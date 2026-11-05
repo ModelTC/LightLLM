@@ -1,13 +1,10 @@
 import torch
-from typing import Callable, Optional
+from typing import Optional
 from lightllm.common.quantization.no_quant import WeightPack
 from .base_impl import FuseMoeBaseImpl
 
 
 class FuseMoeTriton(FuseMoeBaseImpl):
-    def create_workspace(self):
-        return None
-
     def _select_experts(
         self,
         input_tensor: torch.Tensor,
@@ -45,7 +42,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         self,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        is_prefill: Optional[bool],
+        is_prefill: bool,
         shared_expert_gate: Optional[torch.Tensor] = None,
     ):
         """把逻辑路由结果转换成 kernel 使用的执行布局。
@@ -53,6 +50,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         普通路径原样返回。融合 shared expert 时追加新的权重和 ID 行，不修改
         传入的逻辑 ``topk_ids``。
         """
+        assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         if self.num_fused_shared_experts > 0:
             from lightllm.common.basemodel.triton_kernel.fused_moe.append_shared_expert_topk import (
                 append_fused_shared_experts,
@@ -74,11 +72,12 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         w2: WeightPack,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        is_prefill: bool,
         router_logits: Optional[torch.Tensor] = None,
-        is_prefill: bool = False,
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        shared_expert_func=None,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -101,84 +100,3 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             clamp_up_add_one=clamp_up_add_one,
         )
         return input_tensor
-
-    def fused_experts_with_topk(
-        self,
-        input_tensor: torch.Tensor,
-        w13: WeightPack,
-        w2: WeightPack,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        is_prefill: Optional[bool] = None,
-        alpha: Optional[float] = None,
-        limit: Optional[float] = None,
-        clamp_up_add_one: bool = True,
-    ):
-        return self._fused_experts(
-            input_tensor=input_tensor,
-            w13=w13,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            is_prefill=is_prefill,
-            alpha=alpha,
-            limit=limit,
-            clamp_up_add_one=clamp_up_add_one,
-        )
-
-    def __call__(
-        self,
-        input_tensor: torch.Tensor,
-        router_logits: torch.Tensor,
-        w13: WeightPack,
-        w2: WeightPack,
-        correction_bias: Optional[torch.Tensor],
-        scoring_func: str,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool,
-        topk_group: int,
-        num_expert_group: int,
-        is_prefill: Optional[bool] = None,
-        # Callback to capture MoE topk expert ids (routed experts metadata).
-        moe_capture_callback: Optional[Callable[[torch.Tensor], None]] = None,
-        per_expert_scale: Optional[torch.Tensor] = None,
-        shared_expert_gate: Optional[torch.Tensor] = None,
-        alpha: Optional[float] = None,
-        limit: Optional[float] = None,
-        clamp_up_add_one: bool = True,
-    ):
-        topk_weights, topk_ids = self._select_experts(
-            input_tensor=input_tensor,
-            router_logits=router_logits,
-            correction_bias=correction_bias,
-            top_k=top_k,
-            renormalize=renormalize,
-            use_grouped_topk=use_grouped_topk,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            scoring_func=scoring_func,
-            per_expert_scale=per_expert_scale,
-        )
-        if moe_capture_callback is not None:
-            moe_capture_callback(topk_ids)
-        topk_weights, topk_ids = self._prepare_expert_execution(
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            is_prefill=is_prefill,
-            shared_expert_gate=shared_expert_gate,
-        )
-
-        output = self._fused_experts(
-            input_tensor=input_tensor,
-            w13=w13,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            router_logits=router_logits,
-            is_prefill=is_prefill,
-            alpha=alpha,
-            limit=limit,
-            clamp_up_add_one=clamp_up_add_one,
-        )
-        return output

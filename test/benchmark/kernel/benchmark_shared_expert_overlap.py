@@ -83,16 +83,17 @@ def worker(rank, args, port):
     group = dist.new_group(backend="gloo")
     dist.barrier(device_ids=[rank])
     experts = args.experts_per_rank * args.world_size
-    size = deep_ep.Buffer.get_low_latency_rdma_size_hint(args.max_rows, args.hidden, args.world_size, experts)
-    print(rank, "creating DeepEP buffer", size, flush=True)
-    buffer = deep_ep.Buffer(
+    print(rank, "creating DeepEP ElasticBuffer", args.max_rows, args.hidden, flush=True)
+    buffer = deep_ep.ElasticBuffer(
         dist.group.WORLD,
-        num_rdma_bytes=size,
-        low_latency_mode=True,
-        num_qps_per_rank=args.experts_per_rank,
+        num_max_tokens_per_rank=args.max_rows,
+        hidden=args.hidden,
+        num_topk=args.topk,
+        use_fp8_dispatch=True,
+        allow_multiple_reduction=True,
         explicitly_destroy=True,
     )
-    dist_group_manager.ep_low_latency_buffer = buffer
+    dist_group_manager.ep_buffer = buffer
     print(rank, "DeepEP ready", flush=True)
     try:
         torch.manual_seed(1013 + rank)
@@ -109,7 +110,7 @@ def worker(rank, args, port):
         owner.layer_num_ = 0
         owner.w13 = pack((args.experts_per_rank, 2 * args.intermediate, args.hidden))
         owner.w2 = pack((args.experts_per_rank, args.hidden, args.intermediate))
-        owner.fuse_moe_impl = FuseMoeDeepGEMM(experts, 0, 1.0, quant, 0, None, None, False)
+        owner.fuse_moe_impl = FuseMoeDeepGEMM(experts, 0, 1.0, quant, layer_index=0)
 
         def shared_weight(shape):
             w = MMWeightTpl.__new__(MMWeightTpl)

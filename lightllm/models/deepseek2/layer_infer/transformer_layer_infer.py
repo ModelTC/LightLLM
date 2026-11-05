@@ -246,6 +246,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=self.n_group,
             topk_group=self.topk_group,
             num_expert_group=self.n_group,
+            is_prefill=infer_state.is_prefill,
             infer_state=infer_state,
         )
 
@@ -525,7 +526,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             _0_recv_x,
             _0_recv_topk_idx,
             _0_recv_topk_weight,
-            microbatch_index=0,
         )
         del _0_recv_x
 
@@ -562,7 +562,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             _1_recv_x,
             _1_recv_topk_idx,
             _1_recv_topk_weight,
-            microbatch_index=1,
         )
         del _1_recv_x
 

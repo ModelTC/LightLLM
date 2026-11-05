@@ -43,6 +43,7 @@ def test_experts_with_topk_appends_the_fused_shared_expert(monkeypatch):
         torch.ones(2, 4, device="cuda"),
         topk_weights,
         topk_ids,
+        is_prefill=False,
     )
     assert torch.equal(seen["topk_ids"], torch.tensor([[0, 2, 4], [1, 3, 4]], device="cuda"))
     assert torch.allclose(seen["topk_weights"], torch.tensor([[0.2, 0.8, 1.0], [0.4, 0.6, 1.0]], device="cuda"))
@@ -76,6 +77,7 @@ def test_capture_observes_logical_ids_before_execution_mapping():
         use_grouped_topk=False,
         topk_group=0,
         num_expert_group=0,
+        is_prefill=False,
         moe_capture_callback=lambda ids: captured.setdefault("ids", ids),
     )
 

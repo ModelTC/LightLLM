@@ -38,8 +38,6 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_
     if is_prefill:
         metadata = torch.zeros(5, 3, device="cuda", dtype=torch.int32)
         metadata[:, 2] = torch.tensor([0, 1, 2, padded, padded + 1], device="cuda")
-        # Force two chunks so both expert groups execute the requested activation.
-        monkeypatch.setattr(ep.deepgemm, "_get_max_chunk_rows", lambda **kwargs: padded)
         actual = ep.chunked_expanded_moe_forward(
             num_recv_tokens_per_expert_list=[padded, padded],
             num_unaligned_recv_tokens_per_expert=counts,
@@ -51,7 +49,6 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_
             w2=w2,
             w2_scale=w2_scale,
             block_size_k=128,
-            workspace=torch.empty(4 * 1024 * 1024, device="cuda", dtype=torch.uint8),
             hidden_dtype=torch.bfloat16,
             **activation_args,
         )

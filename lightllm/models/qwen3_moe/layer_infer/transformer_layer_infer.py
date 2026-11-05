@@ -88,6 +88,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=False,
             topk_group=None,
             num_expert_group=None,
+            is_prefill=infer_state.is_prefill,
             infer_state=infer_state,
         )
         return hidden_states.view(num_tokens, hidden_dim)
@@ -325,7 +326,6 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             _0_recv_x,
             _0_recv_topk_idx,
             _0_recv_topk_weight,
-            microbatch_index=0,
         )
         del _0_recv_x
 
@@ -362,7 +362,6 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             _1_recv_x,
             _1_recv_topk_idx,
             _1_recv_topk_weight,
-            microbatch_index=1,
         )
         del _1_recv_x
 

@@ -1,12 +1,16 @@
 import torch
 from typing import Optional, Tuple, Any
-from .triton_impl import FuseMoeTriton
+from .base_impl import FuseMoeBaseImpl
 from lightllm.distributed import dist_group_manager
 from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
+    get_env_start_args,
+    get_redundancy_expert_ids,
+    get_redundancy_expert_num,
 )
+from lightllm.utils.dist_utils import get_global_rank, get_global_world_size
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
     fused_experts,
     get_ep_num_sms,
@@ -23,7 +27,26 @@ from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
 
 
-class FuseMoeDeepGEMM(FuseMoeTriton):
+class FuseMoeDeepGEMM(FuseMoeBaseImpl):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        world_size = get_global_world_size()
+        assert self.n_routed_experts % world_size == 0
+        global_rank = get_global_rank()
+        self.global_rank_ = global_rank
+        self.global_world_size_ = world_size
+        self.ep_n_routed_experts = self.n_routed_experts // world_size
+        self.redundancy_expert_num = get_redundancy_expert_num()
+        self.auto_update_redundancy_expert = get_env_start_args().auto_update_redundancy_expert
+        redundancy_ids = list(get_redundancy_expert_ids(self.layer_index))
+        self.redundancy_expert_ids_tensor = torch.tensor(redundancy_ids, dtype=torch.int64, device="cuda")
+        self.routed_expert_counter_tensor = torch.zeros((self.n_routed_experts,), dtype=torch.int64, device="cuda")
+        self.total_expert_num_contain_redundancy = self.n_routed_experts + self.redundancy_expert_num * world_size
+        first_local_expert_id = global_rank * self.ep_n_routed_experts
+        self.local_logics_expert_ids_list = (
+            list(range(first_local_expert_id, first_local_expert_id + self.ep_n_routed_experts)) + redundancy_ids
+        )
+
     def _select_experts(
         self,
         input_tensor: torch.Tensor,
@@ -61,10 +84,11 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         self,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        is_prefill: Optional[bool],
+        is_prefill: bool,
         shared_expert_gate: Optional[torch.Tensor] = None,
     ):
         """在逻辑路由采集之后，生成 DeepEP 实际使用的专家 ID。"""
+        assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
         if self.redundancy_expert_num > 0:
             # repair 会原地改写 ID。复制后再改，保留已经交给 capture 的逻辑 ID。
@@ -77,12 +101,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 expert_counter=self.routed_expert_counter_tensor,
                 enable_counter=self.auto_update_redundancy_expert,
             )
-        return super()._prepare_expert_execution(
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            is_prefill=is_prefill,
-            shared_expert_gate=None,
-        )
+        return topk_weights, topk_ids
 
     def _fused_experts(
         self,
@@ -91,8 +110,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         w2: WeightPack,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        is_prefill: bool,
         router_logits: Optional[torch.Tensor] = None,
-        is_prefill: Optional[bool] = None,
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
@@ -281,7 +300,6 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         w13: WeightPack,
         w2: WeightPack,
         hidden_dtype=torch.bfloat16,
-        microbatch_index: int = 0,
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
@@ -302,7 +320,6 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 w2=w2_weight,
                 w2_scale=w2_scale,
                 block_size_k=self.quant_method.block_size,
-                workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
                 hidden_dtype=hidden_dtype,
                 alpha=alpha,
                 limit=limit,

@@ -162,7 +162,6 @@ def fused_experts_impl(
                 w2=w2,
                 w2_scale=w2_scale,
                 block_size_k=block_size_k,
-                workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(),
                 hidden_dtype=hidden_states.dtype,
                 alpha=alpha,
                 limit=limit,

@@ -10,7 +10,6 @@ from .common import (
 )
 from .deepgemm import (
     HAS_DEEPGEMM,
-    _get_max_chunk_rows,
     chunked_expanded_moe_forward,
     decode_masked_group_gemm,
     deepgemm_grouped_fp8_fp4_nt_contiguous,
@@ -25,7 +24,6 @@ from .prefill_decode_sync import fused_experts, fused_experts_impl
 __all__ = [
     "HAS_DEEPGEMM",
     "SUPPORTED_EP_EXPERT_DTYPES",
-    "_get_max_chunk_rows",
     "check_ep_expert_dtype",
     "chunked_expanded_moe_forward",
     "decode_masked_group_gemm",

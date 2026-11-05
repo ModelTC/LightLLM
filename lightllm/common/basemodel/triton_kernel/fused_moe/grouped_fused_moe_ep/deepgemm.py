@@ -19,8 +19,6 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_ke
 )
 from lightllm.utils.envs_utils import get_env_use_ue8m0_scales
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
-from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
-from lightllm.utils.tensor_buffer_manager import TensorBufferManager
 
 logger = init_logger(__name__)
 
@@ -203,87 +201,6 @@ def masked_group_gemm(
     return gemm_out_b
 
 
-def _get_max_chunk_rows(
-    workspace: torch.Tensor,
-    gather_rows: int,
-    hidden_size: int,
-    intermediate_size: int,
-    intermediate_twice: int,
-    scale_cols: int,
-    hidden_dtype: torch.dtype,
-    quant_dtype: torch.dtype,
-    expert_alignment: int,
-) -> int:
-    """计算并缓存当前 workspace 配置能够容纳的最大 chunk 行数。"""
-    if not hasattr(_get_max_chunk_rows, "cache"):
-        _get_max_chunk_rows.cache = {}
-    max_chunk_rows_cache = _get_max_chunk_rows.cache
-
-    # 同一 1024 行区间共用一个缓存项，并按区间上界探测，保证复用结果不会高估可用空间。
-    cached_gather_rows = (gather_rows + 1023) // 1024 * 1024
-    cache_key = (
-        workspace.numel(),
-        workspace.device,
-        cached_gather_rows,
-        hidden_size,
-        intermediate_size,
-        intermediate_twice,
-        scale_cols,
-        hidden_dtype,
-        quant_dtype,
-        expert_alignment,
-        HAS_SGL_KERNEL,
-    )
-    if cache_key in max_chunk_rows_cache:
-        return max_chunk_rows_cache[cache_key]
-
-    def can_allocate(chunk_rows: int) -> bool:
-        """按实际计算阶段的生命周期申请 buffer，探测该 chunk 是否能够执行。"""
-        try:
-            probe_manager = TensorBufferManager(workspace)
-            probe_manager.alloc((cached_gather_rows, hidden_size), hidden_dtype)
-
-            # W1 阶段同时保存 GEMM 输出和 SwiGLU 输出。
-            silu_out = probe_manager.alloc((chunk_rows, intermediate_size), hidden_dtype)
-            gemm_out_a = probe_manager.alloc((chunk_rows, intermediate_twice), hidden_dtype)
-            probe_manager.free(gemm_out_a)
-
-            # 量化阶段复用 W1 输出空间，并继续保留 SwiGLU 输出。
-            probe_manager.alloc((chunk_rows, intermediate_size), quant_dtype)
-            aligned_chunk_rows = (chunk_rows + 3) // 4 * 4
-            if HAS_SGL_KERNEL:
-                probe_manager.alloc((scale_cols, aligned_chunk_rows), torch.float32)
-            else:
-                # LightLLM fallback 通过 alloc_func 申请 row-major scale；后续 TMA 转置不占用 workspace。
-                probe_manager.alloc((chunk_rows, scale_cols), torch.float32)
-            probe_manager.free(silu_out)
-
-            # W2 阶段释放 SwiGLU 输出后申请最终 GEMM 输出。
-            probe_manager.alloc((chunk_rows, hidden_size), hidden_dtype)
-        except MemoryError:
-            return False
-        return True
-
-    # W1 阶段必须同时保存 gemm_out_a 和 silu_out，可据此得到 chunk 数量的绝对上界。
-    w1_row_bytes = (intermediate_twice + intermediate_size) * hidden_dtype.itemsize
-    left = 1
-    right = workspace.numel() // w1_row_bytes // expert_alignment
-    max_chunk_rows = 0
-
-    while left <= right:
-        chunk_count = (left + right) // 2
-        chunk_rows = chunk_count * expert_alignment
-        if can_allocate(chunk_rows):
-            max_chunk_rows = chunk_rows
-            left = chunk_count + 1
-        else:
-            right = chunk_count - 1
-
-    max_chunk_rows_cache[cache_key] = max_chunk_rows
-    logger.info("cache DeepEP max_chunk_rows: key=%s, max_chunk_rows=%s", cache_key, max_chunk_rows)
-    return max_chunk_rows
-
-
 def chunked_expanded_moe_forward(
     num_recv_tokens_per_expert_list: List[int],  # [num_local_experts], alignment-padded token counts
     num_unaligned_recv_tokens_per_expert: torch.Tensor,  # [num_local_experts], actual token counts
@@ -297,19 +214,18 @@ def chunked_expanded_moe_forward(
     w2: torch.Tensor,  # [num_local_experts, hidden_size, intermediate_size]
     w2_scale: torch.Tensor,  # [num_local_experts, hidden_size // block_size_k, intermediate_size // block_size_k]
     block_size_k: int,
-    workspace: torch.Tensor,  # [workspace_bytes], uint8
     hidden_dtype: torch.dtype,  # scalar dtype descriptor
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
 ):
-    """Run bounded expanded MoE and rewrite metadata for dense DeepEP combine."""
+    """以最多 32K 行为一个 chunk 执行 expanded MoE，并重写 combine metadata。"""
     alignment = get_mk_alignment_for_contiguous_layout()
     all_tokens, intermediate_twice = recv_x[0].shape[0], w1.shape[1]
     intermediate_size, hidden_size = intermediate_twice // 2, w2.shape[1]
     assert all_tokens == sum(num_recv_tokens_per_expert_list) and all_tokens % alignment == 0
     assert all_tokens > 0, "chunked_expanded_moe_forward requires non-empty input"
-    assert workspace.dtype == torch.uint8 and workspace.ndim == 1 and workspace.is_contiguous()
+    assert 32768 % alignment == 0
 
     m_indices = torch.empty(all_tokens, device=recv_x[0].device, dtype=torch.int32)
     # 与 m_indices 一一对应：0 表示真实 token，1 表示 expert 对齐产生的 padding 行。
@@ -324,30 +240,12 @@ def chunked_expanded_moe_forward(
     )
     del padding_mask
 
-    gather_rows = recv_src_metadata.shape[0]
-    scale_cols = intermediate_size // block_size_k
-    max_chunk_rows = _get_max_chunk_rows(
-        workspace=workspace,
-        gather_rows=gather_rows,
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        intermediate_twice=intermediate_twice,
-        scale_cols=scale_cols,
-        hidden_dtype=hidden_dtype,
-        quant_dtype=w2.dtype,
-        expert_alignment=alignment,
+    max_chunk_rows = min(all_tokens, 32768)
+    gather_out = torch.zeros(
+        (recv_src_metadata.shape[0], hidden_size),
+        dtype=hidden_dtype,
+        device=recv_x[0].device,
     )
-
-    if max_chunk_rows == 0:
-        raise RuntimeError(
-            f"DeepEP workspace with {workspace.numel()} bytes cannot hold the dense output and "
-            f"one {alignment}-row temporary chunk"
-        )
-    max_chunk_rows = min(all_tokens, max_chunk_rows)
-
-    workspace_manager = TensorBufferManager(workspace)
-    gather_out = workspace_manager.alloc((gather_rows, hidden_size), hidden_dtype)
-    gather_out.zero_()
 
     # 不同 rank 接收到的 token 数不同，因此实际 chunk 数也可能不同。Autotuner warmup
     # 中的分布式通信要求各 rank 进入 autotuning 的次数一致，否则容易发生通信错位。
@@ -361,8 +259,16 @@ def chunked_expanded_moe_forward(
 
             chunk_end = min(chunk_start + max_chunk_rows, all_tokens)
             chunk_rows = chunk_end - chunk_start
-            silu_out = workspace_manager.alloc((chunk_rows, intermediate_size), hidden_dtype)
-            gemm_out_a = workspace_manager.alloc((chunk_rows, intermediate_twice), hidden_dtype)
+            silu_out = torch.empty(
+                (chunk_rows, intermediate_size),
+                dtype=hidden_dtype,
+                device=recv_x[0].device,
+            )
+            gemm_out_a = torch.empty(
+                (chunk_rows, intermediate_twice),
+                dtype=hidden_dtype,
+                device=recv_x[0].device,
+            )
             deepgemm_grouped_fp8_nt_contiguous(
                 (recv_x[0][chunk_start:chunk_end], recv_x[1][chunk_start:chunk_end]),
                 (w1, w1_scale),
@@ -370,17 +276,7 @@ def chunked_expanded_moe_forward(
                 m_indices[chunk_start:chunk_end],
             )
             silu_and_mul_fwd(gemm_out_a, silu_out, alpha=alpha, limit=limit, clamp_up_add_one=clamp_up_add_one)
-            workspace_manager.free(gemm_out_a)
             del gemm_out_a
-
-            quant_buffers = []
-
-            def workspace_quant_alloc(shape, dtype, device):
-                if device != workspace.device:
-                    raise RuntimeError(f"quant buffer must be allocated on {workspace.device}, got {device}")
-                quant_buffer = workspace_manager.alloc(shape, dtype)
-                quant_buffers.append(quant_buffer)
-                return quant_buffer
 
             qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
                 silu_out,
@@ -388,13 +284,15 @@ def chunked_expanded_moe_forward(
                 dtype=w2.dtype,
                 column_major_scales=True,
                 scale_tma_aligned=True,
-                alloc_func=workspace_quant_alloc,
                 use_ue8m0_scales=get_env_use_ue8m0_scales(),
             )
-            workspace_manager.free(silu_out)
             del silu_out
 
-            gemm_out_b = workspace_manager.alloc((chunk_rows, hidden_size), hidden_dtype)
+            gemm_out_b = torch.empty(
+                (chunk_rows, hidden_size),
+                dtype=hidden_dtype,
+                device=recv_x[0].device,
+            )
             deepgemm_grouped_fp8_nt_contiguous(
                 (qsilu_out, qsilu_out_scale),
                 (w2, w2_scale),
@@ -402,11 +300,9 @@ def chunked_expanded_moe_forward(
                 m_indices[chunk_start:chunk_end],
             )
             del qsilu_out, qsilu_out_scale
-            for quant_buffer in quant_buffers:
-                workspace_manager.free(quant_buffer)
 
             ep_gather_chunk(gemm_out_b, chunk_start, recv_topk_weights, recv_src_metadata, gather_out)
-            workspace_manager.free(gemm_out_b)
+            del gemm_out_b
     finally:
         if is_autotune_warmup:
             Autotuner.start_autotune_warmup(AutotuneKernelType.GENERAL)

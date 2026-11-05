@@ -94,6 +94,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=False,
             topk_group=None,
             num_expert_group=None,
+            is_prefill=infer_state.is_prefill,
             infer_state=infer_state,
             shared_expert_gate=shared_expert_gate,
         )
@@ -183,7 +184,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-
         backend = infer_state.prefill_att_state1.backend
 
         mixed_qkvzba = mixed_qkvzba.contiguous()

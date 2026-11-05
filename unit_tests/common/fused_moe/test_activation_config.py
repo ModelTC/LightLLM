@@ -85,19 +85,20 @@ def test_call_parameters_reach_expert_activation(monkeypatch, activation):
             expert_out = (gate.bfloat16() * up.bfloat16()).bfloat16()
             expected[row] += (expert_out.float() * probs[row, choice]).bfloat16().float()
     if kwargs:
-        default_output = weight.experts(x.clone(), router, 2, True, False, 0, 0)
-    actual = weight.experts(x.clone(), router, 2, True, False, 0, 0, **kwargs)
+        default_output = weight.experts(x.clone(), router, 2, True, False, 0, 0, False)
+    actual = weight.experts(x.clone(), router, 2, True, False, 0, 0, False, **kwargs)
     actual_with_topk = weight.experts_with_topk(
         x.clone(),
         topk_weights=probs,
         topk_ids=top.indices,
+        is_prefill=False,
         **kwargs,
     )
     torch.testing.assert_close(actual, expected.bfloat16(), atol=0.125, rtol=0.01)
     torch.testing.assert_close(actual_with_topk, expected.bfloat16(), atol=0.125, rtol=0.01)
     if kwargs:
         # A clamped call must not change subsequent calls on the same weight.
-        actual_default = weight.experts(x.clone(), router, 2, True, False, 0, 0)
+        actual_default = weight.experts(x.clone(), router, 2, True, False, 0, 0, False)
         torch.testing.assert_close(actual_default, default_output, atol=0, rtol=0)
 
 
@@ -110,10 +111,6 @@ def test_marlin_rejects_clamp_at_call(monkeypatch):
         num_fused_shared_experts=0,
         routed_scaling_factor=1.0,
         quant_method=None,
-        redundancy_expert_num=0,
-        redundancy_expert_ids_tensor=None,
-        routed_expert_counter_tensor=None,
-        auto_update_redundancy_expert=False,
     )
     with pytest.raises(NotImplementedError, match="does not support clamped SwiGLU"):
         impl(
@@ -128,6 +125,7 @@ def test_marlin_rejects_clamp_at_call(monkeypatch):
             use_grouped_topk=False,
             topk_group=0,
             num_expert_group=0,
+            is_prefill=False,
             alpha=1.0,
             limit=10.0,
             clamp_up_add_one=False,
