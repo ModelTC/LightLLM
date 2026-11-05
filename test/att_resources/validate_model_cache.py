@@ -330,34 +330,9 @@ def main():
         config, _ = PretrainedConfig.get_config_dict(args.model_dir)
         model, _ = get_model(config, kvargs)
         draft_models = init_mtp_draft_models(args, kvargs, model)
-        from lightllm.utils.envs_utils import set_model_init_status
-        from lightllm.utils.torch_memory_saver_utils import MemoryTag
-        from lightllm.common.attention_state import AttentionStateManager
-        from lightllm.common.req_manager import ReqManager
+        from lightllm.common.basemodel.model_group import initialize_model_group
 
-        models = (model, *draft_models)
-        assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"
-        assert all(item.max_req_num == model.max_req_num for item in models), "models must share the request domain"
-        # main/draft 共用请求映射；按所有模型的最大需求分配，再逐模型绑定。
-        max_seq_len = max(item.get_req_manager_max_seq_len() for item in models)
-        with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            req_manager = ReqManager(max_request_num=model.max_req_num, max_sequence_length=max_seq_len)
-        for item in models:
-            item.bind_req_manager(req_manager=req_manager)
-        for item in models:
-            item.prepare_attention_states()
-        manager: AttentionStateManager = model.att_state_manager
-        assert all(item.att_state_manager is manager for item in models), "models must share one resource manager"
-        with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            manager.finish_state_registration()
-            manager.load_full_att_calibration(args=model.args)
-            manager.initialize_storage(
-                model.args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
-            )
-        for item in models:
-            item.init_runtime()
-        torch.cuda.empty_cache()
-        set_model_init_status(True)
+        initialize_model_group(model, draft_models)
         report = validate(model, args, draft_models)
         Path(args.report).write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report, indent=2), flush=True)
