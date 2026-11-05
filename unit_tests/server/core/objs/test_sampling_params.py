@@ -151,7 +151,6 @@ def test_node_uuid_initialization():
 def test_sampling_params_initialization():
     params = SamplingParams()
     pd_master_node_id = 12345678901234567890
-    pd_kv_trans_params = b"pd-kv-transport-params"
     data = {
         "best_of": 2,
         "n": 2,
@@ -176,7 +175,6 @@ def test_sampling_params_initialization():
         "stop_sequences": [[2, 1], [3, 4]],
         "exponential_decay_length_penalty": (1, 1.0),
         "pd_master_node_id": pd_master_node_id,
-        "pd_kv_trans_params": pd_kv_trans_params,
     }
     params.init(None, **data)
 
@@ -187,7 +185,6 @@ def test_sampling_params_initialization():
     assert params.temperature == 1.0
     assert params.stop_sequences.size == 2
     assert params.pd_master_node_id.get() == pd_master_node_id
-    assert params.pd_kv_trans_params.get() == pd_kv_trans_params
 
 
 @pytest.mark.parametrize(
@@ -268,6 +265,12 @@ def test_infer_high_priority_is_internal_and_ignores_external_value():
     params = SamplingParams()
     params.init(None, infer_high_priority=-3)
     assert params.infer_high_priority == 0
+
+
+def test_pd_kv_trans_params_is_internal_and_ignores_external_value():
+    params = SamplingParams()
+    params.init(None, pd_kv_trans_params="AAAAdeadbeefBBBB")
+    assert params.pd_kv_trans_params.data_len == 0
 
 
 # Mock tokenizer for testing
