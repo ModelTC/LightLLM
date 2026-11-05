@@ -354,6 +354,7 @@ def ep_reduce_decode_output(
     compact_metadata = torch.empty_like(recv_src_metadata)
 
     block_d = 1024
+    # TODO: 联合搜索 NUM_STAGE、BLOCK_D 和 token program 数量。
     num_stage = 1
     # num_recv_tokens 是接收缓冲区容量，可能大于实际有效 token 数。1024 在
     # 大并发下能提供更充分的行并行度，小并发下额外空 program 的开销很小。
