@@ -1,5 +1,10 @@
+from functools import lru_cache
 from typing import ClassVar, Optional
 
+from transformers.configuration_utils import PretrainedConfig
+
+from lightllm.common.mtp_config import FinalHiddenPolicy, MtpPairConfig
+from lightllm.models.draft_registry import DraftModelRegistry
 from lightllm.common.basemodel.hidden_collector import (
     FinalHiddenCollector,
     HiddenCollector,
@@ -70,6 +75,18 @@ class MtpManager:
         """Return the number of extra decode rows processed per request."""
 
         return self.get_decode_tokens_per_request(is_draft_model) - 1
+
+    @lru_cache(maxsize=None)
+    def _get_pair_config(self, draft_model_dir: str) -> MtpPairConfig:
+        draft_config, _ = PretrainedConfig.get_config_dict(draft_model_dir)
+        return DraftModelRegistry.get_pair_config(draft_config, self.args.mtp_mode)
+
+    def get_final_hidden_policy(self, model) -> FinalHiddenPolicy:
+        if self.args.mtp_mode is None:
+            return FinalHiddenPolicy.NONE
+        draft_model_dir = model.weight_dir_ if model.is_mtp_draft_model else self.args.mtp_draft_model_dir[0]
+        config = self._get_pair_config(draft_model_dir)
+        return config.draft_final_hidden_policy if model.is_mtp_draft_model else config.main_final_hidden_policy
 
     def create_hidden_collector(
         self,
