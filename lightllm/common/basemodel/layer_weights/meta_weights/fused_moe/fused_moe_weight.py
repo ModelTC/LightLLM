@@ -8,7 +8,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer im
     get_col_slice_mixin,
     SliceMixinTpl,
 )
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import select_fuse_moe_impl
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import create_fuse_moe_impl
 from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
@@ -57,17 +57,19 @@ class FusedMoeWeight(BaseWeightTpl):
         self.num_fused_shared_experts = num_fused_shared_experts
         self._init_config(network_config)
         self._init_redundancy_expert_params()
-        self._init_parallel_params()
-        self.fuse_moe_impl = select_fuse_moe_impl(self.quant_method, self.enable_ep_moe)(
+        self.fuse_moe_impl = create_fuse_moe_impl(
             n_routed_experts=self.n_routed_experts,
             num_fused_shared_experts=self.num_fused_shared_experts,
             routed_scaling_factor=self.routed_scaling_factor,
             quant_method=self.quant_method,
-            redundancy_expert_num=self.redundancy_expert_num,
-            redundancy_expert_ids_tensor=self.redundancy_expert_ids_tensor,
-            routed_expert_counter_tensor=self.routed_expert_counter_tensor,
-            auto_update_redundancy_expert=self.auto_update_redundancy_expert,
+            enable_ep_moe=self.enable_ep_moe,
+            layer_index=self.layer_num_,
         )
+        # 冗余专家的 CUDA 状态由 DeepGEMM 实现持有。自动更新仍通过权重对象读写同一份 tensor。
+        if self.enable_ep_moe:
+            self.redundancy_expert_ids_tensor = self.fuse_moe_impl.redundancy_expert_ids_tensor
+            self.routed_expert_counter_tensor = self.fuse_moe_impl.routed_expert_counter_tensor
+        self._init_weight_partition()
         self.lock = threading.Lock()
         self._create_weight()
 
@@ -84,12 +86,10 @@ class FusedMoeWeight(BaseWeightTpl):
         self.redundancy_expert_num = get_redundancy_expert_num()
         self.redundancy_expert_ids = get_redundancy_expert_ids(self.layer_num_)
         self.auto_update_redundancy_expert: bool = get_env_start_args().auto_update_redundancy_expert
-        self.redundancy_expert_ids_tensor = torch.tensor(self.redundancy_expert_ids, dtype=torch.int64, device="cuda")
-        self.routed_expert_counter_tensor = torch.zeros((self.n_routed_experts,), dtype=torch.int64, device="cuda")
         # TODO: find out the reason of failure of deepep when redundancy_expert_num is 1.
         assert self.redundancy_expert_num != 1, "redundancy_expert_num can not be 1 for some unknown hang of deepep."
 
-    def _init_parallel_params(self):
+    def _init_weight_partition(self):
         if self.enable_ep_moe:
             self.tp_rank_ = 0
             self.tp_world_size_ = 1
@@ -103,27 +103,16 @@ class FusedMoeWeight(BaseWeightTpl):
         self.split_inter_size = self.moe_intermediate_size // self.tp_world_size_
         if self.enable_ep_moe:
             assert self.num_fused_shared_experts == 0, "num_fused_shared_experts must be 0 when enable_ep_moe"
+            self.local_logic_expert_ids_list = self.fuse_moe_impl.local_logics_expert_ids_list
             logger.debug(
                 f"global_rank {self.global_rank_} layerindex {self.layer_num_} "
-                f"redundancy_expertids: {self.redundancy_expert_ids}"
+                f"local_logic_expert_ids_list: {self.local_logic_expert_ids_list}"
             )
-            self.local_n_routed_experts = self.n_routed_experts // self.global_world_size + self.redundancy_expert_num
-            n_experts_per_rank = self.n_routed_experts // self.global_world_size
-            start_expert_id = self.global_rank_ * n_experts_per_rank
-            self.local_expert_ids = (
-                list(range(start_expert_id, start_expert_id + n_experts_per_rank)) + self.redundancy_expert_ids
-            )
-            self.expert_idx_to_local_idx = {
-                expert_idx: expert_idx - start_expert_id for expert_idx in self.local_expert_ids[:n_experts_per_rank]
-            }
-            self.redundancy_expert_idx_to_local_idx = {
-                redundancy_expert_idx: n_experts_per_rank + i
-                for (i, redundancy_expert_idx) in enumerate(self.redundancy_expert_ids)
-            }
+            self.local_n_routed_experts = len(self.local_logic_expert_ids_list)
         else:
-            self.local_expert_ids = list(range(self.n_routed_experts + self.num_fused_shared_experts))
-            self.expert_idx_to_local_idx = {expert_idx: i for (i, expert_idx) in enumerate(self.local_expert_ids)}
-            self.rexpert_idx_to_local_idx = {}
+            self.local_logic_expert_ids_list = list(range(self.n_routed_experts + self.num_fused_shared_experts))
+
+    # ==================== Prefill / Decode 公共接口 ====================
 
     def experts(
         self,
@@ -134,13 +123,14 @@ class FusedMoeWeight(BaseWeightTpl):
         use_grouped_topk: bool,
         topk_group: int,
         num_expert_group: int,
-        is_prefill: Optional[bool] = None,
+        is_prefill: bool,
         infer_state=None,
         shared_expert_gate: Optional[torch.Tensor] = None,
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
     ) -> torch.Tensor:
+        assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         # Captures MoE topk expert ids for routed-experts metadata when enabled.
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
         return self.fuse_moe_impl(
@@ -169,34 +159,31 @@ class FusedMoeWeight(BaseWeightTpl):
         input_tensor: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        is_prefill: Optional[bool] = None,
+        is_prefill: bool,
         infer_state=None,
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
         shared_expert_func=None,
     ) -> torch.Tensor:
+        """执行外部已经选好的 top-k。
+
+        ``experts()`` 从 ``router_logits`` 做通用 grouped top-k。DeepSeek-V4 的路由在层内完成，
+        使用 softplus-sqrt，并带 hash 的 ``tid2eid`` 和视觉 token bias，不能放进通用选择。
+        两路 microbatch 重叠也要先拿到 top-k，才能在一路 dispatch 时让另一路继续选专家。
+        传入的是逻辑专家 id：capture 先看到它们，再做冗余修复或追加 fused shared expert。
+        """
+        assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
         if moe_capture_callback is not None:
             moe_capture_callback(topk_ids)
-        if self.num_fused_shared_experts > 0:
-            from lightllm.common.basemodel.triton_kernel.fused_moe.append_shared_expert_topk import (
-                append_fused_shared_experts,
-            )
-
-            topk_weights, topk_ids = append_fused_shared_experts(
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                shared_expert_start_id=self.n_routed_experts,
-                num_fused_shared_experts=self.num_fused_shared_experts,
-            )
+        topk_weights, topk_ids = self.fuse_moe_impl._prepare_expert_execution(
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            is_prefill=is_prefill,
+        )
         # The shared-expert callback is only implemented on the DeepGEMM path.
-        run = self.fuse_moe_impl.fused_experts_with_topk
-        extra = {}
-        if shared_expert_func is not None:
-            run = self.fuse_moe_impl._fused_experts
-            extra["shared_expert_func"] = shared_expert_func
-        return run(
+        return self.fuse_moe_impl._fused_experts(
             input_tensor=input_tensor,
             w13=self.w13,
             w2=self.w2,
@@ -206,43 +193,8 @@ class FusedMoeWeight(BaseWeightTpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
-            **extra,
+            shared_expert_func=shared_expert_func,
         )
-
-    def low_latency_dispatch(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ):
-        assert self.enable_ep_moe, "low_latency_dispatch is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.low_latency_dispatch(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            e_score_correction_bias=self.e_score_correction_bias,
-            use_grouped_topk=self.use_grouped_topk,
-            num_experts_per_tok=self.num_experts_per_tok,
-            norm_topk_prob=self.norm_topk_prob,
-            topk_group=self.topk_group,
-            n_group=self.n_group,
-            scoring_func=self.scoring_func,
-        )
-
-    def low_latency_dispatch_with_topk(
-        self,
-        hidden_states: torch.Tensor,
-        topk_idx: torch.Tensor,
-        topk_weights: torch.Tensor,
-    ):
-        assert self.enable_ep_moe, "low_latency_dispatch_with_topk is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.low_latency_dispatch_with_topk(
-            hidden_states=hidden_states,
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
-        )
-
-    def quantize_dispatch_input(self, hidden_states: torch.Tensor):
-        assert self.enable_ep_moe, "quantize_dispatch_input is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.quantize_dispatch_input(hidden_states=hidden_states, w13=self.w13)
 
     def select_experts_and_quant_input(
         self,
@@ -263,42 +215,96 @@ class FusedMoeWeight(BaseWeightTpl):
             scoring_func=self.scoring_func,
         )
 
-    def dispatch(
+    def quantize_dispatch_input(self, hidden_states: torch.Tensor):
+        assert self.enable_ep_moe, "quantize_dispatch_input is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.quantize_dispatch_input(hidden_states=hidden_states, w13=self.w13)
+
+    # ==================== Decode 接口 ====================
+
+    def decode_dispatch(
         self,
-        qinput_tensor: Tuple[torch.Tensor],
-        topk_idx: torch.Tensor,
-        topk_weights: torch.Tensor,
-        overlap_event: Optional[Any] = None,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
     ):
-        assert self.enable_ep_moe, "dispatch is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.dispatch(
-            qinput_tensor=qinput_tensor,
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
-            overlap_event=overlap_event,
+        assert self.enable_ep_moe, "decode_dispatch requires enable_ep_moe"
+        return self.fuse_moe_impl.decode_dispatch(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            e_score_correction_bias=self.e_score_correction_bias,
+            w13=self.w13,
+            use_grouped_topk=self.use_grouped_topk,
+            num_experts_per_tok=self.num_experts_per_tok,
+            norm_topk_prob=self.norm_topk_prob,
+            topk_group=self.topk_group,
+            n_group=self.n_group,
+            scoring_func=self.scoring_func,
         )
 
-    def masked_group_gemm(
+    def decode_dispatch_with_topk(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
+        assert self.enable_ep_moe, "decode_dispatch_with_topk requires enable_ep_moe"
+        return self.fuse_moe_impl.decode_dispatch_with_topk(
+            hidden_states=hidden_states,
+            w13=self.w13,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+        )
+
+    def decode_masked_group_gemm(
         self,
         recv_x: Tuple[torch.Tensor],
-        masked_m: torch.Tensor,
+        ep_handle: Any,
         dtype: torch.dtype,
         expected_m: int,
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
     ):
-        assert self.enable_ep_moe, "masked_group_gemm is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.masked_group_gemm(
+        assert self.enable_ep_moe, "decode_masked_group_gemm is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.decode_masked_group_gemm(
             recv_x=recv_x,
             w13=self.w13,
             w2=self.w2,
-            masked_m=masked_m,
+            ep_handle=ep_handle,
             dtype=dtype,
             expected_m=expected_m,
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+        )
+
+    def decode_combine(
+        self,
+        expert_output: torch.Tensor,
+        ep_handle: Any,
+        recv_topk_weights: torch.Tensor,
+    ):
+        assert self.enable_ep_moe, "decode_combine is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.decode_combine(
+            expert_output=expert_output,
+            ep_handle=ep_handle,
+            recv_topk_weights=recv_topk_weights,
+        )
+
+    # ==================== Prefill 接口 ====================
+
+    def prefill_dispatch(
+        self,
+        qinput_tensor: Tuple[torch.Tensor],
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        overlap_event: Optional[Any] = None,
+    ):
+        assert self.enable_ep_moe, "prefill_dispatch is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.prefill_dispatch(
+            qinput_tensor=qinput_tensor,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+            overlap_event=overlap_event,
         )
 
     def prefilled_group_gemm(
@@ -310,7 +316,6 @@ class FusedMoeWeight(BaseWeightTpl):
         recv_topk_idx: torch.Tensor,
         recv_topk_weights: torch.Tensor,
         hidden_dtype=torch.bfloat16,
-        microbatch_index: int = 0,
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
@@ -326,35 +331,19 @@ class FusedMoeWeight(BaseWeightTpl):
             w13=self.w13,
             w2=self.w2,
             hidden_dtype=hidden_dtype,
-            microbatch_index=microbatch_index,
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
         )
 
-    def low_latency_combine(
-        self,
-        gemm_out_b: torch.Tensor,
-        topk_idx: torch.Tensor,
-        topk_weights: torch.Tensor,
-        handle: Any,
-    ):
-        assert self.enable_ep_moe, "low_latency_combine is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.low_latency_combine(
-            gemm_out_b=gemm_out_b,
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
-            handle=handle,
-        )
-
-    def combine(
+    def prefill_combine(
         self,
         gemm_out_b: torch.Tensor,
         handle: Any,
         overlap_event: Optional[Any] = None,
     ):
-        assert self.enable_ep_moe, "combine is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.combine(
+        assert self.enable_ep_moe, "prefill_combine is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.prefill_combine(
             gemm_out_b=gemm_out_b,
             handle=handle,
             overlap_event=overlap_event,
@@ -364,9 +353,7 @@ class FusedMoeWeight(BaseWeightTpl):
         # Load bias
         self._load_e_score_correction_bias(weights)
         self._load_per_expert_scale(weights)
-        self._load_weight(self.expert_idx_to_local_idx, weights)
-        if self.redundancy_expert_num > 0:
-            self._load_weight(self.redundancy_expert_idx_to_local_idx, weights)
+        self._load_weight(self.local_logic_expert_ids_list, weights)
 
     def verify_load(self):
         weight_load_ok = all(all(_weight_pack.load_ok) for _weight_pack in self.w1_list + self.w2_list + self.w3_list)
@@ -435,8 +422,8 @@ class FusedMoeWeight(BaseWeightTpl):
             weight_list.append(expert_weight)
         return weight_list
 
-    def _load_weight(self, expert_idx_to_local_idx: Dict[int, int], weights: Dict[str, torch.Tensor]):
-        for expert_idx, local_expert_idx in expert_idx_to_local_idx.items():
+    def _load_weight(self, local_logic_expert_ids_list: List[int], weights: Dict[str, torch.Tensor]):
+        for local_expert_idx, expert_idx in enumerate(local_logic_expert_ids_list):
             with self.lock:
                 self._load_expert(expert_idx, local_expert_idx, weights)
                 self._load_expert_scale(

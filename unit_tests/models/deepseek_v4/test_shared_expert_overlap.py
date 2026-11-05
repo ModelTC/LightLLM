@@ -3,8 +3,10 @@
 from types import SimpleNamespace
 import pytest
 import torch
-import lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep as ep_module
-from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import fused_experts_impl
+from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
+    fused_experts_impl,
+    prefill_decode_sync as sync,
+)
 from lightllm.models.deepseek_v4.layer_infer import transformer_layer_infer as layer_module
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
@@ -63,26 +65,45 @@ def test_ep_ffn_passes_the_shared_expert_callback(monkeypatch):
 def test_decode_runs_shared_expert_between_combine_send_and_recv(monkeypatch):
     events = []
     hidden, topk_weights, topk_idx, w1, w2 = _moe_inputs()
+    import deep_ep
+
+    monkeypatch.setattr(deep_ep.ElasticBuffer, "capture", staticmethod(lambda: events.append("event") or "event"))
+    monkeypatch.setattr(sync, "per_token_group_quant_fp8", lambda *args, **kwargs: (hidden, hidden))
+    monkeypatch.setattr(sync, "get_mk_alignment_for_contiguous_layout", lambda: 128)
+    monkeypatch.setattr(sync, "get_deepep_num_max_dispatch_tokens_per_rank_decode", lambda: 16)
+    monkeypatch.setattr(sync, "get_ep_num_sms", lambda overlap_with_compute: 8)
 
     def dispatch(*args, **kwargs):
         events.append("dispatch")
-        return (hidden, hidden), torch.ones(2, dtype=torch.int32), "handle", None, None
+        handle = SimpleNamespace(
+            psum_num_recv_tokens_per_expert=torch.tensor([3, 3]),
+            expert_alignment=128,
+            recv_src_metadata=torch.zeros(3, 4, dtype=torch.int32),
+            psum_num_recv_tokens_per_scaleup_rank=torch.tensor([3]),
+        )
+        return (hidden, hidden), None, topk_weights, handle, None
 
-    def gemm(*args, **kwargs):
-        assert args[7] == 3  # ceil(3 tokens * group 8 * topk 2 / 16 experts)
+    def gemm(**kwargs):
+        assert kwargs["expected_m"] == 3  # ceil(3 tokens * 8 ranks * topk 2 / 16 experts)
         events.append("gemm")
         return hidden
 
-    def combine(*args, **kwargs):
-        assert kwargs["return_recv_hook"] is True
-        events.append("combine_send")
+    def reduce(**kwargs):
+        events.append("reduce")
+        return hidden, kwargs["recv_src_metadata"]
 
-        def receive():
+    class _Event:
+        def current_stream_wait(self):
             events.append("combine_recv")
 
-        return torch.full((3, 4), 3.0), None, receive
+    def combine(*args, **kwargs):
+        assert kwargs["previous_event"] == "event"
+        assert kwargs["async_with_compute_stream"] is True
+        events.append("combine_send")
+        return torch.full((3, 4), 3.0), None, _Event()
 
-    monkeypatch.setattr(ep_module, "masked_group_gemm", gemm)
+    monkeypatch.setattr(sync, "decode_masked_group_gemm", gemm)
+    monkeypatch.setattr(sync, "ep_reduce_decode_output", reduce)
     result = fused_experts_impl(
         hidden,
         w1,
@@ -90,13 +111,13 @@ def test_decode_runs_shared_expert_between_combine_send_and_recv(monkeypatch):
         topk_weights,
         topk_idx,
         num_experts=16,
-        buffer=SimpleNamespace(group_size=8, low_latency_dispatch=dispatch, low_latency_combine=combine),
+        buffer=SimpleNamespace(num_ranks=8, dispatch=dispatch, combine=combine),
         is_prefill=False,
         use_fp8_w8a8=True,
         use_fp8_all2all=True,
         shared_expert_func=lambda: events.append("shared") or torch.full((3, 4), 2.0),
     )
-    assert events == ["dispatch", "gemm", "combine_send", "shared", "combine_recv"]
+    assert events == ["dispatch", "gemm", "reduce", "event", "combine_send", "shared", "combine_recv"]
     assert torch.all(result == 5)
 
 
@@ -106,8 +127,10 @@ def test_prefill_overlaps_shared_expert_with_combine(monkeypatch):
     import deep_ep
 
     monkeypatch.setattr(deep_ep.ElasticBuffer, "capture", staticmethod(lambda: events.append("event") or "event"))
-    monkeypatch.setattr(ep_module, "get_deepep_num_max_dispatch_tokens_per_rank_prefill", lambda: 16)
-    monkeypatch.setattr(ep_module, "per_token_group_quant_fp8", lambda *args, **kwargs: (hidden, hidden))
+    monkeypatch.setattr(sync, "get_deepep_num_max_dispatch_tokens_per_rank_prefill", lambda: 16)
+    monkeypatch.setattr(sync, "per_token_group_quant_fp8", lambda *args, **kwargs: (hidden, hidden))
+    monkeypatch.setattr(sync, "get_mk_alignment_for_contiguous_layout", lambda: 128)
+    monkeypatch.setattr(sync, "get_ep_num_sms", lambda overlap_with_compute: 8)
 
     def dispatch(*args, **kwargs):
         events.append("dispatch")
