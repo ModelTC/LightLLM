@@ -163,8 +163,6 @@ class CompactSSMExecutor(SSMExecutor):
     def create_commit(self, run_config):
         """把本次 verify 的配置作为 compact 接受提交 payload。"""
 
-        if not isinstance(run_config, SSMRunConfig):
-            raise ValueError("compact commit requires the configuration of its forward")
         return run_config
 
     def validate_commit(self, acceptance, state_name):

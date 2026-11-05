@@ -55,8 +55,6 @@ class SSMForward:
         payload = self.executor.create_commit(self.run_config)
         if payload is None:
             return None
-        if self.resource.state_name is None:
-            raise ValueError("forward commits require a registered resource")
         return StateCommit(self.resource.state_name, payload)
 
     def copy_inputs(self, source: "SSMForward"):
