@@ -15,7 +15,13 @@ from .export import upload_indices
 
 
 class ReplaySSMExecutor(SSMExecutor):
-    """Request-owned scratch; canonical CPU/PD checkpoints never include it."""
+    """以短 history 重放 decode 的 SSM 执行器。
+
+    ``state`` 是唯一的 canonical checkpoint；keys、deltas、gates、betas 和
+    cursor 只属于请求当前的临时 history，不参与 CPU/PD checkpoint。decode
+    先从 checkpoint 加载 history，再把新 token 写入 ring buffer；接受或
+    checkpoint 导出时，materialize kernel 将已接受前缀折叠回 ``state``。
+    """
 
     def __init__(
         self,
@@ -31,6 +37,13 @@ class ReplaySSMExecutor(SSMExecutor):
         run_config=None,
         fold_method="raw",
     ):
+        """创建 ReplaySSM 的 canonical state、双半区 history 和 cursor。
+
+        ``verify_width`` 决定一次 verify 的最大 token 数，``capacity`` 是
+        history ring 的半区长度；``compute_mode`` 选择 projection 的执行
+        方式，``fold_method`` 选择 raw 或 derived history 的折叠路径。
+        """
+
         assert state.dtype in (torch.float32, torch.bfloat16), "ReplaySSM requires FP32 or BF16 SSM state"
         assert verify_width > 0 and capacity >= max(4, verify_width) and capacity & (capacity - 1) == 0
         assert compute_mode in ("inline", "precompute", "parallel")
@@ -95,7 +108,7 @@ class ReplaySSMExecutor(SSMExecutor):
             self.cursors[req] = 0
 
     def prepare_decode(self, reqs, cu_seqlens=None):
-        """Snapshot history for all layers and prepare the base for accepted updates."""
+        """保存本轮 decode 的 history 起点，并折叠即将溢出的旧半区。"""
         positions = torch.empty_like(reqs)
         layers, _, hv, kd, vd = self.state.shape
         active = torch.empty((reqs.numel() + 1,), dtype=torch.int32, device=reqs.device)
@@ -150,7 +163,11 @@ class ReplaySSMExecutor(SSMExecutor):
         return positions
 
     def accept_updates(self, reqs, accepted_state_indices=None):
-        """Accept this round's prefix; accepted_state_indices contains per-request last accepted indexes."""
+        """更新 cursor 以保留每个请求本轮已接受的前缀。
+
+        MTP 时 ``accepted_state_indices`` 是每个请求最后接受的 draft
+        位置；单 token 路径传 ``None``，每个请求只推进一个位置。
+        """
         _accept_updates[(triton.cdiv(reqs.numel(), 256),)](
             self.cursors,
             reqs,
@@ -162,13 +179,15 @@ class ReplaySSMExecutor(SSMExecutor):
         )
 
     def merge_accepted_updates(self, reqs):
-        """Fold accepted history into SSM state and clear its history positions."""
+        """把接受的 history 物化回 canonical state，并清空请求 cursor。"""
         if reqs.numel() == 0:
             return
         self._materialize_accepted_state(reqs, self.state, snapshot=False)
         self.cursors.index_fill_(0, reqs.long(), 0)
 
     def _materialize_accepted_state(self, reqs, output, snapshot, output_strides=None):
+        """将请求的 accepted prefix 写入 state 或调用方提供的输出页。"""
+
         layers, slots, hv, k, v = self.state.shape
         config = self.run_config or SSMRunConfig(32, 4)
         bv = config.BV
@@ -198,7 +217,7 @@ class ReplaySSMExecutor(SSMExecutor):
         )
 
     def get_accepted_state(self, req_idx, accepted_index=None):
-        """Return a canonical checkpoint without changing the active state or history."""
+        """返回不修改 active state/history 的单请求 canonical 快照。"""
         layers, _, hv, k, v = self.state.shape
         output = torch.empty((layers, hv, k, v), dtype=self.state.dtype, device=self.state.device)
         reqs = torch.tensor([req_idx], dtype=torch.int32, device=self.state.device)
@@ -206,6 +225,8 @@ class ReplaySSMExecutor(SSMExecutor):
         return output
 
     def export_accepted_state(self, req_indices, targets, accepted_indices=None):
+        """将多个 accepted 快照直接写入调用方目标页，避免中间整批分配。"""
+
         if not req_indices:
             return
         shape = (self.state.shape[0], *self.state.shape[2:])
@@ -220,6 +241,8 @@ class ReplaySSMExecutor(SSMExecutor):
         )
 
     def get_run_config(self, q, k, v, a, b, a_log, bias, cu_seqlens=None) -> SSMRunConfig:
+        """按当前 kernel 形状选择或返回固定的 ReplaySSM 调优配置。"""
+
         if self.compute_mode == "parallel":
             config = self.run_config or SSMRunConfig(128, 2, 1)
         else:
@@ -243,6 +266,8 @@ class ReplaySSMExecutor(SSMExecutor):
         state_indices=None,
         accepted_token_counts=None,
     ):
+        """执行一层 ReplaySSM decode，并返回输出与本轮 run config。"""
+
         config = run_config or self.get_run_config(q, k, v, a, b, a_log, bias, cu_seqlens)
         hv, kd, vd = self.state.shape[-3:]
         assert self.num_key_heads in (q.shape[-2], hv)
@@ -302,10 +327,12 @@ class ReplaySSMExecutor(SSMExecutor):
         return out, config
 
     def accept_single_token(self, reqs):
-
+        """非 MTP decode 直接把单 token 写入当前 history。"""
         self.accept_updates(reqs)
 
     def commit(self, acceptance, indices, state_name):
+        """应用接受结果；MTP 直接推进 cursor，单 token 还需写入 history。"""
+
         if self.verify_width > 1:
             update_accepted_indices(acceptance, indices, replay_cursors=self.cursors)
         else:

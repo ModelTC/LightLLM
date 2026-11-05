@@ -39,6 +39,7 @@ def _project_replay_queries(
     start,
     state,
 ):
+    # 预计算 verify window 的 q/k 投影；仅 precompute/parallel 路径调用。
     tt = tl.arange(0, BQK)
     tokens = start + tt % BW
     valid = (tt < 2 * BW) & (tokens < end)
@@ -95,6 +96,7 @@ def _project_replay_queries(
 
 @triton.jit
 def _solve_gdn_deltas(power, rhs, BW: tl.constexpr, projection_dtype: tl.constexpr, projection_precision: tl.constexpr):
+    # 解同一 verify window 内的严格下三角 delta 耦合，不读写 history。
     wi = tl.arange(0, power.shape[0])
     inverse = (wi[:, None] == wi[None, :]).to(tl.float32)
     # The strictly lower-triangular coupling is nilpotent. Repeated
@@ -155,8 +157,8 @@ def _replay_gdn_window(
     valid,
     vv,
 ):
-    # Project the whole verify window against both accepted and new keys.
-    # Only the small corrected-value solve below depends on token order.
+    # GDN precompute 路径：一次投影整个窗口，再按 token 顺序写入新 history。
+    # 只有 corrected-value solve 依赖 token 顺序，避免重复计算历史投影。
     jj = tl.arange(0, BR)
     fresh_tokens = start + jj - L
     old = (jj < L) & (jj < n)
@@ -305,6 +307,7 @@ def _replay_sequential(
     tt,
     vv,
 ):
+    # KDA、inline 以及不满足 precompute 条件的路径使用逐 token 递推。
     history = ll < n
     keys = tl.load(
         Keys + (key_slot * (2 * L) + base) * K + ll[:, None] * K + kk[None, :],
@@ -435,7 +438,12 @@ def _replay(
     BQK: tl.constexpr,
     BR: tl.constexpr,
 ):
-    """Output reconstruction with an exact raw-input recurrence at checkpoint folds."""
+    """执行一个请求窗口的 replay decode，并写入 raw/derived history。
+
+    当 history 即将跨半区时，先按 raw input 折叠到 canonical state；随后
+    根据 compute mode 选择预计算投影或逐 token 递推。请求数属于运行时布局，
+    不应因为 eager batch 改变而形成新的 kernel 变体。
+    """
     iv, seq, hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     req = tl.load(Reqs + seq).to(tl.int64)
     if VARLEN:

@@ -28,6 +28,8 @@ def _materialize(
     KDA: tl.constexpr,
     OUTPUT_STRIDES: tl.constexpr = None,
 ):
+    # 将 cursor 指向的 accepted history 应用到 canonical state；SNAPSHOT
+    # 只写独立输出，merge 路径则原地更新请求槽位。
     iv, row, lh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     req = tl.load(Reqs + row).to(tl.int64)
     if req == HOLD:

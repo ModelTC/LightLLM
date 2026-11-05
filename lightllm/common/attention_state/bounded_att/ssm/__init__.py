@@ -2,6 +2,13 @@ import torch
 
 
 def create_ssm_executor(config, request_capacity, mtp_step, device, mode, replay_config, *, kda, gate_lower_bound):
+    """按统一 state layout 创建 native、compact 或 replay executor。
+
+    三种模式共享 canonical SSM state；差异只在 decode 中间量和接受阶段的
+    state 更新方式。native 为每个 MTP 位置分配物理槽位，compact/replay
+    则为每个请求分配一个槽位并在各自 executor 内保存临时数据。
+    """
+
     if mode not in ("native", "compact", "replay"):
         raise ValueError(f"unknown SSM state mode: {mode}")
     slots = mtp_step + 1 if mode == "native" else 1

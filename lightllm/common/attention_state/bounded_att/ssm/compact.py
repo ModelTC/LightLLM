@@ -8,6 +8,8 @@ from .base import SSMExecutor, update_accepted_indices
 
 
 class CompactSSMExecutor(SSMExecutor):
+    """保存 verify 中间量，并在接受阶段按原 forward 配置重建 state。"""
+
     def __init__(
         self,
         state,
@@ -42,6 +44,8 @@ class CompactSSMExecutor(SSMExecutor):
         self.betas = torch.empty(shape, device=state.device, dtype=torch.float32)
 
     def get_run_config(self, q, k, v, a, b, a_log, bias, cu_seqlens=None) -> SSMRunConfig:
+        """选择与 verify layout 一致的 compact kernel 配置。"""
+
         config = resolve_run_config(self, "compact", q, k, v, a, b, a_log, bias, cu_seqlens)
         return config
 
@@ -62,6 +66,8 @@ class CompactSSMExecutor(SSMExecutor):
         state_indices=None,
         accepted_token_counts=None,
     ):
+        """执行 compact verify；该模式只接受带 ``cu_seqlens`` 的 speculative 输入。"""
+
         assert cu_seqlens is not None, "compact replay is only used for speculative verify"
         config = run_config or self.get_run_config(q, k, v, a, b, a_log, bias, cu_seqlens)
         _, slots, hv, kd, vd = self.state.shape
@@ -110,7 +116,7 @@ class CompactSSMExecutor(SSMExecutor):
         return out, config
 
     def accept_updates(self, reqs, accepted_state_indices, run_config=None):
-        """Merge this round's prefix; accepted_state_indices contains per-request last accepted indexes."""
+        """按 accepted index 重建请求前缀，并使用 verify 时的配置保持舍入一致。"""
         assert run_config is not None or not self.batch_configs, "compact acceptance requires the verify configuration"
         layers, slots, hv, kd, vd = self.state.shape
         config = run_config or self.run_config
@@ -155,11 +161,15 @@ class CompactSSMExecutor(SSMExecutor):
         )
 
     def create_commit(self, run_config):
+        """把本次 verify 的配置作为 compact 接受提交 payload。"""
+
         if not isinstance(run_config, SSMRunConfig):
             raise ValueError("compact commit requires the configuration of its forward")
         return run_config
 
     def validate_commit(self, acceptance, state_name):
+        """确认接受结果为每个 microbatch 提供了 compact forward 配置。"""
+
         if not acceptance.batches:
             raise ValueError("compact acceptance requires forward commit batches")
         for _, config in acceptance.partitions(state_name):
@@ -167,6 +177,8 @@ class CompactSSMExecutor(SSMExecutor):
                 raise ValueError(f"missing compact forward configuration for {state_name}")
 
     def commit(self, acceptance, indices, state_name):
+        """先推进通用接受索引，再逐 microbatch 重建 compact state。"""
+
         self.validate_commit(acceptance, state_name)
         update_accepted_indices(acceptance, indices)
         for reqs, config in acceptance.partitions(state_name):

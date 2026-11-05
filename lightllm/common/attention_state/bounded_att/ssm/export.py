@@ -8,6 +8,8 @@ from ..copy_kernel import copy_bounded_att_tensors
 
 
 def upload_indices(values, device, dtype=torch.int64):
+    """把 Python 索引上传到目标 device，使用 pinned memory 减少同步。"""
+
     return torch.tensor(values, dtype=dtype, pin_memory=True).to(device, non_blocking=True)
 
 
@@ -26,6 +28,8 @@ def _export_indexed(
     SIZE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
+    # 每个 request 对应一个预分配目标指针；kernel 只做 indexed copy，
+    # 不改变 source cursor/history，也不负责目标页生命周期。
     total = count.to(tl.int64) * SIZE
     for start in range(tl.program_id(0).to(tl.int64) * BLOCK, total, tl.num_programs(0) * BLOCK):
         row = start + tl.arange(0, BLOCK)
@@ -46,6 +50,13 @@ def _export_indexed(
 
 
 def export_indexed_state(source, req_indices, targets, accepted_indices=None, *, slots_per_request=1, index_stride=1):
+    """将 source 中的 accepted state 写入预分配的 target 页。
+
+    ``req_indices`` 和 ``targets`` 必须一一对应；MTP 通过
+    ``accepted_indices`` 选择请求内槽位。该函数只负责复制，不拥有 target
+    的分配和释放生命周期。
+    """
+
     if not req_indices:
         return
     assert len(req_indices) == len(targets)

@@ -28,6 +28,7 @@ def _accept_updates(
 
 @triton.jit
 def _use_separate_fold(valid, length, count, N, L: tl.constexpr, WIDTH: tl.constexpr, FORCE: tl.constexpr):
+    # 只决定本轮是否单独启动 fold；真正的 history 合并由 _fold_history 完成。
     small_batch: tl.constexpr = 12
     dense_batch: tl.constexpr = 256
     live = tl.sum((valid & (length > 0)).to(tl.int32), axis=0)
@@ -57,7 +58,8 @@ def _prepare_fold(
     WIDTH: tl.constexpr,
     SEPARATE_FOLD: tl.constexpr,
 ):
-    # 先计算每个请求的 history 起点，再把需要折叠的请求写入 Active；N 只控制本轮有效行数。
+    # 输出 Positions/ForwardCursors 供 decode 使用，Active/N 供后续 fold
+    # 使用；只改写本轮请求对应的 cursor，不触碰 canonical state。
     seq = tl.arange(0, BLOCK)
     req = tl.load(Reqs + seq, seq < N, HOLD)
     valid = (seq < N) & (req != HOLD)
@@ -110,7 +112,8 @@ def _fold_history(
     DERIVED: tl.constexpr,
     BL: tl.constexpr,
 ):
-    # 只消费 Active 中的 fold 请求，把 history 合并回 canonical state；请求数不参与变体选择。
+    # 只消费 Active 中的 fold 请求，把 history 合并回 canonical state；
+    # cursor 的 phase 已由 _prepare_fold 切换，写入后新 history 从同一半区继续。
     count = tl.load(Active + N)
     work = tl.program_id(0)
     tiles: tl.constexpr = (V + BV - 1) // BV

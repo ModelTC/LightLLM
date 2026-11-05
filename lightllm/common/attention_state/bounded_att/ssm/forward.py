@@ -13,7 +13,14 @@ if TYPE_CHECKING:
 
 @dataclass
 class SSMForward:
-    # 一次 forward 固定请求布局和执行配置；finish() 把配置封装成提交凭据，供接受阶段复用。
+    """携带一次 forward 的请求布局，并生成对应的状态提交凭据。
+
+    ``req_indices`` 是本次 forward 的 request-row 序列，可能包含 CUDA Graph
+    的 ``HOLD`` padding；``state_indices`` 是 kernel 使用的物理槽位，
+    ``cu_seqlens`` 描述真实 query 窗口。``run_config`` 在第一层执行时确定，
+    后续层复用同一配置，``finish`` 再把它封装进 ``StateCommit``。
+    """
+
     resource: "ConvSSMState"
     executor: "SSMExecutor"
     req_indices: torch.Tensor
@@ -23,6 +30,8 @@ class SSMForward:
     run_config: Optional[SSMRunConfig] = None
 
     def run_layer(self, logical_layer, q, k, v, a, b, a_log, bias):
+        """执行一层线性注意力；logical_layer 会映射到物理权重层。"""
+
         output, self.run_config = self.executor.forward(
             self.resource.get_storage_layer_index(logical_layer),
             q,
@@ -41,6 +50,8 @@ class SSMForward:
         return output
 
     def finish(self):
+        """结束 forward，返回接受阶段需要的状态提交描述。"""
+
         payload = self.executor.create_commit(self.run_config)
         if payload is None:
             return None
@@ -49,6 +60,8 @@ class SSMForward:
         return StateCommit(self.resource.state_name, payload)
 
     def copy_inputs(self, source: "SSMForward"):
+        """把动态图输入复制到已 capture 的 tensor，保留 capture 时的布局。"""
+
         if self.resource is not source.resource or self.executor is not source.executor:
             raise ValueError("cannot copy a forward for a different resource or executor")
         copies = []

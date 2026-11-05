@@ -5,6 +5,8 @@ from .export import export_indexed_state
 
 
 class NativeSSMExecutor(SSMExecutor):
+    """直接调用 fused recurrent kernel，并把 MTP 状态展开为物理槽位。"""
+
     def __init__(self, state, verify_width, *, kda=False, gate_lower_bound=-5.0):
         self.state = state
         self.slots_per_request = verify_width
@@ -12,18 +14,24 @@ class NativeSSMExecutor(SSMExecutor):
         self.gate_lower_bound = gate_lower_bound
 
     def decode_indices(self, reqs, speculative):
+        """返回普通 decode 或 speculative verify 对应的物理 state 索引。"""
+
         if not speculative:
             return reqs if self.slots_per_request == 1 else reqs * self.slots_per_request
         offsets = torch.arange(self.slots_per_request, device=reqs.device, dtype=reqs.dtype)
         return reqs[:, None] * self.slots_per_request + offsets[None, :]
 
     def get_accepted_state(self, req_idx, accepted_index=None):
+        """返回单槽位 view，或 MTP 接受位置对应的 state 副本。"""
+
         if self.slots_per_request == 1:
             return self.state[:, req_idx]
         index = req_idx * self.slots_per_request + accepted_index
         return self.state.index_select(1, index.long().view(1))[:, 0]
 
     def export_accepted_state(self, req_indices, targets, accepted_indices=None):
+        """把 native state 按请求和接受位置导出到调用方目标页。"""
+
         export_indexed_state(
             self.state,
             req_indices,
@@ -50,6 +58,8 @@ class NativeSSMExecutor(SSMExecutor):
         state_indices=None,
         accepted_token_counts=None,
     ):
+        """执行 native recurrent decode，并原地更新 fused kernel 的最终 state。"""
+
         state = self.state[layer]
         if self.kda:
             from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
