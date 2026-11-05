@@ -32,7 +32,7 @@ from lightllm.models.llama.yarn_rotary_utils import (
     find_correction_range,
     linear_ramp_mask,
 )
-from lightllm.utils.envs_utils import get_env_start_args, get_redundancy_expert_num
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
@@ -90,7 +90,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         if self.args.enable_ep_moe:
             if self.args.enable_tpsp_mix_mode and self.tp_world_size_ > 1:
                 raise ValueError("DeepSeek-V4 EP with TP-SP is not supported: FFN and mHC token layouts differ")
-            if get_redundancy_expert_num():
+            if self.args.eplb_num_redundant_experts_per_rank:
                 raise ValueError("DeepSeek-V4 preselected MoE routing does not yet support redundant experts")
         return
 

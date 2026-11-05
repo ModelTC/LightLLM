@@ -64,6 +64,7 @@ class ModeBackend:
         self.enable_decode_microbatch_overlap = get_env_start_args().enable_decode_microbatch_overlap
         self.enable_prefill_microbatch_overlap = get_env_start_args().enable_prefill_microbatch_overlap
         self.spec_engine = None
+        self.eplb_manager = None
 
         # 控制 _get_classed_reqs 分类的参数变量，不同的 backend 具有可能需要不同的分类运行条件。
         self.classed_req_no_decode = False
@@ -288,6 +289,16 @@ class ModeBackend:
         prof_name = f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}"
         prof_mode = self.args.enable_profiling
         self.profiler = ProcessProfiler(mode=prof_mode, name=prof_name, use_multi_thread=True) if prof_mode else None
+        if self.args.eplb_num_redundant_experts_per_rank > 0:
+            from lightllm.server.router.model_infer.mode_backend.eplb.runtime_manager import EPLBManager
+
+            self.eplb_manager = EPLBManager(
+                model=self.model,
+                max_rebalance_count=self.args.eplb_rebalance_count,
+                config_path=self.args.eplb_config_path,
+                plan_mode=self.args.eplb_plan_mode,
+                run_mode=self.args.eplb_run_mode,
+            )
 
         # 策略可能读取模型、缓存管理器和 rank 等全局调度状态，因此在 backend 完成初始化后再创建。
         self.prefill_queue_strategy = create_prefill_queue_strategy(self)

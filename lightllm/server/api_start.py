@@ -182,6 +182,27 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
+    assert (
+        args.eplb_num_redundant_experts_per_rank >= 0
+    ), "--eplb_num_redundant_experts_per_rank must be greater than or equal to 0"
+    assert args.eplb_rebalance_count >= -1, "--eplb_rebalance_count must be greater than or equal to -1"
+    # 启动子进程前校验采集阶段和规划算法的互斥关系，不自动改写用户配置。
+    assert args.eplb_run_mode in ("prefill", "decode"), "--eplb_run_mode must be prefill or decode"
+    if args.eplb_run_mode == "decode":
+        assert args.eplb_plan_mode == "decode_cooccurrence", (
+            "--eplb_run_mode decode requires --eplb_plan_mode decode_cooccurrence, " f"got {args.eplb_plan_mode!r}"
+        )
+    else:
+        assert args.eplb_plan_mode in ("topology_aware", "global_balance"), (
+            "--eplb_run_mode prefill requires --eplb_plan_mode topology_aware or global_balance, "
+            f"got {args.eplb_plan_mode!r}"
+        )
+    if args.eplb_num_redundant_experts_per_rank > 0:
+        assert args.enable_ep_moe, "EPLB requires --enable_ep_moe"
+        assert not args.enable_prefill_cudagraph, "EPLB does not support --enable_prefill_cudagraph"
+        # TODO: Support EPLB redundant experts together with RL after their runtime state updates are coordinated.
+        assert not args.enable_rl, "EPLB redundant experts do not support --enable_rl"
+
     if args.enable_ep_moe:
         allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}
         for backend in args.llm_prefill_att_backend:

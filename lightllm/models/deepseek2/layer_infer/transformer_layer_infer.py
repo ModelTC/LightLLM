@@ -322,6 +322,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         _0_input1 = None
         self._post_cache_kv(_0_cache_kv, infer_state, layer_weight)
         _0_o = self._token_attention_kernel(_0_q, infer_state, layer_weight)
+        del _0_cache_kv
         _0_q = None
         _0_o = self._get_o(_0_o, infer_state, layer_weight)
         input_embdings.add_(_0_o.view(-1, self.embed_dim_))
@@ -351,6 +352,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         _1_input1 = None
         self._post_cache_kv(_1_cache_kv, infer_state1, layer_weight)
         _1_o = self._token_attention_kernel(_1_q, infer_state1, layer_weight)
+        del _1_cache_kv
         _1_q = None
         _1_o = self._get_o(_1_o, infer_state1, layer_weight)
         input_embdings1.add_(_1_o.view(-1, self.embed_dim_))
@@ -446,6 +448,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         _0_input1 = None
         self._post_cache_kv(_0_cache_kv, infer_state, layer_weight)
         _0_o = self._context_attention_kernel(_0_q, _0_cache_kv, infer_state, layer_weight)
+        del _0_cache_kv
         _0_q = None
         _0_o = self._get_o(_0_o, infer_state, layer_weight)
         input_embdings.add_(_0_o.view(-1, self.embed_dim_))
@@ -473,6 +476,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         _1_input1 = None
         self._post_cache_kv(_1_cache_kv, infer_state1, layer_weight)
         _1_o = self._context_attention_kernel(_1_q, _1_cache_kv, infer_state1, layer_weight)
+        del _1_cache_kv
         _1_q = None
         _1_o = self._get_o(_1_o, infer_state1, layer_weight)
         input_embdings1.add_(_1_o.view(-1, self.embed_dim_))
@@ -574,10 +578,14 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         if self.n_shared_experts is not None:
             _0_ffn_out.add_(_0_shared_output)
+            del _0_shared_output
         input_embdings.add_(_0_ffn_out.view(-1, self.embed_dim_))
+        _0_ffn_out.record_stream(torch.cuda.current_stream())
+        del _0_ffn_out
 
         # 1 combine execute
         _1_ffn_out, _1_hook = layer_weight.experts.prefill_combine(_1_moe_out, _1_handle, _1_combine_event)
+        del _1_moe_out
 
         def _1_hook_post():
             _1_hook()
@@ -585,6 +593,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             if self.n_shared_experts is not None:
                 _1_ffn_out.add_(_1_shared_output)
             input_embdings1.add_(_1_ffn_out.view(-1, self.embed_dim_))
+            _1_ffn_out.record_stream(torch.cuda.current_stream())
             return
 
         infer_state1.hook = _1_hook_post

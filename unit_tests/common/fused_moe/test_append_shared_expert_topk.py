@@ -86,29 +86,14 @@ def test_capture_observes_logical_ids_before_execution_mapping():
     assert torch.equal(executed["topk_ids"], torch.tensor([[0, 2, 4]], device="cuda"))
 
 
-def test_redundancy_repair_does_not_overwrite_logical_ids(monkeypatch):
+def test_disabled_eplb_keeps_logical_ids():
     from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.deepgemm_impl import (
         FuseMoeDeepGEMM,
     )
 
     logical_ids = torch.tensor([[1, 3]], dtype=torch.int64, device="cuda")
-    seen = {}
-
-    def repair(topk_ids, **kwargs):
-        seen["ptr"] = topk_ids.data_ptr()
-        topk_ids.fill_(-1)
-
-    monkeypatch.setattr(
-        "lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.deepgemm_impl.redundancy_topk_ids_repair",
-        repair,
-    )
     impl = FuseMoeDeepGEMM.__new__(FuseMoeDeepGEMM)
-    impl.redundancy_expert_num = 1
-    impl.redundancy_expert_ids_tensor = None
-    impl.ep_n_routed_experts = 2
-    impl.global_rank_ = 0
-    impl.routed_expert_counter_tensor = None
-    impl.auto_update_redundancy_expert = False
+    impl.num_redundant_experts_per_rank = 0
     impl.num_fused_shared_experts = 0
     impl.n_routed_experts = 4
     _, execution_ids = FuseMoeDeepGEMM._prepare_expert_execution(
@@ -117,9 +102,8 @@ def test_redundancy_repair_does_not_overwrite_logical_ids(monkeypatch):
         logical_ids,
         is_prefill=False,
     )
-    assert seen["ptr"] != logical_ids.data_ptr()
+    assert execution_ids is logical_ids
     assert torch.equal(logical_ids, torch.tensor([[1, 3]], device="cuda"))
-    assert torch.equal(execution_ids, torch.full_like(logical_ids, -1))
 
 
 def test_append_fused_shared_experts_without_gate():

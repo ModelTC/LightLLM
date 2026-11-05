@@ -69,12 +69,16 @@ def test_rotary_cache_keeps_unscaled_swa_and_yarn_compression():
         (False, False, True, 2, 0, None),
     ],
 )
-def test_unsupported_parallel_layouts_fail_before_inference(monkeypatch, balance, ep, tpsp, tp, redundancy, error):
-    monkeypatch.setattr("lightllm.models.deepseek_v4.model.get_redundancy_expert_num", lambda: redundancy)
+def test_unsupported_parallel_layouts_fail_before_inference(balance, ep, tpsp, tp, redundancy, error):
     model = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
     model.load_way, model.tp_world_size_ = "HF", tp
     model.config = {"num_attention_heads": 64, "o_groups": 8, "index_n_heads": 64}
-    model.args = SimpleNamespace(enable_dp_prefill_balance=balance, enable_ep_moe=ep, enable_tpsp_mix_mode=tpsp)
+    model.args = SimpleNamespace(
+        enable_dp_prefill_balance=balance,
+        enable_ep_moe=ep,
+        enable_tpsp_mix_mode=tpsp,
+        eplb_num_redundant_experts_per_rank=redundancy,
+    )
     if error:
         with pytest.raises(ValueError, match=error):
             model._verify_params()

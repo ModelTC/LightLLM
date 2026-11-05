@@ -7,10 +7,12 @@ from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
     get_env_start_args,
-    get_redundancy_expert_ids,
-    get_redundancy_expert_num,
 )
-from lightllm.utils.dist_utils import get_global_rank, get_global_world_size
+from lightllm.utils.dist_utils import (
+    get_global_rank,
+    get_global_world_size,
+    get_node_world_size,
+)
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
     fused_experts,
     get_ep_num_sms,
@@ -24,7 +26,8 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_ke
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
-from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
+from lightllm.common.basemodel.triton_kernel.fused_moe.decode_eplb_topk_ids import eplb_repair_decode_topk_ids
+from lightllm.common.basemodel.triton_kernel.fused_moe.prefill_eplb_topk_ids import eplb_repair_prefill_topk_ids
 
 
 class FuseMoeDeepGEMM(FuseMoeBaseImpl):
@@ -33,18 +36,146 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         world_size = get_global_world_size()
         assert self.n_routed_experts % world_size == 0
         global_rank = get_global_rank()
-        self.global_rank_ = global_rank
-        self.global_world_size_ = world_size
-        self.ep_n_routed_experts = self.n_routed_experts // world_size
-        self.redundancy_expert_num = get_redundancy_expert_num()
-        self.auto_update_redundancy_expert = get_env_start_args().auto_update_redundancy_expert
-        redundancy_ids = list(get_redundancy_expert_ids(self.layer_index))
-        self.redundancy_expert_ids_tensor = torch.tensor(redundancy_ids, dtype=torch.int64, device="cuda")
-        self.routed_expert_counter_tensor = torch.zeros((self.n_routed_experts,), dtype=torch.int64, device="cuda")
-        self.total_expert_num_contain_redundancy = self.n_routed_experts + self.redundancy_expert_num * world_size
-        first_local_expert_id = global_rank * self.ep_n_routed_experts
-        self.local_logics_expert_ids_list = (
-            list(range(first_local_expert_id, first_local_expert_id + self.ep_n_routed_experts)) + redundancy_ids
+        self.global_rank = global_rank
+        start_args = get_env_start_args()
+        self.num_redundant_experts_per_rank = start_args.eplb_num_redundant_experts_per_rank
+
+        if self.num_redundant_experts_per_rank > 0:
+            self._init_eplb_runtime(
+                start_args=start_args,
+                world_size=world_size,
+                global_rank=global_rank,
+            )
+        else:
+            self._init_standard_expert_layout(
+                world_size=world_size,
+                global_rank=global_rank,
+            )
+
+    def _init_eplb_runtime(self, start_args: Any, world_size: int, global_rank: int) -> None:
+        """初始化本地物理槽位以及可更新的 EPLB 路由运行态。
+
+        ``local_logics_expert_ids_list`` 始终描述全部本地物理行。初始化时主专家
+        在前、冗余专家在后；decode 模式始终保持规范主槽，只有 global_balance
+        允许重排全部物理槽，并在安全推理边界同时更新权重和全部路由映射表。
+        """
+        # 延迟导入：顶层导入会经 mode_backend 包形成 meta_weights -> server 的循环依赖。
+        from lightllm.server.router.model_infer.mode_backend.eplb.placement import (
+            build_initial_local_expert_ids,
+            load_layer_placement,
+        )
+
+        self.num_total_physical_experts = self.n_routed_experts + world_size * self.num_redundant_experts_per_rank
+        self.num_physical_experts_per_rank = self.num_total_physical_experts // world_size
+        # 节点拓扑固定，路由表构建与 decode 初选共用；不在每次推理时读取环境变量。
+        self.node_world_size = get_node_world_size()
+
+        # 阶段 1：先构造确定性的默认布局。未指定配置文件，或配置读取、校验失败时，
+        # 后续权重初始化会继续使用这份布局。
+        initial_local_expert_ids_by_rank = build_initial_local_expert_ids(
+            self.n_routed_experts,
+            world_size,
+            self.num_redundant_experts_per_rank,
+        )
+
+        # 阶段 2：如果指定了配置文件，尝试读取与当前层及部署拓扑匹配的历史布局。
+        # Decode 额外检查规范主槽；配置无效时记录 warning 并返回 None 使用默认布局。
+        config_path = start_args.eplb_config_path
+        if config_path is not None:
+            saved_placement = load_layer_placement(
+                config_path,
+                layer_index=self.layer_index,
+                num_logical_experts=self.n_routed_experts,
+                world_size=world_size,
+                num_redundant_experts_per_rank=self.num_redundant_experts_per_rank,
+                run_mode=start_args.eplb_run_mode,
+            )
+
+            # 阶段 3：只有完整校验通过的历史布局才会替换默认布局，使专家权重在
+            # 初始化时直接加载到上一次优化后的物理槽位中。
+            if saved_placement is not None:
+                initial_local_expert_ids_by_rank = saved_placement
+        self.local_logics_expert_ids_list = initial_local_expert_ids_by_rank[global_rank]
+        self._init_eplb_routing_maps(rank_to_logic_expert_ids=initial_local_expert_ids_by_rank)
+        self.decode_route_statistics_enabled = (
+            start_args.eplb_run_mode == "decode" and start_args.eplb_rebalance_count != 0
+        )
+        self._init_route_statistics(start_args)
+
+    def _init_eplb_routing_maps(self, rank_to_logic_expert_ids: list[list[int]]) -> None:
+        """从同一份布局初始化三张 int32 设备映射表，后续布局更新只原地覆盖。"""
+        # 延迟导入，避免 meta_weights -> server 的循环依赖。
+        from lightllm.server.router.model_infer.mode_backend.eplb.placement import (
+            build_logical_to_physical_map,
+            build_logical_to_rank_physical_map,
+            build_minimal_logical_to_physical_map,
+        )
+
+        # [E, 3 + W*S]：全部副本候选及本卡、本节点计数，供 prefill 和 decode 哈希初选使用。
+        logical_to_physical_map = build_logical_to_physical_map(
+            rank_to_logic_expert_ids=rank_to_logic_expert_ids,
+            num_logical_experts=self.n_routed_experts,
+            current_rank=self.global_rank,
+            node_world_size=self.node_world_size,
+        )
+        # [E, W]：按逻辑 ID 和 rank 查询物理槽，没有副本的位置为 -1。
+        logical_to_rank_physical_map = build_logical_to_rank_physical_map(
+            rank_to_logic_expert_ids=rank_to_logic_expert_ids,
+            num_logical_experts=self.n_routed_experts,
+        )
+        # [E]：每个逻辑专家只保留一个物理槽，供后续控制活跃副本规模的路由使用。
+        minimal_logical_to_physical_map = build_minimal_logical_to_physical_map(
+            rank_to_logic_expert_ids=rank_to_logic_expert_ids,
+            num_logical_experts=self.n_routed_experts,
+        )
+        # 三张表都来自最终加载布局；CUDA Graph 捕获后保持地址不变。
+        self.logical_to_physical_map = torch.tensor(logical_to_physical_map, dtype=torch.int32).cuda()
+        self.logical_to_rank_physical_map = torch.tensor(logical_to_rank_physical_map, dtype=torch.int32).cuda()
+        self.minimal_logical_to_physical_map = torch.tensor(minimal_logical_to_physical_map, dtype=torch.int32).cuda()
+
+    def _init_route_statistics(self, start_args: Any) -> None:
+        """Allocate only the statistics required by the configured run mode."""
+        if start_args.eplb_run_mode == "prefill":
+            # 环形缓冲区保留最近 24 次 prefill 路由采样，每次采样写入独立的一行；
+            # 始终按 logical expert 统计，冗余副本不会拆散规划器观察到的负载信号。
+            self.prefill_route_counter = torch.zeros(
+                (24, self.n_routed_experts),
+                dtype=torch.int64,
+                device="cuda",
+            )
+            # [0] 是单调递增的 sample index；[1] 用于在同一个 kernel 内协调
+            # 目标行清零，并从所有 program 中选出最后完成者。
+            self.prefill_route_sample_index = torch.zeros(2, dtype=torch.int64, device="cuda")
+            self.decode_route_counter = None
+            self.decode_route_recording_enabled = None
+        else:
+            self.prefill_route_counter = None
+            self.prefill_route_sample_index = None
+            # decode 共现矩阵只写包含主对角线的上三角。对角线记录单个
+            # logical expert 的精确负载，非对角位置记录无序 expert pair
+            # 在同一个 token 的 top-k 中共同出现的次数。
+            self.decode_route_counter = torch.zeros(
+                (self.n_routed_experts, self.n_routed_experts),
+                dtype=torch.int64,
+                device="cuda",
+            )
+            # CUDA Graph 会捕获固定的 kernel 参数地址，因此使用设备标志在
+            # 图内动态开关共现采集。完成最后一次允许的重排后，manager 将
+            # 此标志清零，避免持续支付 O(top_k^2) 原子计数开销。
+            self.decode_route_recording_enabled = torch.zeros(1, dtype=torch.int32, device="cuda")
+            if start_args.eplb_rebalance_count != 0:
+                self.decode_route_recording_enabled.fill_(1)
+
+    def _init_standard_expert_layout(self, world_size: int, global_rank: int) -> None:
+        """初始化未启用 EPLB 时连续均分的本地专家布局。"""
+        self.num_total_physical_experts = self.n_routed_experts
+        num_local_experts = self.n_routed_experts // world_size
+        first_local_expert_id = global_rank * num_local_experts
+        self.local_logics_expert_ids_list = list(
+            range(
+                first_local_expert_id,
+                first_local_expert_id + num_local_experts,
+            )
         )
 
     def _select_experts(
@@ -60,7 +191,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
     ):
-        """只选择逻辑专家，冗余专家 ID 留到 ``_prepare_expert_execution``。"""
+        """只选择逻辑专家，不在此阶段应用 EPLB 物理布局。"""
         from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
 
         topk_weights, topk_ids = select_experts(
@@ -87,19 +218,42 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         is_prefill: bool,
         shared_expert_gate: Optional[torch.Tensor] = None,
     ):
-        """在逻辑路由采集之后，生成 DeepEP 实际使用的专家 ID。"""
         assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
-        if self.redundancy_expert_num > 0:
-            # repair 会原地改写 ID。复制后再改，保留已经交给 capture 的逻辑 ID。
-            topk_ids = topk_ids.clone()
-            redundancy_topk_ids_repair(
-                topk_ids=topk_ids,
-                redundancy_expert_ids=self.redundancy_expert_ids_tensor,
-                ep_expert_num=self.ep_n_routed_experts,
-                global_rank=self.global_rank_,
-                expert_counter=self.routed_expert_counter_tensor,
-                enable_counter=self.auto_update_redundancy_expert,
+        if self.num_redundant_experts_per_rank == 0:
+            return topk_weights, topk_ids
+
+        # 按执行阶段映射物理专家；两种 EPLB 布局的 decode 共用算法选择入口。
+        if is_prefill:
+            # 延迟导入以避免 meta_weights -> server 的循环依赖。
+            from lightllm.server.router.model_infer.mode_backend.eplb.eplb_utils import (
+                get_eplb_prefill_dispatch_mode,
+                should_record_prefill_route,
+            )
+
+            topk_ids = eplb_repair_prefill_topk_ids(
+                logical_topk_ids=topk_ids,
+                logical_to_physical_map=self.logical_to_physical_map,
+                minimal_logical_to_physical_map=self.minimal_logical_to_physical_map,
+                world_size=self.logical_to_rank_physical_map.shape[1],
+                prefill_route_counter=self.prefill_route_counter,
+                prefill_route_sample_index=self.prefill_route_sample_index,
+                update_prefill_route_counter=should_record_prefill_route(is_prefill=True),
+                mode=get_eplb_prefill_dispatch_mode(),
+            )
+
+        else:
+            topk_ids = eplb_repair_decode_topk_ids(
+                logical_topk_ids=topk_ids,
+                logical_to_physical_map=self.logical_to_physical_map,
+                logical_to_rank_physical_map=self.logical_to_rank_physical_map,
+                minimal_logical_to_physical_map=self.minimal_logical_to_physical_map,
+                current_rank=self.global_rank,
+                num_physical_experts_per_rank=self.num_physical_experts_per_rank,
+                node_world_size=self.node_world_size,
+                route_counter=self.decode_route_counter,
+                update_route_counter=self.decode_route_statistics_enabled,
+                route_recording_enabled=self.decode_route_recording_enabled,
             )
         return topk_weights, topk_ids
 
@@ -125,7 +279,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             w2=w2,
             topk_weights=topk_weights,
             topk_idx=topk_ids.to(torch.long),
-            num_experts=self.total_expert_num_contain_redundancy,  # number of all experts contain redundancy
+            num_experts=self.num_total_physical_experts,  # number of all experts contain redundancy
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
@@ -213,7 +367,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             qinput_tensor,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
-            num_experts=self.total_expert_num_contain_redundancy,
+            num_experts=self.num_total_physical_experts,
             num_max_tokens_per_rank=get_deepep_num_max_dispatch_tokens_per_rank_decode(),
             expert_alignment=get_mk_alignment_for_contiguous_layout(),
             num_sms=get_ep_num_sms(overlap_with_compute=True),
@@ -312,7 +466,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             qinput_tensor,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
-            num_experts=self.total_expert_num_contain_redundancy,
+            num_experts=self.num_total_physical_experts,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             expert_alignment=get_mk_alignment_for_contiguous_layout(),
             num_sms=get_ep_num_sms(overlap_with_compute=True),

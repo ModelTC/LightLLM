@@ -767,6 +767,90 @@ PD 分离模式参数
 
     使用 tgi 输入和输出格式
 
+专家并行与 EPLB 参数
+--------------------
+
+.. option:: --enable_ep_moe
+
+    为支持的 MoE 模型启用专家并行。使用 EPLB 时必须开启此参数。
+
+.. option:: --eplb_num_redundant_experts_per_rank
+
+    每个 MoE 层在每个 EP rank 上分配的冗余物理专家数量，默认值为 ``0``，表示关闭 EPLB。
+    设置为正数时启用 EPLB，并且必须同时设置 ``--enable_ep_moe``；负数会在启动阶段被拒绝。
+
+    每个 rank 会额外分配指定数量的专家权重行。EPLB 将逻辑专家映射到主副本或冗余物理副本，
+    统计路由负载，并可在线迁移冗余副本以改善专家负载均衡。增大此值可以提供更多布局选择，
+    但也会占用更多 GPU 显存并增加专家迁移流量。
+
+    EPLB 当前不能与 ``--enable_prefill_cudagraph`` 同时使用，也不支持 SM100 GPU。
+    同一部署中的所有 rank 和节点必须使用相同的配置值。
+
+.. option:: --eplb_plan_mode
+
+    EPLB 动态重排使用的专家布局规划算法，默认值为 ``topology_aware``。当前支持：
+
+    * ``topology_aware``：固定每个 rank 的主专家槽，只规划冗余槽位。它保留逐次 prefill
+      样本和源节点负载，匹配节点优先分发，并使用 128-token 对齐、模型级收益门槛和
+      物理槽位复用减少低收益迁移。
+    * ``global_balance``：全局均衡的样板实现。它根据各层逻辑专家的全局路由负载生成
+      近似均衡的完整布局，并尽量复用当前 rank 和物理槽位以减少专家迁移；prefill token
+      在全部有效副本间分发。该模式不适合 grouped top-k 场景。
+    * ``decode_cooccurrence``：固定每个 rank 的规范主专家槽，聚合 decode 专家共现计数，
+      从本 rank 主专家集合开始，逐轮选择与已有专家共现计数总和最高的外部专家填充冗余槽位。
+      评分不做归一化，每个新副本都会加入后续候选评分，并尽量复用当前物理槽位。
+
+      加载历史布局时额外校验规范主槽前缀；不满足要求的层记录 warning 并回退默认布局。
+      只调整冗余槽，仍校验槽位数、单卡去重和全局专家覆盖；prefill 模式不增加主槽加载限制。
+
+    ``topology_aware`` 和 ``global_balance`` 只用于 prefill，``decode_cooccurrence`` 只用于
+    decode。plan mode 必须与 ``--eplb_run_mode`` 匹配，否则在启动子进程前的参数校验中直接失败。同一个 EP
+    通信组内的所有 rank 必须使用相同的值。
+
+.. option:: --eplb_run_mode
+
+    EPLB 采集哪一种推理阶段的路由统计，默认值为 ``prefill``。支持：
+
+    * ``prefill``：标识当前 EPLB manager 面向 prefill 负载进行优化；
+    * ``decode``：采集 decode logical expert 的上三角共现统计。
+
+    ``prefill`` 使用 ``[24, E]`` 环形路由样本，
+    ``decode`` 使用 ``[E, E]`` logical expert 共现矩阵并只写包含主对角线的上三角。
+    选择 ``decode`` 时不会执行 prefill
+    路由统计；选择 ``prefill`` 时也不会给 decode 路径增加统计原子操作。两套统计缓冲区
+    互斥分配，未启用模式对应的属性为 ``None``，不会同时占用显存。decode 模式应与
+    ``--eplb_plan_mode decode_cooccurrence`` 配套使用。
+
+.. option:: --eplb_rebalance_count
+
+    动态 EPLB 最多成功执行的重排次数，默认值为 ``1``。只有新布局实际发生
+    专家权重迁移并完成提交后才计数；样本不足或规划布局不变不会消耗次数。
+
+    * ``-1``：不限制次数，持续进行动态重排；
+    * ``0``：不进行动态重排，仅使用初始化时的冗余布局；
+    * 正整数：完成指定次数的重排后停止规划。
+
+.. option:: --eplb_config_path
+
+    EPLB 布局 JSON 文件路径，默认值为 ``None``。指定后，LightLLM 会在初始化专家权重之前校验并
+    读取各层保存的布局，使服务启动后立即使用上一次优化得到的专家分配。同一个文件也作为输出：
+    每次成功完成动态重排后，rank 0 会写回当前最新布局。
+
+    如果文件不存在、JSON 无法解析、缺少模型层，或保存的专家拓扑与当前部署不匹配，LightLLM 会
+    记录 warning，并对受影响的层使用默认初始化布局。只有后续动态重排成功完成时，rank 0 才会把
+    新布局写入该路径。
+
+    以下示例为每个 EP rank 配置两个冗余专家::
+
+        python -m lightllm.server.api_server \
+            --model_dir /path/to/model \
+            --enable_ep_moe \
+            --eplb_num_redundant_experts_per_rank 2 \
+            --eplb_run_mode prefill \
+            --eplb_plan_mode topology_aware \
+            --eplb_rebalance_count 1 \
+            --eplb_config_path /path/to/eplb-placement.json
+
 MTP 多预测参数
 --------------
 
@@ -793,17 +877,6 @@ MTP 多预测参数
     目前此功能仅支持 DeepSeekV3/R1 模型。
     增加此值允许更多预测，但确保模型与指定的步数兼容。
     目前 deepseekv3/r1 模型仅支持 1 步
-
-DeepSeek 冗余专家参数
----------------------
-
-.. option:: --ep_redundancy_expert_config_path
-
-    冗余专家配置的路径。可用于 deepseekv3 模型。
-
-.. option:: --auto_update_redundancy_expert
-
-    是否通过在线专家使用计数器为 deepseekv3 模型更新冗余专家。
 
 监控和日志参数
 --------------
