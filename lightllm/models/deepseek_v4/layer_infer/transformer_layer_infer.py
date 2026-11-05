@@ -235,12 +235,12 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         combine_event1 = ElasticBuffer.capture()
         routed1, combine_hook1 = experts.combine(moe_out1, handle1, overlap_event=combine_event1)
 
-        shared0 = self._ffn_tp(x0, infer_state, layer_weight)
+        shared0 = self._ffn_shared_expert(x0, infer_state, layer_weight)
         combine_hook0()
         routed0.add_(shared0)
         output0 = self._hc_ffn_out(routed0, residual0, residual_mix0, post_mix0)
 
-        shared1 = self._ffn_tp(x1, infer_state1, layer_weight)
+        shared1 = self._ffn_shared_expert(x1, infer_state1, layer_weight)
         if self.is_last_layer:
             combine_hook1()
             routed1.add_(shared1)
@@ -276,7 +276,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         weights0, indices0 = self._select_experts(x0, infer_state, layer_weight)
         infer_state1.call_overlap_hook()
 
-        shared0 = self._ffn_tp(x0, infer_state, layer_weight)
+        shared0 = self._ffn_shared_expert(x0, infer_state, layer_weight)
         recv_x0, masked_m0, indices0, weights0, handle0, dispatch_hook0 = experts.low_latency_dispatch_with_topk(
             x0, indices0, weights0
         )
@@ -288,7 +288,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         weights1, indices1 = self._select_experts(x1, infer_state1, layer_weight)
         dispatch_hook0()
 
-        shared1 = self._ffn_tp(x1, infer_state1, layer_weight)
+        shared1 = self._ffn_shared_expert(x1, infer_state1, layer_weight)
         recv_x1, masked_m1, indices1, weights1, handle1, dispatch_hook1 = experts.low_latency_dispatch_with_topk(
             x1, indices1, weights1
         )
@@ -544,7 +544,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         )
 
     # ------------------------------------------------------------------ moe
-    def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
+    def _ffn_shared_expert(
+        self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
         input = input.view(-1, self.embed_dim_)
         gate_up = layer_weight.gate_up_proj.mm(input)
         if (
@@ -575,13 +577,16 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         del gate_up
         return layer_weight.down_proj.mm(shared)
 
-    def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
-        x = x.view(-1, self.embed_dim_)
-        x = self._tpsp_allgather(input=x, infer_state=infer_state)
-
-        topk_weights, topk_indices = self._select_experts(x, infer_state, layer_weight)
-        # Routed experts can overwrite x in place, so compute the shared expert first.
-        shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
+    def _ffn_mega_moe(
+        self,
+        x,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+        topk_weights,
+        topk_indices,
+    ):
+        # Mega MoE fuses combine, so the shared expert runs before the routed experts.
+        shared = self._ffn_shared_expert(input=x, infer_state=infer_state, layer_weight=layer_weight)
         routed = layer_weight.experts.experts_with_topk(
             input_tensor=x,
             topk_weights=topk_weights,
@@ -592,10 +597,67 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
         )
-        out = routed + shared
-        if self.enable_ep_moe:
-            return out
+        return routed + shared
+
+    def _ffn_tp(
+        self,
+        x,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+        topk_weights,
+        topk_indices,
+    ):
+        # A fused shared expert is applied inside the routed kernel. Triton may overwrite x,
+        # so a standalone shared expert still runs first.
+        experts = layer_weight.experts
+        fused_shared = getattr(layer_weight, "num_fused_shared_experts", 0) > 0
+        shared = None
+        if not fused_shared:
+            shared = self._ffn_shared_expert(input=x, infer_state=infer_state, layer_weight=layer_weight)
+        out = experts.experts_with_topk(
+            input_tensor=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_indices,
+            is_prefill=infer_state.is_prefill,
+            infer_state=infer_state,
+            alpha=1.0,
+            limit=self.swiglu_limit,
+            clamp_up_add_one=False,
+        )
+        if shared is not None:
+            out = out + shared
         return self._tpsp_reduce(input=out, infer_state=infer_state)
+
+    def _ffn_ep(
+        self,
+        x,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+        topk_weights,
+        topk_indices,
+    ):
+        experts = layer_weight.experts
+        if use_sm100_mega_moe(experts.quant_method):
+            return self._ffn_mega_moe(x, infer_state, layer_weight, topk_weights, topk_indices)
+        return experts.experts_with_topk(
+            input_tensor=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_indices,
+            is_prefill=infer_state.is_prefill,
+            infer_state=infer_state,
+            alpha=1.0,
+            limit=self.swiglu_limit,
+            clamp_up_add_one=False,
+            shared_expert_func=lambda: self._ffn_shared_expert(x, infer_state, layer_weight),
+        )
+
+    def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
+        x = x.view(-1, self.embed_dim_)
+        x = self._tpsp_allgather(input=x, infer_state=infer_state)
+        topk_weights, topk_indices = self._select_experts(x, infer_state, layer_weight)
+        if self.enable_ep_moe:
+            return self._ffn_ep(x, infer_state, layer_weight, topk_weights, topk_indices)
+        return self._ffn_tp(x, infer_state, layer_weight, topk_weights, topk_indices)
 
     def _select_experts(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         num_tokens = x.shape[0]
