@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class SSMForward:
+    # 一次 forward 固定请求布局和执行配置；finish() 把配置封装成提交凭据，供接受阶段复用。
     resource: "ConvSSMState"
     executor: "SSMExecutor"
     req_indices: torch.Tensor

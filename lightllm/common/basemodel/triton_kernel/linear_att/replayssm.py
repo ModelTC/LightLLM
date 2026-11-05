@@ -23,6 +23,7 @@ def _accept_updates(
     WIDTH: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
+    # N 是运行时请求数；BLOCK/WIDTH 仍是编译期参数，避免 eager batch 变化触发重新编译。
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     r = tl.load(reqs + i, i < N, HOLD)
     valid = (i < N) & (r != HOLD)
@@ -62,6 +63,7 @@ def _prepare_fold(
     WIDTH: tl.constexpr,
     SEPARATE_FOLD: tl.constexpr,
 ):
+    # 先计算每个请求的 history 起点，再把需要折叠的请求写入 Active；N 只控制本轮有效行数。
     seq = tl.arange(0, BLOCK)
     req = tl.load(Reqs + seq, seq < N, HOLD)
     valid = (seq < N) & (req != HOLD)
@@ -129,6 +131,7 @@ def _fold_history(
     DERIVED: tl.constexpr,
     BL: tl.constexpr,
 ):
+    # 只消费 Active 中的 fold 请求，把 history 合并回 canonical state；请求数不参与变体选择。
     count = tl.load(Active + N)
     work = tl.program_id(0)
     tiles: tl.constexpr = (V + BV - 1) // BV

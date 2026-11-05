@@ -11,6 +11,9 @@ def update_accepted_indices(acceptance, indices, *, replay_cursors=None):
 class SSMExecutor:
     """Decode execution and storage for one SSM mode; prefill stays in the attention backend."""
 
+    # State 负责资源生命周期和层映射，Executor 只负责本模式的 decode、接受和快照导出。
+    # 这样 Native、Compact、Replay 共享同一条上层调用链，差异收敛在执行器内部。
+
     slots_per_request = 1
     _run_config: SSMRunConfig | None = None
 
@@ -26,6 +29,7 @@ class SSMExecutor:
         pass
 
     def prepare_decode(self, reqs, cu_seqlens=None):
+        # Replay 在这里保存本轮递推所需的基准；Native/Compact 可按各自语义实现为空操作。
         pass
 
     def accept_single_token(self, reqs):
@@ -41,6 +45,7 @@ class SSMExecutor:
         return self.state[:, req_idx]
 
     def export_accepted_state(self, req_indices, targets, accepted_indices=None):
+        # 导出写入调用方提供的目标页，不把 checkpoint 的分配和生命周期带入执行器。
         export_indexed_state(self.state, req_indices, targets)
 
     def create_commit(self, run_config):

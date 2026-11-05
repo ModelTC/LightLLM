@@ -28,6 +28,9 @@ class StateCommitBatch:
 class StateAcceptance:
     """One accepted prefix per distinct request, in forward order, including the base input token."""
 
+    # 接受结果是状态提交的唯一输入；batches 只携带对应 forward 的执行配置，避免调用方
+    # 重新拼装请求顺序、接受长度和 microbatch 分区。
+
     req_indices: torch.Tensor
     accepted_lengths: torch.Tensor
     batches: Tuple[StateCommitBatch, ...] = ()
