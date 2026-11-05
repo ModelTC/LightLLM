@@ -211,6 +211,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 384)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
     module.load_cpu_cache_to_reqs([req])
+    torch.cuda.synchronize()
 
     assert req.cur_kv_len == req.hold_kv_len == token_num
     restored_indices = requests.req_to_token_indexs[req.req_idx, :token_num]

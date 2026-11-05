@@ -267,3 +267,132 @@ def test_standard_load_releases_skipped_and_matched_pages_once_after_barrier(mon
     module.load_cpu_cache_to_reqs(reqs)
 
     assert events == ["barrier", "lock", ("deref", [4, 7]), "unlock"]
+
+
+def _load_module(monkeypatch, *, sync, master=True, world=1):
+    events = []
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.args = SimpleNamespace(page_size=4, cpu_cache_token_page_size=128)
+    module.backend = SimpleNamespace(
+        is_master_in_dp=master,
+        dp_world_size=world,
+        is_hybrid_att_model=False,
+        _alloc_req_kv_mem=lambda req, count: torch.arange(count, dtype=torch.int32),
+        model=SimpleNamespace(
+            req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(512, dtype=torch.int32).view(1, -1)),
+            att_state_manager=SimpleNamespace(
+                get_cpu_cache_operator=lambda: SimpleNamespace(
+                    get_page_layouts=lambda: {},
+                    read_req=lambda **kwargs: events.append("copy"),
+                )
+            ),
+        ),
+    )
+    module.need_sync_compute_stream = lambda: sync
+    module.init_sync_group = module.filter_group = object()
+    module.load_sync_tensor = object()
+    module.load_tasks = deque()
+    module.cpu_cache_client = SimpleNamespace(
+        cpu_kv_cache_tensor=None,
+        lock=SimpleNamespace(acquire_sleep1ms=lambda: events.append("lock"), release=lambda: events.append("unlock")),
+        deref_pages=lambda page_list: events.append(("deref", list(page_list))),
+    )
+    req = SimpleNamespace(
+        req_idx=0,
+        cur_kv_len=0,
+        hold_kv_len=0,
+        mm_input_spans=[],
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
+        shm_req=SimpleNamespace(
+            input_len=256,
+            disk_prompt_cache_len=0,
+            cpu_prompt_cache_len=0,
+            shm_cur_kv_len=0,
+            cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: [3, 4]),
+            token_hash_page_len_list=SimpleNamespace(get_all=lambda: [128, 256]),
+        ),
+    )
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_can_alloc_token_num", lambda: 512)
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_overlap_stream", torch.cuda.Stream)
+    monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: events.append("barrier"))
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
+    return module, req, events
+
+
+def test_async_load_defers_deref_until_the_event_is_notified(monkeypatch):
+    module, req, events = _load_module(monkeypatch, sync=False)
+    recorded = []
+
+    class Event:
+        def __init__(self):
+            self.ready = False
+
+        def record(self):
+            recorded.append(self)
+
+        def query(self):
+            return self.ready
+
+    monkeypatch.setattr(multi_level_kv_cache_impl.torch.cuda, "Event", Event)
+    module.load_cpu_cache_to_reqs([req])
+    assert events == ["copy"] and len(recorded) == 1 and len(module.load_tasks) == 1
+    module._finish_load_tasks()
+    assert "deref" not in [item[0] for item in events if isinstance(item, tuple)]
+    recorded[0].ready = True
+    module._finish_load_tasks()
+    assert events[-3:] == ["lock", ("deref", [3, 4]), "unlock"] and not module.load_tasks
+
+
+def test_synchronous_backend_still_releases_pages_before_returning(monkeypatch):
+    module, req, events = _load_module(monkeypatch, sync=True)
+    module.load_cpu_cache_to_reqs([req])
+    assert events == ["copy", "barrier", "lock", ("deref", [3, 4]), "unlock"]
+    assert not getattr(module, "load_tasks", None) or not module.load_tasks
+
+
+def test_async_load_notifies_every_rank_before_deref(monkeypatch):
+    module, req, events = _load_module(monkeypatch, sync=False, world=2)
+    collectives = []
+
+    class Event:
+        def __init__(self):
+            self.ready = True
+
+        def record(self):
+            return None
+
+        def query(self):
+            return self.ready
+
+    monkeypatch.setattr(multi_level_kv_cache_impl.torch.cuda, "Event", Event)
+    monkeypatch.setattr(
+        multi_level_kv_cache_impl.dist,
+        "all_reduce",
+        lambda tensor, group: collectives.append(("all_reduce", group)),
+    )
+    monkeypatch.setattr(
+        multi_level_kv_cache_impl.dist,
+        "broadcast_object_list",
+        lambda data, group, group_src: collectives.append(("broadcast", data[0], group)),
+    )
+    module.load_cpu_cache_to_reqs([req])
+    assert collectives == [("all_reduce", module.init_sync_group)] and not any(
+        isinstance(item, tuple) and item[0] == "deref" for item in events
+    )
+    module._finish_load_tasks()
+    assert collectives[1][0] == "broadcast" and collectives[1][1] == 1
+    assert ("deref", [3, 4]) in events
+
+
+def test_only_fa3_backends_require_synchronous_cpu_cache():
+    from lightllm.common.basemodel.attention.base_att import BaseAttBackend
+    from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
+    from lightllm.common.basemodel.attention.fa3.fp8 import Fp8Fa3AttBackend
+    from lightllm.common.basemodel.attention.fa3.mla import MlaFa3AttBackend
+    from lightllm.common.basemodel.attention.fa3.neo import NeoFa3AttBackend
+
+    assert BaseAttBackend.requires_cpu_cache_sync is False
+    assert all(
+        backend.requires_cpu_cache_sync
+        for backend in (Fa3AttBackend, Fp8Fa3AttBackend, MlaFa3AttBackend, NeoFa3AttBackend)
+    )

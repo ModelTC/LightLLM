@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import replace
 from functools import lru_cache
 from typing import TYPE_CHECKING, List
 
 import torch
 
-from .bounded_att.copy_kernel import copy_bounded_att_tensors
 from lightllm.common.attention_state.types import StateTransferLayout
 from lightllm.utils.envs_utils import get_env_start_args
 
 if TYPE_CHECKING:
-    from lightllm.common.basemodel.attention.base_att import BaseAttBackend
     from lightllm.common.attention_state.manager import AttentionStateManager
 
 
@@ -23,19 +21,8 @@ class CpuCacheOperator:
     以及 full-attention token 与 bounded 运行态快照如何写回/读回。
     """
 
-    STAGING_SLOTS = 2
-    STAGING_PAGES = 4
-
     def __init__(self, owner: AttentionStateManager):
         self.owner = owner
-        self.async_cache = False
-
-    def configure_backends(self, backends: Iterable[BaseAttBackend | None]) -> None:
-        """容量规划和实际 staging 分配共用已选定的 main/draft backend 能力。"""
-        self.async_cache = not any(backend.requires_cpu_cache_sync for backend in backends if backend is not None)
-
-    def get_staging_bytes(self) -> int:
-        return self.STAGING_SLOTS * self.STAGING_PAGES * self.get_page_bytes() if self.async_cache else 0
 
     @lru_cache(maxsize=None)
     def get_page_layouts(self) -> Mapping[str, StateTransferLayout]:
@@ -105,27 +92,13 @@ class CpuCacheOperator:
             small_page_readies = cpu_page_ready_flags[big_page_count:] if cpu_page_ready_flags is not None else None
 
         for state in full_states:
-            layout = layouts[state.state_name]
-            if cpu_page_buffers.is_cuda:
-                # 暂存页沿用 CPU 布局；full State 的 CUDA 页写入与 CPU 页共用搬运内核。
-                for index, page in enumerate(cpu_page_indices):
-                    if cpu_page_ready_flags is not None and cpu_page_ready_flags[index]:
-                        continue
-                    start = index * layout.tokens_per_page
-                    state.write_to_pd_page(
-                        token_indices=token_indices[start : start + layout.tokens_per_page],
-                        pd_page_buffers=cpu_page_buffers,
-                        pd_page_index=page,
-                        layout=layout,
-                    )
-            else:
-                state.write_to_cpu(
-                    token_indices=token_indices,
-                    cpu_page_buffers=cpu_page_buffers,
-                    cpu_page_indices=cpu_page_indices,
-                    layout=layout,
-                    cpu_page_ready_flags=cpu_page_ready_flags,
-                )
+            state.write_to_cpu(
+                token_indices=token_indices,
+                cpu_page_buffers=cpu_page_buffers,
+                cpu_page_indices=cpu_page_indices,
+                layout=layouts[state.state_name],
+                cpu_page_ready_flags=cpu_page_ready_flags,
+            )
 
         for state in bounded_states:
             layout = layouts.get(state.state_name)
@@ -151,33 +124,6 @@ class CpuCacheOperator:
                     layout=layout,
                     cpu_page_ready_flags=small_page_readies,
                 )
-
-    def scatter_staging_pages(
-        self, staging: torch.Tensor, cpu_page_buffers: torch.Tensor, cpu_page_indices: List[int]
-    ) -> None:
-        """只写当前 TP rank 负责的字段，避免暂存页的空白区域覆盖其他 rank。"""
-        for layout in self.get_page_layouts().values():
-            for region in layout.regions:
-                if not region.write_enabled:
-                    continue
-                slices = [slice(None)] * len(region.axes)
-                for mapping in region.axis_mappings:
-                    assert not mapping.external_circular
-                    slices[region.axes.index(mapping.axis)] = slice(
-                        mapping.external_start, mapping.external_start + mapping.length
-                    )
-                copies = []
-                for index, page in enumerate(cpu_page_indices):
-                    source = staging[index, region.byte_start : region.byte_end].view(region.dtype).view(region.shape)
-                    target = (
-                        cpu_page_buffers[page]
-                        .view(torch.uint8)
-                        .view(-1)[region.byte_start : region.byte_end]
-                        .view(region.dtype)
-                        .view(region.shape)
-                    )
-                    copies.append((source[tuple(slices)], target[tuple(slices)]))
-                copy_bounded_att_tensors(copies)
 
     def read_req(
         self,

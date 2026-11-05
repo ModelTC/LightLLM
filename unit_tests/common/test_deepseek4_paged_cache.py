@@ -1684,6 +1684,7 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         )
     module.load_cpu_cache_to_reqs([restored])
     torch.cuda.synchronize()
+    module._finish_load_tasks()
     assert restored.cur_kv_len == restored.hold_kv_len == length
     assert released == list(range(1, len(ends) + 1))
     if length % page_tokens:
