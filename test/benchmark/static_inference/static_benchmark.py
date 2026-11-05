@@ -703,11 +703,6 @@ class StaticBenchmarkExecutor:
                     output1.mtp_collector.confidence_logits,
                 ),
             ),
-            prefill_mem_indexes_ready_event=(
-                output0.prefill_mem_indexes_ready_event
-                if output0.prefill_mem_indexes_ready_event is not None
-                else output1.prefill_mem_indexes_ready_event
-            ),
             prompt_logics=concat_optional(output0.prompt_logics, output1.prompt_logics),
         )
 

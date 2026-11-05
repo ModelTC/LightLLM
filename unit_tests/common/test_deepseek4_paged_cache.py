@@ -467,7 +467,10 @@ def test_model_selects_held_slots_without_allocating_swa(cache, model_kind):
     )
     model_input.to_cuda()
     for _ in range(2):
-        torch.testing.assert_close(model._select_mem_indexes(model_input), slots[256:257])
+        from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import build_kv_indexes_and_input_ids
+
+        indexes, _ = build_kv_indexes_and_input_ids(model_input, model.req_manager.req_to_token_indexs)
+        torch.testing.assert_close(indexes, slots[256:257])
         assert manager.allocator.can_use_mem_size == manager.size - 512
     requests.free([req_idx], slots)
 

@@ -89,8 +89,8 @@ class DiversehBackend(ChunkedPrefillBackend):
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
-        model_output.prefill_mem_indexes_ready_event.synchronize()
-        update_packs = self._diverse_pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            update_packs = self._diverse_pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()
         sync_event.synchronize()

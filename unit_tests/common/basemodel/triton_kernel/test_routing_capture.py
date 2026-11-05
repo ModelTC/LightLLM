@@ -81,39 +81,6 @@ def test_scatter_routing_topk_respects_layer_index():
     assert torch.equal(routing_buffer, expected)
 
 
-def test_scatter_routing_topk_ignores_hold_indexes():
-    _skip_without_cuda()
-
-    kv_cache_size = 8
-    num_moe_layers = 2
-    topk = 2
-    topk_ids = torch.arange(8, dtype=torch.int64, device="cuda").view(4, topk)
-    mem_indexes = torch.tensor([3, kv_cache_size, kv_cache_size + 1, -1], dtype=torch.int32, device="cuda")
-    routing_buffer = torch.zeros(
-        (kv_cache_size, num_moe_layers, topk),
-        dtype=torch.int16,
-        device="cpu",
-        pin_memory=True,
-    )
-    routing_buffer_ptr = torch.tensor([routing_buffer.data_ptr()], dtype=torch.uint64, device="cuda")
-
-    scatter_routing_topk_to_cpu(
-        topk_ids=topk_ids,
-        mem_indexes=mem_indexes,
-        routing_buffer_ptr=routing_buffer_ptr,
-        moe_layer_index=1,
-        num_moe_layers=num_moe_layers,
-        kv_cache_size=kv_cache_size,
-        topk=topk,
-        dtype_id=2,
-    )
-    torch.cuda.synchronize()
-
-    expected = torch.zeros_like(routing_buffer)
-    expected[3, 1, :] = topk_ids[0].cpu().to(torch.int16)
-    assert torch.equal(routing_buffer, expected)
-
-
 def test_scatter_routing_topk_is_cuda_graph_capturable():
     _skip_without_cuda()
 
