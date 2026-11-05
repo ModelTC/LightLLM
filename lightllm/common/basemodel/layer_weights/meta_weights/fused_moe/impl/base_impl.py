@@ -12,6 +12,24 @@ from lightllm.utils.dist_utils import (
 
 
 class FuseMoeBaseImpl:
+    """将逻辑专家路由与实际执行布局分离。
+
+    融合 MoE 的调用流程如下::
+
+        _select_experts
+            -> topk_weights + logical_topk_ids
+            -> moe_capture_callback(logical_topk_ids)
+            -> _prepare_expert_execution
+                -> 追加 fused shared expert，或者
+                -> 将逻辑专家 ID 修复为包含冗余专家的执行 ID
+            -> _fused_experts(topk_weights, execution_topk_ids)
+
+    ``_select_experts`` 只在模型的逻辑专家空间中选择专家。该阶段不能追加
+    shared expert，也不能改写冗余专家 ID。capture callback 在任何布局转换
+    之前执行，采集到的路由始终描述逻辑专家。逻辑 ID tensor 必须只读；
+    ``_prepare_expert_execution`` 需要改变布局时返回新 tensor。
+    """
+
     def __init__(
         self,
         n_routed_experts: int,

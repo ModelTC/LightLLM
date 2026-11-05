@@ -179,17 +179,11 @@ class FusedMoeWeight(BaseWeightTpl):
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
         if moe_capture_callback is not None:
             moe_capture_callback(topk_ids)
-        if self.num_fused_shared_experts > 0:
-            from lightllm.common.basemodel.triton_kernel.fused_moe.append_shared_expert_topk import (
-                append_fused_shared_experts,
-            )
-
-            topk_weights, topk_ids = append_fused_shared_experts(
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                shared_expert_start_id=self.n_routed_experts,
-                num_fused_shared_experts=self.num_fused_shared_experts,
-            )
+        topk_weights, topk_ids = self.fuse_moe_impl._prepare_expert_execution(
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            is_prefill=is_prefill,
+        )
         # The shared-expert callback is only implemented on the DeepGEMM path.
         run = self.fuse_moe_impl.fused_experts_with_topk
         extra = {}

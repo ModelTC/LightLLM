@@ -104,7 +104,7 @@ def test_call_parameters_reach_expert_activation(monkeypatch, activation):
 def test_marlin_rejects_clamp_at_call(monkeypatch):
     backend = FuseMoeMarlin
     monkeypatch.setattr(backend, "create_workspace", lambda self: None)
-    monkeypatch.setattr(backend, "_select_experts", lambda *args, **kwargs: (None, None, None))
+    monkeypatch.setattr(backend, "_select_experts", lambda *args, **kwargs: (None, None))
     impl = backend(
         n_routed_experts=4,
         num_fused_shared_experts=0,

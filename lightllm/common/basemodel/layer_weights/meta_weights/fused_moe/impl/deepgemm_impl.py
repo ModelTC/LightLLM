@@ -36,10 +36,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         num_expert_group: int,
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
-        shared_expert_gate: Optional[torch.Tensor] = None,
     ):
-        """Select experts and return topk weights and ids."""
-        assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
+        """只选择逻辑专家，冗余专家 ID 留到 ``_prepare_expert_execution``。"""
         from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
 
         topk_weights, topk_ids = select_experts(
@@ -57,10 +55,20 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_weights.mul_(self.routed_scaling_factor)
         if per_expert_scale is not None:
             topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
-        origin_topk_ids = topk_ids
+        return topk_weights, topk_ids
+
+    def _prepare_expert_execution(
+        self,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_prefill: Optional[bool],
+        shared_expert_gate: Optional[torch.Tensor] = None,
+    ):
+        """在逻辑路由采集之后，生成 DeepEP 实际使用的专家 ID。"""
+        assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
         if self.redundancy_expert_num > 0:
-            # 因为 redundancy_topk_ids_repair 会修改 topk_ids，所以需要先复制一份
-            origin_topk_ids = topk_ids.clone()
+            # repair 会原地改写 ID。复制后再改，保留已经交给 capture 的逻辑 ID。
+            topk_ids = topk_ids.clone()
             redundancy_topk_ids_repair(
                 topk_ids=topk_ids,
                 redundancy_expert_ids=self.redundancy_expert_ids_tensor,
@@ -69,7 +77,12 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 expert_counter=self.routed_expert_counter_tensor,
                 enable_counter=self.auto_update_redundancy_expert,
             )
-        return topk_weights, topk_ids, origin_topk_ids
+        return super()._prepare_expert_execution(
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            is_prefill=is_prefill,
+            shared_expert_gate=None,
+        )
 
     def _fused_experts(
         self,
@@ -114,7 +127,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         n_group: int,
         scoring_func: str,
     ):
-        topk_weights, topk_idx, _ = self._select_experts(
+        topk_weights, topk_idx = self._select_experts(
             input_tensor=hidden_states,
             router_logits=router_logits,
             correction_bias=e_score_correction_bias,
@@ -125,6 +138,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_expert_group=n_group,
             scoring_func=scoring_func,
         )
+        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx, is_prefill=False)
         return self.decode_dispatch_with_topk(
             hidden_states=hidden_states,
             w13=w13,
@@ -181,7 +195,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         n_group: int,
         scoring_func: str,
     ):
-        topk_weights, topk_idx, _ = self._select_experts(
+        topk_weights, topk_idx = self._select_experts(
             input_tensor=hidden_states,
             router_logits=router_logits,
             correction_bias=e_score_correction_bias,
@@ -192,6 +206,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_expert_group=n_group,
             scoring_func=scoring_func,
         )
+        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx, is_prefill=True)
         qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
         return topk_weights, topk_idx.to(torch.long), qinput_tensor
 
