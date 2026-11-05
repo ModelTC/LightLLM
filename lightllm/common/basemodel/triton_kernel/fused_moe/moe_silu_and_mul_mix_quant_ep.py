@@ -305,6 +305,7 @@ def silu_and_mul_psum_post_quant_fwd(
     # 行方向总并行度以 256 为目标，并平均分给所有 expert。常见配置为：
     # 4/8/16/32/64/128/256 个 expert 分别得到 64/32/16/8/4/2/1。
     # 单 expert 最多使用 64 个 program；expert 超过 256 时仍至少使用 1 个。
+    # TODO: 根据 expert 数量、预期 token 数和 GPU 型号增加 autotune 配置。
     target_row_parallelism = 256
     max_row_parallelism_per_expert = 64
     row_parallelism = target_row_parallelism // num_experts
