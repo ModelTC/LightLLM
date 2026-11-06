@@ -638,9 +638,16 @@ class ModeBackend:
         """
         将错误请求从 req_ids 中过滤出来, 然后让 _get_classed_reqs 进行处理。 该函数
         主要用于在 pd 分离模式下, 由子类继承重载, prefill 和 decode 节点过滤 kv 传输错误，或者 kv
-        传输没有完成的请求。
+        传输没有完成的请求。开启 cpu cache 时，load 或 offload 仍在进行的请求也尚未就绪。
         """
-        return [g_infer_context.requests_mapping[request_id] for request_id in req_ids]
+        reqs = [g_infer_context.requests_mapping[request_id] for request_id in req_ids]
+        if not self.args.enable_cpu_cache:
+            return reqs
+        return [
+            req
+            for req in reqs
+            if not req.cpu_cache_load_task_status.is_running() and not req.cpu_cache_offload_task_status.is_running()
+        ]
 
     def _timer_merge_radix_tree(self):
         self._radix_tree_merge_counter += 1

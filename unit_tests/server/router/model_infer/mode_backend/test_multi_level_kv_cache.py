@@ -14,6 +14,35 @@ from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache
 from lightllm.server.router.model_infer.infer_batch import InferenceContext
 
 
+def test_running_cpu_cache_tasks_are_not_ready(monkeypatch):
+    from lightllm.server.router.model_infer.infer_batch import InferReq
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+    from lightllm.server.router.model_infer.mode_backend import base_backend as base_backend_impl
+
+    status = InferReq._CpuCacheTaskStatus
+
+    def req(load_status, offload_status):
+        return SimpleNamespace(
+            cpu_cache_load_task_status=load_status,
+            cpu_cache_offload_task_status=offload_status,
+        )
+
+    running_load = req(status.RUNNING, status.NOT_STARTED)
+    running_offload = req(status.FINISHED, status.RUNNING)
+    ready = req(status.NOT_STARTED, status.NOT_STARTED)
+    backend = ModeBackend.__new__(ModeBackend)
+    backend.args = SimpleNamespace(enable_cpu_cache=True)
+    monkeypatch.setattr(
+        base_backend_impl,
+        "g_infer_context",
+        SimpleNamespace(requests_mapping={1: running_load, 2: running_offload, 3: ready}),
+    )
+
+    assert backend._filter_not_ready_reqs([1, 2, 3]) == [ready]
+    backend.args.enable_cpu_cache = False
+    assert backend._filter_not_ready_reqs([1, 2, 3]) == [running_load, running_offload, ready]
+
+
 def test_cache_tiers_reassignment_is_rejected():
     context = InferenceContext()
     context.cache_placement_controller = AdaptiveCachePlacementController(
