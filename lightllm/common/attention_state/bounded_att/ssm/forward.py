@@ -8,7 +8,7 @@ from lightllm.common.ssm_types import SSMRunConfig
 
 if TYPE_CHECKING:
     from .base import SSMExecutor
-    from ..conv_ssm_state import ConvSSMState
+    from ..conv_ssm_state import _ConvSSMState
 
 
 @dataclass
@@ -21,7 +21,7 @@ class SSMForward:
     后续层复用同一配置，``finish`` 再把它封装进 ``StateCommit``。
     """
 
-    resource: "ConvSSMState"
+    resource: "_ConvSSMState"
     executor: "SSMExecutor"
     req_indices: torch.Tensor
     state_indices: torch.Tensor

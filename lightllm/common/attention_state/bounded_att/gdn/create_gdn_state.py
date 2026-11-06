@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from ..conv_ssm_types import ConvSSMStateConfig
-from .gdn_state import GDNState
+from .gdn_state import GDNCompactState, GDNNativeState, GDNReplayState, GDNState
 
 
 def create_gdn_state(
@@ -19,7 +19,14 @@ def create_gdn_state(
     gate_lower_bound: float = -5.0,
 ) -> GDNState:
     """创建 GDN 请求运行态，大小页池由后续容量分配流程初始化。"""
-    return GDNState(
+    state_cls = {
+        "native": GDNNativeState,
+        "compact": GDNCompactState,
+        "replay": GDNReplayState,
+    }.get(ssm_state_mode)
+    if state_cls is None:
+        raise ValueError(f"unknown GDN state mode: {ssm_state_mode}")
+    return state_cls(
         config=config,
         request_capacity=request_capacity,
         mtp_step=mtp_step,

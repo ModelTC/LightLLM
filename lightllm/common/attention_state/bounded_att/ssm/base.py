@@ -11,7 +11,7 @@ def update_accepted_indices(acceptance, indices, *, replay_cursors=None):
 class SSMExecutor:
     """一种 SSM 模式的 decode、接受和快照适配器。
 
-    ``ConvSSMState`` 持有资源和逻辑层到物理层的映射；executor 只处理
+    the algorithm-specific state 持有资源和逻辑层到物理层的映射；executor 只处理
     decode 递推、接受前缀以及 accepted-state 导出。prefill 仍由 attention
     backend 执行。一次 verify 的布局由 ``SSMForward`` 保存，并在 commit
     阶段通过 ``StateCommit`` 传回同一个 executor。
@@ -73,18 +73,14 @@ class SSMExecutor:
 
         return None
 
-    def validate_commit(self, acceptance, state_name):
-        """校验接受结果是否包含本模式所需的 forward 元数据。"""
-
-        return None
-
     def commit(self, acceptance, indices, state_name):
         """校验并应用接受结果；供直接调用 State 接口时使用。"""
 
-        self.validate_commit(acceptance, state_name)
-        self.commit_validated(acceptance, indices, state_name)
+        validator = getattr(self, "validate_commit", None)
+        commit_data = validator(acceptance, state_name) if validator is not None else None
+        self.commit_validated(acceptance, indices, state_name, commit_data=commit_data)
 
-    def commit_validated(self, acceptance, indices, state_name):
+    def commit_validated(self, acceptance, indices, state_name, *, commit_data=None):
         """应用已由 State/Manager 校验过的接受结果，不重复检查公共契约。"""
 
         update_accepted_indices(acceptance, indices)

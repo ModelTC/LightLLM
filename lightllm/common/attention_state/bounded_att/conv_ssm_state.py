@@ -31,10 +31,11 @@ class ConvSSMTensors(NamedTuple):
     ssm: torch.Tensor
 
 
-class ConvSSMState(BoundedAttentionState):
+class _ConvSSMState(BoundedAttentionState):
 
     algorithm: str
     pages_pool_class: type
+    state_mode: str | None = None
 
     def __init__(
         self,
@@ -48,6 +49,9 @@ class ConvSSMState(BoundedAttentionState):
         gate_lower_bound: float = -5.0,
     ):
         self.config = config
+        if self.state_mode is not None and ssm_state_mode != self.state_mode:
+            raise ValueError(f"state mode {ssm_state_mode!r} does not match {self.state_mode!r}")
+        ssm_state_mode = self.state_mode or ssm_state_mode
         self.state_name = None
         self.request_capacity = request_capacity
         self.mtp_step = mtp_step
@@ -237,12 +241,14 @@ class ConvSSMState(BoundedAttentionState):
             acceptance.req_indices.device == self.ssm_state.device
         ), "commit inputs must match the state device; CUDA states require CUDA tensors"
         if self.mtp_state_index is not None:
-            self._ssm.validate_commit(acceptance, self.state_name)
+            validator = getattr(self._ssm, "validate_commit", None)
+            return validator(acceptance, self.state_name) if validator is not None else None
+        return None
 
     def commit_bounded_att_state(self, acceptance):
-        self.validate_bounded_att_commit(acceptance)
+        commit_data = self.validate_bounded_att_commit(acceptance)
         if self.mtp_state_index is not None:
-            self._ssm.commit_validated(acceptance, self.mtp_state_index, self.state_name)
+            self._ssm.commit_validated(acceptance, self.mtp_state_index, self.state_name, commit_data=commit_data)
 
     # ========================================================================
     # 三、CPU Cache 数据交换
@@ -329,7 +335,7 @@ class ConvSSMState(BoundedAttentionState):
         self,
         src_page_ids: List[int],
         dst_page_ids: List[int],
-        remote_dp_bounded_state: ConvSSMState,
+        remote_dp_bounded_state: _ConvSSMState,
     ) -> None:
         """复制同一 TP 分片的大页 Conv/SSM 快照，保留源页和双方请求运行态。"""
         assert isinstance(src_page_ids, list) and isinstance(dst_page_ids, list), "page indices must be lists"
@@ -353,7 +359,7 @@ class ConvSSMState(BoundedAttentionState):
         self,
         src_req_indices: List[int],
         dst_req_indices: List[int],
-        remote_dp_bounded_state: ConvSSMState,
+        remote_dp_bounded_state: _ConvSSMState,
     ) -> None:
         """复制同一 TP 分片的 prefill 基准运行态并重置目标游标，不写入页池。"""
         assert isinstance(src_req_indices, list) and isinstance(dst_req_indices, list), "request indices must be lists"

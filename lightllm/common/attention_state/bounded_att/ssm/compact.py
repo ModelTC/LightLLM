@@ -170,19 +170,23 @@ class CompactSSMExecutor(SSMExecutor):
 
         if not acceptance.batches:
             raise ValueError("compact acceptance requires forward commit batches")
-        for _, config in acceptance.partitions(state_name):
+        partitions = tuple(acceptance.partitions(state_name))
+        for _, config in partitions:
             if not isinstance(config, SSMRunConfig):
                 raise ValueError(f"missing compact forward configuration for {state_name}")
+        return partitions
 
     def commit(self, acceptance, indices, state_name):
         """先推进通用接受索引，再逐 microbatch 重建 compact state。"""
 
-        self.validate_commit(acceptance, state_name)
-        self.commit_validated(acceptance, indices, state_name)
+        commit_data = self.validate_commit(acceptance, state_name)
+        self.commit_validated(acceptance, indices, state_name, commit_data=commit_data)
 
-    def commit_validated(self, acceptance, indices, state_name):
+    def commit_validated(self, acceptance, indices, state_name, *, commit_data=None):
         """使用已验证的 forward 配置完成 compact state 重建。"""
 
+        if commit_data is None:
+            commit_data = self.validate_commit(acceptance, state_name)
         update_accepted_indices(acceptance, indices)
-        for reqs, config in acceptance.partitions(state_name):
+        for reqs, config in commit_data:
             self.accept_updates(reqs, indices, run_config=config)
