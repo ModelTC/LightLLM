@@ -232,6 +232,8 @@ class MultiLevelKvCacheModule(object):
         """
         # 如果开启了cpu cache，将达到finished状态的请求开启将gpu kv cache 卸载到 cpu cache中的操作。
         # 当 kv cache 卸载完成后，才会进行请求的真实退出操作。
+        if not finished_reqs:
+            return []
         true_finished_reqs = []
         offload_stream = self.get_cpu_offload_stream()
         # 当前流上刚写好的 KV，写出先等它。

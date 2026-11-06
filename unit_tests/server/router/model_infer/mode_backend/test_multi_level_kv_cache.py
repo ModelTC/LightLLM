@@ -167,6 +167,14 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
     module.need_sync_compute_stream = lambda: True
     waited.clear()
     assert module.offload_finished_reqs_to_cpu_cache([]) == []
+    assert waited == [] and waited_by_overlap == []
+    short_req = SimpleNamespace(
+        cache_tiers=(CacheTier.CPU,),
+        cur_kv_len=1,
+        cpu_cache_offload_task_status=NotStartedStatus(),
+        shm_req=SimpleNamespace(group_req_id=0, request_id=0, input_len=1),
+    )
+    assert module.offload_finished_reqs_to_cpu_cache([short_req]) == [short_req]
     assert waited == [current, overlap]
     assert waited_by_overlap == [offload_stream]
 
