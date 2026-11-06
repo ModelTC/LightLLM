@@ -15,8 +15,7 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel im
     per_token_group_quant_fp8,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_kernels import (
-    ep_expanded_to_masked,
-    ep_masked_to_expanded,
+    ep_reduce_decode_output,
     ep_build_m_indices,
     ep_compact_metadata,
     ep_gather_chunk,
@@ -63,23 +62,30 @@ def deepep_v2_decode_dispatch(hidden_states, topk_idx, topk_weights, num_experts
         topk_weights=topk_weights,
         num_experts=num_experts,
         num_max_tokens_per_rank=capacity,
-        expert_alignment=128,
+        expert_alignment=deep_gemm.get_mk_alignment_for_contiguous_layout(),
         do_expand=True,
+        do_zero_padding=True,
+        use_tma_aligned_col_major_sf=True,
         do_cpu_sync=False,
+        do_handle_copy=False,
         async_with_compute_stream=False,
         allocate_on_comm_stream=False,
         num_sms=get_ep_num_sms(),
     )
-    max_m = triton.cdiv(capacity * buffer.num_ranks, 128) * 128
-    recv_x, counts = ep_expanded_to_masked(recv_x, handle.psum_num_recv_tokens_per_expert, max_m)
-    return recv_x, counts, (handle, recv_weights)
+    return recv_x, handle.psum_num_recv_tokens_per_expert, (handle, recv_weights)
 
 
 def deepep_v2_decode_combine(gemm_out, handle):
     native_handle, recv_weights = handle
-    expanded = ep_masked_to_expanded(gemm_out, native_handle.psum_num_recv_tokens_per_expert, recv_weights)
+    dense, metadata = ep_reduce_decode_output(
+        gemm_out,
+        recv_weights,
+        native_handle.recv_src_metadata,
+        native_handle.psum_num_recv_tokens_per_scaleup_rank[-1:],
+    )
+    native_handle.recv_src_metadata = metadata
     output, _, _ = dist_group_manager.ep_buffer.combine(
-        expanded,
+        dense,
         native_handle,
         topk_weights=None,
         num_sms=get_ep_num_sms(),
@@ -126,17 +132,31 @@ def masked_group_gemm(
     assert clamp_limit is None or limit is None
     if clamp_limit is not None:
         limit = clamp_limit
-    padded_m = recv_x[0].shape[1]
-    E, N, _ = w1.shape
+    # Elastic dispatch returns packed rows and expert ends. Legacy dispatch returns
+    # a padded 3D tensor and per-expert counts.
+    row_shape = recv_x[0].shape[:-1]
+    use_psum_layout = len(row_shape) == 1
+    expert_alignment = deep_gemm.get_mk_alignment_for_contiguous_layout() if use_psum_layout else None
+    padded_m = row_shape[-1]
+    intermediate_twice = w1.shape[1]
     block_size = 128
-    # groupgemm (masked layout)
-    gemm_out_a = alloc_tensor_func((E, padded_m, N), device=recv_x[0].device, dtype=dtype)
+    gemm_out_a = alloc_tensor_func((*row_shape, intermediate_twice), device=recv_x[0].device, dtype=dtype)
     expected_m = min(expected_m, padded_m)
+    # The expanded path needs a TMA-aligned column-major FP8 scale view.
+    scale_rows = triton.cdiv(padded_m, 4) * 4 if use_psum_layout else padded_m
     qsilu_out_scale = alloc_tensor_func(
-        (E, N // 2 // block_size, padded_m), device=recv_x[0].device, dtype=torch.float32
-    ).transpose(1, 2)
-    qsilu_out = alloc_tensor_func((E, padded_m, N // 2), dtype=w1.dtype, device=recv_x[0].device)
-    _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
+        (*row_shape[:-1], intermediate_twice // 2 // block_size, scale_rows),
+        device=recv_x[0].device,
+        dtype=torch.float32,
+    )
+    if scale_rows != padded_m:
+        qsilu_out_scale = qsilu_out_scale[:, :padded_m]
+    qsilu_out_scale = qsilu_out_scale.transpose(-1, -2)
+    qsilu_out = alloc_tensor_func((*row_shape, intermediate_twice // 2), dtype=w1.dtype, device=recv_x[0].device)
+    if use_psum_layout:
+        deepgemm_grouped_fp8_nt_contiguous(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
+    else:
+        _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
 
     silu_and_mul_masked_post_quant_fwd(
         gemm_out_a,
@@ -147,10 +167,16 @@ def masked_group_gemm(
         alpha=alpha,
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
+        expert_alignment=expert_alignment,
     )
     del gemm_out_a
     gemm_out_b = alloc_tensor_func(recv_x[0].shape, device=recv_x[0].device, dtype=dtype)
-    _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
+    if use_psum_layout:
+        deepgemm_grouped_fp8_nt_contiguous(
+            (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m
+        )
+    else:
+        _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
     return gemm_out_b
 
 
@@ -526,8 +552,18 @@ def deepgemm_grouped_fp8_nt_contiguous(
     w_tuple: Tuple[torch.Tensor, torch.Tensor],
     out: torch.Tensor,
     m_indices: torch.Tensor,
+    expected_m_for_psum_layout: Optional[int] = None,
 ):
     if HAS_DEEPGEMM:
+        if expected_m_for_psum_layout is not None:
+            return deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
+                input_tuple,
+                w_tuple,
+                out,
+                m_indices,
+                use_psum_layout=True,
+                expected_m_for_psum_layout=expected_m_for_psum_layout,
+            )
         if hasattr(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_contiguous"):
             return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(input_tuple, w_tuple, out, m_indices)
         if hasattr(deep_gemm, "m_grouped_fp8_gemm_nt_contiguous"):

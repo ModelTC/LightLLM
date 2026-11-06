@@ -32,6 +32,7 @@ def _silu_and_mul_post_quant_kernel(
     alpha: tl.constexpr = None,
     limit: tl.constexpr = None,
     CLAMP_UP_ADD_ONE: tl.constexpr = True,
+    EXPERT_ALIGNMENT: tl.constexpr = None,
 ):
     expert_id = tl.program_id(2)
     token_id = tl.program_id(1)
@@ -39,7 +40,13 @@ def _silu_and_mul_post_quant_kernel(
 
     block_num_per_expert = tl.num_programs(1)
 
-    token_num_cur_expert = tl.load(masked_m_ptr + expert_id)
+    if EXPERT_ALIGNMENT is None:
+        start = 0
+        end = tl.load(masked_m_ptr + expert_id)
+    else:
+        previous = tl.load(masked_m_ptr + expert_id - 1, expert_id > 0, 0)
+        start = tl.cdiv(previous, EXPERT_ALIGNMENT) * EXPERT_ALIGNMENT
+        end = tl.load(masked_m_ptr + expert_id)
 
     stride_input_0 = tl.cast(stride_input_0, dtype=tl.int64)
     stride_output_0 = tl.cast(stride_output_0, dtype=tl.int64)
@@ -53,7 +60,7 @@ def _silu_and_mul_post_quant_kernel(
         output_scale_ptr + expert_id * stride_output_scale_0 + hidden_dim_block_index * stride_output_scale_2
     )
 
-    for token_index in tl.range(token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE):
+    for token_index in tl.range(start + token_id, end, block_num_per_expert, num_stages=NUM_STAGE):
         gate = tl.load(input_ptr_offs + token_index * stride_input_1, mask=offs_in_d < size_n, other=0.0).to(tl.float32)
         up = tl.load(input_ptr_offs + token_index * stride_input_1 + size_n, mask=offs_in_d < size_n, other=0.0)
         if USE_LIMIT_ONLY:
@@ -100,21 +107,30 @@ def silu_and_mul_masked_post_quant_fwd(
     alpha=None,
     limit=None,
     clamp_up_add_one=True,
+    *,
+    expert_alignment=None,
 ):
     """
     input shape [expert_num, token_num_padded, hidden_dim]
     output shape [expert_num, token_num_padded, hidden_dim // 2], dtype fp8
     output_scale [expert_num token_num_paddded, hidden_dim // 2 // 128] dtype float32
     quant_group_size  int,
-    masked_m shape [expert_num],
+    masked_m shape [expert_num]. For 2D expanded buffers, expert_alignment
+    selects exclusive expert row ends with aligned starts.
     """
 
     assert alpha is None or limit is not None
     assert input.is_contiguous()
     assert output.dtype == torch.float8_e4m3fn
     assert output.is_contiguous()
-    assert len(input.shape) == 3
-    assert input.shape[0] == masked_m.shape[0]
+    if expert_alignment is None:
+        assert input.ndim == 3 and input.shape[0] == masked_m.shape[0]
+        input_strides, output_strides, scale_strides = input.stride(), output.stride(), output_scale.stride()
+    else:
+        assert input.ndim == 2
+        input_strides = (0, *input.stride())
+        output_strides = (0, *output.stride())
+        scale_strides = (0, *output_scale.stride())
     assert input.shape[-1] % 2 == 0
 
     size_n = input.shape[-1] // 2
@@ -145,11 +161,11 @@ def silu_and_mul_masked_post_quant_fwd(
 
     _silu_and_mul_post_quant_kernel[grid](
         input,
-        *input.stride(),
+        *input_strides,
         output,
-        *output.stride(),
+        *output_strides,
         output_scale,
-        *output_scale.stride(),
+        *scale_strides,
         masked_m,
         size_n,
         fp8_max,
@@ -162,6 +178,7 @@ def silu_and_mul_masked_post_quant_fwd(
         alpha=alpha,
         limit=limit,
         CLAMP_UP_ADD_ONE=clamp_up_add_one,
+        EXPERT_ALIGNMENT=expert_alignment,
         num_warps=num_warps,
     )
     return
