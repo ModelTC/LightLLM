@@ -4,6 +4,7 @@ import torch
 import triton
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, TYPE_CHECKING
+from lightllm.utils.envs_utils import enable_env_vars
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache, flash_attn_with_kvcache_autotune
 from lightllm.common.basemodel.triton_kernel.fa3_utils import (
     build_dynamic_spec_fa3_decode_params,
@@ -16,7 +17,8 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_g
 class Fa3AttBackend(BaseAttBackend):
     """Common fixed page-table storage for FA3 attention backends."""
 
-    requires_cpu_cache_sync = True
+    # 设为 1 / TRUE / ON 时，FA3 与 CPU cache 搬运在 GPU 上互相等待。
+    requires_cpu_cache_sync = enable_env_vars("LIGHTLLM_FA3_CPU_CACHE_SYNC")
     page_table_buffers = None
 
     def __init__(self, model):

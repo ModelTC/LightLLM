@@ -456,7 +456,7 @@ def test_async_load_notifies_every_rank_before_deref(monkeypatch):
     assert ("deref", [3, 4]) in events
 
 
-def test_only_fa3_backends_require_synchronous_cpu_cache():
+def test_fa3_cpu_cache_sync_defaults_off():
     from lightllm.common.basemodel.attention.base_att import BaseAttBackend
     from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
     from lightllm.common.basemodel.attention.fa3.fp8 import Fp8Fa3AttBackend
@@ -465,6 +465,6 @@ def test_only_fa3_backends_require_synchronous_cpu_cache():
 
     assert BaseAttBackend.requires_cpu_cache_sync is False
     assert all(
-        backend.requires_cpu_cache_sync
+        backend.requires_cpu_cache_sync is False
         for backend in (Fa3AttBackend, Fp8Fa3AttBackend, MlaFa3AttBackend, NeoFa3AttBackend)
     )
