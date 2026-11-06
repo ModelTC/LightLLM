@@ -569,9 +569,10 @@ class InferReq:
         # 存储对应长度位置的大页buffer_id
         self.hybrid_len_to_big_page_id: Optional[SortedDict] = None
 
-        # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
-        # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
-        self.cpu_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
+        # 在开启 enable_cpu_cache 的情况下，请求命中 CPU cache 时把 KV 拉回 GPU，
+        # 请求结束后再把 KV 卸载回 CPU cache。两个标志分别标记 load 和 offload 任务状态。
+        self.cpu_cache_load_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
+        self.cpu_cache_offload_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
         # 元组记录请求完成后的缓存放置路径，其内容和顺序由缓存放置控制器保证合法。
         # 初始值为 GPU，可直接兼容 pause 等尚未经过控制器分配的提前释放路径。
         # 自适应策略在分界点建立前使用兼容放置，之后选择 GPU 或低层缓存路径；

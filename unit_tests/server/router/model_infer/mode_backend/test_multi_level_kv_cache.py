@@ -89,7 +89,7 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
     module.args = SimpleNamespace(cpu_cache_token_page_size=64, linear_att_hash_page_size=64)
     module.backend = SimpleNamespace(radix_cache=object())
-    module.cpu_cache_handle_queue = deque()
+    module.offload_tasks = deque()
     module.need_sync_compute_stream = lambda: False
     offload_calls = []
 
@@ -108,7 +108,7 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
         SimpleNamespace(
             cache_tiers=req_cache_tiers,
             cur_kv_len=length,
-            cpu_cache_task_status=NotStartedStatus(),
+            cpu_cache_offload_task_status=NotStartedStatus(),
             shm_req=SimpleNamespace(
                 group_req_id=index,
                 request_id=index,
@@ -123,7 +123,7 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
 
     assert true_finished_reqs == []
     assert offload_calls == [(1, False), (2, True)]
-    assert len(module.cpu_cache_handle_queue) == 2
+    assert len(module.offload_tasks) == 2
 
 
 def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
@@ -186,6 +186,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     )
     backend = SimpleNamespace(
         is_master_in_dp=False,
+        dp_world_size=1,
         is_hybrid_att_model=False,
         radix_cache=None,
         model=SimpleNamespace(
@@ -195,6 +196,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         _alloc_req_kv_mem=alloc_req_kv_mem,
     )
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.load_tasks = deque()
     module.args = SimpleNamespace(page_size=4, cpu_cache_token_page_size=132)
     module.backend = backend
     module.init_sync_group = object()
@@ -230,10 +232,11 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     assert table[0, :132].tolist() == list(range(132))
 
 
-def test_standard_load_releases_skipped_and_matched_pages_once_after_barrier(monkeypatch):
+def test_standard_load_releases_unloaded_pages_immediately(monkeypatch):
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
-    module.backend = SimpleNamespace(is_master_in_dp=True)
+    module.backend = SimpleNamespace(is_master_in_dp=True, dp_world_size=1)
     module.init_sync_group = object()
+    module.need_sync_compute_stream = lambda: False
     events = []
     module.cpu_cache_client = SimpleNamespace(
         lock=SimpleNamespace(
@@ -257,11 +260,12 @@ def test_standard_load_releases_skipped_and_matched_pages_once_after_barrier(mon
         for page, logprobs in ((4, 0), (7, -1))
     ]
     monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_can_alloc_token_num", lambda: 128)
-    monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: events.append("barrier"))
 
     module.load_cpu_cache_to_reqs(reqs)
 
-    assert events == ["barrier", "lock", ("deref", [4, 7]), "unlock"]
+    assert events == ["lock", ("deref", [4]), ("deref", [7]), "unlock"]
+    assert not getattr(module, "load_tasks", None)
+    assert all(req.cpu_cache_load_task_status.is_finished() for req in reqs)
 
 
 def _load_module(monkeypatch, *, sync, master=True, world=1):
@@ -331,18 +335,18 @@ def test_async_load_defers_deref_until_the_event_is_notified(monkeypatch):
     monkeypatch.setattr(multi_level_kv_cache_impl.torch.cuda, "Event", Event)
     module.load_cpu_cache_to_reqs([req])
     assert events == ["copy"] and len(recorded) == 1 and len(module.load_tasks) == 1
-    module._finish_load_tasks()
+    module.update_cpu_cache_load_task_states()
     assert "deref" not in [item[0] for item in events if isinstance(item, tuple)]
     recorded[0].ready = True
-    module._finish_load_tasks()
+    module.update_cpu_cache_load_task_states()
     assert events[-3:] == ["lock", ("deref", [3, 4]), "unlock"] and not module.load_tasks
 
 
 def test_synchronous_backend_still_releases_pages_before_returning(monkeypatch):
     module, req, events = _load_module(monkeypatch, sync=True)
     module.load_cpu_cache_to_reqs([req])
-    assert events == ["copy", "barrier", "lock", ("deref", [3, 4]), "unlock"]
-    assert not getattr(module, "load_tasks", None) or not module.load_tasks
+    assert events == ["copy", "lock", ("deref", [3, 4]), "unlock"]
+    assert not module.load_tasks
 
 
 def test_async_load_notifies_every_rank_before_deref(monkeypatch):
@@ -374,7 +378,7 @@ def test_async_load_notifies_every_rank_before_deref(monkeypatch):
     assert collectives == [("all_reduce", module.init_sync_group)] and not any(
         isinstance(item, tuple) and item[0] == "deref" for item in events
     )
-    module._finish_load_tasks()
+    module.update_cpu_cache_load_task_states()
     assert collectives[1][0] == "broadcast" and collectives[1][1] == 1
     assert ("deref", [3, 4]) in events
 

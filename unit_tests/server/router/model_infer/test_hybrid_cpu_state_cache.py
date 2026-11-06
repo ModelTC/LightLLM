@@ -1,6 +1,7 @@
 from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
 import dataclasses
 import json
+from collections import deque
 from types import SimpleNamespace
 
 import pytest
@@ -146,7 +147,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     req = SimpleNamespace(
         req_idx=0,
         cache_tiers=(CacheTier.CPU,),
-        cpu_cache_task_status=InferReq._CpuCacheTaskStatus.NOT_STARTED,
+        cpu_cache_offload_task_status=InferReq._CpuCacheTaskStatus.NOT_STARTED,
         cur_kv_len=token_num,
         hold_kv_len=token_num,
         hybrid_cache_len=token_num,
@@ -167,6 +168,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     # 通过接收 InferReq 的生产入口完成页来源查询、CPU 分配与快照写出。
     requests.req_to_token_indexs[0, :token_num] = indexes
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.load_tasks = deque()
     module.args = get_env_start_args()
     module.cpu_cache_client = client
     module.gloo_group = None
@@ -203,6 +205,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     module.args = get_env_start_args()
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
+        dp_world_size=1,
         _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(req_manager=requests, att_state_manager=resources),
         is_hybrid_att_model=True,
@@ -326,7 +329,7 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
     task = module.write_req_to_cpu(req)
     if allocated_pages == 0:
         assert task is None
-        assert req.cpu_cache_task_status == InferReq._CpuCacheTaskStatus.FINISHED
+        assert req.cpu_cache_offload_task_status == InferReq._CpuCacheTaskStatus.FINISHED
         assert requested_hashes == [[11, 22]]
         assert broadcasts == [[0]]
         assert writes == []

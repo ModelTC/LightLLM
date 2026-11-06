@@ -731,7 +731,8 @@ class ModeBackend:
         self._timer_merge_radix_tree()
 
         if self.args.enable_cpu_cache and len(g_infer_context.infer_req_ids) > 0:
-            self.multi_level_cache_module.update_cpu_cache_task_states()
+            self.multi_level_cache_module.update_cpu_cache_load_task_states()
+            self.multi_level_cache_module.update_cpu_cache_offload_task_states()
 
         if req_ids is None:
             req_ids = g_infer_context.infer_req_ids
@@ -840,7 +841,7 @@ class ModeBackend:
 
         # 先由控制器确定请求需要写入的缓存层级，再按是否包含 CPU cache 决定是否发起 offload。
         cache_controller = g_infer_context.cache_placement_controller
-        new_finished_reqs = [req for req in finished_reqs if req.cpu_cache_task_status.is_not_started()]
+        new_finished_reqs = [req for req in finished_reqs if req.cpu_cache_offload_task_status.is_not_started()]
         cache_controller.set_req_cache_way(new_finished_reqs)
         if self.args.enable_cpu_cache:
             offload_reqs = [

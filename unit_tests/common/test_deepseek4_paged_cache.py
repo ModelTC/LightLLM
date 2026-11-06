@@ -1568,7 +1568,7 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         hybrid_len_to_big_page_id=source_checkpoints,
         hybrid_cache_len=length,
         tail_small_page_buffer_id=tail,
-        cpu_cache_task_status=InferReq._CpuCacheTaskStatus.NOT_STARTED,
+        cpu_cache_offload_task_status=InferReq._CpuCacheTaskStatus.NOT_STARTED,
         cache_tiers=(CacheTier.CPU,),
         shm_req=SimpleNamespace(
             group_req_id=42,
@@ -1610,15 +1610,16 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         model=SimpleNamespace(att_state_manager=manager.manager, req_manager=requests),
     )
     module.cpu_cache_client = client
-    module.cpu_cache_handle_queue = deque()
+    module.offload_tasks = deque()
+    module.load_tasks = deque()
     module.page_index_buffer = torch.empty(8, dtype=torch.int32, device="cuda")
     module.page_ready_buffer = torch.empty(8, dtype=torch.bool, device="cuda")
     module.gloo_group = module.filter_group = module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
     assert module.offload_finished_reqs_to_cpu_cache([req]) == []
-    assert req.cpu_cache_task_status.is_running()
+    assert req.cpu_cache_offload_task_status.is_running()
     torch.cuda.synchronize()
-    module.update_cpu_cache_task_states()
+    module.update_cpu_cache_offload_task_states()
     assert module.offload_finished_reqs_to_cpu_cache([req]) == [req]
     assert published == [
         dict(
@@ -1683,7 +1684,7 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         )
     module.load_cpu_cache_to_reqs([restored])
     torch.cuda.synchronize()
-    module._finish_load_tasks()
+    module.update_cpu_cache_load_task_states()
     assert restored.cur_kv_len == restored.hold_kv_len == length
     assert released == list(range(1, len(ends) + 1))
     if length % page_tokens:

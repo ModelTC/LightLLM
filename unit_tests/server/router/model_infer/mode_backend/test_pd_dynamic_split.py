@@ -22,7 +22,7 @@ def _make_infer_req(cur_output_len: int, shm_output_len: int):
         paused=False,
         infer_aborted=False,
         finish_status=FinishStatus(),
-        cpu_cache_task_status=SimpleNamespace(is_not_started=MagicMock(return_value=True)),
+        cpu_cache_offload_task_status=SimpleNamespace(is_not_started=MagicMock(return_value=True)),
         cur_kv_len=10,
         cur_output_len=cur_output_len,
         shm_req=SimpleNamespace(shm_cur_output_len=shm_output_len),

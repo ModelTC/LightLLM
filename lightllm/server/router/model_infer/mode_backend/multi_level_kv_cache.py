@@ -33,7 +33,7 @@ class MultiLevelKvCacheModule(object):
         self.offload_sync_tensor = torch.empty((1,), dtype=torch.int32, device="cuda")
         self.load_sync_tensor = torch.empty((1,), dtype=torch.int32, device="cuda")
 
-        self.cpu_cache_handle_queue: Deque[TransTask] = deque()
+        self.offload_tasks: Deque[OffloadTask] = deque()
         self.load_tasks: Deque["LoadTask"] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
         resources = self.backend.model.att_state_manager
@@ -80,9 +80,8 @@ class MultiLevelKvCacheModule(object):
 
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
         idle_token_num = g_infer_context.get_can_alloc_token_num()
-        all_page_list = []
-        # 本轮真正发起拷贝时才创建。FA3 仍留在计算流上，这里保持为空。
-        load_stream = None
+        direct_releases = []
+        load_stream = self.get_cpu_load_stream()
         is_master_in_dp = self.backend.is_master_in_dp
         for req in reqs:
             page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
@@ -92,7 +91,7 @@ class MultiLevelKvCacheModule(object):
             if req.sampling_param.shm_param.prompt_logprobs >= 0:
                 if is_master_in_dp:
                     req.shm_req.cpu_prompt_cache_len = 0
-                all_page_list.extend(page_list)
+                direct_releases.append((req, page_list))
                 continue
 
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
@@ -125,6 +124,7 @@ class MultiLevelKvCacheModule(object):
                 assert match_tokens % self.args.page_size == 0
                 assert need_token_num % self.args.page_size == 0
                 assert req.hold_kv_len == req.cur_kv_len
+                copied = False
                 if need_token_num <= idle_token_num:
                     # 计算需要加载的页面（只加载未匹配的部分）
                     ready_page_num = bisect.bisect_right(page_len_list, req.cur_kv_len)
@@ -132,96 +132,64 @@ class MultiLevelKvCacheModule(object):
                     need_pages = page_list[ready_page_num:matched_page_num]
 
                     start_token_len = page_len_list[ready_page_num - 1] if ready_page_num else 0
-                    load_stream = self._copy_matched_prefix(
-                        req=req,
-                        cpu_page_indices=need_pages,
-                        page_lengths=page_len_list[ready_page_num:matched_page_num],
-                        start_token_len=start_token_len,
-                        load_stream=load_stream,
-                    )
+                    with torch.cuda.stream(load_stream):
+                        self.read_req_from_cpu(
+                            req=req,
+                            cpu_page_indices=need_pages,
+                            page_lengths=page_len_list[ready_page_num:matched_page_num],
+                            start_token_len=start_token_len,
+                        )
+                        # 等所有 DP rank 的这次拷贝都提交后，再记录完成事件。
+                        if self.backend.dp_world_size > 1:
+                            dist.all_reduce(self.load_sync_tensor, group=self.init_sync_group)
+                        event = torch.cuda.Event()
+                        event.record()
+                    self.load_tasks.append(LoadTask(req_obj=req, pages=page_list, event=event))
+                    req.cpu_cache_load_task_status = InferReq._CpuCacheTaskStatus.RUNNING
                     idle_token_num -= need_token_num
+                    copied = True
 
-                if self.need_sync_compute_stream():
-                    torch.cuda.current_stream().synchronize()
-
-                if self.backend.is_master_in_dp:
+                if is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
+            else:
+                copied = False
 
-            all_page_list.extend(page_list)
+            if page_list and not copied:
+                direct_releases.append((req, page_list))
 
-        if load_stream is not None:
-            # 拷贝和跨 rank 汇总都在 load 流上。计算流只插入依赖，CPU 不在这里等待。
-            self._defer_load_release(all_page_list, load_stream)
-            torch.cuda.current_stream().wait_stream(load_stream)
-            return
-
-        dist.barrier(group=self.init_sync_group)
-
-        if self.backend.is_master_in_dp:
-            self.cpu_cache_client.lock.acquire_sleep1ms()
-            self.cpu_cache_client.deref_pages(page_list=all_page_list)
-            self.cpu_cache_client.lock.release()
+        self._release_direct_pages(direct_releases)
+        if self.need_sync_compute_stream():
+            # TODO fa3 现在必须使用同步模式, 未来需要移除
+            g_infer_context.get_overlap_stream().synchronize()
+            load_stream.synchronize()
+            self.update_cpu_cache_load_task_states()
         return
 
-    def _copy_matched_prefix(
-        self,
-        req: InferReq,
-        cpu_page_indices: List[int],
-        page_lengths: List[int],
-        start_token_len: int,
-        load_stream: Optional[torch.cuda.Stream],
-    ) -> Optional[torch.cuda.Stream]:
-        """FA3 在计算流上拷贝并返回 None。其余 backend 把拷贝排到 load 流，并返回这条流。"""
-        if self.need_sync_compute_stream():
-            self.read_req_from_cpu(req, cpu_page_indices, page_lengths, start_token_len)
-            return None
-        if load_stream is None:
-            load_stream = self.get_cpu_load_stream()
-            # 页索引已经写在计算流上，拉取流先等到这些写入。
-            load_stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(load_stream):
-            self.read_req_from_cpu(req, cpu_page_indices, page_lengths, start_token_len)
-        return load_stream
-
-    def _defer_load_release(self, pages: List[int], stream: torch.cuda.Stream) -> None:
-        with torch.cuda.stream(stream):
-            if getattr(self.backend, "dp_world_size", 1) > 1:
-                dist.all_reduce(self.load_sync_tensor, group=self.init_sync_group)
-            event = torch.cuda.Event()
-            event.record()
-        if not hasattr(self, "load_tasks"):
-            self.load_tasks = deque()
-        self.load_tasks.append(LoadTask(pages, event))
-
-    def _finish_load_tasks(self) -> None:
-        """查询已完成的 load 事件，通知同一个 DP 内的各 rank，再释放 CPU 页。"""
-        tasks = getattr(self, "load_tasks", None)
-        if not tasks:
+    def _release_direct_pages(self, direct_releases: List[tuple]) -> None:
+        """没有发起拷贝的命中页可以马上还引用，load 状态直接记为完成。只有 DP master 持有 CPU cache 引用。"""
+        if not direct_releases:
             return
-        world = getattr(self.backend, "dp_world_size", 1)
-        if world > 1:
-            if self.backend.is_master_in_dp:
-                done = 0
-                for task in tasks:
-                    if not task.event.query():
-                        break
-                    done += 1
-                dist.broadcast_object_list([done], group=self.filter_group, group_src=0)
-            else:
-                recv_list = [None]
-                dist.broadcast_object_list(recv_list, group=self.filter_group, group_src=0)
-                done = recv_list[0]
-        elif self.backend.is_master_in_dp:
-            done = 0
-            for task in tasks:
-                if not task.event.query():
-                    break
-                done += 1
-        else:
+        for req, _pages in direct_releases:
+            req.cpu_cache_load_task_status = InferReq._CpuCacheTaskStatus.FINISHED
+        if not self.backend.is_master_in_dp:
             return
+        self.cpu_cache_client.lock.acquire_sleep1ms()
+        try:
+            for _req, pages in direct_releases:
+                self.cpu_cache_client.deref_pages(pages)
+        finally:
+            self.cpu_cache_client.lock.release()
+
+    def update_cpu_cache_load_task_states(self) -> None:
+        """出队已经拷完的 load。多 DP 时各 rank 按 master 统计的数量一起出队，再由 master 释放 CPU 页。"""
+        if not self.load_tasks:
+            return
+        done = self._finished_load_count()
         if not done:
             return
-        finished = [tasks.popleft() for _ in range(done)]
+        finished = [self.load_tasks.popleft() for _ in range(done)]
+        for task in finished:
+            task.req_obj.cpu_cache_load_task_status = InferReq._CpuCacheTaskStatus.FINISHED
         if not self.backend.is_master_in_dp:
             return
         self.cpu_cache_client.lock.acquire_sleep1ms()
@@ -230,6 +198,29 @@ class MultiLevelKvCacheModule(object):
                 self.cpu_cache_client.deref_pages(task.pages)
         finally:
             self.cpu_cache_client.lock.release()
+
+    def _finished_load_count(self) -> int:
+        """队头连续完成的任务数。多 DP 时以 master 的统计为准，并广播给同组 rank。"""
+        if self.backend.dp_world_size == 1:
+            if not self.backend.is_master_in_dp:
+                return 0
+            return self._local_finished_load_count()
+
+        if self.backend.is_master_in_dp:
+            done = self._local_finished_load_count()
+            dist.broadcast_object_list([done], group=self.filter_group, group_src=0)
+            return done
+        recv_list = [None]
+        dist.broadcast_object_list(recv_list, group=self.filter_group, group_src=0)
+        return recv_list[0]
+
+    def _local_finished_load_count(self) -> int:
+        done = 0
+        for task in self.load_tasks:
+            if not task.event.query():
+                break
+            done += 1
+        return done
 
     def read_req_from_cpu(
         self,
@@ -253,9 +244,6 @@ class MultiLevelKvCacheModule(object):
         # 阶段一：分配新增 KV，并补齐首个 CPU 页在 GPU 上已经命中的 token 索引。
         mem_indexes = self.backend._alloc_req_kv_mem(req, need_token_num)
         assert mem_indexes is not None
-        if self.need_sync_compute_stream():
-            # FA3 的资源搬运需等待已有计算流完成。
-            torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
         assert 0 <= start_token_len <= req.cur_kv_len, "invalid CPU page start"
         token_indices = torch.cat(
             [
@@ -298,9 +286,9 @@ class MultiLevelKvCacheModule(object):
         # 如果开启了cpu cache，将达到finished状态的请求开启将gpu kv cache 卸载到 cpu cache中的操作。
         # 当 kv cache 卸载完成后，才会进行请求的真实退出操作。
         true_finished_reqs = []
-        # 写出要看到计算流上已经写好的 KV，计算流不必反过来等这次拷贝。
-        offload_stream = self.get_cpu_offload_stream()
-        offload_stream.wait_stream(torch.cuda.current_stream())
+        if self.need_sync_compute_stream():
+            # TODO fa3 现在必须使用同步模式, 未来需要移除, 必须等待 overlap stream 上的计算任务完成，不然会崩溃
+            g_infer_context.get_overlap_stream().synchronize()
         for req in finished_reqs:
             # 只有 group_req_id 和 request_id 相同的请求才会被卸载到 cpu cache 中。
             # 这个限制是为了兼容 diverse 模式下的请求处理, 只有主请求才 offload kv 到 cpu
@@ -320,36 +308,32 @@ class MultiLevelKvCacheModule(object):
                 continue
 
             # 如果请求已经完成了 cpu cache 的任务，则满足了退出条件
-            if req.cpu_cache_task_status.is_finished():
+            if req.cpu_cache_offload_task_status.is_finished():
                 true_finished_reqs.append(req)
                 continue
 
             # 如果请求已经发起过卸载任务且正在卸载过程中，则在当前轮不进行处理
-            if req.cpu_cache_task_status.is_running():
+            if req.cpu_cache_offload_task_status.is_running():
                 continue
 
-            assert req.cpu_cache_task_status.is_not_started()
-
-            if self.need_sync_compute_stream():
-                # TODO fa3 现在必须使用同步模式, 未来需要移除, 必须等待 overlap stream 上的计算任务完成，不然会崩溃
-                g_infer_context.get_overlap_stream().synchronize()
+            assert req.cpu_cache_offload_task_status.is_not_started()
 
             # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
             trans_task = self.write_req_to_cpu(req)
 
             # 根据是否成功创建了卸载任务，决定是否将请求加入到处理队列中
             if trans_task is not None:
-                self.cpu_cache_handle_queue.append(trans_task)
+                self.offload_tasks.append(trans_task)
             else:
                 true_finished_reqs.append(req)
 
         if self.need_sync_compute_stream():
             # TODO fa3 现在必须使用同步模式, 未来需要移除
-            offload_stream.synchronize()
+            self.get_cpu_offload_stream().synchronize()
 
         return true_finished_reqs
 
-    def write_req_to_cpu(self, req: InferReq) -> Optional["TransTask"]:
+    def write_req_to_cpu(self, req: InferReq) -> Optional["OffloadTask"]:
         """选择请求可缓存的前缀，分配 CPU 页并提交写出，返回待确认完成的任务。"""
         assert CacheTier.CPU in req.cache_tiers
         disk_offload_enable = CacheTier.DISK in req.cache_tiers
@@ -373,7 +357,7 @@ class MultiLevelKvCacheModule(object):
 
                 if move_block_size == 0:
                     dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
-                    req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
+                    req.cpu_cache_offload_task_status = InferReq._CpuCacheTaskStatus.FINISHED
                     return None
 
                 try:
@@ -394,7 +378,7 @@ class MultiLevelKvCacheModule(object):
                 item_size = len(page_list)
                 if item_size == 0:
                     dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
-                    req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
+                    req.cpu_cache_offload_task_status = InferReq._CpuCacheTaskStatus.FINISHED
                     return None
 
                 broadcast_data = {"item_size": item_size, "page_list": page_list, "ready_list": ready_list}
@@ -403,7 +387,7 @@ class MultiLevelKvCacheModule(object):
                 recv_list = [None]
                 dist.broadcast_object_list(recv_list, group=self.gloo_group, group_src=0)
                 if isinstance(recv_list[0], int) and recv_list[0] == 0:
-                    req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
+                    req.cpu_cache_offload_task_status = InferReq._CpuCacheTaskStatus.FINISHED
                     return None
                 broadcast_data = recv_list[0]
                 item_size = broadcast_data["item_size"]
@@ -454,8 +438,8 @@ class MultiLevelKvCacheModule(object):
 
             sync_event = torch.cuda.Event()
             sync_event.record()
-            req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
-            trans_task = TransTask(
+            req.cpu_cache_offload_task_status = InferReq._CpuCacheTaskStatus.RUNNING
+            trans_task = OffloadTask(
                 move_token_num=move_token_num,
                 page_indexes=page_indexes,
                 page_readies=page_readies,
@@ -483,16 +467,15 @@ class MultiLevelKvCacheModule(object):
                     return move_block_size - 1
         return move_block_size
 
-    def update_cpu_cache_task_states(self):
-        self._finish_load_tasks()
+    def update_cpu_cache_offload_task_states(self):
         if self.backend.is_master_in_dp:
             trans_ok_tasks = []
-            while len(self.cpu_cache_handle_queue) != 0:
-                task: TransTask = self.cpu_cache_handle_queue.popleft()
+            while len(self.offload_tasks) != 0:
+                task: OffloadTask = self.offload_tasks.popleft()
                 if task.sync_event.query():
                     trans_ok_tasks.append(task)
                 else:
-                    self.cpu_cache_handle_queue.appendleft(task)
+                    self.offload_tasks.appendleft(task)
                     break
             item_size = len(trans_ok_tasks)
             dist.broadcast_object_list([item_size], group=self.filter_group, group_src=0)
@@ -500,7 +483,7 @@ class MultiLevelKvCacheModule(object):
             recv_list = [None]
             dist.broadcast_object_list(recv_list, group=self.filter_group, group_src=0)
             item_size = recv_list[0]
-            trans_ok_tasks: List[TransTask] = [self.cpu_cache_handle_queue.popleft() for _ in range(item_size)]
+            trans_ok_tasks: List[OffloadTask] = [self.offload_tasks.popleft() for _ in range(item_size)]
 
         if item_size > 0:
             page_array_list = [task.page_indexes.tolist() for task in trans_ok_tasks]
@@ -517,12 +500,12 @@ class MultiLevelKvCacheModule(object):
                     )
                 self.cpu_cache_client.lock.release()
             for task in trans_ok_tasks:
-                task.req_obj.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
+                task.req_obj.cpu_cache_offload_task_status = InferReq._CpuCacheTaskStatus.FINISHED
         return
 
 
 @dataclasses.dataclass
-class TransTask:
+class OffloadTask:
     move_token_num: int
     page_indexes: torch.Tensor
     page_readies: torch.Tensor
@@ -532,5 +515,6 @@ class TransTask:
 
 @dataclasses.dataclass
 class LoadTask:
+    req_obj: InferReq
     pages: List[int]
     event: torch.cuda.Event
