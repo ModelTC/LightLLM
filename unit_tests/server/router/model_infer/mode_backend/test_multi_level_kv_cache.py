@@ -98,6 +98,11 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
         return SimpleNamespace(req=req)
 
     module.write_req_to_cpu = start_offload
+    current = torch.cuda.current_stream()
+    offload_stream = torch.cuda.Stream()
+    waited = []
+    offload_stream.wait_stream = lambda stream: waited.append(stream)
+    module.get_cpu_offload_stream = lambda: offload_stream
     monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "is_hybrid_att_model", False)
     cache_tiers = (
         (CacheTier.GPU,),
@@ -121,9 +126,20 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
 
     true_finished_reqs = module.offload_finished_reqs_to_cpu_cache(offload_reqs)
 
+    assert waited == [current]
     assert true_finished_reqs == []
     assert offload_calls == [(1, False), (2, True)]
     assert len(module.offload_tasks) == 2
+
+    overlap = torch.cuda.Stream()
+    waited_by_overlap = []
+    overlap.wait_stream = lambda stream: waited_by_overlap.append(stream)
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_overlap_stream", lambda: overlap)
+    module.need_sync_compute_stream = lambda: True
+    waited.clear()
+    assert module.offload_finished_reqs_to_cpu_cache([]) == []
+    assert waited == [current, overlap]
+    assert waited_by_overlap == [offload_stream]
 
 
 def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
@@ -320,6 +336,13 @@ def _load_module(monkeypatch, *, sync, master=True, world=1):
 
 def test_async_load_defers_deref_until_the_event_is_notified(monkeypatch):
     module, req, events = _load_module(monkeypatch, sync=False)
+    current = torch.cuda.current_stream()
+    overlap = torch.cuda.Stream()
+    waited_by_load = []
+    overlap.wait_stream = lambda stream: events.append("wait")
+    load_stream = module.get_cpu_load_stream()
+    load_stream.wait_stream = lambda stream: waited_by_load.append(stream)
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_overlap_stream", lambda: overlap)
     recorded = []
 
     class Event:
@@ -334,6 +357,7 @@ def test_async_load_defers_deref_until_the_event_is_notified(monkeypatch):
 
     monkeypatch.setattr(multi_level_kv_cache_impl.torch.cuda, "Event", Event)
     module.load_cpu_cache_to_reqs([req])
+    assert waited_by_load == [current]
     assert events == ["copy"] and len(recorded) == 1 and len(module.load_tasks) == 1
     module.update_cpu_cache_load_task_states()
     assert "deref" not in [item[0] for item in events if isinstance(item, tuple)]
@@ -342,11 +366,23 @@ def test_async_load_defers_deref_until_the_event_is_notified(monkeypatch):
     assert events[-3:] == ["lock", ("deref", [3, 4]), "unlock"] and not module.load_tasks
 
 
-def test_synchronous_backend_still_releases_pages_before_returning(monkeypatch):
+def test_synchronous_backend_waits_overlap_for_the_load_stream(monkeypatch):
     module, req, events = _load_module(monkeypatch, sync=True)
+    current = torch.cuda.current_stream()
+    overlap = torch.cuda.Stream()
+    waited_by_overlap = []
+    waited_by_load = []
+    overlap.wait_stream = lambda stream: waited_by_overlap.append(stream)
+    load_stream = module.get_cpu_load_stream()
+    load_stream.wait_stream = lambda stream: waited_by_load.append(stream)
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_overlap_stream", lambda: overlap)
     module.load_cpu_cache_to_reqs([req])
-    assert events == ["copy", "lock", ("deref", [3, 4]), "unlock"]
-    assert not module.load_tasks
+    assert waited_by_load == [current, overlap]
+    assert waited_by_overlap == [load_stream]
+    assert events == ["copy"] and len(module.load_tasks) == 1
+    module.load_tasks[0].event.synchronize()
+    module.update_cpu_cache_load_task_states()
+    assert events[-3:] == ["lock", ("deref", [3, 4]), "unlock"] and not module.load_tasks
 
 
 def test_async_load_notifies_every_rank_before_deref(monkeypatch):
