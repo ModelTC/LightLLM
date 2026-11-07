@@ -1,5 +1,5 @@
-from lightllm.core.contracts.model import ModelWeights
-from lightllm.core.contracts.model import ModelRecipe
+from lightllm.common.execution.contracts.model import ModelWeights
+from lightllm.common.execution.contracts.model import ModelRecipe
 from lightllm.models.deepseek2.adapter import Deepseek2ModelAdapter
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
 from lightllm.models.deepseek_mtp.layer_weights.pre_and_post_layer_weight import Deepseek3MTPPreAndPostLayerWeight

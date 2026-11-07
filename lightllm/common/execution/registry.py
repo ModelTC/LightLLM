@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Callable
-from lightllm.core.compute.attention.backend import AttentionBackend
-from lightllm.core.contracts.provider import Phase
+from lightllm.common.execution.compute.attention.backend import AttentionBackend
+from lightllm.common.execution.contracts.provider import Phase
 
 
 @dataclass(frozen=True)
@@ -90,22 +90,22 @@ class ProviderRegistry:
 
 
 def default_providers():
-    from lightllm.core.compute.attention.dense.fa3 import FA3AttentionBackend
-    from lightllm.core.compute.attention.dense.triton import TritonAttentionBackend
-    from lightllm.core.compute.attention.dense.group_quantized import GroupQuantizedAttentionBackend
-    from lightllm.core.compute.attention.dense.static_fp8 import StaticFP8AttentionBackend
-    from lightllm.core.compute.attention.dense.flashinfer import FlashInferAttentionBackend
-    from lightllm.core.compute.attention.gdn.backend import GatedDeltaNetBackend
-    from lightllm.core.compute.attention.kda.backend import KimiDeltaAttentionBackend
-    from lightllm.core.compute.attention.mla.backend import MLAAttentionBackend
-    from lightllm.core.compute.attention.mla.flashinfer import FlashInferMLABackend
-    from lightllm.core.compute.attention.sparse_mla.backend import SparseMLAAttentionBackend
-    from lightllm.core.compute.attention.pooled_nope.backend import PooledNoPEAttentionBackend
-    from lightllm.core.formats.providers import state_providers
+    from lightllm.common.execution.compute.attention.dense.fa3 import FA3AttentionBackend
+    from lightllm.common.execution.compute.attention.dense.triton import TritonAttentionBackend
+    from lightllm.common.execution.compute.attention.dense.group_quantized import GroupQuantizedAttentionBackend
+    from lightllm.common.execution.compute.attention.dense.static_fp8 import StaticFP8AttentionBackend
+    from lightllm.common.execution.compute.attention.dense.flashinfer import FlashInferAttentionBackend
+    from lightllm.common.execution.compute.attention.gdn.backend import GatedDeltaNetBackend
+    from lightllm.common.execution.compute.attention.kda.backend import KimiDeltaAttentionBackend
+    from lightllm.common.execution.compute.attention.mla.backend import MLAAttentionBackend
+    from lightllm.common.execution.compute.attention.mla.flashinfer import FlashInferMLABackend
+    from lightllm.common.execution.compute.attention.sparse_mla.backend import SparseMLAAttentionBackend
+    from lightllm.common.execution.compute.attention.pooled_nope.backend import PooledNoPEAttentionBackend
+    from lightllm.common.execution.formats.providers import state_providers
 
-    from lightllm.core.compute.linear.backend import LinearBackend
-    from lightllm.core.compute.moe.backend import MoeBackend
-    from lightllm.core.compute.moe.expert import ExpertComputeBackend
+    from lightllm.common.execution.compute.linear.backend import LinearBackend
+    from lightllm.common.execution.compute.moe.backend import MoeBackend
+    from lightllm.common.execution.compute.moe.expert import ExpertComputeBackend
     from functools import partial
 
     return ProviderRegistry(

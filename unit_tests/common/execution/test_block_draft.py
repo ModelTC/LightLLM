@@ -1,4 +1,4 @@
-from lightllm.core.formats.kv.spec import DenseKVStateSpec
+from lightllm.common.execution.formats.kv.spec import DenseKVStateSpec
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -6,14 +6,14 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.core.compute.attention.dense.backend import DenseAttentionBackend
+from lightllm.common.execution.compute.attention.dense.backend import DenseAttentionBackend
 from lightllm.models.base.adapter import DenseModelAdapter
-from lightllm.core.build import BuildConfig, prepare
-from lightllm.core.registry import default_providers
+from lightllm.common.execution.build import BuildConfig, prepare
+from lightllm.common.execution.registry import default_providers
 from lightllm.models.base.build import bind_attention_execution
-from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
-from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
-from lightllm.core.contracts.state import FormatSpec
+from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
+from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.common.execution.contracts.state import FormatSpec
 from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
 from lightllm.models.qwen3_dflash2.model import Qwen3DFlash2Model
 from lightllm.models.qwen3_dflash2.adapter import Qwen3DFlash2ModelAdapter
@@ -201,7 +201,7 @@ def _check_block_checkpoint(model_class, block_size, monkeypatch, tmp_path, shar
     from transformers.models.qwen3_5 import modeling_qwen3_5 as hf35
     from lightllm.common.basemodel.batch_objs import ModelInput
     from lightllm.common.basemodel.mtp_manager import MtpManager
-    from lightllm.core.runner.decode_graph import CudaGraph
+    from lightllm.common.execution.runner.decode_graph import CudaGraph
     from lightllm.common.quantization.no_quant import NoQuantization
     from lightllm.distributed.communication_op import dist_group_manager
     from lightllm.models.qwen3.model import Qwen3TpPartModel
@@ -654,13 +654,13 @@ def _check_block_checkpoint(model_class, block_size, monkeypatch, tmp_path, shar
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_fp8_noncausal_block_matches_decoded_reference_and_graph(per_head, static_q, dtype):
     import torch.nn.functional as F
-    from lightllm.core.compute.attention.batch import AttentionBatch
-    from lightllm.core.compute.attention.dense.backend import DenseStaticParams
-    from lightllm.core.planner.planner import Planner
-    from lightllm.core.contracts.state import StateSpec
-    from lightllm.core.storage.attention import DenseStateStore
-    from lightllm.core.compute.attention.dense.static_fp8 import StaticFP8AttentionBackend
-    from lightllm.core.formats.kv.static_fp8 import StaticFP8KVWriter
+    from lightllm.common.execution.compute.attention.batch import AttentionBatch
+    from lightllm.common.execution.compute.attention.dense.backend import DenseStaticParams
+    from lightllm.common.execution.planner.planner import Planner
+    from lightllm.common.execution.contracts.state import StateSpec
+    from lightllm.common.execution.storage.attention import DenseStateStore
+    from lightllm.common.execution.compute.attention.dense.static_fp8 import StaticFP8AttentionBackend
+    from lightllm.common.execution.formats.kv.static_fp8 import StaticFP8KVWriter
     from unit_tests.common.execution.test_static_fp8 import fp8_format
 
     torch.manual_seed(80)

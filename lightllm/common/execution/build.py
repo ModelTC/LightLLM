@@ -1,14 +1,14 @@
 from dataclasses import dataclass, field
 from typing import Mapping, Hashable, Protocol
 
-from lightllm.core.contracts.model import ModelAdapter
-from lightllm.core.contracts.device import DeviceRuntime, ExecutionLimits
-from lightllm.core.contracts.provider import Phase
-from lightllm.core.contracts.state import StateSpec, StateView, FormatSpec
-from lightllm.core.compute.attention.backend import AttentionParams, AttentionSpec
-from lightllm.core.planner import AttentionRequest, Planner, AttentionSelectionPlan, BoundAttentionPlan
-from lightllm.core.registry import ProviderRegistry, StateProvider
-from lightllm.core.runner.attention import AttentionMetadataRunner
+from lightllm.common.execution.contracts.model import ModelAdapter
+from lightllm.common.execution.contracts.device import DeviceRuntime, ExecutionLimits
+from lightllm.common.execution.contracts.provider import Phase
+from lightllm.common.execution.contracts.state import StateSpec, StateView, FormatSpec
+from lightllm.common.execution.compute.attention.backend import AttentionParams, AttentionSpec
+from lightllm.common.execution.planner import AttentionRequest, Planner, AttentionSelectionPlan, BoundAttentionPlan
+from lightllm.common.execution.registry import ProviderRegistry, StateProvider
+from lightllm.common.execution.runner.attention import AttentionMetadataRunner
 
 
 class StateStore(Protocol):
@@ -171,9 +171,9 @@ class ExpertResources:
 
 
 def build_experts(spec, view, device, resources, providers, transfers=None):
-    from lightllm.core.planner.weights import bind_compute
-    from lightllm.core.runner.expert import ExpertRunner
-    from lightllm.core.transfer.expert import ExpertTransfer
+    from lightllm.common.execution.planner.weights import bind_compute
+    from lightllm.common.execution.runner.expert import ExpertRunner
+    from lightllm.common.execution.transfer.expert import ExpertTransfer
 
     compute = bind_compute(
         spec,

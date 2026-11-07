@@ -1,24 +1,24 @@
-from lightllm.core.formats.kv.spec import SparseMLAKVStateSpec
+from lightllm.common.execution.formats.kv.spec import SparseMLAKVStateSpec
 from dataclasses import replace
 
 import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.core.contracts.device import DeviceCaps
-from lightllm.core.contracts.device import ExecutionLimits
-from lightllm.core.contracts.state import FormatSpec
-from lightllm.core.planner.planner import Planner
-from lightllm.core.contracts.state import StateSpec
-from lightllm.core.compute.attention.sparse_mla.spec import SparseMLAAttentionSpec
-from lightllm.core.compute.attention.batch import AttentionBatch
-from lightllm.core.formats.kv.packed_mla import PackedMLAKVWriter
-from lightllm.core.compute.attention.sparse_mla.backend import (
+from lightllm.common.execution.contracts.device import DeviceCaps
+from lightllm.common.execution.contracts.device import ExecutionLimits
+from lightllm.common.execution.contracts.state import FormatSpec
+from lightllm.common.execution.planner.planner import Planner
+from lightllm.common.execution.contracts.state import StateSpec
+from lightllm.common.execution.compute.attention.sparse_mla.spec import SparseMLAAttentionSpec
+from lightllm.common.execution.compute.attention.batch import AttentionBatch
+from lightllm.common.execution.formats.kv.packed_mla import PackedMLAKVWriter
+from lightllm.common.execution.compute.attention.sparse_mla.backend import (
     SparseMLAAttentionBackend,
     SparseMLAStaticParams,
     SparseMLAInputs,
 )
-from lightllm.core.storage.attention import PackedMLAStateStore
+from lightllm.common.execution.storage.attention import PackedMLAStateStore
 
 
 def format_spec(quantized, shard=(0, 1)):
@@ -81,7 +81,7 @@ def test_flashmla_rejects_unsupported_native_layout_and_kernel_alignment():
 
 def test_fp8_flashmla_checks_library_api_before_binding(monkeypatch):
     from types import SimpleNamespace
-    from lightllm.core.compute.attention.sparse_mla import backend as sparse_mla
+    from lightllm.common.execution.compute.attention.sparse_mla import backend as sparse_mla
 
     spec = SparseMLAAttentionSpec(16, 512, 128, 64, 128, torch.bfloat16, index_topk=256)
     caps, limits = DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(10 ** 7, 2, 512)
@@ -240,7 +240,7 @@ def test_sparse_attention_matches_torch_with_prefix_and_graph(
             bound.attend(query, physical, logical, meta, current)
     torch.cuda.current_stream().wait_stream(stream)
     if bound.requires_dynamic_prefill:
-        from lightllm.core.runner.graph_program import GraphProgram
+        from lightllm.common.execution.runner.graph_program import GraphProgram
 
         graph = GraphProgram(torch.cuda.graph_pool_handle())
         with graph.capture():
@@ -286,8 +286,8 @@ def test_flashmla_fp8_native_packed_attention(monkeypatch, phase, heads):
 def test_sparse_indexer_selection_and_decode_graph(
     monkeypatch, max_seq, topk, index_heads, scale_fmt, implementation="triton"
 ):
-    from lightllm.core.formats.kv.kernels.act_quant import act_quant
-    from lightllm.core.formats.kv.kernels.indexer_copy import destindex_copy_indexer_ks
+    from lightllm.common.execution.formats.kv.kernels.act_quant import act_quant
+    from lightllm.common.execution.formats.kv.kernels.indexer_copy import destindex_copy_indexer_ks
 
     torch.manual_seed(89)
     bound, view, manager = create_bound(
@@ -367,12 +367,12 @@ def test_flashmla_fp8_indexer_long_decode_graph(monkeypatch):
 @torch.no_grad()
 def test_flashmla_fp8_scheduler_groups_and_lanes():
     from types import SimpleNamespace
-    from lightllm.core.build import BuildConfig, prepare as prepare_execution
-    from lightllm.core.registry import default_providers
+    from lightllm.common.execution.build import BuildConfig, prepare as prepare_execution
+    from lightllm.common.execution.registry import default_providers
     from lightllm.models.base.build import bind_attention_execution
     from lightllm.models.base.attention_batch import attention_batch
-    from lightllm.core.contracts.state import LayerStates
-    from lightllm.core.device.cuda import CudaRuntime
+    from lightllm.common.execution.contracts.state import LayerStates
+    from lightllm.common.execution.device.cuda import CudaRuntime
 
     specs = {
         i: SparseMLAAttentionSpec(heads, 512, 128, 64, 128, torch.bfloat16, index_topk=256)

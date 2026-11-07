@@ -1,4 +1,4 @@
-from lightllm.core.contracts.model import ModelWeights
+from lightllm.common.execution.contracts.model import ModelWeights
 from dataclasses import replace
 from lightllm.models.llama.adapter import LlamaModelAdapter
 from lightllm.models.qwen3_dflash.layer_infer.post_layer_infer import Qwen3DFlashPostLayerInfer

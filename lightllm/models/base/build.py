@@ -1,9 +1,9 @@
-from lightllm.core.contracts.device import ExecutionLimits
-from lightllm.core.compute.attention.mla.spec import MLAAttentionSpec
-from lightllm.core.compute.attention.sparse_mla.spec import SparseMLAAttentionSpec
-from lightllm.core.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
-from lightllm.core.build import BuildConfig, prepare
-from lightllm.core.registry import default_providers
+from lightllm.common.execution.contracts.device import ExecutionLimits
+from lightllm.common.execution.compute.attention.mla.spec import MLAAttentionSpec
+from lightllm.common.execution.compute.attention.sparse_mla.spec import SparseMLAAttentionSpec
+from lightllm.common.execution.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
+from lightllm.common.execution.build import BuildConfig, prepare
+from lightllm.common.execution.registry import default_providers
 
 
 def prepare_attention_execution(model, *, providers=None, device=None, formats=None):
@@ -46,7 +46,7 @@ def prepare_attention_execution(model, *, providers=None, device=None, formats=N
         ):
             return None
     if device is None:
-        from lightllm.core.device.cuda import CudaRuntime
+        from lightllm.common.execution.device.cuda import CudaRuntime
 
         device = CudaRuntime()
     runtime = model.execution_device = device
@@ -73,15 +73,15 @@ def prepare_attention_execution(model, *, providers=None, device=None, formats=N
             + (("cpu_cache",) if getattr(model.args, "enable_cpu_cache", False) else ())
         ),
     )
-    from lightllm.core.formats.kv.config import history_formats
-    from lightllm.core.formats.recurrent.conv_ssm import recurrent_format as make_recurrent_format
+    from lightllm.common.execution.formats.kv.config import history_formats
+    from lightllm.common.execution.formats.recurrent.conv_ssm import recurrent_format as make_recurrent_format
 
     if formats is not None:
         format, window_format = formats.get("history"), formats.get("window")
     else:
         calibration = None
         if model.args.llm_kv_type in ("fp8kv_sph", "fp8kv_spt"):
-            from lightllm.core.formats.kv.calibration import calibration_table_identity
+            from lightllm.common.execution.formats.kv.calibration import calibration_table_identity
 
             calibration = calibration_table_identity(
                 model.att_state_manager.read_full_att_calibration(model.args),
