@@ -1,13 +1,26 @@
 from dataclasses import dataclass
 from lightllm.utils.log_utils import init_logger
+from .rpc_payload import MAX_RPC_FRAME_BYTES
 
 logger = init_logger(__name__)
+VISUAL_ONLY_RPC_HOST = "127.0.0.1"
 
 rpyc_config = {
     "allow_pickle": True,
     "allow_all_attrs": True,
     "allow_getattr": True,
     "allow_setattr": True,
+}
+
+visual_only_rpyc_config = {
+    "allow_pickle": False,
+    "allow_all_attrs": False,
+    "allow_getattr": True,
+    "allow_setattr": False,
+    "allow_delattr": False,
+    "allow_public_attrs": False,
+    "allow_exposed_attrs": True,
+    "max_message_size": MAX_RPC_FRAME_BYTES,
 }
 
 

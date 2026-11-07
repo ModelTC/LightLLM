@@ -4,6 +4,8 @@ description: >-
   LightLLM Qwen3-VL-8B-Instruct visual separation (ViT sep / proxy): three processes in
   order—config_server on 8090; internal Redis on 6000; visual_only with visual_rpyc 8091
   and afs_image_embed_dir; normal api_server tp 2 port 8089 with visual_use_proxy_mode.
+  The visual_only worker and normal proxy must share a host because RPyC advertises loopback;
+  the config_server may be remote.
   After HTTP /v1/models on normal, lmms_eval mmmu_val (openai_compatible, batch 900,
   OPENAI_API_BASE http://HOST:8089/v1); restore https_proxy for Hub while no_proxy includes 127.0.0.1.
   lmms_eval_out, console log, mmmu_acc in summary. pipefail for tee exit code.
@@ -21,6 +23,8 @@ description: >-
 | **Redis（由 `config_server` 内部启动并对外暴露）** | **`6000`**（**`--config_server_visual_redis_port`**；与系统独立安装的 Redis 无关） |
 | **`visual_only` RPyC** | **`8091`**（**`--visual_rpyc_port`**） |
 | **`normal` HTTP** | **`8089`**（**`--port`**） |
+
+**部署约束**：`visual_only` 的 RPyC 服务只监听并向 `config_server` 注册 `127.0.0.1`。因此，使用 `--visual_use_proxy_mode` 的 `normal` 服务必须与对应的 `visual_only` 服务运行在同一主机；把两者放在不同主机上会使 proxy 连接到自己的 loopback，无法访问视觉服务。`--host` 和 `--config_server_host` 不会改变 RPyC 的绑定地址。不要通过开放防火墙端口或改绑外部地址来绕过此限制。
 
 **算力**：**`visual_only`** 默认 **1 张 GPU**；**`normal`** 默认 **`--tp 2`** → **2 张 GPU**；**三组进程不得争抢同一物理 GPU**（脚本示例为 **visual：`0`**，**LLM：`6,7`**；实际以 **`nvidia-smi`** 选定）。
 
@@ -44,7 +48,7 @@ description: >-
 3. **`MODEL_DIR`**：指向 **Qwen3-VL-8B-Instruct**；默认试跑 **`/mtc/models/Qwen3-VL-8B-Instruct`**；不存在或加载失败时 **向用户询问** 本机路径。
 4. **`AFS_IMAGE_EMBED_DIR`**：**`--afs_image_embed_dir`** 指向的目录须存在或可创建；默认试跑 **`/mtc/afs/vit_embed_dir`**；不可用时 **向用户询问**。
 5. **显卡**：**`visual_only`** 与 **`normal`** 的 **`CUDA_VISIBLE_DEVICES`** **不得重叠**；先 **`nvidia-smi`** 再 **`export`**（**不要写死**示例卡号）。
-6. **`CONFIG_SERVER_HOST`**：各进程 **`--config_server_host`** 须能访问 **`config_server` 的 HTTP 服务**。**三进程同机**时常见为 **`0.0.0.0`**（与历史脚本一致）；多机时改为 **对端可达的 IP**，并保证防火墙放行 **`config_server` 端口（8090）**、**其内部 Redis 暴露端口（6000）**、**`8091`** 等。
+6. **`CONFIG_SERVER_HOST`**：各进程 **`--config_server_host`** 须能访问 **`config_server` 的 HTTP 服务**。**三进程同机**时常见为 **`0.0.0.0`**（与历史脚本一致）；`config_server` 可单独部署并通过可达 IP 提供服务，但 `visual_only` 与其 `normal` proxy 必须同机。跨主机时只开放所需的 **`config_server` HTTP 端口（8090）**；**Redis 暴露端口（6000）只能向受控可信私有网络中的 allowlist 服务主机开放，且仅允许 `visual_only` 和 `normal` 主机访问**。当前 Redis 未配置认证或 TLS，**不得将其暴露到不受信任的网络**；**`8091` 始终仅供本机 proxy 使用，不要对网络开放**。
 7. **代理**：每条 **`python`（LightLLM）** 前 **`export http_proxy=`**、**`export https_proxy=`**（与仓库其它 acc 测试一致）。**`lmms_eval` 拉取 `lmms-lab/MMMU` 时**若需经企业代理访问 Hugging Face，应在 **`no_proxy` 已包含 `127.0.0.1`** 的前提下**恢复 `https_proxy`（或等价镜像）**；否则易出现 Hub **`ConnectionError`**。仅当本机已有完整离线缓存且确认 **`datasets` 可纯离线命中**时，才可全程无代理。
 8. **`lmms-eval`**：**`python3 -m lmms_eval --help`** 可执行；否则无法完成必跑 **`mmmu_val`**。
 
@@ -97,7 +101,7 @@ python -m lightllm.server.api_server \
 
 ### 2）`visual_only`（**`config_server` 已在 8090 / 6000 就绪后**）
 
-**`--visual_rpyc_port 8091`** 为 **visual_only 模式必需**，供其它服务调用本机视觉推理接口。
+**`--visual_rpyc_port 8091`** 为 **visual_only 模式必需**，供同一主机上的 `normal` proxy 调用视觉推理接口。
 
 ```bash
 CUDA_VISIBLE_DEVICES="${VISUAL_CUDA_DEVICES}" python -m lightllm.server.api_server \
@@ -114,7 +118,7 @@ CUDA_VISIBLE_DEVICES="${VISUAL_CUDA_DEVICES}" python -m lightllm.server.api_serv
   --visual_rpyc_port 8091
 ```
 
-**`--host`** 为 **本进程监听地址**；与 **`--config_server_host`** 含义不同：后者为 **config_server 的可达地址**。
+**`--host`** 为 **本进程监听地址**；与 **`--config_server_host`** 含义不同：后者为 **config_server 的可达地址**。这两个参数均不改变 visual-only RPyC 的 loopback 绑定。
 
 ### 3）`normal`（visual 就绪后）
 

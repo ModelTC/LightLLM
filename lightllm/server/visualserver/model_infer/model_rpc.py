@@ -17,6 +17,7 @@ from lightllm.models.gemma4.gemma4_visual import Gemma4VisionModel
 from lightllm.models.deepseek_v4.deepseek_v4_visual import DeepseekV4VisionModel
 from lightllm.models.vit.model import VisionTransformer
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
+from lightllm.server.visualserver.rpc_payload import unpack_image_items
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
 from lightllm.models.qwen3_vl.qwen3_visual import Qwen3VisionTransformerPretrainedModel
@@ -183,8 +184,9 @@ class VisualModelRpcServer(rpyc.Service):
             )
 
     def exposed_run_task(self, images: List["ImageItem"], ref_event_list: List[threading.Event]):
+        """Validate image items received from the visual proxy and enqueue them."""
         try:
-            images = obtain(images)
+            images = unpack_image_items(images, ImageItem)
             for i in range(len(images)):
                 images[i].event = ref_event_list[i]
                 images[i].start_time = time.time()
