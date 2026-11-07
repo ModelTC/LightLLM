@@ -7,7 +7,6 @@ from contextlib import contextmanager
 import torch
 from lightllm.utils.progress import ThreadProgress
 
-from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 from lightllm.utils.log_utils import init_logger
 from lightllm.core.device.cuda import CudaRuntime
@@ -43,6 +42,8 @@ class WarmupRunner:
         self.device = requests.req_to_token_indexs.device
 
     def prefill_input(self, tokens, request_id, *, random=False):
+        from lightllm.common.basemodel.batch_objs import ModelInput
+
         if tokens <= 0:
             raise ValueError("warmup requires a positive token count")
         if random:
@@ -70,6 +71,8 @@ class WarmupRunner:
         )
 
     def decode_input(self, rows, max_kv_length):
+        from lightllm.common.basemodel.batch_objs import ModelInput
+
         length = getattr(self.runtime, "decode_warmup_length", lambda maximum: 2)(max_kv_length)
         if not 1 <= length <= max_kv_length:
             raise ValueError("decode warmup length exceeds the Graph capacity")
