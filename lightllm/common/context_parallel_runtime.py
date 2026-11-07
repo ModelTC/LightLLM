@@ -41,6 +41,7 @@ class ContextParallelLayout:
     dp_size: int
     context_size: int
     tp_size: int
+    order: str = "context_major"
 
     def __post_init__(self) -> None:
         for name, minimum in (
@@ -50,6 +51,8 @@ class ContextParallelLayout:
             ("tp_size", 1),
         ):
             object.__setattr__(self, name, _index(getattr(self, name), name, minimum=minimum))
+        if self.order not in ("context_major", "tp_major"):
+            raise ValueError(f"order must be 'context_major' or 'tp_major', got {self.order!r}")
         if self.global_rank >= self.world_size:
             raise ValueError(f"global_rank must be in [0, {self.world_size}), got {self.global_rank}")
 
@@ -63,28 +66,32 @@ class ContextParallelLayout:
 
     @property
     def context_rank(self) -> int:
+        if self.order == "tp_major":
+            return self.global_rank % self.context_size
         return (self.global_rank // self.tp_size) % self.context_size
 
     @property
     def tp_rank(self) -> int:
+        if self.order == "tp_major":
+            return (self.global_rank // self.context_size) % self.tp_size
         return self.global_rank % self.tp_size
+
+    def rank_for(self, dp_rank: int, context_rank: int, tp_rank: int) -> int:
+        """Map logical DP/context/TP coordinates to a global rank."""
+
+        if self.order == "tp_major":
+            return (dp_rank * self.context_size * self.tp_size) + (tp_rank * self.context_size) + context_rank
+        return (dp_rank * self.context_size + context_rank) * self.tp_size + tp_rank
 
     def group_ranks(self, kind: str) -> tuple[int, ...]:
         """Return global ranks for one TP, context, or DP subgroup."""
 
         if kind == "tp":
-            base = (self.dp_rank * self.context_size + self.context_rank) * self.tp_size
-            return tuple(base + rank for rank in range(self.tp_size))
+            return tuple(self.rank_for(self.dp_rank, self.context_rank, rank) for rank in range(self.tp_size))
         if kind == "context":
-            return tuple(
-                (self.dp_rank * self.context_size + rank) * self.tp_size + self.tp_rank
-                for rank in range(self.context_size)
-            )
+            return tuple(self.rank_for(self.dp_rank, rank, self.tp_rank) for rank in range(self.context_size))
         if kind == "dp":
-            return tuple(
-                (rank * self.context_size + self.context_rank) * self.tp_size + self.tp_rank
-                for rank in range(self.dp_size)
-            )
+            return tuple(self.rank_for(rank, self.context_rank, self.tp_rank) for rank in range(self.dp_size))
         raise ValueError(f"unsupported process-group kind: {kind}")
 
 
@@ -131,18 +138,13 @@ def _group_specs(layout: ContextParallelLayout) -> Iterable[tuple[str, tuple[int
 
     for dp_rank in range(layout.dp_size):
         for context_rank in range(layout.context_size):
-            base = (dp_rank * layout.context_size + context_rank) * layout.tp_size
-            yield "tp", tuple(base + rank for rank in range(layout.tp_size))
+            yield "tp", tuple(layout.rank_for(dp_rank, context_rank, rank) for rank in range(layout.tp_size))
     for dp_rank in range(layout.dp_size):
         for tp_rank in range(layout.tp_size):
-            yield "context", tuple(
-                (dp_rank * layout.context_size + rank) * layout.tp_size + tp_rank for rank in range(layout.context_size)
-            )
+            yield "context", tuple(layout.rank_for(dp_rank, rank, tp_rank) for rank in range(layout.context_size))
     for context_rank in range(layout.context_size):
         for tp_rank in range(layout.tp_size):
-            yield "dp", tuple(
-                (rank * layout.context_size + context_rank) * layout.tp_size + tp_rank for rank in range(layout.dp_size)
-            )
+            yield "dp", tuple(layout.rank_for(rank, context_rank, tp_rank) for rank in range(layout.dp_size))
 
 
 def create_context_parallel_groups(

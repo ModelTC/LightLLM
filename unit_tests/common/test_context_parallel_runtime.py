@@ -13,6 +13,15 @@ def test_layout_keeps_tp_rank_constant_for_context_groups():
     assert layout.group_ranks("dp") == (1, 5)
 
 
+def test_tp_major_layout_matches_contiguous_dcp_context_groups():
+    layout = module.ContextParallelLayout(global_rank=3, dp_size=2, context_size=2, tp_size=2, order="tp_major")
+
+    assert (layout.dp_rank, layout.context_rank, layout.tp_rank) == (0, 1, 1)
+    assert layout.group_ranks("tp") == (1, 3)
+    assert layout.group_ranks("context") == (2, 3)
+    assert layout.group_ranks("dp") == (3, 7)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
