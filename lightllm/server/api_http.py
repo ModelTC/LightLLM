@@ -547,8 +547,15 @@ async def metrics() -> Response:
 
 # RL 控制面接口（abort / pause / flush / memory / weight update），见 api_http_rl.py
 from .api_http_rl import router as rl_router
+from .rl_auth import RLStartArgs, mount_rl_router, validate_rl_auth
 
-app.include_router(rl_router)
+_rl_router_mounted = False
+
+
+def _mount_rl_router(args: RLStartArgs) -> None:
+    global _rl_router_mounted
+    _rl_router_mounted = mount_rl_router(app, rl_router, args, _rl_router_mounted)
+
 
 # PD 分离控制面接口（worker 发现、P/D 注册与 KV 状态上报），见 api_http_pd.py
 from .api_http_pd import router as pd_router
@@ -595,7 +602,10 @@ async def shutdown():
 async def startup_event():
     logger.info("server start up")
     loop = asyncio.get_event_loop()
-    g_objs.set_args(get_env_start_args())
+    args = get_env_start_args()
+    validate_rl_auth(args)
+    g_objs.set_args(args)
+    _mount_rl_router(args)
     loop.create_task(g_objs.httpserver_manager.handle_loop())
     logger.info(f"server start up ok, loop use is {asyncio.get_event_loop()}")
     return
