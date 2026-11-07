@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from types import SimpleNamespace
+import weakref
 
 import pytest
 import torch
@@ -128,3 +129,73 @@ def test_warmup_failure_restores_phase_without_capturing(capture_env, overlap):
     assert not Autotuner.is_autotune_warmup()
     assert capture_env.capture_count == 0
     assert graph.graph == {}
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("kda", [False, True])
+def test_linear_config_is_local_to_capture_state(capture_env, overlap, kda):
+    from lightllm.common.basemodel.attention.linear.gdn import GDNLinearAttDecodeAttState
+    from lightllm.common.basemodel.attention.linear.kda import KDALinearAttDecodeAttState
+    from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
+    from lightllm.common.basemodel.batch_objs import PostLayerOutput
+    from lightllm.common.basemodel.hidden_collector import NoopHiddenCollector
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+    from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMExecutor
+    from lightllm.common.ssm_types import SSMRunConfig
+    from lightllm.common.attention_state.bounded_att import GDNState, KDAState
+
+    capture_env.args.enable_decode_microbatch_overlap = overlap
+    graph = CudaGraph(1, 2, 1, max_batch_size=2)
+    from unit_tests.common.test_linear_state import make_state
+    from lightllm.common.attention_state.commit import StateCommit
+
+    manager, resources, _ = make_state(KDAState if kda else GDNState, mode="compact", device="cpu")
+    att_class = KDALinearAttDecodeAttState if kda else GDNLinearAttDecodeAttState
+    states = []
+    configs = [SSMRunConfig(8, 1), SSMRunConfig(32, 2)]
+    for _ in range(2 if overlap else 1):
+        state = InferStateInfo()
+        state.input_ids = torch.ones(2, dtype=torch.int64)
+        state.att_state_manager = resources
+        state.hidden_collector = NoopHiddenCollector()
+        state.decode_att_state = TritonDecodeAttState(_infer_state_weak_ref=weakref.ref(state))
+        state.decode_att_state1 = att_class(_infer_state_weak_ref=weakref.ref(state))
+        state.decode_att_state1.forwards[manager.state_name] = manager.prepare_decode(
+            torch.tensor([0, 1], dtype=torch.int32),
+            torch.tensor([0, 3, 6], dtype=torch.int32),
+        )
+        states.append(state)
+
+    def decode_func(*infer_states):
+        outputs = []
+        for index, state in enumerate(infer_states):
+            att = state.decode_att_state1
+            assert att.infer_state is state
+            forward = att.get_forward(0)
+            assert forward.run_config is None
+            assert (att is states[index].decode_att_state1) == capture_env.capturing
+            forward.run_config = configs[index] if capture_env.capturing else SSMRunConfig(128, 4)
+            outputs.append(TpPartBaseModel._create_model_output(None, PostLayerOutput(torch.ones(2, 1)), state))
+        return tuple(outputs) if overlap else outputs[0]
+
+    result = graph.capture_decode(decode_func, *states)
+    outputs = result if overlap else (result,)
+    runtime_states = [cuda_graph_module._copy_warmup_state(state) for state in states]
+    for state in runtime_states:
+        state.decode_att_state1.forwards[manager.state_name] = manager.prepare_decode(
+            torch.tensor([1, 0], dtype=torch.int32),
+            torch.tensor([0, 1, 4], dtype=torch.int32),
+        )
+    replay = graph.replay(*runtime_states)
+    assert replay == result
+    for index, (state, output) in enumerate(zip(states, outputs)):
+        forward = state.decode_att_state1.get_forward(0)
+        assert forward.run_config is configs[index]
+        assert forward.req_indices.tolist() == [1, 0]
+        assert forward.cu_seqlens.tolist() == [0, 1, 4]
+        forward.run_config = SSMRunConfig(64, 4)
+        assert output.state_commits == (StateCommit(manager.state_name, configs[index]),)
+        unpadded = TpPartBaseModel._create_unpad_decode_model_output(None, output, 1)
+        assert unpadded.logits.shape[0] == 1
+        assert unpadded.state_commits is output.state_commits

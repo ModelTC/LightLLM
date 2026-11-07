@@ -1,23 +1,17 @@
 from lightllm.common.attention_state.bounded_att import GDNState
+from .state import LinearDecodeAttState, LinearPrefillAttState, get_resource
 import dataclasses
 import weakref
-import torch
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+
+import torch
+
+from ..base_att import BaseAttBackend, AttControl
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
 from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import fused_gdn_gating
 from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import conv_pack_gdn_decode_inputs
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
-    mtp_fused_recurrent_gated_delta_rule,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
-    build_dynamic_mtp_linear_att_state_params,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
-    fused_recurrent_gated_delta_rule,
-)
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -26,7 +20,7 @@ if TYPE_CHECKING:
     from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerWeight
 
 
-class LinearAttBackend(BaseAttBackend, ABC):
+class GDNLinearAttBackend(BaseAttBackend, ABC):
     def __init__(self, model: "TpPartBaseModel"):
         super().__init__(model=model)
         self._init_linear_layer_metadata(network_config=model.config, tp_world_size=model.tp_world_size_)
@@ -100,28 +94,16 @@ class LinearAttBackend(BaseAttBackend, ABC):
             value = value.view(1, seq_len, self.tp_num_v_heads, self.head_v_dim)
             return query, key, value
 
-    def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "LinearAttPrefillAttState":
-        return LinearAttPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
+    def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "GDNLinearAttPrefillAttState":
+        return GDNLinearAttPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
-    def create_att_decode_state(self, infer_state: "InferStateInfo") -> "LinearAttDecodeAttState":
-        return LinearAttDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
+    def create_att_decode_state(self, infer_state: "InferStateInfo") -> "GDNLinearAttDecodeAttState":
+        return GDNLinearAttDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass
-class LinearAttPrefillAttState(BasePrefillAttState):
-
-    b_conv_buffer_idx: torch.Tensor = None
-    b_ssm_buffer_idx: torch.Tensor = None
-
-    def init_state(self):
-        backend: LinearAttBackend = self.backend
-        mtp_step = backend.mtp_step
-        # 每次 _prefill 都会在 runtime infer_state 上调用 init_state。
-        # prefill cuda graph 回调必须走 new_infer_state.prefill_att_state1，
-        # 才能读到这里按当前 batch（含 token padding 后的 dummy request）更新的索引。
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (mtp_step + 1)
-        return
+class GDNLinearAttPrefillAttState(LinearPrefillAttState):
+    state_class = GDNState
 
     def prefill_att(
         self,
@@ -138,22 +120,24 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         mixed_qkvzba: torch.Tensor = linear_att_dict["mixed_qkvzba"]
         layer_weight = linear_att_dict["layer_weight"]
         layer_num = linear_att_dict["layer_num"]
-        backend: LinearAttBackend = self.backend
+        backend: GDNLinearAttBackend = self.backend
 
-        state = self.infer_state.att_state_manager.get_state(
-            model_role=self.infer_state.att_state_role,
-            state_type_filter="gdn",
-            logical_layer_id=layer_num,
-            state_class=GDNState,
-        )
-        conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
+        resource = get_resource(self, layer_num)
+        conv_states, ssm_states = resource.get_layer_view(layer_num)
         # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
         # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
         if backend.mtp_step > 0:
             conv_states = conv_states[:, :, : -backend.mtp_step]
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
         core_attn_out = self._gdn_prefill_kernel(
-            mixed_qkv, conv_states, ssm_states, a, b, self.infer_state, layer_weight
+            mixed_qkv,
+            conv_states,
+            ssm_states,
+            a,
+            b,
+            self.infer_state,
+            layer_weight,
+            self.state_indices[resource.state_name],
         )
         return core_attn_out, z
 
@@ -166,17 +150,19 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         b: torch.Tensor,
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
+        state_indices,
     ):
         g, beta = fused_gdn_gating(layer_weight.linear_A_log.weight, a, b, layer_weight.linear_dt_bias.weight)
         mixed_qkv = mixed_qkv.transpose(0, 1)
 
-        backend: LinearAttBackend = self.backend
+        conv_indices, ssm_indices = state_indices
+        backend: GDNLinearAttBackend = self.backend
         out_tensor = causal_conv1d_fn(
             mixed_qkv,
             layer_weight.linear_conv1d.mm_param.weight,
             bias=layer_weight.linear_conv1d.bias,
             query_start_loc=infer_state.b1_cu_q_seq_len,
-            cache_indices=self.b_conv_buffer_idx,
+            cache_indices=conv_indices,
             has_initial_state=infer_state.b_ready_cache_len > 0,
             conv_states=conv_states,
             activation=backend.activation,
@@ -185,7 +171,7 @@ class LinearAttPrefillAttState(BasePrefillAttState):
 
         # Recurrent processing
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv)
-        initial_state = ssm_states[self.b_ssm_buffer_idx]
+        initial_state = ssm_states[ssm_indices]
         # g and beta have shape (total_tokens, num_heads), need to unsqueeze to get (1, total_tokens, num_heads)
         core_attn_out, last_recurrent_state = backend.prefill_kernel(
             q=query,
@@ -201,85 +187,16 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         # The chunk kernel accumulates the recurrent state in float32 even when
         # the state cache is configured as bfloat16. Advanced indexing does
         # not perform an implicit dtype conversion for index_put.
-        ssm_states[self.b_ssm_buffer_idx] = last_recurrent_state.to(ssm_states.dtype, copy=False)
+        ssm_states[ssm_indices] = last_recurrent_state.to(ssm_states.dtype, copy=False)
         return core_attn_out
 
 
 @dataclasses.dataclass
-class LinearAttDecodeAttState(BaseDecodeAttState):
+class GDNLinearAttDecodeAttState(LinearDecodeAttState):
+    state_class = GDNState
 
-    b_conv_buffer_idx: torch.Tensor = None
-    b_ssm_buffer_idx: torch.Tensor = None
-    b1_mtp_cu_q_seq_len: torch.Tensor = None
-    b_num_accepted_tokens: torch.Tensor = None
-
-    def init_state(self):
-        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
-        if draft_step == 0:
-            self._init_normal_decode_state()
-            return
-
-        # MTP 元数据按模型初始化，沿用每个角色只有一个 GDN State 的约束。
-        # 只在此读取游标；Backend 不保存 State，逐层计算按逻辑层号查询资源。
-        (state,) = (
-            state
-            for state in self.infer_state.att_state_manager.get_bounded_attention_states(
-                self.infer_state.att_state_role
-            )
-            if isinstance(state, GDNState)
-        )
-        if self.backend.uses_dynamic_spec_verify_layout():
-            self._init_dynamic_mtp_decode_state(draft_step + 1, req_to_mtp_state_index=state.mtp_state_index)
-        else:
-            self._init_fixed_mtp_decode_state(draft_step, req_to_mtp_state_index=state.mtp_state_index)
-
-    def _init_normal_decode_state(self):
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx
-
-    def _init_dynamic_mtp_decode_state(self, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
-        (
-            self.b1_mtp_cu_q_seq_len,
-            self.b_conv_buffer_idx,
-            self.b_num_accepted_tokens,
-        ) = build_dynamic_mtp_linear_att_state_params(
-            b_req_idx=self.infer_state.b_req_idx,
-            b_mtp_index=self.infer_state.b_mtp_index,
-            req_to_mtp_state_index=req_to_mtp_state_index,
-            hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
-        )
-        self._init_mtp_ssm_buffer_idx(mtp_size)
-
-    def _init_fixed_mtp_decode_state(self, draft_step: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
-        mtp_size = draft_step + 1
-        batch_size = self.infer_state.batch_size
-        assert batch_size % mtp_size == 0, (
-            "GDN fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
-            f"got batch_size={batch_size}, draft_step={draft_step}."
-        )
-
-        att_batch_size = batch_size // mtp_size
-        self.b1_mtp_cu_q_seq_len = torch.arange(
-            0,
-            batch_size + 1,
-            mtp_size,
-            dtype=torch.int32,
-            device=self.infer_state.b_req_idx.device,
-        )
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        self.b_num_accepted_tokens = req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
-        self._init_mtp_ssm_buffer_idx(mtp_size)
-
-    def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
-        att_batch_size = self.b_conv_buffer_idx.shape[0]
-        # Each request owns mtp_size consecutive recurrent-state slots.
-        b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
-        state_offsets = torch.arange(
-            mtp_size,
-            device=self.infer_state.b_req_idx.device,
-            dtype=self.infer_state.b_req_idx.dtype,
-        ).view(1, mtp_size)
-        self.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets  # [att_batch_size, mtp_size]
+    def get_draft_step(self):
+        return self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
 
     def decode_att(
         self,
@@ -296,27 +213,23 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         mixed_qkvzba = linear_att_dict["mixed_qkvzba"]
         layer_weight = linear_att_dict["layer_weight"]
         layer_num = linear_att_dict["layer_num"]
-        backend: LinearAttBackend = self.backend
+        backend: GDNLinearAttBackend = self.backend
 
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
-        state = self.infer_state.att_state_manager.get_state(
-            model_role=self.infer_state.att_state_role,
-            state_type_filter="gdn",
-            logical_layer_id=layer_num,
-            state_class=GDNState,
-        )
-        conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
+        forward = self.get_forward(layer_num)
+        conv_states, _ = forward.resource.get_layer_view(layer_num)
 
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step > 0:
             core_attn_out = self._gdn_mtp_kernel(
                 mixed_qkv,
                 conv_states,
-                ssm_states,
+                forward,
                 a,
                 b,
                 self.infer_state,
                 layer_weight,
+                layer_num=layer_num,
             )
         else:
             # 非 MTP 模式下，使用线性层 decode 状态。
@@ -324,11 +237,12 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
                 mixed_qkv,
                 z,
                 conv_states,
-                ssm_states,
+                forward,
                 a,
                 b,
                 self.infer_state,
                 layer_weight,
+                layer_num=layer_num,
             )
         return core_attn_out, z
 
@@ -337,13 +251,15 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         mixed_qkv: torch.Tensor,
         z: torch.Tensor,
         conv_states: torch.Tensor,
-        ssm_states: torch.Tensor,
+        forward,
         a: torch.Tensor,
         b: torch.Tensor,
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
+        *,
+        layer_num: int,
     ):
-        backend: LinearAttBackend = self.backend
+        backend: GDNLinearAttBackend = self.backend
 
         # Recurrent processing with fused gating. Decode uses a specialized
         # conv+pack kernel to avoid materializing the post-conv qkv tensor
@@ -356,7 +272,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             conv_states,
             layer_weight.linear_conv1d.mm_param.weight,
             layer_weight.linear_conv1d.bias,
-            self.b_conv_buffer_idx,
+            forward.req_indices,
             backend.activation,
             backend.conv_kernel_dim,
             backend.tp_num_k_heads,
@@ -364,18 +280,15 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             backend.tp_num_v_heads,
             backend.head_v_dim,
         )
-        core_attn_out, _ = fused_recurrent_gated_delta_rule(
-            q=query,
-            k=key,
-            v=value,
-            initial_state=ssm_states,
-            inplace_final_state=True,
-            ssm_state_indices=self.b_ssm_buffer_idx,
-            use_qk_l2norm_in_kernel=True,
-            A_log=layer_weight.linear_A_log.weight,
-            dt_bias=layer_weight.linear_dt_bias.weight,
-            a_raw=a,
-            b_raw=b,
+        core_attn_out = forward.run_layer(
+            layer_num,
+            query,
+            key,
+            value,
+            a,
+            b,
+            layer_weight.linear_A_log.weight,
+            layer_weight.linear_dt_bias.weight,
         )
         return core_attn_out, z
 
@@ -383,19 +296,21 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         self,
         mixed_qkv: torch.Tensor,
         conv_states: torch.Tensor,
-        ssm_states: torch.Tensor,
+        forward,
         a: torch.Tensor,
         b: torch.Tensor,
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
+        *,
+        layer_num: int,
     ):
         from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
             causal_conv1d_update as causal_conv1d_update_mtp,
         )
 
-        backend: LinearAttBackend = self.backend
+        backend: GDNLinearAttBackend = self.backend
 
-        cu_seqlens_q = self.b1_mtp_cu_q_seq_len
+        cu_seqlens_q = forward.cu_seqlens
         mixed_qkv = causal_conv1d_update_mtp(
             mixed_qkv,
             conv_states,
@@ -403,28 +318,20 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             mtp_step=backend.model.mtp_manager.get_decode_draft_step(backend.model.is_mtp_draft_model),
             bias=layer_weight.linear_conv1d.bias,
             activation=backend.activation,
-            conv_state_indices=self.b_conv_buffer_idx,
-            num_accepted_tokens=self.b_num_accepted_tokens,
+            conv_state_indices=forward.req_indices,
+            num_accepted_tokens=forward.accepted_token_counts,
             query_start_loc=cu_seqlens_q,
         )
 
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
-        assert self.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"
-        # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,
-        # and MTP decode only writes values in [1, mtp_step+1]. The old per-layer per-step
-        # .all() D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
-        core_attn_out, _ = mtp_fused_recurrent_gated_delta_rule(
-            q=query,
-            k=key,
-            v=value,
-            initial_state=ssm_states,
-            cu_seqlens=cu_seqlens_q.to(torch.long),
-            ssm_state_indices=self.b_ssm_buffer_idx,
-            ssm_state_write_indices=self.b_ssm_buffer_idx,
-            num_accepted_tokens=self.b_num_accepted_tokens,
-            A_log=layer_weight.linear_A_log.weight,
-            dt_bias=layer_weight.linear_dt_bias.weight,
-            a_raw=a,
-            b_raw=b,
+        core_attn_out = forward.run_layer(
+            layer_num,
+            query,
+            key,
+            value,
+            a,
+            b,
+            layer_weight.linear_A_log.weight,
+            layer_weight.linear_dt_bias.weight,
         )
         return core_attn_out

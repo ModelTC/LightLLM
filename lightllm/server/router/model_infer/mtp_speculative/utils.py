@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, List, Tuple
 
 import torch
 
+from lightllm.common.attention_state.commit import StateAcceptance
+
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     mtp_scatter_next_token_ids,
     mtp_verify,
@@ -21,10 +23,9 @@ def verify_mtp_tokens(
     next_token_ids: torch.Tensor,
     b_req_idx: torch.Tensor,
     b_req_mtp_start_loc: torch.Tensor,
-    b_mtp_index: torch.Tensor,
+    state_commit_batches=(),
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Verify target tokens and update recurrent MTP state when required."""
-    # 保留原调用接口中的步序参数；当前状态提交直接使用验证返回的接受长度。
 
     accept_lengths, accepted_index = mtp_verify(
         req_to_next_token_ids=backend.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
@@ -32,9 +33,8 @@ def verify_mtp_tokens(
         new_next_token_ids=next_token_ids,
         b_req_idx=b_req_idx,
     )
-    backend.model.att_state_manager.commit_bounded_att_state(
-        b_req_idx[b_req_mtp_start_loc], accept_lengths, role="main"
-    )
+    acceptance = StateAcceptance(b_req_idx[b_req_mtp_start_loc.long()], accept_lengths, state_commit_batches)
+    backend.model.att_state_manager.commit_bounded_att_state(acceptance, role="main")
     return accept_lengths, accepted_index
 
 

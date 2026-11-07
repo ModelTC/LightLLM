@@ -577,11 +577,18 @@ class TpPartBaseModel:
         return new_model_input
 
     def _create_model_output(self, post_output: PostLayerOutput, infer_state: InferStateInfo) -> ModelOutput:
+        state_commits = tuple(
+            commit
+            for state in (infer_state.decode_att_state, infer_state.decode_att_state1)
+            if state is not None
+            for commit in state.get_state_commits()
+        )
         output = ModelOutput(
             logits=post_output.logits.contiguous(),
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
             logits_token_ids=post_output.logits_token_ids,
+            state_commits=state_commits,
         )
         return output
 
