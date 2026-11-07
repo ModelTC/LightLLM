@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isfinite
-from typing import Any, ContextManager, Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, ContextManager, Protocol
 
 if TYPE_CHECKING:
     from torch import Tensor, device, dtype
