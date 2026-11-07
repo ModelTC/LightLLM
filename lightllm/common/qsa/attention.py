@@ -81,7 +81,7 @@ def indexed_attention(
         value_dim,
         selected,
         splits,
-        dim**-0.5 if scale is None else scale,
+        dim ** -0.5 if scale is None else scale,
         max(16, triton.next_power_of_2(q_heads // kv_heads)),
         max(16, triton.next_power_of_2(dim)),
         max(16, triton.next_power_of_2(value_dim)),

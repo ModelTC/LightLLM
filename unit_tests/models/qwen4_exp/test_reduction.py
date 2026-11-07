@@ -47,7 +47,7 @@ def _check_reductions(rank, rendezvous, cuda=False):
                     assert actual.dtype == dtype
                     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
-        midpoint_parts = (1.0, 2**-8, 2**-24, 2**-24)
+        midpoint_parts = (1.0, 2 ** -8, 2 ** -24, 2 ** -24)
         for rows in (1, 3, 256, 512):
             value = torch.full((rows, 16), midpoint_parts[rank], dtype=torch.bfloat16, device=device)
             expected = torch.full_like(value, 1.0078125)

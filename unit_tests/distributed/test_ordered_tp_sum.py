@@ -62,7 +62,7 @@ def _worker(rank, world, rendezvous):
 
             for iteration in range(4):
                 if world >= 4 and iteration == 0:
-                    source.fill_((2**40, 1, -(2**40), 1)[rank] if rank < 4 else 0)
+                    source.fill_((2 ** 40, 1, -(2 ** 40), 1)[rank] if rank < 4 else 0)
                 else:
                     source.copy_((torch.arange(source.numel(), device=rank).reshape_as(source) % 257 + rank) / 64)
                     source.add_(iteration / 8)

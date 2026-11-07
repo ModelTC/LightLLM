@@ -16,7 +16,7 @@ def eager_select(indexer, query, cache, requests, lengths, table):
     count = lengths // indexer.compress_ratio
 
     scores = torch.matmul(query.float(), cache[0].float().transpose(-1, -2))
-    scores = scores.relu().sum(1) / indexer.head_dim**0.5
+    scores = scores.relu().sum(1) / indexer.head_dim ** 0.5
     scores.masked_fill_(torch.arange(blocks, device=query.device)[None, :] >= count[:, None], -float("inf"))
     topk = min(blocks, indexer.token_budget // indexer.compress_ratio)
     selected = scores.topk(topk, sorted=False).indices

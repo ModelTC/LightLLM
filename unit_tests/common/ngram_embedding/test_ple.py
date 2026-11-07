@@ -16,8 +16,8 @@ def make_layer(dim=65, branches=3, embed_dim=32, kernel=4, dilation=3, dtype=tor
 
     width = dim * branches
     return PLELayer(
-        rand(width, embed_dim) / embed_dim**0.5,
-        rand(dim, embed_dim) / embed_dim**0.5,
+        rand(width, embed_dim) / embed_dim ** 0.5,
+        rand(dim, embed_dim) / embed_dim ** 0.5,
         rand(width) * 0.1,
         rand(width) * 0.1,
         rand(width) * 0.1,

@@ -166,7 +166,7 @@ def test_normalize_outer_and_text_config_preserves_checkpoint(config):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
 def test_image_ranges_preserve_text_and_physical_ids(dtype):
-    second = 2**34 if dtype == torch.int64 else 2000000
+    second = 2 ** 34 if dtype == torch.int64 else 2000000
     tokens = torch.tensor(
         [7, 60, 999999, 1000000, 1000001, 1000002, second + 4, second + 5, 63], device="cuda", dtype=dtype
     )

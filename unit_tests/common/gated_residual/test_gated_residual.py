@@ -15,9 +15,9 @@ def make_component(dim, branches, dtype, combine=True):
 
     return GatedResidual(
         rand(width) * 0.1,
-        rand(rank, width) / width**0.5,
-        rand(width, rank) / rank**0.5,
-        rand(branches, width) / width**0.5 if combine else None,
+        rand(rank, width) / width ** 0.5,
+        rand(width, rank) / rank ** 0.5,
+        rand(branches, width) / width ** 0.5 if combine else None,
         branches,
     )
 
@@ -158,9 +158,9 @@ def test_mixer_is_batch_invariant_and_matches_fp64(dtype, dim, branches, rank):
 
     component = GatedResidual(
         rand(width) * 0.1,
-        rand(rank, width) / width**0.5,
-        rand(width, rank) / rank**0.5,
-        rand(branches, width) / width**0.5,
+        rand(rank, width) / width ** 0.5,
+        rand(width, rank) / rank ** 0.5,
+        rand(branches, width) / width ** 0.5,
         branches,
     )
     residual = rand(129, width)

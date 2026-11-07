@@ -42,9 +42,9 @@ def main():
 
     component = GatedResidual(
         rand(width) * 0.1,
-        rand(rank, width) / width**0.5,
-        rand(width, rank) / rank**0.5,
-        rand(branches, width) / width**0.5,
+        rand(rank, width) / width ** 0.5,
+        rand(width, rank) / rank ** 0.5,
+        rand(branches, width) / width ** 0.5,
         branches,
     )
     print(

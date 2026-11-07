@@ -47,8 +47,8 @@ def main():
         return torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
 
     layer = PLELayer(
-        rand(width, embed_dim) / embed_dim**0.5,
-        rand(dim, embed_dim) / embed_dim**0.5,
+        rand(width, embed_dim) / embed_dim ** 0.5,
+        rand(dim, embed_dim) / embed_dim ** 0.5,
         rand(width) * 0.1,
         rand(width) * 0.1,
         rand(width) * 0.1,

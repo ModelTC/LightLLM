@@ -126,7 +126,7 @@ def _scores(
         )
         logits = tl.dot(q, k, input_precision="ieee")
         logits = tl.where(head[:, None] < HEADS, tl.maximum(logits, 0), 0)
-        scores = tl.sum(logits, 0) * (D**-0.5)
+        scores = tl.sum(logits, 0) * (D ** -0.5)
         scores = tl.where(block < visible, scores, -float("inf"))
     tl.store(
         Output + row.to(tl.int64) * BLOCKS + block,

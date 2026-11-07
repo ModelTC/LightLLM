@@ -35,7 +35,7 @@ def test_reference_batching_strides_and_graph(dtype, hidden):
 
 
 def test_small_terms_survive_before_final_dtype_cast():
-    input = torch.tensor([[1, 2**-8, 2**-24, 2**-24]], device="cuda", dtype=torch.bfloat16)
+    input = torch.tensor([[1, 2 ** -8, 2 ** -24, 2 ** -24]], device="cuda", dtype=torch.bfloat16)
     weight = torch.ones_like(input)
     actual = scalar_linear(input, weight)
     torch.testing.assert_close(actual, torch.full_like(actual, 1.0078125), atol=0, rtol=0)

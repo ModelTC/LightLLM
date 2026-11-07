@@ -36,7 +36,7 @@ def reference_ple(residual, tokens, weights, config, ngram_history, conv_history
         F.linear(embedding, weights[prefix + ".key_proj.weight"].cuda()), weights[prefix + ".norm_key.weight"], config
     ).view(-1, branches, hidden)
     query = grouped_norm(residual, weights[prefix + ".norm_query.weight"], config).view(-1, branches, hidden)
-    gate = (key * query).sum(-1, keepdim=True) / (hidden**0.5)
+    gate = (key * query).sum(-1, keepdim=True) / (hidden ** 0.5)
     gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
     value = F.linear(embedding, weights[prefix + ".value_proj.weight"].cuda())
     gated = (gate.sigmoid() * value[:, None]).flatten(-2)
@@ -82,7 +82,7 @@ def reference_gdn(mixed, weights, config, conv_history, recurrent):
     q, k = q.view(-1, key_heads, key_dim).float(), k.view(-1, key_heads, key_dim).float()
     q = q * torch.rsqrt(q.square().sum(-1, keepdim=True) + 1e-6)
     k = k * torch.rsqrt(k.square().sum(-1, keepdim=True) + 1e-6)
-    q = q.repeat_interleave(value_heads // key_heads, dim=1) / (key_dim**0.5)
+    q = q.repeat_interleave(value_heads // key_heads, dim=1) / (key_dim ** 0.5)
     k = k.repeat_interleave(value_heads // key_heads, dim=1)
     v = v.view(-1, value_heads, value_dim).float()
     a = F.linear(mixed, weights[prefix + ".in_proj_a.weight"].cuda())
@@ -155,7 +155,7 @@ def reference_layer(residual, weights, config, cos, sin, lengths):
                 pooled = rotate(
                     pooled, cos[start : start + complete * ratio : ratio], sin[start : start + complete * ratio : ratio]
                 )
-                scores = (iq[start + position].float() @ pooled.float().T).relu().sum(0) / (idim**0.5)
+                scores = (iq[start + position].float() @ pooled.float().T).relu().sum(0) / (idim ** 0.5)
                 blocks = scores.topk(min(complete, budget)).indices
                 selected = (blocks[:, None] * ratio + torch.arange(ratio, device=residual.device)).flatten().tolist()
             selected += list(range(complete * ratio, position + 1))
