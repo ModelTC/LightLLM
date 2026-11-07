@@ -169,6 +169,12 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap:
         args.enable_tpsp_mix_mode = True
+        if args.enable_ep_moe and "PYTORCH_ALLOC_CONF" not in os.environ:
+            # 在启动模型子进程前设置，使 CUDA allocator 第一次初始化时即可
+            # 使用 CUDA Graph 拓扑分析 record_stream 张量的真实依赖关系。在确认
+            # 前一张量已经完成所有跨流访问后，Graph 私有内存池可以更早复用它的
+            # 显存，避免 overlap 路径的临时张量在多层捕获过程中重复保留。
+            os.environ["PYTORCH_ALLOC_CONF"] = "graph_capture_record_stream_reuse:True"
 
     if args.enable_prefill_decode_mixed:
         assert args.run_mode == "normal", "--enable_prefill_decode_mixed only supports run_mode normal"
@@ -296,6 +302,22 @@ def _launch_subprocesses(args: StartArgs):
             "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
             f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
         )
+
+    if args.run_mode == "decode":
+        # Decode 节点的启动 warmup 仍会构造 batch_max_tokens 个 token 做一次
+        # prefill-style model forward。Decode 节点没有必要沿用较大的 prefill
+        # batch 上限，但需要覆盖每个请求的一个 target token 和 mtp_step 个
+        # draft token。
+        decode_batch_max_tokens = int(args.running_max_req_size) * (1 + int(args.mtp_step))
+        logger.info(
+            "Decode node overrides batch_max_tokens: configured=%s, running_max_req_size=%s, "
+            "mtp_step=%s, decode_batch_max_tokens=%s",
+            args.batch_max_tokens,
+            args.running_max_req_size,
+            args.mtp_step,
+            decode_batch_max_tokens,
+        )
+        args.batch_max_tokens = decode_batch_max_tokens
 
     args.disable_chunked_mm_input = args.disable_chunked_mm_input or get_default_disable_chunked_mm_input(
         args.model_dir

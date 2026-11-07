@@ -75,7 +75,7 @@ def test_cached_role_queries_reuse_instance_references_and_keep_stable_order():
     results = {(query.__name__, role): query(role) for query in queries for role in (None, "main", "draft0")}
     assert manager.get_full_attention_states() == (
         manager.draft0_mla_fp32_state,
-        manager.main_gqa_fp32_state,
+        manager.main_gqa_fp32_h1_d4_state,
     )
     assert manager.get_bounded_attention_states("main") == (manager.main_kda_conv_fp32_ssm_fp32_state,)
     assert manager.get_bounded_attention_states("draft0") == (manager.draft0_gdn_conv_fp32_ssm_fp32_state,)

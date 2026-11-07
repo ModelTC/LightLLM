@@ -96,8 +96,8 @@ def test_numbered_drafts_keep_state_name_order_and_unique_members():
         "draft35",
         "main",
     ]
-    assert manager.get_full_attention_states("draft1") == (manager.draft1_gqa_bf16_state,)
-    assert manager.get_full_attention_states("draft10") == (manager.draft10_gqa_bf16_state,)
+    assert manager.get_full_attention_states("draft1") == (manager.draft1_gqa_bf16_h2_d16_state,)
+    assert manager.get_full_attention_states("draft10") == (manager.draft10_gqa_bf16_h2_d16_state,)
 
 
 def test_custom_state_type_controls_registered_resource_name():
@@ -262,13 +262,13 @@ def test_explicit_members_keep_role_and_scheme_distinct_even_with_overlapping_la
         overlapping = allocated_state("static_head")
         manager.register_state("main", overlapping)
     manager.finish_state_registration()
-    assert manager.main_gqa_bf16_state is main
-    assert manager.draft0_gqa_bf16_state is draft
-    assert manager.main_gqa_int8_group8_bf16_scale_state is quant
+    assert manager.main_gqa_bf16_h2_d16_state is main
+    assert manager.draft0_gqa_bf16_h2_d16_state is draft
+    assert manager.main_gqa_int8_group8_bf16_scale_h2_d16_state is quant
     assert manager.get_full_attention_states("draft0") == (draft,)
     expected = [main, quant]
     if overlap:
-        assert manager.main_gqa_fp8_static_per_head_state is overlapping
+        assert manager.main_gqa_fp8_static_per_head_h2_d16_state is overlapping
         expected.append(overlapping)
     assert manager.get_full_attention_states("main") == tuple(sorted(expected, key=lambda state: state.state_name))
 
@@ -278,8 +278,8 @@ def test_mixed_quantization_in_one_role_remains_distinct_in_copy_and_cpu_pages(c
     cpu_args.cpu_cache_token_page_size = 4
     full = allocated_state("gqa", device="cuda")
     quant = allocated_state("int8", device="cuda")
-    assert full.get_state_type() == "gqa_bf16"
-    assert quant.get_state_type() == "gqa_int8_group8_bf16_scale"
+    assert full.get_state_type() == "gqa_bf16_h2_d16"
+    assert quant.get_state_type() == "gqa_int8_group8_bf16_scale_h2_d16"
     for state in (full, quant):
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             field.tensor.fill_(5)

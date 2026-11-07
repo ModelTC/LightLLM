@@ -111,9 +111,10 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         self.v_scales: torch.Tensor | None = None
 
     def get_state_type(self) -> str:
-        """返回量化位数、分组大小及 scale 精度对应的存储方案标记。"""
+        """返回量化方案及全局 head 布局对应的存储方案标记。"""
         return (
             f"gqa_int{self.config.bits}_group{self.config.group_size}_{dtype_name(dtype=self.config.scale_dtype)}_scale"
+            f"_h{self.config.global_head_num}_d{self.config.head_dim}"
         )
 
     def allocate_storage(self, token_capacity: int) -> None:

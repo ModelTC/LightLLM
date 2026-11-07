@@ -43,7 +43,7 @@ def test_creation_does_not_bind_layers(monkeypatch: pytest.MonkeyPatch) -> None:
 
     model.prepare_attention_states()
 
-    assert model.att_state_manager.main_gqa_bf16_state is state
+    assert model.att_state_manager.main_gqa_bf16_h1_d128_state is state
     assert not hasattr(model.layers_infer[0], "full_att_state_name")
     assert not hasattr(model.layers_infer[0].indexer, "full_att_state_name")
 
@@ -85,9 +85,9 @@ def test_query_selects_role_and_scheme_and_preserves_shared_layers(role: str, mo
     assert all(not hasattr(layer, "full_att_state_name") for layer in model.layers_infer)
     manager.finish_state_registration()
     state = manager.get_state(role, "gqa", 0)
-    assert state.state_name == f"{role}_gqa_bf16_state"
+    assert state.state_name == f"{role}_gqa_bf16_h1_d128_state"
     assert manager.get_state(role, "gqa", 2) is state
-    assert manager.get_state(role, "gqa", 3).state_name == f"{role}_gqa_fp16_state"
+    assert manager.get_state(role, "gqa", 3).state_name == f"{role}_gqa_fp16_h1_d128_state"
 
 
 @pytest.mark.parametrize("finalized", [False, True])
@@ -188,7 +188,7 @@ def test_query_matches_complete_model_role(role: str) -> None:
     for model_name in ("draft1", "draft10"):
         manager.register_state(model_name, definition("gqa"))
     manager.finish_state_registration()
-    assert manager.get_state(role, "gqa", 0).state_name == f"{role}_gqa_bf16_state"
+    assert manager.get_state(role, "gqa", 0).state_name == f"{role}_gqa_bf16_h2_d16_state"
 
 
 @pytest.mark.parametrize("algorithm", ["kda", "gdn", "compressor"])

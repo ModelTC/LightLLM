@@ -203,7 +203,7 @@ class StateTransferLayout:
         ...     ),
         ... )
         >>> layout = StateTransferLayout(
-        ...     state_name="main_gqa_fp16_state",
+        ...     state_name="main_gqa_fp16_h8_d128_state",
         ...     tokens_per_page=8,
         ...     byte_start=16384, byte_end=49152,
         ...     regions=(k_region, replace(k_region, field="v", byte_start=32768, byte_end=49152)),
