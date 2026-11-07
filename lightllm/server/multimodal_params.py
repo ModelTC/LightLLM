@@ -76,6 +76,9 @@ class AudioItem:
             # without the noisy 'Failed to read audio' error logs.
             raise e
         except Exception as e:
+            if self._type == "url":
+                logger.exception("Failed to read audio resource")
+                raise ValueError("Failed to read audio resource") from None
             raise ValueError(f"Failed to read audio type={self._type}, data[:100]={self._data[:100]}: {e}!")
 
     def read(self):
@@ -203,6 +206,9 @@ class ImageItem:
             # without the noisy 'Failed to read image' error logs.
             raise e
         except Exception as e:
+            if self._type == "url":
+                logger.exception("Failed to read image resource")
+                raise ValueError("Failed to read image resource") from None
             raise ValueError(f"Failed to read image type={self._type}, data[:100]={self._data[:100]}: {e}!")
 
     def read(self):
