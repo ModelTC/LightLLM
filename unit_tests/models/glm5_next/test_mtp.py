@@ -127,17 +127,18 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
 
 @pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.parametrize("role", ["main", "draft0"])
-def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
+@pytest.mark.parametrize("mode,mtp_step", [("native", 2), ("compact", 2), ("replay", 2), ("native", 0), ("replay", 0)])
+def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mode, mtp_step):
     from types import SimpleNamespace
 
     from lightllm.common.basemodel.attention.base_att import AttControl
-    from lightllm.common.basemodel.attention.linear.kda import KDADecodeAttState
+    from lightllm.common.basemodel.attention.linear.kda import KDALinearAttDecodeAttState
     from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_update
 
     torch.manual_seed(53)
-    heads, dim, width = 2, 128, 3
+    heads, dim, width = 2, 128, mtp_step + 1
     hidden = heads * dim
-    lengths = [2, 1, 3] if dynamic else [3, 3, 3]
+    lengths = [2, 1, 3] if dynamic and mtp_step else [width] * 3
     requests = [2, 0, 1]
     request_rows = [req for req, length in zip(requests, lengths) for _ in range(length)]
     offsets = [offset for length in lengths for offset in range(length)]
@@ -145,10 +146,10 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
         request_rows += [3, 3]
         offsets += [0, 0]
     tokens = len(request_rows)
-    conv = torch.randn(4, 3 * hidden, 5, device="cuda", dtype=torch.bfloat16)
+    conv = torch.randn(4, 3 * hidden, 3 + mtp_step, device="cuda", dtype=torch.bfloat16)
     ssm = torch.randn(4 * width, heads, dim, dim, device="cuda") * 0.01
     old_conv, expected_ssm = conv.clone(), ssm.clone()
-    accepted_offsets = torch.tensor([1, 2, 0, 0], dtype=torch.int32, device="cuda")
+    accepted_offsets = torch.tensor([1, 2, 0, 0] if mtp_step else [0, 0, 0, 0], dtype=torch.int32, device="cuda")
     mixed = torch.randn(tokens, 3 * hidden, device="cuda", dtype=torch.bfloat16)
     gate = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16)
     beta = torch.randn(tokens, heads, device="cuda", dtype=torch.bfloat16)
@@ -186,7 +187,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
             expected_ssm[req * width + token] = state[0]
             row += 1
     backend = SimpleNamespace(
-        mtp_step=2,
+        mtp_step=mtp_step,
         tp_num_heads=heads,
         head_dim=dim,
         tp_hidden_size=hidden,
@@ -205,11 +206,19 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
         conv_dtype=conv.dtype,
         ssm_dtype=ssm.dtype,
     )
+    selected = None
     for model_role in ("main", "draft0"):
-        linear = KDAState(config, request_capacity=4, mtp_step=2, device="meta")
-        linear.mtp_state_index = accepted_offsets if model_role == role else torch.zeros_like(accepted_offsets)
+        linear = KDAState(config, request_capacity=4, mtp_step=mtp_step, device="cuda", ssm_state_mode=mode)
+        if mtp_step:
+            linear.mtp_state_index.copy_(accepted_offsets if model_role == role else torch.zeros_like(accepted_offsets))
         if model_role == role:
-            linear.conv_state, linear.ssm_state = conv.unsqueeze(0), ssm.unsqueeze(0)
+            linear.conv_state[0].copy_(conv)
+            if mode == "native":
+                linear.ssm_state[0].copy_(ssm)
+            else:
+                indexes = torch.arange(4, device="cuda") * width + accepted_offsets
+                linear.ssm_state[0].copy_(ssm[indexes])
+            selected = linear
         resources.register_state(model_role, linear)
     resources.finish_state_registration()
     manager = SimpleNamespace(HOLD_REQUEST_ID=3)
@@ -225,7 +234,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
         linear_A_log=SimpleNamespace(weight=a),
         linear_dt_bias=SimpleNamespace(weight=bias),
     )
-    state = KDADecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
+    state = KDALinearAttDecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
     state.init_state()
     actual = state.decode_att(
         None,
@@ -239,6 +248,26 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
         ),
     )
     torch.testing.assert_close(actual.reshape(tokens, heads, dim)[:row], torch.cat(expected), atol=2e-3, rtol=1e-2)
-    torch.testing.assert_close(ssm, expected_ssm, atol=2e-3, rtol=1e-2)
-    if dynamic:
-        assert torch.equal(conv[3], old_conv[3])
+    if mode == "native":
+        checked_slots = len(requests) if dynamic and not mtp_step else expected_ssm.shape[0]
+        torch.testing.assert_close(
+            selected.ssm_state[0, :checked_slots], expected_ssm[:checked_slots], atol=2e-3, rtol=1e-2
+        )
+    else:
+        ids = torch.tensor(requests, dtype=torch.int32, device="cuda")
+        if mtp_step:
+            accepted = torch.zeros(4, dtype=torch.int32, device="cuda")
+            accepted[ids] = torch.tensor(lengths, dtype=torch.int32, device="cuda") - 1
+            if mode == "compact":
+                selected._ssm.accept_updates(ids, accepted, run_config=state.get_forward(0).run_config)
+            else:
+                selected._ssm.accept_updates(ids, accepted)
+        for req, length in zip(requests, lengths):
+            torch.testing.assert_close(
+                selected._ssm.get_accepted_state(req)[0],
+                expected_ssm[req * width + length - 1],
+                atol=2e-3,
+                rtol=1e-2,
+            )
+    if dynamic and mtp_step:
+        assert torch.equal(selected.conv_state[0, 3], old_conv[3])

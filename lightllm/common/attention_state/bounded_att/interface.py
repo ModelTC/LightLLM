@@ -8,6 +8,8 @@ from typing import Any, List
 
 import torch
 
+from ..commit import StateAcceptance
+
 from ..utils import deepcopy_result
 from lightllm.common.attention_state.types import PageKind, StateTransferLayout, TransferRegion
 
@@ -98,12 +100,7 @@ class CoreInterface(ABC):
         ...
 
     @abstractmethod
-    def commit_bounded_att_state(
-        self,
-        req_indices: torch.Tensor,
-        accepted_steps: torch.Tensor,
-    ) -> None:
-        """两个输入均为 CUDA Tensor；int32 接受步数包含基准输入步，候选区与游标由实现管理。"""
+    def commit_bounded_att_state(self, acceptance: StateAcceptance) -> None:
         ...
 
 
@@ -173,10 +170,7 @@ class DpCopyInterface(ABC):
         dst_req_indices: List[int],
         remote_dp_bounded_state: CoreInterface,
     ) -> None:
-        """复制其他 DP 同一 TP 分片的 prefill 基准运行态并重置目标游标，不修改页池。
 
-        调用方保证源状态尚未执行 MTP 提交；KDA/GDN 的源游标必须为 0。
-        """
         ...
 
 
@@ -205,10 +199,7 @@ class PdInterface(ABC):
         state_token_len: int,
         layout: StateTransferLayout,
     ) -> None:
-        """将指定槽位在 state_token_len 绝对长度处的 prefill 基准运行态写入 PD 页。
 
-        调用方保证源状态尚未执行 MTP 提交；KDA/GDN 的源游标必须为 0。
-        """
         ...
 
     @abstractmethod
