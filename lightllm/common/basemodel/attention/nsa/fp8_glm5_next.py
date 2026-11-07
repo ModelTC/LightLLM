@@ -40,7 +40,9 @@ class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
         }
 
     def get_generic_prefill_workspace(self, infer_state, q, packed_kv, topk_indices):
-        from lightllm.common.execution.compute.attention.pooled_nope.prefill_fp8 import allocate_generic_prefill_workspace
+        from lightllm.common.execution.compute.attention.pooled_nope.prefill_fp8 import (
+            allocate_generic_prefill_workspace,
+        )
 
         slot = self._prefill_workspaces[infer_state.microbatch_index]
         entry = slot["generic"]

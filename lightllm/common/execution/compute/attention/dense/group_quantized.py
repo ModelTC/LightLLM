@@ -7,7 +7,11 @@ import torch
 
 from lightllm.common.execution.compute.attention.dense.inputs import query_tensor
 
-from lightllm.common.execution.compute.attention.dense.backend import BoundDenseAttention, decode_blocks, scratch_elements
+from lightllm.common.execution.compute.attention.dense.backend import (
+    BoundDenseAttention,
+    decode_blocks,
+    scratch_elements,
+)
 from lightllm.common.execution.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
 

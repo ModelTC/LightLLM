@@ -2,7 +2,12 @@ from dataclasses import dataclass
 from typing import Any, Hashable, Mapping
 from lightllm.common.execution.contracts.provider import AttentionOffer, Phase
 from lightllm.common.execution.contracts.state import StateSpec, FormatSpec
-from lightllm.common.execution.compute.attention.backend import AttentionBackend, AttentionSpec, AttentionParams, BoundAttention
+from lightllm.common.execution.compute.attention.backend import (
+    AttentionBackend,
+    AttentionSpec,
+    AttentionParams,
+    BoundAttention,
+)
 
 
 @dataclass(frozen=True)
