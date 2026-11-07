@@ -1,6 +1,7 @@
 import torch
 import time
 from typing import List, Tuple
+from lightllm.common.attention_state.commit import StateCommitBatch
 from lightllm.common.basemodel.triton_kernel.mtp_utils import gen_b_req_mtp_start_loc
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
@@ -530,7 +531,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ids=next_token_ids,
                     b_req_idx=model_input.b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
-                    b_mtp_index=model_input.b_mtp_index,
+                    state_commit_batches=(StateCommitBatch(req_num, model_output.state_commits),),
                 )
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="accepted_index",
@@ -804,7 +805,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ids=next_token_ids,
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
-                    b_mtp_index=b_mtp_index,
+                    state_commit_batches=(
+                        StateCommitBatch(real_request_num0, model_output0.state_commits),
+                        StateCommitBatch(real_request_num1, model_output1.state_commits),
+                    ),
                 )
                 mtp_accept_len0 = mtp_accept_len[:real_request_num0]
                 mtp_accept_len1 = mtp_accept_len[real_request_num0:]

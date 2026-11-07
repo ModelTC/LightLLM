@@ -22,6 +22,7 @@ import sys
 
 import numpy as np
 import torch
+from lightllm.common.attention_state.commit import StateAcceptance, StateCommitBatch
 import torch.distributed as dist
 from transformers import PretrainedConfig
 
@@ -227,19 +228,24 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
                 max_kv_seq_len=int(lengths[-1]),
             )
             output = model.forward(batch)
+            commits = [output.state_commits]
             logits = [output.logits.clone()]
             for draft in draft_models:
                 batch.input_ids = output.logits.argmax(dim=-1)
                 batch.mtp_draft_input_hiddens = output.mtp_collector.spec_hidden
                 output = draft.forward(batch)
+                commits.append(output.state_commits)
                 logits.append(output.logits.clone())
             if draft_models and hybrid:
                 cuda_req_indices = request.cuda(non_blocking=True)
                 accepted_steps = torch.full_like(cuda_req_indices, accepted_width, dtype=torch.int32)
-                for item in (model, *draft_models):
+                for item, state_commits in zip((model, *draft_models), commits):
                     resources.commit_bounded_att_state(
-                        req_indices=cuda_req_indices,
-                        accepted_steps=accepted_steps,
+                        acceptance=StateAcceptance(
+                            cuda_req_indices,
+                            accepted_steps,
+                            (StateCommitBatch(request.numel(), state_commits),),
+                        ),
                         role=item.att_state_role,
                     )
             return logits

@@ -79,6 +79,9 @@ class Glm5NextTpPartModel(TpPartBaseModel):
                     request_capacity=request_capacity,
                     mtp_step=args.mtp_step,
                     device=device,
+                    ssm_state_mode=args.ssm_state_mode,
+                    ssm_replay_config=args.ssm_replay_config,
+                    gate_lower_bound=cfg.gate_lower_bound,
                 )
             )
         full_layers = tuple(model_logical_layer_ids[index] for index in cfg.get_full_att_layer_indices())
