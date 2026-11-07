@@ -66,8 +66,21 @@ class SubmoduleManager:
             except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 # A short-lived child may exit while the process tree is scanned.
                 continue
+            except psutil.AccessDenied:
+                continue
+
+            try:
+                process_cmdline = " ".join(process.cmdline())
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                continue
+            except psutil.AccessDenied:
+                process_cmdline = process_name
 
             if not process_name.startswith("lightllm::"):
+                continue
+
+            # KV move managers own recovery for their transfer workers.
+            if "::prefill_trans:" in process_cmdline or "::decode_trans:" in process_cmdline:
                 continue
 
             if not process.is_running() or not is_process_active(process.pid):

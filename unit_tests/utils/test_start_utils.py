@@ -24,11 +24,14 @@ class FakeHttpServerProcess:
 
 
 class FakeProcess:
-    def __init__(self, pid, running=True, children=None, name="process", exitcode=None, wait_timeout=False):
+    def __init__(
+        self, pid, running=True, children=None, name="process", cmdline=None, exitcode=None, wait_timeout=False
+    ):
         self.pid = pid
         self.running = running
         self._children = children or []
         self._name = name
+        self._cmdline = cmdline or name
         self.exitcode = exitcode
         self.wait_timeout = wait_timeout
 
@@ -40,6 +43,9 @@ class FakeProcess:
 
     def name(self):
         return self._name
+
+    def cmdline(self):
+        return [self._cmdline]
 
     def wait(self, timeout=None):
         if self.wait_timeout:
@@ -109,20 +115,21 @@ def test_register_process_tree_adds_recursive_descendants(monkeypatch):
     }
 
 
-def test_register_process_tree_filters_short_lived_helper_processes(monkeypatch):
+def test_register_process_tree_leaves_transfer_workers_to_their_manager(monkeypatch):
     model_process = FakeProcess(pid=1001, name="lightllm::model_infer")
     compile_worker = FakeProcess(pid=1002, name="python")
-    pd_process = FakeProcess(pid=1003, name="lightllm::decode_trans")
-    router_process = FakeProcess(pid=1000, children=[model_process, compile_worker, pd_process])
+    pd_process = FakeProcess(pid=1003, name="lightllm::node", cmdline="lightllm::node::decode_trans:Device0")
+    manager_process = FakeProcess(pid=1004, name="lightllm::pd_manager")
+    router_process = FakeProcess(pid=1000, children=[model_process, compile_worker, pd_process, manager_process])
     process_manager = start_utils.SubmoduleManager()
     monkeypatch.setattr(start_utils, "is_process_active", lambda pid: True)
 
     process_manager.register_process_tree(router_process)
 
-    assert process_manager.processes == [model_process, pd_process]
+    assert process_manager.processes == [model_process, manager_process]
     assert process_manager.process_names == {
         model_process: "lightllm::model_infer",
-        pd_process: "lightllm::decode_trans",
+        manager_process: "lightllm::pd_manager",
     }
 
 

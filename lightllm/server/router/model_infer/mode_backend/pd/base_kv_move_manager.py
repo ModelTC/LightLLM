@@ -1,18 +1,25 @@
 import time
 import os
-import signal
 import threading
 import queue
 import torch.multiprocessing as mp
 from typing import List, Dict, Union, Callable, Optional
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
+from lightllm.server.pd_io_struct import (
+    PDAbortReq,
+    PDChunckedTransTask,
+    PDChunckedTransTaskGroup,
+    PDChunckedTransTaskRet,
+)
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from .trans_process_obj import KVTransProcess
 from lightllm.utils.error_utils import log_exception
 
 logger = init_logger(__name__)
+
+_MAX_TRANS_PROCESS_RESTARTS = 3
+_TRANS_PROCESS_RESTART_RESET_SECONDS = 60
 
 
 class BaseKVMoveManager:
@@ -33,8 +40,16 @@ class BaseKVMoveManager:
 
         self.info_queue = info_queue
         self.ret_obj_queue = queue.Queue()
+        self.start_trans_process_func = start_trans_process_func
+        self.up_status_in_queue = up_status_in_queue
 
         self.kv_trans_processes: List[KVTransProcess] = [None] * self.node_world_size
+        self._trans_process_locks = [threading.Lock() for _ in range(self.node_world_size)]
+        self._pending_trans_tasks_by_device: List[Dict[str, List[PDChunckedTransTask]]] = [
+            {} for _ in range(self.node_world_size)
+        ]
+        self._trans_process_restart_counts = [0] * self.node_world_size
+        self._trans_process_last_restart_at: List[Optional[float]] = [None] * self.node_world_size
         for device_id in range(self.node_world_size):
             trans_process = KVTransProcess()
             self.kv_trans_processes[device_id] = trans_process
@@ -65,6 +80,37 @@ class BaseKVMoveManager:
 
     def task_dispatcher_loop(self):
         raise NotImplementedError()
+
+    def dispatch_trans_task(
+        self,
+        device_id: int,
+        task: Union[PDChunckedTransTask, PDChunckedTransTaskGroup, PDAbortReq],
+    ) -> None:
+        while True:
+            with self._trans_process_locks[device_id]:
+                trans_process = self.kv_trans_processes[device_id]
+                if trans_process.is_trans_process_health():
+                    trans_process.task_in_queue.put(task)
+                    self._register_pending_trans_tasks(device_id, task)
+                    return
+            time.sleep(0.01)
+
+    def _register_pending_trans_tasks(
+        self,
+        device_id: int,
+        task: Union[PDChunckedTransTask, PDChunckedTransTaskGroup, PDAbortReq],
+    ) -> None:
+        if isinstance(task, PDChunckedTransTaskGroup):
+            tasks = task.task_list
+        elif isinstance(task, PDChunckedTransTask):
+            tasks = [task]
+        else:
+            return
+
+        pending_tasks = self._pending_trans_tasks_by_device[device_id]
+        for trans_task in tasks:
+            key = trans_task.createRetObj().get_key()
+            pending_tasks.setdefault(key, []).append(trans_task)
 
     # ==================================================================================
     #  将收集到的传输返回信息，批量写回给推理进程，触发其进行相关管理信息的更新。
@@ -101,29 +147,100 @@ class BaseKVMoveManager:
     # 处理各个传输任务的返回的信息
     # ==================================================================================
     @log_exception
-    def task_ret_handle_loop(self, trans_process: KVTransProcess):
+    def task_ret_handle_loop(self, trans_process: KVTransProcess) -> None:
         while True:
-            ret_obj: PDChunckedTransTaskRet = trans_process.task_out_queue.get()
-            self.ret_obj_queue.put(ret_obj)
+            ret_obj: Optional[PDChunckedTransTaskRet] = trans_process.task_out_queue.get()
+            if ret_obj is None:
+                return
+            device_id = trans_process.device_id
+            with self._trans_process_locks[device_id]:
+                if self.kv_trans_processes[device_id] is not trans_process:
+                    continue
+
+                pending_tasks = self._pending_trans_tasks_by_device[device_id]
+                ret_key = ret_obj.get_key()
+                tasks_for_key = pending_tasks.get(ret_key)
+                if not tasks_for_key:
+                    continue
+                tasks_for_key.pop()
+                if not tasks_for_key:
+                    del pending_tasks[ret_key]
+                self.ret_obj_queue.put(ret_obj)
+
+    def _fail_pending_trans_tasks(self, device_id: int) -> None:
+        pending_tasks = self._pending_trans_tasks_by_device[device_id]
+        tasks_to_fail = [task for tasks in pending_tasks.values() for task in tasks]
+        pending_tasks.clear()
+
+        for trans_task in tasks_to_fail:
+            trans_task.error_info = f"KV transfer worker for device {device_id} restarted before reporting task result"
+            self.ret_obj_queue.put(trans_task.createRetObj())
+
+    def _restart_trans_process(self, device_id: int) -> None:
+        with self._trans_process_locks[device_id]:
+            old_trans_process = self.kv_trans_processes[device_id]
+            if old_trans_process.process is not None:
+                if old_trans_process.process.is_alive():
+                    old_trans_process.killself()
+                old_trans_process.process.join(timeout=5)
+                if old_trans_process.process.is_alive():
+                    raise RuntimeError(f"KV transfer worker for device {device_id} did not stop before restart")
+            self._fail_pending_trans_tasks(device_id)
+            try:
+                old_trans_process.task_out_queue.put(None)
+            except (EOFError, OSError, ValueError):
+                logger.warning(f"Could not stop return handler for KV transfer worker on device {device_id}")
+
+            trans_process = KVTransProcess()
+            if not trans_process.init_all(
+                device_id=device_id,
+                manager=self,
+                start_func=self.start_trans_process_func,
+                up_status_in_queue=self.up_status_in_queue,
+            ):
+                if trans_process.process is not None and trans_process.process.is_alive():
+                    trans_process.killself()
+                raise RuntimeError(f"KV transfer worker for device {device_id} failed to restart")
+
+            if not trans_process.wait_until_ready():
+                if trans_process.process is not None and trans_process.process.is_alive():
+                    trans_process.killself()
+                raise RuntimeError(f"KV transfer worker for device {device_id} did not become ready after restart")
+
+            self.kv_trans_processes[device_id] = trans_process
+            threading.Thread(target=self.task_ret_handle_loop, args=(trans_process,), daemon=True).start()
+            self._trans_process_last_restart_at[device_id] = time.monotonic()
+            logger.warning(f"Restarted KV transfer worker for device {device_id}")
 
     # ==================================================================================
     # 定时检测传输进程的健康状态，出现问题拉崩整个系统触发重启
     # ==================================================================================
-    def check_trans_process_loop(self):
+    def check_trans_process_loop(self) -> None:
         try:
             while True:
                 for device_id in range(self.node_world_size):
                     if not self.kv_trans_processes[device_id].is_trans_process_health():
-                        raise Exception(f"device_id {device_id} kv process is unhealth")
+                        self._trans_process_restart_counts[device_id] += 1
+                        if self._trans_process_restart_counts[device_id] > _MAX_TRANS_PROCESS_RESTARTS:
+                            raise RuntimeError(f"KV transfer worker for device {device_id} exceeded restart limit")
+                        logger.warning(f"KV transfer worker for device {device_id} is unhealthy; restarting")
+                        self._restart_trans_process(device_id)
+                    elif (
+                        self._trans_process_last_restart_at[device_id] is not None
+                        and time.monotonic() - self._trans_process_last_restart_at[device_id]
+                        >= _TRANS_PROCESS_RESTART_RESET_SECONDS
+                    ):
+                        self._trans_process_restart_counts[device_id] = 0
 
-                time.sleep(10.0)
+                time.sleep(1.0)
         except (BaseException, RuntimeError) as e:
             logger.exception(str(e))
 
             for device_id in range(self.node_world_size):
-                self.kv_trans_processes[device_id].killself()
+                try:
+                    self.kv_trans_processes[device_id].killself()
+                except Exception:
+                    logger.exception(f"Failed to stop KV transfer worker for device {device_id}")
 
-            # 杀掉当前进程的父进程（router), 触发全局崩溃
-            os.kill(os.getppid(), signal.SIGKILL)
-            os.kill(os.getpid(), signal.SIGKILL)
-            raise e
+            # The launcher supervises this manager and removes the node on exit.
+            os._exit(1)
