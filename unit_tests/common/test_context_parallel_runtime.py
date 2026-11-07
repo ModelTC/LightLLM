@@ -1,5 +1,9 @@
+from datetime import timedelta
+
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from lightllm.common import context_parallel_runtime as module
 
@@ -74,3 +78,35 @@ def test_all_reduce_selects_the_requested_group(monkeypatch):
 
     assert groups.all_reduce(tensor, kind="context") is tensor
     assert calls == [(tensor, "context")]
+
+
+@pytest.mark.skipif(not dist.is_available(), reason="torch.distributed is unavailable")
+def test_gloo_groups_collect_and_close_before_world_shutdown(tmp_path):
+    mp.spawn(_gloo_group_worker, args=(str(tmp_path / "init"),), nprocs=4, join=True)
+
+
+def _gloo_group_worker(rank: int, init_file: str) -> None:
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{init_file}",
+        rank=rank,
+        world_size=4,
+        timeout=timedelta(seconds=30),
+    )
+    groups = None
+    try:
+        layout = module.ContextParallelLayout(global_rank=rank, dp_size=1, context_size=2, tp_size=2)
+        groups = module.create_context_parallel_groups(layout, backend="gloo")
+
+        context_value = torch.tensor([float(rank)])
+        groups.all_reduce(context_value, kind="context")
+        assert context_value.item() == sum(layout.group_ranks("context"))
+
+        tp_value = torch.tensor([float(rank)])
+        groups.all_reduce(tp_value, kind="tp")
+        assert tp_value.item() == sum(layout.group_ranks("tp"))
+        dist.barrier()
+    finally:
+        if groups is not None:
+            groups.close()
+        dist.destroy_process_group()
