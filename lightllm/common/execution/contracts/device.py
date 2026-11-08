@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import operator
 from dataclasses import dataclass
 from math import isfinite
 from typing import Any, ContextManager, Protocol, TYPE_CHECKING
@@ -21,6 +22,64 @@ class DeviceCaps:
         return self.device_type == "cuda" and self.platform in (None, "cuda", "nvidia")
 
 
+class CollectiveRuntime(Protocol):
+    """Collective operations for an explicitly selected parallel subgroup."""
+
+    def group(self, kind: str) -> object:
+        ...
+
+    def rank(self, kind: str) -> int:
+        ...
+
+    def size(self, kind: str) -> int:
+        ...
+
+    def all_reduce(self, tensor: Any, *, kind: str = "context") -> Any:
+        ...
+
+
+@dataclass(frozen=True)
+class ParallelContext:
+    """Logical DP x context x TP coordinates used by execution providers.
+
+    The context is optional for legacy single-process execution.  A provider
+    that needs PCP or DCP can inspect the coordinates and use ``collectives``
+    without reaching into the model or global distributed helpers.
+    """
+
+    dp_rank: int = 0
+    dp_world_size: int = 1
+    context_rank: int = 0
+    context_world_size: int = 1
+    tp_rank: int = 0
+    tp_world_size: int = 1
+    collectives: CollectiveRuntime | None = None
+
+    def __post_init__(self):
+        values = (
+            ("dp_rank", "dp_world_size"),
+            ("context_rank", "context_world_size"),
+            ("tp_rank", "tp_world_size"),
+        )
+        for rank_name, size_name in values:
+            raw_rank, raw_size = getattr(self, rank_name), getattr(self, size_name)
+            if isinstance(raw_rank, bool) or isinstance(raw_size, bool):
+                raise ValueError(f"parallel context {rank_name} and {size_name} must be integers")
+            try:
+                rank = operator.index(raw_rank)
+                size = operator.index(raw_size)
+            except TypeError as exc:
+                raise ValueError(f"parallel context {rank_name} and {size_name} must be integers") from exc
+            if size <= 0 or not 0 <= rank < size:
+                raise ValueError(f"invalid parallel context {rank_name}={rank}, size={size}")
+            object.__setattr__(self, rank_name, rank)
+            object.__setattr__(self, size_name, size)
+
+    @property
+    def enabled(self) -> bool:
+        return self.context_world_size > 1
+
+
 @dataclass(frozen=True)
 class ExecutionLimits:
     workspace_bytes: int
@@ -33,6 +92,7 @@ class ExecutionLimits:
     tp_world_size: int = 1
     expert_parallel: bool = False
     transfer_paths: tuple[str, ...] = ()
+    parallel_context: ParallelContext | None = None
 
     def __post_init__(self):
         if self.workspace_bytes < 0:
@@ -46,6 +106,8 @@ class ExecutionLimits:
             raise ValueError("execution capacities must be positive")
         if any(phase not in ("prefill", "decode", "verify") for phase in self.graph_phases):
             raise ValueError("unknown Graph execution phase")
+        if self.parallel_context is not None and self.parallel_context.tp_world_size != self.tp_world_size:
+            raise ValueError("parallel context TP size must match execution TP size")
 
 
 class DeviceEvent(Protocol):

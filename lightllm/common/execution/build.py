@@ -1,19 +1,14 @@
 from dataclasses import dataclass, field
-from typing import Mapping, Hashable, Protocol
+from typing import Mapping, Hashable
 
 from lightllm.common.execution.contracts.model import ModelAdapter
 from lightllm.common.execution.contracts.device import DeviceRuntime, ExecutionLimits
 from lightllm.common.execution.contracts.provider import Phase
-from lightllm.common.execution.contracts.state import StateSpec, StateView, FormatSpec
+from lightllm.common.execution.contracts.state import FormatSpec, StateManager, StateSpec, StateStore, StateView
 from lightllm.common.execution.compute.attention.backend import AttentionParams, AttentionSpec
 from lightllm.common.execution.planner import AttentionRequest, Planner, AttentionSelectionPlan, BoundAttentionPlan
 from lightllm.common.execution.registry import ProviderRegistry, StateProvider
 from lightllm.common.execution.runner.attention import AttentionMetadataRunner
-
-
-class StateStore(Protocol):
-    def views(self) -> Mapping[tuple[str, str], StateView]:
-        ...
 
 
 @dataclass(frozen=True)
@@ -41,7 +36,7 @@ class AttentionBuild:
     specs: Mapping[int, AttentionSpec]
     decode_phase: Phase
 
-    def allocate(self, *, manager, device: DeviceRuntime) -> "AttentionResources":
+    def allocate(self, *, manager: StateManager | None, device: DeviceRuntime) -> "AttentionResources":
         workspaces = self.selection.reserve(device.allocate_workspace)
         stores = {
             item.retention: item.provider.create_store(item.declarations, item.format, manager, device, self.specs)
@@ -58,8 +53,11 @@ class AttentionResources:
     stores: Mapping[str, StateStore]
     workspaces: Mapping[Hashable, object]
     _bound: bool = field(default=False, init=False)
+    _closed: bool = field(default=False, init=False)
 
     def bind(self) -> "AttentionExecution":
+        if self._closed:
+            raise RuntimeError("closed attention resources cannot be bound")
         if self._bound:
             raise RuntimeError("bound execution plans cannot be replaced while resources or Graphs may be in use")
         views = {}
@@ -79,6 +77,17 @@ class AttentionResources:
         self._bound = True
         return AttentionExecution(plan, metadata, views, writers, self)
 
+    def close(self) -> None:
+        """Release provider-owned resources after all bound users have drained."""
+
+        if self._closed:
+            return
+        for store in self.stores.values():
+            close = getattr(store, "close", None)
+            if close is not None:
+                close()
+        self._closed = True
+
 
 @dataclass(frozen=True)
 class AttentionExecution:
@@ -89,6 +98,11 @@ class AttentionExecution:
     views: Mapping[tuple[str, str], StateView]
     writers: Mapping[tuple[str, str], object]
     resources: AttentionResources
+
+    def close(self) -> None:
+        """Close the execution owner after graphs and asynchronous work drain."""
+
+        self.resources.close()
 
 
 def prepare(

@@ -5,6 +5,7 @@ from collections import defaultdict
 import torch
 
 from lightllm.common.execution.contracts.state import StateView
+from lightllm.common.execution.contracts.state import StateManager
 from lightllm.common.execution.formats.kv.spec import (
     DenseKVStateSpec,
     MLAKVStateSpec,
@@ -15,10 +16,17 @@ from lightllm.common.execution.formats.kv.spec import (
 from lightllm.common.execution.formats.recurrent.spec import ConvSSMStateSpec
 
 
+def _require_manager(manager) -> StateManager:
+    if manager is None:
+        raise ValueError("execution state storage requires a shared StateManager")
+    return manager
+
+
 class DenseStateStore:
     def __init__(self, declarations, format, manager, *, kv_type=None):
         from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
 
+        manager = _require_manager(manager)
         if kv_type is None:
             from lightllm.common.execution.formats.providers import dense_kv_type
 
@@ -77,6 +85,7 @@ class MLAStateStore:
     def __init__(self, declarations, format, manager):
         from lightllm.common.attention_state.full_att import MLAConfig, create_mla_state
 
+        manager = _require_manager(manager)
         if format.encoding != "plain" or format.layout != "token_latent" or format.fields != ("latent",):
             raise ValueError("MLA storage requires a plain latent format")
         groups, self.resources = defaultdict(list), {}
@@ -112,6 +121,7 @@ class PackedMLAStateStore:
     def __init__(self, declarations, format, manager):
         from lightllm.common.attention_state.full_att import PackedMLALogicalConfig, create_packed_mla_state
 
+        manager = _require_manager(manager)
         import torch
 
         encodings = {
@@ -168,6 +178,7 @@ class ConvSSMStateStore:
     def __init__(self, declarations, format, manager, request_capacity, device, kind="gdn"):
         from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, create_gdn_state, create_kda_state
 
+        manager = _require_manager(manager)
         create_state = {"gdn": create_gdn_state, "kda": create_kda_state}[kind]
 
         speculative = format.candidate_slots > 1
@@ -236,6 +247,7 @@ class IndexerWindowStateStore:
             create_window_compressor_state,
         )
 
+        manager = _require_manager(manager)
         if format.encoding != "plain" or format.layout != "request_indexer_window" or format.fields != ("tail",):
             raise ValueError("indexer window requires a separate candidate/gate tail format")
         groups, self.resources = defaultdict(list), {}

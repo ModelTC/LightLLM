@@ -1,4 +1,4 @@
-from lightllm.common.execution.contracts.device import ExecutionLimits
+from lightllm.common.execution.contracts.device import ExecutionLimits, ParallelContext
 from lightllm.common.execution.compute.attention.mla.spec import MLAAttentionSpec
 from lightllm.common.execution.compute.attention.sparse_mla.spec import SparseMLAAttentionSpec
 from lightllm.common.execution.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
@@ -50,6 +50,9 @@ def prepare_attention_execution(model, *, providers=None, device=None, formats=N
 
         device = CudaRuntime()
     runtime = model.execution_device = device
+    parallel_context = getattr(model, "execution_parallel_context", None)
+    if parallel_context is not None and not isinstance(parallel_context, ParallelContext):
+        raise TypeError("execution_parallel_context must be a ParallelContext")
     # Draft KV catch-up also consumes the target's expanded verification rows.
     capacity_tokens = max(verify_tokens, model.mtp_manager.get_decode_tokens_per_request(False))
     batch_capacity = max((model.max_req_num + 1) * capacity_tokens, model.graph_max_batch_size)
@@ -72,6 +75,7 @@ def prepare_attention_execution(model, *, providers=None, device=None, formats=N
             (("pd",) if getattr(model.args, "run_mode", None) in ("prefill", "decode") else ())
             + (("cpu_cache",) if getattr(model.args, "enable_cpu_cache", False) else ())
         ),
+        parallel_context=parallel_context,
     )
     from lightllm.common.execution.formats.kv.config import history_formats
     from lightllm.common.execution.formats.recurrent.conv_ssm import recurrent_format as make_recurrent_format
@@ -143,8 +147,6 @@ def bind_attention_execution(resources, layers):
     writers = {}
     for key, writer in execution.writers.items():
         state = execution.views[key].state
-        if state.consumers != (state.producer,):
-            raise ValueError("this model recipe does not support a read-only shared KV consumer")
         if state.producer in writers:
             raise ValueError("this model recipe requires one writer per producer")
         writers[state.producer] = writer

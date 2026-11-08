@@ -219,6 +219,7 @@ class TpPartBaseModel:
         self.execution_providers = kvargs.get("execution_providers")
         self.execution_device = kvargs.get("execution_device")
         self.execution_communication = kvargs.get("execution_communication", ())
+        self.execution_parallel_context = kvargs.get("execution_parallel_context")
         self.execution_formats = kvargs.get("execution_formats")
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)
@@ -386,7 +387,12 @@ class TpPartBaseModel:
                 extra={"event": "backend.selected", "backends": backends},
             )
         else:
-            log_info_on_leader(logger, "%s attention execution: legacy", self.att_state_role)
+            log_info_on_leader(
+                logger,
+                "%s attention execution: legacy reason=%s",
+                self.att_state_role,
+                getattr(self, "execution_fallback_reason", None) or "unspecified",
+            )
 
     @classmethod
     def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
@@ -426,25 +432,37 @@ class TpPartBaseModel:
         # Subclasses with different recipes opt in explicitly as they migrate.
         adapter_class = type(self).__dict__.get("model_adapter_class")
         self.model_adapter = None
-        if adapter_class is not None:
-            adapter = self._create_model_adapter(adapter_class)
-            if self.args.mtp_mode is not None:
-                from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
-                from lightllm.common.execution.compute.attention.gdn.spec import GatedDeltaNetSpec
-                from lightllm.common.execution.compute.attention.kda.spec import KimiDeltaAttentionSpec
-                from lightllm.common.execution.compute.attention.mla.spec import MLAAttentionSpec
-                from lightllm.common.execution.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
+        self.execution_mode = "legacy"
+        self.execution_fallback_reason = None
+        if adapter_class is None:
+            self.execution_fallback_reason = "model does not declare a ModelAdapter"
+            return
 
-                # Other recurrent/sparse families still need their own verify bindings.
-                if not all(
-                    isinstance(
-                        spec, (DenseAttentionSpec, GatedDeltaNetSpec, KimiDeltaAttentionSpec, PooledNoPEAttentionSpec)
-                    )
-                    or type(spec) is MLAAttentionSpec
-                    for spec in adapter.attention_specs().values()
-                ):
-                    return
-            self.model_adapter = adapter
+        adapter = self._create_model_adapter(adapter_class)
+        if self.args.mtp_mode is not None:
+            from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
+            from lightllm.common.execution.compute.attention.gdn.spec import GatedDeltaNetSpec
+            from lightllm.common.execution.compute.attention.kda.spec import KimiDeltaAttentionSpec
+            from lightllm.common.execution.compute.attention.mla.spec import MLAAttentionSpec
+            from lightllm.common.execution.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
+
+            # Other recurrent/sparse families still need their own verify bindings.
+            if not all(
+                isinstance(
+                    spec, (DenseAttentionSpec, GatedDeltaNetSpec, KimiDeltaAttentionSpec, PooledNoPEAttentionSpec)
+                )
+                or type(spec) is MLAAttentionSpec
+                for spec in adapter.attention_specs().values()
+            ):
+                self.execution_fallback_reason = "ModelAdapter does not declare MTP verification bindings"
+                logger.warning(
+                    "event=execution.legacy_fallback role=%s reason=%s",
+                    self.att_state_role,
+                    self.execution_fallback_reason,
+                )
+                return
+        self.model_adapter = adapter
+        self.execution_mode = "contract"
 
     def _create_model_adapter(self, adapter_class):
         return adapter_class(

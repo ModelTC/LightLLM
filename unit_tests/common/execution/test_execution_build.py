@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from lightllm.common.execution import BuildConfig, ProviderRegistry, AttentionProvider, StateProvider, build, prepare
-from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits, ParallelContext
 from lightllm.common.execution.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.common.execution.contracts.state import FormatSpec, StateSpec, StateView, LayerStates
 
@@ -142,6 +142,154 @@ assert DenseAttentionSpec(4, 2, 64).head_dim == 64
 assert not torch.cuda.is_initialized()
 """
     subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
+
+
+def test_parallel_context_is_validated_and_visible_to_provider_probes():
+    context = ParallelContext(
+        dp_rank=1,
+        dp_world_size=2,
+        context_rank=0,
+        context_world_size=2,
+        tp_rank=1,
+        tp_world_size=2,
+    )
+    limits = ExecutionLimits(0, tp_world_size=2, parallel_context=context)
+    assert context.enabled
+    assert limits.parallel_context is context
+
+    with pytest.raises(ValueError, match="TP size"):
+        ExecutionLimits(0, tp_world_size=1, parallel_context=context)
+
+
+def test_model_adapter_migration_mode_is_explicit_for_legacy_and_contract_paths():
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
+
+    legacy = TpPartBaseModel.__new__(TpPartBaseModel)
+    legacy.args = SimpleNamespace(mtp_mode=None)
+    legacy._init_model_adapter()
+    assert legacy.execution_mode == "legacy"
+    assert legacy.execution_fallback_reason == "model does not declare a ModelAdapter"
+
+    class AdapterModel(TpPartBaseModel):
+        model_adapter_class = object
+
+    contract = AdapterModel.__new__(AdapterModel)
+    contract.args = SimpleNamespace(mtp_mode=None)
+    contract._create_model_adapter = lambda adapter_class: object()
+    contract._init_model_adapter()
+    assert contract.execution_mode == "contract"
+    assert contract.model_adapter is not None
+
+    fallback = AdapterModel.__new__(AdapterModel)
+    fallback.args = SimpleNamespace(mtp_mode="mtp")
+    fallback._create_model_adapter = lambda adapter_class: SimpleNamespace(attention_specs=lambda: {0: object()})
+    fallback._init_model_adapter()
+    assert fallback.execution_mode == "legacy"
+    assert fallback.execution_fallback_reason == "ModelAdapter does not declare MTP verification bindings"
+
+
+def test_attention_execution_close_releases_provider_owned_store():
+    closed = []
+    state = StateSpec("offline", "counter", 0, (0,), CounterState())
+    fmt = FormatSpec("custom", torch.float32, "counter", ("value",), 1)
+    adapter = SimpleNamespace(
+        attention_specs=lambda: {0: CounterAttention()},
+        state_specs=lambda: (state,),
+        attention_states=lambda: {0: LayerStates(state)},
+    )
+
+    class Store:
+        def __init__(self, declarations, format, manager, device, specs):
+            self.value = torch.zeros(1)
+
+        def views(self):
+            return {state.key: StateView(state, fmt, (self.value,))}
+
+        def close(self):
+            closed.append(True)
+
+    class Backend:
+        name = implementation = "close"
+        phase = "decode"
+        supports_auxiliary_states = False
+
+        def probe(self, spec, format, device, limits, *, auxiliary_formats=None):
+            return ProbeResult((AttentionOffer(self.name, self.phase, format, execution_limits=limits),))
+
+        def bind(self, offer, view, params, workspace, *, auxiliary_views=None):
+            return SimpleNamespace(metadata_key=self.name, phase=self.phase, run=lambda value, metadata=None: value)
+
+    engine = build(
+        model_adapter=adapter,
+        providers=ProviderRegistry(
+            attention=(AttentionProvider(lambda phase: Backend(), ("decode",)),),
+            storage=(StateProvider("counter", "history", Store, lambda view: object()),),
+        ),
+        device=SimpleNamespace(caps=DeviceCaps("cpu"), allocate_workspace=bytearray),
+        config=BuildConfig(
+            limits=ExecutionLimits(0),
+            formats={"history": fmt},
+            requested={"history": {"decode": "auto"}},
+            static_params={0: SimpleNamespace(spec=CounterAttention())},
+        ),
+    )
+    engine.close()
+    engine.close()
+    assert closed == [True]
+    with pytest.raises(RuntimeError, match="closed attention resources"):
+        engine.resources.bind()
+
+
+def test_model_binding_supports_shared_read_only_history_consumers():
+    from lightllm.models.base.build import bind_attention_execution
+
+    state = StateSpec("main", "shared", 0, (0, 1), CounterState())
+    fmt = FormatSpec("custom", torch.float32, "counter", ("value",), 1)
+    adapter = SimpleNamespace(
+        attention_specs=lambda: {0: CounterAttention(), 1: CounterAttention()},
+        state_specs=lambda: (state,),
+        attention_states=lambda: {0: LayerStates(state), 1: LayerStates(state)},
+    )
+
+    class Store:
+        def __init__(self, declarations, format, manager, device, specs):
+            self.value = torch.zeros(1)
+
+        def views(self):
+            return {state.key: StateView(state, fmt, (self.value,))}
+
+    class Backend:
+        name = implementation = "shared"
+        phase = "decode"
+        supports_auxiliary_states = False
+
+        def probe(self, spec, format, device, limits, *, auxiliary_formats=None):
+            return ProbeResult((AttentionOffer(self.name, self.phase, format, execution_limits=limits),))
+
+        def bind(self, offer, view, params, workspace, *, auxiliary_views=None):
+            return SimpleNamespace(metadata_key=self.name, phase=self.phase, run=lambda value, metadata=None: value)
+
+    resources = prepare(
+        model_adapter=adapter,
+        providers=ProviderRegistry(
+            attention=(AttentionProvider(lambda phase: Backend(), ("decode",)),),
+            storage=(StateProvider("counter", "history", Store, lambda view: object()),),
+        ),
+        device=SimpleNamespace(caps=DeviceCaps("cpu")),
+        config=BuildConfig(
+            limits=ExecutionLimits(0),
+            formats={"history": fmt},
+            requested={"history": {"decode": "auto"}},
+            static_params={0: SimpleNamespace(spec=CounterAttention()), 1: SimpleNamespace(spec=CounterAttention())},
+        ),
+    ).allocate(manager=None, device=SimpleNamespace(allocate_workspace=bytearray))
+    layers = [SimpleNamespace(layer_num_=0), SimpleNamespace(layer_num_=1)]
+
+    bind_attention_execution(resources, layers)
+
+    assert layers[0].bound_kv_writer is not None
+    assert not hasattr(layers[1], "bound_kv_writer")
+    assert layers[0].bound_decode_attention is not layers[1].bound_decode_attention
 
 
 def test_common_execution_dependencies_and_layout():

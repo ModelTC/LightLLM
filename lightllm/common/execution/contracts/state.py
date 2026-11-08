@@ -3,6 +3,50 @@ from math import isfinite
 from typing import Any, Protocol
 
 
+class StateManager(Protocol):
+    """The narrow state-management seam required by execution storage.
+
+    Execution storage may register native state and query the shared request
+    capacity.  Cache admission, eviction and asynchronous retirement remain
+    owned by the manager implementation; they are deliberately not exposed
+    through this construction interface.
+    """
+
+    @property
+    def request_capacity(self) -> int:
+        ...
+
+    def register_state(self, model_role: str, state: Any, resource_id: str | None = None) -> None:
+        ...
+
+    def retire(
+        self,
+        completion: Any,
+        *,
+        token_indices: Any = None,
+        big_pages: tuple[Any, ...] = (),
+        small_pages: tuple[Any, ...] = (),
+        keepalive: Any = None,
+    ) -> None:
+        """Release request/page ownership after asynchronous users drain."""
+        ...
+
+
+class StateStore(Protocol):
+    """Native views for one execution state retention class."""
+
+    def views(self) -> dict[tuple[str, str], "StateView"]:
+        ...
+
+    def close(self) -> None:
+        """Release optional provider-owned resources.
+
+        Existing stores may omit this method; callers use it as an optional
+        teardown hook so native stores can become explicit owners over time.
+        """
+        ...
+
+
 class StateParams(Protocol):
     def validate(self) -> None:
         ...

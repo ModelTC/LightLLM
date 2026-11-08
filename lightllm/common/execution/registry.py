@@ -1,7 +1,22 @@
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Mapping, Protocol
 from lightllm.common.execution.compute.attention.backend import AttentionBackend
 from lightllm.common.execution.contracts.provider import Phase
+from lightllm.common.execution.contracts.state import FormatSpec, StateManager, StateSpec, StateStore
+
+
+class StateStoreFactory(Protocol):
+    """Construction seam between execution planning and state ownership."""
+
+    def __call__(
+        self,
+        declarations: tuple[StateSpec, ...],
+        format: FormatSpec,
+        manager: StateManager | None,
+        device: object,
+        specs: Mapping[int, object],
+    ) -> StateStore:
+        ...
 
 
 @dataclass(frozen=True)
@@ -14,7 +29,7 @@ class AttentionProvider:
 class StateProvider:
     layout: str
     retention: str
-    create_store: Callable
+    create_store: StateStoreFactory
     create_writer: Callable | None = None
     supports: Callable | None = None
 

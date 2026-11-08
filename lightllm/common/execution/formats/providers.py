@@ -1,4 +1,5 @@
 from lightllm.common.execution.registry import StateProvider
+from lightllm.common.execution.contracts.state import StateManager
 
 
 DENSE_ENCODINGS = (
@@ -17,22 +18,30 @@ def dense_kv_type(format):
     raise ValueError(f"unsupported legacy Dense storage encoding: {format.encoding}")
 
 
+def _require_manager(manager) -> StateManager:
+    if manager is None:
+        raise ValueError("execution state storage requires a shared StateManager")
+    return manager
+
+
 def recurrent_store(declarations, format, manager, device, specs):
     from lightllm.common.execution.storage.attention import ConvSSMStateStore
     from lightllm.common.execution.compute.attention.kda.spec import KimiDeltaAttentionSpec
 
+    manager = _require_manager(manager)
     kinds = {isinstance(specs[state.producer], KimiDeltaAttentionSpec) for state in declarations}
     if len(kinds) != 1:
         raise ValueError("a recurrent allocation must use one declared state family")
     return ConvSSMStateStore(
-        declarations, format, manager, manager._request_capacity, device.device, kind="kda" if kinds.pop() else "gdn"
+        declarations, format, manager, manager.request_capacity, device.device, kind="kda" if kinds.pop() else "gdn"
     )
 
 
 def window_store(declarations, format, manager, device, specs):
     from lightllm.common.execution.storage.attention import IndexerWindowStateStore
 
-    return IndexerWindowStateStore(declarations, format, manager, manager._request_capacity, device.device)
+    manager = _require_manager(manager)
+    return IndexerWindowStateStore(declarations, format, manager, manager.request_capacity, device.device)
 
 
 def state_providers():

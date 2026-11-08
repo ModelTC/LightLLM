@@ -62,6 +62,12 @@ class AttentionStateManager(CachedQueries):
         self._dp_shared_operator = DPSharedOperator(self)
         self._pd_operator = PDOperator(self)
 
+    @property
+    def request_capacity(self) -> int:
+        """Capacity shared by every state store created for this manager."""
+
+        return self._request_capacity
+
     def _reset_operators(self) -> None:
         """让浅拷贝后的 Operator 指向新的资源管理器副本。"""
         self.reclaimer = DeferredReclaimer()
