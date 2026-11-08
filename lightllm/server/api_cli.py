@@ -936,6 +936,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     parser.add_argument("--enable_weight_cpu_backup", action="store_true", help="""enable weight cpu backup.""")
     parser.add_argument(
+        "--offload_ngram_embedding",
+        action="store_true",
+        help="Keep supported n-gram embedding tables in pinned CPU memory; gather requested rows onto CUDA.",
+    )
+    parser.add_argument(
         "--disk_cache_dir",
         type=str,
         default=None,

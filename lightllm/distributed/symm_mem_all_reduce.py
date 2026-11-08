@@ -90,3 +90,22 @@ class SymmMemAllreduce:
         else:
             torch.ops.symm_mem.two_shot_all_reduce_(self.buffer[:n], "sum", self.group.group_name)
         inp.view(-1).copy_(self.buffer[:n])
+
+    def ordered_all_gather(self, inp: torch.Tensor):
+        if not self.should_use(inp) or inp.device != self.device:
+            return None
+        count = inp.numel() * self.world_size
+        if not count or count * inp.element_size() > self.max_size:
+            return None
+        if not hasattr(torch.ops.symm_mem, "multimem_all_gather_out"):
+            return None
+        if not hasattr(self, "ordered_gather_buffer"):
+            if torch.cuda.is_current_stream_capturing():
+                return None
+            self.ordered_gather_buffer = torch_symm_mem.empty(
+                self.max_size // self.dtype.itemsize, device=self.device, dtype=self.dtype
+            )
+            torch_symm_mem.rendezvous(self.ordered_gather_buffer, self.group.group_name)
+        gathered = self.ordered_gather_buffer[:count]
+        torch.ops.symm_mem.multimem_all_gather_out(inp.view(-1), self.group.group_name, gathered)
+        return gathered.view(self.world_size, *inp.shape)
