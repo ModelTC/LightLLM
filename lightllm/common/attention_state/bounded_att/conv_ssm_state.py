@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import TYPE_CHECKING, List, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 from math import prod
 
 import torch
@@ -195,7 +195,7 @@ class _ConvSSMState(BoundedAttentionState):
         storage_layer_index = self._logical_to_storage_layer[logical_layer_id]
         return self.conv_state[storage_layer_index], self.ssm_state[storage_layer_index]
 
-    def reset_bounded_att_state(self, req_indices: List[int]) -> None:
+    def reset_bounded_att_state(self, req_indices: list[int]) -> None:
         """清零指定请求的 Conv 历史、全部 SSM 候选及 MTP 游标，保留页池快照。"""
         assert isinstance(req_indices, list), "request indices must be a list"
         for req_idx in req_indices:
@@ -203,10 +203,10 @@ class _ConvSSMState(BoundedAttentionState):
 
     def save_bounded_att_runtime_to_pages(
         self,
-        req_indices: List[int],
-        state_token_lens: List[int],
+        req_indices: list[int],
+        state_token_lens: list[int],
         page_kind: PageKind,
-        page_slot_ids: List[int],
+        page_slot_ids: list[int],
         flush_history: bool = False,
     ) -> None:
         """保存各请求指定绝对 token 长度处的基准状态；Conv/SSM 不依赖长度定位。"""
@@ -231,10 +231,10 @@ class _ConvSSMState(BoundedAttentionState):
 
     def restore_bounded_att_runtime_from_pages(
         self,
-        req_indices: List[int],
-        state_token_lens: List[int],
+        req_indices: list[int],
+        state_token_lens: list[int],
         page_kind: PageKind,
-        page_slot_ids: List[int],
+        page_slot_ids: list[int],
     ) -> None:
         """恢复各请求指定绝对 token 长度处的基准状态并归零游标；Conv/SSM 不依赖长度定位。"""
         assert isinstance(req_indices, list) and isinstance(
@@ -283,9 +283,9 @@ class _ConvSSMState(BoundedAttentionState):
     def write_state_pages_to_cpu(
         self,
         page_kind: PageKind,
-        page_slot_ids: List[int],
+        page_slot_ids: list[int],
         cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
+        cpu_page_indices: list[int],
         layout: StateTransferLayout,
         cpu_page_ready_flags: list[bool] | None = None,
     ) -> None:
@@ -318,8 +318,8 @@ class _ConvSSMState(BoundedAttentionState):
     def read_state_pages_from_cpu(
         self,
         cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        big_page_slot_ids: List[int],
+        cpu_page_indices: list[int],
+        big_page_slot_ids: list[int],
         layout: StateTransferLayout,
     ) -> None:
         """读入指定大页槽位；请求运行态另行通过 restore_bounded_att_runtime_from_pages 恢复。"""
@@ -349,8 +349,8 @@ class _ConvSSMState(BoundedAttentionState):
 
     def copy_big_pages_from_dp(
         self,
-        src_page_ids: List[int],
-        dst_page_ids: List[int],
+        src_page_ids: list[int],
+        dst_page_ids: list[int],
         remote_dp_bounded_state: _ConvSSMState,
     ) -> None:
         """复制同一 TP 分片的大页 Conv/SSM 快照，保留源页和双方请求运行态。"""
@@ -373,8 +373,8 @@ class _ConvSSMState(BoundedAttentionState):
 
     def copy_runtime_state_from_dp(
         self,
-        src_req_indices: List[int],
-        dst_req_indices: List[int],
+        src_req_indices: list[int],
+        dst_req_indices: list[int],
         remote_dp_bounded_state: _ConvSSMState,
     ) -> None:
         """复制同一 TP 分片的 prefill 基准运行态并重置目标游标，不写入页池。"""

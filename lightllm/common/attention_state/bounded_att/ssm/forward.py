@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -21,16 +23,26 @@ class SSMForward:
     后续层复用同一配置，``finish`` 再把它封装进 ``StateCommit``。
     """
 
-    resource: "_ConvSSMState"
-    executor: "SSMExecutor"
+    resource: _ConvSSMState
+    executor: SSMExecutor
     req_indices: torch.Tensor
     state_indices: torch.Tensor
-    cu_seqlens: Optional[torch.Tensor]
-    accepted_token_counts: Optional[torch.Tensor]
-    run_config: Optional[SSMRunConfig] = None
+    cu_seqlens: torch.Tensor | None
+    accepted_token_counts: torch.Tensor | None
+    run_config: SSMRunConfig | None = None
     _layout_checked: bool = field(default=False, init=False, repr=False)
 
-    def run_layer(self, logical_layer, q, k, v, a, b, a_log, bias):
+    def run_layer(
+        self,
+        logical_layer: int,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        a_log: torch.Tensor,
+        bias: torch.Tensor,
+    ) -> torch.Tensor:
         """执行一层线性注意力；logical_layer 会映射到物理权重层。"""
 
         output, self.run_config = self.executor.forward(
@@ -50,7 +62,7 @@ class SSMForward:
         )
         return output
 
-    def finish(self):
+    def finish(self) -> StateCommit | None:
         """结束 forward，返回接受阶段需要的状态提交描述。"""
 
         payload = self.executor.create_commit(self.run_config)
@@ -58,7 +70,7 @@ class SSMForward:
             return None
         return StateCommit(self.resource.state_name, payload)
 
-    def copy_inputs(self, source: "SSMForward"):
+    def copy_inputs(self, source: SSMForward) -> None:
         """把动态图输入复制到已 capture 的 tensor。
 
         graph bucket 的资源和 tensor layout 在首次绑定时校验一次，后续调用

@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from math import prod
 
 import torch
@@ -7,7 +8,7 @@ import triton.language as tl
 from ..copy_kernel import copy_bounded_att_tensors
 
 
-def upload_indices(values, device, dtype=torch.int64):
+def upload_indices(values: Sequence[int], device: torch.device | str, dtype: torch.dtype = torch.int64) -> torch.Tensor:
     """把 Python 索引上传到目标 device，使用 pinned memory 减少同步。"""
 
     return torch.tensor(values, dtype=dtype, pin_memory=True).to(device, non_blocking=True)
@@ -49,7 +50,15 @@ def _export_indexed(
         tl.store(target + target_offset, values, valid)
 
 
-def export_indexed_state(source, req_indices, targets, accepted_indices=None, *, slots_per_request=1, index_stride=1):
+def export_indexed_state(
+    source: torch.Tensor,
+    req_indices: Sequence[int],
+    targets: Sequence[torch.Tensor],
+    accepted_indices: torch.Tensor | None = None,
+    *,
+    slots_per_request: int = 1,
+    index_stride: int = 1,
+) -> None:
     """将 source 中的 accepted state 写入预分配的 target 页。
 
     ``req_indices`` 和 ``targets`` 必须一一对应；MTP 通过

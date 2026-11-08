@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from functools import lru_cache
-from typing import List
-
 import torch
 
 from .commit import StateAcceptance
@@ -333,7 +331,7 @@ class AttentionStateManager:
     # ========================================================================
 
     # 空前缀初始化：只处理 bounded attention；无此类 State 时可为空操作。
-    def reset_bounded_att_state(self, req_indices: List[int]) -> None:
+    def reset_bounded_att_state(self, req_indices: list[int]) -> None:
         """将指定槽位的 bounded 运行态及控制信息恢复到长度 0，保留 KV 和状态页。"""
         for state in self.get_bounded_attention_states():
             state.reset_bounded_att_state(req_indices)
@@ -342,10 +340,10 @@ class AttentionStateManager:
     # 调用方提供已分配的大小页槽位；发布前完成保存，解除引用并结束使用后直接归还 allocator。
     def save_bounded_att_runtime_to_pages(
         self,
-        req_indices: List[int],
-        state_token_lens: List[int],
+        req_indices: list[int],
+        state_token_lens: list[int],
         page_kind: PageKind,
-        page_slot_ids: List[int],
+        page_slot_ids: list[int],
         flush_history: bool = False,
     ) -> None:
         """按各请求已执行的绝对 token 长度保存全部 bounded State；三个列表逐项对应。"""
@@ -370,10 +368,10 @@ class AttentionStateManager:
 
     def restore_bounded_att_runtime_from_pages(
         self,
-        req_indices: List[int],
-        state_token_lens: List[int],
+        req_indices: list[int],
+        state_token_lens: list[int],
         page_kind: PageKind,
-        page_slot_ids: List[int],
+        page_slot_ids: list[int],
     ) -> None:
         """按各快照对应的绝对 token 长度恢复运行态及 ring 位置等控制信息。"""
         bounded_states = self.get_bounded_attention_states()

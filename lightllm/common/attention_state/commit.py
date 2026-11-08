@@ -1,5 +1,5 @@
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Tuple
 
 import torch
 
@@ -17,9 +17,9 @@ class StateCommitBatch:
     """描述一个 microbatch 分区及其各状态的 forward 配置。"""
 
     request_count: int
-    commits: Tuple[StateCommit, ...] = ()
+    commits: tuple[StateCommit, ...] = ()
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if type(self.request_count) is not int or self.request_count < 0:
             raise ValueError("commit batch requires a nonnegative request count")
         names = [commit.state_name for commit in self.commits]
@@ -41,9 +41,9 @@ class StateAcceptance:
 
     req_indices: torch.Tensor
     accepted_lengths: torch.Tensor
-    batches: Tuple[StateCommitBatch, ...] = ()
+    batches: tuple[StateCommitBatch, ...] = ()
 
-    def validate(self, state_names=None):
+    def validate(self, state_names: set[str] | None = None) -> None:
         """检查请求、接受长度和 forward 分区是否能组成一次提交。"""
 
         if self.req_indices.ndim != 1 or self.accepted_lengths.shape != self.req_indices.shape:
@@ -58,7 +58,7 @@ class StateAcceptance:
                 if state_names is not None and commit.state_name not in state_names:
                     raise ValueError(f"commit belongs to an unknown state: {commit.state_name}")
 
-    def partitions(self, state_name: str):
+    def partitions(self, state_name: str) -> Iterator[tuple[torch.Tensor, object | None]]:
         """按 forward 分区返回请求索引和指定状态的提交配置。"""
 
         start = 0
