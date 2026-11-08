@@ -130,7 +130,8 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
     from types import SimpleNamespace
 
     from lightllm.common.basemodel.attention.base_att import AttControl
-    from lightllm.common.basemodel.attention.linear.kda import KDALinearAttDecodeAttState
+    from lightllm.common.basemodel.attention.linear.kda import KDADecodeAttState
+    from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
     from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_update
 
     torch.manual_seed(53)
@@ -206,7 +207,8 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
     )
     selected = None
     for model_role in ("main", "draft0"):
-        linear = KDAState(config, request_capacity=4, mtp_step=mtp_step, device="cuda", ssm_state_mode=mode)
+        state_cls = ReplayKDAState if mode == "replay" else KDAState
+        linear = state_cls(config, request_capacity=4, mtp_step=mtp_step, device="cuda")
         if mtp_step:
             linear.mtp_state_index.copy_(accepted_offsets if model_role == role else torch.zeros_like(accepted_offsets))
         if model_role == role:
@@ -232,7 +234,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
         linear_A_log=SimpleNamespace(weight=a),
         linear_dt_bias=SimpleNamespace(weight=bias),
     )
-    state = KDALinearAttDecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
+    state = KDADecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
     state.init_state()
     actual = state.decode_att(
         None,

@@ -5,7 +5,6 @@ from dataclasses import replace
 
 import pytest
 import torch
-from lightllm.common.attention_state.commit import StateAcceptance
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import (
@@ -255,7 +254,7 @@ def test_reset_requests_preserves_pages(cls: type[KDAState] | type[GDNState]):
     assert (state.small_pages_pool.conv_state[0] == 7).all()
     assert (state.small_pages_pool.ssm_state[0] == 11).all()
     with pytest.raises(AssertionError, match="CUDA tensors"):
-        state.commit_bounded_att_state(StateAcceptance(torch.tensor([0]), torch.tensor([1], dtype=torch.int32)))
+        state.commit_bounded_att_state(torch.tensor([0]), torch.tensor([1], dtype=torch.int32))
 
 
 @pytest.mark.parametrize("cls", [KDAState, GDNState])

@@ -15,7 +15,19 @@ import torch
 import triton
 
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
-from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMExecutor
+
+
+def ReplaySSMExecutor(*args, **kwargs):
+    kda = kwargs.get("kda", False)
+    if kda:
+        from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDARuntime
+
+        return ReplayKDARuntime(*args, **kwargs)
+    from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNRuntime
+
+    return ReplayGDNRuntime(*args, **kwargs)
+
+
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs
 
 

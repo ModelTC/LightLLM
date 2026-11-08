@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from functools import lru_cache
-import torch
+from typing import List
 
-from .commit import StateAcceptance
+import torch
 
 from lightllm.common.attention_state.types import PageKind
 
@@ -331,7 +331,7 @@ class AttentionStateManager:
     # ========================================================================
 
     # 空前缀初始化：只处理 bounded attention；无此类 State 时可为空操作。
-    def reset_bounded_att_state(self, req_indices: list[int]) -> None:
+    def reset_bounded_att_state(self, req_indices: List[int]) -> None:
         """将指定槽位的 bounded 运行态及控制信息恢复到长度 0，保留 KV 和状态页。"""
         for state in self.get_bounded_attention_states():
             state.reset_bounded_att_state(req_indices)
@@ -340,11 +340,10 @@ class AttentionStateManager:
     # 调用方提供已分配的大小页槽位；发布前完成保存，解除引用并结束使用后直接归还 allocator。
     def save_bounded_att_runtime_to_pages(
         self,
-        req_indices: list[int],
-        state_token_lens: list[int],
+        req_indices: List[int],
+        state_token_lens: List[int],
         page_kind: PageKind,
-        page_slot_ids: list[int],
-        flush_history: bool = False,
+        page_slot_ids: List[int],
     ) -> None:
         """按各请求已执行的绝对 token 长度保存全部 bounded State；三个列表逐项对应。"""
         bounded_states = self.get_bounded_attention_states()
@@ -363,15 +362,14 @@ class AttentionStateManager:
                 state_token_lens=state_token_lens,
                 page_kind=page_kind,
                 page_slot_ids=page_slot_ids,
-                flush_history=flush_history,
             )
 
     def restore_bounded_att_runtime_from_pages(
         self,
-        req_indices: list[int],
-        state_token_lens: list[int],
+        req_indices: List[int],
+        state_token_lens: List[int],
         page_kind: PageKind,
-        page_slot_ids: list[int],
+        page_slot_ids: List[int],
     ) -> None:
         """按各快照对应的绝对 token 长度恢复运行态及 ring 位置等控制信息。"""
         bounded_states = self.get_bounded_attention_states()
@@ -394,14 +392,17 @@ class AttentionStateManager:
             )
 
     # MTP 推测解码：只提交指定角色的已接受运行态，由具体 State 管理候选区和游标。
-    def commit_bounded_att_state(self, acceptance: StateAcceptance, role: str) -> None:
-        """提交按请求排列的已接受前缀；无参与 State 时为空操作。"""
-        assert acceptance.req_indices.is_cuda, "commit inputs must be CUDA tensors"
+    def commit_bounded_att_state(
+        self,
+        req_indices: torch.Tensor,
+        accepted_steps: torch.Tensor,
+        role: str,
+    ) -> None:
+        """传入 CUDA 请求索引和 int32 接受步数，包含基准输入步；无参与 State 时为空操作。"""
+        assert req_indices.is_cuda and accepted_steps.is_cuda, "commit inputs must be CUDA tensors"
         assert role in MODEL_ROLES, f"unknown model role {role}"
-        states = self.get_bounded_attention_states(role)
-        acceptance.validate({state.state_name for state in states})
-        for state in states:
-            state.commit_bounded_att_state(acceptance)
+        for state in self.get_bounded_attention_states(role):
+            state.commit_bounded_att_state(req_indices, accepted_steps)
 
     # ========================================================================
     # 四、CPU/DP/PD 操作均由对应 Operator 提供。

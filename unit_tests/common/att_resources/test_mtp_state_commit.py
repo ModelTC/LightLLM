@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from lightllm.common.attention_state.commit import StateAcceptance
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import GDNState
@@ -35,9 +34,8 @@ def test_commit_selects_state_for_one_role():
             state.ssm_state[:, slot].fill_(slot + 10)
         state.mtp_state_index.fill_(1)
     manager.commit_bounded_att_state(
-        StateAcceptance(
-            torch.tensor([0], dtype=torch.int32, device="cuda"), torch.tensor([3], dtype=torch.int32, device="cuda")
-        ),
+        torch.tensor([0], dtype=torch.int32, device="cuda"),
+        torch.tensor([3], dtype=torch.int32, device="cuda"),
         role="main",
     )
     for state in (manager.main_kda_conv_fp32_ssm_fp32_state, manager.main_gdn_conv_fp32_ssm_fp32_state):
@@ -46,9 +44,8 @@ def test_commit_selects_state_for_one_role():
         assert (state.ssm_state[:, selected] == 12).all()
     assert manager.draft0_gdn_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [1, 1, 1]
     manager.commit_bounded_att_state(
-        StateAcceptance(
-            torch.tensor([0], dtype=torch.int32, device="cuda"), torch.tensor([1], dtype=torch.int32, device="cuda")
-        ),
+        torch.tensor([0], dtype=torch.int32, device="cuda"),
+        torch.tensor([1], dtype=torch.int32, device="cuda"),
         role="draft0",
     )
     assert manager.draft0_gdn_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [0, 1, 1]
@@ -61,22 +58,19 @@ def test_commit_without_recurrent_state_and_invalid_role():
     manager = AttentionStateManager(request_capacity=3)
     manager.finish_state_registration()
     manager.commit_bounded_att_state(
-        StateAcceptance(
-            torch.tensor([0], dtype=torch.int32, device="cuda"), torch.tensor([3], dtype=torch.int32, device="cuda")
-        ),
+        torch.tensor([0], dtype=torch.int32, device="cuda"),
+        torch.tensor([3], dtype=torch.int32, device="cuda"),
         role="main",
     )
     manager.commit_bounded_att_state(
-        StateAcceptance(
-            torch.tensor([0], dtype=torch.int32, device="cuda"), torch.tensor([3], dtype=torch.int32, device="cuda")
-        ),
+        torch.tensor([0], dtype=torch.int32, device="cuda"),
+        torch.tensor([3], dtype=torch.int32, device="cuda"),
         role="draft0",
     )
     with pytest.raises(AssertionError, match="unknown model role"):
         manager.commit_bounded_att_state(
-            StateAcceptance(
-                torch.tensor([0], dtype=torch.int32, device="cuda"), torch.tensor([3], dtype=torch.int32, device="cuda")
-            ),
+            torch.tensor([0], dtype=torch.int32, device="cuda"),
+            torch.tensor([3], dtype=torch.int32, device="cuda"),
             role="target",
         )
 
@@ -86,7 +80,6 @@ def test_commit_without_recurrent_state_and_invalid_role():
 def test_verify_commits_main_states_for_fixed_and_dynamic_widths(widths: tuple[int, ...]):
     manager = make_manager("cuda")
     backend = SimpleNamespace(
-        max_draft_step=2,
         model=SimpleNamespace(
             att_state_manager=manager,
             req_manager=SimpleNamespace(
@@ -94,7 +87,7 @@ def test_verify_commits_main_states_for_fixed_and_dynamic_widths(widths: tuple[i
                     req_to_next_token_ids=torch.tensor([[-1, 10, 11]] * 3, device="cuda")
                 )
             ),
-        ),
+        )
     )
     reqs, starts, tokens, expected_mask = [], [], [], []
     for req, width, accepted in zip((2, 0, 1), widths, (3, 1, 2)):
@@ -107,37 +100,10 @@ def test_verify_commits_main_states_for_fixed_and_dynamic_widths(widths: tuple[i
         next_token_ids=torch.tensor(tokens, device="cuda"),
         b_req_idx=torch.tensor(reqs, dtype=torch.int32, device="cuda"),
         b_req_mtp_start_loc=torch.tensor(starts, dtype=torch.int32, device="cuda"),
+        b_mtp_index=torch.tensor([step for width in widths for step in range(width)], dtype=torch.int32, device="cuda"),
     )
     assert accept_lengths.tolist() == [3, 1, 2]
     assert accepted_index.tolist() == expected_mask
     assert manager.main_kda_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [0, 1, 2]
     assert manager.main_gdn_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [0, 1, 2]
     assert manager.draft0_gdn_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [0, 0, 0]
-
-
-def test_verify_routes_one_acceptance(monkeypatch):
-    from lightllm.server.router.model_infer.mtp_speculative import utils
-    from lightllm.common.attention_state.commit import StateCommitBatch
-
-    reqs = torch.tensor([2, 2, 0, 0], dtype=torch.int32)
-    starts = torch.tensor([0, 2], dtype=torch.int32)
-    lengths = torch.tensor([2, 1], dtype=torch.int32)
-    mask = torch.tensor([1, 1, 1, 0], dtype=torch.int32)
-    monkeypatch.setattr(utils, "mtp_verify", lambda **kwargs: (lengths, mask))
-    calls = []
-    resources = SimpleNamespace(commit_bounded_att_state=lambda acceptance, **kw: calls.append((acceptance, kw)))
-    backend = SimpleNamespace(
-        max_draft_step=1,
-        model=SimpleNamespace(
-            att_state_manager=resources,
-            req_manager=SimpleNamespace(req_sampling_params_manager=SimpleNamespace(req_to_next_token_ids=None)),
-        ),
-    )
-    batches = (StateCommitBatch(2),)
-    utils.verify_mtp_tokens(backend, torch.zeros(4), reqs, starts, state_commit_batches=batches)
-    assert len(calls) == 1
-    acceptance, kwargs = calls[0]
-    assert acceptance.req_indices.tolist() == [2, 0]
-    assert acceptance.accepted_lengths is lengths
-    assert acceptance.batches is batches
-    assert kwargs == {"role": "main"}

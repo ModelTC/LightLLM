@@ -20,13 +20,18 @@ def _assert_received_manager_roundtrip(payload, state_name, mode, expected):
     state = getattr(resources, state_name)
     assert state.big_pages_pool is state.small_pages_pool is None
     assert resources.full_att_allocator is None
-    if state._ssm_executor is not None:
-        assert state._ssm_executor.state is state.ssm_state
+    runtime = getattr(state, "runtime", None)
+    if runtime is not None:
+        assert runtime.state is state.ssm_state
     layout = resources.get_pd_operator().get_pd_bounded_att_page_layouts()[state_name]
     block = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
     state.write_to_pd_page(1, block, 0, 8, layout)
     state.read_from_pd_page(block, 2, 0, 8, layout)
-    actual = state.get_accepted_state(2)
+    if hasattr(state, "get_accepted_state"):
+        actual = state.get_accepted_state(2)
+    else:
+        width = state.config.conv_width
+        actual = (state.conv_state[:, 2, :, :width], state.ssm_state[:, 2 * state.ssm_slots_per_req])
     for tensor, values in zip(actual, expected):
         torch.testing.assert_close(tensor, torch.tensor(values, dtype=tensor.dtype, device="cuda"), rtol=0, atol=0)
     assert state.mtp_state_index[2] == 0
@@ -81,7 +86,7 @@ def test_pd_export_copy_keeps_worker_pools_and_runtime_identity(cls, mode):
     assert copy.big_pages_pool is copy.small_pages_pool is None
     assert copy.conv_state is state.conv_state
     assert copy.ssm_state is state.ssm_state
-    assert copy._ssm_executor is state._ssm_executor
+    assert getattr(copy, "runtime", None) is getattr(state, "runtime", None)
     assert copy.mtp_state_index is state.mtp_state_index
     assert all(vars(state)[name] is value for name, value in before.items())
 
@@ -105,7 +110,14 @@ def test_shared_attention_state_roundtrip_preserves_worker_resources(
         state._ssm_executor.gates.fill_(-0.5)
         state._ssm_executor.betas.zero_()
         state._ssm_executor.cursors[1], state._ssm_executor.cursors[2] = 1, 3
-    expected = [tensor.cpu().tolist() for tensor in state.get_accepted_state(1)]
+    if hasattr(state, "get_accepted_state"):
+        expected = [tensor.cpu().tolist() for tensor in state.get_accepted_state(1)]
+    else:
+        width = state.config.conv_width
+        expected = [
+            state.conv_state[:, 1, :, :width].cpu().tolist(),
+            state.ssm_state[:, state.ssm_slots_per_req].cpu().tolist(),
+        ]
     before = vars(state).copy()
     source_conv, source_ssm = state.conv_state[:, 1].clone(), state.ssm_state[:, state.ssm_slots_per_req].clone()
     snapshots = []

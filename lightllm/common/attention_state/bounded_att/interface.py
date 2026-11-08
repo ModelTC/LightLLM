@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from functools import lru_cache
-from typing import Any
+from typing import Any, List
 
 import torch
-
-from ..commit import StateAcceptance
 
 from ..utils import deepcopy_result
 from lightllm.common.attention_state.types import PageKind, StateTransferLayout, TransferRegion
@@ -65,34 +63,32 @@ class CoreInterface(ABC):
         ...
 
     @abstractmethod
-    def reset_bounded_att_state(self, req_indices: list[int]) -> None:
+    def reset_bounded_att_state(self, req_indices: List[int]) -> None:
         """将指定槽位的运行态及控制信息恢复到长度 0，保留大小页快照。"""
         ...
 
     @abstractmethod
     def save_bounded_att_runtime_to_pages(
         self,
-        req_indices: list[int],
-        state_token_lens: list[int],
+        req_indices: List[int],
+        state_token_lens: List[int],
         page_kind: PageKind,
-        page_slot_ids: list[int],
-        flush_history: bool = False,
+        page_slot_ids: List[int],
     ) -> None:
         """按各请求已执行的绝对 token 长度保存基准运行态，三个列表逐项对应。
 
         长度不包含尚未执行的采样 token；ring 状态据此确定窗口和槽位位置。
-        ``flush_history`` 用于持久化 radix checkpoint：支持的 State 可在写页时
-        同步折叠临时 history；前缀与页槽位的关联仍由调用方维护，不要求页池保存长度元数据。
+        前缀与页槽位的关联仍由调用方维护，不要求页池保存长度元数据。
         """
         ...
 
     @abstractmethod
     def restore_bounded_att_runtime_from_pages(
         self,
-        req_indices: list[int],
-        state_token_lens: list[int],
+        req_indices: List[int],
+        state_token_lens: List[int],
         page_kind: PageKind,
-        page_slot_ids: list[int],
+        page_slot_ids: List[int],
     ) -> None:
         """将页快照恢复到对应请求的绝对 token 长度，保留源快照数据。
 
@@ -102,7 +98,12 @@ class CoreInterface(ABC):
         ...
 
     @abstractmethod
-    def commit_bounded_att_state(self, acceptance: StateAcceptance) -> None:
+    def commit_bounded_att_state(
+        self,
+        req_indices: torch.Tensor,
+        accepted_steps: torch.Tensor,
+    ) -> None:
+        """两个输入均为 CUDA Tensor；int32 接受步数包含基准输入步，候选区与游标由实现管理。"""
         ...
 
 
@@ -129,9 +130,9 @@ class CpuCacheInterface(ABC):
     def write_state_pages_to_cpu(
         self,
         page_kind: PageKind,
-        page_slot_ids: list[int],
+        page_slot_ids: List[int],
         cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: list[int],
+        cpu_page_indices: List[int],
         layout: StateTransferLayout,
         cpu_page_ready_flags: list[bool] | None = None,
     ) -> None:
@@ -142,8 +143,8 @@ class CpuCacheInterface(ABC):
     def read_state_pages_from_cpu(
         self,
         cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: list[int],
-        big_page_slot_ids: list[int],
+        cpu_page_indices: List[int],
+        big_page_slot_ids: List[int],
         layout: StateTransferLayout,
     ) -> None:
         """读入指定大页槽位；请求运行态另行通过 restore_bounded_att_runtime_from_pages 恢复。"""
@@ -158,8 +159,8 @@ class DpCopyInterface(ABC):
     @abstractmethod
     def copy_big_pages_from_dp(
         self,
-        src_page_ids: list[int],
-        dst_page_ids: list[int],
+        src_page_ids: List[int],
+        dst_page_ids: List[int],
         remote_dp_bounded_state: CoreInterface,
     ) -> None:
         """将其他 DP 同一 TP 分片的大页快照复制到本地大页，不修改运行态或分配页槽位。"""
@@ -168,11 +169,14 @@ class DpCopyInterface(ABC):
     @abstractmethod
     def copy_runtime_state_from_dp(
         self,
-        src_req_indices: list[int],
-        dst_req_indices: list[int],
+        src_req_indices: List[int],
+        dst_req_indices: List[int],
         remote_dp_bounded_state: CoreInterface,
     ) -> None:
+        """复制其他 DP 同一 TP 分片的 prefill 基准运行态并重置目标游标，不修改页池。
 
+        调用方保证源状态尚未执行 MTP 提交；KDA/GDN 的源游标必须为 0。
+        """
         ...
 
 
@@ -201,7 +205,10 @@ class PdInterface(ABC):
         state_token_len: int,
         layout: StateTransferLayout,
     ) -> None:
+        """将指定槽位在 state_token_len 绝对长度处的 prefill 基准运行态写入 PD 页。
 
+        调用方保证源状态尚未执行 MTP 提交；KDA/GDN 的源游标必须为 0。
+        """
         ...
 
     @abstractmethod

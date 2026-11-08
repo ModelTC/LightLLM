@@ -19,7 +19,14 @@ def make_state(cls=GDNState, mode="native", step=2, dtype=torch.float32, device=
         conv_dtype=torch.bfloat16,
         ssm_dtype=dtype,
     )
-    state = cls(config, 4, mtp_step=step, device=device, ssm_state_mode=mode, ssm_replay_config={"cache_len": 4})
+    if mode == "replay":
+        from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
+        from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
+
+        cls = ReplayKDAState if cls is KDAState else ReplayGDNState
+        state = cls(config, 4, mtp_step=step, device=device, ssm_replay_config={"cache_len": 4})
+    else:
+        state = cls(config, 4, mtp_step=step, device=device)
     resources = AttentionStateManager(request_capacity=4)
     resources.register_state("main", state)
     resources.finish_state_registration()
@@ -42,8 +49,12 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
         state.ssm_state[:, slot].fill_(slot + 1)
     if state.mtp_state_index is not None:
         state.mtp_state_index[src] = offset
-    expected_conv = state.conv_state[:, src, ..., offset : offset + 3].clone()
-    expected_ssm = state.ssm_state[:, src * state.ssm_slots_per_req + (offset if mode == "native" else 0)].clone()
+    if mode == "native":
+        expected_conv = state.conv_state[:, src, ..., :3].clone()
+        expected_ssm = state.ssm_state[:, src * state.ssm_slots_per_req].clone()
+    else:
+        expected_conv = state.conv_state[:, src, ..., offset : offset + 3].clone()
+        expected_ssm = state.ssm_state[:, src].clone()
     if mode == "replay":
         state._ssm_executor.raw_keys.zero_()
         state._ssm_executor.raw_values.zero_()
@@ -74,9 +85,14 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
         if mode == "replay":
             state._ssm_executor.cursors[dst] = 3
         restore()
-        actual = state.get_accepted_state(dst)
-        torch.testing.assert_close(actual.conv, expected_conv, rtol=0, atol=0)
-        torch.testing.assert_close(actual.ssm, expected_ssm, rtol=2e-5, atol=2e-5)
+        if mode == "replay":
+            actual = state.get_accepted_state(dst)
+            actual_conv, actual_ssm = actual.conv, actual.ssm
+        else:
+            actual_conv = state.conv_state[:, dst, ..., :3]
+            actual_ssm = state.ssm_state[:, dst * state.ssm_slots_per_req]
+        torch.testing.assert_close(actual_conv, expected_conv, rtol=0, atol=0)
+        torch.testing.assert_close(actual_ssm, expected_ssm, rtol=2e-5, atol=2e-5)
         if state.mtp_state_index is not None:
             assert state.mtp_state_index[dst].item() == 0
         if mode == "replay":
@@ -111,15 +127,25 @@ def test_checkpoint_batch_export(runtime_start_args, monkeypatch, cls, mode, dty
         state._ssm_executor.betas.zero_()
         state._ssm_executor.cursors.copy_(torch.tensor([1, 2, 3, 0], device="cuda"))
     requests = [2, 0, 1]
-    expected = [(s.conv.clone(), s.ssm.clone()) for s in map(state.get_accepted_state, requests)]
+    if mode == "replay":
+        expected = [(item.conv.clone(), item.ssm.clone()) for item in map(state.get_accepted_state, requests)]
+    else:
+        expected = [
+            (
+                state.conv_state[:, req, :, : state.config.conv_width].clone(),
+                state.ssm_state[:, req * state.ssm_slots_per_req].clone(),
+            )
+            for req in requests
+        ]
     before = state.ssm_state.clone()
-    cursors = state._ssm_executor.cursors.clone() if mode == "replay" else None
+    cursors = state.runtime.cursors.clone() if mode == "replay" else None
 
     def no_snapshot(*args):
         raise AssertionError("batch export must write directly to the destination")
 
-    monkeypatch.setattr(state, "get_accepted_state", no_snapshot)
-    monkeypatch.setattr(state._ssm_executor, "get_accepted_state", no_snapshot)
+    if mode == "replay":
+        monkeypatch.setattr(state, "get_accepted_state", no_snapshot)
+        monkeypatch.setattr(state.runtime, "get_accepted_state", no_snapshot)
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
@@ -132,13 +158,19 @@ def test_checkpoint_batch_export(runtime_start_args, monkeypatch, cls, mode, dty
     assert torch.equal(state.ssm_state, before)
     if cursors is not None:
         assert torch.equal(state._ssm_executor.cursors, cursors)
-    target, _, _ = make_state(cls, "native", 2, dtype)
-    target.mtp_state_index.fill_(2)
+    target, _, _ = make_state(cls, mode, 2, dtype)
+    if target.mtp_state_index is not None:
+        target.mtp_state_index.fill_(2)
     target.copy_runtime_state_from_dp(requests, [0, 1, 2], state)
     for req, (conv, ssm) in enumerate(expected):
-        actual = target.get_accepted_state(req)
-        torch.testing.assert_close(actual.conv, conv, atol=0, rtol=0)
-        torch.testing.assert_close(actual.ssm, ssm, atol=0, rtol=0)
+        if mode == "replay":
+            actual = target.get_accepted_state(req)
+            actual_conv, actual_ssm = actual.conv, actual.ssm
+        else:
+            actual_conv = target.conv_state[:, req, :, : target.config.conv_width]
+            actual_ssm = target.ssm_state[:, req * target.ssm_slots_per_req]
+        torch.testing.assert_close(actual_conv, conv, atol=0, rtol=0)
+        torch.testing.assert_close(actual_ssm, ssm, atol=0, rtol=0)
     assert torch.equal(state.ssm_state, before)
     if cursors is not None:
         assert torch.equal(state._ssm_executor.cursors, cursors)
@@ -171,7 +203,7 @@ def test_native_checkpoint_scratch_is_bounded(runtime_start_args):
 def test_pd_block_roundtrip_preserves_replicated_heads_and_accepted_mtp_state(monkeypatch):
     # Exercise layout and accepted-state selection independently of the CUDA copy kernel.
     monkeypatch.setattr(
-        import_module("lightllm.common.attention_state.bounded_att.conv_ssm_state"),
+        import_module("lightllm.common.attention_state.bounded_att.gdn.gdn_state"),
         "copy_bounded_att_tensors",
         copy_on_cpu,
     )
@@ -193,10 +225,10 @@ def test_pd_block_roundtrip_preserves_replicated_heads_and_accepted_mtp_state(mo
         state.conv_state.fill_(-1)
         state.ssm_state.fill_(-2)
         state.mtp_state_index.fill_(1)
-        state.conv_state[:, src, :2, 1:4].fill_(10 + rank)
-        state.conv_state[:, src, 2:4, 1:4].fill_(20 + rank)
-        state.conv_state[:, src, 4:, 1:4].fill_(30 + rank)
-        state.ssm_state[:, src * state.ssm_slots_per_req + 1].fill_(40 + rank)
+        state.conv_state[:, src, :2, :3].fill_(10 + rank)
+        state.conv_state[:, src, 2:4, :3].fill_(20 + rank)
+        state.conv_state[:, src, 4:, :3].fill_(30 + rank)
+        state.ssm_state[:, src * state.ssm_slots_per_req].fill_(40 + rank)
         states.append(state)
         layouts.append(layout)
         snapshots.append((state.conv_state.clone(), state.ssm_state.clone()))

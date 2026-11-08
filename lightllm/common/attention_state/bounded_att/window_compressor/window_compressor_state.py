@@ -12,7 +12,6 @@ import torch
 
 from lightllm.utils.envs_utils import get_env_start_args
 
-from ...commit import StateAcceptance
 from ...utils import deepcopy_result
 from ...types import PageKind, StateTransferLayout, TensorField, TransferRegion
 from ..base_state import BoundedAttentionState
@@ -174,7 +173,6 @@ class WindowCompressorState(BoundedAttentionState):
         state_token_lens: list[int],
         page_kind: PageKind,
         page_slot_ids: list[int],
-        flush_history: bool = False,
     ) -> None:
         """边界必须完成一个产出步长；仅保留下一步仍需读取的窗口重叠部分。"""
         assert all(
@@ -212,7 +210,7 @@ class WindowCompressorState(BoundedAttentionState):
                 write=False,
             )
 
-    def commit_bounded_att_state(self, acceptance: StateAcceptance) -> None:
+    def commit_bounded_att_state(self, req_indices: torch.Tensor, accepted_steps: torch.Tensor) -> None:
         """按绝对位置寻址；接受后继续覆盖 ring，不维护额外 MTP 游标。"""
         pass
 

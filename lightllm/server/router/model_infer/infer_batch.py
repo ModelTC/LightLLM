@@ -433,7 +433,6 @@ class InferenceContext:
                 state_token_lens=[req.get_chuncked_input_token_len() for req, _ in selected],
                 page_kind="big",
                 page_slot_ids=[slot for _, slot in selected],
-                flush_history=True,
             )
 
         assert not self.args.disable_chunked_prefill, "chunked prefill must be enabled for hybrid attention models"
@@ -455,7 +454,6 @@ class InferenceContext:
                             state_token_lens=[req.hybrid_cache_len],
                             page_kind="small",
                             page_slot_ids=[dst_buffer_idx],
-                            flush_history=True,
                         )
         return
 

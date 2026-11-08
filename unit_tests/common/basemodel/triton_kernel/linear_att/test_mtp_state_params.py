@@ -29,17 +29,15 @@ def test_dynamic_sequences_stay_within_request_capacity_under_graph(request_capa
     sequences = min(request_capacity, token_bucket)
 
     def build():
-        cu, ids = build_dynamic_mtp_linear_att_state_params(reqs, mtp_index, hold)
-        forward = manager.prepare_decode(ids, cu)
-        return cu, forward.req_indices, forward.state_indices, forward.accepted_token_counts
+        return build_dynamic_mtp_linear_att_state_params(reqs, mtp_index, manager.mtp_state_index, hold)
 
     build()
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        cu, ids, ssm, counts = build()
-    assert cu.numel() == sequences + 1
-    assert ids.numel() == counts.numel() == sequences
+        cu, ids, counts = build()
+    assert cu.numel() == token_bucket + 1
+    assert ids.numel() == counts.numel() == token_bucket
 
     # Reuse one graph for full request pools, mixed verify lengths, and HOLD-only padding.
     for lengths in ([1] * sequences, [min(4, token_bucket // sequences)] * sequences, [2, 1], []):
@@ -59,10 +57,9 @@ def test_dynamic_sequences_stay_within_request_capacity_under_graph(request_capa
         expected_cu = [0]
         for length in lengths:
             expected_cu.append(expected_cu[-1] + length)
-        expected_cu += [tokens] * (sequences + 1 - len(expected_cu))
-        expected_ids = request_ids + [hold] * (sequences - len(request_ids))
+        expected_cu += [tokens] * (token_bucket + 1 - len(expected_cu))
+        expected_ids = request_ids + [hold] * (token_bucket - len(request_ids))
         assert cu.tolist() == expected_cu
         assert ids.tolist() == expected_ids
-        expected_counts = [req % 4 + 1 for req in request_ids] + [1] * (sequences - len(request_ids))
+        expected_counts = [req % 4 + 1 for req in request_ids] + [1] * (token_bucket - len(request_ids))
         assert counts.tolist() == expected_counts
-        assert ssm.tolist() == [[req * 4 + offset for offset in range(4)] for req in expected_ids]

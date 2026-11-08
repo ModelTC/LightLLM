@@ -1,6 +1,5 @@
 from contextlib import contextmanager
 from types import SimpleNamespace
-import weakref
 
 import pytest
 import torch

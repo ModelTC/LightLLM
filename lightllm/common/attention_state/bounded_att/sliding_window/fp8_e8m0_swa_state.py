@@ -9,7 +9,6 @@ from math import prod
 
 import torch
 
-from ...commit import StateAcceptance
 from ...utils import deepcopy_result
 from ...types import PageKind, StateTransferLayout, TensorField, TransferRegion
 from ..base_state import BoundedAttentionState
@@ -154,7 +153,6 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
         state_token_lens: list[int],
         page_kind: PageKind,
         page_slot_ids: list[int],
-        flush_history: bool = False,
     ) -> None:
         pool = self._pool(page_kind=page_kind)
         for req_idx, length, slot in zip(req_indices, state_token_lens, page_slot_ids):
@@ -181,7 +179,7 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
                 write=False,
             )
 
-    def commit_bounded_att_state(self, acceptance: StateAcceptance) -> None:
+    def commit_bounded_att_state(self, req_indices: torch.Tensor, accepted_steps: torch.Tensor) -> None:
         """ring 按绝对 token 位置寻址，无需提交额外游标。"""
         pass
 

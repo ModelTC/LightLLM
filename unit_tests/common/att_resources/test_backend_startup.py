@@ -14,7 +14,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from lightllm.common.attention_state.commit import StateAcceptance
 
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
@@ -297,10 +296,8 @@ def test_backend_allocates_all_roles_before_warmup(
     draft_states = [manager.get_bounded_attention_states(f"draft{i}")[0] for i in range(draft_count)]
     assert len({state.conv_state.data_ptr() for state in draft_states}) == draft_count
     manager.commit_bounded_att_state(
-        StateAcceptance(
-            torch.tensor([0], dtype=torch.int32, device="cuda"),
-            torch.tensor([draft_count + 1], dtype=torch.int32, device="cuda"),
-        ),
+        torch.tensor([0], dtype=torch.int32, device="cuda"),
+        torch.tensor([draft_count + 1], dtype=torch.int32, device="cuda"),
         role="main",
     )
     assert all(not state.mtp_state_index.any() for state in draft_states)
@@ -309,10 +306,8 @@ def test_backend_allocates_all_roles_before_warmup(
     for i, state in enumerate(draft_states):
         assert len(state.config.logical_layer_ids) == 1
         manager.commit_bounded_att_state(
-            StateAcceptance(
-                torch.tensor([0], dtype=torch.int32, device="cuda"),
-                torch.tensor([i + 2], dtype=torch.int32, device="cuda"),
-            ),
+            torch.tensor([0], dtype=torch.int32, device="cuda"),
+            torch.tensor([i + 2], dtype=torch.int32, device="cuda"),
             role=f"draft{i}",
         )
         assert state.mtp_state_index[0] == i + 1

@@ -3,10 +3,23 @@ import torch
 import triton
 
 from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update as update
-from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMExecutor
+
+
+def ReplaySSMExecutor(*args, **kwargs):
+    kda = kwargs.get("kda", False)
+    if kda:
+        from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDARuntime
+
+        return ReplayKDARuntime(*args, **kwargs)
+    from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNRuntime
+
+    return ReplayGDNRuntime(*args, **kwargs)
+
+
 from types import SimpleNamespace
 from lightllm.common.attention_state.commit import StateAcceptance
-from lightllm.common.attention_state.bounded_att.ssm.native import NativeSSMExecutor
+from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNRuntime
+from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 
 
 def make(n, width):
@@ -22,7 +35,7 @@ def make(n, width):
         mtps.extend(range(l))
     tensor = lambda x: torch.tensor(x, device="cuda", dtype=torch.int32)
     args = [tensor(starts), tensor(reqs), tensor(mtps), tensor([1] * len(reqs)), width]
-    ssm_backend = ReplaySSMExecutor.__new__(ReplaySSMExecutor)
+    ssm_backend = ReplayGDNRuntime.__new__(ReplayGDNRuntime)
     ssm_backend.cursors = tensor([7] * (hold + 1))
     ssm_backend.hold_req_id = hold
     ssm_backend.capacity = max(4, triton.next_power_of_2(width))
@@ -117,7 +130,11 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
                 assert m._ssm_executor.cursors.tolist() == expected_cursor
                 checks += 1
 
-            m._ssm_executor = NativeSSMExecutor(torch.empty(0), width)
+            class _IndexOnly:
+                def commit(self, acceptance, indices, state_name=None):
+                    commit_ssm_prefix(indices, acceptance.req_indices, acceptance.accepted_lengths)
+
+            m._ssm_executor = _IndexOnly()
             accept_fused(m, args)
             assert m.mtp_state_index.tolist() == expected_index
 

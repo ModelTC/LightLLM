@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from ..conv_ssm_types import ConvSSMStateConfig
-from .gdn_state import GDNNativeState, GDNReplayState, GDNState
+from .gdn_state import GDNState
 
 
 def create_gdn_state(
@@ -15,22 +15,26 @@ def create_gdn_state(
     device: str | torch.device = "cuda",
     *,
     ssm_state_mode: str = "native",
-    ssm_replay_config: dict[str, object] | None = None,
+    ssm_replay_config: dict | None = None,
     gate_lower_bound: float = -5.0,
 ) -> GDNState:
-    """创建 GDN 请求运行态，大小页池由后续容量分配流程初始化。"""
-    state_cls = {
-        "native": GDNNativeState,
-        "replay": GDNReplayState,
-    }.get(ssm_state_mode)
-    if state_cls is None:
+    """创建 GDN 请求运行态。replay 模式使用独立的 ReplayGDNState。"""
+    if ssm_state_mode == "replay":
+        from .replay_gdn_state import ReplayGDNState
+
+        return ReplayGDNState(
+            config=config,
+            request_capacity=request_capacity,
+            mtp_step=mtp_step,
+            device=device,
+            ssm_replay_config=ssm_replay_config,
+            gate_lower_bound=gate_lower_bound,
+        )
+    if ssm_state_mode != "native":
         raise ValueError(f"unknown GDN state mode: {ssm_state_mode}")
-    return state_cls(
+    return GDNState(
         config=config,
         request_capacity=request_capacity,
         mtp_step=mtp_step,
         device=device,
-        ssm_state_mode=ssm_state_mode,
-        ssm_replay_config=ssm_replay_config,
-        gate_lower_bound=gate_lower_bound,
     )
