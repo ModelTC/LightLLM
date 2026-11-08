@@ -17,6 +17,8 @@ def indexed_attention(
     selection_lengths: Optional[torch.Tensor] = None,
     short_rows_direct: bool = False,
     skip_empty_splits: bool = False,
+    block_size: int = 64,
+    num_stages: Optional[int] = None,
 ) -> torch.Tensor:
     if query.ndim != 3 or key.ndim != 3 or value.ndim != 3 or indices.ndim != 2:
         raise ValueError("Indexed attention requires rank-three Q/K/V and rank-two indices")
@@ -53,8 +55,12 @@ def indexed_attention(
         return output
     if not selected:
         return output.zero_()
+    if block_size < 16 or block_size & (block_size - 1):
+        raise ValueError("Indexed attention block size must be a power of two >= 16")
+    if num_stages is not None and num_stages < 1:
+        raise ValueError("Indexed attention num_stages must be positive")
     if splits is None:
-        splits = min(32, max(1, triton.cdiv(64, rows * kv_heads)), triton.cdiv(selected, 64))
+        splits = min(32, max(1, triton.cdiv(block_size, rows * kv_heads)), triton.cdiv(selected, block_size))
     if splits < 1:
         raise ValueError("Indexed attention split count must be positive")
     partial = (
@@ -63,6 +69,9 @@ def indexed_attention(
         else None
     )
     lse = torch.empty((rows, q_heads, splits), dtype=torch.float32, device=query.device) if splits > 1 else None
+    launch_kwargs = {}
+    if num_stages is not None:
+        launch_kwargs["num_stages"] = num_stages
     _attention[(rows, kv_heads, splits)](
         query,
         key,
@@ -85,9 +94,11 @@ def indexed_attention(
         max(16, triton.next_power_of_2(q_heads // kv_heads)),
         max(16, triton.next_power_of_2(dim)),
         max(16, triton.next_power_of_2(value_dim)),
-        64,
+        block_size,
         short_rows_direct,
         skip_empty_splits,
+        "ieee" if query.dtype == torch.float32 else "tf32",
+        **launch_kwargs,
     )
     if splits > 1:
         _reduce[(rows, q_heads)](
@@ -101,8 +112,9 @@ def indexed_attention(
             triton.next_power_of_2(splits),
             triton.next_power_of_2(value_dim),
             selected,
-            64,
+            block_size,
             short_rows_direct,
             skip_empty_splits,
+            **launch_kwargs,
         )
     return output

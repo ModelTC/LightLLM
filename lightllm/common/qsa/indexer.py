@@ -216,6 +216,8 @@ class QSAIndexer:
         block_budget = self.token_budget // self.compress_ratio
         topk = min(blocks, block_budget)
         cuda_topk = self.use_cuda_topk and cuda_topk_supported(query.device, blocks, topk)
+        max_score_elements = 16 * 1024 * 1024
+        query_chunk_size = min(query_chunk_size, max(1, max_score_elements // max(blocks, 1)))
         score_buffer = torch.empty((min(tokens, query_chunk_size), blocks), dtype=torch.float32, device=query.device)
         for first in range(0, tokens, query_chunk_size):
             count = min(query_chunk_size, tokens - first)
@@ -239,6 +241,7 @@ class QSAIndexer:
                     max(16, triton.next_power_of_2(self.head_dim)),
                     64,
                     block_budget if cuda_topk else 0,
+                    "ieee" if query.dtype == torch.float32 else "tf32",
                 )
             selected = (
                 cuda_topk_indices(

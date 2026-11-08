@@ -44,7 +44,7 @@ def ordered_tp_sum(input: torch.Tensor, group, world_size: int, *, scatter_rank=
             all_gather_into_tensor(gathered.view(-1, *input.shape[1:]), source, group=group)
         if input.is_cuda:
             _sum_shards[(triton.cdiv(output.numel(), 256),)](
-                gathered, output, input.numel(), start, output.numel(), world_size, 256, enable_fp_fusion=False
+                gathered, output, input.numel(), start, output.numel(), world_size, 256
             )
         else:
             accumulator = torch.zeros(output.numel(), dtype=torch.float64, device=input.device)

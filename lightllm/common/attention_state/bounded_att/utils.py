@@ -43,16 +43,25 @@ def create_page_pool_tensor(
 
     # 阶段一：未启用 DP fetch 时沿用 torch 分配；GPU 页池也保持原设备分配方式。
     if not shared:
-        tensor = torch.empty(
-            size=size,
-            dtype=dtype,
-            device=device,
-            pin_memory=pin_memory,
-        )
+        try:
+            tensor = torch.empty(
+                size=size,
+                dtype=dtype,
+                device=device,
+                pin_memory=pin_memory,
+            )
+        except RuntimeError:
+            if device.type != "cpu" or not pin_memory or not torch.cuda.is_available():
+                raise
+            tensor = torch.empty(size=size, dtype=dtype, device=device, pin_memory=False)
+            register_page_pool_tensor(tensor=tensor)
+            allocation = "torch.empty + cudaHostRegister"
+        else:
+            allocation = "torch.empty"
         reason = "GPU device allocation" if device.type != "cpu" else "DP prompt cache fetch disabled"
         logger.info(
             f"Allocated bounded attention page pool: shape={size}, dtype={dtype}, bytes={nbytes}, "
-            f"device={device}, shared=False, pin_memory={pin_memory}, allocator=torch.empty, reason={reason}"
+            f"device={device}, shared=False, pin_memory={pin_memory}, allocator={allocation}, reason={reason}"
         )
         return tensor
 
@@ -91,7 +100,6 @@ def register_page_pool_tensor(tensor: torch.Tensor) -> None:
     """
     if tensor.device.type != "cpu" or tensor.numel() == 0 or tensor.is_pinned():
         return
-    assert tensor.is_shared(), "page pool registration requires shared CPU storage"
     storage = tensor.untyped_storage()
     ptr = storage.data_ptr()
     nbytes = storage.nbytes()

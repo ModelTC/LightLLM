@@ -95,6 +95,7 @@ def _scores(
     BD: tl.constexpr,
     BN: tl.constexpr,
     MIN_BLOCKS: tl.constexpr = 0,
+    INPUT_PRECISION: tl.constexpr = "tf32",
 ):
     row = tl.program_id(0)
     query_row = row + QUERY_START
@@ -124,7 +125,7 @@ def _scores(
             (block[None, :] < visible) & (col[:, None] < D),
             other=0,
         )
-        logits = tl.dot(q, k, input_precision="ieee")
+        logits = tl.dot(q, k, input_precision=INPUT_PRECISION)
         logits = tl.where(head[:, None] < HEADS, tl.maximum(logits, 0), 0)
         scores = tl.sum(logits, 0) * (D ** -0.5)
         scores = tl.where(block < visible, scores, -float("inf"))

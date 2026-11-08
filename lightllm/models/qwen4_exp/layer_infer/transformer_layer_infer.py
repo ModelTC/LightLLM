@@ -75,7 +75,8 @@ class Qwen4ExpTransformerLayerInfer(Qwen35TransformerLayerInfer):
             key,
             value,
             infer_state.qwen4_exp_batch,
-            attention_splits=32,
+            decode=not infer_state.is_prefill,
+            attention_splits=None if infer_state.is_prefill else 1,
         )
         return self._get_o(output, infer_state, layer_weight)
 

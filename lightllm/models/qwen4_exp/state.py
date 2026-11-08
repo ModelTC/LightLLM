@@ -73,12 +73,18 @@ class QSAExecutionState:
             request_rows=batch.active_rows,
         )
         selected = indexer.select(
-            index_query, self.pooled_keys, batch.query_rows, batch.visible_lengths, batch.slot_table
+            index_query,
+            self.pooled_keys,
+            batch.query_rows,
+            batch.visible_lengths,
+            batch.slot_table,
+            query_chunk_size=64 if decode else 1024,
         )
 
         splits = attention_splits
         if splits is None and decode:
             splits = min(32, triton.cdiv(selected.shape[1], 64))
+        wide_block = query.dtype in (torch.float16, torch.bfloat16)
         return indexed_attention(
             query.contiguous(),
             key,
@@ -88,6 +94,8 @@ class QSAExecutionState:
             selection_lengths=batch.visible_lengths,
             short_rows_direct=decode or attention_splits is not None,
             skip_empty_splits=True,
+            block_size=128 if wide_block else 64,
+            num_stages=2 if wide_block else None,
         )
 
 

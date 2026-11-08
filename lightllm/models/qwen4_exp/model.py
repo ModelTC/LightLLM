@@ -106,9 +106,9 @@ class Qwen4ExpTpPartModel(Qwen3_5MOETpPartModel):
         super().prepare_attention_states()
         from .lexical_state import Qwen4ExpLexicalState
 
-        for state in self.att_state_manager.get_bounded_attention_states(self.att_state_role):
-            if isinstance(state, Qwen4ExpLexicalState):
-                state.bind_weights(self.trans_layers_weight)
+        state = getattr(self.att_state_manager, f"{self.att_state_role}_qwen4_lexical_state", None)
+        if isinstance(state, Qwen4ExpLexicalState):
+            state.bind_weights(self.trans_layers_weight)
 
     def _init_att_backend(self):
         self.prefill_att_backend = self.decode_att_backend = TritonAttBackend(model=self)

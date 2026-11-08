@@ -32,6 +32,7 @@ def _attention(
     BN: tl.constexpr,
     SHORT_DIRECT: tl.constexpr,
     SKIP_EMPTY: tl.constexpr,
+    INPUT_PRECISION: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     kv_head = tl.program_id(1)
@@ -61,7 +62,7 @@ def _attention(
             key = tl.load(
                 K + slot[None, :] * KS + kv_head * KH + dim[:, None] * KD, valid[None, :] & (dim[:, None] < D), other=0
             )
-            score = tl.dot(q, key, input_precision="ieee") * SCALE
+            score = tl.dot(q, key, input_precision=INPUT_PRECISION) * SCALE
             score = tl.where(valid[None, :], score, -float("inf"))
             new_max = tl.maximum(maximum, tl.max(score, 1))
 
@@ -74,7 +75,7 @@ def _attention(
                 other=0,
             )
             acc = acc * alpha[:, None]
-            acc = tl.dot(prob.to(V.dtype.element_ty), value, acc, input_precision="ieee")
+            acc = tl.dot(prob.to(V.dtype.element_ty), value, acc, input_precision=INPUT_PRECISION)
             denominator = denominator * alpha + tl.sum(prob, 1)
             maximum = new_max
         safe_denominator = tl.where(denominator > 0, denominator, 1.0)
