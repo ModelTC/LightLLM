@@ -1,4 +1,6 @@
-"""Tune one layer's SSM update cycle using the shared autotuner."""
+"""使用共享 autotuner 调优单层 SSM update cycle。"""
+
+from __future__ import annotations
 
 import ast
 
@@ -12,7 +14,8 @@ from lightllm.common.ssm_types import SSMRunConfig
 logger = init_logger(__name__)
 
 
-def get_configs():
+def get_configs() -> list[dict[str, int]]:
+    """返回 ReplaySSM update cycle 的候选 Triton 配置。"""
     return [
         {"BV": bv, "num_warps": warps, "num_stages": stages}
         for bv, warps in [(8, 1), (16, 1), (16, 2), (32, 1), (32, 2), (32, 4), (64, 2), (64, 4), (128, 4)]
@@ -20,11 +23,11 @@ def get_configs():
     ]
 
 
-def static_key(ssm_backend, mode, q, k, v, a, b, cu_seqlens):
+def static_key(ssm_backend, mode, q, k, v, a, b, cu_seqlens) -> dict[str, object]:
+    """构造区分状态布局、数据类型和投影模式的静态调优键。"""
     axis = 1 if cu_seqlens is not None else 0
     _, _, hv, kd, vd = ssm_backend.state.shape
-    # Keep filenames short, but distinguish packed projections, TP layouts,
-    # state precision, recurrent rule and history capacity.
+    # 保持文件名较短，同时区分 packed projection、TP 布局、状态精度、递推规则和 history 容量。
     key = {
         "mode": mode,
         "v": 6,
@@ -46,13 +49,15 @@ def static_key(ssm_backend, mode, q, k, v, a, b, cu_seqlens):
     return key
 
 
-def run_key(ssm_backend, q, cu_seqlens):
+def run_key(ssm_backend, q, cu_seqlens) -> tuple[int, int]:
+    """返回调优使用的 token 数和请求数键。"""
     tokens = q.shape[1 if cu_seqlens is not None else 0]
     return tokens, cu_seqlens.numel() - 1 if cu_seqlens is not None else tokens
 
 
-def scratch_size_bytes(ssm_backend, batch, sequences, inputs):
-    # State/history have a leading layer axis; cursors are shared across layers.
+def scratch_size_bytes(ssm_backend, batch, sequences, inputs) -> int:
+    """估算一次 SSM autotune scratch 所需的字节数。"""
+    # State/history 的首轴是 layer，cursor 在各 layer 之间共享。
     layers, slots = ssm_backend.state.shape[:2]
     pool_bytes = sum(
         x.numel() * x.element_size() // (layers if x.ndim > 1 else 1)
@@ -67,14 +72,17 @@ def scratch_size_bytes(ssm_backend, batch, sequences, inputs):
     return pool_bytes // slots * (batch + 1) + input_bytes + 32 * (batch + sequences + 1)
 
 
-def rebuild_inputs(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, workload=None, run_config=None):
+def rebuild_inputs(
+    ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, workload=None, run_config=None
+) -> tuple[tuple[object, ...], dict[str, object]]:
+    """创建不影响服务态的独立输入，供 autotune benchmark 使用。"""
     tokens, sequences = run_key(ssm_backend, q, cu_seqlens)
     batch = min(sequences, triton.cdiv(tokens, ssm_backend.verify_width)) if cu_seqlens is not None else tokens
     if q.is_cuda:
         required = scratch_size_bytes(ssm_backend, batch, sequences, (q, k, v, a, b, a_log, bias))
         free, _ = torch.cuda.mem_get_info(q.device)
         available = free + torch.cuda.memory_reserved(q.device) - torch.cuda.memory_allocated(q.device)
-        # Leave half for benchmark intermediates, CUDA Graphs and allocator fragmentation.
+        # 为 benchmark 中间量、CUDA Graph 和 allocator 碎片保留一半显存。
         if required > available // 2:
             raise torch.cuda.OutOfMemoryError(
                 f"SSM tuning scratch needs {required} bytes, exceeding its {available // 2}-byte budget"
@@ -91,7 +99,7 @@ def rebuild_inputs(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=Non
         gate_lower_bound=ssm_backend.gate_lower_bound,
         compute_mode=ssm_backend.compute_mode,
     )
-    # Benchmark callbacks must not recursively select a configuration.
+    # benchmark 回调不能再次触发配置选择。
     scratch._config_is_fixed = True
     inputs = [
         torch.empty_strided(x.shape, x.stride(), device=x.device, dtype=x.dtype).normal_(0, 0.2)
@@ -131,15 +139,16 @@ def rebuild_inputs(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=Non
     rebuild_input_func=rebuild_inputs,
     warmup_all_exist_config=False,
 )
-def select_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, workload=None, run_config=None):
-    """Return a layout; only rebuilt disposable inputs execute the timed cycle."""
+def select_config(
+    ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, workload=None, run_config=None
+) -> dict[str, int] | SSMRunConfig | None:
+    """搜索 update cycle 布局；计时只使用重建的临时输入。"""
     if workload is None:
         return run_config
     ssm_backend.run_config = run_config
     reqs, accepted = workload
     ssm_backend.cursors.zero_()
-    # Include an entire history period and the subsequent fold. Repeating
-    # just the first round would benchmark an empty history forever.
+    # 覆盖完整 history 周期并触发一次 fold；只重复第一轮会一直测量空 history。
     tokens = q.shape[1 if cu_seqlens is not None else 0]
     rounds = ssm_backend.capacity // min(ssm_backend.verify_width, tokens) + 1
     for step in range(rounds):
@@ -149,7 +158,8 @@ def select_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None
     return run_config
 
 
-def resolve_run_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens):
+def resolve_run_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens) -> SSMRunConfig:
+    """返回当前 batch 的固定或已调优 SSM kernel 配置。"""
     default = ssm_backend.run_config or SSMRunConfig(32, 1)
     if ssm_backend._config_is_fixed:
         return default
@@ -160,7 +170,7 @@ def resolve_run_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens
         return default
     config = select_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens)
     config = SSMRunConfig(**config) if config else default
-    # Each captured graph keeps its own layout, even after other buckets warm up.
+    # 每个 captured graph 保留自己的布局，即使其他 bucket 后续完成 warmup。
     ssm_backend.batch_configs[key] = config
     logger.info(f"SSM {mode} update-cycle config: {config}, warmup batch: {key[1]}")
     return config

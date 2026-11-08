@@ -7,7 +7,8 @@ class SSMRunConfig:
     num_warps: int
     num_stages: int = 3
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """校验 Triton update cycle 配置的字段类型。"""
         for value in (self.BV, self.num_warps, self.num_stages):
             if type(value) is not int:
                 raise TypeError("SSM kernel configuration must be an integer")

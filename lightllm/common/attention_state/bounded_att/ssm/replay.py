@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import torch
 import triton
 
+from lightllm.common.attention_state.commit import StateAcceptance
 from lightllm.common.ssm_types import SSMRunConfig
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import (
     _accept_updates,
@@ -25,17 +28,17 @@ class ReplaySSMExecutor(SSMExecutor):
 
     def __init__(
         self,
-        state,
-        capacity,
-        verify_width,
-        activation_dtype=torch.bfloat16,
+        state: torch.Tensor,
+        capacity: int,
+        verify_width: int,
+        activation_dtype: torch.dtype = torch.bfloat16,
         *,
-        num_key_heads=None,
-        kda=False,
-        gate_lower_bound=-5.0,
-        compute_mode="inline",
-        run_config=None,
-    ):
+        num_key_heads: int | None = None,
+        kda: bool = False,
+        gate_lower_bound: float = -5.0,
+        compute_mode: str = "inline",
+        run_config: SSMRunConfig | dict[str, int] | None = None,
+    ) -> None:
         """创建 ReplaySSM 的 canonical state、双半区 history 和 cursor。
 
         ``verify_width`` 决定一次 verify 的最大 token 数，``capacity`` 是
@@ -58,16 +61,15 @@ class ReplaySSMExecutor(SSMExecutor):
         self._config_is_fixed = run_config is not None
         self.batch_configs = {}
         layers, slots, hv, k, v = state.shape
-        # Omission preserves the redundant layout for existing callers and A/B.
+        # 保留冗余布局，兼容已有调用方和 A/B 测试。
         self.num_key_heads = hv if num_key_heads is None else num_key_heads
         assert self.num_key_heads > 0 and hv % self.num_key_heads == 0
         self.hold_req_id = slots - 1
         self.cursors = torch.zeros(slots, dtype=torch.int32, device=state.device)
         self.forward_cursors = torch.zeros_like(self.cursors)
-        # Alternate halves on fold so CTAs cannot overwrite history another
-        # V tile is still reading. Cursor packs phase (2*L) and count (0..L).
-        # BF16 can use a narrower short-history buffer for the precompute path;
-        # FP32 remains the safe default for all other shapes.
+        # fold 时交替使用两个半区，避免一个 V tile 仍在读取时被其他 CTA 覆盖。
+        # cursor 打包保存 phase（2*L）和 count（0..L）。precompute 路径在 BF16
+        # 下可以使用更窄的 history buffer；其他形状使用 FP32 作为安全默认值。
         history_dtype = (
             activation_dtype
             if activation_dtype == torch.bfloat16
@@ -88,15 +90,15 @@ class ReplaySSMExecutor(SSMExecutor):
         self.raw_values = torch.empty((layers, slots, hv, 2 * capacity, v), dtype=activation_dtype, device=state.device)
         self.betas = torch.empty((layers, slots, hv, 2 * capacity), dtype=torch.float32, device=state.device)
 
-    def clear_history(self, req):
-        """Invalidate history for a reused/restored request; leave its SSM state intact."""
+    def clear_history(self, req: int | torch.Tensor) -> None:
+        """清空复用或恢复请求的临时 history，保留 canonical SSM state。"""
         if type(req) is int:
-            # Scalar assignment copies a CPU tensor into the CUDA slot.
+            # 标量赋值会把 CPU tensor 复制到 CUDA slot。
             self.cursors[req].zero_()
         else:
             self.cursors[req] = 0
 
-    def prepare_decode(self, reqs, cu_seqlens=None):
+    def prepare_decode(self, reqs: torch.Tensor, cu_seqlens: torch.Tensor | None = None) -> torch.Tensor:
         """保存本轮 decode 的 history 起点，并折叠即将溢出的旧半区。"""
         positions = torch.empty_like(reqs)
         layers, _, hv, kd, vd = self.state.shape
@@ -146,7 +148,7 @@ class ReplaySSMExecutor(SSMExecutor):
         )
         return positions
 
-    def accept_updates(self, reqs, accepted_state_indices=None):
+    def accept_updates(self, reqs: torch.Tensor, accepted_state_indices: torch.Tensor | None = None) -> None:
         """更新 cursor 以保留每个请求本轮已接受的前缀。
 
         MTP 时 ``accepted_state_indices`` 是每个请求最后接受的 draft
@@ -162,14 +164,21 @@ class ReplaySSMExecutor(SSMExecutor):
             256,
         )
 
-    def merge_accepted_updates(self, reqs):
+    def merge_accepted_updates(self, reqs: torch.Tensor) -> None:
         """把接受的 history 物化回 canonical state，并清空请求 cursor。"""
         if reqs.numel() == 0:
             return
         self._materialize_accepted_state(reqs, self.state, snapshot=False)
         self.cursors.index_fill_(0, reqs.long(), 0)
 
-    def _materialize_accepted_state(self, reqs, output, snapshot, output_strides=None, flush_export=False):
+    def _materialize_accepted_state(
+        self,
+        reqs: torch.Tensor,
+        output: torch.Tensor,
+        snapshot: bool,
+        output_strides=None,
+        flush_export: bool = False,
+    ) -> None:
         """将请求的 accepted prefix 写入 state 或调用方提供的输出页。"""
 
         assert not (snapshot and flush_export), "flush export must update the canonical state"
@@ -203,7 +212,7 @@ class ReplaySSMExecutor(SSMExecutor):
             num_stages=config.num_stages,
         )
 
-    def get_accepted_state(self, req_idx, accepted_index=None):
+    def get_accepted_state(self, req_idx: int, accepted_index: int | None = None) -> torch.Tensor:
         """返回不修改 active state/history 的单请求 canonical 快照。"""
         layers, _, hv, k, v = self.state.shape
         output = torch.empty((layers, hv, k, v), dtype=self.state.dtype, device=self.state.device)
@@ -211,7 +220,14 @@ class ReplaySSMExecutor(SSMExecutor):
         self._materialize_accepted_state(reqs, output, snapshot=True)
         return output
 
-    def export_accepted_state(self, req_indices, targets, accepted_indices=None, *, flush=False):
+    def export_accepted_state(
+        self,
+        req_indices: list[int],
+        targets: list[torch.Tensor],
+        accepted_indices: torch.Tensor | None = None,
+        *,
+        flush: bool = False,
+    ) -> None:
         """将多个 accepted 快照直接写入调用方目标页，避免中间整批分配。"""
 
         if not req_indices:
@@ -228,28 +244,38 @@ class ReplaySSMExecutor(SSMExecutor):
             output_strides=strides,
         )
 
-    def get_run_config(self, q, k, v, a, b, a_log, bias, cu_seqlens=None) -> SSMRunConfig:
+    def get_run_config(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        a_log: torch.Tensor,
+        bias: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+    ) -> SSMRunConfig:
         """按当前 kernel 形状选择或返回固定的 ReplaySSM 调优配置。"""
 
         return resolve_run_config(self, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
 
     def forward(
         self,
-        linear_layer_idx,
-        q,
-        k,
-        v,
-        a,
-        b,
-        a_log,
-        bias,
-        reqs,
-        cu_seqlens=None,
-        run_config=None,
+        linear_layer_idx: int,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        a_log: torch.Tensor,
+        bias: torch.Tensor,
+        reqs: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        run_config: SSMRunConfig | None = None,
         *,
-        state_indices=None,
-        accepted_token_counts=None,
-    ):
+        state_indices: torch.Tensor | None = None,
+        accepted_token_counts: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, SSMRunConfig]:
         """执行一层 ReplaySSM decode，并返回输出与本轮 run config。"""
 
         config = run_config or self.get_run_config(q, k, v, a, b, a_log, bias, cu_seqlens)
@@ -259,8 +285,8 @@ class ReplaySSMExecutor(SSMExecutor):
         out = torch.empty_like(v)
         bv = config.BV
         precompute_projections = self.verify_width > 1 and bv >= 16 and self.compute_mode == "precompute"
-        # Resolve tile dimensions in Python: bare max() in Triton JIT code
-        # lowers to a tensor operation, which cannot define static shapes.
+        # 在 Python 中解析 tile 维度；Triton JIT 中直接调用 max() 会降级为 tensor
+        # 运算，无法定义静态 shape。
         bw = triton.next_power_of_2(self.verify_width)
         _replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](
             q,
@@ -307,16 +333,23 @@ class ReplaySSMExecutor(SSMExecutor):
         )
         return out, config
 
-    def accept_single_token(self, reqs):
+    def accept_single_token(self, reqs: torch.Tensor) -> None:
         """非 MTP decode 直接把单 token 写入当前 history。"""
         self.accept_updates(reqs)
 
-    def commit(self, acceptance, indices, state_name):
+    def commit(self, acceptance: StateAcceptance, indices: torch.Tensor, state_name: str) -> None:
         """应用接受结果；MTP 直接推进 cursor，单 token 还需写入 history。"""
 
         self.commit_validated(acceptance, indices, state_name)
 
-    def commit_validated(self, acceptance, indices, state_name, *, commit_data=None):
+    def commit_validated(
+        self,
+        acceptance: StateAcceptance,
+        indices: torch.Tensor,
+        state_name: str,
+        *,
+        commit_data: object | None = None,
+    ) -> None:
         """应用已验证的接受结果，推进 replay cursor。"""
 
         if self.verify_width > 1:

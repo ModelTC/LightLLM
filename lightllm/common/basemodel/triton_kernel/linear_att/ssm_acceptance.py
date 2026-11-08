@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import torch
 import triton
 import triton.language as tl
 
@@ -24,7 +27,13 @@ def _commit_prefix(
         tl.store(Cursors + req, cursor + length, valid)
 
 
-def commit_ssm_prefix(indices, reqs, lengths, replay_cursors=None):
+def commit_ssm_prefix(
+    indices: torch.Tensor,
+    reqs: torch.Tensor,
+    lengths: torch.Tensor,
+    replay_cursors: torch.Tensor | None = None,
+) -> None:
+    """把每个请求的 accepted length 写入 MTP 索引并推进 Replay cursor。"""
     if not reqs.is_cuda:
         indices[reqs] = (lengths - 1).to(indices.dtype)
         if replay_cursors is not None:

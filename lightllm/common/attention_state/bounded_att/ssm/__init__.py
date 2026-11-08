@@ -1,7 +1,26 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import torch
 
+if TYPE_CHECKING:
+    from ..conv_ssm_types import ConvSSMStateConfig
+    from .base import SSMExecutor
 
-def create_ssm_executor(config, request_capacity, mtp_step, device, mode, replay_config, *, kda, gate_lower_bound):
+
+def create_ssm_executor(
+    config: ConvSSMStateConfig,
+    request_capacity: int,
+    mtp_step: int,
+    device: str | torch.device,
+    mode: str,
+    replay_config: dict[str, object] | None,
+    *,
+    kda: bool,
+    gate_lower_bound: float,
+) -> SSMExecutor:
+    """根据状态模式创建 Native 或 Replay SSM executor。"""
     """按统一 state layout 创建 native 或 replay executor。
 
     native 为每个 MTP 位置分配物理槽位，replay 为每个请求分配一个槽位，

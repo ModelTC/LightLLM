@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 @dataclasses.dataclass
 class Glm5NextResourceConfig(Qwen3NextResourceConfig):
-    """Replicated MLA/index KV plus TP-sharded KDA checkpoints."""
+    """描述复制式 MLA/index KV 与 TP 分片 KDA checkpoint 的资源配置。"""
 
     # Indexer 池化步长，单位为原始 token；同时决定 K-pool tail 的基准 ring 长度和恢复边界。
     gate_lower_bound: float = -5.0
@@ -24,6 +24,7 @@ class Glm5NextResourceConfig(Qwen3NextResourceConfig):
 
     @classmethod
     def from_model_config(cls, config: dict[str, object], args: StartArgs | EasyDict) -> "Glm5NextResourceConfig":
+        """从模型配置和启动参数构造 GLM5.3 Flash 资源配置。"""
         config = config.get("text_config", config)
         linear = config["linear_attn_config"]
         tp = args.tp // args.dp

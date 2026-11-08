@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 from math import prod
 
 import torch
@@ -46,9 +46,10 @@ class _ConvSSMState(BoundedAttentionState):
         device: str | torch.device = "cuda",
         *,
         ssm_state_mode: str = "native",
-        ssm_replay_config: dict | None = None,
+        ssm_replay_config: dict[str, object] | None = None,
         gate_lower_bound: float = -5.0,
-    ):
+    ) -> None:
+        """创建共享 Conv/SSM 运行态，并按模式绑定对应的 SSM executor。"""
         self.config = config
         if self.state_mode is not None and ssm_state_mode != self.state_mode:
             raise ValueError(f"state mode {ssm_state_mode!r} does not match {self.state_mode!r}")
@@ -77,29 +78,35 @@ class _ConvSSMState(BoundedAttentionState):
         self.small_pages_pool = None
 
     @property
-    def ssm_state(self):
+    def ssm_state(self) -> torch.Tensor:
+        """返回 executor 持有的 canonical SSM state。"""
         return self._ssm_executor.state
 
     @property
-    def ssm_slots_per_req(self):
+    def ssm_slots_per_req(self) -> int:
+        """返回每个请求占用的物理 SSM 槽位数。"""
         return self._ssm_executor.slots_per_request
 
-    def _reset_tracking(self, req_idx):
+    def _reset_tracking(self, req_idx: int) -> None:
+        """清理请求的临时 history 和 MTP 接受游标。"""
         self._ssm_executor.clear_history(req_idx)
         if self.mtp_state_index is not None:
             self.mtp_state_index[req_idx].zero_()
 
-    def reset(self, req_idx):
+    def reset(self, req_idx: int) -> None:
+        """清空请求的 Conv/SSM 运行态，同时保留页池快照。"""
         self._reset_tracking(req_idx)
         self.conv_state[:, req_idx].zero_()
         start = req_idx * self.ssm_slots_per_req
         self.ssm_state[:, start : start + self.ssm_slots_per_req].zero_()
 
-    def prepare_prefill(self, reqs):
+    def prepare_prefill(self, reqs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """合并已接受 history，并返回 prefill 使用的请求和物理索引。"""
         self._ssm_executor.merge_accepted_updates(reqs)
         return reqs, reqs * self.ssm_slots_per_req
 
-    def prepare_decode(self, reqs, cu_seqlens=None):
+    def prepare_decode(self, reqs: torch.Tensor, cu_seqlens: torch.Tensor | None = None) -> SSMForward:
+        """准备普通或 speculative decode，并返回对应的 SSMForward 上下文。"""
         speculative = cu_seqlens is not None
         accepted = None
         if speculative:
@@ -114,8 +121,8 @@ class _ConvSSMState(BoundedAttentionState):
             self, self._ssm_executor, reqs, self._ssm_executor.decode_indices(reqs, speculative), cu_seqlens, accepted
         )
 
-    def get_accepted_state(self, req_idx):
-        """Return canonical tensors; native MTP gathers and replay materialization allocate snapshots."""
+    def get_accepted_state(self, req_idx: int) -> ConvSSMTensors:
+        """返回 canonical Conv/SSM 状态；Native 会选槽位，Replay 会物化快照。"""
         width = self.config.conv_width
         accepted = self.mtp_state_index[req_idx] if self.mtp_state_index is not None else None
         conv = self.conv_state[:, req_idx, ..., :width]
@@ -124,12 +131,13 @@ class _ConvSSMState(BoundedAttentionState):
             conv = self.conv_state[:, req_idx].index_select(-1, offsets)
         return ConvSSMTensors(conv, self._ssm_executor.get_accepted_state(req_idx, accepted))
 
-    def export_accepted_state(self, req_indices, targets):
-        """Write disjoint targets on the current stream without full-state scratch or changing source history."""
+    def export_accepted_state(self, req_indices: list[int], targets: list[ConvSSMTensors]) -> None:
+        """在当前 stream 写入互不重叠的目标页，不分配整批临时快照。"""
         export_indexed_state(self.conv_state, req_indices, [t.conv for t in targets], self.mtp_state_index)
         self._ssm_executor.export_accepted_state(req_indices, [t.ssm for t in targets], self.mtp_state_index)
 
-    def prepare_restore(self, req_idx):
+    def prepare_restore(self, req_idx: int) -> ConvSSMTensors:
+        """清理请求 tracking，并返回可写入恢复快照的 Conv/SSM 视图。"""
 
         self._reset_tracking(req_idx)
         return ConvSSMTensors(
@@ -137,15 +145,18 @@ class _ConvSSMState(BoundedAttentionState):
             self.ssm_state[:, req_idx * self.ssm_slots_per_req],
         )
 
-    def restore(self, req_idx, conv, ssm):
+    def restore(self, req_idx: int, conv: torch.Tensor, ssm: torch.Tensor) -> None:
+        """把 Conv/SSM 快照复制回指定请求并完成恢复后的 tracking 初始化。"""
         target = self.prepare_restore(req_idx)
         target.conv.copy_(conv, non_blocking=True)
         target.ssm.copy_(ssm, non_blocking=True)
 
-    def get_storage_layer_index(self, logical_layer_id):
+    def get_storage_layer_index(self, logical_layer_id: int) -> int:
+        """把逻辑层号映射到当前 State 的物理层号。"""
         return self._logical_to_storage_layer[logical_layer_id]
 
     def get_state_type(self) -> str:
+        """返回包含算法和 Conv/SSM 精度的稳定 State 类型名。"""
         return (
             f"{self.algorithm}_conv_{dtype_name(dtype=self.config.conv_dtype)}"
             f"_ssm_{dtype_name(dtype=self.config.ssm_dtype)}"
@@ -215,10 +226,9 @@ class _ConvSSMState(BoundedAttentionState):
         ), "request and slot indices must be lists"
         assert len(req_indices) == len(state_token_lens) == len(page_slot_ids), "request, length and page counts differ"
         pool = self._pool(page_kind)
-        # Hybrid radix pages are durable checkpoints. ReplaySSM can fold the
-        # accepted ring into the live canonical state and the page in one
-        # kernel, so the next decode starts from an empty history. MTP keeps
-        # a separate Conv candidate layout and retains the old behavior.
+        # Hybrid radix page 是持久 checkpoint。ReplaySSM 可以在一个 kernel 中把
+        # accepted ring 折叠到 canonical state 和目标页，使下一轮 decode 从空 history 开始。
+        # MTP 使用独立的 Conv candidate 布局，因此保留原有行为。
         replay_flush = flush_history and self.mtp_state_index is None
         targets = [ConvSSMTensors(pool.conv_state[slot], pool.ssm_state[slot]) for slot in page_slot_ids]
         export_indexed_state(self.conv_state, req_indices, [target.conv for target in targets], self.mtp_state_index)
@@ -250,7 +260,8 @@ class _ConvSSMState(BoundedAttentionState):
         copy_bounded_att_tensors(copies=conv_copies)
         copy_bounded_att_tensors(copies=ssm_copies)
 
-    def validate_bounded_att_commit(self, acceptance: StateAcceptance):
+    def validate_bounded_att_commit(self, acceptance: StateAcceptance) -> object | None:
+        """校验 acceptance 设备并委托 executor 检查可选的提交配置。"""
         assert (
             acceptance.req_indices.device == self.ssm_state.device
         ), "commit inputs must match the state device; CUDA states require CUDA tensors"
@@ -260,6 +271,7 @@ class _ConvSSMState(BoundedAttentionState):
         return None
 
     def commit_bounded_att_state(self, acceptance: StateAcceptance) -> None:
+        """应用已接受的 MTP 前缀并推进对应的 executor 状态。"""
         commit_data = self.validate_bounded_att_commit(acceptance)
         if self.mtp_state_index is not None:
             self._ssm_executor.commit_validated(
@@ -562,7 +574,7 @@ class _ConvSSMState(BoundedAttentionState):
         )
         return tuple(regions)
 
-    def _pool(self, page_kind: PageKind):
+    def _pool(self, page_kind: PageKind) -> Any:
         """根据大小页类型取得已启用的页池，不访问 allocator。"""
         assert page_kind in ("big", "small"), f"unknown page kind {page_kind}"
         pool = self.big_pages_pool if page_kind == "big" else self.small_pages_pool
@@ -570,7 +582,8 @@ class _ConvSSMState(BoundedAttentionState):
         return pool
 
     @staticmethod
-    def _fields(conv: torch.Tensor, ssm: torch.Tensor):
+    def _fields(conv: torch.Tensor, ssm: torch.Tensor) -> dict[str, TensorField]:
+        """把 Conv/SSM tensor 包装成页传输布局使用的字段字典。"""
         return {
             "conv": TensorField(tensor=conv, axes=("layer", "channel", "window")),
             "ssm": TensorField(tensor=ssm, axes=("layer", "head", "key_dim", "value_dim")),

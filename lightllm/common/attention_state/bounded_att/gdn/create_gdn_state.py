@@ -15,7 +15,7 @@ def create_gdn_state(
     device: str | torch.device = "cuda",
     *,
     ssm_state_mode: str = "native",
-    ssm_replay_config: dict | None = None,
+    ssm_replay_config: dict[str, object] | None = None,
     gate_lower_bound: float = -5.0,
 ) -> GDNState:
     """创建 GDN 请求运行态，大小页池由后续容量分配流程初始化。"""
