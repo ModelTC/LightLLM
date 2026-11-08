@@ -86,7 +86,7 @@ def test_model_configuration_retains_nondefault_kda_gate_bound():
 
 def test_kda_backend_receives_gate_bound_at_construction(linear_config):
     owner = KDAState(linear_config, 3, mtp_step=2, ssm_state_mode="replay", gate_lower_bound=-2.5, device="cpu")
-    assert owner._ssm.gate_lower_bound == -2.5
+    assert owner._ssm_executor.gate_lower_bound == -2.5
 
 
 def test_replay_backend_publishes_detached_run_config():
@@ -110,7 +110,7 @@ def test_replay_backend_publishes_detached_run_config():
 @pytest.mark.parametrize("mtp_step,expected", [(0, "inline"), (2, "precompute")])
 def test_replay_defaults_to_precompute_for_speculative_decode(linear_config, cls, mtp_step, expected):
     owner = cls(linear_config, request_capacity=2, mtp_step=mtp_step, ssm_state_mode="replay", device="cpu")
-    assert owner._ssm.compute_mode == expected
+    assert owner._ssm_executor.compute_mode == expected
 
 
 def make_acceptance(batches=()):
@@ -161,10 +161,10 @@ def test_replay_fused_acceptance_keeps_cursors_inside_mode(monkeypatch, cls):
     owner, _, _ = make_state(cls, mode="replay", step=3, device="cpu")
     calls = []
     monkeypatch.setattr(base, "commit_ssm_prefix", lambda *args: calls.append(args))
-    monkeypatch.setattr(owner._ssm, "accept_updates", lambda *a: pytest.fail("unfused acceptance"))
+    monkeypatch.setattr(owner._ssm_executor, "accept_updates", lambda *a: pytest.fail("unfused acceptance"))
     owner.commit_bounded_att_state(make_acceptance())
     assert len(calls) == 1
-    assert calls[0][3] is owner._ssm.cursors
+    assert calls[0][3] is owner._ssm_executor.cursors
     assert calls[0][0] is owner.mtp_state_index
 
 
@@ -178,7 +178,7 @@ def test_graph_layout_mismatch_rejected_before_copy(change):
     if change == "owner":
         source.resource = copy(owner)
     elif change == "executor":
-        source.executor = copy(owner._ssm)
+        source.executor = copy(owner._ssm_executor)
     elif change == "shape":
         source.state_indices = source.state_indices[:1]
     elif change == "optional":
@@ -245,9 +245,9 @@ def test_acceptance_keeps_request_order_with_strided_inputs(device):
         pytest.skip("CUDA required")
     owner, _, _ = make_state(mode="replay", step=3, device=device)
     owner.mtp_state_index.fill_(2)
-    owner._ssm.cursors.fill_(8)
+    owner._ssm_executor.cursors.fill_(8)
     reqs = torch.tensor([2, -99, 0, -99, 3, -99], device=device)[::2]
     lengths = torch.tensor([1, -99, 3, -99, 2, -99], dtype=torch.int32, device=device)[::2]
     owner.commit_bounded_att_state(StateAcceptance(reqs, lengths))
     assert owner.mtp_state_index.tolist() == [2, 2, 0, 1]
-    assert owner._ssm.cursors.tolist() == [11, 8, 9, 8]
+    assert owner._ssm_executor.cursors.tolist() == [11, 8, 9, 8]

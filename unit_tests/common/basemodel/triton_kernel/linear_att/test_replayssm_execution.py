@@ -102,7 +102,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         for cls in [ReplaySSMExecutor, ReplaySSMExecutor]
     ]
     manager = SimpleNamespace()
-    manager._ssm = ssm_backends[1]
+    manager._ssm_executor = ssm_backends[1]
     manager.mtp_state_index = torch.zeros(5, device="cuda", dtype=torch.int32)
     rows = torch.full((12,), 4, device="cuda", dtype=torch.int32)
     mtp = torch.zeros_like(rows)
@@ -150,7 +150,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         if index == 0:
             ssm_backend.accept_updates(reqs, accepted)
         else:
-            manager._ssm.commit(
+            manager._ssm_executor.commit(
                 StateAcceptance(rows[starts.long()], accepted[rows[starts.long()]] + 1),
                 manager.mtp_state_index,
                 "main",

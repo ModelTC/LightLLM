@@ -18,7 +18,7 @@ class SSMExecutor:
     """
 
     # State 负责资源生命周期和层映射，Executor 只负责本模式的 decode、接受和快照导出。
-    # 这样 Native、Compact、Replay 共享同一条上层调用链，差异收敛在执行器内部。
+    # 这样 Native、Replay 共享同一条上层调用链，差异收敛在执行器内部。
 
     slots_per_request = 1
     _run_config: SSMRunConfig | None = None
@@ -39,7 +39,7 @@ class SSMExecutor:
         return None
 
     def prepare_decode(self, reqs, cu_seqlens=None):
-        """在 decode 前准备本轮基准；Native/Compact 默认不需要准备。"""
+        """在 decode 前准备本轮基准；Native 默认不需要准备。"""
 
         return None
 

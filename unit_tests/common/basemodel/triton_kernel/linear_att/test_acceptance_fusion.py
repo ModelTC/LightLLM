@@ -29,7 +29,7 @@ def make(n, width):
     ssm_backend.verify_width = width
     manager = SimpleNamespace()
     manager.mtp_state_index = tensor([-9] * (hold + 1))
-    manager._ssm = ssm_backend
+    manager._ssm_executor = ssm_backend
     return manager, args, (ids, lengths, starts)
 
 
@@ -66,7 +66,7 @@ def test_request_counts_share_compiled_kernel(monkeypatch, replay):
 
 def accept_unfused(m, args):
     update(m.mtp_state_index, *args)
-    m._ssm.accept_updates(args[1][args[0].long()], m.mtp_state_index)
+    m._ssm_executor.accept_updates(args[1][args[0].long()], m.mtp_state_index)
 
 
 def accept_fused(m, args):
@@ -74,7 +74,7 @@ def accept_fused(m, args):
     ends = torch.cat((args[0][1:], args[0].new_full((1,), args[3].numel())))
     cumulative = torch.cat((args[3].new_zeros(1), args[3].cumsum(0)))
     lengths = cumulative[ends.long()] - cumulative[args[0].long()]
-    m._ssm.commit(StateAcceptance(reqs, lengths), m.mtp_state_index, "main")
+    m._ssm_executor.commit(StateAcceptance(reqs, lengths), m.mtp_state_index, "main")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -95,15 +95,15 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
             expected_cursor = [7] * len(expected_index)
             m.mtp_state_index.fill_(-9)
             ref.mtp_state_index.fill_(-9)
-            m._ssm.cursors.fill_(7)
-            ref._ssm.cursors.fill_(7)
+            m._ssm_executor.cursors.fill_(7)
+            ref._ssm_executor.cursors.fill_(7)
             for step in range(24):
                 mask = []
                 for i, (r, l) in enumerate(zip(ids, lengths)):
                     count = (step + i) % (l + 1)
                     mask.extend([1] * count + [0] * (l - count))
                     expected_index[r] = count - 1
-                    if r != m._ssm.hold_req_id:
+                    if r != m._ssm_executor.hold_req_id:
                         expected_cursor[r] += count if width > 1 else 1
                 args[3].copy_(torch.tensor(mask, device="cuda", dtype=torch.int32))
                 accept_unfused(ref, args)
@@ -112,12 +112,12 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
                 else:
                     accept_fused(m, args)
                 assert torch.equal(m.mtp_state_index, ref.mtp_state_index)
-                assert torch.equal(m._ssm.cursors, ref._ssm.cursors)
+                assert torch.equal(m._ssm_executor.cursors, ref._ssm_executor.cursors)
                 assert m.mtp_state_index.tolist() == expected_index
-                assert m._ssm.cursors.tolist() == expected_cursor
+                assert m._ssm_executor.cursors.tolist() == expected_cursor
                 checks += 1
 
-            m._ssm = NativeSSMExecutor(torch.empty(0), width)
+            m._ssm_executor = NativeSSMExecutor(torch.empty(0), width)
             accept_fused(m, args)
             assert m.mtp_state_index.tolist() == expected_index
 
@@ -145,7 +145,7 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
     managers = []
     for ssm_backend in ssm_backends:
         manager = SimpleNamespace()
-        manager._ssm = ssm_backend
+        manager._ssm_executor = ssm_backend
         manager.mtp_state_index = torch.zeros(8, dtype=torch.int32, device="cuda")
         managers.append(manager)
     reqs = torch.full((4,), 7, dtype=torch.int32, device="cuda")
@@ -214,8 +214,8 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
             assert torch.equal(ssm_backends[0].state, ssm_backends[1].state)
         if iteration == 19:
             for manager in managers:
-                manager._ssm.clear_history(1)
-                manager._ssm.state[:, 1].zero_()
+                manager._ssm_executor.clear_history(1)
+                manager._ssm_executor.state[:, 1].zero_()
                 manager.mtp_state_index[1] = 0
     for ssm_backend in ssm_backends:
         ssm_backend.merge_accepted_updates(reqs[:3])

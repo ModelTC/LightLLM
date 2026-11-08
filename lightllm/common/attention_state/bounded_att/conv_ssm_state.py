@@ -63,7 +63,7 @@ class _ConvSSMState(BoundedAttentionState):
             dtype=config.conv_dtype,
             device=device,
         )
-        self._ssm = create_ssm_executor(
+        self._ssm_executor = create_ssm_executor(
             config,
             request_capacity,
             mtp_step,
@@ -78,14 +78,14 @@ class _ConvSSMState(BoundedAttentionState):
 
     @property
     def ssm_state(self):
-        return self._ssm.state
+        return self._ssm_executor.state
 
     @property
     def ssm_slots_per_req(self):
-        return self._ssm.slots_per_request
+        return self._ssm_executor.slots_per_request
 
     def _reset_tracking(self, req_idx):
-        self._ssm.clear_history(req_idx)
+        self._ssm_executor.clear_history(req_idx)
         if self.mtp_state_index is not None:
             self.mtp_state_index[req_idx].zero_()
 
@@ -96,7 +96,7 @@ class _ConvSSMState(BoundedAttentionState):
         self.ssm_state[:, start : start + self.ssm_slots_per_req].zero_()
 
     def prepare_prefill(self, reqs):
-        self._ssm.merge_accepted_updates(reqs)
+        self._ssm_executor.merge_accepted_updates(reqs)
         return reqs, reqs * self.ssm_slots_per_req
 
     def prepare_decode(self, reqs, cu_seqlens=None):
@@ -107,10 +107,12 @@ class _ConvSSMState(BoundedAttentionState):
                 raise ValueError("speculative decode requires MTP state slots")
             accepted = self.mtp_state_index[reqs] + 1
             accepted = torch.where(reqs == self.request_capacity - 1, 1, accepted)
-        self._ssm.prepare_decode(reqs, cu_seqlens)
+        self._ssm_executor.prepare_decode(reqs, cu_seqlens)
         if not speculative:
-            self._ssm.accept_single_token(reqs)
-        return SSMForward(self, self._ssm, reqs, self._ssm.decode_indices(reqs, speculative), cu_seqlens, accepted)
+            self._ssm_executor.accept_single_token(reqs)
+        return SSMForward(
+            self, self._ssm_executor, reqs, self._ssm_executor.decode_indices(reqs, speculative), cu_seqlens, accepted
+        )
 
     def get_accepted_state(self, req_idx):
         """Return canonical tensors; native MTP gathers and replay materialization allocate snapshots."""
@@ -120,12 +122,12 @@ class _ConvSSMState(BoundedAttentionState):
         if accepted is not None:
             offsets = torch.arange(width, device=conv.device) + accepted
             conv = self.conv_state[:, req_idx].index_select(-1, offsets)
-        return ConvSSMTensors(conv, self._ssm.get_accepted_state(req_idx, accepted))
+        return ConvSSMTensors(conv, self._ssm_executor.get_accepted_state(req_idx, accepted))
 
     def export_accepted_state(self, req_indices, targets):
         """Write disjoint targets on the current stream without full-state scratch or changing source history."""
         export_indexed_state(self.conv_state, req_indices, [t.conv for t in targets], self.mtp_state_index)
-        self._ssm.export_accepted_state(req_indices, [t.ssm for t in targets], self.mtp_state_index)
+        self._ssm_executor.export_accepted_state(req_indices, [t.ssm for t in targets], self.mtp_state_index)
 
     def prepare_restore(self, req_idx):
 
@@ -220,7 +222,7 @@ class _ConvSSMState(BoundedAttentionState):
         replay_flush = flush_history and self.mtp_state_index is None
         targets = [ConvSSMTensors(pool.conv_state[slot], pool.ssm_state[slot]) for slot in page_slot_ids]
         export_indexed_state(self.conv_state, req_indices, [target.conv for target in targets], self.mtp_state_index)
-        self._ssm.export_accepted_state(
+        self._ssm_executor.export_accepted_state(
             req_indices,
             [target.ssm for target in targets],
             self.mtp_state_index,
@@ -253,14 +255,16 @@ class _ConvSSMState(BoundedAttentionState):
             acceptance.req_indices.device == self.ssm_state.device
         ), "commit inputs must match the state device; CUDA states require CUDA tensors"
         if self.mtp_state_index is not None:
-            validator = getattr(self._ssm, "validate_commit", None)
+            validator = getattr(self._ssm_executor, "validate_commit", None)
             return validator(acceptance, self.state_name) if validator is not None else None
         return None
 
     def commit_bounded_att_state(self, acceptance: StateAcceptance) -> None:
         commit_data = self.validate_bounded_att_commit(acceptance)
         if self.mtp_state_index is not None:
-            self._ssm.commit_validated(acceptance, self.mtp_state_index, self.state_name, commit_data=commit_data)
+            self._ssm_executor.commit_validated(
+                acceptance, self.mtp_state_index, self.state_name, commit_data=commit_data
+            )
 
     # ========================================================================
     # 三、CPU Cache 数据交换

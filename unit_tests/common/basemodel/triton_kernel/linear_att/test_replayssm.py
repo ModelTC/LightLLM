@@ -497,7 +497,7 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(runtime_start_arg
     state.mtp_state_index[1] = 1
     state.conv_state.normal_()
     state.ssm_state.zero_()
-    backend = state._ssm
+    backend = state._ssm_executor
     backend.raw_keys.normal_()
     backend.raw_values.normal_()
     backend.gates.uniform_(-0.1, -0.01)

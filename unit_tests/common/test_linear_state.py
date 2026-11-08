@@ -45,11 +45,11 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
     expected_conv = state.conv_state[:, src, ..., offset : offset + 3].clone()
     expected_ssm = state.ssm_state[:, src * state.ssm_slots_per_req + (offset if mode == "native" else 0)].clone()
     if mode == "replay":
-        state._ssm.raw_keys.zero_()
-        state._ssm.raw_values.zero_()
-        state._ssm.gates.fill_(-0.5)
-        state._ssm.betas.zero_()
-        state._ssm.cursors[src] = 1
+        state._ssm_executor.raw_keys.zero_()
+        state._ssm_executor.raw_values.zero_()
+        state._ssm_executor.gates.fill_(-0.5)
+        state._ssm_executor.betas.zero_()
+        state._ssm_executor.cursors[src] = 1
         expected_ssm = (expected_ssm.float() * torch.exp(torch.tensor(-0.5))).to(dtype)
     before = state.ssm_state.clone()
     block = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
@@ -62,7 +62,7 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
         torch.testing.assert_close(pool.ssm_state[0], expected_ssm.cpu(), rtol=2e-5, atol=2e-5)
     assert torch.equal(state.ssm_state, before)
     if mode == "replay":
-        assert state._ssm.cursors[src].item() == 1
+        assert state._ssm_executor.cursors[src].item() == 1
 
     for restore in (
         lambda: state.restore_bounded_att_runtime_from_pages([dst], [8], "small", [0]),
@@ -72,7 +72,7 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
         if state.mtp_state_index is not None:
             state.mtp_state_index[dst] = step
         if mode == "replay":
-            state._ssm.cursors[dst] = 3
+            state._ssm_executor.cursors[dst] = 3
         restore()
         actual = state.get_accepted_state(dst)
         torch.testing.assert_close(actual.conv, expected_conv, rtol=0, atol=0)
@@ -80,7 +80,7 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
         if state.mtp_state_index is not None:
             assert state.mtp_state_index[dst].item() == 0
         if mode == "replay":
-            assert state._ssm.cursors[dst].item() == 0
+            assert state._ssm_executor.cursors[dst].item() == 0
     state.reset_bounded_att_state([dst])
     assert not state.conv_state[:, dst].any()
     start = dst * state.ssm_slots_per_req
@@ -105,21 +105,21 @@ def test_checkpoint_batch_export(runtime_start_args, monkeypatch, cls, mode, dty
         state.ssm_state[:, slot].fill_(slot + 1)
     state.mtp_state_index.copy_(torch.tensor([0, 2, 1, 0], device="cuda"))
     if mode == "replay":
-        state._ssm.raw_keys.zero_()
-        state._ssm.raw_values.zero_()
-        state._ssm.gates.fill_(-0.5)
-        state._ssm.betas.zero_()
-        state._ssm.cursors.copy_(torch.tensor([1, 2, 3, 0], device="cuda"))
+        state._ssm_executor.raw_keys.zero_()
+        state._ssm_executor.raw_values.zero_()
+        state._ssm_executor.gates.fill_(-0.5)
+        state._ssm_executor.betas.zero_()
+        state._ssm_executor.cursors.copy_(torch.tensor([1, 2, 3, 0], device="cuda"))
     requests = [2, 0, 1]
     expected = [(s.conv.clone(), s.ssm.clone()) for s in map(state.get_accepted_state, requests)]
     before = state.ssm_state.clone()
-    cursors = state._ssm.cursors.clone() if mode == "replay" else None
+    cursors = state._ssm_executor.cursors.clone() if mode == "replay" else None
 
     def no_snapshot(*args):
         raise AssertionError("batch export must write directly to the destination")
 
     monkeypatch.setattr(state, "get_accepted_state", no_snapshot)
-    monkeypatch.setattr(state._ssm, "get_accepted_state", no_snapshot)
+    monkeypatch.setattr(state._ssm_executor, "get_accepted_state", no_snapshot)
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
@@ -131,7 +131,7 @@ def test_checkpoint_batch_export(runtime_start_args, monkeypatch, cls, mode, dty
         torch.testing.assert_close(pool.ssm_state[slot].cpu(), ssm.cpu(), atol=0, rtol=0)
     assert torch.equal(state.ssm_state, before)
     if cursors is not None:
-        assert torch.equal(state._ssm.cursors, cursors)
+        assert torch.equal(state._ssm_executor.cursors, cursors)
     target, _, _ = make_state(cls, "native", 2, dtype)
     target.mtp_state_index.fill_(2)
     target.copy_runtime_state_from_dp(requests, [0, 1, 2], state)
@@ -141,7 +141,7 @@ def test_checkpoint_batch_export(runtime_start_args, monkeypatch, cls, mode, dty
         torch.testing.assert_close(actual.ssm, ssm, atol=0, rtol=0)
     assert torch.equal(state.ssm_state, before)
     if cursors is not None:
-        assert torch.equal(state._ssm.cursors, cursors)
+        assert torch.equal(state._ssm_executor.cursors, cursors)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
