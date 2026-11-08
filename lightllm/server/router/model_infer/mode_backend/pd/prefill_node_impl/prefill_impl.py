@@ -45,6 +45,12 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                 self.info_queue.put(PDAbortReq(request_id=req_obj.req_id, device_id=req_obj.pd_trans_device_id))
                 req_obj.pd_abort_req_send_count = pd_abort_req_send_count + 1
 
+            # CPU cache 还在搬运时，cur_kv_len 已经记成命中长度，但 KV 还不能读。
+            if self.args.enable_cpu_cache and (
+                req_obj.cpu_cache_load_task_status.is_running() or req_obj.cpu_cache_offload_task_status.is_running()
+            ):
+                continue
+
             prefill_finished = req_obj.shm_req.input_len <= req_obj.cur_kv_len
             if prefill_finished:
                 # 等待所有传输任务都已经完成。

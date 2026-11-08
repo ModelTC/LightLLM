@@ -50,6 +50,7 @@ def test_prefill_infer_forwards_abort_to_kv_move_manager(monkeypatch):
 
     backend = PDChunkedPrefillForPrefillNode.__new__(PDChunkedPrefillForPrefillNode)
     backend.is_master_in_dp = True
+    backend.args = SimpleNamespace(enable_cpu_cache=False)
     backend.info_queue = queue.Queue()
 
     ready_reqs = backend._filter_not_ready_reqs([request_id])
@@ -76,6 +77,7 @@ def test_prefill_infer_sends_abort_at_most_six_times(monkeypatch):
 
     backend = PDChunkedPrefillForPrefillNode.__new__(PDChunkedPrefillForPrefillNode)
     backend.is_master_in_dp = True
+    backend.args = SimpleNamespace(enable_cpu_cache=False)
     backend.info_queue = queue.Queue()
 
     for _ in range(8):
@@ -110,6 +112,35 @@ def test_decode_infer_sends_abort_at_most_six_times(monkeypatch):
     assert all(abort_req == PDAbortReq(request_id=request_id, device_id=1) for abort_req in abort_reqs)
     assert backend.info_queue.empty()
     assert req.pd_abort_req_send_count == 6
+
+
+def test_prefill_filter_skips_request_while_cpu_cache_load_is_running(monkeypatch):
+    from lightllm.server.router.model_infer.infer_batch import InferReq
+
+    request_id = 123
+    status = InferReq._CpuCacheTaskStatus
+    req = SimpleNamespace(
+        req_id=request_id,
+        infer_aborted=False,
+        pd_task_num=0,
+        pd_task_failed_num=0,
+        pd_task_success_num=0,
+        cur_kv_len=8192,
+        shm_req=SimpleNamespace(input_len=8192),
+        cpu_cache_load_task_status=status.RUNNING,
+        cpu_cache_offload_task_status=status.NOT_STARTED,
+    )
+    monkeypatch.setattr(prefill_impl.g_infer_context, "requests_mapping", {request_id: req})
+
+    backend = PDChunkedPrefillForPrefillNode.__new__(PDChunkedPrefillForPrefillNode)
+    backend.is_master_in_dp = True
+    backend.args = SimpleNamespace(enable_cpu_cache=True)
+    backend.info_queue = queue.Queue()
+
+    assert backend._filter_not_ready_reqs([request_id]) == []
+
+    req.cpu_cache_load_task_status = status.FINISHED
+    assert backend._filter_not_ready_reqs([request_id]) == [req]
 
 
 def test_prefill_kv_move_manager_routes_abort_to_target_device():
