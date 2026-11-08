@@ -346,6 +346,7 @@ class AttentionStateManager:
         state_token_lens: List[int],
         page_kind: PageKind,
         page_slot_ids: List[int],
+        flush_history: bool = False,
     ) -> None:
         """按各请求已执行的绝对 token 长度保存全部 bounded State；三个列表逐项对应。"""
         bounded_states = self.get_bounded_attention_states()
@@ -364,6 +365,7 @@ class AttentionStateManager:
                 state_token_lens=state_token_lens,
                 page_kind=page_kind,
                 page_slot_ids=page_slot_ids,
+                flush_history=flush_history,
             )
 
     def restore_bounded_att_runtime_from_pages(

@@ -114,7 +114,7 @@ def make_mems(monkeypatch, request):
 @pytest.mark.parametrize("remainder", range(4))
 @pytest.mark.parametrize("decode_mtp_step", [0, 1, 5])
 @pytest.mark.parametrize("source_mode", ["native", "replay"])
-@pytest.mark.parametrize("dest_mode", ["native", "replay", "compact"])
+@pytest.mark.parametrize("dest_mode", ["native", "replay"])
 def test_pd_kv_and_runtime_state_roundtrip(
     make_mems,
     prefill_tp,
@@ -124,8 +124,6 @@ def test_pd_kv_and_runtime_state_roundtrip(
     source_mode,
     dest_mode,
 ):
-    if dest_mode == "compact" and decode_mtp_step == 0:
-        pytest.skip("compact requires MTP")
     source = make_mems(prefill_tp, mode=source_mode)
     dest = make_mems(decode_tp, target_mtp_step=decode_mtp_step, mode=dest_mode)
     dst_ssm_stride = dest[0].linear.ssm_slots_per_req

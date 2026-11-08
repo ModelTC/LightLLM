@@ -104,7 +104,7 @@ def test_whole_image_blocks_fit_batch_at_startup(
             _launch_subprocesses(args)
 
 
-@pytest.mark.parametrize("mode,step", [("native", 0), ("compact", 4), ("replay", 0)])
+@pytest.mark.parametrize("mode,step", [("native", 0), ("replay", 0), ("replay", 4)])
 def test_s3_configuration_is_prepared_before_ssm_validation(launch_args, monkeypatch, tmp_path, mode, step):
     from pathlib import Path
     from lightllm.utils.petrel_helper import PetrelHelper
@@ -131,4 +131,8 @@ def test_s3_configuration_is_prepared_before_ssm_validation(launch_args, monkeyp
         _launch_subprocesses(args)
     assert downloads == [model_dir + "/config.json"]
     if mode == "replay":
-        assert args.ssm_replay_config == {"cache_len": 16, "compute_mode": "inline", "fold_method": "raw"}
+        expected_compute_mode = "precompute" if step > 0 else "inline"
+        assert args.ssm_replay_config == {
+            "cache_len": 16,
+            "compute_mode": expected_compute_mode,
+        }

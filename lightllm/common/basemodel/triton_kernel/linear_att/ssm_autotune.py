@@ -31,23 +31,18 @@ def static_key(ssm_backend, mode, q, k, v, a, b, cu_seqlens):
         "shape": str((q.shape[-2], hv, ssm_backend.num_key_heads, kd, vd, ssm_backend.verify_width)),
         "dtype": str((q.dtype, ssm_backend.state.dtype)),
         "strides": str((q.stride(axis), k.stride(axis), v.stride(axis), a.stride(0), b.stride(0))),
-        "history": ssm_backend.capacity if mode == "replay" else 0,
+        "history": ssm_backend.capacity,
         "gate": int(ssm_backend.kda),
         "varlen": cu_seqlens is not None,
     }
     if ssm_backend.kda:
         key["lower"] = ssm_backend.gate_lower_bound
-    if mode == "replay":
-        key["history_dtype"] = str(ssm_backend.keys.dtype)
-        if ssm_backend.compute_mode == "parallel":
-            key["projection"] = "parallel"
-            key["fold"] = ssm_backend.fold_method
-            return key
-        key["projection"] = (
-            ("kda_mma" if ssm_backend.kda else "gdn_mma")
-            if ssm_backend.compute_mode == "precompute" and ssm_backend.verify_width > 1
-            else "inline"
-        )
+    key["history_dtype"] = str(ssm_backend.keys.dtype)
+    key["projection"] = (
+        ("kda_mma" if ssm_backend.kda else "gdn_mma")
+        if ssm_backend.compute_mode == "precompute" and ssm_backend.verify_width > 1
+        else "inline"
+    )
     return key
 
 
@@ -86,27 +81,16 @@ def rebuild_inputs(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=Non
             )
     _, _, hv, kd, vd = ssm_backend.state.shape
     state = torch.empty((1, batch + 1, hv, kd, vd), device=q.device, dtype=ssm_backend.state.dtype).normal_(0, 0.02)
-    if mode == "replay":
-        scratch = type(ssm_backend)(
-            state,
-            ssm_backend.capacity,
-            ssm_backend.verify_width,
-            q.dtype,
-            num_key_heads=ssm_backend.num_key_heads,
-            kda=ssm_backend.kda,
-            gate_lower_bound=ssm_backend.gate_lower_bound,
-            compute_mode=ssm_backend.compute_mode,
-            fold_method=ssm_backend.fold_method,
-        )
-    else:
-        scratch = type(ssm_backend)(
-            state,
-            ssm_backend.verify_width,
-            q.dtype,
-            num_key_heads=ssm_backend.num_key_heads,
-            kda=ssm_backend.kda,
-            gate_lower_bound=ssm_backend.gate_lower_bound,
-        )
+    scratch = type(ssm_backend)(
+        state,
+        ssm_backend.capacity,
+        ssm_backend.verify_width,
+        q.dtype,
+        num_key_heads=ssm_backend.num_key_heads,
+        kda=ssm_backend.kda,
+        gate_lower_bound=ssm_backend.gate_lower_bound,
+        compute_mode=ssm_backend.compute_mode,
+    )
     # Benchmark callbacks must not recursively select a configuration.
     scratch._config_is_fixed = True
     inputs = [
@@ -122,8 +106,6 @@ def rebuild_inputs(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=Non
     cu = (torch.arange(sequences + 1, dtype=torch.int32, device=q.device) * ssm_backend.verify_width).clamp_max(tokens)
     lengths = cu[1 : batch + 1] - cu[:batch]
     accepted = torch.cat((lengths - 1, lengths.new_zeros(1)))
-    partial = accepted.clone()
-    partial[:-1] = torch.minimum(reqs[:batch] % ssm_backend.verify_width, lengths - 1)
     return (), dict(
         ssm_backend=scratch,
         mode=mode,
@@ -135,7 +117,7 @@ def rebuild_inputs(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=Non
         a_log=inputs[5],
         bias=inputs[6],
         cu_seqlens=cu if cu_seqlens is not None else None,
-        workload=(reqs, accepted, partial),
+        workload=(reqs, accepted),
     )
 
 
@@ -154,19 +136,16 @@ def select_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None
     if workload is None:
         return run_config
     ssm_backend.run_config = run_config
-    reqs, accepted, partial = workload
-    if mode == "replay":
-        ssm_backend.cursors.zero_()
-        # Include an entire history period and the subsequent fold. Repeating
-        # just the first round would benchmark an empty history forever.
-        tokens = q.shape[1 if cu_seqlens is not None else 0]
-        rounds = ssm_backend.capacity // min(ssm_backend.verify_width, tokens) + 1
-    else:
-        rounds = 2  # Partial acceptance followed by full acceptance.
+    reqs, accepted = workload
+    ssm_backend.cursors.zero_()
+    # Include an entire history period and the subsequent fold. Repeating
+    # just the first round would benchmark an empty history forever.
+    tokens = q.shape[1 if cu_seqlens is not None else 0]
+    rounds = ssm_backend.capacity // min(ssm_backend.verify_width, tokens) + 1
     for step in range(rounds):
         ssm_backend.prepare_decode(reqs, cu_seqlens)
         ssm_backend.forward(0, q, k, v, a, b, a_log, bias, reqs, cu_seqlens)
-        ssm_backend.accept_updates(reqs, partial if mode != "replay" and step == 0 else accepted)
+        ssm_backend.accept_updates(reqs, accepted)
     return run_config
 
 

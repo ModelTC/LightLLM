@@ -27,7 +27,7 @@ def _accept_updates(
 
 
 @triton.jit
-def _use_separate_fold(valid, length, count, N, L: tl.constexpr, WIDTH: tl.constexpr, FORCE: tl.constexpr):
+def _use_separate_fold(valid, length, count, N, L: tl.constexpr, WIDTH: tl.constexpr):
     # 只决定本轮是否单独启动 fold；真正的 history 合并由 _fold_history 完成。
     small_batch: tl.constexpr = 12
     dense_batch: tl.constexpr = 256
@@ -37,8 +37,6 @@ def _use_separate_fold(valid, length, count, N, L: tl.constexpr, WIDTH: tl.const
         if N >= dense_batch:
             short = tl.sum((valid & (length > 0) & (length < WIDTH)).to(tl.int32), axis=0)
             split = split & ((live < dense_batch) | (short > 0))
-    if FORCE:
-        split = count > 0
     return split
 
 
@@ -56,7 +54,6 @@ def _prepare_fold(
     VARLEN: tl.constexpr,
     BLOCK: tl.constexpr,
     WIDTH: tl.constexpr,
-    SEPARATE_FOLD: tl.constexpr,
 ):
     # 输出 Positions/ForwardCursors 供 decode 使用，Active/N 供后续 fold
     # 使用；只改写本轮请求对应的 cursor，不触碰 canonical state。
@@ -77,7 +74,7 @@ def _prepare_fold(
     offset = tl.cumsum(needs_fold.to(tl.int32), axis=0) - 1
     tl.store(Active + offset, seq, needs_fold)
     count = tl.sum(needs_fold.to(tl.int32), axis=0)
-    split = _use_separate_fold(valid, length, count, N, L, WIDTH, SEPARATE_FOLD)
+    split = _use_separate_fold(valid, length, count, N, L, WIDTH)
     tl.store(ForwardCursors + req, tl.where(overflow & split, (cursor & (2 * L)) ^ (2 * L), cursor), valid)
     tl.store(Active + N, tl.where(split, count, 0))
 
@@ -107,10 +104,6 @@ def _fold_history(
     GS: tl.constexpr,
     BS: tl.constexpr,
     KDA: tl.constexpr,
-    Keys,
-    Deltas,
-    DERIVED: tl.constexpr,
-    BL: tl.constexpr,
 ):
     # 只消费 Active 中的 fold 请求，把 history 合并回 canonical state；
     # cursor 的 phase 已由 _prepare_fold 切换，写入后新 history 从同一半区继续。
@@ -134,40 +127,21 @@ def _fold_history(
         key_slot = req * KH + hv // (HV // KH)
         sp = State + linear_layer_idx * SS + slot * K * V + kk[:, None] * V + vv[None, :]
         state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
-        if DERIVED:
-            tl.static_assert(not KDA)
-            ll = tl.arange(0, BL)
-            g = tl.load(Gates + linear_layer_idx * GS + slot * (2 * L) + base + ll, ll < n, 0).to(tl.float32)
-            prefix = tl.cumsum(g, 0)
-            total_g = tl.sum(g, 0)
-            keys = tl.load(
-                Keys + linear_layer_idx * RS + (key_slot * (2 * L) + base + ll[None, :]) * K + kk[:, None],
-                (kk[:, None] < K) & (ll[None, :] < n),
-                0,
-            ).to(tl.float32)
-            delta = tl.load(
-                Deltas + linear_layer_idx * VS + (slot * (2 * L) + base + ll[:, None]) * V + vv[None, :],
-                (ll[:, None] < n) & (vv[None, :] < V),
-                0,
-            ).to(tl.float32)
-            keys *= tl.exp(total_g - prefix)[None, :]
-            state = state * tl.exp(total_g) + tl.dot(keys, delta, input_precision="tf32x3")
-        else:
-            for j in range(n):
-                raw_k = tl.load(
-                    RawKeys + linear_layer_idx * RS + (key_slot * (2 * L) + base + j) * K + kk, kk < K, 0
-                ).to(tl.float32)
-                raw_v = tl.load(RawValues + linear_layer_idx * VS + (slot * (2 * L) + base + j) * V + vv, vv < V, 0).to(
+        for j in range(n):
+            raw_k = tl.load(RawKeys + linear_layer_idx * RS + (key_slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(
+                tl.float32
+            )
+            raw_v = tl.load(RawValues + linear_layer_idx * VS + (slot * (2 * L) + base + j) * V + vv, vv < V, 0).to(
+                tl.float32
+            )
+            if KDA:
+                g = tl.load(Gates + linear_layer_idx * GS + (slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(
                     tl.float32
                 )
-                if KDA:
-                    g = tl.load(Gates + linear_layer_idx * GS + (slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(
-                        tl.float32
-                    )
-                else:
-                    g = tl.load(Gates + linear_layer_idx * GS + slot * (2 * L) + base + j).to(tl.float32)
-                beta = tl.load(Betas + linear_layer_idx * BS + slot * (2 * L) + base + j).to(tl.float32)
-                state = _replay_update(state, raw_k, raw_v, g, beta, KDA)
+            else:
+                g = tl.load(Gates + linear_layer_idx * GS + slot * (2 * L) + base + j).to(tl.float32)
+            beta = tl.load(Betas + linear_layer_idx * BS + slot * (2 * L) + base + j).to(tl.float32)
+            state = _replay_update(state, raw_k, raw_v, g, beta, KDA)
         # Start the new history from the same rounded checkpoint future calls load.
         state = state.to(State.dtype.element_ty).to(tl.float32)
         tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))

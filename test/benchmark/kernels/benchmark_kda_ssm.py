@@ -16,7 +16,6 @@ import triton
 
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMExecutor
-from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMExecutor
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs
 
 
@@ -37,9 +36,7 @@ def workload(args, batch, width, dtype, mode, acceptance):
     slots = (batch + 1) * (width if mode == "native" else 1)
     state = torch.randn(layers, slots, heads, dim, dim, dtype=dtype, device="cuda") * 0.01
     ssm_backend = None
-    if mode == "compact":
-        ssm_backend = CompactSSMExecutor(state, width, q.dtype, kda=True)
-    elif mode != "native":
+    if mode != "native":
         capacity = max(8, triton.next_power_of_2(width))
         ssm_backend = ReplaySSMExecutor(state, capacity, width, q.dtype, kda=True, compute_mode=mode)
     if ssm_backend is not None:
@@ -112,7 +109,7 @@ def main():
         for batch in args.batch:
             for width in args.width:
                 for acceptance in ["full", "partial"] if width > 1 else ["full"]:
-                    for mode in ["native", "compact", "inline", "precompute"] if width > 1 else ["native", "inline"]:
+                    for mode in ["native", "inline", "precompute"] if width > 1 else ["native", "inline"]:
                         ssm_backend, cycle, size = workload(
                             args, batch, width, getattr(torch, dtype_name), mode, acceptance
                         )

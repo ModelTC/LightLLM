@@ -76,11 +76,13 @@ class CoreInterface(ABC):
         state_token_lens: List[int],
         page_kind: PageKind,
         page_slot_ids: List[int],
+        flush_history: bool = False,
     ) -> None:
         """按各请求已执行的绝对 token 长度保存基准运行态，三个列表逐项对应。
 
         长度不包含尚未执行的采样 token；ring 状态据此确定窗口和槽位位置。
-        前缀与页槽位的关联仍由调用方维护，不要求页池保存长度元数据。
+        ``flush_history`` 用于持久化 radix checkpoint：支持的 State 可在写页时
+        同步折叠临时 history；前缀与页槽位的关联仍由调用方维护，不要求页池保存长度元数据。
         """
         ...
 

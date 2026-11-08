@@ -125,7 +125,7 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
 
 @pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.parametrize("role", ["main", "draft0"])
-@pytest.mark.parametrize("mode,mtp_step", [("native", 2), ("compact", 2), ("replay", 2), ("native", 0), ("replay", 0)])
+@pytest.mark.parametrize("mode,mtp_step", [("native", 2), ("replay", 2), ("native", 0), ("replay", 0)])
 def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mode, mtp_step):
     from types import SimpleNamespace
 
@@ -256,10 +256,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
         if mtp_step:
             accepted = torch.zeros(4, dtype=torch.int32, device="cuda")
             accepted[ids] = torch.tensor(lengths, dtype=torch.int32, device="cuda") - 1
-            if mode == "compact":
-                selected._ssm.accept_updates(ids, accepted, run_config=state.get_forward(0).run_config)
-            else:
-                selected._ssm.accept_updates(ids, accepted)
+            selected._ssm.accept_updates(ids, accepted)
         for req, length in zip(requests, lengths):
             torch.testing.assert_close(
                 selected._ssm.get_accepted_state(req)[0],

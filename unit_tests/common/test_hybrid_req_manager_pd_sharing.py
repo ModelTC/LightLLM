@@ -71,7 +71,7 @@ def pd_receiver():
 
 
 @pytest.mark.parametrize("cls", [GDNState, KDAState])
-@pytest.mark.parametrize("mode", ["native", "compact", "replay"])
+@pytest.mark.parametrize("mode", ["native", "replay"])
 def test_pd_export_copy_keeps_worker_pools_and_runtime_identity(cls, mode):
     state, resources, _ = make_state(cls=cls, mode=mode, device="meta")
     state.big_pages_pool, state.small_pages_pool = object(), object()

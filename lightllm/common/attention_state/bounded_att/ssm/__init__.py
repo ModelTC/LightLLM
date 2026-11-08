@@ -2,14 +2,13 @@ import torch
 
 
 def create_ssm_executor(config, request_capacity, mtp_step, device, mode, replay_config, *, kda, gate_lower_bound):
-    """按统一 state layout 创建 native、compact 或 replay executor。
+    """按统一 state layout 创建 native 或 replay executor。
 
-    三种模式共享 canonical SSM state；差异只在 decode 中间量和接受阶段的
-    state 更新方式。native 为每个 MTP 位置分配物理槽位，compact/replay
-    则为每个请求分配一个槽位并在各自 executor 内保存临时数据。
+    native 为每个 MTP 位置分配物理槽位，replay 为每个请求分配一个槽位，
+    并在 executor 内保存短 history。
     """
 
-    if mode not in ("native", "compact", "replay"):
+    if mode not in ("native", "replay"):
         raise ValueError(f"unknown SSM state mode: {mode}")
     slots = mtp_step + 1 if mode == "native" else 1
     state = torch.zeros(
@@ -23,10 +22,6 @@ def create_ssm_executor(config, request_capacity, mtp_step, device, mode, replay
 
         return NativeSSMExecutor(state, mtp_step + 1, **kwargs)
     kwargs.update(num_key_heads=config.num_k_heads)
-    if mode == "compact":
-        from .compact import CompactSSMExecutor
-
-        return CompactSSMExecutor(state, mtp_step + 1, config.conv_dtype, **kwargs)
     from .replay import ReplaySSMExecutor
 
     replay_config = replay_config or {}
@@ -35,7 +30,6 @@ def create_ssm_executor(config, request_capacity, mtp_step, device, mode, replay
         replay_config.get("cache_len", 16),
         mtp_step + 1,
         config.conv_dtype,
-        compute_mode=replay_config.get("compute_mode", "inline"),
-        fold_method=replay_config.get("fold_method", "raw"),
+        compute_mode=replay_config.get("compute_mode", "precompute" if mtp_step > 0 else "inline"),
         **kwargs,
     )

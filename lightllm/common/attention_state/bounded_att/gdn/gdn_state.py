@@ -1,4 +1,4 @@
-"""GDN 运行态及其三种 SSM 执行策略。"""
+"""GDN 运行态及其 SSM 执行策略。"""
 
 from ..conv_ssm_state import _ConvSSMState
 from .gdn_pages_pool import GDNPagesPool
@@ -15,12 +15,6 @@ class GDNNativeState(GDNState):
     """GDN 原生 MTP 槽位策略。"""
 
     state_mode = "native"
-
-
-class GDNCompactState(GDNState):
-    """GDN compact 接受前缀重建策略。"""
-
-    state_mode = "compact"
 
 
 class GDNReplayState(GDNState):

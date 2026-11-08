@@ -35,26 +35,16 @@ class ReplaySSMExecutor(SSMExecutor):
         gate_lower_bound=-5.0,
         compute_mode="inline",
         run_config=None,
-        fold_method="raw",
     ):
         """创建 ReplaySSM 的 canonical state、双半区 history 和 cursor。
 
         ``verify_width`` 决定一次 verify 的最大 token 数，``capacity`` 是
-        history ring 的半区长度；``compute_mode`` 选择 projection 的执行
-        方式，``fold_method`` 选择 raw 或 derived history 的折叠路径。
+        history ring 的半区长度；``compute_mode`` 选择 projection 的执行方式。
         """
 
         assert state.dtype in (torch.float32, torch.bfloat16), "ReplaySSM requires FP32 or BF16 SSM state"
         assert verify_width > 0 and capacity >= max(4, verify_width) and capacity & (capacity - 1) == 0
-        assert compute_mode in ("inline", "precompute", "parallel")
-        assert fold_method in ("raw", "derived")
-        assert fold_method == "raw" or compute_mode == "parallel"
-        if compute_mode == "parallel":
-            assert not kda and verify_width > 1, "Parallel ReplaySSM requires GDN MTP"
-            assert state.shape[-2:] == (128, 128), "Parallel ReplaySSM requires 128x128 heads"
-            assert activation_dtype == torch.bfloat16, "Parallel ReplaySSM requires BF16 activations"
-            assert state.dtype == torch.bfloat16, "Parallel ReplaySSM currently supports BF16 state"
-        self.fold_method = fold_method
+        assert compute_mode in ("inline", "precompute")
         self.state = state
         self.kda = kda
         self.gate_lower_bound = gate_lower_bound
@@ -76,9 +66,8 @@ class ReplaySSMExecutor(SSMExecutor):
         self.forward_cursors = torch.zeros_like(self.cursors)
         # Alternate halves on fold so CTAs cannot overwrite history another
         # V tile is still reading. Cursor packs phase (2*L) and count (0..L).
-        # Derived corrections can exceed the activation/state range even when
-        # the recurrence stays finite. Only BF16 has enough exponent range for
-        # the short-history narrowing optimization; FP16 must retain FP32.
+        # BF16 can use a narrower short-history buffer for the precompute path;
+        # FP32 remains the safe default for all other shapes.
         history_dtype = (
             activation_dtype
             if activation_dtype == torch.bfloat16
@@ -125,7 +114,6 @@ class ReplaySSMExecutor(SSMExecutor):
             cu_seqlens is not None,
             triton.next_power_of_2(reqs.numel()),
             self.verify_width,
-            self.compute_mode == "parallel",
             num_warps=4,
         )
         programs = min(self.fold_programs, triton.cdiv(vd, 32) * reqs.numel() * layers * hv)
@@ -153,10 +141,6 @@ class ReplaySSMExecutor(SSMExecutor):
             self.gates.stride(0),
             self.betas.stride(0),
             self.kda,
-            self.keys,
-            self.deltas,
-            self.fold_method == "derived",
-            BL=max(16, self.capacity),
             num_warps=2,
             num_stages=1,
         )
@@ -185,8 +169,10 @@ class ReplaySSMExecutor(SSMExecutor):
         self._materialize_accepted_state(reqs, self.state, snapshot=False)
         self.cursors.index_fill_(0, reqs.long(), 0)
 
-    def _materialize_accepted_state(self, reqs, output, snapshot, output_strides=None):
+    def _materialize_accepted_state(self, reqs, output, snapshot, output_strides=None, flush_export=False):
         """将请求的 accepted prefix 写入 state 或调用方提供的输出页。"""
+
+        assert not (snapshot and flush_export), "flush export must update the canonical state"
 
         layers, slots, hv, k, v = self.state.shape
         config = self.run_config or SSMRunConfig(32, 4)
@@ -211,6 +197,7 @@ class ReplaySSMExecutor(SSMExecutor):
             bv,
             snapshot,
             self.kda,
+            FLUSH_EXPORT=flush_export,
             OUTPUT_STRIDES=output_strides,
             num_warps=config.num_warps,
             num_stages=config.num_stages,
@@ -224,7 +211,7 @@ class ReplaySSMExecutor(SSMExecutor):
         self._materialize_accepted_state(reqs, output, snapshot=True)
         return output
 
-    def export_accepted_state(self, req_indices, targets, accepted_indices=None):
+    def export_accepted_state(self, req_indices, targets, accepted_indices=None, *, flush=False):
         """将多个 accepted 快照直接写入调用方目标页，避免中间整批分配。"""
 
         if not req_indices:
@@ -236,18 +223,15 @@ class ReplaySSMExecutor(SSMExecutor):
         self._materialize_accepted_state(
             upload_indices(req_indices, self.state.device, torch.int32),
             upload_indices([t.data_ptr() for t in targets], self.state.device),
-            snapshot=True,
+            snapshot=not flush,
+            flush_export=flush,
             output_strides=strides,
         )
 
     def get_run_config(self, q, k, v, a, b, a_log, bias, cu_seqlens=None) -> SSMRunConfig:
         """按当前 kernel 形状选择或返回固定的 ReplaySSM 调优配置。"""
 
-        if self.compute_mode == "parallel":
-            config = self.run_config or SSMRunConfig(128, 2, 1)
-        else:
-            config = resolve_run_config(self, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
-        return config
+        return resolve_run_config(self, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
 
     def forward(
         self,
@@ -274,9 +258,7 @@ class ReplaySSMExecutor(SSMExecutor):
         axis = 1 if cu_seqlens is not None else 0
         out = torch.empty_like(v)
         bv = config.BV
-        precompute_projections = self.verify_width > 1 and bv >= 16 and self.compute_mode in ("precompute", "parallel")
-        if self.compute_mode == "parallel":
-            assert precompute_projections, "Parallel ReplaySSM requires BV >= 16"
+        precompute_projections = self.verify_width > 1 and bv >= 16 and self.compute_mode == "precompute"
         # Resolve tile dimensions in Python: bare max() in Triton JIT code
         # lowers to a tensor operation, which cannot define static shapes.
         bw = triton.next_power_of_2(self.verify_width)
@@ -318,7 +300,6 @@ class ReplaySSMExecutor(SSMExecutor):
             bw,
             self.kda,
             self.gate_lower_bound,
-            self.compute_mode == "parallel",
             BQK=max(16, 2 * bw),
             BR=triton.next_power_of_2(max(16, self.capacity + bw)),
             num_warps=config.num_warps,

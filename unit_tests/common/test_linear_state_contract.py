@@ -1,6 +1,5 @@
 import pickle
 from dataclasses import FrozenInstanceError
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -85,22 +84,19 @@ def test_model_configuration_retains_nondefault_kda_gate_bound():
     assert config.gate_lower_bound == -2.5
 
 
-@pytest.mark.parametrize("mode", ["compact", "replay"])
-def test_kda_backend_receives_gate_bound_at_construction(linear_config, mode):
-    owner = KDAState(linear_config, 3, mtp_step=2, ssm_state_mode=mode, gate_lower_bound=-2.5, device="cpu")
+def test_kda_backend_receives_gate_bound_at_construction(linear_config):
+    owner = KDAState(linear_config, 3, mtp_step=2, ssm_state_mode="replay", gate_lower_bound=-2.5, device="cpu")
     assert owner._ssm.gate_lower_bound == -2.5
 
 
-@pytest.mark.parametrize("mode", ["compact", "replay", "parallel"])
-def test_ssm_backend_publishes_detached_run_config(mode):
+def test_replay_backend_publishes_detached_run_config():
     from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMExecutor
-    from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMExecutor
 
-    ssm_backend = object.__new__(CompactSSMExecutor if mode == "compact" else ReplaySSMExecutor)
+    ssm_backend = object.__new__(ReplaySSMExecutor)
     tuning = {"BV": 32, "num_warps": 2}
     ssm_backend.run_config = tuning
     ssm_backend._config_is_fixed = True
-    ssm_backend.compute_mode = "parallel" if mode == "parallel" else "inline"
+    ssm_backend.compute_mode = "inline"
     config = ssm_backend.get_run_config(*([None] * 7))
     assert isinstance(config, SSMRunConfig)
     tuning["BV"] = 128
@@ -110,49 +106,15 @@ def test_ssm_backend_publishes_detached_run_config(mode):
         config.BV = 128
 
 
+@pytest.mark.parametrize("cls", [GDNState, KDAState])
+@pytest.mark.parametrize("mtp_step,expected", [(0, "inline"), (2, "precompute")])
+def test_replay_defaults_to_precompute_for_speculative_decode(linear_config, cls, mtp_step, expected):
+    owner = cls(linear_config, request_capacity=2, mtp_step=mtp_step, ssm_state_mode="replay", device="cpu")
+    assert owner._ssm.compute_mode == expected
+
+
 def make_acceptance(batches=()):
     return StateAcceptance(torch.tensor([2, 0, 1]), torch.tensor([1, 2, 3]), batches)
-
-
-def test_compact_commits_each_unpadded_partition_with_its_verify_config(monkeypatch):
-    from lightllm.common.attention_state.bounded_att.ssm import base
-
-    owner, _, _ = make_state(mode="compact", step=3, device="cpu")
-    reqs = torch.tensor([2, 0, 1], dtype=torch.int32)
-    configs = [SSMRunConfig(8, 1), SSMRunConfig(32, 2)]
-    commits = []
-    for subset, config in zip((reqs[:1], reqs[1:]), configs):
-        forward = owner.prepare_decode(subset, torch.arange(subset.numel() + 1) * 4)
-        forward.run_config = config
-        commits.append(forward.finish())
-    owner._ssm.run_config = {"BV": 128, "num_warps": 4}
-    calls = []
-    monkeypatch.setattr(
-        owner._ssm,
-        "accept_updates",
-        lambda reqs, accepted, run_config: calls.append((reqs.tolist(), accepted, run_config)),
-    )
-    acceptance = make_acceptance(
-        (StateCommitBatch(1, (commits[0],)), StateCommitBatch(0), StateCommitBatch(2, (commits[1],)))
-    )
-    owner.commit_bounded_att_state(acceptance)
-    assert owner.mtp_state_index.tolist() == [1, 2, 0, 0]
-    assert [reqs for reqs, _, _ in calls] == [[2], [0, 1]]
-    assert all(accepted is owner.mtp_state_index for _, accepted, _ in calls)
-    assert [config for _, _, config in calls] == configs
-
-
-@pytest.mark.parametrize("failure", ["missing", "wrong_owner", "mutable_config", "no_batches"])
-def test_invalid_compact_receipt_rejected_before_state_changes(monkeypatch, failure):
-    owner, _, _ = make_state(mode="compact", step=3, device="cpu")
-    owner.mtp_state_index.fill_(2)
-    name = "draft0_other_state" if failure == "wrong_owner" else owner.state_name
-    config = {"BV": 8, "num_warps": 1} if failure == "mutable_config" else SSMRunConfig(8, 1)
-    commits = () if failure == "missing" else (StateCommit(name, config),)
-    acceptance = make_acceptance(() if failure == "no_batches" else (StateCommitBatch(3, commits),))
-    with pytest.raises(ValueError, match="compact"):
-        owner.commit_bounded_att_state(acceptance)
-    assert owner.mtp_state_index.tolist() == [2] * 4
 
 
 def test_commit_partitions_and_resource_identity_are_validated():
@@ -227,53 +189,6 @@ def test_graph_layout_mismatch_rejected_before_copy(change):
         target.copy_inputs(source)
     assert target.req_indices.tolist() == [0, 1]
     assert target.cu_seqlens.tolist() == [0, 3, 6]
-
-
-def test_forward_contexts_select_each_layer_resource_and_publish_both_commits():
-    import weakref
-    from dataclasses import replace
-    from lightllm.common.attention_state import AttentionStateManager
-    from lightllm.common.basemodel.attention.linear.gdn import GDNLinearAttDecodeAttState
-    from lightllm.common.basemodel.batch_objs import PostLayerOutput
-    from lightllm.common.basemodel.basemodel import TpPartBaseModel
-    from lightllm.common.basemodel.hidden_collector import NoopHiddenCollector
-    from lightllm.common.basemodel.infer_struct import InferStateInfo
-
-    first, _, _ = make_state(mode="compact", device="cpu")
-    second = GDNState(
-        replace(first.config, logical_layer_ids=(3,), ssm_dtype=torch.bfloat16),
-        4,
-        mtp_step=2,
-        device="cpu",
-        ssm_state_mode="compact",
-    )
-    resources = AttentionStateManager(request_capacity=4)
-    resources.register_state("main", first)
-    resources.register_state("main", second)
-    resources.register_state("draft0", GDNState(first.config, 4, mtp_step=2, device="cpu"))
-    resources.finish_state_registration()
-    infer = InferStateInfo()
-    infer.batch_size = 6
-    infer.b_req_idx = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int32)
-    infer.att_state_manager = resources
-    infer.hidden_collector = NoopHiddenCollector()
-    backend = SimpleNamespace(
-        model=SimpleNamespace(is_mtp_draft_model=False, mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 2)),
-        uses_dynamic_spec_verify_layout=lambda: False,
-    )
-    att = GDNLinearAttDecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
-    infer.decode_att_state1 = att
-    att.init_state()
-    assert len(att.forwards) == 2
-    assert att.get_forward(0) is att.get_forward(1)
-    assert att.get_forward(3).resource is second
-    configs = [SSMRunConfig(8, 1), SSMRunConfig(32, 2)]
-    att.get_forward(0).run_config, att.get_forward(3).run_config = configs
-    output = TpPartBaseModel._create_model_output(None, PostLayerOutput(torch.ones(6, 1)), infer)
-    assert {c.state_name: c.payload for c in output.state_commits} == {
-        first.state_name: configs[0],
-        second.state_name: configs[1],
-    }
 
 
 @pytest.mark.parametrize("kda", [False, True])

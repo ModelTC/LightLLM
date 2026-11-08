@@ -12,27 +12,16 @@ from lightllm.server.core.objs.start_args_type import StartArgs
     [
         ("native", "bfloat16", 0, "llama", 16, None),
         ("native", "bfloat16", 32, "llama", 16, None),
-        ("compact", "bfloat16", 2, "qwen3_5", 16, None),
-        ("compact", "bfloat16", 2, "sensenova_loop", 16, None),
         ("replay", "float32", 0, "sensenova_loop", 16, None),
         ("replay", "bfloat16", 2, "sensenova_loop", 8, None),
-        ("compact", "float32", 2, "qwen3_5", 16, None),
-        ("compact", "float32", 15, "qwen3_5", 16, None),
-        ("compact", "float32", 16, "qwen3_5", 16, "mtp_step <= 15"),
-        ("compact", "float32", 32, "qwen3_5", 16, "mtp_step <= 15"),
-        ("compact", "bfloat16", 15, "glm5_next", 16, None),
-        ("compact", "bfloat16", 16, "glm5_next", 16, "mtp_step <= 15"),
-        ("compact", "bfloat16", 2, "glm5_next", 16, None),
         ("replay", "float32", 0, "glm5_next", 8, None),
         ("replay", "bfloat16", 2, "glm5_next_text", 8, None),
         ("replay", "float32", 0, "qwen3_next", 16, None),
         ("replay", "float32", 15, "qwen3_5", 16, None),
-        ("compact", "bfloat16", 0, "qwen3_5", 16, "requires MTP"),
         ("replay", "bfloat16", 2, "qwen3_5", 16, None),
         ("replay", "bfloat16", 2, "qwen3_5", 4, None),
         ("replay", "bfloat16", 0, "qwen3_5", 16, None),
         ("replay", "float32", 4, "qwen3_5", 4, "capacity"),
-        ("compact", "float32", 2, "llama", 16, "require a GDN"),
         ("replay", "float32", 2, "llama", 16, "require a GDN"),
     ],
 )
@@ -58,7 +47,7 @@ def test_ssm_mode_validation(monkeypatch, mode, dtype, step, model, capacity, er
 
 
 @pytest.mark.parametrize("model", ["qwen3_5", "glm5_next"])
-@pytest.mark.parametrize("mode", ["native", "compact", "replay"])
+@pytest.mark.parametrize("mode", ["native", "replay"])
 @pytest.mark.parametrize("step", [15, 16])
 def test_gdn_kda_mtp_width_limit(monkeypatch, model, mode, step):
     monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: model)
@@ -71,7 +60,7 @@ def test_gdn_kda_mtp_width_limit(monkeypatch, model, mode, step):
 
 
 @pytest.mark.parametrize("model", ["qwen3_5", "glm5_next"])
-@pytest.mark.parametrize("compute_mode", ["inline", "precompute", "parallel"])
+@pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
 @pytest.mark.parametrize("cache_len", [32, 64])
 def test_replay_large_cache_does_not_bypass_mtp_width_limit(monkeypatch, model, compute_mode, cache_len):
     monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: model)
@@ -118,48 +107,6 @@ def test_replay_compute_mode_requires_replay(monkeypatch):
     parser = make_argument_parser()
     args = parser.parse_args(["--ssm_state_mode", "replay", "--ssm_replay_config", '{"compute_mode":"precompute"}'])
     _validate_and_normalize_ssm_config(args)
-    args.ssm_state_mode = "compact"
-    with pytest.raises(AssertionError, match="requires ssm_state_mode=replay"):
-        _validate_and_normalize_ssm_config(args)
-
-
-@pytest.mark.parametrize("fold", ["raw", "derived"])
-def test_parallel_replay_configuration(monkeypatch, fold):
-    from lightllm.server.core.objs.start_args_type import StartArgs
-
-    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: "qwen3_5")
-    args = StartArgs(
-        ssm_state_mode="replay",
-        ssm_replay_config={"compute_mode": "parallel", "fold_method": fold},
-        mtp_step=4,
-        mtp_mode="eagle_with_att",
-        linear_att_ssm_data_type="bfloat16",
-    )
-    _validate_and_normalize_ssm_config(args)
-    args.mtp_step = 0
-    with pytest.raises(AssertionError, match="requires MTP"):
-        _validate_and_normalize_ssm_config(args)
-
-
-@pytest.mark.parametrize("model", ["glm5_next", "glm5_next_text"])
-def test_kda_rejects_parallel_at_startup(monkeypatch, model):
-    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: model)
-    args = StartArgs(
-        ssm_state_mode="replay",
-        ssm_replay_config={"compute_mode": "parallel"},
-        mtp_step=2,
-        linear_att_ssm_data_type="bfloat16",
-    )
-    with pytest.raises(AssertionError, match="requires GDN, not KDA"):
-        _validate_and_normalize_ssm_config(args)
-
-
-def test_derived_replay_requires_parallel_configuration():
-    from lightllm.server.core.objs.start_args_type import StartArgs
-
-    args = StartArgs(ssm_state_mode="replay", ssm_replay_config={"fold_method": "derived"})
-    with pytest.raises(AssertionError, match="requires parallel"):
-        _validate_and_normalize_ssm_config(args)
 
 
 @pytest.mark.parametrize(
@@ -173,7 +120,7 @@ def test_derived_replay_requires_parallel_configuration():
         ({"cache_len": "16"}, "capacity"),
         ({"cache_len": 128}, "capacity"),
         ({"compute_mode": "auto"}, "compute_mode"),
-        ({"fold_method": "auto"}, "fold_method"),
+        ({"fold_method": "raw"}, "Unknown"),
     ],
 )
 def test_invalid_replay_config(config, error):
@@ -182,7 +129,7 @@ def test_invalid_replay_config(config, error):
         _validate_and_normalize_ssm_config(args)
 
 
-@pytest.mark.parametrize("mode", ["native", "compact"])
+@pytest.mark.parametrize("mode", ["native"])
 def test_replay_config_rejects_other_modes(mode):
     args = StartArgs(ssm_state_mode=mode, ssm_replay_config={"cache_len": 16})
     with pytest.raises(AssertionError, match="requires ssm_state_mode=replay"):
@@ -197,7 +144,7 @@ def test_partial_replay_config_defaults_and_serialization(monkeypatch):
         ["--ssm_state_mode", "replay", "--ssm_replay_config", '{"compute_mode":"precompute"}']
     )
     _validate_and_normalize_ssm_config(args)
-    assert args.ssm_replay_config == {"cache_len": 16, "compute_mode": "precompute", "fold_method": "raw"}
+    assert args.ssm_replay_config == {"cache_len": 16, "compute_mode": "precompute"}
     original = StartArgs(ssm_state_mode="replay", ssm_replay_config=args.ssm_replay_config)
     restored = StartArgs(**json.loads(json.dumps(asdict(original))))
     _validate_and_normalize_ssm_config(restored)
@@ -210,7 +157,6 @@ def test_partial_replay_config_defaults_and_serialization(monkeypatch):
     [
         ("--replayssm_cache_len", "16"),
         ("--replayssm_projection_mode", "inline"),
-        ("--replayssm_fold_method", "raw"),
         ("--ssm_replay_config", "{invalid}"),
     ],
 )

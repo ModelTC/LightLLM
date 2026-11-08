@@ -987,17 +987,17 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--ssm_state_mode",
-        choices=["native", "compact", "replay"],
+        choices=["native", "replay"],
         default="native",
-        help="SSM state storage: native snapshots, compact MTP records, or deferred GDN/KDA replay (FP32/BF16).",
+        help="SSM state storage: native snapshots or deferred GDN/KDA ReplaySSM (FP32/BF16).",
     )
     parser.add_argument(
         "--ssm_replay_config",
         type=json.loads,
         default={},
-        help='Replay-only JSON object: {"cache_len":16,"compute_mode":"inline","fold_method":"raw"}. '
-        "cache_len: 4/8/16/32/64, at least the verify width; compute_mode: inline/precompute/parallel; "
-        "fold_method: raw/derived. Parallel requires BF16 GDN MTP with 128x128 heads; derived requires parallel.",
+        help='Replay-only JSON object: {"cache_len":16,"compute_mode":"precompute"}. '
+        "cache_len: 4/8/16/32/64, at least the verify width; compute_mode: inline/precompute. "
+        "MTP defaults to precompute, single-token decode defaults to inline.",
     )
     parser.add_argument(
         "--linear_att_ssm_data_type",

@@ -25,7 +25,6 @@ def _project_replay_queries(
     BW: tl.constexpr,
     KDA: tl.constexpr,
     LOWER: tl.constexpr,
-    PARALLEL_SOLVE: tl.constexpr,
     BQK: tl.constexpr,
     base,
     end,
@@ -39,7 +38,7 @@ def _project_replay_queries(
     start,
     state,
 ):
-    # 预计算 verify window 的 q/k 投影；仅 precompute/parallel 路径调用。
+    # 预计算 verify window 的 q/k 投影。
     tt = tl.arange(0, BQK)
     tokens = start + tt % BW
     valid = (tt < 2 * BW) & (tokens < end)
@@ -55,10 +54,7 @@ def _project_replay_queries(
         0,
     ).to(tl.float32)
     qk = q_rows + k_rows
-    if PARALLEL_SOLVE:
-        qk /= tl.sqrt(tl.sum(qk * qk, axis=1) + 1.0e-6)[:, None]
-    else:
-        qk *= tl.rsqrt(tl.sum(qk * qk, axis=1) + 1.0e-6)[:, None]
+    qk *= tl.rsqrt(tl.sum(qk * qk, axis=1) + 1.0e-6)[:, None]
     qk *= tl.where(tt < BW, K ** -0.5, 1.0)[:, None]
     if KDA:
         history = ll < n
@@ -95,21 +91,6 @@ def _project_replay_queries(
 
 
 @triton.jit
-def _solve_gdn_deltas(power, rhs, BW: tl.constexpr, projection_dtype: tl.constexpr, projection_precision: tl.constexpr):
-    # 解同一 verify window 内的严格下三角 delta 耦合，不读写 history。
-    wi = tl.arange(0, power.shape[0])
-    inverse = (wi[:, None] == wi[None, :]).to(tl.float32)
-    # The strictly lower-triangular coupling is nilpotent. Repeated
-    # squaring builds (I - power)^-1 in log2(BW) matrix steps; capacity
-    # is at most 64, so six steps cover every supported verify width.
-    for solve in tl.static_range(6):
-        if (1 << solve) < BW:
-            inverse += tl.dot(power, inverse, input_precision="tf32x3")
-            power = tl.dot(power, power, input_precision="tf32x3")
-    return tl.dot(inverse.to(projection_dtype), rhs.to(projection_dtype), input_precision=projection_precision)
-
-
-@triton.jit
 def _replay_gdn_window(
     Kp,
     Vp,
@@ -135,8 +116,6 @@ def _replay_gdn_window(
     L: tl.constexpr,
     BV: tl.constexpr,
     BW: tl.constexpr,
-    PARALLEL_SOLVE: tl.constexpr,
-    BQK: tl.constexpr,
     BR: tl.constexpr,
     base,
     end,
@@ -199,32 +178,14 @@ def _replay_gdn_window(
         0,
     ).to(tl.float32)
     betas = tl.sigmoid(tl.load(B + fresh_tokens * SB + hv, fresh, 0).to(tl.float32))
-    if PARALLEL_SOLVE:
-        projected_history = projections + tl.dot(
-            coefficients.to(projection_dtype), deltas.to(projection_dtype), input_precision=projection_precision
-        )
-        wi = tl.arange(0, BQK)
-        active = (wi < BW) & (start + wi < end)
-        key_rows = tl.gather(projected_history, tl.broadcast_to((BW + wi % BW)[:, None], projected_history.shape), 0)
-        fresh_values = tl.gather(values, tl.broadcast_to((L + wi % BW)[:, None], (BQK, BV)), 0)
-        beta_rows = tl.sigmoid(tl.load(B + (start + wi) * SB + hv, active, 0).to(tl.float32))
-        rhs = tl.where(active[:, None], beta_rows[:, None] * (fresh_values - key_rows), 0.0)
-        cross = tl.gather(coefficients, tl.broadcast_to((BW + wi % BW)[:, None], coefficients.shape), 0)
-        cross = tl.gather(cross, tl.broadcast_to((L + wi % BW)[None, :], (BQK, BQK)), 1)
-        lower = active[:, None] & active[None, :] & (wi[:, None] > wi[None, :])
-        power = tl.where(lower, -beta_rows[:, None] * cross, 0.0)
-        solved = _solve_gdn_deltas(power, rhs, BW, projection_dtype, projection_precision)
-        mapped = tl.gather(solved, tl.broadcast_to(((jj - L) % BW)[:, None], deltas.shape), 0)
-        deltas = tl.where(fresh[:, None], mapped, deltas)
-    else:
-        for t in range(end - start):
-            checkpoint_sk = tl.sum(tl.where((tt == BW + t)[:, None], projections, 0), 0)
-            weights = tl.sum(tl.where((tt == BW + t)[:, None], coefficients, 0), 0)
-            sk = checkpoint_sk + tl.sum(deltas * weights[:, None], 0)
-            value = tl.sum(tl.where((jj == L + t)[:, None], values, 0), 0)
-            beta = tl.sum(tl.where(jj == L + t, betas, 0))
-            delta = beta * (value - sk)
-            deltas = tl.where((jj == L + t)[:, None], delta[None, :], deltas)
+    for t in range(end - start):
+        checkpoint_sk = tl.sum(tl.where((tt == BW + t)[:, None], projections, 0), 0)
+        weights = tl.sum(tl.where((tt == BW + t)[:, None], coefficients, 0), 0)
+        sk = checkpoint_sk + tl.sum(deltas * weights[:, None], 0)
+        value = tl.sum(tl.where((jj == L + t)[:, None], values, 0), 0)
+        beta = tl.sum(tl.where(jj == L + t, betas, 0))
+        delta = beta * (value - sk)
+        deltas = tl.where((jj == L + t)[:, None], delta[None, :], deltas)
     outputs = projections + tl.dot(
         coefficients.to(projection_dtype), deltas.to(projection_dtype), input_precision=projection_precision
     )
@@ -434,11 +395,10 @@ def _replay(
     BW: tl.constexpr,
     KDA: tl.constexpr,
     LOWER: tl.constexpr,
-    PARALLEL_SOLVE: tl.constexpr,
     BQK: tl.constexpr,
     BR: tl.constexpr,
 ):
-    """执行一个请求窗口的 replay decode，并写入 raw/derived history。
+    """执行一个请求窗口的 replay decode，并写入 history。
 
     当 history 即将跨半区时，先按 raw input 折叠到 canonical state；随后
     根据 compute mode 选择预计算投影或逐 token 递推。请求数属于运行时布局，
@@ -468,7 +428,7 @@ def _replay(
     sp = State + slot * K * V + kk[:, None] * V + vv[None, :]
     state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
 
-    if not PARALLEL_SOLVE and n + end - start > L:
+    if n + end - start > L:
         for j in range(n):
             raw_k = tl.load(RawKeys + (key_slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
             raw_v = tl.load(RawValues + (slot * (2 * L) + base + j) * V + vv, vv < V, 0).to(tl.float32)
@@ -505,7 +465,6 @@ def _replay(
             BW,
             KDA,
             LOWER,
-            PARALLEL_SOLVE,
             BQK,
             base,
             end,
@@ -548,8 +507,6 @@ def _replay(
             L,
             BV,
             BW,
-            PARALLEL_SOLVE,
-            BQK,
             BR,
             base,
             end,

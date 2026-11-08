@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from ..conv_ssm_types import ConvSSMStateConfig
-from .gdn_state import GDNCompactState, GDNNativeState, GDNReplayState, GDNState
+from .gdn_state import GDNNativeState, GDNReplayState, GDNState
 
 
 def create_gdn_state(
@@ -21,7 +21,6 @@ def create_gdn_state(
     """创建 GDN 请求运行态，大小页池由后续容量分配流程初始化。"""
     state_cls = {
         "native": GDNNativeState,
-        "compact": GDNCompactState,
         "replay": GDNReplayState,
     }.get(ssm_state_mode)
     if state_cls is None:

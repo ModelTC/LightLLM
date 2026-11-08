@@ -63,7 +63,7 @@ class SSMExecutor:
 
         return self.state[:, req_idx]
 
-    def export_accepted_state(self, req_indices, targets, accepted_indices=None):
+    def export_accepted_state(self, req_indices, targets, accepted_indices=None, *, flush=False):
         """把 accepted state 写入调用方提供的目标页，不负责分配目标。"""
 
         export_indexed_state(self.state, req_indices, targets)

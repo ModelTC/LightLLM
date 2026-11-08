@@ -44,12 +44,12 @@ def _set_envs_and_config(args: StartArgs):
 
 
 def _validate_and_normalize_ssm_config(args: StartArgs):
-    assert args.ssm_state_mode in ("native", "compact", "replay"), "Invalid ssm_state_mode"
+    assert args.ssm_state_mode in ("native", "replay"), "Invalid ssm_state_mode"
     config = args.ssm_replay_config
     assert isinstance(config, dict), "ssm_replay_config must be a JSON object"
     assert args.ssm_state_mode == "replay" or not config, "ssm_replay_config requires ssm_state_mode=replay"
     if args.ssm_state_mode == "replay":
-        defaults = {"cache_len": 16, "compute_mode": "inline", "fold_method": "raw"}
+        defaults = {"cache_len": 16, "compute_mode": "precompute" if args.mtp_step > 0 else "inline"}
         unknown = config.keys() - defaults.keys()
         assert not unknown, f"Unknown ssm_replay_config fields: {unknown}"
         config = {**defaults, **config}
@@ -60,14 +60,7 @@ def _validate_and_normalize_ssm_config(args: StartArgs):
             32,
             64,
         ), "ReplaySSM capacity must be a power of two and at least 4, up to 64"
-        assert config["compute_mode"] in ("inline", "precompute", "parallel"), "Invalid replay compute_mode"
-        assert config["fold_method"] in ("raw", "derived"), "Invalid replay fold_method"
-        assert (
-            config["fold_method"] == "raw" or config["compute_mode"] == "parallel"
-        ), "derived fold requires parallel ReplaySSM compute_mode"
-        if config["compute_mode"] == "parallel":
-            assert args.mtp_step > 0, "Parallel ReplaySSM requires MTP"
-            assert args.linear_att_ssm_data_type == "bfloat16", "Parallel ReplaySSM requires BF16 state"
+        assert config["compute_mode"] in ("inline", "precompute"), "Invalid replay compute_mode"
         args.ssm_replay_config = config
         logger.info(f"SSM mode: replay, config: {config}")
     else:
@@ -96,14 +89,9 @@ def _validate_and_normalize_ssm_config(args: StartArgs):
         "bfloat16",
     ), "Non-native SSM state modes require FP32 or BF16 state"
     assert is_gdn_or_kda, "Non-native SSM state modes currently require a GDN or KDA model"
-    if args.ssm_state_mode == "compact":
-        assert args.mtp_step > 0, "ssm_state_mode=compact requires MTP (mtp_step > 0)"
-    else:
-        assert args.mtp_step >= 0, "ssm_state_mode=replay requires mtp_step >= 0"
-        capacity = config["cache_len"]
-        assert capacity >= args.mtp_step + 1, "ReplaySSM capacity must cover the verify width"
-        if config["compute_mode"] == "parallel":
-            assert model_type not in ("glm5_next", "glm5_next_text"), "Parallel ReplaySSM requires GDN, not KDA"
+    assert args.mtp_step >= 0, "ssm_state_mode=replay requires mtp_step >= 0"
+    capacity = config["cache_len"]
+    assert capacity >= args.mtp_step + 1, "ReplaySSM capacity must cover the verify width"
 
 
 def _launch_subprocesses(args: StartArgs):

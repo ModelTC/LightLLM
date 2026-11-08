@@ -59,7 +59,7 @@ def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state
         ssm_backend.prepare_decode(reqs, cu)
         # The second round must consume the first round's accepted history.
         # For capacity 4 the next span exactly fills it, so no fold should hide
-        # an overflowed derived correction by reconstructing from raw inputs.
+        # an overflowed history correction by reconstructing from raw inputs.
         assert ssm_backend.cursors[0].item() == 2 * round_idx
         assert not state.any()
         actual = ssm_backend.forward(0, q, k, v, a, b, alog, bias, reqs, cu)[0]
@@ -79,6 +79,37 @@ def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state
     assert torch.isfinite(ssm_backend.deltas[0, 0, :, :4]).all()
     assert ssm_backend.cursors[1].item() == 0
     torch.testing.assert_close(ssm_backend.get_accepted_state(0)[0].float(), expected_state, atol=128, rtol=0.01)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_flush_export_updates_checkpoint_and_clears_history(dtype):
+    state = torch.randn(1, 2, 1, 32, 64, device="cuda", dtype=dtype) * 0.01
+    backend = ReplaySSMExecutor(
+        state,
+        capacity=4,
+        verify_width=1,
+        activation_dtype=torch.bfloat16,
+        run_config={"BV": 32, "num_warps": 1, "num_stages": 1},
+    )
+    backend.raw_keys.normal_(0, 0.1)
+    backend.raw_values.normal_(0, 0.1)
+    backend.gates.fill_(-0.1)
+    backend.betas.fill_(0.5)
+    backend.cursors[0] = 2
+    expected = backend.get_accepted_state(0).clone()
+    target = torch.empty_like(expected)
+
+    backend.export_accepted_state([0], [target], flush=True)
+    torch.cuda.synchronize()
+
+    assert backend.cursors[0].item() == 0
+    torch.testing.assert_close(target, expected, atol=0, rtol=0)
+    torch.testing.assert_close(state[:, 0], expected, atol=0, rtol=0)
+
+    empty_history_target = torch.empty_like(expected)
+    backend.export_accepted_state([0], [empty_history_target], flush=True)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(empty_history_target, expected, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("capacity", [16, 32, 64])
@@ -438,113 +469,9 @@ def test_snapshot_without_history_copies_active_state():
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_compact_preserves_accepted_prefix(dtype, run_config=None, kda=False):
-    from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMExecutor
-
-    torch.manual_seed(17)
-    hv, kd, vd, width = 4, 128 if kda else 64, 128 if kda else 64, 3
-    state = torch.randn(2, 4, hv, kd, vd, device="cuda", dtype=dtype) * 0.01
-    ssm_backend = CompactSSMExecutor(state, width, torch.bfloat16, num_key_heads=hv, kda=kda, run_config=run_config)
-    reqs = torch.tensor([2, 0, 3], device="cuda", dtype=torch.int32)
-    cu = torch.tensor([0, 3, 5, 5], device="cuda", dtype=torch.int32)
-    accepted = torch.tensor([1, 0, 0, 0], device="cuda", dtype=torch.int32)
-    shape = (1, 5, hv, kd)
-    q = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
-    k, v = torch.randn_like(q), torch.randn_like(q)
-    a = torch.randn((5, hv * kd if kda else hv), device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(5, hv, device="cuda", dtype=torch.bfloat16)
-    alog = torch.randn(hv, device="cuda") * 0.1
-    bias = torch.randn(hv * kd if kda else hv, device="cuda") * 0.1
-    for _ in range(15):
-        before = state.clone()
-        outputs = [ssm_backend.forward(layer, q, k, v, a, b, alog, bias, reqs, cu)[0] for layer in range(2)]
-        assert torch.equal(state, before), "verify must not mutate the checkpoint"
-        ssm_backend.accept_updates(reqs, accepted)
-        for layer in range(2):
-            for req, start, length in [(2, 0, 3), (0, 3, 2)]:
-                cur = before[layer, req].float()
-                for j in range(length):
-                    t = start + j
-                    out, cur = reference(q[0, t], k[0, t], v[0, t], a[t], b[t], alog, bias, cur, kda=kda)
-                    torch.testing.assert_close(outputs[layer][0, t].float(), out, atol=0.004, rtol=0.02)
-                    cur = cur.to(dtype).float()
-                    if j == int(accepted[req]):
-                        torch.testing.assert_close(
-                            state[layer, req].float(), cur, atol=0.008 if dtype == torch.bfloat16 else 2e-5, rtol=0.02
-                        )
-        torch.testing.assert_close(state[:, 1], before[:, 1], rtol=0, atol=0)
-        torch.testing.assert_close(state[:, 3], before[:, 3], rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("width", [3, 4])
-def test_compact_matches_native_mtp(dtype, width, run_config=None):
-    from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMExecutor
-    from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
-        mtp_fused_recurrent_gated_delta_rule,
-    )
-
-    torch.manual_seed(77)
-    batch, h, hv, kd, vd = 3, 2, 4, 128, 128
-    q = torch.randn(1, batch * width, h, kd, device="cuda", dtype=torch.bfloat16)
-    k = torch.randn_like(q)
-    v = torch.randn(1, batch * width, hv, vd, device="cuda", dtype=torch.bfloat16)
-    a = torch.randn(batch * width, hv, device="cuda", dtype=torch.bfloat16)
-    b = torch.randn(batch * width, hv, device="cuda", dtype=torch.bfloat16)
-    alog = torch.randn(hv, device="cuda") * 0.1
-    bias = torch.randn(hv, device="cuda") * 0.1
-    state = torch.randn(1, batch + 1, hv, kd, vd, device="cuda", dtype=dtype) * 0.01
-    reference_state = state[0].repeat_interleave(width, 0)
-    reqs = torch.arange(batch, device="cuda", dtype=torch.int32)
-    cu = torch.arange(batch + 1, device="cuda", dtype=torch.int32) * width
-    idx = torch.arange(batch * width, device="cuda", dtype=torch.int32).view(batch, width)
-    counts = torch.ones(batch, device="cuda", dtype=torch.int32)
-    accepted = torch.tensor([0, width // 2, width - 1, 0], device="cuda", dtype=torch.int32)
-    ssm_backend = CompactSSMExecutor(state, width, torch.bfloat16, num_key_heads=h, run_config=run_config)
-    for _ in range(32):
-        q.normal_()
-        k.normal_()
-        v.normal_()
-        a.normal_().sub_(3)
-        b.normal_()
-        out = ssm_backend.forward(0, q, k, v, a, b, alog, bias, reqs, cu)[0]
-        ref, _ = mtp_fused_recurrent_gated_delta_rule(
-            q,
-            k,
-            v,
-            reference_state,
-            cu,
-            idx,
-            idx,
-            counts,
-            alog,
-            bias,
-            a,
-            b,
-            run_config={"num_stages": 1, **(run_config or {"BV": 8, "num_warps": 1})},
-        )
-        ssm_backend.accept_updates(reqs, accepted)
-        # BF16 casts can straddle a rounding midpoint across compiler/layouts.
-        rtol = 2 * torch.finfo(dtype).eps if dtype == torch.bfloat16 else 0
-        torch.testing.assert_close(out, ref, rtol=rtol, atol=2e-5 if dtype == torch.bfloat16 else 0)
-        torch.testing.assert_close(
-            state[0, :batch],
-            reference_state[reqs * width + accepted[:batch]],
-            rtol=rtol,
-            atol=5e-4 if dtype == torch.bfloat16 else 0,
-        )
-        counts.copy_(accepted[:batch] + 1)
-        accepted[:batch].add_(1).remainder_(width)
-
-
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("run_config", get_configs(), ids=lambda c: f"bv{c['BV']}-w{c['num_warps']}-s{c['num_stages']}")
-@pytest.mark.parametrize("mode", ["gdn", "replay"])
-def test_autotune_candidates_match_recurrence(dtype, run_config, mode):
-    if mode == "gdn":
-        test_compact_matches_native_mtp(dtype, 4, run_config)
-    else:
-        test_replay_acceptance_flush_and_graph(3, (32, 64), 8, dtype, run_config)
+def test_autotune_candidates_match_recurrence(dtype, run_config):
+    test_replay_acceptance_flush_and_graph(3, (32, 64), 8, dtype, run_config)
 
 
 @pytest.mark.parametrize("save_big", [False, True])
@@ -638,28 +565,20 @@ def test_kda_replay_reference_fold_and_graph(
     )
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_kda_compact_reference_and_partial_acceptance(dtype):
-    test_compact_preserves_accepted_prefix(dtype, kda=True)
-
-
 @pytest.mark.parametrize("config", get_configs())
-@pytest.mark.parametrize("mode", ["compact", "inline", "precompute"])
-def test_kda_tuning_candidates_match_reference(config, mode):
-    if mode == "compact":
-        test_compact_preserves_accepted_prefix(torch.bfloat16, run_config=config, kda=True)
-    else:
-        test_replay_acceptance_flush_and_graph(
-            3,
-            (128, 128),
-            4,
-            torch.bfloat16,
-            run_config=config,
-            compute_mode=mode,
-            head_geometry=(2, 2),
-            kda=True,
-            gate_shift=-3,
-        )
+@pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
+def test_kda_tuning_candidates_match_reference(config, compute_mode):
+    test_replay_acceptance_flush_and_graph(
+        3,
+        (128, 128),
+        4,
+        torch.bfloat16,
+        run_config=config,
+        compute_mode=compute_mode,
+        head_geometry=(2, 2),
+        kda=True,
+        gate_shift=-3,
+    )
 
 
 @pytest.mark.parametrize("kda", [False, True])

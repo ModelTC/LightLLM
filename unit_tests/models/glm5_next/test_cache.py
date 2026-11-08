@@ -48,7 +48,7 @@ def test_nope_cache_config_uses_native_mla_width():
 @pytest.mark.parametrize("small_page", [False, True])
 @pytest.mark.parametrize("tp_world_size", [1, 4])
 @pytest.mark.parametrize("mtp_step", [0, 2])
-@pytest.mark.parametrize("mode", ["native", "compact", "replay"])
+@pytest.mark.parametrize("mode", ["native", "replay"])
 def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     monkeypatch,
     small_page,
@@ -56,8 +56,6 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     mtp_step,
     mode,
 ):
-    if mode == "compact" and mtp_step == 0:
-        pytest.skip("compact requires MTP")
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setattr("lightllm.common.req_manager.req_sampling_params.get_vocab_size", lambda _: 128)

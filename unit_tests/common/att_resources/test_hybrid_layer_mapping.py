@@ -9,7 +9,7 @@ from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 
 
-@pytest.mark.parametrize("mode", ["native", "compact", "replay"])
+@pytest.mark.parametrize("mode", ["native", "replay"])
 @pytest.mark.parametrize("draft_layers", [0, 1, 3])
 @pytest.mark.parametrize(
     "layer_types,expected_indices,linear_layers",

@@ -8,6 +8,7 @@ import torch
 
 from lightllm.utils.log_utils import init_logger
 
+from ..commit import StateAcceptance
 from .ssm import create_ssm_executor
 from .ssm.forward import SSMForward
 from .ssm.export import export_indexed_state
@@ -204,6 +205,7 @@ class _ConvSSMState(BoundedAttentionState):
         state_token_lens: List[int],
         page_kind: PageKind,
         page_slot_ids: List[int],
+        flush_history: bool = False,
     ) -> None:
         """保存各请求指定绝对 token 长度处的基准状态；Conv/SSM 不依赖长度定位。"""
         assert isinstance(req_indices, list) and isinstance(
@@ -211,8 +213,18 @@ class _ConvSSMState(BoundedAttentionState):
         ), "request and slot indices must be lists"
         assert len(req_indices) == len(state_token_lens) == len(page_slot_ids), "request, length and page counts differ"
         pool = self._pool(page_kind)
-        self.export_accepted_state(
-            req_indices, [ConvSSMTensors(pool.conv_state[slot], pool.ssm_state[slot]) for slot in page_slot_ids]
+        # Hybrid radix pages are durable checkpoints. ReplaySSM can fold the
+        # accepted ring into the live canonical state and the page in one
+        # kernel, so the next decode starts from an empty history. MTP keeps
+        # a separate Conv candidate layout and retains the old behavior.
+        replay_flush = flush_history and self.mtp_state_index is None
+        targets = [ConvSSMTensors(pool.conv_state[slot], pool.ssm_state[slot]) for slot in page_slot_ids]
+        export_indexed_state(self.conv_state, req_indices, [target.conv for target in targets], self.mtp_state_index)
+        self._ssm.export_accepted_state(
+            req_indices,
+            [target.ssm for target in targets],
+            self.mtp_state_index,
+            flush=replay_flush,
         )
 
     def restore_bounded_att_runtime_from_pages(
@@ -236,7 +248,7 @@ class _ConvSSMState(BoundedAttentionState):
         copy_bounded_att_tensors(copies=conv_copies)
         copy_bounded_att_tensors(copies=ssm_copies)
 
-    def validate_bounded_att_commit(self, acceptance):
+    def validate_bounded_att_commit(self, acceptance: StateAcceptance):
         assert (
             acceptance.req_indices.device == self.ssm_state.device
         ), "commit inputs must match the state device; CUDA states require CUDA tensors"
@@ -245,7 +257,7 @@ class _ConvSSMState(BoundedAttentionState):
             return validator(acceptance, self.state_name) if validator is not None else None
         return None
 
-    def commit_bounded_att_state(self, acceptance):
+    def commit_bounded_att_state(self, acceptance: StateAcceptance) -> None:
         commit_data = self.validate_bounded_att_commit(acceptance)
         if self.mtp_state_index is not None:
             self._ssm.commit_validated(acceptance, self.mtp_state_index, self.state_name, commit_data=commit_data)

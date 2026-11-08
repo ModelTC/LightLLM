@@ -2,9 +2,9 @@ from .gdn.create_gdn_state import create_gdn_state
 from .kda.create_kda_state import create_kda_state
 from .conv_ssm_types import ConvSSMStateConfig
 from .gdn.gdn_pages_pool import GDNPagesPool
-from .gdn.gdn_state import GDNCompactState, GDNNativeState, GDNReplayState, GDNState
+from .gdn.gdn_state import GDNNativeState, GDNReplayState, GDNState
 from .kda.kda_pages_pool import KDAPagesPool
-from .kda.kda_state import KDACompactState, KDANativeState, KDAReplayState, KDAState
+from .kda.kda_state import KDANativeState, KDAReplayState, KDAState
 from .base_state import BoundedAttentionState
 
 from .sliding_window.fp8_e8m0_swa_state import FP8E8M0SlidingWindowConfig, FP8E8M0SlidingWindowState
@@ -17,13 +17,11 @@ __all__ = [
     "ConvSSMStateConfig",
     "GDNState",
     "GDNNativeState",
-    "GDNCompactState",
     "GDNReplayState",
     "GDNPagesPool",
     "create_gdn_state",
     "KDAState",
     "KDANativeState",
-    "KDACompactState",
     "KDAReplayState",
     "KDAPagesPool",
     "create_kda_state",

@@ -29,7 +29,7 @@ class NativeSSMExecutor(SSMExecutor):
         index = req_idx * self.slots_per_request + accepted_index
         return self.state.index_select(1, index.long().view(1))[:, 0]
 
-    def export_accepted_state(self, req_indices, targets, accepted_indices=None):
+    def export_accepted_state(self, req_indices, targets, accepted_indices=None, *, flush=False):
         """把 native state 按请求和接受位置导出到调用方目标页。"""
 
         export_indexed_state(
