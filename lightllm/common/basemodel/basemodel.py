@@ -219,7 +219,6 @@ class TpPartBaseModel:
         self.execution_providers = kvargs.get("execution_providers")
         self.execution_device = kvargs.get("execution_device")
         self.execution_communication = kvargs.get("execution_communication", ())
-        self.execution_parallel_context = kvargs.get("execution_parallel_context")
         self.execution_formats = kvargs.get("execution_formats")
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)

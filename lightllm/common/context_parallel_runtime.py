@@ -104,7 +104,6 @@ class ContextParallelGroups:
     context: dist.ProcessGroup
     dp: dist.ProcessGroup
     backend: str | None = None
-    all_groups: tuple[dist.ProcessGroup, ...] = ()
     _closed: bool = False
 
     def group(self, kind: str) -> dist.ProcessGroup:
@@ -129,24 +128,9 @@ class ContextParallelGroups:
 
         if self._closed:
             return
-        for group in self.all_groups or (self.tp, self.context, self.dp):
+        for group in (self.tp, self.context, self.dp):
             dist.destroy_process_group(group)
         self._closed = True
-
-    def execution_context(self):
-        """Return the execution contract consumed by attention providers."""
-
-        from lightllm.common.execution.contracts.device import ParallelContext
-
-        return ParallelContext(
-            dp_rank=self.layout.dp_rank,
-            dp_world_size=self.layout.dp_size,
-            context_rank=self.layout.context_rank,
-            context_world_size=self.layout.context_size,
-            tp_rank=self.layout.tp_rank,
-            tp_world_size=self.layout.tp_size,
-            collectives=self,
-        )
 
 
 def _group_specs(layout: ContextParallelLayout) -> Iterable[tuple[str, tuple[int, ...]]]:
@@ -181,10 +165,8 @@ def create_context_parallel_groups(
         raise ValueError(f"distributed rank {dist.get_rank()} does not match layout rank {layout.global_rank}")
 
     selected: dict[str, dist.ProcessGroup] = {}
-    all_groups = []
     for kind, ranks in _group_specs(layout):
         group = dist.new_group(ranks=list(ranks), backend=backend)
-        all_groups.append(group)
         if layout.global_rank in ranks and kind not in selected:
             selected[kind] = group
     return ContextParallelGroups(
@@ -193,5 +175,4 @@ def create_context_parallel_groups(
         context=selected["context"],
         dp=selected["dp"],
         backend=backend,
-        all_groups=tuple(all_groups),
     )

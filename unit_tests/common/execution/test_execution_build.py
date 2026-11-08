@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from lightllm.common.execution import BuildConfig, ProviderRegistry, AttentionProvider, StateProvider, build, prepare
-from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits, ParallelContext
+from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits
 from lightllm.common.execution.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.common.execution.contracts.state import FormatSpec, StateSpec, StateView, LayerStates
 
@@ -142,23 +142,6 @@ assert DenseAttentionSpec(4, 2, 64).head_dim == 64
 assert not torch.cuda.is_initialized()
 """
     subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
-
-
-def test_parallel_context_is_validated_and_visible_to_provider_probes():
-    context = ParallelContext(
-        dp_rank=1,
-        dp_world_size=2,
-        context_rank=0,
-        context_world_size=2,
-        tp_rank=1,
-        tp_world_size=2,
-    )
-    limits = ExecutionLimits(0, tp_world_size=2, parallel_context=context)
-    assert context.enabled
-    assert limits.parallel_context is context
-
-    with pytest.raises(ValueError, match="TP size"):
-        ExecutionLimits(0, tp_world_size=1, parallel_context=context)
 
 
 def test_model_adapter_migration_mode_is_explicit_for_legacy_and_contract_paths():

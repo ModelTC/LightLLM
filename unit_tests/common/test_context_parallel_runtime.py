@@ -80,17 +80,6 @@ def test_all_reduce_selects_the_requested_group(monkeypatch):
     assert calls == [(tensor, "context")]
 
 
-def test_groups_expose_the_execution_parallel_context():
-    layout = module.ContextParallelLayout(global_rank=3, dp_size=2, context_size=2, tp_size=2)
-    groups = module.ContextParallelGroups(layout, tp="tp", context="context", dp="dp")
-
-    context = groups.execution_context()
-
-    assert (context.dp_rank, context.context_rank, context.tp_rank) == (0, 1, 1)
-    assert (context.dp_world_size, context.context_world_size, context.tp_world_size) == (2, 2, 2)
-    assert context.collectives is groups
-
-
 @pytest.mark.skipif(not dist.is_available(), reason="torch.distributed is unavailable")
 def test_gloo_groups_collect_and_close_before_world_shutdown(tmp_path):
     mp.spawn(_gloo_group_worker, args=(str(tmp_path / "init"),), nprocs=4, join=True)
