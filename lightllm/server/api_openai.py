@@ -73,6 +73,7 @@ from .api_models import (
     ImageInputTokensDetails,
     ImageB64,
     TextOutput,
+    RawImageURL
 )
 
 logger = init_logger(__name__)
@@ -1648,13 +1649,13 @@ async def image_generation_impl(request: ImageGenerationRequest | ImageEditReque
     # get prompt
     prompt = await build_prompt_from_image_request(request, **get_chat_template_kwargs())
 
-    images = []
+    input_images = []
     if isinstance(request, ImageEditRequest):
         for image in request.images:
-            images.append(image.to_image_url())
+            input_images.append(image.to_image_url())
 
     images = await g_objs.httpserver_manager.generate_image(
-        prompt, x2i_params, MultimodalParams(images=images), request=raw_request, input_image_num=len(images)
+        prompt, x2i_params, MultimodalParams(images=input_images), request=raw_request, input_image_num=len(input_images)
     )
 
     if images is None or len(images) == 0:
@@ -1665,8 +1666,9 @@ async def image_generation_impl(request: ImageGenerationRequest | ImageEditReque
     )
 
     if not (await raw_request.is_disconnected()) and get_enable_self_correction() and request.self_correction:
+        input_images.append(RawImageURL(image_url=_raw_image_to_data_url(images[0], request.output_format)).to_image_url())
         # auto fix one round
-        revision_feedback, revised_image = await _self_correction(prompt, _raw_image_to_data_url(images[0], request.output_format), x2i_params, raw_request)
+        revision_feedback, revised_image = await _self_correction(prompt, input_images, x2i_params, raw_request)
         if revised_image:
             output_image_tokens += output_image_tokens
             if request.stream:
@@ -1677,9 +1679,9 @@ async def image_generation_impl(request: ImageGenerationRequest | ImageEditReque
     return await _images_to_image_generation_response(images, request, x2i_params, output_image_tokens)
 
 
-async def _self_correction(prompt: str, b64_image: str, x2i_params: X2IParams, raw_request: Request):
+async def _self_correction(prompt: str, input_images: List[str], x2i_params: X2IParams, raw_request: Request):
     from .api_http import g_objs
-    from .api_models import RawImageURL
+
     image_start_tag = g_objs.httpserver_manager.tokenizer.image_start_tag
     image_tag = g_objs.httpserver_manager.tokenizer.image_tag
     sampling_params_dict = {
@@ -1689,7 +1691,7 @@ async def _self_correction(prompt: str, b64_image: str, x2i_params: X2IParams, r
     }
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
-    multimodal_params = MultimodalParams(images=[RawImageURL(image_url=b64_image).to_image_url()])
+    multimodal_params = MultimodalParams(images=input_images)
     prompt += image_tag
     text_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params.clone(), request=raw_request
