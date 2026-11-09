@@ -100,47 +100,6 @@ class ReplayGDNState(BoundedAttentionState):
             None,
         )
 
-    @classmethod
-    def from_ssm(
-        cls,
-        ssm: torch.Tensor,
-        capacity: int,
-        verify_width: int,
-        activation_dtype: torch.dtype = torch.bfloat16,
-        num_key_heads: int | None = None,
-        kda: bool = False,
-        gate_lower_bound: float = -5.0,
-        compute_mode: str = "inline",
-        run_config: dict[str, int] | None = None,
-    ) -> "ReplayGDNState":
-        """用已有 SSM 张量组装 history。kernel 测试和 autotune scratch 走这里。"""
-
-        if kda:
-            raise ValueError("GDN replay does not use the KDA gate")
-        owner = cls.__new__(cls)
-        owner.config = None
-        owner.state_name = None
-        owner.request_capacity = ssm.shape[1]
-        owner.mtp_step = verify_width - 1
-        owner._algorithm = "gdn"
-        owner._logical_to_storage_layer = {}
-        owner.conv_state = None
-        owner.mtp_state_index = None
-        owner.big_pages_pool = None
-        owner.small_pages_pool = None
-        _bind_history(
-            owner,
-            ssm,
-            capacity,
-            verify_width,
-            activation_dtype,
-            num_key_heads,
-            gate_lower_bound,
-            compute_mode,
-            run_config,
-        )
-        return owner
-
     def get_state_type(self) -> str:
         """返回算法名和 Conv/SSM 存储精度。"""
         return (
@@ -809,6 +768,43 @@ def _upload_indices(values: Sequence[int], device, dtype=torch.int64) -> torch.T
     """把 Python 索引上传到目标 device。"""
 
     return torch.tensor(list(values), dtype=dtype, pin_memory=True).to(device, non_blocking=True)
+
+
+def _history_owner(
+    ssm: torch.Tensor,
+    capacity: int,
+    verify_width: int,
+    activation_dtype: torch.dtype = torch.bfloat16,
+    num_key_heads: int | None = None,
+    gate_lower_bound: float = -5.0,
+    compute_mode: str = "inline",
+    run_config: dict[str, int] | None = None,
+) -> ReplayGDNState:
+    """把 history 挂到调用方已有的 SSM 上，不再分配第二份状态。供保持原 stride 的 kernel 测试使用。"""
+
+    owner = ReplayGDNState.__new__(ReplayGDNState)
+    owner.config = None
+    owner.state_name = None
+    owner.request_capacity = ssm.shape[1]
+    owner.mtp_step = verify_width - 1
+    owner._algorithm = "gdn"
+    owner._logical_to_storage_layer = {}
+    owner.conv_state = None
+    owner.mtp_state_index = None
+    owner.big_pages_pool = None
+    owner.small_pages_pool = None
+    _bind_history(
+        owner,
+        ssm,
+        capacity,
+        verify_width,
+        activation_dtype,
+        num_key_heads,
+        gate_lower_bound,
+        compute_mode,
+        run_config,
+    )
+    return owner
 
 
 def _bind_history(

@@ -50,7 +50,7 @@ def replay(
     cu_seqlens: torch.Tensor | None = None,
     run_config: dict[str, int] | None = None,
 ) -> tuple[torch.Tensor, dict[str, int]]:
-    """执行一层 KDA replay decode，并返回输出与本轮 run config。"""
+    """执行一层 KDA replay decode。Kernel 只接收这一层的 SSM 和 history；state 只提供共用 cursor 与配置。"""
 
     if not history.kda:
         raise ValueError("KDA replay step requires the KDA gate")

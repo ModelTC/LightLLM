@@ -89,17 +89,27 @@ def rebuild_inputs(
                 f"SSM tuning scratch needs {required} bytes, exceeding its {available // 2}-byte budget"
             )
     _, _, hv, kd, vd = ssm_backend.ssm_state.shape
-    state = torch.empty((1, batch + 1, hv, kd, vd), device=q.device, dtype=ssm_backend.ssm_state.dtype).normal_(0, 0.02)
-    scratch = type(ssm_backend).from_ssm(
-        state,
-        ssm_backend.capacity,
-        ssm_backend.verify_width,
-        q.dtype,
-        num_key_heads=ssm_backend.num_key_heads,
-        kda=ssm_backend.kda,
+    from lightllm.common.attention_state.bounded_att.conv_ssm_types import ConvSSMStateConfig
+
+    # 计时只需要一层、本 batch 的槽位。正式执行仍用调用方原来的 state。
+    scratch = type(ssm_backend)(
+        ConvSSMStateConfig(
+            logical_layer_ids=(0,),
+            global_k_heads=ssm_backend.num_key_heads,
+            global_v_heads=hv,
+            key_dim=kd,
+            value_dim=vd,
+            conv_width=1,
+            conv_dtype=q.dtype,
+            ssm_dtype=ssm_backend.ssm_state.dtype,
+        ),
+        batch + 1,
+        mtp_step=ssm_backend.verify_width - 1,
+        device=q.device,
+        ssm_replay_config={"cache_len": ssm_backend.capacity, "compute_mode": ssm_backend.compute_mode},
         gate_lower_bound=ssm_backend.gate_lower_bound,
-        compute_mode=ssm_backend.compute_mode,
     )
+    scratch.ssm_state.normal_(0, 0.02)
     # benchmark 回调不能再次触发配置选择。
     scratch._config_is_fixed = True
     inputs = [
