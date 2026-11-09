@@ -168,22 +168,16 @@ class GQAFullAttentionState(FullAttentionState):
         assert self.k_storage.is_cuda, "token copies require CUDA storage"
         if not src_indices.numel():
             return
-        from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer
+        from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_pair_to_kv_buffer_pair
 
         # 直接使用调用方提供的 CUDA 索引，保留原 dtype 和 stride。
         # 按字节直接从源槽位写到目标槽位，覆盖量化 scale 和 packed padding，不创建中间 KV。
         # 调用方保证源、目标集合不相交，且目标索引不重复，避免并行读写竞争。
-        # TODO：将 K/V 的同索引 token 复制融合为一次 kernel 发射，
-        # 保持原始字节编码及各字段 stride，仍要求源目标不重叠、目标索引不重复。
-        copy_kv_buffer_to_kv_buffer(
+        copy_kv_buffer_pair_to_kv_buffer_pair(
             src_mem_index=src_indices,
             dst_mem_index=dst_indices,
-            kv_buffer=self.k_storage,
-        )
-        copy_kv_buffer_to_kv_buffer(
-            src_mem_index=src_indices,
-            dst_mem_index=dst_indices,
-            kv_buffer=self.v_storage,
+            k_buffer=self.k_storage,
+            v_buffer=self.v_storage,
         )
 
     # ========================================================================
