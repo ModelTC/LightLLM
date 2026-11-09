@@ -1,7 +1,7 @@
 """GDN replay 的 bounded attention 状态。
 
 Conv、canonical SSM、replay history、页布局和已接受快照都在本类。
-一层 decode 重放在 replay_gdn_step。
+一层 decode 重放在 replay_gdn_decode。
 """
 
 from __future__ import annotations

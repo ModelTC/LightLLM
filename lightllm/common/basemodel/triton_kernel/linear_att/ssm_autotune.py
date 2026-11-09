@@ -137,9 +137,9 @@ def replay_layer(history, *args, **kwargs):
     from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
 
     if isinstance(history, ReplayKDAState):
-        from lightllm.common.basemodel.attention.linear.replay_kda_step import replay
+        from lightllm.common.basemodel.attention.linear.replay_kda_decode import replay
     elif isinstance(history, ReplayGDNState):
-        from lightllm.common.basemodel.attention.linear.replay_gdn_step import replay
+        from lightllm.common.basemodel.attention.linear.replay_gdn_decode import replay
     else:
         raise TypeError(f"replay_layer expects ReplayGDNState or ReplayKDAState, got {type(history).__name__}")
     return replay(history, *args, **kwargs)

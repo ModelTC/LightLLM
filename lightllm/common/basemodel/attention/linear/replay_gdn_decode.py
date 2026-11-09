@@ -1,6 +1,6 @@
-"""GDN replay 的一层 decode。
+"""GDN replay decode 的 kernel 辅助。
 
-History 张量和 cursor 在 ReplayGDNState。这里只选择 kernel 配置并发起重放。
+History 张量和 cursor 在 ReplayGDNState。这里只选择 kernel 配置，并发起一层重放。
 """
 
 from __future__ import annotations

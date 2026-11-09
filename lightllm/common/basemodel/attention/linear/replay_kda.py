@@ -34,7 +34,7 @@ from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import 
     build_dynamic_mtp_linear_att_state_params,
 )
 
-from .replay_kda_step import begin_decode, replay
+from .replay_kda_decode import begin_decode, replay
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo

@@ -38,7 +38,7 @@ from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import 
 )
 from lightllm.utils.envs_utils import get_env_start_args
 
-from .replay_gdn_step import begin_decode, replay
+from .replay_gdn_decode import begin_decode, replay
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo

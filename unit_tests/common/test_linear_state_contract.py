@@ -4,7 +4,7 @@ import torch
 from lightllm.common.attention_state.bounded_att import KDAState
 from unit_tests.common.test_linear_state import make_state
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel.attention.linear.replay_gdn_step import run_config as gdn_run_config
+from lightllm.common.basemodel.attention.linear.replay_gdn_decode import run_config as gdn_run_config
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
