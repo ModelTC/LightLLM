@@ -146,14 +146,13 @@ class GQAFullAttentionState(FullAttentionState):
         if not len(token_indices):
             return
         assert self.k_storage.is_cuda, "KV writes require CUDA storage"
-        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
+        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv_fused
 
-        # TODO：将同一层 K/V 的两次索引写入融合到一个 kernel，直接写入独立 K/V 存储。
-        destindex_copy_kv(
-            K=kv[:, : self.config.head_num], DestLoc=token_indices, Out=self.k_storage[storage_layer_index]
-        )
-        destindex_copy_kv(
-            K=kv[:, self.config.head_num :], DestLoc=token_indices, Out=self.v_storage[storage_layer_index]
+        destindex_copy_kv_fused(
+            KV=kv,
+            DestLoc=token_indices,
+            OutK=self.k_storage[storage_layer_index],
+            OutV=self.v_storage[storage_layer_index],
         )
 
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
