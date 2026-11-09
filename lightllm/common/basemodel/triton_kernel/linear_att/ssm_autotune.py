@@ -24,7 +24,7 @@ def get_configs() -> list[dict[str, int]]:
     ]
 
 
-def static_key(ssm_backend, mode, q, k, v, a, b, cu_seqlens) -> dict[str, object]:
+def static_key(ssm_backend, mode, q, cu_seqlens) -> dict[str, object]:
     """构造区分状态布局、数据类型和投影模式的静态调优键。"""
     _, _, hv, kd, vd = ssm_backend.ssm_state.shape
     # 保持文件名较短，同时区分 packed projection、TP 布局、状态精度、递推规则和 history 容量。
@@ -41,14 +41,12 @@ def static_key(ssm_backend, mode, q, k, v, a, b, cu_seqlens) -> dict[str, object
         key["lower"] = ssm_backend.gate_lower_bound
     key["history_dtype"] = str(ssm_backend.keys.dtype)
     key["projection"] = (
-        ("kda_mma" if ssm_backend.kda else "gdn_mma")
-        if ssm_backend.compute_mode == "precompute" and ssm_backend.verify_width > 1
-        else "inline"
+        ("kda_mma" if ssm_backend.kda else "gdn_mma") if ssm_backend.compute_mode == "precompute" else "inline"
     )
     return key
 
 
-def run_key(ssm_backend, q, cu_seqlens) -> tuple[int, int]:
+def run_key(q, cu_seqlens) -> tuple[int, int]:
     """返回调优使用的 token 数和请求数键。"""
     tokens = q.shape[1 if cu_seqlens is not None else 0]
     return tokens, cu_seqlens.numel() - 1 if cu_seqlens is not None else tokens
@@ -58,7 +56,7 @@ def rebuild_inputs(
     ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, workload=None, run_config=None
 ) -> tuple[tuple[object, ...], dict[str, object]]:
     """为一层 scratch 和同形状的紧凑激活分配调优输入。不复制服务状态池。"""
-    tokens, sequences = run_key(ssm_backend, q, cu_seqlens)
+    tokens, sequences = run_key(q, cu_seqlens)
     batch = min(sequences, triton.cdiv(tokens, ssm_backend.verify_width)) if cu_seqlens is not None else tokens
     _, _, hv, kd, vd = ssm_backend.ssm_state.shape
     from lightllm.common.attention_state.bounded_att.conv_ssm_types import ConvSSMStateConfig
@@ -145,11 +143,10 @@ def select_config(
     ssm_backend.run_config = run_config
     reqs, accepted = workload
     ssm_backend.cursors.zero_()
-    # 把前缀写满但不越出 capacity。只重复空 history 会测不到已有前缀的读取。
+    # 把前缀写满但不越出 capacity。replay 自己读 cursor，正式 decode 也不经过 prepare_decode。
     tokens = q.shape[1 if cu_seqlens is not None else 0]
     rounds = max(1, ssm_backend.capacity // min(ssm_backend.verify_width, tokens))
     for _ in range(rounds):
-        ssm_backend.prepare_decode(reqs, cu_seqlens)
         replay_layer(ssm_backend, 0, q, k, v, a, b, a_log, bias, reqs, cu_seqlens)
         ssm_backend.accept_updates(reqs, accepted)
     return run_config
@@ -160,7 +157,7 @@ def resolve_run_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens
     if ssm_backend._config_is_fixed and ssm_backend.run_config is not None:
         return ssm_backend.run_config
     default = _replay_config(ssm_backend.run_config)
-    key = (tuple(static_key(ssm_backend, mode, q, k, v, a, b, cu_seqlens).items()), run_key(ssm_backend, q, cu_seqlens))
+    key = (tuple(static_key(ssm_backend, mode, q, cu_seqlens).items()), run_key(q, cu_seqlens))
     if key in ssm_backend.batch_configs:
         return ssm_backend.batch_configs[key]
     if not Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):

@@ -62,32 +62,21 @@ def _materialize(
             g = tl.load(Gates + slot * L + j).to(tl.float32)
         beta = tl.load(Betas + slot * L + j).to(tl.float32)
         state = _replay_update(state, raw_k, raw_v, g, beta, KDA)
-    if FLUSH_EXPORT:
+    mask = (kk[:, None] < K) & (vv[None, :] < V)
+    if OUTPUT_STRIDES is not None:
         target = tl.load(Output + row).to(tl.pointer_type(State.dtype.element_ty))
-        target_out = (
+        out = (
             target
             + linear_layer_idx.to(tl.int64) * OUTPUT_STRIDES[0]
             + head * OUTPUT_STRIDES[1]
             + kk[:, None] * OUTPUT_STRIDES[2]
             + vv[None, :] * OUTPUT_STRIDES[3]
         )
-        tl.store(target_out, state, (kk[:, None] < K) & (vv[None, :] < V))
-        tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
-        if iv == 0 and lh == 0:
-            tl.store(Cursors + req, 0)
     else:
-        if OUTPUT_STRIDES is not None:
-            target = tl.load(Output + row).to(tl.pointer_type(State.dtype.element_ty))
-            out = (
-                target
-                + linear_layer_idx.to(tl.int64) * OUTPUT_STRIDES[0]
-                + head * OUTPUT_STRIDES[1]
-                + kk[:, None] * OUTPUT_STRIDES[2]
-                + vv[None, :] * OUTPUT_STRIDES[3]
-            )
-        else:
-            out_slot = linear_layer_idx * HV + head if SNAPSHOT else slot
-            out = Output + out_slot * K * V + kk[:, None] * V + vv[None, :]
-        tl.store(out, state, (kk[:, None] < K) & (vv[None, :] < V))
-        if WHEN_FULL and iv == 0 and lh == 0:
-            tl.store(Cursors + req, 0)
+        out_slot = linear_layer_idx * HV + head if SNAPSHOT else slot
+        out = Output + out_slot * K * V + kk[:, None] * V + vv[None, :]
+    tl.store(out, state, mask)
+    if FLUSH_EXPORT:
+        tl.store(sp, state, mask)
+    if (FLUSH_EXPORT or WHEN_FULL) and iv == 0 and lh == 0:
+        tl.store(Cursors + req, 0)

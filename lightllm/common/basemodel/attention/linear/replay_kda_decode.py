@@ -36,7 +36,8 @@ def replay(
     axis = 1 if cu_seqlens is not None else 0
     out = torch.empty_like(v)
     bv = config["BV"]
-    precompute_projections = history.verify_width > 1 and bv >= 16 and history.compute_mode == "precompute"
+    # mtp_step == 0 时 verify_width 为 1。compute_mode=precompute 仍然投影；BV < 16 才退回逐 token。
+    precompute_projections = history.compute_mode == "precompute" and bv >= 16
     # 在 Python 中解析 tile 维度；Triton JIT 中直接调用 max() 会降级为 tensor 运算，无法定义静态 shape。
     bw = triton.next_power_of_2(history.verify_width)
     _replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](

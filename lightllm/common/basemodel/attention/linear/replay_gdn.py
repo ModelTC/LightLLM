@@ -180,7 +180,6 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             core = self._mtp(mixed_qkv, conv_states, a, b, layer_weight, layer_num, draft_step, state)
         else:
             core, z = self._decode(mixed_qkv, z, conv_states, a, b, layer_weight, layer_num, state)
-        if self.b1_mtp_cu_q_seq_len is None:
             state.finish_decode_token(layer_num, self.b_conv_buffer_idx)
         return core, z
 

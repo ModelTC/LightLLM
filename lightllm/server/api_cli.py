@@ -997,7 +997,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default={},
         help='Replay-only JSON object: {"cache_len":16,"compute_mode":"precompute"}. '
         "cache_len: 4/8/16/32/64, at least the verify width; compute_mode: inline/precompute. "
-        "MTP defaults to precompute, single-token decode defaults to inline.",
+        "mtp_step=0 decode uses the same replay history: explicit precompute projects that one token, "
+        "and the default is inline. MTP defaults to precompute.",
     )
     parser.add_argument(
         "--linear_att_ssm_data_type",

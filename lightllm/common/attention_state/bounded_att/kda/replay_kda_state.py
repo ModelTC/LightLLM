@@ -413,7 +413,7 @@ class ReplayKDAState(BoundedAttentionState):
 
         if not self._is_last_layer(logical_layer_id):
             return
-        self._note_new_token(reqs)
+        self.accept_single_token(reqs)
         self.maybe_compress_prefix(reqs)
 
     def clear_history(self, req: int | torch.Tensor) -> None:
@@ -431,8 +431,10 @@ class ReplayKDAState(BoundedAttentionState):
         del cu_seqlens
         return self.cursors.index_select(0, reqs.long())
 
-    def accept_updates(self, reqs: torch.Tensor, accepted_state_indices: torch.Tensor | None = None) -> None:
-        """更新 cursor，保留每个请求本轮已接受的前缀。"""
+    def accept_updates(
+        self, reqs: torch.Tensor, accepted_state_indices: torch.Tensor | None = None, width: int | None = None
+    ) -> None:
+        """更新 cursor。width 缺省时按 verify_width 取已接受长度，传 1 时固定加一个 token。"""
 
         _accept_updates[(triton.cdiv(reqs.numel(), 256),)](
             self.cursors,
@@ -440,14 +442,17 @@ class ReplayKDAState(BoundedAttentionState):
             accepted_state_indices,
             reqs.numel(),
             self.hold_req_id,
-            self.verify_width,
+            self.verify_width if width is None else width,
             256,
         )
 
     def accept_single_token(self, reqs: torch.Tensor) -> None:
         """把一个已接受 token 记入前缀长度。"""
 
-        self._note_new_token(reqs)
+        if reqs.numel() == 0:
+            return
+        # width=1 不读 index。仍传 reqs，kernel 不能收到空指针。
+        self.accept_updates(reqs, reqs, width=1)
 
     def merge_accepted_updates(self, reqs: torch.Tensor) -> None:
         """把 cursor 覆盖的已接受前缀整段折回 canonical SSM，并清空 cursor。"""
@@ -490,7 +495,6 @@ class ReplayKDAState(BoundedAttentionState):
         self,
         req_indices: list[int],
         targets: list[torch.Tensor],
-        accepted_indices: torch.Tensor | None = None,
         flush: bool = False,
     ) -> None:
         """将多个 accepted 快照直接写入调用方目标页。"""
@@ -528,16 +532,7 @@ class ReplayKDAState(BoundedAttentionState):
             self.export_accepted_state(req_indices, targets, flush=flush)
             return
         for req, dst in zip(req_indices, targets):
-            snap = torch.empty(
-                (self.ssm_state.shape[0], *self.ssm_state.shape[2:]),
-                dtype=self.ssm_state.dtype,
-                device=self.ssm_state.device,
-            )
-            self._materialize_accepted(
-                torch.tensor([req], dtype=torch.int32, device=self.ssm_state.device),
-                snap,
-                snapshot=True,
-            )
+            snap = self.accepted_ssm(req)
             dst.copy_(snap)
             if flush:
                 self.ssm_state[:, req].copy_(snap)
@@ -572,22 +567,6 @@ class ReplayKDAState(BoundedAttentionState):
         if self.config is None or not self.config.logical_layer_ids:
             return False
         return logical_layer_id == self.config.logical_layer_ids[-1]
-
-    def _note_new_token(self, reqs: torch.Tensor) -> None:
-        """非 MTP 最后一层在写入之后，把这一个 token 记进前缀长度。"""
-
-        if reqs.numel() == 0:
-            return
-        # 固定加 1，并在 kernel 内跳过 hold。避免按请求号做布尔索引，CUDA graph 不能捕获这种同步。
-        _accept_updates[(triton.cdiv(reqs.numel(), 256),)](
-            self.cursors,
-            reqs,
-            reqs,
-            reqs.numel(),
-            self.hold_req_id,
-            1,
-            256,
-        )
 
     def _transfer_regions(self) -> tuple[TransferRegion, ...]:
         """依次描述全局 Conv 和 SSM 区域，并标明当前 TP rank 的读写范围。"""
