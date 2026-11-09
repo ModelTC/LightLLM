@@ -5,10 +5,10 @@ import torch
 def ReplaySSMExecutor(*args, **kwargs):
     kda = kwargs.get("kda", False)
     if kda:
-        from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDARuntime
+        from lightllm.common.attention_state.bounded_att.kda.replay_kda_runtime import ReplayKDARuntime
 
         return ReplayKDARuntime(*args, **kwargs)
-    from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNRuntime
+    from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_runtime import ReplayGDNRuntime
 
     return ReplayGDNRuntime(*args, **kwargs)
 

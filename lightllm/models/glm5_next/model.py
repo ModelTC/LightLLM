@@ -158,7 +158,10 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """GLM full-attention 层采用 NoPE packed MLA，并保存压缩 indexer 字段。"""
-        from lightllm.common.attention_state.full_att import PackedMLALogicalConfig, create_packed_mla_state
+        from lightllm.common.attention_state.full_att import (
+            PackedMLALogicalConfig,
+            create_packed_mla_state,
+        )
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -192,7 +195,9 @@ class Glm5NextTpPartModel(TpPartBaseModel):
             Fp8Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
 
     def _init_att_backend(self):
-        from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+        from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import (
+            Fp8Glm5NextSparseAttBackend,
+        )
 
         backend_class = (
             Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
@@ -201,7 +206,15 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.decode_att_backend = self.prefill_att_backend
 
     def _init_att_backend1(self):
-        self.prefill_att_backend1 = KDALinearAttBackend(model=self)
+        if getattr(self.args, "ssm_state_mode", "native") == "replay":
+            from lightllm.common.basemodel.attention.linear.replay_kda import (
+                ReplayKDALinearAttBackend,
+            )
+
+            backend_cls = ReplayKDALinearAttBackend
+        else:
+            backend_cls = KDALinearAttBackend
+        self.prefill_att_backend1 = backend_cls(model=self)
         self.decode_att_backend1 = self.prefill_att_backend1
 
     def _init_custom(self):

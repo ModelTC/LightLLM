@@ -64,11 +64,6 @@ class KDAPrefillAttState(BasePrefillAttState):
     b_ssm_buffer_idx: torch.Tensor = None
 
     def init_state(self):
-        self._replay_state = None
-        from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import prepare_replay_kda_prefill
-
-        if prepare_replay_kda_prefill(self):
-            return
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
         self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (self.backend.mtp_step + 1)
 
@@ -93,7 +88,7 @@ class KDAPrefillAttState(BasePrefillAttState):
             model_role=self.infer_state.att_state_role,
             state_type_filter="kda",
             logical_layer_id=layer_num,
-            state_class=type(self._replay_state) if self._replay_state is not None else KDAState,
+            state_class=KDAState,
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         conv_states = conv_states[..., : backend.conv_kernel_size - 1]
@@ -143,11 +138,6 @@ class KDADecodeAttState(BaseDecodeAttState):
     b_num_accepted_tokens: torch.Tensor = None
 
     def init_state(self):
-        self._replay_state = None
-        from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import prepare_replay_kda_decode
-
-        if prepare_replay_kda_decode(self):
-            return
         mtp_step = self.backend.mtp_step
         if mtp_step == 0:
             self._init_normal_decode_state()
@@ -236,7 +226,7 @@ class KDADecodeAttState(BaseDecodeAttState):
             model_role=self.infer_state.att_state_role,
             state_type_filter="kda",
             logical_layer_id=layer_num,
-            state_class=type(self._replay_state) if self._replay_state is not None else KDAState,
+            state_class=KDAState,
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         conv_kwargs = dict(bias=None, activation="silu", conv_state_indices=self.b_conv_buffer_idx)
@@ -256,19 +246,6 @@ class KDADecodeAttState(BaseDecodeAttState):
         v = v.view(*shape, backend.tp_num_heads, backend.head_dim)
         raw_gate = raw_gate.view(*shape, backend.tp_hidden_size)
         raw_beta = raw_beta.view(*shape, backend.tp_num_heads)
-        if self._replay_state is not None:
-            return self._replay_state.replay_forward(
-                layer_num,
-                q,
-                k,
-                v,
-                raw_gate.reshape(-1, backend.tp_hidden_size),
-                raw_beta.reshape(-1, backend.tp_num_heads),
-                layer_weight.linear_A_log.weight,
-                layer_weight.linear_dt_bias.weight,
-                self.b_conv_buffer_idx,
-                self.b1_mtp_cu_q_seq_len,
-            )
         output, _ = fused_recurrent_kda(
             q=q,
             k=k,

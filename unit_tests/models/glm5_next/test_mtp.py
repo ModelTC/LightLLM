@@ -5,7 +5,9 @@ import torch
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, KDAState
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
+from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import (
+    fused_recurrent_kda,
+)
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
 
 
@@ -23,7 +25,11 @@ def test_kda_mtp_matches_single_token_decode_and_restores_accepted_state(mtp_ste
     states = torch.randn(6 * width, heads, dim, dim, device="cuda", dtype=state_dtype) * 0.1
     accepted = torch.tensor([width, 1, 1], device="cuda", dtype=torch.int32)
     for lengths in ([width, 1, 0], [2, width, 0], [1, 1, 0]):
-        cu = torch.tensor([0, lengths[0], sum(lengths), sum(lengths)], device="cuda", dtype=torch.int32)
+        cu = torch.tensor(
+            [0, lengths[0], sum(lengths), sum(lengths)],
+            device="cuda",
+            dtype=torch.int32,
+        )
         tokens = sum(lengths)
         q, k, v, gate = [torch.randn(1, tokens, heads, dim, device="cuda", dtype=torch.bfloat16) for _ in range(4)]
         beta = torch.randn(1, tokens, heads, device="cuda", dtype=torch.bfloat16)
@@ -100,7 +106,12 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
 
     prefill(raw[:prefix], packed, ring)
     # Alternate expanded verification, rewound single-token drafting, and re-verification.
-    for start, count in [(prefix, width), (prefix + 1, 1), (prefix + 2, 1), (prefix + 1, width)]:
+    for start, count in [
+        (prefix, width),
+        (prefix + 1, 1),
+        (prefix + 2, 1),
+        (prefix + 1, width),
+    ]:
         raw[start : start + count] = torch.randn(count, 256, device="cuda", dtype=torch.bfloat16)
         lengths = torch.arange(start + 1, start + count + 1, device="cuda", dtype=torch.int32)
         compress_pools(
@@ -117,7 +128,11 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
             b_mtp_index=torch.arange(count, device="cuda", dtype=torch.int32),
         )
         expected = torch.zeros_like(packed)
-        prefill(raw[: start + count], expected, torch.zeros(2, 4, 256, device="cuda", dtype=torch.bfloat16))
+        prefill(
+            raw[: start + count],
+            expected,
+            torch.zeros(2, 4, 256, device="cuda", dtype=torch.bfloat16),
+        )
         closing = torch.arange(start, start + count, device="cuda")
         closing = closing[(closing + 1) % 4 == 0]
         assert torch.equal(packed[closing], expected[closing])
@@ -131,8 +146,15 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
 
     from lightllm.common.basemodel.attention.base_att import AttControl
     from lightllm.common.basemodel.attention.linear.kda import KDADecodeAttState
-    from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
-    from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_update
+    from lightllm.common.basemodel.attention.linear.replay_kda import (
+        ReplayKDADecodeAttState,
+    )
+    from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import (
+        ReplayKDAState,
+    )
+    from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
+        causal_conv1d_update,
+    )
 
     torch.manual_seed(53)
     heads, dim, width = 2, 128, mtp_step + 1
@@ -234,7 +256,8 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
         linear_A_log=SimpleNamespace(weight=a),
         linear_dt_bias=SimpleNamespace(weight=bias),
     )
-    state = KDADecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
+    decode_cls = ReplayKDADecodeAttState if mode == "replay" else KDADecodeAttState
+    state = decode_cls(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
     state.init_state()
     actual = state.decode_att(
         None,
@@ -243,15 +266,27 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
         AttControl(
             linear_att_decode=True,
             linear_att_decode_dict=dict(
-                layer_weight=weight, layer_num=0, mixed_qkv=mixed, raw_gate=gate, raw_beta=beta
+                layer_weight=weight,
+                layer_num=0,
+                mixed_qkv=mixed,
+                raw_gate=gate,
+                raw_beta=beta,
             ),
         ),
     )
-    torch.testing.assert_close(actual.reshape(tokens, heads, dim)[:row], torch.cat(expected), atol=2e-3, rtol=1e-2)
+    torch.testing.assert_close(
+        actual.reshape(tokens, heads, dim)[:row],
+        torch.cat(expected),
+        atol=2e-3,
+        rtol=1e-2,
+    )
     if mode == "native":
         checked_slots = len(requests) if dynamic and not mtp_step else expected_ssm.shape[0]
         torch.testing.assert_close(
-            selected.ssm_state[0, :checked_slots], expected_ssm[:checked_slots], atol=2e-3, rtol=1e-2
+            selected.ssm_state[0, :checked_slots],
+            expected_ssm[:checked_slots],
+            atol=2e-3,
+            rtol=1e-2,
         )
     else:
         ids = torch.tensor(requests, dtype=torch.int32, device="cuda")

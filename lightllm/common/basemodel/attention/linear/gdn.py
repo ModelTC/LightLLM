@@ -114,11 +114,6 @@ class LinearAttPrefillAttState(BasePrefillAttState):
     b_ssm_buffer_idx: torch.Tensor = None
 
     def init_state(self):
-        self._replay_state = None
-        from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import prepare_replay_gdn_prefill
-
-        if prepare_replay_gdn_prefill(self):
-            return
         backend: LinearAttBackend = self.backend
         mtp_step = backend.mtp_step
         # 每次 _prefill 都会在 runtime infer_state 上调用 init_state。
@@ -149,7 +144,7 @@ class LinearAttPrefillAttState(BasePrefillAttState):
             model_role=self.infer_state.att_state_role,
             state_type_filter="gdn",
             logical_layer_id=layer_num,
-            state_class=type(self._replay_state) if self._replay_state is not None else GDNState,
+            state_class=GDNState,
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
@@ -219,11 +214,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
     b_num_accepted_tokens: torch.Tensor = None
 
     def init_state(self):
-        self._replay_state = None
-        from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import prepare_replay_gdn_decode
-
-        if prepare_replay_gdn_decode(self):
-            return
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step == 0:
             self._init_normal_decode_state()
@@ -313,7 +303,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             model_role=self.infer_state.att_state_role,
             state_type_filter="gdn",
             logical_layer_id=layer_num,
-            state_class=type(self._replay_state) if self._replay_state is not None else GDNState,
+            state_class=GDNState,
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
 
@@ -327,7 +317,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
                 b,
                 self.infer_state,
                 layer_weight,
-                layer_num=layer_num,
             )
         else:
             # 非 MTP 模式下，使用线性层 decode 状态。
@@ -340,7 +329,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
                 b,
                 self.infer_state,
                 layer_weight,
-                layer_num=layer_num,
             )
         return core_attn_out, z
 
@@ -354,7 +342,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         b: torch.Tensor,
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
-        layer_num: int = 0,
     ):
         backend: LinearAttBackend = self.backend
 
@@ -377,20 +364,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             backend.tp_num_v_heads,
             backend.head_v_dim,
         )
-        if self._replay_state is not None:
-            core_attn_out = self._replay_state.replay_forward(
-                layer_num,
-                query,
-                key,
-                value,
-                a,
-                b,
-                layer_weight.linear_A_log.weight,
-                layer_weight.linear_dt_bias.weight,
-                self.b_conv_buffer_idx,
-                self.b1_mtp_cu_q_seq_len,
-            )
-            return core_attn_out, z
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
             k=key,
@@ -415,7 +388,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         b: torch.Tensor,
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
-        layer_num: int = 0,
     ):
         from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
             causal_conv1d_update as causal_conv1d_update_mtp,
@@ -437,19 +409,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         )
 
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
-        if self._replay_state is not None:
-            return self._replay_state.replay_forward(
-                layer_num,
-                query,
-                key,
-                value,
-                a,
-                b,
-                layer_weight.linear_A_log.weight,
-                layer_weight.linear_dt_bias.weight,
-                self.b_conv_buffer_idx,
-                cu_seqlens_q,
-            )
         assert self.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"
         # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,
         # and MTP decode only writes values in [1, mtp_step+1]. The old per-layer per-step
