@@ -26,38 +26,19 @@ class Qwen35TransformerLayerWeight(Qwen3NextTransformerLayerWeight):
         super()._init_gdn_weight()
 
         prefix = f"model.layers.{self.layer_num_}.linear_attn"
-        hidden_size = self.network_config_["hidden_size"]
         qk_dim = self.linear_num_k_heads * self.linear_k_head_dim
         v_dim = self.linear_num_v_heads * self.linear_v_head_dim
-        quant_method = self.linear_in_proj.quant_method
-        out_dims = [qk_dim, qk_dim, v_dim, v_dim]
-        weight_names = [f"{prefix}.in_proj_{part}.weight" for part in ("q", "k", "v", "z")]
-        gate_dims = [self.linear_num_v_heads, self.linear_num_v_heads]
-        gate_modules = [f"{prefix}.in_proj_{part}" for part in ("b", "a")]
-        gate_weight_names = [f"{module}.weight" for module in gate_modules]
-
-        self.linear_gate_proj = None
-        quantization = quant_method.hf_quantization_config or {}
-        excluded = {
-            name.replace("model.language_model.", "model.", 1)
-            for name in (quantization.get("modules_to_not_convert") or ())
-        }
-        if quant_method.method_name in ("awq", "awq_marlin") and all(
-            any(module == name or module.endswith(f".{name}") for name in excluded) for module in gate_modules
-        ):
-            self.linear_gate_proj = ROWMMWeight(
-                in_dim=hidden_size,
-                out_dims=gate_dims,
-                weight_names=gate_weight_names,
-                data_type=self.data_type_,
-            )
-        else:
-            out_dims.extend(gate_dims)
-            weight_names.extend(gate_weight_names)
 
         # The attention kernels consume [q, k, v, z, b, a].
+        self._init_gdn_in_proj(
+            out_dims=[qk_dim, qk_dim, v_dim, v_dim, self.linear_num_v_heads, self.linear_num_v_heads],
+            weight_names=[f"{prefix}.in_proj_{part}.weight" for part in ("q", "k", "v", "z", "b", "a")],
+            quant_method=self.get_quant_method("in_proj_weight"),
+        )
+
+    def _init_gdn_in_proj(self, out_dims, weight_names, quant_method):
         self.linear_in_proj = ROWMMWeight(
-            in_dim=hidden_size,
+            in_dim=self.network_config_["hidden_size"],
             out_dims=out_dims,
             weight_names=weight_names,
             data_type=self.data_type_,

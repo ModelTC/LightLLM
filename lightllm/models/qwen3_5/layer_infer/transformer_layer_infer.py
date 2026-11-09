@@ -19,13 +19,6 @@ class Qwen35TransformerLayerInfer(Qwen3NextTransformerLayerInfer):
         mrope_section = rope_scaling.get("mrope_section", [11, 11, 10])
         self.mrope_section = torch.tensor(mrope_section, dtype=torch.int32, device="cuda")
 
-    def _linear_in_proj(self, input: torch.Tensor, layer_weight: Qwen35TransformerLayerWeight) -> torch.Tensor:
-        projected = super()._linear_in_proj(input, layer_weight)
-        if layer_weight.linear_gate_proj is not None:
-            gates = layer_weight.linear_gate_proj.mm(input.view(-1, self.embed_dim_))
-            projected = torch.cat((projected, gates), dim=-1)
-        return projected
-
     def _get_qkv(
         self,
         input: torch.Tensor,

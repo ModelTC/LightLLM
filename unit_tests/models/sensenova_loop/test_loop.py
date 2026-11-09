@@ -249,6 +249,37 @@ def test_awq_fused_projections_split_on_output_axis(suffix, factor):
     assert torch.equal(weights[gate_name], torch.cat((gate1, gate2), dim=1))
 
 
+def test_loop_binds_split_gdn_projection_only_for_weights_with_separate_gates(monkeypatch):
+    from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
+    from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35TransformerLayerInfer
+    from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerInfer
+    from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
+    from lightllm.models.sensenova_loop.layer_infer.transformer_layer_infer import SenseNovaLoopTransformerLayerInfer
+
+    qkvz = torch.arange(8).reshape(2, 4)
+    gates = torch.arange(8, 12).reshape(2, 2)
+    fused = torch.cat((qkvz, gates), dim=-1)
+    fused_weight = SimpleNamespace(linear_in_proj=SimpleNamespace(mm=lambda _: fused))
+    split_weight = SimpleNamespace(
+        linear_in_proj=SimpleNamespace(mm=lambda _: qkvz),
+        linear_gate_proj=SimpleNamespace(mm=lambda _: gates),
+    )
+    model = object.__new__(SenseNovaLoopTpPartModel)
+    model.trans_layers_weight = [fused_weight, split_weight, split_weight]
+    layers = [object.__new__(SenseNovaLoopTransformerLayerInfer) for _ in model.trans_layers_weight]
+    for layer in layers:
+        layer.embed_dim_ = 4
+    monkeypatch.setattr(Qwen3_5TpPartModel, "_init_infer_layer", lambda self, _: setattr(self, "layers_infer", layers))
+
+    model._init_infer_layer()
+    assert Qwen35TransformerLayerInfer._linear_in_proj is Qwen3NextTransformerLayerInfer._linear_in_proj
+    assert layers[0]._linear_in_proj.__func__ is Qwen3NextTransformerLayerInfer._linear_in_proj
+    for layer in layers[1:]:
+        assert layer._linear_in_proj.__func__ is SenseNovaLoopTransformerLayerInfer._linear_in_proj_with_gates
+    for layer, weight in zip(layers, model.trans_layers_weight):
+        assert torch.equal(layer._linear_in_proj(torch.zeros(1, 2, 4), weight), fused)
+
+
 def test_weight_load_failure_restores_execution_weights(monkeypatch):
     from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
     from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
