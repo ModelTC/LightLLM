@@ -61,13 +61,13 @@ class PastKVCacheModule(object):
         true_finished_reqs = []
         for req in finished_reqs:
             try:
-                # filter out aborted reqs
-                if req.infer_aborted:
+                # filter out non-img-gen reqs
+                if not req.shm_req.sample_params.img_gen_prefill:
                     true_finished_reqs.append(req)
                     continue
 
-                # filter out non-img-gen reqs
-                if not req.shm_req.sample_params.img_gen_prefill:
+                # filter out aborted reqs when the trans task is not started, otherwise wait the trans task to finish.
+                if req.infer_aborted and req.past_kv_cache_task_status.is_not_started():
                     true_finished_reqs.append(req)
                     continue
 

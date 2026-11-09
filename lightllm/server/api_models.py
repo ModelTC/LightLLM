@@ -559,7 +559,8 @@ class ImageGenerationRequest(BaseModel):
     n: Literal[1] = 1
     output_format: ImageType = "jpeg"
     response_format: Literal["b64_json"] = "b64_json"
-    watermark: Optional[bool] = False
+    self_correction: Optional[bool] = False
+    stream: Optional[bool] = False
 
     img_config: Optional[ImageConfig] = None
 
@@ -600,12 +601,18 @@ class ImageUsageInfo(BaseModel):
 
 
 class ImageB64(BaseModel):
+    index: int
     b64_json: str
+
+
+class TextOutput(BaseModel):
+    index: int
+    text: str
 
 
 class ImageGenerationResponse(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
-    data: List[ImageB64]
+    data: List[ImageB64 | TextOutput]
     output_format: ImageType
     size: str
     usage: ImageUsageInfo
