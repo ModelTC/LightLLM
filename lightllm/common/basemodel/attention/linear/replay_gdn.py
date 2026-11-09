@@ -158,9 +158,16 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
     b_num_accepted_tokens: torch.Tensor = None
 
     def init_state(self):
-        state = _single_replay_state(self)
+        role = self.infer_state.att_state_role
+        matches = [
+            state
+            for state in self.infer_state.att_state_manager.get_bounded_attention_states(role)
+            if isinstance(state, ReplayGDNState)
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"expected one ReplayGDNState for {role}")
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
-        self._init_indices(draft_step, state.mtp_state_index)
+        self._init_indices(draft_step, matches[0].mtp_state_index)
         self.b_ssm_buffer_idx = self.b_conv_buffer_idx
 
     def decode_att(
@@ -281,6 +288,15 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         return output
 
 
+def _replay_state(att_state, layer_num: int) -> ReplayGDNState:
+    return att_state.infer_state.att_state_manager.get_state(
+        model_role=att_state.infer_state.att_state_role,
+        state_type_filter="gdn",
+        logical_layer_id=layer_num,
+        state_class=ReplayGDNState,
+    )
+
+
 def _configure_gdn(backend, model, prefill_kernel) -> None:
     """写入 GDN 的张量并行尺寸，并绑定这个 backend 自己的 prefill kernel。"""
 
@@ -334,24 +350,3 @@ def _rearrange_mixed_qkv(backend, mixed_qkv, decode=False):
     key = key.view(*leading, backend.tp_num_k_heads, backend.head_k_dim)
     value = value.view(*leading, backend.tp_num_v_heads, backend.head_v_dim)
     return query, key, value
-
-
-def _replay_state(att_state, layer_num: int) -> ReplayGDNState:
-    return att_state.infer_state.att_state_manager.get_state(
-        model_role=att_state.infer_state.att_state_role,
-        state_type_filter="gdn",
-        logical_layer_id=layer_num,
-        state_class=ReplayGDNState,
-    )
-
-
-def _single_replay_state(att_state) -> ReplayGDNState:
-    role = att_state.infer_state.att_state_role
-    matches = [
-        state
-        for state in att_state.infer_state.att_state_manager.get_bounded_attention_states(role)
-        if isinstance(state, ReplayGDNState)
-    ]
-    if len(matches) != 1:
-        raise ValueError(f"expected one ReplayGDNState for {role}")
-    return matches[0]

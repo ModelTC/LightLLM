@@ -31,6 +31,11 @@ from .kda_pages_pool import KDAPagesPool
 logger = init_logger(__name__)
 
 
+class _AcceptedTensors(NamedTuple):
+    conv: torch.Tensor
+    ssm: torch.Tensor
+
+
 class ReplayKDAState(BoundedAttentionState):
     """KDA replay 运行态。Conv、单槽 SSM 和 history 都在本类，不沿用 native 的 MTP 槽。"""
 
@@ -818,8 +823,3 @@ def _bind_history(
     owner.raw_keys = torch.empty(key_shape, dtype=activation_dtype, device=ssm.device)
     owner.raw_values = torch.empty((layers, slots, hv, capacity, v), dtype=activation_dtype, device=ssm.device)
     owner.betas = torch.empty((layers, slots, hv, capacity), dtype=torch.float32, device=ssm.device)
-
-
-class _AcceptedTensors(NamedTuple):
-    conv: torch.Tensor
-    ssm: torch.Tensor

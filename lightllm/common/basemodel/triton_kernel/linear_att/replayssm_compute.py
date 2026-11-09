@@ -6,6 +6,205 @@ import triton.language as tl
 
 
 @triton.jit
+def _replay(
+    Q,
+    Kp,
+    Vp,
+    A,
+    B,
+    Alog,
+    Bias,
+    State,
+    Keys,
+    Deltas,
+    Gates,
+    RawKeys,
+    RawValues,
+    Betas,
+    Reqs,
+    Cursors,
+    Cu,
+    Out,
+    SQ: tl.constexpr,
+    SK: tl.constexpr,
+    SV: tl.constexpr,
+    SA: tl.constexpr,
+    SB: tl.constexpr,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    KH: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    L: tl.constexpr,
+    HOLD: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    VARLEN: tl.constexpr,
+    PRECOMPUTE_PROJECTIONS: tl.constexpr,
+    BW: tl.constexpr,
+    KDA: tl.constexpr,
+    LOWER: tl.constexpr,
+    BQK: tl.constexpr,
+    BR: tl.constexpr,
+):
+    """执行一个请求窗口的 replay decode，并写入 history。
+
+    只把本步 token 追加到长度为 L 的连续前缀，不写 canonical SSM。
+    cursor 是已有前缀长度，本步从那里接着写。请求数属于运行时布局，
+    不应因为 eager batch 改变而形成新的 kernel 变体。
+    """
+    iv, seq, hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    req = tl.load(Reqs + seq).to(tl.int64)
+    if VARLEN:
+        start, end = tl.load(Cu + seq), tl.load(Cu + seq + 1)
+    else:
+        start, end = seq, seq + 1
+    vv = iv * BV + tl.arange(0, BV)
+    if req == HOLD:
+        for t in range(start, end):
+            tl.store(Out + (t * HV + hv) * V + vv, 0, vv < V)
+        return
+    if start == end:
+        return
+
+    kk = tl.arange(0, BK)
+    ll = tl.arange(0, L)
+    slot = req * HV + hv
+    key_slot = req * KH + hv // (HV // KH)
+    n = tl.load(Cursors + req)
+    sp = State + slot * K * V + kk[:, None] * V + vv[None, :]
+    state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
+
+    if PRECOMPUTE_PROJECTIONS:
+        projection_dtype: tl.constexpr = (
+            tl.bfloat16 if State.dtype.element_ty == tl.bfloat16 and Q.dtype.element_ty == tl.bfloat16 else tl.float32
+        )
+        projection_precision: tl.constexpr = "tf32" if Q.dtype.element_ty == tl.bfloat16 else "tf32x3"
+        qk, projections, tt, tokens, valid, h = _project_replay_queries(
+            Q,
+            Kp,
+            A,
+            Alog,
+            Bias,
+            Gates,
+            SQ,
+            SK,
+            SA,
+            H,
+            HV,
+            K,
+            L,
+            BW,
+            KDA,
+            LOWER,
+            BQK,
+            end,
+            hv,
+            kk,
+            ll,
+            n,
+            projection_dtype,
+            projection_precision,
+            slot,
+            start,
+            state,
+        )
+    else:
+        projections, tt = None, None
+
+    if PRECOMPUTE_PROJECTIONS and not KDA:
+        _replay_gdn_window(
+            Kp,
+            Vp,
+            A,
+            B,
+            Alog,
+            Bias,
+            Keys,
+            Deltas,
+            Gates,
+            RawKeys,
+            RawValues,
+            Betas,
+            Out,
+            SK,
+            SV,
+            SA,
+            SB,
+            HV,
+            KH,
+            K,
+            V,
+            L,
+            BV,
+            BW,
+            BR,
+            end,
+            h,
+            hv,
+            iv,
+            key_slot,
+            kk,
+            n,
+            projection_dtype,
+            projection_precision,
+            projections,
+            qk,
+            slot,
+            start,
+            tokens,
+            tt,
+            valid,
+            vv,
+        )
+    else:
+        _replay_sequential(
+            Q,
+            Kp,
+            Vp,
+            A,
+            B,
+            Alog,
+            Bias,
+            Keys,
+            Deltas,
+            Gates,
+            RawKeys,
+            RawValues,
+            Betas,
+            Out,
+            SQ,
+            SK,
+            SV,
+            SA,
+            SB,
+            H,
+            HV,
+            KH,
+            K,
+            V,
+            L,
+            PRECOMPUTE_PROJECTIONS,
+            BW,
+            KDA,
+            LOWER,
+            end,
+            hv,
+            iv,
+            key_slot,
+            kk,
+            ll,
+            n,
+            projections,
+            slot,
+            start,
+            state,
+            tt,
+            vv,
+        )
+
+
+@triton.jit
 def _project_replay_queries(
     Q,
     Kp,
@@ -351,202 +550,3 @@ def _replay_sequential(
             gate_prefix = tl.where(ll >= n, total_g, gate_prefix)
         history |= ll == n
         n += 1
-
-
-@triton.jit
-def _replay(
-    Q,
-    Kp,
-    Vp,
-    A,
-    B,
-    Alog,
-    Bias,
-    State,
-    Keys,
-    Deltas,
-    Gates,
-    RawKeys,
-    RawValues,
-    Betas,
-    Reqs,
-    Cursors,
-    Cu,
-    Out,
-    SQ: tl.constexpr,
-    SK: tl.constexpr,
-    SV: tl.constexpr,
-    SA: tl.constexpr,
-    SB: tl.constexpr,
-    H: tl.constexpr,
-    HV: tl.constexpr,
-    KH: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
-    L: tl.constexpr,
-    HOLD: tl.constexpr,
-    BK: tl.constexpr,
-    BV: tl.constexpr,
-    VARLEN: tl.constexpr,
-    PRECOMPUTE_PROJECTIONS: tl.constexpr,
-    BW: tl.constexpr,
-    KDA: tl.constexpr,
-    LOWER: tl.constexpr,
-    BQK: tl.constexpr,
-    BR: tl.constexpr,
-):
-    """执行一个请求窗口的 replay decode，并写入 history。
-
-    只把本步 token 追加到长度为 L 的连续前缀，不写 canonical SSM。
-    cursor 是已有前缀长度，本步从那里接着写。请求数属于运行时布局，
-    不应因为 eager batch 改变而形成新的 kernel 变体。
-    """
-    iv, seq, hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    req = tl.load(Reqs + seq).to(tl.int64)
-    if VARLEN:
-        start, end = tl.load(Cu + seq), tl.load(Cu + seq + 1)
-    else:
-        start, end = seq, seq + 1
-    vv = iv * BV + tl.arange(0, BV)
-    if req == HOLD:
-        for t in range(start, end):
-            tl.store(Out + (t * HV + hv) * V + vv, 0, vv < V)
-        return
-    if start == end:
-        return
-
-    kk = tl.arange(0, BK)
-    ll = tl.arange(0, L)
-    slot = req * HV + hv
-    key_slot = req * KH + hv // (HV // KH)
-    n = tl.load(Cursors + req)
-    sp = State + slot * K * V + kk[:, None] * V + vv[None, :]
-    state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
-
-    if PRECOMPUTE_PROJECTIONS:
-        projection_dtype: tl.constexpr = (
-            tl.bfloat16 if State.dtype.element_ty == tl.bfloat16 and Q.dtype.element_ty == tl.bfloat16 else tl.float32
-        )
-        projection_precision: tl.constexpr = "tf32" if Q.dtype.element_ty == tl.bfloat16 else "tf32x3"
-        qk, projections, tt, tokens, valid, h = _project_replay_queries(
-            Q,
-            Kp,
-            A,
-            Alog,
-            Bias,
-            Gates,
-            SQ,
-            SK,
-            SA,
-            H,
-            HV,
-            K,
-            L,
-            BW,
-            KDA,
-            LOWER,
-            BQK,
-            end,
-            hv,
-            kk,
-            ll,
-            n,
-            projection_dtype,
-            projection_precision,
-            slot,
-            start,
-            state,
-        )
-    else:
-        projections, tt = None, None
-
-    if PRECOMPUTE_PROJECTIONS and not KDA:
-        _replay_gdn_window(
-            Kp,
-            Vp,
-            A,
-            B,
-            Alog,
-            Bias,
-            Keys,
-            Deltas,
-            Gates,
-            RawKeys,
-            RawValues,
-            Betas,
-            Out,
-            SK,
-            SV,
-            SA,
-            SB,
-            HV,
-            KH,
-            K,
-            V,
-            L,
-            BV,
-            BW,
-            BR,
-            end,
-            h,
-            hv,
-            iv,
-            key_slot,
-            kk,
-            n,
-            projection_dtype,
-            projection_precision,
-            projections,
-            qk,
-            slot,
-            start,
-            tokens,
-            tt,
-            valid,
-            vv,
-        )
-    else:
-        _replay_sequential(
-            Q,
-            Kp,
-            Vp,
-            A,
-            B,
-            Alog,
-            Bias,
-            Keys,
-            Deltas,
-            Gates,
-            RawKeys,
-            RawValues,
-            Betas,
-            Out,
-            SQ,
-            SK,
-            SV,
-            SA,
-            SB,
-            H,
-            HV,
-            KH,
-            K,
-            V,
-            L,
-            PRECOMPUTE_PROJECTIONS,
-            BW,
-            KDA,
-            LOWER,
-            end,
-            hv,
-            iv,
-            key_slot,
-            kk,
-            ll,
-            n,
-            projections,
-            slot,
-            start,
-            state,
-            tt,
-            vv,
-        )

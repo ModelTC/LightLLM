@@ -135,8 +135,15 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
     b_num_accepted_tokens: torch.Tensor = None
 
     def init_state(self):
-        state = _single_replay_state(self)
-        self._init_indices(self.backend.mtp_step, state.mtp_state_index)
+        role = self.infer_state.att_state_role
+        matches = [
+            state
+            for state in self.infer_state.att_state_manager.get_bounded_attention_states(role)
+            if isinstance(state, ReplayKDAState)
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"expected one ReplayKDAState for {role}")
+        self._init_indices(self.backend.mtp_step, matches[0].mtp_state_index)
         self.b_ssm_buffer_idx = self.b_conv_buffer_idx
 
     def decode_att(
@@ -232,15 +239,3 @@ def _replay_state(att_state, layer_num: int) -> ReplayKDAState:
         logical_layer_id=layer_num,
         state_class=ReplayKDAState,
     )
-
-
-def _single_replay_state(att_state) -> ReplayKDAState:
-    role = att_state.infer_state.att_state_role
-    matches = [
-        state
-        for state in att_state.infer_state.att_state_manager.get_bounded_attention_states(role)
-        if isinstance(state, ReplayKDAState)
-    ]
-    if len(matches) != 1:
-        raise ValueError(f"expected one ReplayKDAState for {role}")
-    return matches[0]
