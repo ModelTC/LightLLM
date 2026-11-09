@@ -19,7 +19,6 @@ from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import 
     build_dynamic_mtp_linear_att_state_params,
 )
 from types import SimpleNamespace
-from lightllm.common.attention_state.commit import StateAcceptance
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -162,10 +161,10 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         if index == 0:
             ssm_backend.accept_updates(reqs, accepted)
         else:
-            manager._ssm_executor.commit(
-                StateAcceptance(rows[starts.long()], accepted[rows[starts.long()]] + 1),
+            manager._ssm_executor.commit_accepted(
                 manager.mtp_state_index,
-                "main",
+                rows[starts.long()],
+                accepted[rows[starts.long()]] + 1,
             )
         return out
 

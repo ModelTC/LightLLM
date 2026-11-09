@@ -21,7 +21,6 @@ def ssm_snapshot(backend, req):
 
 
 from types import SimpleNamespace
-from lightllm.common.attention_state.commit import StateAcceptance
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import replay_layer
@@ -92,7 +91,7 @@ def accept_fused(m, args):
     ends = torch.cat((args[0][1:], args[0].new_full((1,), args[3].numel())))
     cumulative = torch.cat((args[3].new_zeros(1), args[3].cumsum(0)))
     lengths = cumulative[ends.long()] - cumulative[args[0].long()]
-    m._ssm_executor.commit(StateAcceptance(reqs, lengths), m.mtp_state_index, "main")
+    m._ssm_executor.commit_accepted(m.mtp_state_index, reqs, lengths)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -136,8 +135,8 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
                 checks += 1
 
             class _IndexOnly:
-                def commit(self, acceptance, indices, state_name=None):
-                    commit_ssm_prefix(indices, acceptance.req_indices, acceptance.accepted_lengths)
+                def commit_accepted(self, indices, req_indices, accepted_lengths):
+                    commit_ssm_prefix(indices, req_indices, accepted_lengths)
 
             m._ssm_executor = _IndexOnly()
             accept_fused(m, args)

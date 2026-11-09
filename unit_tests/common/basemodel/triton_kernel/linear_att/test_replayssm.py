@@ -610,8 +610,6 @@ def test_kda_tuning_candidates_match_reference(config, compute_mode):
     ],
 )
 def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, separate, kda):
-    from lightllm.common.attention_state.commit import StateAcceptance
-
     torch.manual_seed(72)
     initial = torch.randn(1, live + 1, 1, 32, 32, device="cuda") * 0.01
     backend = ReplaySSMExecutor(initial.clone(), 8, 4, torch.float32, kda=kda, run_config={"BV": 32, "num_warps": 1})
@@ -666,7 +664,7 @@ def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, sepa
             )
             torch.testing.assert_close(actual[:, token], output, atol=3e-4, rtol=3e-4)
         lengths = torch.full((live,), query_width, device="cuda", dtype=torch.int32)
-        backend.commit(StateAcceptance(reqs[:live], lengths), indices, "main")
+        backend.commit_accepted(indices, reqs[:live], lengths)
     backend.merge_accepted_updates(reqs[:live])
     torch.testing.assert_close(backend.ssm_state[0, :live], expected, atol=3e-4, rtol=3e-4)
     assert torch.equal(backend.ssm_state[0, live], initial[0, live])
