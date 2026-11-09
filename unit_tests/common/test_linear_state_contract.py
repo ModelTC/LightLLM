@@ -9,6 +9,7 @@ from lightllm.common.attention_state.bounded_att import KDAState
 from unit_tests.common.test_linear_state import make_state
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_runtime import ReplayGDNRuntime
+from lightllm.common.basemodel.attention.linear.replay_gdn_step import run_config as gdn_run_config
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
@@ -97,7 +98,7 @@ def test_replay_backend_publishes_detached_run_config():
     ssm_backend.run_config = tuning
     ssm_backend._config_is_fixed = True
     ssm_backend.compute_mode = "inline"
-    config = ssm_backend.get_run_config(*([None] * 7))
+    config = gdn_run_config(ssm_backend, *([None] * 7))
     assert isinstance(config, SSMRunConfig)
     tuning["BV"] = 128
     assert config.BV == 32

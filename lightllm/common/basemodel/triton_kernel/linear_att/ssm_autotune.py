@@ -129,6 +129,16 @@ def rebuild_inputs(
     )
 
 
+def replay_layer(history, *args, **kwargs):
+    """按 history 所属算法调用对应的 replay decode。"""
+
+    if history.kda:
+        from lightllm.common.basemodel.attention.linear.replay_kda_step import replay
+    else:
+        from lightllm.common.basemodel.attention.linear.replay_gdn_step import replay
+    return replay(history, *args, **kwargs)
+
+
 @autotune(
     kernel_name="ssm_update_cycle:v1",
     configs_gen_func=get_configs,
@@ -153,7 +163,7 @@ def select_config(
     rounds = ssm_backend.capacity // min(ssm_backend.verify_width, tokens) + 1
     for step in range(rounds):
         ssm_backend.prepare_decode(reqs, cu_seqlens)
-        ssm_backend.forward(0, q, k, v, a, b, a_log, bias, reqs, cu_seqlens)
+        replay_layer(ssm_backend, 0, q, k, v, a, b, a_log, bias, reqs, cu_seqlens)
         ssm_backend.accept_updates(reqs, accepted)
     return run_config
 

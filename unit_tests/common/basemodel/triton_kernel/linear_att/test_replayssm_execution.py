@@ -14,6 +14,7 @@ def ReplaySSMExecutor(*args, **kwargs):
     return ReplayGDNRuntime(*args, **kwargs)
 
 
+from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import replay_layer
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
     build_dynamic_mtp_linear_att_state_params,
 )
@@ -57,7 +58,7 @@ def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
     def cycle(backend, ids):
         count = ids.numel()
         backend.prepare_decode(ids)
-        out = backend.forward(0, q[:count], k[:count], v[:count], a[:count], beta[:count], alog, bias, ids)[0]
+        out = replay_layer(backend, 0, q[:count], k[:count], v[:count], a[:count], beta[:count], alog, bias, ids)[0]
         backend.accept_single_token(ids)
         return out
 
@@ -157,7 +158,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
 
     def forward_accept(index, cu, reqs):
         ssm_backend = ssm_backends[index]
-        out = [ssm_backend.forward(layer, q, k, v, a, beta, alog, bias, reqs, cu)[0] for layer in range(3)]
+        out = [replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, reqs, cu)[0] for layer in range(3)]
         if index == 0:
             ssm_backend.accept_updates(reqs, accepted)
         else:
@@ -250,7 +251,7 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
     bias = torch.zeros(4 * 128 if kda else 4, device="cuda")
 
     def forward(ssm_backend):
-        return [ssm_backend.forward(layer, q, k, v, a, beta, alog, bias, reqs)[0] for layer in range(3)]
+        return [replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, reqs)[0] for layer in range(3)]
 
     def warm(ssm_backend):
         ssm_backend.prepare_decode(reqs)
@@ -336,7 +337,7 @@ def test_cross_layer_fold_with_state_offset_above_int32():
 
     def step(ssm_backend, accepted):
         pos = ssm_backend.prepare_decode(reqs, cu)
-        out = [ssm_backend.forward(layer, q, k, v, a, beta, alog, bias, reqs, cu)[0] for layer in range(48)]
+        out = [replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, reqs, cu)[0] for layer in range(48)]
         ssm_backend.accept_updates(reqs, accepted)
         return pos, out
 
@@ -385,7 +386,9 @@ def test_small_batch_matches_larger_graph_padding(batch, dtype, kda):
 
         def step():
             ssm_backend.prepare_decode(ids, offsets)
-            out = [ssm_backend.forward(layer, q, k, v, a, beta, alog, bias, ids, offsets)[0] for layer in range(2)]
+            out = [
+                replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, ids, offsets)[0] for layer in range(2)
+            ]
             ssm_backend.accept_updates(ids, accepted)
             return out
 

@@ -28,7 +28,7 @@ def ReplaySSMExecutor(*args, **kwargs):
     return ReplayGDNRuntime(*args, **kwargs)
 
 
-from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs
+from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs, replay_layer
 
 
 def workload(args, batch, width, dtype, mode, acceptance):
@@ -84,7 +84,7 @@ def workload(args, batch, width, dtype, mode, acceptance):
                         num_accepted_tokens=counts if cu is not None else None,
                     )
                 else:
-                    ssm_backend.forward(layer, q, k, v, gate, beta, alog, bias, reqs, cu)
+                    replay_layer(ssm_backend, layer, q, k, v, gate, beta, alog, bias, reqs, cu)
             if ssm_backend is not None:
                 ssm_backend.accept_updates(reqs, accepted)
         if isinstance(ssm_backend, ReplaySSMExecutor):

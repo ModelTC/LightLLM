@@ -34,6 +34,8 @@ from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import 
     build_dynamic_mtp_linear_att_state_params,
 )
 
+from .replay_kda_step import begin_decode, replay
+
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
@@ -157,7 +159,7 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
         state = _single_replay_state(self)
         self._init_indices(self.backend.mtp_step, state.mtp_state_index)
         self.b_ssm_buffer_idx = self.b_conv_buffer_idx
-        state.prepare_for_decode(self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
+        begin_decode(state.runtime, self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
 
     def _init_indices(self, mtp_step: int, mtp_index: torch.Tensor | None) -> None:
         infer = self.infer_state
@@ -227,8 +229,9 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
         v = v.view(*shape, backend.tp_num_heads, backend.head_dim)
         raw_gate = params["raw_gate"].view(*shape, backend.tp_hidden_size)
         raw_beta = params["raw_beta"].view(*shape, backend.tp_num_heads)
-        return state.replay_forward(
-            layer_num,
+        output, _ = replay(
+            state.runtime,
+            state.storage_layer(layer_num),
             q,
             k,
             v,
@@ -239,3 +242,4 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
             self.b_conv_buffer_idx,
             self.b1_mtp_cu_q_seq_len,
         )
+        return output

@@ -1,4 +1,4 @@
-"""GDN replay history。只负责 ring buffer、重放 kernel 和 accepted SSM 物化。"""
+"""GDN replay history。只保存 ring buffer、cursor，以及 accepted SSM 的物化和拷贝。"""
 
 from __future__ import annotations
 
@@ -13,10 +13,6 @@ from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import (
     _prepare_fold,
     _fold_history,
     _materialize,
-    _replay,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import (
-    resolve_run_config,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import (
     commit_ssm_prefix,
@@ -30,7 +26,7 @@ def upload_indices(values: Sequence[int], device, dtype=torch.int64) -> torch.Te
 
 
 class ReplayGDNRuntime:
-    """以短 history 重放 decode 的 SSM 执行器。
+    """请求槽上的 GDN replay history。
 
     ``state`` 是唯一的 canonical checkpoint；keys、deltas、gates、betas 和
     cursor 只属于请求当前的临时 history，不参与 CPU/PD checkpoint。decode
@@ -42,7 +38,7 @@ class ReplayGDNRuntime:
 
     @property
     def run_config(self) -> SSMRunConfig | None:
-        """返回最近一次 forward 使用的 kernel 配置。"""
+        """返回物化和 autotune 使用的 kernel 配置。"""
 
         return self._run_config
 
@@ -285,95 +281,6 @@ class ReplayGDNRuntime:
             flush_export=flush,
             output_strides=strides,
         )
-
-    def get_run_config(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        a_log: torch.Tensor,
-        bias: torch.Tensor,
-        cu_seqlens: torch.Tensor | None = None,
-    ) -> SSMRunConfig:
-        """按当前 kernel 形状选择或返回固定的 GDN replay 调优配置。"""
-
-        return resolve_run_config(self, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
-
-    def forward(
-        self,
-        linear_layer_idx: int,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        a_log: torch.Tensor,
-        bias: torch.Tensor,
-        reqs: torch.Tensor,
-        cu_seqlens: torch.Tensor | None = None,
-        run_config: SSMRunConfig | None = None,
-        *,
-        state_indices: torch.Tensor | None = None,
-        accepted_token_counts: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, SSMRunConfig]:
-        """执行一层 GDN replay decode，并返回输出与本轮 run config。"""
-
-        config = run_config or self.get_run_config(q, k, v, a, b, a_log, bias, cu_seqlens)
-        hv, kd, vd = self.state.shape[-3:]
-        assert self.num_key_heads in (q.shape[-2], hv)
-        axis = 1 if cu_seqlens is not None else 0
-        out = torch.empty_like(v)
-        bv = config.BV
-        precompute_projections = self.verify_width > 1 and bv >= 16 and self.compute_mode == "precompute"
-        # 在 Python 中解析 tile 维度；Triton JIT 中直接调用 max() 会降级为 tensor
-        # 运算，无法定义静态 shape。
-        bw = triton.next_power_of_2(self.verify_width)
-        _replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](
-            q,
-            k,
-            v,
-            a,
-            b,
-            a_log,
-            bias,
-            self.state[linear_layer_idx],
-            self.keys[linear_layer_idx],
-            self.deltas[linear_layer_idx],
-            self.gates[linear_layer_idx],
-            self.raw_keys[linear_layer_idx],
-            self.raw_values[linear_layer_idx],
-            self.betas[linear_layer_idx],
-            reqs,
-            self.forward_cursors,
-            cu_seqlens,
-            out,
-            q.stride(axis),
-            k.stride(axis),
-            v.stride(axis),
-            a.stride(0),
-            b.stride(0),
-            q.shape[-2],
-            hv,
-            self.num_key_heads,
-            kd,
-            vd,
-            self.capacity,
-            self.hold_req_id,
-            triton.next_power_of_2(kd),
-            bv,
-            cu_seqlens is not None,
-            precompute_projections,
-            bw,
-            self.kda,
-            self.gate_lower_bound,
-            BQK=max(16, 2 * bw),
-            BR=triton.next_power_of_2(max(16, self.capacity + bw)),
-            num_warps=config.num_warps,
-            num_stages=config.num_stages,
-        )
-        return out, config
 
     def accept_single_token(self, reqs: torch.Tensor) -> None:
         """非 MTP decode 直接把单 token 写入当前 history。"""

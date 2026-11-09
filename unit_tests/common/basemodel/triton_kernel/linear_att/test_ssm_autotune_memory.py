@@ -76,5 +76,5 @@ def test_tuning_budget_falls_back_without_touching_serving_state(monkeypatch, tm
 
     reqs = torch.arange(3, device="cuda", dtype=torch.int32)
     ssm_backend.prepare_decode(reqs, cu)
-    ssm_backend.forward(0, q, q, q, gates, gates, a_log, bias, reqs, cu, run_config=config)
+    tuning.replay_layer(ssm_backend, 0, q, q, q, gates, gates, a_log, bias, reqs, cu, run_config=config)
     torch.cuda.synchronize()

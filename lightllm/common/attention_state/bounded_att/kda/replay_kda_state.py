@@ -2,6 +2,7 @@
 
 直接实现状态接口，不继承 native KDAState。history 在 replay_kda_runtime，
 页布局在 replay_kda_checkpoint，已接受快照在 replay_kda_snapshot。
+一层 decode 重放在 replay_kda_step。
 """
 
 from __future__ import annotations
@@ -137,8 +138,13 @@ class ReplayKDAState(BoundedAttentionState):
     def contains_logical_layer(self, logical_layer_id: int) -> bool:
         return logical_layer_id in self._logical_to_storage_layer
 
+    def storage_layer(self, logical_layer_id: int) -> int:
+        """返回逻辑层在 history 和 canonical state 里的存储下标。"""
+
+        return self._logical_to_storage_layer[logical_layer_id]
+
     def get_layer_view(self, logical_layer_id: int):
-        index = self._logical_to_storage_layer[logical_layer_id]
+        index = self.storage_layer(logical_layer_id)
         return self.conv_state[index], self.ssm_state[index]
 
     @deepcopy_result
@@ -213,40 +219,6 @@ class ReplayKDAState(BoundedAttentionState):
     def merge_accepted_updates(self, reqs: torch.Tensor) -> None:
         """Prefill 前把已接受 history 折回 canonical state。"""
         self.runtime.merge_accepted_updates(reqs)
-
-    def prepare_for_decode(self, reqs: torch.Tensor, cu_seqlens: torch.Tensor | None) -> None:
-        """折叠即将溢出的 history。普通 decode 同时接受本轮唯一 token。"""
-        self.runtime.prepare_decode(reqs, cu_seqlens)
-        if cu_seqlens is None:
-            self.runtime.accept_single_token(reqs)
-
-    def replay_forward(
-        self,
-        logical_layer: int,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        a_log: torch.Tensor,
-        bias: torch.Tensor,
-        reqs: torch.Tensor,
-        cu_seqlens: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """执行一层 replay decode。"""
-        output, _ = self.runtime.forward(
-            self._logical_to_storage_layer[logical_layer],
-            q,
-            k,
-            v,
-            a,
-            b,
-            a_log,
-            bias,
-            reqs,
-            cu_seqlens,
-        )
-        return output
 
     def get_accepted_state(self, req_idx: int) -> _AcceptedTensors:
         """返回已接受 Conv 窗口和物化 SSM，不改写 canonical state。"""

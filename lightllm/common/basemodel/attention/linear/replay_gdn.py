@@ -38,6 +38,8 @@ from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import 
 )
 from lightllm.utils.envs_utils import get_env_start_args
 
+from .replay_gdn_step import begin_decode, replay
+
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
@@ -245,7 +247,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         self._init_indices(draft_step, state.mtp_state_index)
         self.b_ssm_buffer_idx = self.b_conv_buffer_idx
-        state.prepare_for_decode(self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
+        begin_decode(state.runtime, self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
 
     def _init_indices(self, draft_step: int, mtp_index: torch.Tensor | None) -> None:
         infer = self.infer_state
@@ -318,8 +320,9 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             backend.tp_num_v_heads,
             backend.head_v_dim,
         )
-        output = state.replay_forward(
-            layer_num,
+        output, _ = replay(
+            state.runtime,
+            state.storage_layer(layer_num),
             query,
             key,
             value,
@@ -346,8 +349,9 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             query_start_loc=self.b1_mtp_cu_q_seq_len,
         )
         query, key, value = _rearrange_mixed_qkv(backend, mixed_qkv, decode=False)
-        return state.replay_forward(
-            layer_num,
+        output, _ = replay(
+            state.runtime,
+            state.storage_layer(layer_num),
             query,
             key,
             value,
@@ -358,3 +362,4 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             self.b_conv_buffer_idx,
             self.b1_mtp_cu_q_seq_len,
         )
+        return output

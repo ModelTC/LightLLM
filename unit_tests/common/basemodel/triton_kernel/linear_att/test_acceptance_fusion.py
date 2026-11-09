@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from lightllm.common.attention_state.commit import StateAcceptance
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_runtime import ReplayGDNRuntime
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
+from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import replay_layer
 
 
 def make(n, width):
@@ -181,7 +182,7 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
     def cycle(i):
         ssm_backend = ssm_backends[i]
         ssm_backend.prepare_decode(reqs, cu)
-        outputs = [ssm_backend.forward(layer, q, k, v, a, b, alog, alog, reqs, cu)[0] for layer in range(2)]
+        outputs = [replay_layer(ssm_backend, layer, q, k, v, a, b, alog, alog, reqs, cu)[0] for layer in range(2)]
         (accept_unfused if i == 0 else accept_fused)(managers[i], args)
         return outputs
 

@@ -13,7 +13,7 @@ def ReplaySSMExecutor(*args, **kwargs):
     return ReplayGDNRuntime(*args, **kwargs)
 
 
-from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs
+from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs, replay_layer
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -73,7 +73,7 @@ def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state
         # an overflowed history correction by reconstructing from raw inputs.
         assert ssm_backend.cursors[0].item() == 2 * round_idx
         assert not state.any()
-        actual = ssm_backend.forward(0, q, k, v, a, b, alog, bias, reqs, cu)[0]
+        actual = replay_layer(ssm_backend, 0, q, k, v, a, b, alog, bias, reqs, cu)[0]
         expected = []
         for token in range(2):
             output, expected_state = reference(
@@ -178,7 +178,7 @@ def test_replay_acceptance_flush_and_graph(
 
     def step():
         ssm_backend.prepare_decode(reqs, cu)
-        out = [ssm_backend.forward(layer, q, k, v, a, b, alog, bias, reqs, cu)[0] for layer in range(2)]
+        out = [replay_layer(ssm_backend, layer, q, k, v, a, b, alog, bias, reqs, cu)[0] for layer in range(2)]
         ssm_backend.accept_updates(reqs, accepted)
         return out
 
@@ -336,7 +336,7 @@ def test_precomputed_projections_preserve_precision(warps, decay, state_dtype, d
         outputs = []
         for ssm_backend in ssm_backends:
             ssm_backend.prepare_decode(reqs, cu)
-            outputs.append(ssm_backend.forward(0, q, k, v, a, b, alog, alog, reqs, cu)[0])
+            outputs.append(replay_layer(ssm_backend, 0, q, k, v, a, b, alog, alog, reqs, cu)[0])
             ssm_backend.accept_updates(reqs, accepted)
         if dtype == torch.float32:
             torch.testing.assert_close(outputs[0], outputs[1], atol=2e-6, rtol=2e-5)
@@ -374,7 +374,7 @@ def test_bf16_decode_fold_uses_rounded_checkpoint():
     for ssm_backend in ssm_backends:
         ssm_backend.prepare_decode(reqs)
         ssm_backend.accept_updates(reqs)
-        outputs.append(ssm_backend.forward(0, q, k, v, a, b, alog, bias, reqs)[0])
+        outputs.append(replay_layer(ssm_backend, 0, q, k, v, a, b, alog, bias, reqs)[0])
     torch.testing.assert_close(outputs[0], outputs[1], atol=1e-7, rtol=1e-6)
     torch.testing.assert_close(ssm_backends[0].state, ssm_backends[1].state, atol=0, rtol=0)
 
@@ -401,7 +401,7 @@ def test_dynamic_verify_lengths_fill_history_before_folding(dtype, compute_mode,
     alog = torch.zeros(4, device="cuda")
 
     def forward():
-        return [ssm_backend.forward(layer, q, k, v, a, b, alog, alog, reqs, cu)[0] for layer in range(2)]
+        return [replay_layer(ssm_backend, layer, q, k, v, a, b, alog, alog, reqs, cu)[0] for layer in range(2)]
 
     def step():
         positions = ssm_backend.prepare_decode(reqs, cu)
@@ -636,7 +636,8 @@ def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, sepa
             inline = backend.forward_cursors[:live] % 16 + query_width > 8
             assert inline[:folding].eq(not separate).all()
             assert not inline[folding:].any()
-        actual = backend.forward(
+        actual = replay_layer(
+            backend,
             0,
             q.reshape(1, -1, 1, 32),
             k.reshape(1, -1, 1, 32),
