@@ -1,3 +1,5 @@
+import torch
+
 from lightllm.models.sensenova_loop.triton_kernel.mhc import hc_contract, hc_expand, hc_post, hc_pre_norm
 from lightllm.models.sensenova_loop.triton_kernel.mhc.pre_norm import has_deepgemm_mhc
 from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35TransformerLayerInfer
@@ -15,6 +17,12 @@ class SenseNovaLoopTransformerLayerInfer(Qwen35TransformerLayerInfer):
         self.use_deepgemm_mhc = self.mhc["streams"] == 4 and has_deepgemm_mhc()
         self.mhc_entry = self.physical_layer_num == self.mhc["start"]
         self.mhc_exit = self.physical_layer_num == self.mhc["end"] - 1
+
+    def _linear_in_proj_with_gates(self, input, layer_weight):
+        input = input.view(-1, self.embed_dim_)
+        projected = layer_weight.linear_in_proj.mm(input)
+        gates = layer_weight.linear_gate_proj.mm(input)
+        return torch.cat((projected, gates), dim=-1)
 
     def context_forward(self, hidden, infer_state, layer_weight):
         if not self.use_mhc:
