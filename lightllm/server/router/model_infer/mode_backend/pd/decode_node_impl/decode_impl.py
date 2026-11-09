@@ -98,19 +98,12 @@ class PDDecodeNode(ChunkedPrefillBackend):
                             f"(reason={req_obj.finish_status.get_finish_reason()}), kv transfer error"
                         )
 
-                # 提前释放有问题的 mem_index。cur_kv_len 只表示已经传输完成的
-                # 逻辑长度，hold_kv_len 还包含最后一个页面中尚未使用的预留槽位。
+                # 只有原共享前缀仍是可信 KV，失败尾部不能参与缓存插入。
+                # 保留 hold_kv_len 和索引状态，后续统一释放流程会回收全部持有的尾页。
                 old_prefix_len = 0 if req_obj.shared_kv_node is None else req_obj.shared_kv_node.node_prefix_total_len
-                if req_obj.hold_kv_len > old_prefix_len:
-                    self.model.req_manager.free_token_index_blocks(
-                        self.model.req_manager.get_cpu_token_index_blocks(
-                            req_obj.req_idx, old_prefix_len, req_obj.hold_kv_len
-                        )
-                    )
-                    req_obj.cur_kv_len = old_prefix_len
-                    req_obj.hold_kv_len = old_prefix_len
-                    if self.is_master_in_dp:
-                        req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
+                req_obj.cur_kv_len = old_prefix_len
+                if self.is_master_in_dp:
+                    req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
 
             ans_list.append(req_obj)
         return ans_list

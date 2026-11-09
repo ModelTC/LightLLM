@@ -71,12 +71,20 @@ def test_non_gpu_cache_tiers_release_owned_tokens_without_radix_insert():
     released_refs = []
     context = InferenceContext()
     context.is_hybrid_att_model = False
-    context.req_manager = SimpleNamespace(
-        get_cpu_token_index_blocks=lambda row, start, end: torch.arange(10 + start, 10 + end).numpy()
-    )
+    context.req_manager = SimpleNamespace()
     context.radix_cache = SimpleNamespace(dec_node_ref_counter=released_refs.append)
     shared_node = SimpleNamespace(node_prefix_total_len=2)
-    req = SimpleNamespace(req_idx=0, cur_kv_len=5, hold_kv_len=7, shared_kv_node=shared_node)
+    req = SimpleNamespace(
+        req_idx=0,
+        cur_kv_len=5,
+        hold_kv_len=7,
+        shared_kv_node=shared_node,
+        token_index=SimpleNamespace(
+            get_free_token_indexes=lambda start, end: torch.arange(10 + start, 10 + end),
+            get_cpu_token_indexes=lambda start, end: torch.arange(10 + start, 10 + end),
+            reset=lambda: None,
+        ),
+    )
     free_token_index_blocks = []
 
     context._free_req_mem_without_radix_insert(free_token_index_blocks, req)
@@ -91,11 +99,12 @@ def test_legacy_cache_tiers_still_insert_gpu_radix_cache():
     context.radix_cache = object()
     context.is_hybrid_att_model = False
     inserted_reqs = []
-    context._full_att_free_req = lambda free_token_index_blocks, req: inserted_reqs.append(req)
+    context._full_att_free_req = lambda free_token_index, req: inserted_reqs.append(req)
     req = SimpleNamespace(
         cache_tiers=(CacheTier.GPU, CacheTier.CPU, CacheTier.DISK),
         cur_kv_len=3,
         shm_req=SimpleNamespace(shm_cur_kv_len=3),
+        token_index=SimpleNamespace(reset=lambda: None),
     )
 
     context.free_a_req_mem([], req)
@@ -186,9 +195,7 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
     freed_big_pages = []
     context = InferenceContext()
     context.is_hybrid_att_model = True
-    context.req_manager = SimpleNamespace(
-        get_cpu_token_index_blocks=lambda row, start, end: torch.arange(10 + start, 10 + end).numpy()
-    )
+    context.req_manager = SimpleNamespace()
     context.att_state_manager = SimpleNamespace(
         bounded_att_small_page_allocator=SimpleNamespace(free=freed_small_pages.extend),
         bounded_att_big_page_allocator=SimpleNamespace(free=freed_big_pages.extend),
@@ -197,6 +204,10 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
         req_idx=0,
         cur_kv_len=3,
         hold_kv_len=3,
+        token_index=SimpleNamespace(
+            get_free_token_indexes=lambda start, end: torch.arange(10 + start, 10 + end),
+            reset=lambda: None,
+        ),
         shared_kv_node=None,
         tail_small_page_buffer_id=7,
         hybrid_len_to_big_page_id={128: 8, 256: 9},

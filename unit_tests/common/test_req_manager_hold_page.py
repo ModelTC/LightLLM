@@ -1,6 +1,5 @@
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 
@@ -13,7 +12,6 @@ def test_bind_hold_page_initializes_only_padding_request():
     req_manager.req_list = SimpleNamespace(is_all_free=lambda: True)
     req_manager.req_to_token_indexs = torch.full((3, 8), -1, dtype=torch.int32)
     req_manager.page_size = 4
-    req_manager._cpu_token_index_blocks = np.empty((3, 2), dtype=np.int32)
     req_manager.bind_hold_page((100, 101, 102, 103))
 
     assert not hasattr(req_manager, "mem_manager")

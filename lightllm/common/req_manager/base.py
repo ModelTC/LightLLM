@@ -1,9 +1,6 @@
 from typing import List
 
-import numpy as np
-
 import torch
-from triton.runtime import driver
 
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
@@ -53,10 +50,6 @@ class ReqManager:
         self.req_to_token_indexs = torch.zeros(
             (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cuda"
         )
-        # P=1 stores every token index; P>1 stores the first token index of each consecutive block.
-        self._cpu_token_index_blocks = np.empty((max_request_num + 1, max_sequence_length // page_size), dtype=np.int32)
-        self.token_indexes_ready = torch.cuda.Event()
-        self._token_indexes_stream = None
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
@@ -73,133 +66,31 @@ class ReqManager:
         expected = hold_page[0] + torch.arange(self.page_size, dtype=torch.int32)
         if not torch.equal(hold_page, expected):
             raise ValueError("HOLD indices must form one consecutive physical page")
-        self._cpu_token_index_blocks[self.HOLD_REQUEST_ID].fill(hold_page[0].item())
         self.req_to_token_indexs[self.HOLD_REQUEST_ID].view(-1, self.page_size).copy_(hold_page)
 
-    def get_cpu_token_index_blocks(self, req_idx, start, end):
-        """Borrow CPU index storage for [start, end); P>1 requires whole consecutive blocks."""
-        page_size = self.page_size
-        if page_size > 1:
-            assert start % page_size == end % page_size == 0
-            return self._cpu_token_index_blocks[req_idx, start // page_size : end // page_size]
-        return self._cpu_token_index_blocks[req_idx, start:end]
-
-    def get_cpu_token_indexes(self, req_idx, start, end):
-        """Return owned token indexes for cache insertion and asynchronous PD metadata."""
-        page_size = self.page_size
-        if page_size > 1:
-            first, offset = divmod(start, page_size)
-            index_blocks = self._cpu_token_index_blocks[req_idx, first : (end + page_size - 1) // page_size]
-            indexes = self.full_att_allocator.expand_token_index_blocks(index_blocks)
-            return torch.from_numpy(indexes[offset : offset + end - start])
-        return torch.from_numpy(self._cpu_token_index_blocks[req_idx, start:end].copy())
-
-    def write_token_index_prefix(self, req_idx, start, indexes, req_prefix_lens):
-        """Update CPU prefix mappings and collect pending GPU copies."""
-        page_size = self.page_size
-        assert start == 0
-        size = indexes.numel()
-        assert size % page_size == 0
-        self._cpu_token_index_blocks[req_idx, : size // page_size] = indexes.numpy()[::page_size]
-        if size:
-            req_prefix_lens[req_idx] = max(size, req_prefix_lens.get(req_idx, 0))
-
-    def copy_token_index_prefixes_to_gpu(self, req_prefix_lens):
-        """Copy the collected CPU token-index prefixes on the current CUDA stream."""
-        if req_prefix_lens:
-            updates, offset = [], 0
-            for row, size in req_prefix_lens.items():
-                updates.append((row, 0, size, offset))
-                offset += size
-            self._copy_token_indexes_to_gpu(updates)
-
-    def copy_token_index_prefix(self, source_req_idx, dest_req_idx, size):
-        """Copy a published prefix on the GPU and retain its CPU page mapping."""
-        self.get_cpu_token_index_blocks(dest_req_idx, 0, size)[:] = self.get_cpu_token_index_blocks(
-            source_req_idx, 0, size
-        )
-        stream = self.wait_token_indexes()
-        table = self.req_to_token_indexs
-        table[dest_req_idx, :size].copy_(table[source_req_idx, :size], non_blocking=True)
-        self.token_indexes_ready.record(stream)
-        self._token_indexes_stream = stream
-
     def alloc_req_token_indexes(self, allocations, radix_cache=None):
-        """Allocate token capacity once and publish the same indexes to the CPU and GPU tables."""
+        """Allocate token capacity once and record it on each request's token index."""
+        from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex
+
         need = sum(size for _, size in allocations)
         if radix_cache is not None:
             radix_cache.free_radix_cache_to_get_enough_token(need)
-        page_size = self.page_size
-        index_blocks = self.full_att_allocator._alloc_token_index_blocks(need)
-        updates, offset = [], 0
+        if not need:
+            return
+        indexes = self.full_att_allocator.alloc(need)
+        offset = 0
         for req, size in allocations:
-            start = req.hold_kv_len
-            block_offset = offset // page_size
-            if size == page_size:
-                self._cpu_token_index_blocks[req.req_idx, start // page_size] = index_blocks[block_offset]
-            else:
-                self._cpu_token_index_blocks[
-                    req.req_idx, start // page_size : (start + size) // page_size
-                ] = index_blocks[block_offset : block_offset + size // page_size]
-            updates.append((req.req_idx, start, size, offset))
+            req.token_index.append_token_indexes(indexes[offset : offset + size])
             req.hold_kv_len += size
             offset += size
-        self._copy_token_indexes_to_gpu(updates, index_blocks)
+        ReqTokenIndex.submit_pending_uploads([req.token_index for req, _ in allocations])
 
     def alloc_token_indexes(self, req, end, radix_cache=None):
         """Return write slots for [cur_kv_len, end), reusing any existing page tail."""
         size = self.get_need_alloc_token_num(req, end)
         if size:
             self.alloc_req_token_indexes([(req, size)], radix_cache)
-        return self.get_cpu_token_indexes(req.req_idx, req.cur_kv_len, end)
-
-    def _copy_token_indexes_to_gpu(self, updates, index_blocks=None):
-        """Publish token ranges using one owned snapshot; expand compressed P>1 indexes only as needed."""
-        from lightllm.common.basemodel.triton_kernel.update_req_token_indexes import update_req_token_indexes
-
-        page_size = self.page_size
-        if index_blocks is None:
-            parts = [
-                self._cpu_token_index_blocks[row, start // page_size : (start + size) // page_size]
-                for row, start, size, _ in updates
-            ]
-            index_blocks = parts[0] if len(parts) == 1 else np.concatenate(parts)
-        if not len(index_blocks):
-            return
-        packed = len(updates) > 4
-        header = 4 * len(updates) if packed else 0
-        packet = torch.empty(
-            header + len(index_blocks) * (1 if packed else page_size), dtype=torch.int32, device="cpu", pin_memory=True
-        )
-        data = packet.numpy()
-        if packed:
-            meta = data[:header].reshape(-1, 4)
-            meta[:] = updates
-            data[header:] = index_blocks
-        elif page_size > 1:
-            self.full_att_allocator.expand_token_index_blocks(index_blocks, data)
-        else:
-            data[:] = index_blocks
-        stream = self.wait_token_indexes()
-        if packed:
-            update_req_token_indexes(
-                self.req_to_token_indexs,
-                packet.cuda(non_blocking=True),
-                len(updates),
-                max(x[2] for x in updates),
-                page_size,
-            )
-        else:
-            table = self.req_to_token_indexs
-            row_stride, token_stride = table.stride()
-            base = table.storage_offset()
-            for row, start, size, offset in updates:
-                table.as_strided((size,), (token_stride,), base + row * row_stride + start * token_stride).copy_(
-                    packet if len(updates) == 1 else packet[offset : offset + size],
-                    non_blocking=True,
-                )
-        self.token_indexes_ready.record(stream)
-        self._token_indexes_stream = stream
+        return req.token_index.get_cpu_token_indexes(req.cur_kv_len, end)
 
     def get_need_alloc_token_num(self, req, target):
         """Return additional page-aligned KV capacity, measured in token slots."""
@@ -210,25 +101,17 @@ class ReqManager:
             return size
         return max(0, target - req.hold_kv_len)
 
-    def wait_token_indexes(self):
-        # Reuse the writer's Python Stream; query only the raw handle on the common path.
-        stream = self._token_indexes_stream
-        if stream is None or driver.active.get_current_stream(stream.device_index) != stream.cuda_stream:
-            stream = torch.cuda.current_stream()
-            self.token_indexes_ready.wait(stream)
-        return stream
-
     def alloc(self):
         return self.req_list.alloc()
 
-    def free(self, free_req_indexes: List[int], free_token_index_blocks=()):
+    def free(self, free_req_indexes: List[int], free_token_index=()):
         for req_index in free_req_indexes:
             self.req_list.free(req_index)
 
         if self.req_list.is_all_free():
             logger.debug(f"freed all request size {self.req_list.can_alloc_size}")
-        if len(free_token_index_blocks):
-            self.full_att_allocator.free_token_index_blocks(free_token_index_blocks)
+        if len(free_token_index):
+            self.full_att_allocator.free(free_token_index)
 
     def free_req(self, free_req_index: int):
         self.req_list.free(free_req_index)
@@ -236,8 +119,9 @@ class ReqManager:
             logger.debug(f"freed all request size {self.req_list.can_alloc_size}")
         return
 
-    def free_token_index_blocks(self, free_token_index_blocks):
-        self.full_att_allocator.free_token_index_blocks(free_token_index_blocks)
+    def free_token(self, free_token_index):
+        self.full_att_allocator.free(free_token_index)
+        return
 
     def free_all(self):
         self.req_list = _ReqIndexPool(self.max_request_num)

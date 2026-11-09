@@ -9,6 +9,7 @@ from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
+from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
@@ -874,6 +875,7 @@ class ModeBackend:
                     prefill_reqs.append(decode_req)
                 decode_reqs = []
 
+        ReqTokenIndex.submit_pending_uploads([req.token_index for req in prefill_reqs + decode_reqs])
         return prefill_reqs, decode_reqs, prefill_tokens
 
     # 一些可以复用的通用功能函数

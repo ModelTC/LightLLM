@@ -1,6 +1,5 @@
 from types import MethodType, SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 
@@ -8,6 +7,7 @@ from lightllm.common.attention_state.allocators import full_att_kv_allocator as 
 from lightllm.common.req_manager import base as req_module
 from lightllm.common.req_manager import req_sampling_params
 from lightllm.server.router.model_infer.infer_batch import InferReq
+from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex, create_req_token_index
 from lightllm.server.router.model_infer.mode_backend import base_backend
 
 
@@ -31,11 +31,21 @@ def _make_manager(monkeypatch, page_size, count=12):
     return manager
 
 
+def _attach_token_index(manager, req, mode="pin_mem_page_cache"):
+    req.req_manager = manager
+    req.args = SimpleNamespace(req_token_index_mode=mode, page_size=manager.page_size)
+    req.shm_req = SimpleNamespace(input_len=manager.req_to_token_indexs.shape[1])
+    req.token_index = create_req_token_index(req, torch.cuda.current_stream())
+    return req
+
+
 @pytest.mark.parametrize("page_size", [1, 2, 4, 8, 64])
 @pytest.mark.parametrize("count", [0, 1, 4, 5, 9])
 def test_alloc_publish_reuse_and_owned_snapshot(monkeypatch, page_size, count):
     manager = _make_manager(monkeypatch, page_size)
-    requests = [SimpleNamespace(req_idx=i, hold_kv_len=0, cur_kv_len=0) for i in range(count)]
+    requests = [
+        _attach_token_index(manager, SimpleNamespace(req_idx=i, hold_kv_len=0, cur_kv_len=0)) for i in range(count)
+    ]
     allocations = [(req, page_size * (1 + i % 3)) for i, req in enumerate(requests)]
     manager.alloc_req_token_indexes(allocations)
     torch.cuda.synchronize()
@@ -44,14 +54,16 @@ def test_alloc_publish_reuse_and_owned_snapshot(monkeypatch, page_size, count):
     for req, size in allocations:
         expected = torch.arange(expected_offset, expected_offset + size, dtype=torch.int32)
         assert torch.equal(manager.req_to_token_indexs[req.req_idx, :size].cpu(), expected)
-        snapshot = manager.get_cpu_token_indexes(req.req_idx, 0, size)
+        snapshot = req.token_index.get_cpu_token_indexes(0, size)
         assert torch.equal(snapshot, expected)
         snapshots.append((snapshot, expected))
         assert req.hold_kv_len == size
         expected_offset += size
-    blocks = [manager.get_cpu_token_index_blocks(req.req_idx, 0, size).copy() for req, size in allocations]
-    if blocks:
-        manager.free_token_index_blocks(np.concatenate(blocks))
+    indexes = [req.token_index.get_free_token_indexes(0, size) for req, size in allocations]
+    if indexes:
+        manager.free_token(torch.cat(indexes))
+        for req, _ in allocations:
+            req.token_index.reset()
         for req, _ in allocations:
             req.hold_kv_len = 0
         manager.alloc_req_token_indexes(list(reversed(allocations)))
@@ -61,7 +73,7 @@ def test_alloc_publish_reuse_and_owned_snapshot(monkeypatch, page_size, count):
     for req, size in allocations:
         start = min(1, size)
         assert torch.equal(
-            manager.get_cpu_token_indexes(req.req_idx, start, size),
+            req.token_index.get_cpu_token_indexes(start, size),
             manager.req_to_token_indexs[req.req_idx, start:size].cpu(),
         )
 
@@ -71,22 +83,22 @@ def test_prefix_cross_stream_publish(monkeypatch, page_size):
     manager = _make_manager(monkeypatch, page_size)
     writer, reader = torch.cuda.Stream(), torch.cuda.Stream()
     source = torch.arange(page_size * 3, dtype=torch.int32) + page_size * 20
+    req = _attach_token_index(manager, SimpleNamespace(req_idx=0, hold_kv_len=0, cur_kv_len=0))
+    req.token_index = create_req_token_index(req, writer)
     with torch.cuda.stream(writer):
-        prefixes = {}
-        manager.write_token_index_prefix(0, 0, source, prefixes)
-        manager.copy_token_index_prefixes_to_gpu(prefixes)
+        req.token_index.append_token_indexes(source)
+        ReqTokenIndex.submit_pending_uploads([req.token_index])
     with torch.cuda.stream(reader):
-        manager.copy_token_index_prefix(0, 1, len(source))
-        observed = manager.req_to_token_indexs[1, : len(source)].clone()
+        observed = req.token_index.get_gpu_token_indexes(0, len(source)).clone()
     reader.synchronize()
     assert torch.equal(observed.cpu(), source)
-    assert torch.equal(manager.get_cpu_token_indexes(1, 0, len(source)), source)
+    assert torch.equal(req.token_index.get_cpu_token_indexes(0, len(source)), source)
 
 
 @pytest.mark.parametrize("page_size", [1, 4, 64])
 def test_alloc_token_indexes_returns_logical_span_and_reuses_page_tail(monkeypatch, page_size):
     manager = _make_manager(monkeypatch, page_size)
-    req = SimpleNamespace(req_idx=0, hold_kv_len=0, cur_kv_len=0)
+    req = _attach_token_index(manager, SimpleNamespace(req_idx=0, hold_kv_len=0, cur_kv_len=0))
     indexes = manager.alloc_token_indexes(req, page_size + 1)
     assert indexes.tolist() == list(range(page_size + 1))
     expected_hold = (page_size + 1 + page_size - 1) // page_size * page_size
@@ -128,7 +140,7 @@ def _make_scheduler(monkeypatch, page_size, available, batch_max_tokens=8):
     return manager, backend, allocations
 
 
-def _make_scheduler_req(req_idx, current, total):
+def _make_scheduler_req(manager, req_idx, current, total):
     req = SimpleNamespace(
         req_idx=req_idx,
         cur_kv_len=current,
@@ -143,6 +155,7 @@ def _make_scheduler_req(req_idx, current, total):
         get_cur_total_len=total,
         get_chuncked_input_token_len=total,
     )
+    _attach_token_index(manager, req)
     req.prefill_need_token_num = MethodType(InferReq.prefill_need_token_num, req)
     req.decode_need_token_num = MethodType(InferReq.decode_need_token_num, req)
     return req
@@ -156,7 +169,7 @@ def test_prefill_scheduler_checks_compute_and_kv_budgets_separately(
     monkeypatch, hold_kv_len, available, batch_max_tokens, expected_alloc_sizes, second_req_wait_pause
 ):
     manager, backend, allocations = _make_scheduler(monkeypatch, 4, available, batch_max_tokens)
-    reqs = [_make_scheduler_req(i, 3, lambda: 6) for i in range(2)]
+    reqs = [_make_scheduler_req(manager, i, 3, lambda: 6) for i in range(2)]
     manager.alloc_req_token_indexes([(req, hold_kv_len) for req in reqs])
     allocations.clear()
     backend._filter_not_ready_reqs = lambda req_ids: reqs
@@ -171,13 +184,13 @@ def test_prefill_scheduler_checks_compute_and_kv_budgets_separately(
     assert not reqs[0].wait_pause
     assert reqs[1].hold_kv_len == hold_kv_len
     assert reqs[1].wait_pause is second_req_wait_pause
-    manager.wait_token_indexes().synchronize()
-    assert torch.equal(manager.req_to_token_indexs[0, :8].cpu(), manager.get_cpu_token_indexes(0, 0, 8))
+    torch.cuda.synchronize()
+    assert torch.equal(manager.req_to_token_indexs[0, :8].cpu(), reqs[0].token_index.get_cpu_token_indexes(0, 8))
 
 
 def test_decode_scheduler_publishes_batched_request_table(monkeypatch):
     manager, backend, allocations = _make_scheduler(monkeypatch, 4, 12)
-    req = _make_scheduler_req(0, 4, lambda: 5)
+    req = _make_scheduler_req(manager, 0, 4, lambda: 5)
     manager.alloc_req_token_indexes([(req, 4)])
     allocations.clear()
     backend._filter_not_ready_reqs = lambda req_ids: [req]
@@ -189,7 +202,7 @@ def test_decode_scheduler_publishes_batched_request_table(monkeypatch):
     assert prefill_tokens == 0
     assert req.hold_kv_len == 16
     assert allocations == [12]
-    manager.wait_token_indexes().synchronize()
+    torch.cuda.synchronize()
     assert manager.req_to_token_indexs[0, :16].tolist() == list(range(16))
 
 
@@ -198,7 +211,7 @@ def test_decode_small_page_preallocation_reuses_one_allocation_for_multiple_step
     monkeypatch, page_size, expected_alloc_token_num
 ):
     manager, backend, allocations = _make_scheduler(monkeypatch, page_size, 32)
-    req = _make_scheduler_req(0, page_size, lambda: req.cur_kv_len + 1)
+    req = _make_scheduler_req(manager, 0, page_size, lambda: req.cur_kv_len + 1)
     manager.alloc_req_token_indexes([(req, page_size)])
     allocations.clear()
     backend._filter_not_ready_reqs = lambda req_ids: [req]

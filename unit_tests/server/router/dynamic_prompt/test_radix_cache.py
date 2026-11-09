@@ -679,12 +679,14 @@ def test_hybrid_request_release_frees_or_transfers_image_page_slots(
     context.radix_cache = tree
     context.att_state_manager = tree.att_state_manager
     table = torch.arange(100, 132).view(1, -1)
-    context.req_manager = SimpleNamespace(
-        get_cpu_token_indexes=lambda row, start, end: table[row, start:end].clone(),
-        get_cpu_token_index_blocks=lambda row, start, end: table[row, start:end].numpy(),
-    )
+    context.req_manager = SimpleNamespace()
     req = InferReq.__new__(InferReq)
     req.req_idx = req.cur_output_len = 0
+    req.token_index = SimpleNamespace(
+        get_cpu_token_indexes=lambda start, end: table[0, start:end].clone(),
+        get_free_token_indexes=lambda start, end: table[0, start:end].clone(),
+        reset=lambda: None,
+    )
     req.cur_kv_len, req.hold_kv_len, req.hybrid_cache_len = computed, max(24, computed), cache_len
     req.shared_kv_node = None
     req.hybrid_len_to_big_page_id = SortedDict({end: end // 8 + 4 for end in range(8, min(computed, cache_len) + 1, 8)})

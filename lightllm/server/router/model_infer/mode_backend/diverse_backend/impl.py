@@ -4,6 +4,7 @@ from lightllm.server.router.model_infer.infer_batch import (
     InferReq,
     InferReqUpdatePack,
 )
+from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex
 from typing import List, Tuple
 from lightllm.server.router.model_infer.mode_backend.pre import (
     prepare_prefill_inputs,
@@ -127,7 +128,6 @@ class DiversehBackend(ChunkedPrefillBackend):
 
     def _diverse_pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
         update_func_objs: List[InferReqUpdatePack] = []
-        req_prefix_lens = {}
         # 通用状态预先填充
         is_master_in_dp = self.is_master_in_dp
         pre_master_req_pack = None
@@ -160,24 +160,25 @@ class DiversehBackend(ChunkedPrefillBackend):
                 if req_obj.slave_reqs:
                     # 存在 slave reqs 的 master req 需要将自己的 kv 信息写入到 radix cache 中
                     # 方便 slave req 进行 kv 的复用
-                    self._master_req_to_radix_cache(master_req=req_obj, req_prefix_lens=req_prefix_lens)
+                    self._master_req_to_radix_cache(master_req=req_obj)
             else:
                 # slave req 直接复用 master req 的更新包。
                 assert pre_master_req_pack is not None
                 assert pre_master_req_pack.req_obj.shm_req.group_req_id == req_obj.shm_req.group_req_id
-                self._copy_master_req_to_slave_req(slave_req=req_obj, req_prefix_lens=req_prefix_lens)
+                self._copy_master_req_to_slave_req(slave_req=req_obj)
                 # 在拷贝后，请求独立了，与 master_req 的关系解除
                 req_obj.remove_master_req()
                 pack = InferReqUpdatePack(req_obj=req_obj, output_len=pre_master_req_pack.output_len)
                 update_func_objs.append(pack)
 
-        self.model.req_manager.copy_token_index_prefixes_to_gpu(req_prefix_lens)
+        ReqTokenIndex.submit_pending_uploads([req.token_index for req in run_reqs])
         return update_func_objs
 
-    def _master_req_to_radix_cache(self, master_req: InferReq, req_prefix_lens):
+    def _master_req_to_radix_cache(self, master_req: InferReq):
         key = master_req.get_input_token_ids()[0 : master_req.cur_kv_len]
         key = torch.tensor(key, dtype=torch.int64, device="cpu")
-        value = self.model.req_manager.get_cpu_token_indexes(master_req.req_idx, 0, master_req.cur_kv_len)
+        recorded = master_req.token_index.get_cpu_token_indexes(0, master_req.hold_kv_len)
+        value = recorded[: master_req.cur_kv_len]
         prefix_len, new_shared_kv_node = self.radix_cache.insert(key, value)
         old_prefix_len = 0 if master_req.shared_kv_node is None else master_req.shared_kv_node.node_prefix_total_len
         assert old_prefix_len <= master_req.cur_kv_len
@@ -191,12 +192,16 @@ class DiversehBackend(ChunkedPrefillBackend):
             new_shared_kv_node.node_prefix_total_len == master_req.cur_kv_len
         ), f"shared len: {new_shared_kv_node.node_prefix_total_len} cur_kv_len {master_req.cur_kv_len}"
 
-        share_node, kv_len, value = self.radix_cache.match_prefix(key, update_refs=False)
+        share_node, kv_len, shared_value = self.radix_cache.match_prefix(key, update_refs=False)
         assert share_node == new_shared_kv_node and kv_len == master_req.cur_kv_len
-        self.model.req_manager.write_token_index_prefix(master_req.req_idx, 0, value, req_prefix_lens=req_prefix_lens)
+        tail = recorded[master_req.cur_kv_len :]
+        master_req.token_index.reset()
+        master_req.token_index.append_token_indexes(shared_value)
+        if tail.numel():
+            master_req.token_index.append_token_indexes(tail)
         return
 
-    def _copy_master_req_to_slave_req(self, slave_req: InferReq, req_prefix_lens):
+    def _copy_master_req_to_slave_req(self, slave_req: InferReq):
         master_req = slave_req.related_master_req
         assert master_req is not None
 
@@ -204,12 +209,8 @@ class DiversehBackend(ChunkedPrefillBackend):
         self.radix_cache.add_node_ref_counter(master_req.shared_kv_node)
 
         kv_len = master_req.cur_kv_len
-
-        req_manager = self.model.req_manager
-        # Radix insertion may remap the master prefix; publish it before the GPU copy.
-        req_manager.copy_token_index_prefixes_to_gpu(req_prefix_lens)
-        req_prefix_lens.clear()
-        req_manager.copy_token_index_prefix(master_req.req_idx, slave_req.req_idx, kv_len)
+        slave_req.token_index.reset()
+        slave_req.token_index.append_token_indexes(master_req.token_index.get_cpu_token_indexes(0, kv_len))
         slave_req.shared_kv_node = master_req.shared_kv_node
         slave_req.cur_kv_len = kv_len
         # slave 在 prefill 阶段没有独立分配 KV，共享完成后需要同步其已持有的 KV 长度。

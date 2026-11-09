@@ -68,7 +68,7 @@ def test_bounded_cache_miss_resets_runtime_and_preserves_pages(monkeypatch):
     req.cur_kv_len = req.cur_output_len = 0
     req.sampling_param = SimpleNamespace(disable_prompt_cache=False)
     req.shm_req = SimpleNamespace(input_len=1, hybrid_token_hash_list=SimpleNamespace(get_all=lambda: [], size=0))
-    req._hybrid_match_radix_cache({})
+    req._hybrid_match_radix_cache()
 
     for state in resources.get_bounded_attention_states():
         assert not state.conv_state[:, 1].any()
@@ -180,24 +180,26 @@ def test_full_attention_gpu_restore_stays_outside_image(
 
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", False)
     monkeypatch.setattr(g_infer_context, "radix_cache", radix_cache)
+    from lightllm.server.router.model_infer.infer_req_ext1 import create_req_token_index
+
     req_manager = ReqManager.__new__(ReqManager)
     req_manager.page_size = page_size
-    req_manager._cpu_token_index_blocks = torch.full(
-        (1, (len(query) + page_size - 1) // page_size), -1, dtype=torch.int32
-    ).numpy()
+    req_manager.req_to_token_indexs = torch.zeros((1, len(query)), dtype=torch.int32)
     monkeypatch.setattr(g_infer_context, "req_manager", req_manager)
     req = InferReq.__new__(InferReq)
-    req.args = SimpleNamespace(page_size=page_size)
+    req.req_manager = req_manager
+    req.args = SimpleNamespace(page_size=page_size, req_token_index_mode="pin_mem_page_cache")
     req.sampling_param = SimpleNamespace(disable_prompt_cache=False)
     req.cur_kv_len = req.cur_output_len = req.hold_kv_len = req.req_idx = 0
     req.shared_kv_node = None
     req.mm_input_spans = [(700, 1200)]
     req.shm_req = SimpleNamespace(input_len=len(query), shm_prompt_ids=SimpleNamespace(arr=query))
-    req_prefix_lens = {}
-    req._match_radix_cache(req_prefix_lens=req_prefix_lens)
+    req.token_index = create_req_token_index(req, torch.cuda.current_stream())
+    req._match_radix_cache()
     assert req.cur_kv_len == req.hold_kv_len == gpu_end
-    assert req_prefix_lens == ({0: gpu_end} if gpu_end else {})
-    assert req_manager.get_cpu_token_index_blocks(0, 0, gpu_end).tolist() == query[:gpu_end:page_size]
+    if gpu_end:
+        got = req.token_index.get_cpu_token_indexes(0, gpu_end)
+        assert got[::page_size].tolist() == query[:gpu_end:page_size]
     assert not any(start < gpu_end < end for start, end in req.mm_input_spans)
     assert radix_cache.get_refed_tokens_num() == gpu_end
 
