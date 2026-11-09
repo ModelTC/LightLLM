@@ -8,7 +8,7 @@ from __future__ import annotations
 import torch
 import triton
 
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import _replay
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import _decode_replay
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import resolve_run_config
 
 
@@ -40,7 +40,7 @@ def replay(
     precompute_projections = history.compute_mode == "precompute" and bv >= 16
     # 在 Python 中解析 tile 维度；Triton JIT 中直接调用 max() 会降级为 tensor 运算，无法定义静态 shape。
     bw = triton.next_power_of_2(history.verify_width)
-    _replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](
+    _decode_replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](
         q,
         k,
         v,

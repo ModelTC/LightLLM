@@ -14,8 +14,8 @@ import torch
 import triton
 
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import (
-    _accept_updates,
-    _materialize,
+    _advance_cursor,
+    _fold_prefix,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 from lightllm.utils.log_utils import init_logger
@@ -445,7 +445,7 @@ class ReplayKDAState(BoundedAttentionState):
     ) -> None:
         """更新 cursor。width 缺省时按 verify_width 取已接受长度，传 1 时固定加一个 token。"""
 
-        _accept_updates[(triton.cdiv(reqs.numel(), 256),)](
+        _advance_cursor[(triton.cdiv(reqs.numel(), 256),)](
             self.cursors,
             reqs,
             accepted_state_indices,
@@ -712,7 +712,7 @@ class ReplayKDAState(BoundedAttentionState):
         layers, slots, hv, k, v = self.ssm_state.shape
         config = self.run_config or {"BV": 32, "num_warps": 4, "num_stages": 3}
         bv = config["BV"]
-        _materialize[(triton.cdiv(v, bv), reqs.numel(), layers * hv)](
+        _fold_prefix[(triton.cdiv(v, bv), reqs.numel(), layers * hv)](
             self.ssm_state,
             output,
             self.raw_keys,

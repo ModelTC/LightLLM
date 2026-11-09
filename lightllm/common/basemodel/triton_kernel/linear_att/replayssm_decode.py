@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""ReplaySSM projection and recurrent decode kernels."""
+"""ReplaySSM decode kernels.
+
+`_decode_replay` is the entry. It projects the verify window when asked, then
+either solves a GDN window or walks tokens one by one. Neither path writes the
+canonical SSM.
+"""
 
 import triton
 import triton.language as tl
 
 
 @triton.jit
-def _replay(
+def _decode_replay(
     Q,
     Kp,
     Vp,
@@ -80,7 +85,7 @@ def _replay(
             tl.bfloat16 if State.dtype.element_ty == tl.bfloat16 and Q.dtype.element_ty == tl.bfloat16 else tl.float32
         )
         projection_precision: tl.constexpr = "tf32" if Q.dtype.element_ty == tl.bfloat16 else "tf32x3"
-        qk, projections, tt, tokens, valid, h = _project_replay_queries(
+        qk, projections, tt, tokens, valid, h = _project_qk(
             Q,
             Kp,
             A,
@@ -113,7 +118,7 @@ def _replay(
         projections, tt = None, None
 
     if PRECOMPUTE_PROJECTIONS and not KDA:
-        _replay_gdn_window(
+        _gdn_precomputed_window(
             Kp,
             Vp,
             A,
@@ -158,7 +163,7 @@ def _replay(
             vv,
         )
     else:
-        _replay_sequential(
+        _replay_each_token(
             Q,
             Kp,
             Vp,
@@ -205,7 +210,7 @@ def _replay(
 
 
 @triton.jit
-def _project_replay_queries(
+def _project_qk(
     Q,
     Kp,
     A,
@@ -287,7 +292,7 @@ def _project_replay_queries(
 
 
 @triton.jit
-def _replay_gdn_window(
+def _gdn_precomputed_window(
     Kp,
     Vp,
     A,
@@ -419,7 +424,7 @@ def _replay_gdn_window(
 
 
 @triton.jit
-def _replay_sequential(
+def _replay_each_token(
     Q,
     Kp,
     Vp,

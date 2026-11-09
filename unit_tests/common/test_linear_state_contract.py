@@ -130,7 +130,7 @@ def test_mtp0_precompute_reaches_replay_kernel(monkeypatch, linear_config, modul
 
     decode = importlib.import_module(f"lightllm.common.basemodel.attention.linear.{module_name}")
     captured = _CaptureKernel()
-    monkeypatch.setattr(decode, "_replay", captured)
+    monkeypatch.setattr(decode, "_decode_replay", captured)
     owner = cls(
         linear_config,
         request_capacity=2,

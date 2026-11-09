@@ -1,26 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Public ReplaySSM kernel exports.
+"""ReplaySSM kernel exports, in lifecycle order.
 
-Kernel implementations are split by lifecycle stage; these imports preserve the
-existing module-level names used by the executor and tests.
+decode writes history for the current window.
+cursor records how many of those tokens were accepted.
+fold applies that accepted prefix onto the canonical SSM.
 """
 
-from .replayssm_compute import (
-    _project_replay_queries,
-    _replay,
-    _replay_gdn_window,
-    _replay_sequential,
+from .replayssm_decode import (
+    _decode_replay,
+    _gdn_precomputed_window,
+    _project_qk,
+    _replay_each_token,
 )
-from .replayssm_common import _replay_update
-from .replayssm_fold import _accept_updates
-from .replayssm_materialize import _materialize
+from .replayssm_delta import _delta_rule_step
+from .replayssm_cursor import _advance_cursor
+from .replayssm_fold import _fold_prefix
 
 __all__ = [
-    "_replay",
-    "_project_replay_queries",
-    "_replay_gdn_window",
-    "_replay_sequential",
-    "_replay_update",
-    "_accept_updates",
-    "_materialize",
+    "_decode_replay",
+    "_project_qk",
+    "_gdn_precomputed_window",
+    "_replay_each_token",
+    "_delta_rule_step",
+    "_advance_cursor",
+    "_fold_prefix",
 ]

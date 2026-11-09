@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
     from lightllm.common.basemodel.triton_kernel.linear_att import replayssm
 
-    kernels = ("_replay", "_accept_updates")
+    kernels = ("_decode_replay", "_advance_cursor")
     hashes = {name: set() for name in kernels}
     launches = []
     for name in kernels:
@@ -86,8 +86,8 @@ def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
             torch.testing.assert_close(output[:count], expected, atol=3e-5, rtol=3e-5)
         assert torch.equal(captured.cursors, eager.cursors)
         torch.testing.assert_close(captured.ssm_state, eager.ssm_state, atol=3e-5, rtol=3e-5)
-    assert len(hashes["_replay"]) == 1
-    assert len(hashes["_accept_updates"]) == 1
+    assert len(hashes["_decode_replay"]) == 1
+    assert len(hashes["_advance_cursor"]) == 1
     assert captured.cursors[-1] == 0
     assert torch.equal(captured.ssm_state[:, -1], initial[:, -1])
 
