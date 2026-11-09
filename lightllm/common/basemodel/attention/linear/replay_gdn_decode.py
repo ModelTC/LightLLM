@@ -12,30 +12,6 @@ from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import _replay
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import resolve_run_config
 
 
-def begin_decode(history, reqs: torch.Tensor, cu_seqlens: torch.Tensor | None) -> None:
-    """折叠即将溢出的 history。普通 decode 同时接受本轮唯一 token。"""
-
-    history.prepare_decode(reqs, cu_seqlens)
-    if cu_seqlens is None:
-        history.accept_single_token(reqs)
-
-
-def run_config(
-    history,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    a: torch.Tensor,
-    b: torch.Tensor,
-    a_log: torch.Tensor,
-    bias: torch.Tensor,
-    cu_seqlens: torch.Tensor | None = None,
-) -> dict[str, int]:
-    """按当前 kernel 形状选择或返回固定的 GDN replay 调优配置。"""
-
-    return resolve_run_config(history, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
-
-
 def replay(
     history,
     linear_layer_idx: int,

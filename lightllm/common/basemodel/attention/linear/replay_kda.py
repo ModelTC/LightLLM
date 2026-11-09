@@ -34,7 +34,7 @@ from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import 
     build_dynamic_mtp_linear_att_state_params,
 )
 
-from .replay_kda_decode import begin_decode, replay
+from .replay_kda_decode import replay
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -139,7 +139,9 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
         state = _single_replay_state(self)
         self._init_indices(self.backend.mtp_step, state.mtp_state_index)
         self.b_ssm_buffer_idx = self.b_conv_buffer_idx
-        begin_decode(state, self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
+        state.prepare_decode(self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
+        if self.b1_mtp_cu_q_seq_len is None:
+            state.accept_single_token(self.b_conv_buffer_idx)
 
     def decode_att(
         self,

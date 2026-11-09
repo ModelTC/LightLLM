@@ -38,7 +38,7 @@ from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import 
 )
 from lightllm.utils.envs_utils import get_env_start_args
 
-from .replay_gdn_decode import begin_decode, replay
+from .replay_gdn_decode import replay
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -159,7 +159,9 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         self._init_indices(draft_step, state.mtp_state_index)
         self.b_ssm_buffer_idx = self.b_conv_buffer_idx
-        begin_decode(state, self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
+        state.prepare_decode(self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
+        if self.b1_mtp_cu_q_seq_len is None:
+            state.accept_single_token(self.b_conv_buffer_idx)
 
     def decode_att(
         self,
