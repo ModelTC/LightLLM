@@ -6,7 +6,6 @@ Conv、canonical SSM、replay history、页布局和已接受快照都在本类�
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from functools import lru_cache
 from math import prod
 from typing import NamedTuple
@@ -85,7 +84,10 @@ class ReplayKDAState(BoundedAttentionState):
         self.mtp_state_index = torch.zeros(request_capacity, dtype=torch.int32, device=device) if mtp_step else None
         self.big_pages_pool = None
         self.small_pages_pool = None
-        capacity, compute_mode, force_compress = _replay_settings(ssm_replay_config, mtp_step)
+        replay_config = dict(ssm_replay_config or {})
+        capacity = int(replay_config.get("cache_len", 16))
+        compute_mode = replay_config.get("compute_mode", "precompute" if mtp_step > 0 else "inline")
+        force_compress = bool(replay_config.get("force_compress", False))
         _bind_history(
             self,
             self.ssm_state,
@@ -405,13 +407,15 @@ class ReplayKDAState(BoundedAttentionState):
     def finish_prefill(self, logical_layer_id: int, reqs: torch.Tensor) -> None:
         """最后一层把已接受前缀整段压进 SSM。"""
 
-        if self._is_last_layer(logical_layer_id):
+        layers = () if self.config is None else self.config.logical_layer_ids
+        if layers and logical_layer_id == layers[-1]:
             self.compress_prefix(reqs)
 
     def finish_decode_token(self, logical_layer_id: int, reqs: torch.Tensor) -> None:
         """最后一层记下这 1 个 token，再按容量决定是否整段压缩。"""
 
-        if not self._is_last_layer(logical_layer_id):
+        layers = () if self.config is None else self.config.logical_layer_ids
+        if not layers or logical_layer_id != layers[-1]:
             return
         self.accept_single_token(reqs)
         self.maybe_compress_prefix(reqs)
@@ -505,9 +509,12 @@ class ReplayKDAState(BoundedAttentionState):
         strides = targets[0].stride()
         assert len(req_indices) == len(targets)
         assert all(t.shape == shape and t.stride() == strides and t.dtype == self.ssm_state.dtype for t in targets)
+        device = self.ssm_state.device
         self._materialize_accepted(
-            _upload_indices(req_indices, self.ssm_state.device, torch.int32),
-            _upload_indices([t.data_ptr() for t in targets], self.ssm_state.device),
+            torch.tensor(req_indices, dtype=torch.int32, pin_memory=True).to(device, non_blocking=True),
+            torch.tensor([t.data_ptr() for t in targets], dtype=torch.int64, pin_memory=True).to(
+                device, non_blocking=True
+            ),
             snapshot=not flush,
             flush_export=flush,
             output_strides=strides,
@@ -562,11 +569,6 @@ class ReplayKDAState(BoundedAttentionState):
     # ========================================================================
     # 七、私有辅助实现
     # ========================================================================
-
-    def _is_last_layer(self, logical_layer_id: int) -> bool:
-        if self.config is None or not self.config.logical_layer_ids:
-            return False
-        return logical_layer_id == self.config.logical_layer_ids[-1]
 
     def _transfer_regions(self) -> tuple[TransferRegion, ...]:
         """依次描述全局 Conv 和 SSM 区域，并标明当前 TP rank 的读写范围。"""
@@ -732,20 +734,6 @@ class ReplayKDAState(BoundedAttentionState):
             num_warps=config["num_warps"],
             num_stages=config["num_stages"],
         )
-
-
-def _replay_settings(config: dict | None, mtp_step: int) -> tuple[int, str, bool]:
-    config = dict(config or {})
-    capacity = int(config.get("cache_len", 16))
-    compute_mode = config.get("compute_mode", "precompute" if mtp_step > 0 else "inline")
-    force_compress = bool(config.get("force_compress", False))
-    return capacity, compute_mode, force_compress
-
-
-def _upload_indices(values: Sequence[int], device, dtype=torch.int64) -> torch.Tensor:
-    """把 Python 索引上传到目标 device。"""
-
-    return torch.tensor(list(values), dtype=dtype, pin_memory=True).to(device, non_blocking=True)
 
 
 def _history_owner(

@@ -62,7 +62,9 @@ class ReplayGDNTritonAttBackend(BaseAttBackend):
 
     def __init__(self, model):
         super().__init__(model=model)
-        _configure_gdn(self, model, _triton_prefill_kernel())
+        from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import chunk_gated_delta_rule
+
+        _configure_gdn(self, model, chunk_gated_delta_rule)
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo"):
         return ReplayGDNPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
@@ -76,7 +78,9 @@ class ReplayGDNFlashQlaAttBackend(BaseAttBackend):
 
     def __init__(self, model):
         super().__init__(model=model)
-        _configure_gdn(self, model, _flashqla_prefill_kernel())
+        from flash_qla import chunk_gated_delta_rule
+
+        _configure_gdn(self, model, chunk_gated_delta_rule)
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo"):
         return ReplayGDNPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
@@ -275,20 +279,6 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             self.b1_mtp_cu_q_seq_len,
         )
         return output
-
-
-def _triton_prefill_kernel():
-    from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
-        chunk_gated_delta_rule,
-    )
-
-    return chunk_gated_delta_rule
-
-
-def _flashqla_prefill_kernel():
-    from flash_qla import chunk_gated_delta_rule
-
-    return chunk_gated_delta_rule
 
 
 def _configure_gdn(backend, model, prefill_kernel) -> None:
