@@ -156,10 +156,7 @@ def test_dflash_hidden_commit_uses_draft_state(device, monkeypatch):
     model.is_mtp_draft_model = True
     model.mtp_previous_draft_models = []
     model._cos_cached = model._sin_cached = torch.zeros(8, 16, device=device)
-    model.req_manager = SimpleNamespace(req_to_token_indexs=object())
-    monkeypatch.setattr(
-        "lightllm.models.qwen3_dflash.model.build_kv_indexes_and_input_ids", lambda inputs, table: (ids, None)
-    )
+    model._select_mem_indexes = lambda _: ids
     model.pre_post_weight = None
     model.pre_infer = SimpleNamespace(context_forward=lambda _, state, weight: state.mtp_draft_input_hiddens)
 

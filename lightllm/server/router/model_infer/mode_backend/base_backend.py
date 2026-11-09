@@ -454,7 +454,7 @@ class ModeBackend:
             return
 
         mgr = PromptLogprobsCaptureManager.get_instance()
-        mem_indexes = model_input.mem_indexes
+        mem_indexes = self.model._select_mem_indexes(model_input)
 
         start_loc = 0
         for req_obj in run_reqs:
