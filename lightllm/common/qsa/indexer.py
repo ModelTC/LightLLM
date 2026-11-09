@@ -97,7 +97,10 @@ class QSAIndexer:
                 triton.next_power_of_2(self.head_dim),
                 enable_fp_fusion=False,
             )
-        return output, projected[:, self.query_heads * self.head_dim :].contiguous()
+        # Keep the raw-key projection as a view.  The state writer accepts a
+        # strided source, so making this slice contiguous only adds a full
+        # token-by-head-dimension copy on every QSA layer.
+        return output, projected[:, self.query_heads * self.head_dim :]
 
     def empty_cache(self, requests: int, max_tokens: int) -> torch.Tensor:
         return torch.empty(
