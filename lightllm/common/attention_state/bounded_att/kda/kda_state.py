@@ -71,12 +71,6 @@ class KDAState(BoundedAttentionState):
         self.big_pages_pool = None
         self.small_pages_pool = None
 
-    @property
-    def ssm_slots_per_req(self) -> int:
-        """每个请求的物理 SSM 槽位数，包含 MTP 候选。"""
-
-        return self.mtp_step + 1
-
     def get_state_type(self) -> str:
         """返回 KDA 算法及 Conv/SSM 存储精度。"""
         return f"kda_conv_{dtype_name(dtype=self.config.conv_dtype)}" f"_ssm_{dtype_name(dtype=self.config.ssm_dtype)}"

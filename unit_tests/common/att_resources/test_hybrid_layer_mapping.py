@@ -79,7 +79,8 @@ def test_hybrid_layer_mapping_and_mtp_states(
         device="meta",
     )
     if mode == "native":
-        assert bounded_state.ssm_slots_per_req == 3
+        stride = bounded_state.mtp_step + 1
+        assert bounded_state.ssm_state.shape[1] == bounded_state.request_capacity * stride
     if mode == "replay":
         assert bounded_state.capacity == 8
     manager = AttentionStateManager(request_capacity=1)

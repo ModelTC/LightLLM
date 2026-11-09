@@ -126,7 +126,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
 ):
     source = make_mems(prefill_tp, mode=source_mode)
     dest = make_mems(decode_tp, target_mtp_step=decode_mtp_step, mode=dest_mode)
-    dst_ssm_stride = 1 if dest_mode == "replay" else dest[0].linear.ssm_slots_per_req
+    dst_ssm_stride = 1 if dest_mode == "replay" else dest[0].linear.mtp_step + 1
     mtp_size = get_env_start_args().mtp_step + 1
     layers = sum(len(state.config.logical_layer_groups) for state in source[0].full_states)
     src_req, dst_req = 0, 2
@@ -165,7 +165,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
             state.storage.view(torch.uint8)[:, src_indexes] = packed[offset:end]
             offset = end
         mem.linear.conv_state[:, src_req, ..., :3].copy_(conv[:, :, heads].reshape(6, -1, 3))
-        src_slot = src_req if source_mode == "replay" else src_req * mem.linear.ssm_slots_per_req
+        src_slot = src_req if source_mode == "replay" else src_req * (mem.linear.mtp_step + 1)
         mem.linear.ssm_state[:, src_slot].copy_(ssm[:, heads])
         if source_mode == "replay":
             backend = mem.linear

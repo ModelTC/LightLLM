@@ -175,7 +175,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     )
     torch.cuda.synchronize()
     assert torch.equal(linear.conv_state[:, 2, ..., :3], conv)
-    restored_slot = 2 if mode == "replay" else 2 * linear.ssm_slots_per_req
+    restored_slot = 2 if mode == "replay" else 2 * (linear.mtp_step + 1)
     assert torch.equal(linear.ssm_state[:, restored_slot], ssm)
     if mode == "replay":
         assert linear.cursors[2] == 0
@@ -188,7 +188,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     if mode == "replay":
         assert not linear.ssm_state[:, 2].any()
     else:
-        assert not linear.ssm_state[:, 2 * linear.ssm_slots_per_req : 3 * linear.ssm_slots_per_req].any()
+        assert not linear.ssm_state[:, 2 * (linear.mtp_step + 1) : 3 * (linear.mtp_step + 1)].any()
     assert not tail.buffer[:, 2, :, : tail.config.candidate_dim].any()
     assert torch.isneginf(tail.buffer[:, 2, :, tail.config.candidate_dim :]).all()
     assert torch.equal(tail.buffer[:, [0, 1, 3]], unchanged[:, [0, 1, 3]])

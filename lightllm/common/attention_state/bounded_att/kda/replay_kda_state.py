@@ -135,7 +135,6 @@ class ReplayKDAState(BoundedAttentionState):
         request_capacity: int,
         mtp_step: int = 0,
         device: str | torch.device = "cuda",
-        *,
         ssm_state_mode: str = "replay",
         ssm_replay_config: dict | None = None,
         gate_lower_bound: float = -5.0,
@@ -196,7 +195,6 @@ class ReplayKDAState(BoundedAttentionState):
         capacity: int,
         verify_width: int,
         activation_dtype: torch.dtype = torch.bfloat16,
-        *,
         num_key_heads: int | None = None,
         kda: bool = True,
         gate_lower_bound: float = -5.0,
@@ -362,7 +360,7 @@ class ReplayKDAState(BoundedAttentionState):
     ) -> None:
         read_pd(self, pd_page_buffers, req_idx, pd_page_index, state_token_len, layout)
 
-    def close_history_after_layer(self, logical_layer_id: int, reqs: torch.Tensor, *, fold: bool) -> None:
+    def close_history_after_layer(self, logical_layer_id: int, reqs: torch.Tensor, fold: bool) -> None:
         """本状态最后一层结束时收口 history。fold 时先把已接受前缀折进 canonical SSM。"""
 
         if self.config is None or not self.config.logical_layer_ids:
@@ -514,7 +512,6 @@ class ReplayKDAState(BoundedAttentionState):
         req_indices: list[int],
         targets: list[torch.Tensor],
         accepted_indices: torch.Tensor | None = None,
-        *,
         flush: bool = False,
     ) -> None:
         """将多个 accepted 快照直接写入调用方目标页。"""
@@ -547,7 +544,7 @@ class ReplayKDAState(BoundedAttentionState):
 
         self.commit_accepted(indices, acceptance.req_indices, acceptance.accepted_lengths)
 
-    def export_ssm(self, req_indices: list[int], targets: list[torch.Tensor], *, flush: bool = False) -> None:
+    def export_ssm(self, req_indices: list[int], targets: list[torch.Tensor], flush: bool = False) -> None:
         """把已接受 SSM 写入调用方页面。CUDA 目标直接写指针，其他设备先物化再拷贝。"""
 
         if not req_indices:

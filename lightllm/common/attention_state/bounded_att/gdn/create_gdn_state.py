@@ -13,7 +13,6 @@ def create_gdn_state(
     request_capacity: int,
     mtp_step: int = 0,
     device: str | torch.device = "cuda",
-    *,
     ssm_state_mode: str = "native",
     ssm_replay_config: dict | None = None,
     gate_lower_bound: float = -5.0,

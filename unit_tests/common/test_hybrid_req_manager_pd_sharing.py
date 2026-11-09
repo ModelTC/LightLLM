@@ -28,7 +28,7 @@ def _assert_received_manager_roundtrip(payload, state_name, mode, expected):
         actual = state.get_accepted_state(2)
     else:
         width = state.config.conv_width
-        actual = (state.conv_state[:, 2, :, :width], state.ssm_state[:, 2 * state.ssm_slots_per_req])
+        actual = (state.conv_state[:, 2, :, :width], state.ssm_state[:, 2 * (state.mtp_step + 1)])
     for tensor, values in zip(actual, expected):
         torch.testing.assert_close(tensor, torch.tensor(values, dtype=tensor.dtype, device="cuda"), rtol=0, atol=0)
     assert state.mtp_state_index[2] == 0
@@ -115,10 +115,10 @@ def test_shared_attention_state_roundtrip_preserves_worker_resources(
         width = state.config.conv_width
         expected = [
             state.conv_state[:, 1, :, :width].cpu().tolist(),
-            state.ssm_state[:, state.ssm_slots_per_req].cpu().tolist(),
+            state.ssm_state[:, state.mtp_step + 1].cpu().tolist(),
         ]
     before = vars(state).copy()
-    source_slot = 1 if mode == "replay" else state.ssm_slots_per_req
+    source_slot = 1 if mode == "replay" else state.mtp_step + 1
     source_conv, source_ssm = state.conv_state[:, 1].clone(), state.ssm_state[:, source_slot].clone()
     snapshots = []
     for pool in (state.big_pages_pool, state.small_pages_pool):

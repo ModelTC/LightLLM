@@ -51,7 +51,7 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
         state.mtp_state_index[src] = offset
     if mode == "native":
         expected_conv = state.conv_state[:, src, ..., :3].clone()
-        expected_ssm = state.ssm_state[:, src * state.ssm_slots_per_req].clone()
+        expected_ssm = state.ssm_state[:, src * (state.mtp_step + 1)].clone()
     else:
         expected_conv = state.conv_state[:, src, ..., offset : offset + 3].clone()
         expected_ssm = state.ssm_state[:, src].clone()
@@ -90,7 +90,7 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
             actual_conv, actual_ssm = actual.conv, actual.ssm
         else:
             actual_conv = state.conv_state[:, dst, ..., :3]
-            actual_ssm = state.ssm_state[:, dst * state.ssm_slots_per_req]
+            actual_ssm = state.ssm_state[:, dst * (state.mtp_step + 1)]
         torch.testing.assert_close(actual_conv, expected_conv, rtol=0, atol=0)
         torch.testing.assert_close(actual_ssm, expected_ssm, rtol=2e-5, atol=2e-5)
         if state.mtp_state_index is not None:
@@ -102,8 +102,8 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
     if mode == "replay":
         assert not state.ssm_state[:, dst].any()
     else:
-        start = dst * state.ssm_slots_per_req
-        assert not state.ssm_state[:, start : start + state.ssm_slots_per_req].any()
+        start = dst * (state.mtp_step + 1)
+        assert not state.ssm_state[:, start : start + state.mtp_step + 1].any()
 
 
 def copy_on_cpu(*, copies):
@@ -136,7 +136,7 @@ def test_checkpoint_batch_export(runtime_start_args, monkeypatch, cls, mode, dty
         expected = [
             (
                 state.conv_state[:, req, :, : state.config.conv_width].clone(),
-                state.ssm_state[:, req * state.ssm_slots_per_req].clone(),
+                state.ssm_state[:, req * (state.mtp_step + 1)].clone(),
             )
             for req in requests
         ]
@@ -173,7 +173,7 @@ def test_checkpoint_batch_export(runtime_start_args, monkeypatch, cls, mode, dty
             actual_conv, actual_ssm = actual.conv, actual.ssm
         else:
             actual_conv = target.conv_state[:, req, :, : target.config.conv_width]
-            actual_ssm = target.ssm_state[:, req * target.ssm_slots_per_req]
+            actual_ssm = target.ssm_state[:, req * (target.mtp_step + 1)]
         torch.testing.assert_close(actual_conv, conv, atol=0, rtol=0)
         torch.testing.assert_close(actual_ssm, ssm, atol=0, rtol=0)
     assert torch.equal(state.ssm_state, before)
@@ -233,7 +233,7 @@ def test_pd_block_roundtrip_preserves_replicated_heads_and_accepted_mtp_state(mo
         state.conv_state[:, src, :2, :3].fill_(10 + rank)
         state.conv_state[:, src, 2:4, :3].fill_(20 + rank)
         state.conv_state[:, src, 4:, :3].fill_(30 + rank)
-        state.ssm_state[:, src * state.ssm_slots_per_req].fill_(40 + rank)
+        state.ssm_state[:, src * (state.mtp_step + 1)].fill_(40 + rank)
         states.append(state)
         layouts.append(layout)
         snapshots.append((state.conv_state.clone(), state.ssm_state.clone()))
