@@ -159,11 +159,6 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         self._init_indices(draft_step, state.mtp_state_index)
         self.b_ssm_buffer_idx = self.b_conv_buffer_idx
-        if self.b1_mtp_cu_q_seq_len is None:
-            state.reserve_prefix(self.b_conv_buffer_idx, 1)
-        else:
-            cu = self.b1_mtp_cu_q_seq_len
-            state.reserve_prefix(self.b_conv_buffer_idx, cu[1:] - cu[:-1])
 
     def decode_att(
         self,

@@ -4,6 +4,8 @@
 import triton
 import triton.language as tl
 
+from .replayssm_common import _replay_update
+
 
 @triton.jit
 def _materialize(
@@ -28,16 +30,21 @@ def _materialize(
     KDA: tl.constexpr,
     FLUSH_EXPORT: tl.constexpr = False,
     OUTPUT_STRIDES: tl.constexpr = None,
+    WHEN_FULL: tl.constexpr = False,
+    NEXT: tl.constexpr = 1,
 ):
-    # 将 cursor 指向的 accepted history 应用到 canonical state；SNAPSHOT
-    # 只写独立输出，merge 路径则原地更新请求槽位。FLUSH_EXPORT 同时
-    # 更新 canonical state 和缓存目标，并在同一个 kernel 中清空 cursor。
+    # 将 cursor 指向的 accepted history 应用到 canonical state。SNAPSHOT
+    # 只写独立输出。WHEN_FULL 只压缩「长度 + 下一次最大宽度」放不下的请求，
+    # 并在 kernel 内把这些请求的 cursor 清零，避免主机分支进不了 CUDA Graph。
     iv, row, lh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     req = tl.load(Reqs + row).to(tl.int64)
     if req == HOLD:
         return
     n = tl.load(Cursors + req)
-    if n == 0 and not SNAPSHOT and not FLUSH_EXPORT:
+    if WHEN_FULL:
+        if n == 0 or n + NEXT <= L:
+            return
+    elif n == 0 and not SNAPSHOT and not FLUSH_EXPORT:
         return
     linear_layer_idx, head = lh // HV, lh % HV
     slot = (linear_layer_idx * SLOTS + req) * HV + head
@@ -54,10 +61,7 @@ def _materialize(
         else:
             g = tl.load(Gates + slot * L + j).to(tl.float32)
         beta = tl.load(Betas + slot * L + j).to(tl.float32)
-        raw_k /= tl.sqrt(tl.sum(raw_k * raw_k) + 1.0e-6)
-        state *= tl.exp(g)[:, None] if KDA else tl.exp(g)
-        d = beta * (raw_v - tl.sum(state * raw_k[:, None], 0))
-        state += raw_k[:, None] * d[None, :]
+        state = _replay_update(state, raw_k, raw_v, g, beta, KDA)
     if FLUSH_EXPORT:
         target = tl.load(Output + row).to(tl.pointer_type(State.dtype.element_ty))
         target_out = (
@@ -85,3 +89,5 @@ def _materialize(
             out_slot = linear_layer_idx * HV + head if SNAPSHOT else slot
             out = Output + out_slot * K * V + kk[:, None] * V + vv[None, :]
         tl.store(out, state, (kk[:, None] < K) & (vv[None, :] < V))
+        if WHEN_FULL and iv == 0 and lh == 0:
+            tl.store(Cursors + req, 0)

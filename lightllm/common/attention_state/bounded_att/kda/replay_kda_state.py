@@ -474,21 +474,7 @@ class ReplayKDAState(BoundedAttentionState):
         if self.force_compress:
             self.compress_prefix(reqs)
             return
-        used = self.cursors.index_select(0, reqs.long())
-        overflow = (reqs != self.hold_req_id) & (used + self.verify_width > self.capacity)
-        if bool(overflow.any()):
-            self.compress_prefix(reqs[overflow])
-
-    def reserve_prefix(self, reqs: torch.Tensor, width: int | torch.Tensor) -> None:
-        """下一步写不下时，先把已接受前缀整段压进 SSM。"""
-
-        if reqs.numel() == 0 or not self.ssm_state.is_cuda:
-            return
-        used = self.cursors.index_select(0, reqs.long())
-        need = width if isinstance(width, torch.Tensor) else used.new_full((), width)
-        overflow = (reqs != self.hold_req_id) & (used + need > self.capacity)
-        if bool(overflow.any()):
-            self.merge_accepted_updates(reqs[overflow])
+        self._materialize_accepted(reqs, self.ssm_state, snapshot=False, when_full=True)
 
     def accepted_ssm(self, req_idx: int) -> torch.Tensor:
         """返回不修改 canonical SSM 和 history 的单请求快照。"""
@@ -720,6 +706,7 @@ class ReplayKDAState(BoundedAttentionState):
         snapshot: bool,
         output_strides=None,
         flush_export: bool = False,
+        when_full: bool = False,
     ) -> None:
         """将请求的 accepted prefix 写入 canonical SSM 或调用方提供的输出页。"""
 
@@ -749,6 +736,8 @@ class ReplayKDAState(BoundedAttentionState):
             True,
             FLUSH_EXPORT=flush_export,
             OUTPUT_STRIDES=output_strides,
+            WHEN_FULL=when_full,
+            NEXT=self.verify_width,
             num_warps=config["num_warps"],
             num_stages=config["num_stages"],
         )
