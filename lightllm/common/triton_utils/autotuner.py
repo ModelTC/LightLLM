@@ -164,6 +164,7 @@ class Autotuner:
         benchmark_repeats: int = 3,
         benchmark_retries: int = 3,
     ):
+
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
         self.kernel_type = AutotuneKernelType(kernel_type)
