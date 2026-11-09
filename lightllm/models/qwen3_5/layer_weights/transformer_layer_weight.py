@@ -29,28 +29,39 @@ class Qwen35TransformerLayerWeight(Qwen3NextTransformerLayerWeight):
         hidden_size = self.network_config_["hidden_size"]
         qk_dim = self.linear_num_k_heads * self.linear_k_head_dim
         v_dim = self.linear_num_v_heads * self.linear_v_head_dim
+        quant_method = self.linear_in_proj.quant_method
+        out_dims = [qk_dim, qk_dim, v_dim, v_dim]
+        weight_names = [f"{prefix}.in_proj_{part}.weight" for part in ("q", "k", "v", "z")]
+        gate_dims = [self.linear_num_v_heads, self.linear_num_v_heads]
+        gate_modules = [f"{prefix}.in_proj_{part}" for part in ("b", "a")]
+        gate_weight_names = [f"{module}.weight" for module in gate_modules]
 
-        # NOTE: keep grouped layout directly (q, k, v, z, b, a).
+        self.linear_gate_proj = None
+        quantization = quant_method.hf_quantization_config or {}
+        excluded = {
+            name.replace("model.language_model.", "model.", 1)
+            for name in (quantization.get("modules_to_not_convert") or ())
+        }
+        if quant_method.method_name in ("awq", "awq_marlin") and all(
+            any(module == name or module.endswith(f".{name}") for name in excluded) for module in gate_modules
+        ):
+            self.linear_gate_proj = ROWMMWeight(
+                in_dim=hidden_size,
+                out_dims=gate_dims,
+                weight_names=gate_weight_names,
+                data_type=self.data_type_,
+            )
+        else:
+            out_dims.extend(gate_dims)
+            weight_names.extend(gate_weight_names)
+
+        # The attention kernels consume [q, k, v, z, b, a].
         self.linear_in_proj = ROWMMWeight(
             in_dim=hidden_size,
-            out_dims=[
-                qk_dim,
-                qk_dim,
-                v_dim,
-                v_dim,
-                self.linear_num_v_heads,
-                self.linear_num_v_heads,
-            ],
-            weight_names=[
-                f"{prefix}.in_proj_q.weight",
-                f"{prefix}.in_proj_k.weight",
-                f"{prefix}.in_proj_v.weight",
-                f"{prefix}.in_proj_z.weight",
-                f"{prefix}.in_proj_b.weight",
-                f"{prefix}.in_proj_a.weight",
-            ],
+            out_dims=out_dims,
+            weight_names=weight_names,
             data_type=self.data_type_,
-            quant_method=self.get_quant_method("in_proj_weight"),
+            quant_method=quant_method,
         )
 
     def _preprocess_weight(self, weights):
@@ -69,24 +80,26 @@ class Qwen35TransformerLayerWeight(Qwen3NextTransformerLayerWeight):
 
     def _split_linear_in_proj_qkv(self, weights):
         prefix = f"model.layers.{self.layer_num_}.linear_attn"
-        qkv_name = f"{prefix}.in_proj_qkv.weight"
-        if qkv_name not in weights:
-            return
-
         qk_dim = self.linear_num_k_heads * self.linear_k_head_dim
         v_dim = self.linear_num_v_heads * self.linear_v_head_dim
-        expected_rows = 2 * qk_dim + v_dim
+        quant_method = self.linear_in_proj.quant_method
+        layouts = [("weight", 0, 1)]
+        if quant_method.method_name in ("awq", "awq_marlin"):
+            pack_factor = quant_method.pack_factor
+            layouts.extend([("qweight", -1, pack_factor), ("qzeros", -1, pack_factor), ("scales", -1, 1)])
 
-        qkv = weights[qkv_name]
-        if qkv.shape[0] != expected_rows:
-            logger.warning(
-                f"Layer {self.layer_num_}: unexpected in_proj_qkv shape "
-                f"{tuple(qkv.shape)}, expected first dim {expected_rows}; skip split"
-            )
-            return
-
-        q, k, v = torch.split(qkv, [qk_dim, qk_dim, v_dim], dim=0)
-        weights[f"{prefix}.in_proj_q.weight"] = q
-        weights[f"{prefix}.in_proj_k.weight"] = k
-        weights[f"{prefix}.in_proj_v.weight"] = v
-        del weights[qkv_name]
+        for suffix, axis, factor in layouts:
+            qkv_name = f"{prefix}.in_proj_qkv.{suffix}"
+            qkv = weights.get(qkv_name)
+            if qkv is None:
+                continue
+            sizes = [qk_dim // factor, qk_dim // factor, v_dim // factor]
+            if qkv.shape[axis] != sum(sizes):
+                logger.warning(
+                    f"Layer {self.layer_num_}: unexpected {qkv_name} shape "
+                    f"{tuple(qkv.shape)}, expected dimension {axis} to be {sum(sizes)}; skip split"
+                )
+                continue
+            for part, tensor in zip(("q", "k", "v"), torch.split(qkv, sizes, dim=axis)):
+                weights[f"{prefix}.in_proj_{part}.{suffix}"] = tensor
+            del weights[qkv_name]
