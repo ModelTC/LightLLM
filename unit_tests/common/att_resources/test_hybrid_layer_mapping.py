@@ -78,9 +78,9 @@ def test_hybrid_layer_mapping_and_mtp_states(
         model_logical_layer_ids=logical_layer_ids,
         device="meta",
     )
-    assert bounded_state.ssm_slots_per_req == (3 if mode == "native" else 1)
+    if mode == "native":
+        assert bounded_state.ssm_slots_per_req == 3
     if mode == "replay":
-        assert bounded_state.state is bounded_state.ssm_state
         assert bounded_state.capacity == 8
     manager = AttentionStateManager(request_capacity=1)
     manager.register_state(model_role="main", state=full_state)

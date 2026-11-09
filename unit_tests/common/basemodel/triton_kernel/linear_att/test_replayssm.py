@@ -351,7 +351,7 @@ def test_precomputed_projections_preserve_precision(warps, decay, state_dtype, d
             assert error < scale * (torch.finfo(dtype).eps / 2)
     for ssm_backend in ssm_backends:
         ssm_backend.merge_accepted_updates(reqs)
-    torch.testing.assert_close(ssm_backends[0].state, ssm_backends[1].state, atol=0, rtol=0)
+    torch.testing.assert_close(ssm_backends[0].ssm_state, ssm_backends[1].ssm_state, atol=0, rtol=0)
 
 
 def test_bf16_decode_fold_uses_rounded_checkpoint():
@@ -380,7 +380,7 @@ def test_bf16_decode_fold_uses_rounded_checkpoint():
         ssm_backend.accept_updates(reqs)
         outputs.append(replay_layer(ssm_backend, 0, q, k, v, a, b, alog, bias, reqs)[0])
     torch.testing.assert_close(outputs[0], outputs[1], atol=1e-7, rtol=1e-6)
-    torch.testing.assert_close(ssm_backends[0].state, ssm_backends[1].state, atol=0, rtol=0)
+    torch.testing.assert_close(ssm_backends[0].ssm_state, ssm_backends[1].ssm_state, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -512,28 +512,27 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(runtime_start_arg
     state.mtp_state_index[1] = 1
     state.conv_state.normal_()
     state.ssm_state.zero_()
-    backend = state._ssm_executor
-    backend.raw_keys.normal_()
-    backend.raw_values.normal_()
-    backend.gates.uniform_(-0.1, -0.01)
-    backend.betas.uniform_(0.1, 0.9)
+    state.raw_keys.normal_()
+    state.raw_values.normal_()
+    state.gates.uniform_(-0.1, -0.01)
+    state.betas.uniform_(0.1, 0.9)
     active_before = state.ssm_state[:, 1].clone()
     conv_expected = state.conv_state[:, 1, :, 1:4].clone()
     block = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
     kind = "big" if save_big else "small"
     pool = state.big_pages_pool if save_big else state.small_pages_pool
     for count in (2, 1):
-        backend.cursors[1] = count
+        state.cursors[1] = count
         expected = active_before.float().clone()
         for i in range(count):
-            key = backend.raw_keys[:, 1, :, i].float()
+            key = state.raw_keys[:, 1, :, i].float()
             key /= (key.square().sum(-1, keepdim=True) + 1e-6).sqrt()
-            expected *= backend.gates[:, 1, :, i].exp()[..., None, None]
-            delta = backend.betas[:, 1, :, i, None] * (
-                backend.raw_values[:, 1, :, i].float() - torch.einsum("lhkv,lhk->lhv", expected, key)
+            expected *= state.gates[:, 1, :, i].exp()[..., None, None]
+            delta = state.betas[:, 1, :, i, None] * (
+                state.raw_values[:, 1, :, i].float() - torch.einsum("lhkv,lhk->lhv", expected, key)
             )
             expected += key[..., None] * delta[..., None, :]
-        materialized = ssm_snapshot(backend, 1)
+        materialized = ssm_snapshot(state, 1)
         torch.testing.assert_close(materialized, expected.to(dtype), rtol=state_rtol, atol=2e-5)
         state.save_bounded_att_runtime_to_pages([1], [8], kind, [0])
         state.write_to_pd_page(1, block, 0, 8, layout)
@@ -541,15 +540,15 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(runtime_start_arg
         torch.testing.assert_close(pool.ssm_state[0], materialized.cpu(), rtol=0, atol=0)
         torch.testing.assert_close(pool.conv_state[0], conv_expected.cpu(), rtol=0, atol=0)
         torch.testing.assert_close(state.ssm_state[:, 1], active_before, rtol=0, atol=0)
-        assert backend.cursors[1].item() == count
+        assert state.cursors[1].item() == count
         for restore in (
             lambda: state.restore_bounded_att_runtime_from_pages([2], [8], kind, [0]),
             lambda: state.read_from_pd_page(block, 2, 0, 8, layout),
         ):
-            backend.cursors[2] = 3
+            state.cursors[2] = 3
             state.mtp_state_index[2] = 2
             restore()
-            assert backend.cursors[2].item() == state.mtp_state_index[2].item() == 0
+            assert state.cursors[2].item() == state.mtp_state_index[2].item() == 0
             torch.testing.assert_close(state.ssm_state[:, 2], materialized, rtol=0, atol=0)
             torch.testing.assert_close(state.conv_state[:, 2, :, :3], conv_expected, rtol=0, atol=0)
     state.reset_bounded_att_state([2])
@@ -669,5 +668,5 @@ def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, sepa
         lengths = torch.full((live,), query_width, device="cuda", dtype=torch.int32)
         backend.commit(StateAcceptance(reqs[:live], lengths), indices, "main")
     backend.merge_accepted_updates(reqs[:live])
-    torch.testing.assert_close(backend.state[0, :live], expected, atol=3e-4, rtol=3e-4)
-    assert torch.equal(backend.state[0, live], initial[0, live])
+    torch.testing.assert_close(backend.ssm_state[0, :live], expected, atol=3e-4, rtol=3e-4)
+    assert torch.equal(backend.ssm_state[0, live], initial[0, live])

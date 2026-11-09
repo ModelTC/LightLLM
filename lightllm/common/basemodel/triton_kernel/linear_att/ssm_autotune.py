@@ -9,9 +9,10 @@ import triton
 
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType, autotune
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.ssm_types import SSMRunConfig
 
 logger = init_logger(__name__)
+
+_DEFAULT_REPLAY_CONFIG = {"BV": 32, "num_warps": 1, "num_stages": 3}
 
 
 def get_configs() -> list[dict[str, int]]:
@@ -26,13 +27,13 @@ def get_configs() -> list[dict[str, int]]:
 def static_key(ssm_backend, mode, q, k, v, a, b, cu_seqlens) -> dict[str, object]:
     """构造区分状态布局、数据类型和投影模式的静态调优键。"""
     axis = 1 if cu_seqlens is not None else 0
-    _, _, hv, kd, vd = ssm_backend.state.shape
+    _, _, hv, kd, vd = ssm_backend.ssm_state.shape
     # 保持文件名较短，同时区分 packed projection、TP 布局、状态精度、递推规则和 history 容量。
     key = {
         "mode": mode,
         "v": 6,
         "shape": str((q.shape[-2], hv, ssm_backend.num_key_heads, kd, vd, ssm_backend.verify_width)),
-        "dtype": str((q.dtype, ssm_backend.state.dtype)),
+        "dtype": str((q.dtype, ssm_backend.ssm_state.dtype)),
         "strides": str((q.stride(axis), k.stride(axis), v.stride(axis), a.stride(0), b.stride(0))),
         "history": ssm_backend.capacity,
         "gate": int(ssm_backend.kda),
@@ -58,7 +59,7 @@ def run_key(ssm_backend, q, cu_seqlens) -> tuple[int, int]:
 def scratch_size_bytes(ssm_backend, batch, sequences, inputs) -> int:
     """估算一次 SSM autotune scratch 所需的字节数。"""
     # State/history 的首轴是 layer，cursor 在各 layer 之间共享。
-    layers, slots = ssm_backend.state.shape[:2]
+    layers, slots = ssm_backend.ssm_state.shape[:2]
     pool_bytes = sum(
         x.numel() * x.element_size() // (layers if x.ndim > 1 else 1)
         for x in vars(ssm_backend).values()
@@ -87,17 +88,9 @@ def rebuild_inputs(
             raise torch.cuda.OutOfMemoryError(
                 f"SSM tuning scratch needs {required} bytes, exceeding its {available // 2}-byte budget"
             )
-    _, _, hv, kd, vd = ssm_backend.state.shape
-    state = torch.empty((1, batch + 1, hv, kd, vd), device=q.device, dtype=ssm_backend.state.dtype).normal_(0, 0.02)
-    if ssm_backend.kda:
-        from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
-
-        history_cls = ReplayKDAState
-    else:
-        from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
-
-        history_cls = ReplayGDNState
-    scratch = history_cls.from_ssm(
+    _, _, hv, kd, vd = ssm_backend.ssm_state.shape
+    state = torch.empty((1, batch + 1, hv, kd, vd), device=q.device, dtype=ssm_backend.ssm_state.dtype).normal_(0, 0.02)
+    scratch = type(ssm_backend).from_ssm(
         state,
         ssm_backend.capacity,
         ssm_backend.verify_width,
@@ -138,12 +131,17 @@ def rebuild_inputs(
 
 
 def replay_layer(history, *args, **kwargs):
-    """按 history 所属算法调用对应的 replay decode。"""
+    """按 history 的具体类型调用对应的 replay decode。"""
 
-    if history.kda:
+    from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
+    from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
+
+    if isinstance(history, ReplayKDAState):
         from lightllm.common.basemodel.attention.linear.replay_kda_step import replay
-    else:
+    elif isinstance(history, ReplayGDNState):
         from lightllm.common.basemodel.attention.linear.replay_gdn_step import replay
+    else:
+        raise TypeError(f"replay_layer expects ReplayGDNState or ReplayKDAState, got {type(history).__name__}")
     return replay(history, *args, **kwargs)
 
 
@@ -159,7 +157,7 @@ def replay_layer(history, *args, **kwargs):
 )
 def select_config(
     ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, workload=None, run_config=None
-) -> dict[str, int] | SSMRunConfig | None:
+) -> dict[str, int] | None:
     """搜索 update cycle 布局；计时只使用重建的临时输入。"""
     if workload is None:
         return run_config
@@ -176,18 +174,27 @@ def select_config(
     return run_config
 
 
-def resolve_run_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens) -> SSMRunConfig:
+def _replay_config(config: dict | None) -> dict[str, int]:
+    if not config:
+        return dict(_DEFAULT_REPLAY_CONFIG)
+    return {
+        "BV": int(config["BV"]),
+        "num_warps": int(config["num_warps"]),
+        "num_stages": int(config.get("num_stages", 3)),
+    }
+
+
+def resolve_run_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens) -> dict[str, int]:
     """返回当前 batch 的固定或已调优 SSM kernel 配置。"""
-    default = ssm_backend.run_config or SSMRunConfig(32, 1)
-    if ssm_backend._config_is_fixed:
-        return default
+    if ssm_backend._config_is_fixed and ssm_backend.run_config is not None:
+        return ssm_backend.run_config
+    default = _replay_config(ssm_backend.run_config)
     key = (tuple(static_key(ssm_backend, mode, q, k, v, a, b, cu_seqlens).items()), run_key(ssm_backend, q, cu_seqlens))
     if key in ssm_backend.batch_configs:
         return ssm_backend.batch_configs[key]
     if not Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
         return default
-    config = select_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens)
-    config = SSMRunConfig(**config) if config else default
+    config = _replay_config(select_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens))
     # 每个 captured graph 保留自己的布局，即使其他 bucket 后续完成 warmup。
     ssm_backend.batch_configs[key] = config
     logger.info(f"SSM {mode} update-cycle config: {config}, warmup batch: {key[1]}")

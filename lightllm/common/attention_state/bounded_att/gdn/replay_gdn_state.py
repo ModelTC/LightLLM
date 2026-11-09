@@ -20,8 +20,6 @@ from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import (
     _prepare_fold,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
-from lightllm.common.ssm_types import SSMRunConfig
-
 from ...utils import deepcopy_result, dtype_name
 from ..base_state import BoundedAttentionState
 from ..conv_ssm_types import ConvSSMStateConfig
@@ -69,7 +67,7 @@ def _bind_history(
     num_key_heads: int | None,
     gate_lower_bound: float,
     compute_mode: str,
-    run_config: SSMRunConfig | dict[str, int] | None,
+    run_config: dict[str, int] | None,
 ) -> None:
     """在 owner 上创建 GDN replay 的双半区 history 和 cursor。"""
 
@@ -110,28 +108,26 @@ def _bind_history(
 class ReplayGDNState(BoundedAttentionState):
     """GDN replay 运行态。Conv、单槽 SSM 和 history 都在本类，不沿用 native 的 MTP 槽。"""
 
-    _run_config: SSMRunConfig | None = None
+    _run_config: dict[str, int] | None = None
 
     @property
-    def state(self) -> torch.Tensor:
-        """Replay kernel 读取的 canonical SSM，与 ssm_state 是同一张量。"""
-
-        return self.ssm_state
-
-    @property
-    def run_config(self) -> SSMRunConfig | None:
+    def run_config(self) -> dict[str, int] | None:
         """返回物化和 autotune 使用的 kernel 配置。"""
 
         return self._run_config
 
     @run_config.setter
-    def run_config(self, config: SSMRunConfig | dict | None) -> None:
-        """保存 kernel 配置，兼容 autotune 返回的字典。"""
+    def run_config(self, config: dict | None) -> None:
+        """保存一份与调用方脱开的 kernel 配置。"""
 
-        if config is None or isinstance(config, SSMRunConfig):
-            self._run_config = config
-        else:
-            self._run_config = SSMRunConfig(**config)
+        if config is None:
+            self._run_config = None
+            return
+        self._run_config = {
+            "BV": int(config["BV"]),
+            "num_warps": int(config["num_warps"]),
+            "num_stages": int(config.get("num_stages", 3)),
+        }
 
     def __init__(
         self,
@@ -205,7 +201,7 @@ class ReplayGDNState(BoundedAttentionState):
         kda: bool = False,
         gate_lower_bound: float = -5.0,
         compute_mode: str = "inline",
-        run_config: SSMRunConfig | dict[str, int] | None = None,
+        run_config: dict[str, int] | None = None,
     ) -> "ReplayGDNState":
         """用已有 SSM 张量组装 history。kernel 测试和 autotune scratch 走这里。"""
 
@@ -234,18 +230,6 @@ class ReplayGDNState(BoundedAttentionState):
             run_config,
         )
         return owner
-
-    @property
-    def ssm_slots_per_req(self) -> int:
-        """每个请求只保留一份 canonical SSM。"""
-
-        return 1
-
-    @property
-    def _ssm_executor(self):
-        """History 张量在本对象上。测试沿用这个入口。"""
-
-        return self
 
     def get_state_type(self) -> str:
         """返回算法名和 Conv/SSM 存储精度。"""
@@ -339,10 +323,12 @@ class ReplayGDNState(BoundedAttentionState):
         restore_runtime(self, req_indices, state_token_lens, page_kind, page_slot_ids)
 
     def commit_bounded_att_state(self, req_indices: torch.Tensor, accepted_steps: torch.Tensor) -> None:
-        """提交已接受前缀，并推进 replay cursor。"""
+        """提交已接受前缀，折进 canonical SSM，并清空 history。"""
         if self.mtp_state_index is None:
             return
         self.commit_accepted(self.mtp_state_index, req_indices, accepted_steps)
+        if self.ssm_state.is_cuda:
+            self.merge_accepted_updates(req_indices)
 
     def get_accepted_state(self, req_idx: int) -> _AcceptedTensors:
         """返回已接受 Conv 窗口和物化 SSM，不改写 canonical state。"""
@@ -375,6 +361,18 @@ class ReplayGDNState(BoundedAttentionState):
         layout,
     ) -> None:
         read_pd(self, pd_page_buffers, req_idx, pd_page_index, state_token_len, layout)
+
+    def close_history_after_layer(self, logical_layer_id: int, reqs: torch.Tensor, *, fold: bool) -> None:
+        """本状态最后一层结束时收口 history。fold 时先把已接受前缀折进 canonical SSM。"""
+
+        if self.config is None or not self.config.logical_layer_ids:
+            return
+        if logical_layer_id != self.config.logical_layer_ids[-1]:
+            return
+        if fold:
+            self.merge_accepted_updates(reqs)
+        else:
+            self.clear_history(reqs)
 
     def clear_history(self, req: int | torch.Tensor) -> None:
         """清空复用或恢复请求的临时 history，保留 canonical SSM。"""
@@ -455,7 +453,7 @@ class ReplayGDNState(BoundedAttentionState):
         self.accept_updates(reqs)
 
     def merge_accepted_updates(self, reqs: torch.Tensor) -> None:
-        """Prefill 前把已接受 history 折回 canonical SSM，并清空 cursor。"""
+        """把已接受 history 折回 canonical SSM，并清空 cursor。"""
 
         if reqs.numel() == 0:
             return
@@ -474,8 +472,8 @@ class ReplayGDNState(BoundedAttentionState):
 
         assert not (snapshot and flush_export), "flush export must update the canonical state"
         layers, slots, hv, k, v = self.ssm_state.shape
-        config = self.run_config or SSMRunConfig(32, 4)
-        bv = config.BV
+        config = self.run_config or {"BV": 32, "num_warps": 4, "num_stages": 3}
+        bv = config["BV"]
         _materialize[(triton.cdiv(v, bv), reqs.numel(), layers * hv)](
             self.ssm_state,
             output,
@@ -498,8 +496,8 @@ class ReplayGDNState(BoundedAttentionState):
             False,
             FLUSH_EXPORT=flush_export,
             OUTPUT_STRIDES=output_strides,
-            num_warps=config.num_warps,
-            num_stages=config.num_stages,
+            num_warps=config["num_warps"],
+            num_stages=config["num_stages"],
         )
 
     def accepted_ssm(self, req_idx: int) -> torch.Tensor:

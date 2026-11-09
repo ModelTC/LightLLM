@@ -181,8 +181,8 @@ class ReplayGDNPrefillAttState(BasePrefillAttState):
     b_ssm_buffer_idx: torch.Tensor = None
 
     def init_state(self):
+        # Prefill 直接覆盖 canonical SSM。进入前 history 已经在 decode 接受时折完。
         reqs = self.infer_state.b_req_idx
-        _single_replay_state(self).merge_accepted_updates(reqs)
         self.b_conv_buffer_idx = reqs
         self.b_ssm_buffer_idx = reqs
 
@@ -204,7 +204,9 @@ class ReplayGDNPrefillAttState(BasePrefillAttState):
         if backend.mtp_step > 0:
             conv_states = conv_states[:, :, : -backend.mtp_step]
         mixed_qkv, z, b, a = _split_qkvzba(backend, params["mixed_qkvzba"])
-        return self._prefill(mixed_qkv, conv_states, ssm_states, a, b, layer_weight), z
+        core_attn_out = self._prefill(mixed_qkv, conv_states, ssm_states, a, b, layer_weight)
+        state.close_history_after_layer(layer_num, self.b_conv_buffer_idx, fold=False)
+        return core_attn_out, z
 
     def _prefill(self, mixed_qkv, conv_states, ssm_states, a, b, layer_weight):
         backend = self.backend
@@ -333,6 +335,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             self.b_conv_buffer_idx,
             self.b1_mtp_cu_q_seq_len,
         )
+        state.close_history_after_layer(layer_num, self.b_conv_buffer_idx, fold=True)
         return output, z
 
     def _mtp(self, mixed_qkv, conv_states, a, b, layer_weight, layer_num, draft_step, state):

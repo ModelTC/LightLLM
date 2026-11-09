@@ -1,10 +1,6 @@
-import pickle
-from dataclasses import FrozenInstanceError
-
 import pytest
 import torch
 
-from lightllm.common.ssm_types import SSMRunConfig
 from lightllm.common.attention_state.bounded_att import KDAState
 from unit_tests.common.test_linear_state import make_state
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
@@ -13,24 +9,6 @@ from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import Rep
 from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
-
-
-def test_published_config_is_detached_immutable_and_pickleable():
-    tuning = {"BV": 8, "num_warps": 1}
-    config = SSMRunConfig(**tuning)
-    tuning.update(BV=128, num_warps=4, num_stages=1)
-    assert config == SSMRunConfig(BV=8, num_warps=1, num_stages=3)
-    with pytest.raises(FrozenInstanceError):
-        config.BV = 128
-    restored = pickle.loads(pickle.dumps(config))
-    assert restored == config
-
-
-def test_config_rejects_unrepresented_kernel_options():
-    with pytest.raises(TypeError, match="unexpected keyword argument"):
-        SSMRunConfig(**{"BV": 32, "num_warps": 1, "future_layout_option": 2})
-    with pytest.raises(TypeError, match="must be an integer"):
-        SSMRunConfig(BV=[32], num_warps=1)
 
 
 @pytest.fixture
@@ -98,12 +76,8 @@ def test_replay_backend_publishes_detached_run_config():
     ssm_backend._config_is_fixed = True
     ssm_backend.compute_mode = "inline"
     config = gdn_run_config(ssm_backend, *([None] * 7))
-    assert isinstance(config, SSMRunConfig)
     tuning["BV"] = 128
-    assert config.BV == 32
-    assert config.num_stages == 3
-    with pytest.raises(FrozenInstanceError):
-        config.BV = 128
+    assert config == {"BV": 32, "num_warps": 2, "num_stages": 3}
 
 
 @pytest.mark.parametrize("cls", [GDNState, KDAState])
@@ -151,6 +125,6 @@ def test_acceptance_keeps_request_order_with_strided_inputs(device):
     history.cursors.fill_(8)
     reqs = torch.tensor([2, -99, 0, -99, 3, -99], device=device)[::2]
     lengths = torch.tensor([1, -99, 3, -99, 2, -99], dtype=torch.int32, device=device)[::2]
-    owner.commit_bounded_att_state(reqs, lengths)
+    owner.commit_accepted(owner.mtp_state_index, reqs, lengths)
     assert owner.mtp_state_index.tolist() == [2, 2, 0, 1]
     assert history.cursors.tolist() == [11, 8, 9, 8]

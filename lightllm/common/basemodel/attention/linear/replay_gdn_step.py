@@ -10,7 +10,6 @@ import triton
 
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import _replay
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import resolve_run_config
-from lightllm.common.ssm_types import SSMRunConfig
 
 
 def begin_decode(history, reqs: torch.Tensor, cu_seqlens: torch.Tensor | None) -> None:
@@ -31,7 +30,7 @@ def run_config(
     a_log: torch.Tensor,
     bias: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
-) -> SSMRunConfig:
+) -> dict[str, int]:
     """按当前 kernel 形状选择或返回固定的 GDN replay 调优配置。"""
 
     return resolve_run_config(history, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
@@ -49,8 +48,8 @@ def replay(
     bias: torch.Tensor,
     reqs: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
-    run_config: SSMRunConfig | None = None,
-) -> tuple[torch.Tensor, SSMRunConfig]:
+    run_config: dict[str, int] | None = None,
+) -> tuple[torch.Tensor, dict[str, int]]:
     """执行一层 GDN replay decode，并返回输出与本轮 run config。"""
 
     if history.kda:
@@ -60,7 +59,7 @@ def replay(
     assert history.num_key_heads in (q.shape[-2], hv)
     axis = 1 if cu_seqlens is not None else 0
     out = torch.empty_like(v)
-    bv = config.BV
+    bv = config["BV"]
     precompute_projections = history.verify_width > 1 and bv >= 16 and history.compute_mode == "precompute"
     # 在 Python 中解析 tile 维度；Triton JIT 中直接调用 max() 会降级为 tensor 运算，无法定义静态 shape。
     bw = triton.next_power_of_2(history.verify_width)
@@ -104,7 +103,7 @@ def replay(
         history.gate_lower_bound,
         BQK=max(16, 2 * bw),
         BR=triton.next_power_of_2(max(16, history.capacity + bw)),
-        num_warps=config.num_warps,
-        num_stages=config.num_stages,
+        num_warps=config["num_warps"],
+        num_stages=config.get("num_stages", 3),
     )
     return out, config

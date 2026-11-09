@@ -20,8 +20,6 @@ def _assert_received_manager_roundtrip(payload, state_name, mode, expected):
     state = getattr(resources, state_name)
     assert state.big_pages_pool is state.small_pages_pool is None
     assert resources.full_att_allocator is None
-    if mode == "replay":
-        assert state.state is state.ssm_state
     layout = resources.get_pd_operator().get_pd_bounded_att_page_layouts()[state_name]
     block = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
     state.write_to_pd_page(1, block, 0, 8, layout)
@@ -36,8 +34,8 @@ def _assert_received_manager_roundtrip(payload, state_name, mode, expected):
     assert state.mtp_state_index[2] == 0
     assert state.mtp_state_index[1] == 1
     if mode == "replay":
-        assert state._ssm_executor.cursors[2] == 0
-        assert state._ssm_executor.cursors[1] == 1
+        assert state.cursors[2] == 0
+        assert state.cursors[1] == 1
     torch.cuda.synchronize()
 
 
@@ -106,11 +104,11 @@ def test_shared_attention_state_roundtrip_preserves_worker_resources(
         state.ssm_state[:, slot].fill_(slot + 1)
     state.mtp_state_index[1], state.mtp_state_index[2] = 1, 2
     if mode == "replay":
-        state._ssm_executor.raw_keys.zero_()
-        state._ssm_executor.raw_values.zero_()
-        state._ssm_executor.gates.fill_(-0.5)
-        state._ssm_executor.betas.zero_()
-        state._ssm_executor.cursors[1], state._ssm_executor.cursors[2] = 1, 3
+        state.raw_keys.zero_()
+        state.raw_values.zero_()
+        state.gates.fill_(-0.5)
+        state.betas.zero_()
+        state.cursors[1], state.cursors[2] = 1, 3
     if hasattr(state, "get_accepted_state"):
         expected = [tensor.cpu().tolist() for tensor in state.get_accepted_state(1)]
     else:
@@ -120,7 +118,8 @@ def test_shared_attention_state_roundtrip_preserves_worker_resources(
             state.ssm_state[:, state.ssm_slots_per_req].cpu().tolist(),
         ]
     before = vars(state).copy()
-    source_conv, source_ssm = state.conv_state[:, 1].clone(), state.ssm_state[:, state.ssm_slots_per_req].clone()
+    source_slot = 1 if mode == "replay" else state.ssm_slots_per_req
+    source_conv, source_ssm = state.conv_state[:, 1].clone(), state.ssm_state[:, source_slot].clone()
     snapshots = []
     for pool in (state.big_pages_pool, state.small_pages_pool):
         for tensor in (pool.conv_state, pool.ssm_state):
@@ -139,7 +138,7 @@ def test_shared_attention_state_roundtrip_preserves_worker_resources(
         assert error is None, error
     assert all(vars(state)[name] is value for name, value in before.items())
     torch.testing.assert_close(state.conv_state[:, 1], source_conv, rtol=0, atol=0)
-    torch.testing.assert_close(state.ssm_state[:, state.ssm_slots_per_req], source_ssm, rtol=0, atol=0)
+    torch.testing.assert_close(state.ssm_state[:, source_slot], source_ssm, rtol=0, atol=0)
     for tensor, pointer, contents in snapshots:
         assert tensor.data_ptr() == pointer
         torch.testing.assert_close(tensor, contents, rtol=0, atol=0)

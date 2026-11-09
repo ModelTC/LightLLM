@@ -293,7 +293,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
         if mtp_step:
             accepted = torch.zeros(4, dtype=torch.int32, device="cuda")
             accepted[ids] = torch.tensor(lengths, dtype=torch.int32, device="cuda") - 1
-            selected._ssm_executor.accept_updates(ids, accepted)
+            selected.accept_updates(ids, accepted)
         for req, length in zip(requests, lengths):
             torch.testing.assert_close(
                 selected.accepted_ssm(req)[0],

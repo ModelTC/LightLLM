@@ -4,7 +4,6 @@ This synthetic kernel benchmark excludes convolutions, model projections and
 HTTP scheduling. Use a matched service workload for end-to-end conclusions.
 """
 
-from dataclasses import asdict
 import argparse
 import gc
 import json
@@ -149,7 +148,7 @@ def main():
                             state_history_bytes=size,
                             ms_per_round=statistics.median(samples),
                             samples_ms=samples,
-                            config=asdict(ssm_backend.run_config) if ssm_backend else None,
+                            config=dict(ssm_backend.run_config) if ssm_backend and ssm_backend.run_config else None,
                             candidates=candidates,
                         )
                         rows.append(row)

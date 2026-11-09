@@ -70,7 +70,7 @@ def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
         with torch.cuda.graph(graph):
             out = cycle(captured, ids)
         graphs[bucket] = graph, ids, out
-    captured.state.copy_(initial)
+    captured.ssm_state.copy_(initial)
     captured.cursors.zero_()
     counts = (1, 2, 7, 16, 23, 24, 25, 31, 32, 33, 255, 256, 257, 511)
     for count in counts:
@@ -84,12 +84,12 @@ def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
             assert len(launches) == calls
             torch.testing.assert_close(output[:count], expected, atol=3e-5, rtol=3e-5)
         assert torch.equal(captured.cursors, eager.cursors)
-        torch.testing.assert_close(captured.state, eager.state, atol=3e-5, rtol=3e-5)
+        torch.testing.assert_close(captured.ssm_state, eager.ssm_state, atol=3e-5, rtol=3e-5)
     assert len(hashes["_prepare_fold"]) == len({triton.next_power_of_2(n) for n in counts})
     for name in kernels[1:]:
         assert len(hashes[name]) == 1, (name, hashes[name])
     assert captured.cursors[-1] == 0
-    assert torch.equal(captured.state[:, -1], initial[:, -1])
+    assert torch.equal(captured.ssm_state[:, -1], initial[:, -1])
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -174,7 +174,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
     for index, ssm_backend in enumerate(ssm_backends):
         cu, reqs, pos = metadata(ssm_backend)
         forward_accept(index, cu, reqs)
-        ssm_backend.state.copy_(initial)
+        ssm_backend.ssm_state.copy_(initial)
         ssm_backend.cursors.zero_()
         manager.mtp_state_index.zero_()
         g = torch.cuda.CUDAGraph()
@@ -186,7 +186,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         captured.append((cu, reqs, pos))
         outputs.append(out)
     for ssm_backend in ssm_backends:
-        ssm_backend.state.copy_(initial)
+        ssm_backend.ssm_state.copy_(initial)
         ssm_backend.cursors.zero_()
     manager.mtp_state_index.zero_()
     folds = 0
@@ -210,7 +210,10 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
                 actual[:, :logical].float(), expected[:, :logical].float(), atol=0.006, rtol=0.02
             )
         torch.testing.assert_close(
-            ssm_backends[1].state.float(), ssm_backends[0].state.float(), atol=0.002, rtol=torch.finfo(dtype).eps
+            ssm_backends[1].ssm_state.float(),
+            ssm_backends[0].ssm_state.float(),
+            atol=0.002,
+            rtol=torch.finfo(dtype).eps,
         )
         table = manager.mtp_state_index.cpu().tolist()
         for req, count in zip(ids, counts):
@@ -262,7 +265,7 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
     graphs, positions, outputs = [], [], []
     for early, ssm_backend in enumerate(ssm_backends):
         warm(ssm_backend)
-        ssm_backend.state.copy_(initial)
+        ssm_backend.ssm_state.copy_(initial)
         ssm_backend.cursors.zero_()
         if stagger:
             reqs.copy_(reqs.new_tensor([0, 2, 2]))
@@ -303,7 +306,10 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
         for expected, actual in zip(outputs[0], outputs[1]):
             torch.testing.assert_close(actual.float(), expected.float(), atol=0.006, rtol=0.02)
         torch.testing.assert_close(
-            ssm_backends[1].state.float(), ssm_backends[0].state.float(), atol=0.002, rtol=torch.finfo(dtype).eps
+            ssm_backends[1].ssm_state.float(),
+            ssm_backends[0].ssm_state.float(),
+            atol=0.002,
+            rtol=torch.finfo(dtype).eps,
         )
         folded = any(n % 16 + 1 > 8 for n in old[:2].cpu().tolist())
         saw_fold |= folded
@@ -398,7 +404,7 @@ def test_small_batch_matches_larger_graph_padding(batch, dtype, kda):
             out = step()
         graphs.append(graph)
         outputs.append(out)
-        ssm_backend.state.copy_(initial)
+        ssm_backend.ssm_state.copy_(initial)
         ssm_backend.cursors.zero_()
     for iteration in range(32):
         accepted[:batch] = (torch.arange(batch, device="cuda") + iteration) % 4
@@ -410,5 +416,8 @@ def test_small_batch_matches_larger_graph_padding(batch, dtype, kda):
             torch.testing.assert_close(small.float(), padded_out.float(), atol=0.006, rtol=0.02)
         assert torch.equal(ssm_backends[0].cursors, ssm_backends[1].cursors)
         torch.testing.assert_close(
-            ssm_backends[0].state.float(), ssm_backends[1].state.float(), atol=0.002, rtol=torch.finfo(dtype).eps
+            ssm_backends[0].ssm_state.float(),
+            ssm_backends[1].ssm_state.float(),
+            atol=0.002,
+            rtol=torch.finfo(dtype).eps,
         )

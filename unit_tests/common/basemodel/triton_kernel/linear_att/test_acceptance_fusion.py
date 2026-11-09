@@ -225,7 +225,7 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
             graph.replay()
         for left, right in zip(outputs[0], outputs[1]):
             assert torch.equal(left, right)
-        assert torch.equal(ssm_backends[0].state, ssm_backends[1].state)
+        assert torch.equal(ssm_backends[0].ssm_state, ssm_backends[1].ssm_state)
         assert torch.equal(ssm_backends[0].cursors, ssm_backends[1].cursors)
         assert torch.equal(managers[0].mtp_state_index, managers[1].mtp_state_index)
         if iteration % 7 == 0:
@@ -233,13 +233,13 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
         if iteration % 11 == 10:
             for ssm_backend in ssm_backends:
                 ssm_backend.merge_accepted_updates(reqs[:3])
-            assert torch.equal(ssm_backends[0].state, ssm_backends[1].state)
+            assert torch.equal(ssm_backends[0].ssm_state, ssm_backends[1].ssm_state)
         if iteration == 19:
             for manager in managers:
                 manager._ssm_executor.clear_history(1)
-                manager._ssm_executor.state[:, 1].zero_()
+                manager._ssm_executor.ssm_state[:, 1].zero_()
                 manager.mtp_state_index[1] = 0
     for ssm_backend in ssm_backends:
         ssm_backend.merge_accepted_updates(reqs[:3])
-    assert torch.equal(ssm_backends[0].state, ssm_backends[1].state)
-    assert torch.equal(ssm_backends[0].state[:, [0, 2, 4, 5, 7]], initial[:, [0, 2, 4, 5, 7]])
+    assert torch.equal(ssm_backends[0].ssm_state, ssm_backends[1].ssm_state)
+    assert torch.equal(ssm_backends[0].ssm_state[:, [0, 2, 4, 5, 7]], initial[:, [0, 2, 4, 5, 7]])

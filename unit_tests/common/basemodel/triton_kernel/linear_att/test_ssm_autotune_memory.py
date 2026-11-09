@@ -1,6 +1,5 @@
 import pytest
 import torch
-from lightllm.common.ssm_types import SSMRunConfig
 
 from lightllm.common.basemodel.triton_kernel.linear_att import ssm_autotune as tuning
 
@@ -69,7 +68,7 @@ def test_tuning_budget_falls_back_without_touching_serving_state(monkeypatch, tm
     with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
         config = tuning.resolve_run_config(**inputs)
         assert tuning.resolve_run_config(**inputs) is config
-    assert config == SSMRunConfig(32, 1)
+    assert config == {"BV": 32, "num_warps": 1, "num_stages": 3}
     assert not list(tmp_path.iterdir())
     for name, expected in before.items():
         torch.testing.assert_close(getattr(ssm_backend, name), expected, atol=0, rtol=0)

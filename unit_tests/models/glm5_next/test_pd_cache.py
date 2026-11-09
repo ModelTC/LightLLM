@@ -126,7 +126,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
 ):
     source = make_mems(prefill_tp, mode=source_mode)
     dest = make_mems(decode_tp, target_mtp_step=decode_mtp_step, mode=dest_mode)
-    dst_ssm_stride = dest[0].linear.ssm_slots_per_req
+    dst_ssm_stride = 1 if dest_mode == "replay" else dest[0].linear.ssm_slots_per_req
     mtp_size = get_env_start_args().mtp_step + 1
     layers = sum(len(state.config.logical_layer_groups) for state in source[0].full_states)
     src_req, dst_req = 0, 2
@@ -165,9 +165,10 @@ def test_pd_kv_and_runtime_state_roundtrip(
             state.storage.view(torch.uint8)[:, src_indexes] = packed[offset:end]
             offset = end
         mem.linear.conv_state[:, src_req, ..., :3].copy_(conv[:, :, heads].reshape(6, -1, 3))
-        mem.linear.ssm_state[:, src_req * mem.linear.ssm_slots_per_req].copy_(ssm[:, heads])
+        src_slot = src_req if source_mode == "replay" else src_req * mem.linear.ssm_slots_per_req
+        mem.linear.ssm_state[:, src_slot].copy_(ssm[:, heads])
         if source_mode == "replay":
-            backend = mem.linear._ssm_executor
+            backend = mem.linear
             backend.raw_keys.zero_()
             backend.raw_values.zero_()
             backend.gates.fill_(-0.5)
@@ -188,7 +189,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
         mem.linear.conv_state.normal_()
         mem.linear.ssm_state.normal_()
         if dest_mode == "replay":
-            mem.linear._ssm_executor.cursors[dst_req] = 3
+            mem.linear.cursors[dst_req] = 3
         if mem.linear.mtp_state_index is not None:
             mem.linear.mtp_state_index[dst_req] = decode_mtp_step
         for state in mem.tails:
@@ -260,7 +261,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
             expected_tail[:, position % (4 + decode_mtp_step)] = tail[:, position % tail.shape[1]]
         assert torch.equal(restored_tail, expected_tail)
         if dest_mode == "replay":
-            assert mem.linear._ssm_executor.cursors[dst_req] == 0
+            assert mem.linear.cursors[dst_req] == 0
         if mem.linear.mtp_state_index is not None:
             assert mem.linear.mtp_state_index[dst_req] == 0
         for (state, stride), expected in zip(
