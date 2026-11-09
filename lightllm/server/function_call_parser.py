@@ -1620,8 +1620,11 @@ class DeepSeekV32Detector(BaseFormatDetector):
                         self._accumulated_params = param_matches
                         current_args_json = self._dsml_params_to_json(param_matches)
 
+                        # Hold back the closing brace while the invoke is open: the next
+                        # parameter is appended after it, and the complete-invoke branch
+                        # sends the brace once the invoke ends.
                         sent = len(self.streamed_args_for_tool[self.current_tool_id])
-                        argument_diff = current_args_json[sent:]
+                        argument_diff = current_args_json[:-1][sent:]
 
                         if argument_diff:
                             calls.append(
