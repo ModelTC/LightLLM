@@ -71,7 +71,6 @@ class ReplayKDAPrefillAttState(BasePrefillAttState):
     b_ssm_buffer_idx: torch.Tensor = None
 
     def init_state(self):
-        # Prefill 直接覆盖 canonical SSM。进入前 history 已经在 decode 接受时折完。
         reqs = self.infer_state.b_req_idx
         self.b_conv_buffer_idx = reqs
         self.b_ssm_buffer_idx = reqs
@@ -124,7 +123,7 @@ class ReplayKDAPrefillAttState(BasePrefillAttState):
             lower_bound=backend.lower_bound,
         )
         ssm_states[self.b_ssm_buffer_idx] = final_state.to(ssm_states.dtype, copy=False)
-        state.close_history_after_layer(layer_num, self.b_conv_buffer_idx, fold=False)
+        state.finish_prefill(layer_num, self.b_conv_buffer_idx)
         return output
 
 
@@ -191,7 +190,7 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
             self.b1_mtp_cu_q_seq_len,
         )
         if self.b1_mtp_cu_q_seq_len is None:
-            state.close_history_after_layer(layer_num, self.b_conv_buffer_idx, fold=True)
+            state.finish_decode_token(layer_num, self.b_conv_buffer_idx)
         return output
 
     def _init_indices(self, mtp_step: int, mtp_index: torch.Tensor | None) -> None:

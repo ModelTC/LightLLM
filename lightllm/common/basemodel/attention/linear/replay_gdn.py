@@ -91,7 +91,6 @@ class ReplayGDNPrefillAttState(BasePrefillAttState):
     b_ssm_buffer_idx: torch.Tensor = None
 
     def init_state(self):
-        # Prefill 直接覆盖 canonical SSM。进入前 history 已经在 decode 接受时折完。
         reqs = self.infer_state.b_req_idx
         self.b_conv_buffer_idx = reqs
         self.b_ssm_buffer_idx = reqs
@@ -115,7 +114,7 @@ class ReplayGDNPrefillAttState(BasePrefillAttState):
             conv_states = conv_states[:, :, : -backend.mtp_step]
         mixed_qkv, z, b, a = _split_qkvzba(backend, params["mixed_qkvzba"])
         core_attn_out = self._prefill(mixed_qkv, conv_states, ssm_states, a, b, layer_weight)
-        state.close_history_after_layer(layer_num, self.b_conv_buffer_idx, fold=False)
+        state.finish_prefill(layer_num, self.b_conv_buffer_idx)
         return core_attn_out, z
 
     def _prefill(self, mixed_qkv, conv_states, ssm_states, a, b, layer_weight):
@@ -179,8 +178,11 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         draft_step = backend.model.mtp_manager.get_decode_draft_step(backend.model.is_mtp_draft_model)
         if draft_step > 0:
             core = self._mtp(mixed_qkv, conv_states, a, b, layer_weight, layer_num, draft_step, state)
-            return core, z
-        return self._decode(mixed_qkv, z, conv_states, a, b, layer_weight, layer_num, state)
+        else:
+            core, z = self._decode(mixed_qkv, z, conv_states, a, b, layer_weight, layer_num, state)
+        if self.b1_mtp_cu_q_seq_len is None:
+            state.finish_decode_token(layer_num, self.b_conv_buffer_idx)
+        return core, z
 
     def _init_indices(self, draft_step: int, mtp_index: torch.Tensor | None) -> None:
         infer = self.infer_state
@@ -244,7 +246,6 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             self.b_conv_buffer_idx,
             self.b1_mtp_cu_q_seq_len,
         )
-        state.close_history_after_layer(layer_num, self.b_conv_buffer_idx, fold=True)
         return output, z
 
     def _mtp(self, mixed_qkv, conv_states, a, b, layer_weight, layer_num, draft_step, state):

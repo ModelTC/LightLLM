@@ -403,18 +403,19 @@ class ReplayGDNState(BoundedAttentionState):
     # 六、Replay history
     # ========================================================================
 
-    def close_history_after_layer(self, logical_layer_id: int, reqs: torch.Tensor, fold: bool) -> None:
-        """最后一层收口。非 MTP 先记下这 1 个 token，再按容量决定是否整段压缩。Prefill 总是压缩。"""
+    def finish_prefill(self, logical_layer_id: int, reqs: torch.Tensor) -> None:
+        """最后一层把已接受前缀整段压进 SSM。"""
 
-        if self.config is None or not self.config.logical_layer_ids:
-            return
-        if logical_layer_id != self.config.logical_layer_ids[-1]:
-            return
-        if fold:
-            self._note_new_token(reqs)
-            self.maybe_compress_prefix(reqs)
-        else:
+        if self._is_last_layer(logical_layer_id):
             self.compress_prefix(reqs)
+
+    def finish_decode_token(self, logical_layer_id: int, reqs: torch.Tensor) -> None:
+        """最后一层记下这 1 个 token，再按容量决定是否整段压缩。"""
+
+        if not self._is_last_layer(logical_layer_id):
+            return
+        self._note_new_token(reqs)
+        self.maybe_compress_prefix(reqs)
 
     def clear_history(self, req: int | torch.Tensor) -> None:
         """清空复用或恢复请求的临时 history，保留 canonical SSM。"""
@@ -445,9 +446,9 @@ class ReplayGDNState(BoundedAttentionState):
         )
 
     def accept_single_token(self, reqs: torch.Tensor) -> None:
-        """非 MTP decode 把单 token 记入当前 history。"""
+        """把一个已接受 token 记入前缀长度。"""
 
-        self.accept_updates(reqs)
+        self._note_new_token(reqs)
 
     def merge_accepted_updates(self, reqs: torch.Tensor) -> None:
         """把 cursor 覆盖的已接受前缀整段折回 canonical SSM，并清空 cursor。"""
@@ -568,15 +569,26 @@ class ReplayGDNState(BoundedAttentionState):
     # 七、私有辅助实现
     # ========================================================================
 
+    def _is_last_layer(self, logical_layer_id: int) -> bool:
+        if self.config is None or not self.config.logical_layer_ids:
+            return False
+        return logical_layer_id == self.config.logical_layer_ids[-1]
+
     def _note_new_token(self, reqs: torch.Tensor) -> None:
         """非 MTP 最后一层在写入之后，把这一个 token 记进前缀长度。"""
 
         if reqs.numel() == 0:
             return
-        live = reqs[reqs != self.hold_req_id]
-        if live.numel() == 0:
-            return
-        self.cursors[live.long()] += 1
+        # 固定加 1，并在 kernel 内跳过 hold。避免按请求号做布尔索引，CUDA graph 不能捕获这种同步。
+        _accept_updates[(triton.cdiv(reqs.numel(), 256),)](
+            self.cursors,
+            reqs,
+            reqs,
+            reqs.numel(),
+            self.hold_req_id,
+            1,
+            256,
+        )
 
     def _transfer_regions(self) -> tuple[TransferRegion, ...]:
         """依次描述全局 Conv 和 SSM 区域，并标明当前 TP rank 的读写范围。"""

@@ -26,15 +26,13 @@ def get_configs() -> list[dict[str, int]]:
 
 def static_key(ssm_backend, mode, q, k, v, a, b, cu_seqlens) -> dict[str, object]:
     """构造区分状态布局、数据类型和投影模式的静态调优键。"""
-    axis = 1 if cu_seqlens is not None else 0
     _, _, hv, kd, vd = ssm_backend.ssm_state.shape
     # 保持文件名较短，同时区分 packed projection、TP 布局、状态精度、递推规则和 history 容量。
     key = {
         "mode": mode,
-        "v": 6,
+        "v": 7,
         "shape": str((q.shape[-2], hv, ssm_backend.num_key_heads, kd, vd, ssm_backend.verify_width)),
         "dtype": str((q.dtype, ssm_backend.ssm_state.dtype)),
-        "strides": str((q.stride(axis), k.stride(axis), v.stride(axis), a.stride(0), b.stride(0))),
         "history": ssm_backend.capacity,
         "gate": int(ssm_backend.kda),
         "varlen": cu_seqlens is not None,
@@ -56,38 +54,12 @@ def run_key(ssm_backend, q, cu_seqlens) -> tuple[int, int]:
     return tokens, cu_seqlens.numel() - 1 if cu_seqlens is not None else tokens
 
 
-def scratch_size_bytes(ssm_backend, batch, sequences, inputs) -> int:
-    """估算一次 SSM autotune scratch 所需的字节数。"""
-    # State/history 的首轴是 layer，cursor 在各 layer 之间共享。
-    layers, slots = ssm_backend.ssm_state.shape[:2]
-    pool_bytes = sum(
-        x.numel() * x.element_size() // (layers if x.ndim > 1 else 1)
-        for x in vars(ssm_backend).values()
-        if isinstance(x, torch.Tensor)
-    )
-    input_bytes = sum(
-        (1 + sum((size - 1) * stride for size, stride in zip(x.shape, x.stride()))) * x.element_size()
-        for x in inputs
-        if x.numel()
-    )
-    return pool_bytes // slots * (batch + 1) + input_bytes + 32 * (batch + sequences + 1)
-
-
 def rebuild_inputs(
     ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, workload=None, run_config=None
 ) -> tuple[tuple[object, ...], dict[str, object]]:
-    """创建不影响服务态的独立输入，供 autotune benchmark 使用。"""
+    """为一层 scratch 和同形状的紧凑激活分配调优输入。不复制服务状态池。"""
     tokens, sequences = run_key(ssm_backend, q, cu_seqlens)
     batch = min(sequences, triton.cdiv(tokens, ssm_backend.verify_width)) if cu_seqlens is not None else tokens
-    if q.is_cuda:
-        required = scratch_size_bytes(ssm_backend, batch, sequences, (q, k, v, a, b, a_log, bias))
-        free, _ = torch.cuda.mem_get_info(q.device)
-        available = free + torch.cuda.memory_reserved(q.device) - torch.cuda.memory_allocated(q.device)
-        # 为 benchmark 中间量、CUDA Graph 和 allocator 碎片保留一半显存。
-        if required > available // 2:
-            raise torch.cuda.OutOfMemoryError(
-                f"SSM tuning scratch needs {required} bytes, exceeding its {available // 2}-byte budget"
-            )
     _, _, hv, kd, vd = ssm_backend.ssm_state.shape
     from lightllm.common.attention_state.bounded_att.conv_ssm_types import ConvSSMStateConfig
 
@@ -113,8 +85,7 @@ def rebuild_inputs(
     # benchmark 回调不能再次触发配置选择。
     scratch._config_is_fixed = True
     inputs = [
-        torch.empty_strided(x.shape, x.stride(), device=x.device, dtype=x.dtype).normal_(0, 0.2)
-        for x in (q, k, v, a, b, a_log, bias)
+        torch.empty(x.shape, device=x.device, dtype=x.dtype).normal_(0, 0.2) for x in (q, k, v, a, b, a_log, bias)
     ]
     reqs = torch.cat(
         (
@@ -156,7 +127,7 @@ def replay_layer(history, *args, **kwargs):
 
 
 @autotune(
-    kernel_name="ssm_update_cycle:v1",
+    kernel_name="ssm_update_cycle:v2",
     configs_gen_func=get_configs,
     static_key_func=static_key,
     run_key_func=run_key,
@@ -177,7 +148,7 @@ def select_config(
     # 把前缀写满但不越出 capacity。只重复空 history 会测不到已有前缀的读取。
     tokens = q.shape[1 if cu_seqlens is not None else 0]
     rounds = max(1, ssm_backend.capacity // min(ssm_backend.verify_width, tokens))
-    for step in range(rounds):
+    for _ in range(rounds):
         ssm_backend.prepare_decode(reqs, cu_seqlens)
         replay_layer(ssm_backend, 0, q, k, v, a, b, a_log, bias, reqs, cu_seqlens)
         ssm_backend.accept_updates(reqs, accepted)

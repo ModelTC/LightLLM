@@ -164,7 +164,6 @@ class Autotuner:
         benchmark_repeats: int = 3,
         benchmark_retries: int = 3,
     ):
-
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
         self.kernel_type = AutotuneKernelType(kernel_type)
@@ -181,7 +180,6 @@ class Autotuner:
         self.cached_configs = {}
         self.fast_match_configs = collections.defaultdict(dict)
         self.warmuped_configs_set = set()
-        self._oom_keys = set()
         self.arg_names = [param.name for param in inspect.signature(self.fn).parameters.values()]
         self._argname_to_pos = {name: idx for idx, name in enumerate(self.arg_names)}
         self._pos_to_argname = {idx: name for idx, name in enumerate(self.arg_names)}
@@ -245,8 +243,6 @@ class Autotuner:
             need_tuning = (autotune_level == AutotuneLevel.FORCE_AUTOTUNE) or (
                 run_key not in self.cached_configs.get(static_key, {})
             )
-            if (static_key, run_key) in self._oom_keys:
-                need_tuning = False
             if world_size > 1:
                 _need_tunings = [None for _ in range(world_size)]
                 dist.all_gather_object(_need_tunings, obj=need_tuning, group=self._get_autotune_group())
@@ -393,22 +389,7 @@ class Autotuner:
 
         # 仅为本次调优重建输入，构造开销不计入计时，最终执行仍使用调用方的原始输入。
         if self.rebuild_input_func is not None:
-            ready = True
-            try:
-                args, kwargs = self.rebuild_input_func(*args, **kwargs)
-            except torch.cuda.OutOfMemoryError as error:
-                ready = False
-                logger.warning(f"Cannot allocate tuning inputs for {self.kernel_name}: {error}")
-            if world_size > 1:
-                all_ready = [None for _ in range(world_size)]
-                dist.all_gather_object(all_ready, obj=ready, group=self._get_autotune_group())
-                ready = all(all_ready)
-            if not ready:
-                # Every rank skips the search. Keep existing/default configs without
-                # persisting a memory-pressure fallback as a measured tuning result.
-                self._oom_keys.add((static_key, run_key))
-                logger.warning(f"Skipping autotune for {self.kernel_name} / {run_key}: insufficient scratch memory")
-                return
+            args, kwargs = self.rebuild_input_func(*args, **kwargs)
 
         best_config = None
         best_time = float("inf")
