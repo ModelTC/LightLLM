@@ -1639,7 +1639,7 @@ async def _images_to_image_generation_response(
 async def image_generation_impl(request: ImageGenerationRequest | ImageEditRequest, raw_request: Request) -> Response:
     from .api_http import g_objs
     from lightllm.server.x2i_server.manager import get_chat_template_kwargs
-    from lightllm.server.x2i_server.manager import get_enable_t2i_auto_fix
+    from lightllm.server.x2i_server.manager import get_enable_self_correction
 
     # get x2i params
     x2i_params = X2IParams()
@@ -1664,9 +1664,9 @@ async def image_generation_impl(request: ImageGenerationRequest | ImageEditReque
         x2i_params.width, x2i_params.height
     )
 
-    if not (await raw_request.is_disconnected()) and isinstance(request, ImageGenerationRequest) and get_enable_t2i_auto_fix() and request.self_correction:
+    if not (await raw_request.is_disconnected()) and get_enable_self_correction() and request.self_correction:
         # auto fix one round
-        revision_feedback, revised_image = await t2i_auto_fix(prompt, _raw_image_to_data_url(images[0], request.output_format), x2i_params, raw_request)
+        revision_feedback, revised_image = await _self_correction(prompt, _raw_image_to_data_url(images[0], request.output_format), x2i_params, raw_request)
         if revised_image:
             output_image_tokens += output_image_tokens
             if request.stream:
@@ -1677,7 +1677,7 @@ async def image_generation_impl(request: ImageGenerationRequest | ImageEditReque
     return await _images_to_image_generation_response(images, request, x2i_params, output_image_tokens)
 
 
-async def t2i_auto_fix(prompt: str, b64_image: str, x2i_params: X2IParams, raw_request: Request):
+async def _self_correction(prompt: str, b64_image: str, x2i_params: X2IParams, raw_request: Request):
     from .api_http import g_objs
     from .api_models import RawImageURL
     image_start_tag = g_objs.httpserver_manager.tokenizer.image_start_tag

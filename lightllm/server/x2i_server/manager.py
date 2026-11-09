@@ -280,8 +280,8 @@ def get_chat_template_kwargs() -> dict[str, Any]:
     return X2VConfig.get_value("chat_template_kwargs", {})
 
 
-def get_enable_t2i_auto_fix() -> bool:
-    return X2VConfig.get_value("enable_t2i_auto_fix", False)
+def get_enable_self_correction() -> bool:
+    return X2VConfig.get_value("enable_self_correction", False)
 
 
 def setup_devices(args: StartArgs):
