@@ -1,6 +1,5 @@
 import pytest
 import torch
-import triton
 
 
 def ReplaySSMExecutor(*args, **kwargs):
@@ -26,7 +25,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
     from lightllm.common.basemodel.triton_kernel.linear_att import replayssm
 
-    kernels = ("_prepare_fold", "_fold_history", "_replay", "_accept_updates")
+    kernels = ("_replay", "_accept_updates")
     hashes = {name: set() for name in kernels}
     launches = []
     for name in kernels:
@@ -75,7 +74,11 @@ def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
         graph, ids, output = graphs[32 if count <= 32 else 512]
         ids.fill_(captured.hold_req_id)
         ids[:count].copy_(reqs[:count])
-        for _ in range(9):
+        for _ in range(8):
+            live = reqs[:count]
+            if (eager.cursors[live.long()] + 1 > eager.capacity).any():
+                eager.merge_accepted_updates(live)
+                captured.merge_accepted_updates(ids[:count])
             expected = cycle(eager, reqs[:count])
             calls = len(launches)
             graph.replay()
@@ -83,9 +86,8 @@ def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
             torch.testing.assert_close(output[:count], expected, atol=3e-5, rtol=3e-5)
         assert torch.equal(captured.cursors, eager.cursors)
         torch.testing.assert_close(captured.ssm_state, eager.ssm_state, atol=3e-5, rtol=3e-5)
-    assert len(hashes["_prepare_fold"]) == len({triton.next_power_of_2(n) for n in counts})
-    for name in kernels[1:]:
-        assert len(hashes[name]) == 1, (name, hashes[name])
+    assert len(hashes["_replay"]) == 1
+    assert len(hashes["_accept_updates"]) == 1
     assert captured.cursors[-1] == 0
     assert torch.equal(captured.ssm_state[:, -1], initial[:, -1])
 
@@ -192,6 +194,14 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         ids, lengths, counts, logical = inputs(iteration)
         for tensor in [q, k, v, beta]:
             tensor.normal_()
+        overflow = [
+            req for req, length in zip(ids, lengths) if ssm_backends[0].cursors[req] + length > ssm_backends[0].capacity
+        ]
+        if overflow:
+            overflow_reqs = torch.tensor(overflow, dtype=torch.int32, device="cuda")
+            for ssm_backend in ssm_backends:
+                ssm_backend.merge_accepted_updates(overflow_reqs)
+            folds += len(overflow)
         for index, ssm_backend in enumerate(ssm_backends):
             if not capture_metadata:
                 for dst, src in zip(captured[index], metadata(ssm_backend)):
@@ -201,8 +211,6 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         for expected, actual in zip(captured[0], captured[1]):
             assert torch.equal(actual, expected)
         assert torch.equal(ssm_backends[0].cursors, ssm_backends[1].cursors)
-        positions = captured[0][2].cpu().tolist()
-        folds += sum(positions[j] % 16 + length > 8 for j, length in enumerate(lengths))
         for expected, actual in zip(outputs[0], outputs[1]):
             torch.testing.assert_close(
                 actual[:, :logical].float(), expected[:, :logical].float(), atol=0.006, rtol=0.02
@@ -261,7 +269,7 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
         return out
 
     graphs, positions, outputs = [], [], []
-    for early, ssm_backend in enumerate(ssm_backends):
+    for ssm_backend in ssm_backends:
         warm(ssm_backend)
         ssm_backend.ssm_state.copy_(initial)
         ssm_backend.cursors.zero_()
@@ -275,27 +283,27 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
         with torch.cuda.graph(graph):
             if capture_metadata:
                 pos = ssm_backend.prepare_decode(reqs)
-                if early:
-                    ssm_backend.accept_updates(reqs)
             out = forward(ssm_backend)
-            if capture_metadata and not early:
+            if capture_metadata:
                 ssm_backend.accept_updates(reqs)
         graphs.append(graph)
         positions.append(pos)
         outputs.append(out)
-    saw_fold = saw_nonfold = False
     for iteration in range(24):
         reqs.copy_(reqs.new_tensor([0, 1, 2] if iteration % 2 == 0 else [1, 0, 2]))
         for tensor in [q, k, v, beta]:
             tensor.normal_()
+        overflow = [int(req) for req in reqs.tolist() if ssm_backends[0].cursors[req] + 1 > ssm_backends[0].capacity]
+        if overflow:
+            overflow_reqs = torch.tensor(sorted(set(overflow)), dtype=torch.int32, device="cuda")
+            for ssm_backend in ssm_backends:
+                ssm_backend.merge_accepted_updates(overflow_reqs)
         old = ssm_backends[0].cursors[reqs.long()].clone()
-        for early, (ssm_backend, graph, pos) in enumerate(zip(ssm_backends, graphs, positions)):
+        for ssm_backend, graph, pos in zip(ssm_backends, graphs, positions):
             if not capture_metadata:
                 pos.copy_(ssm_backend.prepare_decode(reqs))
-                if early:
-                    ssm_backend.accept_updates(reqs)
             graph.replay()
-            if not capture_metadata and not early:
+            if not capture_metadata:
                 ssm_backend.accept_updates(reqs)
         torch.cuda.synchronize()
         assert torch.equal(positions[0], old)
@@ -309,10 +317,6 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
             atol=0.002,
             rtol=torch.finfo(dtype).eps,
         )
-        folded = any(n % 16 + 1 > 8 for n in old[:2].cpu().tolist())
-        saw_fold |= folded
-        saw_nonfold |= not folded
-    assert saw_fold and saw_nonfold
 
 
 def test_cross_layer_fold_with_state_offset_above_int32():
@@ -340,6 +344,9 @@ def test_cross_layer_fold_with_state_offset_above_int32():
     cu = reqs.new_tensor([0, 4, 8])
 
     def step(ssm_backend, accepted):
+        overflow = [int(req) for req in reqs.tolist() if ssm_backend.cursors[req] + 4 > ssm_backend.capacity]
+        if overflow:
+            ssm_backend.merge_accepted_updates(reqs.new_tensor(overflow))
         pos = ssm_backend.prepare_decode(reqs, cu)
         out = [replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, reqs, cu)[0] for layer in range(48)]
         ssm_backend.accept_updates(reqs, accepted)
@@ -408,6 +415,11 @@ def test_small_batch_matches_larger_graph_padding(batch, dtype, kda):
         accepted[:batch] = (torch.arange(batch, device="cuda") + iteration) % 4
         for value in [q, k, v, beta]:
             value.normal_()
+        overflow = [idx for idx in range(batch) if ssm_backends[0].cursors[idx] + 4 > ssm_backends[0].capacity]
+        if overflow:
+            overflow_reqs = torch.tensor(overflow, dtype=torch.int32, device="cuda")
+            for ssm_backend in ssm_backends:
+                ssm_backend.merge_accepted_updates(overflow_reqs)
         for graph in graphs:
             graph.replay()
         for small, padded_out in zip(outputs[0], outputs[1]):

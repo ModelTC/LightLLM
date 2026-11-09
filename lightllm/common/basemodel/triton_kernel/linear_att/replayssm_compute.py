@@ -4,8 +4,6 @@
 import triton
 import triton.language as tl
 
-from .replayssm_common import _replay_update
-
 
 @triton.jit
 def _project_replay_queries(
@@ -26,7 +24,6 @@ def _project_replay_queries(
     KDA: tl.constexpr,
     LOWER: tl.constexpr,
     BQK: tl.constexpr,
-    base,
     end,
     hv,
     kk,
@@ -59,7 +56,7 @@ def _project_replay_queries(
     if KDA:
         history = ll < n
         gates = tl.load(
-            Gates + (slot * (2 * L) + base + ll[:, None]) * K + kk[None, :],
+            Gates + (slot * L + ll[:, None]) * K + kk[None, :],
             history[:, None] & (kk[None, :] < K),
             0,
         ).to(tl.float32)
@@ -117,7 +114,6 @@ def _replay_gdn_window(
     BV: tl.constexpr,
     BW: tl.constexpr,
     BR: tl.constexpr,
-    base,
     end,
     h,
     hv,
@@ -143,7 +139,7 @@ def _replay_gdn_window(
     old = (jj < L) & (jj < n)
     fresh = (jj >= L) & (jj < L + end - start)
     cached_keys = tl.load(
-        Keys + (key_slot * (2 * L) + base) * K + jj[:, None] * K + kk[None, :],
+        Keys + (key_slot * L) * K + jj[:, None] * K + kk[None, :],
         old[:, None] & (kk[None, :] < K),
         0,
     ).to(tl.float32)
@@ -162,7 +158,7 @@ def _replay_gdn_window(
     log_a, bias = tl.load(Alog + hv).to(tl.float32), tl.load(Bias + hv).to(tl.float32)
     x = tl.load(A + fresh_tokens * SA + hv, fresh, 0).to(tl.float32) + bias
     fresh_gates = -tl.exp(log_a) * tl.where(x <= 20.0, tl.log(1.0 + tl.exp(x)), x)
-    gates = tl.load(Gates + slot * (2 * L) + base + jj, old, 0).to(tl.float32)
+    gates = tl.load(Gates + slot * L + jj, old, 0).to(tl.float32)
     gates += tl.where(fresh, fresh_gates, 0.0)
     prefix = tl.cumsum(gates, axis=0)
     query_gates = tl.sum(tl.where(jj[None, :] <= L + (tt % BW)[:, None], gates[None, :], 0), 1)
@@ -173,7 +169,7 @@ def _replay_gdn_window(
     coefficients *= tl.where(causal, tl.exp(tl.minimum(query_gates[:, None] - prefix[None, :], 0.0)), 0.0)
     projections *= tl.exp(query_gates)[:, None]
     deltas = tl.load(
-        Deltas + (slot * (2 * L) + base) * V + jj[:, None] * V + vv[None, :],
+        Deltas + (slot * L) * V + jj[:, None] * V + vv[None, :],
         old[:, None] & (vv[None, :] < V),
         0,
     ).to(tl.float32)
@@ -194,31 +190,32 @@ def _replay_gdn_window(
         outputs,
         (valid & (tt < BW))[:, None] & (vv[None, :] < V),
     )
-    records = base + n + jj - L
+    records = n + jj - L
+    in_prefix = fresh & (records < L)
     tl.store(
-        Deltas + (slot * (2 * L) + records[:, None]) * V + vv[None, :],
+        Deltas + (slot * L + records[:, None]) * V + vv[None, :],
         deltas,
-        fresh[:, None] & (vv[None, :] < V),
+        in_prefix[:, None] & (vv[None, :] < V),
     )
     tl.store(
-        RawValues + (slot * (2 * L) + records[:, None]) * V + vv[None, :],
+        RawValues + (slot * L + records[:, None]) * V + vv[None, :],
         values,
-        fresh[:, None] & (vv[None, :] < V),
+        in_prefix[:, None] & (vv[None, :] < V),
     )
     if iv == 0:
         if hv % (HV // KH) == 0:
             tl.store(
-                Keys + (key_slot * (2 * L) + records[:, None]) * K + kk[None, :],
+                Keys + (key_slot * L + records[:, None]) * K + kk[None, :],
                 fresh_keys,
-                fresh[:, None] & (kk[None, :] < K),
+                in_prefix[:, None] & (kk[None, :] < K),
             )
             tl.store(
-                RawKeys + (key_slot * (2 * L) + records[:, None]) * K + kk[None, :],
+                RawKeys + (key_slot * L + records[:, None]) * K + kk[None, :],
                 raw_keys,
-                fresh[:, None] & (kk[None, :] < K),
+                in_prefix[:, None] & (kk[None, :] < K),
             )
-        tl.store(Gates + slot * (2 * L) + records, fresh_gates, fresh)
-        tl.store(Betas + slot * (2 * L) + records, betas, fresh)
+        tl.store(Gates + slot * L + records, fresh_gates, in_prefix)
+        tl.store(Betas + slot * L + records, betas, in_prefix)
     return
 
 
@@ -253,7 +250,6 @@ def _replay_sequential(
     BW: tl.constexpr,
     KDA: tl.constexpr,
     LOWER: tl.constexpr,
-    base,
     end,
     hv,
     iv,
@@ -271,23 +267,23 @@ def _replay_sequential(
     # KDA、inline 以及不满足 precompute 条件的路径使用逐 token 递推。
     history = ll < n
     keys = tl.load(
-        Keys + (key_slot * (2 * L) + base) * K + ll[:, None] * K + kk[None, :],
+        Keys + (key_slot * L) * K + ll[:, None] * K + kk[None, :],
         history[:, None] & (kk[None, :] < K),
         0,
     ).to(tl.float32)
     deltas = tl.load(
-        Deltas + (slot * (2 * L) + base) * V + ll[:, None] * V + vv[None, :],
+        Deltas + (slot * L) * V + ll[:, None] * V + vv[None, :],
         history[:, None] & (vv[None, :] < V),
         0,
     ).to(tl.float32)
     if KDA:
         gates = tl.load(
-            Gates + (slot * (2 * L) + base + ll[:, None]) * K + kk[None, :],
+            Gates + (slot * L + ll[:, None]) * K + kk[None, :],
             history[:, None] & (kk[None, :] < K),
             0,
         ).to(tl.float32)
     else:
-        gates = tl.load(Gates + slot * (2 * L) + base + ll, history, 0).to(tl.float32)
+        gates = tl.load(Gates + slot * L + ll, history, 0).to(tl.float32)
     gate_prefix = tl.cumsum(gates, axis=0)
     total_g = tl.sum(gates, axis=0)
     if KDA:
@@ -334,20 +330,21 @@ def _replay_sequential(
             sq = checkpoint_sq * tl.exp(total_g) + tl.sum(deltas * hq[:, None], axis=0)
         d = beta * (v - sk)
         tl.store(Out + (t * HV + hv) * V + vv, sq + d * tl.sum(k * q), vv < V)
-        record = base + n
-        tl.store(Deltas + (slot * (2 * L) + record) * V + vv, d, vv < V)
-        tl.store(RawValues + (slot * (2 * L) + record) * V + vv, v, vv < V)
+        record = n
+        in_prefix = record < L
+        tl.store(Deltas + (slot * L + record) * V + vv, d, in_prefix & (vv < V))
+        tl.store(RawValues + (slot * L + record) * V + vv, v, in_prefix & (vv < V))
         if iv == 0:
             # Only the group owner writes shared K. Every CTA computes this
             # round's K locally; readers only consume earlier accepted records.
             if hv % (HV // KH) == 0:
-                tl.store(Keys + (key_slot * (2 * L) + record) * K + kk, k, kk < K)
-                tl.store(RawKeys + (key_slot * (2 * L) + record) * K + kk, raw_k, kk < K)
+                tl.store(Keys + (key_slot * L + record) * K + kk, k, in_prefix & (kk < K))
+                tl.store(RawKeys + (key_slot * L + record) * K + kk, raw_k, in_prefix & (kk < K))
             if KDA:
-                tl.store(Gates + (slot * (2 * L) + record) * K + kk, g, kk < K)
+                tl.store(Gates + (slot * L + record) * K + kk, g, in_prefix & (kk < K))
             else:
-                tl.store(Gates + slot * (2 * L) + record, g)
-            tl.store(Betas + slot * (2 * L) + record, beta)
+                tl.store(Gates + slot * L + record, g, in_prefix)
+            tl.store(Betas + slot * L + record, beta, in_prefix)
         keys = tl.where((ll == n)[:, None], k[None, :], keys)
         deltas = tl.where((ll == n)[:, None], d[None, :], deltas)
         if not KDA:
@@ -400,8 +397,8 @@ def _replay(
 ):
     """执行一个请求窗口的 replay decode，并写入 history。
 
-    当 history 即将跨半区时，先按 raw input 折叠到 canonical state；随后
-    根据 compute mode 选择预计算投影或逐 token 递推。请求数属于运行时布局，
+    只把本步 token 追加到长度为 L 的连续前缀，不写 canonical SSM。
+    cursor 是已有前缀长度，本步从那里接着写。请求数属于运行时布局，
     不应因为 eager batch 改变而形成新的 kernel 变体。
     """
     iv, seq, hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -422,26 +419,9 @@ def _replay(
     ll = tl.arange(0, L)
     slot = req * HV + hv
     key_slot = req * KH + hv // (HV // KH)
-    cursor = tl.load(Cursors + req)
-    n = cursor % (2 * L)
-    base = (cursor // (2 * L)) * L
+    n = tl.load(Cursors + req)
     sp = State + slot * K * V + kk[:, None] * V + vv[None, :]
     state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
-
-    if n + end - start > L:
-        for j in range(n):
-            raw_k = tl.load(RawKeys + (key_slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
-            raw_v = tl.load(RawValues + (slot * (2 * L) + base + j) * V + vv, vv < V, 0).to(tl.float32)
-            if KDA:
-                g = tl.load(Gates + (slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
-            else:
-                g = tl.load(Gates + slot * (2 * L) + base + j).to(tl.float32)
-            beta = tl.load(Betas + slot * (2 * L) + base + j).to(tl.float32)
-            state = _replay_update(state, raw_k, raw_v, g, beta, KDA)
-        # Start the new history from the same rounded checkpoint future calls load.
-        state = state.to(State.dtype.element_ty).to(tl.float32)
-        tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
-        base, n = L - base, 0
 
     if PRECOMPUTE_PROJECTIONS:
         projection_dtype: tl.constexpr = (
@@ -466,7 +446,6 @@ def _replay(
             KDA,
             LOWER,
             BQK,
-            base,
             end,
             hv,
             kk,
@@ -508,7 +487,6 @@ def _replay(
             BV,
             BW,
             BR,
-            base,
             end,
             h,
             hv,
@@ -558,7 +536,6 @@ def _replay(
             BW,
             KDA,
             LOWER,
-            base,
             end,
             hv,
             iv,

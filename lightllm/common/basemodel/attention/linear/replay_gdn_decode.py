@@ -55,7 +55,7 @@ def replay(
         history.raw_values[linear_layer_idx],
         history.betas[linear_layer_idx],
         reqs,
-        history.forward_cursors,
+        history.cursors,
         cu_seqlens,
         out,
         q.stride(axis),

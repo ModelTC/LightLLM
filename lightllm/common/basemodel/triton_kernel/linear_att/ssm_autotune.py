@@ -174,9 +174,9 @@ def select_config(
     ssm_backend.run_config = run_config
     reqs, accepted = workload
     ssm_backend.cursors.zero_()
-    # 覆盖完整 history 周期并触发一次 fold；只重复第一轮会一直测量空 history。
+    # 把前缀写满但不越出 capacity。只重复空 history 会测不到已有前缀的读取。
     tokens = q.shape[1 if cu_seqlens is not None else 0]
-    rounds = ssm_backend.capacity // min(ssm_backend.verify_width, tokens) + 1
+    rounds = max(1, ssm_backend.capacity // min(ssm_backend.verify_width, tokens))
     for step in range(rounds):
         ssm_backend.prepare_decode(reqs, cu_seqlens)
         replay_layer(ssm_backend, 0, q, k, v, a, b, a_log, bias, reqs, cu_seqlens)

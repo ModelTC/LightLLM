@@ -36,9 +36,7 @@ def _materialize(
     req = tl.load(Reqs + row).to(tl.int64)
     if req == HOLD:
         return
-    cursor = tl.load(Cursors + req)
-    n = cursor % (2 * L)
-    base = (cursor // (2 * L)) * L
+    n = tl.load(Cursors + req)
     if n == 0 and not SNAPSHOT and not FLUSH_EXPORT:
         return
     linear_layer_idx, head = lh // HV, lh % HV
@@ -49,13 +47,13 @@ def _materialize(
     sp = State + slot * K * V + kk[:, None] * V + vv[None, :]
     state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
     for j in range(n):
-        raw_k = tl.load(RawKeys + (key_slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
-        raw_v = tl.load(RawValues + (slot * (2 * L) + base + j) * V + vv, vv < V, 0).to(tl.float32)
+        raw_k = tl.load(RawKeys + (key_slot * L + j) * K + kk, kk < K, 0).to(tl.float32)
+        raw_v = tl.load(RawValues + (slot * L + j) * V + vv, vv < V, 0).to(tl.float32)
         if KDA:
-            g = tl.load(Gates + (slot * (2 * L) + base + j) * K + kk, kk < K, 0).to(tl.float32)
+            g = tl.load(Gates + (slot * L + j) * K + kk, kk < K, 0).to(tl.float32)
         else:
-            g = tl.load(Gates + slot * (2 * L) + base + j).to(tl.float32)
-        beta = tl.load(Betas + slot * (2 * L) + base + j).to(tl.float32)
+            g = tl.load(Gates + slot * L + j).to(tl.float32)
+        beta = tl.load(Betas + slot * L + j).to(tl.float32)
         raw_k /= tl.sqrt(tl.sum(raw_k * raw_k) + 1.0e-6)
         state *= tl.exp(g)[:, None] if KDA else tl.exp(g)
         d = beta * (raw_v - tl.sum(state * raw_k[:, None], 0))

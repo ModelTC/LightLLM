@@ -16,9 +16,7 @@ import triton
 
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import (
     _accept_updates,
-    _fold_history,
     _materialize,
-    _prepare_fold,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 from lightllm.utils.log_utils import init_logger
@@ -87,7 +85,7 @@ class ReplayGDNState(BoundedAttentionState):
         self.mtp_state_index = torch.zeros(request_capacity, dtype=torch.int32, device=device) if mtp_step else None
         self.big_pages_pool = None
         self.small_pages_pool = None
-        capacity, compute_mode = _replay_settings(ssm_replay_config, mtp_step)
+        capacity, compute_mode, force_compress = _replay_settings(ssm_replay_config, mtp_step)
         _bind_history(
             self,
             self.ssm_state,
@@ -98,6 +96,7 @@ class ReplayGDNState(BoundedAttentionState):
             gate_lower_bound,
             compute_mode,
             None,
+            force_compress,
         )
 
     def get_state_type(self) -> str:
@@ -208,12 +207,11 @@ class ReplayGDNState(BoundedAttentionState):
                 self.mtp_state_index[req_idx].fill_(0)
 
     def commit_bounded_att_state(self, req_indices: torch.Tensor, accepted_steps: torch.Tensor) -> None:
-        """提交已接受前缀，折进 canonical SSM，并清空 history。"""
+        """提交已接受长度，再按容量或 force_compress 决定是否整段压缩。"""
         if self.mtp_state_index is None:
             return
         self.commit_accepted(self.mtp_state_index, req_indices, accepted_steps)
-        if self.ssm_state.is_cuda:
-            self.merge_accepted_updates(req_indices)
+        self.maybe_compress_prefix(req_indices)
 
     def get_accepted_state(self, req_idx: int) -> _AcceptedTensors:
         """返回已接受 Conv 窗口和物化 SSM，不改写 canonical state。"""
@@ -406,16 +404,17 @@ class ReplayGDNState(BoundedAttentionState):
     # ========================================================================
 
     def close_history_after_layer(self, logical_layer_id: int, reqs: torch.Tensor, fold: bool) -> None:
-        """本状态最后一层结束时收口 history。fold 时先把已接受前缀折进 canonical SSM。"""
+        """最后一层收口。非 MTP 先记下这 1 个 token，再按容量决定是否整段压缩。Prefill 总是压缩。"""
 
         if self.config is None or not self.config.logical_layer_ids:
             return
         if logical_layer_id != self.config.logical_layer_ids[-1]:
             return
         if fold:
-            self.merge_accepted_updates(reqs)
+            self._note_new_token(reqs)
+            self.maybe_compress_prefix(reqs)
         else:
-            self.clear_history(reqs)
+            self.compress_prefix(reqs)
 
     def clear_history(self, req: int | torch.Tensor) -> None:
         """清空复用或恢复请求的临时 history，保留 canonical SSM。"""
@@ -427,55 +426,10 @@ class ReplayGDNState(BoundedAttentionState):
             self.cursors[req] = 0
 
     def prepare_decode(self, reqs: torch.Tensor, cu_seqlens: torch.Tensor | None = None) -> torch.Tensor:
-        """保存本轮 decode 的 history 起点，并折叠即将溢出的旧半区。"""
+        """返回本步写入前的前缀长度。decode 不在这里修改 SSM。"""
 
-        positions = torch.empty_like(reqs)
-        layers, _, hv, kd, vd = self.ssm_state.shape
-        active = torch.empty((reqs.numel() + 1,), dtype=torch.int32, device=reqs.device)
-        _prepare_fold[(1,)](
-            reqs,
-            self.cursors,
-            positions,
-            self.forward_cursors,
-            cu_seqlens,
-            active,
-            reqs.numel(),
-            self.hold_req_id,
-            self.capacity,
-            cu_seqlens is not None,
-            triton.next_power_of_2(reqs.numel()),
-            self.verify_width,
-            num_warps=4,
-        )
-        programs = min(self.fold_programs, triton.cdiv(vd, 32) * reqs.numel() * layers * hv)
-        _fold_history[(programs,)](
-            self.ssm_state,
-            self.raw_keys,
-            self.raw_values,
-            self.gates,
-            self.betas,
-            reqs,
-            positions,
-            active,
-            reqs.numel(),
-            layers,
-            hv,
-            self.num_key_heads,
-            kd,
-            vd,
-            self.capacity,
-            triton.next_power_of_2(kd),
-            32,
-            self.ssm_state.stride(0),
-            self.raw_keys.stride(0),
-            self.raw_values.stride(0),
-            self.gates.stride(0),
-            self.betas.stride(0),
-            False,
-            num_warps=2,
-            num_stages=1,
-        )
-        return positions
+        del cu_seqlens
+        return self.cursors.index_select(0, reqs.long())
 
     def accept_updates(self, reqs: torch.Tensor, accepted_state_indices: torch.Tensor | None = None) -> None:
         """更新 cursor，保留每个请求本轮已接受的前缀。"""
@@ -496,12 +450,46 @@ class ReplayGDNState(BoundedAttentionState):
         self.accept_updates(reqs)
 
     def merge_accepted_updates(self, reqs: torch.Tensor) -> None:
-        """把已接受 history 折回 canonical SSM，并清空 cursor。"""
+        """把 cursor 覆盖的已接受前缀整段折回 canonical SSM，并清空 cursor。"""
 
         if reqs.numel() == 0:
             return
         self._materialize_accepted(reqs, self.ssm_state, snapshot=False)
         self.cursors.index_fill_(0, reqs.long(), 0)
+
+    def compress_prefix(self, reqs: torch.Tensor) -> None:
+        """把 cursor 覆盖的已接受前缀整段压进 SSM。长度为 0 时 kernel 直接返回。"""
+
+        if reqs.numel() == 0:
+            return
+        if self.ssm_state.is_cuda:
+            self.merge_accepted_updates(reqs)
+        else:
+            self.clear_history(reqs)
+
+    def maybe_compress_prefix(self, reqs: torch.Tensor) -> None:
+        """长度加上一次最大 verify_width 放不下，或 force_compress 打开时，整段压缩。"""
+
+        if reqs.numel() == 0 or not self.ssm_state.is_cuda:
+            return
+        if self.force_compress:
+            self.compress_prefix(reqs)
+            return
+        used = self.cursors.index_select(0, reqs.long())
+        overflow = (reqs != self.hold_req_id) & (used + self.verify_width > self.capacity)
+        if bool(overflow.any()):
+            self.compress_prefix(reqs[overflow])
+
+    def reserve_prefix(self, reqs: torch.Tensor, width: int | torch.Tensor) -> None:
+        """下一步写不下时，先把已接受前缀整段压进 SSM。"""
+
+        if reqs.numel() == 0 or not self.ssm_state.is_cuda:
+            return
+        used = self.cursors.index_select(0, reqs.long())
+        need = width if isinstance(width, torch.Tensor) else used.new_full((), width)
+        overflow = (reqs != self.hold_req_id) & (used + need > self.capacity)
+        if bool(overflow.any()):
+            self.merge_accepted_updates(reqs[overflow])
 
     def accepted_ssm(self, req_idx: int) -> torch.Tensor:
         """返回不修改 canonical SSM 和 history 的单请求快照。"""
@@ -593,6 +581,16 @@ class ReplayGDNState(BoundedAttentionState):
     # ========================================================================
     # 七、私有辅助实现
     # ========================================================================
+
+    def _note_new_token(self, reqs: torch.Tensor) -> None:
+        """非 MTP 最后一层在写入之后，把这一个 token 记进前缀长度。"""
+
+        if reqs.numel() == 0:
+            return
+        live = reqs[reqs != self.hold_req_id]
+        if live.numel() == 0:
+            return
+        self.cursors[live.long()] += 1
 
     def _transfer_regions(self) -> tuple[TransferRegion, ...]:
         """依次描述全局 Conv 和 SSM 区域，并标明当前 TP rank 的读写范围。"""
@@ -757,11 +755,12 @@ class ReplayGDNState(BoundedAttentionState):
         )
 
 
-def _replay_settings(config: dict | None, mtp_step: int) -> tuple[int, str]:
+def _replay_settings(config: dict | None, mtp_step: int) -> tuple[int, str, bool]:
     config = dict(config or {})
     capacity = int(config.get("cache_len", 16))
     compute_mode = config.get("compute_mode", "precompute" if mtp_step > 0 else "inline")
-    return capacity, compute_mode
+    force_compress = bool(config.get("force_compress", False))
+    return capacity, compute_mode, force_compress
 
 
 def _upload_indices(values: Sequence[int], device, dtype=torch.int64) -> torch.Tensor:
@@ -817,8 +816,9 @@ def _bind_history(
     gate_lower_bound: float,
     compute_mode: str,
     run_config: dict[str, int] | None,
+    force_compress: bool = False,
 ) -> None:
-    """在 owner 上创建 GDN replay 的双半区 history 和 cursor。"""
+    """在 owner 上创建 GDN replay 的连续前缀 history 和 cursor。"""
 
     assert ssm.dtype in (torch.float32, torch.bfloat16), "GDN replay requires FP32 or BF16 SSM state"
     assert verify_width > 0 and capacity >= max(4, verify_width) and capacity & (capacity - 1) == 0
@@ -826,9 +826,9 @@ def _bind_history(
     owner.ssm_state = ssm
     owner.kda = False
     owner.gate_lower_bound = gate_lower_bound
-    owner.fold_programs = 8 * torch.cuda.get_device_properties(ssm.device).multi_processor_count if ssm.is_cuda else 0
     owner.capacity = capacity
     owner.verify_width = verify_width
+    owner.force_compress = bool(force_compress)
     owner.compute_mode = compute_mode
     owner.run_config = run_config
     owner._config_is_fixed = run_config is not None
@@ -838,20 +838,19 @@ def _bind_history(
     assert owner.num_key_heads > 0 and hv % owner.num_key_heads == 0
     owner.hold_req_id = slots - 1
     owner.cursors = torch.zeros(slots, dtype=torch.int32, device=ssm.device)
-    owner.forward_cursors = torch.zeros_like(owner.cursors)
-    # fold 时交替使用两个半区。precompute 且 BF16、短 history 时 history 用激活精度，其余用 FP32。
+    # 一段连续前缀，长度不超过 capacity。precompute 且 BF16、短 history 时 history 用激活精度，其余用 FP32。
     history_dtype = (
         activation_dtype
         if activation_dtype == torch.bfloat16 and verify_width > 1 and compute_mode == "precompute" and capacity <= 8
         else torch.float32
     )
-    key_shape = (layers, slots, owner.num_key_heads, 2 * capacity, k)
+    key_shape = (layers, slots, owner.num_key_heads, capacity, k)
     owner.keys = torch.empty(key_shape, dtype=history_dtype, device=ssm.device)
-    owner.deltas = torch.empty((layers, slots, hv, 2 * capacity, v), dtype=history_dtype, device=ssm.device)
-    owner.gates = torch.empty((layers, slots, hv, 2 * capacity), dtype=torch.float32, device=ssm.device)
+    owner.deltas = torch.empty((layers, slots, hv, capacity, v), dtype=history_dtype, device=ssm.device)
+    owner.gates = torch.empty((layers, slots, hv, capacity), dtype=torch.float32, device=ssm.device)
     owner.raw_keys = torch.empty(key_shape, dtype=activation_dtype, device=ssm.device)
-    owner.raw_values = torch.empty((layers, slots, hv, 2 * capacity, v), dtype=activation_dtype, device=ssm.device)
-    owner.betas = torch.empty((layers, slots, hv, 2 * capacity), dtype=torch.float32, device=ssm.device)
+    owner.raw_values = torch.empty((layers, slots, hv, capacity, v), dtype=activation_dtype, device=ssm.device)
+    owner.betas = torch.empty((layers, slots, hv, capacity), dtype=torch.float32, device=ssm.device)
 
 
 class _AcceptedTensors(NamedTuple):
