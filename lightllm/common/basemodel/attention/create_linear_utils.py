@@ -15,52 +15,52 @@ linear_decode_att_backend_classes = {
 }
 
 
-def _replay_backend(native_path: str) -> str:
+def _linear_backend_class(native_path: str, backend_name: str):
+    """Native 仍按路径加载。replay 把 kernel 名字交给独立的 GDN replay 入口。"""
+
     if getattr(get_env_start_args(), "ssm_state_mode", "native") != "replay":
-        return native_path
-    replay_paths = {
-        "linear.triton:TritonLinearAttBackend": "linear.replay_gdn:ReplayTritonLinearAttBackend",
-        "linear.flashqla:FlashQlaLinearAttBackend": "linear.replay_gdn:ReplayFlashQlaLinearAttBackend",
-    }
-    return replay_paths[native_path]
+        return load_backend_class(native_path)
+    from lightllm.common.basemodel.attention.linear.replay_gdn import replay_gdn_backend_class
+
+    return replay_gdn_backend_class(backend_name)
 
 
 def get_qwen35_linear_prefill_att_backend_class(index=1, priority_list=("flashqla", "triton")):
     args = get_env_start_args()
     backend_str = _get_backend_str(args.llm_prefill_att_backend, index)
     if backend_str != "auto":
-        return load_backend_class(_replay_backend(linear_prefill_att_backend_classes[backend_str]))
+        return _linear_backend_class(linear_prefill_att_backend_classes[backend_str], backend_str)
 
     for backend_name in priority_list:
         backend_class = linear_prefill_att_backend_classes[backend_name]
         if backend_name == "triton":
             logger.info("Linear prefill attention backend: triton.")
-            return load_backend_class(_replay_backend(backend_class))
+            return _linear_backend_class(backend_class, backend_name)
         if validate(backend_name):
             logger.info(f"Linear prefill attention backend: {backend_name} (validated).")
-            return load_backend_class(_replay_backend(backend_class))
+            return _linear_backend_class(backend_class, backend_name)
 
     logger.warning("No linear prefill attention backend validation succeeded, falling back to Triton.")
-    return load_backend_class(_replay_backend("linear.triton:TritonLinearAttBackend"))
+    return _linear_backend_class("linear.triton:TritonLinearAttBackend", "triton")
 
 
 def get_qwen35_linear_decode_att_backend_class(index=1, priority_list=("triton",)):
     args = get_env_start_args()
     backend_str = _get_backend_str(args.llm_decode_att_backend, index)
     if backend_str != "auto":
-        return load_backend_class(_replay_backend(linear_decode_att_backend_classes[backend_str]))
+        return _linear_backend_class(linear_decode_att_backend_classes[backend_str], backend_str)
 
     for backend_name in priority_list:
         backend_class = linear_decode_att_backend_classes[backend_name]
         if backend_name == "triton":
             logger.info("Linear decode attention backend: triton.")
-            return load_backend_class(_replay_backend(backend_class))
+            return _linear_backend_class(backend_class, backend_name)
         if validate(backend_name):
             logger.info(f"Linear decode attention backend: {backend_name} (validated).")
-            return load_backend_class(_replay_backend(backend_class))
+            return _linear_backend_class(backend_class, backend_name)
 
     logger.warning("No linear decode attention backend validation succeeded, falling back to Triton.")
-    return load_backend_class(_replay_backend("linear.triton:TritonLinearAttBackend"))
+    return _linear_backend_class("linear.triton:TritonLinearAttBackend", "triton")
 
 
 def _get_backend_str(backend_args, index):

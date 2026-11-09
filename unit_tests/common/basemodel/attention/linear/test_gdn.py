@@ -177,6 +177,34 @@ def test_missing_linear_backend_arg_uses_auto_selection(monkeypatch, auto_linear
     assert validate_calls == ["flashqla"]
 
 
+def test_replay_mode_selects_standalone_gdn_backends(monkeypatch):
+    monkeypatch.setattr(
+        linear_create_utils,
+        "get_env_start_args",
+        lambda: SimpleNamespace(
+            llm_prefill_att_backend=["fa3", "flashqla"],
+            llm_decode_att_backend=["flashinfer", "triton"],
+            ssm_state_mode="replay",
+        ),
+    )
+    from lightllm.common.basemodel.attention.base_att import BaseAttBackend
+    from lightllm.common.basemodel.attention.linear.gdn import LinearAttBackend
+    from lightllm.common.basemodel.attention.linear.replay_gdn import (
+        ReplayGDNFlashQlaAttBackend,
+        ReplayGDNTritonAttBackend,
+    )
+
+    prefill_backend = linear_create_utils.get_qwen35_linear_prefill_att_backend_class(index=1)
+    decode_backend = linear_create_utils.get_qwen35_linear_decode_att_backend_class(index=1)
+
+    assert prefill_backend is ReplayGDNFlashQlaAttBackend
+    assert decode_backend is ReplayGDNTritonAttBackend
+    assert prefill_backend.__bases__ == (BaseAttBackend,)
+    assert decode_backend.__bases__ == (BaseAttBackend,)
+    assert not issubclass(prefill_backend, LinearAttBackend)
+    assert not issubclass(decode_backend, LinearAttBackend)
+
+
 def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
     linear_config = SimpleNamespace(
         tp_world_size=2,

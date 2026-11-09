@@ -1,6 +1,6 @@
-"""KDA replay 的线性 attention backend。
+"""KDA replay 的推理入口。
 
-Native backend 仍走 fused recurrent。这里单独准备单槽 history，并调用 ReplayKDAState。
+这个 backend 只服务 ReplayKDAState。维度在这里自己读取，不继承 native KDA backend。
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import (
 )
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
+    BaseAttBackend,
     BaseDecodeAttState,
     BasePrefillAttState,
 )
-from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
@@ -59,8 +59,23 @@ def _single_replay_state(att_state) -> ReplayKDAState:
     return matches[0]
 
 
-class ReplayKDALinearAttBackend(KDALinearAttBackend):
-    """维度配置沿用 KDALinearAttBackend，计算状态换成 replay。"""
+class ReplayKDALinearAttBackend(BaseAttBackend):
+    """KDA replay 推理 backend。GLM-5-Next 在 replay 模式下只构造这一个类。"""
+
+    def __init__(self, model):
+        super().__init__(model=model)
+        config = model.config["linear_attn_config"]
+        self.num_heads = config["num_heads"]
+        self.head_dim = config["head_dim"]
+        assert self.num_heads % model.tp_world_size_ == 0
+        self.tp_num_heads = self.num_heads // model.tp_world_size_
+        self.tp_hidden_size = self.tp_num_heads * self.head_dim
+        self.conv_kernel_size = config["short_conv_kernel_size"]
+        self.lower_bound = config.get("gate_lower_bound", -5.0)
+        self.mtp_step = model.args.mtp_step
+
+    def split_qkv(self, mixed_qkv: torch.Tensor):
+        return mixed_qkv.split(self.tp_hidden_size, dim=-1)
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo"):
         return ReplayKDAPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
@@ -92,7 +107,7 @@ class ReplayKDAPrefillAttState(BasePrefillAttState):
         params = att_control.linear_att_prefill_dict
         layer_num = params["layer_num"]
         layer_weight = params["layer_weight"]
-        backend: KDALinearAttBackend = self.backend
+        backend: ReplayKDALinearAttBackend = self.backend
         state = _replay_state(self, layer_num)
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         conv_states = conv_states[..., : backend.conv_kernel_size - 1]
@@ -187,7 +202,7 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
         params = att_control.linear_att_decode_dict
         layer_num = params["layer_num"]
         layer_weight = params["layer_weight"]
-        backend: KDALinearAttBackend = self.backend
+        backend: ReplayKDALinearAttBackend = self.backend
         state = _replay_state(self, layer_num)
         conv_states, _ = state.get_layer_view(logical_layer_id=layer_num)
         conv_kwargs = dict(bias=None, activation="silu", conv_state_indices=self.b_conv_buffer_idx)

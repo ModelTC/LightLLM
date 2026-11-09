@@ -1,6 +1,7 @@
-"""GDN replay 的线性 attention backend。
+"""GDN replay 的推理入口。
 
-Native backend 仍走 fused recurrent。这里单独准备单槽 history，并调用 ReplayGDNState。
+Triton 和 FlashQla 各有一个 backend。它们只差 prefill chunk kernel，
+decode 都走 ReplayGDNState。两个类都直接实现 backend 接口，不继承 native GDN。
 """
 
 from __future__ import annotations
@@ -16,12 +17,10 @@ from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import (
 )
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
+    BaseAttBackend,
     BaseDecodeAttState,
     BasePrefillAttState,
 )
-from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
-from lightllm.common.basemodel.attention.linear.gdn import LinearAttBackend
-from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
     causal_conv1d_fn,
 )
@@ -37,9 +36,92 @@ from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import (
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
     build_dynamic_mtp_linear_att_state_params,
 )
+from lightllm.utils.envs_utils import get_env_start_args
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
+
+
+def replay_gdn_backend_class(name: str):
+    """按已选中的 linear kernel 名字返回对应的 replay backend。"""
+
+    classes = {
+        "triton": ReplayGDNTritonAttBackend,
+        "flashqla": ReplayGDNFlashQlaAttBackend,
+    }
+    try:
+        return classes[name]
+    except KeyError:
+        raise ValueError(f"replay GDN has no backend named {name!r}") from None
+
+
+def _triton_prefill_kernel():
+    from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
+        chunk_gated_delta_rule,
+    )
+
+    return chunk_gated_delta_rule
+
+
+def _flashqla_prefill_kernel():
+    from flash_qla import chunk_gated_delta_rule
+
+    return chunk_gated_delta_rule
+
+
+def _configure_gdn(backend, model, prefill_kernel) -> None:
+    """写入 GDN 的张量并行尺寸，并绑定这个 backend 自己的 prefill kernel。"""
+
+    config = model.config
+    tp_world_size = model.tp_world_size_
+    backend.mtp_step = get_env_start_args().mtp_step
+    backend.num_v_heads = config["linear_num_value_heads"]
+    backend.num_k_heads = config["linear_num_key_heads"]
+    backend.head_k_dim = config["linear_key_head_dim"]
+    backend.head_v_dim = config["linear_value_head_dim"]
+    backend.key_dim = backend.head_k_dim * backend.num_k_heads
+    backend.value_dim = backend.head_v_dim * backend.num_v_heads
+    backend.conv_kernel_dim = config["linear_conv_kernel_dim"]
+    backend.activation = config["hidden_act"]
+    backend.tp_qkvz_dim = (backend.key_dim * 2 + backend.value_dim * 2) // tp_world_size
+    backend.tp_ba_dim = (backend.num_v_heads * 2) // tp_world_size
+    backend.tp_num_k_heads = backend.num_k_heads // tp_world_size
+    backend.tp_num_v_heads = backend.num_v_heads // tp_world_size
+    backend.tp_key_dim = backend.key_dim // tp_world_size
+    backend.tp_value_dim = backend.value_dim // tp_world_size
+    assert backend.num_v_heads % backend.num_k_heads == 0, "num_v_heads must be divisible by num_k_heads"
+    backend.num_v_heads_per_k_head = backend.num_v_heads // backend.num_k_heads
+    ssm_dtypes = {"bfloat16": torch.bfloat16, "float32": torch.float32}
+    backend.ssm_state_dtype = ssm_dtypes.get(get_env_start_args().linear_att_ssm_data_type, torch.bfloat16)
+    backend.prefill_kernel = prefill_kernel
+
+
+def _split_qkvzba(backend, mixed_qkvzba):
+    qkv_dim = backend.tp_key_dim * 2 + backend.tp_value_dim
+    z_end = qkv_dim + backend.tp_value_dim
+    b_end = z_end + backend.tp_num_v_heads
+    mixed_qkv = mixed_qkvzba[:, :qkv_dim]
+    z = mixed_qkvzba[:, qkv_dim:z_end].view(-1, backend.tp_num_v_heads, backend.head_v_dim)
+    b = mixed_qkvzba[:, z_end:b_end]
+    a = mixed_qkvzba[:, b_end:]
+    return mixed_qkv, z, b, a
+
+
+def _rearrange_mixed_qkv(backend, mixed_qkv, decode=False):
+    query, key, value = torch.split(
+        mixed_qkv,
+        [backend.tp_key_dim, backend.tp_key_dim, backend.tp_value_dim],
+        dim=-1,
+    )
+    if decode:
+        batch_size = mixed_qkv.shape[0]
+        leading = (batch_size, 1)
+    else:
+        leading = (1, query.shape[0])
+    query = query.view(*leading, backend.tp_num_k_heads, backend.head_k_dim)
+    key = key.view(*leading, backend.tp_num_k_heads, backend.head_k_dim)
+    value = value.view(*leading, backend.tp_num_v_heads, backend.head_v_dim)
+    return query, key, value
 
 
 def _replay_state(att_state, layer_num: int) -> ReplayGDNState:
@@ -63,8 +145,12 @@ def _single_replay_state(att_state) -> ReplayGDNState:
     return matches[0]
 
 
-class _ReplayGDNBackend:
-    """把 prefill/decode 状态换成 replay 实现，维度和 prefill kernel 仍来自具体 backend。"""
+class ReplayGDNTritonAttBackend(BaseAttBackend):
+    """GDN replay 的 Triton 入口。Prefill 使用仓内 chunk kernel。"""
+
+    def __init__(self, model):
+        super().__init__(model=model)
+        _configure_gdn(self, model, _triton_prefill_kernel())
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo"):
         return ReplayGDNPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
@@ -73,12 +159,18 @@ class _ReplayGDNBackend:
         return ReplayGDNDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
-class ReplayTritonLinearAttBackend(_ReplayGDNBackend, TritonLinearAttBackend):
-    pass
+class ReplayGDNFlashQlaAttBackend(BaseAttBackend):
+    """GDN replay 的 FlashQla 入口。Prefill 使用 flash_qla chunk kernel。"""
 
+    def __init__(self, model):
+        super().__init__(model=model)
+        _configure_gdn(self, model, _flashqla_prefill_kernel())
 
-class ReplayFlashQlaLinearAttBackend(_ReplayGDNBackend, FlashQlaLinearAttBackend):
-    pass
+    def create_att_prefill_state(self, infer_state: "InferStateInfo"):
+        return ReplayGDNPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
+
+    def create_att_decode_state(self, infer_state: "InferStateInfo"):
+        return ReplayGDNDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass
@@ -104,16 +196,16 @@ class ReplayGDNPrefillAttState(BasePrefillAttState):
         params = att_control.linear_att_prefill_dict
         layer_num = params["layer_num"]
         layer_weight = params["layer_weight"]
-        backend: LinearAttBackend = self.backend
+        backend = self.backend
         state = _replay_state(self, layer_num)
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         if backend.mtp_step > 0:
             conv_states = conv_states[:, :, : -backend.mtp_step]
-        mixed_qkv, z, b, a = backend._split_qkvzba(params["mixed_qkvzba"])
+        mixed_qkv, z, b, a = _split_qkvzba(backend, params["mixed_qkvzba"])
         return self._prefill(mixed_qkv, conv_states, ssm_states, a, b, layer_weight), z
 
     def _prefill(self, mixed_qkv, conv_states, ssm_states, a, b, layer_weight):
-        backend: LinearAttBackend = self.backend
+        backend = self.backend
         g, beta = fused_gdn_gating(layer_weight.linear_A_log.weight, a, b, layer_weight.linear_dt_bias.weight)
         mixed_qkv = causal_conv1d_fn(
             mixed_qkv.transpose(0, 1),
@@ -125,7 +217,7 @@ class ReplayGDNPrefillAttState(BasePrefillAttState):
             conv_states=conv_states,
             activation=backend.activation,
         ).transpose(0, 1)
-        query, key, value = backend._rearrange_mixed_qkv(mixed_qkv)
+        query, key, value = _rearrange_mixed_qkv(backend, mixed_qkv)
         core_attn_out, last_state = backend.prefill_kernel(
             q=query,
             k=key,
@@ -198,8 +290,8 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         params = att_control.linear_att_decode_dict
         layer_num = params["layer_num"]
         layer_weight = params["layer_weight"]
-        backend: LinearAttBackend = self.backend
-        mixed_qkv, z, b, a = backend._split_qkvzba(params["mixed_qkvzba"])
+        backend = self.backend
+        mixed_qkv, z, b, a = _split_qkvzba(backend, params["mixed_qkvzba"])
         state = _replay_state(self, layer_num)
         conv_states, _ = state.get_layer_view(logical_layer_id=layer_num)
         draft_step = backend.model.mtp_manager.get_decode_draft_step(backend.model.is_mtp_draft_model)
@@ -209,7 +301,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         return self._decode(mixed_qkv, z, conv_states, a, b, layer_weight, layer_num, state)
 
     def _decode(self, mixed_qkv, z, conv_states, a, b, layer_weight, layer_num, state):
-        backend: LinearAttBackend = self.backend
+        backend = self.backend
         query, key, value, z, a, b = conv_pack_gdn_decode_inputs(
             mixed_qkv,
             z,
@@ -241,7 +333,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         return output, z
 
     def _mtp(self, mixed_qkv, conv_states, a, b, layer_weight, layer_num, draft_step, state):
-        backend: LinearAttBackend = self.backend
+        backend = self.backend
         mixed_qkv = causal_conv1d_update_mtp(
             mixed_qkv,
             conv_states,
@@ -253,7 +345,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             num_accepted_tokens=self.b_num_accepted_tokens,
             query_start_loc=self.b1_mtp_cu_q_seq_len,
         )
-        query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
+        query, key, value = _rearrange_mixed_qkv(backend, mixed_qkv, decode=False)
         return state.replay_forward(
             layer_num,
             query,
