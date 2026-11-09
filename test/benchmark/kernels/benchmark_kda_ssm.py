@@ -20,12 +20,12 @@ from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode impor
 def ReplaySSMExecutor(*args, **kwargs):
     kda = kwargs.get("kda", False)
     if kda:
-        from lightllm.common.attention_state.bounded_att.kda.replay_kda_runtime import ReplayKDARuntime
+        from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
 
-        return ReplayKDARuntime(*args, **kwargs)
-    from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_runtime import ReplayGDNRuntime
+        return ReplayKDAState.from_ssm(*args, **kwargs)
+    from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 
-    return ReplayGDNRuntime(*args, **kwargs)
+    return ReplayGDNState.from_ssm(*args, **kwargs)
 
 
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs, replay_layer

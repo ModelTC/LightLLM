@@ -33,7 +33,7 @@ def save_runtime(state, req_indices, state_token_lens, page_kind, page_slot_ids)
             for req_idx, slot_id in zip(req_indices, page_slot_ids)
         ]
     )
-    state.runtime.export_ssm(req_indices, [pool.ssm_state[slot_id] for slot_id in page_slot_ids])
+    state.export_ssm(req_indices, [pool.ssm_state[slot_id] for slot_id in page_slot_ids])
 
 
 def restore_runtime(state, req_indices, state_token_lens, page_kind, page_slot_ids) -> None:
@@ -44,7 +44,7 @@ def restore_runtime(state, req_indices, state_token_lens, page_kind, page_slot_i
     width = state.config.conv_width
     conv_copies, ssm_copies = [], []
     for req_idx, slot_id in zip(req_indices, page_slot_ids):
-        state.runtime.clear_history(req_idx)
+        state.clear_history(req_idx)
         conv_copies.append((pool.conv_state[slot_id], state.conv_state[:, req_idx, :, :width]))
         ssm_copies.append((pool.ssm_state[slot_id], state.ssm_state[:, req_idx]))
     copy_bounded_att_tensors(copies=conv_copies)
@@ -64,7 +64,7 @@ def copy_runtime_from_dp(state, src_req_indices, dst_req_indices, remote_dp_boun
     width = state.config.conv_width
     conv_copies = []
     for src_req, dst_req in zip(src_req_indices, dst_req_indices):
-        state.runtime.clear_history(dst_req)
+        state.clear_history(dst_req)
         conv_copies.append(
             (
                 accepted_conv(remote_dp_bounded_state, src_req),
@@ -72,9 +72,7 @@ def copy_runtime_from_dp(state, src_req_indices, dst_req_indices, remote_dp_boun
             )
         )
     copy_bounded_att_tensors(copies=conv_copies)
-    remote_dp_bounded_state.runtime.export_ssm(
-        src_req_indices, [state.ssm_state[:, dst_req] for dst_req in dst_req_indices]
-    )
+    remote_dp_bounded_state.export_ssm(src_req_indices, [state.ssm_state[:, dst_req] for dst_req in dst_req_indices])
     if state.mtp_state_index is not None:
         for dst_req in dst_req_indices:
             state.mtp_state_index[dst_req].fill_(0)
@@ -100,7 +98,7 @@ def read_pd(state, pd_page_buffers, req_idx, pd_page_index, state_token_len, lay
     """读入基准 Conv/SSM，并清空该请求的 history。"""
     assert layout.state_name == state.state_name, "transfer layout does not describe this resource"
     assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
-    state.runtime.clear_history(req_idx)
+    state.clear_history(req_idx)
     fields = tensor_fields(
         state.conv_state[:, req_idx, :, : state.config.conv_width],
         state.ssm_state[:, req_idx],

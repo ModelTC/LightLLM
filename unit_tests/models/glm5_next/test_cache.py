@@ -152,7 +152,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
         linear._ssm_executor.gates.fill_(-0.5)
         linear._ssm_executor.betas.zero_()
         linear._ssm_executor.cursors[0] = 1
-        ssm = linear._ssm_executor.get_accepted_state(0).clone()
+        ssm = linear.accepted_ssm(0).clone()
         linear._ssm_executor.cursors[2] = 3
     if mtp_step:
         linear.mtp_state_index[2] = mtp_step

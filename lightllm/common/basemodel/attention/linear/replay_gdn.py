@@ -247,7 +247,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         self._init_indices(draft_step, state.mtp_state_index)
         self.b_ssm_buffer_idx = self.b_conv_buffer_idx
-        begin_decode(state.runtime, self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
+        begin_decode(state, self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
 
     def _init_indices(self, draft_step: int, mtp_index: torch.Tensor | None) -> None:
         infer = self.infer_state
@@ -321,7 +321,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             backend.head_v_dim,
         )
         output, _ = replay(
-            state.runtime,
+            state,
             state.storage_layer(layer_num),
             query,
             key,
@@ -350,7 +350,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         )
         query, key, value = _rearrange_mixed_qkv(backend, mixed_qkv, decode=False)
         output, _ = replay(
-            state.runtime,
+            state,
             state.storage_layer(layer_num),
             query,
             key,

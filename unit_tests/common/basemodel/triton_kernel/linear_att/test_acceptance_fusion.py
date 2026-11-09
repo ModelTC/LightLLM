@@ -8,17 +8,21 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_sta
 def ReplaySSMExecutor(*args, **kwargs):
     kda = kwargs.get("kda", False)
     if kda:
-        from lightllm.common.attention_state.bounded_att.kda.replay_kda_runtime import ReplayKDARuntime
+        from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
 
-        return ReplayKDARuntime(*args, **kwargs)
-    from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_runtime import ReplayGDNRuntime
+        return ReplayKDAState.from_ssm(*args, **kwargs)
+    from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 
-    return ReplayGDNRuntime(*args, **kwargs)
+    return ReplayGDNState.from_ssm(*args, **kwargs)
+
+
+def ssm_snapshot(backend, req):
+    return backend.accepted_ssm(req)
 
 
 from types import SimpleNamespace
 from lightllm.common.attention_state.commit import StateAcceptance
-from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_runtime import ReplayGDNRuntime
+from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import replay_layer
 
@@ -36,7 +40,7 @@ def make(n, width):
         mtps.extend(range(l))
     tensor = lambda x: torch.tensor(x, device="cuda", dtype=torch.int32)
     args = [tensor(starts), tensor(reqs), tensor(mtps), tensor([1] * len(reqs)), width]
-    ssm_backend = ReplayGDNRuntime.__new__(ReplayGDNRuntime)
+    ssm_backend = ReplayGDNState.__new__(ReplayGDNState)
     ssm_backend.cursors = tensor([7] * (hold + 1))
     ssm_backend.hold_req_id = hold
     ssm_backend.capacity = max(4, triton.next_power_of_2(width))
@@ -225,7 +229,7 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
         assert torch.equal(ssm_backends[0].cursors, ssm_backends[1].cursors)
         assert torch.equal(managers[0].mtp_state_index, managers[1].mtp_state_index)
         if iteration % 7 == 0:
-            assert torch.equal(ssm_backends[0].get_accepted_state(3), ssm_backends[1].get_accepted_state(3))
+            assert torch.equal(ssm_snapshot(ssm_backends[0], 3), ssm_snapshot(ssm_backends[1], 3))
         if iteration % 11 == 10:
             for ssm_backend in ssm_backends:
                 ssm_backend.merge_accepted_updates(reqs[:3])

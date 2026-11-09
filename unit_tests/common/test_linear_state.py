@@ -138,14 +138,16 @@ def test_checkpoint_batch_export(runtime_start_args, monkeypatch, cls, mode, dty
             for req in requests
         ]
     before = state.ssm_state.clone()
-    cursors = state.runtime.cursors.clone() if mode == "replay" else None
+    history = getattr(state, "runtime", state)
+    cursors = history.cursors.clone() if mode == "replay" else None
 
     def no_snapshot(*args):
         raise AssertionError("batch export must write directly to the destination")
 
     if mode == "replay":
         monkeypatch.setattr(state, "get_accepted_state", no_snapshot)
-        monkeypatch.setattr(state.runtime, "get_accepted_state", no_snapshot)
+        if history is not state:
+            monkeypatch.setattr(history, "get_accepted_state", no_snapshot)
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):

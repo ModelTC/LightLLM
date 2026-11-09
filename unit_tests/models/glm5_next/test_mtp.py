@@ -296,7 +296,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
             selected._ssm_executor.accept_updates(ids, accepted)
         for req, length in zip(requests, lengths):
             torch.testing.assert_close(
-                selected._ssm_executor.get_accepted_state(req)[0],
+                selected.accepted_ssm(req)[0],
                 expected_ssm[req * width + length - 1],
                 atol=2e-3,
                 rtol=1e-2,

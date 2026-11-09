@@ -8,7 +8,6 @@ from lightllm.common.ssm_types import SSMRunConfig
 from lightllm.common.attention_state.bounded_att import KDAState
 from unit_tests.common.test_linear_state import make_state
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_runtime import ReplayGDNRuntime
 from lightllm.common.basemodel.attention.linear.replay_gdn_step import run_config as gdn_run_config
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
@@ -89,11 +88,11 @@ def test_model_configuration_retains_nondefault_kda_gate_bound():
 
 def test_kda_backend_receives_gate_bound_at_construction(linear_config):
     owner = ReplayKDAState(linear_config, 3, mtp_step=2, gate_lower_bound=-2.5, device="cpu")
-    assert owner.runtime.gate_lower_bound == -2.5
+    assert owner.gate_lower_bound == -2.5
 
 
 def test_replay_backend_publishes_detached_run_config():
-    ssm_backend = object.__new__(ReplayGDNRuntime)
+    ssm_backend = object.__new__(ReplayGDNState)
     tuning = {"BV": 32, "num_warps": 2}
     ssm_backend.run_config = tuning
     ssm_backend._config_is_fixed = True
@@ -112,7 +111,8 @@ def test_replay_backend_publishes_detached_run_config():
 def test_replay_defaults_to_precompute_for_speculative_decode(linear_config, cls, mtp_step, expected):
     replay_cls = ReplayKDAState if cls is KDAState else ReplayGDNState
     owner = replay_cls(linear_config, request_capacity=2, mtp_step=mtp_step, device="cpu")
-    assert owner.runtime.compute_mode == expected
+    history = getattr(owner, "runtime", owner)
+    assert history.compute_mode == expected
 
 
 @pytest.mark.parametrize("cls", [GDNState, KDAState])
@@ -131,14 +131,13 @@ def test_replay_fused_acceptance_keeps_cursors_inside_mode(monkeypatch, cls):
     import sys
 
     owner, _, _ = make_state(cls, mode="replay", step=3, device="cpu")
+    history = getattr(owner, "runtime", owner)
     calls = []
-    monkeypatch.setattr(
-        sys.modules[owner.runtime.__class__.__module__], "commit_ssm_prefix", lambda *args: calls.append(args)
-    )
-    monkeypatch.setattr(owner.runtime, "accept_updates", lambda *a: pytest.fail("unfused acceptance"))
+    monkeypatch.setattr(sys.modules[type(history).__module__], "commit_ssm_prefix", lambda *args: calls.append(args))
+    monkeypatch.setattr(history, "accept_updates", lambda *a: pytest.fail("unfused acceptance"))
     owner.commit_bounded_att_state(torch.tensor([2, 0, 1]), torch.tensor([1, 2, 3]))
     assert len(calls) == 1
-    assert calls[0][3] is owner.runtime.cursors
+    assert calls[0][3] is history.cursors
     assert calls[0][0] is owner.mtp_state_index
 
 
@@ -148,9 +147,10 @@ def test_acceptance_keeps_request_order_with_strided_inputs(device):
         pytest.skip("CUDA required")
     owner, _, _ = make_state(mode="replay", step=3, device=device)
     owner.mtp_state_index.fill_(2)
-    owner.runtime.cursors.fill_(8)
+    history = getattr(owner, "runtime", owner)
+    history.cursors.fill_(8)
     reqs = torch.tensor([2, -99, 0, -99, 3, -99], device=device)[::2]
     lengths = torch.tensor([1, -99, 3, -99, 2, -99], dtype=torch.int32, device=device)[::2]
     owner.commit_bounded_att_state(reqs, lengths)
     assert owner.mtp_state_index.tolist() == [2, 2, 0, 1]
-    assert owner.runtime.cursors.tolist() == [11, 8, 9, 8]
+    assert history.cursors.tolist() == [11, 8, 9, 8]

@@ -20,9 +20,8 @@ def _assert_received_manager_roundtrip(payload, state_name, mode, expected):
     state = getattr(resources, state_name)
     assert state.big_pages_pool is state.small_pages_pool is None
     assert resources.full_att_allocator is None
-    runtime = getattr(state, "runtime", None)
-    if runtime is not None:
-        assert runtime.state is state.ssm_state
+    if mode == "replay":
+        assert state.state is state.ssm_state
     layout = resources.get_pd_operator().get_pd_bounded_att_page_layouts()[state_name]
     block = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
     state.write_to_pd_page(1, block, 0, 8, layout)
@@ -86,7 +85,9 @@ def test_pd_export_copy_keeps_worker_pools_and_runtime_identity(cls, mode):
     assert copy.big_pages_pool is copy.small_pages_pool is None
     assert copy.conv_state is state.conv_state
     assert copy.ssm_state is state.ssm_state
-    assert getattr(copy, "runtime", None) is getattr(state, "runtime", None)
+    if mode == "replay":
+        assert copy.cursors is state.cursors
+        assert copy.keys is state.keys
     assert copy.mtp_state_index is state.mtp_state_index
     assert all(vars(state)[name] is value for name, value in before.items())
 

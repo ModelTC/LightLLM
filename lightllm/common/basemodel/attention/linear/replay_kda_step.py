@@ -1,6 +1,6 @@
 """KDA replay 的一层 decode。
 
-History 张量和 cursor 留在 ReplayKDARuntime。这里只选择 kernel 配置并发起重放。
+History 张量和 cursor 在 ReplayKDAState。这里只选择 kernel 配置并发起重放。
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ def replay(
     if not history.kda:
         raise ValueError("KDA replay step requires the KDA gate")
     config = run_config or resolve_run_config(history, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
-    hv, kd, vd = history.state.shape[-3:]
+    hv, kd, vd = history.ssm_state.shape[-3:]
     assert history.num_key_heads in (q.shape[-2], hv)
     axis = 1 if cu_seqlens is not None else 0
     out = torch.empty_like(v)
@@ -72,7 +72,7 @@ def replay(
         b,
         a_log,
         bias,
-        history.state[linear_layer_idx],
+        history.ssm_state[linear_layer_idx],
         history.keys[linear_layer_idx],
         history.deltas[linear_layer_idx],
         history.gates[linear_layer_idx],

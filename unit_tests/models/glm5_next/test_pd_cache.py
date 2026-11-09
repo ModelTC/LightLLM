@@ -173,7 +173,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
             backend.gates.fill_(-0.5)
             backend.betas.zero_()
             backend.cursors[src_req] = 1
-            ssm[:, heads].copy_(backend.get_accepted_state(src_req))
+            ssm[:, heads].copy_(mem.linear.accepted_ssm(src_req))
         offset = 0
         for state in mem.tails:
             end = offset + len(state.config.logical_layer_ids)

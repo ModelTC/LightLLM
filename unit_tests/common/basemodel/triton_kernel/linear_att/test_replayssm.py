@@ -5,12 +5,16 @@ import torch
 def ReplaySSMExecutor(*args, **kwargs):
     kda = kwargs.get("kda", False)
     if kda:
-        from lightllm.common.attention_state.bounded_att.kda.replay_kda_runtime import ReplayKDARuntime
+        from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
 
-        return ReplayKDARuntime(*args, **kwargs)
-    from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_runtime import ReplayGDNRuntime
+        return ReplayKDAState.from_ssm(*args, **kwargs)
+    from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 
-    return ReplayGDNRuntime(*args, **kwargs)
+    return ReplayGDNState.from_ssm(*args, **kwargs)
+
+
+def ssm_snapshot(backend, req):
+    return backend.accepted_ssm(req)
 
 
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs, replay_layer
@@ -89,7 +93,7 @@ def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state
     assert ssm_backend.deltas[0, 0, 0, 1, 0].item() > torch.finfo(torch.float16).max
     assert torch.isfinite(ssm_backend.deltas[0, 0, :, :4]).all()
     assert ssm_backend.cursors[1].item() == 0
-    torch.testing.assert_close(ssm_backend.get_accepted_state(0)[0].float(), expected_state, atol=128, rtol=0.01)
+    torch.testing.assert_close(ssm_snapshot(ssm_backend, 0)[0].float(), expected_state, atol=128, rtol=0.01)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -107,7 +111,7 @@ def test_flush_export_updates_checkpoint_and_clears_history(dtype):
     backend.gates.fill_(-0.1)
     backend.betas.fill_(0.5)
     backend.cursors[0] = 2
-    expected = backend.get_accepted_state(0).clone()
+    expected = ssm_snapshot(backend, 0).clone()
     target = torch.empty_like(expected)
 
     backend.export_accepted_state([0], [target], flush=True)
@@ -474,7 +478,7 @@ def test_dynamic_verify_lengths_fill_history_before_folding(dtype, compute_mode,
 def test_snapshot_without_history_copies_active_state():
     state = torch.randn((2, 3, 2, 32, 64), device="cuda", dtype=torch.bfloat16)
     ssm_backend = ReplaySSMExecutor(state, 4, 3)
-    snapshot = ssm_backend.get_accepted_state(1)
+    snapshot = ssm_snapshot(ssm_backend, 1)
     torch.testing.assert_close(snapshot, state[:, 1], rtol=0, atol=0)
     assert ssm_backend.cursors[1].item() == 0
 
@@ -529,7 +533,7 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(runtime_start_arg
                 backend.raw_values[:, 1, :, i].float() - torch.einsum("lhkv,lhk->lhv", expected, key)
             )
             expected += key[..., None] * delta[..., None, :]
-        materialized = backend.get_accepted_state(1)
+        materialized = ssm_snapshot(backend, 1)
         torch.testing.assert_close(materialized, expected.to(dtype), rtol=state_rtol, atol=2e-5)
         state.save_bounded_att_runtime_to_pages([1], [8], kind, [0])
         state.write_to_pd_page(1, block, 0, 8, layout)

@@ -159,7 +159,7 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
         state = _single_replay_state(self)
         self._init_indices(self.backend.mtp_step, state.mtp_state_index)
         self.b_ssm_buffer_idx = self.b_conv_buffer_idx
-        begin_decode(state.runtime, self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
+        begin_decode(state, self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
 
     def _init_indices(self, mtp_step: int, mtp_index: torch.Tensor | None) -> None:
         infer = self.infer_state
@@ -230,7 +230,7 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
         raw_gate = params["raw_gate"].view(*shape, backend.tp_hidden_size)
         raw_beta = params["raw_beta"].view(*shape, backend.tp_num_heads)
         output, _ = replay(
-            state.runtime,
+            state,
             state.storage_layer(layer_num),
             q,
             k,

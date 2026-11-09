@@ -89,7 +89,15 @@ def rebuild_inputs(
             )
     _, _, hv, kd, vd = ssm_backend.state.shape
     state = torch.empty((1, batch + 1, hv, kd, vd), device=q.device, dtype=ssm_backend.state.dtype).normal_(0, 0.02)
-    scratch = type(ssm_backend)(
+    if ssm_backend.kda:
+        from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
+
+        history_cls = ReplayKDAState
+    else:
+        from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
+
+        history_cls = ReplayGDNState
+    scratch = history_cls.from_ssm(
         state,
         ssm_backend.capacity,
         ssm_backend.verify_width,
