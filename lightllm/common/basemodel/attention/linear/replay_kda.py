@@ -40,27 +40,6 @@ if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
-def _replay_state(att_state, layer_num: int) -> ReplayKDAState:
-    return att_state.infer_state.att_state_manager.get_state(
-        model_role=att_state.infer_state.att_state_role,
-        state_type_filter="kda",
-        logical_layer_id=layer_num,
-        state_class=ReplayKDAState,
-    )
-
-
-def _single_replay_state(att_state) -> ReplayKDAState:
-    role = att_state.infer_state.att_state_role
-    matches = [
-        state
-        for state in att_state.infer_state.att_state_manager.get_bounded_attention_states(role)
-        if isinstance(state, ReplayKDAState)
-    ]
-    if len(matches) != 1:
-        raise ValueError(f"expected one ReplayKDAState for {role}")
-    return matches[0]
-
-
 class ReplayKDALinearAttBackend(BaseAttBackend):
     """KDA replay 推理 backend。GLM-5-Next 在 replay 模式下只构造这一个类。"""
 
@@ -162,37 +141,6 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
         self.b_ssm_buffer_idx = self.b_conv_buffer_idx
         begin_decode(state, self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
 
-    def _init_indices(self, mtp_step: int, mtp_index: torch.Tensor | None) -> None:
-        infer = self.infer_state
-        if mtp_step == 0:
-            self.b_conv_buffer_idx = infer.b_req_idx
-            self.b1_mtp_cu_q_seq_len = None
-            self.b_num_accepted_tokens = None
-            return
-        if self.backend.uses_dynamic_spec_verify_layout():
-            cu, conv_idx, accepted = build_dynamic_mtp_linear_att_state_params(
-                b_req_idx=infer.b_req_idx,
-                b_mtp_index=infer.b_mtp_index,
-                req_to_mtp_state_index=mtp_index,
-                hold_req_id=infer.req_manager.HOLD_REQUEST_ID,
-            )
-            self.b1_mtp_cu_q_seq_len = cu
-            self.b_conv_buffer_idx = conv_idx
-            self.b_num_accepted_tokens = accepted
-            return
-        width = mtp_step + 1
-        batch_size = infer.batch_size
-        if batch_size % width:
-            raise ValueError(
-                "KDA replay decode requires batch_size divisible by mtp_step + 1, "
-                f"got batch_size={batch_size}, mtp_step={mtp_step}."
-            )
-        self.b1_mtp_cu_q_seq_len = torch.arange(
-            0, batch_size + 1, width, dtype=torch.int32, device=infer.b_req_idx.device
-        )
-        self.b_conv_buffer_idx = infer.b_req_idx.view(-1, width)[:, 0].contiguous()
-        self.b_num_accepted_tokens = mtp_index[self.b_conv_buffer_idx] + 1
-
     def decode_att(
         self,
         q: torch.Tensor,
@@ -246,3 +194,55 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
         if self.b1_mtp_cu_q_seq_len is None:
             state.close_history_after_layer(layer_num, self.b_conv_buffer_idx, fold=True)
         return output
+
+    def _init_indices(self, mtp_step: int, mtp_index: torch.Tensor | None) -> None:
+        infer = self.infer_state
+        if mtp_step == 0:
+            self.b_conv_buffer_idx = infer.b_req_idx
+            self.b1_mtp_cu_q_seq_len = None
+            self.b_num_accepted_tokens = None
+            return
+        if self.backend.uses_dynamic_spec_verify_layout():
+            cu, conv_idx, accepted = build_dynamic_mtp_linear_att_state_params(
+                b_req_idx=infer.b_req_idx,
+                b_mtp_index=infer.b_mtp_index,
+                req_to_mtp_state_index=mtp_index,
+                hold_req_id=infer.req_manager.HOLD_REQUEST_ID,
+            )
+            self.b1_mtp_cu_q_seq_len = cu
+            self.b_conv_buffer_idx = conv_idx
+            self.b_num_accepted_tokens = accepted
+            return
+        width = mtp_step + 1
+        batch_size = infer.batch_size
+        if batch_size % width:
+            raise ValueError(
+                "KDA replay decode requires batch_size divisible by mtp_step + 1, "
+                f"got batch_size={batch_size}, mtp_step={mtp_step}."
+            )
+        self.b1_mtp_cu_q_seq_len = torch.arange(
+            0, batch_size + 1, width, dtype=torch.int32, device=infer.b_req_idx.device
+        )
+        self.b_conv_buffer_idx = infer.b_req_idx.view(-1, width)[:, 0].contiguous()
+        self.b_num_accepted_tokens = mtp_index[self.b_conv_buffer_idx] + 1
+
+
+def _replay_state(att_state, layer_num: int) -> ReplayKDAState:
+    return att_state.infer_state.att_state_manager.get_state(
+        model_role=att_state.infer_state.att_state_role,
+        state_type_filter="kda",
+        logical_layer_id=layer_num,
+        state_class=ReplayKDAState,
+    )
+
+
+def _single_replay_state(att_state) -> ReplayKDAState:
+    role = att_state.infer_state.att_state_role
+    matches = [
+        state
+        for state in att_state.infer_state.att_state_manager.get_bounded_attention_states(role)
+        if isinstance(state, ReplayKDAState)
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"expected one ReplayKDAState for {role}")
+    return matches[0]

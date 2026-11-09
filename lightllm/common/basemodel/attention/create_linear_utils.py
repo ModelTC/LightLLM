@@ -15,16 +15,6 @@ linear_decode_att_backend_classes = {
 }
 
 
-def _linear_backend_class(native_path: str, backend_name: str):
-    """Native 仍按路径加载。replay 把 kernel 名字交给独立的 GDN replay 入口。"""
-
-    if getattr(get_env_start_args(), "ssm_state_mode", "native") != "replay":
-        return load_backend_class(native_path)
-    from lightllm.common.basemodel.attention.linear.replay_gdn import replay_gdn_backend_class
-
-    return replay_gdn_backend_class(backend_name)
-
-
 def get_qwen35_linear_prefill_att_backend_class(index=1, priority_list=("flashqla", "triton")):
     args = get_env_start_args()
     backend_str = _get_backend_str(args.llm_prefill_att_backend, index)
@@ -61,6 +51,16 @@ def get_qwen35_linear_decode_att_backend_class(index=1, priority_list=("triton",
 
     logger.warning("No linear decode attention backend validation succeeded, falling back to Triton.")
     return _linear_backend_class("linear.triton:TritonLinearAttBackend", "triton")
+
+
+def _linear_backend_class(native_path: str, backend_name: str):
+    """Native 仍按路径加载。replay 把 kernel 名字交给独立的 GDN replay 入口。"""
+
+    if getattr(get_env_start_args(), "ssm_state_mode", "native") != "replay":
+        return load_backend_class(native_path)
+    from lightllm.common.basemodel.attention.linear.replay_gdn import replay_gdn_backend_class
+
+    return replay_gdn_backend_class(backend_name)
 
 
 def _get_backend_str(backend_args, index):

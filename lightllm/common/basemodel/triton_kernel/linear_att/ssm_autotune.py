@@ -174,16 +174,6 @@ def select_config(
     return run_config
 
 
-def _replay_config(config: dict | None) -> dict[str, int]:
-    if not config:
-        return dict(_DEFAULT_REPLAY_CONFIG)
-    return {
-        "BV": int(config["BV"]),
-        "num_warps": int(config["num_warps"]),
-        "num_stages": int(config.get("num_stages", 3)),
-    }
-
-
 def resolve_run_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens) -> dict[str, int]:
     """返回当前 batch 的固定或已调优 SSM kernel 配置。"""
     if ssm_backend._config_is_fixed and ssm_backend.run_config is not None:
@@ -199,3 +189,13 @@ def resolve_run_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens
     ssm_backend.batch_configs[key] = config
     logger.info(f"SSM {mode} update-cycle config: {config}, warmup batch: {key[1]}")
     return config
+
+
+def _replay_config(config: dict | None) -> dict[str, int]:
+    if not config:
+        return dict(_DEFAULT_REPLAY_CONFIG)
+    return {
+        "BV": int(config["BV"]),
+        "num_warps": int(config["num_warps"]),
+        "num_stages": int(config.get("num_stages", 3)),
+    }

@@ -59,12 +59,6 @@ class AttentionStateManager:
         self._dp_shared_operator = DPSharedOperator(self)
         self._pd_operator = PDOperator(self)
 
-    def _reset_operators(self) -> None:
-        """让浅拷贝后的 Operator 指向新的资源管理器副本。"""
-        self._cpu_cache_operator = CpuCacheOperator(self)
-        self._dp_shared_operator = DPSharedOperator(self)
-        self._pd_operator = PDOperator(self)
-
     def get_cpu_cache_operator(self) -> CpuCacheOperator:
         """返回当前资源管理器唯一的 CPU cache 操作对象。"""
         return self._cpu_cache_operator
@@ -411,6 +405,12 @@ class AttentionStateManager:
     # ========================================================================
     # 七、私有辅助实现
     # ========================================================================
+
+    def _reset_operators(self) -> None:
+        """让浅拷贝后的 Operator 指向新的资源管理器副本。"""
+        self._cpu_cache_operator = CpuCacheOperator(self)
+        self._dp_shared_operator = DPSharedOperator(self)
+        self._pd_operator = PDOperator(self)
 
     # 私有实现：缓存创建完成后的成员集合，模型逐层计算直接访问具体 State 成员。
     @lru_cache(maxsize=None)

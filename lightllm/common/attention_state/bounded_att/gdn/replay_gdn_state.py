@@ -34,38 +34,12 @@ from .gdn_pages_pool import GDNPagesPool
 logger = init_logger(__name__)
 
 
-class _AcceptedTensors(NamedTuple):
-    conv: torch.Tensor
-    ssm: torch.Tensor
-
-
 class ReplayGDNState(BoundedAttentionState):
     """GDN replay 运行态。Conv、单槽 SSM 和 history 都在本类，不沿用 native 的 MTP 槽。"""
 
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================
-
-    _run_config: dict[str, int] | None = None
-
-    @property
-    def run_config(self) -> dict[str, int] | None:
-        """返回物化和 autotune 使用的 kernel 配置。"""
-
-        return self._run_config
-
-    @run_config.setter
-    def run_config(self, config: dict | None) -> None:
-        """保存一份与调用方脱开的 kernel 配置。"""
-
-        if config is None:
-            self._run_config = None
-            return
-        self._run_config = {
-            "BV": int(config["BV"]),
-            "num_warps": int(config["num_warps"]),
-            "num_stages": int(config.get("num_stages", 3)),
-        }
 
     def __init__(
         self,
@@ -636,6 +610,27 @@ class ReplayGDNState(BoundedAttentionState):
                 self.ssm_state[:, req].copy_(snap)
                 self.clear_history(req)
 
+    _run_config: dict[str, int] | None = None
+
+    @property
+    def run_config(self) -> dict[str, int] | None:
+        """返回物化和 autotune 使用的 Triton 配置，不是 SSM 布局。"""
+
+        return self._run_config
+
+    @run_config.setter
+    def run_config(self, config: dict | None) -> None:
+        """保存一份与调用方脱开的 kernel 配置。"""
+
+        if config is None:
+            self._run_config = None
+            return
+        self._run_config = {
+            "BV": int(config["BV"]),
+            "num_warps": int(config["num_warps"]),
+            "num_stages": int(config.get("num_stages", 3)),
+        }
+
     # ========================================================================
     # 七、私有辅助实现
     # ========================================================================
@@ -861,3 +856,8 @@ def _bind_history(
     owner.raw_keys = torch.empty(key_shape, dtype=activation_dtype, device=ssm.device)
     owner.raw_values = torch.empty((layers, slots, hv, 2 * capacity, v), dtype=activation_dtype, device=ssm.device)
     owner.betas = torch.empty((layers, slots, hv, 2 * capacity), dtype=torch.float32, device=ssm.device)
+
+
+class _AcceptedTensors(NamedTuple):
+    conv: torch.Tensor
+    ssm: torch.Tensor

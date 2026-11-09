@@ -36,8 +36,13 @@ class LinearAttBackend(BaseAttBackend, ABC):
     def get_prefill_kernel(self):
         pass
 
-    def _init_linear_layer_metadata(self, network_config, tp_world_size):
+    def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "LinearAttPrefillAttState":
+        return LinearAttPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
+    def create_att_decode_state(self, infer_state: "InferStateInfo") -> "LinearAttDecodeAttState":
+        return LinearAttDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
+
+    def _init_linear_layer_metadata(self, network_config, tp_world_size):
         self.mtp_step = get_env_start_args().mtp_step
 
         # Linear attention specific dimensions
@@ -100,16 +105,9 @@ class LinearAttBackend(BaseAttBackend, ABC):
             value = value.view(1, seq_len, self.tp_num_v_heads, self.head_v_dim)
             return query, key, value
 
-    def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "LinearAttPrefillAttState":
-        return LinearAttPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
-
-    def create_att_decode_state(self, infer_state: "InferStateInfo") -> "LinearAttDecodeAttState":
-        return LinearAttDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
-
 
 @dataclasses.dataclass
 class LinearAttPrefillAttState(BasePrefillAttState):
-
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
@@ -207,7 +205,6 @@ class LinearAttPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class LinearAttDecodeAttState(BaseDecodeAttState):
-
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
@@ -232,54 +229,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             self._init_dynamic_mtp_decode_state(draft_step + 1, req_to_mtp_state_index=state.mtp_state_index)
         else:
             self._init_fixed_mtp_decode_state(draft_step, req_to_mtp_state_index=state.mtp_state_index)
-
-    def _init_normal_decode_state(self):
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx
-
-    def _init_dynamic_mtp_decode_state(self, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
-        (
-            self.b1_mtp_cu_q_seq_len,
-            self.b_conv_buffer_idx,
-            self.b_num_accepted_tokens,
-        ) = build_dynamic_mtp_linear_att_state_params(
-            b_req_idx=self.infer_state.b_req_idx,
-            b_mtp_index=self.infer_state.b_mtp_index,
-            req_to_mtp_state_index=req_to_mtp_state_index,
-            hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
-        )
-        self._init_mtp_ssm_buffer_idx(mtp_size)
-
-    def _init_fixed_mtp_decode_state(self, draft_step: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
-        mtp_size = draft_step + 1
-        batch_size = self.infer_state.batch_size
-        assert batch_size % mtp_size == 0, (
-            "GDN fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
-            f"got batch_size={batch_size}, draft_step={draft_step}."
-        )
-
-        att_batch_size = batch_size // mtp_size
-        self.b1_mtp_cu_q_seq_len = torch.arange(
-            0,
-            batch_size + 1,
-            mtp_size,
-            dtype=torch.int32,
-            device=self.infer_state.b_req_idx.device,
-        )
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        self.b_num_accepted_tokens = req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
-        self._init_mtp_ssm_buffer_idx(mtp_size)
-
-    def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
-        att_batch_size = self.b_conv_buffer_idx.shape[0]
-        # Each request owns mtp_size consecutive recurrent-state slots.
-        b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
-        state_offsets = torch.arange(
-            mtp_size,
-            device=self.infer_state.b_req_idx.device,
-            dtype=self.infer_state.b_req_idx.dtype,
-        ).view(1, mtp_size)
-        self.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets  # [att_batch_size, mtp_size]
 
     def decode_att(
         self,
@@ -331,6 +280,54 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
                 layer_weight,
             )
         return core_attn_out, z
+
+    def _init_normal_decode_state(self):
+        self.b_conv_buffer_idx = self.infer_state.b_req_idx
+        self.b_ssm_buffer_idx = self.infer_state.b_req_idx
+
+    def _init_dynamic_mtp_decode_state(self, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
+        (
+            self.b1_mtp_cu_q_seq_len,
+            self.b_conv_buffer_idx,
+            self.b_num_accepted_tokens,
+        ) = build_dynamic_mtp_linear_att_state_params(
+            b_req_idx=self.infer_state.b_req_idx,
+            b_mtp_index=self.infer_state.b_mtp_index,
+            req_to_mtp_state_index=req_to_mtp_state_index,
+            hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
+        )
+        self._init_mtp_ssm_buffer_idx(mtp_size)
+
+    def _init_fixed_mtp_decode_state(self, draft_step: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
+        mtp_size = draft_step + 1
+        batch_size = self.infer_state.batch_size
+        assert batch_size % mtp_size == 0, (
+            "GDN fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
+            f"got batch_size={batch_size}, draft_step={draft_step}."
+        )
+
+        att_batch_size = batch_size // mtp_size
+        self.b1_mtp_cu_q_seq_len = torch.arange(
+            0,
+            batch_size + 1,
+            mtp_size,
+            dtype=torch.int32,
+            device=self.infer_state.b_req_idx.device,
+        )
+        self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
+        self.b_num_accepted_tokens = req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
+        self._init_mtp_ssm_buffer_idx(mtp_size)
+
+    def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
+        att_batch_size = self.b_conv_buffer_idx.shape[0]
+        # Each request owns mtp_size consecutive recurrent-state slots.
+        b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
+        state_offsets = torch.arange(
+            mtp_size,
+            device=self.infer_state.b_req_idx.device,
+            dtype=self.infer_state.b_req_idx.dtype,
+        ).view(1, mtp_size)
+        self.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets  # [att_batch_size, mtp_size]
 
     def _gdn_decode_kernel(
         self,

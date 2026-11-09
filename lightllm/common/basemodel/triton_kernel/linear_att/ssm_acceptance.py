@@ -5,28 +5,6 @@ import triton
 import triton.language as tl
 
 
-@triton.jit(do_not_specialize=["N"])
-def _commit_prefix(
-    Indices,
-    Reqs,
-    Lengths,
-    Cursors,
-    N,
-    HOLD: tl.constexpr,
-    REQ_STRIDE: tl.constexpr,
-    LENGTH_STRIDE: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    req = tl.load(Reqs + row * REQ_STRIDE, row < N, 0)
-    length = tl.load(Lengths + row * LENGTH_STRIDE, row < N, 0)
-    tl.store(Indices + req, length - 1, row < N)
-    if Cursors is not None:
-        valid = (row < N) & (req != HOLD)
-        cursor = tl.load(Cursors + req, valid, 0)
-        tl.store(Cursors + req, cursor + length, valid)
-
-
 def commit_ssm_prefix(
     indices: torch.Tensor,
     reqs: torch.Tensor,
@@ -53,3 +31,25 @@ def commit_ssm_prefix(
             256,
             num_warps=4,
         )
+
+
+@triton.jit(do_not_specialize=["N"])
+def _commit_prefix(
+    Indices,
+    Reqs,
+    Lengths,
+    Cursors,
+    N,
+    HOLD: tl.constexpr,
+    REQ_STRIDE: tl.constexpr,
+    LENGTH_STRIDE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    req = tl.load(Reqs + row * REQ_STRIDE, row < N, 0)
+    length = tl.load(Lengths + row * LENGTH_STRIDE, row < N, 0)
+    tl.store(Indices + req, length - 1, row < N)
+    if Cursors is not None:
+        valid = (row < N) & (req != HOLD)
+        cursor = tl.load(Cursors + req, valid, 0)
+        tl.store(Cursors + req, cursor + length, valid)

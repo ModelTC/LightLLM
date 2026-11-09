@@ -157,54 +157,6 @@ class KDADecodeAttState(BaseDecodeAttState):
         else:
             self._init_fixed_mtp_decode_state(mtp_step, req_to_mtp_state_index=state.mtp_state_index)
 
-    def _init_normal_decode_state(self):
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx
-
-    def _init_dynamic_mtp_decode_state(self, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
-        (
-            self.b1_mtp_cu_q_seq_len,
-            self.b_conv_buffer_idx,
-            self.b_num_accepted_tokens,
-        ) = build_dynamic_mtp_linear_att_state_params(
-            b_req_idx=self.infer_state.b_req_idx,
-            b_mtp_index=self.infer_state.b_mtp_index,
-            req_to_mtp_state_index=req_to_mtp_state_index,
-            hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
-        )
-        self._init_mtp_ssm_buffer_idx(mtp_size)
-
-    def _init_fixed_mtp_decode_state(self, mtp_step: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
-        mtp_size = mtp_step + 1
-        batch_size = self.infer_state.batch_size
-        assert batch_size % mtp_size == 0, (
-            "KDA fixed-layout decode requires batch_size to be divisible by mtp_step + 1, "
-            f"got batch_size={batch_size}, mtp_step={mtp_step}."
-        )
-
-        att_batch_size = batch_size // mtp_size
-        self.b1_mtp_cu_q_seq_len = torch.arange(
-            0,
-            batch_size + 1,
-            mtp_size,
-            dtype=torch.int32,
-            device=self.infer_state.b_req_idx.device,
-        )
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        self.b_num_accepted_tokens = req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
-        self._init_mtp_ssm_buffer_idx(mtp_size)
-
-    def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
-        att_batch_size = self.b_conv_buffer_idx.shape[0]
-        # Each request owns mtp_size consecutive recurrent-state slots.
-        b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
-        state_offsets = torch.arange(
-            mtp_size,
-            device=self.infer_state.b_req_idx.device,
-            dtype=self.infer_state.b_req_idx.dtype,
-        ).view(1, mtp_size)
-        self.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets  # [att_batch_size, mtp_size]
-
     def decode_att(
         self,
         q: torch.Tensor,
@@ -262,3 +214,51 @@ class KDADecodeAttState(BaseDecodeAttState):
             num_accepted_tokens=self.b_num_accepted_tokens,
         )
         return output
+
+    def _init_normal_decode_state(self):
+        self.b_conv_buffer_idx = self.infer_state.b_req_idx
+        self.b_ssm_buffer_idx = self.infer_state.b_req_idx
+
+    def _init_dynamic_mtp_decode_state(self, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
+        (
+            self.b1_mtp_cu_q_seq_len,
+            self.b_conv_buffer_idx,
+            self.b_num_accepted_tokens,
+        ) = build_dynamic_mtp_linear_att_state_params(
+            b_req_idx=self.infer_state.b_req_idx,
+            b_mtp_index=self.infer_state.b_mtp_index,
+            req_to_mtp_state_index=req_to_mtp_state_index,
+            hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
+        )
+        self._init_mtp_ssm_buffer_idx(mtp_size)
+
+    def _init_fixed_mtp_decode_state(self, mtp_step: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
+        mtp_size = mtp_step + 1
+        batch_size = self.infer_state.batch_size
+        assert batch_size % mtp_size == 0, (
+            "KDA fixed-layout decode requires batch_size to be divisible by mtp_step + 1, "
+            f"got batch_size={batch_size}, mtp_step={mtp_step}."
+        )
+
+        att_batch_size = batch_size // mtp_size
+        self.b1_mtp_cu_q_seq_len = torch.arange(
+            0,
+            batch_size + 1,
+            mtp_size,
+            dtype=torch.int32,
+            device=self.infer_state.b_req_idx.device,
+        )
+        self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
+        self.b_num_accepted_tokens = req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
+        self._init_mtp_ssm_buffer_idx(mtp_size)
+
+    def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
+        att_batch_size = self.b_conv_buffer_idx.shape[0]
+        # Each request owns mtp_size consecutive recurrent-state slots.
+        b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
+        state_offsets = torch.arange(
+            mtp_size,
+            device=self.infer_state.b_req_idx.device,
+            dtype=self.infer_state.b_req_idx.dtype,
+        ).view(1, mtp_size)
+        self.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets  # [att_batch_size, mtp_size]
