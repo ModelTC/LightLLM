@@ -14,6 +14,37 @@ from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as 
 from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
 
 
+@pytest.mark.parametrize("supports_out", [False, True])
+@pytest.mark.parametrize("strided", [False, True])
+def test_flashmla_output_api_compatibility(monkeypatch, supports_out, strided):
+    backend = attention.DeepseekV4FlashMlaFp8SparseAttBackend.__new__(attention.DeepseekV4FlashMlaFp8SparseAttBackend)
+    backend.swa_config = SimpleNamespace(get_attention_view=lambda *, packed_kv: packed_kv)
+    q = torch.randn(2, 4, 8)
+    storage = torch.full((2, 4, 16 if strided else 8), float("nan"))
+    out = storage[..., :8]
+    expected = q * 2
+
+    def kernel(**kwargs):
+        assert ("out" in kwargs) == supports_out
+        if supports_out:
+            assert kwargs["out"].data_ptr() == out.data_ptr()
+            assert kwargs["out"].stride() == out.unsqueeze(1).stride()
+            result = kwargs["out"].copy_(expected.unsqueeze(1))
+        else:
+            result = expected.unsqueeze(1).clone()
+        return result, None
+
+    monkeypatch.setattr(attention, "_FLASHMLA_SUPPORTS_OUT", supports_out)
+    monkeypatch.setattr(attention.flashmla, "flash_mla_with_kvcache", kernel)
+    params = dict(head_dim_v=8, softmax_scale=0.5, swa_indices=None, swa_lengths=None, attn_sink=None)
+    actual = backend._flashmla_att(q, (torch.empty(0), None), params, None, out)
+    assert actual.data_ptr() == out.data_ptr()
+    assert actual.stride() == out.stride()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    if strided:
+        assert storage[..., 8:].isnan().all()
+
+
 @pytest.fixture(autouse=True)
 def _tp_env(monkeypatch):
     monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", "1")
@@ -166,7 +197,7 @@ def test_prefill_matches_reference_and_preserves_out(monkeypatch, heads, ratio, 
     kernel = attention.flashmla.flash_mla_with_kvcache
 
     def flashmla_with_out(**kwargs):
-        assert kwargs["out"] is not None
+        assert ("out" in kwargs) == attention._FLASHMLA_SUPPORTS_OUT
         return kernel(**kwargs)
 
     monkeypatch.setattr(attention.flashmla, "flash_mla_with_kvcache", flashmla_with_out)

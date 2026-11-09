@@ -1,4 +1,5 @@
 import dataclasses
+import inspect
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
@@ -7,6 +8,8 @@ import flash_mla as flashmla
 
 
 from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
+
+_FLASHMLA_SUPPORTS_OUT = "out" in inspect.signature(flashmla.flash_mla_with_kvcache).parameters
 
 if TYPE_CHECKING:
     from flash_mla.flash_mla_interface import FlashMLASchedMeta
@@ -120,9 +123,13 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
             extra_k_cache=compressed_cache,
             extra_indices_in_kvcache=nsa_dict.get("extra_indices"),
             extra_topk_length=nsa_dict.get("extra_lengths"),
-            out=out.unsqueeze(1),
+            **({"out": out.unsqueeze(1)} if _FLASHMLA_SUPPORTS_OUT else {}),
         )
-        return padded_out[:, 0]
+        if not _FLASHMLA_SUPPORTS_OUT:
+            # Older FlashMLA releases allocate their output internally. Keep the
+            # caller's buffer and strides, including during CUDA graph replay.
+            out.copy_(padded_out[:, 0])
+        return out
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "_PrefillAttState":
         return _PrefillAttState(backend=self)

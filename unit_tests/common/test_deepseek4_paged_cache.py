@@ -799,8 +799,11 @@ def test_pd_transport_completion_covers_peer_gpu_state(cache, length):
 @pytest.mark.parametrize("cache", [(256, 0), (256, 1), (256, 5)], indirect=True)
 def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, layer, is_indexer, length):
     from lightllm.models.deepseek_v4.layer_infer.compressor import fused_compress
+    from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 
     manager, requests = cache
+    workspace = DeepseekV4Workspace(SimpleNamespace(tp_world_size_=1, batch_max_tokens=length))
+    workspace.c128_compress_scratch = torch.empty((1, length, 512), dtype=torch.float32, device="cuda")
     source, src = _reserve(manager, requests, length)
     destination, dst = _reserve(manager, requests, length)
     _prepare_swa(requests, source, 0, length)
@@ -814,6 +817,8 @@ def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, l
         positions = torch.arange(start, end, dtype=torch.int32, device="cuda")
         width = end - start
         state = SimpleNamespace(
+            dsv4_workspace=workspace,
+            microbatch_index=0,
             mem_manager=manager,
             req_manager=requests,
             swa_state=requests.swa_state,

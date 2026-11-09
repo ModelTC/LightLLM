@@ -3,15 +3,18 @@ import time
 from multiprocessing import Process
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AtomicLockItem
 
+pytestmark = pytest.mark.usefixtures("service_identity")
+
 
 @pytest.fixture
-def setup_shared_memory():
+def setup_shared_memory(service_identity):
     lock_name = "test_array_lock"
     lock_num = 2
     # Create an instance of AtomicShmArrayLock
     lock = AtomicShmArrayLock(lock_name, lock_num)
     yield lock
     lock.shm.unlink()  # Clean up the shared memory after tests
+    lock.shm.close()
 
 
 def test_initialization(setup_shared_memory):

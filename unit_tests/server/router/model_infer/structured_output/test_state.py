@@ -48,7 +48,9 @@ def test_context_initializes_state_factory_with_resolved_eos_at_startup(monkeypa
         patch.object(xgr, "GrammarCompiler", side_effect=AssertionError("Inference must not compile")),
     ):
         context.register(
-            backend=SimpleNamespace(dp_rank_in_node=0),
+            backend=SimpleNamespace(
+                dp_rank_in_node=0, model=SimpleNamespace(att_state_manager=None), is_hybrid_att_model=False
+            ),
             req_manager=SimpleNamespace(req_sampling_params_manager=None),
             radix_cache=None,
             shm_req_manager=None,
@@ -163,7 +165,11 @@ def test_request_admission_loads_shared_artifacts_without_compilation(
         )
         requests.append((req_id, index, SimpleNamespace(to_dict=lambda: {}), owner_dp_rank))
     monkeypatch.setattr(compiler, "_compile", lambda *args: pytest.fail("Inference must not compile"))
-    monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: SimpleNamespace(diverse_mode=False, mtp_step=0))
+    monkeypatch.setattr(
+        infer_batch,
+        "get_env_start_args",
+        lambda: SimpleNamespace(diverse_mode=False, mtp_step=0, disable_chunked_mm_input=False),
+    )
     context = infer_batch.InferenceContext(
         req_manager=SimpleNamespace(
             alloc=count().__next__,

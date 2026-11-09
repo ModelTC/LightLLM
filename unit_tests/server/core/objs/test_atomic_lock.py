@@ -6,13 +6,16 @@ from lightllm.server.core.objs.atomic_lock import AtomicShmLock
 
 logger = init_logger(__name__)
 
+pytestmark = pytest.mark.usefixtures("service_identity")
 
-@pytest.fixture(scope="module")
-def setup_shared_memory():
+
+@pytest.fixture
+def setup_shared_memory(service_identity):
     lock_name = "test_lock"
     lock = AtomicShmLock(lock_name)
     yield lock
     lock.shm.unlink()  # Clean up after tests
+    lock.shm.close()
 
 
 def test_lock_acquisition(setup_shared_memory):
@@ -25,9 +28,8 @@ def test_lock_acquisition(setup_shared_memory):
     assert lock.shm.buf.cast("i")[0] == 0  # Lock should be released
 
 
-def test_multiple_processes_locking():
-    lock_name = "test_lock"
-    lock = AtomicShmLock(lock_name)
+def test_multiple_processes_locking(setup_shared_memory):
+    lock = setup_shared_memory
 
     # Function to be run in a separate process
     def acquire_lock():

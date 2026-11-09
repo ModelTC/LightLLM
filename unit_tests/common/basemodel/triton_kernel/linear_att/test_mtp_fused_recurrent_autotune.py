@@ -117,6 +117,7 @@ def reference(inputs):
             h += k[token, :, :, None] * delta[:, None, :]
             output[0, token] = (h * q[token, :, :, None]).sum(1)
             state[inputs["ssm_state_write_indices"][row, token - start]] = h.to(state.dtype)
+            h = h.to(state.dtype).float()
     return output, state
 
 

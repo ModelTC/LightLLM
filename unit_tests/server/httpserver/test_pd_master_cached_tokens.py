@@ -609,7 +609,8 @@ def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch
 @pytest.mark.parametrize(
     "exit_mode, token_count", [("finish", 2), ("close", 1), ("error", 1), ("empty", 0), ("empty_prompt", 2)]
 )
-def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, token_count):
+def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, capture_lightllm_logs, exit_mode, token_count):
+    capture_lightllm_logs("lightllm.server.httpserver_for_pd_master.manager")
     import math
     import time
     from unittest.mock import MagicMock
@@ -671,7 +672,8 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, 
 
 
 @pytest.mark.parametrize("late_status", [FinishStatus.NO_FINISH, FinishStatus.FINISHED_PD_DECODE_CAPACITY])
-def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_status):
+def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, capture_lightllm_logs, late_status):
+    capture_lightllm_logs("lightllm.server.httpserver_for_pd_master.manager")
     import time
     from unittest.mock import AsyncMock, MagicMock
 

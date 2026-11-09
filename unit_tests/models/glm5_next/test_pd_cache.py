@@ -285,7 +285,8 @@ def test_pd_kv_and_runtime_state_roundtrip(
     assert torch.equal(*outputs)
 
 
-def test_pd_page_capacity_includes_tail_without_resizing(make_mems, monkeypatch, caplog):
+def test_pd_page_capacity_includes_tail_without_resizing(make_mems, monkeypatch, caplog, capture_lightllm_logs):
+    capture_lightllm_logs("lightllm.common.attention_state.pd_operator")
     monkeypatch.setattr(get_env_start_args(), "pd_kv_page_size", 8)
     mem = make_mems(1)[0]
     full_bytes = max(
