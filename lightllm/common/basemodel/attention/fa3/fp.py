@@ -3,6 +3,7 @@ import weakref
 import torch
 import triton
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from typing import Optional, TYPE_CHECKING
 from lightllm.utils.envs_utils import enable_env_vars
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache, flash_attn_with_kvcache_autotune
 from lightllm.common.basemodel.triton_kernel.fa3_utils import (

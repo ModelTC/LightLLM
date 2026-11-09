@@ -30,7 +30,7 @@ from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
 from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
-from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock
+from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -344,6 +344,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
         # 用于等待 pd_master 下发的交换信息
         pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
+
         start_time = time.time()
         # 在请求登记、编码和 PD 握手前获取语法；缓存未命中时先完成编译，避免后续流程等待或校验失败。
         compiled_grammar = await sampling_params.get_compiled_grammar(self.output_grammar_compiler)
@@ -755,6 +756,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
+
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
                 self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
@@ -797,6 +799,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
         req_status: "ReqStatus",
         request: Request,
     ):
+
         event = req_status.event
         unfinished_count = sampling_params.best_of
         out_token_counter = 0

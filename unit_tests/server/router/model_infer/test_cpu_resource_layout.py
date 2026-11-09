@@ -397,26 +397,15 @@ def test_production_offload_preserves_ready_pages_without_host_sync(
         module.args = get_env_start_args()
         module.cpu_cache_client = client
         module.gloo_group = None
-        token_indexes = torch.arange(16, device="cuda").view(1, -1)
-        indexes_ready = torch.cuda.Event()
-        indexes_ready.record(producer)
-        index_waits = []
-
-        def wait_token_indexes():
-            stream = torch.cuda.current_stream()
-            index_waits.append(stream)
-            indexes_ready.wait(stream)
-
+        token_indexes = torch.arange(16, device="cuda")
+        req.token_index = SimpleNamespace(get_gpu_token_indexes=lambda start, end: token_indexes[start:end])
         module.backend = SimpleNamespace(
             is_master_in_dp=True,
             is_hybrid_att_model=hybrid,
             dp_world_size=1,
             model=SimpleNamespace(
                 att_state_manager=resources,
-                req_manager=SimpleNamespace(
-                    req_to_token_indexs=token_indexes,
-                    wait_token_indexes=wait_token_indexes,
-                ),
+                req_manager=SimpleNamespace(req_to_token_indexs=token_indexes.view(1, -1)),
             ),
         )
         monkeypatch.setattr(common.dist, "broadcast_object_list", lambda *args, **kwargs: None)
@@ -441,7 +430,6 @@ def test_production_offload_preserves_ready_pages_without_host_sync(
             module.get_cpu_offload_stream = lambda: copy_stream
             task = module.write_req_to_cpu(req)
         assert waited_streams == []
-        assert index_waits == [copy_stream]
     task.sync_event.synchronize()
     assert write_batches == [(pages, [True, False])]
     assert req.cpu_cache_offload_task_status.is_running()

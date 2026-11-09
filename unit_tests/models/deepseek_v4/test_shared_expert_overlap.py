@@ -1,7 +1,6 @@
 """Shared-expert overlap on the EP prefill and decode paths."""
 
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 import pytest
 import torch
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
@@ -43,14 +42,6 @@ def _moe_inputs():
     return hidden, topk_weights, topk_idx, w1, w2
 
 
-def _mock_deepep_capture(monkeypatch, events):
-    # These CPU scheduling tests mock communication and GEMM, so loading the
-    # native DeepEP/NCCL extension would not exercise any additional behavior.
-    module = ModuleType("deep_ep")
-    module.ElasticBuffer = SimpleNamespace(capture=lambda: events.append("event") or "event")
-    monkeypatch.setitem(sys.modules, "deep_ep", module)
-
-
 def test_ep_ffn_passes_the_shared_expert_callback(monkeypatch):
     monkeypatch.setattr(layer_module, "use_sm100_mega_moe", lambda method: False)
     layer, _ids = _layer(True)
@@ -74,7 +65,9 @@ def test_ep_ffn_passes_the_shared_expert_callback(monkeypatch):
 def test_decode_runs_shared_expert_between_combine_send_and_recv(monkeypatch):
     events = []
     hidden, topk_weights, topk_idx, w1, w2 = _moe_inputs()
-    _mock_deepep_capture(monkeypatch, events)
+    import deep_ep
+
+    monkeypatch.setattr(deep_ep.ElasticBuffer, "capture", staticmethod(lambda: events.append("event") or "event"))
     monkeypatch.setattr(sync, "per_token_group_quant_fp8", lambda *args, **kwargs: (hidden, hidden))
     monkeypatch.setattr(sync, "get_mk_alignment_for_contiguous_layout", lambda: 128)
     monkeypatch.setattr(sync, "get_deepep_num_max_dispatch_tokens_per_rank_decode", lambda: 16)
@@ -131,7 +124,9 @@ def test_decode_runs_shared_expert_between_combine_send_and_recv(monkeypatch):
 def test_prefill_overlaps_shared_expert_with_combine(monkeypatch):
     events = []
     hidden, topk_weights, topk_idx, w1, w2 = _moe_inputs()
-    _mock_deepep_capture(monkeypatch, events)
+    import deep_ep
+
+    monkeypatch.setattr(deep_ep.ElasticBuffer, "capture", staticmethod(lambda: events.append("event") or "event"))
     monkeypatch.setattr(sync, "get_deepep_num_max_dispatch_tokens_per_rank_prefill", lambda: 16)
     monkeypatch.setattr(sync, "per_token_group_quant_fp8", lambda *args, **kwargs: (hidden, hidden))
     monkeypatch.setattr(sync, "get_mk_alignment_for_contiguous_layout", lambda: 128)

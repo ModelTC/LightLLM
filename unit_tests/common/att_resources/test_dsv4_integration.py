@@ -116,12 +116,9 @@ def test_backend_reads_owned_state_views(cache):
 @pytest.mark.parametrize("ratio,layer,is_indexer", [(4, 0, False), (4, 0, True), (128, 1, False)])
 def test_real_compressor_continues_after_checkpoint_restore(cache, ratio, layer, is_indexer):
     from lightllm.models.deepseek_v4.layer_infer.compressor import fused_compress
-    from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 
     manager, window, _ = cache
     length, boundary = 1024, 512
-    workspace = DeepseekV4Workspace(SimpleNamespace(tp_world_size_=1, batch_max_tokens=length))
-    workspace.c128_compress_scratch = torch.empty((1, length, 512), dtype=torch.float32, device="cuda")
     head_dim = 128 if is_indexer else 512
     scores = torch.randn((length, head_dim * (4 if ratio == 4 else 2)), device="cuda")
     cos = torch.ones((length, 32), device="cuda")
@@ -130,7 +127,6 @@ def test_real_compressor_continues_after_checkpoint_restore(cache, ratio, layer,
 
     def compress(req_idx, start, end, decode=False):
         infer = make_infer(manager, window)
-        infer.dsv4_workspace = workspace
         positions = torch.arange(start, end, dtype=torch.int32, device="cuda")
         width = end - start
         infer.mem_index, infer.position_ids, infer.is_prefill = slots[req_idx][start:end], positions, not decode
