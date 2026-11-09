@@ -78,7 +78,7 @@ class QSAExecutionState:
             batch.query_rows,
             batch.visible_lengths,
             batch.slot_table,
-            query_chunk_size=64 if decode else 1024,
+            query_chunk_size=max(64, query.shape[0]) if decode else 1024,
         )
 
         splits = attention_splits
