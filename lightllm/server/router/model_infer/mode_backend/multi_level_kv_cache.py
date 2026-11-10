@@ -188,7 +188,8 @@ class MultiLevelKvCacheModule(object):
         # 阶段一：先分配新增 KV，再按 [页起点, 持有长度) 一次取 GPU 索引。
         # 该区间覆盖首个 CPU 页里已经命中的前缀和刚分配的页；getter 会补齐上传并让当前流等待。
         assert 0 <= start_token_len <= req.cur_kv_len, "invalid CPU page start"
-        assert req.alloc_kv_mem(req.kv_cache_alloc_need(page_lengths[-1])) is not None
+        mem_indexes = req.alloc_kv_mem(req.kv_cache_alloc_need(page_lengths[-1]))
+        assert mem_indexes is not None
         token_indices = req.token_index.get_gpu_token_indexes(start_token_len, req.hold_kv_len)
         assert token_indices.numel() == page_lengths[-1] - start_token_len
 

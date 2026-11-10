@@ -113,7 +113,8 @@ class PinnedH2DBatchCopier:
             return False
 
         try:
-            (error,) = batch_copy(dst_ptrs, src_ptrs, byte_sizes, len(byte_sizes), [attrs], [0], 1, stream.cuda_stream)
+            result = batch_copy(dst_ptrs, src_ptrs, byte_sizes, len(byte_sizes), [attrs], [0], 1, stream.cuda_stream)
+            error = result[0]
             if error != cuda_runtime.cudaError_t.cudaSuccess:
                 raise RuntimeError(f"cudaMemcpyBatchAsync failed: {error.name}")
         except Exception as error:
