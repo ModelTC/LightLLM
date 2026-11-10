@@ -1,6 +1,7 @@
 import os
 import json
 import ctypes
+import math
 from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
 from lightllm.server.httpserver.req_id_generator_server import MAX_BEST_OF
@@ -261,6 +262,8 @@ class ExponentialDecayLengthPenalty(ctypes.Structure):
         self.item0 = inputs[0]
         assert self.item0 >= 0, "ExponentialDecayLengthPenalty item0 must be int >= 0"
         self.item1 = inputs[1]
+        if not math.isfinite(self.item1):
+            raise ValueError("exponential_decay_length_penalty[1] must be finite")
         assert self.item1 >= 1.0, "ExponentialDecayLengthPenalty item1 must be a float >= 1.0"
         return
 
@@ -454,6 +457,9 @@ class SamplingParams(ctypes.Structure):
             pass
 
     def verify(self):
+        for name in ("presence_penalty", "frequency_penalty", "repetition_penalty", "temperature", "top_p"):
+            if not math.isfinite(getattr(self, name)):
+                raise ValueError(f"{name} must be finite, got {getattr(self, name)}")
         if self.best_of <= 0 or self.best_of > MAX_BEST_OF:
             raise ValueError(f"need 0 < best_of <= {MAX_BEST_OF}, but got {self.best_of}")
         if self.n != self.best_of:

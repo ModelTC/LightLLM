@@ -302,7 +302,7 @@ def _gather_prefill_kv_kernel(
     )
 
 
-@triton.jit(do_not_specialize=["chunk_start", "chunk_end"])
+@triton.jit(do_not_specialize=["chunk_end"])
 def _compact_topk_indices_kernel(
     TopkIndices,
     KVStarts,
@@ -331,13 +331,13 @@ def _compact_topk_indices_kernel(
         )
 
 
-@triton.jit(do_not_specialize=["NUM_Q_TOKENS", "chunk_lse_stride_s", "chunk_lse_stride_h"])
+@triton.jit(do_not_specialize=["NUM_Q_TOKENS", "chunk_lse_stride_h"])
 def _merge_att_output_kernel(
     Output,
     Lse,
     ChunkOutput,
     ChunkLse,
-    chunk_lse_stride_s,
+    chunk_lse_stride_s: tl.constexpr,
     chunk_lse_stride_h,
     NUM_HEADS: tl.constexpr,
     NUM_Q_TOKENS,

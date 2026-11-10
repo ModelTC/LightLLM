@@ -46,6 +46,14 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         self.is_hash = self.layer_num_ < self.num_hash_layers
         self.has_vision = cfg.get("vision_n_layers", 0) > 0
         self.prefix = f"layers.{self.layer_num_}"
+        # TP folds the shared expert into the routed expert list. EP keeps it separate
+        # so combine can overlap it. MXFP4 routed experts use a different packed layout.
+        args = get_env_start_args()
+        self.num_fused_shared_experts = 0
+        if args.enable_fused_shared_experts and not args.enable_ep_moe:
+            moe_quant = self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe")
+            if moe_quant.method_name != "fp4fp8-b32-deepgemm":
+                self.num_fused_shared_experts = int(cfg.get("n_shared_experts", 1))
 
     def _init_weight(self):
         self._init_qkvo()
@@ -214,31 +222,32 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             self.gate_bias_vl_ = ParameterWeight(
                 weight_name=f"{p}.gate.bias_vl", data_type=torch.float32, weight_shape=(self.n_routed_experts,)
             )
-        # Shared expert: w1/w3 fuse gate/up in the row projection; w2 projects down.
-        # _ffn_tp consumes [gate, up] and applies the configured SwiGLU clamp before down_proj.
-        sp = f"{p}.shared_experts"
-        # EP keeps a complete shared expert per rank, so its output needs no per-layer all-reduce.
-        enable_ep_moe = get_env_start_args().enable_ep_moe
-        shared_tp_rank = 0 if enable_ep_moe else None
-        shared_tp_world_size = 1 if enable_ep_moe else None
-        self.gate_up_proj = ROWMMWeight(
-            in_dim=self.hidden,
-            out_dims=[self.moe_inter, self.moe_inter],
-            weight_names=[f"{sp}.w1.weight", f"{sp}.w3.weight"],
-            data_type=self.data_type_,
-            quant_method=self.get_quant_method("shared_gate"),
-            tp_rank=shared_tp_rank,
-            tp_world_size=shared_tp_world_size,
-        )
-        self.down_proj = COLMMWeight(
-            in_dim=self.moe_inter,
-            out_dims=[self.hidden],
-            weight_names=f"{sp}.w2.weight",
-            data_type=self.data_type_,
-            quant_method=self.get_quant_method("shared_down"),
-            tp_rank=shared_tp_rank,
-            tp_world_size=shared_tp_world_size,
-        )
+        # The fused shared expert is loaded as expert n_routed_experts. Otherwise w1/w3
+        # fuse gate/up and w2 projects down for the standalone shared FFN.
+        if self.num_fused_shared_experts == 0:
+            sp = f"{p}.shared_experts"
+            # EP keeps a complete shared expert per rank, so its output needs no per-layer all-reduce.
+            enable_ep_moe = get_env_start_args().enable_ep_moe
+            shared_tp_rank = 0 if enable_ep_moe else None
+            shared_tp_world_size = 1 if enable_ep_moe else None
+            self.gate_up_proj = ROWMMWeight(
+                in_dim=self.hidden,
+                out_dims=[self.moe_inter, self.moe_inter],
+                weight_names=[f"{sp}.w1.weight", f"{sp}.w3.weight"],
+                data_type=self.data_type_,
+                quant_method=self.get_quant_method("shared_gate"),
+                tp_rank=shared_tp_rank,
+                tp_world_size=shared_tp_world_size,
+            )
+            self.down_proj = COLMMWeight(
+                in_dim=self.moe_inter,
+                out_dims=[self.hidden],
+                weight_names=f"{sp}.w2.weight",
+                data_type=self.data_type_,
+                quant_method=self.get_quant_method("shared_down"),
+                tp_rank=shared_tp_rank,
+                tp_world_size=shared_tp_world_size,
+            )
         self.experts = FusedMoeWeight(
             gate_proj_name="w1",
             down_proj_name="w2",
@@ -250,6 +259,7 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             moe_intermediate_size=self.moe_inter,
             data_type=self.data_type_,
             quant_method=self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe"),
+            num_fused_shared_experts=self.num_fused_shared_experts,
             layer_num=self.layer_num_,
             network_config=self.network_config_,
         )
@@ -293,6 +303,8 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             weight for weight in self.__dict__.values() if isinstance(weight, (MMWeightTpl, BMMWeightTpl))
         )
         prepare_fp8_weights(weights, matrix_weights, self.data_type_)
+        if self.num_fused_shared_experts > 0:
+            self._rename_shared_experts(weights)
 
         # MXFP4 loads expert .scale unchanged; FP8 expert kernels expect their own suffix.
         expert_scale_suffix = self.experts.quant_method.weight_scale_suffix
@@ -311,3 +323,18 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
                 per_group_in = self.n_heads * self.head_dim // self.o_groups
                 weights[woa] = w.view(self.o_groups, self.o_lora_rank, per_group_in).transpose(1, 2)
         return super().load_hf_weights(weights)
+
+    def _rename_shared_experts(self, weights):
+        # Load the shared expert with the same names as routed expert n_routed_experts.
+        old_prefix = f"{self.prefix}.ffn.shared_experts"
+        new_prefix = f"{self.prefix}.ffn.experts.{self.n_routed_experts}"
+        suffixes = ["weight", "scale"]
+        quant_method = self.experts.quant_method
+        for suffix in (quant_method.weight_scale_suffix, quant_method.weight_zero_point_suffix):
+            if suffix and suffix not in suffixes:
+                suffixes.append(suffix)
+        for proj in ("w1", "w2", "w3"):
+            for suffix in suffixes:
+                source = f"{old_prefix}.{proj}.{suffix}"
+                if source in weights:
+                    weights[f"{new_prefix}.{proj}.{suffix}"] = weights[source]
