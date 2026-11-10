@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from lightllm.models.glm5_next.triton_kernel import (
-    context_flashattention_nopad_fp8 as fp8,
+    fp8_prefill as fp8,
 )
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

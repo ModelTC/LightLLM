@@ -2,7 +2,7 @@ import pytest
 import torch
 from triton.runtime.jit import JITFunction
 
-from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import _compact_topk_indices_kernel
+from lightllm.models.glm5_next.triton_kernel.fp8_prefill import _compact_topk_indices_kernel
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

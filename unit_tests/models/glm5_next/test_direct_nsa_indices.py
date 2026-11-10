@@ -15,7 +15,7 @@ from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import (
 )
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
-from lightllm.models.glm5_next.triton_kernel import context_flashattention_nopad_fp8 as fp8_prefill
+from lightllm.common.basemodel.attention.nsa import fp8_glm5_next
 from lightllm.models.glm5_next.triton_kernel.kpool import expand_topk, prefill_nsa_params
 
 
@@ -139,7 +139,7 @@ def test_decode_aliases_infer_state_without_ragged_allocation(monkeypatch, fp8):
     ],
 )
 def test_fp8_prefill_reads_request_table_without_ragged_buffer(monkeypatch, queries, heads, total_kv, chunk_size):
-    monkeypatch.setattr(fp8_prefill, "KV_GATHER_CHUNK_SIZE", chunk_size)
+    monkeypatch.setattr(fp8_glm5_next, "KV_GATHER_CHUNK_SIZE", chunk_size)
 
     torch.manual_seed(1685)
     batch = min(queries, 2)

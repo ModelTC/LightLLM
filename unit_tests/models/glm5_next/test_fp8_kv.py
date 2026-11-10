@@ -22,8 +22,8 @@ from lightllm.models.glm5_next.triton_kernel.fp8_sparse_decode import (
 )
 from lightllm.models.glm5_next.triton_kernel.pad_query_heads import _fused_strided_qpad_kernel
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
-from lightllm.models.glm5_next.triton_kernel import context_flashattention_nopad_fp8 as fp8_prefill
-from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
+from lightllm.common.basemodel.attention.nsa import fp8_glm5_next
+from lightllm.models.glm5_next.triton_kernel.fp8_prefill import (
     _gather_prefill_kv_kernel,
 )
 
@@ -319,7 +319,7 @@ def test_fp8_nope_decode_and_cuda_graph(num_heads):
 @pytest.mark.parametrize("num_heads", [8, 16, 64, 128])
 @pytest.mark.parametrize("chunk_size", [3, 7, 32768])
 def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chunk_size):
-    monkeypatch.setattr(fp8_prefill, "KV_GATHER_CHUNK_SIZE", chunk_size)
+    monkeypatch.setattr(fp8_glm5_next, "KV_GATHER_CHUNK_SIZE", chunk_size)
     torch.manual_seed(53)
     prefix = 4 if cached else 0
     case = _PrefillCase([prefix + 3] * 2, [3, 3], num_heads, width=128, capacity=64, softmax_scale=512 ** -0.5)
@@ -342,7 +342,7 @@ def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chun
 def test_fp8_uncached_prefill_reuses_current_kv(monkeypatch, num_heads, chunk_size):
     from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
-    monkeypatch.setattr(fp8_prefill, "KV_GATHER_CHUNK_SIZE", chunk_size)
+    monkeypatch.setattr(fp8_glm5_next, "KV_GATHER_CHUNK_SIZE", chunk_size)
     case = _PrefillCase([3, 3], [3, 3], num_heads, width=128)
     case.prefill_cache_kv = torch.randn(6, 1, 1536, device="cuda", dtype=torch.bfloat16)[..., :512]
     case.control.nsa_prefill_dict["prefill_cache_kv"] = case.prefill_cache_kv
@@ -362,7 +362,7 @@ def test_fp8_uncached_prefill_reuses_current_kv(monkeypatch, num_heads, chunk_si
 @pytest.mark.parametrize("num_heads", [8, 16, 64, 128])
 @pytest.mark.parametrize("softmax_scale", [0.0625, 512 ** -0.5])
 def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softmax_scale):
-    monkeypatch.setattr(fp8_prefill, "KV_GATHER_CHUNK_SIZE", 129)
+    monkeypatch.setattr(fp8_glm5_next, "KV_GATHER_CHUNK_SIZE", 129)
     torch.manual_seed(53)
     case = _PrefillCase([1025], [9], num_heads, capacity=2048, softmax_scale=softmax_scale)
     lengths = torch.tensor([0, 1, 3, 127, 128, 511, 2048, 2049, 2051], device="cuda")
