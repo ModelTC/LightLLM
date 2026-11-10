@@ -60,13 +60,11 @@ class ReqManager:
             self.req_list.is_all_free()
         ), "hold request indexes can only be initialized when all requests are released"
 
-        hold_page = torch.as_tensor(token_indices, dtype=torch.int32, device="cpu")
+        hold_row = self.req_to_token_indexs[self.HOLD_REQUEST_ID]
+        hold_page = torch.as_tensor(token_indices, dtype=hold_row.dtype, device=hold_row.device)
         if hold_page.ndim != 1 or hold_page.numel() != self.page_size:
             raise ValueError("HOLD indices must describe exactly one physical page")
-        expected = hold_page[0] + torch.arange(self.page_size, dtype=torch.int32)
-        if not torch.equal(hold_page, expected):
-            raise ValueError("HOLD indices must form one consecutive physical page")
-        self.req_to_token_indexs[self.HOLD_REQUEST_ID].view(-1, self.page_size).copy_(hold_page)
+        hold_row.view(-1, self.page_size).copy_(hold_page)
 
     def alloc(self):
         return self.req_list.alloc()
