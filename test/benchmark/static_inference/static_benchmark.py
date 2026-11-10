@@ -28,7 +28,6 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
-from lightllm.server.router.model_infer.infer_req_ext1 import alloc_req_token_indexes
 from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
 from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.api_cli import make_argument_parser
@@ -571,19 +570,15 @@ class StaticBenchmarkExecutor:
 
         allocator = self.model.att_state_manager.full_att_allocator
         page_size = allocator.page_size
-        allocations = []
         for req_id, target_len in max_target_len_by_req.items():
             new_hold_kv_len = align_up(target_len, page_size)
             old_hold_kv_len = self._hold_kv_len_by_req.get(req_id, 0)
             if new_hold_kv_len <= old_hold_kv_len:
                 continue
 
-            req = SimpleNamespace(req_idx=req_id, hold_kv_len=old_hold_kv_len)
-            allocations.append((req, new_hold_kv_len - old_hold_kv_len))
-        if allocations:
-            alloc_req_token_indexes(allocations, allocator)
-            for req, _ in allocations:
-                self._hold_kv_len_by_req[req.req_idx] = req.hold_kv_len
+            indexes = allocator.alloc(new_hold_kv_len - old_hold_kv_len)
+            self.model.req_manager.req_to_token_indexs[req_id, old_hold_kv_len:new_hold_kv_len] = indexes
+            self._hold_kv_len_by_req[req_id] = new_hold_kv_len
 
     def _forward_prefill_input(self, model_input: ModelInput, allow_overlap: bool) -> ModelOutput:
         if allow_overlap and self.args.enable_prefill_microbatch_overlap and model_input.batch_size > 1:

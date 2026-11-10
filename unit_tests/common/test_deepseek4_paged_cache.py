@@ -362,7 +362,16 @@ def _request_pages(requests, req):
 
 
 def _reserve(manager, requests, length):
-    from lightllm.server.router.model_infer.infer_req_ext1 import alloc_req_token_indexes, create_req_token_index
+    from lightllm.server.router.model_infer.infer_req_ext1 import (
+        PinMemPageCacheReqTokenIndex,
+        create_req_token_index,
+    )
+
+    if (
+        PinMemPageCacheReqTokenIndex._page_offsets is not None
+        and PinMemPageCacheReqTokenIndex._page_offsets.numel() != manager.page_size
+    ):
+        PinMemPageCacheReqTokenIndex._page_offsets = None
 
     req_idx = requests.alloc()
     held = (length + manager.page_size - 1) // manager.page_size * manager.page_size
@@ -370,7 +379,8 @@ def _reserve(manager, requests, length):
     req.args = SimpleNamespace(req_token_index_mode="pin_mem_page_cache", page_size=manager.page_size)
     req.shm_req = SimpleNamespace(input_len=held)
     req.token_index = create_req_token_index(req, torch.cuda.current_stream())
-    alloc_req_token_indexes([(req, held)], requests.memory.allocator)
+    req.token_index.append_token_indexes(requests.memory.allocator.alloc(held))
+    req.hold_kv_len = held
     slots = req.token_index.get_cpu_token_indexes(0, held).cuda()
     return req_idx, slots
 

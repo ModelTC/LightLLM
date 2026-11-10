@@ -23,11 +23,7 @@ from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.multi_level_kv_cache import CachePlacementController, CacheTier
 from lightllm.server.router.model_infer.infer_req_ext import FinalTokenMetadataExt, PromptSelectedLogprobsExt
-from lightllm.server.router.model_infer.infer_req_ext1 import (
-    ReqTokenIndex,
-    create_req_token_index,
-    need_alloc_token_num,
-)
+from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex, create_req_token_index
 from lightllm.server.router.model_infer.structured_output.state import ConstraintState
 
 if TYPE_CHECKING:
@@ -378,9 +374,7 @@ class InferenceContext:
             for req in paused_reqs:
                 # 暂停恢复保持原有的保守语义：只有当前完整序列所需的 KV 页面都有足够空间时才恢复，
                 # 才允许执行 radix cache 匹配，避免在容量不足时提前改变引用或重建 hybrid cache 状态。
-                alloc_token_num = need_alloc_token_num(
-                    req, req.get_cur_total_len(), self.att_state_manager.full_att_allocator.page_size
-                )
+                alloc_token_num = req.kv_cache_alloc_need(req.get_cur_total_len())
                 if alloc_token_num > can_alloc_token_num:
                     break
 
@@ -934,17 +928,53 @@ class InferReq:
                         return True
         return False
 
-    def prefill_need_token_num(self, is_chuncked_prefill: bool) -> int:
-        """本轮计算量；调度通过计算预算检查后再检查 KV 容量。"""
+    def prefill_need_token_num(self, is_chuncked_prefill: bool) -> Tuple[int, int]:
+        """返回 (本轮需要计算的 token 数, 需要额外分配的 KV token 容量)。
+
+        第一个值为目标 KV 长度减去已计算的 cur_kv_len，用于限制 batch 的计算量。
+        第二个值先将目标 KV 长度按 page_size 向上对齐，再扣除已持有的 hold_kv_len，
+        用于检查和分配 KV 空间。已有页的剩余容量足够时，即使仍需计算 token，第二个值也可以为 0。
+        """
         if is_chuncked_prefill:
             target_kv_len = self.get_chuncked_input_token_len()
         else:
             target_kv_len = self.get_cur_total_len()
-        return target_kv_len - self.cur_kv_len
+        token_num = target_kv_len - self.cur_kv_len
+        alloc_token_num = self.kv_cache_alloc_need(target_kv_len)
+        return token_num, alloc_token_num
 
-    def decode_need_token_num(self) -> int:
-        """普通 decode 为 1；MTP 保留原有的双窗口容量。"""
-        return 1 if self.mtp_step == 0 else 2 * (1 + self.mtp_step)
+    def decode_need_token_num(self) -> Tuple[int, int]:
+        """返回 (decode 需要的 token 数, 需要额外分配的 KV token 容量)。
+
+        第一个值沿用分页分配前的需求估算：普通 decode 为 1，MTP 为 2 * (mtp_step + 1)，
+        其中 MTP 的两倍系数包含原有的预留窗口，并非本轮实际接受的输出 token 数。
+        第二个值将 cur_kv_len 加上上述需求后按 page_size 向上对齐，再扣除已持有的 hold_kv_len，
+        用于检查和分配 KV 空间。已有页的剩余容量足够时，第二个值为 0，仍可继续 decode。
+        """
+        decode_token_num = 1 if self.mtp_step == 0 else 2 * (1 + self.mtp_step)
+        alloc_token_num = self.kv_cache_alloc_need(self.cur_kv_len + decode_token_num)
+        return decode_token_num, alloc_token_num
+
+    def kv_cache_alloc_need(self, target_kv_len: int) -> int:
+        page_size = self.args.page_size
+        target_hold_len = (target_kv_len + page_size - 1) // page_size * page_size
+        alloc_token_num = max(target_hold_len - self.hold_kv_len, 0)
+        assert alloc_token_num % page_size == 0
+        return alloc_token_num
+
+    def alloc_kv_mem(self, alloc_token_num: int) -> Optional[torch.Tensor]:
+        """按完整页追加 KV 容量，更新请求索引和持有长度；零申请返回 None。"""
+        if alloc_token_num == 0:
+            return None
+
+        assert alloc_token_num > 0 and alloc_token_num % self.args.page_size == 0
+        if g_infer_context.radix_cache is not None:
+            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(alloc_token_num)
+
+        mem_indexes = g_infer_context.att_state_manager.full_att_allocator.alloc(alloc_token_num)
+        self.token_index.append_token_indexes(mem_indexes)
+        self.hold_kv_len += alloc_token_num
+        return mem_indexes
 
 
 class InferReqUpdatePack:

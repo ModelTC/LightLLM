@@ -45,11 +45,9 @@ def test_hybrid_pd_uses_the_shared_att_state_task_without_model_flags(monkeypatc
         backend.model = SimpleNamespace(
             att_state_manager=SimpleNamespace(full_att_allocator=SimpleNamespace(page_size=backend.args.page_size)),
         )
-        monkeypatch.setattr(
-            decode_impl,
-            "alloc_token_indexes",
-            lambda req, end, allocator, page_size, radix_cache=None: torch.arange(end),
-        )
+        req.args = SimpleNamespace(page_size=backend.args.page_size)
+        req.kv_cache_alloc_need = lambda target: target
+        req.alloc_kv_mem = lambda alloc_token_num: torch.arange(alloc_token_num)
         backend._decode_node_gen_trans_tasks(req)
         assert len(groups) == 1
     assert [task.page_kind for task in tasks] == ["kv", "kv", "att_state"]

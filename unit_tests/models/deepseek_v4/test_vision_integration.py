@@ -268,11 +268,16 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
     )
     table = torch.arange(8192, dtype=torch.int32).view(1, -1)
 
-    def allocate(req, end, allocator, page_size, radix_cache=None):
-        req.hold_kv_len = end
-        return torch.arange(req.cur_kv_len, end, dtype=torch.int32)
+    def allocate(alloc_token_num):
+        if alloc_token_num == 0:
+            return None
+        start = req.cur_kv_len
+        req.hold_kv_len += alloc_token_num
+        return torch.arange(start, start + alloc_token_num, dtype=torch.int32)
 
-    monkeypatch.setattr(common, "alloc_token_indexes", allocate)
+    req.args = SimpleNamespace(page_size=256)
+    req.kv_cache_alloc_need = lambda target: max(0, target - req.hold_kv_len)
+    req.alloc_kv_mem = allocate
 
     from collections import deque
 

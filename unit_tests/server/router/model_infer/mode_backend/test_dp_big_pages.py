@@ -39,7 +39,11 @@ def test_dp_page_ids_use_separate_shared_array(monkeypatch: pytest.MonkeyPatch, 
 
 def test_fill_orders_radix_and_owned_pages_and_clears_reused_rows(monkeypatch: pytest.MonkeyPatch):
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
-    module.backend = SimpleNamespace(is_master_in_dp=True, node_nccl_group=None)
+    module.backend = SimpleNamespace(
+        is_master_in_dp=True,
+        node_nccl_group=None,
+        _copy_req_token_indexes_to_gpu=lambda reqs: None,
+    )
     module.dp_rank_in_node = 0
     module.big_page_tokens = 8
     module.shared_req_infos = SimpleNamespace(arr=np.full((2, 2, 2), 99, dtype=np.int64))
@@ -135,6 +139,7 @@ def test_local_longest_prefix_skips_copy_but_keeps_barriers(
         model=SimpleNamespace(att_state_manager=manager),
         dp_att_state_managers={},
         dp_req_to_token_indices={},
+        _copy_req_token_indexes_to_gpu=lambda reqs: None,
     )
     module.dp_rank_in_node = local_dp_rank
     module.big_page_tokens = 8 if hybrid else 0
@@ -210,18 +215,15 @@ def _build_fixture(monkeypatch: pytest.MonkeyPatch, capacity: int, src_kv_len: i
     module.shared_req_big_page_ids = SimpleNamespace(arr=np.array([[[77, -1, -1, -1], [10, 20, 21, -1]]]))
     requests = SimpleNamespace(
         get_need_alloc_token_num=lambda req, end, page_size=None: max(0, ((end + 3) // 4) * 4 - req.hold_kv_len),
-        alloc_token_indexes=lambda req, end, allocator, page_size, radix=None: allocate(
-            req, ((end + 3) // 4) * 4 - req.hold_kv_len
-        )[: end - req.cur_kv_len],
     )
+    req.kv_cache_alloc_need = lambda target: requests.get_need_alloc_token_num(req, target)
+    req.alloc_kv_mem = lambda alloc_token_num: allocate(req, alloc_token_num)
     monkeypatch.setattr(
         dp_shared_kv_trans,
         "g_infer_context",
         SimpleNamespace(get_can_alloc_token_num=lambda: 100, req_manager=requests, radix_cache=None),
     )
     monkeypatch.setattr(dp_shared_kv_trans.dist, "barrier", lambda group: None)
-    monkeypatch.setattr(dp_shared_kv_trans, "need_alloc_token_num", requests.get_need_alloc_token_num)
-    monkeypatch.setattr(dp_shared_kv_trans, "alloc_token_indexes", requests.alloc_token_indexes)
     return module, req, allocator, allocations
 
 
@@ -271,9 +273,8 @@ def test_build_evicts_cached_state_pages(monkeypatch, kv_allocator_environment, 
         req.hold_kv_len += count
         return requests.req_to_token_indexs[req.req_idx, req.cur_kv_len : end].clone()
 
-    requests.alloc_token_indexes = allocate_tokens
-    monkeypatch.setattr(dp_shared_kv_trans, "need_alloc_token_num", requests.get_need_alloc_token_num)
-    monkeypatch.setattr(dp_shared_kv_trans, "alloc_token_indexes", allocate_tokens)
+    req.kv_cache_alloc_need = lambda target: requests.get_need_alloc_token_num(req, target)
+    req.alloc_kv_mem = lambda alloc_token_num: allocate_tokens(req, req.cur_kv_len + alloc_token_num, None, 4, radix)
     assert full.can_use_mem_size == allocator.free_count == 0
     assert context.get_can_alloc_token_num() == 16
     (task,) = module.build_shared_kv_trans_tasks([req], req_dp_ranks=[0])

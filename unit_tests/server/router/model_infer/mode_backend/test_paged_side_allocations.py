@@ -27,7 +27,6 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
         req_manager=req_manager,
         att_state_manager=SimpleNamespace(full_att_allocator=None),
     )
-    monkeypatch.setattr(decode_impl, "alloc_token_indexes", req_manager.alloc_token_indexes)
     backend.is_master_in_dp = False
     backend.radix_cache = None
 
@@ -53,6 +52,10 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
             shm_req=SimpleNamespace(input_len=10),
         ),
         page_size=4,
+    )
+    req.kv_cache_alloc_need = lambda target: req_manager.get_need_alloc_token_num(req, target)
+    req.alloc_kv_mem = lambda alloc_token_num: req_manager.alloc_token_indexes(
+        req, req.cur_kv_len + alloc_token_num, None, req.args.page_size
     )
 
     backend._decode_node_gen_trans_tasks(req)
@@ -126,8 +129,10 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
     module.dp_rank_in_node = 0
     module.shared_req_infos = SimpleNamespace(arr=np.array([[[4, 0], [10, 0]]], dtype=np.int64))
     req_manager = _make_req_manager(table, alloc_sizes, next_index)
-    monkeypatch.setattr(dp_shared_kv_trans, "alloc_token_indexes", req_manager.alloc_token_indexes)
-    monkeypatch.setattr(dp_shared_kv_trans, "need_alloc_token_num", req_manager.get_need_alloc_token_num)
+    req.kv_cache_alloc_need = lambda target: req_manager.get_need_alloc_token_num(req, target)
+    req.alloc_kv_mem = lambda alloc_token_num: req_manager.alloc_token_indexes(
+        req, req.cur_kv_len + alloc_token_num, None, req.args.page_size
+    )
     context = SimpleNamespace(
         req_manager=req_manager,
         radix_cache=None,

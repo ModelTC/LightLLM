@@ -180,7 +180,16 @@ def test_full_attention_gpu_restore_stays_outside_image(
 
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", False)
     monkeypatch.setattr(g_infer_context, "radix_cache", radix_cache)
-    from lightllm.server.router.model_infer.infer_req_ext1 import create_req_token_index
+    from lightllm.server.router.model_infer.infer_req_ext1 import (
+        PinMemPageCacheReqTokenIndex,
+        create_req_token_index,
+    )
+
+    if (
+        PinMemPageCacheReqTokenIndex._page_offsets is not None
+        and PinMemPageCacheReqTokenIndex._page_offsets.numel() != page_size
+    ):
+        PinMemPageCacheReqTokenIndex._page_offsets = None
 
     req_manager = ReqManager.__new__(ReqManager)
     req_manager.page_size = page_size
@@ -323,11 +332,16 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
     )
     table = torch.arange(8192, dtype=torch.int32).view(1, -1)
 
-    def allocate(req, end, allocator, page_size, radix_cache=None):
-        req.hold_kv_len = end
-        return torch.arange(req.cur_kv_len, end, dtype=torch.int32)
+    def allocate(alloc_token_num):
+        if alloc_token_num == 0:
+            return None
+        start = req.cur_kv_len
+        req.hold_kv_len += alloc_token_num
+        return torch.arange(start, start + alloc_token_num, dtype=torch.int32)
 
-    monkeypatch.setattr(common, "alloc_token_indexes", allocate)
+    req.args = SimpleNamespace(page_size=256)
+    req.kv_cache_alloc_need = lambda target: max(0, target - req.hold_kv_len)
+    req.alloc_kv_mem = allocate
 
     from collections import deque
 

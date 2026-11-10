@@ -290,8 +290,10 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: [132]),
         ),
         sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
+        args=SimpleNamespace(page_size=4),
     )
-    monkeypatch.setattr(multi_level_kv_cache_impl, "alloc_token_indexes", alloc_token_indexes)
+    req.kv_cache_alloc_need = lambda target: max(0, (target + 3) // 4 * 4 - req.hold_kv_len)
+    req.alloc_kv_mem = lambda alloc_token_num: alloc_token_indexes(req, req.hold_kv_len + alloc_token_num, None, 4)
     monkeypatch.setattr(multi_level_kv_cache_impl, "g_infer_context", context)
     monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
@@ -369,7 +371,6 @@ def _load_module(monkeypatch, *, sync, master=True, world=1):
             ),
         ),
     )
-    monkeypatch.setattr(multi_level_kv_cache_impl, "alloc_token_indexes", alloc_token_indexes)
     module.need_sync_compute_stream = lambda: sync
     module.init_sync_group = module.filter_group = object()
     module.load_sync_tensor = object()
@@ -393,7 +394,10 @@ def _load_module(monkeypatch, *, sync, master=True, world=1):
             cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: [3, 4]),
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: [128, 256]),
         ),
+        args=SimpleNamespace(page_size=4),
     )
+    req.kv_cache_alloc_need = lambda target: max(0, (target + 3) // 4 * 4 - req.hold_kv_len)
+    req.alloc_kv_mem = lambda alloc_token_num: alloc_token_indexes(req, req.hold_kv_len + alloc_token_num, None, 4)
     monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_can_alloc_token_num", lambda: 512)
     monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_overlap_stream", torch.cuda.Stream)
     monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: events.append("barrier"))

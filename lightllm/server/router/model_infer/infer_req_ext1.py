@@ -217,16 +217,16 @@ class PinMemCacheReqTokenIndex(ReqTokenIndex):
 class PinMemPageCacheReqTokenIndex(PinMemCacheReqTokenIndex):
     """每个逻辑页仅保存首 token 的 pinned CPU 索引，对外仍使用 token 单位。"""
 
-    _page_offsets_by_size: dict = {}
+    # 同一进程使用统一的 page_size，所有请求共享首次初始化的页内偏移。
+    _page_offsets: Optional[torch.Tensor] = None
 
     def __init__(self, infer_req: "InferReq", index_stream: torch.cuda.Stream):
         super().__init__(infer_req, index_stream)
         self.page_size = infer_req.req_manager.page_size
-        offsets = PinMemPageCacheReqTokenIndex._page_offsets_by_size.get(self.page_size)
-        if offsets is None:
-            offsets = torch.arange(self.page_size, dtype=self.gpu_indexes.dtype, device="cpu", requires_grad=False)
-            PinMemPageCacheReqTokenIndex._page_offsets_by_size[self.page_size] = offsets
-        self._page_offsets = offsets
+        if PinMemPageCacheReqTokenIndex._page_offsets is None:
+            PinMemPageCacheReqTokenIndex._page_offsets = torch.arange(
+                self.page_size, dtype=self.gpu_indexes.dtype, device="cpu", requires_grad=False
+            )
 
     def append_token_indexes(self, mem_indexes: torch.Tensor):
         """从页边界追加完整页；调用方保证同一逻辑页内物理 token 索引连续。"""
@@ -342,36 +342,3 @@ def create_req_token_index(infer_req: "InferReq", index_stream: torch.cuda.Strea
     raise ValueError(
         f"Unknown request token index mode: {mode}; expected pin_mem_cache, pin_mem_page_cache or pure_gpu"
     )
-
-
-def need_alloc_token_num(req, target: int, page_size: int) -> int:
-    """返回补齐到 target 还要申请的 token 数，按物理页对齐。"""
-    if page_size > 1:
-        size = max(0, (target + page_size - 1) // page_size * page_size - req.hold_kv_len)
-        assert size % page_size == 0
-        return size
-    return max(0, target - req.hold_kv_len)
-
-
-def alloc_req_token_indexes(allocations, allocator, radix_cache=None):
-    """一次申请一批请求的 token 容量，记到各自的 token 索引并提交上传。"""
-    need = sum(size for _, size in allocations)
-    if radix_cache is not None:
-        radix_cache.free_radix_cache_to_get_enough_token(need)
-    if not need:
-        return
-    indexes = allocator.alloc(need)
-    offset = 0
-    for req, size in allocations:
-        req.token_index.append_token_indexes(indexes[offset : offset + size])
-        req.hold_kv_len += size
-        offset += size
-    ReqTokenIndex.submit_pending_uploads([req.token_index for req, _ in allocations])
-
-
-def alloc_token_indexes(req, end: int, allocator, page_size: int, radix_cache=None):
-    """返回 [cur_kv_len, end) 的写入槽位，已有页尾直接复用。"""
-    size = need_alloc_token_num(req, end, page_size)
-    if size:
-        alloc_req_token_indexes([(req, size)], allocator, radix_cache)
-    return req.token_index.get_cpu_token_indexes(req.cur_kv_len, end)

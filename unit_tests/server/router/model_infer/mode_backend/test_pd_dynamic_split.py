@@ -32,7 +32,10 @@ def _make_infer_req(cur_output_len: int, shm_output_len: int):
             shm_param=SimpleNamespace(max_new_tokens=65535),
         ),
         get_cur_total_len=MagicMock(return_value=11),
-        decode_need_token_num=MagicMock(return_value=1),
+        args=SimpleNamespace(page_size=4),
+        decode_need_token_num=MagicMock(return_value=(1, 4)),
+        kv_cache_alloc_need=lambda target: max(0, (target + 3) // 4 * 4 - 8),
+        alloc_kv_mem=lambda alloc_token_num: None,
     )
 
 

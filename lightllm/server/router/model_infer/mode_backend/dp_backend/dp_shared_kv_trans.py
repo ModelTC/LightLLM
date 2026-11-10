@@ -8,7 +8,6 @@ from lightllm.utils.dist_utils import get_dp_rank_in_node
 from lightllm.server.core.objs.shm_array import ShmArray
 from ...infer_batch import InferReq
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
-from lightllm.server.router.model_infer.infer_req_ext1 import alloc_token_indexes, need_alloc_token_num
 import torch.distributed as dist
 
 
@@ -49,6 +48,11 @@ class DPKVSharedMoudle:
 
     def fill_reqs_info(self, reqs: List[InferReq]) -> None:
         """发布每个请求的 KV 长度、请求槽位及完整有序大页列表。"""
+        # 请求索引统一在默认流维护，原生 batch 的默认流适配由拷贝封装处理。
+        # DP 发布复用统一入口，不另建索引流或逐请求事件。
+        self.backend._copy_req_token_indexes_to_gpu(reqs)
+        # 同步 NCCL barrier 会等待默认流上排入的上传依赖完成；所有 TP rank
+        # 到达此屏障后，其他 DP rank 才能读取已发布的 GPU 索引和共享请求元数据。
         dist.barrier(group=self.backend.node_nccl_group)
         if self.backend.is_master_in_dp:
             for req_index, req in enumerate(reqs):
@@ -93,8 +97,7 @@ class DPKVSharedMoudle:
             # 计算需要传输的 kv 长度， 不能超过 req.get_cur_total_len() - 1
             trans_size = min(max_available_kv_len, req.get_cur_total_len() - 1) - req.cur_kv_len
             target_kv_len = req.cur_kv_len + trans_size
-            allocator = self.backend.model.att_state_manager.full_att_allocator
-            alloc_token_num = need_alloc_token_num(req, target_kv_len, allocator.page_size) if trans_size > 0 else 0
+            alloc_token_num = req.kv_cache_alloc_need(target_kv_len) if trans_size > 0 else 0
 
             if is_local_dp_request and trans_size > 0 and alloc_token_num <= g_infer_context.get_can_alloc_token_num():
                 assert req.hold_kv_len == req.cur_kv_len
@@ -113,13 +116,7 @@ class DPKVSharedMoudle:
                         assert all(
                             page_id >= 0 for page_id in src_big_page_ids
                         ), "DP source is missing prefix big pages"
-                dst_token_indices = alloc_token_indexes(
-                    req,
-                    target_kv_len,
-                    allocator,
-                    allocator.page_size,
-                    g_infer_context.radix_cache,
-                )
+                dst_token_indices = req.alloc_kv_mem(alloc_token_num)
                 assert dst_token_indices is not None
                 if src_big_page_ids:
                     allocator = self.backend.model.att_state_manager.bounded_att_big_page_allocator
