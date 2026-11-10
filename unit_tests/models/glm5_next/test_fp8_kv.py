@@ -42,7 +42,7 @@ def _make_workspace_backend(batch_max_tokens):
     backend.model = SimpleNamespace(
         batch_max_tokens=batch_max_tokens, prefill_graph=None, config={"index_topk": 2048, "index_kpool": 4}
     )
-    backend._prefill_workspaces = [{"direct": None, "generic": None} for _ in range(2)]
+    backend._prefill_workspaces = [None, None]
     return backend
 
 
@@ -337,6 +337,28 @@ def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chun
     case.check(output)
 
 
+@pytest.mark.parametrize("num_heads", [8, 64])
+@pytest.mark.parametrize("chunk_size", [3, 32768])
+def test_fp8_uncached_prefill_reuses_current_kv(monkeypatch, num_heads, chunk_size):
+    from sgl_kernel.flash_attn import flash_attn_with_kvcache
+
+    monkeypatch.setattr(fp8_prefill, "KV_GATHER_CHUNK_SIZE", chunk_size)
+    case = _PrefillCase([3, 3], [3, 3], num_heads, width=128)
+    case.prefill_cache_kv = torch.randn(6, 1, 1536, device="cuda", dtype=torch.bfloat16)[..., :512]
+    case.control.nsa_prefill_dict["prefill_cache_kv"] = case.prefill_cache_kv
+
+    def check_kv_storage(*args, **kwargs):
+        assert kwargs["v_cache"].untyped_storage().data_ptr() == case.prefill_cache_kv.untyped_storage().data_ptr()
+        return flash_attn_with_kvcache(*args, **kwargs)
+
+    monkeypatch.setattr("sgl_kernel.flash_attn.flash_attn_with_kvcache", check_kv_storage)
+    case.check(case.run())
+    graph, output = _capture_cuda_graph(case.run)
+    case.mutate()
+    graph.replay()
+    case.check(output)
+
+
 @pytest.mark.parametrize("num_heads", [8, 16, 64, 128])
 @pytest.mark.parametrize("softmax_scale", [0.0625, 512 ** -0.5])
 def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softmax_scale):
@@ -358,22 +380,25 @@ def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softm
 
 
 @pytest.mark.parametrize("num_q", [64, 129])
-def test_fp8_h64_largeq_native_prefill_request_table_graph(monkeypatch, num_q):
-    if torch.cuda.get_device_capability()[0] != 9:
-        pytest.skip("Validated FlashMLA sparse prefill target is Hopper")
-    from sgl_kernel.flash_mla import flash_mla_sparse_fwd
+@pytest.mark.parametrize("num_heads", [8, 64])
+def test_fp8_prefill_uses_flashattention_and_request_table_graph(monkeypatch, num_q, num_heads):
+    from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
     torch.manual_seed(53100 + num_q)
-    case = _PrefillCase([32768, 32768], [num_q // 2, num_q - num_q // 2], 64, capacity=131072)
+    case = _PrefillCase([32768, 32768], [num_q // 2, num_q - num_q // 2], num_heads, capacity=131072)
     observed = []
 
-    def observed_sparse(*args, **kwargs):
-        observed.append((kwargs["q"].shape, kwargs["kv"].shape, kwargs["indices"].shape))
-        return flash_mla_sparse_fwd(*args, **kwargs)
+    def observed_flashattention(*args, **kwargs):
+        observed.append(kwargs["qv"].shape)
+        return flash_attn_with_kvcache(*args, **kwargs)
 
-    monkeypatch.setattr("sgl_kernel.flash_mla.flash_mla_sparse_fwd", observed_sparse)
+    def unexpected_flashmla(*args, **kwargs):
+        raise AssertionError("FP8 prefill must use its single FlashAttention backend")
+
+    monkeypatch.setattr("sgl_kernel.flash_attn.flash_attn_with_kvcache", observed_flashattention)
+    monkeypatch.setattr("sgl_kernel.flash_mla.flash_mla_sparse_fwd", unexpected_flashmla)
     case.check(case.run())
-    assert observed == [((num_q, 64, 512), (65536, 1, 512), (num_q, 1, 2176))]
+    assert observed == [(num_q, num_heads, 512)]
     graph, output = _capture_cuda_graph(case.run)
     case.mutate()
     graph.replay()
@@ -381,35 +406,13 @@ def test_fp8_h64_largeq_native_prefill_request_table_graph(monkeypatch, num_q):
     case.topk_indices.fill_(-1)
     graph.replay()
     assert torch.count_nonzero(output) == 0
-    assert len(observed) == 3
-
-
-def test_fp8_h8_largeq_prefill_keeps_flashattention_path(monkeypatch):
-    import sgl_kernel.flash_attn as flash_attn
-
-    torch.manual_seed(53180)
-    case = _PrefillCase([65536], [16], 8, capacity=65536)
-    observed = []
-    original = flash_attn.flash_attn_with_kvcache
-
-    def observed_flashattention(*args, **kwargs):
-        observed.append(True)
-        return original(*args, **kwargs)
-
-    def unexpected_native(*args, **kwargs):
-        raise AssertionError("H8 large-Q prefill entered the native H64 sparse path")
-
-    monkeypatch.setattr(flash_attn, "flash_attn_with_kvcache", observed_flashattention)
-    monkeypatch.setattr("sgl_kernel.flash_mla.flash_mla_sparse_fwd", unexpected_native)
-    case.check(case.run())
-    assert observed
 
 
 @pytest.mark.parametrize(
     "num_q,num_heads",
     [(1, 8), (2, 8), (8, 8), (1, 64), (2, 64), (3, 64), (4, 64), (5, 64), (6, 64), (7, 64), (8, 64)],
 )
-def test_fp8_direct_prefill_dispatch_strided_holes_and_current(num_q, num_heads):
+def test_fp8_cached_prefill_strided_holes_and_current(num_q, num_heads):
     torch.manual_seed(53016 + num_q)
     seqs = [65536 + value for value in [127, 521, 1031, 2053, 4099, 8191, 12289, 16381][:num_q]]
     case = _PrefillCase(seqs, [1] * num_q, num_heads)
@@ -428,25 +431,8 @@ def test_fp8_direct_prefill_dispatch_strided_holes_and_current(num_q, num_heads)
     case.check(output)
 
 
-def test_fp8_h64_direct_prefill_state_workspace_reuse_and_fresh_state():
-    torch.manual_seed(53150)
-    case = _PrefillCase([65536], [1], 64)
-    case.check(case.run())
-    workspace = case.backend._prefill_workspaces[0]["direct"]
-    pointers = {name: value.data_ptr() for name, value in workspace.items()}
-    for _ in range(10):
-        infer, state = case.new_state()
-        case.check(case.run(state))
-    assert {name: value.data_ptr() for name, value in workspace.items()} == pointers
-    fresh_infer, fresh = case.new_state(mem_index=case.infer_state.mem_index.clone())
-    case.check(case.run(fresh))
-    assert {name: value.data_ptr() for name, value in workspace.items()} == pointers
-    case.mutate()
-    case.check(case.run())
-
-
 @pytest.mark.parametrize("num_q", [2, 3, 5, 8, 16, 32, 128])
-def test_fp8_h64_selected_prefill_cached_chunks_and_graph(num_q):
+def test_fp8_cached_prefill_multi_query_and_graph(num_q):
     torch.manual_seed(53200 + num_q)
     case = _PrefillCase([131072, 131072], [num_q // 2, num_q - num_q // 2], 64)
     case.check(case.run())
@@ -464,7 +450,7 @@ def test_fp8_h64_selected_prefill_cached_chunks_and_graph(num_q):
     assert torch.count_nonzero(output) == 0
 
 
-def test_fp8_selected_prefill_graph_with_empty_requests_and_changing_boundaries():
+def test_fp8_prefill_graph_with_empty_requests_and_changing_boundaries():
     case = _PrefillCase([65536] * 4, [0, 4, 0, 3], 64)
     case.check(case.run())
     graph, output = _capture_cuda_graph(case.run)
@@ -1003,12 +989,13 @@ def test_fp8_sparse_direct_decode_large_workload_retains_native_graph(monkeypatc
     torch.testing.assert_close(output.float(), expected, atol=0.02, rtol=0.02)
 
 
-def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallback():
+@pytest.mark.parametrize("num_heads", [8, 64])
+def test_fp8_prefill_workspace_reuse_mutable_inputs_and_graph_fallback(num_heads):
     torch.manual_seed(53450)
     backend = _make_workspace_backend(66)
-    case = _PrefillCase([32768, 16384, 16384], [11, 11, 11], 64, backend=backend)
+    case = _PrefillCase([32768, 16384, 16384], [11, 11, 11], num_heads, backend=backend)
     case.check(case.run())
-    workspace = backend._prefill_workspaces[0]["generic"]
+    workspace = backend._prefill_workspaces[0]
     assert set(workspace) == {"chunk_topk_indices", "chunk_cache_seqlens", "cu_seqlens_q"}
     pointers = {name: value.data_ptr() for name, value in workspace.items()}
     for _ in range(10):
@@ -1016,9 +1003,9 @@ def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallba
         case.check(case.run(state))
     case.mutate()
     case.check(case.run())
-    fresh = _PrefillCase([16384, 32768, 16384], [9, 11, 13], 64, capacity=131072, backend=backend)
+    fresh = _PrefillCase([16384, 32768, 16384], [9, 11, 13], num_heads, capacity=131072, backend=backend)
     fresh.check(fresh.run())
-    assert {name: value.data_ptr() for name, value in backend._prefill_workspaces[0]["generic"].items()} == pointers
+    assert {name: value.data_ptr() for name, value in backend._prefill_workspaces[0].items()} == pointers
     for overrides in ({"prefill_cuda_graph_exe_list": []}, {"is_cuda_graph_capture": True}):
         infer, state = case.new_state(**overrides)
         case.check(case.run(state))
@@ -1026,34 +1013,6 @@ def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallba
     case.mutate()
     graph.replay()
     case.check(output)
-
-
-def test_fp8_generic_prefill_workspace_graph_query_is_generic_h64_only(monkeypatch):
-    def forbidden():
-        raise AssertionError("Non-generic prefill queried CUDA graph capture state")
-
-    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", forbidden)
-    monkeypatch.setattr(fp8_prefill, "context_attention_fwd_fp8", lambda **kwargs: kwargs["q"])
-    params = {
-        "prefill_cache_kv": torch.empty((1, 1, 512), dtype=torch.bfloat16),
-        "topk_indices": torch.empty((1, 2176), dtype=torch.int32),
-        "topk_mem_indices": torch.empty((1, 2176), dtype=torch.int32),
-        "softmax_scale": 0.0625,
-    }
-    control = AttControl(nsa_prefill=True, nsa_prefill_dict=params)
-    for heads, direct, selected in ((8, False, False), (64, True, False), (64, False, True)):
-        monkeypatch.setattr(fp8_prefill, "can_use_direct_prefill", lambda *args, d=direct: d)
-        monkeypatch.setattr(fp8_prefill, "can_use_selected_prefill", lambda *args, s=selected: s)
-        infer = _make_infer_state(
-            mem_index=torch.empty(1, dtype=torch.int32),
-            req_manager=SimpleNamespace(req_to_token_indexs=torch.empty((1, 1), dtype=torch.int32)),
-        )
-        backend = _make_workspace_backend(1)
-        backend.get_direct_prefill_workspace = lambda *args: {}
-        state = Fp8Glm5NextSparsePrefillState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
-        assert (
-            state._nsa_prefill_att(torch.empty((1, heads, 512), dtype=torch.bfloat16), None, control).shape[1] == heads
-        )
 
 
 def test_fp8_state_preserves_kv_and_indexer_across_cpu_and_pd(monkeypatch):

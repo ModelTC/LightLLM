@@ -10,25 +10,14 @@ from ..base_att import BaseAttBackend
 class Fp8Glm5NextSparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
-        self._prefill_workspaces = [{"direct": None, "generic": None} for _ in range(2)]
+        self._prefill_workspaces = [None, None]
 
-    def get_direct_prefill_workspace(self, infer_state, q):
+    def get_prefill_workspace(self, infer_state, q, topk_indices):
         from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
-            allocate_direct_prefill_workspace,
+            allocate_prefill_workspace,
         )
 
-        slot = self._prefill_workspaces[infer_state.microbatch_index]
-        if slot["direct"] is None:
-            slot["direct"] = allocate_direct_prefill_workspace(q)
-        return slot["direct"]
-
-    def get_generic_prefill_workspace(self, infer_state, q, topk_indices):
-        from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
-            allocate_generic_prefill_workspace,
-        )
-
-        slot = self._prefill_workspaces[infer_state.microbatch_index]
-        buffers = slot["generic"]
+        buffers = self._prefill_workspaces[infer_state.microbatch_index]
         q_token_num, topk_size = topk_indices.shape
         if (
             buffers is None
@@ -36,10 +25,10 @@ class Fp8Glm5NextSparseAttBackend(BaseAttBackend):
             or buffers["chunk_topk_indices"].shape[1] != topk_size
             or buffers["chunk_topk_indices"].dtype != topk_indices.dtype
         ):
-            buffers = allocate_generic_prefill_workspace(
+            buffers = allocate_prefill_workspace(
                 q, topk_indices, q_token_capacity=max(self.model.batch_max_tokens or 0, q_token_num)
             )
-            slot["generic"] = buffers
+            self._prefill_workspaces[infer_state.microbatch_index] = buffers
         return {
             "chunk_topk_indices": buffers["chunk_topk_indices"][:q_token_num],
             "chunk_cache_seqlens": buffers["chunk_cache_seqlens"][:q_token_num],
@@ -61,53 +50,31 @@ class Fp8Glm5NextSparseAttBackend(BaseAttBackend):
 @dataclasses.dataclass
 class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
     def _nsa_prefill_att(self, q, packed_kv, att_control):
-        from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
-            context_attention_fwd_fp8,
-            can_use_direct_prefill,
-            can_use_selected_prefill,
-        )
+        from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import context_attention_fwd_fp8
 
         nsa_prefill_dict = att_control.nsa_prefill_dict
         infer_state = self.infer_state
-        topk_mem_indices = nsa_prefill_dict["topk_mem_indices"]
-        direct_workspace = generic_workspace = None
-        if q.shape[1] == 64:
-            eligibility = (
-                q,
-                packed_kv,
-                infer_state.mem_index,
-                nsa_prefill_dict["prefill_cache_kv"],
-                topk_mem_indices,
-                infer_state.total_token_num,
-            )
-            if can_use_direct_prefill(*eligibility):
-                direct_workspace = self.backend.get_direct_prefill_workspace(infer_state, q)
-            elif not can_use_selected_prefill(*eligibility):
-                graph_guard = (
-                    infer_state.is_cuda_graph_capture
-                    or self.backend.model.prefill_graph is not None
-                    or hasattr(infer_state, "prefill_cuda_graph_exe_list")
-                )
-                if not graph_guard and not torch.cuda.is_current_stream_capturing():
-                    generic_workspace = self.backend.get_generic_prefill_workspace(
-                        infer_state, q, nsa_prefill_dict["topk_indices"]
-                    )
+        workspace = None
+        graph_guard = (
+            infer_state.is_cuda_graph_capture
+            or self.backend.model.prefill_graph is not None
+            or hasattr(infer_state, "prefill_cuda_graph_exe_list")
+        )
+        if not graph_guard and not torch.cuda.is_current_stream_capturing():
+            workspace = self.backend.get_prefill_workspace(infer_state, q, nsa_prefill_dict["topk_indices"])
         return context_attention_fwd_fp8(
             q=q,
             packed_kv=packed_kv,
-            mem_index=infer_state.mem_index,
             prefill_cache_kv=nsa_prefill_dict["prefill_cache_kv"],
             q_kv_start_loc=self.q_kv_start_loc,
             topk_indices=nsa_prefill_dict["topk_indices"],
-            topk_mem_indices=topk_mem_indices,
             req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
             b_req_idx=infer_state.b_req_idx,
             b1_cu_kv_seq_len=infer_state.b1_cu_kv_seq_len,
             b1_cu_q_seq_len=infer_state.b1_cu_q_seq_len,
             total_token_num=infer_state.total_token_num,
             softmax_scale=nsa_prefill_dict["softmax_scale"],
-            direct_workspace=direct_workspace,
-            generic_workspace=generic_workspace,
+            workspace=workspace,
         )
 
 

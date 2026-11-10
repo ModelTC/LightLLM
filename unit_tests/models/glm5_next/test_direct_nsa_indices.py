@@ -214,9 +214,9 @@ def test_fp8_prefill_reads_request_table_without_ragged_buffer(monkeypatch, quer
         torch.testing.assert_close(output.float(), torch.stack(expected), atol=0.012, rtol=0.015)
 
     check(run())
-    generic = backend._prefill_workspaces[0]["generic"]
-    if generic is not None:
-        assert set(generic) == {"chunk_topk_indices", "chunk_cache_seqlens", "cu_seqlens_q"}
+    workspace = backend._prefill_workspaces[0]
+    if workspace is not None:
+        assert set(workspace) == {"chunk_topk_indices", "chunk_cache_seqlens", "cu_seqlens_q"}
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         output = run()

@@ -85,6 +85,34 @@ def _fp8_sparse_direct_decode_kernel(
     )
 
 
+@triton.jit
+def reduce_sparse_attention_kernel(
+    partial_output,
+    partial_softmax_lse,
+    output,
+    q_head_num: tl.constexpr,
+    NUM_SPLITS: tl.constexpr,
+    BLOCK_SPLITS: tl.constexpr,
+):
+    qid = tl.program_id(0)
+    h = tl.program_id(1)
+    d = tl.program_id(2) * 128 + tl.arange(0, 128)
+    s = tl.arange(0, BLOCK_SPLITS)
+    sm = s < NUM_SPLITS
+    softmax_lse = tl.load(partial_softmax_lse + (qid * NUM_SPLITS + s) * q_head_num + h, sm, -float("inf"))
+    maximum = tl.max(softmax_lse, axis=0)
+    safe_maximum = tl.where(maximum == -float("inf"), 0.0, maximum)
+    weight = tl.where(sm & (softmax_lse > -float("inf")), tl.exp(softmax_lse - safe_maximum), 0.0)
+    denominator = tl.sum(weight, axis=0)
+    partial = tl.load(
+        partial_output + ((qid * NUM_SPLITS + s[:, None]) * q_head_num + h) * 512 + d[None, :],
+        sm[:, None],
+        0.0,
+    ).to(tl.float32)
+    value = tl.sum(partial * weight[:, None], axis=0) / tl.where(denominator > 0.0, denominator, 1.0)
+    tl.store(output + (qid * q_head_num + h) * 512 + d, value)
+
+
 def can_use_fp8_sparse_direct_decode(q_nope, packed_kv, topk, kv_lora_rank, bound, is_cuda_graph_capture=False):
     """Validate the GLM packed format and choose the direct decode implementation."""
     # The producer guarantees valid indices occupy at most the first 2051 slots.
@@ -116,10 +144,6 @@ def can_use_fp8_sparse_direct_decode(q_nope, packed_kv, topk, kv_lora_rank, boun
 
 
 def fp8_sparse_direct_decode(q_nope, packed_kv, topk, softmax_scale):
-    from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
-        reduce_sparse_attention_kernel,
-    )
-
     batch = q_nope.shape[0]
     heads = q_nope.shape[1]
     block_h = 16 if batch * heads <= 64 else min(32, max(16, triton.next_power_of_2(heads)))
