@@ -18,39 +18,44 @@ from lightllm.models.glm5_next.triton_kernel.kpool import (
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
+def _check_pool_ranges(batch, max_pools, single_query):
+    counts = [1] * batch if single_query else [0 if i % 7 == 3 else i % 3 + 1 for i in range(batch)]
+    cu = [0]
+    visible, owners = [], []
+    for owner, count in enumerate(counts):
+        visible.extend(range(4, count + 4))
+        owners.extend([owner] * count)
+        cu.append(len(visible))
+    lengths = torch.tensor(visible, device="cuda", dtype=torch.int32)
+    cu_q_lens = torch.tensor(cu, device="cuda", dtype=torch.int32)
+    outputs = [torch.empty_like(lengths) for _ in range(3)]
+    tokens = lengths.numel()
+    blocks = triton.cdiv(tokens, 256) if single_query else tokens // 256 + batch
+    compiled = _get_pool_ranges[(blocks,)](
+        lengths, cu_q_lens, *outputs, batch, tokens, max_pools, single_query, 256, num_warps=4
+    )
+    starts = torch.tensor(owners, device="cuda", dtype=torch.int32) * max_pools
+    expected = (starts, starts + lengths // 4, lengths // 4)
+    for actual, reference in zip(outputs, expected):
+        assert torch.equal(actual, reference)
+    return compiled.hash
+
+
 @pytest.mark.parametrize("single_query", [False, True])
 def test_pool_ranges_reuse_compilation_across_runtime_sizes(single_query):
-    hashes = set()
-    for batch, max_pools in [
-        (1, 1),
-        (3, 3),
-        (16, 16),
-        (17, 640),
-        (127, 768),
-        (128, 1024),
-        (129, 1025),
-    ]:
-        counts = [1] * batch if single_query else [0 if i % 7 == 3 else i % 3 + 1 for i in range(batch)]
-        cu = [0]
-        visible, owners = [], []
-        for owner, count in enumerate(counts):
-            visible.extend(range(4, count + 4))
-            owners.extend([owner] * count)
-            cu.append(len(visible))
-        lengths = torch.tensor(visible, device="cuda", dtype=torch.int32)
-        cu_q_lens = torch.tensor(cu, device="cuda", dtype=torch.int32)
-        outputs = [torch.empty_like(lengths) for _ in range(3)]
-        tokens = lengths.numel()
-        blocks = triton.cdiv(tokens, 256) if single_query else tokens // 256 + batch
-        compiled = _get_pool_ranges[(blocks,)](
-            lengths, cu_q_lens, *outputs, batch, tokens, max_pools, single_query, 256, num_warps=4
-        )
-        hashes.add(compiled.hash)
-        starts = torch.tensor(owners, device="cuda", dtype=torch.int32) * max_pools
-        expected = (starts, starts + lengths // 4, lengths // 4)
-        for actual, reference in zip(outputs, expected):
-            assert torch.equal(actual, reference)
+    # The indexer rounds capacity up to 128 pools. Changing that capacity keeps
+    # its default alignment specialization while batch/token counts are dynamic.
+    hashes = {
+        _check_pool_ranges(batch, max_pools, single_query)
+        for batch, max_pools in [(1, 128), (3, 256), (16, 384), (17, 640), (127, 768), (128, 1024), (129, 1152)]
+    }
     assert len(hashes) == 1
+
+
+@pytest.mark.parametrize("single_query", [False, True])
+@pytest.mark.parametrize("batch,max_pools", [(1, 1), (3, 3), (16, 16), (129, 1025)])
+def test_pool_ranges_nonstandard_capacities_preserve_correctness(batch, max_pools, single_query):
+    _check_pool_ranges(batch, max_pools, single_query)
 
 
 def test_pool_compression_reuses_compilation_within_static_query_layouts(monkeypatch):

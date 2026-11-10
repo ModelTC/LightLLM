@@ -78,7 +78,7 @@ def gen_sampling_params(b_req_idx: torch.Tensor, req_sampling_params_manager):
     )
 
 
-@triton.jit(do_not_specialize=["input_size", "vocab_size"])
+@triton.jit(do_not_specialize=["input_size"])
 def _token_id_counter_kernel(
     prompt_ids_ptr,
     token_id_to_counter_ptr,
@@ -112,7 +112,7 @@ def token_id_counter(prompt_ids: torch.Tensor, out_token_id_counter: torch.Tenso
     return
 
 
-@triton.jit(do_not_specialize=["batch_size", "counter_stride_m", "counter_stride_n"])
+@triton.jit(do_not_specialize=["batch_size"])
 def _token_id_counter_update_kernel(
     b_req_idx_ptr,
     req_to_out_token_id_counter_ptr,

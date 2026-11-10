@@ -9,7 +9,8 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 
 
 @pytest.mark.parametrize("first_mode", [True, False])
-def test_compact_modes_preserve_layout_and_reuse_each_variant(monkeypatch, first_mode):
+@pytest.mark.parametrize("aligned_chunks", [False, True])
+def test_compact_modes_preserve_layout_and_reuse_each_variant(monkeypatch, first_mode, aligned_chunks):
     torch.manual_seed(1525)
     misses, hashes = [], {}
     original = JITFunction._do_compile
@@ -20,14 +21,26 @@ def test_compact_modes_preserve_layout_and_reuse_each_variant(monkeypatch, first
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(JITFunction, "_do_compile", observe)
+    # Default production starts share the 16-aligned class. Exercise generic
+    # nonaligned starts separately, retaining correctness and mode coverage.
+    chunk_starts = [0, 2097152, 4194304, 0] if aligned_chunks else [127, 8193, 8193, 127]
     for index, mode in enumerate([first_mode, not first_mode, first_mode, not first_mode]):
         batch = [1, 3, 33, 65][index]
+        low = chunk_starts[index]
+        high = low + [1, 2305, 16385, 30000][index]
         topk = torch.randint(-7, 20000, (batch, 2176), device="cuda", dtype=torch.int32)
         topk[:, ::17] = -1
-        starts = torch.arange(batch, device="cuda", dtype=torch.int32) * 31
+        base = max(0, low - 32)
+        starts = torch.arange(batch, device="cuda", dtype=torch.int32) * 31 + base
+        # Positive indices can still belong to the preceding/following chunk.
+        # Include low-2 as well as low-1 so noncompact output must mask both to -1.
+        topk[0, 1:6] = torch.tensor(
+            [low - 2 - base, low - 1 - base, low - base, high - 1 - base, high - base],
+            device="cuda",
+            dtype=torch.int32,
+        )
         output = torch.full_like(topk, -99999)
         lengths = torch.full((batch,), -987, device="cuda", dtype=torch.int32)
-        low, high = [(0, 1), (127, 2305), (8193, 16385), (0, 30000)][index]
         before_misses = len(misses)
         compiled = _compact_topk_indices_kernel[(batch,)](
             topk,

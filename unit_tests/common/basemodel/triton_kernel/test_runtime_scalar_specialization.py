@@ -44,28 +44,40 @@ def _assert_reused(misses, hashes):
 
 
 @pytest.mark.parametrize("has_mask", [False, True])
-def test_token_helpers_reuse_runtime_counts_and_strides(monkeypatch, has_mask):
-    # None and tensor masks are distinct input types; hold that type fixed while
-    # checking that request count and row stride introduce no new signatures.
+@pytest.mark.parametrize("width", [1, 3, 16, 17])
+def test_token_helpers_reuse_runtime_counts_with_fixed_strides(monkeypatch, has_mask, width):
+    # MTP width and vocabulary are fixed for each service. Preserve their stride
+    # specializations while varying the request count across integer classes.
     kernels = [
         token_ops._fwd_kernel_scatter,
         token_ops._fwd_kernel_gather,
+        token_ops._fwd_kernel_gather_prefill_decode_mixed,
         sampling_ops._token_id_counter_update_kernel,
     ]
     misses, hashes = _observe(monkeypatch, kernels)
-    for batch, width in [(1, 1), (3, 3), (16, 16), (17, 17), (33, 3), (65, 1)]:
+    table = torch.zeros((128, width), dtype=torch.int64, device="cuda")
+    counters = torch.zeros((128, width), dtype=torch.int32, device="cuda")
+    for batch in [1, 3, 16, 17, 33, 65]:
         requests = torch.arange(batch, dtype=torch.int32, device="cuda")
         columns = requests % width
         values = requests.long() + 100
         enabled = requests % 3 != 1
         mask = enabled if has_mask else None
-        table = torch.zeros((128, width), dtype=torch.int64, device="cuda")
+        table.zero_()
         token_ops.scatter_token(values, table, requests, columns, mask)
         actual = token_ops.gather_token(table, requests, columns)
         expected = torch.where(enabled, values, 0) if has_mask else values
         assert torch.equal(actual, expected)
 
-        counters = torch.zeros((128, width), dtype=torch.int32, device="cuda")
+        input_ids = torch.full((batch * 2,), -1, dtype=torch.int64, device="cuda")
+        is_decode = requests % 2 == 0
+        starts = requests * 2
+        expected_input = input_ids.clone()
+        expected_input[starts[is_decode]] = expected[is_decode]
+        token_ops.gather_token_prefill_decode_mixed(input_ids, table, requests, columns, is_decode, starts)
+        assert torch.equal(input_ids, expected_input)
+
+        counters.zero_()
         owners = requests % 7
         sampling_ops.update_req_to_token_id_counter(owners, columns, counters, mask)
         included = enabled if has_mask else torch.ones_like(enabled)
@@ -75,7 +87,8 @@ def test_token_helpers_reuse_runtime_counts_and_strides(monkeypatch, has_mask):
     _assert_reused(misses, hashes)
 
 
-def test_sampling_parameter_and_prompt_counts_reuse_compilation(monkeypatch):
+@pytest.mark.parametrize("vocab", [1, 3, 16, 17])
+def test_sampling_parameter_and_prompt_counts_reuse_compilation(monkeypatch, vocab):
     kernels = [sampling_ops._gen_sampling_params_kernel, sampling_ops._token_id_counter_kernel]
     misses, hashes = _observe(monkeypatch, kernels)
     fields = [
@@ -91,7 +104,7 @@ def test_sampling_parameter_and_prompt_counts_reuse_compilation(monkeypatch):
             for index, field in enumerate(fields)
         }
     )
-    for count, vocab in [(1, 1), (3, 3), (16, 16), (17, 17), (65, 3)]:
+    for count in [1, 3, 16, 17, 65]:
         requests = torch.arange(count, device="cuda", dtype=torch.int32).flip(0)
         actual = sampling_ops.gen_sampling_params(requests, manager)
         for value, field in zip(actual, fields):
