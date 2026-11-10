@@ -153,6 +153,14 @@ class Glm5NextMTPModel(TpPartBaseModel):
         config.update(num_hidden_layers=1, n_layer=1, mhc=False)
         return config
 
+    def prepare_attention_states(self) -> None:
+        super().prepare_attention_states()
+        if self.args.llm_kv_type == "fp8kv_dsa" and self.att_state_manager.get_full_attention_states(
+            self.att_state_role
+        ):
+            # Reserve fixed scratch space before the shared KV capacity is profiled.
+            Fp8Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
+
     def _init_att_backend(self):
         backend_class = (
             Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend

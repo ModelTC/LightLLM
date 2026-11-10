@@ -31,18 +31,29 @@ from lightllm.models.glm5_next.triton_kernel.fp8_prefill import (
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
+@pytest.fixture(autouse=True)
+def current_cuda_device(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", str(torch.cuda.current_device()))
+
+
 def _make_infer_state(**attributes):
     state = InferStateInfo()
     vars(state).update(attributes)
     return state
 
 
-def _make_workspace_backend(batch_max_tokens):
+def _make_workspace_backend(batch_max_tokens, overlap=False):
     backend = object.__new__(Fp8Glm5NextSparseAttBackend)
     backend.model = SimpleNamespace(
-        batch_max_tokens=batch_max_tokens, prefill_graph=None, config={"index_topk": 2048, "index_kpool": 4}
+        batch_max_tokens=batch_max_tokens,
+        prefill_graph=None,
+        config={"index_topk": 2048, "index_kpool": 4},
+        max_req_num=1,
+        max_seq_length=fp8_glm5_next.KV_GATHER_CHUNK_SIZE,
+        att_state_role="unit_test",
+        args=SimpleNamespace(enable_prefill_microbatch_overlap=overlap, run_mode="normal"),
     )
-    backend._prefill_workspaces = [None, None]
+    backend._prefill_workspaces = backend.allocate_prefill_workspaces(backend.model)
     return backend
 
 
@@ -156,10 +167,13 @@ def test_main_and_native_mtp_backend_selection(monkeypatch, draft, kv_type):
 
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     model = object.__new__(Glm5NextMTPModel if draft else Glm5NextTpPartModel)
-    model.args = SimpleNamespace(llm_kv_type=kv_type)
+    model.args = SimpleNamespace(llm_kv_type=kv_type, enable_prefill_microbatch_overlap=False, run_mode="normal")
     model.config = {"index_topk": 2048, "index_kpool": 4}
     model.graph_max_batch_size = 4
     model.max_seq_length = 128
+    model.max_req_num = 2
+    model.batch_max_tokens = 4
+    model.mtp_previous_draft_models = []
     model._init_att_backend()
     infer_state = InferStateInfo()
     prefill = model.prefill_att_backend.create_att_prefill_state(infer_state)
@@ -990,13 +1004,13 @@ def test_fp8_sparse_direct_decode_large_workload_retains_native_graph(monkeypatc
 
 
 @pytest.mark.parametrize("num_heads", [8, 64])
-def test_fp8_prefill_workspace_reuse_mutable_inputs_and_graph_fallback(num_heads):
+def test_fp8_prefill_workspace_reuse_mutable_inputs_and_graph_replay(num_heads):
     torch.manual_seed(53450)
     backend = _make_workspace_backend(66)
     case = _PrefillCase([32768, 16384, 16384], [11, 11, 11], num_heads, backend=backend)
     case.check(case.run())
     workspace = backend._prefill_workspaces[0]
-    assert set(workspace) == {"chunk_topk_indices", "chunk_cache_seqlens", "cu_seqlens_q"}
+    assert set(workspace) == {"gathered_kv", "chunk_topk_indices", "chunk_cache_seqlens", "cu_seqlens_q"}
     pointers = {name: value.data_ptr() for name, value in workspace.items()}
     for _ in range(10):
         infer, state = case.new_state()

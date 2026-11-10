@@ -105,7 +105,19 @@ def test_decode_aliases_infer_state_without_ragged_allocation(monkeypatch, fp8):
         raise AssertionError("GLM must not generate or copy a full ragged index")
 
     monkeypatch.setattr(legacy, "gen_nsa_ks_ke", forbidden)
-    model = type("Model", (), {"config": {"index_kpool": 4, "index_topk": 2048}})()
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", str(torch.cuda.current_device()))
+    model = type(
+        "Model",
+        (),
+        {
+            "config": {"index_kpool": 4, "index_topk": 2048},
+            "batch_max_tokens": 4,
+            "max_req_num": 1,
+            "max_seq_length": 32,
+            "att_state_role": "decode_test",
+            "args": SimpleNamespace(enable_prefill_microbatch_overlap=False, run_mode="decode"),
+        },
+    )()
     backend = (Fp8Glm5NextSparseAttBackend if fp8 else Glm5NextSparseAttBackend)(model)
     assert not hasattr(backend, "ragged_mem_buffers")
     infer = InferStateInfo()
@@ -183,7 +195,20 @@ def test_fp8_prefill_reads_request_table_without_ragged_buffer(monkeypatch, quer
     infer.b1_cu_q_seq_len, infer.b1_cu_kv_seq_len = tensor(q_prefix), tensor(kv_prefix)
     infer.total_token_num = total_kv
     infer.req_manager = SimpleNamespace(req_to_token_indexs=table)
-    model = type("Model", (), {"batch_max_tokens": queries, "prefill_graph": None})()
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", str(torch.cuda.current_device()))
+    model = type(
+        "Model",
+        (),
+        {
+            "batch_max_tokens": queries,
+            "prefill_graph": None,
+            "max_req_num": batch,
+            "max_seq_length": max(seqs),
+            "att_state_role": "indices_test",
+            "config": {"index_topk": 2048},
+            "args": SimpleNamespace(enable_prefill_microbatch_overlap=False, run_mode="normal"),
+        },
+    )()
     backend = Fp8Glm5NextSparseAttBackend(model)
     state = backend.create_att_prefill_state(infer)
     state.init_state()
@@ -216,7 +241,7 @@ def test_fp8_prefill_reads_request_table_without_ragged_buffer(monkeypatch, quer
     check(run())
     workspace = backend._prefill_workspaces[0]
     if workspace is not None:
-        assert set(workspace) == {"chunk_topk_indices", "chunk_cache_seqlens", "cu_seqlens_q"}
+        assert set(workspace) == {"gathered_kv", "chunk_topk_indices", "chunk_cache_seqlens", "cu_seqlens_q"}
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         output = run()

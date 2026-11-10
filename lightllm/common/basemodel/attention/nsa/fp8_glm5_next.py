@@ -8,40 +8,56 @@ from .glm5_next import Glm5NextSparsePrefillState, Glm5NextSparseDecodeState
 from ..base_att import BaseAttBackend
 
 
-# Bound the temporary BF16 gather buffer to 2 GiB (2097152 × 1 × 512 × 2 bytes).
+# Cap each microbatch's BF16 KV workspace at 2 GiB (2097152 × 512 × 2 bytes).
 KV_GATHER_CHUNK_SIZE = 2097152
 
 
 class Fp8Glm5NextSparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
-        self._prefill_workspaces = [None, None]
+        self._prefill_workspaces = self.allocate_prefill_workspaces(model)
 
-    def allocate_prefill_workspace(self, q, topk_indices, q_token_capacity=None):
-        capacity = q.shape[0] if q_token_capacity is None else q_token_capacity
-        return {
-            "chunk_topk_indices": torch.empty(
-                (capacity, topk_indices.shape[1]), dtype=topk_indices.dtype, device=q.device
-            ),
-            "chunk_cache_seqlens": torch.empty(capacity, dtype=torch.int32, device=q.device),
-            "cu_seqlens_q": torch.arange(capacity + 1, dtype=torch.int32, device=q.device),
-        }
+    @classmethod
+    def allocate_prefill_workspaces(cls, model):
+        regions = 1 + int(model.args.enable_prefill_microbatch_overlap)
+        q_token_capacity = model.batch_max_tokens
+        topk_size = triton.cdiv(model.config["index_topk"] + 3, 128) * 128
+        kv_token_capacity = min(KV_GATHER_CHUNK_SIZE, model.max_req_num * model.max_seq_length + q_token_capacity)
+        if model.args.run_mode == "decode":
+            kv_token_capacity = min(kv_token_capacity, q_token_capacity)
+        prefix = f"glm5_fp8_prefill_{model.att_state_role}"
+        gathered_kv = cls.get_gpu_workspace_buffer(
+            prefix + "_kv", regions * kv_token_capacity * 512, torch.bfloat16
+        ).view(regions, kv_token_capacity, 1, 512)
+        chunk_topk_indices = cls.get_gpu_workspace_buffer(
+            prefix + "_topk", regions * q_token_capacity * topk_size, torch.int32
+        ).view(regions, q_token_capacity, topk_size)
+        chunk_cache_seqlens = cls.get_gpu_workspace_buffer(
+            prefix + "_seqlens", regions * q_token_capacity, torch.int32
+        ).view(regions, q_token_capacity)
+        cu_seqlens_q = cls.get_gpu_workspace_buffer(
+            prefix + "_cu_q", regions * (q_token_capacity + 1), torch.int32
+        ).view(regions, q_token_capacity + 1)
+        cu_seqlens_q.copy_(torch.arange(q_token_capacity + 1, dtype=torch.int32, device=cu_seqlens_q.device))
+        return [
+            {
+                "gathered_kv": gathered_kv[index],
+                "chunk_topk_indices": chunk_topk_indices[index],
+                "chunk_cache_seqlens": chunk_cache_seqlens[index],
+                "cu_seqlens_q": cu_seqlens_q[index],
+            }
+            for index in range(regions)
+        ]
 
-    def get_prefill_workspace(self, infer_state, q, topk_indices):
+    def get_prefill_workspace(self, infer_state, topk_indices):
         buffers = self._prefill_workspaces[infer_state.microbatch_index]
         q_token_num, topk_size = topk_indices.shape
-        if (
-            buffers is None
-            or buffers["chunk_topk_indices"].shape[0] < q_token_num
-            or buffers["chunk_topk_indices"].shape[1] != topk_size
-            or buffers["chunk_topk_indices"].dtype != topk_indices.dtype
-        ):
-            buffers = self.allocate_prefill_workspace(
-                q, topk_indices, q_token_capacity=max(self.model.batch_max_tokens or 0, q_token_num)
-            )
-            self._prefill_workspaces[infer_state.microbatch_index] = buffers
+        assert q_token_num <= buffers["chunk_cache_seqlens"].numel()
+        assert topk_size <= buffers["chunk_topk_indices"].shape[1]
+        chunk_topk_indices = buffers["chunk_topk_indices"].view(-1)
         return {
-            "chunk_topk_indices": buffers["chunk_topk_indices"][:q_token_num],
+            "gathered_kv": buffers["gathered_kv"],
+            "chunk_topk_indices": chunk_topk_indices[: q_token_num * topk_size].view(q_token_num, topk_size),
             "chunk_cache_seqlens": buffers["chunk_cache_seqlens"][:q_token_num],
             "cu_seqlens_q": buffers["cu_seqlens_q"][: q_token_num + 1],
         }
@@ -71,14 +87,6 @@ class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
 
         nsa_prefill_dict = att_control.nsa_prefill_dict
         infer_state = self.infer_state
-        workspace = None
-        graph_guard = (
-            infer_state.is_cuda_graph_capture
-            or self.backend.model.prefill_graph is not None
-            or hasattr(infer_state, "prefill_cuda_graph_exe_list")
-        )
-        if not graph_guard and not torch.cuda.is_current_stream_capturing():
-            workspace = self.backend.get_prefill_workspace(infer_state, q, nsa_prefill_dict["topk_indices"])
         q_token_num, q_head_num, _ = q.shape
         prefill_cache_kv = nsa_prefill_dict["prefill_cache_kv"]
         topk_indices = nsa_prefill_dict["topk_indices"]
@@ -88,14 +96,13 @@ class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
         b1_cu_kv_seq_len = infer_state.b1_cu_kv_seq_len
         b1_cu_q_seq_len = infer_state.b1_cu_q_seq_len
         total_token_num = infer_state.total_token_num
-        gather_chunk_size = min(KV_GATHER_CHUNK_SIZE, total_token_num)
-        workspace = workspace or self.backend.allocate_prefill_workspace(q, topk_indices)
+        workspace = self.backend.get_prefill_workspace(infer_state, topk_indices)
+        gathered_kv = workspace["gathered_kv"]
+        gather_chunk_size = min(gathered_kv.shape[0], total_token_num)
         chunk_topk_indices = workspace["chunk_topk_indices"]
         chunk_cache_seqlens = workspace["chunk_cache_seqlens"]
         cu_seqlens_q = workspace["cu_seqlens_q"]
-        # Keep this potentially 2 GiB buffer local to a DSA layer.
         has_history = total_token_num > q_token_num
-        gathered_kv = q.new_empty((gather_chunk_size, 1, 512)) if has_history else None
         if not has_history and prefill_cache_kv.stride(-1) != 1:
             prefill_cache_kv = prefill_cache_kv.contiguous()
         output = softmax_lse = None
