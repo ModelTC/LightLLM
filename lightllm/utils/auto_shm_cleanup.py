@@ -30,7 +30,7 @@ class AutoShmCleanup:
 
     def _init_libc(self):
         try:
-            self.libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6")
+            self.libc = ctypes.CDLL("libc.so.6")
             self.libc.shmget.argtypes = (ctypes.c_long, ctypes.c_size_t, ctypes.c_int)
             self.libc.shmget.restype = ctypes.c_int
             self.libc.shmctl.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_void_p)

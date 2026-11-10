@@ -169,7 +169,7 @@ class CpuKVCacheMeta:
 
 @lru_cache(maxsize=None)
 def create_shm_kv_cache_ptr(key: int, size: int) -> int:
-    libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6", use_errno=True)
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
     libc.shmget.argtypes = (ctypes.c_long, ctypes.c_size_t, ctypes.c_int)
     libc.shmget.restype = ctypes.c_int
     libc.shmat.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
@@ -254,7 +254,12 @@ def _load_gpu_runtime():
         candidates = ["libamdhip64.so", "/opt/rocm/lib/libamdhip64.so"]
         prefix = "hip"
     else:
-        candidates = ["libcudart.so", "/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so"]
+        candidates = [
+            "libcudart.so",
+            "/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so",
+            "/usr/local/cuda/lib64/libcudart.so",
+            "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so",
+        ]
         prefix = "cuda"
     for cand in candidates:
         try:
@@ -348,7 +353,7 @@ class AsyncRegistrationHandle:
 
 @lru_cache(maxsize=None)
 def attach_shm_kv_cache_ptr(key: int, size: int) -> int:
-    libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6", use_errno=True)
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
     libc.shmget.argtypes = (ctypes.c_long, ctypes.c_size_t, ctypes.c_int)
     libc.shmget.restype = ctypes.c_int
     libc.shmat.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
