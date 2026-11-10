@@ -249,14 +249,14 @@ def _context_attention_fwd_fp8_direct_smallq(
     return output
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens"])
 def _build_prefill_row_table_kernel(PrefillMemIndex, RowTable, num_tokens, BLOCK: tl.constexpr):
     row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mem_index = tl.load(PrefillMemIndex + row, row < num_tokens, 0)
     tl.store(RowTable + mem_index, row, row < num_tokens)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens"])
 def _gather_prefill_kv_kernel(
     PackedKV,
     MemIndex,
@@ -331,7 +331,7 @@ def _compact_topk_indices_kernel(
         )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["NUM_Q_TOKENS", "chunk_lse_stride_h"])
 def _merge_att_output_kernel(
     Output,
     Lse,
@@ -372,7 +372,7 @@ def _merge_att_output_kernel(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ragged_n"])
 def _selected_prefill_compact_kernel(
     Topk,
     KVStarts,
