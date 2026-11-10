@@ -4,7 +4,6 @@ from lightllm.server.router.model_infer.infer_batch import (
     InferReq,
     InferReqUpdatePack,
 )
-from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex
 from typing import List, Tuple
 from lightllm.server.router.model_infer.mode_backend.pre import (
     prepare_prefill_inputs,
@@ -88,6 +87,7 @@ class DiversehBackend(ChunkedPrefillBackend):
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
+        # TODO: 分析 prefill 元数据事件同步的必要性，以及对 CPU/GPU overlap 的影响。
         model_output.prefill_mem_indexes_ready_event.synchronize()
         update_packs = self._diverse_pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         # 第三阶段
@@ -127,6 +127,10 @@ class DiversehBackend(ChunkedPrefillBackend):
         # 一些可以复用的通用功能函数
 
     def _diverse_pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
+        # diverse 会把 master/slave 已有前缀重新指向共享 KV，属于旧索引重写。
+        # 先在默认流等待上一轮模型读取结束，随后 CPU 缓存模式的批量上传、纯 GPU
+        # 模式的直接写入都沿默认流排序；普通请求仅追加新索引，不需要这一等待。
+        torch.cuda.default_stream().wait_stream(g_infer_context.get_overlap_stream())
         update_func_objs: List[InferReqUpdatePack] = []
         # 通用状态预先填充
         is_master_in_dp = self.is_master_in_dp
@@ -171,18 +175,23 @@ class DiversehBackend(ChunkedPrefillBackend):
                 pack = InferReqUpdatePack(req_obj=req_obj, output_len=pre_master_req_pack.output_len)
                 update_func_objs.append(pack)
 
-        ReqTokenIndex.submit_pending_uploads([req.token_index for req in run_reqs])
+        # TODO: 分析 master/slave 状态更新后同步当前流的必要性，以及对 overlap 并行的影响。
+        torch.cuda.current_stream().synchronize()
         return update_func_objs
 
     def _master_req_to_radix_cache(self, master_req: InferReq):
         key = master_req.get_input_token_ids()[0 : master_req.cur_kv_len]
         key = torch.tensor(key, dtype=torch.int64, device="cpu")
-        recorded = master_req.token_index.get_cpu_token_indexes(0, master_req.hold_kv_len)
-        value = recorded[: master_req.cur_kv_len]
-        prefix_len, new_shared_kv_node = self.radix_cache.insert(key, value)
+        # 一次性保存全部已持有索引。重建共享前缀后，页内预留的尾部仍由 master 持有，
+        # 不能随 reset 丢掉；独立 CPU 快照也避免缓存复用时覆盖尚未追加的尾部。
+        token_indexes = master_req.token_index.get_cpu_token_indexes(0, master_req.hold_kv_len)
+        prefix_len, new_shared_kv_node = self.radix_cache.insert(key, token_indexes[: master_req.cur_kv_len])
         old_prefix_len = 0 if master_req.shared_kv_node is None else master_req.shared_kv_node.node_prefix_total_len
         assert old_prefix_len <= master_req.cur_kv_len
-        self.model.att_state_manager.full_att_allocator.free(value[old_prefix_len:prefix_len])
+        # 释放在默认流同步消费；纯 GPU 模式可借用索引表视图，避免整段 token 索引 D2H。
+        self.model.att_state_manager.full_att_allocator.free(
+            master_req.token_index.get_free_token_indexes(old_prefix_len, prefix_len)
+        )
 
         # 将原有共享节点替换为新共享节点，新共享节点对应的长度为当前的cur_kv_len
         self.radix_cache.dec_node_ref_counter(master_req.shared_kv_node)
@@ -192,13 +201,11 @@ class DiversehBackend(ChunkedPrefillBackend):
             new_shared_kv_node.node_prefix_total_len == master_req.cur_kv_len
         ), f"shared len: {new_shared_kv_node.node_prefix_total_len} cur_kv_len {master_req.cur_kv_len}"
 
-        share_node, kv_len, shared_value = self.radix_cache.match_prefix(key, update_refs=False)
+        share_node, kv_len, value = self.radix_cache.match_prefix(key, update_refs=False)
         assert share_node == new_shared_kv_node and kv_len == master_req.cur_kv_len
-        tail = recorded[master_req.cur_kv_len :]
         master_req.token_index.reset()
-        master_req.token_index.append_token_indexes(shared_value)
-        if tail.numel():
-            master_req.token_index.append_token_indexes(tail)
+        master_req.token_index.append_token_indexes(value)
+        master_req.token_index.append_token_indexes(token_indexes[master_req.cur_kv_len :])
         return
 
     def _copy_master_req_to_slave_req(self, slave_req: InferReq):
@@ -209,8 +216,10 @@ class DiversehBackend(ChunkedPrefillBackend):
         self.radix_cache.add_node_ref_counter(master_req.shared_kv_node)
 
         kv_len = master_req.cur_kv_len
+
+        token_indexes = master_req.token_index.get_cpu_token_indexes(0, kv_len)
         slave_req.token_index.reset()
-        slave_req.token_index.append_token_indexes(master_req.token_index.get_cpu_token_indexes(0, kv_len))
+        slave_req.token_index.append_token_indexes(token_indexes)
         slave_req.shared_kv_node = master_req.shared_kv_node
         slave_req.cur_kv_len = kv_len
         # slave 在 prefill 阶段没有独立分配 KV，共享完成后需要同步其已持有的 KV 长度。
