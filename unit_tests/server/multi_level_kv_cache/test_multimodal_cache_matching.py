@@ -72,6 +72,9 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
         return torch.arange(start, start + alloc_token_num, dtype=torch.int32)
 
     req.args = SimpleNamespace(page_size=1)
+    req.token_index = SimpleNamespace(
+        get_gpu_token_indexes=lambda start, end: torch.empty(end - start, dtype=torch.int32)
+    )
     req.kv_cache_alloc_need = lambda target: max(0, target - req.hold_kv_len)
     req.alloc_kv_mem = allocate
 

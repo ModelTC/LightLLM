@@ -168,6 +168,9 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
 
     # 通过接收 InferReq 的生产入口完成页来源查询、CPU 分配与快照写出。
     requests.req_to_token_indexs[0, :token_num] = indexes
+    req.token_index = SimpleNamespace(
+        get_gpu_token_indexes=lambda start, end: requests.req_to_token_indexs[req.req_idx, start:end]
+    )
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
     module.load_tasks = deque()
     module.args = get_env_start_args()

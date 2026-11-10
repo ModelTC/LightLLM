@@ -276,6 +276,7 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
         return torch.arange(start, start + alloc_token_num, dtype=torch.int32)
 
     req.args = SimpleNamespace(page_size=256)
+    req.token_index = SimpleNamespace(get_gpu_token_indexes=lambda start, end: table[0, start:end])
     req.kv_cache_alloc_need = lambda target: max(0, target - req.hold_kv_len)
     req.alloc_kv_mem = allocate
 

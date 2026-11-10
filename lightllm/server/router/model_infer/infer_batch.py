@@ -123,7 +123,6 @@ class InferenceContext:
             request_ids.append(r_id)
             req_objs.append(r_obj)
 
-        ReqTokenIndex.submit_pending_uploads([req.token_index for req in req_objs])
         self.infer_req_ids.extend(request_ids)
 
         # diverse mode 下，建立一组请求间的主从关系

@@ -292,6 +292,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
         args=SimpleNamespace(page_size=4),
     )
+    req.token_index = SimpleNamespace(get_gpu_token_indexes=lambda start, end: table[req.req_idx, start:end])
     req.kv_cache_alloc_need = lambda target: max(0, (target + 3) // 4 * 4 - req.hold_kv_len)
     req.alloc_kv_mem = lambda alloc_token_num: alloc_token_indexes(req, req.hold_kv_len + alloc_token_num, None, 4)
     monkeypatch.setattr(multi_level_kv_cache_impl, "g_infer_context", context)
@@ -396,6 +397,8 @@ def _load_module(monkeypatch, *, sync, master=True, world=1):
         ),
         args=SimpleNamespace(page_size=4),
     )
+    token_table = module.backend.model.req_manager.req_to_token_indexs
+    req.token_index = SimpleNamespace(get_gpu_token_indexes=lambda start, end: token_table[req.req_idx, start:end])
     req.kv_cache_alloc_need = lambda target: max(0, (target + 3) // 4 * 4 - req.hold_kv_len)
     req.alloc_kv_mem = lambda alloc_token_num: alloc_token_indexes(req, req.hold_kv_len + alloc_token_num, None, 4)
     monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_can_alloc_token_num", lambda: 512)

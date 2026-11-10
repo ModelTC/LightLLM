@@ -1706,6 +1706,9 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
             cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: list(range(1, len(ends) + 1))),
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: ends),
         ),
+        token_index=SimpleNamespace(
+            get_gpu_token_indexes=lambda start, end: requests.req_to_token_indexs[destination, start:end]
+        ),
     )
     if prefix >= page_tokens:
         slot = manager.big_page_buffers.alloc_one_state_cache()
