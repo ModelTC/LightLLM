@@ -168,12 +168,14 @@ def test_request_admission_loads_shared_artifacts_without_compilation(
     monkeypatch.setattr(
         infer_batch,
         "get_env_start_args",
-        lambda: SimpleNamespace(diverse_mode=False, mtp_step=0, disable_chunked_mm_input=False),
+        lambda: SimpleNamespace(
+            diverse_mode=False, mtp_step=0, disable_chunked_mm_input=False, req_token_index_mode="pin_mem_cache"
+        ),
     )
     context = infer_batch.InferenceContext(
         req_manager=SimpleNamespace(
             alloc=count().__next__,
-            copy_token_index_prefixes_to_gpu=lambda req_prefix_lens: None,
+            req_to_token_indexs=torch.zeros((len(requests), 1), dtype=torch.int32),
             req_sampling_params_manager=SimpleNamespace(init_req_sampling_params=lambda req: None),
         ),
         shm_req_manager=SimpleNamespace(get_req_obj_by_index=lambda index: shared_reqs[index]),

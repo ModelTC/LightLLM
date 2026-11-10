@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from unit_tests.common.dsv4_test_utils import DeepseekV4MemoryManager, DeepseekV4CacheConfig, DeepseekV4ReqManager
+from unit_tests.common.req_token_index_test_utils import attach_req_token_index
 from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.deepseek_v4.triton_kernel.swa_cache import get_swa_token_indices as _get_swa_token_indices
@@ -362,26 +363,13 @@ def _request_pages(requests, req):
 
 
 def _reserve(manager, requests, length):
-    from lightllm.server.router.model_infer.infer_req_ext1 import (
-        PinMemPageCacheReqTokenIndex,
-        create_req_token_index,
-    )
-
-    if (
-        PinMemPageCacheReqTokenIndex._page_offsets is not None
-        and PinMemPageCacheReqTokenIndex._page_offsets.numel() != manager.page_size
-    ):
-        PinMemPageCacheReqTokenIndex._page_offsets = None
-
     req_idx = requests.alloc()
     held = (length + manager.page_size - 1) // manager.page_size * manager.page_size
-    req = SimpleNamespace(req_idx=req_idx, hold_kv_len=0, cur_kv_len=0, req_manager=requests)
-    req.args = SimpleNamespace(req_token_index_mode="pin_mem_page_cache", page_size=manager.page_size)
-    req.shm_req = SimpleNamespace(input_len=held)
-    req.token_index = create_req_token_index(req, torch.cuda.current_stream())
-    req.token_index.append_token_indexes(requests.memory.allocator.alloc(held))
-    req.hold_kv_len = held
-    slots = req.token_index.get_cpu_token_indexes(0, held).cuda()
+    req = SimpleNamespace(req_idx=req_idx, hold_kv_len=held, cur_kv_len=0, shm_req=SimpleNamespace(input_len=held))
+    attach_req_token_index(req, requests, requests.memory.allocator.alloc(held), mode="pin_mem_page_cache")
+    # Publish the request table before kernels consume it; keep an owned snapshot
+    # because callers may hold slots after the request row has been reused.
+    slots = req.token_index.get_gpu_token_indexes(0, held).clone()
     return req_idx, slots
 
 
@@ -484,14 +472,7 @@ def test_model_selects_held_slots_without_allocating_swa(cache, model_kind):
     )
     model_input.to_cuda()
     for _ in range(2):
-        from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import select_kv_index_from_req
-
-        indexes = select_kv_index_from_req(
-            model.req_manager.req_to_token_indexs,
-            model_input.b_req_idx,
-            model_input.b_seq_len,
-        )
-        torch.testing.assert_close(indexes, slots[256:257])
+        torch.testing.assert_close(model._select_mem_indexes(model_input), slots[256:257])
         assert manager.allocator.can_use_mem_size == manager.size - 512
     requests.free([req_idx], slots)
 
@@ -1543,8 +1524,9 @@ def test_empty_dspark_commit_is_local_but_proposal_keeps_common_padding_path(mon
     "length,prefix", [(768, 0), (768, 256), (2816, 0), (2816, 2304), (4096, 0), (4096, 256), (4096, 2304)]
 )
 @pytest.mark.parametrize("exhaust_small_pool", [False, True])
+@pytest.mark.parametrize("token_index_mode", ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"])
 def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
-    cache, monkeypatch, length, prefix, exhaust_small_pool
+    cache, monkeypatch, length, prefix, exhaust_small_pool, token_index_mode
 ):
     """Offload after the runtime ring is overwritten, then resume through the common loader."""
     from collections import deque
@@ -1618,6 +1600,7 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: ends),
         ),
     )
+    attach_req_token_index(req, requests, src.cpu(), mode=token_index_mode)
     # 已命中的大页来自 radix，其余完整大页来自当前请求。
     shared_page_ids = [source_checkpoints.pop(end) for end in range(page_tokens, prefix + 1, page_tokens)]
     producer = torch.cuda.current_stream()
@@ -1706,10 +1689,8 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
             cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: list(range(1, len(ends) + 1))),
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: ends),
         ),
-        token_index=SimpleNamespace(
-            get_gpu_token_indexes=lambda start, end: requests.req_to_token_indexs[destination, start:end]
-        ),
     )
+    attach_req_token_index(restored, requests, dst.cpu(), mode=token_index_mode)
     if prefix >= page_tokens:
         slot = manager.big_page_buffers.alloc_one_state_cache()
         manager.big_page_buffers.buffer[slot].copy_(expected_checkpoints[0])
