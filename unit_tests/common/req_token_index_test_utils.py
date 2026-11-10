@@ -5,7 +5,7 @@ from types import MethodType, SimpleNamespace
 import torch
 
 from lightllm.server.router.model_infer.infer_batch import InferReq
-from lightllm.server.router.model_infer.infer_req_ext1 import (
+from lightllm.server.router.model_infer.req_token_index import (
     PinMemPageCacheReqTokenIndex,
     create_req_token_index,
 )

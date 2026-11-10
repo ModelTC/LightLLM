@@ -8,7 +8,7 @@ from lightllm.common.req_manager import base as req_module
 from lightllm.common.req_manager import req_sampling_params
 from lightllm.server.router.model_infer import infer_batch
 from lightllm.server.router.model_infer.infer_batch import InferReq
-from lightllm.server.router.model_infer.infer_req_ext1 import (
+from lightllm.server.router.model_infer.req_token_index import (
     PinMemPageCacheReqTokenIndex,
     ReqTokenIndex,
     create_req_token_index,

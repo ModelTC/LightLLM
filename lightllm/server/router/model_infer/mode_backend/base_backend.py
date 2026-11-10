@@ -9,7 +9,7 @@ from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
-from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex
+from lightllm.server.router.model_infer.req_token_index import ReqTokenIndex
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.cuda_wrapper import cuda_memcpy_pinned_h2d_batch_async

@@ -1145,7 +1145,7 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
         req.args = args
         if not hasattr(args, "req_token_index_mode"):
             args.req_token_index_mode = "pin_mem_page_cache"
-        from lightllm.server.router.model_infer.infer_req_ext1 import create_req_token_index
+        from lightllm.server.router.model_infer.req_token_index import create_req_token_index
 
         req.token_index = create_req_token_index(req, torch.cuda.current_stream())
         return req
@@ -1173,7 +1173,7 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
 
     forks = [request(requests.alloc(), hit_len + 1) for _ in range(2)]
     for fork in forks:
-        from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex
+        from lightllm.server.router.model_infer.req_token_index import ReqTokenIndex
 
         fork._hybrid_match_radix_cache()
         ReqTokenIndex.submit_pending_uploads([fork.token_index])

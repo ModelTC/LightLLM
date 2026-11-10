@@ -180,7 +180,7 @@ def test_full_attention_gpu_restore_stays_outside_image(
 
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", False)
     monkeypatch.setattr(g_infer_context, "radix_cache", radix_cache)
-    from lightllm.server.router.model_infer.infer_req_ext1 import (
+    from lightllm.server.router.model_infer.req_token_index import (
         PinMemPageCacheReqTokenIndex,
         create_req_token_index,
     )
