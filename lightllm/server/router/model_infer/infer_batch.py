@@ -23,7 +23,7 @@ from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.multi_level_kv_cache import CachePlacementController, CacheTier
 from lightllm.server.router.model_infer.infer_req_ext import FinalTokenMetadataExt, PromptSelectedLogprobsExt
-from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex, create_req_token_index
+from lightllm.server.router.model_infer.infer_req_ext1 import create_req_token_index
 from lightllm.server.router.model_infer.structured_output.state import ConstraintState
 
 if TYPE_CHECKING:
@@ -369,7 +369,6 @@ class InferenceContext:
         if paused_reqs:
             # pause_reqs 可能刚刚释放了 KV，因此恢复前重新读取实时可用容量。
             can_alloc_token_num = self.get_can_alloc_token_num()
-            recovered = []
 
             for req in paused_reqs:
                 # 暂停恢复保持原有的保守语义：只有当前完整序列所需的 KV 页面都有足够空间时才恢复，
@@ -389,8 +388,6 @@ class InferenceContext:
                     req.shm_req.is_paused = False
                     logger.debug(f"infer recover paused req id {req.req_id}")
                 can_alloc_token_num -= alloc_token_num
-                recovered.append(req)
-            ReqTokenIndex.submit_pending_uploads([req.token_index for req in recovered])
         return
 
     def get_can_alloc_token_num(self):
