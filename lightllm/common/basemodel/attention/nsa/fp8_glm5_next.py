@@ -12,19 +12,20 @@ from ..base_att import BaseAttBackend
 KV_GATHER_CHUNK_SIZE = 2097152
 
 
-def allocate_prefill_workspace(q, topk_indices, q_token_capacity=None):
-    capacity = q.shape[0] if q_token_capacity is None else q_token_capacity
-    return {
-        "chunk_topk_indices": torch.empty((capacity, topk_indices.shape[1]), dtype=topk_indices.dtype, device=q.device),
-        "chunk_cache_seqlens": torch.empty(capacity, dtype=torch.int32, device=q.device),
-        "cu_seqlens_q": torch.arange(capacity + 1, dtype=torch.int32, device=q.device),
-    }
-
-
 class Fp8Glm5NextSparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
         self._prefill_workspaces = [None, None]
+
+    def allocate_prefill_workspace(self, q, topk_indices, q_token_capacity=None):
+        capacity = q.shape[0] if q_token_capacity is None else q_token_capacity
+        return {
+            "chunk_topk_indices": torch.empty(
+                (capacity, topk_indices.shape[1]), dtype=topk_indices.dtype, device=q.device
+            ),
+            "chunk_cache_seqlens": torch.empty(capacity, dtype=torch.int32, device=q.device),
+            "cu_seqlens_q": torch.arange(capacity + 1, dtype=torch.int32, device=q.device),
+        }
 
     def get_prefill_workspace(self, infer_state, q, topk_indices):
         buffers = self._prefill_workspaces[infer_state.microbatch_index]
@@ -35,7 +36,7 @@ class Fp8Glm5NextSparseAttBackend(BaseAttBackend):
             or buffers["chunk_topk_indices"].shape[1] != topk_size
             or buffers["chunk_topk_indices"].dtype != topk_indices.dtype
         ):
-            buffers = allocate_prefill_workspace(
+            buffers = self.allocate_prefill_workspace(
                 q, topk_indices, q_token_capacity=max(self.model.batch_max_tokens or 0, q_token_num)
             )
             self._prefill_workspaces[infer_state.microbatch_index] = buffers
@@ -88,7 +89,7 @@ class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
         b1_cu_q_seq_len = infer_state.b1_cu_q_seq_len
         total_token_num = infer_state.total_token_num
         gather_chunk_size = min(KV_GATHER_CHUNK_SIZE, total_token_num)
-        workspace = workspace or allocate_prefill_workspace(q, topk_indices)
+        workspace = workspace or self.backend.allocate_prefill_workspace(q, topk_indices)
         chunk_topk_indices = workspace["chunk_topk_indices"]
         chunk_cache_seqlens = workspace["chunk_cache_seqlens"]
         cu_seqlens_q = workspace["cu_seqlens_q"]
