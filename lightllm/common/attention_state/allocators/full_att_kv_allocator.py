@@ -30,7 +30,6 @@ class FullAttKVAllocator:
         self._mem_state = torch.arange(0, size, page_size, dtype=torch.int32, device="cpu", pin_memory=pin_memory)
         self._mark_start = 0
         self._mark_end = self._mem_state.numel()
-        self._return_buffer = None
         rank = get_current_rank_in_node()
         self._shared_can_use_token_num = SharedInt(f"kv_available_tokens_{rank}")
         self._shared_can_use_token_num.set_value(self.can_use_mem_size)
@@ -98,7 +97,7 @@ class FullAttKVAllocator:
         buffer_token_num = 1024 * 1024
         if need_size == 0 or need_size > buffer_token_num:
             return torch.empty(need_size, dtype=torch.int32, device="cpu", pin_memory=self._pin_memory)
-        if self._return_buffer is None or self._return_buffer.numel() < need_size:
+        if not hasattr(self, "_return_buffer") or self._return_buffer.numel() < need_size:
             self._return_buffer = torch.empty(
                 buffer_token_num, dtype=torch.int32, device="cpu", pin_memory=self._pin_memory
             )
