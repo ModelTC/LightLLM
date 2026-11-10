@@ -59,19 +59,22 @@ def _gather_prefill_kv_kernel(
         cached[:, None] & (dim[None, :] < 448),
         0.0,
     ).to(tl.float32)
-    scales = tl.load(packed_row + 576 + dim[None, :] // 64, cached[:, None] & (dim[None, :] < 448), 127)
-    values = quantized * (scales.to(tl.uint32) << 23).to(tl.float32, bitcast=True)
+    group = tl.arange(0, 8)
+    exponent = tl.load(packed_row + 576 + group[None, :], cached[:, None] & (group[None, :] < 7), 127)
+    scales = (exponent.to(tl.uint32) << 23).to(tl.float32, bitcast=True)
+    scales = tl.broadcast_to(scales[:, :, None], (BLOCK_ROWS, 8, 64)).reshape(BLOCK_ROWS, 512)
+    values = quantized * scales
     tail = tl.load(
         (packed_row + 448).to(tl.pointer_type(tl.bfloat16)) + dim[None, :] - 448,
         cached[:, None] & (dim[None, :] >= 448),
         0,
     ).to(tl.float32)
-    values = tl.where(dim[None, :] < 448, values, tail)
+    values = tl.where(dim[None, :] < 448, values, tail).to(tl.bfloat16)
     current_values = tl.load(
         prefill_cache_kv + prefill_row[:, None] * prefill_cache_kv_stride_s + dim[None, :] * prefill_cache_kv_stride_d,
         current[:, None],
         0,
-    ).to(tl.float32)
+    )
     tl.store(
         output + row[:, None] * 512 + dim[None, :],
         tl.where(current[:, None], current_values, values),
@@ -187,7 +190,7 @@ def context_attention_fwd_fp8(
     for chunk_start in range(0, total_token_num, gather_chunk_size):
         chunk_token_num = min(gather_chunk_size, total_token_num - chunk_start)
         if has_history:
-            _gather_prefill_kv_kernel[(chunk_token_num // 4 + b_req_idx.numel(),)](
+            _gather_prefill_kv_kernel[(chunk_token_num // 2 + b_req_idx.numel(),)](
                 packed_kv,
                 prefill_cache_kv,
                 gathered_kv,
@@ -203,7 +206,8 @@ def context_attention_fwd_fp8(
                 req_to_token_indexs_stride_b=req_to_token_indexs.stride(0),
                 req_to_token_indexs_stride_s=req_to_token_indexs.stride(1),
                 batch_size=b_req_idx.numel(),
-                BLOCK_ROWS=4,
+                BLOCK_ROWS=2,
+                num_warps=2,
             )
             chunk_kv = gathered_kv[:chunk_token_num].view(-1, 1, 1, 512)
         else:
