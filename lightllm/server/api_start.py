@@ -3,6 +3,7 @@ import os
 import uuid
 import subprocess
 import math
+import resource
 from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
 from .httpserver.req_id_generator_server import start_req_id_generator_server
@@ -43,8 +44,28 @@ def _set_envs_and_config(args: StartArgs):
     mp.set_start_method("spawn", force=True)
 
 
+def _configure_decode_open_file_limit(args: StartArgs):
+    if args.run_mode != "decode":
+        return
+
+    # Each admitted request keeps several shared memory mappings open.
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    preferred = 65536
+    target = preferred if hard == resource.RLIM_INFINITY else min(preferred, hard)
+    if soft != resource.RLIM_INFINITY and soft < target:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+        except (OSError, ValueError):
+            logger.warning("Could not raise Decode open-file soft limit from %d to %d", soft, target, exc_info=True)
+        else:
+            logger.info("Raised the Decode open-file soft limit from %d to %d", soft, target)
+    if hard != resource.RLIM_INFINITY and hard < preferred:
+        logger.warning("Decode open-file hard limit is %d; a burst of requests may exhaust it", hard)
+
+
 def _launch_subprocesses(args: StartArgs):
     _validate_pd_features(args)
+    _configure_decode_open_file_limit(args)
     _set_envs_and_config(args)
 
     if args.target_vocab_topk_sampling is not None:
