@@ -302,7 +302,7 @@ def _gather_prefill_kv_kernel(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["chunk_end"])
 def _compact_topk_indices_kernel(
     TopkIndices,
     KVStarts,

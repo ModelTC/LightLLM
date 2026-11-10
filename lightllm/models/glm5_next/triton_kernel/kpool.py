@@ -28,7 +28,7 @@ def _get_query_block(CuQLens, BATCH, BLOCK: tl.constexpr):
     return batch, q_start, q_end, local_block
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["BATCH"])
 def _compress_pools(
     Raw,
     Tail,
@@ -178,7 +178,7 @@ def compress_pools(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["BATCH", "TOKENS"])
 def _get_pool_ranges(
     Lengths,
     CuQLens,
