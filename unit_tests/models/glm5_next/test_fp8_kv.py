@@ -24,7 +24,6 @@ from lightllm.models.glm5_next.triton_kernel.pad_query_heads import _fused_strid
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
 from lightllm.models.glm5_next.triton_kernel import context_flashattention_nopad_fp8 as fp8_prefill
 from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
-    _build_prefill_row_table_kernel,
     _gather_prefill_kv_kernel,
 )
 
@@ -43,6 +42,99 @@ def _make_workspace_backend(batch_max_tokens):
     backend.model = SimpleNamespace(batch_max_tokens=batch_max_tokens, prefill_graph=None)
     backend._prefill_workspaces = [{"smallq": None, "generic": None} for _ in range(2)]
     return backend
+
+
+class _PrefillCase:
+    def __init__(self, seq_lens, q_lens, heads, width=2176, capacity=None, backend=None, softmax_scale=0.0625):
+        device = "cuda"
+        tensor = lambda values: torch.tensor(values, device=device, dtype=torch.int32)
+        self.seq_lens, self.q_lens = seq_lens, q_lens
+        self.requests = list(range(2 * len(seq_lens) - 1, 0, -2))
+        total, queries = sum(seq_lens), sum(q_lens)
+        capacity = capacity or total + 17
+        self.table = torch.full((2 * len(seq_lens) + 1, max(seq_lens) + 7), -1, device=device, dtype=torch.int32)
+        slots = torch.randperm(capacity, device=device, dtype=torch.int32)[:total]
+        cu_q, cu_kv, query_req, positions = [0], [0], [], []
+        for req, length, count in zip(self.requests, seq_lens, q_lens):
+            self.table[req, :length] = slots[cu_kv[-1] : cu_kv[-1] + length]
+            query_req.extend([req] * count)
+            positions.extend(range(length - count, length))
+            cu_q.append(cu_q[-1] + count)
+            cu_kv.append(cu_kv[-1] + length)
+        self.query_req, self.positions = tensor(query_req).long(), tensor(positions).long()
+        self.q = torch.randn(queries, heads, 512, device=device, dtype=torch.bfloat16)
+        self.source = torch.randn(capacity, 1, 512, device=device, dtype=torch.bfloat16)
+        self.packed = torch.zeros(capacity, 1, 720, device=device, dtype=torch.uint8)
+        self.all_slots = torch.arange(capacity, device=device, dtype=torch.int32)
+        write_fp8_e8m0_packed_kv(self.source, self.all_slots, self.packed)
+        self.prefill = torch.randn(queries, 1, 1024, device=device, dtype=torch.bfloat16)[..., ::2]
+        visible = tensor(positions) + 1
+        self.topk = torch.randint(max(seq_lens), (queries, width), device=device, dtype=torch.int32)
+        self.topk.remainder_(visible[:, None])
+        self.topk.masked_fill_(torch.arange(width, device=device)[None, :] >= visible.clamp_max(2048)[:, None], -1)
+        self.topk[:, ::19] = -1
+        self.topk[:, 0] = visible - 1
+        self.topk[:, 1] = visible - 1
+        self.physical = torch.empty(queries, width * 2, device=device, dtype=torch.int32)[:, ::2]
+        self.infer = _make_infer_state(
+            req_manager=SimpleNamespace(req_to_token_indexs=self.table),
+            b_req_idx=tensor(self.requests),
+            b_seq_len=tensor(seq_lens),
+            b1_cu_q_seq_len=tensor(cu_q),
+            b1_cu_kv_seq_len=tensor(cu_kv),
+            position_ids=tensor(positions),
+            total_token_num=total,
+            mem_index=torch.empty(queries, device=device, dtype=torch.int32),
+        )
+        self.backend = backend or _make_workspace_backend(queries)
+        _, self.state = self.new_state()
+        self.control = AttControl(
+            nsa_prefill=True,
+            nsa_prefill_dict={
+                "topk_indices": self.topk,
+                "topk_mem_indices": self.physical,
+                "prefill_cache_kv": self.prefill,
+                "softmax_scale": softmax_scale,
+                "kv_lora_rank": 512,
+            },
+        )
+
+    def new_state(self, **overrides):
+        if overrides:
+            infer = _make_infer_state(**vars(self.infer))
+            vars(infer).update(overrides)
+        else:
+            infer = self.infer
+        state = self.backend.create_att_prefill_state(infer)
+        state.init_state()
+        return infer, state
+
+    def refresh(self):
+        self.infer.mem_index.copy_(self.table[self.query_req, self.positions])
+        self.physical.copy_(self.table[self.query_req[:, None], self.topk.clamp_min(0).long()])
+        self.physical.masked_fill_(self.topk < 0, -1)
+        self.control.nsa_prefill_dict["topk_indices"] = self.topk
+
+    def run(self, state=None):
+        self.refresh()
+        active = self.state if state is None else state
+        return active.prefill_att(self.q, self.packed[..., :584], None, self.control)
+
+    def check(self, actual):
+        values = _dequantize_kv_cache(self.packed)
+        values[self.infer.mem_index.long()] = self.prefill
+        physical = self.table[self.query_req[:, None], self.topk.clamp_min(0).long()].masked_fill(self.topk < 0, -1)
+        expected = _torch_sparse_attention(self.q, values, physical, self.control.nsa_prefill_dict["softmax_scale"])
+        torch.testing.assert_close(actual.float(), expected, atol=0.012, rtol=0.015)
+
+    def mutate(self):
+        self.q.normal_()
+        self.prefill.normal_()
+        self.source.normal_()
+        write_fp8_e8m0_packed_kv(self.source, self.all_slots, self.packed)
+        for req, length in zip(self.requests, self.seq_lens):
+            self.table[req, :length].copy_(self.table[req, :length].roll(1))
+        self.topk.copy_(self.topk.roll(1, dims=1))
 
 
 @pytest.mark.parametrize("draft", [False, True])
@@ -141,35 +233,29 @@ def test_fp8_scatter_quantization_and_gather_prefill(index_dtype, source_d_strid
     changed_values = (changed_groups / changed_scales.unsqueeze(-1)).to(torch.float8_e4m3fn)
     assert torch.equal(packed_kv[mem_index, :, :448], changed_values.view(torch.uint8).reshape(11, 1, 448))
 
-    indices = mem_index[[0, 2, 8, 2, 5, 1, 9, 3]]
     prefill_kv = source[8:].clone().add_(0.25)
-    row_table = torch.full((31,), -1, device="cuda", dtype=torch.int32)
-    _build_prefill_row_table_kernel[(1,)](mem_index[8:], row_table, 3, BLOCK=256)
-    gathered_kv = torch.empty((indices.numel(), 1, 512), device="cuda", dtype=torch.bfloat16)
-    _gather_prefill_kv_kernel[(triton.cdiv(indices.numel(), 4),)](
+    gathered_kv = torch.empty((8, 1, 512), device="cuda", dtype=torch.bfloat16)
+    _gather_prefill_kv_kernel[(3,)](
         packed_kv[..., :584],
-        indices,
-        row_table,
         prefill_kv,
         gathered_kv,
-        None,
-        None,
-        None,
-        None,
-        0,
-        indices.numel(),
+        mem_index[None],
+        torch.zeros(1, device="cuda", dtype=torch.int32),
+        torch.tensor([0, 11], device="cuda", dtype=torch.int32),
+        torch.tensor([0, 3], device="cuda", dtype=torch.int32),
+        2,
+        8,
         packed_kv.stride(0),
         prefill_kv.stride(0),
         prefill_kv.stride(2),
-        REQ_STRIDE=0,
-        TOKEN_STRIDE=0,
+        REQ_STRIDE=11,
+        TOKEN_STRIDE=1,
         BATCH=1,
-        USE_REQ_TABLE=False,
         BLOCK_ROWS=4,
     )
     expected = _dequantize_kv_cache(packed_kv)
-    expected[mem_index[8:]] = prefill_kv
-    assert torch.equal(gathered_kv, expected[indices.long()])
+    expected[mem_index[8:].long()] = prefill_kv
+    assert torch.equal(gathered_kv, expected[mem_index[2:10].long()])
 
 
 @pytest.mark.parametrize("num_heads", [8, 16, 64, 128])
@@ -224,68 +310,20 @@ def test_fp8_nope_decode_and_cuda_graph(num_heads):
 def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chunk_size):
     monkeypatch.setattr(fp8_prefill, "KV_GATHER_CHUNK_SIZE", chunk_size)
     torch.manual_seed(53)
-    # Two requests whose physical cache locations are unrelated to batch order.
-    prefix_len = 4 if cached else 0
-    seq_len = prefix_len + 3
-    ragged_mem_index = torch.randperm(64, device="cuda")[: 2 * seq_len].int()
-    prefill_rows = torch.cat(
-        (torch.arange(prefix_len, seq_len), torch.arange(seq_len + prefix_len, 2 * seq_len))
-    ).cuda()
-    prefill_mem_index = ragged_mem_index[prefill_rows]
-    source = torch.randn(2 * seq_len, 1, 512, device="cuda", dtype=torch.bfloat16)
-    prefill_kv = source[prefill_rows].clone().add_(0.25)
-    packed_kv = torch.zeros(64, 1, 720, device="cuda", dtype=torch.uint8)
-    write_fp8_e8m0_packed_kv(source, ragged_mem_index, packed_kv)
-    q = torch.randn(num_heads, 6, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
-    kv_start_offsets = torch.tensor([0] * 3 + [seq_len] * 3, device="cuda", dtype=torch.int32)
-    topk_indices = torch.full((6, 128), -1, device="cuda", dtype=torch.int32)
-    for row in range(6):
-        length = prefix_len + row % 3 + 1
-        topk_indices[row, :length] = torch.arange(length, device="cuda")
-    topk_indices[0].fill_(-1)
-    topk_indices[1, :2] = prefix_len
-    topk_indices[3].fill_(-1)
-    topk_indices[3, 0] = prefix_len
-    control = AttControl(
-        nsa_prefill=True,
-        nsa_prefill_dict={
-            "topk_indices": topk_indices,
-            "prefill_cache_kv": prefill_kv,
-            "softmax_scale": 512 ** -0.5,
-            "kv_lora_rank": 512,
-        },
-    )
-    infer_state = _make_infer_state(max_cache_len=prefix_len, mem_index=prefill_mem_index)
-    state = Fp8Glm5NextSparsePrefillState(
-        backend=_make_workspace_backend(q.shape[0]),
-        _infer_state_weak_ref=weakref.ref(infer_state),
-        ks=kv_start_offsets,
-        ragged_mem_index=ragged_mem_index,
-    )
-
-    def run():
-        return state.prefill_att(q, packed_kv[..., :584], None, control)
-
-    def check(out):
-        expected_kv = _dequantize_kv_cache(packed_kv)[ragged_mem_index.long()]
-        expected_kv[prefill_rows] = prefill_kv
-        indices = torch.where(topk_indices >= 0, topk_indices + kv_start_offsets[:, None], -1)
-        expected = _torch_sparse_attention(q, expected_kv, indices, control.nsa_prefill_dict["softmax_scale"])
-        torch.testing.assert_close(out.float(), expected, atol=0.012, rtol=0.015)
-
-    check(run())
-    graph, out = _capture_cuda_graph(run)
+    prefix = 4 if cached else 0
+    case = _PrefillCase([prefix + 3] * 2, [3, 3], num_heads, width=128, capacity=64, softmax_scale=512 ** -0.5)
+    case.q = torch.randn(num_heads, 6, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
+    case.topk[0].fill_(-1)
+    case.topk[1, :2] = prefix
+    case.topk[3].fill_(-1)
+    case.topk[3, 0] = prefix
+    case.check(case.run())
+    graph, output = _capture_cuda_graph(case.run)
     graph.replay()
-    check(out)
-    q.normal_()
-    source.normal_()
-    prefill_kv.copy_(source[prefill_rows] + 0.25)
-    ragged_mem_index.copy_(ragged_mem_index.roll(1))
-    prefill_mem_index.copy_(ragged_mem_index[prefill_rows])
-    topk_indices.copy_(topk_indices.roll(1, dims=1))
-    write_fp8_e8m0_packed_kv(source, ragged_mem_index, packed_kv)
+    case.check(output)
+    case.mutate()
     graph.replay()
-    check(out)
+    case.check(output)
 
 
 @pytest.mark.parametrize("num_heads", [8, 16, 64, 128])
@@ -293,111 +331,29 @@ def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chun
 def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softmax_scale):
     monkeypatch.setattr(fp8_prefill, "KV_GATHER_CHUNK_SIZE", 129)
     torch.manual_seed(53)
-    num_tokens = 1025
-    source = torch.randn(num_tokens, 1, 1024, device="cuda", dtype=torch.bfloat16)[..., :512]
-    ragged_mem_index = torch.randperm(2048, device="cuda")[:num_tokens].int()
-    prefill_rows = torch.tensor([1, 15, 128, 129, 255, 257, 511, 512, 1024], device="cuda")
-    prefill_mem_index = ragged_mem_index[prefill_rows].long()
-    prefill_kv = torch.randn(9, 1, 1024, device="cuda", dtype=torch.bfloat16)[..., :512]
-    packed_kv = torch.zeros(2048, 1, 720, device="cuda", dtype=torch.uint8)
-    write_fp8_e8m0_packed_kv(source, ragged_mem_index, packed_kv)
-    q = torch.randn(num_heads, 9, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
+    case = _PrefillCase([1025], [9], num_heads, capacity=2048, softmax_scale=softmax_scale)
     lengths = torch.tensor([0, 1, 3, 127, 128, 511, 2048, 2049, 2051], device="cuda")
-    topk_indices = torch.randint(num_tokens, (9, 2176), device="cuda", dtype=torch.int32)
-    lanes = torch.arange(2176, device="cuda")
-    topk_indices.masked_fill_(lanes[None, :] >= lengths[:, None], -1)
-    topk_indices[1, 0] = 15
-    topk_indices[2, :3] = torch.tensor([2, 3, 4], device="cuda")
-    topk_indices[3, :127] = prefill_rows[torch.randint(9, (127,), device="cuda")].int()
-    control = AttControl(
-        nsa_prefill=True,
-        nsa_prefill_dict={
-            "topk_indices": topk_indices,
-            "prefill_cache_kv": prefill_kv,
-            "softmax_scale": softmax_scale,
-            "kv_lora_rank": 512,
-        },
-    )
-    infer_state = _make_infer_state(mem_index=prefill_mem_index)
-    state = Fp8Glm5NextSparsePrefillState(
-        backend=_make_workspace_backend(q.shape[0]),
-        _infer_state_weak_ref=weakref.ref(infer_state),
-        ks=torch.zeros(9, device="cuda", dtype=torch.int32),
-        ragged_mem_index=ragged_mem_index,
-    )
-
-    def run():
-        return state.prefill_att(q, packed_kv[..., :584], None, control)
-
-    def check(actual):
-        expected_kv = _dequantize_kv_cache(packed_kv)[ragged_mem_index.long()]
-        expected_kv[prefill_rows] = prefill_kv
-        expected = _torch_sparse_attention(q, expected_kv, topk_indices, softmax_scale)
-        torch.testing.assert_close(actual.float(), expected, atol=0.012, rtol=0.015)
-
-    check(run())
-    graph, output = _capture_cuda_graph(run)
+    case.topk.masked_fill_(torch.arange(2176, device="cuda")[None, :] >= lengths[:, None], -1)
+    case.topk[1, 0] = 1016
+    case.topk[2, :3] = torch.tensor([2, 3, 4], device="cuda")
+    case.topk[3, :127] = torch.randint(1016, 1025, (127,), device="cuda", dtype=torch.int32)
+    case.check(case.run())
+    graph, output = _capture_cuda_graph(case.run)
     graph.replay()
-    check(output)
-    q.normal_()
-    source.normal_()
-    prefill_kv.normal_()
-    ragged_mem_index.copy_(ragged_mem_index.roll(1))
-    prefill_mem_index.copy_(ragged_mem_index[prefill_rows])
-    write_fp8_e8m0_packed_kv(source, ragged_mem_index, packed_kv)
-    topk_indices.copy_(topk_indices.roll(1, dims=1))
+    case.check(output)
+    case.mutate()
     graph.replay()
-    check(output)
-
-
-def _sampled_h64_sparse_reference(q, packed, ragged, prefill_mem, prefill_kv, starts, topk, samples):
-    """Reference only a few H64 rows so the large-Q regression stays bounded."""
-    expected = []
-    for row, heads in samples:
-        local = topk[row]
-        local = local[local >= 0].long()
-        physical = ragged[(starts[row].long() + local)].long()
-        values = _dequantize_kv_cache(packed[physical])[:, 0].float()
-        current = physical[:, None] == prefill_mem[None, :].long()
-        has_current = current.any(dim=1)
-        current_row = current.int().argmax(dim=1)
-        values[has_current] = prefill_kv[current_row[has_current], 0].float()
-        expected.append(((q[row, heads].float() @ values.T * 0.0625).softmax(-1) @ values))
-    return expected
+    case.check(output)
 
 
 @pytest.mark.parametrize("num_q", [16, 33])
-def test_fp8_h64_largeq_native_prefill_permuted_ragged_graph(monkeypatch, num_q):
-    """The native sparse prefill path maps top-k ragged positions, never physical IDs."""
+def test_fp8_h64_largeq_native_prefill_request_table_graph(monkeypatch, num_q):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("Validated FlashMLA sparse prefill target is Hopper")
     from sgl_kernel.flash_mla import flash_mla_sparse_fwd
 
     torch.manual_seed(53100 + num_q)
-    capacity = 131072
-    ragged_n = 65536
-    packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
-    source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
-    write_fp8_e8m0_packed_kv(source, torch.arange(capacity, device="cuda", dtype=torch.int32), packed)
-    ragged = torch.randperm(capacity, device="cuda", dtype=torch.int32)[:ragged_n]
-    q = torch.randn(num_q, 64, 512, device="cuda", dtype=torch.bfloat16)
-    starts = torch.where(
-        torch.arange(num_q, device="cuda", dtype=torch.int32) < num_q // 2,
-        torch.full((num_q,), 1024, device="cuda", dtype=torch.int32),
-        torch.full((num_q,), 32768, device="cuda", dtype=torch.int32),
-    )
-    current_local = (torch.arange(num_q, device="cuda", dtype=torch.int32) * 37) % 2048 + 64
-    current_positions = starts + current_local
-    prefill_mem = ragged[current_positions.long()].clone()
-    prefill_kv = torch.randn(num_q, 1, 512, device="cuda", dtype=torch.bfloat16)
-    prefill_kv.add_(torch.arange(num_q, device="cuda", dtype=torch.bfloat16)[:, None, None])
-    topk = torch.randint(0, 2176, (num_q, 2176), device="cuda", dtype=torch.int32)
-    topk[:, ::19] = -1  # Holes must survive the native position-preserving map.
-    topk[:, 0] = current_local
-    topk[:, 1] = current_local  # Duplicates are valid selected keys.
-    topk[:, 2] = topk[:, 3]
-    assert q.is_contiguous() and topk.is_contiguous()
-
+    case = _PrefillCase([32768, 32768], [num_q // 2, num_q - num_q // 2], 64, capacity=131072)
     observed = []
 
     def observed_sparse(*args, **kwargs):
@@ -405,74 +361,37 @@ def test_fp8_h64_largeq_native_prefill_permuted_ragged_graph(monkeypatch, num_q)
         return flash_mla_sparse_fwd(*args, **kwargs)
 
     monkeypatch.setattr("sgl_kernel.flash_mla.flash_mla_sparse_fwd", observed_sparse)
-
-    def run():
-        return fp8_prefill.context_attention_fwd_fp8(
-            q, packed[..., :584], ragged, prefill_mem, prefill_kv, starts, topk, 0.0625
-        )
-
-    samples = [(0, torch.tensor([0, 9, 63], device="cuda")), (num_q - 1, torch.tensor([3, 31, 62], device="cuda"))]
-
-    def check(actual):
-        expected = _sampled_h64_sparse_reference(q, packed, ragged, prefill_mem, prefill_kv, starts, topk, samples)
-        for (row, heads), value in zip(samples, expected):
-            torch.testing.assert_close(actual[row, heads].float(), value, atol=0.012, rtol=0.015)
-
-    eager = run()
-    check(eager)
-    assert observed == [((num_q, 64, 512), (ragged_n, 1, 512), (num_q, 1, 2176))]
-    graph, output = _capture_cuda_graph(run)
-    q.normal_()
-    prefill_kv.normal_()
-    ragged.copy_(ragged.roll(1))
-    prefill_mem.copy_(ragged[current_positions.long()])
-    topk.copy_(topk.roll(1, dims=1))
-    topk[:, 1] = current_local
+    case.check(case.run())
+    assert observed == [((num_q, 64, 512), (65536, 1, 512), (num_q, 1, 2176))]
+    graph, output = _capture_cuda_graph(case.run)
+    case.mutate()
     graph.replay()
-    check(output)
-    topk.fill_(-1)
+    case.check(output)
+    case.topk.fill_(-1)
     graph.replay()
     assert torch.count_nonzero(output) == 0
-    assert len(observed) == 3  # eager, graph warmup, and capture; replay stays inside the CUDA graph.
+    assert len(observed) == 3
 
 
 def test_fp8_h8_largeq_prefill_keeps_flashattention_path(monkeypatch):
-    """H8 large-Q prefill must not enter the H64 native sparse fast path."""
     import sgl_kernel.flash_attn as flash_attn
-    import sgl_kernel.flash_mla as flash_mla
 
     torch.manual_seed(53180)
-    capacity = 65536
-    num_q = 16
-    packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
-    source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
-    write_fp8_e8m0_packed_kv(source, torch.arange(capacity, device="cuda", dtype=torch.int32), packed)
-    q = torch.randn(num_q, 8, 512, device="cuda", dtype=torch.bfloat16)
-    ragged = torch.randperm(capacity, device="cuda", dtype=torch.int32)
-    starts = torch.full((num_q,), 1024, device="cuda", dtype=torch.int32)
-    current_local = torch.arange(num_q, device="cuda", dtype=torch.int32) + 64
-    prefill_mem = ragged[(starts + current_local).long()].clone()
-    prefill_kv = torch.randn(num_q, 1, 512, device="cuda", dtype=torch.bfloat16)
-    topk = torch.full((num_q, 2176), -1, device="cuda", dtype=torch.int32)
-    topk[:, :64] = torch.arange(64, device="cuda", dtype=torch.int32)
-    topk[:, 0] = current_local
-    seen_flashattention = []
-    original_flashattention = flash_attn.flash_attn_with_kvcache
+    case = _PrefillCase([65536], [16], 8, capacity=65536)
+    observed = []
+    original = flash_attn.flash_attn_with_kvcache
 
     def observed_flashattention(*args, **kwargs):
-        seen_flashattention.append(True)
-        return original_flashattention(*args, **kwargs)
+        observed.append(True)
+        return original(*args, **kwargs)
 
     def unexpected_native(*args, **kwargs):
         raise AssertionError("H8 large-Q prefill entered the native H64 sparse path")
 
     monkeypatch.setattr(flash_attn, "flash_attn_with_kvcache", observed_flashattention)
-    monkeypatch.setattr(flash_mla, "flash_mla_sparse_fwd", unexpected_native)
-    output = fp8_prefill.context_attention_fwd_fp8(
-        q, packed[..., :584], ragged, prefill_mem, prefill_kv, starts, topk, 0.0625
-    )
-    assert seen_flashattention
-    assert output.shape == q.shape
+    monkeypatch.setattr("sgl_kernel.flash_mla.flash_mla_sparse_fwd", unexpected_native)
+    case.check(case.run())
+    assert observed
 
 
 @pytest.mark.parametrize(
@@ -480,204 +399,59 @@ def test_fp8_h8_largeq_prefill_keeps_flashattention_path(monkeypatch):
     [(1, 8), (2, 8), (8, 8), (1, 64), (2, 64), (3, 64), (4, 64), (5, 64), (6, 64), (7, 64), (8, 64)],
 )
 def test_fp8_direct_smallq_prefill_dispatch_strided_holes_and_current(num_q, num_heads):
-    """Exercise eager and graph replay for no-rowtable, small-Q packed prefill."""
     torch.manual_seed(53016 + num_q)
-    capacity = 65536
-    packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
-    source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
-    mem = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    write_fp8_e8m0_packed_kv(source, mem, packed)
-    ragged = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    q = torch.randn(num_heads, num_q, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
-    # Requests deliberately have different spans; starts are not fixed-stride.
-    seq_lens = torch.tensor([127, 521, 1031, 2053, 4099, 8191, 12289, 16381], device="cuda", dtype=torch.int32)[:num_q]
-    starts = torch.nn.functional.pad(seq_lens.cumsum(0), (1, 0))[:-1]
-    current_rows = starts + seq_lens - 1
-    prefill_mem = ragged[current_rows]
-    prefill_kv = torch.randn(num_q, 1, 1024, device="cuda", dtype=torch.bfloat16)[..., :512]
-    topk_backing = torch.full((num_q, 2176 * 2), -1, device="cuda", dtype=torch.int32)
-    topk = topk_backing[:, ::2]  # Exercise the topk stride passed to the direct kernel.
-    topk[:, :3] = torch.tensor([3, 11, 11], device="cuda", dtype=torch.int32)
-    topk[:, 3] = seq_lens - 1
-
-    def run():
-        return fp8_prefill.context_attention_fwd_fp8(
-            q, packed[..., :584], ragged, prefill_mem, prefill_kv, starts, topk, 0.0625
-        )
-
-    def check(actual):
-        assert actual.shape == q.shape and actual.is_contiguous()
-        expected_kv = _dequantize_kv_cache(packed)[ragged.long()]
-        expected_kv[current_rows.long()] = prefill_kv
-        physical = torch.where(topk >= 0, topk + starts[:, None], -1)
-        expected = _torch_sparse_attention(q, expected_kv, physical)
-        torch.testing.assert_close(actual.float(), expected, atol=0.012, rtol=0.015)
-
-    actual = run()
-    check(actual)
-    assert torch.count_nonzero(actual) > 0  # Includes BF16 current KV in every row.
-    graph, output = _capture_cuda_graph(run)
+    seqs = [65536 + value for value in [127, 521, 1031, 2053, 4099, 8191, 12289, 16381][:num_q]]
+    case = _PrefillCase(seqs, [1] * num_q, num_heads)
+    case.q = torch.randn(num_heads, num_q, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
+    backing = torch.full((num_q, 4352), -1, device="cuda", dtype=torch.int32)
+    backing[:, ::2] = case.topk
+    case.topk = backing[:, ::2]
+    output = case.run()
+    case.check(output)
+    assert output.is_contiguous() and torch.count_nonzero(output) > 0
+    graph, output = _capture_cuda_graph(case.run)
     graph.replay()
-    check(output)
-    q.normal_()
-    source.normal_()
-    prefill_kv.normal_()
-    ragged.copy_(ragged.roll(1))
-    prefill_mem.copy_(ragged[current_rows])
-    write_fp8_e8m0_packed_kv(source, mem, packed)
-    topk.copy_(topk.roll(1, dims=1))
+    case.check(output)
+    case.mutate()
     graph.replay()
-    check(output)
-    topk.fill_(-1)  # Empty graph replay must not read invalid packed pointers.
-    graph.replay()
-    assert torch.count_nonzero(output) == 0
+    case.check(output)
 
 
 def test_fp8_h64_direct_smallq_state_workspace_reuse_and_fresh_state():
-    """Q1 H64 direct workspace is owned by the backend and reused across infer states."""
     torch.manual_seed(53150)
-    capacity = 65536
-    packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
-    source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
-    mem = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    write_fp8_e8m0_packed_kv(source, mem, packed)
-    ragged = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    q = torch.randn(64, 1, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1).contiguous()
-    starts = torch.zeros(1, device="cuda", dtype=torch.int32)
-    current_rows = torch.tensor([2048], device="cuda", dtype=torch.int32)
-    prefill_mem = ragged[current_rows]
-    prefill_kv = torch.randn(1, 1, 512, device="cuda", dtype=torch.bfloat16)
-    topk = torch.full((1, 2176), -1, device="cuda", dtype=torch.int32)
-    topk[:, :2048] = torch.arange(2048, device="cuda", dtype=torch.int32)
-    topk[:, 2048] = current_rows
-    control = AttControl(
-        nsa_prefill=True,
-        nsa_prefill_dict={
-            "topk_indices": topk,
-            "prefill_cache_kv": prefill_kv,
-            "softmax_scale": 0.0625,
-            "kv_lora_rank": 512,
-        },
-    )
-    infer_state = _make_infer_state(mem_index=prefill_mem)
-    backend = _make_workspace_backend(q.shape[0])
-    state = Fp8Glm5NextSparsePrefillState(
-        backend=backend, _infer_state_weak_ref=weakref.ref(infer_state), ks=starts, ragged_mem_index=ragged
-    )
-
-    def expected():
-        values = _dequantize_kv_cache(packed)[ragged.long()]
-        values[current_rows.long()] = prefill_kv
-        return _torch_sparse_attention(q, values, topk)
-
-    def run(active_state=state):
-        return active_state.prefill_att(q, packed[..., :584], None, control)
-
-    torch.testing.assert_close(run().float(), expected(), atol=0.012, rtol=0.015)
-    cache = backend._prefill_workspaces[0]["smallq"]
-    assert not hasattr(infer_state, "_glm5_fp8_smallq_workspace_cache")
-    workspace = cache["direct"]
-    pointers = {name: tensor.data_ptr() for name, tensor in workspace.items()}
+    case = _PrefillCase([65536], [1], 64)
+    case.check(case.run())
+    cache = case.backend._prefill_workspaces[0]["smallq"]
+    pointers = {name: value.data_ptr() for name, value in cache["direct"].items()}
     for _ in range(10):
-        layer_state = Fp8Glm5NextSparsePrefillState(
-            backend=backend, _infer_state_weak_ref=weakref.ref(infer_state), ks=starts, ragged_mem_index=ragged
-        )
-        torch.testing.assert_close(run(layer_state).float(), expected(), atol=0.012, rtol=0.015)
-    assert {name: tensor.data_ptr() for name, tensor in cache["direct"].items()} == pointers
-
-    fresh_infer_state = _make_infer_state(mem_index=prefill_mem.clone())
-    fresh_state = Fp8Glm5NextSparsePrefillState(
-        backend=backend, _infer_state_weak_ref=weakref.ref(fresh_infer_state), ks=starts, ragged_mem_index=ragged
-    )
-    torch.testing.assert_close(run(fresh_state).float(), expected(), atol=0.012, rtol=0.015)
-    fresh_workspace = backend._prefill_workspaces[0]["smallq"]["direct"]
-    assert fresh_workspace["partial_o"].data_ptr() == workspace["partial_o"].data_ptr()
-
-    q.normal_()
-    source.normal_()
-    prefill_kv.normal_()
-    write_fp8_e8m0_packed_kv(source, mem, packed)
-    torch.testing.assert_close(run().float(), expected(), atol=0.012, rtol=0.015)
-    assert {name: tensor.data_ptr() for name, tensor in cache["direct"].items()} == pointers
+        infer, state = case.new_state()
+        case.check(case.run(state))
+    assert {name: value.data_ptr() for name, value in cache["direct"].items()} == pointers
+    fresh_infer, fresh = case.new_state(mem_index=case.infer.mem_index.clone())
+    case.check(case.run(fresh))
+    assert {name: value.data_ptr() for name, value in cache["direct"].items()} == pointers
+    case.mutate()
+    case.check(case.run())
 
 
 @pytest.mark.parametrize("num_q", [2, 3, 5, 8])
 def test_fp8_h64_selected_prefill_state_workspace_reuse(num_q):
-    """H64 selected prefill rewrites backend workspace across DSA layers."""
     torch.manual_seed(53200 + num_q)
-    capacity = 65536
-    packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
-    source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
-    mem = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    write_fp8_e8m0_packed_kv(source, mem, packed)
-    ragged = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    q = torch.randn(64, num_q, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
-    starts = torch.arange(num_q, device="cuda", dtype=torch.int32) * 4096
-    current_rows = starts + 2048
-    prefill_mem = ragged[current_rows]
-    prefill_kv = torch.randn(num_q, 1, 512, device="cuda", dtype=torch.bfloat16)
-    topk = torch.full((num_q, 2176), -1, device="cuda", dtype=torch.int32)
-    topk[:, :2048] = torch.arange(2048, device="cuda", dtype=torch.int32)
-    topk[:, 2048] = 2048
-    control = AttControl(
-        nsa_prefill=True,
-        nsa_prefill_dict={
-            "topk_indices": topk,
-            "prefill_cache_kv": prefill_kv,
-            "softmax_scale": 0.0625,
-            "kv_lora_rank": 512,
-        },
-    )
-    infer_state = _make_infer_state(mem_index=prefill_mem)
-    backend = _make_workspace_backend(q.shape[0])
-    state = Fp8Glm5NextSparsePrefillState(
-        backend=backend, _infer_state_weak_ref=weakref.ref(infer_state), ks=starts, ragged_mem_index=ragged
-    )
-
-    def expected():
-        values = _dequantize_kv_cache(packed)[ragged.long()]
-        values[current_rows.long()] = prefill_kv
-        physical = torch.where(topk >= 0, topk + starts[:, None], -1)
-        return _torch_sparse_attention(q, values, physical)
-
-    def run(active_state=state):
-        return active_state.prefill_att(q, packed[..., :584], None, control)
-
-    eager = run()
-    torch.testing.assert_close(eager.float(), expected(), atol=0.012, rtol=0.015)
-    cache = backend._prefill_workspaces[0]["smallq"]
-    assert not hasattr(infer_state, "_glm5_fp8_smallq_workspace_cache")
-    workspace = cache["selected"]
-    pointers = {name: tensor.data_ptr() for name, tensor in workspace.items()}
-    # All 11 DSA layers share the backend allocation and rewrite its contents.
+    case = _PrefillCase([32768] * num_q, [1] * num_q, 64)
+    case.check(case.run())
+    workspace = case.backend._prefill_workspaces[0]["smallq"]["selected"]
+    pointers = {name: value.data_ptr() for name, value in workspace.items()}
     for _ in range(10):
-        layer_state = Fp8Glm5NextSparsePrefillState(
-            backend=backend, _infer_state_weak_ref=weakref.ref(infer_state), ks=starts, ragged_mem_index=ragged
-        )
-        torch.testing.assert_close(run(layer_state).float(), expected(), atol=0.012, rtol=0.015)
-    assert {name: tensor.data_ptr() for name, tensor in cache["selected"].items()} == pointers
-
-    fresh_infer_state = _make_infer_state(mem_index=prefill_mem.clone())
-    fresh_state = Fp8Glm5NextSparsePrefillState(
-        backend=backend, _infer_state_weak_ref=weakref.ref(fresh_infer_state), ks=starts, ragged_mem_index=ragged
-    )
-    torch.testing.assert_close(run(fresh_state).float(), expected(), atol=0.012, rtol=0.015)
-    fresh_workspace = backend._prefill_workspaces[0]["smallq"]["selected"]
-    assert fresh_workspace["compact"].data_ptr() == workspace["compact"].data_ptr()
-
-    source.normal_()
-    write_fp8_e8m0_packed_kv(source, mem, packed)
-    prefill_kv.normal_()
-    q.normal_()
-    eager = run()
-    assert {name: tensor.data_ptr() for name, tensor in cache["selected"].items()} == pointers
-    torch.testing.assert_close(eager.float(), expected(), atol=0.012, rtol=0.015)
-    graph, output = _capture_cuda_graph(run)
-    q.normal_()
-    topk.copy_(topk.roll(1, dims=1))
+        infer, state = case.new_state()
+        case.check(case.run(state))
+    fresh_infer, fresh = case.new_state(mem_index=case.infer.mem_index.clone())
+    case.check(case.run(fresh))
+    assert {name: value.data_ptr() for name, value in workspace.items()} == pointers
+    graph, output = _capture_cuda_graph(case.run)
+    case.mutate()
     graph.replay()
-    torch.testing.assert_close(output.float(), expected(), atol=0.012, rtol=0.015)
-    topk.fill_(-1)
+    case.check(output)
+    case.topk.fill_(-1)
     graph.replay()
     assert torch.count_nonzero(output) == 0
 
@@ -1158,132 +932,56 @@ def test_fp8_sparse_direct_decode_large_workload_retains_native_graph(monkeypatc
 
 
 def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallback():
-    """Generic H64 backend buffers are reused, batch metadata resets, and graph falls back."""
     torch.manual_seed(53450)
-    capacity, num_q = 65536, 13
-    packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
-    source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
-    mem = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    write_fp8_e8m0_packed_kv(source, mem, packed)
-    ragged = torch.randperm(capacity, device="cuda", dtype=torch.int32)
-    starts = torch.arange(num_q, device="cuda", dtype=torch.int32) * 2048
-    current_local = torch.full((num_q,), 2048, device="cuda", dtype=torch.int32)
-    prefill_mem = ragged[(starts + current_local).long()].clone()
-    prefill_kv = torch.randn(num_q, 1, 512, device="cuda", dtype=torch.bfloat16).add_(2)
-    q = torch.randn(64, num_q, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1).contiguous()
-    topk = torch.full((num_q, 2176), -1, device="cuda", dtype=torch.int32)
-    topk[:, :2048] = torch.arange(2048, device="cuda", dtype=torch.int32)
-    topk[:, 2048] = current_local
-    topk[:, 2049] = current_local
-    control = AttControl(
-        nsa_prefill=True,
-        nsa_prefill_dict={
-            "topk_indices": topk,
-            "prefill_cache_kv": prefill_kv,
-            "softmax_scale": 0.0625,
-            "kv_lora_rank": 512,
-        },
-    )
-    infer = _make_infer_state(mem_index=prefill_mem)
-    backend = _make_workspace_backend(2 * num_q)
-
-    def expected(active_ragged=ragged):
-        values = _dequantize_kv_cache(packed)[active_ragged.long()]
-        values[(starts + current_local).long()] = prefill_kv
-        physical = torch.where(topk >= 0, topk + starts[:, None], -1)
-        return _torch_sparse_attention(q, values, physical)
-
-    def run(active):
-        return active.prefill_att(q, packed[..., :584], None, control)
-
-    state = Fp8Glm5NextSparsePrefillState(
-        backend=backend, _infer_state_weak_ref=weakref.ref(infer), ks=starts, ragged_mem_index=ragged
-    )
-    torch.testing.assert_close(run(state).float(), expected(), atol=0.012, rtol=0.015)
-    cache = backend._prefill_workspaces[0]
-    assert not hasattr(infer, "_fp8_sparse_generic_prefill_workspace_cache")
-    workspace = cache["generic"]["workspace"]
-    pointers = {k: v.data_ptr() for k, v in workspace.items() if isinstance(v, torch.Tensor)}
+    backend = _make_workspace_backend(26)
+    case = _PrefillCase([32768, 16384, 16384], [5, 4, 4], 64, backend=backend)
+    case.check(case.run())
+    workspace = backend._prefill_workspaces[0]["generic"]
+    assert set(workspace) == {"chunk_indices", "chunk_lengths", "cu_seqlens_q"}
+    pointers = {name: value.data_ptr() for name, value in workspace.items()}
     for _ in range(10):
-        layer = Fp8Glm5NextSparsePrefillState(
-            backend=backend, _infer_state_weak_ref=weakref.ref(infer), ks=starts, ragged_mem_index=ragged
-        )
-        torch.testing.assert_close(run(layer).float(), expected(), atol=0.012, rtol=0.015)
-    assert workspace["row_table_built"]
-    assert {
-        k: v.data_ptr() for k, v in cache["generic"]["workspace"].items() if isinstance(v, torch.Tensor)
-    } == pointers
-
-    # Change raw KV/top-k in place: reusable metadata must not cache either.
-    q.normal_()
-    prefill_kv.normal_()
-    topk.copy_(topk.roll(1, dims=1))
-    topk[:, 2049] = current_local
-    torch.testing.assert_close(run(state).float(), expected(), atol=0.012, rtol=0.015)
-
-    fresh_ragged = ragged.roll(1)
-    fresh_mem = fresh_ragged[(starts + current_local).long()].clone()
-    fresh = _make_infer_state(mem_index=fresh_mem)
-    fresh_state = Fp8Glm5NextSparsePrefillState(
-        backend=backend, _infer_state_weak_ref=weakref.ref(fresh), ks=starts, ragged_mem_index=fresh_ragged
-    )
-    torch.testing.assert_close(run(fresh_state).float(), expected(fresh_ragged), atol=0.012, rtol=0.015)
-    assert cache["generic"]["workspace"]["prefill_row_table"].data_ptr() == workspace["prefill_row_table"].data_ptr()
-
-    graph_infer = _make_infer_state(mem_index=prefill_mem, prefill_cuda_graph_exe_list=[])
-    graph_state = Fp8Glm5NextSparsePrefillState(
-        backend=backend, _infer_state_weak_ref=weakref.ref(graph_infer), ks=starts, ragged_mem_index=ragged
-    )
-    torch.testing.assert_close(run(graph_state).float(), expected(), atol=0.012, rtol=0.015)
-    assert not hasattr(graph_infer, "_fp8_sparse_generic_prefill_workspace_cache")
-
-    explicit_graph_infer = _make_infer_state(mem_index=prefill_mem, is_cuda_graph_capture=True)
-    explicit_graph_state = Fp8Glm5NextSparsePrefillState(
-        backend=backend, _infer_state_weak_ref=weakref.ref(explicit_graph_infer), ks=starts, ragged_mem_index=ragged
-    )
-    torch.testing.assert_close(run(explicit_graph_state).float(), expected(), atol=0.012, rtol=0.015)
-    assert not hasattr(explicit_graph_infer, "_fp8_sparse_generic_prefill_workspace_cache")
+        infer, state = case.new_state()
+        case.check(case.run(state))
+    case.mutate()
+    case.check(case.run())
+    fresh = _PrefillCase([16384, 32768, 16384], [3, 5, 5], 64, capacity=131072, backend=backend)
+    fresh.check(fresh.run())
+    assert {name: value.data_ptr() for name, value in backend._prefill_workspaces[0]["generic"].items()} == pointers
+    for overrides in ({"prefill_cuda_graph_exe_list": []}, {"is_cuda_graph_capture": True}):
+        infer, state = case.new_state(**overrides)
+        case.check(case.run(state))
+    graph, output = _capture_cuda_graph(case.run)
+    case.mutate()
+    graph.replay()
+    case.check(output)
 
 
 def test_fp8_generic_prefill_workspace_graph_query_is_generic_h64_only(monkeypatch):
-    """H8/direct/selected prefill never queries CUDA graph-capture state."""
-    import lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 as fp8_prefill
+    def forbidden():
+        raise AssertionError("Non-generic prefill queried CUDA graph capture state")
 
-    queries = []
-
-    def query_spy():
-        queries.append(True)
-        raise AssertionError("non-generic path queried CUDA graph capture state")
-
-    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", query_spy)
-    kv = torch.empty((1, 1, 584), dtype=torch.uint8)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", forbidden)
+    monkeypatch.setattr(fp8_prefill, "context_attention_fwd_fp8", lambda **kwargs: kwargs["q"])
     params = {
         "prefill_cache_kv": torch.empty((1, 1, 512), dtype=torch.bfloat16),
         "topk_indices": torch.empty((1, 2176), dtype=torch.int32),
+        "topk_mem_indices": torch.empty((1, 2176), dtype=torch.int32),
         "softmax_scale": 0.0625,
     }
     control = AttControl(nsa_prefill=True, nsa_prefill_dict=params)
-
-    def fake_context(*args):
-        return args[0]
-
-    monkeypatch.setattr(fp8_prefill, "context_attention_fwd_fp8", fake_context)
     for heads, direct, selected in ((8, False, False), (64, True, False), (64, False, True)):
         monkeypatch.setattr(fp8_prefill, "can_use_direct_smallq", lambda *args, d=direct: d)
         monkeypatch.setattr(fp8_prefill, "can_use_selected_prefill", lambda *args, s=selected: s)
-        infer = _make_infer_state(mem_index=torch.empty(1, dtype=torch.int32))
-        backend = _make_workspace_backend(1)
-        backend.get_smallq_workspace = lambda active_infer, active_q, kind="direct" if direct else "selected": {
-            "kind": kind
-        }
-        state = Fp8Glm5NextSparsePrefillState(
-            backend=backend,
-            _infer_state_weak_ref=weakref.ref(infer),
-            ks=torch.zeros(1, dtype=torch.int32),
-            ragged_mem_index=torch.zeros(1, dtype=torch.int32),
+        infer = _make_infer_state(
+            mem_index=torch.empty(1, dtype=torch.int32),
+            req_manager=SimpleNamespace(req_to_token_indexs=torch.empty((1, 1), dtype=torch.int32)),
         )
-        assert state._nsa_prefill_att(torch.empty((1, heads, 512), dtype=torch.bfloat16), kv, control).shape[1] == heads
-    assert not queries
+        backend = _make_workspace_backend(1)
+        backend.get_smallq_workspace = lambda *args: {}
+        state = Fp8Glm5NextSparsePrefillState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
+        assert (
+            state._nsa_prefill_att(torch.empty((1, heads, 512), dtype=torch.bfloat16), None, control).shape[1] == heads
+        )
 
 
 def test_fp8_state_preserves_kv_and_indexer_across_cpu_and_pd(monkeypatch):

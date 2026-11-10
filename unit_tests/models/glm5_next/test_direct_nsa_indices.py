@@ -116,7 +116,7 @@ def test_decode_aliases_infer_state_without_ragged_allocation(monkeypatch, fp8):
     state.init_state()
     assert state.lengths is infer.b_seq_len
     assert state.query_req is infer.b_req_idx
-    assert state.ragged_mem_index is None and state.ks is None and state.ke is None
+    assert not hasattr(state, "ragged_mem_index") and not hasattr(state, "ks")
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         state.init_state()
@@ -141,11 +141,6 @@ def test_decode_aliases_infer_state_without_ragged_allocation(monkeypatch, fp8):
 def test_fp8_prefill_reads_request_table_without_ragged_buffer(monkeypatch, queries, heads, total_kv, chunk_size):
     monkeypatch.setattr(fp8_prefill, "KV_GATHER_CHUNK_SIZE", chunk_size)
 
-    class ForbiddenRowTable:
-        def __getitem__(self, grid):
-            raise AssertionError("Request-layout prefill must not build a physical-slot row table")
-
-    monkeypatch.setattr(fp8_prefill, "_build_prefill_row_table_kernel", ForbiddenRowTable())
     torch.manual_seed(1685)
     batch = min(queries, 2)
     counts = [queries] if batch == 1 else [queries // 2, queries - queries // 2]
@@ -192,7 +187,7 @@ def test_fp8_prefill_reads_request_table_without_ragged_buffer(monkeypatch, quer
     backend = Fp8Glm5NextSparseAttBackend(model)
     state = backend.create_att_prefill_state(infer)
     state.init_state()
-    assert state.ragged_mem_index is None and not hasattr(backend, "ragged_mem_buffers")
+    assert not hasattr(state, "ragged_mem_index") and not hasattr(backend, "ragged_mem_buffers")
     control = AttControl(
         nsa_prefill=True,
         nsa_prefill_dict={
@@ -221,8 +216,7 @@ def test_fp8_prefill_reads_request_table_without_ragged_buffer(monkeypatch, quer
     check(run())
     generic = backend._prefill_workspaces[0]["generic"]
     if generic is not None:
-        assert generic["buffers"]["prefill_row_table"].numel() == 0
-        assert not generic["workspace"]["row_table_built"]
+        assert set(generic) == {"chunk_indices", "chunk_lengths", "cu_seqlens_q"}
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         output = run()

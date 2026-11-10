@@ -11,14 +11,12 @@ KV_GATHER_CHUNK_SIZE = 2097152
 def _direct_smallq_packed_kernel(
     Q,
     PackedKV,
-    RaggedMemIndex,
     PrefillMemIndex,
     PrefillKV,
-    KVStarts,
     Topk,
     PartialO,
     PartialLse,
-    ragged_n,
+    packed_rows,
     q_stride_s: tl.constexpr,
     q_stride_h: tl.constexpr,
     q_stride_d: tl.constexpr,
@@ -34,7 +32,6 @@ def _direct_smallq_packed_kernel(
     BLOCKS_: tl.constexpr,
     SLOTS_: tl.constexpr,
     softmax_scale: tl.constexpr,
-    PHYSICAL_INDICES: tl.constexpr,
 ):
     qid = tl.program_id(0)
     split = tl.program_id(1)
@@ -58,8 +55,6 @@ def _direct_smallq_packed_kernel(
         acc = tl.zeros((BLOCK_H_, 512), tl.float32)
         m = tl.full((BLOCK_H_,), -float("inf"), tl.float32)
         denominator = tl.zeros((BLOCK_H_,), tl.float32)
-    if not PHYSICAL_INDICES:
-        start = tl.load(KVStarts + qid).to(tl.int64)
     for b in tl.range(0, BLOCKS_, num_stages=1, loop_unroll_factor=1, disallow_acc_multi_buffer=True):
         n = tl.arange(0, 64)
         slot = split * SLOTS_ + b * 64 + n
@@ -68,13 +63,8 @@ def _direct_smallq_packed_kernel(
             slot < 2176,
             -1,
         ).to(tl.int64)
-        if PHYSICAL_INDICES:
-            valid = (top >= 0) & (top < ragged_n)
-            mem = tl.where(valid, top, 0)
-        else:
-            ragged_pos = start + top
-            valid = (top >= 0) & (ragged_pos >= 0) & (ragged_pos < ragged_n)
-            mem = tl.load(RaggedMemIndex + ragged_pos, valid, 0).to(tl.int64)
+        valid = (top >= 0) & (top < packed_rows)
+        mem = tl.where(valid, top, 0)
         current_row = tl.full((64,), -1, tl.int32)
         for j in tl.static_range(PREFILL_N):
             current_row = tl.where(valid & (mem == tl.load(PrefillMemIndex + j).to(tl.int64)), j, current_row)
@@ -155,9 +145,7 @@ def reduce_direct_smallq_kernel(
     tl.store(Out + (qid * HEADS_ + h) * 512 + d, value)
 
 
-def can_use_direct_smallq(
-    q, packed_kv, ragged_mem_index, prefill_mem_index, prefill_kv, topk_indices, total_kv_tokens=None
-):
+def can_use_direct_smallq(q, packed_kv, prefill_mem_index, prefill_kv, topk_mem_indices, total_kv_tokens):
     return (
         q.ndim == 3
         and 1 <= q.shape[0] <= 8
@@ -166,14 +154,13 @@ def can_use_direct_smallq(
         and packed_kv.ndim == 3
         and packed_kv.shape[1] == 1
         and packed_kv.shape[2] >= 584
-        and ragged_mem_index.dtype == torch.int32
-        and (ragged_mem_index.numel() if total_kv_tokens is None else total_kv_tokens) >= 65536
+        and total_kv_tokens >= 65536
         and prefill_mem_index.dtype == torch.int32
         and prefill_mem_index.numel() == q.shape[0]
         and prefill_kv.dtype == torch.bfloat16
         and prefill_kv.shape == (q.shape[0], 1, 512)
-        and topk_indices.dtype == torch.int32
-        and topk_indices.shape == (q.shape[0], 2176)
+        and topk_mem_indices.dtype == torch.int32
+        and topk_mem_indices.shape == (q.shape[0], 2176)
     )
 
 
@@ -190,16 +177,7 @@ def allocate_direct_smallq_workspace(q):
 
 @torch.no_grad()
 def _context_attention_fwd_fp8_direct_smallq(
-    q,
-    packed_kv,
-    ragged_mem_index,
-    prefill_mem_index,
-    prefill_kv,
-    kv_starts,
-    topk_indices,
-    softmax_scale,
-    direct_workspace=None,
-    topk_mem_indices=None,
+    q, packed_kv, prefill_mem_index, prefill_kv, topk_mem_indices, softmax_scale, direct_workspace=None
 ):
     qn = q.shape[0]
     heads = q.shape[1]
@@ -218,26 +196,23 @@ def _context_attention_fwd_fp8_direct_smallq(
         partial_lse = workspace["partial_lse"]
         output = workspace["output"]
         launch_grid = (qn, splits, triton.cdiv(heads, block_h))
-    indices = topk_indices if topk_mem_indices is None else topk_mem_indices
     _direct_smallq_packed_kernel[launch_grid](
         q,
         packed_kv,
-        ragged_mem_index,
         prefill_mem_index,
         prefill_kv,
-        kv_starts,
-        indices,
+        topk_mem_indices,
         partial_o,
         partial_lse,
-        ragged_mem_index.numel() if topk_mem_indices is None else packed_kv.shape[0],
+        packed_kv.shape[0],
         q.stride(0),
         q.stride(1),
         q.stride(2),
         packed_kv.stride(0),
         prefill_kv.stride(0),
         prefill_kv.stride(2),
-        indices.stride(0),
-        indices.stride(1),
+        topk_mem_indices.stride(0),
+        topk_mem_indices.stride(1),
         HEADS_=heads,
         BLOCK_H_=block_h,
         PREFILL_N=qn,
@@ -245,7 +220,6 @@ def _context_attention_fwd_fp8_direct_smallq(
         BLOCKS_=blocks,
         SLOTS_=slots,
         softmax_scale=softmax_scale,
-        PHYSICAL_INDICES=topk_mem_indices is not None,
         num_warps=8,
     )
     reduce_direct_smallq_kernel[(qn, heads, 4)](
@@ -261,17 +235,8 @@ def _context_attention_fwd_fp8_direct_smallq(
 
 
 @triton.jit
-def _build_prefill_row_table_kernel(PrefillMemIndex, RowTable, num_tokens, BLOCK: tl.constexpr):
-    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    mem_index = tl.load(PrefillMemIndex + row, row < num_tokens, 0)
-    tl.store(RowTable + mem_index, row, row < num_tokens)
-
-
-@triton.jit
 def _gather_prefill_kv_kernel(
     PackedKV,
-    MemIndex,
-    PrefillRowTable,
     PrefillKV,
     Output,
     ReqToToken,
@@ -286,36 +251,29 @@ def _gather_prefill_kv_kernel(
     REQ_STRIDE: tl.constexpr,
     TOKEN_STRIDE: tl.constexpr,
     BATCH: tl.constexpr,
-    USE_REQ_TABLE: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
 ):
     block = tl.program_id(0)
-    if USE_REQ_TABLE:
-        lanes = tl.arange(0, triton.next_power_of_2(BATCH))
-        ends = tl.load(CuKV + lanes + 1, lanes < BATCH, 0)
-        ends = tl.minimum(tl.maximum(ends - chunk_start, 0), num_tokens)
-        block_ends = ends // BLOCK_ROWS + lanes + 1
-        batch = tl.sum(((block >= block_ends) & (lanes < BATCH)).to(tl.int32), 0)
-        start = tl.load(CuKV + batch)
-        copy_start = tl.minimum(tl.maximum(start - chunk_start, 0), num_tokens)
-        copy_end = tl.minimum(tl.maximum(tl.load(CuKV + batch + 1) - chunk_start, 0), num_tokens)
-        local_block = block - (copy_start // BLOCK_ROWS + batch)
-        row = copy_start + local_block * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
-        live = row < copy_end
-        req = tl.load(ReqIdx + batch).to(tl.int64)
-        position = chunk_start + row - start
-        q_start = tl.load(CuQ + batch)
-        q_len = tl.load(CuQ + batch + 1) - q_start
-        cache_len = tl.load(CuKV + batch + 1) - start - q_len
-        prefill_row = tl.where(position >= cache_len, q_start + position - cache_len, -1)
-        mem_index = tl.load(ReqToToken + req * REQ_STRIDE + position * TOKEN_STRIDE, live & (prefill_row < 0), 0).to(
-            tl.int64
-        )
-    else:
-        row = block * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
-        live = row < num_tokens
-        mem_index = tl.load(MemIndex + row, live, 0).to(tl.int64)
-        prefill_row = tl.load(PrefillRowTable + mem_index, live, -1)
+    lanes = tl.arange(0, triton.next_power_of_2(BATCH))
+    ends = tl.load(CuKV + lanes + 1, lanes < BATCH, 0)
+    ends = tl.minimum(tl.maximum(ends - chunk_start, 0), num_tokens)
+    block_ends = ends // BLOCK_ROWS + lanes + 1
+    batch = tl.sum(((block >= block_ends) & (lanes < BATCH)).to(tl.int32), 0)
+    start = tl.load(CuKV + batch)
+    copy_start = tl.minimum(tl.maximum(start - chunk_start, 0), num_tokens)
+    copy_end = tl.minimum(tl.maximum(tl.load(CuKV + batch + 1) - chunk_start, 0), num_tokens)
+    local_block = block - (copy_start // BLOCK_ROWS + batch)
+    row = copy_start + local_block * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
+    live = row < copy_end
+    req = tl.load(ReqIdx + batch).to(tl.int64)
+    position = chunk_start + row - start
+    q_start = tl.load(CuQ + batch)
+    q_len = tl.load(CuQ + batch + 1) - q_start
+    cache_len = tl.load(CuKV + batch + 1) - start - q_len
+    prefill_row = tl.where(position >= cache_len, q_start + position - cache_len, -1)
+    mem_index = tl.load(ReqToToken + req * REQ_STRIDE + position * TOKEN_STRIDE, live & (prefill_row < 0), 0).to(
+        tl.int64
+    )
     dim = tl.arange(0, 512)
     cached = live & (prefill_row < 0)
     current = live & (prefill_row >= 0)
@@ -361,16 +319,16 @@ def _compact_topk_indices_kernel(
     row = tl.program_id(0)
     lane = tl.arange(0, BLOCK)
     index = tl.load(TopkIndices + row * TOPK + lane, lane < TOPK, -1)
-    ragged_index = index + tl.load(KVStarts + row)
-    valid = (lane < TOPK) & (index >= 0) & (ragged_index >= chunk_start) & (ragged_index < chunk_end)
+    kv_index = index + tl.load(KVStarts + row)
+    valid = (lane < TOPK) & (index >= 0) & (kv_index >= chunk_start) & (kv_index < chunk_end)
     if COMPACT:
         compact_index = tl.cumsum(valid.to(tl.int32)) - 1
-        tl.store(ChunkIndices + row * TOPK + compact_index, ragged_index - chunk_start, valid)
+        tl.store(ChunkIndices + row * TOPK + compact_index, kv_index - chunk_start, valid)
         tl.store(ChunkLengths + row, tl.sum(valid.to(tl.int32)))
     else:
         tl.store(
             ChunkIndices + row * TOPK + lane,
-            tl.where(valid, ragged_index - chunk_start, -1),
+            tl.where(valid, kv_index - chunk_start, -1),
             lane < TOPK,
         )
 
@@ -419,30 +377,21 @@ def _merge_att_output_kernel(
 @triton.jit
 def _selected_prefill_compact_kernel(
     Topk,
-    KVStarts,
-    RaggedMemIndex,
     CompactPhysical,
     Lengths,
     PageTable,
     CuQ,
-    ragged_n,
     packed_rows: tl.constexpr,
     topk_stride_s: tl.constexpr,
     topk_stride_d: tl.constexpr,
     BATCH: tl.constexpr,
     BLOCK: tl.constexpr,
-    PHYSICAL_INDICES: tl.constexpr,
 ):
     qid = tl.program_id(0)
     lane = tl.arange(0, BLOCK)
     local = tl.load(Topk + qid * topk_stride_s + lane * topk_stride_d, lane < 2176, -1).to(tl.int64)
-    if PHYSICAL_INDICES:
-        valid = (lane < 2176) & (local >= 0)
-        physical = local
-    else:
-        ragged_pos = tl.load(KVStarts + qid).to(tl.int64) + local
-        valid = (lane < 2176) & (local >= 0) & (ragged_pos >= 0) & (ragged_pos < ragged_n)
-        physical = tl.load(RaggedMemIndex + ragged_pos, valid, 0).to(tl.int64)
+    valid = (lane < 2176) & (local >= 0)
+    physical = local
     valid = valid & (physical >= 0) & (physical < packed_rows)
     rank = tl.cumsum(valid.to(tl.int32), axis=0) - 1
     tl.store(CompactPhysical + qid * 2176 + rank, physical, valid)
@@ -515,9 +464,7 @@ def _selected_prefill_gather_kernel(
         tl.store(CuK + 1 + x, tl.cumsum(lengths, axis=0), x < BATCH)
 
 
-def can_use_selected_prefill(
-    q, packed_kv, ragged_mem_index, prefill_mem_index, prefill_kv, topk_indices, total_kv_tokens=None
-):
+def can_use_selected_prefill(q, packed_kv, prefill_mem_index, prefill_kv, topk_mem_indices, total_kv_tokens):
     return (
         q.ndim == 3
         and 2 <= q.shape[0] <= 8
@@ -528,18 +475,16 @@ def can_use_selected_prefill(
         and packed_kv.shape[1:] == (1, 584)
         and packed_kv.dtype == torch.uint8
         and packed_kv.device == q.device
-        and ragged_mem_index.dtype == torch.int32
-        and ragged_mem_index.device == q.device
-        and (ragged_mem_index.numel() if total_kv_tokens is None else total_kv_tokens) >= 65536
+        and total_kv_tokens >= 65536
         and prefill_mem_index.dtype == torch.int32
         and prefill_mem_index.device == q.device
         and prefill_mem_index.shape == (q.shape[0],)
         and prefill_kv.dtype == torch.bfloat16
         and prefill_kv.device == q.device
         and prefill_kv.shape == (q.shape[0], 1, 512)
-        and topk_indices.dtype == torch.int32
-        and topk_indices.device == q.device
-        and topk_indices.shape == (q.shape[0], 2176)
+        and topk_mem_indices.dtype == torch.int32
+        and topk_mem_indices.device == q.device
+        and topk_mem_indices.shape == (q.shape[0], 2176)
     )
 
 
@@ -555,54 +500,35 @@ def allocate_selected_prefill_workspace(q, batch_capacity=None):
     }
 
 
-def allocate_generic_prefill_workspace(q, packed_kv, topk_indices, query_capacity=None, use_request_table=False):
-    """Allocate generic prefill metadata up to the backend's planned query capacity."""
+def allocate_generic_prefill_workspace(q, topk_indices, query_capacity=None):
     capacity = q.shape[0] if query_capacity is None else query_capacity
     return {
-        "prefill_row_table": torch.full(
-            (0 if use_request_table else packed_kv.shape[0],), -1, dtype=torch.int32, device=q.device
-        ),
         "chunk_indices": torch.empty((capacity, topk_indices.shape[1]), dtype=topk_indices.dtype, device=q.device),
         "chunk_lengths": torch.empty(capacity, dtype=torch.int32, device=q.device),
         "cu_seqlens_q": torch.arange(capacity + 1, dtype=torch.int32, device=q.device),
-        "row_table_built": False,
     }
 
 
 @torch.no_grad()
 def _context_attention_fwd_fp8_selected_prefill(
-    q,
-    packed_kv,
-    ragged_mem_index,
-    prefill_mem_index,
-    prefill_kv,
-    kv_starts,
-    topk_indices,
-    softmax_scale,
-    selected_workspace=None,
-    topk_mem_indices=None,
+    q, packed_kv, prefill_mem_index, prefill_kv, topk_mem_indices, softmax_scale, selected_workspace=None
 ):
     from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
     batch = q.shape[0]
     workspace = selected_workspace or allocate_selected_prefill_workspace(q)
     batch_pad = triton.next_power_of_2(batch)
-    indices = topk_indices if topk_mem_indices is None else topk_mem_indices
     _selected_prefill_compact_kernel[(batch,)](
-        indices,
-        kv_starts,
-        ragged_mem_index,
+        topk_mem_indices,
         workspace["compact"],
         workspace["lengths"],
         workspace["page_table"],
         workspace["cu_q"],
-        ragged_mem_index.numel() if ragged_mem_index is not None else 0,
         packed_kv.shape[0],
-        indices.stride(0),
-        indices.stride(1),
+        topk_mem_indices.stride(0),
+        topk_mem_indices.stride(1),
         BATCH=batch,
         BLOCK=4096,
-        PHYSICAL_INDICES=topk_mem_indices is not None,
         num_warps=8,
     )
     _selected_prefill_gather_kernel[(batch, triton.cdiv(2176, 4))](
@@ -638,104 +564,49 @@ def _context_attention_fwd_fp8_selected_prefill(
 
 @torch.no_grad()
 def context_attention_fwd_fp8(
-    q: torch.Tensor,
-    packed_kv: torch.Tensor,
-    ragged_mem_index: torch.Tensor,
-    prefill_mem_index: torch.Tensor,
-    prefill_kv: torch.Tensor,
-    kv_starts: torch.Tensor,
-    topk_indices: torch.Tensor,
-    softmax_scale: float,
+    q,
+    packed_kv,
+    prefill_mem_index,
+    prefill_kv,
+    kv_starts,
+    topk_indices,
+    topk_mem_indices,
+    req_to_token_index,
+    b_req_idx,
+    cu_kv_seq_len,
+    cu_q_seq_len,
+    total_kv_tokens,
+    softmax_scale,
     selected_workspace=None,
     direct_workspace=None,
     generic_workspace=None,
-    topk_mem_indices=None,
-    req_to_token_index=None,
-    b_req_idx=None,
-    cu_kv_seq_len=None,
-    total_kv_tokens=None,
-    cu_q_seq_len=None,
 ):
-    """Run NoPE sparse prefill with a bounded gather buffer and BF16 current KV.
-
-    GLM passes physical top-k slots and the existing request table/prefix sums,
-    leaving ragged_mem_index unset. The ragged form supports standalone callers.
-    """
-    # Direct packed attention is intentionally restricted to the validated
-    # small-Q GLM-5.3 shape; all other cases retain the bounded-gather path.
-    index_layout = ragged_mem_index if ragged_mem_index is not None else topk_mem_indices
-    if can_use_direct_smallq(q, packed_kv, index_layout, prefill_mem_index, prefill_kv, topk_indices, total_kv_tokens):
+    """Run NoPE sparse prefill from request mappings and physical top-k slots."""
+    eligibility = (q, packed_kv, prefill_mem_index, prefill_kv, topk_mem_indices, total_kv_tokens)
+    if can_use_direct_smallq(*eligibility):
         return _context_attention_fwd_fp8_direct_smallq(
-            q,
-            packed_kv,
-            ragged_mem_index,
-            prefill_mem_index,
-            prefill_kv,
-            kv_starts,
-            topk_indices,
-            softmax_scale,
-            direct_workspace,
-            topk_mem_indices,
+            q, packed_kv, prefill_mem_index, prefill_kv, topk_mem_indices, softmax_scale, direct_workspace
         )
-    if can_use_selected_prefill(
-        q, packed_kv, index_layout, prefill_mem_index, prefill_kv, topk_indices, total_kv_tokens
-    ):
+    if can_use_selected_prefill(*eligibility):
         return _context_attention_fwd_fp8_selected_prefill(
-            q,
-            packed_kv,
-            ragged_mem_index,
-            prefill_mem_index,
-            prefill_kv,
-            kv_starts,
-            topk_indices,
-            softmax_scale,
-            selected_workspace,
-            topk_mem_indices,
+            q, packed_kv, prefill_mem_index, prefill_kv, topk_mem_indices, softmax_scale, selected_workspace
         )
     from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
     num_q_tokens, num_heads, _ = q.shape
-    use_req_table = ragged_mem_index is None
-    num_kv_tokens = total_kv_tokens if use_req_table else ragged_mem_index.numel()
+    num_kv_tokens = total_kv_tokens
     gather_chunk_size = min(KV_GATHER_CHUNK_SIZE, num_kv_tokens)
-    if generic_workspace is None:
-        # Build the row table before gathering KV and allocating compaction metadata.
-        prefill_row_table = None
-        if not use_req_table:
-            prefill_row_table = torch.full((packed_kv.shape[0],), -1, dtype=torch.int32, device=q.device)
-            _build_prefill_row_table_kernel[(triton.cdiv(prefill_mem_index.numel(), 256),)](
-                prefill_mem_index, prefill_row_table, prefill_mem_index.numel(), BLOCK=256
-            )
-        # Keep this potentially 2 GiB buffer local to a DSA layer.
-        gathered_kv = q.new_empty((gather_chunk_size, 1, 512))
-        chunk_indices = torch.empty_like(topk_indices)
-        chunk_lengths = torch.empty(num_q_tokens, dtype=torch.int32, device=q.device)
-        cu_seqlens_q = torch.arange(num_q_tokens + 1, dtype=torch.int32, device=q.device)
-    else:
-        prefill_row_table = generic_workspace["prefill_row_table"]
-        chunk_indices = generic_workspace["chunk_indices"]
-        chunk_lengths = generic_workspace["chunk_lengths"]
-        cu_seqlens_q = generic_workspace["cu_seqlens_q"]
-        if not use_req_table and not generic_workspace["row_table_built"]:
-            _build_prefill_row_table_kernel[(triton.cdiv(prefill_mem_index.numel(), 256),)](
-                prefill_mem_index, prefill_row_table, prefill_mem_index.numel(), BLOCK=256
-            )
-            generic_workspace["row_table_built"] = True
-        # Keep this potentially 2 GiB buffer local to a DSA layer.
-        gathered_kv = q.new_empty((gather_chunk_size, 1, 512))
+    workspace = generic_workspace or allocate_generic_prefill_workspace(q, topk_indices)
+    chunk_indices = workspace["chunk_indices"]
+    chunk_lengths = workspace["chunk_lengths"]
+    cu_seqlens_q = workspace["cu_seqlens_q"]
+    # Keep this potentially 2 GiB buffer local to a DSA layer.
+    gathered_kv = q.new_empty((gather_chunk_size, 1, 512))
     output = lse = None
     for chunk_start in range(0, num_kv_tokens, gather_chunk_size):
         num_chunk_tokens = min(gather_chunk_size, num_kv_tokens - chunk_start)
-        if use_req_table:
-            gather_rows = 4
-            gather_grid = (num_chunk_tokens // gather_rows + b_req_idx.numel(),)
-        else:
-            gather_rows = 4
-            gather_grid = (triton.cdiv(num_chunk_tokens, 4),)
-        _gather_prefill_kv_kernel[gather_grid](
+        _gather_prefill_kv_kernel[(num_chunk_tokens // 4 + b_req_idx.numel(),)](
             packed_kv,
-            None if use_req_table else ragged_mem_index[chunk_start : chunk_start + num_chunk_tokens],
-            prefill_row_table,
             prefill_kv,
             gathered_kv,
             req_to_token_index,
@@ -747,11 +618,10 @@ def context_attention_fwd_fp8(
             packed_kv.stride(0),
             prefill_kv.stride(0),
             prefill_kv.stride(2),
-            REQ_STRIDE=req_to_token_index.stride(0) if use_req_table else 0,
-            TOKEN_STRIDE=req_to_token_index.stride(1) if use_req_table else 0,
-            BATCH=b_req_idx.numel() if use_req_table else 1,
-            USE_REQ_TABLE=use_req_table,
-            BLOCK_ROWS=gather_rows,
+            REQ_STRIDE=req_to_token_index.stride(0),
+            TOKEN_STRIDE=req_to_token_index.stride(1),
+            BATCH=b_req_idx.numel(),
+            BLOCK_ROWS=4,
         )
         chunk_kv = gathered_kv[:num_chunk_tokens].view(-1, 1, 1, 512)
         if (

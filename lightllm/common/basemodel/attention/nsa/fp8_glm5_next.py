@@ -3,8 +3,7 @@ import weakref
 
 import torch
 
-from .fp8_flashmla_sparse import NsaFlashMlaFp8SparseDecodeAttState
-from .glm5_next import Glm5NextSparsePrefillState
+from .glm5_next import Glm5NextSparsePrefillState, Glm5NextSparseDecodeState
 from ..base_att import BaseAttBackend
 
 
@@ -39,48 +38,29 @@ class Fp8Glm5NextSparseAttBackend(BaseAttBackend):
             "selected_kv": selected["selected_kv"][: batch * slots],
         }
 
-    def get_generic_prefill_workspace(self, infer_state, q, packed_kv, topk_indices, use_request_table=False):
+    def get_generic_prefill_workspace(self, infer_state, q, topk_indices):
         from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
             allocate_generic_prefill_workspace,
         )
 
         slot = self._prefill_workspaces[infer_state.microbatch_index]
-        entry = slot["generic"]
+        buffers = slot["generic"]
         rows, columns = topk_indices.shape
         if (
-            entry is None
-            or entry["buffers"]["chunk_indices"].shape[0] < rows
-            or entry["buffers"]["chunk_indices"].shape[1] != columns
-            or entry["buffers"]["chunk_indices"].dtype != topk_indices.dtype
-            or entry["use_request_table"] != use_request_table
-            or (not use_request_table and entry["buffers"]["prefill_row_table"].numel() < packed_kv.shape[0])
+            buffers is None
+            or buffers["chunk_indices"].shape[0] < rows
+            or buffers["chunk_indices"].shape[1] != columns
+            or buffers["chunk_indices"].dtype != topk_indices.dtype
         ):
-            capacity = max(self.model.batch_max_tokens or 0, rows)
-            entry = {
-                "buffers": allocate_generic_prefill_workspace(
-                    q, packed_kv, topk_indices, query_capacity=capacity, use_request_table=use_request_table
-                ),
-                "owner": None,
-                "use_request_table": use_request_table,
-            }
-            slot["generic"] = entry
-        mem_index = infer_state.mem_index
-        binding = (id(mem_index), mem_index.data_ptr(), tuple(topk_indices.shape), packed_kv.shape[0])
-        if entry["owner"] is None or entry["owner"]() is not infer_state or entry["binding"] != binding:
-            buffers = entry["buffers"]
-            # Capacity is persistent; the current batch's mapping is not.
-            if not use_request_table:
-                buffers["prefill_row_table"].fill_(-1)
-            entry["workspace"] = {
-                "prefill_row_table": buffers["prefill_row_table"][: packed_kv.shape[0]],
-                "chunk_indices": buffers["chunk_indices"][:rows],
-                "chunk_lengths": buffers["chunk_lengths"][:rows],
-                "cu_seqlens_q": buffers["cu_seqlens_q"][: rows + 1],
-                "row_table_built": False,
-            }
-            entry["owner"] = weakref.ref(infer_state)
-            entry["binding"] = binding
-        return entry["workspace"]
+            buffers = allocate_generic_prefill_workspace(
+                q, topk_indices, query_capacity=max(self.model.batch_max_tokens or 0, rows)
+            )
+            slot["generic"] = buffers
+        return {
+            "chunk_indices": buffers["chunk_indices"][:rows],
+            "chunk_lengths": buffers["chunk_lengths"][:rows],
+            "cu_seqlens_q": buffers["cu_seqlens_q"][: rows + 1],
+        }
 
     def create_att_prefill_state(self, infer_state):
         return Fp8Glm5NextSparsePrefillState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
@@ -99,96 +79,52 @@ class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
     def _nsa_prefill_att(self, q, kv, att_control):
         from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
             context_attention_fwd_fp8,
-        )
-
-        params = att_control.nsa_prefill_dict
-        request_layout = {}
-        index_layout = self.ragged_mem_index
-        if index_layout is None:
-            state = self.infer_state
-            index_layout = params["topk_mem_indices"]
-            request_layout = {
-                "topk_mem_indices": index_layout,
-                "req_to_token_index": state.req_manager.req_to_token_indexs,
-                "b_req_idx": state.b_req_idx,
-                "cu_kv_seq_len": state.b1_cu_kv_seq_len,
-                "total_kv_tokens": state.total_token_num,
-                "cu_q_seq_len": state.b1_cu_q_seq_len,
-            }
-        total_kv_tokens = request_layout.get("total_kv_tokens")
-        # Only H64 uses the small-Q workspace paths.
-        if q.shape[1] != 64:
-            return context_attention_fwd_fp8(
-                q,
-                kv,
-                self.ragged_mem_index,
-                self.infer_state.mem_index,
-                params["prefill_cache_kv"],
-                self.ks,
-                params["topk_indices"],
-                params["softmax_scale"],
-                **request_layout,
-            )
-
-        from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
             can_use_direct_smallq,
             can_use_selected_prefill,
         )
 
-        direct_workspace = (
-            self.backend.get_smallq_workspace(self.infer_state, q)
-            if can_use_direct_smallq(
-                q,
-                kv,
-                index_layout,
-                self.infer_state.mem_index,
-                params["prefill_cache_kv"],
-                params["topk_indices"],
-                total_kv_tokens,
-            )
-            else None
-        )
-        selected_eligible = direct_workspace is None and can_use_selected_prefill(
-            q,
-            kv,
-            index_layout,
-            self.infer_state.mem_index,
-            params["prefill_cache_kv"],
-            params["topk_indices"],
-            total_kv_tokens,
-        )
-        workspace = self.backend.get_smallq_workspace(self.infer_state, q) if selected_eligible else None
-        generic_workspace = None
-        if direct_workspace is None and not selected_eligible:
-            graph_guard = (
-                self.infer_state.is_cuda_graph_capture
-                or self.backend.model.prefill_graph is not None
-                or hasattr(self.infer_state, "prefill_cuda_graph_exe_list")
-            )
-            if not graph_guard and not torch.cuda.is_current_stream_capturing():
-                generic_workspace = self.backend.get_generic_prefill_workspace(
-                    self.infer_state, q, kv, params["topk_indices"], use_request_table=bool(request_layout)
+        params = att_control.nsa_prefill_dict
+        state = self.infer_state
+        topk_mem_indices = params["topk_mem_indices"]
+        direct_workspace = selected_workspace = generic_workspace = None
+        if q.shape[1] == 64:
+            eligibility = (q, kv, state.mem_index, params["prefill_cache_kv"], topk_mem_indices, state.total_token_num)
+            if can_use_direct_smallq(*eligibility):
+                direct_workspace = self.backend.get_smallq_workspace(state, q)
+            elif can_use_selected_prefill(*eligibility):
+                selected_workspace = self.backend.get_smallq_workspace(state, q)
+            else:
+                graph_guard = (
+                    state.is_cuda_graph_capture
+                    or self.backend.model.prefill_graph is not None
+                    or hasattr(state, "prefill_cuda_graph_exe_list")
                 )
+                if not graph_guard and not torch.cuda.is_current_stream_capturing():
+                    generic_workspace = self.backend.get_generic_prefill_workspace(state, q, params["topk_indices"])
         return context_attention_fwd_fp8(
-            q,
-            kv,
-            self.ragged_mem_index,
-            self.infer_state.mem_index,
-            params["prefill_cache_kv"],
-            self.ks,
-            params["topk_indices"],
-            params["softmax_scale"],
-            workspace,
-            direct_workspace,
-            generic_workspace,
-            **request_layout,
+            q=q,
+            packed_kv=kv,
+            prefill_mem_index=state.mem_index,
+            prefill_kv=params["prefill_cache_kv"],
+            kv_starts=self.ks,
+            topk_indices=params["topk_indices"],
+            topk_mem_indices=topk_mem_indices,
+            req_to_token_index=state.req_manager.req_to_token_indexs,
+            b_req_idx=state.b_req_idx,
+            cu_kv_seq_len=state.b1_cu_kv_seq_len,
+            cu_q_seq_len=state.b1_cu_q_seq_len,
+            total_kv_tokens=state.total_token_num,
+            softmax_scale=params["softmax_scale"],
+            selected_workspace=selected_workspace,
+            direct_workspace=direct_workspace,
+            generic_workspace=generic_workspace,
         )
 
 
 @dataclasses.dataclass
-class Fp8Glm5NextSparseDecodeState(NsaFlashMlaFp8SparseDecodeAttState):
+class Fp8Glm5NextSparseDecodeState(Glm5NextSparseDecodeState):
     decode_topk_bound: int = None
-    query_req: torch.Tensor = None
+    flashmla_sched_meta: object = None
 
     def init_state(self):
         import flash_mla
