@@ -1,22 +1,11 @@
-import os
-
+from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 import triton
 
-from lightllm.common.attention_state.full_att import FullAttentionState
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
 
 from .triton_kernel.index_quant import hadamard_transform_quant_fp8
 from .triton_kernel.kpool import compress_pools, gather_pools, gather_paged_pools, get_pool_ranges, expand_topk
-
-
-def get_prefill_logits_chunk_size(num_q_tokens: int, max_pools: int, logits_budget_mib: int) -> int:
-    """Bound the FP32 temporary without changing the per-query indexer math."""
-    if not 16 <= logits_budget_mib <= 1024:
-        raise ValueError("GLM prefill logits budget must be between 16 and 1024 MiB")
-    if max_pools <= 0:
-        raise ValueError("max_pools must be positive")
-    return max(1, min(num_q_tokens, logits_budget_mib * 1024 * 1024 // 4 // max_pools))
 
 
 class Glm5NextNsaInfer:
@@ -29,8 +18,6 @@ class Glm5NextNsaInfer:
         self.dim = network_config["index_head_dim"]
         self.eps = network_config["rms_norm_eps"]
         self.pool_size = network_config["index_kpool"]
-        self.prefill_logits_budget_mib = int(os.environ.get("LIGHTLLM_GLM53_PREFILL_LOGITS_MIB", "64"))
-        get_prefill_logits_chunk_size(1, 1, self.prefill_logits_budget_mib)
 
     def select_topk_indices(self, logits, lengths, indices):
         """Select row-relative indices, with valid entries before -1 padding."""
@@ -109,8 +96,16 @@ class Glm5NextNsaInfer:
             att_state.lengths, infer_state.b1_cu_q_seq_len, infer_state.max_q_seq_len, max_pools
         )
         groups = torch.empty((q_fp8.shape[0], self.topk // 4), dtype=torch.int32, device=q_fp8.device)
-        # Keep the 64 MiB default; larger budgets trade memory for query parallelism.
-        chunk_size = get_prefill_logits_chunk_size(q_fp8.shape[0], max_pools, self.prefill_logits_budget_mib)
+        # Leave room for the rest of prefill: target 1/16 of free GPU memory,
+        # capped at 1 GiB, for temporary logits. This needs no user configuration.
+        free_bytes, _ = torch.cuda.mem_get_info(q_fp8.device)
+        logits_budget_bytes = min(free_bytes // 16, 1024 ** 3)
+        # DeepGEMM pads FP32 logits to 256 columns and 128 / num_heads query rows.
+        # Round chunks down to whole query tiles, with at least one tile per chunk.
+        query_tile = 128 // self.heads
+        logits_row_bytes = triton.cdiv(max_pools, 256) * 256 * 4
+        query_tiles = max(1, logits_budget_bytes // (query_tile * logits_row_bytes))
+        chunk_size = query_tiles * query_tile
         import deep_gemm
 
         for start in range(0, q_fp8.shape[0], chunk_size):
