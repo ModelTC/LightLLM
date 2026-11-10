@@ -1,0 +1,22 @@
+source /opt/lightllm-b300/env.sh
+
+export MODEL_DIR="${MODEL_DIR:-/opt/lightllm-b300/models/DeepSeek-V4.1-Flash-1017-FP8}"
+export LIGHTLLM_ENGRAM_USE_SYSV_SHM=1
+read -r PD_NODE_IP _ <<< "$(hostname -i)"
+export PD_MASTER_IP=127.0.0.1
+export PD_MASTER_PORT=60011
+export MAX_REQ_TOTAL_LEN=262144
+
+export LOADWORKER=16
+export OMP_NUM_THREADS=4
+export LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1
+export LIGHTLLM_TOKEN_HASH_LIST_SIZE=4096
+export LIGHTLLM_MODEL_INFER_RECURSION_LIMIT=5000
+export LIGHTLLM_USE_UE8M0_SCALES=1
+export LIGHTLLM_DSV4_THINKING_EFFORT=low
+export DSV4_SWA_FULL_TOKENS_RATIO=0.05
+export NVSHMEM_IB_ENABLE_IBGDA=0
+export EP_DISABLE_GIN=1
+export UCX_TLS=cuda_copy,cuda_ipc,sm,self,tcp
+export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="$NO_PROXY"

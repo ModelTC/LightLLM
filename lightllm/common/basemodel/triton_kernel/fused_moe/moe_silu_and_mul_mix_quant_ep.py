@@ -4,6 +4,7 @@ import triton
 import triton.language as tl
 
 from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
+from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import _ceil_to_ue8m0
 
 
 @triton.jit
@@ -33,6 +34,7 @@ def _silu_and_mul_post_quant_kernel(
     limit: tl.constexpr = None,
     CLAMP_UP_ADD_ONE: tl.constexpr = True,
     EXPERT_ALIGNMENT: tl.constexpr = None,
+    USE_UE8M0_SCALES: tl.constexpr = False,
 ):
     expert_id = tl.program_id(2)
     token_id = tl.program_id(1)
@@ -86,6 +88,8 @@ def _silu_and_mul_post_quant_kernel(
             gate_up = gate_up.to(input_ptr.dtype.element_ty).to(tl.float32)
         _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
         output_s = _absmax / fp8_max
+        if USE_UE8M0_SCALES:
+            output_s = _ceil_to_ue8m0(output_s)
         output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(output_ptr.dtype.element_ty)
         tl.store(
             output_ptr_offs + token_index * stride_output_1,
@@ -109,6 +113,7 @@ def silu_and_mul_masked_post_quant_fwd(
     clamp_up_add_one=True,
     *,
     expert_alignment=None,
+    use_ue8m0_scales=False,
 ):
     """
     input shape [expert_num, token_num_padded, hidden_dim]
@@ -179,6 +184,7 @@ def silu_and_mul_masked_post_quant_fwd(
         limit=limit,
         CLAMP_UP_ADD_ONE=clamp_up_add_one,
         EXPERT_ALIGNMENT=expert_alignment,
+        USE_UE8M0_SCALES=use_ue8m0_scales,
         num_warps=num_warps,
     )
     return

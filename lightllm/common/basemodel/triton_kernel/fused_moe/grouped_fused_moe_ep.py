@@ -13,6 +13,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quan
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
     lightllm_per_token_group_quant_fp8,
     per_token_group_quant_fp8,
+    tma_align_input_scale,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_kernels import (
     ep_reduce_decode_output,
@@ -54,7 +55,7 @@ def deepep_v2_decode_dispatch(hidden_states, topk_idx, topk_weights, num_experts
     # DP ranks may have different local batch sizes. This collective capacity
     # must be identical on every rank, including CUDA graph replays.
     capacity = get_deepep_num_max_dispatch_tokens_per_rank_decode()
-    qinput = per_token_group_quant_fp8(hidden_states, 128)
+    qinput = per_token_group_quant_fp8(hidden_states, 128, use_ue8m0_scales=is_sm100_gpu())
     # Compute-stream ownership lets CUDA Graph reuse receive storage across layers.
     recv_x, _, recv_weights, handle, _ = buffer.dispatch(
         qinput,
@@ -168,6 +169,7 @@ def masked_group_gemm(
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
         expert_alignment=expert_alignment,
+        use_ue8m0_scales=is_sm100_gpu(),
     )
     del gemm_out_a
     gemm_out_b = alloc_tensor_func(recv_x[0].shape, device=recv_x[0].device, dtype=dtype)
@@ -304,7 +306,9 @@ def quantize_fused_experts_input(
     check_ep_expert_dtype(quant_method)
     block_size_k = quant_method.block_size
     assert block_size_k == 128, "block_size_k must be 128"
-    return per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w13.weight.dtype)
+    return per_token_group_quant_fp8(
+        hidden_states, block_size_k, dtype=w13.weight.dtype, use_ue8m0_scales=is_sm100_gpu()
+    )
 
 
 def fused_experts(
@@ -412,7 +416,7 @@ def fused_experts_impl(
     combined_x = None
     if is_prefill:
         qinput_tensor, input_scale = per_token_group_quant_fp8(
-            hidden_states, block_size_k, dtype=w1.dtype, alloc_func=alloc_tensor_func
+            hidden_states, block_size_k, dtype=w1.dtype, alloc_func=alloc_tensor_func, use_ue8m0_scales=is_sm100_gpu()
         )
         allocate_on_comm_stream = previous_event is not None
         # Expanded dispatch directly produces expert-contiguous, alignment-padded inputs:
@@ -735,8 +739,12 @@ def chunked_expanded_moe_forward(
             chunk_rows = chunk_end - chunk_start
             silu_out = workspace_manager.alloc((chunk_rows, intermediate_size), hidden_dtype)
             gemm_out_a = workspace_manager.alloc((chunk_rows, intermediate_twice), hidden_dtype)
+            input_scale = recv_x[1][chunk_start:chunk_end]
+            # Blackwell's FP32-to-UE8M0 packer requires the chunk's own column pitch.
+            if is_sm100_gpu() and input_scale.stride(1) != chunk_rows:
+                input_scale = tma_align_input_scale(input_scale)
             deepgemm_grouped_fp8_nt_contiguous(
-                (recv_x[0][chunk_start:chunk_end], recv_x[1][chunk_start:chunk_end]),
+                (recv_x[0][chunk_start:chunk_end], input_scale),
                 (w1, w1_scale),
                 gemm_out_a,
                 m_indices[chunk_start:chunk_end],
@@ -761,6 +769,7 @@ def chunked_expanded_moe_forward(
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 alloc_func=workspace_quant_alloc,
+                use_ue8m0_scales=is_sm100_gpu(),
             )
             workspace_manager.free(silu_out)
             del silu_out

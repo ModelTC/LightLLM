@@ -19,7 +19,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import Bas
 from lightllm.distributed.communication_op import all_reduce
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_size
-from lightllm.utils.shm_utils import create_or_link_shm, ServiceSharedMemory
+from lightllm.utils.shm_utils import create_or_link_shm, create_or_link_sysv_shm, ServiceSharedMemory
 from lightllm.common.weight_cache import is_preloading_weights, initializing_weight_client
 
 logger = init_logger(__name__)
@@ -278,29 +278,40 @@ class EngramEmbeddingWeight(BaseWeightTpl):
         )
         table_bytes = weight_bytes + scale_bytes
         client = initializing_weight_client()
+        use_sysv = os.getenv("LIGHTLLM_ENGRAM_USE_SYSV_SHM") == "1"
         if get_dp_size() > 1 or is_preloading_weights() or client is not None:
             # DP ranks on this node read the same TP shard; pin one physical table per node.
-            if client is None:
-                self._host_shm = create_or_link_shm(f"{self.prefix}_tp{self.tp_rank_}", table_bytes + 2)
+            name = f"{self.prefix}_tp{self.tp_rank_}"
+            if use_sysv:
+                assert client is None and not is_preloading_weights(), "System V Engram requires direct weight loading"
+                self._host_shm, self._host_mapping = create_or_link_sysv_shm(name, table_bytes + 2)
+            elif client is None:
+                self._host_shm = create_or_link_shm(name, table_bytes + 2)
+                self._host_mapping = self._host_shm._mmap
             else:
                 self._host_shm = ServiceSharedMemory(
                     name=f"{client.host_namespace}_{self.prefix}_tp{self.tp_rank_}", create=False
                 )
                 assert self._host_shm.size == table_bytes + 2, "Resident Engram table size differs"
-            self._host_mapping = self._host_shm._mmap
+                self._host_mapping = self._host_shm._mmap
             self.loaded = np.ndarray((2,), dtype=np.uint8, buffer=self._host_mapping, offset=table_bytes)
             self._load_lock = FileLock(f"/tmp/{self._host_shm.name}.load.lock")
         else:
             self._host_mapping = mmap.mmap(-1, table_bytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
             self.loaded = [False, False]
             self._load_lock = nullcontext()
-        self._host_mapping.madvise(mmap.MADV_HUGEPAGE)
         from lightllm.utils.kv_cache_utils import interleave_pages_across_numa_nodes
         import ctypes
 
+        address = ctypes.addressof(ctypes.c_uint8.from_buffer(self._host_mapping))
+        libc = ctypes.CDLL(None, use_errno=True)
+        if use_sysv and get_dp_size() > 1:
+            libc.madvise(ctypes.c_void_p(address), ctypes.c_size_t(table_bytes), mmap.MADV_HUGEPAGE)
+        else:
+            self._host_mapping.madvise(mmap.MADV_HUGEPAGE)
         interleave_pages_across_numa_nodes(
-            ctypes.CDLL(None, use_errno=True),
-            ctypes.addressof(ctypes.c_uint8.from_buffer(self._host_mapping)),
+            libc,
+            address,
             table_bytes,
             use_hugetlb=False,
         )

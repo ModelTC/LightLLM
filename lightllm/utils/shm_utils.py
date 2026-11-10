@@ -1,3 +1,4 @@
+import ctypes
 from multiprocessing import shared_memory
 from threading import RLock
 from unittest.mock import patch
@@ -49,6 +50,29 @@ def get_service_shm_name(name):
         )
     prefix = f"{service_name}_"
     return name if name.startswith(prefix) else f"{prefix}{name}"
+
+
+def create_or_link_sysv_shm(name, size):
+    """Keep only the segment ID in /dev/shm. Linux frees the data after the last detach."""
+    id_shm = create_or_link_shm(name, 8)
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.shmat.restype = ctypes.c_void_p
+    with FileLock(f"/tmp/{id_shm.name}.load.lock"):
+        stored_id = int.from_bytes(id_shm.buf, "little")
+        shmid = stored_id - 1 if stored_id else libc.shmget(0, ctypes.c_size_t(size), 0o600)
+        if shmid < 0:
+            raise OSError(ctypes.get_errno(), f"shmget failed for {name}")
+        address = libc.shmat(shmid, None, 0)
+        attach_errno = ctypes.get_errno()
+        if not stored_id:
+            # Linux permits later attaches to a marked segment while a worker is attached.
+            if libc.shmctl(shmid, 0, None) != 0:
+                raise OSError(ctypes.get_errno(), f"IPC_RMID failed for {name}")
+        if address == ctypes.c_void_p(-1).value:
+            raise OSError(attach_errno, f"shmat failed for {name}")
+        if not stored_id:
+            id_shm.buf[:] = (shmid + 1).to_bytes(8, "little")
+    return id_shm, (ctypes.c_uint8 * size).from_address(address)
 
 
 def create_or_link_shm(name, expected_size, force_mode=None):
