@@ -64,9 +64,11 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
         ),
     )
 
-    def allocate(req, end, radix_cache):
+    def allocate(req, end, allocator, page_size, radix_cache=None):
         req.hold_kv_len = end
         return torch.arange(req.cur_kv_len, end, dtype=torch.int32)
+
+    monkeypatch.setattr(common, "alloc_token_indexes", allocate)
 
     from collections import deque
 
@@ -93,6 +95,7 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
                         cpu_page_indices
                     ),
                 ),
+                full_att_allocator=None,
             ),
         ),
     )

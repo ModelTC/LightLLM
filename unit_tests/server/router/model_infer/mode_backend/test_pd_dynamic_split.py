@@ -57,8 +57,12 @@ def _classify_without_token_capacity(monkeypatch, req, support_overlap=True):
     infer_context = base_backend.g_infer_context
     manager = ReqManager.__new__(ReqManager)
     manager.page_size = 4
-    manager.full_att_allocator = SimpleNamespace(can_use_mem_size=0)
     monkeypatch.setattr(infer_context, "req_manager", manager)
+    monkeypatch.setattr(
+        infer_context,
+        "att_state_manager",
+        SimpleNamespace(full_att_allocator=SimpleNamespace(page_size=4, can_use_mem_size=0)),
+    )
     monkeypatch.setattr(infer_context, "get_can_alloc_token_num", MagicMock(return_value=0))
     monkeypatch.setattr(
         infer_context,

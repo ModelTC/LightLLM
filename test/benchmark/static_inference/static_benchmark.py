@@ -28,6 +28,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
+from lightllm.server.router.model_infer.infer_req_ext1 import alloc_req_token_indexes
 from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
 from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.api_cli import make_argument_parser
@@ -568,8 +569,8 @@ class StaticBenchmarkExecutor:
             req_id = int(req_id)
             max_target_len_by_req[req_id] = max(max_target_len_by_req.get(req_id, 0), int(target_len))
 
-        req_manager = self.model.req_manager
-        page_size = req_manager.page_size
+        allocator = self.model.att_state_manager.full_att_allocator
+        page_size = allocator.page_size
         allocations = []
         for req_id, target_len in max_target_len_by_req.items():
             new_hold_kv_len = align_up(target_len, page_size)
@@ -580,7 +581,7 @@ class StaticBenchmarkExecutor:
             req = SimpleNamespace(req_idx=req_id, hold_kv_len=old_hold_kv_len)
             allocations.append((req, new_hold_kv_len - old_hold_kv_len))
         if allocations:
-            req_manager.alloc_req_token_indexes(allocations)
+            alloc_req_token_indexes(allocations, allocator)
             for req, _ in allocations:
                 self._hold_kv_len_by_req[req.req_idx] = req.hold_kv_len
 

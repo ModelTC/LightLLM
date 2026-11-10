@@ -10,6 +10,7 @@ def test_hybrid_pd_uses_the_shared_att_state_task_without_model_flags(monkeypatc
     from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl.prefill_impl import (
         PDChunkedPrefillForPrefillNode,
     )
+    from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_impl
     from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_impl import PDDecodeNode
 
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
@@ -42,7 +43,12 @@ def test_hybrid_pd_uses_the_shared_att_state_task_without_model_flags(monkeypatc
     else:
         backend.radix_cache = None
         backend.model = SimpleNamespace(
-            req_manager=SimpleNamespace(alloc_token_indexes=lambda req, end, radix_cache: torch.arange(end)),
+            att_state_manager=SimpleNamespace(full_att_allocator=SimpleNamespace(page_size=backend.args.page_size)),
+        )
+        monkeypatch.setattr(
+            decode_impl,
+            "alloc_token_indexes",
+            lambda req, end, allocator, page_size, radix_cache=None: torch.arange(end),
         )
         backend._decode_node_gen_trans_tasks(req)
         assert len(groups) == 1

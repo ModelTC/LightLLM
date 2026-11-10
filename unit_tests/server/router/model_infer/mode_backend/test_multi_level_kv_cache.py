@@ -237,7 +237,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         next_index += need_size
         return mem_indexes
 
-    def alloc_token_indexes(req, end, radix_cache):
+    def alloc_token_indexes(req, end, allocator, page_size, radix_cache=None):
         alloc_token_num = end - req.hold_kv_len
         mem_indexes = alloc(alloc_token_num)
         new_hold_kv_len = req.hold_kv_len + alloc_token_num
@@ -252,6 +252,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
                 token_indices.tolist()
             ),
         ),
+        full_att_allocator=None,
     )
     backend = SimpleNamespace(
         is_master_in_dp=False,
@@ -290,6 +291,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         ),
         sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
     )
+    monkeypatch.setattr(multi_level_kv_cache_impl, "alloc_token_indexes", alloc_token_indexes)
     monkeypatch.setattr(multi_level_kv_cache_impl, "g_infer_context", context)
     monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
@@ -342,7 +344,7 @@ def test_standard_load_releases_unloaded_pages_immediately(monkeypatch):
 def _load_module(monkeypatch, *, sync, master=True, world=1):
     events = []
 
-    def alloc_token_indexes(req, end, radix_cache):
+    def alloc_token_indexes(req, end, allocator, page_size, radix_cache=None):
         req.hold_kv_len = end
         return torch.arange(req.cur_kv_len, end, dtype=torch.int32)
 
@@ -362,10 +364,12 @@ def _load_module(monkeypatch, *, sync, master=True, world=1):
                 get_cpu_cache_operator=lambda: SimpleNamespace(
                     get_page_layouts=lambda: {},
                     read_req=lambda **kwargs: events.append("copy"),
-                )
+                ),
+                full_att_allocator=None,
             ),
         ),
     )
+    monkeypatch.setattr(multi_level_kv_cache_impl, "alloc_token_indexes", alloc_token_indexes)
     module.need_sync_compute_stream = lambda: sync
     module.init_sync_group = module.filter_group = object()
     module.load_sync_tensor = object()

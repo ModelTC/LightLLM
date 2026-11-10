@@ -268,9 +268,11 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
     )
     table = torch.arange(8192, dtype=torch.int32).view(1, -1)
 
-    def allocate(req, end, radix_cache):
+    def allocate(req, end, allocator, page_size, radix_cache=None):
         req.hold_kv_len = end
         return torch.arange(req.cur_kv_len, end, dtype=torch.int32)
+
+    monkeypatch.setattr(common, "alloc_token_indexes", allocate)
 
     from collections import deque
 
@@ -290,6 +292,7 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
                     get_page_layouts=lambda: {},
                     read_req=lambda **kwargs: loaded.append(req.cur_kv_len + kwargs["token_indices"].numel()),
                 ),
+                full_att_allocator=None,
             ),
         ),
     )

@@ -342,3 +342,36 @@ def create_req_token_index(infer_req: "InferReq", index_stream: torch.cuda.Strea
     raise ValueError(
         f"Unknown request token index mode: {mode}; expected pin_mem_cache, pin_mem_page_cache or pure_gpu"
     )
+
+
+def need_alloc_token_num(req, target: int, page_size: int) -> int:
+    """返回补齐到 target 还要申请的 token 数，按物理页对齐。"""
+    if page_size > 1:
+        size = max(0, (target + page_size - 1) // page_size * page_size - req.hold_kv_len)
+        assert size % page_size == 0
+        return size
+    return max(0, target - req.hold_kv_len)
+
+
+def alloc_req_token_indexes(allocations, allocator, radix_cache=None):
+    """一次申请一批请求的 token 容量，记到各自的 token 索引并提交上传。"""
+    need = sum(size for _, size in allocations)
+    if radix_cache is not None:
+        radix_cache.free_radix_cache_to_get_enough_token(need)
+    if not need:
+        return
+    indexes = allocator.alloc(need)
+    offset = 0
+    for req, size in allocations:
+        req.token_index.append_token_indexes(indexes[offset : offset + size])
+        req.hold_kv_len += size
+        offset += size
+    ReqTokenIndex.submit_pending_uploads([req.token_index for req, _ in allocations])
+
+
+def alloc_token_indexes(req, end: int, allocator, page_size: int, radix_cache=None):
+    """返回 [cur_kv_len, end) 的写入槽位，已有页尾直接复用。"""
+    size = need_alloc_token_num(req, end, page_size)
+    if size:
+        alloc_req_token_indexes([(req, size)], allocator, radix_cache)
+    return req.token_index.get_cpu_token_indexes(req.cur_kv_len, end)

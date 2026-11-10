@@ -9,7 +9,11 @@ from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
-from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex
+from lightllm.server.router.model_infer.infer_req_ext1 import (
+    ReqTokenIndex,
+    alloc_req_token_indexes,
+    need_alloc_token_num,
+)
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
@@ -668,17 +672,17 @@ class ModeBackend:
         prefill 和 decode 两组请求都会跨调度轮次保留已分配的 token 容量。
         decode 的可选额外预留仅使用满足所有必要分配后剩余的空闲容量。
         """
-        req_manager = g_infer_context.req_manager
+        allocator = g_infer_context.att_state_manager.full_att_allocator
         batch_max_tokens = self.batch_max_tokens
         prefill, decode, rejected, allocations, headroom = [], [], [], [], []
         prefill_tokens = required = 0
-        page_size = req_manager.page_size
+        page_size = allocator.page_size
         for req, is_decode, tokens in candidates:
             if not is_decode and prefill_tokens + tokens > batch_max_tokens:
                 continue
 
             target = req.cur_kv_len + tokens
-            size = req_manager.get_need_alloc_token_num(req, target) if target > req.hold_kv_len else 0
+            size = need_alloc_token_num(req, target, page_size) if target > req.hold_kv_len else 0
             if size > available:
                 rejected.append((req, is_decode))
                 continue
@@ -694,13 +698,13 @@ class ModeBackend:
                 if is_decode and page_size < 8:
                     headroom.append(allocation)
 
-        extra_budget = max(0, req_manager.full_att_allocator.can_use_mem_size - required)
+        extra_budget = max(0, allocator.can_use_mem_size - required)
         for allocation in headroom:
             extra = min(8, extra_budget) // page_size * page_size
             allocation[1] += extra
             extra_budget -= extra
         if allocations:
-            req_manager.alloc_req_token_indexes(allocations, g_infer_context.radix_cache)
+            alloc_req_token_indexes(allocations, allocator, g_infer_context.radix_cache)
         return prefill, decode, rejected, prefill_tokens
 
     @staticmethod

@@ -390,7 +390,6 @@ class DeepseekV4ReqManager(ReqManager):
 
     def bind_mem_manager(self, memory: DeepseekV4MemoryManager | None):
         self.memory = memory
-        self.full_att_allocator = memory.allocator
         self.bind_hold_page(memory.allocator.hold_token_indices)
         if not memory.manager._state_registration_finished:
             for state in self.states:

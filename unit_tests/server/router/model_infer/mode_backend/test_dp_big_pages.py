@@ -124,6 +124,7 @@ def test_local_longest_prefix_skips_copy_but_keeps_barriers(
     barriers = []
     manager = SimpleNamespace(
         bounded_att_big_page_allocator=SimpleNamespace(alloc=allocate_pages),
+        full_att_allocator=None,
         get_dp_shared_operator=lambda: SimpleNamespace(copy_from_dp=copy_resources),
     )
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
@@ -196,7 +197,11 @@ def _build_fixture(monkeypatch: pytest.MonkeyPatch, capacity: int, src_kv_len: i
         dp_world_size=2,
         rank_in_dp=1,
         node_nccl_group=None,
-        model=SimpleNamespace(att_state_manager=SimpleNamespace(bounded_att_big_page_allocator=allocator)),
+        model=SimpleNamespace(
+            att_state_manager=SimpleNamespace(
+                bounded_att_big_page_allocator=allocator, full_att_allocator=SimpleNamespace(page_size=4)
+            )
+        ),
         dp_req_to_token_indices={1: torch.arange(64, dtype=torch.int32).reshape(2, 32)},
     )
     module.dp_rank_in_node = 0
@@ -204,10 +209,10 @@ def _build_fixture(monkeypatch: pytest.MonkeyPatch, capacity: int, src_kv_len: i
     module.shared_req_infos = SimpleNamespace(arr=np.array([[[8, 0], [src_kv_len, 1]]], dtype=np.int64))
     module.shared_req_big_page_ids = SimpleNamespace(arr=np.array([[[77, -1, -1, -1], [10, 20, 21, -1]]]))
     requests = SimpleNamespace(
-        get_need_alloc_token_num=lambda req, end: max(0, ((end + 3) // 4) * 4 - req.hold_kv_len),
-        alloc_token_indexes=lambda req, end, radix: allocate(req, ((end + 3) // 4) * 4 - req.hold_kv_len)[
-            : end - req.cur_kv_len
-        ],
+        get_need_alloc_token_num=lambda req, end, page_size=None: max(0, ((end + 3) // 4) * 4 - req.hold_kv_len),
+        alloc_token_indexes=lambda req, end, allocator, page_size, radix=None: allocate(
+            req, ((end + 3) // 4) * 4 - req.hold_kv_len
+        )[: end - req.cur_kv_len],
     )
     monkeypatch.setattr(
         dp_shared_kv_trans,
@@ -215,6 +220,8 @@ def _build_fixture(monkeypatch: pytest.MonkeyPatch, capacity: int, src_kv_len: i
         SimpleNamespace(get_can_alloc_token_num=lambda: 100, req_manager=requests, radix_cache=None),
     )
     monkeypatch.setattr(dp_shared_kv_trans.dist, "barrier", lambda group: None)
+    monkeypatch.setattr(dp_shared_kv_trans, "need_alloc_token_num", requests.get_need_alloc_token_num)
+    monkeypatch.setattr(dp_shared_kv_trans, "alloc_token_indexes", requests.alloc_token_indexes)
     return module, req, allocator, allocations
 
 
@@ -253,9 +260,9 @@ def test_build_evicts_cached_state_pages(monkeypatch, kv_allocator_environment, 
     monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", context)
     monkeypatch.setattr(base_backend, "g_infer_context", context)
     module.backend.args = SimpleNamespace(page_size=4)
-    requests.get_need_alloc_token_num = lambda req, end: max(0, ((end + 3) // 4) * 4 - req.hold_kv_len)
+    requests.get_need_alloc_token_num = lambda req, end, page_size=None: max(0, ((end + 3) // 4) * 4 - req.hold_kv_len)
 
-    def allocate_tokens(req, end, radix_cache):
+    def allocate_tokens(req, end, allocator, page_size, radix_cache=None):
         count = requests.get_need_alloc_token_num(req, end)
         radix_cache.free_radix_cache_to_get_enough_token(count)
         indexes = full.alloc(count)
@@ -265,6 +272,8 @@ def test_build_evicts_cached_state_pages(monkeypatch, kv_allocator_environment, 
         return requests.req_to_token_indexs[req.req_idx, req.cur_kv_len : end].clone()
 
     requests.alloc_token_indexes = allocate_tokens
+    monkeypatch.setattr(dp_shared_kv_trans, "need_alloc_token_num", requests.get_need_alloc_token_num)
+    monkeypatch.setattr(dp_shared_kv_trans, "alloc_token_indexes", allocate_tokens)
     assert full.can_use_mem_size == allocator.free_count == 0
     assert context.get_can_alloc_token_num() == 16
     (task,) = module.build_shared_kv_trans_tasks([req], req_dp_ranks=[0])

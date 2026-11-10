@@ -7,7 +7,12 @@ from lightllm.common.attention_state.allocators import full_att_kv_allocator as 
 from lightllm.common.req_manager import base as req_module
 from lightllm.common.req_manager import req_sampling_params
 from lightllm.server.router.model_infer.infer_batch import InferReq
-from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex, create_req_token_index
+from lightllm.server.router.model_infer.infer_req_ext1 import (
+    ReqTokenIndex,
+    alloc_req_token_indexes,
+    alloc_token_indexes,
+    create_req_token_index,
+)
 from lightllm.server.router.model_infer.mode_backend import base_backend
 
 
@@ -26,9 +31,8 @@ def _make_manager(monkeypatch, page_size, count=12):
     monkeypatch.setattr(req_sampling_params, "ReqSamplingParamsManager", lambda size: None)
     alloc = allocator_module.FullAttKVAllocator(page_size * 200, page_size)
     manager = req_module.ReqManager(count, page_size * 10)
-    manager.full_att_allocator = alloc
     manager.bind_hold_page(alloc.hold_token_indices)
-    return manager
+    return manager, alloc
 
 
 def _attach_token_index(manager, req, mode="pin_mem_page_cache"):
@@ -42,12 +46,12 @@ def _attach_token_index(manager, req, mode="pin_mem_page_cache"):
 @pytest.mark.parametrize("page_size", [1, 2, 4, 8, 64])
 @pytest.mark.parametrize("count", [0, 1, 4, 5, 9])
 def test_alloc_publish_reuse_and_owned_snapshot(monkeypatch, page_size, count):
-    manager = _make_manager(monkeypatch, page_size)
+    manager, alloc = _make_manager(monkeypatch, page_size)
     requests = [
         _attach_token_index(manager, SimpleNamespace(req_idx=i, hold_kv_len=0, cur_kv_len=0)) for i in range(count)
     ]
     allocations = [(req, page_size * (1 + i % 3)) for i, req in enumerate(requests)]
-    manager.alloc_req_token_indexes(allocations)
+    alloc_req_token_indexes(allocations, alloc)
     torch.cuda.synchronize()
     expected_offset = 0
     snapshots = []
@@ -61,12 +65,12 @@ def test_alloc_publish_reuse_and_owned_snapshot(monkeypatch, page_size, count):
         expected_offset += size
     indexes = [req.token_index.get_free_token_indexes(0, size) for req, size in allocations]
     if indexes:
-        manager.free_token(torch.cat(indexes))
+        alloc.free(torch.cat(indexes))
         for req, _ in allocations:
             req.token_index.reset()
         for req, _ in allocations:
             req.hold_kv_len = 0
-        manager.alloc_req_token_indexes(list(reversed(allocations)))
+        alloc_req_token_indexes(list(reversed(allocations)), alloc)
         torch.cuda.synchronize()
         for snapshot, expected in snapshots:
             assert torch.equal(snapshot, expected)
@@ -80,7 +84,7 @@ def test_alloc_publish_reuse_and_owned_snapshot(monkeypatch, page_size, count):
 
 @pytest.mark.parametrize("page_size", [1, 4, 64])
 def test_prefix_cross_stream_publish(monkeypatch, page_size):
-    manager = _make_manager(monkeypatch, page_size)
+    manager, _alloc = _make_manager(monkeypatch, page_size)
     writer, reader = torch.cuda.Stream(), torch.cuda.Stream()
     source = torch.arange(page_size * 3, dtype=torch.int32) + page_size * 20
     req = _attach_token_index(manager, SimpleNamespace(req_idx=0, hold_kv_len=0, cur_kv_len=0))
@@ -97,23 +101,24 @@ def test_prefix_cross_stream_publish(monkeypatch, page_size):
 
 @pytest.mark.parametrize("page_size", [1, 4, 64])
 def test_alloc_token_indexes_returns_logical_span_and_reuses_page_tail(monkeypatch, page_size):
-    manager = _make_manager(monkeypatch, page_size)
+    manager, alloc = _make_manager(monkeypatch, page_size)
     req = _attach_token_index(manager, SimpleNamespace(req_idx=0, hold_kv_len=0, cur_kv_len=0))
-    indexes = manager.alloc_token_indexes(req, page_size + 1)
+    indexes = alloc_token_indexes(req, page_size + 1, alloc, page_size)
     assert indexes.tolist() == list(range(page_size + 1))
     expected_hold = (page_size + 1 + page_size - 1) // page_size * page_size
     assert req.hold_kv_len == expected_hold
-    capacity = manager.full_att_allocator.can_use_mem_size
+    capacity = alloc.can_use_mem_size
     req.cur_kv_len = page_size
-    tail = manager.alloc_token_indexes(req, expected_hold)
+    tail = alloc_token_indexes(req, expected_hold, alloc, page_size)
     assert tail.tolist() == list(range(page_size, expected_hold))
-    assert manager.full_att_allocator.can_use_mem_size == capacity
+    assert alloc.can_use_mem_size == capacity
 
 
 def _make_scheduler(monkeypatch, page_size, available, batch_max_tokens=8):
-    manager = _make_manager(monkeypatch, page_size)
+    manager, alloc = _make_manager(monkeypatch, page_size)
     context = SimpleNamespace(
         req_manager=manager,
+        att_state_manager=SimpleNamespace(full_att_allocator=alloc),
         radix_cache=None,
         get_can_alloc_token_num=lambda: available,
         cache_placement_controller=SimpleNamespace(set_req_cache_way=lambda reqs: None),
@@ -130,14 +135,13 @@ def _make_scheduler(monkeypatch, page_size, available, batch_max_tokens=8):
     backend._timer_merge_radix_tree = lambda: None
     backend.prefill_queue_strategy = SimpleNamespace(reorder=lambda reqs, **kwargs: reqs)
     allocations = []
-    original_alloc = manager.alloc_req_token_indexes
 
-    def record_alloc(items, radix_cache=None):
+    def record_alloc(items, kv_allocator, radix_cache=None):
         allocations.append(sum(size for _, size in items))
-        return original_alloc(items, radix_cache)
+        return alloc_req_token_indexes(items, kv_allocator, radix_cache)
 
-    monkeypatch.setattr(manager, "alloc_req_token_indexes", record_alloc)
-    return manager, backend, allocations
+    monkeypatch.setattr(base_backend, "alloc_req_token_indexes", record_alloc)
+    return manager, alloc, backend, allocations
 
 
 def _make_scheduler_req(manager, req_idx, current, total):
@@ -168,9 +172,9 @@ def _make_scheduler_req(manager, req_idx, current, total):
 def test_prefill_scheduler_checks_compute_and_kv_budgets_separately(
     monkeypatch, hold_kv_len, available, batch_max_tokens, expected_alloc_sizes, second_req_wait_pause
 ):
-    manager, backend, allocations = _make_scheduler(monkeypatch, 4, available, batch_max_tokens)
+    manager, alloc, backend, allocations = _make_scheduler(monkeypatch, 4, available, batch_max_tokens)
     reqs = [_make_scheduler_req(manager, i, 3, lambda: 6) for i in range(2)]
-    manager.alloc_req_token_indexes([(req, hold_kv_len) for req in reqs])
+    alloc_req_token_indexes([(req, hold_kv_len) for req in reqs], alloc)
     allocations.clear()
     backend._filter_not_ready_reqs = lambda req_ids: reqs
 
@@ -189,9 +193,9 @@ def test_prefill_scheduler_checks_compute_and_kv_budgets_separately(
 
 
 def test_decode_scheduler_publishes_batched_request_table(monkeypatch):
-    manager, backend, allocations = _make_scheduler(monkeypatch, 4, 12)
+    manager, alloc, backend, allocations = _make_scheduler(monkeypatch, 4, 12)
     req = _make_scheduler_req(manager, 0, 4, lambda: 5)
-    manager.alloc_req_token_indexes([(req, 4)])
+    alloc_req_token_indexes([(req, 4)], alloc)
     allocations.clear()
     backend._filter_not_ready_reqs = lambda req_ids: [req]
 
@@ -210,9 +214,9 @@ def test_decode_scheduler_publishes_batched_request_table(monkeypatch):
 def test_decode_small_page_preallocation_reuses_one_allocation_for_multiple_steps(
     monkeypatch, page_size, expected_alloc_token_num
 ):
-    manager, backend, allocations = _make_scheduler(monkeypatch, page_size, 32)
+    manager, alloc, backend, allocations = _make_scheduler(monkeypatch, page_size, 32)
     req = _make_scheduler_req(manager, 0, page_size, lambda: req.cur_kv_len + 1)
-    manager.alloc_req_token_indexes([(req, page_size)])
+    alloc_req_token_indexes([(req, page_size)], alloc)
     allocations.clear()
     backend._filter_not_ready_reqs = lambda req_ids: [req]
 

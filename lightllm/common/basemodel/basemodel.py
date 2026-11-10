@@ -180,7 +180,6 @@ class TpPartBaseModel:
 
     def init_runtime(self) -> None:
         """Initialize this model's backends, warmup and graphs after shared allocation."""
-        self.req_manager.full_att_allocator = self.att_state_manager.full_att_allocator
         self.req_manager.bind_hold_page(self.att_state_manager.full_att_allocator.hold_token_indices)
         self._check_mem_size()
         self._init_att_backend()

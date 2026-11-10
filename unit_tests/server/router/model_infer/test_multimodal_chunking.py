@@ -323,9 +323,11 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
     )
     table = torch.arange(8192, dtype=torch.int32).view(1, -1)
 
-    def allocate(req, end, radix_cache):
+    def allocate(req, end, allocator, page_size, radix_cache=None):
         req.hold_kv_len = end
         return torch.arange(req.cur_kv_len, end, dtype=torch.int32)
+
+    monkeypatch.setattr(common, "alloc_token_indexes", allocate)
 
     from collections import deque
 
@@ -348,6 +350,7 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
                     ),
                 ),
                 bounded_att_big_page_allocator=SimpleNamespace(alloc=lambda count: list(range(count))),
+                full_att_allocator=None,
             ),
         ),
     )

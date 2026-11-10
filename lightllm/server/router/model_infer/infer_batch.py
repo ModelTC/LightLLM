@@ -23,7 +23,11 @@ from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.multi_level_kv_cache import CachePlacementController, CacheTier
 from lightllm.server.router.model_infer.infer_req_ext import FinalTokenMetadataExt, PromptSelectedLogprobsExt
-from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex, create_req_token_index
+from lightllm.server.router.model_infer.infer_req_ext1 import (
+    ReqTokenIndex,
+    create_req_token_index,
+    need_alloc_token_num,
+)
 from lightllm.server.router.model_infer.structured_output.state import ConstraintState
 
 if TYPE_CHECKING:
@@ -325,8 +329,8 @@ class InferenceContext:
             self.shm_req_manager.put_back_req_obj(req.shm_req)
 
         if free_token_index:
-            free_token_index = torch.cat(free_token_index)
-        self.req_manager.free(free_req_index, free_token_index)
+            self.att_state_manager.full_att_allocator.free(torch.cat(free_token_index))
+        self.req_manager.free(free_req_index)
 
         finished_req_ids_set = set(finished_request_ids)
         self.infer_req_ids = [_id for _id in self.infer_req_ids if _id not in finished_req_ids_set]
@@ -362,7 +366,7 @@ class InferenceContext:
                     logger.debug(f"infer paused req id {req.req_id}")
 
             if free_token_index:
-                self.req_manager.free_token(torch.cat(free_token_index))
+                self.att_state_manager.full_att_allocator.free(torch.cat(free_token_index))
         return self
 
     def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool):
@@ -374,7 +378,9 @@ class InferenceContext:
             for req in paused_reqs:
                 # 暂停恢复保持原有的保守语义：只有当前完整序列所需的 KV 页面都有足够空间时才恢复，
                 # 才允许执行 radix cache 匹配，避免在容量不足时提前改变引用或重建 hybrid cache 状态。
-                alloc_token_num = self.req_manager.get_need_alloc_token_num(req, req.get_cur_total_len())
+                alloc_token_num = need_alloc_token_num(
+                    req, req.get_cur_total_len(), self.att_state_manager.full_att_allocator.page_size
+                )
                 if alloc_token_num > can_alloc_token_num:
                     break
 

@@ -3,6 +3,7 @@ from lightllm.server.pd_io_struct import PDChunckedTransTask, PDChunckedTransTas
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
+from lightllm.server.router.model_infer.infer_req_ext1 import alloc_token_indexes
 from lightllm.server.core.objs import FinishStatus
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import kv_trans_use_p2p
@@ -119,7 +120,8 @@ class PDDecodeNode(ChunkedPrefillBackend):
             trans_page_size = self.args.pd_kv_page_size
             assert trans_page_size % self.args.page_size == 0, "pd_kv_page_size must be divisible by page_size"
             req_obj.pd_trans_kv_start_index = req_obj.cur_kv_len
-            mem_indexes = self.model.req_manager.alloc_token_indexes(req_obj, input_len, self.radix_cache)
+            allocator = self.model.att_state_manager.full_att_allocator
+            mem_indexes = alloc_token_indexes(req_obj, input_len, allocator, self.args.page_size, self.radix_cache)
 
             while req_obj.pd_trans_kv_start_index < input_len:
                 cur_page_size = min(trans_page_size, input_len - req_obj.pd_trans_kv_start_index)

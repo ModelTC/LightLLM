@@ -22,10 +22,14 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
     tasks = []
     backend = decode_impl.PDDecodeNode.__new__(decode_impl.PDDecodeNode)
     backend.args = SimpleNamespace(pd_kv_page_size=4, page_size=4)
-    backend.model = SimpleNamespace(req_manager=SimpleNamespace(req_to_token_indexs=table))
+    req_manager = _make_req_manager(table, alloc_sizes, next_index)
+    backend.model = SimpleNamespace(
+        req_manager=req_manager,
+        att_state_manager=SimpleNamespace(full_att_allocator=None),
+    )
+    monkeypatch.setattr(decode_impl, "alloc_token_indexes", req_manager.alloc_token_indexes)
     backend.is_master_in_dp = False
     backend.radix_cache = None
-    backend.model.req_manager = _make_req_manager(table, alloc_sizes, next_index)
 
     def create_task(**kwargs):
         tasks.append(
@@ -106,7 +110,10 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
     )
     source_table = torch.arange(32, dtype=torch.int32).reshape(2, 16)
     backend = SimpleNamespace(
-        model=SimpleNamespace(mem_manager=SimpleNamespace()),
+        model=SimpleNamespace(
+            mem_manager=SimpleNamespace(),
+            att_state_manager=SimpleNamespace(full_att_allocator=SimpleNamespace(page_size=4)),
+        ),
         dp_world_size=tp_size,
         rank_in_dp=tp_rank,
         node_nccl_group=None,
@@ -118,8 +125,11 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
     module.backend = backend
     module.dp_rank_in_node = 0
     module.shared_req_infos = SimpleNamespace(arr=np.array([[[4, 0], [10, 0]]], dtype=np.int64))
+    req_manager = _make_req_manager(table, alloc_sizes, next_index)
+    monkeypatch.setattr(dp_shared_kv_trans, "alloc_token_indexes", req_manager.alloc_token_indexes)
+    monkeypatch.setattr(dp_shared_kv_trans, "need_alloc_token_num", req_manager.get_need_alloc_token_num)
     context = SimpleNamespace(
-        req_manager=_make_req_manager(table, alloc_sizes, next_index),
+        req_manager=req_manager,
         radix_cache=None,
         get_can_alloc_token_num=lambda: 100,
     )
@@ -227,11 +237,11 @@ def _reserve_into_table(
 
 
 def _make_req_manager(table, alloc_sizes, next_index):
-    def need(req, end):
-        page_size = req.args.page_size
+    def need(req, end, page_size=None):
+        page_size = req.args.page_size if page_size is None else page_size
         return max(0, (end + page_size - 1) // page_size * page_size - req.hold_kv_len)
 
-    def allocate(req, end, radix_cache):
+    def allocate(req, end, allocator, page_size, radix_cache=None):
         _reserve_into_table(table, req, alloc_sizes, next_index, need(req, end))
         return table[req.req_idx, req.cur_kv_len : end].clone()
 

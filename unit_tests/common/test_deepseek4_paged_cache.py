@@ -362,7 +362,7 @@ def _request_pages(requests, req):
 
 
 def _reserve(manager, requests, length):
-    from lightllm.server.router.model_infer.infer_req_ext1 import create_req_token_index
+    from lightllm.server.router.model_infer.infer_req_ext1 import alloc_req_token_indexes, create_req_token_index
 
     req_idx = requests.alloc()
     held = (length + manager.page_size - 1) // manager.page_size * manager.page_size
@@ -370,7 +370,7 @@ def _reserve(manager, requests, length):
     req.args = SimpleNamespace(req_token_index_mode="pin_mem_page_cache", page_size=manager.page_size)
     req.shm_req = SimpleNamespace(input_len=held)
     req.token_index = create_req_token_index(req, torch.cuda.current_stream())
-    requests.alloc_req_token_indexes([(req, held)])
+    alloc_req_token_indexes([(req, held)], requests.memory.allocator)
     slots = req.token_index.get_cpu_token_indexes(0, held).cuda()
     return req_idx, slots
 
@@ -1176,7 +1176,7 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
     req.cur_kv_len = tail_len + 1
     freed = []
     g_infer_context.free_a_req_mem(freed, req)
-    requests.free_token(torch.cat(freed))
+    requests.memory.allocator.free(torch.cat(freed))
     requests.free_req(source)
     assert radix.get_tree_total_tokens_num() == tail_len
 
@@ -1203,7 +1203,7 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
     for fork in forks:
         freed = []
         g_infer_context.free_a_req_mem(freed, fork)
-        requests.free_token(torch.cat(freed))
+        requests.memory.allocator.free(torch.cat(freed))
         requests.free_req(fork.req_idx)
     radix.free_radix_cache_to_get_enough_token(manager.size)
     assert manager.allocator.can_use_mem_size == manager.size

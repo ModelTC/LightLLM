@@ -8,6 +8,7 @@ from lightllm.utils.dist_utils import get_dp_rank_in_node
 from lightllm.server.core.objs.shm_array import ShmArray
 from ...infer_batch import InferReq
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.server.router.model_infer.infer_req_ext1 import alloc_token_indexes, need_alloc_token_num
 import torch.distributed as dist
 
 
@@ -92,9 +93,8 @@ class DPKVSharedMoudle:
             # 计算需要传输的 kv 长度， 不能超过 req.get_cur_total_len() - 1
             trans_size = min(max_available_kv_len, req.get_cur_total_len() - 1) - req.cur_kv_len
             target_kv_len = req.cur_kv_len + trans_size
-            alloc_token_num = (
-                g_infer_context.req_manager.get_need_alloc_token_num(req, target_kv_len) if trans_size > 0 else 0
-            )
+            allocator = self.backend.model.att_state_manager.full_att_allocator
+            alloc_token_num = need_alloc_token_num(req, target_kv_len, allocator.page_size) if trans_size > 0 else 0
 
             if is_local_dp_request and trans_size > 0 and alloc_token_num <= g_infer_context.get_can_alloc_token_num():
                 assert req.hold_kv_len == req.cur_kv_len
@@ -113,8 +113,12 @@ class DPKVSharedMoudle:
                         assert all(
                             page_id >= 0 for page_id in src_big_page_ids
                         ), "DP source is missing prefix big pages"
-                dst_token_indices = g_infer_context.req_manager.alloc_token_indexes(
-                    req, target_kv_len, g_infer_context.radix_cache
+                dst_token_indices = alloc_token_indexes(
+                    req,
+                    target_kv_len,
+                    allocator,
+                    allocator.page_size,
+                    g_infer_context.radix_cache,
                 )
                 assert dst_token_indices is not None
                 if src_big_page_ids:

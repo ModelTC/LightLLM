@@ -11,6 +11,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.server.router.model_infer.infer_req_ext1 import alloc_token_indexes
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.multimodal_chunk_utils import clamp_mm_cache_len
 
@@ -187,7 +188,10 @@ class MultiLevelKvCacheModule(object):
         req_manager = self.backend.model.req_manager
 
         # 阶段一：分配新增 KV，并补齐首个 CPU 页在 GPU 上已经命中的 token 索引。
-        mem_indexes = req_manager.alloc_token_indexes(req, page_lengths[-1], g_infer_context.radix_cache)
+        allocator = self.backend.model.att_state_manager.full_att_allocator
+        mem_indexes = alloc_token_indexes(
+            req, page_lengths[-1], allocator, self.args.page_size, g_infer_context.radix_cache
+        )
         assert mem_indexes is not None
         assert 0 <= start_token_len <= req.cur_kv_len, "invalid CPU page start"
         token_indices = torch.cat(

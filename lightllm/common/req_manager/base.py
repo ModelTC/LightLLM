@@ -68,60 +68,17 @@ class ReqManager:
             raise ValueError("HOLD indices must form one consecutive physical page")
         self.req_to_token_indexs[self.HOLD_REQUEST_ID].view(-1, self.page_size).copy_(hold_page)
 
-    def alloc_req_token_indexes(self, allocations, radix_cache=None):
-        """Allocate token capacity once and record it on each request's token index."""
-        from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex
-
-        need = sum(size for _, size in allocations)
-        if radix_cache is not None:
-            radix_cache.free_radix_cache_to_get_enough_token(need)
-        if not need:
-            return
-        indexes = self.full_att_allocator.alloc(need)
-        offset = 0
-        for req, size in allocations:
-            req.token_index.append_token_indexes(indexes[offset : offset + size])
-            req.hold_kv_len += size
-            offset += size
-        ReqTokenIndex.submit_pending_uploads([req.token_index for req, _ in allocations])
-
-    def alloc_token_indexes(self, req, end, radix_cache=None):
-        """Return write slots for [cur_kv_len, end), reusing any existing page tail."""
-        size = self.get_need_alloc_token_num(req, end)
-        if size:
-            self.alloc_req_token_indexes([(req, size)], radix_cache)
-        return req.token_index.get_cpu_token_indexes(req.cur_kv_len, end)
-
-    def get_need_alloc_token_num(self, req, target):
-        """Return additional page-aligned KV capacity, measured in token slots."""
-        page_size = self.page_size
-        if page_size > 1:
-            size = max(0, (target + page_size - 1) // page_size * page_size - req.hold_kv_len)
-            assert size % page_size == 0
-            return size
-        return max(0, target - req.hold_kv_len)
-
     def alloc(self):
         return self.req_list.alloc()
 
-    def free(self, free_req_indexes: List[int], free_token_index=()):
+    def free(self, free_req_indexes: List[int]):
         for req_index in free_req_indexes:
             self.req_list.free(req_index)
-
         if self.req_list.is_all_free():
             logger.debug(f"freed all request size {self.req_list.can_alloc_size}")
-        if len(free_token_index):
-            self.full_att_allocator.free(free_token_index)
 
     def free_req(self, free_req_index: int):
-        self.req_list.free(free_req_index)
-        if self.req_list.is_all_free():
-            logger.debug(f"freed all request size {self.req_list.can_alloc_size}")
-        return
-
-    def free_token(self, free_token_index):
-        self.full_att_allocator.free(free_token_index)
-        return
+        self.free([free_req_index])
 
     def free_all(self):
         self.req_list = _ReqIndexPool(self.max_request_num)

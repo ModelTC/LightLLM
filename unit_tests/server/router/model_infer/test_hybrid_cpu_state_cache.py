@@ -85,7 +85,6 @@ def linear_cache(monkeypatch, tmp_path, request):
         big_page_capacity=5,
         small_page_capacity=2,
     )
-    requests.full_att_allocator = resources.full_att_allocator
     monkeypatch.setattr(g_infer_context, "att_state_manager", resources)
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(g_infer_context, "req_manager", requests)

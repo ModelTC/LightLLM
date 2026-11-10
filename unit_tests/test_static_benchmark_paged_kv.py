@@ -12,6 +12,7 @@ for path in (REPO_ROOT, STATIC_BENCHMARK_DIR):
     if str(path) not in sys.path:
         sys.path.append(str(path))
 
+import static_benchmark
 from static_benchmark import (
     BenchmarkCase,
     StaticBenchmarkExecutor,
@@ -41,8 +42,8 @@ def make_executor(page_size: int = 4):
     )
     req_manager.page_size = page_size
 
-    def allocate_requests(allocations):
-        indexes = allocator.alloc(sum(size for _, size in allocations))
+    def allocate_requests(allocations, kv_allocator, radix_cache=None):
+        indexes = kv_allocator.alloc(sum(size for _, size in allocations))
         offset = 0
         for req, size in allocations:
             start = req.hold_kv_len
@@ -50,7 +51,7 @@ def make_executor(page_size: int = 4):
             req.hold_kv_len += size
             offset += size
 
-    req_manager.alloc_req_token_indexes = allocate_requests
+    static_benchmark.alloc_req_token_indexes = allocate_requests
     model = SimpleNamespace(att_state_manager=SimpleNamespace(full_att_allocator=allocator), req_manager=req_manager)
     args = SimpleNamespace(mtp_mode=None, mtp_step=0)
     executor = StaticBenchmarkExecutor(args=args, model=model, draft_models=[], token_source=None)
