@@ -9,18 +9,18 @@ from lightllm.models.glm5_next.indexer import Glm5NextNsaInfer
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires the GLM GPU indexer kernels")
 @pytest.mark.parametrize(
-    "max_pools,q_lengths,kv_lengths,chunk_counts",
-    [(640, [2047, 2048, 2049], [2304, 2432, 2560], [2, 1, 1]), (262144, [31, 1026], [65536, 1048576], [67, 5, 2])],
+    "max_pools,q_lengths,kv_lengths,expected_chunks",
+    [(640, [2047, 2048, 2049] * 4, [2304, 2432, 2560] * 4, 2), (262144, [31, 1026], [65536, 1048576], 17)],
 )
-def test_workspace_preserves_mixed_request_pool_selection(monkeypatch, max_pools, q_lengths, kv_lengths, chunk_counts):
-    """Automatic chunks respect padded allocations and preserve top-k results."""
+def test_workspace_preserves_mixed_request_pool_selection(
+    monkeypatch, max_pools, q_lengths, kv_lengths, expected_chunks
+):
+    """Chunked prefill bounds padded allocations and preserves top-k results."""
     import deep_gemm
 
     indexer = Glm5NextNsaInfer(
         0, {"index_kpool": 4, "index_topk": 2048, "index_n_heads": 32, "index_head_dim": 128, "rms_norm_eps": 1e-5}, 1
     )
-    free_bytes, logits_budget_bytes = 1024 ** 3, 64 * 1024 ** 2
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (free_bytes, 80 * 1024 ** 3))
     fp8_mqa_logits = deep_gemm.fp8_mqa_logits
     previous_logits = None
     chunk_count = 0
@@ -31,7 +31,7 @@ def test_workspace_preserves_mixed_request_pool_selection(monkeypatch, max_pools
             assert previous_logits() is None, "the previous logits chunk is still alive"
         logits = fp8_mqa_logits(*args, **kwargs)
         allocated_bytes = logits.untyped_storage().nbytes()
-        assert allocated_bytes <= logits_budget_bytes
+        assert allocated_bytes <= 64 * 1024 ** 2
         previous_logits = weakref.ref(logits)
         chunk_count += 1
         return logits
@@ -58,14 +58,12 @@ def test_workspace_preserves_mixed_request_pool_selection(monkeypatch, max_pools
     )
     att_state = SimpleNamespace(lengths=lengths)
     expected = indexer._get_prefill_indices(q_fp8, weights, packed_buffer, infer_state, att_state, max_pools)
+    assert chunk_count == expected_chunks
     expected = expected.sort(dim=1).values
-    for (free_bytes, logits_budget_bytes), expected_chunks in zip(
-        [(256 * 1024 ** 2, 16 * 1024 ** 2), (4 * 1024 ** 3, 256 * 1024 ** 2), (32 * 1024 ** 3, 1024 ** 3)], chunk_counts
-    ):
-        chunk_count = 0
-        actual = indexer._get_prefill_indices(q_fp8, weights, packed_buffer, infer_state, att_state, max_pools)
-        assert chunk_count == expected_chunks
-        torch.testing.assert_close(actual.sort(dim=1).values, expected, rtol=0, atol=0)
-        valid = actual >= 0
-        assert (valid.sum(dim=1) == (lengths // 4).clamp_max(indexer.topk // 4)).all().item()
-        assert ((actual == -1) | (valid & (actual < (lengths // 4)[:, None]))).all().item()
+    chunk_size = indexer._get_prefill_chunk_size(max_pools)
+    monkeypatch.setattr(indexer, "_get_prefill_chunk_size", lambda _: chunk_size // 2)
+    actual = indexer._get_prefill_indices(q_fp8, weights, packed_buffer, infer_state, att_state, max_pools)
+    torch.testing.assert_close(actual.sort(dim=1).values, expected, rtol=0, atol=0)
+    valid = actual >= 0
+    assert (valid.sum(dim=1) == (lengths // 4).clamp_max(indexer.topk // 4)).all().item()
+    assert ((actual == -1) | (valid & (actual < (lengths // 4)[:, None]))).all().item()

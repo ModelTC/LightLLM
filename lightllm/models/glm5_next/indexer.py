@@ -84,6 +84,13 @@ class Glm5NextNsaInfer:
             groups = self._get_decode_indices(q_fp8, weights, packed_buffer, infer_state, att_state, max_pools)
         return expand_topk(groups, att_state.lengths, att_state.ks, att_state.ragged_mem_index, self.topk)
 
+    def _get_prefill_chunk_size(self, max_pools):
+        # Account for DeepGEMM padding within the 64 MiB workspace.
+        query_tile = 128 // self.heads
+        logits_row_bytes = triton.cdiv(max_pools, 256) * 256 * 4
+        query_tiles = max(1, 64 * 1024 ** 2 // (query_tile * logits_row_bytes))
+        return query_tiles * query_tile
+
     def _get_prefill_indices(self, q_fp8, weights, packed_buffer, infer_state, att_state, max_pools):
         keys = gather_pools(
             packed_buffer,
@@ -96,16 +103,7 @@ class Glm5NextNsaInfer:
             att_state.lengths, infer_state.b1_cu_q_seq_len, infer_state.max_q_seq_len, max_pools
         )
         groups = torch.empty((q_fp8.shape[0], self.topk // 4), dtype=torch.int32, device=q_fp8.device)
-        # Leave room for the rest of prefill: target 1/16 of free GPU memory,
-        # capped at 1 GiB, for temporary logits. This needs no user configuration.
-        free_bytes, _ = torch.cuda.mem_get_info(q_fp8.device)
-        logits_budget_bytes = min(free_bytes // 16, 1024 ** 3)
-        # DeepGEMM pads FP32 logits to 256 columns and 128 / num_heads query rows.
-        # Round chunks down to whole query tiles, with at least one tile per chunk.
-        query_tile = 128 // self.heads
-        logits_row_bytes = triton.cdiv(max_pools, 256) * 256 * 4
-        query_tiles = max(1, logits_budget_bytes // (query_tile * logits_row_bytes))
-        chunk_size = query_tiles * query_tile
+        chunk_size = self._get_prefill_chunk_size(max_pools)
         import deep_gemm
 
         for start in range(0, q_fp8.shape[0], chunk_size):
@@ -120,7 +118,7 @@ class Glm5NextNsaInfer:
                 max_seqlen_k=max_pools,
             )
             self.select_topk_indices(logits, lengths[start:end], groups[start:end])
-            # Release this chunk before DeepGEMM allocates the next one.
+            # Free before allocating the next chunk.
             del logits
         return groups
 
