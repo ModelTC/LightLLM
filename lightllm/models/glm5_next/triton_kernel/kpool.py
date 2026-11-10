@@ -65,7 +65,7 @@ def prefill_nsa_params(position_ids, b_req_idx, b1_cu_q_seq_len, b1_cu_kv_seq_le
     return q_kv_seq_len, q_req_idx, q_kv_start_loc
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["batch_size"])
 def _compress_pools(
     k_and_gate,
     indexer_tail,
@@ -228,7 +228,7 @@ def compress_pools(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["batch_size", "q_token_num"])
 def _get_pool_ranges(
     q_kv_seq_len,
     b1_cu_q_seq_len,

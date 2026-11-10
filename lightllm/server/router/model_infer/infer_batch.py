@@ -50,7 +50,6 @@ class InferenceContext:
     output_constraint_state_factory: Optional["OutputConstraintStateFactory"] = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
-    cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
     is_hybrid_att_model: bool = False  # 使用大小页 checkpoint 的混合 attention 模型。
 
     def register(
@@ -106,11 +105,6 @@ class InferenceContext:
         if self.overlap_stream is None:
             self.overlap_stream = torch.cuda.Stream()
         return self.overlap_stream
-
-    def get_cpu_kv_cache_stream(self) -> torch.cuda.Stream:
-        if self.cpu_kv_cache_stream is None:
-            self.cpu_kv_cache_stream = torch.cuda.Stream()
-        return self.cpu_kv_cache_stream
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
         req_objs = []
@@ -575,9 +569,10 @@ class InferReq:
         # 存储对应长度位置的大页buffer_id
         self.hybrid_len_to_big_page_id: Optional[SortedDict] = None
 
-        # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
-        # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
-        self.cpu_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
+        # 在开启 enable_cpu_cache 的情况下，请求命中 CPU cache 时把 KV 拉回 GPU，
+        # 请求结束后再把 KV 卸载回 CPU cache。两个标志分别标记 load 和 offload 任务状态。
+        self.cpu_cache_load_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
+        self.cpu_cache_offload_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
         # 元组记录请求完成后的缓存放置路径，其内容和顺序由缓存放置控制器保证合法。
         # 初始值为 GPU，可直接兼容 pause 等尚未经过控制器分配的提前释放路径。
         # 自适应策略在分界点建立前使用兼容放置，之后选择 GPU 或低层缓存路径；
@@ -859,8 +854,10 @@ class InferReq:
         total_end = self.get_cur_total_len()
         end = min(total_end, chunked_end, big_page_end)
 
-        if chunked_start < self.hybrid_cache_len < end:
-            # hybrid checkpoint 对应需要存储的部分。
+        if chunked_start < self.hybrid_cache_len < end and not any(
+            start < self.hybrid_cache_len < stop for start, stop in self.mm_input_spans
+        ):
+            # 多模态块内部不会保存 checkpoint，不能为它额外切分。
             end = self.hybrid_cache_len
 
         end = adjust_mm_chunk_end(chunked_start, end, self.mm_input_spans)
@@ -878,7 +875,9 @@ class InferReq:
         big_page_end = ((chunked_start // big_page_token_num) + 1) * big_page_token_num
         total_end = self.get_cur_total_len()
         end = min(total_end, chunked_end, big_page_end)
-        if chunked_start < self.hybrid_cache_len < end:
+        if chunked_start < self.hybrid_cache_len < end and not any(
+            start < self.hybrid_cache_len < stop for start, stop in self.mm_input_spans
+        ):
             end = self.hybrid_cache_len
         return adjust_mm_chunk_end(chunked_start, end, self.mm_input_spans)
 

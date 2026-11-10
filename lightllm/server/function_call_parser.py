@@ -926,11 +926,14 @@ class DeepSeekV31Detector(BaseFormatDetector):
 
         calls: list[ToolCallItem] = []
         try:
-            partial_match = re.search(
-                pattern=r"<｜tool▁call▁begin｜>(.*)<｜tool▁sep｜>(.*)<｜tool▁call▁end｜>",
-                string=current_text,
-                flags=re.DOTALL,
-            )
+            # The pattern needs the tool call end token, so skip the regex scan until it arrives.
+            partial_match = None
+            if "<｜tool▁call▁end｜>" in current_text:
+                partial_match = re.search(
+                    pattern=r"<｜tool▁call▁begin｜>(.*)<｜tool▁sep｜>(.*)<｜tool▁call▁end｜>",
+                    string=current_text,
+                    flags=re.DOTALL,
+                )
             if partial_match:
                 func_name = partial_match.group(1).strip()
                 func_args_raw = partial_match.group(2).strip()
@@ -1513,8 +1516,11 @@ class DeepSeekV32Detector(BaseFormatDetector):
         calls: List[ToolCallItem] = []
 
         try:
-            # Try to find complete invoke blocks first
-            complete_invoke_match = self.invoke_regex.search(current_text)
+            # Try to find complete invoke blocks first. An invoke is only complete once
+            # its end tag is in the buffer, so skip the regex scan until then.
+            complete_invoke_match = None
+            if self.invoke_end_token in current_text:
+                complete_invoke_match = self.invoke_regex.search(current_text)
             if complete_invoke_match:
                 func_name = complete_invoke_match.group(1)
                 invoke_body = complete_invoke_match.group(2)
@@ -1613,15 +1619,19 @@ class DeepSeekV32Detector(BaseFormatDetector):
                             "name": func_name,
                             "arguments": {},
                         }
-                else:
-                    # Stream arguments as complete parameters are parsed
+                elif partial_body.count(self.param_end_token) > len(self._accumulated_params):
+                    # Stream arguments as complete parameters are parsed. Each parameter
+                    # ends with its end tag, so only re-parse once a new one has arrived.
                     param_matches = self.param_regex.findall(partial_body)
                     if param_matches and len(param_matches) > len(self._accumulated_params):
                         self._accumulated_params = param_matches
                         current_args_json = self._dsml_params_to_json(param_matches)
 
+                        # Hold back the closing brace while the invoke is open: the next
+                        # parameter is appended after it, and the complete-invoke branch
+                        # sends the brace once the invoke ends.
                         sent = len(self.streamed_args_for_tool[self.current_tool_id])
-                        argument_diff = current_args_json[sent:]
+                        argument_diff = current_args_json[:-1][sent:]
 
                         if argument_diff:
                             calls.append(

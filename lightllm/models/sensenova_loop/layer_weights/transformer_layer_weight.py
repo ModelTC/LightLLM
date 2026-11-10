@@ -1,6 +1,6 @@
 import torch
 
-from lightllm.common.basemodel.layer_weights.meta_weights import ParameterWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import ParameterWeight, ROWMMWeight
 from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import Qwen35TransformerLayerWeight
 
 
@@ -12,6 +12,26 @@ class SenseNovaLoopTransformerLayerWeight(Qwen35TransformerLayerWeight):
         self.mhc = self.network_config_.get("mhc")
         if self.mhc is not None and self.mhc["start"] <= self.layer_num_ < self.mhc["end"]:
             self._init_mhc()
+
+    def _init_gdn_in_proj(self, out_dims, weight_names, quant_method):
+        if quant_method.method_name in ("awq", "awq_marlin"):
+            quantization = quant_method.hf_quantization_config or {}
+            excluded = {
+                name.replace("model.language_model.", "model.", 1)
+                for name in (quantization.get("modules_to_not_convert") or ())
+            }
+            gate_weights = weight_names[-2:]
+            gate_modules = [name.removesuffix(".weight") for name in gate_weights]
+            if all(any(module == name or module.endswith(f".{name}") for name in excluded) for module in gate_modules):
+                self.linear_gate_proj = ROWMMWeight(
+                    in_dim=self.network_config_["hidden_size"],
+                    out_dims=out_dims[-2:],
+                    weight_names=gate_weights,
+                    data_type=self.data_type_,
+                )
+                out_dims, weight_names = out_dims[:-2], weight_names[:-2]
+
+        super()._init_gdn_in_proj(out_dims, weight_names, quant_method)
 
     def _init_mhc(self):
         prefix = f"model.layers.{self.layer_num_}"

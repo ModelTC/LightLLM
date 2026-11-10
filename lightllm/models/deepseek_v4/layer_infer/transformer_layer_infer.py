@@ -21,6 +21,15 @@ from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_so
 
 
 class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
+    @classmethod
+    def get_prefill_aux_stream(cls: type["DeepseekV4TransformerLayerInfer"]) -> torch.cuda.Stream:
+        """Return the single C4 prefill auxiliary stream shared by every layer in this process."""
+        stream: torch.cuda.Stream | None = getattr(cls, "_prefill_aux_stream", None)
+        if stream is None:
+            stream = torch.cuda.Stream()
+            setattr(cls, "_prefill_aux_stream", stream)
+        return stream
+
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.eps_ = network_config["rms_norm_eps"]
@@ -62,7 +71,6 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         self.index_infer = DeepseekV4IndexInfer(
             layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
         )
-        self.dsv4_prefill_aux_stream = None
 
     def _hc_attn_in(self, input_embdings, layer_weight: DeepseekV4TransformerLayerWeight):
         """Run attention pre + norm. Later layers also finish the previous FFN post.
@@ -173,24 +181,26 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         x1 = self._tpsp_allgather(x1.view(-1, self.embed_dim_), infer_state1)
         weights1, indices1 = self._select_experts(x1, infer_state1, layer_weight)
 
-        recv_x0, recv_indices0, recv_weights0, recv_count0, handle0, dispatch_hook0 = experts.dispatch(
+        recv_x0, recv_indices0, recv_weights0, recv_count0, handle0, dispatch_hook0 = experts.prefill_dispatch(
             qinput0,
             indices0,
             weights0,
             overlap_event=dispatch_event0,
         )
+        del qinput0, indices0, weights0
         dispatch_hook0()
 
         indices1 = indices1.to(torch.long)
         qinput1 = experts.quantize_dispatch_input(x1)
 
         dispatch_event1 = ElasticBuffer.capture()
-        recv_x1, recv_indices1, recv_weights1, recv_count1, handle1, dispatch_hook1 = experts.dispatch(
+        recv_x1, recv_indices1, recv_weights1, recv_count1, handle1, dispatch_hook1 = experts.prefill_dispatch(
             qinput1,
             indices1,
             weights1,
             overlap_event=dispatch_event1,
         )
+        del qinput1, indices1, weights1
 
         moe_out0 = experts.prefilled_group_gemm(
             recv_count0,
@@ -200,14 +210,15 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             recv_indices0,
             recv_weights0,
             hidden_dtype=x0.dtype,
-            microbatch_index=infer_state.microbatch_index,
             alpha=1.0,
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
         )
+        del recv_x0
 
         combine_event0 = ElasticBuffer.capture()
-        routed0, combine_hook0 = experts.combine(moe_out0, handle0, overlap_event=combine_event0)
+        routed0, combine_hook0 = experts.prefill_combine(moe_out0, handle0, overlap_event=combine_event0)
+        del moe_out0
 
         dispatch_hook1()
         moe_out1 = experts.prefilled_group_gemm(
@@ -218,21 +229,22 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             recv_indices1,
             recv_weights1,
             hidden_dtype=x1.dtype,
-            microbatch_index=infer_state1.microbatch_index,
             alpha=1.0,
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
         )
+        del recv_x1
 
         combine_event1 = ElasticBuffer.capture()
-        routed1, combine_hook1 = experts.combine(moe_out1, handle1, overlap_event=combine_event1)
+        routed1, combine_hook1 = experts.prefill_combine(moe_out1, handle1, overlap_event=combine_event1)
+        del moe_out1
 
-        shared0 = self._ffn_tp(x0, infer_state, layer_weight)
+        shared0 = self._ffn_shared_expert(x0, infer_state, layer_weight)
         combine_hook0()
         routed0.add_(shared0)
         output0 = self._hc_ffn_out(routed0, residual0, residual_mix0, post_mix0)
 
-        shared1 = self._ffn_tp(x1, infer_state1, layer_weight)
+        shared1 = self._ffn_shared_expert(x1, infer_state1, layer_weight)
         if self.is_last_layer:
             combine_hook1()
             routed1.add_(shared1)
@@ -268,10 +280,8 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         weights0, indices0 = self._select_experts(x0, infer_state, layer_weight)
         infer_state1.call_overlap_hook()
 
-        shared0 = self._ffn_tp(x0, infer_state, layer_weight)
-        recv_x0, masked_m0, indices0, weights0, handle0, dispatch_hook0 = experts.low_latency_dispatch_with_topk(
-            x0, indices0, weights0
-        )
+        shared0 = self._ffn_shared_expert(x0, infer_state, layer_weight)
+        recv_x0, handle0, recv_weights0, dispatch_hook0 = experts.decode_dispatch_with_topk(x0, indices0, weights0)
 
         x1, residual1, residual_mix1, post_mix1 = self._hc_attn_in(input_embdings1, layer_weight)
         x1 = self.token_attention_forward(x1, infer_state1, layer_weight)
@@ -280,43 +290,45 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         weights1, indices1 = self._select_experts(x1, infer_state1, layer_weight)
         dispatch_hook0()
 
-        shared1 = self._ffn_tp(x1, infer_state1, layer_weight)
-        recv_x1, masked_m1, indices1, weights1, handle1, dispatch_hook1 = experts.low_latency_dispatch_with_topk(
-            x1, indices1, weights1
-        )
+        shared1 = self._ffn_shared_expert(x1, infer_state1, layer_weight)
+        recv_x1, handle1, recv_weights1, dispatch_hook1 = experts.decode_dispatch_with_topk(x1, indices1, weights1)
 
         expected_m = triton.cdiv(
             x0.shape[0] * get_global_world_size() * self.num_experts_per_tok,
             layer_weight.n_routed_experts,
         )
-        moe_out0 = experts.masked_group_gemm(
+        moe_out0 = experts.decode_masked_group_gemm(
             recv_x0,
-            masked_m0,
+            handle0,
             x0.dtype,
             expected_m,
             alpha=1.0,
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
         )
+        del recv_x0
 
         dispatch_hook1()
-        routed0, combine_hook0 = experts.low_latency_combine(moe_out0, indices0, weights0, handle0)
+        routed0, combine_hook0 = experts.decode_combine(moe_out0, handle0, recv_weights0)
+        del moe_out0
 
-        moe_out1 = experts.masked_group_gemm(
+        moe_out1 = experts.decode_masked_group_gemm(
             recv_x1,
-            masked_m1,
+            handle1,
             x1.dtype,
             expected_m,
             alpha=1.0,
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
         )
+        del recv_x1
 
         combine_hook0()
         routed0.add_(shared0)
         output0 = self._hc_ffn_out(routed0, residual0, residual_mix0, post_mix0)
 
-        routed1, combine_hook1 = experts.low_latency_combine(moe_out1, indices1, weights1, handle1)
+        routed1, combine_hook1 = experts.decode_combine(moe_out1, handle1, recv_weights1)
+        del moe_out1
         if self.is_last_layer:
             combine_hook1()
             routed1.add_(shared1)
@@ -434,13 +446,14 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
 
     def _compress_and_index(self, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight):
         cos_table, sin_table = self.cos_compress_table, self.sin_compress_table
-        aux_stream = self.dsv4_prefill_aux_stream
+        c4_aux = infer_state.dsv4_workspace.c4_prefill_aux if infer_state.dsv4_workspace is not None else None
         if (
             infer_state.is_prefill
             and self.compress_ratio == 4
-            and aux_stream is not None
+            and c4_aux is not None
             and not torch.cuda.is_current_stream_capturing()
         ):
+            aux_stream = self.get_prefill_aux_stream()
             main_stream = torch.cuda.current_stream()
             aux_stream.wait_stream(main_stream)  # aux waits for x / q_lora produced on main
             with torch.cuda.stream(aux_stream):
@@ -454,7 +467,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                     cos_table,
                     sin_table,
                     use_custom_tensor_manager=False,
-                    c4_aux_workspace=infer_state.dsv4_workspace.c4_prefill_aux,
+                    c4_aux_workspace=c4_aux,
                 )
                 meta = self.index_infer.build_metadata(
                     x,
@@ -462,7 +475,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                     infer_state,
                     layer_weight,
                     use_custom_tensor_manager=False,
-                    c4_aux_workspace=infer_state.dsv4_workspace.c4_prefill_aux,
+                    c4_aux_workspace=c4_aux,
                 )
             self.compressor.compress(x, infer_state, layer_weight, cos_table, sin_table)
             main_stream.wait_stream(aux_stream)  # join before prefill_att reads the indices / latent KV
@@ -535,7 +548,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         )
 
     # ------------------------------------------------------------------ moe
-    def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
+    def _ffn_shared_expert(
+        self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
         input = input.view(-1, self.embed_dim_)
         gate_up = layer_weight.gate_up_proj.mm(input)
         if (
@@ -566,13 +581,16 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         del gate_up
         return layer_weight.down_proj.mm(shared)
 
-    def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
-        x = x.view(-1, self.embed_dim_)
-        x = self._tpsp_allgather(input=x, infer_state=infer_state)
-
-        topk_weights, topk_indices = self._select_experts(x, infer_state, layer_weight)
-        # Routed experts can overwrite x in place, so compute the shared expert first.
-        shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
+    def _ffn_mega_moe(
+        self,
+        x,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+        topk_weights,
+        topk_indices,
+    ):
+        # Mega MoE fuses combine, so the shared expert runs before the routed experts.
+        shared = self._ffn_shared_expert(input=x, infer_state=infer_state, layer_weight=layer_weight)
         routed = layer_weight.experts.experts_with_topk(
             input_tensor=x,
             topk_weights=topk_weights,
@@ -583,10 +601,67 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
         )
-        out = routed + shared
-        if self.enable_ep_moe:
-            return out
+        return routed + shared
+
+    def _ffn_tp(
+        self,
+        x,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+        topk_weights,
+        topk_indices,
+    ):
+        # A fused shared expert is applied inside the routed kernel. Triton may overwrite x,
+        # so a standalone shared expert still runs first.
+        experts = layer_weight.experts
+        fused_shared = getattr(layer_weight, "num_fused_shared_experts", 0) > 0
+        shared = None
+        if not fused_shared:
+            shared = self._ffn_shared_expert(input=x, infer_state=infer_state, layer_weight=layer_weight)
+        out = experts.experts_with_topk(
+            input_tensor=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_indices,
+            is_prefill=infer_state.is_prefill,
+            infer_state=infer_state,
+            alpha=1.0,
+            limit=self.swiglu_limit,
+            clamp_up_add_one=False,
+        )
+        if shared is not None:
+            out = out + shared
         return self._tpsp_reduce(input=out, infer_state=infer_state)
+
+    def _ffn_ep(
+        self,
+        x,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+        topk_weights,
+        topk_indices,
+    ):
+        experts = layer_weight.experts
+        if use_sm100_mega_moe(experts.quant_method):
+            return self._ffn_mega_moe(x, infer_state, layer_weight, topk_weights, topk_indices)
+        return experts.experts_with_topk(
+            input_tensor=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_indices,
+            is_prefill=infer_state.is_prefill,
+            infer_state=infer_state,
+            alpha=1.0,
+            limit=self.swiglu_limit,
+            clamp_up_add_one=False,
+            shared_expert_func=lambda: self._ffn_shared_expert(x, infer_state, layer_weight),
+        )
+
+    def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
+        x = x.view(-1, self.embed_dim_)
+        x = self._tpsp_allgather(input=x, infer_state=infer_state)
+        topk_weights, topk_indices = self._select_experts(x, infer_state, layer_weight)
+        if self.enable_ep_moe:
+            return self._ffn_ep(x, infer_state, layer_weight, topk_weights, topk_indices)
+        return self._ffn_tp(x, infer_state, layer_weight, topk_weights, topk_indices)
 
     def _select_experts(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         num_tokens = x.shape[0]

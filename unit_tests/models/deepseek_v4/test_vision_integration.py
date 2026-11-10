@@ -272,10 +272,14 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
         req.hold_kv_len += count
         return torch.arange(req.cur_kv_len, req.cur_kv_len + count, dtype=torch.int32)
 
+    from collections import deque
+
     module = common.MultiLevelKvCacheModule.__new__(common.MultiLevelKvCacheModule)
+    module.load_tasks = deque()
     module.args = SimpleNamespace(page_size=256)
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
+        dp_world_size=1,
         is_hybrid_att_model=False,
         _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
@@ -298,8 +302,10 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
     monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 8192)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
-    monkeypatch.setattr(torch.cuda, "current_stream", lambda: SimpleNamespace(synchronize=lambda: None))
     module.load_cpu_cache_to_reqs([req])
+    for task in getattr(module, "load_tasks", ()):
+        task.event.synchronize()
+    module.update_cpu_cache_load_task_states()
     assert req.cur_kv_len == req.hold_kv_len == expected
     assert loaded == ([expected] if expected > loaded_start else [])
     assert released == page_ids

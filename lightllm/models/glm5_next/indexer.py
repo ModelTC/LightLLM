@@ -103,6 +103,13 @@ class Glm5NextNsaInfer:
             self.index_topk,
         )
 
+    def _get_prefill_chunk_size(self, max_pools):
+        # Account for DeepGEMM padding within the 512 MiB workspace.
+        query_tile = 128 // self.index_n_heads
+        logits_row_bytes = triton.cdiv(max_pools, 256) * 256 * 4
+        query_tiles = max(1, 512 * 1024 ** 2 // (query_tile * logits_row_bytes))
+        return query_tiles * query_tile
+
     def _get_prefill_indices(self, q_fp8, weights, indexer_k, infer_state, att_state, max_pools):
         k_fp8_and_scale = gather_pools(
             indexer_k,
@@ -115,9 +122,7 @@ class Glm5NextNsaInfer:
             att_state.q_kv_seq_len, infer_state.b1_cu_q_seq_len, infer_state.max_q_seq_len, max_pools
         )
         topk_pool_indices = torch.empty((q_fp8.shape[0], self.index_topk // 4), dtype=torch.int32, device=q_fp8.device)
-        # Budget 64 MiB for FP32 logits. At 1M tokens this permits 64 queries per chunk,
-        # limiting Q parallelism even when the prefill batch contains many tokens.
-        chunk_size = max(1, min(q_fp8.shape[0], 16 * 1024 * 1024 // max_pools))
+        chunk_size = self._get_prefill_chunk_size(max_pools)
         import deep_gemm
 
         for start in range(0, q_fp8.shape[0], chunk_size):
@@ -132,6 +137,8 @@ class Glm5NextNsaInfer:
                 max_seqlen_k=max_pools,
             )
             self.select_topk_indices(logits, q_pool_seq_len[start:end], topk_pool_indices[start:end])
+            # Free before allocating the next chunk.
+            del logits
         return topk_pool_indices
 
     def _get_decode_indices(self, q_fp8, weights, indexer_k, infer_state, att_state, max_pools):

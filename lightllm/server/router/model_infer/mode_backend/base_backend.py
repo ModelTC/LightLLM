@@ -638,9 +638,16 @@ class ModeBackend:
         """
         将错误请求从 req_ids 中过滤出来, 然后让 _get_classed_reqs 进行处理。 该函数
         主要用于在 pd 分离模式下, 由子类继承重载, prefill 和 decode 节点过滤 kv 传输错误，或者 kv
-        传输没有完成的请求。
+        传输没有完成的请求。开启 cpu cache 时，load 或 offload 仍在进行的请求也尚未就绪。
         """
-        return [g_infer_context.requests_mapping[request_id] for request_id in req_ids]
+        reqs = [g_infer_context.requests_mapping[request_id] for request_id in req_ids]
+        if not self.args.enable_cpu_cache:
+            return reqs
+        return [
+            req
+            for req in reqs
+            if not req.cpu_cache_load_task_status.is_running() and not req.cpu_cache_offload_task_status.is_running()
+        ]
 
     def _timer_merge_radix_tree(self):
         self._radix_tree_merge_counter += 1
@@ -731,7 +738,8 @@ class ModeBackend:
         self._timer_merge_radix_tree()
 
         if self.args.enable_cpu_cache and len(g_infer_context.infer_req_ids) > 0:
-            self.multi_level_cache_module.update_cpu_cache_task_states()
+            self.multi_level_cache_module.update_cpu_cache_load_task_states()
+            self.multi_level_cache_module.update_cpu_cache_offload_task_states()
 
         if req_ids is None:
             req_ids = g_infer_context.infer_req_ids
@@ -840,7 +848,7 @@ class ModeBackend:
 
         # 先由控制器确定请求需要写入的缓存层级，再按是否包含 CPU cache 决定是否发起 offload。
         cache_controller = g_infer_context.cache_placement_controller
-        new_finished_reqs = [req for req in finished_reqs if req.cpu_cache_task_status.is_not_started()]
+        new_finished_reqs = [req for req in finished_reqs if req.cpu_cache_offload_task_status.is_not_started()]
         cache_controller.set_req_cache_way(new_finished_reqs)
         if self.args.enable_cpu_cache:
             offload_reqs = [

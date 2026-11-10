@@ -7,7 +7,7 @@ import triton.language as tl
 KV_GATHER_CHUNK_SIZE = 2097152
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["chunk_token_num"])
 def _gather_prefill_kv_kernel(
     packed_kv,
     prefill_cache_kv,
@@ -79,7 +79,7 @@ def _gather_prefill_kv_kernel(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["chunk_end"])
 def _compact_topk_indices_kernel(
     topk_indices,
     q_kv_start_loc,
@@ -102,7 +102,7 @@ def _compact_topk_indices_kernel(
     tl.store(chunk_cache_seqlens + row, tl.sum(valid.to(tl.int32)))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["q_token_num", "chunk_lse_stride_h"])
 def _merge_att_output_kernel(
     output,
     softmax_lse,
