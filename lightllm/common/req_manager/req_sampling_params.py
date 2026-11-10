@@ -37,7 +37,6 @@ class ReqSamplingParamsManager:
             dtype=torch.int64,
             device="cuda",
         )
-        self.req_to_next_token_ids[max_request_num].fill_(1)  # HOLD request used by padded decode.
         # 常驻 CPU 快照，由 MTP scatter 后的异步拷贝更新；读取前复用已有 CUDA event 等待完成。
         self.req_to_next_token_ids_cpu = torch.zeros(
             (max_request_num + 1, self.mtp_verify_width),
