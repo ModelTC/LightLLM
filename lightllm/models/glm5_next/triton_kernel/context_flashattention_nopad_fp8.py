@@ -8,7 +8,7 @@ KV_GATHER_CHUNK_SIZE = 2097152
 
 
 @triton.jit
-def _direct_smallq_packed_kernel(
+def _direct_prefill_packed_kernel(
     q,
     packed_kv,
     mem_index,
@@ -120,7 +120,7 @@ def _direct_smallq_packed_kernel(
 
 
 @triton.jit
-def reduce_direct_smallq_kernel(
+def reduce_sparse_attention_kernel(
     partial_output,
     partial_softmax_lse,
     output,
@@ -147,7 +147,7 @@ def reduce_direct_smallq_kernel(
     tl.store(output + (qid * q_head_num + h) * 512 + d, value)
 
 
-def can_use_direct_smallq(q, packed_kv, mem_index, prefill_cache_kv, topk_mem_indices, total_token_num):
+def can_use_direct_prefill(q, packed_kv, mem_index, prefill_cache_kv, topk_mem_indices, total_token_num):
     return (
         q.ndim == 3
         and 1 <= q.shape[0] <= 8
@@ -166,7 +166,7 @@ def can_use_direct_smallq(q, packed_kv, mem_index, prefill_cache_kv, topk_mem_in
     )
 
 
-def allocate_direct_smallq_workspace(q):
+def allocate_direct_prefill_workspace(q):
     q_token_num, q_head_num, _ = q.shape
     num_splits = 34 if q_token_num == 1 else 17
     return {
@@ -180,7 +180,7 @@ def allocate_direct_smallq_workspace(q):
 
 
 @torch.no_grad()
-def _context_attention_fwd_fp8_direct_smallq(
+def _context_attention_fwd_fp8_direct_prefill(
     q, packed_kv, mem_index, prefill_cache_kv, topk_mem_indices, softmax_scale, direct_workspace=None
 ):
     q_token_num = q.shape[0]
@@ -195,12 +195,12 @@ def _context_attention_fwd_fp8_direct_smallq(
         output = torch.empty(q.shape, dtype=q.dtype, device=q.device)
         launch_grid = (q_token_num, num_splits)
     else:
-        workspace = direct_workspace or allocate_direct_smallq_workspace(q)
+        workspace = direct_workspace or allocate_direct_prefill_workspace(q)
         partial_output = workspace["partial_output"]
         partial_softmax_lse = workspace["partial_softmax_lse"]
         output = workspace["output"]
         launch_grid = (q_token_num, num_splits, triton.cdiv(q_head_num, block_heads))
-    _direct_smallq_packed_kernel[launch_grid](
+    _direct_prefill_packed_kernel[launch_grid](
         q,
         packed_kv,
         mem_index,
@@ -226,7 +226,7 @@ def _context_attention_fwd_fp8_direct_smallq(
         softmax_scale=softmax_scale,
         num_warps=8,
     )
-    reduce_direct_smallq_kernel[(q_token_num, q_head_num, 4)](
+    reduce_sparse_attention_kernel[(q_token_num, q_head_num, 4)](
         partial_output,
         partial_softmax_lse,
         output,
@@ -385,67 +385,79 @@ def _merge_att_output_kernel(
 @triton.jit
 def _selected_prefill_compact_kernel(
     topk_mem_indices,
-    compact_topk_mem_indices,
+    compact_topk_offsets,
     cache_seqlens,
-    page_table,
-    cu_seqlens_q,
     kv_cache_capacity: tl.constexpr,
     topk_mem_indices_stride_s: tl.constexpr,
     topk_mem_indices_stride_d: tl.constexpr,
-    q_token_num: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     qid = tl.program_id(0)
     lane = tl.arange(0, BLOCK)
-    local = tl.load(
+    physical = tl.load(
         topk_mem_indices + qid * topk_mem_indices_stride_s + lane * topk_mem_indices_stride_d, lane < 2176, -1
     ).to(tl.int64)
-    valid = (lane < 2176) & (local >= 0)
-    physical = local
-    valid = valid & (physical >= 0) & (physical < kv_cache_capacity)
+    valid = (lane < 2176) & (physical >= 0) & (physical < kv_cache_capacity)
     rank = tl.cumsum(valid.to(tl.int32), axis=0) - 1
-    tl.store(compact_topk_mem_indices + qid * 2176 + rank, physical, valid)
-    # Every selected slot has a stable contiguous page; invalid tail pages are
-    # harmless because cache_seqlens limits FA3 to cache_seqlens[qid].
-    tl.store(page_table + qid * 2176 + lane, qid * 2176 + lane, lane < 2176)
-    if qid == 0:
-        tl.store(cu_seqlens_q + lane, lane.to(tl.int32), lane <= q_token_num)
+    tl.store(compact_topk_offsets + qid * 2176 + rank, lane, valid)
     tl.store(cache_seqlens + qid, tl.sum(valid.to(tl.int32), axis=0))
 
 
 @triton.jit
 def _selected_prefill_gather_kernel(
-    compact_topk_mem_indices,
+    compact_topk_offsets,
     cache_seqlens,
-    mem_index,
+    topk_indices,
+    topk_mem_indices,
+    b1_cu_q_seq_len,
+    b1_cu_kv_seq_len,
     prefill_cache_kv,
     packed_kv,
     selected_kv,
-    cu_seqlens_k_new,
     packed_kv_stride_s: tl.constexpr,
     prefill_cache_kv_stride_s: tl.constexpr,
     prefill_cache_kv_stride_d: tl.constexpr,
-    q_token_num: tl.constexpr,
-    BLOCK_Q_TOKENS: tl.constexpr,
+    topk_indices_stride_s: tl.constexpr,
+    topk_indices_stride_d: tl.constexpr,
+    topk_mem_indices_stride_s: tl.constexpr,
+    topk_mem_indices_stride_d: tl.constexpr,
+    batch_size: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
 ):
     qid = tl.program_id(0)
-    row = tl.program_id(1) * 4 + tl.arange(0, 4)
+    row = tl.program_id(1) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
     length = tl.load(cache_seqlens + qid)
     live = row < length
-    physical = tl.load(compact_topk_mem_indices + qid * 2176 + row, live, 0).to(tl.int64)
-    current_row = tl.full((4,), -1, tl.int32)
-    for j in tl.static_range(BLOCK_Q_TOKENS):
-        current = j < q_token_num
-        current_mem = tl.load(mem_index + j, current, 0).to(tl.int64)
-        current_row = tl.where(live & current & (physical == current_mem), j, current_row)
-    cached = live & (current_row < 0)
-    current = live & (current_row >= 0)
+    offset = tl.load(compact_topk_offsets + qid * 2176 + row, live, 0)
+    physical = tl.load(
+        topk_mem_indices + qid * topk_mem_indices_stride_s + offset * topk_mem_indices_stride_d, live, 0
+    ).to(tl.int64)
+    position = tl.load(topk_indices + qid * topk_indices_stride_s + offset * topk_indices_stride_d, live, 0)
+    if batch_size == 1:
+        batch = 0
+    else:
+        lower, upper = 0, batch_size
+        while lower < upper:
+            middle = (lower + upper) // 2
+            q_end = tl.load(b1_cu_q_seq_len + middle + 1)
+            before = qid < q_end
+            upper = tl.where(before, middle, upper)
+            lower = tl.where(before, lower, middle + 1)
+        batch = lower
+    q_start = tl.load(b1_cu_q_seq_len + batch)
+    q_end = tl.load(b1_cu_q_seq_len + batch + 1)
+    kv_start = tl.load(b1_cu_kv_seq_len + batch)
+    kv_end = tl.load(b1_cu_kv_seq_len + batch + 1)
+    cache_len = kv_end - kv_start - (q_end - q_start)
+    current = live & (position >= cache_len)
+    cached = live & (position < cache_len)
+    current_row = q_start + position - cache_len
     dim = tl.arange(0, 512)
     packed_row = packed_kv + physical[:, None] * packed_kv_stride_s
     group = tl.arange(0, 8)
     raw_scales = tl.load(packed_row + 576 + group[None, :], cached[:, None] & (group[None, :] < 7), 127)
     scales = (raw_scales.to(tl.uint32) << 23).to(tl.float32, bitcast=True)
-    scales = tl.broadcast_to(scales[:, :, None], (4, 8, 64)).reshape(4, 512)
+    scales = tl.broadcast_to(scales[:, :, None], (BLOCK_ROWS, 8, 64)).reshape(BLOCK_ROWS, 512)
     fp8 = (
         tl.load(
             packed_row.to(tl.pointer_type(tl.float8e4nv)) + dim[None, :],
@@ -467,17 +479,13 @@ def _selected_prefill_gather_kernel(
     ).to(tl.float32)
     value = tl.where(current[:, None], current_value, cached_value).to(tl.bfloat16)
     tl.store(selected_kv + (qid * 2176 + row[:, None]) * 512 + dim[None, :], value, row[:, None] < 2176)
-    if (qid == 0) & (tl.program_id(1) == 0):
-        x = tl.arange(0, BLOCK_Q_TOKENS)
-        lengths = tl.load(cache_seqlens + x, x < q_token_num, 0)
-        tl.store(cu_seqlens_k_new, 0)
-        tl.store(cu_seqlens_k_new + 1 + x, tl.cumsum(lengths, axis=0), x < q_token_num)
 
 
 def can_use_selected_prefill(q, packed_kv, mem_index, prefill_cache_kv, topk_mem_indices, total_token_num):
+    # Bound the BF16 scratch space and avoid gathering more KV than the full context.
     return (
         q.ndim == 3
-        and 2 <= q.shape[0] <= 8
+        and 2 <= q.shape[0] <= 128
         and q.shape[1:] == (64, 512)
         and q.dtype == torch.bfloat16
         and q.is_cuda
@@ -485,7 +493,7 @@ def can_use_selected_prefill(q, packed_kv, mem_index, prefill_cache_kv, topk_mem
         and packed_kv.shape[1:] == (1, 584)
         and packed_kv.dtype == torch.uint8
         and packed_kv.device == q.device
-        and total_token_num >= 65536
+        and total_token_num >= max(65536 if q.shape[0] <= 8 else 131072, q.shape[0] * 2048)
         and mem_index.dtype == torch.int32
         and mem_index.device == q.device
         and mem_index.shape == (q.shape[0],)
@@ -498,15 +506,12 @@ def can_use_selected_prefill(q, packed_kv, mem_index, prefill_cache_kv, topk_mem
     )
 
 
-def allocate_selected_prefill_workspace(q, q_token_capacity=None):
-    q_token_num = q.shape[0] if q_token_capacity is None else q_token_capacity
+def allocate_selected_prefill_workspace(q):
+    q_token_num = q.shape[0]
     return {
-        "compact_topk_mem_indices": torch.empty((q_token_num, 2176), dtype=torch.int64, device=q.device),
+        "compact_topk_offsets": torch.empty((q_token_num, 2176), dtype=torch.int32, device=q.device),
         "cache_seqlens": torch.empty(q_token_num, dtype=torch.int32, device=q.device),
-        "page_table": torch.empty((q_token_num, 2176), dtype=torch.int32, device=q.device),
-        "cu_seqlens_q": torch.empty(q_token_num + 1, dtype=torch.int32, device=q.device),
-        "cu_seqlens_k_new": torch.empty(q_token_num + 1, dtype=torch.int32, device=q.device),
-        "selected_kv": torch.empty((q_token_num * 2176, 1, q.shape[-1]), dtype=q.dtype, device=q.device),
+        "selected_kv": torch.empty((q_token_num, 2176, 1, 512), dtype=q.dtype, device=q.device),
     }
 
 
@@ -521,55 +526,62 @@ def allocate_generic_prefill_workspace(q, topk_indices, q_token_capacity=None):
 
 @torch.no_grad()
 def _context_attention_fwd_fp8_selected_prefill(
-    q, packed_kv, mem_index, prefill_cache_kv, topk_mem_indices, softmax_scale, selected_workspace=None
+    q,
+    packed_kv,
+    prefill_cache_kv,
+    topk_indices,
+    topk_mem_indices,
+    b1_cu_q_seq_len,
+    b1_cu_kv_seq_len,
+    softmax_scale,
 ):
     from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
     q_token_num = q.shape[0]
-    workspace = selected_workspace or allocate_selected_prefill_workspace(q)
-    block_q_tokens = triton.next_power_of_2(q_token_num)
+    workspace = allocate_selected_prefill_workspace(q)
     _selected_prefill_compact_kernel[(q_token_num,)](
         topk_mem_indices,
-        workspace["compact_topk_mem_indices"],
+        workspace["compact_topk_offsets"],
         workspace["cache_seqlens"],
-        workspace["page_table"],
-        workspace["cu_seqlens_q"],
         packed_kv.shape[0],
         topk_mem_indices.stride(0),
         topk_mem_indices.stride(1),
-        q_token_num=q_token_num,
         BLOCK=4096,
         num_warps=8,
     )
     _selected_prefill_gather_kernel[(q_token_num, triton.cdiv(2176, 4))](
-        workspace["compact_topk_mem_indices"],
+        workspace["compact_topk_offsets"],
         workspace["cache_seqlens"],
-        mem_index,
+        topk_indices,
+        topk_mem_indices,
+        b1_cu_q_seq_len,
+        b1_cu_kv_seq_len,
         prefill_cache_kv,
         packed_kv,
         workspace["selected_kv"],
-        workspace["cu_seqlens_k_new"],
         packed_kv.stride(0),
         prefill_cache_kv.stride(0),
         prefill_cache_kv.stride(2),
-        q_token_num=q_token_num,
-        BLOCK_Q_TOKENS=block_q_tokens,
+        topk_indices_stride_s=topk_indices.stride(0),
+        topk_indices_stride_d=topk_indices.stride(1),
+        topk_mem_indices_stride_s=topk_mem_indices.stride(0),
+        topk_mem_indices_stride_d=topk_mem_indices.stride(1),
+        batch_size=b1_cu_q_seq_len.numel() - 1,
+        BLOCK_ROWS=4,
         num_warps=4,
     )
+    qv = q.unsqueeze(1)
+    selected_kv = workspace["selected_kv"]
     return flash_attn_with_kvcache(
-        q=None,
-        qv=q,
-        k_cache=None,
-        v_cache=workspace["selected_kv"].view(-1, 1, 1, 512),
-        page_table=workspace["page_table"],
+        q=qv[..., :64],
+        qv=qv,
+        k_cache=selected_kv[..., :64],
+        v_cache=selected_kv,
         cache_seqlens=workspace["cache_seqlens"],
-        cu_seqlens_q=workspace["cu_seqlens_q"],
-        cu_seqlens_k_new=workspace["cu_seqlens_k_new"],
-        max_seqlen_q=1,
         softmax_scale=softmax_scale,
         causal=False,
         only_qv=True,
-    )
+    ).squeeze(1)
 
 
 @torch.no_grad()
@@ -587,19 +599,25 @@ def context_attention_fwd_fp8(
     b1_cu_q_seq_len,
     total_token_num,
     softmax_scale,
-    selected_workspace=None,
     direct_workspace=None,
     generic_workspace=None,
 ):
     """Run NoPE sparse prefill from request mappings and physical top-k slots."""
     eligibility = (q, packed_kv, mem_index, prefill_cache_kv, topk_mem_indices, total_token_num)
-    if can_use_direct_smallq(*eligibility):
-        return _context_attention_fwd_fp8_direct_smallq(
+    if can_use_direct_prefill(*eligibility):
+        return _context_attention_fwd_fp8_direct_prefill(
             q, packed_kv, mem_index, prefill_cache_kv, topk_mem_indices, softmax_scale, direct_workspace
         )
     if can_use_selected_prefill(*eligibility):
         return _context_attention_fwd_fp8_selected_prefill(
-            q, packed_kv, mem_index, prefill_cache_kv, topk_mem_indices, softmax_scale, selected_workspace
+            q,
+            packed_kv,
+            prefill_cache_kv,
+            topk_indices,
+            topk_mem_indices,
+            b1_cu_q_seq_len,
+            b1_cu_kv_seq_len,
+            softmax_scale,
         )
     from sgl_kernel.flash_attn import flash_attn_with_kvcache
 

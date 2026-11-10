@@ -10,33 +10,17 @@ from ..base_att import BaseAttBackend
 class Fp8Glm5NextSparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
-        self._prefill_workspaces = [{"smallq": None, "generic": None} for _ in range(2)]
+        self._prefill_workspaces = [{"direct": None, "generic": None} for _ in range(2)]
 
-    def get_smallq_workspace(self, infer_state, q):
+    def get_direct_prefill_workspace(self, infer_state, q):
         from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
-            allocate_direct_smallq_workspace,
-            allocate_selected_prefill_workspace,
+            allocate_direct_prefill_workspace,
         )
 
         slot = self._prefill_workspaces[infer_state.microbatch_index]
-        if slot["smallq"] is None:
-            slot["smallq"] = {
-                "direct": allocate_direct_smallq_workspace(q[:1]),
-                "selected": allocate_selected_prefill_workspace(q, q_token_capacity=8),
-            }
-        if q.shape[0] == 1:
-            return slot["smallq"]["direct"]
-        q_token_num = q.shape[0]
-        selected = slot["smallq"]["selected"]
-        topk_size = selected["compact_topk_mem_indices"].shape[1]
-        return {
-            "compact_topk_mem_indices": selected["compact_topk_mem_indices"][:q_token_num],
-            "cache_seqlens": selected["cache_seqlens"][:q_token_num],
-            "page_table": selected["page_table"][:q_token_num],
-            "cu_seqlens_q": selected["cu_seqlens_q"][: q_token_num + 1],
-            "cu_seqlens_k_new": selected["cu_seqlens_k_new"][: q_token_num + 1],
-            "selected_kv": selected["selected_kv"][: q_token_num * topk_size],
-        }
+        if slot["direct"] is None:
+            slot["direct"] = allocate_direct_prefill_workspace(q)
+        return slot["direct"]
 
     def get_generic_prefill_workspace(self, infer_state, q, topk_indices):
         from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
@@ -79,14 +63,14 @@ class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
     def _nsa_prefill_att(self, q, packed_kv, att_control):
         from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
             context_attention_fwd_fp8,
-            can_use_direct_smallq,
+            can_use_direct_prefill,
             can_use_selected_prefill,
         )
 
         nsa_prefill_dict = att_control.nsa_prefill_dict
         infer_state = self.infer_state
         topk_mem_indices = nsa_prefill_dict["topk_mem_indices"]
-        direct_workspace = selected_workspace = generic_workspace = None
+        direct_workspace = generic_workspace = None
         if q.shape[1] == 64:
             eligibility = (
                 q,
@@ -96,11 +80,9 @@ class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
                 topk_mem_indices,
                 infer_state.total_token_num,
             )
-            if can_use_direct_smallq(*eligibility):
-                direct_workspace = self.backend.get_smallq_workspace(infer_state, q)
-            elif can_use_selected_prefill(*eligibility):
-                selected_workspace = self.backend.get_smallq_workspace(infer_state, q)
-            else:
+            if can_use_direct_prefill(*eligibility):
+                direct_workspace = self.backend.get_direct_prefill_workspace(infer_state, q)
+            elif not can_use_selected_prefill(*eligibility):
                 graph_guard = (
                     infer_state.is_cuda_graph_capture
                     or self.backend.model.prefill_graph is not None
@@ -124,7 +106,6 @@ class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
             b1_cu_q_seq_len=infer_state.b1_cu_q_seq_len,
             total_token_num=infer_state.total_token_num,
             softmax_scale=nsa_prefill_dict["softmax_scale"],
-            selected_workspace=selected_workspace,
             direct_workspace=direct_workspace,
             generic_workspace=generic_workspace,
         )

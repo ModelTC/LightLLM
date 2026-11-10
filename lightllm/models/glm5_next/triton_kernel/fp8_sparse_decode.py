@@ -117,7 +117,7 @@ def can_use_fp8_sparse_direct_decode(q_nope, packed_kv, topk, kv_lora_rank, boun
 
 def fp8_sparse_direct_decode(q_nope, packed_kv, topk, softmax_scale):
     from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
-        reduce_direct_smallq_kernel,
+        reduce_sparse_attention_kernel,
     )
 
     batch = q_nope.shape[0]
@@ -150,7 +150,7 @@ def fp8_sparse_direct_decode(q_nope, packed_kv, topk, softmax_scale):
         num_warps=4 if block_k == 16 else 8,
         num_stages=1,
     )
-    reduce_direct_smallq_kernel[(batch, heads, 4)](
+    reduce_sparse_attention_kernel[(batch, heads, 4)](
         partial_o,
         partial_lse,
         out,

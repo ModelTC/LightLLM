@@ -39,8 +39,10 @@ def _make_infer_state(**attributes):
 
 def _make_workspace_backend(batch_max_tokens):
     backend = object.__new__(Fp8Glm5NextSparseAttBackend)
-    backend.model = SimpleNamespace(batch_max_tokens=batch_max_tokens, prefill_graph=None)
-    backend._prefill_workspaces = [{"smallq": None, "generic": None} for _ in range(2)]
+    backend.model = SimpleNamespace(
+        batch_max_tokens=batch_max_tokens, prefill_graph=None, config={"index_topk": 2048, "index_kpool": 4}
+    )
+    backend._prefill_workspaces = [{"direct": None, "generic": None} for _ in range(2)]
     return backend
 
 
@@ -81,6 +83,7 @@ class _PrefillCase:
         self.topk_indices[:, 1] = visible - 1
         self.topk_mem_indices = torch.empty(queries, width * 2, device=device, dtype=torch.int32)[:, ::2]
         self.infer_state = _make_infer_state(
+            is_prefill=True,
             req_manager=SimpleNamespace(req_to_token_indexs=self.req_to_token_indexs),
             b_req_idx=tensor(self.requests),
             b_seq_len=tensor(seq_lens),
@@ -354,7 +357,7 @@ def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softm
     case.check(output)
 
 
-@pytest.mark.parametrize("num_q", [16, 33])
+@pytest.mark.parametrize("num_q", [64, 129])
 def test_fp8_h64_largeq_native_prefill_request_table_graph(monkeypatch, num_q):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("Validated FlashMLA sparse prefill target is Hopper")
@@ -406,7 +409,7 @@ def test_fp8_h8_largeq_prefill_keeps_flashattention_path(monkeypatch):
     "num_q,num_heads",
     [(1, 8), (2, 8), (8, 8), (1, 64), (2, 64), (3, 64), (4, 64), (5, 64), (6, 64), (7, 64), (8, 64)],
 )
-def test_fp8_direct_smallq_prefill_dispatch_strided_holes_and_current(num_q, num_heads):
+def test_fp8_direct_prefill_dispatch_strided_holes_and_current(num_q, num_heads):
     torch.manual_seed(53016 + num_q)
     seqs = [65536 + value for value in [127, 521, 1031, 2053, 4099, 8191, 12289, 16381][:num_q]]
     case = _PrefillCase(seqs, [1] * num_q, num_heads)
@@ -425,36 +428,33 @@ def test_fp8_direct_smallq_prefill_dispatch_strided_holes_and_current(num_q, num
     case.check(output)
 
 
-def test_fp8_h64_direct_smallq_state_workspace_reuse_and_fresh_state():
+def test_fp8_h64_direct_prefill_state_workspace_reuse_and_fresh_state():
     torch.manual_seed(53150)
     case = _PrefillCase([65536], [1], 64)
     case.check(case.run())
-    cache = case.backend._prefill_workspaces[0]["smallq"]
-    pointers = {name: value.data_ptr() for name, value in cache["direct"].items()}
-    for _ in range(10):
-        infer, state = case.new_state()
-        case.check(case.run(state))
-    assert {name: value.data_ptr() for name, value in cache["direct"].items()} == pointers
-    fresh_infer, fresh = case.new_state(mem_index=case.infer_state.mem_index.clone())
-    case.check(case.run(fresh))
-    assert {name: value.data_ptr() for name, value in cache["direct"].items()} == pointers
-    case.mutate()
-    case.check(case.run())
-
-
-@pytest.mark.parametrize("num_q", [2, 3, 5, 8])
-def test_fp8_h64_selected_prefill_state_workspace_reuse(num_q):
-    torch.manual_seed(53200 + num_q)
-    case = _PrefillCase([32768] * num_q, [1] * num_q, 64)
-    case.check(case.run())
-    workspace = case.backend._prefill_workspaces[0]["smallq"]["selected"]
+    workspace = case.backend._prefill_workspaces[0]["direct"]
     pointers = {name: value.data_ptr() for name, value in workspace.items()}
     for _ in range(10):
         infer, state = case.new_state()
         case.check(case.run(state))
+    assert {name: value.data_ptr() for name, value in workspace.items()} == pointers
     fresh_infer, fresh = case.new_state(mem_index=case.infer_state.mem_index.clone())
     case.check(case.run(fresh))
     assert {name: value.data_ptr() for name, value in workspace.items()} == pointers
+    case.mutate()
+    case.check(case.run())
+
+
+@pytest.mark.parametrize("num_q", [2, 3, 5, 8, 16, 32, 128])
+def test_fp8_h64_selected_prefill_cached_chunks_and_graph(num_q):
+    torch.manual_seed(53200 + num_q)
+    case = _PrefillCase([131072, 131072], [num_q // 2, num_q - num_q // 2], 64)
+    case.check(case.run())
+    for _ in range(2):
+        infer, state = case.new_state()
+        case.check(case.run(state))
+    fresh_infer, fresh = case.new_state(mem_index=case.infer_state.mem_index.clone())
+    case.check(case.run(fresh))
     graph, output = _capture_cuda_graph(case.run)
     case.mutate()
     graph.replay()
@@ -462,6 +462,70 @@ def test_fp8_h64_selected_prefill_state_workspace_reuse(num_q):
     case.topk_indices.fill_(-1)
     graph.replay()
     assert torch.count_nonzero(output) == 0
+
+
+def test_fp8_selected_prefill_graph_with_empty_requests_and_changing_boundaries():
+    case = _PrefillCase([65536] * 4, [0, 4, 0, 3], 64)
+    case.check(case.run())
+    graph, output = _capture_cuda_graph(case.run)
+    replacement = _PrefillCase([65536] * 4, [2, 0, 5, 0], 64)
+    for name in (
+        "q",
+        "packed_kv",
+        "prefill_cache_kv",
+        "req_to_token_indexs",
+        "q_req_idx",
+        "position_ids",
+        "topk_indices",
+        "topk_mem_indices",
+    ):
+        getattr(case, name).copy_(getattr(replacement, name))
+    case.infer_state.b1_cu_q_seq_len.copy_(replacement.infer_state.b1_cu_q_seq_len)
+    case.infer_state.position_ids.copy_(replacement.infer_state.position_ids)
+    for name in ("q_kv_seq_len", "q_req_idx", "q_kv_start_loc"):
+        getattr(case.att_state, name).copy_(getattr(replacement.att_state, name))
+    graph.replay()
+    case.check(output)
+
+
+def test_fp8_one_query_prefill_and_decode_read_their_own_kv_sources():
+    case = _PrefillCase([65536], [1], 64)
+    case.q.zero_()
+    case.prefill_cache_kv.fill_(1)
+    case.source_kv.fill_(2)
+    write_fp8_e8m0_packed_kv(case.source_kv, case.all_slots, case.packed_kv)
+    case.topk_indices.fill_(-1)
+    case.topk_indices[:, 0] = 65535
+    case.refresh()
+    decode_infer = _make_infer_state(**vars(case.infer_state))
+    decode_infer.is_prefill = False
+    decode_infer.is_cuda_graph_capture = True
+    decode_state = case.backend.create_att_decode_state(decode_infer)
+    decode_state.init_state()
+    control = AttControl(
+        nsa_decode=True,
+        nsa_decode_dict={
+            "topk_mem_indices": case.topk_mem_indices,
+            "softmax_scale": 0.0625,
+            "kv_lora_rank": 512,
+        },
+    )
+
+    def run():
+        prefill = case.run()
+        decode = decode_state.decode_att((case.q, case.q[..., :0]), case.packed_kv[..., :584], None, control)
+        return prefill, decode
+
+    prefill, decode = run()
+    torch.testing.assert_close(prefill, torch.ones_like(prefill), rtol=0, atol=0)
+    torch.testing.assert_close(decode, torch.full_like(decode, 2), rtol=0, atol=0)
+    graph, (prefill, decode) = _capture_cuda_graph(run)
+    case.prefill_cache_kv.fill_(3)
+    case.source_kv.fill_(4)
+    write_fp8_e8m0_packed_kv(case.source_kv, case.all_slots, case.packed_kv)
+    graph.replay()
+    torch.testing.assert_close(prefill, torch.full_like(prefill, 3), rtol=0, atol=0)
+    torch.testing.assert_close(decode, torch.full_like(decode, 4), rtol=0, atol=0)
 
 
 def test_fp8_h64_b1_decode_uses_native_eager_and_direct_graph():
@@ -941,8 +1005,8 @@ def test_fp8_sparse_direct_decode_large_workload_retains_native_graph(monkeypatc
 
 def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallback():
     torch.manual_seed(53450)
-    backend = _make_workspace_backend(26)
-    case = _PrefillCase([32768, 16384, 16384], [5, 4, 4], 64, backend=backend)
+    backend = _make_workspace_backend(66)
+    case = _PrefillCase([32768, 16384, 16384], [11, 11, 11], 64, backend=backend)
     case.check(case.run())
     workspace = backend._prefill_workspaces[0]["generic"]
     assert set(workspace) == {"chunk_topk_indices", "chunk_cache_seqlens", "cu_seqlens_q"}
@@ -952,7 +1016,7 @@ def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallba
         case.check(case.run(state))
     case.mutate()
     case.check(case.run())
-    fresh = _PrefillCase([16384, 32768, 16384], [3, 5, 5], 64, capacity=131072, backend=backend)
+    fresh = _PrefillCase([16384, 32768, 16384], [9, 11, 13], 64, capacity=131072, backend=backend)
     fresh.check(fresh.run())
     assert {name: value.data_ptr() for name, value in backend._prefill_workspaces[0]["generic"].items()} == pointers
     for overrides in ({"prefill_cuda_graph_exe_list": []}, {"is_cuda_graph_capture": True}):
@@ -978,14 +1042,14 @@ def test_fp8_generic_prefill_workspace_graph_query_is_generic_h64_only(monkeypat
     }
     control = AttControl(nsa_prefill=True, nsa_prefill_dict=params)
     for heads, direct, selected in ((8, False, False), (64, True, False), (64, False, True)):
-        monkeypatch.setattr(fp8_prefill, "can_use_direct_smallq", lambda *args, d=direct: d)
+        monkeypatch.setattr(fp8_prefill, "can_use_direct_prefill", lambda *args, d=direct: d)
         monkeypatch.setattr(fp8_prefill, "can_use_selected_prefill", lambda *args, s=selected: s)
         infer = _make_infer_state(
             mem_index=torch.empty(1, dtype=torch.int32),
             req_manager=SimpleNamespace(req_to_token_indexs=torch.empty((1, 1), dtype=torch.int32)),
         )
         backend = _make_workspace_backend(1)
-        backend.get_smallq_workspace = lambda *args: {}
+        backend.get_direct_prefill_workspace = lambda *args: {}
         state = Fp8Glm5NextSparsePrefillState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
         assert (
             state._nsa_prefill_att(torch.empty((1, heads, 512), dtype=torch.bfloat16), None, control).shape[1] == heads
