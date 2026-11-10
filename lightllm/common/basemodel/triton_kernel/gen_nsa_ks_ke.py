@@ -20,7 +20,6 @@ def _gen_nsa_ks_ke(
     ragged_mem_index,
     BLOCK_REQ: tl.constexpr,
     BLOCK_SEQ_SPLIT: tl.constexpr,
-    COPY_RAGGED: tl.constexpr = True,
 ):
     cur_index = tl.program_id(0)
     # 只处理最后一个同样req_idx的req进行处理，代表seq_len最长的那个。
@@ -66,55 +65,22 @@ def _gen_nsa_ks_ke(
             mask=mask,
         )
 
-    if COPY_RAGGED:
-        for block_index in range(tl.cdiv(cur_total_len, BLOCK_SEQ_SPLIT)):
-            block_start = block_index * BLOCK_SEQ_SPLIT
-            block_end = min(cur_total_len, (block_index + 1) * BLOCK_SEQ_SPLIT)
-            mask = (block_start + tl.arange(0, BLOCK_SEQ_SPLIT)) < block_end
+    for block_index in range(tl.cdiv(cur_total_len, BLOCK_SEQ_SPLIT)):
+        block_start = block_index * BLOCK_SEQ_SPLIT
+        block_end = min(cur_total_len, (block_index + 1) * BLOCK_SEQ_SPLIT)
+        mask = (block_start + tl.arange(0, BLOCK_SEQ_SPLIT)) < block_end
 
-            src_mem_index_ptr = (
-                req_to_token_index
-                + strided_req_to_token_index_b * cur_req_idx
-                + block_start
-                + tl.arange(0, BLOCK_SEQ_SPLIT)
-            )
-            src_mem_index = tl.load(src_mem_index_ptr, mask=mask, other=-1)
-            tl.store(
-                ragged_mem_index + pre_sum_seq_len + block_start + tl.arange(0, BLOCK_SEQ_SPLIT),
-                src_mem_index,
-                mask=mask,
-            )
+        src_mem_index_ptr = (
+            req_to_token_index
+            + strided_req_to_token_index_b * cur_req_idx
+            + block_start
+            + tl.arange(0, BLOCK_SEQ_SPLIT)
+        )
+        src_mem_index = tl.load(src_mem_index_ptr, mask=mask, other=-1)
+        tl.store(
+            ragged_mem_index + pre_sum_seq_len + block_start + tl.arange(0, BLOCK_SEQ_SPLIT), src_mem_index, mask=mask
+        )
     return
-
-
-@triton.jit
-def _copy_nsa_ragged_mem_index(
-    b_seq_len,
-    b_req_idx,
-    b_same_req_mark,
-    req_to_token_index,
-    ragged_mem_index,
-    strided_req_to_token_index_b: tl.constexpr,
-    BLOCK_REQ: tl.constexpr,
-    BLOCK_SEQ_SPLIT: tl.constexpr,
-):
-    cur_index = tl.program_id(0)
-    block_index = tl.program_id(1)
-    req_mark = tl.load(b_same_req_mark + cur_index)
-    cur_total_len = tl.load(b_seq_len + cur_index)
-    if req_mark == 0 or block_index * BLOCK_SEQ_SPLIT >= cur_total_len:
-        return
-    off = tl.arange(0, BLOCK_REQ)
-    pre_req_marks = tl.load(b_same_req_mark + off, off < cur_index, other=0)
-    pre_seq_lens = tl.load(b_seq_len + off, (off < cur_index) & (pre_req_marks != 0), other=0)
-    pre_sum_seq_len = tl.sum(pre_seq_lens)
-    cur_req_idx = tl.load(b_req_idx + cur_index)
-    block_off = block_index * BLOCK_SEQ_SPLIT + tl.arange(0, BLOCK_SEQ_SPLIT)
-    mask = block_off < cur_total_len
-    src_mem_index = tl.load(
-        req_to_token_index + cur_req_idx * strided_req_to_token_index_b + block_off, mask=mask, other=-1
-    )
-    tl.store(ragged_mem_index + pre_sum_seq_len + block_off, src_mem_index, mask=mask)
 
 
 @torch.no_grad()
@@ -126,28 +92,15 @@ def gen_nsa_ks_ke(
     q_token_num: int,
     ragged_mem_index: torch.Tensor,
     hold_req_idx: int = -1,
-    max_seq_len: Optional[int] = None,
 ):
     """
     hold_req_idx 这是一个特殊req idx，主要是用于padding 请求数量时使用，所以其处理存在特殊性。
-    max_seq_len 是 b_seq_len 的 CPU 上界，长序列可据此并行复制 ragged 索引。
     """
     batch_size = b_seq_len.shape[0]
     ks = torch.empty((q_token_num,), dtype=torch.int32, device=b_seq_len.device)
     ke = torch.empty((q_token_num,), dtype=torch.int32, device=b_seq_len.device)
     lengths = torch.empty((q_token_num,), dtype=torch.int32, device=b_seq_len.device)
     b_same_req_mark = gen_same_req_mark(b_req_idx, hold_req_idx=hold_req_idx)
-    # Long GLM index tables otherwise traverse the entire prefix on one CTA.
-    # init_att_state runs outside the model graph, so this bound is refreshed
-    # for each decode call. Keep the established short/unspecified path.
-    if max_seq_len is None and req_to_token_index.shape[1] >= 32768 and req_to_token_index.stride(1) == 1:
-        # Long contiguous request tables are the GLM-5.3 layout. Infer the
-        # static copy bound here so model-specific attention wrappers do not
-        # need to duplicate this dispatch plumbing.
-        max_seq_len = req_to_token_index.shape[1]
-    use_parallel_ragged_copy = max_seq_len is not None and max_seq_len >= 32768
-    if use_parallel_ragged_copy:
-        assert req_to_token_index.stride(1) == 1
 
     _gen_nsa_ks_ke[(batch_size,)](
         b_seq_len=b_seq_len,
@@ -163,19 +116,7 @@ def gen_nsa_ks_ke(
         ragged_mem_index=ragged_mem_index,
         BLOCK_REQ=triton.next_power_of_2(batch_size),
         BLOCK_SEQ_SPLIT=256,
-        COPY_RAGGED=not use_parallel_ragged_copy,
     )
-    if use_parallel_ragged_copy:
-        _copy_nsa_ragged_mem_index[(batch_size, triton.cdiv(max_seq_len, 4096))](
-            b_seq_len=b_seq_len,
-            b_req_idx=b_req_idx,
-            b_same_req_mark=b_same_req_mark,
-            req_to_token_index=req_to_token_index,
-            ragged_mem_index=ragged_mem_index,
-            strided_req_to_token_index_b=req_to_token_index.stride(0),
-            BLOCK_REQ=triton.next_power_of_2(batch_size),
-            BLOCK_SEQ_SPLIT=4096,
-        )
     return ks, ke, lengths
 
 

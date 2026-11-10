@@ -57,8 +57,7 @@ class Glm5NextNsaInfer:
             packed_buffer=packed_buffer,
             ape=layer_weight.index_kpool_compress_ape.weight,
             lengths=att_state.lengths,
-            starts=att_state.ks,
-            ragged=att_state.ragged_mem_index,
+            mem_index=infer_state.mem_index,
             req_idx=infer_state.b_req_idx,
             cu_q_lens=infer_state.b1_cu_q_seq_len,
             seq_lens=infer_state.b_seq_len,
@@ -67,7 +66,14 @@ class Glm5NextNsaInfer:
         )
 
         if infer_state.max_kv_seq_len <= self.topk:
-            return expand_topk(None, att_state.lengths, att_state.ks, att_state.ragged_mem_index, self.topk, dense=True)
+            return expand_topk(
+                None,
+                att_state.lengths,
+                att_state.query_req,
+                infer_state.req_manager.req_to_token_indexs,
+                self.topk,
+                dense=True,
+            )
 
         # The small indexer is replicated: no all-gather of query heads and
         # identical pool selection on every TP rank.
@@ -82,7 +88,9 @@ class Glm5NextNsaInfer:
             groups = self._get_prefill_indices(q_fp8, weights, packed_buffer, infer_state, att_state, max_pools)
         else:
             groups = self._get_decode_indices(q_fp8, weights, packed_buffer, infer_state, att_state, max_pools)
-        return expand_topk(groups, att_state.lengths, att_state.ks, att_state.ragged_mem_index, self.topk)
+        return expand_topk(
+            groups, att_state.lengths, att_state.query_req, infer_state.req_manager.req_to_token_indexs, self.topk
+        )
 
     def _get_prefill_indices(self, q_fp8, weights, packed_buffer, infer_state, att_state, max_pools):
         keys = gather_pools(

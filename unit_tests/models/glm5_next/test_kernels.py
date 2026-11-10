@@ -211,8 +211,7 @@ def test_kpool_chunk_boundaries_and_fragmented_token_kv(cuda_graph):
             packed,
             ape,
             tensor(lengths),
-            tensor(starts),
-            tensor(locations),
+            tensor(locations)[tensor(starts) + tensor(lengths) - 1],
             tensor([r for r, _, _ in chunks]),
             tensor(cu_q_lens),
             tensor([end for _, _, end in chunks]),
@@ -248,7 +247,7 @@ def test_kpool_chunk_boundaries_and_fragmented_token_kv(cuda_graph):
     lengths = torch.tensor(seqs, device="cuda", dtype=torch.int32)
     starts = torch.tensor([0, 9], device="cuda", dtype=torch.int32)
     groups = torch.tensor([[1, 0], [0, -1]], device="cuda", dtype=torch.int32)
-    out, relative = expand_topk(groups, lengths, starts, ragged, topk=8)
+    out, relative = expand_topk(groups, lengths, req_idx, table, topk=8)
     for batch, expected in enumerate([[4, 5, 6, 7, 0, 1, 2, 3, 8], list(range(7))]):
         assert relative[batch, : len(expected)].tolist() == expected
         assert (
@@ -270,12 +269,11 @@ def test_kpool_decode_cuda_graph_and_padding():
     raw = torch.zeros(4, 256, device="cuda", dtype=torch.bfloat16)
     req_idx = torch.tensor([1, 3, 4, 4], device="cuda", dtype=torch.int32)
     lengths = torch.ones(4, device="cuda", dtype=torch.int32)
-    starts = torch.arange(4, device="cuda", dtype=torch.int32) * 8
-    ragged = table.flatten().clone()
+    mem_index = torch.zeros(4, device="cuda", dtype=torch.int32)
     cu_q_lens = torch.arange(5, device="cuda", dtype=torch.int32)
 
     def run():
-        compress_pools(raw, tail, packed, ape, lengths, starts, ragged, req_idx, cu_q_lens, lengths, max_q_len=1)
+        compress_pools(raw, tail, packed, ape, lengths, mem_index, req_idx, cu_q_lens, lengths, max_q_len=1)
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -291,7 +289,7 @@ def test_kpool_decode_cuda_graph_and_padding():
         req_idx[:2] = torch.tensor([1 if i == 0 else 3 for i in order], device="cuda")
         raw[:2] = source[order, pos]
         lengths.fill_(pos + 1)
-        ragged[:16] = table[order].flatten()
+        mem_index[:2] = table[order, pos]
         graph.replay()
         for batch, req in enumerate([1, 3]):
             pending = (pos + 1) % 4
@@ -404,7 +402,7 @@ def test_kpool_packed_kv_above_two_gib():
     zero = torch.zeros(4, device="cuda", dtype=torch.int32)
     ragged = torch.tensor([0, 1, 2, loc], device="cuda", dtype=torch.int32)
     cu_q_lens = torch.tensor([0, 4], device="cuda", dtype=torch.int32)
-    compress_pools(raw, tail, packed, ape, lengths, zero, ragged, zero[:1], cu_q_lens, lengths[-1:], max_q_len=4)
+    compress_pools(raw, tail, packed, ape, lengths, ragged, zero[:1], cu_q_lens, lengths[-1:], max_q_len=4)
     keys, scales = gather_pools(packed, ragged[None], zero[:1], lengths[-1:], 1)
     pooled = (raw[:, :128].float() * (raw[:, 128:].float() + ape).softmax(0)).sum(0).bfloat16()
     expected_key, expected_scale = hadamard_transform_quant_fp8(pooled[None], scale=128 ** -0.5)
@@ -614,8 +612,7 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
     )
     state = SimpleNamespace(
         lengths=torch.arange(1, tokens + 1, device="cuda", dtype=torch.int32),
-        ks=torch.zeros(tokens, device="cuda", dtype=torch.int32),
-        ragged_mem_index=ragged,
+        query_req=torch.zeros(tokens, device="cuda", dtype=torch.int32),
     )
     indexer = Glm5NextNsaInfer(
         0,
@@ -641,7 +638,7 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
         infer.max_kv_seq_len = pos + 1
         infer.b_seq_len.fill_(pos + 1)
         state.lengths = torch.tensor([pos + 1], device="cuda", dtype=torch.int32)
-        state.ks = torch.zeros_like(state.lengths)
+        state.query_req = infer.b_req_idx
         _, decoded = indexer._get_indices(hidden[pos : pos + 1], hidden[pos : pos + 1], infer, state, weights)
         valid = 2048 + (pos + 1) % 4
         assert set(decoded[0, :valid].tolist()) == set(full[pos, :valid].tolist())

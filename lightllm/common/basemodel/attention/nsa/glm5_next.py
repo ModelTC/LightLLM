@@ -3,14 +3,15 @@ import weakref
 
 import torch
 
+from ..base_att import BaseAttBackend
+
 from .flashmla_sparse import (
-    NsaFlashMlaSparseAttBackend,
     NsaFlashMlaSparsePrefillAttState,
     NsaFlashMlaSparseDecodeAttState,
 )
 
 
-class Glm5NextSparseAttBackend(NsaFlashMlaSparseAttBackend):
+class Glm5NextSparseAttBackend(BaseAttBackend):
     def create_att_prefill_state(self, infer_state):
         return Glm5NextSparsePrefillState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
@@ -20,6 +21,16 @@ class Glm5NextSparseAttBackend(NsaFlashMlaSparseAttBackend):
 
 @dataclasses.dataclass
 class Glm5NextSparsePrefillState(NsaFlashMlaSparsePrefillAttState):
+    query_req: torch.Tensor = None
+
+    def init_state(self):
+        from lightllm.models.glm5_next.triton_kernel.kpool import prefill_nsa_params
+
+        state = self.infer_state
+        self.lengths, self.query_req, self.ks = prefill_nsa_params(
+            state.position_ids, state.b_req_idx, state.b1_cu_q_seq_len, state.b1_cu_kv_seq_len
+        )
+
     def _nsa_prefill_att(self, q, kv, att_control):
         from sgl_kernel.flash_mla import flash_mla_sparse_fwd
 
@@ -43,8 +54,11 @@ class Glm5NextSparsePrefillState(NsaFlashMlaSparsePrefillAttState):
 
 @dataclasses.dataclass
 class Glm5NextSparseDecodeState(NsaFlashMlaSparseDecodeAttState):
+    query_req: torch.Tensor = None
+
     def init_state(self):
-        super().init_state()
+        self.lengths = self.infer_state.b_seq_len
+        self.query_req = self.infer_state.b_req_idx
         pool = self.backend.model.config["index_kpool"]
         topk = self.backend.model.config["index_topk"]
         self.nsa_cache_seqlens = (

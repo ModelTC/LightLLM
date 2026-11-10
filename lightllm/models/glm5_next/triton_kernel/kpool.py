@@ -29,14 +29,32 @@ def _get_query_block(CuQLens, BATCH, BLOCK: tl.constexpr):
 
 
 @triton.jit
+def _prefill_nsa_params(PositionIds, ReqIdx, CuQ, CuKV, Lengths, QueryReq, KVStarts, BATCH, BLOCK: tl.constexpr):
+    batch, q_start, q_end, block = _get_query_block(CuQ, BATCH, BLOCK)
+    rows = q_start + block * BLOCK + tl.arange(0, BLOCK)
+    valid = rows < q_end
+    tl.store(Lengths + rows, tl.load(PositionIds + rows, valid, 0) + 1, valid)
+    tl.store(QueryReq + rows, tl.load(ReqIdx + batch), valid)
+    tl.store(KVStarts + rows, tl.load(CuKV + batch), valid)
+
+
+def prefill_nsa_params(position_ids, req_idx, cu_q_lens, cu_kv_lens):
+    """Expand existing request metadata to query rows without visiting historical KV."""
+    lengths, query_req, kv_starts = [torch.empty_like(position_ids) for _ in range(3)]
+    _prefill_nsa_params[(position_ids.numel() // 256 + req_idx.numel(),)](
+        position_ids, req_idx, cu_q_lens, cu_kv_lens, lengths, query_req, kv_starts, req_idx.numel(), BLOCK=256
+    )
+    return lengths, query_req, kv_starts
+
+
+@triton.jit
 def _compress_pools(
     Raw,
     Tail,
     Packed,
     Ape,
     Lengths,
-    Starts,
-    Ragged,
+    MemIndex,
     ReqIdx,
     CuQLens,
     MtpIndex,
@@ -67,7 +85,6 @@ def _compress_pools(
         valid = row < q_end
     req = tl.load(ReqIdx + batch)
     if valid and req != HOLD_REQ:
-        start = tl.load(Starts + row)
         pool = tl.arange(0, 4)
         cols = tl.arange(0, 128)
         raw_rows = row - 3 + pool
@@ -94,7 +111,8 @@ def _compress_pools(
         key = (key * (128 ** -0.5)).to(tl.bfloat16).to(tl.float32)
         scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(tl.max(tl.abs(key), 1), 1e-4) / 448.0)))
         key = tl.minimum(tl.maximum(key / scale[:, None], -448.0), 448.0).to(tl.float8e4nv)
-        loc = tl.load(Ragged + start + length - 1).to(tl.int64)
+        # A completed pool lives at its closing token, which is a current query row.
+        loc = tl.load(MemIndex + row).to(tl.int64)
         dest = Packed + loc * PACKED_STRIDE
         tl.store(dest + cols, key.reshape(128).to(tl.uint8, bitcast=True))
         tl.store((dest + 128).to(tl.pointer_type(tl.float32)), tl.sum(scale, 0))
@@ -135,7 +153,7 @@ def _save_pool_tails(
 
 
 def compress_pools(
-    raw, tail, packed_buffer, ape, lengths, starts, ragged, req_idx, cu_q_lens, seq_lens, max_q_len, mtp_index=None
+    raw, tail, packed_buffer, ape, lengths, mem_index, req_idx, cu_q_lens, seq_lens, max_q_len, mtp_index=None
 ):
     batch = req_idx.numel()
     single_query = max_q_len == 1 and lengths.numel() == batch
@@ -146,8 +164,7 @@ def compress_pools(
         packed_buffer,
         ape,
         lengths,
-        starts,
-        ragged,
+        mem_index,
         req_idx,
         cu_q_lens,
         mtp_index,
@@ -384,10 +401,12 @@ def gather_paged_pools(packed_buffer, req_to_token_indexs, b_req_idx, pool_lengt
 def _expand_topk(
     Groups,
     Lengths,
-    Starts,
-    Ragged,
+    QueryReq,
+    ReqToToken,
     Out,
     Relative,
+    REQ_STRIDE: tl.constexpr,
+    TOKEN_STRIDE: tl.constexpr,
     TOPK: tl.constexpr,
     WIDTH: tl.constexpr,
     DENSE: tl.constexpr,
@@ -396,7 +415,7 @@ def _expand_topk(
     row = tl.program_id(0)
     lane = tl.arange(0, BLOCK)
     length = tl.load(Lengths + row)
-    start = tl.load(Starts + row)
+    req = tl.load(QueryReq + row).to(tl.int64)
     if DENSE:
         token = lane
         valid = lane < length
@@ -405,22 +424,24 @@ def _expand_topk(
         group = tl.load(Groups + row * (TOPK // 4) + lane // 4, lane < closed_tokens, -1)
         token = tl.where(lane < closed_tokens, group * 4 + lane % 4, length // 4 * 4 + lane - closed_tokens)
         valid = (lane < closed_tokens + length % 4) & (token >= 0)
-    mem = tl.load(Ragged + start + token, valid & (lane < WIDTH), -1)
+    mem = tl.load(ReqToToken + req * REQ_STRIDE + token * TOKEN_STRIDE, valid & (lane < WIDTH), -1)
     tl.store(Out + row * WIDTH + lane, mem, lane < WIDTH)
     tl.store(Relative + row * WIDTH + lane, tl.where(valid, token, -1), lane < WIDTH)
 
 
-def expand_topk(groups, lengths, starts, ragged, topk, dense=False):
+def expand_topk(groups, lengths, query_req, req_to_token, topk, dense=False):
     width = triton.cdiv(topk + 3, 128) * 128
     out = torch.empty((lengths.numel(), width), dtype=torch.int32, device=lengths.device)
     relative = torch.empty_like(out)
     _expand_topk[(lengths.numel(),)](
         groups,
         lengths,
-        starts,
-        ragged,
+        query_req,
+        req_to_token,
         out,
         relative,
+        req_to_token.stride(0),
+        req_to_token.stride(1),
         topk,
         width,
         dense,
