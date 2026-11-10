@@ -103,6 +103,8 @@ class CompressedAttentionState(FullAttentionState):
     当前实现固定为单个共享 KV head，各 TP rank 完整复制；不执行 CSA/HCA 的历史选择。
     """
 
+    storage_layout = ("compressed_fp8_e8m0_token_row", 1)
+
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================

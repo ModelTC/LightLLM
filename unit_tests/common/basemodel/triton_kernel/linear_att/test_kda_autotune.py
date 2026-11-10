@@ -8,7 +8,7 @@ import pytest
 import torch
 import triton
 
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import kda
+from lightllm.common.attention.backends.kda.triton.kernels import kda
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneLevel
@@ -46,7 +46,7 @@ def wrapper_inputs(kernel, tokens=65):
         R=torch.empty(1, tokens, 2, 64, dtype=q.dtype),
         h=torch.empty(1, len(chunk_indices), 2, 128, 80, dtype=q.dtype),
         o=torch.empty_like(v),
-        scale=128 ** -0.5,
+        scale=128**-0.5,
         cu_seqlens=torch.tensor([0, 3, tokens]),
         chunk_indices=chunk_indices,
     )

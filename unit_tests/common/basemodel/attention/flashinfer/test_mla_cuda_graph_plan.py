@@ -6,10 +6,9 @@ import torch
 
 flashinfer = pytest.importorskip("flashinfer")
 
-from lightllm.common.basemodel.attention.flashinfer.mla import (  # noqa: E402
-    MlaFlashInferDecodeAttState,
-)
+from lightllm.common.attention.backends.mla.flashinfer.backend import MlaFlashInferAttBackend
 from lightllm.common.basemodel.infer_struct import InferStateInfo  # noqa: E402
+from unit_tests.common.attention.helpers import backend_plan
 
 
 def _make_wrapper(
@@ -128,9 +127,10 @@ def test_mla_cuda_graph_triton_plan_matches_flashinfer_plan(lengths, num_heads, 
     captured_owner = InferStateInfo()
     captured_owner.batch_size = batch_size
     captured_owner.b_seq_len = graph_wrapper._kv_len_arr_buf
-    graph_state = MlaFlashInferDecodeAttState(
-        backend=backend,
-        _infer_state_weak_ref=weakref.ref(captured_owner),
+    graph_state = backend_plan(
+        MlaFlashInferAttBackend,
+        "decode",
+        settings=backend,
         kv_starts=graph_wrapper._kv_indptr_buf,
         kv_indices=graph_wrapper._kv_indices_buf,
         decode_wrapper=graph_wrapper,
@@ -152,13 +152,13 @@ def test_mla_cuda_graph_triton_plan_matches_flashinfer_plan(lengths, num_heads, 
         runtime_owner.batch_size = batch_size
         runtime_owner.b_seq_len = replay_lens
         runtime_owner.max_kv_seq_len = max(replay_lengths)
-        new_state = MlaFlashInferDecodeAttState(
-            backend=backend,
-            _infer_state_weak_ref=weakref.ref(runtime_owner),
-            kv_starts=replay_indptr,
-            kv_indices=kv_indices,
+        graph_state.kv_starts.copy_(replay_indptr)
+        graph_state.kv_indices.copy_(kv_indices)
+        graph_wrapper._kv_len_arr_buf.copy_(replay_lens)
+        graph_state.batch = runtime_owner
+        graph_state.backend_identity._decode_refresh_cuda_graph_decode_plan(
+            graph_state, replay_lens, max(replay_lengths)
         )
-        graph_state.copy_for_decode_cuda_graph(new_state)
         graph.replay()
         ref_wrapper.plan(
             q_indptr,

@@ -27,7 +27,7 @@ import math
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.fa3.neo import flash_attn_with_kvcache_neo as flash_attn_with_kvcache
+from lightllm.common.attention.backends.dense.fa3.neo import flash_attn_with_kvcache_neo as flash_attn_with_kvcache
 
 try:
     import triton
@@ -37,7 +37,7 @@ except ImportError:
     triton_testing = None
 
 try:
-    from lightllm.common.basemodel.triton_kernel.att.prefill_att.context_attention_fwd_neo import (
+    from lightllm.common.attention.backends.dense.triton.kernels.prefill.context_attention_fwd_neo import (
         context_attention_fwd_neo,
     )
 except ImportError:
@@ -496,7 +496,7 @@ def _bench_case(
         f"bench: batch={batch} Hq={Hq} Hk={Hk} D={D} dtype={str(dtype).split('.')[-1]:<8s} "
         f"max_q_seq_len={max_q_seq_len:4d} max_prompt_cache_len={max_prompt_cache_len:4d} "
         f"image_tokens={n_image:4d}/{n_tokens:5d} sum_kv={sum_kv:6d} | "
-        f"fa3 {fa3_ms*1000:8.1f} us | triton {triton_ms*1000:8.1f} us | "
+        f"fa3 {fa3_ms * 1000:8.1f} us | triton {triton_ms * 1000:8.1f} us | "
         f"speedup {speedup:5.2f}x"
     )
 

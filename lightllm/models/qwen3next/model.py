@@ -134,20 +134,3 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             device="meta",
         )
         return [state]
-
-    def _init_att_backend1(self):
-        role = self.att_state_role
-        if not self.att_state_manager.get_bounded_attention_states(role):
-            self.prefill_att_backend1 = None
-            self.decode_att_backend1 = None
-            return
-        from lightllm.common.basemodel.attention.create_linear_utils import (
-            get_qwen35_linear_prefill_att_backend_class,
-            get_qwen35_linear_decode_att_backend_class,
-        )
-
-        linear_prefill_att_backend_class = get_qwen35_linear_prefill_att_backend_class(index=1)
-        linear_decode_att_backend_class = get_qwen35_linear_decode_att_backend_class(index=1)
-        self.prefill_att_backend1 = linear_prefill_att_backend_class(model=self)
-        self.decode_att_backend1 = linear_decode_att_backend_class(model=self)
-        return

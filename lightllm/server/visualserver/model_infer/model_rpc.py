@@ -67,7 +67,7 @@ class VisualModelRpcServer(rpyc.Service):
         self.is_visual_only_mode = get_env_start_args().run_mode == "visual_only"
         self.data_type = kvargs["data_type"]
         self.vit_attn_backend = kvargs["vit_attn_backend"]
-        set_vit_att_backend(self.vit_attn_backend)
+        set_vit_att_backend(self.vit_attn_backend, defer_validation=True)
         init_vision_distributed_env(kvargs)
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
 

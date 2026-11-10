@@ -53,6 +53,7 @@ class ReqManager:
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
+        self.request_generations = torch.zeros(max_request_num + 1, dtype=torch.int64, device="cuda")
 
     def bind_hold_page(self, token_indices):
         """Map padding requests to the resource owner's reserved physical page."""
@@ -67,11 +68,15 @@ class ReqManager:
         hold_row.view(-1, self.page_size).copy_(hold_page)
 
     def alloc(self):
-        return self.req_list.alloc()
+        index = self.req_list.alloc()
+        if index is not None:
+            self.request_generations[index].add_(1)
+        return index
 
     def free(self, free_req_indexes: List[int]):
         for req_index in free_req_indexes:
             self.req_list.free(req_index)
+            self.request_generations[req_index].add_(1)
         if self.req_list.is_all_free():
             logger.debug(f"freed all request size {self.req_list.can_alloc_size}")
 
@@ -80,4 +85,5 @@ class ReqManager:
 
     def free_all(self):
         self.req_list = _ReqIndexPool(self.max_request_num)
+        self.request_generations.add_(1)
         return

@@ -198,6 +198,9 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
         device="meta",
     )
     resources = AttentionStateManager(request_capacity=1)
+    from lightllm.platform.cuda import CudaRuntime
+
+    resources.device_runtime = CudaRuntime("cuda:3")
     resources.register_state("main", rebuild_full_state(template, config=template.config))
     resources.finish_state_registration()
     resources.initialize_storage(

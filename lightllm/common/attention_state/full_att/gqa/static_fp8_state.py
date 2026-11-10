@@ -72,6 +72,8 @@ class StaticFP8AttentionConfig:
 class StaticFP8FullAttentionState(FullAttentionState):
     """使用静态标定参数的 FP8 KV 存储，固定 scale 随 State 初始化，不逐 token 搬运。"""
 
+    storage_layout = ("gqa_static_fp8_token_head_dim", 1)
+
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================

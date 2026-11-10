@@ -2,6 +2,7 @@ import os
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import gc
+from functools import cached_property
 import copy
 import math
 import json
@@ -43,8 +44,7 @@ from lightllm.utils.torch_memory_saver_utils import (
     TorchMemorySaverWrapper,
     MemoryTag,
 )
-from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
-from .attention import BaseAttBackend
+from lightllm.common.attention.backends.base import BaseAttentionBackend
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -58,6 +58,17 @@ torch.backends.cudnn.enabled = True
 
 
 class TpPartBaseModel:
+    @cached_property
+    def device_runtime(self):
+        from lightllm.platform import get_device_runtime
+
+        return get_device_runtime(platform=self.args.hardware_platform)
+
+    def prepare_attention_backends(self):
+        from lightllm.common.basemodel.attention import initialize_attention_groups
+
+        initialize_attention_groups(self)
+
     is_mtp_draft_model = False
 
     # weight class
@@ -153,6 +164,7 @@ class TpPartBaseModel:
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             if not self.is_mtp_draft_model:
                 self.att_state_manager = AttentionStateManager(request_capacity=self.max_req_num + 1)
+                self.att_state_manager.device_runtime = self.device_runtime
             # 无 attention 的 draft 只共享管理器，不创建自身 State。
             if self.is_mtp_draft_model and self.args.mtp_mode in ("vanilla_no_att", "eagle_no_att"):
                 return
@@ -173,7 +185,7 @@ class TpPartBaseModel:
                 request_capacity=self.max_req_num + 1,
                 tp_rank=self.tp_rank_,
                 tp_world_size=self.tp_world_size_,
-                device="cuda",
+                device=self.device_runtime.device,
             )
             for state in (*full_states, *bounded_states):
                 self.att_state_manager.register_state(self.att_state_role, state)
@@ -182,20 +194,20 @@ class TpPartBaseModel:
         """Initialize this model's backends, warmup and graphs after shared allocation."""
         self.req_manager.bind_hold_page(self.att_state_manager.full_att_allocator.hold_token_indices)
         self._check_mem_size()
-        self._init_att_backend()
-        self._init_att_backend1()
+        from lightllm.common.basemodel.attention import bind_attention_layers
+
+        bind_attention_layers(self)
         self._init_hidden_collector()
         role = self.att_state_role
-        logger.info(
-            f"{role} prefill/decode attention: {type(self.prefill_att_backend).__name__} / "
-            f"{type(self.decode_att_backend).__name__}"
-        )
-        if self.prefill_att_backend1 is not None:
+        for group_id, group in enumerate(self.attention_groups):
             logger.info(
-                f"{role} prefill/decode attention1: {type(self.prefill_att_backend1).__name__} / "
-                f"{type(self.decode_att_backend1).__name__}"
+                "%s attention group %d (%s): prefill=%s, decode=%s",
+                role,
+                group_id,
+                group.prefill_spec.family.value,
+                type(group.prefill_backend).__name__,
+                type(group.decode_backend).__name__,
             )
-
         self._autotune_warmup()
         self._init_padded_req()
         self._init_cudagraph()
@@ -250,6 +262,11 @@ class TpPartBaseModel:
 
     def load_weights(self, weight_dict: dict):
         assert weight_dict is None or isinstance(weight_dict, dict), "weight_dict must be a dict or None"
+        if hasattr(self, "_attention_storage_generation"):
+            if self.graph is not None:
+                self.graph.close()
+            if self.prefill_graph is not None:
+                self.prefill_graph.close()
         load_hf_weights(
             data_type=self.data_type,
             weight_dir=self.weight_dir_,
@@ -259,6 +276,10 @@ class TpPartBaseModel:
         )
         self.pre_post_weight.verify_load()
         [weight.verify_load() for weight in self.trans_layers_weight]
+        if hasattr(self, "_attention_storage_generation"):
+            from lightllm.common.basemodel.attention import bind_attention_layers
+
+            bind_attention_layers(self)
         return
 
     @classmethod
@@ -336,21 +357,8 @@ class TpPartBaseModel:
         self.vocab_size = self.config["vocab_size"]
         return
 
-    def _init_att_backend(self):
-        role = self.att_state_role
-        if not self.att_state_manager.get_full_attention_states(role):
-            # FFN-only and linear-only models do not need a full-attention backend.
-            self.prefill_att_backend = self.decode_att_backend = None
-            return
-        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(index=0)(model=self)
-        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0)(model=self)
-        return
-
-    def _init_att_backend1(self):
-        # self.prefill_att_backend1 是给后续有模型支持不同层用不同的att模块时，保留的扩展。
-        self.prefill_att_backend1: BaseAttBackend = None
-        self.decode_att_backend1: BaseAttBackend = None
-        return
+    def attention_backend_candidates(self, family, phase):
+        return None, None
 
     def _align_decode_batch_size(self, batch_size: int) -> int:
         alignment = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
@@ -369,6 +377,7 @@ class TpPartBaseModel:
             None
             if self.disable_cudagraph
             else CudaGraph(
+                runtime=self.device_runtime,
                 batch_step_size_before_split=cuda_graph_grow_step_size,
                 split_batch_size=self.args.graph_split_batch_size * decode_tokens_per_request,
                 batch_step_size_after_split=self.args.graph_grow_step_size * cuda_graph_grow_step_size,
@@ -388,7 +397,9 @@ class TpPartBaseModel:
         self.prefill_graph = (
             None
             if not get_env_start_args().enable_prefill_cudagraph
-            else PrefillCudaGraph(decode_cuda_graph=self.graph, tp_world_size=self.tp_world_size_)
+            else PrefillCudaGraph(
+                decode_cuda_graph=self.graph, tp_world_size=self.tp_world_size_, runtime=self.device_runtime
+            )
         )
         if self.prefill_graph is not None:
             if get_env_start_args().enable_prefill_microbatch_overlap:
@@ -467,26 +478,7 @@ class TpPartBaseModel:
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
 
-        if infer_state.is_prefill:
-            infer_state.prefill_att_state = (
-                self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
-                if self.prefill_att_backend is not None
-                else None
-            )
-            if self.prefill_att_backend1 is not None:
-                infer_state.prefill_att_state1 = self.prefill_att_backend1.create_att_prefill_state(
-                    infer_state=infer_state
-                )
-        else:
-            infer_state.decode_att_state = (
-                self.decode_att_backend.create_att_decode_state(infer_state=infer_state)
-                if self.decode_att_backend is not None
-                else None
-            )
-            if self.decode_att_backend1 is not None:
-                infer_state.decode_att_state1 = self.decode_att_backend1.create_att_decode_state(
-                    infer_state=infer_state
-                )
+        infer_state.attention_groups = self.attention_groups
 
         return infer_state
 
@@ -585,6 +577,20 @@ class TpPartBaseModel:
         )
         return output
 
+    def _attach_attention_commit(self, output, infer_state, batch_size):
+        if not self.args.mtp_step:
+            return output
+        from lightllm.common.attention_state.commit import BoundedStateCommit
+
+        output = copy.copy(output)
+        output.attention_commit = BoundedStateCommit.capture(
+            self.att_state_role,
+            infer_state.b_req_idx[:batch_size],
+            infer_state.b_mtp_index[:batch_size],
+            self.req_manager.request_generations,
+        )
+        return output
+
     def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
         padded_batch_size = model_output.logits.shape[0]
         if padded_batch_size == origin_batch_size:
@@ -654,7 +660,7 @@ class TpPartBaseModel:
         prefill_mem_indexes_ready_event.record()
 
         infer_state.init_some_extra_state(self)
-        infer_state.init_att_state()
+        infer_state.prepare_attention(self)
         model_output = self._context_forward(infer_state=infer_state)
 
         model_output = self._create_unpad_prefill_model_output(
@@ -663,6 +669,7 @@ class TpPartBaseModel:
             origin_batch_size=origin_batch_size,
         )
         model_output.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
+        infer_state.finish_attention()
         return model_output
 
     def _decode(
@@ -708,7 +715,7 @@ class TpPartBaseModel:
         infer_state.is_cuda_graph_capture = need_capture
         infer_state.is_cuda_graph_replay = use_cuda_graph and not need_capture
         infer_state.init_some_extra_state(self)
-        infer_state.init_att_state()
+        infer_state.prepare_attention(self)
 
         if use_cuda_graph:
             if need_capture:
@@ -718,11 +725,15 @@ class TpPartBaseModel:
         else:
             model_output = self._token_forward(infer_state)
 
-        return self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
+        output = self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
+        output = self._attach_attention_commit(output, infer_state, origin_batch_size)
+
+        infer_state.finish_attention()
+        return output
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
+        infer_state.update_attention()
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -788,6 +799,7 @@ class TpPartBaseModel:
         return model_output
 
     def _token_forward(self, infer_state: InferStateInfo):
+        infer_state.update_attention()
         hidden_collector = infer_state.hidden_collector
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
@@ -855,11 +867,11 @@ class TpPartBaseModel:
 
         infer_state0 = self._create_inferstate(model_input0, 0)
         infer_state0.init_some_extra_state(self)
-        infer_state0.init_att_state()
+        infer_state0.prepare_attention(self)
 
         infer_state1 = self._create_inferstate(model_input1, 1)
         infer_state1.init_some_extra_state(self)
-        infer_state1.init_att_state()
+        infer_state1.prepare_attention(self)
 
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
@@ -881,6 +893,8 @@ class TpPartBaseModel:
         dist_group_manager.clear_deepep_buffer()
         model_output0.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
         model_output1.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
+        infer_state0.finish_attention()
+        infer_state1.finish_attention()
         return model_output0, model_output1
 
     @torch.no_grad()
@@ -921,13 +935,13 @@ class TpPartBaseModel:
             infer_state0.is_cuda_graph_capture = need_capture
             infer_state0.is_cuda_graph_replay = not need_capture
             infer_state0.init_some_extra_state(self)
-            infer_state0.init_att_state()
+            infer_state0.prepare_attention(self)
 
             infer_state1 = self._create_inferstate(padded_model_input1, 1)
             infer_state1.is_cuda_graph_capture = need_capture
             infer_state1.is_cuda_graph_replay = not need_capture
             infer_state1.init_some_extra_state(self)
-            infer_state1.init_att_state()
+            infer_state1.prepare_attention(self)
 
             if need_capture:
                 model_output0, model_output1 = self.graph.capture_decode(
@@ -948,20 +962,26 @@ class TpPartBaseModel:
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(model_input0, 0)
             infer_state0.init_some_extra_state(self)
-            infer_state0.init_att_state()
+            infer_state0.prepare_attention(self)
 
             infer_state1 = self._create_inferstate(model_input1, 1)
             infer_state1.init_some_extra_state(self)
-            infer_state1.init_att_state()
+            infer_state1.prepare_attention(self)
 
             model_output0, model_output1 = self._overlap_tpsp_token_forward(infer_state0, infer_state1=infer_state1)
             model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
             model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size1)
 
+        model_output0 = self._attach_attention_commit(model_output0, infer_state0, origin_batch_size0)
+        model_output1 = self._attach_attention_commit(model_output1, infer_state1, origin_batch_size1)
+        infer_state0.finish_attention()
+        infer_state1.finish_attention()
         return model_output0, model_output1
 
     @final
     def _overlap_tpsp_context_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
+        infer_state.update_attention()
+        infer_state1.update_attention()
         g_cache_manager.cache_env_in()
         hidden_collector0 = infer_state.hidden_collector
         hidden_collector1 = infer_state1.hidden_collector
@@ -1019,6 +1039,8 @@ class TpPartBaseModel:
 
     @final
     def _overlap_tpsp_token_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
+        infer_state.update_attention()
+        infer_state1.update_attention()
         hidden_collector0 = infer_state.hidden_collector
         hidden_collector1 = infer_state1.hidden_collector
         input_embs, input_embs1 = self.pre_infer.overlap_tpsp_token_forward(

@@ -115,7 +115,12 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
+            (
+                _,
+                next_token_ids_cpu,
+                next_token_logprobs_cpu,
+                next_token_ranks_cpu,
+            ) = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
@@ -160,7 +165,12 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
+            (
+                _,
+                next_token_ids_cpu,
+                next_token_logprobs_cpu,
+                next_token_ranks_cpu,
+            ) = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
@@ -291,11 +301,7 @@ class ChunkedPrefillBackend(ModeBackend):
 
             b_req_mtp_start_loc = gen_b_req_mtp_start_loc(model_input.b_mtp_index, num_reqs=req_num)
             mtp_accept_len, accepted_index = mtp_utils.verify_mtp_tokens(
-                backend=self,
-                next_token_ids=next_token_ids,
-                b_req_idx=model_input.b_req_idx,
-                b_req_mtp_start_loc=b_req_mtp_start_loc,
-                b_mtp_index=model_input.b_mtp_index,
+                backend=self, next_token_ids=next_token_ids, model_output=model_output, num_reqs=req_num
             )
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="accepted_index",

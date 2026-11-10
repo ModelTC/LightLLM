@@ -12,7 +12,8 @@ from transformers.activations import ACT2FN
 from lightllm.server.multimodal_params import AudioItem
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
-from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
+from lightllm.common.attention.api import VarlenAttentionInputs
+from lightllm.common.attention.varlen import AutoVarlenAttention
 from lightllm.models.qwen3_omni_moe_thinker.audio_process import WhisperFeatureExtractor
 
 QWEN3_OMNI_CONV_CHUNKSIZE = int(os.getenv("LIGHTLLM_QWEN3_OMNI_CONV_CHUNKSIZE", 200))
@@ -99,10 +100,11 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
                 f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim}"
                 f" and `num_heads`: {self.num_heads})."
             )
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
         self.attention_dropout = 0.0
         self.is_decoder = False
         self.is_causal = False
+        self.attention_backend = AutoVarlenAttention()
         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
@@ -125,7 +127,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
 
         attn_output = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
 
-        flash_attention_fwd(q, k, v, attn_output, cu_seqlens, max_seqlen)
+        self.attention_backend.forward(VarlenAttentionInputs(q, k, v, cu_seqlens, max_seqlen), out=attn_output)
 
         attn_output = attn_output.reshape(seq_length, -1).contiguous()
         attn_output = self.out_proj(attn_output)

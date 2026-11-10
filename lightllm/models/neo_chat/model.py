@@ -20,11 +20,7 @@ from lightllm.models.neo_chat.layer_weights.transformer_layer_weight import NeoC
 from lightllm.models.neo_chat.layer_weights.pre_and_post_layer_weight import NeoChatPreAndPostLayerWeight
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
-from lightllm.common.basemodel.attention import (
-    get_neo_prefill_att_backend_class,
-    get_decode_att_backend_class,
-    BaseAttBackend,
-)
+from lightllm.common.attention.backends.base import BaseAttentionBackend
 from lightllm.utils.log_utils import init_logger
 
 
@@ -33,7 +29,6 @@ logger = init_logger(__name__)
 
 class NeoModelBase:
     def _init_custom(self):
-
         super()._init_custom()
 
         if "rope_theta_hw" in self.config:
@@ -123,7 +118,6 @@ class NeoModelBase:
 
 
 class NeoTpPartModel(NeoModelBase, Qwen3TpPartModel):
-
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer
     transformer_layer_infer_class = NeoChatTransformerLayerInfer
 
@@ -139,11 +133,13 @@ class NeoTpPartModel(NeoModelBase, Qwen3TpPartModel):
     def _init_inferstate_cls(self):
         pass
 
-    def _init_att_backend(self):
-        self.prefill_att_backend: BaseAttBackend = get_neo_prefill_att_backend_class(
-            index=0, priority_list=["fa3", "triton"]
-        )(model=self)
-        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0)(model=self)
+    def attention_backend_candidates(self, family, phase):
+        from lightllm.common.attention.api import AttentionPhase
+        from lightllm.common.attention.selection import neo_data_type_to_backend
+
+        if phase is AttentionPhase.PREFILL:
+            return neo_data_type_to_backend, ["fa3", "triton"]
+        return None, None
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:

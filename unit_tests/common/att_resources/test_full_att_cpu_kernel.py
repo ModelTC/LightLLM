@@ -375,10 +375,12 @@ def test_full_state_interfaces_reject_cpu_token_indices(kind: str) -> None:
     cuda_ids = torch.tensor([1], dtype=torch.int64, device="cuda")
     cpu_pages = torch.empty((1, layout.byte_end), dtype=torch.uint8, pin_memory=True)
     pd_pages = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
-    with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
+    write_error = "KV writes require same-device tensors" if kind == "gqa" else "token indices must reside on CUDA"
+    copy_error = "token indices must match storage" if kind == "gqa" else "token indices must reside on CUDA"
+    with pytest.raises(AssertionError, match=write_error):
         state.write_full_att_kv(state.config.logical_layer_groups[0][0], cpu_ids, torch.empty(0, device="cuda"))
     for src, dst in ((cpu_ids, cuda_ids), (cuda_ids, cpu_ids)):
-        with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
+        with pytest.raises(AssertionError, match=copy_error):
             state.copy_full_att_tokens(src, dst)
         with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
             state.copy_tokens_from_dp(src, dst, state)

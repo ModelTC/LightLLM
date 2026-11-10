@@ -51,6 +51,8 @@ class MLAConfig:
 class MLAFullAttentionState(FullAttentionState):
     """存储复制到各 TP rank 的 MLA 压缩 latent，使用单个 KV 字段。"""
 
+    storage_layout = ("mla_token_latent", 1)
+
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================

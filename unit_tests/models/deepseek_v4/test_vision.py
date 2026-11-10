@@ -12,7 +12,7 @@ from PIL import Image
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from lightllm.common.basemodel.attention_vit.sdpa.fp import SdpaVitAttBackend
+from lightllm.common.attention.backends.dense.sdpa.varlen import SdpaVarlenAttentionBackend
 from lightllm.models.deepseek_v4 import deepseek_v4_visual as visual
 from lightllm.models.deepseek_v4 import image_processor as ours
 from lightllm.server import visualserver
@@ -105,7 +105,7 @@ def test_tokenizer_spans_match_reference_blocks(reference_processor, prefix_len,
     expected_cache = []
     for index, (image, (height, width)) in enumerate(zip(params.images, grids)):
         canonical_types, _ = reference_processor.build_image_block(height, width, start_pos=0)
-        image.token_id = 2 ** 62 + (0 if reuse_image and index == 2 else index * 1024)
+        image.token_id = 2**62 + (0 if reuse_image and index == 2 else index * 1024)
         image.token_num = len(canonical_types)
         image.start_index_in_embed_cache = 100 + (0 if reuse_image and index == 2 else index * 1024)
         expected_cache.append((image.token_id, image.token_num, image.start_index_in_embed_cache))
@@ -201,7 +201,7 @@ def _tiny_vision_args():
 
 @pytest.mark.parametrize("n_vit_h,n_vit_w", [(4, 4), (5, 3)])
 def test_vit_matches_reference(reference_vision, n_vit_h, n_vit_w, monkeypatch):
-    monkeypatch.setattr(visualserver, "VIT_ATTN_BACKEND", SdpaVitAttBackend)
+    monkeypatch.setattr(visualserver, "VIT_ATTN_BACKEND", SdpaVarlenAttentionBackend())
     torch.manual_seed(0)
     args = _tiny_vision_args()
     model = visual.ViT(args).eval()

@@ -11,8 +11,7 @@ from lightllm.common.attention_state.bounded_att import GDNState
 from unit_tests.common.att_resources.test_full_state import full_state
 from unit_tests.common.att_resources.test_bounded_state import make_state
 
-if TYPE_CHECKING:
-    import torch
+import torch
 
 
 class MainDraftTestResourceManager(AttentionStateManager):
@@ -25,7 +24,9 @@ class MainDraftTestResourceManager(AttentionStateManager):
             mtp_step=self.main_kda_conv_fp32_ssm_fp32_state.mtp_step,
             device=device,
         )
-        draft_state.initialize_page_pools(big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu")
+        draft_state.initialize_page_pools(
+            big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu" and torch.cuda.is_available()
+        )
         self.register_state("draft0", draft_state)
         self.register_state("main", full_state(device=device))
         prepared_full_state = MLAFullAttentionState(

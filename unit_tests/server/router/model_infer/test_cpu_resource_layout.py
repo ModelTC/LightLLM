@@ -372,9 +372,8 @@ def test_production_offload_preserves_ready_pages_without_host_sync(
             pool.ssm_state[slot].fill_(5)
     producer = torch.cuda.Stream()
     producer.wait_stream(torch.cuda.current_stream())
+    monkeypatch.setattr(common.g_infer_context, "get_overlap_stream", lambda: producer)
     with torch.cuda.stream(producer):
-        # 延迟当前生产流的 KV 写入；当前实现不在此处隐式插入 wait_stream，
-        # 生产者与搬运流的依赖由调用方负责组织。
         torch.cuda._sleep(10_000_000)
         (full,) = resources.get_full_attention_states("main")
         for field in full_state_test_fields(full, full_state_test_buffers(full)).values():
@@ -429,7 +428,7 @@ def test_production_offload_preserves_ready_pages_without_host_sync(
             patch.setattr(torch.cuda.Stream, "wait_stream", record_wait)
             module.get_cpu_offload_stream = lambda: copy_stream
             task = module.write_req_to_cpu(req)
-        assert waited_streams == []
+        assert waited_streams == [producer]
     task.sync_event.synchronize()
     assert write_batches == [(pages, [True, False])]
     assert req.cpu_cache_offload_task_status.is_running()

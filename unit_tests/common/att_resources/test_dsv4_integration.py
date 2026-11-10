@@ -13,6 +13,9 @@ from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+
+
 @pytest.fixture
 def cache(monkeypatch):
     for key in ("LIGHTLLM_DP_WORLD_SIZE", "LIGHTLLM_CURRENT_RANK_IN_DP", "LIGHTLLM_CURRENT_DEVICE_ID"):
@@ -76,10 +79,16 @@ def cache(monkeypatch):
         att_state_role="main",
         args=SimpleNamespace(run_mode="normal", enable_prefill_microbatch_overlap=True),
     )
-    from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DeepseekV4FlashMlaFp8SparseAttBackend
+    from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4FlashMlaFp8SparseAttBackend
 
-    backend = DeepseekV4FlashMlaFp8SparseAttBackend(model=model)
-    yield manager, window, backend
+    from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
+
+    workspace = DeepseekV4Workspace(model)
+    workspace.c128_compress_scratch = torch.empty((2, 2048, 512), dtype=torch.float32, device="cuda")
+    manager._test_workspace = workspace
+    model.att_state_manager = manager
+    model.swa_prefill_workspace = DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(model)
+    yield manager, window, model
     torch.cuda.synchronize()
     get_env_start_args.cache_clear()
 
@@ -87,6 +96,7 @@ def cache(monkeypatch):
 def make_infer(manager, window):
     infer = DeepseekV4InferStateInfo()
     infer.att_state_manager = manager
+    infer.dsv4_workspace = manager._test_workspace
     infer.att_state_role = "main"
     infer.first_logical_layer_id = window.config.logical_layer_ids[0]
     return infer
@@ -101,12 +111,21 @@ def read_packed_rows(buffer, slots, page_tokens):
 
 
 def test_backend_reads_owned_state_views(cache):
-    manager, window, backend = cache
+    manager, window, model = cache
     infer = make_infer(manager, window)
     assert infer.swa_state is window
     infer.is_prefill = False
     for layer in range(3):
-        swa, compressed = backend.get_att_input_params(infer, layer)
+        from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
+        from lightllm.common.attention.api import AttentionFamily
+
+        adapter = DeepseekV4TransformerLayerInfer.__new__(DeepseekV4TransformerLayerInfer)
+        adapter.layer_num_, adapter.compress_ratio = layer, model.config["compress_ratios"][layer]
+        adapter.v_head_dim, adapter.softmax_scale = 512, 512**-0.5
+        weight = SimpleNamespace(attn_sink_=SimpleNamespace(weight=torch.zeros(64, device="cuda")))
+        params = adapter.bind_attention_params(model, weight, AttentionFamily.SPARSE_MLA)
+        swa, compressed = params.swa, params.compressed
+        assert params.prefill_swa.data_ptr() == model.swa_prefill_workspace[0][layer].data_ptr()
         assert swa.shape[1] == 74880
         assert (compressed is None) == (layer == 2)
         if layer != 2:
@@ -183,13 +202,22 @@ def test_long_prefill_keeps_swa_prefix_and_runtime_tail(cache):
     from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
     from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
 
-    manager, window, backend = cache
+    manager, window, model = cache
     reference = torch.zeros((17, 74880), dtype=torch.uint8, device="cuda")
     kv = torch.randn((2048, 512), dtype=torch.bfloat16, device="cuda")
     weight, angles = torch.randn(512, dtype=torch.bfloat16, device="cuda"), torch.randn((2048, 32), device="cuda")
     freqs = torch.complex(angles.cos(), angles.sin())
     layer = DeepseekV4TransformerLayerInfer.__new__(DeepseekV4TransformerLayerInfer)
     layer.layer_num_, layer.eps_, layer.freqs_cis = 2, 1e-6, freqs
+    layer.compress_ratio, layer.v_head_dim, layer.softmax_scale = 0, 512, 512**-0.5
+    from lightllm.common.attention.api import AttentionFamily
+
+    params = layer.bind_attention_params(
+        model,
+        SimpleNamespace(attn_sink_=SimpleNamespace(weight=torch.zeros(64, device="cuda"))),
+        AttentionFamily.SPARSE_MLA,
+    )
+    layer.prefill_attention = SimpleNamespace(params=params)
     for start, end in ((0, 255), (255, 641), (641, 1100), (1100, 2048)):
         infer = make_infer(manager, window)
         positions = torch.arange(start, end, device="cuda", dtype=torch.int32)
@@ -198,9 +226,11 @@ def test_long_prefill_keeps_swa_prefix_and_runtime_tail(cache):
         infer.b_ready_cache_len, infer.b_seq_len = (
             torch.tensor([value], dtype=torch.int32, device="cuda") for value in (start, end)
         )
-        prefill = backend.create_att_prefill_state(infer)
-        prefill.prepare_swa_workspace(infer)
-        infer.prefill_att_state = prefill
+        from lightllm.models.deepseek_v4.attention.sparse_mla import prepare_swa_workspace
+
+        buffer, capacity = model.swa_prefill_workspace
+        prefill = prepare_swa_workspace(window, buffer, capacity, infer, 0)
+        infer.swa_workspace = prefill
         indices = torch.empty((positions.numel(), 128), dtype=torch.int32, device="cuda")
         lengths, writes, runtime = (torch.empty_like(positions) for _ in range(3))
         build_swa_indices(
@@ -233,9 +263,9 @@ def test_models_prepare_owned_states_in_one_manager(cache, draft_kind):
     from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
     from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
 
-    _, _, backend = cache
+    _, _, model = cache
     config = dict(
-        backend.model.config,
+        model.config,
         compress_ratios=[4, 128, 0, 0, 0],
         dspark_target_layer_ids=[0, 1],
         dspark_block_size=4,
@@ -244,6 +274,7 @@ def test_models_prepare_owned_states_in_one_manager(cache, draft_kind):
     )
     args = SimpleNamespace(
         llm_kv_type="None",
+        hardware_platform="cuda",
         page_size=256,
         mtp_step=3,
         mtp_mode="vanilla_with_att",

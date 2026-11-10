@@ -81,6 +81,8 @@ class GroupQuantizedAttentionConfig:
 class GroupQuantizedFullAttentionState(FullAttentionState):
     """管理 INT4/INT8 KV 与逐 token 分组 scale，复制和传输始终覆盖二者。"""
 
+    storage_layout = ("gqa_group_quantized_token_head_dim", 1)
+
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================

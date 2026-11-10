@@ -13,6 +13,7 @@ from safetensors import safe_open
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import PatchEmbed, VisionRotaryEmbedding
 from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
+from lightllm.common.attention.api import VarlenAttentionInputs
 from lightllm.server.visualserver import get_vit_attn_backend
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
@@ -74,7 +75,7 @@ class Qwen2_5_VLVisionFlashAttention(nn.Module):
         k = apply_rotary_pos_emb_triton(k, rotary_cos, rotary_sin)
 
         attn_output = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
-        get_vit_attn_backend()(q, k, v, attn_output, cu_seqlens, max_seqlen)
+        get_vit_attn_backend().forward(VarlenAttentionInputs(q, k, v, cu_seqlens, max_seqlen), out=attn_output)
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
@@ -122,7 +123,7 @@ class Qwen2_5_VLVisionBlock(nn.Module):
 class Qwen2_5_VLPatchMerger(nn.Module):
     def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2) -> None:
         super().__init__()
-        self.hidden_size = context_dim * (spatial_merge_size ** 2)
+        self.hidden_size = context_dim * (spatial_merge_size**2)
         self.ln_q = Qwen2RMSNorm(context_dim, eps=1e-6)
         self.mlp = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
@@ -350,7 +351,6 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         return pixel_values.to(dtype=self.data_type), image_grid_thw
 
     def load_model(self, weight_dir):
-
         bin_weight_files = [file_ for file_ in os.listdir(weight_dir) if file_.endswith(".bin")]
         if bin_weight_files:
             weight_dict = {}
@@ -390,7 +390,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                 raise Exception("Unsupported input types: {} for {}".format(type(img), img))
 
             # must devide merge_length
-            cur_num = img_tensors[-1].shape[0] // (self.spatial_merge_size ** 2)
+            cur_num = img_tensors[-1].shape[0] // (self.spatial_merge_size**2)
 
             valid_ids.append([valid_id, valid_id + cur_num])
             valid_id += cur_num

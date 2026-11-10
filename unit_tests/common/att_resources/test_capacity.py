@@ -152,6 +152,13 @@ def test_budget_matches_token_stores_including_hold_and_padding(
     )
     for budget, expected in ((actual, 20), (actual - 1, 16), (minimum, 0), (minimum - 1, None)):
         resources = AttentionStateManager(request_capacity=1)
+        from types import SimpleNamespace
+
+        resources.device_runtime = SimpleNamespace(
+            device=torch.device("cpu"),
+            empty_cache=lambda: None,
+            memory_info=lambda: (budget + reserve, budget + reserve),
+        )
         resources.register_state("main", rebuild_full_state(template, config=template.config))
         monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _: (budget + reserve, budget + reserve))
         resources.finish_state_registration()

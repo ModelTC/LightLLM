@@ -5,7 +5,7 @@ import torch
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, KDAState
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
+from lightllm.common.attention.backends.kda.triton.kernels.kda_decode import fused_recurrent_kda
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
 
 
@@ -128,9 +128,8 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
 def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
     from types import SimpleNamespace
 
-    from lightllm.common.basemodel.attention.base_att import AttControl
-    from lightllm.common.basemodel.attention.linear.kda import KDADecodeAttState
-    from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_update
+    from lightllm.common.attention.backends.kda.triton.backend import KDALinearAttBackend
+    from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_update
 
     torch.manual_seed(53)
     heads, dim, width = 2, 128, 3
@@ -183,15 +182,6 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
             expected.append(output.reshape(1, heads, dim))
             expected_ssm[req * width + token] = state[0]
             row += 1
-    backend = SimpleNamespace(
-        mtp_step=2,
-        tp_num_heads=heads,
-        head_dim=dim,
-        tp_hidden_size=hidden,
-        lower_bound=-5.0,
-        uses_dynamic_spec_verify_layout=lambda: dynamic,
-        split_qkv=lambda x: x.split(hidden, -1),
-    )
     resources = AttentionStateManager(request_capacity=4)
     config = ConvSSMStateConfig(
         logical_layer_ids=(0,),
@@ -218,24 +208,27 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
     infer.req_manager = manager
     infer.att_state_manager = resources
     infer.att_state_role = role
-    weight = SimpleNamespace(
-        get_merged_kda_conv_weight=lambda: conv_weight,
-        linear_A_log=SimpleNamespace(weight=a),
-        linear_dt_bias=SimpleNamespace(weight=bias),
+    from unit_tests.common.attention.helpers import make_backend, make_batch, make_plan, bind
+    from lightllm.common.attention.api.inputs import KDAParams, KDAInputs
+
+    executor = make_backend(
+        KDALinearAttBackend,
+        mtp_step=2,
+        decode_draft_step=2,
+        dynamic_verify=dynamic,
+        tp_num_heads=heads,
+        head_dim=dim,
+        tp_hidden_size=hidden,
+        lower_bound=-5.0,
+        mtp_state_index=accepted_offsets,
     )
-    state = KDADecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
-    state.init_state()
-    actual = state.decode_att(
-        None,
-        None,
-        None,
-        AttControl(
-            linear_att_decode=True,
-            linear_att_decode_dict=dict(
-                layer_weight=weight, layer_num=0, mixed_qkv=mixed, raw_gate=gate, raw_beta=beta
-            ),
-        ),
+    batch = make_batch(
+        (1,) * tokens, device="cuda", b_req_idx=infer.b_req_idx, b_mtp_index=infer.b_mtp_index, hold_req_id=3
     )
+    plan = make_plan(executor, batch)
+    executor.update(plan)
+    binding = bind(executor, plan, KDAParams(conv, ssm, conv_weight, a, bias))
+    actual = binding(plan, KDAInputs(mixed, gate, beta))
     torch.testing.assert_close(actual.reshape(tokens, heads, dim)[:row], torch.cat(expected), atol=2e-3, rtol=1e-2)
     torch.testing.assert_close(ssm, expected_ssm, atol=2e-3, rtol=1e-2)
     if dynamic:

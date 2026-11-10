@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.commit import BoundedStateCommit
 import copy
 from dataclasses import dataclass
 from typing import List, Optional
@@ -189,6 +190,7 @@ class ModelOutput:
     # attached here. ModelOutput therefore owns a stable output view instead
     # of the mutable collector used while the forward is still running.
     mtp_collector: Optional[ModelMtpOutputCollector] = None
+    attention_commit: Optional[BoundedStateCommit] = None
     # 用于判断 mem_indexes 是否成功写入 req manager 中的事件对象。
     prefill_mem_indexes_ready_event: torch.Event = None
 

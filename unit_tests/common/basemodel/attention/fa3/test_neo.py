@@ -6,7 +6,17 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.fa3 import fp, neo
+from lightllm.common.attention.backends.dense.fa3 import backend as fp
+from lightllm.common.attention.backends.dense.fa3 import neo as neo
+from unit_tests.common.attention.helpers import (
+    backend_plan,
+    update_plan,
+    run_sparse,
+    run_dense,
+    make_plan,
+    make_batch,
+    make_backend,
+)
 
 
 def _load_neo(monkeypatch, attention_func):
@@ -15,7 +25,7 @@ def _load_neo(monkeypatch, attention_func):
         interface = ModuleType("flash_attn_interface")
         interface.flash_attn_with_kvcache = attention_func
     monkeypatch.setitem(sys.modules, "flash_attn_interface", interface)
-    name = "lightllm.common.basemodel.attention.fa3._neo_import_test"
+    name = "lightllm.common.attention.backends.dense._neo_import_test"
     spec = importlib.util.spec_from_file_location(name, neo.__file__)
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, name, module)
@@ -83,8 +93,8 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
     infer_state.b_image_token_end = image_ends
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token_indexs)
     backend = SimpleNamespace(uses_causal_attention=lambda: True, infer_page_size=page_size)
-    state = neo.NeoFa3AttBackend.create_att_prefill_state(backend, infer_state)
-    state.init_state()
+    state = backend_plan(neo.NeoFa3AttBackend, "prefill", settings=backend)
+    update_plan(state, infer_state)
 
     q = torch.randn(3, 2, 16, device="cuda")
     k = torch.randn(4 * page_size, 1, 16, device="cuda")
@@ -109,11 +119,15 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
 
     monkeypatch.setattr(neo, "HAS_FLASH_ATTN_INTERFACE", True)
     monkeypatch.setattr(neo, "flash_attn_with_kvcache_neo", neo_attention)
-    assert state.prefill_att(q, k, v) is output
+    assert run_dense(state, infer_state, q, k, v) is output
 
 
 def test_prefill_missing_extension_reports_install_instructions(monkeypatch):
     monkeypatch.setattr(neo, "HAS_FLASH_ATTN_INTERFACE", False)
-    state = neo.NeoFa3PrefillAttState()
+    state = backend_plan(neo.NeoFa3AttBackend, "prefill")
     with pytest.raises(ImportError, match="WANDY666/flash-attention"):
-        state.prefill_att(None, None, None)
+        state.backend_identity._forward_prefill(
+            SimpleNamespace(alloc_tensor=torch.empty, params=SimpleNamespace(key=None, value=None)),
+            state,
+            SimpleNamespace(query=None),
+        )

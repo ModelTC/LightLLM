@@ -1,11 +1,18 @@
 from types import SimpleNamespace
+from pathlib import Path
+import importlib.util
 
 import pytest
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.full_att import create_compressed_att_state
 from lightllm.models.deepseek_v4.config import DSV4AttentionConfig
-from test.att_resources import validate_model_cache
+
+_spec = importlib.util.spec_from_file_location(
+    "validate_model_cache", Path(__file__).resolve().parents[3] / "test/att_resources/validate_model_cache.py"
+)
+validate_model_cache = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(validate_model_cache)
 
 
 @pytest.mark.parametrize("draft_count,bad_role", [(0, None), (2, None), (2, "main"), (2, "draft1")])

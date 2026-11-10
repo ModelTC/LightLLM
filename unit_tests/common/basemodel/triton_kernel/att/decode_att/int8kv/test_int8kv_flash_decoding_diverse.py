@@ -1,19 +1,13 @@
 import pytest
-from types import SimpleNamespace
 
 import torch
+
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
 
 def alloc_tensor_func(shape, dtype, device):
     """兼容的 tensor 分配函数"""
     return torch.empty(shape, dtype=dtype, device=device)
-
-
-class MockReqManager:
-    """Mock request manager for testing"""
-
-    def __init__(self, req_to_token_indexs):
-        self.req_to_token_indexs = req_to_token_indexs
 
 
 class MockInferState:
@@ -29,7 +23,7 @@ class MockInferState:
     ):
         self.batch_size = batch_size
         self.max_kv_seq_len = max_kv_seq_len
-        self.req_manager = MockReqManager(req_to_tokens)
+        self.req_to_token_indexs = req_to_tokens
         self.b_req_idx = b_req_idx
         self.b_seq_len = b_seq_len
 
@@ -43,10 +37,10 @@ def test_token_decode_attention_flash_decoding_diverse_matches_normal_decode(sha
     diverse：int8kv_flash_decoding_diverse；对照：int8kv/normal token_decode_attention_flash_decoding。
     """
 
-    from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.int8kv_flash_decoding_diverse import (
+    from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.int8kv_flash_decoding_diverse import (
         token_decode_attention_flash_decoding as diverse_attention,
     )
-    from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.normal import (
+    from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.normal import (
         token_decode_attention_flash_decoding as normal_decode,
     )
 
@@ -102,15 +96,10 @@ def test_token_decode_attention_flash_decoding_diverse_matches_normal_decode(sha
         b_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
     )
-    diverse_infer_state.decode_att_state = SimpleNamespace(
-        b_shared_seq_len=b_shared_seq_len,
-        b_mark_shared_group=b_mark_shared_group,
-    )
-
     # 运行 baseline
     normal_out = normal_decode(
         q=q.clone(),
-        infer_state=baseline_infer_state,
+        batch=baseline_infer_state,
         cache_k=cache_k,
         cache_k_scale=cache_k_scale,
         cache_v=cache_v,
@@ -121,7 +110,10 @@ def test_token_decode_attention_flash_decoding_diverse_matches_normal_decode(sha
     # 运行 diverse 版本
     diverse_out = diverse_attention(
         q=q.clone(),
-        infer_state=diverse_infer_state,
+        batch=diverse_infer_state,
+        b_shared_seq_len=b_shared_seq_len,
+        b_mark_shared_group=b_mark_shared_group,
+        shared_streams_dict={},
         cache_k=cache_k,
         cache_k_scale=cache_k_scale,
         cache_v=cache_v,

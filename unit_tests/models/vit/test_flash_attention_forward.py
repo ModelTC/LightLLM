@@ -1,139 +1,145 @@
-import torch
-import math
-import time
+from lightllm.platform import get_device_runtime
 import pytest
-from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
-from lightllm.models.vit.triton_kernel import flashattention_nopad
-from lightllm.common.basemodel.attention_vit.fa3.fp import Fa3VitAttBackend
+import torch
+
+from lightllm.common.attention.api import CapabilityResult, VarlenAttentionInputs
+from lightllm.common.attention.selection import get_varlen_backend_class
+from lightllm.common.attention.varlen import AutoVarlenAttention
 
 
-_fa3_mark = pytest.mark.skipif(
-    not flashattention_nopad._flash_attn_v3_available
-    or not torch.cuda.is_available()
-    or torch.cuda.get_device_capability()[0] < 9,
-    reason="FA3 requires sgl_kernel and a Hopper GPU",
-)
+def make_inputs(lengths=(3, 0, 5), *, device="cpu", dtype=torch.float32, head_dim=80, strided=False):
+    tokens = sum(lengths)
+    if strided:
+        qkv = torch.randn(tokens, 3, 2, head_dim, dtype=dtype, device=device)
+        q, k, v = qkv.unbind(1)
+    else:
+        q, k, v = [torch.randn(tokens, 2, head_dim, dtype=dtype, device=device) for _ in range(3)]
+    cu = torch.tensor([0, *lengths], dtype=torch.int32, device=device).cumsum(0, dtype=torch.int32)
+    return VarlenAttentionInputs(q, k, v, cu, max(lengths))
 
 
-def test_fa3_failure_computes_fallback_on_same_invocation(monkeypatch):
-    calls = []
-    q = torch.zeros(2, 1, 4)
-    out = torch.full_like(q, -123)
-    cu = torch.tensor([0, 2], dtype=torch.int32)
-
-    def fail_fa3(q, k, v, o, cu_seqlens, max_seqlen):
-        calls.append("fa3")
-        o[0].fill_(99)  # A backend may fail after partially writing output.
-        raise RuntimeError("shape-dependent FA3 failure")
-
-    def fallback(q, k, v, o, cu_seqlens, max_seqlen):
-        calls.append("triton")
-        o.fill_(7)
-
-    monkeypatch.setattr(flashattention_nopad, "_flash_attn_v3_available", True)
-    monkeypatch.setattr(flashattention_nopad, "is_hopper", lambda: True)
-    monkeypatch.setattr(flashattention_nopad, "flash_attention_v3_fwd", fail_fa3, raising=False)
-    monkeypatch.setattr(flashattention_nopad, "_flash_attention_triton_fwd", fallback)
-    flash_attention_fwd(q, q, q, out, cu, 2)
-    assert calls == ["fa3", "triton"]
-    assert torch.equal(out, torch.full_like(q, 7))
-    assert not flashattention_nopad._flash_attn_v3_available
-
-    # Later calls should use the disabled-backend path without retrying FA3.
-    out.fill_(-123)
-    flash_attention_fwd(q, q, q, out, cu, 2)
-    assert calls == ["fa3", "triton", "triton"]
-    assert torch.equal(out, torch.full_like(q, 7))
-
-
-def test_fa3_success_does_not_run_fallback(monkeypatch):
-    q = torch.zeros(2, 1, 4)
-    out = torch.full_like(q, -123)
-    cu = torch.tensor([0, 2], dtype=torch.int32)
-
-    def fa3(q, k, v, o, cu_seqlens, max_seqlen):
-        o.fill_(9)
-
-    monkeypatch.setattr(flashattention_nopad, "_flash_attn_v3_available", True)
-    monkeypatch.setattr(flashattention_nopad, "is_hopper", lambda: True)
-    monkeypatch.setattr(flashattention_nopad, "flash_attention_v3_fwd", fa3, raising=False)
-    monkeypatch.setattr(
-        flashattention_nopad,
-        "_flash_attention_triton_fwd",
-        lambda *args: pytest.fail("a successful FA3 call must not run fallback"),
-    )
-    flash_attention_fwd(q, q, q, out, cu, 2)
-    assert torch.equal(out, torch.full_like(q, 9))
-    assert flashattention_nopad._flash_attn_v3_available
-
-
-def reference_attention_varlen(q, k, v, cu):
-    """
-    q, k, v : (total_len, n_head, D)
-    cu_seqlen      : prefix sums (batch+1,)
-    """
-    total, n_head, d = q.shape
-    out = torch.empty_like(q)
-    scale = 1.0 / math.sqrt(d)
-
-    for b in range(cu.numel() - 1):
-        s, e = cu[b].item(), cu[b + 1].item()
-        q_b, k_b, v_b = q[s:e], k[s:e], v[s:e]  # (seq, head, D)
-
-        q_hsd = q_b.permute(1, 0, 2)  # (head, seq, D)
-        k_hds = k_b.permute(1, 2, 0)  # (head, D,  seq)
-        v_hsd = v_b.permute(1, 0, 2)  # (head, seq, D)
-
-        scores = torch.matmul(q_hsd, k_hds) * scale  # (head, seq, seq)
-        probs = torch.softmax(scores.float(), dim=-1)
-
-        out_hsd = torch.matmul(probs, v_hsd.float())  # (head, seq, D)
-        out[s:e] = out_hsd.permute(1, 0, 2).to(q.dtype)  # back to (seq, head, D)
-
+def reference_attention(inputs):
+    out = torch.empty_like(inputs.query)
+    offsets = inputs.cu_seqlens.cpu().tolist()
+    for start, end in zip(offsets, offsets[1:]):
+        if start == end:
+            continue
+        q, k, v = [x[start:end].float().transpose(0, 1) for x in (inputs.query, inputs.key, inputs.value)]
+        scores = q @ k.transpose(-1, -2) * inputs.query.shape[-1] ** -0.5
+        out[start:end] = (scores.softmax(-1) @ v).transpose(0, 1).to(out.dtype)
     return out
 
 
+@pytest.mark.parametrize("error_type", [None, RuntimeError, TypeError, AssertionError])
+def test_audio_fallback_overwrites_partial_output(monkeypatch, error_type):
+    from lightllm.common.attention import varlen
+
+    calls = []
+
+    class FakeBackend:
+        @classmethod
+        def check_environment(cls, caps):
+            return CapabilityResult.ok()
+
+        @classmethod
+        def check_support(cls, inputs, caps=None):
+            return CapabilityResult.ok()
+
+        def forward(self, inputs, *, out):
+            calls.append("fa3")
+            if error_type:
+                out[0].fill_(99)
+                raise error_type("shape-dependent FA3 failure")
+            out.fill_(9)
+            return out
+
+    class Fallback(FakeBackend):
+        def forward(self, inputs, *, out):
+            calls.append("triton")
+            out.fill_(7)
+            return out
+
+    monkeypatch.setattr(varlen, "get_varlen_backend_class", lambda name: {"fa3": FakeBackend, "triton": Fallback}[name])
+    backend = AutoVarlenAttention()
+    inputs = make_inputs()
+    out = torch.full_like(inputs.query, -123)
+    assert backend.forward(inputs, out=out) is out
+    assert torch.equal(out, torch.full_like(out, 7 if error_type else 9))
+    out.fill_(-123)
+    backend.forward(inputs, out=out)
+    assert calls == (["fa3", "triton", "triton"] if error_type else ["fa3", "fa3"])
+    assert torch.equal(out, torch.full_like(out, 7 if error_type else 9))
+
+
+@pytest.mark.parametrize("lengths", [(3, 0, 5), (1, 7), (0, 0)])
+def test_sdpa_preserves_sequence_boundaries_and_output_storage(lengths):
+    inputs = make_inputs(lengths)
+    inputs.query.zero_()
+    inputs.key.zero_()
+    start = 0
+    for i, length in enumerate(lengths):
+        inputs.value[start : start + length].fill_(i + 1)
+        start += length
+    out = torch.empty_like(inputs.query)
+    result = get_varlen_backend_class("sdpa")().forward(inputs, out=out)
+    assert result is out
+    torch.testing.assert_close(out, inputs.value)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("provider", ["fa3", "triton", "sdpa", "xformers"])
 @pytest.mark.parametrize("dtype,atol", [(torch.float16, 1e-2), (torch.bfloat16, 2e-2)])
-@pytest.mark.parametrize(
-    "attention_fn",
-    [
-        flash_attention_fwd,
-        pytest.param(
-            getattr(flashattention_nopad, "flash_attention_v3_fwd", None),
-            marks=_fa3_mark,
-        ),
-        pytest.param(
-            Fa3VitAttBackend._vit_att_fwd,
-            marks=_fa3_mark,
-        ),
-    ],
-)
-def test_varlen(dtype, atol, attention_fn, batch=4, heads=8, d=80, device="cuda:0"):
+@pytest.mark.parametrize("head_dim,strided", [(64, False), (80, True), (128, False)])
+def test_varlen(provider, dtype, atol, head_dim, strided):
+    backend = get_varlen_backend_class(provider)
+    environment = backend.check_environment(get_device_runtime().caps)
+    if not environment.supported:
+        pytest.skip(environment.reason)
     torch.manual_seed(0)
-    lengths = torch.randint(1, 257, (batch,))
-    max_len = int(lengths.max().item())
-
-    cu = torch.zeros(batch + 1, dtype=torch.int32, device=device)
-    cu[1:] = torch.cumsum(lengths, 0)
-    tot = int(cu[-1])
-
-    q = torch.randn(tot, heads, d, dtype=dtype, device=device)
-    k = torch.randn_like(q)
-    v = torch.randn_like(q)
-    out_tri = torch.randn_like(q)
-    attention_fn(q, k, v, out_tri, cu, max_len)
-    a = time.time()
-    for _ in range(100):
-        attention_fn(q, k, v, out_tri, cu, max_len)
-    b = time.time()
-    print(f"flash_attention_fwd time: {(b - a) / 100 * 1000:.2f} ms")
-    out_ref = reference_attention_varlen(q, k, v, cu)
-
-    max_err = (out_ref - out_tri).abs().max().item()
-    mean_err = (out_ref - out_tri).abs().mean().item()
-    print(f"{dtype}: max {max_err:.6f}, mean {mean_err:.6f}")
-    torch.testing.assert_close(out_tri, out_ref, atol=atol, rtol=0)
+    inputs = make_inputs((1, 0, 65, 129), device="cuda", dtype=dtype, head_dim=head_dim, strided=strided)
+    storage = torch.full((*inputs.query.shape[:2], head_dim * 2), -123, device="cuda", dtype=dtype)
+    out = storage[..., :head_dim]
+    before = [x.clone() for x in (inputs.query, inputs.key, inputs.value)]
+    result = backend().forward(inputs, out=out)
+    assert result is out
+    torch.testing.assert_close(out, reference_attention(inputs), atol=atol, rtol=0)
+    assert torch.equal(storage[..., head_dim:], torch.full_like(out, -123))
+    for actual, expected in zip((inputs.query, inputs.key, inputs.value), before):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
-if __name__ == "__main__":
-    pytest.main()
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("provider", ["fa3", "triton", "sdpa", "xformers"])
+def test_empty_batch(provider):
+    backend = get_varlen_backend_class(provider)
+    environment = backend.check_environment(get_device_runtime().caps)
+    if not environment.supported:
+        pytest.skip(environment.reason)
+    inputs = make_inputs((0, 0), device="cuda", dtype=torch.bfloat16)
+    out = torch.empty_like(inputs.query)
+    assert backend().forward(inputs, out=out) is out
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("provider", ["fa3", "triton"])
+def test_graph_replay_uses_new_inputs(provider):
+    backend_cls = get_varlen_backend_class(provider)
+    environment = backend_cls.check_environment(get_device_runtime().caps)
+    if not environment.supported:
+        pytest.skip(environment.reason)
+    backend = backend_cls()
+    assert backend.supports_graph
+    inputs = make_inputs((3, 5), device="cuda", dtype=torch.bfloat16)
+    out = torch.empty_like(inputs.query)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        backend.forward(inputs, out=out)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        backend.forward(inputs, out=out)
+    inputs.value.add_(1)
+    inputs.cu_seqlens.copy_(torch.tensor([0, 5, 8], device="cuda", dtype=torch.int32))
+    graph.replay()
+    torch.testing.assert_close(out, reference_attention(inputs), atol=2e-2, rtol=0)

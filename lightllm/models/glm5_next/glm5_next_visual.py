@@ -12,6 +12,7 @@ from safetensors import safe_open
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
 from lightllm.models.vit.triton_kernel.rms_norm_vit import qk_rms_norm, rms_norm
+from lightllm.common.attention.api import VarlenAttentionInputs
 from lightllm.server.visualserver import get_vit_attn_backend
 from .vision_process import Glm5NextImageProcessor
 
@@ -56,7 +57,7 @@ class Glm5NextVisionAttention(nn.Module):
         q = apply_rotary_pos_emb_triton(q, rotary_cos, rotary_sin)
         k = apply_rotary_pos_emb_triton(k, rotary_cos, rotary_sin)
         out = torch.empty_like(q)
-        get_vit_attn_backend()(q, k, v, out, cu_seqlens, max_seqlen)
+        get_vit_attn_backend().forward(VarlenAttentionInputs(q, k, v, cu_seqlens, max_seqlen), out=out)
         return self.proj(out.reshape(x.shape[0], -1))
 
 

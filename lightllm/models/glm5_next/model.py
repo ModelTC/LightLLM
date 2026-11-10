@@ -6,8 +6,8 @@ import torch
 import triton
 
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
-from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
+from lightllm.common.attention.backends.kda.triton.backend import KDALinearAttBackend
+from lightllm.models.glm5_next.attention.sparse_mla import Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
@@ -178,28 +178,14 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         )
         return [state]
 
-    def prepare_attention_states(self) -> None:
-        super().prepare_attention_states()
-        if self.args.llm_kv_type == "fp8kv_dsa" and self.att_state_manager.get_full_attention_states(
-            self.att_state_role
-        ):
-            from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+    def attention_backend_candidates(self, family, phase):
+        from lightllm.common.attention.api import AttentionFamily
+        from lightllm.models.glm5_next.attention.fp8_sparse_mla import Fp8Glm5NextSparseAttBackend
 
-            # Reserve fixed scratch space before the shared KV capacity is profiled.
-            Fp8Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
-
-    def _init_att_backend(self):
-        from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
-
-        backend_class = (
-            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
-        )
-        self.prefill_att_backend = backend_class(model=self)
-        self.decode_att_backend = self.prefill_att_backend
-
-    def _init_att_backend1(self):
-        self.prefill_att_backend1 = KDALinearAttBackend(model=self)
-        self.decode_att_backend1 = self.prefill_att_backend1
+        if family is AttentionFamily.KDA:
+            return None, ["triton"]
+        backend = Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
+        return {self.args.llm_kv_type: {"flashmla_sparse": backend}}, ["flashmla_sparse"]
 
     def _init_custom(self):
         triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))

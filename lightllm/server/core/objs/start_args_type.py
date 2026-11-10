@@ -175,21 +175,20 @@ class StartArgs:
     vit_quant_type: Optional[str] = field(default="none")
     vit_quant_cfg: Optional[str] = field(default=None)
     expert_dtype: Optional[str] = field(default=None, metadata={"choices": ["fp8", "fp4"]})
-    llm_prefill_att_backend: List[str] = field(
-        default_factory=lambda: ["auto"],
-        metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashqla"]},
+    llm_prefill_att_backend: str = field(
+        default="auto", metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashmla_sparse"]}
     )
-    llm_decode_att_backend: List[str] = field(
-        default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
+    llm_decode_att_backend: str = field(
+        default="auto", metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashmla_sparse"]}
     )
+    llm_prefill_linear_att_backend: str = field(default="auto", metadata={"choices": ["auto", "triton", "flashqla"]})
+    llm_decode_linear_att_backend: str = field(default="auto", metadata={"choices": ["auto", "triton"]})
     page_size: int = field(default=1)
     req_token_index_mode: str = field(
         default="pin_mem_cache",
         metadata={"choices": ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"]},
     )
-    vit_att_backend: List[str] = field(
-        default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
-    )
+    vit_att_backend: str = field(default="auto", metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]})
     llm_kv_type: str = field(
         default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt", "fp8kv_dsa"]}
     )

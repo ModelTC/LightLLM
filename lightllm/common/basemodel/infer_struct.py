@@ -1,4 +1,5 @@
 import torch
+from contextlib import contextmanager
 import triton
 import collections
 from lightllm.common.attention_state.manager import AttentionStateManager
@@ -11,7 +12,8 @@ from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
-from .attention import BasePrefillAttState, BaseDecodeAttState
+from dataclasses import replace
+from lightllm.common.attention.api import AttentionBatch, AttentionPhase, PlanCapacity
 
 
 class InferStateInfo:
@@ -20,13 +22,9 @@ class InferStateInfo:
     """
 
     def __init__(self):
-        # prefill 和 decode 使用的 att 状态对象
-        self.prefill_att_state: BasePrefillAttState = None
-        self.decode_att_state: BaseDecodeAttState = None
-
-        # 保留的扩展, 支持线性att与标准att混合使用时使用
-        self.prefill_att_state1: BasePrefillAttState = None
-        self.decode_att_state1: BaseDecodeAttState = None
+        self.attention_groups = ()
+        self.attention_plans = {}
+        self.attention_batch = None
 
         self.input_ids: torch.Tensor = None
         self.batch_size: int = None
@@ -133,58 +131,102 @@ class InferStateInfo:
             ) = gen_decode_params(self.b_seq_len)
             self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
-    def init_att_state(self):
-        if self.is_prefill:
-            if self.prefill_att_state is not None:
-                self.prefill_att_state.init_state()
-            if self.prefill_att_state1 is not None:
-                self.prefill_att_state1.init_state()
-        else:
-            if self.decode_att_state is not None:
-                self.decode_att_state.init_state()
-            if self.decode_att_state1 is not None:
-                self.decode_att_state1.init_state()
-        self.check_att_states()
+    def prepare_attention(self, model):
+        from lightllm.common.basemodel.attention import get_attention_workspace
 
-    def check_att_states(self) -> None:
-        """检查 attention state，防止其强引用 InferStateInfo 而形成循环引用。
+        self.device_runtime = model.device_runtime
+        if model._attention_storage_generation != self.att_state_manager.storage_generation:
+            raise RuntimeError("attention storage changed; rebind layers and recapture CUDA graphs")
+        phase = AttentionPhase.PREFILL if self.is_prefill else AttentionPhase.DECODE
+        self.attention_batch = AttentionBatch(
+            phase=phase,
+            batch_size=self.batch_size,
+            token_num=self.input_ids.shape[0],
+            total_token_num=self.total_token_num,
+            max_q_seq_len=self.max_q_seq_len,
+            max_kv_seq_len=self.max_kv_seq_len,
+            max_cache_len=self.max_cache_len or 0,
+            b_req_idx=self.b_req_idx,
+            b_seq_len=self.b_seq_len,
+            b_q_seq_len=self.b_q_seq_len,
+            b1_cu_q_seq_len=self.b1_cu_q_seq_len,
+            b1_cu_kv_seq_len=self.b1_cu_kv_seq_len,
+            req_to_token_indexs=self.req_manager.req_to_token_indexs,
+            hold_req_id=self.req_manager.HOLD_REQUEST_ID,
+            b_ready_cache_len=self.b_ready_cache_len,
+            b_mtp_index=self.b_mtp_index,
+            b_shared_seq_len=self.b_shared_seq_len,
+            b_shared_radix_node_id=self.b_shared_radix_node_id,
+            mem_index=self.mem_index,
+            position_ids=self.position_ids,
+            b_image_token_end=getattr(self, "b_image_token_end", None),
+        )
+        if self.is_cuda_graph_replay:
+            return
+        capacity = PlanCapacity(
+            phase,
+            self.batch_size,
+            self.input_ids.shape[0],
+            model.graph_max_len_in_batch if self.is_cuda_graph_capture else self.max_kv_seq_len,
+            self.max_q_seq_len,
+        )
+        for group_id, group in enumerate(self.attention_groups):
+            workspace = get_attention_workspace(model, group_id, self.microbatch_index, self.input_ids.device)
+            workspace.begin()
+            backend = group.backend_for(phase)
+            if self.is_cuda_graph_capture:
+                workspace = workspace.fork()
+            workspace.reserve(backend.resource_requirements(capacity, capture=self.is_cuda_graph_capture))
+            plan = backend.allocate_plan(capacity, capture=self.is_cuda_graph_capture, workspace=workspace)
+            backend.prepare(plan, self.attention_batch)
+            self.attention_plans[group_id] = plan
 
-        InferStateInfo 已经通过下列四个属性强引用主、辅 attention state。
-        如果 attention state 再把 infer_state 存到普通属性中，就会形成
-        infer_state -> attention state -> infer_state 的强引用闭环。
-        即使一次推理结束、外部引用全部释放，引用计数也无法立即回收这两个对象，
-        必须等待 Python 的循环 GC。循环 GC 主要由 Python 对象分配和阈值驱动，
-        不能保证在 GPU 显存紧张时及时运行。
+    def update_attention(self):
+        for group_id, plan in self.attention_plans.items():
+            self.attention_groups[group_id].backend_for(plan.capacity.phase).update(plan)
 
-        这些对象还持有本次推理的 Tensor。对象延迟回收会使相关 Tensor 的显存
-        继续被占用，无法及时交还给 PyTorch 分配器复用；多次推理累积后可能抬高
-        显存峰值，甚至触发 OOM。集中进行循环 GC 还可能造成推理延迟抖动。
-        因此，即使循环最终能够被 GC 回收，也不能依赖它管理推理临时状态的生命周期。
-
-        InferStateInfo 的生命周期应由推理调用方或 CUDA Graph 缓存负责：
-        调用方使用期间、图仍需回放期间保留强引用，结束使用后即可释放。
-        attention state 只通过 _infer_state_weak_ref 和 infer_state 属性访问它，
-        不应额外延长其生命周期。这里在 attention state 初始化完成后统一检查，
-        尽早发现新后端或后续修改误存的 InferStateInfo 强引用。
-
-        注意：检查仅扫描非空 attention state 的第一层实例属性，不递归检查容器或
-        回调闭包；实现后端时也应避免通过这些位置间接保存 infer_state 的强引用。
-        """
-        for state in (self.prefill_att_state, self.prefill_att_state1, self.decode_att_state, self.decode_att_state1):
-            if state is not None:
-                state.check_no_infer_state()
+    def finish_attention(self):
+        for plan in self.attention_plans.values():
+            plan.workspace.finish()
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
+        if (
+            self.att_state_role != new_infer_state.att_state_role
+            or len(self.attention_groups) != len(new_infer_state.attention_groups)
+            or any(
+                current is not incoming
+                for current, incoming in zip(self.attention_groups, new_infer_state.attention_groups)
+            )
+        ):
+            raise ValueError("captured attention belongs to a different model role or group")
+        copies = []
+        batch_tensor_names = {
+            name for name, value in vars(self.attention_batch).items() if isinstance(value, torch.Tensor)
+        }
         for attr_name, attr_value in vars(new_infer_state).items():
-            if isinstance(attr_value, torch.Tensor):
-                attr_ = getattr(self, attr_name, None)
-                if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
-                    attr_.copy_(attr_value, non_blocking=True)
-
-        if self.decode_att_state is not None:
-            self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
-        if self.decode_att_state1 is not None:
-            self.decode_att_state1.copy_for_decode_cuda_graph(new_infer_state.decode_att_state1)
+            if isinstance(attr_value, torch.Tensor) and attr_name not in batch_tensor_names:
+                target = getattr(self, attr_name, None)
+                if target is not None and target.data_ptr() != attr_value.data_ptr():
+                    if (target.shape, target.dtype, target.device) != (
+                        attr_value.shape,
+                        attr_value.dtype,
+                        attr_value.device,
+                    ):
+                        raise ValueError(f"captured input {attr_name} changed shape, dtype or device")
+                    copies.append((target, attr_value))
+        for plan in self.attention_plans.values():
+            plan.workspace.begin()
+        self.attention_batch.copy_inputs(new_infer_state.attention_batch)
+        for target, source in copies:
+            target.copy_(source, non_blocking=True)
+        batch = replace(
+            self.attention_batch,
+            max_kv_seq_len=new_infer_state.max_kv_seq_len,
+            max_q_seq_len=new_infer_state.max_q_seq_len,
+            total_token_num=new_infer_state.total_token_num,
+        )
+        for group_id, plan in self.attention_plans.items():
+            self.attention_groups[group_id].decode_backend.prepare(plan, batch)
         return
 
     def call_overlap_hook(self):
@@ -386,11 +428,20 @@ class InferStateInfo:
         return origin_data.view(-1, *old_shape[1:])
 
     # 用于 prefill cuda graph 的专用功能接口
+    @contextmanager
+    def _capture_prefill_segment(self, graph_obj):
+        with self.device_runtime.capture_graph(graph_obj, pool=self.mem_pool):
+            self._prefill_capture_active = True
+            try:
+                yield
+            finally:
+                self._prefill_capture_active = False
+
     def prefill_cuda_graph_create_graph_obj(self):
         if not hasattr(self, "prefill_cuda_graph_exe_list"):
             self.prefill_cuda_graph_exe_list = []
-        graph_obj = torch.cuda.CUDAGraph()
-        capture_graph = torch.cuda.graph(graph_obj, pool=self.mem_pool)
+        graph_obj = self.device_runtime.create_graph()
+        capture_graph = self._capture_prefill_segment(graph_obj)
         self.prefill_cuda_graph_exe_list.append((graph_obj, capture_graph))
         return
 
@@ -422,6 +473,19 @@ class InferStateInfo:
             else:
                 func(new_infer_state)
         return
+
+    def close_prefill_graphs(self):
+        try:
+            # 错误可能发生在某一段内部，也可能发生在段间的 CPU 回调中。
+            # 只退出仍在捕获的上下文，避免重复结束已经完成的段。
+            if getattr(self, "_prefill_capture_active", False):
+                self.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
+        finally:
+            self.device_runtime.synchronize()
+            for item in getattr(self, "prefill_cuda_graph_exe_list", ()):
+                if isinstance(item, tuple):
+                    item[0].reset()
+            self.prefill_cuda_graph_exe_list = []
 
     def copy_for_prefill_cuda_graph(self, new_infer_state: "InferStateInfo"):
         for attr_name, attr_value in vars(new_infer_state).items():

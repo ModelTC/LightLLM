@@ -19,8 +19,7 @@ from lightllm.models.deepseek_v4.layer_infer.post_layer_infer import (
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
     DeepseekV4TransformerLayerInfer,
 )
-from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
-from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import (
+from lightllm.models.deepseek_v4.attention.sparse_mla import (
     DSV4_NSA_BACKENDS,
     DeepseekV4FlashMlaFp8SparseAttBackend,
 )
@@ -209,18 +208,21 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         config = dict(self.config, n_layer=len(self.config["compress_ratios"]))
         self.quant_cfg = Quantcfg(config, self.quant_type, self.quant_cfg_path, self.expert_dtype)
 
-    def _init_att_backend(self):
+    def attention_backend_candidates(self, family, phase):
+        return DSV4_NSA_BACKENDS, ["flashmla_sparse"]
+
+    def prepare_attention_backends(self):
         args = get_env_start_args()
         if args.llm_kv_type == "None":
             args.llm_kv_type = "fp8kv_dsa"
         # TODO: 支持其他 kv type
         if args.llm_kv_type != "fp8kv_dsa":
             raise RuntimeError("DeepSeek-V4 requires llm_kv_type=fp8kv_dsa for packed FlashMLA sparse attention")
-        self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0, backend_map=DSV4_NSA_BACKENDS)(model=self)
-        self.decode_att_backend = get_nsa_decode_att_backend_class(index=0, backend_map=DSV4_NSA_BACKENDS)(model=self)
-
-        tp_q_head_num = self.prefill_att_backend.tp_q_head_num
-        padded_q_head_num = self.prefill_att_backend.padded_q_head_num
+        self.args.llm_kv_type = args.llm_kv_type
+        super().prepare_attention_backends()
+        backend = self.attention_groups[0].prefill_backend
+        tp_q_head_num = backend.tp_q_head_num
+        padded_q_head_num = backend.padded_q_head_num
         if not self.is_mtp_draft_model:
             # Drafts share this buffer after the main model has captured its CUDA graphs.
             self.dsv4_workspace.init_flashmla_prefill_q(
@@ -299,7 +301,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         orig_max = rs.get("original_max_position_embeddings", 0)
 
         def build_inv_freq(base):
-            freqs = 1.0 / (base ** freq_exponents)
+            freqs = 1.0 / (base**freq_exponents)
             if rope_type == "yarn" and orig_max > 0:
                 beta_fast = rs.get("beta_fast", 32)
                 beta_slow = rs.get("beta_slow", 1)

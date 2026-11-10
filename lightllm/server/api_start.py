@@ -183,17 +183,11 @@ def _launch_subprocesses(args: StartArgs):
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
     if args.enable_ep_moe:
-        allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}
-        for backend in args.llm_prefill_att_backend:
-            assert backend in allowed_ep_prefill_att_backends, (
-                "When --enable_ep_moe is enabled, --llm_prefill_att_backend must be one of "
-                f"{sorted(allowed_ep_prefill_att_backends)}; flashinfer is not supported."
-            )
-        allowed_ep_decode_att_backends = {"auto", "fa3", "triton"}
-        for backend in args.llm_decode_att_backend:
-            assert backend in allowed_ep_decode_att_backends, (
-                "When --enable_ep_moe is enabled, --llm_decode_att_backend must be one of "
-                f"{sorted(allowed_ep_decode_att_backends)}; flashinfer is not supported."
+        allowed_ep_att_backends = {"auto", "fa3", "triton"}
+        for option in ("llm_prefill_att_backend", "llm_decode_att_backend"):
+            assert getattr(args, option) in allowed_ep_att_backends, (
+                f"When --enable_ep_moe is enabled, --{option} must be one of "
+                f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
             )
 
     if args.page_size < 1:

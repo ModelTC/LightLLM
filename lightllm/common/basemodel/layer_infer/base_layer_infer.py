@@ -11,6 +11,27 @@ from lightllm.common.basemodel.triton_kernel.sp_pad_copy import sp_pad_copy
 
 
 class BaseLayerInfer:
+    attention_family = "dense"
+    attention_uses_alibi = False
+    attention_uses_sink = False
+    attention_variant = ""
+
+    def get_attention_family(self):
+        from lightllm.common.attention.api import AttentionFamily
+
+        return AttentionFamily(self.attention_family)
+
+    def attention_window(self, phase):
+        return None
+
+    def attention_kv_view(self, state):
+        return state.get_layer_view(self.layer_num_)
+
+    def bind_attention_params(self, model, weight, family):
+        from lightllm.common.basemodel.attention import make_layer_params
+
+        return make_layer_params(model, self, weight, family)
+
     def __init__(self) -> None:
         self.tp_rank_ = get_current_rank_in_dp()
         self.tp_world_size_ = get_dp_world_size()

@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING
 import os
 import json
 import torch
-from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
+from lightllm.common.attention.backends.dense.triton.backend import TritonAttBackend
 from lightllm.common.build_utils import repair_config
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.gemma4.infer_struct import Gemma4InferStateInfo
@@ -138,24 +138,8 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         )
         return [state]
 
-    def _init_att_backend(self):
-        # Gemma-4 has per-layer heterogeneous attention: sliding layers use
-        # (head_dim=256, kv_heads=16); full-attn layers use (head_dim=512,
-        # kv_heads=4, k_eq_v). FA3 caps head_dim at 256 and flashinfer plans
-        # once per infer_state on a single shape — both unworkable for the
-        # heterogeneous layout. Both layer kinds go through triton.
-        #
-        # Primary backend = sliding layers. Sliding prefill bypasses the
-        # backend and calls gemma4_mm directly (SWA + image bidi in one
-        # pass); the prefill_att_state created here is unused but the
-        # framework requires prefill_att_backend to be non-None.
-        self.prefill_att_backend = TritonAttBackend(model=self)
-        self.decode_att_backend = TritonAttBackend(model=self)
-
-    def _init_att_backend1(self):
-        # Secondary backend = full-attn layers (head_dim=512, plain causal).
-        self.prefill_att_backend1 = TritonAttBackend(model=self)
-        self.decode_att_backend1 = TritonAttBackend(model=self)
+    def attention_backend_candidates(self, family, phase):
+        return {self.args.llm_kv_type: {"triton": TritonAttBackend}}, ["triton"]
 
     def _init_custom(self):
         self._init_to_get_rotary_gemma4()

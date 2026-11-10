@@ -18,20 +18,19 @@ def _compute_ground_truth(q, k, v, is_causal=True):
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
 
 
-def _validate_fa3():
+def _validate_fa3(dtype=torch.bfloat16, spec=None):
     """Validate FA3 with ground truth."""
-    from lightllm.utils.device_utils import is_hopper
     from lightllm.utils.sgl_utils import flash_attn_varlen_func
 
-    if not is_hopper():
-        return False, "Not a Hopper GPU"
+    if torch.cuda.get_device_capability()[0] < 9:
+        return False, "FA3 requires SM90 or newer"
     if flash_attn_varlen_func is None:
         return False, "flash_attn_varlen_func is None"
 
-    batch, heads, seq, dim = 1, 4, 8, 64
-    q = torch.randn(batch, heads, seq, dim, dtype=torch.bfloat16, device="cuda")
-    k = torch.randn(batch, heads, seq, dim, dtype=torch.bfloat16, device="cuda")
-    v = torch.randn(batch, heads, seq, dim, dtype=torch.bfloat16, device="cuda")
+    batch, heads, seq, dim = 1, 4 if spec is None else spec.num_q_heads, 8, 64 if spec is None else spec.head_size
+    q = torch.randn(batch, heads, seq, dim, dtype=dtype, device="cuda")
+    k = torch.randn(batch, heads, seq, dim, dtype=dtype, device="cuda")
+    v = torch.randn(batch, heads, seq, dim, dtype=dtype, device="cuda")
 
     expected = _compute_ground_truth(q, k, v)
 
@@ -48,18 +47,21 @@ def _validate_fa3():
         cu_seqlens_k=cu_seqlens,
         max_seqlen_q=seq,
         max_seqlen_k=seq,
-        softmax_scale=1.0 / (dim ** 0.5),
+        softmax_scale=1.0 / (dim**0.5),
         causal=True,
     )
     out = out.reshape(batch, seq, heads, dim).transpose(1, 2)
     torch.cuda.synchronize()
 
     if not torch.allclose(out, expected, rtol=1e-2, atol=1e-2):
-        return False, f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}"
+        return (
+            False,
+            f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}",
+        )
     return True, None
 
 
-def _validate_flashinfer():
+def _validate_flashinfer(dtype=torch.float16, spec=None):
     """Validate FlashInfer with ground truth."""
     capability = torch.cuda.get_device_capability()
     arch = f"{capability[0]}.{capability[1]}"
@@ -67,10 +69,10 @@ def _validate_flashinfer():
 
     import flashinfer
 
-    batch, heads, seq, dim = 1, 4, 8, 64
-    q = torch.randn(batch, heads, seq, dim, dtype=torch.float16, device="cuda")
-    k = torch.randn(batch, heads, seq, dim, dtype=torch.float16, device="cuda")
-    v = torch.randn(batch, heads, seq, dim, dtype=torch.float16, device="cuda")
+    batch, heads, seq, dim = 1, 4 if spec is None else spec.num_q_heads, 8, 64 if spec is None else spec.head_size
+    q = torch.randn(batch, heads, seq, dim, dtype=dtype, device="cuda")
+    k = torch.randn(batch, heads, seq, dim, dtype=dtype, device="cuda")
+    v = torch.randn(batch, heads, seq, dim, dtype=dtype, device="cuda")
 
     expected = _compute_ground_truth(q, k, v)
 
@@ -88,15 +90,18 @@ def _validate_flashinfer():
     torch.cuda.synchronize()
 
     if not torch.allclose(out, expected, rtol=1e-2, atol=1e-2):
-        return False, f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}"
+        return (
+            False,
+            f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}",
+        )
     return True, None
 
 
-def _validate_flashqla():
+def _validate_flashqla(dtype=None, spec=None):
     """Validate FlashQLA against LightLLM's vendored FLA kernel."""
     from flash_qla import chunk_gated_delta_rule as flashqla_chunk_gated_delta_rule
 
-    from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
+    from lightllm.common.attention.backends.gdn.triton.kernels.chunk import (
         chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
     )
     from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
@@ -107,7 +112,11 @@ def _validate_flashqla():
     num_v_heads = max(1, linear_config.global_linear_v_heads // linear_config.tp_world_size)
     head_k_dim = linear_config.head_linear_k_dim
     head_v_dim = linear_config.head_linear_v_dim
-    qkv_dtype = linear_config.conv_state_dtype
+    qkv_dtype = dtype or linear_config.conv_state_dtype
+    if spec is not None:
+        num_k_heads = spec.num_q_heads
+        num_v_heads = max(num_k_heads, num_v_heads)
+        head_k_dim, head_v_dim = spec.head_size, spec.value_head_size
     state_dtype = linear_config.ssm_state_dtype
 
     batch, seq = 1, 64
@@ -140,7 +149,10 @@ def _validate_flashqla():
         ("final state", final_state, expected_state),
     ):
         if not torch.allclose(actual, expected, rtol=1e-2, atol=1e-2):
-            return False, f"{name} mismatch: max diff {(actual - expected).abs().max().item():.6f}"
+            return (
+                False,
+                f"{name} mismatch: max diff {(actual - expected).abs().max().item():.6f}",
+            )
     return True, None
 
 
@@ -169,7 +181,10 @@ def _validate_triton():
     torch.cuda.synchronize()
 
     if not torch.allclose(out, expected, rtol=1e-3, atol=1e-3):
-        return False, f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}"
+        return (
+            False,
+            f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}",
+        )
     return True, None
 
 
@@ -208,7 +223,10 @@ def _validate_xformers():
     out = out.transpose(1, 2).contiguous()
 
     if not torch.allclose(out, expected, rtol=1e-2, atol=1e-2):
-        return False, f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}"
+        return (
+            False,
+            f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}",
+        )
 
     return True, None
 
@@ -234,12 +252,15 @@ def _validate_sdpa():
     out = scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
 
     if not torch.allclose(out, expected, rtol=1e-2, atol=1e-2):
-        return False, f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}"
+        return (
+            False,
+            f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}",
+        )
 
     return True, None
 
 
-def _validate_flashmla_sparse():
+def _validate_flashmla_sparse(dtype=torch.bfloat16, spec=None):
     """Validate flashmla_sparse (NSA) with ground truth."""
     try:
         from sgl_kernel.flash_mla import flash_mla_sparse_fwd
@@ -252,7 +273,6 @@ def _validate_flashmla_sparse():
     kv_lora_rank = 512
     qk_rope_head_dim = 64
     qk_dim = kv_lora_rank + qk_rope_head_dim
-    dtype = torch.bfloat16
     device = "cuda"
 
     q = torch.randn(batch * seq, heads, qk_dim, dtype=dtype, device=device)
@@ -265,7 +285,7 @@ def _validate_flashmla_sparse():
 
     topk_indices = topk_indices.view(batch * seq, 1, index_topk)
 
-    softmax_scale = 1.0 / (qk_dim ** 0.5)
+    softmax_scale = 1.0 / (qk_dim**0.5)
 
     try:
         mla_out, _, _ = flash_mla_sparse_fwd(
@@ -282,7 +302,39 @@ def _validate_flashmla_sparse():
     return True, None
 
 
-def _run_in_subprocess(backend_name, pipe):
+def _validate_varlen(backend_name, dtype=None, device=None, head_dim=80):
+    from lightllm.common.attention.api import VarlenAttentionInputs
+    from lightllm.common.attention.selection import get_varlen_backend_class
+
+    from lightllm.platform import get_device_runtime
+
+    runtime = get_device_runtime(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    backend_cls = get_varlen_backend_class(backend_name)
+    environment = backend_cls.check_environment(runtime.caps)
+    if not environment.supported:
+        return False, environment.reason
+    device = runtime.device
+    dtype = dtype or (torch.float32 if device.type == "cpu" else torch.bfloat16)
+    q, k, v = [torch.randn(8, 2, head_dim, dtype=dtype, device=device) for _ in range(3)]
+    cu = torch.tensor([0, 3, 8], dtype=torch.int32, device=device)
+    out = torch.empty_like(q)
+    inputs = VarlenAttentionInputs(q, k, v, cu, 5)
+    support = backend_cls.check_support(inputs, runtime.caps)
+    if not support.supported:
+        return False, support.reason
+    backend_cls().forward(inputs, out=out)
+    expected = torch.empty_like(q)
+    for start, end in ((0, 3), (3, 8)):
+        result = _compute_ground_truth(
+            q[start:end].transpose(0, 1), k[start:end].transpose(0, 1), v[start:end].transpose(0, 1), is_causal=False
+        )
+        expected[start:end].copy_(result.transpose(0, 1))
+    if not torch.allclose(out, expected, rtol=2e-2, atol=2e-2):
+        return False, f"varlen output mismatch: max diff {(out - expected).abs().max().item():.6f}"
+    return True, None
+
+
+def _run_in_subprocess(backend_name, pipe, varlen=False, device=None, dtype=None, spec=None, head_dim=80):
     """Run validation in subprocess with suppressed output."""
     import sys
 
@@ -292,20 +344,48 @@ def _run_in_subprocess(backend_name, pipe):
     sys.stderr = devnull
 
     try:
-        if backend_name == "fa3":
-            success, err = _validate_fa3()
+        if device is not None or spec is not None:
+            from lightllm.platform import get_device_runtime
+
+            runtime = get_device_runtime(device)
+            if runtime.api is not None:
+                runtime.api.set_device(runtime.device)
+        if spec is not None:
+            from lightllm.common.attention.api import AttentionFamily
+            from lightllm.common.attention.selection import load_backend_class
+
+            cls = load_backend_class(backend_name)
+            if (
+                spec.family is AttentionFamily.DENSE
+                and spec.cache.format == "None"
+                and not spec.use_mtp
+                and not spec.use_alibi
+                and not spec.use_sink
+                and spec.sliding_window is None
+                and not spec.variant
+            ):
+                from lightllm.common.attention.probe import probe_dense
+
+                success, err = probe_dense(cls, spec, runtime)
+                pipe.send((success, err))
+                return
+            backend_name = cls.provider
+        if varlen:
+            success, err = _validate_varlen(backend_name, dtype, device, head_dim)
+        elif backend_name == "fa3":
+            success, err = _validate_fa3(dtype or torch.bfloat16, spec)
         elif backend_name == "xformers":
             success, err = _validate_xformers()
         elif backend_name == "sdpa":
             success, err = _validate_sdpa()
         elif backend_name == "flashinfer":
-            success, err = _validate_flashinfer()
+            success, err = _validate_flashinfer(dtype or torch.float16, spec)
         elif backend_name == "flashqla":
-            success, err = _validate_flashqla()
+            success, err = _validate_flashqla(dtype, spec)
         elif backend_name == "triton":
             success, err = _validate_triton()
         elif backend_name == "flashmla_sparse":
-            success, err = _validate_flashmla_sparse()
+            success, err = _validate_flashmla_sparse(dtype or torch.bfloat16, spec)
         else:
             success, err = False, f"Unknown backend: {backend_name}"
         pipe.send((success, err))
@@ -316,25 +396,20 @@ def _run_in_subprocess(backend_name, pipe):
 
 
 @lru_cache(maxsize=None)
-def validate(backend_name: str) -> bool:
-    if get_global_rank() == 0:
-        validate_ok = _validate(backend_name)
-        torch.distributed.broadcast_object_list([validate_ok], src=0)
-    else:
-        validate_ok = [None]
-        torch.distributed.broadcast_object_list(validate_ok, src=0)
-        validate_ok = validate_ok[0]
-    return validate_ok
+def validate(backend_name: str, *, device=None, dtype=None, spec=None) -> bool:
+    """每个 rank 在自身设备验证；dtype/完整 spec 不同不能复用另一配置的结果。"""
+    return _validate(backend_name, device=device, dtype=dtype, spec=spec)
 
 
-def _validate(backend_name: str) -> bool:
+def _validate(backend_name: str, *, varlen=False, device=None, dtype=None, spec=None, head_dim=80) -> bool:
     """Validate backend in subprocess with ground truth check."""
     try:
         ctx = mp.get_context("spawn")
         parent, child = ctx.Pipe(duplex=False)
         logger.info(f"Validating {backend_name} backend start, please wait ...")
-        proc = ctx.Process(target=_run_in_subprocess, args=(backend_name, child))
+        proc = ctx.Process(target=_run_in_subprocess, args=(backend_name, child, varlen, device, dtype, spec, head_dim))
         proc.start()
+        child.close()
         proc.join(timeout=_VALIDATION_TIMEOUT)
 
         if proc.is_alive():
@@ -358,3 +433,8 @@ def _validate(backend_name: str) -> bool:
     except Exception as e:
         logger.warning(f"{backend_name} validation error: {e}")
         return False
+    finally:
+        if "parent" in locals():
+            parent.close()
+        if "child" in locals():
+            child.close()

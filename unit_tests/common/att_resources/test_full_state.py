@@ -97,7 +97,7 @@ def test_full_attention_write_copy_and_pd(
     data = torch.arange(2 * read_kv_storage(state).shape[2] * 4, dtype=torch.float32, device=device).reshape(
         2, read_kv_storage(state).shape[2], 4
     )
-    if device == "cuda":
+    if device == "cuda" or cls is GQAFullAttentionState:
         state.write_full_att_kv(2, ids, data)
         state.write_full_att_kv(5, ids, data + 100)
     else:
@@ -114,7 +114,7 @@ def test_full_attention_write_copy_and_pd(
     def reject_host_list(tensor: torch.Tensor):
         raise AssertionError("token copies must not convert indices to Python lists")
 
-    if device == "cuda":
+    if device == "cuda" or cls is GQAFullAttentionState:
         with monkeypatch.context() as patch:
             patch.setattr(torch.Tensor, "tolist", reject_host_list)
             state.copy_full_att_tokens(ids, torch.tensor([8, 9], dtype=torch.int32, device=device))

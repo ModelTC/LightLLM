@@ -146,6 +146,8 @@ class PackedMLALayerView:
 class PackedMLAFullAttentionState(FullAttentionState):
     """在同一物理 token 行中存储 MLA latent、量化参数及稀疏 indexer key/scale。"""
 
+    storage_layout = ("mla_packed_token_row", 1)
+
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================

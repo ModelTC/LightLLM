@@ -1,3 +1,12 @@
+from lightllm.common.attention.api.inputs import (
+    DenseInputs,
+    MLAPrefillInputs,
+    MLADecodeInputs,
+    SparseMLAPrefillInputs,
+    SparseMLADecodeInputs,
+    GDNInputs,
+    KDAInputs,
+)
 import os
 import torch
 from functools import partial
@@ -10,13 +19,15 @@ from lightllm.models.neo_chat.layer_weights.transformer_layer_weight import NeoC
 from lightllm.distributed import all_reduce
 import torch.distributed as dist
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.common.basemodel.attention.base_att import AttControl
+
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 
 class NeoChatTransformerLayerInfer(Qwen3TransformerLayerInfer):
+    attention_variant = "neo"
+
     def __init__(self, data_type, network_config):
         super().__init__(data_type, network_config)
         return

@@ -12,8 +12,9 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel import cuda_graph as graph_module
-from lightllm.common.basemodel.attention.triton import fp as state_module
-from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.mtp_diverse import (
+from lightllm.common.attention_state.manager import AttentionStateManager
+from lightllm.common.attention.backends.dense.triton import backend as state_module
+from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.mtp_diverse import (
     mtp_diverse_attn as decode_module,
     stage1_single_token as stage1_module,
     stage2_single_token as stage2_module,
@@ -21,6 +22,15 @@ from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.mtp_diverse impo
 from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType, AutotuneLevel
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
+from unit_tests.common.attention.helpers import (
+    backend_plan,
+    update_plan,
+    run_sparse,
+    run_dense,
+    make_plan,
+    make_batch,
+    make_backend,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -138,16 +148,15 @@ def test_decode_passes_saved_length_and_selected_block_n(monkeypatch):
     infer_state.b_req_idx = inputs["B_req_idx"]
     infer_state.b_seq_len = inputs["b_seq_len"]
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"])
+    infer_state.req_to_token_indexs = infer_state.req_manager.req_to_token_indexs
     model = SimpleNamespace(
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 2),
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
     )
     monkeypatch.setattr(state_module, "build_mtp_shared_group_markers", lambda *a, **kw: inputs["b_mark_shared_group"])
-    state = state_module.TritonDecodeAttState(
-        backend=SimpleNamespace(model=model), _infer_state_weak_ref=weakref.ref(infer_state)
-    )
-    state.init_state()
+    state = backend_plan(state_module.TritonAttBackend, "decode", settings=SimpleNamespace(model=model))
+    update_plan(state, infer_state)
     infer_state.max_kv_seq_len = 32768
     calls = []
 
@@ -157,7 +166,7 @@ def test_decode_passes_saved_length_and_selected_block_n(monkeypatch):
 
     monkeypatch.setattr(decode_module, "mtp_diverse_stage1_single_token", stage1)
     monkeypatch.setattr(decode_module, "mtp_diverse_stage2_single_token", lambda **kwargs: calls.append(kwargs))
-    state.decode_att(q=inputs["q"], k=inputs["k"], v=inputs["v"])
+    run_dense(state, infer_state, inputs["q"], inputs["k"], inputs["v"])
     assert calls[0]["max_kv_len"] == 8193
     assert calls[0]["b_mark_shared_group"] is inputs["b_mark_shared_group"]
     assert calls[1]["block_n"] == 32
@@ -264,7 +273,17 @@ def test_full_autotune_before_graph_and_cached_reuse(tmp_path, monkeypatch, kv_l
         return out
 
     graph = graph_module.CudaGraph(1, 7, 1, max_batch_size=7, max_len_in_batch=32768)
-    graph.capture_decode(decode, SimpleNamespace(input_ids=torch.ones(7, device="cuda")))
+    resources = AttentionStateManager(request_capacity=7)
+    resources.finish_state_registration()
+    state = SimpleNamespace(
+        input_ids=torch.ones(7, device="cuda"),
+        b_req_idx=torch.arange(7, device="cuda", dtype=torch.int32),
+        att_state_manager=resources,
+        att_state_role="main",
+        attention_plans={},
+        attention_groups=(),
+    )
+    graph.capture_decode(decode, state)
     torch.cuda.synchronize()
     assert rebuild_count == 1 and benchmark_count == len(kernel.configs_gen_func())
     assert valid_benchmark_count > 0
@@ -296,6 +315,6 @@ def test_full_autotune_before_graph_and_cached_reuse(tmp_path, monkeypatch, kv_l
     inputs["b_seq_len"].copy_(
         torch.tensor([kv_len - 2, kv_len - 1, kv_len] * 2 + [kv_len], device="cuda", dtype=torch.int32)
     )
-    graph.graph[7][0].replay()
+    graph.graph[7].replay()
     torch.cuda.synchronize()
     torch.testing.assert_close(out.float(), reference_attention(inputs), atol=2e-3, rtol=2e-2)

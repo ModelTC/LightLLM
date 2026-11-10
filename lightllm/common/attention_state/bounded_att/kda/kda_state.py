@@ -26,6 +26,8 @@ logger = init_logger(__name__)
 class KDAState(BoundedAttentionState):
     """KDA 的 Conv 历史、方形 SSM 和 MTP 游标，要求 Q/K/V head 数及维度相同。"""
 
+    storage_layout = ("kda_conv_ssm", 1)
+
     big_pages_pool: KDAPagesPool | None
     small_pages_pool: KDAPagesPool | None
 
@@ -118,6 +120,15 @@ class KDAState(BoundedAttentionState):
         """按逻辑层号映射到物理层，返回 Conv/SSM Tensor 引用；MTP 游标和步数直接从 State 读取。"""
         storage_layer_index = self._logical_to_storage_layer[logical_layer_id]
         return self.conv_state[storage_layer_index], self.ssm_state[storage_layer_index]
+
+    def capture_snapshot_views(self, req_indices):
+        views = []
+        for req in req_indices:
+            start = req * (self.mtp_step + 1)
+            views.extend((self.conv_state[:, req], self.ssm_state[:, start : start + self.mtp_step + 1]))
+            if self.mtp_state_index is not None:
+                views.append(self.mtp_state_index[req : req + 1])
+        return views
 
     def reset_bounded_att_state(self, req_indices: List[int]) -> None:
         """清零指定请求的 Conv 历史、全部 SSM 候选及 MTP 游标，保留页池快照。"""

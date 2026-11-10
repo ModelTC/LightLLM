@@ -1,3 +1,6 @@
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_plan, bind
+from lightllm.common.attention.api import AttentionPhase
+from lightllm.common.attention.api.inputs import MLAParams
 import weakref
 import dataclasses
 import json
@@ -8,7 +11,7 @@ import torch
 import torch.nn.functional as F
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparsePrefillState, Glm5NextSparseDecodeState
+from lightllm.models.glm5_next.attention.sparse_mla import Glm5NextSparseAttBackend
 from lightllm.common.quantization import Quantcfg
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
@@ -174,14 +177,16 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     state.att_state_manager = SimpleNamespace(
         get_state=lambda **kwargs: SimpleNamespace(get_layer_view=lambda logical_layer_id: SimpleNamespace(kv=kv))
     )
-    state.prefill_att_state = Glm5NextSparsePrefillState()
-    state.b1_cu_q_seq_len = torch.arange(4, device="cuda", dtype=torch.int32)
+    backend = make_backend(Glm5NextSparseAttBackend)
+    phase = AttentionPhase.PREFILL
+    plan = make_plan(backend, make_batch((2, 3, 5), phase=phase, device="cuda"))
+    plan.nsa_cache_seqlens = lengths
+    plan.nsa_cu_seqlens_k_new = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
+    state.b1_cu_q_seq_len = plan.batch.b1_cu_q_seq_len
     state.max_q_seq_len = 1
-    state.decode_att_state = Glm5NextSparseDecodeState(
-        _infer_state_weak_ref=weakref.ref(state),
-        nsa_cache_seqlens=lengths,
-        nsa_cu_seqlens_k_new=F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0)),
-    )
+    state.attention_plans = {0: plan}
+    binding = bind(backend, plan, MLAParams(kv, layer.softmax_scale, layer.kv_lora_rank, 0))
+    layer.prefill_attention = layer.decode_attention = binding
     projected = torch.bmm(q.transpose(0, 1), kv_b.view(4, 256, 512)[:, :128]).transpose(0, 1)
     expected = []
     for row, length in enumerate(lengths.tolist()):
@@ -191,6 +196,11 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     expected = torch.stack(expected)
     prefill = layer._context_attention_kernel(q, None, state, weight)
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
+    plan = make_plan(backend, make_batch((2, 3, 5), phase=AttentionPhase.DECODE, device="cuda"))
+    plan.nsa_cache_seqlens = lengths
+    plan.nsa_cu_seqlens_k_new = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
+    state.attention_plans = {0: plan}
+    layer.decode_attention = bind(backend, plan, MLAParams(kv, layer.softmax_scale, layer.kv_lora_rank, 0))
     decode = layer._token_attention_kernel(q, state, weight)
     for output in (prefill, decode):
         torch.testing.assert_close(output.float(), expected, atol=1e-3, rtol=0.015)
@@ -427,14 +437,15 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
     for step, draft in enumerate(drafts):
         draft.prepare_attention_states()
         assert draft.att_state_manager is main.att_state_manager
-        draft._init_att_backend1()
         state = getattr(draft.att_state_manager, f"draft{step}_mla_packed_bf16_state")
         assert state is not main.att_state_manager.main_mla_packed_bf16_state
         assert not hasattr(draft, "full_att_state")
         assert state.storage is None
         assert state.config.logical_layer_groups == ((4 + step,),)
         assert state.state_name == f"draft{step}_mla_packed_bf16_state"
-        assert draft.prefill_att_backend1 is None and draft.decode_att_backend1 is None
+        from lightllm.common.attention.api import AttentionFamily
+
+        assert draft.layers_infer[0].get_attention_family() is AttentionFamily.SPARSE_MLA
         assert getattr(draft.att_state_manager, f"draft{step}_compressor_indexer_w4_s4_bf16_state").buffer.is_cuda
 
     # NoPE state initialization must not require a model-owned RoPE cache.

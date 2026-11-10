@@ -52,6 +52,8 @@ class TorchMemorySaverWrapper:
 
 
 class _TorchMemorySaver:
+    enabled = True
+
     @contextmanager
     def configure_subprocess(self):
         # 子进程启动需要放在该上下文里，让 torch_memory_saver 在 worker
@@ -80,6 +82,8 @@ class _TorchMemorySaver:
 
 
 class _TorchMemorySaverFake:
+    enabled = False
+
     # 未开启 torch_memory_saver 时保持相同接口，保证调用方逻辑完全一致。
     @contextmanager
     def configure_subprocess(self):

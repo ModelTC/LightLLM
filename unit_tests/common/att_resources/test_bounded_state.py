@@ -51,7 +51,9 @@ def make_state(
     )
     manager = AttentionStateManager(request_capacity=3)
     manager.register_state("main", state)
-    state.initialize_page_pools(big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu")
+    state.initialize_page_pools(
+        big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu" and torch.cuda.is_available()
+    )
     return state
 
 

@@ -20,6 +20,9 @@ from lightllm.common.basemodel.layer_infer.transformer_layer_infer import Transf
 
 def test_creation_does_not_bind_layers(monkeypatch: pytest.MonkeyPatch) -> None:
     model = LlamaTpPartModel.__new__(LlamaTpPartModel)
+    from lightllm.platform import get_device_runtime
+
+    model.device_runtime = get_device_runtime("cpu")
     model.args, model.config = SimpleNamespace(), {}
     model.tp_rank_, model.tp_world_size_ = 0, 1
     model.layers_infer = [SimpleNamespace(layer_num_=0, indexer=SimpleNamespace())]
@@ -65,6 +68,9 @@ def test_query_selects_role_and_scheme_and_preserves_shared_layers(role: str, mo
                 ),
             )
     model = TpPartBaseModel.__new__(TpPartBaseModel)
+    from lightllm.platform import get_device_runtime
+
+    model.device_runtime = get_device_runtime("cpu")
     model.is_mtp_draft_model = role != "main"
     model.mtp_previous_draft_models = []
     model.max_req_num = 0

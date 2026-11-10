@@ -3,8 +3,8 @@ from copy import deepcopy
 import torch
 
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
-from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+from lightllm.models.glm5_next.attention.sparse_mla import Glm5NextSparseAttBackend
+from lightllm.models.glm5_next.attention.fp8_sparse_mla import Fp8Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
@@ -153,20 +153,13 @@ class Glm5NextMTPModel(TpPartBaseModel):
         config.update(num_hidden_layers=1, n_layer=1, mhc=False)
         return config
 
-    def prepare_attention_states(self) -> None:
-        super().prepare_attention_states()
-        if self.args.llm_kv_type == "fp8kv_dsa" and self.att_state_manager.get_full_attention_states(
-            self.att_state_role
-        ):
-            # Reserve fixed scratch space before the shared KV capacity is profiled.
-            Fp8Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
+    def attention_backend_candidates(self, family, phase):
+        from lightllm.common.attention.api import AttentionFamily
 
-    def _init_att_backend(self):
-        backend_class = (
-            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
-        )
-        self.prefill_att_backend = backend_class(model=self)
-        self.decode_att_backend = self.prefill_att_backend
+        if family is AttentionFamily.KDA:
+            return None, ["triton"]
+        backend = Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
+        return {self.args.llm_kv_type: {"flashmla_sparse": backend}}, ["flashmla_sparse"]
 
     def autotune_layers(self):
         return 1

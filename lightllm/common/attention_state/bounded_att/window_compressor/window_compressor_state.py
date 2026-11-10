@@ -79,6 +79,8 @@ class WindowCompressorState(BoundedAttentionState):
     无重叠的窗口在组边界不需要快照，因此不创建大小页池，也不占 CPU 联合页字节。
     """
 
+    storage_layout = ("window_compressor_ring", 1)
+
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================
@@ -161,6 +163,9 @@ class WindowCompressorState(BoundedAttentionState):
     def get_layer_view(self, logical_layer_id: int) -> torch.Tensor:
         """返回该层 [request, window+MTP, candidate|gate] 的计算视图。"""
         return self.buffer[self._logical_to_storage_layer[logical_layer_id]]
+
+    def capture_snapshot_views(self, req_indices):
+        return [self.buffer[:, req] for req in req_indices]
 
     def reset_bounded_att_state(self, req_indices: list[int]) -> None:
         for req_idx in req_indices:

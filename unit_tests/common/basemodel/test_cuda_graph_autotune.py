@@ -22,16 +22,20 @@ def capture_env(monkeypatch):
     monkeypatch.setattr(Autotuner, "_autotune_warmup_kernel_type", None)
     monkeypatch.setattr(autotuner_module.dist, "is_initialized", lambda: False)
     monkeypatch.setattr(autotuner_module.KernelConfigs, "get_config_file_name", lambda params: "configs.json")
-    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *args: None)
     monkeypatch.setattr(torch.cuda, "graph_pool_handle", lambda: None)
 
     class FakeGraph:
         def __init__(self):
             self.replays = 0
+            self.resets = 0
             env.graphs.append(self)
 
         def replay(self):
             self.replays += 1
+
+        def reset(self):
+            self.resets += 1
 
     @contextmanager
     def capture(graph, **kwargs):
@@ -45,6 +49,12 @@ def capture_env(monkeypatch):
 
     monkeypatch.setattr(torch.cuda, "CUDAGraph", FakeGraph)
     monkeypatch.setattr(torch.cuda, "graph", capture)
+    from lightllm.platform.cuda import CudaRuntime
+    from lightllm.platform import DeviceCaps, Platform
+
+    runtime = CudaRuntime("cuda:0")
+    runtime.caps = DeviceCaps(Platform.CUDA, torch.device("cuda:0"), supports_graph=True)
+    monkeypatch.setattr(cuda_graph_module, "get_device_runtime", lambda: runtime)
     return env
 
 
@@ -82,7 +92,23 @@ def test_decode_attention_tunes_before_capture_only(capture_env, tmp_path, monke
 
     general, general_cache = make_kernel(AutotuneKernelType.GENERAL)
     attention, attention_cache = make_kernel(AutotuneKernelType.DECODE_ATTENTION)
-    states = [SimpleNamespace(input_ids=torch.ones(2, dtype=torch.int64)) for _ in range(2 if overlap else 1)]
+    manager = SimpleNamespace(
+        storage_generation=0,
+        register_graph=lambda graph: None,
+        snapshot_capture_state=lambda *args: (),
+        restore_capture_state=lambda snapshot: None,
+    )
+    states = [
+        SimpleNamespace(
+            input_ids=torch.ones(2, dtype=torch.int64),
+            b_req_idx=torch.tensor([0, 1]),
+            att_state_role="main",
+            att_state_manager=manager,
+            attention_plans={},
+            attention_groups=(),
+        )
+        for _ in range(2 if overlap else 1)
+    ]
     outputs = [object() for _ in states]
     forward_calls = []
 
@@ -115,7 +141,23 @@ def test_decode_attention_tunes_before_capture_only(capture_env, tmp_path, monke
 def test_warmup_failure_restores_phase_without_capturing(capture_env, overlap):
     capture_env.args.enable_decode_microbatch_overlap = overlap
     graph = CudaGraph(1, 2, 1, max_batch_size=2)
-    states = [SimpleNamespace(input_ids=torch.ones(2, dtype=torch.int64)) for _ in range(2 if overlap else 1)]
+    manager = SimpleNamespace(
+        storage_generation=0,
+        register_graph=lambda graph: None,
+        snapshot_capture_state=lambda *args: (),
+        restore_capture_state=lambda snapshot: None,
+    )
+    states = [
+        SimpleNamespace(
+            input_ids=torch.ones(2, dtype=torch.int64),
+            b_req_idx=torch.tensor([0, 1]),
+            att_state_role="main",
+            att_state_manager=manager,
+            attention_plans={},
+            attention_groups=(),
+        )
+        for _ in range(2 if overlap else 1)
+    ]
 
     def decode_func(*infer_states):
         assert Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION)
@@ -128,3 +170,49 @@ def test_warmup_failure_restores_phase_without_capturing(capture_env, overlap):
     assert not Autotuner.is_autotune_warmup()
     assert capture_env.capture_count == 0
     assert graph.graph == {}
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("fail_binding", [False, True])
+def test_capture_failure_restores_state_and_releases_native_graph(capture_env, overlap, fail_binding):
+    from lightllm.common.attention.api import AttentionPhase
+
+    capture_env.args.enable_decode_microbatch_overlap = overlap
+    graph = CudaGraph(1, 2, 1, max_batch_size=2)
+    persistent = torch.zeros(1)
+    manager = SimpleNamespace(
+        storage_generation=0,
+        register_graph=lambda graph: None,
+        snapshot_capture_state=lambda *args: persistent.clone(),
+        restore_capture_state=lambda snapshot: persistent.copy_(snapshot),
+    )
+
+    def bind_graph(plan):
+        raise ValueError("failed binding")
+
+    backend = SimpleNamespace(bind_graph=bind_graph)
+    states = [
+        SimpleNamespace(
+            input_ids=torch.ones(2, dtype=torch.int64),
+            b_req_idx=torch.tensor([0, 1]),
+            att_state_role="main",
+            att_state_manager=manager,
+            attention_plans={0: SimpleNamespace(capacity=SimpleNamespace(phase=AttentionPhase.DECODE))}
+            if fail_binding
+            else {},
+            attention_groups=(SimpleNamespace(backend_for=lambda phase: backend),),
+        )
+        for _ in range(2 if overlap else 1)
+    ]
+
+    def decode_func(*infer_states):
+        persistent.add_(1)
+        if capture_env.capturing and not fail_binding:
+            raise ValueError("failed capture")
+        return (None, None) if overlap else None
+
+    with pytest.raises(ValueError, match="failed binding" if fail_binding else "failed capture"):
+        graph.capture_decode(decode_func, *states)
+    assert persistent.item() == 0
+    assert not capture_env.capturing and not graph.graph
+    assert capture_env.graphs[0].resets == 1

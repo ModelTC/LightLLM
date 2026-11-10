@@ -58,6 +58,8 @@ class FP8E8M0PackedMLAConfig:
 class FP8E8M0PackedMLAState(FullAttentionState):
     """独立的 group64/E8M0 MLA 实现，不继承其他具体 State 或动态选择编码。"""
 
+    storage_layout = ("mla_packed_fp8_e8m0_token_row", 1)
+
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================

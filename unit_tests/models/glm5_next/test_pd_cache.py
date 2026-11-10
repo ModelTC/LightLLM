@@ -284,6 +284,9 @@ def test_pd_kv_and_runtime_state_roundtrip(
 
 
 def test_pd_page_capacity_includes_tail_without_resizing(make_mems, monkeypatch, caplog):
+    from lightllm.common.attention_state.pd_operator import logger
+
+    monkeypatch.setattr(logger, "handlers", [*logger.handlers, caplog.handler])
     monkeypatch.setattr(get_env_start_args(), "pd_kv_page_size", 8)
     mem = make_mems(1)[0]
     full_bytes = max(

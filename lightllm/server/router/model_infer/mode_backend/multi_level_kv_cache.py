@@ -47,18 +47,13 @@ class MultiLevelKvCacheModule(object):
         """不支持异步 CPU cache 的 backend（目前是 FA3）仍要等计算流，否则搬运可能崩溃。"""
 
         model = self.backend.model
-        att_backends = [
-            model.prefill_att_backend,
-            model.decode_att_backend,
-            model.prefill_att_backend1,
-            model.decode_att_backend1,
-        ]
-        for att_backend in att_backends:
-            if att_backend is not None and att_backend.requires_cpu_cache_sync:
-                logger.info(
-                    "MultiLevelKvCacheModule: %s requires synchronous CPU cache IO.", type(att_backend).__name__
-                )
-                return True
+        for group in model.attention_groups:
+            for backend in (group.prefill_backend, group.decode_backend):
+                if backend.requires_cpu_cache_sync:
+                    logger.info(
+                        "MultiLevelKvCacheModule: %s requires synchronous CPU cache IO.", type(backend).__name__
+                    )
+                    return True
         logger.info("MultiLevelKvCacheModule: CPU cache load waits on a recorded event.")
         return False
 
@@ -282,8 +277,13 @@ class MultiLevelKvCacheModule(object):
         """选择请求可缓存的前缀，分配 CPU 页并提交写出，返回待确认完成的任务。"""
         assert CacheTier.CPU in req.cache_tiers
         disk_offload_enable = CacheTier.DISK in req.cache_tiers
-        # KV 和 bounded 快照均在 offload 流上复制，由后续完成事件统一确认就绪。
-        with torch.cuda.stream(self.get_cpu_offload_stream()):
+        cpu_kv_cache_stream = self.get_cpu_offload_stream()
+        producer = torch.cuda.current_stream()
+        cpu_kv_cache_stream.wait_stream(producer)
+        overlap = g_infer_context.get_overlap_stream()
+        if overlap != producer:
+            cpu_kv_cache_stream.wait_stream(overlap)
+        with torch.cuda.stream(cpu_kv_cache_stream):
             # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
             token_hash_list = req.shm_req.token_hash_list.get_all()
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
