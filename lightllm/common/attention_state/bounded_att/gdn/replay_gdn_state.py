@@ -811,15 +811,12 @@ def _bind_history(
     assert owner.num_key_heads > 0 and hv % owner.num_key_heads == 0
     owner.hold_req_id = slots - 1
     owner.cursors = torch.zeros(slots, dtype=torch.int32, device=ssm.device)
-    # 一段连续前缀，长度不超过 capacity。precompute 且 BF16、短 history 时 history 用激活精度，其余用 FP32。
-    history_dtype = (
-        activation_dtype
-        if activation_dtype == torch.bfloat16 and verify_width > 1 and compute_mode == "precompute" and capacity <= 8
-        else torch.float32
-    )
+    # 输出重建用归一化 k 和 d。bf16 激活时这两份用 fp16，尾数比 bf16 多，和当前精度更好的重建缓存一致。
+    # 原始 k/v 保持激活精度。g 和 beta 保持 fp32。压缩在 fp32 里从原始值折回。
+    reconstruction_dtype = torch.float16 if activation_dtype == torch.bfloat16 else torch.float32
     key_shape = (layers, slots, owner.num_key_heads, capacity, k)
-    owner.keys = torch.empty(key_shape, dtype=history_dtype, device=ssm.device)
-    owner.deltas = torch.empty((layers, slots, hv, capacity, v), dtype=history_dtype, device=ssm.device)
+    owner.keys = torch.empty(key_shape, dtype=reconstruction_dtype, device=ssm.device)
+    owner.deltas = torch.empty((layers, slots, hv, capacity, v), dtype=reconstruction_dtype, device=ssm.device)
     owner.gates = torch.empty((layers, slots, hv, capacity), dtype=torch.float32, device=ssm.device)
     owner.raw_keys = torch.empty(key_shape, dtype=activation_dtype, device=ssm.device)
     owner.raw_values = torch.empty((layers, slots, hv, capacity, v), dtype=activation_dtype, device=ssm.device)

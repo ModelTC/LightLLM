@@ -9,6 +9,7 @@ fold applies that accepted prefix onto the canonical SSM.
 from .replayssm_decode import (
     _decode_replay,
     _gdn_precomputed_window,
+    _kda_precomputed_window,
     _project_qk,
     _replay_each_token,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "_decode_replay",
     "_project_qk",
     "_gdn_precomputed_window",
+    "_kda_precomputed_window",
     "_replay_each_token",
     "_delta_rule_step",
     "_advance_cursor",

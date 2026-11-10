@@ -395,6 +395,53 @@ def test_bf16_commit_rounds_before_the_next_token():
     torch.testing.assert_close(ssm_backends[0].ssm_state, ssm_backends[1].ssm_state, atol=0, rtol=0)
 
 
+def test_large_bf16_state_precompute_matches_inline():
+    # 输出投影用 tf32x3。重建缓存的 k/d 在 bf16 激活下是 fp16，输出允许一个 fp16 单位。
+    # 折回 SSM 仍从原始 k/v 在 fp32 中计算，两条路径的 checkpoint 必须一致。
+    heads = 16
+    config = {"BV": 32, "num_warps": 1, "num_stages": 1}
+    reqs = torch.tensor([0], dtype=torch.int32, device="cuda")
+    alog = torch.zeros(heads, device="cuda")
+    bias = torch.zeros_like(alog)
+
+    def check(capacity, width, steps):
+        torch.manual_seed(7)
+        state = (torch.randn((1, 2, heads, 128, 128), device="cuda") * 10).bfloat16()
+        backends = [
+            ReplaySSMExecutor(
+                state.clone(),
+                capacity,
+                width,
+                torch.bfloat16,
+                num_key_heads=heads,
+                compute_mode=mode,
+                run_config=config,
+            )
+            for mode in ("inline", "precompute")
+        ]
+        cu = None if width == 1 else torch.tensor([0, width], dtype=torch.int32, device="cuda")
+        accepted = torch.tensor([width - 1], dtype=torch.int32, device="cuda")
+        for step in range(steps):
+            torch.manual_seed(100 + step)
+            q = torch.randn((1, width, heads, 128), device="cuda", dtype=torch.bfloat16)
+            k = torch.randn_like(q)
+            v = torch.randn((1, width, heads, 128), device="cuda", dtype=torch.bfloat16)
+            a = torch.randn((width, heads), device="cuda", dtype=torch.bfloat16) - 1
+            b = torch.randn_like(a)
+            outputs = [replay_layer(backend, 0, q, k, v, a, b, alog, bias, reqs, cu)[0] for backend in backends]
+            # 重建用的 k/d 在 bf16 激活下是 fp16。两条路径在存入前的舍入可以差一个 fp16 单位。
+            torch.testing.assert_close(outputs[0], outputs[1], atol=5e-4, rtol=5e-4)
+            for backend in backends:
+                backend.accept_updates(reqs, accepted, width=width)
+                backend.maybe_compress_prefix(reqs)
+        for backend in backends:
+            backend.merge_accepted_updates(reqs)
+        torch.testing.assert_close(backends[0].ssm_state, backends[1].ssm_state, atol=0, rtol=0)
+
+    check(4, 1, 16)
+    check(16, 2, 4)
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
 @pytest.mark.parametrize("capture_metadata", [False, True])

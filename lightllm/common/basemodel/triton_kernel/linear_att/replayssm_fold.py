@@ -53,15 +53,18 @@ def _fold_prefix(
     vv = iv * BV + tl.arange(0, BV)
     sp = State + slot * K * V + kk[:, None] * V + vv[None, :]
     state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
-    for j in range(n):
-        raw_k = tl.load(RawKeys + (key_slot * L + j) * K + kk, kk < K, 0).to(tl.float32)
-        raw_v = tl.load(RawValues + (slot * L + j) * V + vv, vv < V, 0).to(tl.float32)
+    # cursor 可能暂时超过容量。循环只走容量内的槽，越界步不读 history，也不更新 state。
+    for j in range(L):
+        active = j < n
+        raw_k = tl.load(RawKeys + (key_slot * L + j) * K + kk, active & (kk < K), 0).to(tl.float32)
+        raw_v = tl.load(RawValues + (slot * L + j) * V + vv, active & (vv < V), 0).to(tl.float32)
         if KDA:
-            g = tl.load(Gates + (slot * L + j) * K + kk, kk < K, 0).to(tl.float32)
+            g = tl.load(Gates + (slot * L + j) * K + kk, active & (kk < K), 0).to(tl.float32)
         else:
-            g = tl.load(Gates + slot * L + j).to(tl.float32)
-        beta = tl.load(Betas + slot * L + j).to(tl.float32)
-        state = _delta_rule_step(state, raw_k, raw_v, g, beta, KDA)
+            g = tl.load(Gates + slot * L + j, active, 0).to(tl.float32)
+        beta = tl.load(Betas + slot * L + j, active, 0).to(tl.float32)
+        updated = _delta_rule_step(state, raw_k, raw_v, g, beta, KDA)
+        state = tl.where(active, updated, state)
     mask = (kk[:, None] < K) & (vv[None, :] < V)
     if OUTPUT_STRIDES is not None:
         target = tl.load(Output + row).to(tl.pointer_type(State.dtype.element_ty))

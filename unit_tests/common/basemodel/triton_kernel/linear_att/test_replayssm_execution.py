@@ -431,3 +431,40 @@ def test_small_batch_matches_larger_graph_padding(batch, dtype, kda):
             atol=0.002,
             rtol=torch.finfo(dtype).eps,
         )
+
+
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+def test_full_prefix_does_not_address_past_capacity(kda):
+    torch.manual_seed(4)
+    capacity = 4
+    backend = ReplaySSMExecutor(
+        torch.randn(1, 3, 2, 32, 32, device="cuda") * 0.01,
+        capacity,
+        1,
+        torch.bfloat16,
+        kda=kda,
+        run_config={"BV": 32, "num_warps": 1, "num_stages": 1},
+    )
+    reqs = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+    q = torch.randn(2, 1, 32, device="cuda") * 0.2
+    k, v = torch.randn_like(q), torch.randn_like(q)
+    a = torch.full((2, 32 if kda else 1), -3.0, device="cuda")
+    beta = torch.randn(2, 1, device="cuda")
+    alog, bias = torch.zeros(1, device="cuda"), torch.zeros(a.shape[-1], device="cuda")
+    backend.ssm_state.zero_()
+    backend.cursors.zero_()
+    for name in ("keys", "deltas", "gates", "raw_keys", "raw_values", "betas"):
+        getattr(backend, name).zero_()
+    backend.cursors[reqs.long()] = capacity + 2
+    replay_layer(backend, 0, q, k, v, a, beta, alog, bias, reqs)
+    backend.merge_accepted_updates(reqs)
+    torch.cuda.synchronize()
+    assert torch.equal(backend.cursors[reqs.long()], torch.zeros(2, device="cuda", dtype=torch.int32))
+    assert torch.isfinite(backend.ssm_state).all()
+    for _ in range(12):
+        replay_layer(backend, 0, q, k, v, a, beta, alog, bias, reqs)
+        backend.accept_single_token(reqs)
+        backend.maybe_compress_prefix(reqs)
+    torch.cuda.synchronize()
+    assert int(backend.cursors[reqs.long()].max()) <= capacity
+    assert torch.isfinite(backend.ssm_state).all()

@@ -2,12 +2,28 @@
 """ReplaySSM decode kernels.
 
 `_decode_replay` is the entry. It projects the verify window when asked, then
-either solves a GDN window or walks tokens one by one. Neither path writes the
+solves a GDN or KDA window, or walks tokens one by one. Neither path writes the
 canonical SSM.
 """
 
 import triton
 import triton.language as tl
+
+
+@triton.jit
+def _history_coeff(rows, vec, BK: tl.constexpr):
+    # rows [R, BK] · vec [BK] -> [R]. tf32x3 是 tensor core 上最接近 fp32 的输出重建。
+    if BK >= 16:
+        return tl.sum(tl.dot(rows, vec[:, None], input_precision="tf32x3"), 1)
+    return tl.sum(rows * vec[None, :], 1)
+
+
+@triton.jit
+def _apply_deltas(coeff, deltas, R: tl.constexpr, BV: tl.constexpr):
+    # coeff [R] · deltas [R, BV] -> [BV]. R 小于 16 时 tensor core 不能做这次点积。
+    if R >= 16 and BV >= 16:
+        return tl.sum(tl.dot(coeff[None, :], deltas, input_precision="tf32x3"), 0)
+    return tl.sum(deltas * coeff[:, None], 0)
 
 
 @triton.jit
@@ -81,10 +97,10 @@ def _decode_replay(
     state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
 
     if PRECOMPUTE_PROJECTIONS:
-        projection_dtype: tl.constexpr = (
-            tl.bfloat16 if State.dtype.element_ty == tl.bfloat16 and Q.dtype.element_ty == tl.bfloat16 else tl.float32
-        )
-        projection_precision: tl.constexpr = "tf32" if Q.dtype.element_ty == tl.bfloat16 else "tf32x3"
+        # 输出用 tf32x3 tensor core 从冻结的 checkpoint 和 history 重建。
+        # 状态不在这里更新；压缩仍用原始 k/v 做 fp32 串行折回。
+        projection_dtype: tl.constexpr = tl.float32
+        projection_precision: tl.constexpr = "tf32x3"
         qk, projections, tt, tokens, valid, h = _project_qk(
             Q,
             Kp,
@@ -117,7 +133,50 @@ def _decode_replay(
     else:
         projections, tt = None, None
 
-    if PRECOMPUTE_PROJECTIONS and not KDA:
+    if PRECOMPUTE_PROJECTIONS and KDA:
+        _kda_precomputed_window(
+            Kp,
+            Vp,
+            A,
+            B,
+            Alog,
+            Bias,
+            Keys,
+            Deltas,
+            Gates,
+            RawKeys,
+            RawValues,
+            Betas,
+            Out,
+            SK,
+            SV,
+            SA,
+            SB,
+            HV,
+            KH,
+            K,
+            V,
+            L,
+            BV,
+            BW,
+            BR,
+            BK,
+            LOWER,
+            end,
+            h,
+            hv,
+            iv,
+            key_slot,
+            kk,
+            n,
+            projections,
+            qk,
+            slot,
+            start,
+            tt,
+            vv,
+        )
+    elif PRECOMPUTE_PROJECTIONS:
         _gdn_precomputed_window(
             Kp,
             Vp,
@@ -193,6 +252,8 @@ def _decode_replay(
             BW,
             KDA,
             LOWER,
+            BK,
+            BV,
             end,
             hv,
             iv,
@@ -243,20 +304,25 @@ def _project_qk(
     tt = tl.arange(0, BQK)
     tokens = start + tt % BW
     valid = (tt < 2 * BW) & (tokens < end)
+    safe_tokens = tl.where(valid, tokens, start)
     h = hv // (HV // H)
     q_rows = tl.load(
-        Q + tokens[:, None] * SQ + h * K + kk[None, :],
+        Q + safe_tokens[:, None] * SQ + h * K + kk[None, :],
         (valid & (tt < BW))[:, None] & (kk[None, :] < K),
         0,
     ).to(tl.float32)
     k_rows = tl.load(
-        Kp + tokens[:, None] * SK + h * K + kk[None, :],
+        Kp + safe_tokens[:, None] * SK + h * K + kk[None, :],
         (valid & (tt >= BW))[:, None] & (kk[None, :] < K),
         0,
     ).to(tl.float32)
-    qk = q_rows + k_rows
+    # Padded query/key rows share the MMA tile. Keep them at zero so they
+    # cannot change the valid rows.
+    row_valid = valid[:, None]
+    qk = tl.where(row_valid, q_rows + k_rows, 0)
     qk *= tl.rsqrt(tl.sum(qk * qk, axis=1) + 1.0e-6)[:, None]
     qk *= tl.where(tt < BW, K ** -0.5, 1.0)[:, None]
+    qk = tl.where(row_valid, qk, 0)
     if KDA:
         history = ll < n
         gates = tl.load(
@@ -266,9 +332,11 @@ def _project_qk(
         ).to(tl.float32)
         total_g = tl.sum(gates, axis=0)
         wi = tl.arange(0, BW)
+        gate_ok = start + wi < end
+        safe_wi = tl.where(gate_ok, wi, 0)
         gate_inputs = tl.load(
-            A + (start + wi[:, None]) * SA + hv * K + kk[None, :],
-            (start + wi[:, None] < end) & (kk[None, :] < K),
+            A + (start + safe_wi[:, None]) * SA + hv * K + kk[None, :],
+            gate_ok[:, None] & (kk[None, :] < K),
             0,
         ).to(tl.float32)
         gate_inputs += tl.load(Bias + hv * K + kk, kk < K, 0).to(tl.float32)[None, :]
@@ -281,8 +349,10 @@ def _project_qk(
         )
         # All exponents are forward decay. No inverse prefix scaling can
         # overflow when a long history contains strongly negative gates.
+        # Padded rows stay zero: 0 * exp(garbage) is NaN and would enter the dot.
+        scaled = tl.where(row_valid, qk * tl.exp(query_gates), 0)
         projections = tl.dot(
-            (qk * tl.exp(query_gates)).to(projection_dtype),
+            scaled.to(projection_dtype),
             state.to(projection_dtype),
             input_precision=projection_precision,
         )
@@ -342,27 +412,32 @@ def _gdn_precomputed_window(
     fresh_tokens = start + jj - L
     old = (jj < L) & (jj < n)
     fresh = (jj >= L) & (jj < L + end - start)
+    # BR is rounded above the history length. Masked lanes must still address
+    # a real slot; otherwise they read uninitialized neighbor rows into the dot.
+    safe_jj = tl.where(jj < L, jj, 0)
+    safe_fresh = tl.where(fresh, fresh_tokens, start)
     cached_keys = tl.load(
-        Keys + (key_slot * L) * K + jj[:, None] * K + kk[None, :],
+        Keys + (key_slot * L) * K + safe_jj[:, None] * K + kk[None, :],
         old[:, None] & (kk[None, :] < K),
         0,
     ).to(tl.float32)
     raw_keys = tl.load(
-        Kp + fresh_tokens[:, None] * SK + h * K + kk[None, :],
+        Kp + safe_fresh[:, None] * SK + h * K + kk[None, :],
         fresh[:, None] & (kk[None, :] < K),
         0,
     ).to(tl.float32)
     fresh_keys = raw_keys * tl.rsqrt(tl.sum(raw_keys * raw_keys, axis=1) + 1.0e-6)[:, None]
+    fresh_keys = tl.where(fresh[:, None], fresh_keys, 0)
     all_keys = cached_keys + fresh_keys
     values = tl.load(
-        Vp + fresh_tokens[:, None] * SV + hv * V + vv[None, :],
+        Vp + safe_fresh[:, None] * SV + hv * V + vv[None, :],
         fresh[:, None] & (vv[None, :] < V),
         0,
     ).to(tl.float32)
     log_a, bias = tl.load(Alog + hv).to(tl.float32), tl.load(Bias + hv).to(tl.float32)
-    x = tl.load(A + fresh_tokens * SA + hv, fresh, 0).to(tl.float32) + bias
+    x = tl.load(A + safe_fresh * SA + hv, fresh, 0).to(tl.float32) + bias
     fresh_gates = -tl.exp(log_a) * tl.where(x <= 20.0, tl.log(1.0 + tl.exp(x)), x)
-    gates = tl.load(Gates + slot * L + jj, old, 0).to(tl.float32)
+    gates = tl.load(Gates + slot * L + safe_jj, old, 0).to(tl.float32)
     gates += tl.where(fresh, fresh_gates, 0.0)
     prefix = tl.cumsum(gates, axis=0)
     query_gates = tl.sum(tl.where(jj[None, :] <= L + (tt % BW)[:, None], gates[None, :], 0), 1)
@@ -373,15 +448,15 @@ def _gdn_precomputed_window(
     coefficients *= tl.where(causal, tl.exp(tl.minimum(query_gates[:, None] - prefix[None, :], 0.0)), 0.0)
     projections *= tl.exp(query_gates)[:, None]
     deltas = tl.load(
-        Deltas + (slot * L) * V + jj[:, None] * V + vv[None, :],
+        Deltas + (slot * L) * V + safe_jj[:, None] * V + vv[None, :],
         old[:, None] & (vv[None, :] < V),
         0,
     ).to(tl.float32)
-    betas = tl.sigmoid(tl.load(B + fresh_tokens * SB + hv, fresh, 0).to(tl.float32))
+    betas = tl.sigmoid(tl.load(B + safe_fresh * SB + hv, fresh, 0).to(tl.float32))
     for t in range(end - start):
         checkpoint_sk = tl.sum(tl.where((tt == BW + t)[:, None], projections, 0), 0)
         weights = tl.sum(tl.where((tt == BW + t)[:, None], coefficients, 0), 0)
-        sk = checkpoint_sk + tl.sum(deltas * weights[:, None], 0)
+        sk = checkpoint_sk + _apply_deltas(weights, deltas, BR, BV)
         value = tl.sum(tl.where((jj == L + t)[:, None], values, 0), 0)
         beta = tl.sum(tl.where(jj == L + t, betas, 0))
         delta = beta * (value - sk)
@@ -389,37 +464,193 @@ def _gdn_precomputed_window(
     outputs = projections + tl.dot(
         coefficients.to(projection_dtype), deltas.to(projection_dtype), input_precision=projection_precision
     )
+    out_tokens = tl.where(valid, tokens, start)
     tl.store(
-        Out + (tokens[:, None] * HV + hv) * V + vv[None, :],
+        Out + (out_tokens[:, None] * HV + hv) * V + vv[None, :],
         outputs,
         (valid & (tt < BW))[:, None] & (vv[None, :] < V),
     )
     records = n + jj - L
     in_prefix = fresh & (records < L)
+    safe_records = tl.where(in_prefix, records, 0)
     tl.store(
-        Deltas + (slot * L + records[:, None]) * V + vv[None, :],
+        Deltas + (slot * L + safe_records[:, None]) * V + vv[None, :],
         deltas,
         in_prefix[:, None] & (vv[None, :] < V),
     )
     tl.store(
-        RawValues + (slot * L + records[:, None]) * V + vv[None, :],
+        RawValues + (slot * L + safe_records[:, None]) * V + vv[None, :],
         values,
         in_prefix[:, None] & (vv[None, :] < V),
     )
     if iv == 0:
         if hv % (HV // KH) == 0:
             tl.store(
-                Keys + (key_slot * L + records[:, None]) * K + kk[None, :],
+                Keys + (key_slot * L + safe_records[:, None]) * K + kk[None, :],
                 fresh_keys,
                 in_prefix[:, None] & (kk[None, :] < K),
             )
             tl.store(
-                RawKeys + (key_slot * L + records[:, None]) * K + kk[None, :],
+                RawKeys + (key_slot * L + safe_records[:, None]) * K + kk[None, :],
                 raw_keys,
                 in_prefix[:, None] & (kk[None, :] < K),
             )
-        tl.store(Gates + slot * L + records, fresh_gates, in_prefix)
-        tl.store(Betas + slot * L + records, betas, in_prefix)
+        tl.store(Gates + slot * L + safe_records, fresh_gates, in_prefix)
+        tl.store(Betas + slot * L + safe_records, betas, in_prefix)
+    return
+
+
+@triton.jit
+def _kda_precomputed_window(
+    Kp,
+    Vp,
+    A,
+    B,
+    Alog,
+    Bias,
+    Keys,
+    Deltas,
+    Gates,
+    RawKeys,
+    RawValues,
+    Betas,
+    Out,
+    SK: tl.constexpr,
+    SV: tl.constexpr,
+    SA: tl.constexpr,
+    SB: tl.constexpr,
+    HV: tl.constexpr,
+    KH: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    L: tl.constexpr,
+    BV: tl.constexpr,
+    BW: tl.constexpr,
+    BR: tl.constexpr,
+    BK: tl.constexpr,
+    LOWER: tl.constexpr,
+    end,
+    h,
+    hv,
+    iv,
+    key_slot,
+    kk,
+    n,
+    projections,
+    qk,
+    slot,
+    start,
+    tt,
+    vv,
+):
+    # KDA 的衰减在每个 key 通道上，不能把标量 exp 提到点积外面。
+    # 每个 token 用冻结 checkpoint 的投影，加上 history 的通道衰减点积重建输出。
+    # exp(G_t - G_j) 对已可见的 token 不大于 1。新 delta 仍按 token 解。
+    # 状态压缩继续用原始 k/v 在 fp32 里折回。
+    jj = tl.arange(0, BR)
+    fresh_tokens = start + jj - L
+    old = (jj < L) & (jj < n)
+    fresh = (jj >= L) & (jj < L + end - start)
+    safe_jj = tl.where(jj < L, jj, 0)
+    safe_fresh = tl.where(fresh, fresh_tokens, start)
+    cached_keys = tl.load(
+        Keys + (key_slot * L) * K + safe_jj[:, None] * K + kk[None, :],
+        old[:, None] & (kk[None, :] < K),
+        0,
+    ).to(tl.float32)
+    raw_keys = tl.load(
+        Kp + safe_fresh[:, None] * SK + h * K + kk[None, :],
+        fresh[:, None] & (kk[None, :] < K),
+        0,
+    ).to(tl.float32)
+    fresh_keys = raw_keys * tl.rsqrt(tl.sum(raw_keys * raw_keys, axis=1) + 1.0e-6)[:, None]
+    fresh_keys = tl.where(fresh[:, None], fresh_keys, 0)
+    all_keys = tl.where(old[:, None], cached_keys, 0) + fresh_keys
+    values = tl.load(
+        Vp + safe_fresh[:, None] * SV + hv * V + vv[None, :],
+        fresh[:, None] & (vv[None, :] < V),
+        0,
+    ).to(tl.float32)
+    hist_g = tl.load(
+        Gates + (slot * L + safe_jj[:, None]) * K + kk[None, :],
+        old[:, None] & (kk[None, :] < K),
+        0,
+    ).to(tl.float32)
+    total_hist = tl.sum(hist_g, axis=0)
+    hist_prefix = tl.cumsum(hist_g, axis=0)
+    wi = tl.arange(0, BW)
+    gate_ok = start + wi < end
+    safe_wi = tl.where(gate_ok, wi, 0)
+    gate_inputs = tl.load(
+        A + (start + safe_wi[:, None]) * SA + hv * K + kk[None, :],
+        gate_ok[:, None] & (kk[None, :] < K),
+        0,
+    ).to(tl.float32)
+    gate_inputs += tl.load(Bias + hv * K + kk, kk < K, 0).to(tl.float32)[None, :]
+    fresh_g_rows = LOWER * tl.sigmoid(tl.exp(tl.load(Alog + hv).to(tl.float32)) * gate_inputs)
+    fresh_g_rows = tl.where(gate_ok[:, None], fresh_g_rows, 0)
+    fresh_prefix = tl.cumsum(fresh_g_rows, axis=0)
+    fresh_index = tl.broadcast_to(tl.where(fresh, jj - L, 0)[:, None], (BR, BK))
+    G_pos = tl.where(old[:, None], hist_prefix, 0.0)
+    G_pos = tl.where(fresh[:, None], total_hist[None, :] + tl.gather(fresh_prefix, fresh_index, 0), G_pos)
+    step_g = tl.where(fresh[:, None], tl.gather(fresh_g_rows, fresh_index, 0), 0.0)
+    G_query = total_hist[None, :] + tl.gather(fresh_prefix, tl.broadcast_to((tt % BW)[:, None], qk.shape), 0)
+    deltas = tl.load(
+        Deltas + (slot * L) * V + safe_jj[:, None] * V + vv[None, :],
+        old[:, None] & (vv[None, :] < V),
+        0,
+    ).to(tl.float32)
+    betas = tl.sigmoid(tl.load(B + safe_fresh * SB + hv, fresh, 0).to(tl.float32))
+    for t in range(start, end):
+        local = t - start
+        q = tl.sum(tl.where((tt == local)[:, None], qk, 0), 0)
+        k = tl.sum(tl.where((tt == BW + local)[:, None], qk, 0), 0)
+        g_now = tl.sum(tl.where((tt == local)[:, None], G_query, 0), 0)
+        causal = old | (fresh & (jj <= L + local))
+        decay = tl.exp(tl.where(causal[:, None], g_now[None, :] - G_pos, 0.0))
+        scaled = tl.where(causal[:, None], all_keys * decay, 0)
+        hk = _history_coeff(scaled, k, BK)
+        proj_k = tl.sum(tl.where((tt == BW + local)[:, None], projections, 0), 0)
+        sk = proj_k + _apply_deltas(hk, deltas, BR, BV)
+        value = tl.sum(tl.where((jj == L + local)[:, None], values, 0), 0)
+        beta = tl.sum(tl.where(jj == L + local, betas, 0))
+        delta = beta * (value - sk)
+        deltas = tl.where((jj == L + local)[:, None], delta[None, :], deltas)
+        hq = _history_coeff(scaled, q, BK)
+        proj_q = tl.sum(tl.where((tt == local)[:, None], projections, 0), 0)
+        sq = proj_q + _apply_deltas(hq, deltas, BR, BV)
+        tl.store(Out + (t * HV + hv) * V + vv, sq, vv < V)
+    records = n + jj - L
+    in_prefix = fresh & (records < L)
+    safe_records = tl.where(in_prefix, records, 0)
+    tl.store(
+        Deltas + (slot * L + safe_records[:, None]) * V + vv[None, :],
+        deltas,
+        in_prefix[:, None] & (vv[None, :] < V),
+    )
+    tl.store(
+        RawValues + (slot * L + safe_records[:, None]) * V + vv[None, :],
+        values,
+        in_prefix[:, None] & (vv[None, :] < V),
+    )
+    if iv == 0:
+        if hv % (HV // KH) == 0:
+            tl.store(
+                Keys + (key_slot * L + safe_records[:, None]) * K + kk[None, :],
+                fresh_keys,
+                in_prefix[:, None] & (kk[None, :] < K),
+            )
+            tl.store(
+                RawKeys + (key_slot * L + safe_records[:, None]) * K + kk[None, :],
+                raw_keys,
+                in_prefix[:, None] & (kk[None, :] < K),
+            )
+        tl.store(
+            Gates + (slot * L + safe_records[:, None]) * K + kk[None, :],
+            step_g,
+            in_prefix[:, None] & (kk[None, :] < K),
+        )
+        tl.store(Betas + slot * L + safe_records, betas, in_prefix)
     return
 
 
@@ -454,6 +685,8 @@ def _replay_each_token(
     BW: tl.constexpr,
     KDA: tl.constexpr,
     LOWER: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
     end,
     hv,
     iv,
@@ -514,41 +747,43 @@ def _replay_each_token(
             # Advance the decayed keys once per token, rather than
             # evaluating L independent vector exponentials each time.
             keys *= tl.exp(g)[None, :]
-            hk = tl.sum(keys * k[None, :], axis=1)
-            hq = tl.sum(keys * q[None, :], axis=1)
+            hk = _history_coeff(keys, k, BK)
+            hq = _history_coeff(keys, q, BK)
             if PRECOMPUTE_PROJECTIONS:
                 checkpoint_sk = tl.sum(tl.where((tt == BW + t - start)[:, None], projections, 0), 0)
                 checkpoint_sq = tl.sum(tl.where((tt == t - start)[:, None], projections, 0), 0)
             else:
                 checkpoint_sk = tl.sum(state * (k * tl.exp(total_g))[:, None], axis=0)
                 checkpoint_sq = tl.sum(state * (q * tl.exp(total_g))[:, None], axis=0)
-            sk = checkpoint_sk + tl.sum(deltas * hk[:, None], axis=0)
-            sq = checkpoint_sq + tl.sum(deltas * hq[:, None], axis=0)
+            sk = checkpoint_sk + _apply_deltas(hk, deltas, L, BV)
+            sq = checkpoint_sq + _apply_deltas(hq, deltas, L, BV)
         else:
             weights = tl.where(history, tl.exp(total_g - gate_prefix), 0.0)
-            hk = tl.sum(keys * k[None, :], axis=1) * weights
-            hq = tl.sum(keys * q[None, :], axis=1) * weights
+            hk = _history_coeff(keys, k, BK) * weights
+            hq = _history_coeff(keys, q, BK) * weights
             checkpoint_sk = tl.sum(state * k[:, None], axis=0)
             checkpoint_sq = tl.sum(state * q[:, None], axis=0)
-            sk = checkpoint_sk * tl.exp(total_g) + tl.sum(deltas * hk[:, None], axis=0)
-            sq = checkpoint_sq * tl.exp(total_g) + tl.sum(deltas * hq[:, None], axis=0)
+            sk = checkpoint_sk * tl.exp(total_g) + _apply_deltas(hk, deltas, L, BV)
+            sq = checkpoint_sq * tl.exp(total_g) + _apply_deltas(hq, deltas, L, BV)
         d = beta * (v - sk)
         tl.store(Out + (t * HV + hv) * V + vv, sq + d * tl.sum(k * q), vv < V)
         record = n
         in_prefix = record < L
-        tl.store(Deltas + (slot * L + record) * V + vv, d, in_prefix & (vv < V))
-        tl.store(RawValues + (slot * L + record) * V + vv, v, in_prefix & (vv < V))
+        # 被 mask 掉的 lane 仍会计算地址。cursor 已经顶到容量时必须改写 0 号槽，避免非法访问。
+        safe_record = tl.where(in_prefix, record, 0)
+        tl.store(Deltas + (slot * L + safe_record) * V + vv, d, in_prefix & (vv < V))
+        tl.store(RawValues + (slot * L + safe_record) * V + vv, v, in_prefix & (vv < V))
         if iv == 0:
             # Only the group owner writes shared K. Every CTA computes this
             # round's K locally; readers only consume earlier accepted records.
             if hv % (HV // KH) == 0:
-                tl.store(Keys + (key_slot * L + record) * K + kk, k, in_prefix & (kk < K))
-                tl.store(RawKeys + (key_slot * L + record) * K + kk, raw_k, in_prefix & (kk < K))
+                tl.store(Keys + (key_slot * L + safe_record) * K + kk, k, in_prefix & (kk < K))
+                tl.store(RawKeys + (key_slot * L + safe_record) * K + kk, raw_k, in_prefix & (kk < K))
             if KDA:
-                tl.store(Gates + (slot * L + record) * K + kk, g, in_prefix & (kk < K))
+                tl.store(Gates + (slot * L + safe_record) * K + kk, g, in_prefix & (kk < K))
             else:
-                tl.store(Gates + slot * L + record, g, in_prefix)
-            tl.store(Betas + slot * L + record, beta, in_prefix)
+                tl.store(Gates + slot * L + safe_record, g, in_prefix)
+            tl.store(Betas + slot * L + safe_record, beta, in_prefix)
         keys = tl.where((ll == n)[:, None], k[None, :], keys)
         deltas = tl.where((ll == n)[:, None], d[None, :], deltas)
         if not KDA:
