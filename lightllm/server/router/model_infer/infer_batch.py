@@ -157,9 +157,10 @@ class InferenceContext:
             else:
                 self._hybrid_att_free_req(free_token_index=free_token_index, req=req)
                 assert len(req.hybrid_len_to_big_page_id) == 0
-        req.token_index.reset()
         req.cur_kv_len = 0
         req.hold_kv_len = 0
+        # 待释放列表已持有 CPU 快照或 GPU 行视图；reset 清理扩展状态，不改写 GPU 表。
+        req.token_index.reset()
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
         return
 
@@ -640,15 +641,6 @@ class InferReq:
 
         return
 
-    def _set_cache_prefix(self, shared_node, indexes):
-        self.token_index.reset()
-        if indexes.numel():
-            self.token_index.append_token_indexes(indexes)
-        self.shared_kv_node = shared_node
-        self.cur_kv_len = self.hold_kv_len = indexes.numel()
-        assert self.hold_kv_len % self.args.page_size == 0
-        self.shm_req.prompt_cache_len = self.cur_kv_len
-
     def _match_radix_cache(self):
         assert (
             g_infer_context.is_hybrid_att_model is False
@@ -662,7 +654,14 @@ class InferReq:
                 key, update_refs=True, mm_input_spans=self.mm_input_spans
             )
             if share_node is not None:
-                self._set_cache_prefix(share_node, value_tensor)
+                self.shared_kv_node = share_node
+                ready_cache_len = share_node.node_prefix_total_len
+                self.token_index.reset()
+                self.token_index.append_token_indexes(value_tensor[:ready_cache_len])
+                self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                self.hold_kv_len = self.cur_kv_len
+                assert self.hold_kv_len % self.args.page_size == 0
+                self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
@@ -703,7 +702,12 @@ class InferReq:
                 assert self.tail_small_page_buffer_id is None
                 if share_node.is_big_page_node():
                     # 大页匹配
-                    self._set_cache_prefix(share_node, value_tensor)
+                    self.shared_kv_node = share_node
+                    ready_cache_len = share_node.node_prefix_total_len
+                    self.token_index.reset()
+                    self.token_index.append_token_indexes(value_tensor[:ready_cache_len])
+                    self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                    self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                     assert self.tail_small_page_buffer_id is None
                     # 恢复 hybrid checkpoint
                     self._restore_attention_page(share_node, "big")
@@ -711,7 +715,12 @@ class InferReq:
                     # 小页匹配
                     if big_page_is_disable:
                         # 如果 大页本质是被禁用的，可以直接使用小页的匹配结果
-                        self._set_cache_prefix(share_node, value_tensor)
+                        self.shared_kv_node = share_node
+                        ready_cache_len = share_node.node_prefix_total_len
+                        self.token_index.reset()
+                        self.token_index.append_token_indexes(value_tensor[:ready_cache_len])
+                        self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                        self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                         assert self.tail_small_page_buffer_id is None
                         # 恢复 hybrid checkpoint
                         self._restore_attention_page(share_node, "small")
@@ -727,7 +736,9 @@ class InferReq:
                             assert need_tokens % self.args.page_size == 0
                             radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_tokens)
                             tail_mems = g_infer_context.att_state_manager.full_att_allocator.alloc(need_tokens)
-                            indexes = torch.cat((value_tensor[:cur_big_page_tokens], tail_mems))
+                            self.token_index.reset()
+                            self.token_index.append_token_indexes(value_tensor[0:cur_big_page_tokens])
+                            self.token_index.append_token_indexes(tail_mems)
 
                             # 将 对应的 value_tensors 中的 kv 数据 拷贝到 tail_mems 中对应的数据去
                             g_infer_context.att_state_manager.copy_full_att_tokens(
@@ -743,7 +754,9 @@ class InferReq:
                             self._restore_attention_page(share_node, "small")
 
                             big_page_shared_node = radix_cache.deref_to_first_big_page_node(node=share_node)
-                            self._set_cache_prefix(big_page_shared_node, indexes)
+                            self.shared_kv_node = big_page_shared_node
+                            self.cur_kv_len = int(shared_kv_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                            self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                         else:
                             # 没有充足的token 容量时， 直接找到最接近的大页，进行大页恢复
                             share_node = radix_cache.deref_to_first_big_page_node(
@@ -752,8 +765,12 @@ class InferReq:
                             if share_node is not None:
                                 assert share_node.is_big_page_node()
                                 # 大页匹配
+                                self.shared_kv_node = share_node
                                 ready_cache_len = share_node.node_prefix_total_len
-                                self._set_cache_prefix(share_node, value_tensor[:ready_cache_len])
+                                self.token_index.reset()
+                                self.token_index.append_token_indexes(value_tensor[0:ready_cache_len])
+                                self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                                self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                                 assert self.tail_small_page_buffer_id is None
                                 # 恢复 hybrid checkpoint
                                 self._restore_attention_page(share_node, "big")
