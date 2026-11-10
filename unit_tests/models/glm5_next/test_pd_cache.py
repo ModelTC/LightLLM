@@ -267,19 +267,17 @@ def test_pd_kv_and_runtime_state_roundtrip(
     outputs = []
     for mem, req_idx, indexes in ((source[0], src_req, src_indexes), (dest[0], dst_req, dst_indexes)):
         new_indexes = [i for i in range(32) if i not in indexes][:count]
-        all_indexes = indexes + new_indexes
         compress_pools(
-            raw=raw,
-            tail=mem.tail.buffer[0],
-            packed_buffer=mem.full.get_layer_view(3).indexer_k,
-            ape=ape,
-            lengths=tensor(range(length + 1, length + count + 1)),
-            starts=tensor([0] * count),
-            ragged=tensor(all_indexes),
-            req_idx=tensor([req_idx]),
-            cu_q_lens=tensor([0, count]),
-            seq_lens=tensor([length + count]),
-            max_q_len=count,
+            k_and_gate=raw,
+            indexer_tail=mem.tail.buffer[0],
+            indexer_k=mem.full.get_layer_view(3).indexer_k,
+            index_kpool_compress_ape=ape,
+            q_kv_seq_len=tensor(range(length + 1, length + count + 1)),
+            mem_index=tensor(new_indexes),
+            b_req_idx=tensor([req_idx]),
+            b1_cu_q_seq_len=tensor([0, count]),
+            b_seq_len=tensor([length + count]),
+            max_q_seq_len=count,
         )
         outputs.append(mem.full.get_layer_view(3).indexer_k[new_indexes[-1]].clone())
     assert torch.equal(*outputs)
@@ -347,22 +345,21 @@ def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step,
     def prefill(values, destination, tail):
         count = len(values)
         compress_pools(
-            raw=values,
-            tail=tail,
-            packed_buffer=destination,
-            ape=ape,
-            lengths=torch.arange(
+            k_and_gate=values,
+            indexer_tail=tail,
+            indexer_k=destination,
+            index_kpool_compress_ape=ape,
+            q_kv_seq_len=torch.arange(
                 start=1,
                 end=count + 1,
                 device="cuda",
                 dtype=torch.int32,
             ),
-            starts=torch.zeros(count, device="cuda", dtype=torch.int32),
-            ragged=ragged,
-            req_idx=torch.zeros(1, device="cuda", dtype=torch.int32),
-            cu_q_lens=torch.tensor([0, count], device="cuda", dtype=torch.int32),
-            seq_lens=torch.tensor([count], device="cuda", dtype=torch.int32),
-            max_q_len=count,
+            mem_index=ragged[:count],
+            b_req_idx=torch.zeros(1, device="cuda", dtype=torch.int32),
+            b1_cu_q_seq_len=torch.tensor([0, count], device="cuda", dtype=torch.int32),
+            b_seq_len=torch.tensor([count], device="cuda", dtype=torch.int32),
+            max_q_seq_len=count,
         )
 
     prefill(raw[:prefix], packed, source.get_layer_view(0))
@@ -407,18 +404,17 @@ def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step,
             dtype=torch.int32,
         )
         compress_pools(
-            raw=raw[start : start + count],
-            tail=target.get_layer_view(0),
-            packed_buffer=packed,
-            ape=ape,
-            lengths=lengths,
-            starts=torch.zeros(count, device="cuda", dtype=torch.int32),
-            ragged=ragged,
-            req_idx=torch.zeros(count, device="cuda", dtype=torch.int32),
-            cu_q_lens=torch.arange(count + 1, device="cuda", dtype=torch.int32),
-            seq_lens=lengths,
-            max_q_len=1,
-            mtp_index=torch.arange(count, device="cuda", dtype=torch.int32),
+            k_and_gate=raw[start : start + count],
+            indexer_tail=target.get_layer_view(0),
+            indexer_k=packed,
+            index_kpool_compress_ape=ape,
+            q_kv_seq_len=lengths,
+            mem_index=ragged[start : start + count],
+            b_req_idx=torch.zeros(count, device="cuda", dtype=torch.int32),
+            b1_cu_q_seq_len=torch.arange(count + 1, device="cuda", dtype=torch.int32),
+            b_seq_len=lengths,
+            max_q_seq_len=1,
+            b_mtp_index=torch.arange(count, device="cuda", dtype=torch.int32),
         )
         expected = torch.zeros_like(packed)
         prefill(raw[: start + count], expected, torch.zeros_like(source.get_layer_view(0)))

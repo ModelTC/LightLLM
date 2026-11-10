@@ -64,7 +64,7 @@ def test_workspace_preserves_mixed_request_pool_selection(
         max_q_seq_len=max(q_lengths),
         req_manager=SimpleNamespace(req_to_token_indexs=req_to_token_indexs),
     )
-    att_state = SimpleNamespace(lengths=lengths)
+    att_state = SimpleNamespace(q_kv_seq_len=lengths)
     indexer._get_prefill_indices(q_fp8, weights, packed_buffer, infer_state, att_state, max_pools)
     assert chunk_count == expected_chunks
     expected_scores = torch.cat(topk_scores)
@@ -74,5 +74,5 @@ def test_workspace_preserves_mixed_request_pool_selection(
     actual = indexer._get_prefill_indices(q_fp8, weights, packed_buffer, infer_state, att_state, max_pools)
     torch.testing.assert_close(torch.cat(topk_scores), expected_scores, rtol=0, atol=0)
     valid = actual >= 0
-    assert (valid.sum(dim=1) == (lengths // 4).clamp_max(indexer.topk // 4)).all().item()
+    assert (valid.sum(dim=1) == (lengths // 4).clamp_max(indexer.index_topk // 4)).all().item()
     assert ((actual == -1) | (valid & (actual < (lengths // 4)[:, None]))).all().item()

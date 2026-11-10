@@ -91,8 +91,7 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
             destination,
             ape,
             torch.arange(1, count + 1, device="cuda", dtype=torch.int32),
-            torch.zeros(count, device="cuda", dtype=torch.int32),
-            ragged,
+            ragged[:count],
             torch.zeros(1, device="cuda", dtype=torch.int32),
             torch.tensor([0, count], device="cuda", dtype=torch.int32),
             torch.tensor([count], device="cuda", dtype=torch.int32),
@@ -110,13 +109,12 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
             packed,
             ape,
             lengths,
-            torch.zeros(count, device="cuda", dtype=torch.int32),
-            ragged,
+            ragged[start : start + count],
             torch.zeros(count, device="cuda", dtype=torch.int32),
             torch.arange(count + 1, device="cuda", dtype=torch.int32),
             lengths,
             1,
-            mtp_index=torch.arange(count, device="cuda", dtype=torch.int32),
+            b_mtp_index=torch.arange(count, device="cuda", dtype=torch.int32),
         )
         expected = torch.zeros_like(packed)
         prefill(raw[: start + count], expected, torch.zeros(2, 4, 256, device="cuda", dtype=torch.bfloat16))

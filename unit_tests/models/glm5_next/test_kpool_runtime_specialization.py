@@ -92,20 +92,18 @@ def test_pool_compression_reuses_compilation_within_static_query_layouts(monkeyp
             tail[:batch, :3] = values[:, :3]
             raw = values[:, 3].contiguous()
             lengths = seq_lens
-            starts = requests * 4
+            mem_index = requests * 4 + 3
             cu = torch.arange(batch + 1, device="cuda", dtype=torch.int32)
         else:
             raw = values.reshape(batch * 4, 256)
             lengths = torch.arange(1, 5, device="cuda", dtype=torch.int32).repeat(batch)
-            starts = requests.repeat_interleave(4) * 4
+            mem_index = ragged
             cu = torch.arange(batch + 1, device="cuda", dtype=torch.int32) * 4
         # Query mode and address strides stay constexpr for the faster kernel.
         layout = (single_query, raw.stride(0))
         seen_layout = layout in hashes
         misses_before = len(misses)
-        compress_pools(
-            raw, tail, packed, ape, lengths, starts, ragged, requests, cu, seq_lens, 1 if single_query else 4
-        )
+        compress_pools(raw, tail, packed, ape, lengths, mem_index, requests, cu, seq_lens, 1 if single_query else 4)
         if seen_layout:
             assert len(misses) == misses_before
         keys, scales = gather_pools(packed, ragged.view(batch, 4), requests, seq_lens, 1)
@@ -177,7 +175,6 @@ def test_pool_compression_reuses_compilation_across_request_counts(monkeypatch):
         packed = torch.zeros((batch * 4, 1, 720), device="cuda", dtype=torch.uint8)
         requests = torch.arange(batch, device="cuda", dtype=torch.int32)
         lengths = torch.arange(1, 5, device="cuda", dtype=torch.int32).repeat(batch)
-        starts = requests.repeat_interleave(4) * 4
         ragged = torch.arange(batch * 4, device="cuda", dtype=torch.int32)
         cu = torch.arange(batch + 1, device="cuda", dtype=torch.int32) * 4
         seq_lens = torch.full((batch,), 4, device="cuda", dtype=torch.int32)
@@ -187,12 +184,11 @@ def test_pool_compression_reuses_compilation_across_request_counts(monkeypatch):
             packed,
             ape,
             lengths,
-            starts,
             ragged,
             requests,
             cu,
             seq_lens,
-            max_q_len=4,
+            max_q_seq_len=4,
         )
         keys, scales = gather_pools(packed, ragged.view(batch, 4), requests, seq_lens, 1)
         values = raw.view(batch, 4, 256)
