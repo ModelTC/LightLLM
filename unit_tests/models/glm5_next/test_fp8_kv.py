@@ -52,32 +52,36 @@ class _PrefillCase:
         self.requests = list(range(2 * len(seq_lens) - 1, 0, -2))
         total, queries = sum(seq_lens), sum(q_lens)
         capacity = capacity or total + 17
-        self.table = torch.full((2 * len(seq_lens) + 1, max(seq_lens) + 7), -1, device=device, dtype=torch.int32)
+        self.req_to_token_indexs = torch.full(
+            (2 * len(seq_lens) + 1, max(seq_lens) + 7), -1, device=device, dtype=torch.int32
+        )
         slots = torch.randperm(capacity, device=device, dtype=torch.int32)[:total]
-        cu_q, cu_kv, query_req, positions = [0], [0], [], []
+        cu_q, cu_kv, q_req_idx, positions = [0], [0], [], []
         for req, length, count in zip(self.requests, seq_lens, q_lens):
-            self.table[req, :length] = slots[cu_kv[-1] : cu_kv[-1] + length]
-            query_req.extend([req] * count)
+            self.req_to_token_indexs[req, :length] = slots[cu_kv[-1] : cu_kv[-1] + length]
+            q_req_idx.extend([req] * count)
             positions.extend(range(length - count, length))
             cu_q.append(cu_q[-1] + count)
             cu_kv.append(cu_kv[-1] + length)
-        self.query_req, self.positions = tensor(query_req).long(), tensor(positions).long()
+        self.q_req_idx, self.position_ids = tensor(q_req_idx).long(), tensor(positions).long()
         self.q = torch.randn(queries, heads, 512, device=device, dtype=torch.bfloat16)
-        self.source = torch.randn(capacity, 1, 512, device=device, dtype=torch.bfloat16)
-        self.packed = torch.zeros(capacity, 1, 720, device=device, dtype=torch.uint8)
+        self.source_kv = torch.randn(capacity, 1, 512, device=device, dtype=torch.bfloat16)
+        self.packed_kv = torch.zeros(capacity, 1, 720, device=device, dtype=torch.uint8)
         self.all_slots = torch.arange(capacity, device=device, dtype=torch.int32)
-        write_fp8_e8m0_packed_kv(self.source, self.all_slots, self.packed)
-        self.prefill = torch.randn(queries, 1, 1024, device=device, dtype=torch.bfloat16)[..., ::2]
+        write_fp8_e8m0_packed_kv(self.source_kv, self.all_slots, self.packed_kv)
+        self.prefill_cache_kv = torch.randn(queries, 1, 1024, device=device, dtype=torch.bfloat16)[..., ::2]
         visible = tensor(positions) + 1
-        self.topk = torch.randint(max(seq_lens), (queries, width), device=device, dtype=torch.int32)
-        self.topk.remainder_(visible[:, None])
-        self.topk.masked_fill_(torch.arange(width, device=device)[None, :] >= visible.clamp_max(2048)[:, None], -1)
-        self.topk[:, ::19] = -1
-        self.topk[:, 0] = visible - 1
-        self.topk[:, 1] = visible - 1
-        self.physical = torch.empty(queries, width * 2, device=device, dtype=torch.int32)[:, ::2]
-        self.infer = _make_infer_state(
-            req_manager=SimpleNamespace(req_to_token_indexs=self.table),
+        self.topk_indices = torch.randint(max(seq_lens), (queries, width), device=device, dtype=torch.int32)
+        self.topk_indices.remainder_(visible[:, None])
+        self.topk_indices.masked_fill_(
+            torch.arange(width, device=device)[None, :] >= visible.clamp_max(2048)[:, None], -1
+        )
+        self.topk_indices[:, ::19] = -1
+        self.topk_indices[:, 0] = visible - 1
+        self.topk_indices[:, 1] = visible - 1
+        self.topk_mem_indices = torch.empty(queries, width * 2, device=device, dtype=torch.int32)[:, ::2]
+        self.infer_state = _make_infer_state(
+            req_manager=SimpleNamespace(req_to_token_indexs=self.req_to_token_indexs),
             b_req_idx=tensor(self.requests),
             b_seq_len=tensor(seq_lens),
             b1_cu_q_seq_len=tensor(cu_q),
@@ -87,13 +91,13 @@ class _PrefillCase:
             mem_index=torch.empty(queries, device=device, dtype=torch.int32),
         )
         self.backend = backend or _make_workspace_backend(queries)
-        _, self.state = self.new_state()
+        _, self.att_state = self.new_state()
         self.control = AttControl(
             nsa_prefill=True,
             nsa_prefill_dict={
-                "topk_indices": self.topk,
-                "topk_mem_indices": self.physical,
-                "prefill_cache_kv": self.prefill,
+                "topk_indices": self.topk_indices,
+                "topk_mem_indices": self.topk_mem_indices,
+                "prefill_cache_kv": self.prefill_cache_kv,
                 "softmax_scale": softmax_scale,
                 "kv_lora_rank": 512,
             },
@@ -101,40 +105,44 @@ class _PrefillCase:
 
     def new_state(self, **overrides):
         if overrides:
-            infer = _make_infer_state(**vars(self.infer))
+            infer = _make_infer_state(**vars(self.infer_state))
             vars(infer).update(overrides)
         else:
-            infer = self.infer
+            infer = self.infer_state
         state = self.backend.create_att_prefill_state(infer)
         state.init_state()
         return infer, state
 
     def refresh(self):
-        self.infer.mem_index.copy_(self.table[self.query_req, self.positions])
-        self.physical.copy_(self.table[self.query_req[:, None], self.topk.clamp_min(0).long()])
-        self.physical.masked_fill_(self.topk < 0, -1)
-        self.control.nsa_prefill_dict["topk_indices"] = self.topk
+        self.infer_state.mem_index.copy_(self.req_to_token_indexs[self.q_req_idx, self.position_ids])
+        self.topk_mem_indices.copy_(
+            self.req_to_token_indexs[self.q_req_idx[:, None], self.topk_indices.clamp_min(0).long()]
+        )
+        self.topk_mem_indices.masked_fill_(self.topk_indices < 0, -1)
+        self.control.nsa_prefill_dict["topk_indices"] = self.topk_indices
 
     def run(self, state=None):
         self.refresh()
-        active = self.state if state is None else state
-        return active.prefill_att(self.q, self.packed[..., :584], None, self.control)
+        active = self.att_state if state is None else state
+        return active.prefill_att(self.q, self.packed_kv[..., :584], None, self.control)
 
     def check(self, actual):
-        values = _dequantize_kv_cache(self.packed)
-        values[self.infer.mem_index.long()] = self.prefill
-        physical = self.table[self.query_req[:, None], self.topk.clamp_min(0).long()].masked_fill(self.topk < 0, -1)
+        values = _dequantize_kv_cache(self.packed_kv)
+        values[self.infer_state.mem_index.long()] = self.prefill_cache_kv
+        physical = self.req_to_token_indexs[self.q_req_idx[:, None], self.topk_indices.clamp_min(0).long()].masked_fill(
+            self.topk_indices < 0, -1
+        )
         expected = _torch_sparse_attention(self.q, values, physical, self.control.nsa_prefill_dict["softmax_scale"])
         torch.testing.assert_close(actual.float(), expected, atol=0.012, rtol=0.015)
 
     def mutate(self):
         self.q.normal_()
-        self.prefill.normal_()
-        self.source.normal_()
-        write_fp8_e8m0_packed_kv(self.source, self.all_slots, self.packed)
+        self.prefill_cache_kv.normal_()
+        self.source_kv.normal_()
+        write_fp8_e8m0_packed_kv(self.source_kv, self.all_slots, self.packed_kv)
         for req, length in zip(self.requests, self.seq_lens):
-            self.table[req, :length].copy_(self.table[req, :length].roll(1))
-        self.topk.copy_(self.topk.roll(1, dims=1))
+            self.req_to_token_indexs[req, :length].copy_(self.req_to_token_indexs[req, :length].roll(1))
+        self.topk_indices.copy_(self.topk_indices.roll(1, dims=1))
 
 
 @pytest.mark.parametrize("draft", [False, True])
@@ -248,9 +256,9 @@ def test_fp8_scatter_quantization_and_gather_prefill(index_dtype, source_d_strid
         packed_kv.stride(0),
         prefill_kv.stride(0),
         prefill_kv.stride(2),
-        REQ_STRIDE=11,
-        TOKEN_STRIDE=1,
-        BATCH=1,
+        req_to_token_indexs_stride_b=11,
+        req_to_token_indexs_stride_s=1,
+        batch_size=1,
         BLOCK_ROWS=4,
     )
     expected = _dequantize_kv_cache(packed_kv)
@@ -313,10 +321,10 @@ def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chun
     prefix = 4 if cached else 0
     case = _PrefillCase([prefix + 3] * 2, [3, 3], num_heads, width=128, capacity=64, softmax_scale=512 ** -0.5)
     case.q = torch.randn(num_heads, 6, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
-    case.topk[0].fill_(-1)
-    case.topk[1, :2] = prefix
-    case.topk[3].fill_(-1)
-    case.topk[3, 0] = prefix
+    case.topk_indices[0].fill_(-1)
+    case.topk_indices[1, :2] = prefix
+    case.topk_indices[3].fill_(-1)
+    case.topk_indices[3, 0] = prefix
     case.check(case.run())
     graph, output = _capture_cuda_graph(case.run)
     graph.replay()
@@ -333,10 +341,10 @@ def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softm
     torch.manual_seed(53)
     case = _PrefillCase([1025], [9], num_heads, capacity=2048, softmax_scale=softmax_scale)
     lengths = torch.tensor([0, 1, 3, 127, 128, 511, 2048, 2049, 2051], device="cuda")
-    case.topk.masked_fill_(torch.arange(2176, device="cuda")[None, :] >= lengths[:, None], -1)
-    case.topk[1, 0] = 1016
-    case.topk[2, :3] = torch.tensor([2, 3, 4], device="cuda")
-    case.topk[3, :127] = torch.randint(1016, 1025, (127,), device="cuda", dtype=torch.int32)
+    case.topk_indices.masked_fill_(torch.arange(2176, device="cuda")[None, :] >= lengths[:, None], -1)
+    case.topk_indices[1, 0] = 1016
+    case.topk_indices[2, :3] = torch.tensor([2, 3, 4], device="cuda")
+    case.topk_indices[3, :127] = torch.randint(1016, 1025, (127,), device="cuda", dtype=torch.int32)
     case.check(case.run())
     graph, output = _capture_cuda_graph(case.run)
     graph.replay()
@@ -367,7 +375,7 @@ def test_fp8_h64_largeq_native_prefill_request_table_graph(monkeypatch, num_q):
     case.mutate()
     graph.replay()
     case.check(output)
-    case.topk.fill_(-1)
+    case.topk_indices.fill_(-1)
     graph.replay()
     assert torch.count_nonzero(output) == 0
     assert len(observed) == 3
@@ -404,8 +412,8 @@ def test_fp8_direct_smallq_prefill_dispatch_strided_holes_and_current(num_q, num
     case = _PrefillCase(seqs, [1] * num_q, num_heads)
     case.q = torch.randn(num_heads, num_q, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
     backing = torch.full((num_q, 4352), -1, device="cuda", dtype=torch.int32)
-    backing[:, ::2] = case.topk
-    case.topk = backing[:, ::2]
+    backing[:, ::2] = case.topk_indices
+    case.topk_indices = backing[:, ::2]
     output = case.run()
     case.check(output)
     assert output.is_contiguous() and torch.count_nonzero(output) > 0
@@ -427,7 +435,7 @@ def test_fp8_h64_direct_smallq_state_workspace_reuse_and_fresh_state():
         infer, state = case.new_state()
         case.check(case.run(state))
     assert {name: value.data_ptr() for name, value in cache["direct"].items()} == pointers
-    fresh_infer, fresh = case.new_state(mem_index=case.infer.mem_index.clone())
+    fresh_infer, fresh = case.new_state(mem_index=case.infer_state.mem_index.clone())
     case.check(case.run(fresh))
     assert {name: value.data_ptr() for name, value in cache["direct"].items()} == pointers
     case.mutate()
@@ -444,14 +452,14 @@ def test_fp8_h64_selected_prefill_state_workspace_reuse(num_q):
     for _ in range(10):
         infer, state = case.new_state()
         case.check(case.run(state))
-    fresh_infer, fresh = case.new_state(mem_index=case.infer.mem_index.clone())
+    fresh_infer, fresh = case.new_state(mem_index=case.infer_state.mem_index.clone())
     case.check(case.run(fresh))
     assert {name: value.data_ptr() for name, value in workspace.items()} == pointers
     graph, output = _capture_cuda_graph(case.run)
     case.mutate()
     graph.replay()
     case.check(output)
-    case.topk.fill_(-1)
+    case.topk_indices.fill_(-1)
     graph.replay()
     assert torch.count_nonzero(output) == 0
 
@@ -937,7 +945,7 @@ def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallba
     case = _PrefillCase([32768, 16384, 16384], [5, 4, 4], 64, backend=backend)
     case.check(case.run())
     workspace = backend._prefill_workspaces[0]["generic"]
-    assert set(workspace) == {"chunk_indices", "chunk_lengths", "cu_seqlens_q"}
+    assert set(workspace) == {"chunk_topk_indices", "chunk_cache_seqlens", "cu_seqlens_q"}
     pointers = {name: value.data_ptr() for name, value in workspace.items()}
     for _ in range(10):
         infer, state = case.new_state()

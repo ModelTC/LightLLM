@@ -220,15 +220,15 @@ def test_kpool_chunk_boundaries_and_fragmented_token_kv(cuda_graph):
         if cuda_graph:
             # Compile before capture, then restore this chunk's input cache state.
             saved_tail, saved_packed = tail.clone(), packed.clone()
-            compress_pools(*args, max_q_len=max_q_len)
+            compress_pools(*args, max_q_seq_len=max_q_len)
             tail.copy_(saved_tail)
             packed.copy_(saved_packed)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                compress_pools(*args, max_q_len=max_q_len)
+                compress_pools(*args, max_q_seq_len=max_q_len)
             graph.replay()
         else:
-            compress_pools(*args, max_q_len=max_q_len)
+            compress_pools(*args, max_q_seq_len=max_q_len)
         for req, _, end in chunks:
             offset = 0 if req == 1 else 9
             assert torch.equal(tail[req, : end % 4], source[offset + end // 4 * 4 : offset + end])
@@ -247,7 +247,7 @@ def test_kpool_chunk_boundaries_and_fragmented_token_kv(cuda_graph):
     lengths = torch.tensor(seqs, device="cuda", dtype=torch.int32)
     starts = torch.tensor([0, 9], device="cuda", dtype=torch.int32)
     groups = torch.tensor([[1, 0], [0, -1]], device="cuda", dtype=torch.int32)
-    out, relative = expand_topk(groups, lengths, req_idx, table, topk=8)
+    out, relative = expand_topk(groups, lengths, req_idx, table, index_topk=8)
     for batch, expected in enumerate([[4, 5, 6, 7, 0, 1, 2, 3, 8], list(range(7))]):
         assert relative[batch, : len(expected)].tolist() == expected
         assert (
@@ -273,7 +273,7 @@ def test_kpool_decode_cuda_graph_and_padding():
     cu_q_lens = torch.arange(5, device="cuda", dtype=torch.int32)
 
     def run():
-        compress_pools(raw, tail, packed, ape, lengths, mem_index, req_idx, cu_q_lens, lengths, max_q_len=1)
+        compress_pools(raw, tail, packed, ape, lengths, mem_index, req_idx, cu_q_lens, lengths, max_q_seq_len=1)
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -402,7 +402,7 @@ def test_kpool_packed_kv_above_two_gib():
     zero = torch.zeros(4, device="cuda", dtype=torch.int32)
     ragged = torch.tensor([0, 1, 2, loc], device="cuda", dtype=torch.int32)
     cu_q_lens = torch.tensor([0, 4], device="cuda", dtype=torch.int32)
-    compress_pools(raw, tail, packed, ape, lengths, ragged, zero[:1], cu_q_lens, lengths[-1:], max_q_len=4)
+    compress_pools(raw, tail, packed, ape, lengths, ragged, zero[:1], cu_q_lens, lengths[-1:], max_q_seq_len=4)
     keys, scales = gather_pools(packed, ragged[None], zero[:1], lengths[-1:], 1)
     pooled = (raw[:, :128].float() * (raw[:, 128:].float() + ape).softmax(0)).sum(0).bfloat16()
     expected_key, expected_scale = hadamard_transform_quant_fp8(pooled[None], scale=128 ** -0.5)
@@ -611,8 +611,8 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
         max_q_seq_len=tokens,
     )
     state = SimpleNamespace(
-        lengths=torch.arange(1, tokens + 1, device="cuda", dtype=torch.int32),
-        query_req=torch.zeros(tokens, device="cuda", dtype=torch.int32),
+        q_kv_seq_len=torch.arange(1, tokens + 1, device="cuda", dtype=torch.int32),
+        q_req_idx=torch.zeros(tokens, device="cuda", dtype=torch.int32),
     )
     indexer = Glm5NextNsaInfer(
         0,
@@ -637,8 +637,8 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
         infer.mem_index = ragged[pos : pos + 1]
         infer.max_kv_seq_len = pos + 1
         infer.b_seq_len.fill_(pos + 1)
-        state.lengths = torch.tensor([pos + 1], device="cuda", dtype=torch.int32)
-        state.query_req = infer.b_req_idx
+        state.q_kv_seq_len = torch.tensor([pos + 1], device="cuda", dtype=torch.int32)
+        state.q_req_idx = infer.b_req_idx
         _, decoded = indexer._get_indices(hidden[pos : pos + 1], hidden[pos : pos + 1], infer, state, weights)
         valid = 2048 + (pos + 1) % 4
         assert set(decoded[0, :valid].tolist()) == set(full[pos, :valid].tolist())

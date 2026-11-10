@@ -114,8 +114,8 @@ def test_decode_aliases_infer_state_without_ragged_allocation(monkeypatch, fp8):
     cls = Fp8Glm5NextSparseDecodeState if fp8 else Glm5NextSparseDecodeState
     state = cls(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
     state.init_state()
-    assert state.lengths is infer.b_seq_len
-    assert state.query_req is infer.b_req_idx
+    assert state.q_kv_seq_len is infer.b_seq_len
+    assert state.q_req_idx is infer.b_req_idx
     assert not hasattr(state, "ragged_mem_index") and not hasattr(state, "ks")
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -123,7 +123,7 @@ def test_decode_aliases_infer_state_without_ragged_allocation(monkeypatch, fp8):
     infer.b_seq_len[:3].sub_(100)
     infer.b_req_idx[:3].copy_(tensor([0, 0, 1]))
     graph.replay()
-    assert state.lengths is infer.b_seq_len and state.query_req is infer.b_req_idx
+    assert state.q_kv_seq_len is infer.b_seq_len and state.q_req_idx is infer.b_req_idx
 
 
 @pytest.mark.parametrize(
@@ -216,7 +216,7 @@ def test_fp8_prefill_reads_request_table_without_ragged_buffer(monkeypatch, quer
     check(run())
     generic = backend._prefill_workspaces[0]["generic"]
     if generic is not None:
-        assert set(generic) == {"chunk_indices", "chunk_lengths", "cu_seqlens_q"}
+        assert set(generic) == {"chunk_topk_indices", "chunk_cache_seqlens", "cu_seqlens_q"}
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         output = run()
