@@ -185,18 +185,11 @@ class MultiLevelKvCacheModule(object):
         resources = self.backend.model.att_state_manager
         cpu_cache_operator = resources.get_cpu_cache_operator()
 
-        # 阶段一：先取已命中前缀的 GPU 索引，再分配新增 KV。
-        # get_gpu_token_indexes 会补齐尚未上传的索引，并让当前流等待索引流。
+        # 阶段一：先分配新增 KV，再按 [页起点, 持有长度) 一次取 GPU 索引。
+        # 该区间覆盖首个 CPU 页里已经命中的前缀和刚分配的页；getter 会补齐上传并让当前流等待。
         assert 0 <= start_token_len <= req.cur_kv_len, "invalid CPU page start"
-        prefix_indexes = req.token_index.get_gpu_token_indexes(start_token_len, req.cur_kv_len)
-        mem_indexes = req.alloc_kv_mem(req.kv_cache_alloc_need(page_lengths[-1]))
-        assert mem_indexes is not None
-        token_indices = torch.cat(
-            [
-                prefix_indexes,
-                mem_indexes.pin_memory().cuda(non_blocking=True),
-            ]
-        )
+        assert req.alloc_kv_mem(req.kv_cache_alloc_need(page_lengths[-1])) is not None
+        token_indices = req.token_index.get_gpu_token_indexes(start_token_len, req.hold_kv_len)
         assert token_indices.numel() == page_lengths[-1] - start_token_len
 
         # 阶段二：只为完整 bounded 页分配普通大页，碎页 LOAD 槽位由资源层管理。
