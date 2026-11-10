@@ -94,7 +94,7 @@ class ServiceShmCleanup:
     @staticmethod
     def cleanup_system_v_shm(keys):
         """删除启动参数中记录的 System V 共享内存。"""
-        libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6", use_errno=True)
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
         libc.shmget.argtypes = (ctypes.c_long, ctypes.c_size_t, ctypes.c_int)
         libc.shmget.restype = ctypes.c_int
         libc.shmctl.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_void_p)

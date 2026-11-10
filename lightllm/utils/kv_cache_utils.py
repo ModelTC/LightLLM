@@ -167,7 +167,7 @@ class CpuKVCacheMeta:
 
 @lru_cache(maxsize=None)
 def create_shm_kv_cache_ptr(key: int, size: int) -> int:
-    libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6", use_errno=True)
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
     libc.shmget.argtypes = (ctypes.c_long, ctypes.c_size_t, ctypes.c_int)
     libc.shmget.restype = ctypes.c_int
     libc.shmat.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
@@ -248,7 +248,12 @@ def _load_gpu_runtime():
         candidates = ["libamdhip64.so", "/opt/rocm/lib/libamdhip64.so"]
         prefix = "hip"
     else:
-        candidates = ["libcudart.so", "/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so"]
+        candidates = [
+            "libcudart.so",
+            "/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so",
+            "/usr/local/cuda/lib64/libcudart.so",
+            "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so",
+        ]
         prefix = "cuda"
     for cand in candidates:
         try:
@@ -260,7 +265,7 @@ def _load_gpu_runtime():
 
 @lru_cache(maxsize=None)
 def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
-    """Synchronously cudaHostRegister the given [shm_ptr, shm_ptr+size)."""
+    """Synchronously host-memory registration the given [shm_ptr, shm_ptr+size)."""
     chunk_bytes = 128 * 1024 * 1024  # 128M性能最好
     tasks: list[tuple[int, int]] = []
     offset = 0
@@ -269,13 +274,14 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
         tasks.append((offset, seg_len))
         offset += seg_len
 
-    cuda = ctypes.CDLL("/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so")
-    cuda.cudaHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
-    cuda.cudaHostRegister.restype = ctypes.c_int
-    cuda.cudaHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
-    cuda.cudaHostGetDevicePointer.restype = ctypes.c_int
+    lib, prefix = _load_gpu_runtime()
+    host_register = getattr(lib, f"{prefix}HostRegister")
+    host_get_device_pointer = getattr(lib, f"{prefix}HostGetDevicePointer")
+    host_register.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
+    host_register.restype = ctypes.c_int
+    host_get_device_pointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
 
-    cudaHostRegisterFlag = 3
+    host_register_flag = 3 # Portable | Mapped
 
     device_id = get_current_device_id()
     torch.cuda.set_device(device_id)
@@ -285,9 +291,9 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
         offset, seg_len = task
         torch.cuda.set_device(device_id)
         ptr = ctypes.c_void_p(shm_ptr + offset)
-        r = cuda.cudaHostRegister(ptr, ctypes.c_size_t(seg_len), cudaHostRegisterFlag)
+        r = r = host_register(ptr, ctypes.c_size_t(seg_len), host_register_flag)
         if r != 0:
-            raise Exception(f"cudaHostRegister failed with error code {r}, prefer to use hugetlb")
+            raise Exception(f"{prefix}HostRegister failed with error code {r}, prefer to use hugetlb")
         return
 
     # worker_num的数值需要与_pre_warm_memory一致，不然会丢失warmup的效果
@@ -300,16 +306,16 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
 
     device_ptr = ctypes.c_void_p()
     host_ptr = ctypes.c_void_p(shm_ptr)
-    res = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
+    res = host_get_device_pointer(ctypes.byref(device_ptr), host_ptr, 0)
     if res != 0:
-        raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
-    logger.info(f"cudaHostGetDevicePointer success, host_ptr={host_ptr.value}, device_ptr={device_ptr.value}")
+        raise Exception(f"{prefix}HostGetDevicePointer failed with error code {res}")
+    logger.info(f"{prefix}HostGetDevicePointer success, host_ptr={host_ptr.value}, device_ptr={device_ptr.value}")
     return device_ptr.value
 
 
 @lru_cache(maxsize=None)
 def attach_shm_kv_cache_ptr(key: int, size: int) -> int:
-    libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6", use_errno=True)
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
     libc.shmget.argtypes = (ctypes.c_long, ctypes.c_size_t, ctypes.c_int)
     libc.shmget.restype = ctypes.c_int
     libc.shmat.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
