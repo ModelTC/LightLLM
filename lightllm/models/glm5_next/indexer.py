@@ -85,10 +85,10 @@ class Glm5NextNsaInfer:
         return expand_topk(groups, att_state.lengths, att_state.ks, att_state.ragged_mem_index, self.topk)
 
     def _get_prefill_chunk_size(self, max_pools):
-        # Account for DeepGEMM padding within the 64 MiB workspace.
+        # Account for DeepGEMM padding within the 512 MiB workspace.
         query_tile = 128 // self.heads
         logits_row_bytes = triton.cdiv(max_pools, 256) * 256 * 4
-        query_tiles = max(1, 64 * 1024 ** 2 // (query_tile * logits_row_bytes))
+        query_tiles = max(1, 512 * 1024 ** 2 // (query_tile * logits_row_bytes))
         return query_tiles * query_tile
 
     def _get_prefill_indices(self, q_fp8, weights, packed_buffer, infer_state, att_state, max_pools):
