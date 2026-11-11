@@ -76,7 +76,7 @@ class KvCacheAllocator:
         return
 
     def free_all(self):
-        self.mem_state.numpy()[:] = list(range(0, len(self.mem_state)))
+        torch.arange(len(self.mem_state), out=self.mem_state)
         self.mark_start = 0
         self.mark_end = len(self.mem_state)
         self.can_use_mem_size = len(self.mem_state)
