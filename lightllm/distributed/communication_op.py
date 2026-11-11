@@ -396,7 +396,7 @@ class DistributeGroupManager:
         skip_deepep_sm_reservation = (
             enable_triton_ep_moe_buffer
             or self.ep_mega_moe_mma_type == "fp8xfp8"
-            or (self.ep_mega_moe_mma_type == "fp8xfp4" and args.run_mode == "decode")
+            or (self.ep_mega_moe_mma_type == "fp8xfp4" and args.run_mode in ("prefill", "decode"))
         )
         theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_prefill_num_experts, num_experts_per_tok)
         deepep_sms = 0 if skip_deepep_sm_reservation and not has_legacy_moe_layer else theoretical_sms
@@ -475,7 +475,7 @@ class DistributeGroupManager:
                 # Decode executes routed GEMMs after dispatch instead of
                 # keeping Prefill's persistent communication/compute partition.
                 deep_gemm_sms = device_sms
-            if self.ep_mega_moe_mma_type == "fp8xfp4" and deepep_sms == 0 and run_mode == "decode":
+            if self.ep_mega_moe_mma_type == "fp8xfp4" and deepep_sms == 0:
                 # Leave one CTA pair of headroom for SM100 clustered launches.
                 deep_gemm_sms = max(2, deep_gemm_sms - 2)
                 deep_gemm_sms -= deep_gemm_sms % 2
