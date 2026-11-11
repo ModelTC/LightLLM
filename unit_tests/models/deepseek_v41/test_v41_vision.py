@@ -89,6 +89,26 @@ def test_image_preprocessing_and_layout_match_checkpoint(reference, width, heigh
     assert grid[-1] == types.numel() <= 1024
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA patch packing requires a GPU")
+@pytest.mark.parametrize("row_major,width,height", [(False, 41, 512), (True, 800, 600), (True, 30000, 1)])
+def test_gpu_image_preprocessing_matches_cpu(row_major, width, height):
+    args = SimpleNamespace(
+        vision_row_major=row_major,
+        vision_patch_size=14,
+        vision_downsample_ratio=3,
+        vision_max_n_token=1024,
+        vision_min_pixels=295936,
+        vision_max_wh_ratio=None,
+    )
+    rgb = np.arange(height * width * 3, dtype=np.uint32).astype(np.uint8).reshape(height, width, 3)
+    image = Image.fromarray(rgb)
+    expected = image_processor.load_image(image, args)
+    actual = image_processor.load_image(image, args, rgb_lookup=image_processor.rgb_normalization_table().cuda())
+    assert actual[0].is_cuda
+    assert actual[1:] == expected[1:]
+    assert torch.equal(actual[0].view(torch.int16).cpu(), expected[0].view(torch.int16))
+
+
 @pytest.mark.parametrize("prefix_len", [0, 1, 2, 3, 7])
 def test_vision_config_registry_and_tokenizer_preserve_row_major_positions(config, tmp_path, prefix_len):
     from lightllm.models.registry import ModelRegistry

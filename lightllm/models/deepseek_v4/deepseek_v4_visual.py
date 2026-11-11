@@ -17,6 +17,7 @@ from lightllm.models.deepseek_v4.image_processor import (
     IMAGE,
     build_canonical_image_block,
     load_image,
+    rgb_normalization_table,
 )
 from lightllm.server.embed_cache.utils import get_shm_name_data, read_shm
 from lightllm.server.multimodal_params import ImageItem
@@ -171,6 +172,7 @@ class DeepseekV4VisionModel(nn.Module):
         self.image_newline = nn.Parameter(torch.empty(self.config.hidden_size, dtype=torch.bfloat16))
         if not self.row_major:
             self.image_pad = nn.Parameter(torch.empty(self.config.hidden_size, dtype=torch.bfloat16))
+        self.register_buffer("_rgb_lookup", rgb_normalization_table(), persistent=False)
 
     def load_model(self, weight_dir):
         index_path = os.path.join(weight_dir, "model.safetensors.index.json")
@@ -196,6 +198,7 @@ class DeepseekV4VisionModel(nn.Module):
         uuids = []
         valid_ids = []
         valid_start = 0
+        rgb_lookup = self._rgb_lookup if self._rgb_lookup.is_cuda else None
         image_pad = self.image_start if self.row_major else self.image_pad
         sentinel_table = torch.stack(
             [
@@ -211,7 +214,7 @@ class DeepseekV4VisionModel(nn.Module):
             uuids.append(image_item.uuid)
             image_data = read_shm(get_shm_name_data(image_item.uuid))
             with Image.open(BytesIO(image_data)) as image:
-                patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w = load_image(image, self.config)
+                patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w = load_image(image, self.config, rgb_lookup=rgb_lookup)
 
             patches = patches.to(device=self.image_start.device, non_blocking=True)
             row_major_embeds = self.aligner(
