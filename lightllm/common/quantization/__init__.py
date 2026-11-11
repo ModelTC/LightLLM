@@ -20,13 +20,19 @@ SUPPORTED_EXPERT_DTYPES = tuple(EXPERT_DTYPE_TO_QUANT_TYPE)
 
 
 class Quantcfg:
-    def __init__(self, network_config, quant_type="none", custom_cfg_path=None, expert_dtype=None):
+    def __init__(
+        self, network_config, quant_type="none", custom_cfg_path=None, expert_dtype=None, *, enable_ep_moe=False
+    ):
         self.layer_num = network_config["n_layer"]
         self.quant_type = quant_type
         self.start_args_expert_dtype = expert_dtype
         self.config_expert_dtype = network_config.get("expert_dtype", None)
         self.model_type = network_config.get("model_type", None)
-        if self.model_type == "deepseek_v41":
+        if (
+            self.model_type == "deepseek_v41"
+            and "fp4" in (self.config_expert_dtype, self.start_args_expert_dtype)
+            and not (enable_ep_moe and is_sm100_gpu())
+        ):
             if self.config_expert_dtype == "fp4":
                 self.config_expert_dtype = "mxfp4"
             if self.start_args_expert_dtype == "fp4":

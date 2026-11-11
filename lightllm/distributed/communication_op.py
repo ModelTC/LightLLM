@@ -170,6 +170,7 @@ class DistributeGroupManager:
         self.ep_decode_use_v2 = False
         self.ep_prefill_moe_workspace = None
         self.ep_mega_moe_buffer = None
+        self.ep_mega_moe_draft_buffer = None
         self.ep_mega_moe_mma_type = None
         self.ep_mega_moe_quant_method = None
         self.ep_triton_moe_buffer = None
@@ -244,6 +245,7 @@ class DistributeGroupManager:
         存在的执行路径分配 buffer，避免为未使用的路径长期占用显存。
         """
         args = get_env_start_args()
+        self.ep_mega_moe_draft_buffer = None
         enable_ep_moe = args.enable_ep_moe
         self.ep_decode_use_v2 = args.ep_moe_backend == "deepep_v2"
         prefill_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
@@ -506,6 +508,24 @@ class DistributeGroupManager:
         assert 0 <= microbatch_index < microbatch_count
         workspace_size = workspace.numel() // microbatch_count
         return workspace.narrow(0, microbatch_index * workspace_size, workspace_size)
+
+    def new_draft_mega_moe_buffer(self, num_experts: int, num_topk: int):
+        if self.ep_mega_moe_mma_type != "fp8xfp4":
+            return
+        target = self.ep_mega_moe_buffer
+        if (num_experts, num_topk) == (target.num_experts, target.num_topk):
+            return
+
+        import deep_gemm
+
+        self.ep_mega_moe_draft_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
+            target.group,
+            num_experts,
+            target.num_max_tokens_per_rank,
+            num_topk,
+            target.hidden,
+            target.intermediate_hidden,
+        )
 
     def clear_deepep_buffer(self):
         """

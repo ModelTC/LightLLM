@@ -198,13 +198,19 @@ class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         self.block_size = 32
         self.weight_suffix = "weight"
         self.weight_zero_point_suffix = None
-        self.weight_scale_suffix = None
+        self.weight_scale_suffix = "scale"
         self.has_weight_scale = True
         self.has_weight_zero_point = False
 
     @property
     def method_name(self):
         return "fp4fp8-b32-deepgemm"
+
+    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack) -> None:
+        n, packed_k = weight_pack.weight.shape
+        scale = weight_scale.to(device=weight_pack.weight.device, dtype=torch.float32)
+        packed_scale = deep_gemm.transform_sf_into_required_layout(scale, n, packed_k * 2, (1, self.block_size), None)
+        super().load_weight_scale(packed_scale, weight_pack)
 
     def quantize(self, weight: torch.Tensor, output: WeightPack):
         from deep_gemm.utils import per_token_cast_to_fp4
@@ -249,9 +255,10 @@ class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         assert in_dim % self.block_size == 0, "FP4 scale dimension must be divisible by block_size"
         expert_prefix = (num_experts,) if num_experts > 1 else ()
         weight = torch.empty(expert_prefix + (out_dim, in_dim // 2), dtype=torch.int8).cuda(device_id)
-        weight_scale = torch.empty(expert_prefix + (out_dim, in_dim // self.block_size), dtype=torch.int32).cuda(
-            device_id
-        )
+        packed_scale_cols = (in_dim // self.block_size + 3) // 4
+        weight_scale = torch.empty(
+            expert_prefix + (packed_scale_cols, out_dim), dtype=torch.int32, device=f"cuda:{device_id}"
+        ).transpose(-1, -2)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
         mm_param_list = self._split_weight_pack(
             mm_param,

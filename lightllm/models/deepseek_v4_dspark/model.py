@@ -150,6 +150,9 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
         self.layers_num = self.config["dspark_layer_num"]
 
     def _init_custom(self):
+        dist_group_manager.new_draft_mega_moe_buffer(
+            self.config["n_routed_experts"], self.config["num_experts_per_tok"]
+        )
         self._freqs_cis_sliding = self.main_model._freqs_cis_sliding
         self._freqs_cis_compress = self.main_model._freqs_cis_compress
         self._cos_cached_sliding = self.main_model._cos_cached_sliding

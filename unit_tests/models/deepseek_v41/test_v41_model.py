@@ -61,7 +61,16 @@ def test_config_flattens_text_without_losing_model_identity(tmp_path):
 
 
 @pytest.mark.parametrize("expert_dtype", [None, "fp4"])
-def test_v41_mxfp4_uses_quant_selector_on_hopper(expert_dtype):
+@pytest.mark.parametrize(
+    "sm100,enable_ep_moe,expected",
+    [
+        (False, False, "mxfp4w4a16-b32-marlin"),
+        (True, False, "mxfp4w4a16-b32-marlin"),
+        (True, True, "fp4fp8-b32-deepgemm"),
+    ],
+)
+def test_v41_mxfp4_uses_quant_selector(monkeypatch, expert_dtype, sm100, enable_ep_moe, expected):
+    from lightllm.common import quantization
     from lightllm.common.quantization import Quantcfg
 
     config = dict(
@@ -70,8 +79,9 @@ def test_v41_mxfp4_uses_quant_selector_on_hopper(expert_dtype):
         expert_dtype="fp4",
         quantization_config=dict(quant_method="fp8", weight_block_size=[32, 32]),
     )
-    quant = Quantcfg(config, expert_dtype=expert_dtype)
-    assert quant.get_quant_method(0, "fused_moe").method_name == "mxfp4w4a16-b32-marlin"
+    monkeypatch.setattr(quantization, "is_sm100_gpu", lambda: sm100)
+    quant = Quantcfg(config, expert_dtype=expert_dtype, enable_ep_moe=enable_ep_moe)
+    assert quant.get_quant_method(0, "fused_moe").method_name == expected
     assert quant.get_quant_method(0, "wq_a").method_name == "fp8w8a8-b32-triton"
 
 

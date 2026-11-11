@@ -192,16 +192,14 @@ def _get_mega_moe_weights(w13: Any, w2: Any, mma_type: str):
         (w2.weight, w2.weight_scale),
         **transform_kwargs,
     )
-    if mma_type == "fp8xfp8":
-        # Keep the transformed layout in the preallocated weight storage so we do not retain a second
-        # full copy of the expert weights. Skip copy_ when DeepGEMM already returned an alias.
-        for target, transformed in zip(
-            (w13.weight, w13.weight_scale, w2.weight, w2.weight_scale),
-            (*weights[0], *weights[1]),
-        ):
-            if target.data_ptr() != transformed.data_ptr():
-                target.copy_(transformed)
-        weights = ((w13.weight, w13.weight_scale), (w2.weight, w2.weight_scale))
+    # Keep the transformed layout in the preallocated expert storage.
+    for target, transformed in zip(
+        (w13.weight, w13.weight_scale, w2.weight, w2.weight_scale),
+        (*weights[0], *weights[1]),
+    ):
+        if target.data_ptr() != transformed.data_ptr():
+            target.copy_(transformed)
+    weights = ((w13.weight, w13.weight_scale), (w2.weight, w2.weight_scale))
     w13._mega_moe_weights = weights
     return weights
 
@@ -223,8 +221,7 @@ def prepare_ep_moe_weights(w13: Any, w2: Any, quant_method: Any):
         quant_method.mega_moe_mma_type = None
         return
     quant_method.mega_moe_mma_type = mma_type
-    if mma_type == "fp8xfp8":
-        _get_mega_moe_weights(w13, w2, mma_type)
+    _get_mega_moe_weights(w13, w2, mma_type)
 
 
 def mega_moe_impl(
@@ -245,6 +242,12 @@ def mega_moe_impl(
     buffer = getattr(dist_group_manager, "ep_mega_moe_buffer", None)
     if buffer is None:
         raise RuntimeError("Mega MoE requires dist_group_manager.ep_mega_moe_buffer to be initialized")
+    draft_buffer = dist_group_manager.ep_mega_moe_draft_buffer
+    if draft_buffer is not None and (w13.weight.shape[0] * buffer.group.size(), topk_ids.shape[-1]) == (
+        draft_buffer.num_experts,
+        draft_buffer.num_topk,
+    ):
+        buffer = draft_buffer
 
     num_tokens = hidden_states.shape[0]
     if num_tokens > buffer.num_max_tokens_per_rank:
@@ -266,16 +269,15 @@ def mega_moe_impl(
             topk_weights_out=buffer.topk_weights[:num_tokens],
         )
     else:
-        from deep_gemm.utils import per_token_cast_to_fp8
-
-        qinput_tensor = per_token_cast_to_fp8(
-            hidden_states,
-            use_ue8m0=True,
-            gran_k=quant_method.block_size,
+        lightllm_per_token_group_quant_fp8(
+            x=hidden_states,
+            group_size=quant_method.block_size,
+            x_q=buffer.x[:num_tokens],
+            x_s=buffer.x_sf[:num_tokens],
+            eps=1e-4,
+            dtype=buffer.x.dtype,
             use_packed_ue8m0=True,
         )
-        buffer.x[:num_tokens].copy_(qinput_tensor[0])
-        buffer.x_sf[:num_tokens].copy_(qinput_tensor[1])
         buffer.topk_idx[:num_tokens].copy_(topk_ids)
         buffer.topk_weights[:num_tokens].copy_(topk_weights)
 

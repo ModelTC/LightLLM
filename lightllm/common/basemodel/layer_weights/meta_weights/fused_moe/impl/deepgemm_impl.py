@@ -31,7 +31,10 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         self.eplb = expert_parallel_state.eplb
         self.ep_balance_counters = None
         self._primary_weight_pack_cache = {}
-        self.supports_decode_shared_expert_overlap = not use_mega_moe(self.quant_method)
+
+    @property
+    def supports_decode_shared_expert_overlap(self):
+        return not use_mega_moe(self.quant_method)
 
     def low_latency_dispatch(
         self,
