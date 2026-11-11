@@ -44,6 +44,7 @@ def replay(
     precompute_projections = history.compute_mode == "precompute" and bv >= 16
     # 在 Python 中解析 tile 维度；Triton JIT 中直接调用 max() 会降级为 tensor 运算，无法定义静态 shape。
     bw = triton.next_power_of_2(history.verify_width)
+    sync_mark = history.tile_sync_mark
     _decode_replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](
         q,
         k,
@@ -61,6 +62,7 @@ def replay(
         history.betas[linear_layer_idx],
         reqs,
         history.cursors,
+        sync_mark,
         cu_seqlens,
         out,
         q.stride(axis),
@@ -84,6 +86,7 @@ def replay(
         history.gate_lower_bound,
         BQK=max(16, 2 * bw),
         BR=triton.next_power_of_2(max(16, history.capacity + bw)),
+        NV=triton.cdiv(vd, bv),
         num_warps=config["num_warps"],
         num_stages=config.get("num_stages", 3),
     )

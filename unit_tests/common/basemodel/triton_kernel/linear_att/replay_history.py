@@ -56,6 +56,7 @@ def attach_replay_history(
     # 最后一个 slot 是 HOLD。cursor 是尚未折回的已接受长度。
     owner.hold_req_id = slots - 1
     owner.cursors = torch.zeros(slots, dtype=torch.int32, device=ssm.device)
+    owner.tile_sync_mark = torch.zeros((slots * (owner.mtp_step + 6), hv), dtype=torch.int32, device=ssm.device)
     # 重建用 k/d：bf16 激活用 fp16。折回仍用原始 k/v。KDA 的 g 按 key 通道存。
     reconstruction_dtype = torch.float16 if activation_dtype == torch.bfloat16 else torch.float32
     key_shape = (layers, slots, owner.num_key_heads, capacity, k)

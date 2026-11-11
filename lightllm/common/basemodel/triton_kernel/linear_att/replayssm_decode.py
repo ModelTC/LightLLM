@@ -13,6 +13,22 @@ from .replayssm_delta import _apply_accepted_prefix
 
 
 @triton.jit
+def _arrive_value_tiles(SyncMark, seq, hv, HV: tl.constexpr, NV: tl.constexpr):
+    # 同一个 launch 行、同一个 value head 的 V/BV 个 tile 都读完旧前缀后，才允许写新窗口。
+    # 行号不是请求槽。HOLD 会在一批里重复出现，用请求槽做下标会撞到同一格。
+    # 最后到达的 tile 把计数写回 0，这个 0 就是放行信号。其余 tile 已经加过 1，
+    # 之后再看见 0 只可能是这次复原。
+    idx = seq * HV + hv
+    arrived = tl.atomic_add(SyncMark + idx, 1, sem="acq_rel", scope="gpu")
+    if arrived == NV - 1:
+        tl.atomic_xchg(SyncMark + idx, 0, sem="release", scope="gpu")
+    else:
+        seen = arrived + 1
+        while seen != 0:
+            seen = tl.atomic_add(SyncMark + idx, 0, sem="acquire", scope="gpu")
+
+
+@triton.jit
 def _history_coeff(rows, vec, BK: tl.constexpr):
     # rows [R, BK] · vec [BK] -> [R]. tf32x3 是 tensor core 上最接近 fp32 的输出重建。
     if BK >= 16:
@@ -46,6 +62,7 @@ def _decode_replay(
     Betas,
     Reqs,
     Cursors,
+    SyncMark,
     Cu,
     Out,
     SQ: tl.constexpr,
@@ -69,6 +86,7 @@ def _decode_replay(
     LOWER: tl.constexpr,
     BQK: tl.constexpr,
     BR: tl.constexpr,
+    NV: tl.constexpr,
 ):
     """执行一个请求窗口的 replay decode，并写入 history。
 
@@ -103,6 +121,8 @@ def _decode_replay(
         state = state.to(State.dtype.element_ty).to(tl.float32)
         tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
         n = 0
+        # 新 token 会从槽 0 覆盖刚读过的 RawKeys、Gates、Betas。等这一组 V tile 都读完再往下走。
+        _arrive_value_tiles(SyncMark, seq, hv, HV, NV)
 
     if PRECOMPUTE_PROJECTIONS:
         # 输出用 tf32x3 tensor core 从冻结的 checkpoint 和 history 重建。
