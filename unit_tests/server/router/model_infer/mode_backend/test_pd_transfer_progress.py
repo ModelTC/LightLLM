@@ -140,6 +140,24 @@ def test_waiting_pages_timeout_from_shared_progress(monkeypatch):
     assert not module.waiting_dict
 
 
+def test_decode_abort_keeps_active_and_unrelated_pages():
+    first, active, last, unrelated = make_task(1, 0), make_task(1, 1), make_task(1, 2), make_task(2, 0)
+    active.shared_time_out_mark = last.shared_time_out_mark = first.shared_time_out_mark
+    active.dst_page_index = 0
+    active.start_trans_time = 100.0
+    module = make_module(first, active, last, unrelated)
+
+    module._abort(1, error_info="request cancelled")
+    module._abort(1, error_info="repeated cancellation")
+
+    assert [module.failed_queue.get_nowait(), module.failed_queue.get_nowait()] == [first, last]
+    assert module.failed_queue.empty()
+    assert first.error_info == last.error_info == "request cancelled"
+    assert module.waiting_dict == {task.get_key(): task for task in (active, unrelated)}
+    assert module.waiting_dict.active[active.get_key()] is active
+    assert active.dst_page_index == 0 and active.error_info is None
+
+
 @pytest.mark.parametrize("stage", ["request", "done"])
 def test_matched_notifications_refresh_local_siblings_only(monkeypatch, stage):
     now = [100.0]

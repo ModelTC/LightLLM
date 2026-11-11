@@ -240,13 +240,10 @@ class _DecodeTransModule:
         return True
 
     def _abort(self, request_id: int, error_info: str = "aborted req"):
-        aborted_tasks = []
         with self.waiting_dict_lock:
-            for key, trans_task in list(self.waiting_dict.items()):
-                if trans_task.request_id == request_id and trans_task.dst_page_index is None:
-                    # 对于 已经分配了page index 的任务，不能直接失败，需要两边走完正常流程再失败，不然可能
-                    # 出现复杂的异步协同问题。
-                    aborted_tasks.append(self.waiting_dict.pop(key))
+            # Activated WRITEs already own a destination page. Let their normal
+            # completion or quiescence path return it.
+            aborted_tasks = self.waiting_dict.pop_pending_for_request(request_id)
 
         for trans_task in aborted_tasks:
             trans_task.error_info = error_info
@@ -659,6 +656,13 @@ class _WaitingTasks(dict):
         self._remove_pending(task)
         self.active[task.get_key()] = task
         self._push(task.start_trans_time + task.transfer_time_out_secs, task)
+
+    def pop_pending_for_request(self, request_id: int) -> List[PDChunckedTransTask]:
+        # Dispatch assigns one shared timeout mark to the entire request's page group.
+        for pages in self.pending.values():
+            if next(iter(pages.values())).request_id == request_id:
+                return [self.pop(key) for key in list(pages)]
+        return []
 
     def pop(self, key, *default):
         task = super().pop(key, *default)
