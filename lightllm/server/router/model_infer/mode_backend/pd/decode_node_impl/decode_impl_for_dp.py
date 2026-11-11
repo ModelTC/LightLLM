@@ -1,7 +1,8 @@
 import torch.multiprocessing as mp
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.utils.log_utils import init_logger
-from typing import List, Tuple
+from typing import List, Tuple, Union
+from numpy import ndarray
 from lightllm.server.router.model_infer.mode_backend.dp_backend.impl import DPChunkedPrefillBackend
 from .decode_impl import PDDecodeNode, PDChunckedTransTaskGroup
 
@@ -33,7 +34,7 @@ class PDDPForDecodeNode(DPChunkedPrefillBackend):
     def _create_pd_trans_task(
         self,
         req_obj: InferReq,
-        mem_indexes: List[int],
+        mem_indexes: Union[List[int], ndarray],
         kv_start_index: int,
         kv_end_index: int,
         group: PDChunckedTransTaskGroup,

@@ -32,7 +32,10 @@ def test_hybrid_pd_uses_the_shared_att_state_task_without_model_flags(monkeypatc
 
     def create(**kwargs):
         task = SimpleNamespace(
-            page_kind=kwargs.get("page_kind", "kv"), first_gen_token_id=None, first_gen_token_logprob=None
+            page_kind=kwargs.get("page_kind", "kv"),
+            mem_indexes=kwargs["mem_indexes"],
+            first_gen_token_id=None,
+            first_gen_token_logprob=None,
         )
         tasks.append(task)
         if "group" in kwargs:
@@ -44,9 +47,13 @@ def test_hybrid_pd_uses_the_shared_att_state_task_without_model_flags(monkeypatc
         backend._prefill_chuncked_handle_func(req, next_token_id=17, next_token_prob=-0.2, output_len=1)
         assert tasks[-1].first_gen_token_id == 17
     else:
-        backend._alloc_req_kv_mem = lambda req, count: torch.arange(count)
+        allocator_indexes = torch.arange(512, dtype=torch.int32)
+        backend._alloc_req_kv_mem = lambda req, count: allocator_indexes[:count]
         backend._decode_node_gen_trans_tasks(req)
         assert len(groups) == 1
+        allocator_indexes.fill_(-1)
+        assert all(task.mem_indexes.dtype == np.int32 for task in tasks[:2])
+        assert [task.mem_indexes.tolist() for task in tasks[:2]] == [list(range(256)), list(range(256, 512))]
     assert [task.page_kind for task in tasks] == ["kv", "kv", "att_state"]
 
 

@@ -2,7 +2,8 @@ import random
 import torch.multiprocessing as mp
 from lightllm.server.pd_io_struct import PDChunckedTransTask, PDChunckedTransTaskGroup, PDAbortReq
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
-from typing import List, Tuple
+from typing import List, Tuple, Union
+from numpy import ndarray
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.server.core.objs import FinishStatus
 from lightllm.utils.log_utils import init_logger
@@ -149,7 +150,8 @@ class PDDecodeNode(ChunkedPrefillBackend):
             assert mem_indexes is not None
             # 传输只覆盖真实 KV；最后一个模型页面中尚未使用的部分继续留在
             # req_to_token_indexs 中，供后续 decode 直接切片使用。
-            mem_indexes = mem_indexes[: input_len - req_obj.cur_kv_len]
+            # The allocator reuses its return buffer, while the queue pickles tasks asynchronously.
+            mem_indexes = mem_indexes[: input_len - req_obj.cur_kv_len].numpy().copy()
 
             while req_obj.pd_trans_kv_start_index < input_len:
                 cur_page_size = min(trans_page_size, input_len - req_obj.pd_trans_kv_start_index)
@@ -159,7 +161,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
                 page_mem_indexes = mem_indexes[start_index - req_obj.cur_kv_len : end_index - req_obj.cur_kv_len]
                 self._create_pd_trans_task(
                     req_obj=req_obj,
-                    mem_indexes=page_mem_indexes.tolist(),
+                    mem_indexes=page_mem_indexes,
                     kv_start_index=start_index,
                     kv_end_index=end_index,
                     group=group,
@@ -202,7 +204,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
     def _create_pd_trans_task(
         self,
         req_obj: InferReq,
-        mem_indexes: List[int],
+        mem_indexes: Union[List[int], ndarray],
         kv_start_index: int,
         kv_end_index: int,
         group: PDChunckedTransTaskGroup,
