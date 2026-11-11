@@ -393,9 +393,13 @@ class DistributeGroupManager:
                 device=torch.device("cuda", torch.cuda.current_device()),
             )
 
+        skip_deepep_sm_reservation = (
+            enable_triton_ep_moe_buffer
+            or self.ep_mega_moe_mma_type == "fp8xfp8"
+            or (self.ep_mega_moe_mma_type == "fp8xfp4" and args.run_mode == "decode")
+        )
         theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_prefill_num_experts, num_experts_per_tok)
-        use_all_sms_for_fp8 = enable_triton_ep_moe_buffer or self.ep_mega_moe_mma_type == "fp8xfp8"
-        deepep_sms = 0 if use_all_sms_for_fp8 and not has_legacy_moe_layer else theoretical_sms
+        deepep_sms = 0 if skip_deepep_sm_reservation and not has_legacy_moe_layer else theoretical_sms
         low_latency_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_decode_num_experts, num_experts_per_tok)
         self._set_num_sms_for_deep_gemm(deepep_sms, low_latency_sms)
 
@@ -466,13 +470,16 @@ class DistributeGroupManager:
                 # its SM reservation based on decode's logical expert count.
                 deep_ep.Buffer.set_num_sms(low_latency_sms - low_latency_sms % 2)
             deep_gemm_sms = max(device_sms - deepep_sms, 2)
-            if (
-                self.ep_low_latency_buffer is not None or self.ep_decode_use_v2
-            ) and get_env_start_args().run_mode == "decode":
+            run_mode = get_env_start_args().run_mode
+            if (self.ep_low_latency_buffer is not None or self.ep_decode_use_v2) and run_mode == "decode":
                 # Decode executes routed GEMMs after dispatch instead of
                 # keeping Prefill's persistent communication/compute partition.
                 deep_gemm_sms = device_sms
-            if self.ep_mega_moe_mma_type == "fp8xfp8":
+            if self.ep_mega_moe_mma_type == "fp8xfp4" and deepep_sms == 0 and run_mode == "decode":
+                # Leave one CTA pair of headroom for SM100 clustered launches.
+                deep_gemm_sms = max(2, deep_gemm_sms - 2)
+                deep_gemm_sms -= deep_gemm_sms % 2
+            elif self.ep_mega_moe_mma_type == "fp8xfp8":
                 deep_gemm_sms -= deep_gemm_sms % 2
             set_num_sms(deep_gemm_sms)
         except BaseException as e:
