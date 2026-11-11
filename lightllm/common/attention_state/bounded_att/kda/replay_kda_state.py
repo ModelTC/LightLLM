@@ -460,12 +460,6 @@ class ReplayKDAState(BoundedAttentionState):
             self.cursors[req] = 0
             self.write_bases[req] = 0
 
-    def prepare_decode(self, reqs: torch.Tensor, cu_seqlens: torch.Tensor | None = None) -> torch.Tensor:
-        """返回本步写入前的前缀长度。decode 不在这里修改 SSM。"""
-
-        del cu_seqlens
-        return self.cursors.index_select(0, reqs.long())
-
     def accept_updates(
         self, reqs: torch.Tensor, accepted_state_indices: torch.Tensor | None = None, width: int | None = None
     ) -> None:

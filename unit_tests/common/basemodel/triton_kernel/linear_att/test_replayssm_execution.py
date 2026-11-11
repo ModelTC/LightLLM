@@ -46,7 +46,6 @@ def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
 
     def cycle(backend, ids):
         count = ids.numel()
-        backend.prepare_decode(ids)
         out = replay_layer(backend, 0, q[:count], k[:count], v[:count], a[:count], beta[:count], alog, bias, ids)[0]
         backend.accept_updates(ids, ids, width=1)
         return out
@@ -146,7 +145,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
 
     def metadata(ssm_backend):
         cu, reqs, _counts = build_dynamic_mtp_linear_att_state_params(rows, mtp, manager.mtp_state_index, 4)
-        return cu, reqs, ssm_backend.prepare_decode(reqs, cu)
+        return cu, reqs, ssm_backend.cursors.index_select(0, reqs.long())
 
     def forward_accept(index, cu, reqs):
         ssm_backend = ssm_backends[index]
@@ -255,7 +254,6 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
         return [replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, reqs)[0] for layer in range(3)]
 
     def warm(ssm_backend):
-        ssm_backend.prepare_decode(reqs)
         out = forward(ssm_backend)
         ssm_backend.accept_updates(reqs)
         return out
@@ -274,7 +272,7 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             if capture_metadata:
-                pos = ssm_backend.prepare_decode(reqs)
+                pos = ssm_backend.cursors.index_select(0, reqs.long())
             out = forward(ssm_backend)
             if capture_metadata:
                 ssm_backend.accept_updates(reqs)
@@ -293,7 +291,7 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
         old = ssm_backends[0].cursors[reqs.long()].clone()
         for ssm_backend, graph, pos in zip(ssm_backends, graphs, positions):
             if not capture_metadata:
-                pos.copy_(ssm_backend.prepare_decode(reqs))
+                pos.copy_(ssm_backend.cursors.index_select(0, reqs.long()))
             graph.replay()
             if not capture_metadata:
                 ssm_backend.accept_updates(reqs)
@@ -341,7 +339,7 @@ def test_cross_layer_fold_with_state_offset_above_int32(kda):
         overflow = [int(req) for req in reqs.tolist() if ssm_backend.cursors[req] + 4 > ssm_backend.capacity]
         if overflow:
             ssm_backend.merge_accepted_updates(reqs.new_tensor(overflow))
-        pos = ssm_backend.prepare_decode(reqs, cu)
+        pos = ssm_backend.cursors.index_select(0, reqs.long())
         out = [replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, reqs, cu)[0] for layer in range(48)]
         ssm_backend.accept_updates(reqs, accepted)
         return pos, out
@@ -390,7 +388,6 @@ def test_small_batch_matches_larger_graph_padding(batch, dtype, kda):
     for ssm_backend, ids, offsets in zip(ssm_backends, [reqs, padded], [cu, padded_cu]):
 
         def step():
-            ssm_backend.prepare_decode(ids, offsets)
             out = [
                 replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, ids, offsets)[0] for layer in range(2)
             ]

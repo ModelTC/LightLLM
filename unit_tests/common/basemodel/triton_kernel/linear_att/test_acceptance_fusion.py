@@ -182,7 +182,6 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
 
     def cycle(i):
         ssm_backend = ssm_backends[i]
-        ssm_backend.prepare_decode(reqs, cu)
         outputs = [replay_layer(ssm_backend, layer, q, k, v, a, b, alog, alog, reqs, cu)[0] for layer in range(2)]
         (accept_unfused if i == 0 else accept_fused)(managers[i], args)
         return outputs

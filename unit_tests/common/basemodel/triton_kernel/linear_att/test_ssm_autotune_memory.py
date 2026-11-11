@@ -70,6 +70,5 @@ def test_rebuild_failure_leaves_serving_state_unchanged(monkeypatch, tmp_path, w
         torch.testing.assert_close(getattr(ssm_backend, name), expected, atol=0, rtol=0)
 
     reqs = torch.arange(3, device="cuda", dtype=torch.int32)
-    ssm_backend.prepare_decode(reqs, cu)
     tuning.replay_layer(ssm_backend, 0, q, q, q, gates, gates, a_log, bias, reqs, cu, run_config=config)
     torch.cuda.synchronize()

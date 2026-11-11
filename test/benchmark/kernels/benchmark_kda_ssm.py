@@ -55,8 +55,6 @@ def workload(args, batch, width, dtype, mode, acceptance):
 
     def cycle():
         for _ in range(args.rounds):
-            if ssm_backend is not None:
-                ssm_backend.prepare_decode(reqs, cu)
             for layer in range(layers):
                 if ssm_backend is None:
                     fused_recurrent_kda(

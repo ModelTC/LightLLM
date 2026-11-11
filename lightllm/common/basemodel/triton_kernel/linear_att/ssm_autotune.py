@@ -160,7 +160,7 @@ def select_config(
     ssm_backend.run_config = run_config
     reqs, accepted = workload
     ssm_backend.cursors.zero_()
-    # 把前缀写满但不越出 capacity。replay 自己读 cursor，正式 decode 也不经过 prepare_decode。
+    # 把前缀写满但不越出 capacity。replay kernel 自己读 cursor。
     tokens = q.shape[1 if cu_seqlens is not None else 0]
     rounds = max(1, ssm_backend.capacity // min(ssm_backend.verify_width, tokens))
     for _ in range(rounds):

@@ -64,7 +64,6 @@ def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state
     bias = torch.zeros(128 if kda else 1, device="cuda")
     expected_state = state[0, 0].float().clone()
     for round_idx in range(2):
-        ssm_backend.prepare_decode(reqs, cu)
         # The second round must consume the first round's accepted history.
         # For capacity 4 the next span exactly fills it, so no fold should hide
         # an overflowed history correction by reconstructing from raw inputs.
@@ -174,7 +173,6 @@ def test_replay_acceptance_flush_and_graph(
     accepted = torch.zeros(slots, dtype=torch.int32, device="cuda")
 
     def step():
-        ssm_backend.prepare_decode(reqs, cu)
         out = [replay_layer(ssm_backend, layer, q, k, v, a, b, alog, bias, reqs, cu)[0] for layer in range(2)]
         ssm_backend.accept_updates(reqs, accepted)
         return out
@@ -347,7 +345,6 @@ def test_precomputed_projections_preserve_precision(warps, decay, state_dtype, d
             for ssm_backend in ssm_backends:
                 ssm_backend.merge_accepted_updates(overflow_reqs)
         for ssm_backend in ssm_backends:
-            ssm_backend.prepare_decode(reqs, cu)
             outputs.append(replay_layer(ssm_backend, 0, q, k, v, a, b, alog, alog, reqs, cu)[0])
             ssm_backend.accept_updates(reqs, accepted)
         if dtype == torch.float32:
@@ -537,7 +534,7 @@ def test_dynamic_verify_lengths_fill_history_before_folding(kda, dtype, compute_
         return [replay_layer(ssm_backend, layer, q, k, v, a, b, alog, bias, reqs, cu)[0] for layer in range(2)]
 
     def step():
-        positions = ssm_backend.prepare_decode(reqs, cu)
+        positions = ssm_backend.cursors.index_select(0, reqs.long())
         out = forward()
         ssm_backend.accept_updates(reqs, accepted)
         return positions, out
@@ -573,7 +570,7 @@ def test_dynamic_verify_lengths_fill_history_before_folding(kda, dtype, compute_
                 pending[req] = 0
         old_cursors = [pending[req] for req in ids] + [0]
         if not capture_metadata:
-            positions.copy_(ssm_backend.prepare_decode(reqs, cu))
+            positions.copy_(ssm_backend.cursors.index_select(0, reqs.long()))
         graph.replay()
         if not capture_metadata:
             ssm_backend.accept_updates(reqs, accepted)
@@ -763,7 +760,6 @@ def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, sepa
         b = torch.randn(live, query_width, 1, device="cuda")
         if (backend.cursors[:live] + query_width > backend.capacity).any():
             backend.merge_accepted_updates(reqs[:live])
-        backend.prepare_decode(reqs, cu)
         actual = replay_layer(
             backend,
             0,
