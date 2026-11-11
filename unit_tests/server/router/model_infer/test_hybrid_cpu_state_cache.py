@@ -66,7 +66,7 @@ def linear_cache(monkeypatch, tmp_path, request):
         "radix_cache",
         SimpleNamespace(
             get_big_page_ids_by_node=lambda node: [],
-            free_one_small_page_buffer=lambda: None,
+            alloc_small_page_buffer=requests.small_page_buffers.alloc_one_state_cache,
             small_page_buffers=requests.small_page_buffers,
         ),
     )

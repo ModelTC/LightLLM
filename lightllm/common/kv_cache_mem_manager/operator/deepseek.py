@@ -213,8 +213,7 @@ class DeepseekV4MemOperator(BaseMemManagerOperator):
         )
 
         if has_tail_page and req.cur_kv_len == req.hybrid_cache_len:
-            g_infer_context.radix_cache.free_one_small_page_buffer()
-            small_page_buffer_id = req_manager.small_page_buffers.alloc_one_state_cache()
+            small_page_buffer_id = g_infer_context.radix_cache.alloc_small_page_buffer()
             if small_page_buffer_id is not None:
                 req.tail_small_page_buffer_id = small_page_buffer_id
                 checkpoint_leases.append((req_manager.small_page_buffers, [small_page_buffer_id]))

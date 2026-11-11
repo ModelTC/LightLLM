@@ -503,8 +503,7 @@ class InferenceContext:
             if req.get_chuncked_input_token_len() == req.hybrid_cache_len:
                 assert req.tail_small_page_buffer_id is None
                 if req.hybrid_cache_len % big_page_token_num != 0:
-                    self.radix_cache.free_one_small_page_buffer()
-                    req.tail_small_page_buffer_id = self.radix_cache.small_page_buffers.alloc_one_state_cache()
+                    req.tail_small_page_buffer_id = self.radix_cache.alloc_small_page_buffer()
                     if req.tail_small_page_buffer_id is not None:
                         dst_buffer_idx = req.tail_small_page_buffer_id
                         self.req_manager.save_state(

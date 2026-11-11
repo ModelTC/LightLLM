@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 import queue
 import threading
 import time
-from typing import List, Optional
+from typing import Callable, Iterator, List, Optional
 
 from lightllm.utils.log_utils import init_logger
 
@@ -96,14 +96,18 @@ class StateCacheManager(ABC):
     def get_state_cache(self, buffer_idx: int):
         """返回指定槽位的状态视图；可以是单个 Tensor 或多个 Tensor。"""
 
-    def alloc_one_state_cache(self) -> Optional[int]:
-        indexes = self.alloc_state_cache(1)
+    def alloc_one_state_cache(self, *, reuse_indexes: Optional[Callable[[], Iterator[int]]] = None) -> Optional[int]:
+        indexes = self.alloc_state_cache(1, reuse_indexes=reuse_indexes)
         return None if indexes is None else indexes[0]
 
-    def alloc_state_cache(self, need_size: int) -> Optional[List[int]]:
+    def alloc_state_cache(
+        self, need_size: int, *, reuse_indexes: Optional[Callable[[], Iterator[int]]] = None
+    ) -> Optional[List[int]]:
+        """Allocate free slots or transfer the caller's exclusive reference to one occupied slot."""
         if need_size == 0:
             return []
         capacity = self.size - self.keep_num
+        assert reuse_indexes is None or need_size == 1
         while True:
             with self.lock:
                 free_num = int(self.metadata[0])
@@ -116,6 +120,12 @@ class StateCacheManager(ABC):
                     self.metadata[1] = (head + need_size) % capacity
                     self.refs[indexes] = 1
                     return indexes
+                if reuse_indexes is not None:
+                    for index in reuse_indexes():
+                        assert 0 <= index < capacity
+                        if self.refs[index] == 1:
+                            # Keep the reference owned throughout the handoff across the shared pool.
+                            return [index]
                 if self.metadata[-1]:
                     raise RuntimeError("checkpoint copy failed; cannot safely reclaim event leases")
                 if need_size > capacity or self.metadata[-2] == 0:

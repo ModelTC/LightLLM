@@ -412,10 +412,8 @@ def test_page_key_bytes_does_not_share_tensor_memory():
 
 
 def test_hybrid_match_refs_only_valid_prefix_after_tail_state_eviction():
-    freed_state_ids = []
     small_page_buffers = SimpleNamespace(
-        get_free_cache_num=lambda: 0,
-        free_state_cache=lambda free_indexes: freed_state_ids.extend(free_indexes),
+        alloc_one_state_cache=lambda reuse_indexes: next(reuse_indexes(), None),
     )
     mem_manager = SimpleNamespace(big_page_buffers=SimpleNamespace())
     tree = HybridAttPagedRadixCache(
@@ -444,8 +442,7 @@ def test_hybrid_match_refs_only_valid_prefix_after_tail_state_eviction():
     tree.dec_node_ref_counter(node)
     assert tree.get_refed_tokens_num() == 0
 
-    tree.free_one_small_page_buffer()
-    assert freed_state_ids == [7]
+    assert tree.alloc_small_page_buffer() == 7
     node, matched_len, matched_values = tree.match_prefix(key, block_hashs=[11, 22, 33], update_refs=True)
     assert node is big_page and matched_len == 8
     assert matched_values.tolist() == list(range(100, 108))
@@ -536,7 +533,7 @@ def test_hybrid_match_falls_back_along_matched_branch(monkeypatch, small_state_v
         kv_cache_mem_manager=SimpleNamespace(
             big_page_buffers=SimpleNamespace(free_state_cache=freed_big_states.extend)
         ),
-        small_page_buffers=SimpleNamespace(get_free_cache_num=lambda: 0, free_state_cache=lambda **kwargs: None),
+        small_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda reuse_indexes: next(reuse_indexes(), None)),
     )
     # The older request leaves a small-page state at 384, before the image.
     old_values = torch.arange(1000, 1384)
@@ -559,7 +556,7 @@ def test_hybrid_match_falls_back_along_matched_branch(monkeypatch, small_state_v
     )
     assert prefix_len == 256
     if not small_state_valid:
-        tree.free_one_small_page_buffer()
+        assert tree.alloc_small_page_buffer() == 7
 
     common = tree.root_node.children[4]
     small_320 = common.children[5]

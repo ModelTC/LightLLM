@@ -111,8 +111,8 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
     context.is_hybrid_att_model = True
     context.radix_cache = SimpleNamespace(
         big_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: next(slots)),
-        small_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: 7),
-        free_one_small_page_buffer=lambda: None,
+        small_page_buffers=SimpleNamespace(),
+        alloc_small_page_buffer=lambda: 7,
     )
 
     def save_big_page_states(b_req_idx, reqs, buffer_indexes):

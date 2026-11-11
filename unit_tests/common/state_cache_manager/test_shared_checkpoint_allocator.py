@@ -97,6 +97,23 @@ def test_source_release_does_not_reclaim_destination_checkpoint(pool):
     assert pool.get_used_cache_num() == 2
 
 
+def test_allocator_hands_off_only_exclusive_checkpoint(pool):
+    peer = _attach("pool")
+    oldest, next_oldest = pool.alloc_state_cache(2)
+
+    def unused_candidates():
+        pytest.fail("free slots should be preferred over checkpoint eviction")
+
+    assert pool.alloc_one_state_cache(reuse_indexes=unused_candidates) not in (oldest, next_oldest)
+    assert len(pool.alloc_state_cache(5)) == 5
+    peer.retain_state_cache([oldest])
+    assert pool.alloc_one_state_cache(reuse_indexes=lambda: iter((oldest,))) is None
+    assert pool.alloc_one_state_cache(reuse_indexes=lambda: iter((oldest, next_oldest))) == next_oldest
+    assert peer.refs[oldest] == 2
+    assert peer.alloc_one_state_cache() is None
+    assert peer.refs[next_oldest] == 1
+
+
 def test_startup_attach_preserves_metadata(pool):
     target = _attach("pool")
     slot = pool.alloc_one_state_cache()

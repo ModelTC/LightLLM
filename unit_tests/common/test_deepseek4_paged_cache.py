@@ -1517,7 +1517,8 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         context,
         "radix_cache",
         SimpleNamespace(
-            get_big_page_ids_by_node=lambda node: shared_page_ids.copy(), free_one_small_page_buffer=lambda: None
+            get_big_page_ids_by_node=lambda node: shared_page_ids.copy(),
+            alloc_small_page_buffer=requests.small_page_buffers.alloc_one_state_cache,
         ),
     )
     monkeypatch.setattr(context, "is_hybrid_att_model", True)

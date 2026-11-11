@@ -649,23 +649,21 @@ class HybridAttPagedRadixCache:
     def get_available_small_page_buffer_num(self):
         return self.small_page_buffers.get_free_cache_num() + len(self._evict_tree_set_for_state_cache)
 
-    def free_one_small_page_buffer(self):
-        if self.small_page_buffers is None:
-            return
-        if self.small_page_buffers.get_free_cache_num() > 0:
-            return
-        if len(self._evict_tree_set_for_state_cache) == 0:
-            return
+    def alloc_small_page_buffer(self) -> Optional[int]:
+        reuse_node = None
 
-        node: HybridAttPagedTreeNode = self._evict_tree_set_for_state_cache.pop(0)
-        self._discard_node(node)
+        def reuse_indexes():
+            # The allocator only advances this iterator when its free queue is empty.
+            nonlocal reuse_node
+            for reuse_node in self._evict_tree_set_for_state_cache:
+                yield reuse_node.small_page_buffer_idx
 
-        assert node.small_page_buffer_idx is not None
-        self.small_page_buffers.free_state_cache(free_indexes=[node.small_page_buffer_idx])
-        node.small_page_buffer_idx = None
-
-        self._add_node(node)
-        return
+        slot = self.small_page_buffers.alloc_one_state_cache(reuse_indexes=reuse_indexes)
+        if reuse_node is not None and slot == reuse_node.small_page_buffer_idx:
+            self._discard_node(reuse_node)
+            reuse_node.small_page_buffer_idx = None
+            self._add_node(reuse_node)
+        return slot
 
     def _evict(self, need_remove_tokens, evict_callback):
         if self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0] < need_remove_tokens:

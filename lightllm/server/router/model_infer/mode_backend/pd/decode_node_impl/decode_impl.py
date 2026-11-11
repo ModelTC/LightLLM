@@ -227,8 +227,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
         if page_kind == "att_state" and self.is_deepseek_v4 and req_obj.hybrid_cache_len:
             big_tokens = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
             if req_obj.hybrid_cache_len % big_tokens:
-                self.radix_cache.free_one_small_page_buffer()
-                checkpoint_id = self.small_page_buffers.alloc_one_state_cache()
+                checkpoint_id = self.radix_cache.alloc_small_page_buffer()
                 checkpoint_kind = "small"
                 assert req_obj.tail_small_page_buffer_id is None
                 req_obj.tail_small_page_buffer_id = checkpoint_id
