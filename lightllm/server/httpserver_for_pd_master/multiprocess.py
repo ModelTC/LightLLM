@@ -141,6 +141,7 @@ def _build_haproxy_config(args: StartArgs, worker_ports: list[int], server_state
         "",
         # 普通请求继续使用全部 worker，不受健康聚合 backend 状态影响。
         "backend pd_master_workers",
+        "    option http-no-delay",
         "    balance leastconn",
         *worker_servers,
     ]
