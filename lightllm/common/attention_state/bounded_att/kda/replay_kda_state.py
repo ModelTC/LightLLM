@@ -11,7 +11,7 @@ from math import prod
 
 import torch
 
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor as advance_replay_cursor
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_fold import fold_prefix
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 from lightllm.utils.log_utils import init_logger
@@ -424,7 +424,7 @@ class ReplayKDAState(BoundedAttentionState):
     # cursor 是已接受、尚未折回的长度，各层只读。
     # 最后一层返回后按整窗全接受推进：放不下时 cursor 变成窗口长度，否则加上窗口长度。
     # MTP 验证后再减去没接受的尾部。宽度为 1 时窗口就是这一个 token，没有尾部可剪。
-    # 前缀放不下时，折回发生在 replay kernel 内。fold_accepted_prefix 只用于层外对照和只读快照。
+    # 前缀放不下时，折回发生在 replay kernel 内。fold_accepted_prefix 把已接受前缀写回 canonical SSM。
     # ========================================================================
 
     def finish_decode_token(self, logical_layer_id: int, reqs: torch.Tensor, cu_seqlens: torch.Tensor) -> None:
@@ -433,28 +433,15 @@ class ReplayKDAState(BoundedAttentionState):
         layers = () if self.config is None else self.config.logical_layer_ids
         if not layers or logical_layer_id != layers[-1] or reqs.numel() == 0:
             return
-        self.advance_cursor(reqs, cu_seqlens)
+        advance_cursor(self, reqs, cu_seqlens)
 
-    def advance_cursor(self, reqs: torch.Tensor, cu_seqlens: torch.Tensor) -> None:
-        """按 cu_seqlens 给出的整窗全接受推进 cursor，不修改 SSM。"""
-
-        advance_replay_cursor(self, reqs, cu_seqlens)
-
-    def fold_accepted_prefix(self, reqs: torch.Tensor, snapshot: torch.Tensor | None = None, run_config=None) -> None:
-        """用原始 k/v 把 cursor 覆盖的已接受前缀折进 SSM。
-
-        snapshot 为空时写回 canonical SSM，并清掉这些请求的 cursor。
-        传入 snapshot 时只写入这块独立缓冲，不改 canonical SSM，也不动 cursor。
-        run_config 为空时由 fold_prefix 使用它自己的默认配置。
-        """
+    def fold_accepted_prefix(self, reqs: torch.Tensor) -> None:
+        """用原始 k/v 把 cursor 覆盖的已接受前缀折进 canonical SSM，并清掉这些请求的 cursor。"""
 
         if reqs.numel() == 0:
             return
-        if snapshot is None:
-            fold_prefix(self, reqs, self.ssm_state, False, run_config)
-            self.cursors.index_fill_(0, reqs.long(), 0)
-            return
-        fold_prefix(self, reqs, snapshot, True, run_config)
+        fold_prefix(self, reqs)
+        self.cursors.index_fill_(0, reqs.long(), 0)
 
     # ========================================================================
     # 七、私有辅助实现

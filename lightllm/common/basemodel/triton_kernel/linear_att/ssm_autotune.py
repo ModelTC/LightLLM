@@ -7,6 +7,7 @@ import ast
 import torch
 import triton
 
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType, autotune
 from lightllm.utils.log_utils import init_logger
 
@@ -166,7 +167,7 @@ def select_config(
         adopt_cu = cu_seqlens
         if adopt_cu is None:
             adopt_cu = torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device)
-        ssm_backend.advance_cursor(reqs, adopt_cu)
+        advance_cursor(ssm_backend, reqs, adopt_cu)
     return run_config
 
 

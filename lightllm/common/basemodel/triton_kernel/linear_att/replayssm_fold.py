@@ -10,7 +10,6 @@ from .replayssm_delta import _apply_accepted_prefix
 @triton.jit
 def _fold_prefix(
     State,
-    Output,
     RawKeys,
     RawValues,
     Gates,
@@ -26,23 +25,20 @@ def _fold_prefix(
     HOLD: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    SNAPSHOT: tl.constexpr,
     KDA: tl.constexpr,
-    FLUSH_EXPORT: tl.constexpr = False,
-    OUTPUT_STRIDES: tl.constexpr = None,
     STRIDE_LAYER: tl.constexpr = 0,
     STRIDE_SLOT: tl.constexpr = 0,
     STRIDE_HEAD: tl.constexpr = 0,
     STRIDE_K: tl.constexpr = 0,
     STRIDE_V: tl.constexpr = 1,
 ):
-    # 将 cursor 指向的 accepted history 应用到 canonical state。SNAPSHOT 只写独立输出。
+    # 将 cursor 指向的 accepted history 写回 canonical state。
     iv, row, lh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     req = tl.load(Reqs + row).to(tl.int64)
     if req == HOLD:
         return
     n = tl.load(Cursors + req)
-    if n == 0 and not SNAPSHOT and not FLUSH_EXPORT:
+    if n == 0:
         return
     linear_layer_idx, head = lh // HV, lh % HV
     # history 是连续分配的。canonical SSM 可能带大于 int32 的层距，地址必须用真实 stride 的 int64。
@@ -67,31 +63,13 @@ def _fold_prefix(
     state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
     # cursor 可能暂时超过容量。循环只走容量内的槽，越界步不读 history，也不更新 state。
     state = _apply_accepted_prefix(state, RawKeys, RawValues, Gates, Betas, key_slot, slot, kk, vv, n, K, V, L, KDA)
-    mask = (kk[:, None] < K) & (vv[None, :] < V)
-    if OUTPUT_STRIDES is not None:
-        target = tl.load(Output + row).to(tl.pointer_type(State.dtype.element_ty))
-        out = (
-            target
-            + linear_layer_idx.to(tl.int64) * OUTPUT_STRIDES[0]
-            + head * OUTPUT_STRIDES[1]
-            + kk[:, None] * OUTPUT_STRIDES[2]
-            + vv[None, :] * OUTPUT_STRIDES[3]
-        )
-    elif SNAPSHOT:
-        out_slot = layer64 * HV + head64
-        out = Output + out_slot * K * V + kk[:, None].to(tl.int64) * V + vv[None, :].to(tl.int64)
-    else:
-        out = sp
-    tl.store(out, state, mask)
-    if FLUSH_EXPORT:
-        tl.store(sp, state, mask)
+    tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
     # cursor 不在这里清。和折回并行的其他线程块还要读原来的长度，清零放到 kernel 结束之后。
 
 
-def fold_prefix(history, reqs, output, snapshot: bool, run_config=None) -> None:
-    """把 history 上 cursor 覆盖的已接受前缀折进 output。
+def fold_prefix(history, reqs, run_config=None) -> None:
+    """把 history 上 cursor 覆盖的已接受前缀折进 canonical SSM。
 
-    snapshot 为真时 output 是独立缓冲，kernel 不写回 canonical SSM。
     没传入 run_config 时用 BV=32、4 个 warp、3 个 stage。
     """
 
@@ -105,7 +83,6 @@ def fold_prefix(history, reqs, output, snapshot: bool, run_config=None) -> None:
     layer_stride, slot_stride, head_stride, key_stride, value_stride = state.stride()
     _fold_prefix[(triton.cdiv(v, bv), reqs.numel(), layers * hv)](
         state,
-        output,
         history.raw_keys,
         history.raw_values,
         history.gates,
@@ -121,7 +98,6 @@ def fold_prefix(history, reqs, output, snapshot: bool, run_config=None) -> None:
         history.hold_req_id,
         triton.next_power_of_2(k),
         bv,
-        snapshot,
         history.kda,
         STRIDE_LAYER=layer_stride,
         STRIDE_SLOT=slot_stride,

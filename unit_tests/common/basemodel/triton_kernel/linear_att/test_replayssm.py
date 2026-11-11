@@ -8,12 +8,20 @@ from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import 
 
 
 def ssm_snapshot(backend, req):
-    state = backend.ssm_state
-    output = torch.empty((state.shape[0], *state.shape[2:]), dtype=state.dtype, device=state.device)
-    backend.fold_accepted_prefix(torch.tensor([req], dtype=torch.int32, device=state.device), snapshot=output)
-    return output
+    """折进一份 SSM 副本再读出这个请求。不改 canonical SSM，也不动 cursor。"""
+
+    saved = backend.ssm_state
+    clone = saved.clone()
+    backend.ssm_state = clone
+    try:
+        fold_prefix(backend, torch.tensor([req], dtype=torch.int32, device=saved.device))
+    finally:
+        backend.ssm_state = saved
+    return clone[:, req]
 
 
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_fold import fold_prefix
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs, replay_layer
 
@@ -461,7 +469,8 @@ def test_overflow_folds_inside_replay_for_gdn_and_kda(kda, dtype, capacity):
         a = (torch.randn(1, hv * dim if kda else hv, device="cuda", dtype=dtype) - 1).contiguous()
         b = torch.randn(1, hv, device="cuda", dtype=dtype)
         if step == capacity:
-            twin.fold_accepted_prefix(reqs, run_config=config)
+            fold_prefix(twin, reqs, config)
+            twin.cursors.index_fill_(0, reqs.long(), 0)
             assert int(backend.cursors[0]) == capacity
         outs, twin_outs = [], []
         for layer in range(2):
@@ -788,7 +797,7 @@ def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, sepa
             )
             torch.testing.assert_close(actual[:, token], output, atol=3e-4, rtol=3e-4)
         lengths = torch.full((live,), query_width, device="cuda", dtype=torch.int32)
-        backend.advance_cursor(reqs[:live], cu[: live + 1])
+        advance_cursor(backend, reqs[:live], cu[: live + 1])
         commit_ssm_prefix(indices, reqs[:live], lengths, lengths, backend.cursors)
     backend.fold_accepted_prefix(reqs[:live])
     torch.testing.assert_close(backend.ssm_state[0, :live], expected, atol=3e-4, rtol=3e-4)
@@ -819,7 +828,7 @@ def test_mtp_commit_keeps_folded_prefix_length(kda, compute_mode):
         b = torch.randn(2, hv, device="cuda", dtype=dtype)
         replay_layer(backend, 0, q, k, v, a, b, alog, bias, reqs, cu)
         lengths = torch.tensor([2], device="cuda", dtype=torch.int32)
-        backend.advance_cursor(reqs, cu)
+        advance_cursor(backend, reqs, cu)
         commit_ssm_prefix(indices, reqs, lengths, lengths, backend.cursors)
         if step < 2:
             assert int(backend.cursors[0]) == 2 * (step + 1)

@@ -4,6 +4,7 @@ import torch
 from lightllm.common.attention_state.bounded_att import KDAState
 from unit_tests.common.test_linear_state import make_state
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import resolve_run_config
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
@@ -213,7 +214,7 @@ def test_acceptance_keeps_request_order_with_strided_inputs(device):
         flat_lengths = lengths.contiguous()
         cu = torch.zeros(flat_lengths.numel() + 1, dtype=torch.int32, device=device)
         cu[1:] = torch.cumsum(flat_lengths, 0)
-        history.advance_cursor(reqs.contiguous(), cu)
+        advance_cursor(history, reqs.contiguous(), cu)
         owner.commit_bounded_att_state(reqs, lengths, lengths)
     else:
         # 正式提交只接受 CUDA。CPU 用例只核对 stride 下的请求顺序。

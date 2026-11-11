@@ -8,6 +8,7 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import (
     fused_recurrent_kda,
 )
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_fold import fold_prefix
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
 
 
@@ -290,13 +291,15 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
         )
     else:
         for req, length in zip(requests, lengths):
-            snap = torch.empty_like(selected.ssm_state[:, req])
-            selected.fold_accepted_prefix(
-                torch.tensor([req], dtype=torch.int32, device="cuda"),
-                snapshot=snap,
-            )
+            saved = selected.ssm_state
+            clone = saved.clone()
+            selected.ssm_state = clone
+            try:
+                fold_prefix(selected, torch.tensor([req], dtype=torch.int32, device="cuda"))
+            finally:
+                selected.ssm_state = saved
             torch.testing.assert_close(
-                snap[0],
+                clone[0, req],
                 expected_ssm[req * width + length - 1],
                 atol=2e-3,
                 rtol=1e-2,

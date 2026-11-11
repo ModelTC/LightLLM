@@ -1,6 +1,8 @@
 import pytest
 import torch
 
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_fold import fold_prefix
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update as update
 from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
@@ -10,10 +12,16 @@ from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import 
 
 
 def ssm_snapshot(backend, req):
-    state = backend.ssm_state
-    output = torch.empty((state.shape[0], *state.shape[2:]), dtype=state.dtype, device=state.device)
-    backend.fold_accepted_prefix(torch.tensor([req], dtype=torch.int32, device=state.device), snapshot=output)
-    return output
+    """折进一份 SSM 副本再读出这个请求。不改 canonical SSM，也不动 cursor。"""
+
+    saved = backend.ssm_state
+    clone = saved.clone()
+    backend.ssm_state = clone
+    try:
+        fold_prefix(backend, torch.tensor([req], dtype=torch.int32, device=saved.device))
+    finally:
+        backend.ssm_state = saved
+    return clone[:, req]
 
 
 from types import SimpleNamespace
@@ -100,12 +108,12 @@ def accept_fused(m, args):
     executor = m._ssm_executor
     if executor.verify_width > 1:
         cu = _replay_cu(args)
-        executor.advance_cursor(reqs, cu)
+        advance_cursor(executor, reqs, cu)
         commit_ssm_prefix(m.mtp_state_index, reqs, lengths, cu[1:] - cu[:-1], executor.cursors)
     else:
         # 宽度为 1 时正式路径不提交。对照只写下标，并把每个请求的 cursor 加一。
         m.mtp_state_index[reqs] = (lengths - 1).to(m.mtp_state_index.dtype)
-        executor.advance_cursor(reqs, torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device))
+        advance_cursor(executor, reqs, torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

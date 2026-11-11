@@ -6,6 +6,7 @@ import triton.language as tl
 
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
 
 
 def attach_replay_history(
@@ -101,7 +102,7 @@ def accept_replay_window(history, reqs, accepted_state_indices=None, cu_seqlens=
         return
     if cu_seqlens is None:
         cu_seqlens = torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device)
-    history.advance_cursor(reqs, cu_seqlens)
+    advance_cursor(history, reqs, cu_seqlens)
     if cu_seqlens is None or accepted_state_indices is None:
         return
     _trim_rejected_index[(triton.cdiv(reqs.numel(), 256),)](
