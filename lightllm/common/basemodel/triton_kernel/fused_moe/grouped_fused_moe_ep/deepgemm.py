@@ -229,17 +229,17 @@ def chunked_expanded_moe_forward(
     del padding_mask
 
     max_chunk_rows = min(all_tokens, 32768)
-    gather_out = torch.zeros(
-        (recv_src_metadata.shape[0], hidden_size),
-        dtype=hidden_dtype,
-        device=recv_x[0].device,
-    )
-
     # 不同 rank 接收到的 token 数不同，因此实际 chunk 数也可能不同。Autotuner warmup
     # 中的分布式通信要求各 rank 进入 autotuning 的次数一致，否则容易发生通信错位。
     # 所以只允许第一个 chunk 保持 autotuning；从第二个 chunk 开始临时关闭，循环结束
     # 后再恢复进入函数时的 warmup 状态。零 token rank 的首次调用由外层特殊分支补齐。
     is_autotune_warmup = Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL)
+    # 首个 chunk 的 gather 覆盖所有输出行（无贡献行写 0），后续 chunk 再累加。
+    gather_out = torch.empty(
+        (recv_src_metadata.shape[0], hidden_size),
+        dtype=hidden_dtype,
+        device=recv_x[0].device,
+    )
     try:
         for chunk_index, chunk_start in enumerate(range(0, all_tokens, max_chunk_rows)):
             if is_autotune_warmup and chunk_index == 1:
@@ -289,7 +289,14 @@ def chunked_expanded_moe_forward(
             )
             del qsilu_out, qsilu_out_scale
 
-            ep_gather_chunk(gemm_out_b, chunk_start, recv_topk_weights, recv_src_metadata, gather_out)
+            ep_gather_chunk(
+                gemm_out_b,
+                chunk_start,
+                recv_topk_weights,
+                recv_src_metadata,
+                gather_out,
+                init_output=chunk_index == 0,
+            )
             del gemm_out_b
     finally:
         if is_autotune_warmup:

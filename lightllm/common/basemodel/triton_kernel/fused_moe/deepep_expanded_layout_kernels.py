@@ -173,6 +173,7 @@ def _ep_gather_chunk_kernel(
     TOPK: tl.constexpr,
     BLOCK_D: tl.constexpr,
     NEED_HIDDEN_MASK: tl.constexpr,
+    INIT_OUTPUT: tl.constexpr = False,
 ):
     hidden_block_id = tl.program_id(0)
     start_recv_token_id = tl.program_id(1)
@@ -183,7 +184,9 @@ def _ep_gather_chunk_kernel(
 
     for recv_token_id in range(start_recv_token_id, total_recv_tokens, recv_token_grid_size):
         output_ptrs = output + recv_token_id * output_stride_m + hidden_offsets * output_stride_k
-        if NEED_HIDDEN_MASK:
+        if INIT_OUTPUT:
+            accumulator = tl.full((BLOCK_D,), 0.0, tl.float32)
+        elif NEED_HIDDEN_MASK:
             accumulator = tl.load(output_ptrs, mask=hidden_mask, other=0.0).to(tl.float32)
         else:
             accumulator = tl.load(output_ptrs).to(tl.float32)
@@ -211,6 +214,8 @@ def ep_gather_chunk(
     weights: torch.Tensor,  # [num_expanded_tokens]
     recv_src_metadata: torch.Tensor,  # [num_recv_tokens, topk + 2]
     output: torch.Tensor,  # [num_recv_tokens, hidden_size]
+    *,
+    init_output: bool = False,
 ):
     """Accumulate one expanded W2-output chunk into dense receive-token rows.
 
@@ -218,6 +223,8 @@ def ep_gather_chunk(
     token to global expanded-row IDs. Entries covered by this chunk are read,
     multiplied by ``weights``, and accumulated in-place into ``output``. This
     allows multiple chunks to contribute to the same dense output tensor.
+    With ``init_output`` the first chunk writes all rows, including rows with
+    no contribution, from a zero accumulator without reading ``output``.
     """
     topk = recv_src_metadata.shape[1] - 2
     block_d = 1024
@@ -243,6 +250,7 @@ def ep_gather_chunk(
         BLOCK_D=block_d,
         # 常见整块 hidden size 保持原来的无 mask kernel；仅尾块不完整时启用边界保护。
         NEED_HIDDEN_MASK=hidden_size % block_d != 0,
+        INIT_OUTPUT=init_output,
         num_warps=2,
     )
 
