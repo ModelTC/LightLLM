@@ -133,9 +133,14 @@ class StaticFP8FullAttentionState(FullAttentionState):
                 calibration.get("quant_type", config.scale_mode) == config.scale_mode
             ), "calibration quantization mode does not match the State"
             limits = torch.finfo(torch.float8_e4m3fn)
-            assert (
-                calibration.get("qmin", limits.min) == limits.min and calibration.get("qmax", limits.max) == limits.max
-            ), "calibration range does not match float8_e4m3fn"
+
+            def validate_encoding(values: Mapping[str, object]) -> None:
+                assert values.get("dtype", "fp8_e4m3") == "fp8_e4m3", "calibration dtype must be FP8 E4M3"
+                assert (
+                    values.get("qmin", limits.min) == limits.min and values.get("qmax", limits.max) == limits.max
+                ), "calibration range does not match float8_e4m3fn"
+
+            validate_encoding(calibration)
 
             def scale_tensor(values: Mapping[str, object], shape: tuple[int, ...]) -> torch.Tensor:
                 tensor = torch.tensor(data=values["scales"], dtype=torch.float32)
@@ -147,6 +152,11 @@ class StaticFP8FullAttentionState(FullAttentionState):
 
             def shard(tensor: torch.Tensor, calibrated_heads: int) -> torch.Tensor:
                 heads = config.head_num
+                if config.replicated:
+                    assert (
+                        calibrated_heads > 0 and heads % calibrated_heads == 0
+                    ), "calibration heads do not cover the model's KV heads"
+                    return tensor.repeat_interleave(repeats=heads // calibrated_heads, dim=-1).contiguous()
                 assert (
                     calibrated_heads > 0 and (heads * config.tp_world_size) % calibrated_heads == 0
                 ), "calibration heads do not cover the model's KV heads"
@@ -162,6 +172,7 @@ class StaticFP8FullAttentionState(FullAttentionState):
                 q_config = calibration.get("q_calibration")
                 q_scales = None
                 if q_config is not None:
+                    validate_encoding(q_config)
                     q_scales = shard(
                         scale_tensor(q_config, (calibrated_layer_count, q_config["num_head"])),
                         q_config["num_head"],

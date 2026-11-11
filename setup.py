@@ -1,6 +1,12 @@
 from setuptools import setup, find_packages
 
-package_data = {"lightllm": ["common/all_kernel_configs/*/*.json", "common/triton_utils/*/*/*/*/*.json"]}
+package_data = {
+    "lightllm": [
+        "common/all_kernel_configs/*/*.json",
+        "common/triton_utils/*/*/*/*/*.json",
+        "common/basemodel/flashinfer_kernel/*.cuh",
+    ]
+}
 setup(
     name="lightllm",
     version="1.2.0",

@@ -333,8 +333,8 @@ class GQAFullAttentionState(FullAttentionState):
         )
         # 阶段一：按本方案固定字段计算形状和 dtype，不分配 meta 存储。
         field_specs = (
-            ("k", self.storage_dtype, config.head_dim, "dim"),
-            ("v", self.storage_dtype, config.head_dim, "dim"),
+            ("k", self.storage_dtype, self._storage_shape()[-1], "dim"),
+            ("v", self.storage_dtype, self._storage_shape()[-1], "dim"),
         )
         for field_name, field_dtype, field_width, last_axis in field_specs:
             axes = ("layer", "token", "head", last_axis)

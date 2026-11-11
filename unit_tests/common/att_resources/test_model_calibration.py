@@ -23,6 +23,42 @@ if TYPE_CHECKING:
     from easydict import EasyDict
 
 
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_fp8_full_head_replication_preserves_kv_and_q_scales(tp_rank):
+    from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
+
+    config = GQAAttentionConfig(((3,),), 2, 64, torch.bfloat16, tp_rank=tp_rank, tp_world_size=2, replicated=True)
+    state = create_gqa_state(config, kv_type="fp8kv_sph", device="cpu")
+    calibration = dict(
+        num_layers=1,
+        num_head=2,
+        scales_shape=[1, 4],
+        scales=[[0.5, 1.0, 1.5, 2.0]],
+        q_calibration=dict(num_head=2, scales_shape=[1, 2], scales=[[2.5, 3.0]]),
+    )
+    state.bind_calibration(calibration, 0)
+    assert state.scales.tolist() == calibration["scales"]
+    assert state.q_scales.tolist() == calibration["q_calibration"]["scales"]
+
+
+@pytest.mark.parametrize("target", ["kv", "q"])
+@pytest.mark.parametrize("change", [dict(dtype="wrong_format"), dict(qmin=-6.0), dict(qmax=6.0)])
+def test_fp8_calibration_rejects_incompatible_kv_and_q_encoding(target, change):
+    from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
+
+    state = create_gqa_state(GQAAttentionConfig(((3,),), 2, 64, torch.bfloat16), kv_type="fp8kv_sph", device="cpu")
+    calibration = dict(
+        num_layers=1,
+        num_head=2,
+        scales_shape=[1, 4],
+        scales=[[0.5, 1.0, 1.5, 2.0]],
+        q_calibration=dict(num_head=2, scales_shape=[1, 2], scales=[[2.5, 3.0]]),
+    )
+    (calibration if target == "kv" else calibration["q_calibration"]).update(change)
+    with pytest.raises(AssertionError):
+        state.bind_calibration(calibration, 0)
+
+
 @pytest.mark.parametrize("encoding", ["fp8kv_sph", "fp8kv_spt"])
 def test_calibration_binds_all_model_states_after_creation(tmp_path: Path, encoding: str):
     config = dict(

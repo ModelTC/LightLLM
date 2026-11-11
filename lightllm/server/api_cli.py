@@ -545,7 +545,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm_kv_type",
         type=str,
-        choices=["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt", "fp8kv_dsa"],
+        choices=["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt", "fp8kv_dsa", "nvfp4kv"],
         default="None",
         help="""kv type used in llm, None for dtype that llm used in config.json.
                 fp8kv_sph: use float8_e4m3fn to store kv cache for inference,
@@ -554,10 +554,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                 quant way is static per tensor kv quant.
                 fp8kv_dsa: use dynamic per-token/group FlashMLA FP8 sparse KV cache
                 for DeepSeek-V3.2 or GLM-5.3 Flash.
+                nvfp4kv: E2M1 block16 KV with dynamic E4M3 scales and unit global scales.
+                Keeps Q in BF16/FP16; no calibration file is required.
                 fp8kv_sph and fp8kv_spt requires --kv_quant_calibration_config_path
                 to load pre-computed FP8 scales.
-                Note: fp8kv_spt requires flashinfer-python>=0.6.5 (default is 0.6.3,
-                may cause runtime issues). Install with: pip install flashinfer-python==0.6.5""",
+                Install the FlashInfer version pinned in requirements.txt for fp8kv_spt.""",
     )
     parser.add_argument(
         "--llm_kv_quant_group_size",

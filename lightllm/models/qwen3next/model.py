@@ -115,7 +115,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
-        assert args.llm_kv_type in ("None", "fp8kv_sph", "fp8kv_spt"), "unsupported Qwen3Next KV encoding"
+        assert args.llm_kv_type in ("None", "fp8kv_sph", "fp8kv_spt", "nvfp4kv"), "unsupported Qwen3Next KV encoding"
         cfg = Qwen3NextResourceConfig.from_model_config(config, args)
         logical_layer_groups = tuple((model_logical_layer_ids[index],) for index in cfg.get_full_att_layer_indices())
         if not logical_layer_groups:

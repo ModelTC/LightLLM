@@ -45,14 +45,15 @@ def test_nope_sparse_mla_eager_and_graph_replay(num_tokens, num_heads, kv_dtype)
     scale_kwargs = {"ckv_scale": scale, "kpe_scale": 1.0} if scale != 1.0 else {}
 
     qo_indptr = torch.arange(num_tokens + 1, dtype=torch.int32)
-    kv_indptr = qo_indptr * width
+    kv_indptr = torch.empty_like(qo_indptr)
     slots = torch.zeros(num_tokens, width, dtype=torch.int32, device="cuda")
+    kv_indices = torch.empty(num_tokens * width, dtype=torch.int32, device="cuda")
     wrapper = wrapper_cls(
         torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda"),
         use_cuda_graph=True,
         qo_indptr=qo_indptr.to("cuda"),
-        kv_indptr=kv_indptr.to("cuda"),
-        kv_indices=slots.flatten(),
+        kv_indptr=torch.empty_like(qo_indptr, device="cuda"),
+        kv_indices=kv_indices,
         kv_len_arr=torch.empty(num_tokens, dtype=torch.int32, device="cuda"),
         backend="fa3",
     )
@@ -63,12 +64,18 @@ def test_nope_sparse_mla_eager_and_graph_replay(num_tokens, num_heads, kv_dtype)
         slots.zero_()
         for row, length in enumerate(lengths):
             slots[row, :length] = (torch.arange(length, device="cuda") * 5 + row * 31 + step * 7) % num_slots
+        # CSR offsets count live pages. Keep graph storage fixed while
+        # packing the selected rows according to each request's actual length.
+        kv_indptr[0] = 0
+        kv_indptr[1:] = torch.tensor(lengths, dtype=torch.int32).cumsum(0)
+        selected = torch.cat([slots[row, :length] for row, length in enumerate(lengths)])
+        kv_indices[: selected.numel()].copy_(selected)
         # Lengths are compiled into the host-side plan. Replan before graph
         # replay when they change, while keeping all captured buffers stable.
         wrapper.plan(
             qo_indptr,
             kv_indptr,
-            slots.flatten(),
+            kv_indices,
             torch.tensor(lengths, dtype=torch.int32),
             num_heads,
             dim,

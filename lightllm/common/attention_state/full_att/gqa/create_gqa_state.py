@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Union
 
 import torch
 
+from .nvfp4_state import NVFP4AttentionConfig, NVFP4FullAttentionState
 from .gqa_state import GQAAttentionConfig, GQAFullAttentionState
 from .group_quantized_state import GroupQuantizedAttentionConfig, GroupQuantizedFullAttentionState
 from .static_fp8_state import StaticFP8AttentionConfig, StaticFP8FullAttentionState
@@ -13,11 +14,13 @@ from .static_fp8_state import StaticFP8AttentionConfig, StaticFP8FullAttentionSt
 
 def create_gqa_state(
     config: GQAAttentionConfig,
-    kv_type: Literal["None", "int4kv", "int8kv", "fp8kv_spt", "fp8kv_sph"] = "None",
+    kv_type: Literal["None", "int4kv", "int8kv", "fp8kv_spt", "fp8kv_sph", "nvfp4kv"] = "None",
     page_size: int = 1,
     device: str | torch.device = "cuda",
     group_size: int = 8,
-) -> GQAFullAttentionState | GroupQuantizedFullAttentionState | StaticFP8FullAttentionState:
+) -> Union[
+    GQAFullAttentionState, GroupQuantizedFullAttentionState, StaticFP8FullAttentionState, NVFP4FullAttentionState
+]:
     """按编码参数创建 GQA（含 MHA/MQA）State，普通 token 容量由后续流程分配。
 
     config 描述逻辑 KV 维度和 TP 信息；kv_type 沿用启动参数中的编码名称。
@@ -26,6 +29,8 @@ def create_gqa_state(
     """
     if kv_type == "None":
         return GQAFullAttentionState(layout_config=config, page_size=page_size, device=device)
+    if kv_type == "nvfp4kv":
+        return NVFP4FullAttentionState(NVFP4AttentionConfig(**config.__dict__), page_size=page_size, device=device)
     if kv_type in ("int4kv", "int8kv"):
         quant_config = GroupQuantizedAttentionConfig(
             logical_layer_groups=config.logical_layer_groups,

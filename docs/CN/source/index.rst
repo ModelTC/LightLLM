@@ -51,6 +51,7 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
    DeepSeek R1 部署 <tutorial/deepseek_deployment>
    单机多进程 PD Master <tutorial/pd_master_multiprocess>
    FP8 KV 量化与校准 <tutorial/fp8_kv_quantization>
+   NVFP4 KV 缓存 <tutorial/nvfp4_kv>
    多级缓存部署 <tutorial/multi_level_cache_deployment>
    多模态部署 <tutorial/multimodal>
    奖励模型部署 <tutorial/reward_model>

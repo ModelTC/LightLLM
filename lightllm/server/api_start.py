@@ -166,6 +166,11 @@ def _launch_subprocesses(args: StartArgs):
         assert (
             args.kv_quant_calibration_config_path is not None
         ), "fp8kv inference mode requires --kv_quant_calibration_config_path. "
+    if args.llm_kv_type == "nvfp4kv":
+        assert args.kv_quant_calibration_config_path is None, "NVFP4 uses dynamic blocks and unit global scales"
+        assert args.data_type in ("float16", "bfloat16"), "NVFP4 requires float16 or bfloat16"
+        assert args.llm_prefill_att_backend[0] in ("auto", "triton", "fa3", "flashinfer")
+        assert args.llm_decode_att_backend[0] in ("auto", "triton", "fa3", "flashinfer")
 
     if args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap:
         args.enable_tpsp_mix_mode = True

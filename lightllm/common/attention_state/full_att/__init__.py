@@ -6,7 +6,12 @@ from .gqa.gqa_state import GQAAttentionConfig, GQAFullAttentionState
 from .gqa import gqa_transfer
 from .mla.mla_state import MLAConfig, MLAFullAttentionState
 
+from .gqa.nvfp4_state import NVFP4AttentionConfig, NVFP4FullAttentionState
+
+
 __all__ = [
+    "NVFP4AttentionConfig",
+    "NVFP4FullAttentionState",
     "create_gqa_state",
     "create_mla_state",
     "create_packed_mla_state",
