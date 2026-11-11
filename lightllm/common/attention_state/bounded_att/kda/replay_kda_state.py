@@ -426,16 +426,12 @@ class ReplayKDAState(BoundedAttentionState):
     # 前缀放不下时，折回发生在 replay kernel 内。fold_accepted_prefix 只用于层外对照和只读快照。
     # ========================================================================
 
-    def finish_decode_token(
-        self, logical_layer_id: int, reqs: torch.Tensor, cu_seqlens: torch.Tensor | None = None
-    ) -> None:
+    def finish_decode_token(self, logical_layer_id: int, reqs: torch.Tensor, cu_seqlens: torch.Tensor) -> None:
         """最后一层按整窗全接受推进 cursor。非最后一层直接返回。"""
 
         layers = () if self.config is None else self.config.logical_layer_ids
         if not layers or logical_layer_id != layers[-1] or reqs.numel() == 0:
             return
-        if cu_seqlens is None:
-            cu_seqlens = torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device)
         self.advance_cursor(reqs, cu_seqlens)
 
     def advance_cursor(self, reqs: torch.Tensor, cu_seqlens: torch.Tensor) -> None:

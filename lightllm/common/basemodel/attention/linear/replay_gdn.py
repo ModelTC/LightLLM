@@ -154,6 +154,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
+    b_cu_seqlens: torch.Tensor = None
     b_num_accepted_tokens: torch.Tensor = None
 
     def init_state(self):
@@ -191,7 +192,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         else:
             core, z = self._decode(mixed_qkv, z, conv_states, a, b, layer_weight, layer_num, state)
         # 各层都读到了本步开始时的 cursor。最后一层返回后再按整窗全接受推进。
-        state.finish_decode_token(layer_num, self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
+        state.finish_decode_token(layer_num, self.b_conv_buffer_idx, self.b_cu_seqlens)
         return core, z
 
     def _init_indices(self, draft_step: int, mtp_index: torch.Tensor | None) -> None:
@@ -200,6 +201,10 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             self.b_conv_buffer_idx = infer.b_req_idx
             self.b1_mtp_cu_q_seq_len = None
             self.b_num_accepted_tokens = None
+            # 每行一个 token。replay kernel 仍用这个布局，cursor 需要现成的前缀和。
+            self.b_cu_seqlens = torch.arange(
+                infer.b_req_idx.numel() + 1, dtype=torch.int32, device=infer.b_req_idx.device
+            )
             return
         if self.backend.uses_dynamic_spec_verify_layout():
             cu, conv_idx, accepted = build_dynamic_mtp_linear_att_state_params(
@@ -209,6 +214,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
                 hold_req_id=infer.req_manager.HOLD_REQUEST_ID,
             )
             self.b1_mtp_cu_q_seq_len = cu
+            self.b_cu_seqlens = cu
             self.b_conv_buffer_idx = conv_idx
             self.b_num_accepted_tokens = accepted
             return
@@ -222,6 +228,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         self.b1_mtp_cu_q_seq_len = torch.arange(
             0, batch_size + 1, width, dtype=torch.int32, device=infer.b_req_idx.device
         )
+        self.b_cu_seqlens = self.b1_mtp_cu_q_seq_len
         self.b_conv_buffer_idx = infer.b_req_idx.view(-1, width)[:, 0].contiguous()
         self.b_num_accepted_tokens = mtp_index[self.b_conv_buffer_idx] + 1
 
