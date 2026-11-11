@@ -9,6 +9,8 @@ import triton.language as tl
 def _bound_swa_replay(
     INDICES,
     LENGTHS,
+    OUT_INDICES,
+    OUT_LENGTHS,
     POS,
     TOKEN_TO_BATCH,
     STARTS,
@@ -18,6 +20,7 @@ def _bound_swa_replay(
     IMAGE_LEFT,
     IMAGE_RIGHT,
     STRIDE: tl.constexpr,
+    OUT_STRIDE: tl.constexpr,
     WIDTH: tl.constexpr,
     WINDOW: tl.constexpr,
     HAS_IMAGE: tl.constexpr,
@@ -43,14 +46,20 @@ def _bound_swa_replay(
     else:
         length = tl.minimum(length, pos - start + 1)
     value = tl.load(INDICES + row * STRIDE + col + shift, (col < length) & (col + shift < WIDTH), -1)
-    tl.store(INDICES + row * STRIDE + col, value, col < WIDTH)
-    tl.store(LENGTHS + row, length)
+    tl.store(OUT_INDICES + row * OUT_STRIDE + col, value, col < WIDTH)
+    tl.store(OUT_LENGTHS + row, length)
 
 
-def bound_swa_replay(state, *, write_slots=None):
+def bound_swa_replay(state, *, write_slots=None, copy_swa=False):
     """Bound SWA at each request's replay start and optionally mask global KV writes."""
-    width = state.dsv4_swa_indices.shape[1]
+    indices, lengths = state.dsv4_swa_indices, state.dsv4_swa_lengths
+    if copy_swa:
+        state.dsv4_swa_indices = torch.empty_like(indices)
+        state.dsv4_swa_lengths = torch.empty_like(lengths)
+    width = indices.shape[1]
     _bound_swa_replay[(state.position_ids.numel(),)](
+        indices,
+        lengths,
         state.dsv4_swa_indices,
         state.dsv4_swa_lengths,
         state.position_ids,
@@ -61,6 +70,7 @@ def bound_swa_replay(state, *, write_slots=None):
         write_slots,
         state.dsv4_image_left,
         state.dsv4_image_right,
+        indices.stride(0),
         state.dsv4_swa_indices.stride(0),
         width,
         state.req_manager.cache_config.sliding_window,

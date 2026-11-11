@@ -82,11 +82,8 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
             value = getattr(self, name)
             if value is not None:
                 setattr(state, name, value[rows])
-        if isinstance(rows, slice):
-            # The decoder masks SWA in place. Keep the encoder's indices and lengths.
-            state.dsv4_swa_indices = state.dsv4_swa_indices.clone()
-            state.dsv4_swa_lengths = state.dsv4_swa_lengths.clone()
-        bound_swa_replay(state)
+        # Sliced SWA metadata still aliases the encoder's buffers.
+        bound_swa_replay(state, copy_swa=isinstance(rows, slice))
         state.v41_sparse_selection = {name: value[rows] for name, value in self.v41_sparse_selection.items()}
         # The first decoder indexer produces the candidates after this trim.
         if self.candidate_block_indices is not None:
