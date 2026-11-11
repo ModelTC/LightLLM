@@ -1383,21 +1383,33 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
         state.b_seq_len = torch.arange(258, 261, dtype=torch.int32, device="cuda")
         if mode == "commit":
             state.mtp_draft_input_hiddens = torch.zeros((3, 1), device="cuda")
+            state.b_req_idx[-1] = requests.HOLD_REQUEST_ID
+            state.b_seq_len = torch.arange(258, 264, dtype=torch.int32, device="cuda")[::2]
     state.max_kv_seq_len = 260
     causal_builder = Mock(wraps=swa_kernel.build_swa_indices)
     draft_builder = Mock(wraps=dspark_state.build_dspark_swa_indices)
     monkeypatch.setattr(swa_kernel, "build_swa_indices", causal_builder)
     monkeypatch.setattr(dspark_state, "build_dspark_swa_indices", draft_builder)
-    state.init_some_extra_state(model)
     proposal = mode == "proposal"
-    assert causal_builder.call_count == int(not proposal)
+    if mode == "commit":
+        state.init_kv_commit_state(model)
+        assert state.dsv4_swa_indices is None
+        assert state.dsv4_swa_lengths is None
+        assert state.position_cos_sliding is None
+        torch.testing.assert_close(state.position_ids, state.b_seq_len - 1)
+    else:
+        state.init_some_extra_state(model)
+        assert state.dsv4_swa_indices.shape == (3, 256 if proposal else 128)
+        torch.testing.assert_close(
+            state.dsv4_swa_lengths, torch.full_like(state.dsv4_swa_lengths, 131 if proposal else 128)
+        )
+    assert causal_builder.call_count == int(mode == "prefill")
     assert draft_builder.call_count == int(proposal)
-    assert state.dsv4_swa_indices.shape == (3, 256 if proposal else 128)
-    torch.testing.assert_close(
-        state.dsv4_swa_lengths, torch.full_like(state.dsv4_swa_lengths, 131 if proposal else 128)
-    )
     expected_slots = _get_swa_token_indices(
-        requests, req_idx, state.position_ids, prefill_state=state.prefill_att_state if state.is_prefill else None
+        requests,
+        state.b_req_idx if mode == "commit" else req_idx,
+        state.position_ids,
+        prefill_state=state.prefill_att_state if state.is_prefill else None,
     ).to(torch.int32)
     torch.testing.assert_close(state.dsv4_swa_write_slots, expected_slots)
     requests.free([req_idx], slots)

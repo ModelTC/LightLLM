@@ -54,6 +54,49 @@ def build_image_visibility(
 
 
 @triton.jit
+def _build_swa_decode_write_slots(
+    REQ_IDS,
+    SEQ_LENS,
+    POSITIONS,
+    SLOTS,
+    rows,
+    SEQ_STRIDE: tl.constexpr,
+    CAPACITY: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    HOLD_REQ: tl.constexpr,
+    HOLD_SLOT: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = row < rows
+    req = tl.load(REQ_IDS + row, valid, HOLD_REQ).to(tl.int64)
+    pos = tl.load(SEQ_LENS + row * SEQ_STRIDE, valid, 1) - 1
+    slot = get_swa_token_index(req, pos, None, None, CAPACITY, 0, PAGE_SIZE, HOLD_REQ, HOLD_SLOT, False)
+    tl.store(POSITIONS + row, pos, valid)
+    tl.store(SLOTS + row, slot, valid)
+
+
+def build_swa_decode_write_slots(req_manager, req_ids, seq_lens):
+    positions = torch.empty_like(seq_lens)
+    slots = torch.empty_like(req_ids, dtype=torch.int32)
+    rows = req_ids.numel()
+    _build_swa_decode_write_slots[(triton.cdiv(rows, 128),)](
+        req_ids,
+        seq_lens,
+        positions,
+        slots,
+        rows,
+        seq_lens.stride(0),
+        req_manager.swa_capacity_tokens,
+        req_manager.cache_config.swa_page_token_num,
+        req_manager.HOLD_REQUEST_ID,
+        req_manager.HOLD_SWA_SLOT,
+        BLOCK=128,
+    )
+    return positions, slots
+
+
+@triton.jit
 def _build_swa_indices_kernel(
     token_req_idx,
     position_ids,

@@ -4,6 +4,7 @@ from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 from lightllm.models.deepseek_v4.triton_kernel.build_dspark_swa_indices import (
     build_dspark_swa_indices,
 )
+from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_decode_write_slots
 
 
 class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
@@ -11,6 +12,15 @@ class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
 
     # Produced by the first context layer after DP rebalance, consumed per stage.
     context_kv: tuple
+
+    def init_kv_commit_state(self, model):
+        if self.is_prefill:
+            # Prefill also writes to the workspace while retaining the runtime tail.
+            self.init_some_extra_state(model)
+        else:
+            self.position_ids, self.dsv4_swa_write_slots = build_swa_decode_write_slots(
+                self.req_manager, self.b_req_idx, self.b_seq_len
+            )
 
     def _init_swa_metadata(self, model):
         if self.is_prefill or self.mtp_draft_input_hiddens is not None:
