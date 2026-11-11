@@ -1455,6 +1455,8 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             out = model.forward(inp)
             assert out.mtp_collector.spec_hidden.shape == (128, 384)
             assert out.mtp_collector.spec_hidden_prefill_ready_cache_len.tolist() == [128]
+            assert out.mtp_collector.spec_hidden_prefill_start_loc.tolist() == [0]
+            torch.testing.assert_close(out.mtp_collector.spec_hidden_prefill_input_ids, inp.input_ids[-128:])
             torch.testing.assert_close(
                 out.mtp_collector.spec_hidden, torch.cat([hidden[-128:] for hidden in captured], -1), atol=0, rtol=0
             )

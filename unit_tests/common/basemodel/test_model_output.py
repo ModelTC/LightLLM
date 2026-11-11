@@ -66,7 +66,10 @@ def test_prefill_unpad_restores_empty_output():
     output = ModelOutput(
         logits=torch.arange(4).view(1, 4),
         mtp_collector=ModelMtpOutputCollector(
-            spec_hidden=torch.arange(6).view(2, 3), spec_hidden_prefill_ready_cache_len=torch.tensor([0])
+            spec_hidden=torch.arange(6).view(2, 3),
+            spec_hidden_prefill_ready_cache_len=torch.tensor([0]),
+            spec_hidden_prefill_input_ids=torch.arange(2),
+            spec_hidden_prefill_start_loc=torch.tensor([0]),
         ),
         prompt_logics=torch.arange(8).view(2, 4),
     )
@@ -80,6 +83,8 @@ def test_prefill_unpad_restores_empty_output():
     assert unpadded.logits.shape == (0, 4)
     assert unpadded.mtp_collector.spec_hidden.shape == (0, 3)
     assert unpadded.mtp_collector.spec_hidden_prefill_ready_cache_len.shape == (0,)
+    assert unpadded.mtp_collector.spec_hidden_prefill_input_ids.shape == (0,)
+    assert unpadded.mtp_collector.spec_hidden_prefill_start_loc.shape == (0,)
     assert output.mtp_collector.spec_hidden_prefill_ready_cache_len.tolist() == [0]
     assert unpadded.prompt_logics.shape == (0, 4)
 

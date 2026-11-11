@@ -161,11 +161,18 @@ class ModelMtpOutputCollector:
     # - Vanilla MTP、EAGLE、EAGLE3、DFlash 以及未启用 MTP 的模型均不使用该字段。
     confidence_logits: Optional[torch.Tensor] = None
 
+    # Token IDs and request offsets in the same packed prefill layout as spec_hidden.
+    # Both are present when spec_hidden_prefill_ready_cache_len is set.
+    spec_hidden_prefill_input_ids: Optional[torch.Tensor] = None
+    spec_hidden_prefill_start_loc: Optional[torch.Tensor] = None
+
     def to_no_ref_tensor(self) -> None:
         if self.spec_hidden is not None:
             self.spec_hidden = tensor_to_no_ref_tensor(self.spec_hidden)
         if self.spec_hidden_prefill_ready_cache_len is not None:
             self.spec_hidden_prefill_ready_cache_len = tensor_to_no_ref_tensor(self.spec_hidden_prefill_ready_cache_len)
+            self.spec_hidden_prefill_input_ids = tensor_to_no_ref_tensor(self.spec_hidden_prefill_input_ids)
+            self.spec_hidden_prefill_start_loc = tensor_to_no_ref_tensor(self.spec_hidden_prefill_start_loc)
         if self.draft_token_ids is not None:
             self.draft_token_ids = tensor_to_no_ref_tensor(self.draft_token_ids)
         if self.confidence_logits is not None:
@@ -193,6 +200,8 @@ class ModelMtpOutputCollector:
             collector.spec_hidden_prefill_ready_cache_len = collector.spec_hidden_prefill_ready_cache_len[
                 :origin_batch_size
             ]
+            collector.spec_hidden_prefill_input_ids = collector.spec_hidden_prefill_input_ids[:origin_handle_token_num]
+            collector.spec_hidden_prefill_start_loc = collector.spec_hidden_prefill_start_loc[:origin_batch_size]
         return collector
 
 

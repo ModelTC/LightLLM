@@ -43,6 +43,8 @@ class DeepseekV41LayerHiddenCollector(DeepseekV4LayerHiddenCollector):
         output = super().finish_output(decoder if decoder is not None else infer_state)
         if decoder is not None:
             output.spec_hidden_prefill_ready_cache_len = decoder.b_ready_cache_len
+            output.spec_hidden_prefill_input_ids = decoder.input_ids
+            output.spec_hidden_prefill_start_loc = decoder.b_q_start_loc
         return output
 
 

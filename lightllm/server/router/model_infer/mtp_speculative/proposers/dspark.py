@@ -33,24 +33,19 @@ class DSparkProposer(BaseSpecProposer):
         assert target_next_token_ids.shape == target_model_input.b_req_idx.shape
         assert len(self.backend.draft_models) == 1
 
-        target_hidden = target_model_output.mtp_collector.spec_hidden
+        collector = target_model_output.mtp_collector
+        target_hidden = collector.spec_hidden
         assert target_hidden is not None
         if target_hidden.numel() == 0:
             return
         draft_model = self.backend.draft_models[0]
         draft_input = copy.copy(target_model_input)
         draft_input.mtp_draft_input_hiddens = target_hidden
-        ready = target_model_output.mtp_collector.spec_hidden_prefill_ready_cache_len
+        ready = collector.spec_hidden_prefill_ready_cache_len
         if ready is not None:
-            lengths = draft_input.b_seq_len - ready
-            starts = lengths.cumsum(0, dtype=lengths.dtype) - lengths
-            offsets = draft_input.b_prefill_start_loc + ready - draft_input.b_ready_cache_len - starts
-            rows = torch.arange(target_hidden.shape[0], device=target_hidden.device) + offsets.repeat_interleave(
-                lengths, output_size=target_hidden.shape[0]
-            )
-            draft_input.input_ids = draft_input.input_ids[rows]
+            draft_input.input_ids = collector.spec_hidden_prefill_input_ids
             draft_input.b_ready_cache_len = ready
-            draft_input.b_prefill_start_loc = starts
+            draft_input.b_prefill_start_loc = collector.spec_hidden_prefill_start_loc
             window = draft_model.config["sliding_window"]
             draft_input.max_q_seq_len = min(draft_input.max_q_seq_len, window)
             draft_input.max_cache_len = max(draft_input.max_cache_len, draft_input.max_kv_seq_len - window)

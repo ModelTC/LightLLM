@@ -10,8 +10,11 @@ from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import 
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
 
-@pytest.mark.parametrize("lengths,ready", [([3, 2], None), ([5, 2], [2, 0]), ([], [])])
-def test_dspark_prefill_commits_suffix_without_proposal(lengths, ready):
+@pytest.mark.parametrize(
+    "lengths,prefix_ready,ready",
+    [([3, 2], [0, 0], None), ([5, 2], [4, 7], [6, 7]), ([], [], [])],
+)
+def test_dspark_prefill_commits_suffix_without_proposal(lengths, prefix_ready, ready):
     forwarded_inputs = []
     req_num = len(lengths)
     draft_model = SimpleNamespace(config={"sliding_window": 3}, forward=forwarded_inputs.append)
@@ -19,8 +22,10 @@ def test_dspark_prefill_commits_suffix_without_proposal(lengths, ready):
         backend=SimpleNamespace(draft_models=[draft_model], decode_timelog=None, profiler=None),
         enable_dynmaic_mtp=False,
     )
-    seq_lens = torch.tensor(lengths, dtype=torch.int32)
-    starts = seq_lens.cumsum(0, dtype=torch.int32) - seq_lens
+    query_lens = torch.tensor(lengths, dtype=torch.int32)
+    prefix_ready = torch.tensor(prefix_ready, dtype=torch.int32)
+    seq_lens = query_lens + prefix_ready
+    starts = query_lens.cumsum(0, dtype=torch.int32) - query_lens
     model_input = SimpleNamespace(
         is_prefill=True,
         max_q_seq_len=max(lengths, default=0),
@@ -29,34 +34,40 @@ def test_dspark_prefill_commits_suffix_without_proposal(lengths, ready):
         b_position_delta=None,
         b_req_idx=torch.arange(req_num, dtype=torch.int32) + 3,
         b_seq_len=seq_lens,
-        b_ready_cache_len=torch.zeros_like(seq_lens),
+        b_ready_cache_len=prefix_ready,
         b_prefill_start_loc=starts,
         input_ids=torch.arange(sum(lengths), dtype=torch.int64),
         mtp_draft_input_hiddens=None,
     )
-    hidden_rows = sum(lengths) if ready is None else sum(n - r for n, r in zip(lengths, ready))
-    target_hidden = torch.empty((hidden_rows, 8))
+    expected_rows = list(range(sum(lengths)))
+    collector = ModelMtpOutputCollector()
+    if ready is not None:
+        collector.spec_hidden_prefill_ready_cache_len = torch.tensor(ready, dtype=torch.int32)
+        tail_lens = seq_lens - collector.spec_hidden_prefill_ready_cache_len
+        collector.spec_hidden_prefill_start_loc = tail_lens.cumsum(0, dtype=torch.int32) - tail_lens
+        expected_rows = [
+            i for start, n, tail in zip(starts, lengths, tail_lens) for i in range(start + n - tail, start + n)
+        ]
+        collector.spec_hidden_prefill_input_ids = model_input.input_ids[expected_rows]
+    target_hidden = torch.empty((len(expected_rows), 8))
+    collector.spec_hidden = target_hidden
     proposal = proposer.fill_draft_model_kv_state(
         target_model_input=model_input,
-        target_model_output=SimpleNamespace(
-            mtp_collector=ModelMtpOutputCollector(
-                spec_hidden=target_hidden,
-                spec_hidden_prefill_ready_cache_len=None if ready is None else torch.tensor(ready, dtype=torch.int32),
-            )
-        ),
+        target_model_output=SimpleNamespace(mtp_collector=collector),
         target_next_token_ids=torch.arange(req_num, dtype=torch.int64) + 11,
     )
     assert proposal is None
-    assert len(forwarded_inputs) == (1 if hidden_rows else 0)
-    if not hidden_rows:
+    assert len(forwarded_inputs) == (1 if expected_rows else 0)
+    if not expected_rows:
         return
     commit = forwarded_inputs[0]
     assert commit is not model_input
     assert commit.mtp_draft_input_hiddens is target_hidden
     assert model_input.mtp_draft_input_hiddens is None
-    expected_rows = [
-        i for start, n, r in zip(starts.tolist(), lengths, ready or [0] * req_num) for i in range(start + r, start + n)
-    ]
+    if ready is not None:
+        assert commit.input_ids is collector.spec_hidden_prefill_input_ids
+        assert commit.b_prefill_start_loc is collector.spec_hidden_prefill_start_loc
+        assert commit.b_ready_cache_len is collector.spec_hidden_prefill_ready_cache_len
     assert commit.input_ids.tolist() == expected_rows
     assert model_input.input_ids.tolist() == list(range(sum(lengths)))
 
