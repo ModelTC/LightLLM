@@ -54,9 +54,8 @@ def _per_token_group_quant_fp8(
 ):
     if USE_PACKED_UE8M0:
         row_id = tl.program_id(0)
-        packed_col = tl.program_id(1)
-        byte_ids = tl.arange(0, 4)
-        group_ids = packed_col * 4 + byte_ids
+        groups = tl.arange(0, GROUPS_PER_CTA)
+        group_ids = tl.program_id(1) * GROUPS_PER_CTA + groups
         cols = tl.arange(0, BLOCK)
         offsets = (row_id * xs_n + group_ids[:, None]) * y_stride + cols[None, :]
         mask = (group_ids[:, None] < xs_n) & (cols[None, :] < N)
@@ -66,9 +65,12 @@ def _per_token_group_quant_fp8(
         y_q = tl.clamp(y / y_s[:, None], fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
         tl.store(y_q_ptr + offsets, y_q, mask=mask)
         exponents = (y_s.to(tl.int32, bitcast=True) >> 23) & 255
-        packed = tl.sum(tl.where(group_ids < xs_n, exponents << (byte_ids * 8), 0), axis=0)
+        bytes_ = tl.where(group_ids < xs_n, exponents << ((groups % 4) * 8), 0)
+        packs_per_cta: tl.constexpr = GROUPS_PER_CTA // 4
+        packed = tl.sum(tl.reshape(bytes_, (packs_per_cta, 4)), axis=1)
+        packed_col = tl.program_id(1) * packs_per_cta + tl.arange(0, packs_per_cta)
         scale_offset = row_id * xs_stride_m + packed_col * xs_stride_n
-        tl.store(y_s_ptr + scale_offset, packed)
+        tl.store(y_s_ptr + scale_offset, packed, mask=packed_col < tl.cdiv(xs_n, 4))
         return
 
     g_id = tl.program_id(0) * GROUPS_PER_CTA + tl.arange(0, GROUPS_PER_CTA)
@@ -162,10 +164,16 @@ def lightllm_per_token_group_quant_fp8(
         topk_block = 1
         num_topk = topk_row_stride = topk_out_row_stride = 0
     # Large Mega inputs otherwise launch one CTA per 128-element group.
-    groups_per_cta = 16 if copy_topk and M >= 4096 else 1
-    if groups_per_cta > 1:
+    if use_packed_ue8m0:
+        groups_per_cta = 32 if M >= 4096 else 4
+    else:
+        groups_per_cta = 16 if copy_topk and M >= 4096 else 1
+    if groups_per_cta >= 16:
         num_warps = 4
-    grid = (x.shape[-2], triton.cdiv(xs_n, 4)) if use_packed_ue8m0 else (triton.cdiv(M, groups_per_cta),)
+    if use_packed_ue8m0:
+        grid = (x.shape[-2], triton.cdiv(xs_n, groups_per_cta))
+    else:
+        grid = (triton.cdiv(M, groups_per_cta),)
     _per_token_group_quant_fp8[grid](
         x,
         x_q,
