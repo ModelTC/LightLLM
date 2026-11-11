@@ -769,7 +769,6 @@ class ModeBackend:
         pause_max_req_num = 2
         wait_pause_count = 0
         prefill_tokens = 0
-        deferred_prefill_req = None
 
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
@@ -845,17 +844,32 @@ class ModeBackend:
                 token_num, alloc_token_num = req_obj.prefill_need_token_num(
                     is_chuncked_prefill=not self.disable_chunked_prefill
                 )
-                if prefill_tokens + token_num > self.batch_max_tokens:
-                    if (
+                chunk_end = None
+                remaining = self.batch_max_tokens - prefill_tokens
+                if token_num > remaining:
+                    if not (
                         no_decode
                         and not self.disable_chunked_prefill
-                        and deferred_prefill_req is None
                         and req_obj.cur_kv_len > 0
+                        and remaining >= self.args.page_size
                     ):
-                        deferred_prefill_req = req_obj
-                    continue
+                        continue
+                    # Fit a continuation before considering lower-ranked requests.
+                    chunk_end = req_obj.get_chuncked_input_token_len(
+                        chunk_size=min(remaining, self.args.chunked_prefill_size)
+                    )
+                    token_num = chunk_end - req_obj.get_prefill_input_start(chunk_end)
+                    alloc_token_num = req_obj._kv_cache_alloc_need(chunk_end)
+                    if (
+                        chunk_end <= req_obj.cur_kv_len
+                        or token_num > remaining
+                        or alloc_token_num > can_alloc_token_num
+                    ):
+                        continue
                 if alloc_token_num <= can_alloc_token_num:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
+                    if chunk_end is not None:
+                        req_obj.prefill_chunk_end = chunk_end
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
@@ -863,19 +877,6 @@ class ModeBackend:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True
                         wait_pause_count += 1
-
-        # P 端先按原顺序装入完整 chunk，再用剩余预算推进一个已开始的请求。
-        remaining = self.batch_max_tokens - prefill_tokens
-        if deferred_prefill_req is not None and remaining >= self.args.page_size:
-            req = deferred_prefill_req
-            end = req.get_chuncked_input_token_len(chunk_size=min(remaining, self.args.chunked_prefill_size))
-            token_num = end - req.get_prefill_input_start(end)
-            alloc_token_num = req._kv_cache_alloc_need(end)
-            if end > req.cur_kv_len and token_num <= remaining and alloc_token_num <= can_alloc_token_num:
-                self._alloc_req_kv_mem(req, alloc_token_num, no_blcoking_copy=True)
-                req.prefill_chunk_end = end
-                prefill_reqs.append(req)
-                prefill_tokens += token_num
 
         # 先由控制器确定请求需要写入的缓存层级。
         cache_controller = g_infer_context.cache_placement_controller

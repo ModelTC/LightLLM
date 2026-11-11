@@ -241,10 +241,14 @@ def test_prefill_scheduler_checks_compute_and_kv_budgets_separately(
 
 
 @pytest.mark.parametrize(
-    "image_spans, long_end",
-    [([], 12288), ([(11264, 13312)], 11264), ([(8192, 13312)], 8192)],
+    "image_spans, later_len, long_end, selected",
+    [
+        ([], 6144, 14336, [0, 1]),
+        ([(11264, 15360)], 2048, 11264, [0, 1, 2]),
+        ([(8192, 15360)], 2048, 8192, [0, 2]),
+    ],
 )
-def test_pd_prefill_uses_remaining_budget_after_full_chunks(monkeypatch, image_spans, long_end):
+def test_pd_prefill_fits_started_chunk_in_queue_order(monkeypatch, image_spans, later_len, long_end, selected):
     context, backend = _make_context(monkeypatch)
     monkeypatch.setattr(infer_batch, "g_infer_context", context)
     context.backend.model.prefill_replay_window = 128
@@ -267,7 +271,9 @@ def test_pd_prefill_uses_remaining_budget_after_full_chunks(monkeypatch, image_s
     context.req_manager.req_to_token_indexs = torch.full((3, 24576), -1, dtype=torch.int32)
 
     reqs = []
-    for index, (input_len, cur_len, spans) in enumerate(((2048, 0, []), (24576, 8192, image_spans), (2048, 0, []))):
+    for index, (input_len, cur_len, spans) in enumerate(
+        ((2048, 0, []), (24576, 8192, image_spans), (later_len, 0, []))
+    ):
         req = InferReq.__new__(InferReq)
         req.args = args
         req.req_idx = index
@@ -287,20 +293,17 @@ def test_pd_prefill_uses_remaining_budget_after_full_chunks(monkeypatch, image_s
 
     prefill_reqs, decode_reqs, token_num = backend._get_classed_reqs(req_ids=[0, 1, 2], no_decode=True)
 
-    expected = [reqs[0], reqs[2]]
-    if long_end > 8192:
-        expected.append(reqs[1])
-    assert prefill_reqs == expected and not decode_reqs
-    assert token_num == 4096 + long_end - 8192
+    assert [req.req_idx for req in prefill_reqs] == selected and not decode_reqs
+    assert token_num == 2048 + long_end - 8192 + (later_len if 2 in selected else 0)
     assert reqs[1].hold_kv_len == long_end
     model_input, run_reqs = generic_pre_process.prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=True)
     assert model_input.input_ids.numel() == token_num
     if long_end > 8192:
-        assert model_input.b_seq_len[-1] == long_end
+        assert model_input.b_seq_len[1] == long_end
     updates = backend._pre_post_handle(run_reqs, is_chuncked_mode=True)
     assert reqs[1].cur_kv_len == long_end
     if long_end > 8192:
-        assert updates[-1].output_len == 0
+        assert updates[1].output_len == 0
     assert reqs[1].get_chuncked_input_token_len() == 16384
 
 
