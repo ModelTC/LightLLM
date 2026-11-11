@@ -48,7 +48,7 @@ class HRRNPrefillStrategy(PrefillQueueStrategy):
 
     负优先级请求仍按原始相对顺序排在最前面。普通请求按
     ``waited_prefill_tokens / uncached_prefill_tokens`` 从大到小排列；等待越久或
-    首次参与 HRRN 排序时的未缓存工作量越小，越早获得调度。请求 ID 用作相同比率下的
+    首次参与 HRRN 排序时需要计算的 token 越少，越早获得调度。请求 ID 用作相同比率下的
     确定性次级排序键。
     """
 
@@ -61,10 +61,12 @@ class HRRNPrefillStrategy(PrefillQueueStrategy):
             # 首次参与 HRRN 普通请求排序时记录 aging 起点，后续轮次保留该快照。
             if not hasattr(req, "arrival_processed_prefill_tokens"):
                 req.arrival_processed_prefill_tokens = processed_prefill_tokens
-            # 请求第一次进入 HRRN 排序时才绑定服务成本，使此前完成的 Cache 初始化
-            # 能反映在分母中；后续 chunked prefill 不再改变该请求的服务成本。
+            # 首次排序时按模型实际计算起点估算成本，计入短续段需要重算的缓存窗口。
+            # 后续 chunked prefill 不再改变该请求的服务成本。
             if not hasattr(req, "uncached_prefill_tokens"):
-                req.uncached_prefill_tokens = max(1, remaining_prefill_tokens(req))
+                prompt_len = req.shm_req.input_len
+                prefill_start = req.get_prefill_input_start(prompt_len) if req.cur_kv_len < prompt_len else prompt_len
+                req.uncached_prefill_tokens = max(1, prompt_len - prefill_start)
             uncached_prefill_tokens = req.uncached_prefill_tokens
             waited_tokens = max(0, processed_prefill_tokens - req.arrival_processed_prefill_tokens)
             return (-waited_tokens / uncached_prefill_tokens, req.req_id)

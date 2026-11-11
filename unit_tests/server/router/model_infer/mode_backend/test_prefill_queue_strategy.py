@@ -5,12 +5,19 @@ import pytest
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs import FinishStatus
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-from lightllm.server.router.model_infer.infer_batch import InferReq
+from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.mode_backend.prefill_queue_strategy import (
     PREFILL_QUEUE_STRATEGIES,
     PrefillQueueStrategy,
     create_prefill_queue_strategy,
 )
+
+
+@pytest.fixture(autouse=True)
+def prefill_model(monkeypatch):
+    model = SimpleNamespace(prefill_replay_window=0)
+    monkeypatch.setattr(g_infer_context, "backend", SimpleNamespace(model=model))
+    return model
 
 
 def req(
@@ -29,6 +36,7 @@ def req(
     request = InferReq.__new__(InferReq)
     request.req_id = group_id
     request.cur_kv_len = kv_len
+    request.mm_input_spans = []
     request.finish_status = FinishStatus(finish_status)
     request.infer_aborted = infer_aborted
     request.filter_mark = filter_mark
@@ -332,6 +340,21 @@ def test_hrrn_binds_uncached_tokens_once_and_uses_request_id_tiebreaker():
     more_cached.cur_kv_len = 0
     policy.backend.processed_prefill_tokens = 2000
     assert policy.reorder(requests) == [more_cached, equally_cached_later_id, less_cached]
+
+
+@pytest.mark.parametrize("mm_spans, cost", [([], 160), ([(3900, 4040)], 228)])
+def test_hrrn_charges_cached_window_replay(prefill_model, mm_spans, cost):
+    prefill_model.prefill_replay_window = 128
+    cached = req(1, 4128, kv_len=4096)
+    cached.mm_input_spans = mm_spans
+    uncached = req(2, 128)
+    policy = strategy("hrrn")
+    policy.reorder([cached, uncached], no_decode=True)
+    policy.backend.processed_prefill_tokens = 8192
+
+    assert policy.reorder([cached, uncached], no_decode=True) == [uncached, cached]
+    assert cached.uncached_prefill_tokens == cost
+    assert uncached.uncached_prefill_tokens == 128
 
 
 def test_hrrn_keeps_internal_high_priority_requests_first():

@@ -133,17 +133,17 @@ Python 的 `sorted()` 是稳定排序。因此：
 ```text
 priority_score = waited_prefill_tokens / uncached_prefill_tokens
 waited_prefill_tokens = processed_prefill_tokens - arrival_processed_prefill_tokens
-uncached_prefill_tokens = max(1, input_len - cur_kv_len_at_first_hrrn_sort)
+uncached_prefill_tokens = max(1, input_len - prefill_input_start_at_first_hrrn_sort)
 ```
 
 - `processed_prefill_tokens` 是当前推理后端累计提交给 prefill forward 执行的 token 数。
 - 普通请求第一次参与 HRRN 排序时，策略将当前计数保存为 `arrival_processed_prefill_tokens`，后续轮次保持不变。等待量从这次排序开始累计，不包含此前未参与 HRRN 排队的阶段。
-- 请求第一次参与 HRRN 排序时，策略通过动态属性保存 `uncached_prefill_tokens`。因此此前完成的 Prefix/CPU Cache 初始化会反映在服务成本中；属性绑定后保持不变，后续 chunked prefill 不会持续缩小分母。
+- 请求第一次参与 HRRN 排序时，策略通过动态属性保存 `uncached_prefill_tokens`。计算起点计入此前的 Prefix/CPU Cache 命中，也计入模型为短续段重算的缓存窗口。属性绑定后保持不变，后续 chunked prefill 不会持续缩小分母。
 - 分数越高越先调度；服务成本最小按一个 token 计算，避免零分母分支。
 - 分数相同时使用请求 ID 作为确定性的次级排序键，确保各 TP rank 得到相同顺序。
 - `infer_high_priority < 0` 的内部高优先级请求始终位于 HRRN 普通请求之前。
 
-如果吞吐量在一段时间内近似稳定，处理过的 prefill token 数与等待时间成正比，首次 HRRN 排序时的未缓存 prefill token 数与预计服务时间成正比。因此该公式与经典 HRRN 的 `1 + wait_time / service_time` 具有相同的排序效果，同时不依赖各 TP rank 可能略有差异的墙上时钟，也不需要配置预计 TPS。
+如果吞吐量在一段时间内近似稳定，处理过的 prefill token 数与等待时间成正比，首次 HRRN 排序时需要计算的 token 数与预计服务时间成正比。因此该公式与经典 HRRN 的 `1 + wait_time / service_time` 具有相同的排序效果，同时不依赖各 TP rank 可能略有差异的墙上时钟，也不需要配置预计 TPS。
 
 该模式主要适合 PD 分离架构的 Prefill 节点，尤其是 prompt 长度和 Prefix Cache 命中长度差异较大的流量。短请求通常能更早完成 Prefill，从而改善 TTFT 和首字体验；长请求的分数会随等待期间处理的 token 数持续增长，从而降低饥饿和尾延迟风险。
 
@@ -230,7 +230,7 @@ python -m lightllm.server.api_server \
 
 `promote_shortest` 主要用于改善 PD 分离模式下 Prefill 节点中部分短请求的首字体验。它只提升一个普通请求，通常比完整 SJF 更温和，但具体 TTFT 和 SLA 收益仍取决于实际流量。
 
-`hrrn` 更适合长短请求差异明显且需要兼顾平均 TTFT 与长请求公平性的场景。其服务成本使用请求首次参与 HRRN 排序时的未缓存 token 数近似；对于每 token 成本随上下文长度明显增长的模型，这个估算并不完全等价于真实 Prefill 时间，仍应通过生产流量压测确认收益。
+`hrrn` 更适合长短请求差异明显且需要兼顾平均 TTFT 与长请求公平性的场景。其服务成本用请求首次参与排序时需要计算的 token 数估算。对于每 token 成本随上下文长度明显增长的模型，仍应通过生产流量压测确认收益。
 
 ## 扩展新策略
 
