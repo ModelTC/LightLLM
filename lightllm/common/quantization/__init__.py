@@ -100,7 +100,7 @@ class Quantcfg:
     def _mapping_quant_method(self):
         if self.hf_quantization_method == "fp8":
             block_size = self.hf_quantization_config.get("weight_block_size", None)
-            if block_size == [32, 32]:
+            if block_size == [32, 32] and self.quant_type != "fp8w8a8-b32-deepgemm":
                 self.quant_type = "fp8w8a8-b32-triton"
             if block_size == [128, 128]:
                 from lightllm.common.quantization.deepgemm import HAS_DEEPGEMM

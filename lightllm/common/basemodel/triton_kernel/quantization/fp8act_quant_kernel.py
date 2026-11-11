@@ -238,7 +238,7 @@ def per_token_group_quant_fp8(
 
     # Adapted from
     # https://github.com/sgl-project/sglang/blob/7e257cd666c0d639626487987ea8e590da1e9395/python/sglang/srt/layers/quantization/fp8_kernel.py#L290
-    if HAS_SGL_KERNEL and (not use_ue8m0_scales or use_packed_ue8m0):
+    if HAS_SGL_KERNEL and (not use_ue8m0_scales or (use_packed_ue8m0 and eps == 1e-10)):
         finfo = torch.finfo(dtype)
         fp8_max, fp8_min = finfo.max, finfo.min
         # 使用SGL kernel进行量化

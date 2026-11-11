@@ -58,6 +58,8 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
         self.block_size = 128
+        self.activation_quant_eps = 1e-10
+        self.gemm_recipe = None
         self.weight_suffix = "weight"
         self.weight_zero_point_suffix = None
         self.weight_scale_suffix = "weight_scale_inv"
@@ -113,6 +115,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
             qinput_tensor, input_scale = per_token_group_quant_fp8(
                 input_tensor,
                 self.block_size,
+                eps=self.activation_quant_eps,
                 dtype=qweight.dtype,
                 column_major_scales=True,
                 scale_tma_aligned=True,
@@ -123,7 +126,9 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
 
         if out is None:
             out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
-        _deepgemm_fp8_nt((qinput_tensor, input_scale), (qweight, weight_scale), out)
+        if self.gemm_recipe is not None:
+            assert bias is None, f"Bias addition is not supported in {self.method_name}"
+        _deepgemm_fp8_nt((qinput_tensor, input_scale), (qweight, weight_scale), out, recipe=self.gemm_recipe)
         return out
 
     def apply_swiglu(self, input_tensor, weight_pack, limit=None, out=None, use_custom_tensor_mananger=True, bias=None):
@@ -189,6 +194,29 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
             weight_scale_split_dim=-2,
         )
         return mm_param, mm_param_list
+
+
+@QUANTMETHODS.register("fp8w8a8-b32-deepgemm", platform="cuda")
+class DeepGEMMFP8w8a8B32QuantizationMethod(DeepGEMMFP8w8a8B128QuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        self.block_size = 32
+        self.activation_quant_eps = 1e-4
+        self.gemm_recipe = (1, 1, 32)
+        self.weight_scale_suffix = "scale"
+
+    @property
+    def method_name(self):
+        return "fp8w8a8-b32-deepgemm"
+
+    def _create_weight(self, out_dims, in_dim, dtype, device_id, num_experts=1):
+        if not is_sm100_gpu() or (self.hf_quantization_config or {}).get("scale_fmt") != "ue8m0":
+            raise ValueError("fp8w8a8-b32-deepgemm requires SM100 and UE8M0 weight scales")
+        return super()._create_weight(out_dims, in_dim, dtype, device_id, num_experts)
+
+    def load_weight_scale(self, weight_scale, weight_pack):
+        if weight_scale is not None:
+            super().load_weight_scale(weight_scale.float(), weight_pack)
 
 
 @QUANTMETHODS.register("fp4fp8-b32-deepgemm", platform="cuda")
@@ -420,7 +448,9 @@ class MXFP4MoEQuantizationMethod(QuantizationMethod):
         moe_weight.w2.weight_scale = moe_weight.w2.marlin_weight_scale
 
 
-def _deepgemm_fp8_nt(a_tuple, b_tuple, out):
+def _deepgemm_fp8_nt(a_tuple, b_tuple, out, *, recipe=None):
+    if recipe is not None:
+        return deep_gemm.fp8_gemm_nt(a_tuple, b_tuple, out, recipe=recipe)
     if HAS_DEEPGEMM:
         if hasattr(deep_gemm, "gemm_fp8_fp8_bf16_nt"):
             return deep_gemm.gemm_fp8_fp8_bf16_nt([a_tuple[0], a_tuple[1]], [b_tuple[0], b_tuple[1]], out)
