@@ -977,7 +977,16 @@ def test_o_projection_loads_bf16_groups_and_preserves_tp_slices(block_size, tp_s
         torch.testing.assert_close(actual, expected, atol=0.015625, rtol=0.01)
 
 
-def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
+@pytest.mark.parametrize(
+    "starts,query_lengths,uses_slice",
+    [
+        ([20, 1000, 128], [200, 3, 129], False),
+        ([20], [201], True),
+        ([20, 1000, 128], [128, 3, 1], True),
+    ],
+    ids=["ragged-tails", "single-tail", "whole-batch"],
+)
+def test_decoder_replay_rows_and_swa_floor_preserve_encoder_state(starts, query_lengths, uses_slice):
     from lightllm.models.deepseek_v41.infer_struct import DeepseekV41InferStateInfo
 
     state = DeepseekV41InferStateInfo()
@@ -986,14 +995,18 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
         init_state=lambda: None,
         swa_buffer=object(),
     )
-    state.b_q_seq_len = torch.tensor([200, 3, 129], dtype=torch.int32, device="cuda")
-    state.b_seq_len = torch.tensor([220, 1003, 257], dtype=torch.int32, device="cuda")
+    ends = [start + length for start, length in zip(starts, query_lengths)]
+    token_count = sum(query_lengths)
+    state.b_q_seq_len = torch.tensor(query_lengths, dtype=torch.int32, device="cuda")
+    state.b_seq_len = torch.tensor(ends, dtype=torch.int32, device="cuda")
     state.b_ready_cache_len = state.b_seq_len - state.b_q_seq_len
-    state.max_q_seq_len = 200
-    state._dsv4_token_to_batch_idx = torch.repeat_interleave(torch.arange(3, device="cuda"), state.b_q_seq_len)
-    state.position_ids = torch.cat(
-        [torch.arange(a, b, device="cuda") for a, b in ((20, 220), (1000, 1003), (128, 257))]
+    state.max_q_seq_len = max(query_lengths)
+    state.b1_cu_q_seq_len = torch.nn.functional.pad(state.b_q_seq_len.cumsum(0, dtype=torch.int32), (1, 0))
+    state.b_q_start_loc = state.b1_cu_q_seq_len[:-1]
+    state._dsv4_token_to_batch_idx = torch.repeat_interleave(
+        torch.arange(len(starts), device="cuda"), state.b_q_seq_len
     )
+    state.position_ids = torch.cat([torch.arange(start, end, device="cuda") for start, end in zip(starts, ends)])
     for name in (
         "input_ids",
         "mem_index",
@@ -1001,19 +1014,24 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
         "dsv4_swa_write_slots",
         "dsv4_swa_runtime_write_slots",
     ):
-        setattr(state, name, torch.arange(332, device="cuda"))
+        setattr(state, name, torch.arange(token_count, device="cuda"))
     for name in ("position_cos_sliding", "position_sin_sliding", "position_cos_compress", "position_sin_compress"):
-        setattr(state, name, torch.randn(332, 32, device="cuda"))
-    state.dsv4_swa_indices = torch.arange(332 * 128, dtype=torch.int32, device="cuda").view(332, 128)
-    state.dsv4_swa_lengths = torch.full((332,), 128, dtype=torch.int32, device="cuda")
-    state.v41_sparse_selection = {"extra_indices": torch.arange(332, device="cuda")[:, None, None]}
-    state.candidate_block_indices = torch.arange(332, device="cuda")[:, None]
-    state.engram_hashes = torch.arange(332, device="cuda")[:, None, None]
+        setattr(state, name, torch.randn(token_count, 32, device="cuda"))
+    state.dsv4_swa_indices = torch.arange(token_count * 128, dtype=torch.int32, device="cuda").view(token_count, 128)
+    state.dsv4_swa_lengths = torch.full((token_count,), 128, dtype=torch.int32, device="cuda")
+    all_rows = torch.arange(token_count, device="cuda")
+    state.v41_sparse_selection = {"extra_indices": all_rows[:, None, None]}
+    state.candidate_block_indices = all_rows[:, None]
+    state.engram_hashes = all_rows[:, None, None]
     state.indexer_metadata = object()
     original_swa = state.dsv4_swa_indices.clone()
     rows = state.init_decoder_state()
-    expected_rows = torch.cat((torch.arange(72, 203, device="cuda"), torch.arange(204, 332, device="cuda")))
-    torch.testing.assert_close(rows, expected_rows)
+    expected_q_lengths = [min(length, 128) for length in query_lengths]
+    expected_ready = [end - length for end, length in zip(ends, expected_q_lengths)]
+    ready_per_row = torch.tensor(expected_ready, device="cuda")[state._dsv4_token_to_batch_idx]
+    expected_rows = all_rows[state.position_ids >= ready_per_row]
+    assert isinstance(rows, slice) == uses_slice
+    torch.testing.assert_close(all_rows[rows], expected_rows)
     decoder = state.decoder_state
     assert decoder.prefill_att_state is not state.prefill_att_state
     assert decoder.prefill_att_state.swa_buffer is state.prefill_att_state.swa_buffer
@@ -1021,18 +1039,21 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
     assert decoder.indexer_metadata is None
     assert state.indexer_metadata is not None
     assert decoder.max_q_seq_len == 128
-    assert decoder.b_q_seq_len.tolist() == [128, 3, 128]
-    assert decoder.b_ready_cache_len.tolist() == [92, 1000, 129]
-    assert decoder.b_q_start_loc.tolist() == [0, 128, 131]
+    assert decoder.b_q_seq_len.tolist() == expected_q_lengths
+    assert decoder.b_ready_cache_len.tolist() == expected_ready
+    assert decoder.b_q_start_loc.tolist() == [sum(expected_q_lengths[:i]) for i in range(len(starts))]
     torch.testing.assert_close(decoder.engram_hashes[:, 0, 0], expected_rows)
     torch.testing.assert_close(decoder.candidate_block_indices[:, 0], expected_rows)
     torch.testing.assert_close(decoder.v41_sparse_selection["extra_indices"][:, 0, 0], expected_rows)
-    expected_lengths = torch.tensor([*range(1, 129), 1, 2, 3, *range(1, 129)], device="cuda", dtype=torch.int32)
+    expected_lengths = torch.tensor(
+        [i for length in expected_q_lengths for i in range(1, length + 1)], device="cuda", dtype=torch.int32
+    )
     torch.testing.assert_close(decoder.dsv4_swa_lengths, expected_lengths)
     invalid = torch.arange(128, device="cuda")[None, :] >= expected_lengths[:, None]
     assert (decoder.dsv4_swa_indices[invalid] == -1).all()
     torch.testing.assert_close(state.dsv4_swa_indices, original_swa)
-    assert state.b_ready_cache_len.tolist() == [20, 1000, 128]
+    assert (state.dsv4_swa_lengths == 128).all()
+    assert state.b_ready_cache_len.tolist() == starts
 
 
 @pytest.mark.parametrize(

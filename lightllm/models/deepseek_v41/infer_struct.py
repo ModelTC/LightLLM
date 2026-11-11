@@ -43,15 +43,17 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
         Decoder SWA reads only replayed rows, including after a prefix-cache hit.
         """
         window = self.req_manager.cache_config.sliding_window
-        lengths = self.b_q_seq_len.clamp_max(window)
-        ready = self.b_seq_len - lengths
-        batch = self._dsv4_token_to_batch_idx.long()
-        if self.b_seq_len.numel() == 1:
-            # A single request has a contiguous tail with a known row count.
-            end = self.position_ids.numel()
-            rows = torch.arange(max(0, end - window), end, device=self.position_ids.device)
+        if self.max_q_seq_len <= window:
+            rows = slice(None)
+            lengths, ready = self.b_q_seq_len, self.b_ready_cache_len
         else:
-            rows = (self.position_ids >= ready[batch]).nonzero(as_tuple=True)[0]
+            lengths = self.b_q_seq_len.clamp_max(window)
+            ready = self.b_seq_len - lengths
+            if self.b_seq_len.numel() == 1:
+                rows = slice(-window, None)
+            else:
+                batch = self._dsv4_token_to_batch_idx.long()
+                rows = (self.position_ids >= ready[batch]).nonzero(as_tuple=True)[0]
         state = copy(self)
         # CED changes query rows while retaining this forward's SWA workspace.
         # FlashMLA schedulers cache the query row count and must be rebuilt.
@@ -76,8 +78,9 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
             setattr(state, name, getattr(self, name)[rows])
         state.b_ready_cache_len = ready
         state.b_q_seq_len = lengths
-        state.b1_cu_q_seq_len = torch.cat((lengths.new_zeros(1), lengths.cumsum(0, dtype=lengths.dtype)))
-        state.b_q_start_loc = state.b1_cu_q_seq_len[:-1]
+        if self.max_q_seq_len > window:
+            state.b1_cu_q_seq_len = torch.cat((lengths.new_zeros(1), lengths.cumsum(0, dtype=lengths.dtype)))
+            state.b_q_start_loc = state.b1_cu_q_seq_len[:-1]
         state.max_q_seq_len = min(self.max_q_seq_len, window)
         from .triton_kernel.attention import bound_swa_replay
 
@@ -85,7 +88,11 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
             value = getattr(self, name)
             if value is not None:
                 setattr(state, name, value[rows])
-        bound_swa_replay(state, ready[batch[rows]])
+        if isinstance(rows, slice):
+            # The decoder masks SWA in place. Keep the encoder's indices and lengths.
+            state.dsv4_swa_indices = state.dsv4_swa_indices.clone()
+            state.dsv4_swa_lengths = state.dsv4_swa_lengths.clone()
+        bound_swa_replay(state, ready[state._dsv4_token_to_batch_idx.long()])
         state.v41_sparse_selection = {name: value[rows] for name, value in self.v41_sparse_selection.items()}
         # The first decoder indexer produces the candidates after this trim.
         if self.candidate_block_indices is not None:
