@@ -46,7 +46,12 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
         lengths = self.b_q_seq_len.clamp_max(window)
         ready = self.b_seq_len - lengths
         batch = self._dsv4_token_to_batch_idx.long()
-        rows = (self.position_ids >= ready[batch]).nonzero(as_tuple=True)[0]
+        if self.b_seq_len.numel() == 1:
+            # A single request has a contiguous tail with a known row count.
+            end = self.position_ids.numel()
+            rows = torch.arange(max(0, end - window), end, device=self.position_ids.device)
+        else:
+            rows = (self.position_ids >= ready[batch]).nonzero(as_tuple=True)[0]
         state = copy(self)
         # CED changes query rows while retaining this forward's SWA workspace.
         # FlashMLA schedulers cache the query row count and must be rebuilt.
