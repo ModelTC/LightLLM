@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import weakref
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,9 @@ from lightllm.common.basemodel.attention.base_att import (
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
+)
+from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_token_major import (
+    causal_conv1d_prefill_token_major,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
@@ -47,6 +51,17 @@ class KDALinearAttBackend(BaseAttBackend):
         self.conv_kernel_size = config["short_conv_kernel_size"]
         self.lower_bound = config.get("gate_lower_bound", -5.0)
         self.mtp_step = model.args.mtp_step
+        args = model.args
+        self.use_token_major_conv = (
+            os.getenv("LIGHTLLM_GLM53_PREFILL_TOKEN_MAJOR_CONV", "0") == "1"
+            and args.run_mode == "prefill"
+            and self.mtp_step == 1
+            and (self.tp_num_heads, self.head_dim, self.conv_kernel_size) == (64, 128, 4)
+            and not args.enable_prefill_cudagraph
+            and not args.enable_prefill_microbatch_overlap
+            and not args.enable_tpsp_mix_mode
+            and torch.cuda.get_device_capability() == (9, 0)
+        )
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo"):
         return KDAPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
@@ -66,6 +81,40 @@ class KDAPrefillAttState(BasePrefillAttState):
     def init_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
         self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (self.backend.mtp_step + 1)
+
+    def _can_use_token_major_conv(self, x, weight, conv_states, starts, warm):
+        state = self.infer_state
+        slots = self.b_conv_buffer_idx
+        max_len = state.max_q_seq_len
+        batch = slots.numel()
+        # Avoid launching a large rectangular grid for short or very ragged batches.
+        return (
+            state.is_prefill
+            and not state.is_cuda_graph_capture
+            and not state.need_dp_prefill_balance
+            and x.ndim == 2
+            and x.shape[1] == 24576
+            and x.stride() == (24896, 1)
+            and x.is_cuda
+            and x.dtype == torch.bfloat16
+            and type(max_len) is int
+            and 1024 <= max_len <= x.shape[0] <= 8192
+            and 1 <= batch <= 8
+            and max_len * batch <= 2 * x.shape[0]
+            and weight.shape == (24576, 4)
+            and weight.is_contiguous()
+            and weight.dtype == x.dtype
+            and conv_states.ndim == 3
+            and conv_states.shape[1:] == (24576, 3)
+            and conv_states.stride() in ((73728, 3, 1), (98304, 4, 1))
+            and conv_states.dtype == x.dtype
+            and starts.shape == (batch + 1,)
+            and slots.shape == warm.shape == (batch,)
+            and starts.dtype == slots.dtype == torch.int32
+            and warm.dtype == torch.bool
+            and all(t.device == x.device for t in (weight, conv_states, starts, slots, warm))
+            and all(t.is_contiguous() for t in (starts, slots, warm))
+        )
 
     def prefill_att(
         self,
@@ -92,16 +141,26 @@ class KDAPrefillAttState(BasePrefillAttState):
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         conv_states = conv_states[..., : backend.conv_kernel_size - 1]
-        mixed_qkv = causal_conv1d_fn(
-            mixed_qkv.transpose(0, 1),
-            layer_weight.get_merged_kda_conv_weight(),
-            bias=None,
-            query_start_loc=self.infer_state.b1_cu_q_seq_len,
-            cache_indices=self.b_conv_buffer_idx,
-            has_initial_state=self.infer_state.b_ready_cache_len > 0,
-            conv_states=conv_states,
-            activation="silu",
-        ).transpose(0, 1)
+        weight = layer_weight.get_merged_kda_conv_weight()
+        starts = self.infer_state.b1_cu_q_seq_len
+        warm = self.infer_state.b_ready_cache_len > 0
+        if backend.use_token_major_conv and self._can_use_token_major_conv(
+            mixed_qkv, weight, conv_states, starts, warm
+        ):
+            mixed_qkv = causal_conv1d_prefill_token_major(
+                mixed_qkv, weight, conv_states, starts, self.b_conv_buffer_idx, warm, self.infer_state.max_q_seq_len
+            )
+        else:
+            mixed_qkv = causal_conv1d_fn(
+                mixed_qkv.transpose(0, 1),
+                weight,
+                bias=None,
+                query_start_loc=starts,
+                cache_indices=self.b_conv_buffer_idx,
+                has_initial_state=warm,
+                conv_states=conv_states,
+                activation="silu",
+            ).transpose(0, 1)
 
         q, k, v = backend.split_qkv(mixed_qkv)
         q = q.view(1, -1, backend.tp_num_heads, backend.head_dim)
