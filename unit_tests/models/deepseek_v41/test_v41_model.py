@@ -978,18 +978,20 @@ def test_o_projection_loads_bf16_groups_and_preserves_tp_slices(block_size, tp_s
 
 
 @pytest.mark.parametrize(
-    "starts,query_lengths,uses_slice",
+    "starts,query_lengths,uses_slice,tail_token_num",
     [
-        ([20, 1000, 128], [200, 3, 129], False),
-        ([20], [201], True),
-        ([20, 1000, 128], [128, 3, 1], True),
+        ([20, 1000, 128], [200, 3, 129], False, None),
+        ([20, 1000, 128], [200, 3, 129], False, 259),
+        ([20], [201], True, None),
+        ([20, 1000, 128], [128, 3, 1], True, None),
     ],
-    ids=["ragged-tails", "single-tail", "whole-batch"],
+    ids=["ragged-tails", "known-ragged-size", "single-tail", "whole-batch"],
 )
-def test_decoder_replay_rows_and_swa_floor_preserve_encoder_state(starts, query_lengths, uses_slice):
+def test_decoder_replay_rows_and_swa_floor_preserve_encoder_state(starts, query_lengths, uses_slice, tail_token_num):
     from lightllm.models.deepseek_v41.infer_struct import DeepseekV41InferStateInfo
 
     state = DeepseekV41InferStateInfo()
+    state.prefill_tail_token_num = tail_token_num
     state.req_manager = SimpleNamespace(cache_config=SimpleNamespace(sliding_window=128))
     state.prefill_att_state = SimpleNamespace(
         init_state=lambda: None,

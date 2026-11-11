@@ -4,10 +4,12 @@ import torch
 
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 
-from .triton_kernel.attention import bound_swa_replay
+from .triton_kernel.attention import bound_swa_replay, build_decoder_tail_rows
 
 
 class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
+    prefill_tail_token_num: int | None = None
+
     def init_some_extra_state(self, model):
         super().init_some_extra_state(model)
         self.global_kv_write_slots = self.mem_index
@@ -39,18 +41,24 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
         Decoder SWA reads only replayed rows, including after a prefix-cache hit.
         """
         window = self.req_manager.cache_config.sliding_window
+        state = copy(self)
         if self.max_q_seq_len <= window:
             rows = slice(None)
-            lengths, ready = self.b_q_seq_len, self.b_ready_cache_len
         else:
             lengths = self.b_q_seq_len.clamp_max(window)
-            ready = self.b_seq_len - lengths
+            state.b_q_seq_len = lengths
+            state.b_ready_cache_len = self.b_seq_len - lengths
+            state.b1_cu_q_seq_len = torch.cat((lengths.new_zeros(1), lengths.cumsum(0, dtype=lengths.dtype)))
+            state.b_q_start_loc = state.b1_cu_q_seq_len[:-1]
             if self.b_seq_len.numel() == 1:
                 rows = slice(-window, None)
+            elif self.prefill_tail_token_num is not None:
+                rows = build_decoder_tail_rows(
+                    self.b1_cu_q_seq_len, state.b1_cu_q_seq_len, self.prefill_tail_token_num, window
+                )
             else:
                 batch = self._dsv4_token_to_batch_idx.long()
-                rows = (self.position_ids >= ready[batch]).nonzero(as_tuple=True)[0]
-        state = copy(self)
+                rows = (self.position_ids >= state.b_ready_cache_len[batch]).nonzero(as_tuple=True)[0]
         # CED changes query rows while retaining this forward's SWA workspace.
         # FlashMLA schedulers cache the query row count and must be rebuilt.
         state.prefill_att_state = copy(self.prefill_att_state)
@@ -72,11 +80,6 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
             "_dsv4_token_to_batch_idx",
         ):
             setattr(state, name, getattr(self, name)[rows])
-        state.b_ready_cache_len = ready
-        state.b_q_seq_len = lengths
-        if self.max_q_seq_len > window:
-            state.b1_cu_q_seq_len = torch.cat((lengths.new_zeros(1), lengths.cumsum(0, dtype=lengths.dtype)))
-            state.b_q_start_loc = state.b1_cu_q_seq_len[:-1]
         state.max_q_seq_len = min(self.max_q_seq_len, window)
         for name in ("dsv4_image_left", "dsv4_image_right"):
             value = getattr(self, name)

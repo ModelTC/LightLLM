@@ -94,6 +94,11 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
             self.engram_hasher.restore_history(model_input.token_lookback, self.req_manager)
         return super().forward(model_input)
 
+    def _create_inferstate(self, model_input, microbatch_index=0):
+        infer_state = super()._create_inferstate(model_input, microbatch_index)
+        infer_state.prefill_tail_token_num = model_input.prefill_tail_token_num
+        return infer_state
+
     def _token_forward(self, infer_state):
         if not self.is_mtp_draft_model and self.engram_hasher is not None:
             # Stage inputs/history first; both hash kernels are replayed with decode.

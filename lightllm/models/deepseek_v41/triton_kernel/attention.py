@@ -80,6 +80,23 @@ def bound_swa_replay(state, *, write_slots=None, copy_swa=False):
 
 
 @triton.jit
+def _build_decoder_tail_rows(Q_OFFSETS, DECODER_OFFSETS, ROWS, BLOCK: tl.constexpr):
+    req = tl.program_id(0)
+    decoder_start = tl.load(DECODER_OFFSETS + req)
+    decoder_end = tl.load(DECODER_OFFSETS + req + 1)
+    length = decoder_end - decoder_start
+    source_end = tl.load(Q_OFFSETS + req + 1)
+    offsets = tl.arange(0, BLOCK)
+    tl.store(ROWS + decoder_start + offsets, source_end - length + offsets, offsets < length)
+
+
+def build_decoder_tail_rows(q_offsets, decoder_offsets, token_num, window):
+    rows = torch.empty((token_num,), dtype=torch.int64, device=q_offsets.device)
+    _build_decoder_tail_rows[(q_offsets.numel() - 1,)](q_offsets, decoder_offsets, rows, triton.next_power_of_2(window))
+    return rows
+
+
+@triton.jit
 def _pool_pairs(
     KV,
     SCORE,

@@ -58,6 +58,8 @@ class ModelInput:
     # One-time CPU lookback at request admission/resume: (req_idx, chunk_start, token_ids).
     # Request-aligned metadata is independent of MTP verify-row compaction and graph padding.
     token_lookback: Optional[List[Tuple[int, int, List[int]]]] = None
+    # Packed row count when prefill keeps at most the replay window per request.
+    prefill_tail_token_num: Optional[int] = None
 
     def to_cuda(self):
         self.check_input()

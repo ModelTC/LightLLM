@@ -116,6 +116,22 @@ def test_v41_replay_start_preserves_multimodal_block(monkeypatch):
     assert req.get_prefill_input_start(257) == 100
 
 
+def test_v41_prefill_passes_tail_size_after_prefix_replay(monkeypatch):
+    context = _patch_empty_input_context(monkeypatch)
+    context.backend.model.prefill_replay_window = 128
+    monkeypatch.setattr(infer_batch, "g_infer_context", context)
+    requests = [_make_prefill_req(0, 180), _make_prefill_req(1, 280), _make_prefill_req(2, 3)]
+    for req, hit in zip(requests, (0, 256, 0)):
+        req.cur_kv_len = hit
+        req.mm_input_spans = []
+        req.get_prefill_input_start = InferReq.get_prefill_input_start.__get__(req)
+
+    model_input, _ = generic_pre_process.prepare_prefill_inputs(requests, True)
+    assert model_input.b_ready_cache_len.tolist() == [0, 128, 0]
+    assert model_input.b_prefill_start_loc.tolist() == [0, 180, 332]
+    assert model_input.prefill_tail_token_num == 259
+
+
 def test_prepare_decode_inputs_allows_empty_batch(monkeypatch):
     _patch_empty_input_context(monkeypatch)
 
