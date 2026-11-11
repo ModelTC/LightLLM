@@ -72,17 +72,17 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         swa_packed, compressed_packed = packed_kv
         config = self.cache_config
         bytes_per_token = config.kv_bytes
-        # Expose FlashMLA's [page, token, KV head, byte] axes while retaining padded page strides.
+        # A singleton page can lose its padded stride under view(), which Blackwell FlashMLA needs.
         compressed_cache = None
         if compressed_packed is not None:
             page_size = config.compressed_kv_token_alignment // nsa_dict["compress_ratio"]
-            bytes_per_page = page_size * bytes_per_token
-            compressed_cache = compressed_packed[:, :bytes_per_page].view(
-                compressed_packed.shape[0], page_size, 1, bytes_per_token
+            compressed_cache = compressed_packed.as_strided(
+                (compressed_packed.shape[0], page_size, 1, bytes_per_token),
+                (compressed_packed.stride(0), bytes_per_token, bytes_per_token, 1),
             )
-        swa_bytes_per_page = config.swa_page_token_num * bytes_per_token
-        swa_cache = swa_packed[:, :swa_bytes_per_page].view(
-            swa_packed.shape[0], config.swa_page_token_num, 1, bytes_per_token
+        swa_cache = swa_packed.as_strided(
+            (swa_packed.shape[0], config.swa_page_token_num, 1, bytes_per_token),
+            (swa_packed.stride(0), bytes_per_token, bytes_per_token, 1),
         )
 
         if split_workspace is not None:

@@ -48,7 +48,8 @@ assert not any(name == 'flash_mla' or name.startswith('flash_mla.') for name in 
 
 
 @pytest.mark.parametrize("ratio", [0, 4, 128])
-def test_vllm_call_preserves_output_and_cache_views(monkeypatch, ratio):
+@pytest.mark.parametrize("num_pages", [1, 2])
+def test_vllm_call_preserves_output_and_cache_views(monkeypatch, ratio, num_pages):
     from vllm.third_party.flashmla.flash_mla_interface import flash_mla_with_kvcache
 
     signature = inspect.signature(flash_mla_with_kvcache)
@@ -61,9 +62,9 @@ def test_vllm_call_preserves_output_and_cache_views(monkeypatch, ratio):
     q = torch.zeros((2, 64, 512), dtype=torch.bfloat16)
     storage = torch.full((2, 64, 1024), float("nan"), dtype=q.dtype)
     out = storage[..., :512]
-    swa = torch.zeros((2, 128 * 584 + 256), dtype=torch.uint8)
+    swa = torch.zeros((num_pages, 128 * 584 + 256), dtype=torch.uint8)
     page_size = 256 // ratio if ratio else 0
-    compressed = torch.zeros((2, page_size * 584 + 256), dtype=torch.uint8) if ratio else None
+    compressed = torch.zeros((num_pages, page_size * 584 + 256), dtype=torch.uint8) if ratio else None
     sched_meta = object()
     params = dict(
         compress_ratio=ratio,
@@ -83,7 +84,7 @@ def test_vllm_call_preserves_output_and_cache_views(monkeypatch, ratio):
         assert kwargs["k_cache"].stride(0) == swa.stride(0)
         if ratio:
             assert kwargs["extra_k_cache"].data_ptr() == compressed.data_ptr()
-            assert kwargs["extra_k_cache"].shape == (2, page_size, 1, 584)
+            assert kwargs["extra_k_cache"].shape == (num_pages, page_size, 1, 584)
             assert kwargs["extra_k_cache"].stride(0) == compressed.stride(0)
         else:
             assert kwargs["extra_k_cache"] is None
