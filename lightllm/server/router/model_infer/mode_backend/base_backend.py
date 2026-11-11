@@ -3,14 +3,16 @@ import torch
 import time
 import threading
 import torch.distributed as dist
-from typing import List, Tuple, Callable, Optional, Union
+from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
+from lightllm.server.router.model_infer.req_token_index import ReqTokenIndex
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.cuda_wrapper import cuda_memcpy_pinned_h2d_batch_async
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
@@ -597,9 +599,7 @@ class ModeBackend:
                                 req_to_next_token_ids = (
                                     self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids
                                 )
-                                # to do 这个地方是否需要加流同步
                                 req_to_next_token_ids[req.req_idx, 0:1].fill_(obj.first_gen_token_id)
-                                torch.cuda.current_stream().synchronize()
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
                                     next_token_id=obj.first_gen_token_id,
                                     next_token_logprob=obj.first_gen_token_logprob,
@@ -662,30 +662,6 @@ class ModeBackend:
                 f"radix tree merge_unreferenced_nodes cost time {time.time() - start} s in rank {self.global_rank}"
             )
         return
-
-    # 一些可以复用的通用功能函数
-    def _alloc_req_kv_mem(
-        self,
-        req_obj: InferReq,
-        alloc_token_num: int,
-        no_blcoking_copy: bool = False,
-    ) -> Optional[torch.Tensor]:
-        if alloc_token_num == 0:
-            return None
-
-        assert alloc_token_num > 0 and alloc_token_num % self.args.page_size == 0
-        if g_infer_context.radix_cache is not None:
-            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(alloc_token_num)
-
-        old_hold_kv_len = req_obj.hold_kv_len
-        new_hold_kv_len = old_hold_kv_len + alloc_token_num
-        mem_indexes = g_infer_context.att_state_manager.full_att_allocator.alloc(alloc_token_num)
-        # 高频调度路径允许异步写入请求索引表，其他调用方默认保持原有的同步拷贝语义。
-        g_infer_context.req_manager.req_to_token_indexs[req_obj.req_idx, old_hold_kv_len:new_hold_kv_len].copy_(
-            mem_indexes, non_blocking=no_blcoking_copy
-        )
-        req_obj.hold_kv_len = new_hold_kv_len
-        return mem_indexes
 
     @staticmethod
     def _is_decode_req(req: InferReq, no_decode: bool, strict_prefill: bool) -> bool:
@@ -760,6 +736,7 @@ class ModeBackend:
         finished_reqs = []
         prefill_reqs = []
         decode_reqs = []
+        decode_allocations = []
 
         # 单轮最多处理少量因 token 容量不足而无法继续的请求，避免一次性影响大量请求。
         # 普通 Decode 请求进入暂停队列等待恢复；PD Decode 请求则强制提前结束并进入清理流程。
@@ -770,7 +747,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -795,34 +771,31 @@ class ModeBackend:
             if self._is_decode_req(req_obj, no_decode=no_decode, strict_prefill=strict_prefill):
                 # KV 容量检查使用额外分配量，已有页的剩余容量可以覆盖部分或全部 decode 需求。
                 _, alloc_token_num = req_obj.decode_need_token_num()
-                # page_size 较小时，decode 会频繁触发 KV 内存分配。此处额外预申请不超过 8 个 token，
-                # 并将数量向下对齐到 page_size 的整数倍，以减少 alloc 调用次数并保持分页分配约束。
-                if alloc_token_num > 0 and self.args.page_size < 8:
-                    alloc_token_num += 8 // self.args.page_size * self.args.page_size
                 if alloc_token_num <= can_alloc_token_num:
-                    self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
+                    # 只扣除必需容量；等本轮分类结束后，再从剩余预算中分配可选预留。
+                    if alloc_token_num > 0:
+                        decode_allocations.append((req_obj, alloc_token_num))
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
-                else:
-                    if wait_pause_count < pause_max_req_num:
-                        if self.args.run_mode == "decode":
-                            # PD Decode 节点的 token 容量不足时，强制当前请求提前结束以释放资源。
-                            # 单轮只处理 pause_max_req_num 个请求，避免所有资源不足的请求同时退出。
-                            wait_pause_count += 1
-                            setattr(req_obj, "finished_by_pd_decode_capacity", True)
-                            if support_overlap:
-                                # overlap 模式可能仍有异步计算在访问请求，先标记，下一轮再安全清理。
-                                req_obj.filter_mark = True
-                            else:
-                                # 非 overlap 模式没有在途的异步计算，可以在本轮直接清理。
-                                finished_reqs.append(req_obj)
-                            self.logger.info(
-                                f"force early finish for PD decode req_id={req_obj.req_id} "
-                                f"because token capacity is insufficient"
-                            )
+                elif wait_pause_count < pause_max_req_num:
+                    if self.args.run_mode == "decode":
+                        # PD Decode 节点的 token 容量不足时，强制当前请求提前结束以释放资源。
+                        # 单轮只处理 pause_max_req_num 个请求，避免所有资源不足的请求同时退出。
+                        wait_pause_count += 1
+                        setattr(req_obj, "finished_by_pd_decode_capacity", True)
+                        if support_overlap:
+                            # overlap 模式可能仍有异步计算在访问请求，先标记，下一轮再安全清理。
+                            req_obj.filter_mark = True
                         else:
-                            req_obj.wait_pause = True
-                            wait_pause_count += 1
+                            # 非 overlap 模式没有在途的异步计算，可以在本轮直接清理。
+                            finished_reqs.append(req_obj)
+                        self.logger.info(
+                            f"force early finish for PD decode req_id={req_obj.req_id} "
+                            f"because token capacity is insufficient"
+                        )
+                    else:
+                        req_obj.wait_pause = True
+                        wait_pause_count += 1
             else:
                 # 在 diverse mode 模式下，prefill 只会使用 master 状态的请求，slave 请求依靠后续
                 # 的推理代码中将master请求的状态复制到slave请求中去， 所以这里 slave 状态的请求，不
@@ -837,14 +810,24 @@ class ModeBackend:
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
                 if alloc_token_num <= can_alloc_token_num:
-                    self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
+                    req_obj.alloc_kv_mem(alloc_token_num)
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
-                else:
-                    if wait_pause_count < pause_max_req_num:
-                        req_obj.wait_pause = True
-                        wait_pause_count += 1
+                elif wait_pause_count < pause_max_req_num:
+                    req_obj.wait_pause = True
+                    wait_pause_count += 1
+
+        # 所有接纳请求的必需容量均已计入预算，额外预留不能挤占后续 decode 或 prefill。
+        # page_size 较小时，decode 频繁分配会增加 CPU overhead；因此在剩余预算允许时，
+        # 为 decode 请求额外预留一些 token，供后续步骤复用，减少分配次数并降低 CPU overhead。
+        for req_obj, alloc_token_num in decode_allocations:
+            if self.args.page_size < 8:
+                extra_token_num = min(8, can_alloc_token_num) // self.args.page_size * self.args.page_size
+                alloc_token_num += extra_token_num
+                can_alloc_token_num -= extra_token_num
+            # 将必需容量和可选预留合并申请，保留每个请求一次 alloc 的行为。
+            req_obj.alloc_kv_mem(alloc_token_num)
 
         # 先由控制器确定请求需要写入的缓存层级，再按是否包含 CPU cache 决定是否发起 offload。
         cache_controller = g_infer_context.cache_placement_controller
@@ -871,10 +854,7 @@ class ModeBackend:
         g_infer_context.pause_reqs(wait_pause_reqs, is_master_in_dp=self.is_master_in_dp)
 
         if recover_paused:
-            g_infer_context.recover_paused_reqs(
-                paused_reqs=paused_reqs,
-                is_master_in_dp=self.is_master_in_dp,
-            )
+            g_infer_context.recover_paused_reqs(paused_reqs=paused_reqs, is_master_in_dp=self.is_master_in_dp)
 
         # 在 enable_prefill_decode_mixed 模式下，如果存在 prefill 请求和 decode 请求，
         # 并且 prefill 请求需要的 token 数量 + decode 请求需要的 token 数量小于等于 batch_max_tokens，
@@ -890,7 +870,14 @@ class ModeBackend:
                     prefill_reqs.append(decode_req)
                 decode_reqs = []
 
+        self._copy_req_token_indexes_to_gpu(prefill_reqs + decode_reqs)
         return prefill_reqs, decode_reqs, prefill_tokens
+
+    def _copy_req_token_indexes_to_gpu(self, run_reqs: List[InferReq]):
+        """选择本批请求；索引对象统一管理上传区间、提交进度和流依赖。"""
+        ReqTokenIndex.submit_pending_uploads(
+            [req.token_index for req in run_reqs], copy_batch=cuda_memcpy_pinned_h2d_batch_async
+        )
 
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:

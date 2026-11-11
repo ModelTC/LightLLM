@@ -105,15 +105,13 @@ class ReqSamplingParamsManager:
         else:
             self.req_to_out_token_id_counter[req.req_idx].fill_(0)
             if req.sampling_param.shm_param.input_penalty and req.need_out_token_id_statistics:
-                prompt_ids = g_pin_mem_manager.gen_from_list(
-                    key="prompt_ids_for_penalty",
-                    data=req.shm_req.get_prompt_ids_numpy(),
-                    dtype=torch.int32,
-                ).cuda(non_blocking=True)
+                prompt_tokens = req.shm_req.get_prompt_ids_numpy()
+                prompt_ids = torch.empty(len(prompt_tokens), dtype=torch.int32, device="cpu", pin_memory=True)
+                prompt_ids.numpy()[:] = prompt_tokens
                 token_id_counter(
-                    prompt_ids=prompt_ids, out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx]
+                    prompt_ids=prompt_ids.cuda(non_blocking=True),
+                    out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx],
                 )
-                torch.cuda.current_stream().synchronize()
 
         return
 

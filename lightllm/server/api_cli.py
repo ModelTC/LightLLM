@@ -523,6 +523,16 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         page-aligned contiguous KV slots and make paged attention/cache reuse operate on full pages.""",
     )
     parser.add_argument(
+        "--req_token_index_mode",
+        type=str,
+        choices=["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"],
+        default="pin_mem_cache",
+        help="""How each request stores its token indexes. pin_mem_cache keeps a CPU copy and uploads
+        pending indexes from a fresh pinned slice. pin_mem_page_cache stores one pinned CPU index per KV
+        page and expands it for reads and uploads. pure_gpu writes the GPU request table directly; CPU
+        reads copy back from that table.""",
+    )
+    parser.add_argument(
         "--vit_att_backend",
         type=str,
         nargs="+",

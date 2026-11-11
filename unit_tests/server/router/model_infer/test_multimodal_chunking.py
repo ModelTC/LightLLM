@@ -165,6 +165,7 @@ def test_full_attention_gpu_restore_stays_outside_image(
     from lightllm.server.multi_level_kv_cache.manager import MultiLevelKVCacheManager
     from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
     from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
+    from lightllm.common.req_manager import ReqManager
     from lightllm.utils import shm_utils
     from lightllm.utils.kv_cache_utils import CpuKVCacheMeta, compute_token_list_hash
 
@@ -179,20 +180,35 @@ def test_full_attention_gpu_restore_stays_outside_image(
 
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", False)
     monkeypatch.setattr(g_infer_context, "radix_cache", radix_cache)
-    monkeypatch.setattr(
-        g_infer_context,
-        "req_manager",
-        SimpleNamespace(req_to_token_indexs=torch.empty((1, len(query)), dtype=torch.int64)),
+    from lightllm.server.router.model_infer.req_token_index import (
+        PinMemPageCacheReqTokenIndex,
+        create_req_token_index,
     )
+
+    if (
+        PinMemPageCacheReqTokenIndex._page_offsets is not None
+        and PinMemPageCacheReqTokenIndex._page_offsets.numel() != page_size
+    ):
+        PinMemPageCacheReqTokenIndex._page_offsets = None
+
+    req_manager = ReqManager.__new__(ReqManager)
+    req_manager.page_size = page_size
+    req_manager.req_to_token_indexs = torch.zeros((1, len(query)), dtype=torch.int32)
+    monkeypatch.setattr(g_infer_context, "req_manager", req_manager)
     req = InferReq.__new__(InferReq)
-    req.args = SimpleNamespace(page_size=page_size)
+    req.req_manager = req_manager
+    req.args = SimpleNamespace(page_size=page_size, req_token_index_mode="pin_mem_page_cache")
     req.sampling_param = SimpleNamespace(disable_prompt_cache=False)
     req.cur_kv_len = req.cur_output_len = req.hold_kv_len = req.req_idx = 0
     req.shared_kv_node = None
     req.mm_input_spans = [(700, 1200)]
     req.shm_req = SimpleNamespace(input_len=len(query), shm_prompt_ids=SimpleNamespace(arr=query))
+    req.token_index = create_req_token_index(req, torch.cuda.current_stream())
     req._match_radix_cache()
     assert req.cur_kv_len == req.hold_kv_len == gpu_end
+    if gpu_end:
+        got = req.token_index.get_cpu_token_indexes(0, gpu_end)
+        assert got[::page_size].tolist() == query[:gpu_end:page_size]
     assert not any(start < gpu_end < end for start, end in req.mm_input_spans)
     assert radix_cache.get_refed_tokens_num() == gpu_end
 
@@ -316,9 +332,17 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
     )
     table = torch.arange(8192, dtype=torch.int32).view(1, -1)
 
-    def allocate(req, count):
-        req.hold_kv_len += count
-        return torch.arange(req.cur_kv_len, req.cur_kv_len + count, dtype=torch.int32)
+    def allocate(alloc_token_num):
+        if alloc_token_num == 0:
+            return None
+        start = req.cur_kv_len
+        req.hold_kv_len += alloc_token_num
+        return torch.arange(start, start + alloc_token_num, dtype=torch.int32)
+
+    req.args = SimpleNamespace(page_size=256)
+    req.token_index = SimpleNamespace(get_gpu_token_indexes=lambda start, end: table[0, start:end])
+    req.kv_cache_alloc_need = lambda target: max(0, target - req.hold_kv_len)
+    req.alloc_kv_mem = allocate
 
     from collections import deque
 
@@ -329,9 +353,10 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
         is_master_in_dp=True,
         dp_world_size=1,
         is_hybrid_att_model=hybrid,
-        _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
-            req_manager=SimpleNamespace(req_to_token_indexs=table),
+            req_manager=SimpleNamespace(
+                req_to_token_indexs=table, alloc_token_indexes=allocate, wait_token_indexes=lambda: None
+            ),
             att_state_manager=SimpleNamespace(
                 get_cpu_cache_operator=lambda: SimpleNamespace(
                     get_page_layouts=lambda: {},
@@ -340,12 +365,18 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
                     ),
                 ),
                 bounded_att_big_page_allocator=SimpleNamespace(alloc=lambda count: list(range(count))),
+                full_att_allocator=None,
             ),
         ),
     )
     module.cpu_cache_client = client
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
+    monkeypatch.setattr(
+        common.g_infer_context,
+        "req_manager",
+        SimpleNamespace(alloc_token_indexes=allocate),
+    )
     monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 8192)
     monkeypatch.setattr(common.g_infer_context, "is_hybrid_att_model", hybrid)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)

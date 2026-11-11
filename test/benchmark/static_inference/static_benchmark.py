@@ -576,9 +576,8 @@ class StaticBenchmarkExecutor:
             if new_hold_kv_len <= old_hold_kv_len:
                 continue
 
-            alloc_token_num = new_hold_kv_len - old_hold_kv_len
-            mem_indexes = allocator.alloc(alloc_token_num)
-            self.model.req_manager.req_to_token_indexs[req_id, old_hold_kv_len:new_hold_kv_len].copy_(mem_indexes)
+            indexes = allocator.alloc(new_hold_kv_len - old_hold_kv_len)
+            self.model.req_manager.req_to_token_indexs[req_id, old_hold_kv_len:new_hold_kv_len] = indexes
             self._hold_kv_len_by_req[req_id] = new_hold_kv_len
 
     def _forward_prefill_input(self, model_input: ModelInput, allow_overlap: bool) -> ModelOutput:

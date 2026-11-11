@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from lightllm.common.req_manager import ReqManager
 from lightllm.server.core.objs import FinishStatus
 from lightllm.server.core.objs import req as req_module
 from lightllm.server.router.model_infer.mode_backend import base_backend
@@ -24,13 +25,17 @@ def _make_infer_req(cur_output_len: int, shm_output_len: int):
         finish_status=FinishStatus(),
         cpu_cache_offload_task_status=SimpleNamespace(is_not_started=MagicMock(return_value=True)),
         cur_kv_len=10,
+        hold_kv_len=8,
         cur_output_len=cur_output_len,
         shm_req=SimpleNamespace(shm_cur_output_len=shm_output_len),
         sampling_param=SimpleNamespace(
             shm_param=SimpleNamespace(max_new_tokens=65535),
         ),
         get_cur_total_len=MagicMock(return_value=11),
-        decode_need_token_num=MagicMock(return_value=(1, 1)),
+        args=SimpleNamespace(page_size=4),
+        decode_need_token_num=MagicMock(return_value=(1, 4)),
+        kv_cache_alloc_need=lambda target: max(0, (target + 3) // 4 * 4 - 8),
+        alloc_kv_mem=lambda alloc_token_num: None,
     )
 
 
@@ -51,7 +56,16 @@ def _classify_without_token_capacity(monkeypatch, req, support_overlap=True):
     backend._filter_not_ready_reqs = MagicMock(return_value=reqs)
     backend.prefill_queue_strategy = SimpleNamespace(reorder=MagicMock(side_effect=lambda reqs, **kwargs: reqs))
 
+    backend.batch_max_tokens = 16
     infer_context = base_backend.g_infer_context
+    manager = ReqManager.__new__(ReqManager)
+    manager.page_size = 4
+    monkeypatch.setattr(infer_context, "req_manager", manager)
+    monkeypatch.setattr(
+        infer_context,
+        "att_state_manager",
+        SimpleNamespace(full_att_allocator=SimpleNamespace(page_size=4, can_use_mem_size=0)),
+    )
     monkeypatch.setattr(infer_context, "get_can_alloc_token_num", MagicMock(return_value=0))
     monkeypatch.setattr(
         infer_context,

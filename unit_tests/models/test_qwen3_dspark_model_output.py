@@ -66,6 +66,8 @@ def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
     model._cos_cached = torch.arange(24).view(6, 4)
     model._sin_cached = model._cos_cached + 100
     model.att_state_manager = object()
+    model.is_mtp_draft_model = True
+    model.mtp_previous_draft_models = []
     model.pre_post_weight = object()
 
     target_hiddens = torch.arange(6, dtype=torch.float32).view(2, 3)

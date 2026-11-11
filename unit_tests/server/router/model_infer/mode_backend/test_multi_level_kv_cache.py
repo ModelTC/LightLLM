@@ -71,15 +71,25 @@ def test_non_gpu_cache_tiers_release_owned_tokens_without_radix_insert():
     released_refs = []
     context = InferenceContext()
     context.is_hybrid_att_model = False
-    context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12, 13, 14, 15, 16]]))
+    context.req_manager = SimpleNamespace()
     context.radix_cache = SimpleNamespace(dec_node_ref_counter=released_refs.append)
     shared_node = SimpleNamespace(node_prefix_total_len=2)
-    req = SimpleNamespace(req_idx=0, cur_kv_len=5, hold_kv_len=7, shared_kv_node=shared_node)
-    free_token_indexes = []
+    req = SimpleNamespace(
+        req_idx=0,
+        cur_kv_len=5,
+        hold_kv_len=7,
+        shared_kv_node=shared_node,
+        token_index=SimpleNamespace(
+            get_free_token_indexes=lambda start, end: torch.arange(10 + start, 10 + end),
+            get_cpu_token_indexes=lambda start, end: torch.arange(10 + start, 10 + end),
+            reset=lambda: None,
+        ),
+    )
+    free_token_index_blocks = []
 
-    context._free_req_mem_without_radix_insert(free_token_indexes, req)
+    context._free_req_mem_without_radix_insert(free_token_index_blocks, req)
 
-    assert free_token_indexes[0].tolist() == [12, 13, 14, 15, 16]
+    assert free_token_index_blocks[0].tolist() == [12, 13, 14, 15, 16]
     assert released_refs == [shared_node]
     assert req.shared_kv_node is None
 
@@ -94,6 +104,7 @@ def test_legacy_cache_tiers_still_insert_gpu_radix_cache():
         cache_tiers=(CacheTier.GPU, CacheTier.CPU, CacheTier.DISK),
         cur_kv_len=3,
         shm_req=SimpleNamespace(shm_cur_kv_len=3),
+        token_index=SimpleNamespace(reset=lambda: None),
     )
 
     context.free_a_req_mem([], req)
@@ -184,7 +195,7 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
     freed_big_pages = []
     context = InferenceContext()
     context.is_hybrid_att_model = True
-    context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12]]))
+    context.req_manager = SimpleNamespace()
     context.att_state_manager = SimpleNamespace(
         bounded_att_small_page_allocator=SimpleNamespace(free=freed_small_pages.extend),
         bounded_att_big_page_allocator=SimpleNamespace(free=freed_big_pages.extend),
@@ -193,15 +204,19 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
         req_idx=0,
         cur_kv_len=3,
         hold_kv_len=3,
+        token_index=SimpleNamespace(
+            get_free_token_indexes=lambda start, end: torch.arange(10 + start, 10 + end),
+            reset=lambda: None,
+        ),
         shared_kv_node=None,
         tail_small_page_buffer_id=7,
         hybrid_len_to_big_page_id={128: 8, 256: 9},
     )
-    free_token_indexes = []
+    free_token_index_blocks = []
 
-    context._free_req_mem_without_radix_insert(free_token_indexes, req)
+    context._free_req_mem_without_radix_insert(free_token_index_blocks, req)
 
-    assert free_token_indexes[0].tolist() == [10, 11, 12]
+    assert free_token_index_blocks[0].tolist() == [10, 11, 12]
     assert freed_small_pages == [7]
     assert freed_big_pages == [8, 9]
     assert req.tail_small_page_buffer_id is None
@@ -222,7 +237,8 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         next_index += need_size
         return mem_indexes
 
-    def alloc_req_kv_mem(req, alloc_token_num):
+    def alloc_token_indexes(req, end, allocator, page_size, radix_cache=None):
+        alloc_token_num = end - req.hold_kv_len
         mem_indexes = alloc(alloc_token_num)
         new_hold_kv_len = req.hold_kv_len + alloc_token_num
         table[req.req_idx, req.hold_kv_len : new_hold_kv_len] = mem_indexes
@@ -236,6 +252,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
                 token_indices.tolist()
             ),
         ),
+        full_att_allocator=None,
     )
     backend = SimpleNamespace(
         is_master_in_dp=False,
@@ -244,9 +261,10 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         radix_cache=None,
         model=SimpleNamespace(
             att_state_manager=resources,
-            req_manager=SimpleNamespace(req_to_token_indexs=table),
+            req_manager=SimpleNamespace(
+                req_to_token_indexs=table, alloc_token_indexes=alloc_token_indexes, wait_token_indexes=lambda: None
+            ),
         ),
-        _alloc_req_kv_mem=alloc_req_kv_mem,
     )
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
     module.load_tasks = deque()
@@ -256,7 +274,8 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     module.need_sync_compute_stream = lambda: False
     module.cpu_cache_client = SimpleNamespace(cpu_kv_cache_tensor=None)
     context = SimpleNamespace(
-        req_manager=SimpleNamespace(req_to_token_indexs=table, mem_manager=SimpleNamespace(alloc=alloc)),
+        req_manager=SimpleNamespace(req_to_token_indexs=table, alloc_token_indexes=alloc_token_indexes),
+        radix_cache=None,
         get_can_alloc_token_num=lambda: 200,
     )
     req = SimpleNamespace(
@@ -271,7 +290,11 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: [132]),
         ),
         sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
+        args=SimpleNamespace(page_size=4),
     )
+    req.token_index = SimpleNamespace(get_gpu_token_indexes=lambda start, end: table[req.req_idx, start:end])
+    req.kv_cache_alloc_need = lambda target: max(0, (target + 3) // 4 * 4 - req.hold_kv_len)
+    req.alloc_kv_mem = lambda alloc_token_num: alloc_token_indexes(req, req.hold_kv_len + alloc_token_num, None, 4)
     monkeypatch.setattr(multi_level_kv_cache_impl, "g_infer_context", context)
     monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
@@ -323,20 +346,29 @@ def test_standard_load_releases_unloaded_pages_immediately(monkeypatch):
 
 def _load_module(monkeypatch, *, sync, master=True, world=1):
     events = []
+
+    def alloc_token_indexes(req, end, allocator, page_size, radix_cache=None):
+        req.hold_kv_len = end
+        return torch.arange(req.cur_kv_len, end, dtype=torch.int32)
+
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
     module.args = SimpleNamespace(page_size=4, cpu_cache_token_page_size=128)
     module.backend = SimpleNamespace(
         is_master_in_dp=master,
         dp_world_size=world,
         is_hybrid_att_model=False,
-        _alloc_req_kv_mem=lambda req, count: torch.arange(count, dtype=torch.int32),
         model=SimpleNamespace(
-            req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(512, dtype=torch.int32).view(1, -1)),
+            req_manager=SimpleNamespace(
+                req_to_token_indexs=torch.arange(512, dtype=torch.int32).view(1, -1),
+                alloc_token_indexes=alloc_token_indexes,
+                wait_token_indexes=lambda: None,
+            ),
             att_state_manager=SimpleNamespace(
                 get_cpu_cache_operator=lambda: SimpleNamespace(
                     get_page_layouts=lambda: {},
                     read_req=lambda **kwargs: events.append("copy"),
-                )
+                ),
+                full_att_allocator=None,
             ),
         ),
     )
@@ -363,7 +395,12 @@ def _load_module(monkeypatch, *, sync, master=True, world=1):
             cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: [3, 4]),
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: [128, 256]),
         ),
+        args=SimpleNamespace(page_size=4),
     )
+    token_table = module.backend.model.req_manager.req_to_token_indexs
+    req.token_index = SimpleNamespace(get_gpu_token_indexes=lambda start, end: token_table[req.req_idx, start:end])
+    req.kv_cache_alloc_need = lambda target: max(0, (target + 3) // 4 * 4 - req.hold_kv_len)
+    req.alloc_kv_mem = lambda alloc_token_num: alloc_token_indexes(req, req.hold_kv_len + alloc_token_num, None, 4)
     monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_can_alloc_token_num", lambda: 512)
     monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_overlap_stream", torch.cuda.Stream)
     monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: events.append("barrier"))

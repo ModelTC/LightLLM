@@ -268,9 +268,17 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
     )
     table = torch.arange(8192, dtype=torch.int32).view(1, -1)
 
-    def allocate(req, count):
-        req.hold_kv_len += count
-        return torch.arange(req.cur_kv_len, req.cur_kv_len + count, dtype=torch.int32)
+    def allocate(alloc_token_num):
+        if alloc_token_num == 0:
+            return None
+        start = req.cur_kv_len
+        req.hold_kv_len += alloc_token_num
+        return torch.arange(start, start + alloc_token_num, dtype=torch.int32)
+
+    req.args = SimpleNamespace(page_size=256)
+    req.token_index = SimpleNamespace(get_gpu_token_indexes=lambda start, end: table[0, start:end])
+    req.kv_cache_alloc_need = lambda target: max(0, target - req.hold_kv_len)
+    req.alloc_kv_mem = allocate
 
     from collections import deque
 
@@ -281,14 +289,16 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
         is_master_in_dp=True,
         dp_world_size=1,
         is_hybrid_att_model=False,
-        _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
-            req_manager=SimpleNamespace(req_to_token_indexs=table),
+            req_manager=SimpleNamespace(
+                req_to_token_indexs=table, alloc_token_indexes=allocate, wait_token_indexes=lambda: None
+            ),
             att_state_manager=SimpleNamespace(
                 get_cpu_cache_operator=lambda: SimpleNamespace(
                     get_page_layouts=lambda: {},
                     read_req=lambda **kwargs: loaded.append(req.cur_kv_len + kwargs["token_indices"].numel()),
                 ),
+                full_att_allocator=None,
             ),
         ),
     )

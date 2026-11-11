@@ -1,10 +1,12 @@
 import json
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
 from unit_tests.common.dsv4_test_utils import DeepseekV4MemoryManager, DeepseekV4CacheConfig, DeepseekV4ReqManager
+from unit_tests.common.req_token_index_test_utils import attach_req_token_index
 from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.deepseek_v4.triton_kernel.swa_cache import get_swa_token_indices as _get_swa_token_indices
@@ -363,8 +365,11 @@ def _request_pages(requests, req):
 def _reserve(manager, requests, length):
     req_idx = requests.alloc()
     held = (length + manager.page_size - 1) // manager.page_size * manager.page_size
-    slots = manager.alloc(held).cuda()
-    requests.req_to_token_indexs[req_idx, :held] = slots
+    req = SimpleNamespace(req_idx=req_idx, hold_kv_len=held, cur_kv_len=0, shm_req=SimpleNamespace(input_len=held))
+    attach_req_token_index(req, requests, requests.memory.allocator.alloc(held), mode="pin_mem_page_cache")
+    # Publish the request table before kernels consume it; keep an owned snapshot
+    # because callers may hold slots after the request row has been reused.
+    slots = req.token_index.get_gpu_token_indexes(0, held).clone()
     return req_idx, slots
 
 
@@ -794,8 +799,11 @@ def test_pd_transport_completion_covers_peer_gpu_state(cache, length):
 @pytest.mark.parametrize("cache", [(256, 0), (256, 1), (256, 5)], indirect=True)
 def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, layer, is_indexer, length):
     from lightllm.models.deepseek_v4.layer_infer.compressor import fused_compress
+    from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 
     manager, requests = cache
+    workspace = DeepseekV4Workspace(SimpleNamespace(tp_world_size_=1, batch_max_tokens=length))
+    workspace.c128_compress_scratch = torch.empty((1, length, 512), dtype=torch.float32, device="cuda")
     source, src = _reserve(manager, requests, length)
     destination, dst = _reserve(manager, requests, length)
     _prepare_swa(requests, source, 0, length)
@@ -809,6 +817,8 @@ def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, l
         positions = torch.arange(start, end, dtype=torch.int32, device="cuda")
         width = end - start
         state = SimpleNamespace(
+            dsv4_workspace=workspace,
+            microbatch_index=0,
             mem_manager=manager,
             req_manager=requests,
             swa_state=requests.swa_state,
@@ -1131,10 +1141,18 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
             prompt_cache_len=0,
         )
         req.get_chuncked_input_token_len = req.get_chuncked_input_token_len_for_hybrid_att
+        req.req_manager = requests
+        req.args = args
+        if not hasattr(args, "req_token_index_mode"):
+            args.req_token_index_mode = "pin_mem_page_cache"
+        from lightllm.server.router.model_infer.req_token_index import create_req_token_index
+
+        req.token_index = create_req_token_index(req, torch.cuda.current_stream())
         return req
 
     source, held = _reserve(manager, requests, tail_len + 1)
     req = request(source, tail_len + 1)
+    req.token_index.append_token_indexes(held.cpu())
     req.hold_kv_len = held.numel()
     for end in (big_page_tokens, tail_len):
         assert req.get_chuncked_input_token_len() == end
@@ -1149,13 +1167,16 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
     req.cur_kv_len = tail_len + 1
     freed = []
     g_infer_context.free_a_req_mem(freed, req)
-    manager.free(torch.cat(freed))
+    requests.memory.allocator.free(torch.cat(freed))
     requests.free_req(source)
     assert radix.get_tree_total_tokens_num() == tail_len
 
     forks = [request(requests.alloc(), hit_len + 1) for _ in range(2)]
     for fork in forks:
+        from lightllm.server.router.model_infer.req_token_index import ReqTokenIndex
+
         fork._hybrid_match_radix_cache()
+        ReqTokenIndex.submit_pending_uploads([fork.token_index])
         assert fork.cur_kv_len == hit_len
         assert fork.hold_kv_len == hit_len
         assert fork.shared_kv_node.node_prefix_total_len == big_page_tokens
@@ -1173,7 +1194,7 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
     for fork in forks:
         freed = []
         g_infer_context.free_a_req_mem(freed, fork)
-        manager.free(torch.cat(freed))
+        requests.memory.allocator.free(torch.cat(freed))
         requests.free_req(fork.req_idx)
     radix.free_radix_cache_to_get_enough_token(manager.size)
     assert manager.allocator.can_use_mem_size == manager.size
@@ -1503,8 +1524,9 @@ def test_empty_dspark_commit_is_local_but_proposal_keeps_common_padding_path(mon
     "length,prefix", [(768, 0), (768, 256), (2816, 0), (2816, 2304), (4096, 0), (4096, 256), (4096, 2304)]
 )
 @pytest.mark.parametrize("exhaust_small_pool", [False, True])
+@pytest.mark.parametrize("token_index_mode", ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"])
 def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
-    cache, monkeypatch, length, prefix, exhaust_small_pool
+    cache, monkeypatch, length, prefix, exhaust_small_pool, token_index_mode
 ):
     """Offload after the runtime ring is overwritten, then resume through the common loader."""
     from collections import deque
@@ -1578,6 +1600,7 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: ends),
         ),
     )
+    attach_req_token_index(req, requests, src.cpu(), mode=token_index_mode)
     # 已命中的大页来自 radix，其余完整大页来自当前请求。
     shared_page_ids = [source_checkpoints.pop(end) for end in range(page_tokens, prefix + 1, page_tokens)]
     producer = torch.cuda.current_stream()
@@ -1588,7 +1611,9 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         context,
         "radix_cache",
         SimpleNamespace(
-            get_big_page_ids_by_node=lambda node: shared_page_ids.copy(), free_one_small_page_buffer=lambda: None
+            get_big_page_ids_by_node=lambda node: shared_page_ids.copy(),
+            free_one_small_page_buffer=lambda: None,
+            free_radix_cache_to_get_enough_token=lambda need: None,
         ),
     )
     monkeypatch.setattr(context, "is_hybrid_att_model", True)
@@ -1665,18 +1690,12 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: ends),
         ),
     )
+    attach_req_token_index(restored, requests, dst.cpu(), mode=token_index_mode)
     if prefix >= page_tokens:
         slot = manager.big_page_buffers.alloc_one_state_cache()
         manager.big_page_buffers.buffer[slot].copy_(expected_checkpoints[0])
         restored.hybrid_len_to_big_page_id[page_tokens] = slot
 
-    def allocate(req, count):
-        slots = manager.alloc(count)
-        requests.req_to_token_indexs[req.req_idx, req.hold_kv_len : req.hold_kv_len + count].copy_(slots)
-        req.hold_kv_len += count
-        return slots
-
-    module.backend._alloc_req_kv_mem = allocate
     busy_small_slots = []
     if exhaust_small_pool:
         busy_small_slots = requests.small_page_buffers.alloc_state_cache(

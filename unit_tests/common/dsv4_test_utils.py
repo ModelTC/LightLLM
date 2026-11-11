@@ -272,6 +272,7 @@ class DeepseekV4MemoryManager:
                     state.buffer = getattr(self, field)
             setattr(self.manager, state.state_name, state)
         self.manager._get_states.cache_clear()
+        self.manager._reset_operators()
         get_env_start_args().pd_kv_page_size = page_size
         self.manager.get_pd_operator().get_pd_full_att_page_layouts.cache_clear()
         self.manager.get_pd_operator().get_pd_bounded_att_page_layouts.cache_clear()

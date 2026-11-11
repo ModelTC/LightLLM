@@ -1,4 +1,5 @@
 from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
+from unit_tests.common.req_token_index_test_utils import attach_req_token_index
 import dataclasses
 import json
 from collections import deque
@@ -94,6 +95,7 @@ def linear_cache(monkeypatch, tmp_path, request):
         SimpleNamespace(
             get_big_page_ids_by_node=lambda node: [],
             free_one_small_page_buffer=lambda: None,
+            free_radix_cache_to_get_enough_token=lambda need: None,
         ),
     )
     yield full, resources, requests, config
@@ -102,11 +104,13 @@ def linear_cache(monkeypatch, tmp_path, request):
 
 
 @pytest.mark.parametrize("token_num", [320, 384])
+@pytest.mark.parametrize("token_index_mode", ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"])
 def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     monkeypatch,
     linear_cache,
     cpu_cache_factory,
     token_num,
+    token_index_mode,
 ):
     from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
     from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as common
@@ -166,7 +170,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     )
 
     # 通过接收 InferReq 的生产入口完成页来源查询、CPU 分配与快照写出。
-    requests.req_to_token_indexs[0, :token_num] = indexes
+    attach_req_token_index(req, requests, indexes.cpu(), mode=token_index_mode)
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
     module.load_tasks = deque()
     module.args = get_env_start_args()
@@ -191,22 +195,16 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     req.hybrid_len_to_big_page_id = {}
     req.tail_small_page_buffer_id = None
     req.cur_kv_len = req.hold_kv_len = 0
+    req.token_index.reset()
     full.k_storage.zero_()
     full.v_storage.zero_()
     big.conv_state.zero_()
     big.ssm_state.zero_()
 
-    def allocate(req, count):
-        allocated = resources.full_att_allocator.alloc(count)
-        requests.req_to_token_indexs[req.req_idx, :count] = allocated.cuda()
-        req.hold_kv_len = count
-        return allocated
-
     module.args = get_env_start_args()
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
         dp_world_size=1,
-        _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(req_manager=requests, att_state_manager=resources),
         is_hybrid_att_model=True,
     )
@@ -286,12 +284,15 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
         hybrid_len_to_big_page_id=big_slots,
         tail_small_page_buffer_id=None,
         cur_kv_len=256,
+        hold_kv_len=256,
         cache_tiers=(CacheTier.CPU,),
         shm_req=SimpleNamespace(
+            input_len=257,
             token_hash_list=SimpleNamespace(get_all=lambda: [11, 22]),
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: [128, 256]),
         ),
     )
+    attach_req_token_index(req, requests, torch.arange(256, dtype=torch.int32))
     requested_hashes = []
     writes = []
 
