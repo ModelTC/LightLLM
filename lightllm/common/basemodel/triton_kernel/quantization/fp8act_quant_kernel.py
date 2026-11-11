@@ -71,6 +71,16 @@ def _per_token_group_quant_fp8(
         packed_col = tl.program_id(1) * packs_per_cta + tl.arange(0, packs_per_cta)
         scale_offset = row_id * xs_stride_m + packed_col * xs_stride_n
         tl.store(y_s_ptr + scale_offset, packed, mask=packed_col < tl.cdiv(xs_n, 4))
+        if COPY_TOPK:
+            if tl.program_id(1) == 0:
+                topk_cols = tl.arange(0, TOPK_BLOCK)
+                topk_mask = topk_cols < num_topk
+                topk_offsets = row_id * topk_row_stride + topk_cols
+                topk_out_offsets = row_id * topk_out_row_stride + topk_cols
+                topk_ids = tl.load(topk_ids_ptr + topk_offsets, mask=topk_mask)
+                topk_weights = tl.load(topk_weights_ptr + topk_offsets, mask=topk_mask)
+                tl.store(topk_ids_out_ptr + topk_out_offsets, topk_ids, mask=topk_mask)
+                tl.store(topk_weights_out_ptr + topk_out_offsets, topk_weights, mask=topk_mask)
         return
 
     g_id = tl.program_id(0) * GROUPS_PER_CTA + tl.arange(0, GROUPS_PER_CTA)
@@ -153,7 +163,6 @@ def lightllm_per_token_group_quant_fp8(
     num_warps = min(max(BLOCK // 256, 1), 8)
     num_stages = 1
     copy_topk = topk_ids is not None
-    assert not (copy_topk and use_packed_ue8m0), "packed UE8M0 does not support fused topk copying"
     if copy_topk:
         num_topk = topk_ids.shape[-1]
         topk_block = triton.next_power_of_2(num_topk)

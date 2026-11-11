@@ -255,31 +255,19 @@ def mega_moe_impl(
             f"Mega MoE got {num_tokens} tokens, exceeding num_max_tokens_per_rank={buffer.num_max_tokens_per_rank}"
         )
 
-    if mma_type == "fp8xfp8":
-        lightllm_per_token_group_quant_fp8(
-            x=hidden_states,
-            group_size=quant_method.block_size,
-            x_q=buffer.x[:num_tokens],
-            x_s=buffer.x_sf[:num_tokens],
-            eps=1e-4,
-            dtype=buffer.x.dtype,
-            topk_ids=topk_ids,
-            topk_weights=topk_weights,
-            topk_ids_out=buffer.topk_idx[:num_tokens],
-            topk_weights_out=buffer.topk_weights[:num_tokens],
-        )
-    else:
-        lightllm_per_token_group_quant_fp8(
-            x=hidden_states,
-            group_size=quant_method.block_size,
-            x_q=buffer.x[:num_tokens],
-            x_s=buffer.x_sf[:num_tokens],
-            eps=1e-4,
-            dtype=buffer.x.dtype,
-            use_packed_ue8m0=True,
-        )
-        buffer.topk_idx[:num_tokens].copy_(topk_ids)
-        buffer.topk_weights[:num_tokens].copy_(topk_weights)
+    lightllm_per_token_group_quant_fp8(
+        x=hidden_states,
+        group_size=quant_method.block_size,
+        x_q=buffer.x[:num_tokens],
+        x_s=buffer.x_sf[:num_tokens],
+        eps=1e-4,
+        dtype=buffer.x.dtype,
+        topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        topk_ids_out=buffer.topk_idx[:num_tokens],
+        topk_weights_out=buffer.topk_weights[:num_tokens],
+        use_packed_ue8m0=mma_type != "fp8xfp8",
+    )
 
     l1_weights, l2_weights = _get_mega_moe_weights(w13, w2, mma_type)
     state = getattr(w13, "_mega_moe_state", None)
