@@ -54,8 +54,7 @@ class ReplayGDNState(BoundedAttentionState):
         gate_lower_bound: float = -5.0,
     ) -> None:
         """创建单槽 canonical SSM，并挂上只属于当前请求的 replay history。"""
-        if ssm_state_mode != "replay":
-            raise ValueError(f"ReplayGDNState only implements replay mode, got {ssm_state_mode}")
+        assert ssm_state_mode == "replay", f"ReplayGDNState only implements replay mode, got {ssm_state_mode}"
         assert isinstance(config, ConvSSMStateConfig), "config must be ConvSSMStateConfig"
         self.config = config
         self.state_name = None
@@ -548,27 +547,6 @@ class ReplayGDNState(BoundedAttentionState):
                 self.ssm_state[:, req].copy_(snap)
                 self.clear_history(req)
 
-    _run_config: dict[str, int] | None = None
-
-    @property
-    def run_config(self) -> dict[str, int] | None:
-        """返回物化和 autotune 使用的 Triton 配置，不是 SSM 布局。"""
-
-        return self._run_config
-
-    @run_config.setter
-    def run_config(self, config: dict | None) -> None:
-        """保存一份与调用方脱开的 kernel 配置。"""
-
-        if config is None:
-            self._run_config = None
-            return
-        self._run_config = {
-            "BV": int(config["BV"]),
-            "num_warps": int(config["num_warps"]),
-            "num_stages": int(config.get("num_stages", 3)),
-        }
-
     # ========================================================================
     # 七、私有辅助实现
     # ========================================================================
@@ -708,8 +686,11 @@ class ReplayGDNState(BoundedAttentionState):
         assert not (snapshot and flush_export), "flush export must update the canonical state"
         layers, slots, hv, k, v = self.ssm_state.shape
         layer_stride, slot_stride, head_stride, key_stride, value_stride = self.ssm_state.stride()
-        config = self.run_config or {"BV": 32, "num_warps": 4, "num_stages": 3}
-        bv = config["BV"]
+        # 折回不走 replay 的 autotune。没固定配置时用这份默认值。
+        config = self.run_config or {}
+        bv = config.get("BV", 32)
+        num_warps = config.get("num_warps", 4)
+        num_stages = config.get("num_stages", 3)
         _fold_prefix[(triton.cdiv(v, bv), reqs.numel(), layers * hv)](
             self.ssm_state,
             output,
@@ -737,6 +718,6 @@ class ReplayGDNState(BoundedAttentionState):
             STRIDE_HEAD=head_stride,
             STRIDE_K=key_stride,
             STRIDE_V=value_stride,
-            num_warps=config["num_warps"],
-            num_stages=config["num_stages"],
+            num_warps=num_warps,
+            num_stages=num_stages,
         )

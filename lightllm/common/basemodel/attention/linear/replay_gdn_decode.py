@@ -9,7 +9,7 @@ import torch
 import triton
 
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import _decode_replay
-from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import resolve_run_config
+from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import _replay_config, resolve_run_config
 
 
 def replay(
@@ -28,9 +28,13 @@ def replay(
 ) -> tuple[torch.Tensor, dict[str, int]]:
     """执行一层 GDN replay decode。Kernel 只接收这一层的 SSM 和 history；state 只提供共用 cursor 与配置。"""
 
-    if history.kda:
-        raise ValueError("GDN replay step does not use the KDA gate")
-    config = run_config or resolve_run_config(history, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
+    assert not history.kda, "GDN replay step does not use the KDA gate"
+    # 没传入时走 autotune 或默认 BV/warp/stage。传入的缺项也在这里补，不在 state 上改写。
+    config = (
+        _replay_config(run_config)
+        if run_config is not None
+        else resolve_run_config(history, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
+    )
     hv, kd, vd = history.ssm_state.shape[-3:]
     assert history.num_key_heads in (q.shape[-2], hv)
     axis = 1 if cu_seqlens is not None else 0

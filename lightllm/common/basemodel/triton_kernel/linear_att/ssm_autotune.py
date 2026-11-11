@@ -18,7 +18,7 @@ _DEFAULT_REPLAY_CONFIG = {"BV": 32, "num_warps": 1, "num_stages": 3}
 def resolve_run_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens) -> dict[str, int]:
     """返回当前 batch 的固定或已调优 SSM kernel 配置。"""
     if ssm_backend._config_is_fixed and ssm_backend.run_config is not None:
-        return ssm_backend.run_config
+        return _replay_config(ssm_backend.run_config)
     default = _replay_config(ssm_backend.run_config)
     key = (tuple(static_key(ssm_backend, mode, q, cu_seqlens).items()), run_key(q, cu_seqlens))
     if key in ssm_backend.batch_configs:
