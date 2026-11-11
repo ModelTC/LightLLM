@@ -250,6 +250,7 @@ def test_constraint_state_lifetime_follows_request_cleanup(compiler):
     grammar = compiler.output_constraint_state_factory.get_grammar(payload)
     context = infer_batch.InferenceContext(
         req_manager=SimpleNamespace(free=lambda *args: None),
+        att_state_manager=SimpleNamespace(full_att_allocator=SimpleNamespace(free=lambda _: None)),
         requests_mapping={1: req},
         shm_req_manager=SimpleNamespace(put_back_req_obj=lambda req: None),
     )
