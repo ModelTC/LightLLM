@@ -51,6 +51,7 @@ class ReplayGDNState(BoundedAttentionState):
         self.state_name = None
         self.request_capacity = request_capacity
         self.mtp_step = mtp_step
+        self.mtp_enabled = mtp_step > 0
         self.gate_lower_bound = gate_lower_bound
         self._algorithm = "gdn"
         self._logical_to_storage_layer = {layer_id: index for index, layer_id in enumerate(config.logical_layer_ids)}
@@ -76,7 +77,7 @@ class ReplayGDNState(BoundedAttentionState):
             dtype=config.ssm_dtype,
             device=device,
         )
-        self.mtp_state_index = torch.zeros(request_capacity, dtype=torch.int32, device=device) if mtp_step else None
+        self.mtp_state_index = torch.zeros(request_capacity, dtype=torch.int32, device=device)
         self.big_pages_pool = None
         self.small_pages_pool = None
         replay_config = dict(ssm_replay_config or {})
@@ -179,7 +180,7 @@ class ReplayGDNState(BoundedAttentionState):
             self.conv_state[:, req_idx].zero_()
             self.ssm_state[:, req_idx].zero_()
             self.cursors[req_idx].zero_()
-            if self.mtp_state_index is not None:
+            if self.mtp_enabled:
                 self.mtp_state_index[req_idx].fill_(0)
 
     def save_bounded_att_runtime_to_pages(
@@ -219,7 +220,7 @@ class ReplayGDNState(BoundedAttentionState):
             ssm_copies.append((pool.ssm_state[slot_id], self.ssm_state[:, req_idx]))
         copy_bounded_att_tensors(copies=conv_copies)
         copy_bounded_att_tensors(copies=ssm_copies)
-        if self.mtp_state_index is not None:
+        if self.mtp_enabled:
             for req_idx in req_indices:
                 self.mtp_state_index[req_idx].fill_(0)
 
@@ -229,10 +230,10 @@ class ReplayGDNState(BoundedAttentionState):
         accepted_steps: torch.Tensor,
         req_verify_width: torch.Tensor,
     ) -> None:
-        """提交已接受长度，并剪掉整窗全接受后未通过验证的尾部。"""
-        if self.mtp_state_index is None:
+        """MTP 验证后写入索引，并从整窗全接受后的 cursor 上剪掉未接受尾部。"""
+        if not self.mtp_enabled:
             return
-        self.commit_accepted(self.mtp_state_index, req_indices, accepted_steps, req_verify_width)
+        commit_ssm_prefix(self.mtp_state_index, req_indices, accepted_steps, req_verify_width, self.cursors)
 
     # ========================================================================
     # 三、CPU Cache 数据交换
@@ -353,7 +354,7 @@ class ReplayGDNState(BoundedAttentionState):
             ssm_copies.append((remote_dp_bounded_state.ssm_state[:, src_req], self.ssm_state[:, dst_req]))
         copy_bounded_att_tensors(copies=conv_copies)
         copy_bounded_att_tensors(copies=ssm_copies)
-        if self.mtp_state_index is not None:
+        if self.mtp_enabled:
             for dst_req in dst_req_indices:
                 self.mtp_state_index[dst_req].fill_(0)
 
@@ -414,7 +415,7 @@ class ReplayGDNState(BoundedAttentionState):
             write=False,
         ):
             copy_bounded_att_tensors(copies=copies)
-        if self.mtp_state_index is not None:
+        if self.mtp_enabled:
             self.mtp_state_index[req_idx].fill_(0)
 
     # ========================================================================
@@ -438,26 +439,6 @@ class ReplayGDNState(BoundedAttentionState):
         """按 cu_seqlens 给出的整窗全接受推进 cursor，不修改 SSM。"""
 
         advance_replay_cursor(self, reqs, cu_seqlens)
-
-    def commit_accepted(
-        self,
-        mtp_state_index: torch.Tensor,
-        reqs: torch.Tensor,
-        accepted_lengths: torch.Tensor,
-        req_verify_width: torch.Tensor,
-    ) -> None:
-        """MTP verify 之后写入索引，并从全接受后的 cursor 上剪掉未接受尾部。
-
-        accepted_lengths 含基准 token。req_verify_width 与 reqs 逐行对齐，是每个请求这次送去验证的 token 数。
-        配置的 verify_width 为 1 时没有尾部，只把这一个 token 记入 cursor。
-        """
-
-        if self.verify_width > 1:
-            commit_ssm_prefix(mtp_state_index, reqs, accepted_lengths, req_verify_width, self.cursors)
-        else:
-            mtp_state_index[reqs] = (accepted_lengths - 1).to(mtp_state_index.dtype)
-            cu_seqlens = torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device)
-            self.advance_cursor(reqs, cu_seqlens)
 
     def fold_accepted_prefix(self, reqs: torch.Tensor, snapshot: torch.Tensor | None = None, run_config=None) -> None:
         """用原始 k/v 把 cursor 覆盖的已接受前缀折进 SSM。

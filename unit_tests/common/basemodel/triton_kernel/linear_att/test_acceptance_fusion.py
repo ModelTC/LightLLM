@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update as update
 from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
     accept_replay_window,
@@ -97,12 +98,14 @@ def accept_fused(m, args):
     cumulative = torch.cat((args[3].new_zeros(1), args[3].cumsum(0)))
     lengths = cumulative[ends.long()] - cumulative[args[0].long()]
     executor = m._ssm_executor
-    if getattr(executor, "verify_width", 1) > 1:
+    if executor.verify_width > 1:
         cu = _replay_cu(args)
         executor.advance_cursor(reqs, cu)
-        executor.commit_accepted(m.mtp_state_index, reqs, lengths, cu[1:] - cu[:-1])
+        commit_ssm_prefix(m.mtp_state_index, reqs, lengths, cu[1:] - cu[:-1], executor.cursors)
     else:
-        executor.commit_accepted(m.mtp_state_index, reqs, lengths, lengths)
+        # 宽度为 1 时正式路径不提交。对照只写下标，并把每个请求的 cursor 加一。
+        m.mtp_state_index[reqs] = (lengths - 1).to(m.mtp_state_index.dtype)
+        executor.advance_cursor(reqs, torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -144,14 +147,6 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
                 assert m.mtp_state_index.tolist() == expected_index
                 assert m._ssm_executor.cursors.tolist() == expected_cursor
                 checks += 1
-
-            class _IndexOnly:
-                def commit_accepted(self, indices, req_indices, accepted_lengths, req_verify_width):
-                    indices[req_indices] = (accepted_lengths - 1).to(indices.dtype)
-
-            m._ssm_executor = _IndexOnly()
-            accept_fused(m, args)
-            assert m.mtp_state_index.tolist() == expected_index
 
     print("ACCEPT_EQUIVALENCE_CHECKS=" + str(checks), flush=True)
 

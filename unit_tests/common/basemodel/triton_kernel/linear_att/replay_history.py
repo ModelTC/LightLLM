@@ -35,10 +35,11 @@ def attach_replay_history(
     owner.state_name = None
     owner.request_capacity = ssm.shape[1]
     owner.mtp_step = verify_width - 1
+    owner.mtp_enabled = owner.mtp_step > 0
     owner._algorithm = "kda" if kda else "gdn"
     owner._logical_to_storage_layer = {}
     owner.conv_state = None
-    owner.mtp_state_index = None
+    owner.mtp_state_index = torch.zeros(owner.request_capacity, dtype=torch.int32, device=ssm.device)
     owner.big_pages_pool = None
     owner.small_pages_pool = None
     owner.ssm_state = ssm
@@ -93,7 +94,7 @@ def _trim_rejected_index(
 def accept_replay_window(history, reqs, accepted_state_indices=None, cu_seqlens=None) -> None:
     """测试里一次结算 cursor：先按整窗全接受，再按槽位 index 剪掉未接受尾部。
 
-    没传 cu_seqlens 时每个请求的窗口长度是 1。正式路径用 advance_cursor 和 commit_accepted。
+    没传 cu_seqlens 时每个请求的窗口长度是 1。正式路径先 advance_cursor，开了 MTP 再 commit_ssm_prefix。
     """
 
     if reqs.numel() == 0:

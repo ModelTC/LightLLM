@@ -189,7 +189,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
         mem.linear.ssm_state.normal_()
         if dest_mode == "replay":
             mem.linear.cursors[dst_req] = 3
-        if mem.linear.mtp_state_index is not None:
+        if mem.linear.mtp_enabled:
             mem.linear.mtp_state_index[dst_req] = decode_mtp_step
         for state in mem.tails:
             state.buffer.normal_()
@@ -261,7 +261,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
         assert torch.equal(restored_tail, expected_tail)
         if dest_mode == "replay":
             assert mem.linear.cursors[dst_req] == 0
-        if mem.linear.mtp_state_index is not None:
+        if mem.linear.mtp_enabled:
             assert mem.linear.mtp_state_index[dst_req] == 0
         for (state, stride), expected in zip(
             (

@@ -47,7 +47,7 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
     state.conv_state.copy_(torch.arange(3 + step, device="cuda").to(torch.bfloat16))
     for slot in range(state.ssm_state.shape[1]):
         state.ssm_state[:, slot].fill_(slot + 1)
-    if state.mtp_state_index is not None:
+    if state.mtp_enabled:
         state.mtp_state_index[src] = offset
     if mode == "native":
         expected_conv = state.conv_state[:, src, ..., :3].clone()
@@ -80,7 +80,7 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
         lambda: state.restore_bounded_att_runtime_from_pages([dst], [8], "big", [0]),
         lambda: state.read_from_pd_page(block, dst, 0, 8, layout),
     ):
-        if state.mtp_state_index is not None:
+        if state.mtp_enabled:
             state.mtp_state_index[dst] = step
         if mode == "replay":
             state.cursors[dst] = 3
@@ -92,7 +92,7 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
             actual_ssm = state.ssm_state[:, dst * (state.mtp_step + 1)]
         torch.testing.assert_close(actual_conv, expected_conv, rtol=0, atol=0)
         torch.testing.assert_close(actual_ssm, expected_ssm, rtol=2e-5, atol=2e-5)
-        if state.mtp_state_index is not None:
+        if state.mtp_enabled:
             assert state.mtp_state_index[dst].item() == 0
         if mode == "replay":
             assert state.cursors[dst].item() == 0
@@ -156,7 +156,7 @@ def test_checkpoint_batch_export(runtime_start_args, cls, mode, dtype, destinati
     if cursors is not None:
         assert torch.equal(state.cursors, cursors)
     target, _, _ = make_state(cls, mode, 2, dtype)
-    if target.mtp_state_index is not None:
+    if target.mtp_enabled:
         target.mtp_state_index.fill_(2)
     target.copy_runtime_state_from_dp(requests, [0, 1, 2], state)
     for req, (conv, ssm) in enumerate(expected):

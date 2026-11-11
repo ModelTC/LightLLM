@@ -9,6 +9,7 @@ from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import repl
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
     build_dynamic_mtp_linear_att_state_params,
 )
+from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 from types import SimpleNamespace
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -158,11 +159,12 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
             commit_reqs = rows[starts.long()]
             window = (cu[1 : count + 1] - cu[:count]).contiguous()
             ssm_backend.advance_cursor(commit_reqs, cu[: count + 1])
-            manager._ssm_executor.commit_accepted(
+            commit_ssm_prefix(
                 manager.mtp_state_index,
                 commit_reqs,
                 accepted[commit_reqs.long()] + 1,
                 window,
+                ssm_backend.cursors,
             )
         return out
 

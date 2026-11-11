@@ -14,6 +14,7 @@ def ssm_snapshot(backend, req):
     return output
 
 
+from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs, replay_layer
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -788,7 +789,7 @@ def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, sepa
             torch.testing.assert_close(actual[:, token], output, atol=3e-4, rtol=3e-4)
         lengths = torch.full((live,), query_width, device="cuda", dtype=torch.int32)
         backend.advance_cursor(reqs[:live], cu[: live + 1])
-        backend.commit_accepted(indices, reqs[:live], lengths, lengths)
+        commit_ssm_prefix(indices, reqs[:live], lengths, lengths, backend.cursors)
     backend.fold_accepted_prefix(reqs[:live])
     torch.testing.assert_close(backend.ssm_state[0, :live], expected, atol=3e-4, rtol=3e-4)
     assert torch.equal(backend.ssm_state[0, live], initial[0, live])
@@ -819,7 +820,7 @@ def test_mtp_commit_keeps_folded_prefix_length(kda, compute_mode):
         replay_layer(backend, 0, q, k, v, a, b, alog, bias, reqs, cu)
         lengths = torch.tensor([2], device="cuda", dtype=torch.int32)
         backend.advance_cursor(reqs, cu)
-        backend.commit_accepted(indices, reqs, lengths, lengths)
+        commit_ssm_prefix(indices, reqs, lengths, lengths, backend.cursors)
         if step < 2:
             assert int(backend.cursors[0]) == 2 * (step + 1)
         else:

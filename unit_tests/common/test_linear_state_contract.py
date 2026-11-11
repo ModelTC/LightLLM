@@ -214,7 +214,7 @@ def test_acceptance_keeps_request_order_with_strided_inputs(device):
         cu = torch.zeros(flat_lengths.numel() + 1, dtype=torch.int32, device=device)
         cu[1:] = torch.cumsum(flat_lengths, 0)
         history.advance_cursor(reqs.contiguous(), cu)
-        owner.commit_accepted(owner.mtp_state_index, reqs, lengths, lengths)
+        owner.commit_bounded_att_state(reqs, lengths, lengths)
     else:
         # 正式提交只接受 CUDA。CPU 用例只核对 stride 下的请求顺序。
         history.cursors[0] = 3
