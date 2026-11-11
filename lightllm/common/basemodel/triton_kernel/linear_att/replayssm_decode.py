@@ -46,7 +46,6 @@ def _decode_replay(
     Betas,
     Reqs,
     Cursors,
-    WriteBase,
     Cu,
     Out,
     SQ: tl.constexpr,
@@ -74,7 +73,7 @@ def _decode_replay(
     """执行一个请求窗口的 replay decode，并写入 history。
 
     前缀放不下本步 token 时，先在本 kernel 里把已有前缀从原始 k/v 折进 checkpoint，
-    舍入成 SSM 的 dtype，再从这份状态重放本步。cursor 本 kernel 不修改，写起点记到 WriteBase。
+    舍入成 SSM 的 dtype，再从这份状态重放本步。cursor 本 kernel 不修改，留给最后一层返回后更新。
     """
     iv, seq, hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     req = tl.load(Reqs + seq).to(tl.int64)
@@ -87,12 +86,10 @@ def _decode_replay(
         for t in range(start, end):
             tl.store(Out + (t * HV + hv) * V + vv, 0, vv < V)
         return
-    n = tl.load(Cursors + req)
     if start == end:
-        # 本步没有 token。写起点保持原 cursor，接受 0 个 token 时长度不变。
-        if iv == 0 and hv == 0:
-            tl.store(WriteBase + req, n)
+        # 本步没有 token。cursor 保持原值，接受 0 个 token 时长度不变。
         return
+    n = tl.load(Cursors + req)
 
     kk = tl.arange(0, BK)
     ll = tl.arange(0, L)
@@ -106,8 +103,6 @@ def _decode_replay(
         state = state.to(State.dtype.element_ty).to(tl.float32)
         tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
         n = 0
-    if iv == 0 and hv == 0:
-        tl.store(WriteBase + req, n)
 
     if PRECOMPUTE_PROJECTIONS:
         # 输出用 tf32x3 tensor core 从冻结的 checkpoint 和 history 重建。

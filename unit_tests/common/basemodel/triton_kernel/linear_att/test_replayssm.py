@@ -2,12 +2,16 @@ import pytest
 import torch
 
 from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
+    accept_replay_window,
     attach_replay_history as ReplaySSMExecutor,
 )
 
 
 def ssm_snapshot(backend, req):
-    return backend.accepted_ssm(req)
+    state = backend.ssm_state
+    output = torch.empty((state.shape[0], *state.shape[2:]), dtype=state.dtype, device=state.device)
+    backend.fold_accepted_prefix(torch.tensor([req], dtype=torch.int32, device=state.device), snapshot=output)
+    return output
 
 
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs, replay_layer
@@ -79,7 +83,7 @@ def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state
         assert torch.isfinite(expected_state).all()
         assert torch.isfinite(actual).all()
         torch.testing.assert_close(actual[0, :2].float(), torch.stack(expected), atol=4, rtol=1e-3)
-        ssm_backend.accept_updates(reqs, accepted)
+        accept_replay_window(ssm_backend, reqs, accepted, cu)
     # The correction is larger than FP16 can represent even though the
     # recurrent state, inputs, and attention outputs are all finite.
     assert ssm_backend.deltas[0, 0, 0, 1, 0].item() > torch.finfo(torch.float16).max
@@ -104,17 +108,16 @@ def test_flush_export_updates_checkpoint_and_clears_history(dtype):
     backend.betas.fill_(0.5)
     backend.cursors[0] = 2
     expected = ssm_snapshot(backend, 0).clone()
-    target = torch.empty_like(expected)
-
-    backend.export_accepted_state([0], [target], flush=True)
+    target = ssm_snapshot(backend, 0)
+    reqs = torch.tensor([0], dtype=torch.int32, device="cuda")
+    backend.fold_accepted_prefix(reqs)
     torch.cuda.synchronize()
 
     assert backend.cursors[0].item() == 0
     torch.testing.assert_close(target, expected, atol=0, rtol=0)
     torch.testing.assert_close(state[:, 0], expected, atol=0, rtol=0)
 
-    empty_history_target = torch.empty_like(expected)
-    backend.export_accepted_state([0], [empty_history_target], flush=True)
+    empty_history_target = ssm_snapshot(backend, 0)
     torch.cuda.synchronize()
     torch.testing.assert_close(empty_history_target, expected, atol=0, rtol=0)
 
@@ -174,7 +177,7 @@ def test_replay_acceptance_flush_and_graph(
 
     def step():
         out = [replay_layer(ssm_backend, layer, q, k, v, a, b, alog, bias, reqs, cu)[0] for layer in range(2)]
-        ssm_backend.accept_updates(reqs, accepted)
+        accept_replay_window(ssm_backend, reqs, accepted, cu)
         return out
 
     # Compile on disposable state, then capture with the HOLD slot only.
@@ -195,7 +198,7 @@ def test_replay_acceptance_flush_and_graph(
         for seq, req in enumerate([2, 0]):
             query_len = width if seq == 0 else max(width - 1, 1)
             if pending[seq] + query_len > capacity:
-                ssm_backend.merge_accepted_updates(torch.tensor([req], dtype=torch.int32, device="cuda"))
+                ssm_backend.fold_accepted_prefix(torch.tensor([req], dtype=torch.int32, device="cuda"))
                 expected[:, req] = expected[:, req].to(dtype).float()
                 pending[seq] = 0
             pending[seq] += counts[seq]
@@ -223,11 +226,11 @@ def test_replay_acceptance_flush_and_graph(
                     if j + 1 == counts[seq]:
                         expected[layer, req].copy_(cur)
         if iteration == 2 * capacity + 1:
-            ssm_backend.merge_accepted_updates(reqs[:2])
+            ssm_backend.fold_accepted_prefix(reqs[:2])
             expected = expected.to(dtype).float()
             pending = [0, 0]
             torch.testing.assert_close(state[:, :4].float(), expected[:, :4], atol=state_atol, rtol=state_rtol)
-    ssm_backend.merge_accepted_updates(reqs[:2])
+    ssm_backend.fold_accepted_prefix(reqs[:2])
     torch.testing.assert_close(state.float(), expected.to(dtype).float(), atol=state_atol, rtol=state_rtol)
 
 
@@ -343,10 +346,10 @@ def test_precomputed_projections_preserve_precision(warps, decay, state_dtype, d
             ]
             overflow_reqs = torch.tensor(overflow, dtype=torch.int32, device="cuda")
             for ssm_backend in ssm_backends:
-                ssm_backend.merge_accepted_updates(overflow_reqs)
+                ssm_backend.fold_accepted_prefix(overflow_reqs)
         for ssm_backend in ssm_backends:
             outputs.append(replay_layer(ssm_backend, 0, q, k, v, a, b, alog, alog, reqs, cu)[0])
-            ssm_backend.accept_updates(reqs, accepted)
+            accept_replay_window(ssm_backend, reqs, accepted, cu)
         if dtype == torch.float32:
             torch.testing.assert_close(outputs[0], outputs[1], atol=2e-6, rtol=2e-5)
         else:
@@ -355,7 +358,7 @@ def test_precomputed_projections_preserve_precision(warps, decay, state_dtype, d
             scale = torch.linalg.vector_norm(outputs[0].float())
             assert error < scale * (torch.finfo(dtype).eps / 2)
     for ssm_backend in ssm_backends:
-        ssm_backend.merge_accepted_updates(reqs)
+        ssm_backend.fold_accepted_prefix(reqs)
     torch.testing.assert_close(ssm_backends[0].ssm_state, ssm_backends[1].ssm_state, atol=0, rtol=0)
 
 
@@ -370,7 +373,7 @@ def test_bf16_commit_rounds_before_the_next_token():
         ssm_backend.gates.fill_(-0.01)
         ssm_backend.betas.zero_()
         ssm_backend.cursors[0] = 16
-        ssm_backend.merge_accepted_updates(reqs)
+        ssm_backend.fold_accepted_prefix(reqs)
     q = torch.ones((1, 1, 32), device="cuda")
     k = torch.zeros_like(q)
     v = torch.zeros((1, 1, 64), device="cuda")
@@ -423,12 +426,12 @@ def test_large_bf16_state_precompute_matches_inline():
             # 重建用的 k/d 在 bf16 激活下是 fp16。两条路径在存入前的舍入可以差一个 fp16 单位。
             torch.testing.assert_close(outputs[0], outputs[1], atol=5e-4, rtol=5e-4)
             for backend in backends:
-                backend.accept_updates(reqs, accepted, width=width)
+                accept_replay_window(backend, reqs, accepted, cu)
                 overflow = reqs[backend.cursors[reqs.long()] + backend.verify_width > backend.capacity]
                 if overflow.numel():
-                    backend.merge_accepted_updates(overflow)
+                    backend.fold_accepted_prefix(overflow)
         for backend in backends:
-            backend.merge_accepted_updates(reqs)
+            backend.fold_accepted_prefix(reqs)
         torch.testing.assert_close(backends[0].ssm_state, backends[1].ssm_state, atol=0, rtol=0)
 
     check(4, 1, 16)
@@ -447,7 +450,6 @@ def test_overflow_folds_inside_replay_for_gdn_and_kda(kda, dtype, capacity):
     backend = ReplaySSMExecutor(state, capacity, 1, dtype, num_key_heads=kh, kda=kda, run_config=config)
     twin = ReplaySSMExecutor(state.clone(), capacity, 1, dtype, num_key_heads=kh, kda=kda, run_config=config)
     assert backend.gates.shape[-1] == (dim if kda else capacity)
-    assert twin.write_bases.shape == backend.cursors.shape
     reqs = torch.tensor([0], device="cuda", dtype=torch.int32)
     alog = torch.zeros(hv, device="cuda")
     bias = torch.zeros(hv * dim if kda else hv, device="cuda")
@@ -458,7 +460,7 @@ def test_overflow_folds_inside_replay_for_gdn_and_kda(kda, dtype, capacity):
         a = (torch.randn(1, hv * dim if kda else hv, device="cuda", dtype=dtype) - 1).contiguous()
         b = torch.randn(1, hv, device="cuda", dtype=dtype)
         if step == capacity:
-            twin.merge_accepted_updates(reqs)
+            twin.fold_accepted_prefix(reqs, run_config=config)
             assert int(backend.cursors[0]) == capacity
         outs, twin_outs = [], []
         for layer in range(2):
@@ -466,11 +468,10 @@ def test_overflow_folds_inside_replay_for_gdn_and_kda(kda, dtype, capacity):
             twin_outs.append(replay_layer(twin, layer, q, k, v, a, b, alog, bias, reqs)[0])
             if step == capacity:
                 assert int(backend.cursors[0]) == capacity
-                assert int(backend.write_bases[0]) == 0
         for actual, expected in zip(outs, twin_outs):
             torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-        backend.accept_updates(reqs, reqs, width=1)
-        twin.accept_updates(reqs, reqs, width=1)
+        accept_replay_window(backend, reqs)
+        accept_replay_window(twin, reqs)
     assert int(backend.cursors[0]) == 1
     assert int(twin.cursors[0]) == 1
     # bf16 两条路径都先舍入到同一状态。fp32 的独立 kernel 与层内 kernel 归约顺序可差几个 ulp。
@@ -494,9 +495,8 @@ def test_empty_window_keeps_cursor_for_gdn_and_kda(kda):
     b = torch.zeros(1, 2, device="cuda")
     bias = torch.zeros(2 * 32 if kda else 2, device="cuda")
     replay_layer(backend, 0, q, k, v, a, b, bias, bias, reqs, cu)
-    assert int(backend.write_bases[0]) == 3
     accepted = torch.tensor([-1, -1, -1], device="cuda", dtype=torch.int32)
-    backend.accept_updates(reqs, accepted)
+    accept_replay_window(backend, reqs, accepted, cu)
     assert backend.cursors.tolist() == [3, 0, 0]
 
 
@@ -536,7 +536,7 @@ def test_dynamic_verify_lengths_fill_history_before_folding(kda, dtype, compute_
     def step():
         positions = ssm_backend.cursors.index_select(0, reqs.long())
         out = forward()
-        ssm_backend.accept_updates(reqs, accepted)
+        accept_replay_window(ssm_backend, reqs, accepted, cu)
         return positions, out
 
     step()
@@ -565,7 +565,7 @@ def test_dynamic_verify_lengths_fill_history_before_folding(kda, dtype, compute_
         before = state.clone()
         for req, width in zip(ids, widths):
             if pending[req] + width > 8:
-                ssm_backend.merge_accepted_updates(torch.tensor([req], dtype=torch.int32, device="cuda"))
+                ssm_backend.fold_accepted_prefix(torch.tensor([req], dtype=torch.int32, device="cuda"))
                 expected[:, req] = expected[:, req].to(dtype).float()
                 pending[req] = 0
         old_cursors = [pending[req] for req in ids] + [0]
@@ -573,7 +573,7 @@ def test_dynamic_verify_lengths_fill_history_before_folding(kda, dtype, compute_
             positions.copy_(ssm_backend.cursors.index_select(0, reqs.long()))
         graph.replay()
         if not capture_metadata:
-            ssm_backend.accept_updates(reqs, accepted)
+            accept_replay_window(ssm_backend, reqs, accepted, cu)
         assert positions.tolist() == old_cursors
         for seq, (req, width, count) in enumerate(zip(ids, widths, counts)):
             for layer in range(2):
@@ -592,7 +592,7 @@ def test_dynamic_verify_lengths_fill_history_before_folding(kda, dtype, compute_
         if iteration == 2:
             assert pending[0] == 8
             torch.testing.assert_close(state[:, 0], before[:, 0], atol=0, rtol=0)
-    ssm_backend.merge_accepted_updates(reqs[:2])
+    ssm_backend.fold_accepted_prefix(reqs[:2])
     torch.testing.assert_close(
         state.float(),
         expected.to(dtype).float(),
@@ -751,7 +751,7 @@ def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, sepa
     bias = torch.zeros(32 if kda else 1, device="cuda")
     for step, query_width in enumerate((4, 4, width)):
         if step == 2:
-            backend.clear_history(reqs[folding:live])
+            backend.cursors.index_fill_(0, reqs[folding:live].long(), 0)
             expected[folding:] = initial[0, folding:live]
         cu = (torch.arange(bucket + 1, device="cuda", dtype=torch.int32) * query_width).clamp_max(live * query_width)
         q = torch.randn(live, query_width, 1, 32, device="cuda") * 0.2
@@ -759,7 +759,7 @@ def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, sepa
         a = torch.full((live, query_width, 32 if kda else 1), -2.0, device="cuda")
         b = torch.randn(live, query_width, 1, device="cuda")
         if (backend.cursors[:live] + query_width > backend.capacity).any():
-            backend.merge_accepted_updates(reqs[:live])
+            backend.fold_accepted_prefix(reqs[:live])
         actual = replay_layer(
             backend,
             0,
@@ -787,8 +787,9 @@ def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, sepa
             )
             torch.testing.assert_close(actual[:, token], output, atol=3e-4, rtol=3e-4)
         lengths = torch.full((live,), query_width, device="cuda", dtype=torch.int32)
-        backend.commit_accepted(indices, reqs[:live], lengths)
-    backend.merge_accepted_updates(reqs[:live])
+        backend.advance_cursor(reqs[:live], cu[: live + 1])
+        backend.commit_accepted(indices, reqs[:live], lengths, lengths)
+    backend.fold_accepted_prefix(reqs[:live])
     torch.testing.assert_close(backend.ssm_state[0, :live], expected, atol=3e-4, rtol=3e-4)
     assert torch.equal(backend.ssm_state[0, live], initial[0, live])
 
@@ -796,7 +797,7 @@ def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, sepa
 @pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
 @pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
 def test_mtp_commit_keeps_folded_prefix_length(kda, compute_mode):
-    # 验证窗口放不下时，replay 先折回并把写起点记为 0。提交必须用写起点，不能再把旧 cursor 加上去。
+    # 最后一层按整窗全接受推进 cursor。放不下时 cursor 变成窗口长度，而不是旧 cursor 加窗口。
     torch.manual_seed(19 + int(kda))
     hv, kh, dim = 2, 2, 32
     dtype = torch.bfloat16
@@ -817,11 +818,10 @@ def test_mtp_commit_keeps_folded_prefix_length(kda, compute_mode):
         b = torch.randn(2, hv, device="cuda", dtype=dtype)
         replay_layer(backend, 0, q, k, v, a, b, alog, bias, reqs, cu)
         lengths = torch.tensor([2], device="cuda", dtype=torch.int32)
-        backend.commit_accepted(indices, reqs, lengths)
+        backend.advance_cursor(reqs, cu)
+        backend.commit_accepted(indices, reqs, lengths, lengths)
         if step < 2:
             assert int(backend.cursors[0]) == 2 * (step + 1)
-            assert int(backend.write_bases[0]) == 2 * step
         else:
-            assert int(backend.write_bases[0]) == 0
             assert int(backend.cursors[0]) == 2
     assert torch.isfinite(backend.ssm_state).all()

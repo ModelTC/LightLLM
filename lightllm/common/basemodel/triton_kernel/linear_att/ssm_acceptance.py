@@ -6,62 +6,54 @@ import triton.language as tl
 
 
 def commit_ssm_prefix(
-    indices: torch.Tensor,
+    mtp_state_index: torch.Tensor,
     reqs: torch.Tensor,
-    lengths: torch.Tensor,
-    replay_cursors: torch.Tensor | None = None,
-    write_bases: torch.Tensor | None = None,
+    accepted_lengths: torch.Tensor,
+    req_verify_width: torch.Tensor,
+    replay_cursors: torch.Tensor,
 ) -> None:
-    """把每个请求的 accepted length 写入 MTP 索引。
+    """写入 MTP 索引，并从已按验证宽度全接受推进的 cursor 上剪掉未接受尾部。
 
-    传入 write_bases 时，cursor 设为这次 replay 的写起点加接受长度。层内已经折回时写起点是 0。
+    accepted_lengths 含基准 token。req_verify_width 与 reqs 逐行对齐，是每个请求这次送去验证的 token 数。
     """
-    if not reqs.is_cuda:
-        indices[reqs] = (lengths - 1).to(indices.dtype)
-        if replay_cursors is not None:
-            valid = reqs != replay_cursors.numel() - 1
-            accepted = lengths[valid].to(replay_cursors.dtype)
-            if write_bases is not None:
-                replay_cursors[reqs[valid]] = write_bases[reqs[valid]] + accepted
-            else:
-                replay_cursors[reqs[valid]] += accepted
-        return
+
+    assert reqs.is_cuda, "commit_ssm_prefix requires CUDA requests"
     if reqs.numel():
         _commit_prefix[(triton.cdiv(reqs.numel(), 256),)](
-            indices,
+            mtp_state_index,
             reqs,
-            lengths,
+            accepted_lengths,
             replay_cursors,
-            write_bases if write_bases is not None else (replay_cursors if replay_cursors is not None else indices),
+            req_verify_width,
             reqs.numel(),
-            indices.numel() - 1,
+            mtp_state_index.numel() - 1,
             reqs.stride(0),
-            lengths.stride(0),
+            accepted_lengths.stride(0),
+            req_verify_width.stride(0),
             256,
-            WRITE_BASE=write_bases is not None,
             num_warps=4,
         )
 
 
 @triton.jit(do_not_specialize=["N"])
 def _commit_prefix(
-    Indices,
+    MtpIndex,
     Reqs,
-    Lengths,
+    Accepted,
     Cursors,
-    WriteBase,
+    ReqVerifyWidth,
     N,
     HOLD: tl.constexpr,
     REQ_STRIDE: tl.constexpr,
-    LENGTH_STRIDE: tl.constexpr,
+    ACCEPTED_STRIDE: tl.constexpr,
+    VERIFY_STRIDE: tl.constexpr,
     BLOCK: tl.constexpr,
-    WRITE_BASE: tl.constexpr,
 ):
     row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     req = tl.load(Reqs + row * REQ_STRIDE, row < N, 0)
-    length = tl.load(Lengths + row * LENGTH_STRIDE, row < N, 0)
-    tl.store(Indices + req, length - 1, row < N)
-    if Cursors is not None:
-        valid = (row < N) & (req != HOLD)
-        base = tl.load(WriteBase + req, valid, 0) if WRITE_BASE else tl.load(Cursors + req, valid, 0)
-        tl.store(Cursors + req, base + length, valid)
+    accepted = tl.load(Accepted + row * ACCEPTED_STRIDE, row < N, 0)
+    tl.store(MtpIndex + req, accepted - 1, row < N)
+    valid = (row < N) & (req != HOLD)
+    verify_tokens = tl.load(ReqVerifyWidth + row * VERIFY_STRIDE, valid, 0)
+    cursor = tl.load(Cursors + req, valid, 0)
+    tl.store(Cursors + req, cursor - (verify_tokens - accepted), valid)

@@ -289,14 +289,14 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
             rtol=1e-2,
         )
     else:
-        ids = torch.tensor(requests, dtype=torch.int32, device="cuda")
-        if mtp_step:
-            accepted = torch.zeros(4, dtype=torch.int32, device="cuda")
-            accepted[ids] = torch.tensor(lengths, dtype=torch.int32, device="cuda") - 1
-            selected.accept_updates(ids, accepted)
         for req, length in zip(requests, lengths):
+            snap = torch.empty_like(selected.ssm_state[:, req])
+            selected.fold_accepted_prefix(
+                torch.tensor([req], dtype=torch.int32, device="cuda"),
+                snapshot=snap,
+            )
             torch.testing.assert_close(
-                selected.accepted_ssm(req)[0],
+                snap[0],
                 expected_ssm[req * width + length - 1],
                 atol=2e-3,
                 rtol=1e-2,

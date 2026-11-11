@@ -178,6 +178,7 @@ class KDAState(BoundedAttentionState):
         self,
         req_indices: torch.Tensor,
         accepted_steps: torch.Tensor,
+        req_verify_width: torch.Tensor,
     ) -> None:
         """用 CUDA 请求索引和 int32 接受步数选择 SSM 候选位置；步数包含基准输入步。"""
         assert req_indices.is_cuda and accepted_steps.is_cuda, "commit inputs must be CUDA tensors"

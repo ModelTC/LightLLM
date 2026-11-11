@@ -109,8 +109,6 @@ def rebuild_inputs(
         )
     )
     cu = (torch.arange(sequences + 1, dtype=torch.int32, device=q.device) * ssm_backend.verify_width).clamp_max(tokens)
-    lengths = cu[1 : batch + 1] - cu[:batch]
-    accepted = torch.cat((lengths - 1, lengths.new_zeros(1)))
     return (), dict(
         ssm_backend=scratch,
         mode=mode,
@@ -122,7 +120,7 @@ def rebuild_inputs(
         a_log=inputs[5],
         bias=inputs[6],
         cu_seqlens=cu if cu_seqlens is not None else None,
-        workload=(reqs, accepted),
+        workload=(reqs,),
     )
 
 
@@ -158,14 +156,17 @@ def select_config(
     if workload is None:
         return run_config
     ssm_backend.run_config = run_config
-    reqs, accepted = workload
+    (reqs,) = workload
     ssm_backend.cursors.zero_()
-    # 把前缀写满但不越出 capacity。replay kernel 自己读 cursor。
+    # 把前缀写满但不越出 capacity。replay kernel 自己读 cursor。调优窗口全部接受。
     tokens = q.shape[1 if cu_seqlens is not None else 0]
     rounds = max(1, ssm_backend.capacity // min(ssm_backend.verify_width, tokens))
     for _ in range(rounds):
         replay_layer(ssm_backend, 0, q, k, v, a, b, a_log, bias, reqs, cu_seqlens)
-        ssm_backend.accept_updates(reqs, accepted)
+        adopt_cu = cu_seqlens
+        if adopt_cu is None:
+            adopt_cu = torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device)
+        ssm_backend.advance_cursor(reqs, adopt_cu)
     return run_config
 
 

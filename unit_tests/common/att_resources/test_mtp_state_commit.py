@@ -36,6 +36,7 @@ def test_commit_selects_state_for_one_role():
     manager.commit_bounded_att_state(
         torch.tensor([0], dtype=torch.int32, device="cuda"),
         torch.tensor([3], dtype=torch.int32, device="cuda"),
+        torch.tensor([3], dtype=torch.int32, device="cuda"),
         role="main",
     )
     for state in (manager.main_kda_conv_fp32_ssm_fp32_state, manager.main_gdn_conv_fp32_ssm_fp32_state):
@@ -45,6 +46,7 @@ def test_commit_selects_state_for_one_role():
     assert manager.draft0_gdn_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [1, 1, 1]
     manager.commit_bounded_att_state(
         torch.tensor([0], dtype=torch.int32, device="cuda"),
+        torch.tensor([1], dtype=torch.int32, device="cuda"),
         torch.tensor([1], dtype=torch.int32, device="cuda"),
         role="draft0",
     )
@@ -60,16 +62,19 @@ def test_commit_without_recurrent_state_and_invalid_role():
     manager.commit_bounded_att_state(
         torch.tensor([0], dtype=torch.int32, device="cuda"),
         torch.tensor([3], dtype=torch.int32, device="cuda"),
+        torch.tensor([3], dtype=torch.int32, device="cuda"),
         role="main",
     )
     manager.commit_bounded_att_state(
         torch.tensor([0], dtype=torch.int32, device="cuda"),
+        torch.tensor([3], dtype=torch.int32, device="cuda"),
         torch.tensor([3], dtype=torch.int32, device="cuda"),
         role="draft0",
     )
     with pytest.raises(AssertionError, match="unknown model role"):
         manager.commit_bounded_att_state(
             torch.tensor([0], dtype=torch.int32, device="cuda"),
+            torch.tensor([3], dtype=torch.int32, device="cuda"),
             torch.tensor([3], dtype=torch.int32, device="cuda"),
             role="target",
         )

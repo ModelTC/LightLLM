@@ -190,7 +190,8 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             core = self._mtp(mixed_qkv, conv_states, a, b, layer_weight, layer_num, draft_step, state)
         else:
             core, z = self._decode(mixed_qkv, z, conv_states, a, b, layer_weight, layer_num, state)
-            state.finish_decode_token(layer_num, self.b_conv_buffer_idx)
+        # 各层都读到了本步开始时的 cursor。最后一层返回后再按整窗全接受推进。
+        state.finish_decode_token(layer_num, self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
         return core, z
 
     def _init_indices(self, draft_step: int, mtp_index: torch.Tensor | None) -> None:

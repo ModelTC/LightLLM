@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """ReplaySSM kernel exports, in lifecycle order.
 
-decode writes history for the current window.
-cursor records how many of those tokens were accepted.
+decode writes history for the current window and does not move the cursor.
+advance_cursor moves the cursor after the last layer; verify trims the rejected tail.
 fold applies that accepted prefix onto the canonical SSM.
 """
 

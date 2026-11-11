@@ -1,6 +1,8 @@
 """测试用的 replay history。正式路径走 ReplayGDNState / ReplayKDAState 的构造函数。"""
 
 import torch
+import triton
+import triton.language as tl
 
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
@@ -51,10 +53,9 @@ def attach_replay_history(
     layers, slots, hv, k, v = ssm.shape
     owner.num_key_heads = hv if num_key_heads is None else num_key_heads
     assert owner.num_key_heads > 0 and hv % owner.num_key_heads == 0
-    # 最后一个 slot 是 HOLD。cursor 是尚未折回的已接受长度，write_bases 是本步写入起点。
+    # 最后一个 slot 是 HOLD。cursor 是尚未折回的已接受长度。
     owner.hold_req_id = slots - 1
     owner.cursors = torch.zeros(slots, dtype=torch.int32, device=ssm.device)
-    owner.write_bases = torch.zeros(slots, dtype=torch.int32, device=ssm.device)
     # 重建用 k/d：bf16 激活用 fp16。折回仍用原始 k/v。KDA 的 g 按 key 通道存。
     reconstruction_dtype = torch.float16 if activation_dtype == torch.bfloat16 else torch.float32
     key_shape = (layers, slots, owner.num_key_heads, capacity, k)
@@ -66,3 +67,48 @@ def attach_replay_history(
     owner.raw_values = torch.empty((layers, slots, hv, capacity, v), dtype=activation_dtype, device=ssm.device)
     owner.betas = torch.empty((layers, slots, hv, capacity), dtype=torch.float32, device=ssm.device)
     return owner
+
+
+@triton.jit(do_not_specialize=["N"])
+def _trim_rejected_index(
+    cursors,
+    reqs,
+    cu,
+    accepted_index,
+    N,
+    HOLD: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    # accepted_index 按请求槽存放，接受个数是 index + 1。窗口长度与 reqs 逐行对齐。
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    r = tl.load(reqs + i, i < N, HOLD)
+    valid = (i < N) & (r != HOLD)
+    window = tl.load(cu + i + 1, valid, 0) - tl.load(cu + i, valid, 0)
+    accepted = tl.load(accepted_index + r, valid, 0) + 1
+    cursor = tl.load(cursors + r, valid, 0)
+    tl.store(cursors + r, cursor - (window - accepted), valid)
+
+
+def accept_replay_window(history, reqs, accepted_state_indices=None, cu_seqlens=None) -> None:
+    """测试里一次结算 cursor：先按整窗全接受，再按槽位 index 剪掉未接受尾部。
+
+    没传 cu_seqlens 时每个请求的窗口长度是 1。正式路径用 advance_cursor 和 commit_accepted。
+    """
+
+    if reqs.numel() == 0:
+        return
+    if cu_seqlens is None:
+        cu_seqlens = torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device)
+    history.advance_cursor(reqs, cu_seqlens)
+    if cu_seqlens is None or accepted_state_indices is None:
+        return
+    _trim_rejected_index[(triton.cdiv(reqs.numel(), 256),)](
+        history.cursors,
+        reqs,
+        cu_seqlens,
+        accepted_state_indices,
+        reqs.numel(),
+        history.hold_req_id,
+        256,
+        num_warps=4,
+    )

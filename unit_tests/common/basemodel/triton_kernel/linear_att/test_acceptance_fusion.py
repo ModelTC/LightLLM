@@ -1,20 +1,22 @@
 import pytest
 import torch
-import triton
 
 from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update as update
 from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
+    accept_replay_window,
     attach_replay_history as ReplaySSMExecutor,
 )
 
 
 def ssm_snapshot(backend, req):
-    return backend.accepted_ssm(req)
+    state = backend.ssm_state
+    output = torch.empty((state.shape[0], *state.shape[2:]), dtype=state.dtype, device=state.device)
+    backend.fold_accepted_prefix(torch.tensor([req], dtype=torch.int32, device=state.device), snapshot=output)
+    return output
 
 
 from types import SimpleNamespace
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
-from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import replay_layer
 
 
@@ -33,9 +35,9 @@ def make(n, width):
     args = [tensor(starts), tensor(reqs), tensor(mtps), tensor([1] * len(reqs)), width]
     ssm_backend = ReplayGDNState.__new__(ReplayGDNState)
     ssm_backend.cursors = tensor([7] * (hold + 1))
-    ssm_backend.write_bases = ssm_backend.cursors.clone()
     ssm_backend.hold_req_id = hold
-    ssm_backend.capacity = max(4, triton.next_power_of_2(width))
+    # 这个用例不触发折回，容量要盖住多步累加后的 cursor。
+    ssm_backend.capacity = 4096
     ssm_backend.verify_width = width
     manager = SimpleNamespace()
     manager.mtp_state_index = tensor([-9] * (hold + 1))
@@ -43,15 +45,22 @@ def make(n, width):
     return manager, args, (ids, lengths, starts)
 
 
+def _replay_cu(args):
+    """args[0] 是每个请求的起点，最后一个请求接到本批 token 末尾。"""
+
+    starts = args[0]
+    return torch.cat((starts, starts.new_full((1,), args[3].numel())))
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("replay", [False, True])
-def test_request_counts_share_compiled_kernel(monkeypatch, replay):
+def test_request_counts_share_compiled_kernel(monkeypatch):
     from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import _commit_prefix, commit_ssm_prefix
 
     reqs = torch.arange(512, dtype=torch.int32, device="cuda")
     lengths = reqs % 4 + 1
+    window = lengths + 4
     indices = torch.zeros(513, dtype=torch.int32, device="cuda")
-    cursors = torch.zeros_like(indices) if replay else None
+    cursors = torch.zeros_like(indices)
     hashes = set()
     run = _commit_prefix.run
 
@@ -63,20 +72,23 @@ def test_request_counts_share_compiled_kernel(monkeypatch, replay):
     monkeypatch.setattr(_commit_prefix, "run", record)
     for count in (1, 2, 7, 16, 23, 24, 25, 31, 32, 33, 255, 256, 257, 511):
         indices.fill_(-1)
-        if replay:
-            cursors.zero_()
-        commit_ssm_prefix(indices, reqs[:count], lengths[:count], cursors)
+        cursors.zero_()
+        cursors[:count] = window[:count]
+        commit_ssm_prefix(indices, reqs[:count], lengths[:count], window[:count], cursors)
         assert torch.equal(indices[:count], lengths[:count] - 1)
         assert (indices[count:] == -1).all()
-        if replay:
-            assert torch.equal(cursors[:count], lengths[:count])
-            assert not cursors[count:].any()
+        assert torch.equal(cursors[:count], lengths[:count])
+        assert not cursors[count:].any()
     assert len(hashes) == 1
 
 
 def accept_unfused(m, args):
     update(m.mtp_state_index, *args)
-    m._ssm_executor.accept_updates(args[1][args[0].long()], m.mtp_state_index)
+    reqs = args[1][args[0].long()]
+    if m._ssm_executor.verify_width > 1:
+        accept_replay_window(m._ssm_executor, reqs, m.mtp_state_index, _replay_cu(args))
+    else:
+        accept_replay_window(m._ssm_executor, reqs)
 
 
 def accept_fused(m, args):
@@ -84,7 +96,13 @@ def accept_fused(m, args):
     ends = torch.cat((args[0][1:], args[0].new_full((1,), args[3].numel())))
     cumulative = torch.cat((args[3].new_zeros(1), args[3].cumsum(0)))
     lengths = cumulative[ends.long()] - cumulative[args[0].long()]
-    m._ssm_executor.commit_accepted(m.mtp_state_index, reqs, lengths)
+    executor = m._ssm_executor
+    if getattr(executor, "verify_width", 1) > 1:
+        cu = _replay_cu(args)
+        executor.advance_cursor(reqs, cu)
+        executor.commit_accepted(m.mtp_state_index, reqs, lengths, cu[1:] - cu[:-1])
+    else:
+        executor.commit_accepted(m.mtp_state_index, reqs, lengths, lengths)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -107,8 +125,6 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
             ref.mtp_state_index.fill_(-9)
             m._ssm_executor.cursors.fill_(7)
             ref._ssm_executor.cursors.fill_(7)
-            m._ssm_executor.write_bases.fill_(7)
-            ref._ssm_executor.write_bases.fill_(7)
             for step in range(24):
                 mask = []
                 for i, (r, l) in enumerate(zip(ids, lengths)):
@@ -118,9 +134,6 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
                     if r != m._ssm_executor.hold_req_id:
                         expected_cursor[r] += count if width > 1 else 1
                 args[3].copy_(torch.tensor(mask, device="cuda", dtype=torch.int32))
-                # replay 没有折回时，写起点就是当前 cursor。提交把它加上本步接受数。
-                m._ssm_executor.write_bases.copy_(m._ssm_executor.cursors)
-                ref._ssm_executor.write_bases.copy_(ref._ssm_executor.cursors)
                 accept_unfused(ref, args)
                 if step % 2:
                     graph.replay()
@@ -133,8 +146,8 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
                 checks += 1
 
             class _IndexOnly:
-                def commit_accepted(self, indices, req_indices, accepted_lengths):
-                    commit_ssm_prefix(indices, req_indices, accepted_lengths)
+                def commit_accepted(self, indices, req_indices, accepted_lengths, req_verify_width):
+                    indices[req_indices] = (accepted_lengths - 1).to(indices.dtype)
 
             m._ssm_executor = _IndexOnly()
             accept_fused(m, args)
@@ -228,14 +241,14 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
             assert torch.equal(ssm_snapshot(ssm_backends[0], 3), ssm_snapshot(ssm_backends[1], 3))
         if iteration % 11 == 10:
             for ssm_backend in ssm_backends:
-                ssm_backend.merge_accepted_updates(reqs[:3])
+                ssm_backend.fold_accepted_prefix(reqs[:3])
             assert torch.equal(ssm_backends[0].ssm_state, ssm_backends[1].ssm_state)
         if iteration == 19:
             for manager in managers:
-                manager._ssm_executor.clear_history(1)
+                manager._ssm_executor.cursors[1].zero_()
                 manager._ssm_executor.ssm_state[:, 1].zero_()
                 manager.mtp_state_index[1] = 0
     for ssm_backend in ssm_backends:
-        ssm_backend.merge_accepted_updates(reqs[:3])
+        ssm_backend.fold_accepted_prefix(reqs[:3])
     assert torch.equal(ssm_backends[0].ssm_state, ssm_backends[1].ssm_state)
     assert torch.equal(ssm_backends[0].ssm_state[:, [0, 2, 4, 5, 7]], initial[:, [0, 2, 4, 5, 7]])

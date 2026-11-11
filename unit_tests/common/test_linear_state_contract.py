@@ -165,9 +165,8 @@ def test_native_commit_selects_mtp_slot(cls):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     owner, _, _ = make_state(cls, step=2)
-    owner.commit_bounded_att_state(
-        torch.tensor([1], device="cuda"), torch.tensor([3], dtype=torch.int32, device="cuda")
-    )
+    accepted = torch.tensor([3], dtype=torch.int32, device="cuda")
+    owner.commit_bounded_att_state(torch.tensor([1], device="cuda"), accepted, accepted)
     assert owner.mtp_state_index.tolist() == [0, 2, 0, 0]
 
 
@@ -179,11 +178,25 @@ def test_replay_fused_acceptance_keeps_cursors_inside_mode(monkeypatch, cls):
     history = getattr(owner, "runtime", owner)
     calls = []
     monkeypatch.setattr(sys.modules[type(history).__module__], "commit_ssm_prefix", lambda *args: calls.append(args))
-    monkeypatch.setattr(history, "accept_updates", lambda *a: pytest.fail("unfused acceptance"))
-    owner.commit_bounded_att_state(torch.tensor([2, 0, 1]), torch.tensor([1, 2, 3]))
+    widths = torch.tensor([1, 2, 3])
+    owner.commit_bounded_att_state(torch.tensor([2, 0, 1]), torch.tensor([1, 2, 3]), widths)
     assert len(calls) == 1
-    assert calls[0][3] is history.cursors
+    assert calls[0][3] is widths
+    assert calls[0][4] is history.cursors
     assert calls[0][0] is owner.mtp_state_index
+
+
+def _commit_prefix_cpu(indices, reqs, lengths, req_verify_width, replay_cursors) -> None:
+    """CPU 上按请求行核对索引和 cursor。正式提交算子只跑 CUDA。"""
+
+    indices[reqs] = (lengths - 1).to(indices.dtype)
+    hold = replay_cursors.numel() - 1
+    for row in range(reqs.numel()):
+        req = int(reqs[row])
+        if req == hold:
+            continue
+        rejected = int(req_verify_width[row]) - int(lengths[row])
+        replay_cursors[req] = int(replay_cursors[req]) - rejected
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -193,10 +206,19 @@ def test_acceptance_keeps_request_order_with_strided_inputs(device):
     owner, _, _ = make_state(mode="replay", step=3, device=device)
     owner.mtp_state_index.fill_(2)
     history = getattr(owner, "runtime", owner)
-    history.cursors.fill_(8)
-    history.write_bases.copy_(history.cursors)
+    history.cursors.zero_()
     reqs = torch.tensor([2, -99, 0, -99, 3, -99], device=device)[::2]
     lengths = torch.tensor([1, -99, 3, -99, 2, -99], dtype=torch.int32, device=device)[::2]
-    owner.commit_accepted(owner.mtp_state_index, reqs, lengths)
+    if device == "cuda":
+        flat_lengths = lengths.contiguous()
+        cu = torch.zeros(flat_lengths.numel() + 1, dtype=torch.int32, device=device)
+        cu[1:] = torch.cumsum(flat_lengths, 0)
+        history.advance_cursor(reqs.contiguous(), cu)
+        owner.commit_accepted(owner.mtp_state_index, reqs, lengths, lengths)
+    else:
+        # 正式提交只接受 CUDA。CPU 用例只核对 stride 下的请求顺序。
+        history.cursors[0] = 3
+        history.cursors[2] = 1
+        _commit_prefix_cpu(owner.mtp_state_index, reqs, lengths, lengths, history.cursors)
     assert owner.mtp_state_index.tolist() == [2, 2, 0, 1]
-    assert history.cursors.tolist() == [11, 8, 9, 8]
+    assert history.cursors.tolist() == [3, 0, 1, 0]

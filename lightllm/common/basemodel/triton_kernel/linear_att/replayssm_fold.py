@@ -86,3 +86,48 @@ def _fold_prefix(
     if FLUSH_EXPORT:
         tl.store(sp, state, mask)
     # cursor 不在这里清。和折回并行的其他线程块还要读原来的长度，清零放到 kernel 结束之后。
+
+
+def fold_prefix(history, reqs, output, snapshot: bool, run_config=None) -> None:
+    """把 history 上 cursor 覆盖的已接受前缀折进 output。
+
+    snapshot 为真时 output 是独立缓冲，kernel 不写回 canonical SSM。
+    没传入 run_config 时用 BV=32、4 个 warp、3 个 stage。
+    """
+
+    if run_config is None:
+        run_config = {"BV": 32, "num_warps": 4, "num_stages": 3}
+    bv = run_config["BV"]
+    num_warps = run_config["num_warps"]
+    num_stages = run_config["num_stages"]
+    state = history.ssm_state
+    layers, slots, hv, k, v = state.shape
+    layer_stride, slot_stride, head_stride, key_stride, value_stride = state.stride()
+    _fold_prefix[(triton.cdiv(v, bv), reqs.numel(), layers * hv)](
+        state,
+        output,
+        history.raw_keys,
+        history.raw_values,
+        history.gates,
+        history.betas,
+        history.cursors,
+        reqs,
+        slots,
+        hv,
+        history.num_key_heads,
+        k,
+        v,
+        history.capacity,
+        history.hold_req_id,
+        triton.next_power_of_2(k),
+        bv,
+        snapshot,
+        history.kda,
+        STRIDE_LAYER=layer_stride,
+        STRIDE_SLOT=slot_stride,
+        STRIDE_HEAD=head_stride,
+        STRIDE_K=key_stride,
+        STRIDE_V=value_stride,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )

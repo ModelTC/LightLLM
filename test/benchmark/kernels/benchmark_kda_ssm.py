@@ -16,6 +16,7 @@ import triton
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs, replay_layer
 from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
+    accept_replay_window,
     attach_replay_history as ReplaySSMExecutor,
 )
 
@@ -73,10 +74,13 @@ def workload(args, batch, width, dtype, mode, acceptance):
                 else:
                     replay_layer(ssm_backend, layer, q, k, v, gate, beta, alog, bias, reqs, cu)
             if ssm_backend is not None:
-                ssm_backend.accept_updates(reqs, accepted)
+                if cu is None:
+                    accept_replay_window(ssm_backend, reqs)
+                else:
+                    accept_replay_window(ssm_backend, reqs, accepted, cu)
         if isinstance(ssm_backend, ReplaySSMExecutor):
             ssm_backend._materialize_accepted_state(reqs[:1], snapshot, snapshot=True)
-            ssm_backend.merge_accepted_updates(reqs)
+            ssm_backend.fold_accepted_prefix(reqs)
         else:
             snapshot.copy_(state[:, native_index] if ssm_backend is None else state[:, 0])
 

@@ -10,12 +10,9 @@ from functools import lru_cache
 from math import prod
 
 import torch
-import triton
 
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import (
-    _advance_cursor,
-    _fold_prefix,
-)
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor as advance_replay_cursor
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_fold import fold_prefix
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 from lightllm.utils.log_utils import init_logger
 
@@ -104,10 +101,8 @@ class ReplayKDAState(BoundedAttentionState):
         assert self.num_key_heads > 0 and hv % self.num_key_heads == 0
         # 最后一个 slot 是 HOLD，replay 写零并且不记 history。
         self.hold_req_id = slots - 1
-        # cursor 是已接受、尚未折回的长度，各层只读。
-        # write_bases 是本步 replay 的写入起点：层内折回后为 0，否则等于进入 kernel 时的 cursor。
+        # cursor 是已接受、尚未折回的长度。各层只读，最后一层返回后才按整窗推进。
         self.cursors = torch.zeros(slots, dtype=torch.int32, device=device)
-        self.write_bases = torch.zeros(slots, dtype=torch.int32, device=device)
         # 输出重建用归一化 k 和 d。bf16 激活用 fp16，尾数更多。
         # 折回不用这份 d，而用下面的原始 k/v，避免把重建误差写进 SSM。g、beta 保持 fp32。
         # KDA 的 g 按 key 通道存。
@@ -181,7 +176,7 @@ class ReplayKDAState(BoundedAttentionState):
         for req_idx in req_indices:
             self.conv_state[:, req_idx].zero_()
             self.ssm_state[:, req_idx].zero_()
-            self.clear_history(req_idx)
+            self.cursors[req_idx].zero_()
             if self.mtp_state_index is not None:
                 self.mtp_state_index[req_idx].fill_(0)
 
@@ -211,14 +206,13 @@ class ReplayKDAState(BoundedAttentionState):
         page_kind,
         page_slot_ids: list[int],
     ) -> None:
-        """从页恢复基准 Conv/SSM，并清空目标请求的 history。"""
+        """从页恢复基准 Conv/SSM。prefill 时 cursor 仍是 0。"""
         assert isinstance(req_indices, list) and isinstance(page_slot_ids, list), "indices must be lists"
         assert len(req_indices) == len(state_token_lens) == len(page_slot_ids), "request, length and page counts differ"
         pool = self._pool(page_kind)
         width = self.config.conv_width
         conv_copies, ssm_copies = [], []
         for req_idx, slot_id in zip(req_indices, page_slot_ids):
-            self.clear_history(req_idx)
             conv_copies.append((pool.conv_state[slot_id], self.conv_state[:, req_idx, :, :width]))
             ssm_copies.append((pool.ssm_state[slot_id], self.ssm_state[:, req_idx]))
         copy_bounded_att_tensors(copies=conv_copies)
@@ -227,11 +221,16 @@ class ReplayKDAState(BoundedAttentionState):
             for req_idx in req_indices:
                 self.mtp_state_index[req_idx].fill_(0)
 
-    def commit_bounded_att_state(self, req_indices: torch.Tensor, accepted_steps: torch.Tensor) -> None:
-        """提交已接受长度。前缀放不下时，折回发生在下一次 replay kernel 里。"""
+    def commit_bounded_att_state(
+        self,
+        req_indices: torch.Tensor,
+        accepted_steps: torch.Tensor,
+        req_verify_width: torch.Tensor,
+    ) -> None:
+        """提交已接受长度，并剪掉整窗全接受后未通过验证的尾部。"""
         if self.mtp_state_index is None:
             return
-        self.commit_accepted(self.mtp_state_index, req_indices, accepted_steps)
+        self.commit_accepted(self.mtp_state_index, req_indices, accepted_steps, req_verify_width)
 
     # ========================================================================
     # 三、CPU Cache 数据交换
@@ -334,7 +333,7 @@ class ReplayKDAState(BoundedAttentionState):
         dst_req_indices: list[int],
         remote_dp_bounded_state: "ReplayKDAState",
     ) -> None:
-        """复制 prefill 基准 Conv/SSM 到目标单槽，并清空目标 history。"""
+        """复制 prefill 基准 Conv/SSM 到目标单槽。prefill 时目标 cursor 仍是 0。"""
         assert isinstance(src_req_indices, list) and isinstance(dst_req_indices, list), "request indices must be lists"
         assert len(src_req_indices) == len(dst_req_indices), "source and destination request counts differ"
         assert (
@@ -343,7 +342,6 @@ class ReplayKDAState(BoundedAttentionState):
         width = self.config.conv_width
         conv_copies, ssm_copies = [], []
         for src_req, dst_req in zip(src_req_indices, dst_req_indices):
-            self.clear_history(dst_req)
             conv_copies.append(
                 (
                     remote_dp_bounded_state.conv_state[:, src_req, :, :width],
@@ -399,10 +397,9 @@ class ReplayKDAState(BoundedAttentionState):
         state_token_len: int,
         layout: StateTransferLayout,
     ) -> None:
-        """读入基准 Conv/SSM，并清空该请求的 history。"""
+        """读入基准 Conv/SSM。prefill 时 cursor 仍是 0。"""
         assert layout.state_name == self.state_name, "transfer layout does not describe this resource"
         assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
-        self.clear_history(req_idx)
         fields = self._tensor_fields(
             self.conv_state[:, req_idx, :, : self.config.conv_width],
             self.ssm_state[:, req_idx],
@@ -420,98 +417,65 @@ class ReplayKDAState(BoundedAttentionState):
 
     # ========================================================================
     # 六、Replay history
+    #
+    # cursor 是已接受、尚未折回的长度，各层只读。
+    # 最后一层返回后按整窗全接受推进：放不下时 cursor 变成窗口长度，否则加上窗口长度。
+    # MTP 验证后再减去没接受的尾部。宽度为 1 时窗口就是这一个 token，没有尾部可剪。
+    # 前缀放不下时，折回发生在 replay kernel 内。fold_accepted_prefix 只用于层外对照和只读快照。
     # ========================================================================
 
-    def finish_decode_token(self, logical_layer_id: int, reqs: torch.Tensor) -> None:
-        """最后一层记下这 1 个 token。前缀放不下时，折回发生在下一次 replay kernel 里。"""
+    def finish_decode_token(
+        self, logical_layer_id: int, reqs: torch.Tensor, cu_seqlens: torch.Tensor | None = None
+    ) -> None:
+        """最后一层按整窗全接受推进 cursor。非最后一层直接返回。"""
 
         layers = () if self.config is None else self.config.logical_layer_ids
         if not layers or logical_layer_id != layers[-1] or reqs.numel() == 0:
             return
-        # width=1 不读 index。仍传 reqs，kernel 不能收到空指针。
-        self.accept_updates(reqs, reqs, width=1)
+        if cu_seqlens is None:
+            cu_seqlens = torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device)
+        self.advance_cursor(reqs, cu_seqlens)
 
-    def clear_history(self, req: int | torch.Tensor) -> None:
-        """清空复用或恢复请求的临时 history，保留 canonical SSM。"""
+    def advance_cursor(self, reqs: torch.Tensor, cu_seqlens: torch.Tensor) -> None:
+        """按 cu_seqlens 给出的整窗全接受推进 cursor，不修改 SSM。"""
 
-        if type(req) is int:
-            # 标量赋值会把 CPU tensor 复制到 CUDA slot。
-            self.cursors[req].zero_()
-            self.write_bases[req].zero_()
-        else:
-            self.cursors[req] = 0
-            self.write_bases[req] = 0
+        advance_replay_cursor(self, reqs, cu_seqlens)
 
-    def accept_updates(
-        self, reqs: torch.Tensor, accepted_state_indices: torch.Tensor | None = None, width: int | None = None
+    def commit_accepted(
+        self,
+        mtp_state_index: torch.Tensor,
+        reqs: torch.Tensor,
+        accepted_lengths: torch.Tensor,
+        req_verify_width: torch.Tensor,
     ) -> None:
-        """更新 cursor。width 缺省时按 verify_width 取已接受长度，传 1 时固定加一个 token。"""
+        """MTP verify 之后写入索引，并从全接受后的 cursor 上剪掉未接受尾部。
 
-        _advance_cursor[(triton.cdiv(reqs.numel(), 256),)](
-            self.cursors,
-            self.write_bases,
-            reqs,
-            accepted_state_indices,
-            reqs.numel(),
-            self.hold_req_id,
-            self.verify_width if width is None else width,
-            256,
-        )
+        accepted_lengths 含基准 token。req_verify_width 与 reqs 逐行对齐，是每个请求这次送去验证的 token 数。
+        配置的 verify_width 为 1 时没有尾部，只把这一个 token 记入 cursor。
+        """
 
-    def merge_accepted_updates(self, reqs: torch.Tensor) -> None:
-        """把 cursor 覆盖的已接受前缀整段折回 canonical SSM，并清空 cursor。"""
+        if self.verify_width > 1:
+            commit_ssm_prefix(mtp_state_index, reqs, accepted_lengths, req_verify_width, self.cursors)
+        else:
+            mtp_state_index[reqs] = (accepted_lengths - 1).to(mtp_state_index.dtype)
+            cu_seqlens = torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device)
+            self.advance_cursor(reqs, cu_seqlens)
+
+    def fold_accepted_prefix(self, reqs: torch.Tensor, snapshot: torch.Tensor | None = None, run_config=None) -> None:
+        """用原始 k/v 把 cursor 覆盖的已接受前缀折进 SSM。
+
+        snapshot 为空时写回 canonical SSM，并清掉这些请求的 cursor。
+        传入 snapshot 时只写入这块独立缓冲，不改 canonical SSM，也不动 cursor。
+        run_config 为空时由 fold_prefix 使用它自己的默认配置。
+        """
 
         if reqs.numel() == 0:
             return
-        self._materialize_accepted(reqs, self.ssm_state, snapshot=False)
-        self.cursors.index_fill_(0, reqs.long(), 0)
-
-    def accepted_ssm(self, req_idx: int) -> torch.Tensor:
-        """返回不修改 canonical SSM 和 history 的单请求快照。"""
-
-        layers, _, hv, k, v = self.ssm_state.shape
-        output = torch.empty((layers, hv, k, v), dtype=self.ssm_state.dtype, device=self.ssm_state.device)
-        reqs = torch.tensor([req_idx], dtype=torch.int32, device=self.ssm_state.device)
-        self._materialize_accepted(reqs, output, snapshot=True)
-        return output
-
-    def export_accepted_state(
-        self,
-        req_indices: list[int],
-        targets: list[torch.Tensor],
-        flush: bool = False,
-    ) -> None:
-        """将多个 accepted 快照直接写入调用方目标页。"""
-
-        if not req_indices:
+        if snapshot is None:
+            fold_prefix(self, reqs, self.ssm_state, False, run_config)
+            self.cursors.index_fill_(0, reqs.long(), 0)
             return
-        shape = (self.ssm_state.shape[0], *self.ssm_state.shape[2:])
-        strides = targets[0].stride()
-        assert len(req_indices) == len(targets)
-        assert all(t.shape == shape and t.stride() == strides and t.dtype == self.ssm_state.dtype for t in targets)
-        device = self.ssm_state.device
-        self._materialize_accepted(
-            torch.tensor(req_indices, dtype=torch.int32, pin_memory=True).to(device, non_blocking=True),
-            torch.tensor([t.data_ptr() for t in targets], dtype=torch.int64, pin_memory=True).to(
-                device, non_blocking=True
-            ),
-            snapshot=not flush,
-            flush_export=flush,
-            output_strides=strides,
-        )
-        if flush:
-            slots = torch.tensor(req_indices, dtype=torch.int64, device=device)
-            self.cursors.index_fill_(0, slots, 0)
-            self.write_bases.index_fill_(0, slots, 0)
-
-    def commit_accepted(self, indices: torch.Tensor, reqs: torch.Tensor, lengths: torch.Tensor) -> None:
-        """把接受长度写入 MTP 槽位索引，并把 cursor 设为这次 replay 的写起点加接受长度。"""
-
-        if self.verify_width > 1:
-            commit_ssm_prefix(indices, reqs, lengths, self.cursors, self.write_bases)
-        else:
-            commit_ssm_prefix(indices, reqs, lengths)
-            self.accept_updates(reqs, indices)
+        fold_prefix(self, reqs, snapshot, True, run_config)
 
     # ========================================================================
     # 七、私有辅助实现
@@ -629,52 +593,3 @@ class ReplayKDAState(BoundedAttentionState):
             "conv": TensorField(tensor=conv, axes=("layer", "channel", "window")),
             "ssm": TensorField(tensor=ssm, axes=("layer", "head", "key_dim", "value_dim")),
         }
-
-    def _materialize_accepted(
-        self,
-        reqs: torch.Tensor,
-        output: torch.Tensor,
-        snapshot: bool,
-        output_strides=None,
-        flush_export: bool = False,
-    ) -> None:
-        """将请求的 accepted prefix 写入 canonical SSM 或调用方提供的输出页。"""
-
-        assert not (snapshot and flush_export), "flush export must update the canonical state"
-        layers, slots, hv, k, v = self.ssm_state.shape
-        layer_stride, slot_stride, head_stride, key_stride, value_stride = self.ssm_state.stride()
-        # 折回不走 replay 的 autotune。没固定配置时用这份默认值。
-        config = self.run_config or {}
-        bv = config.get("BV", 32)
-        num_warps = config.get("num_warps", 4)
-        num_stages = config.get("num_stages", 3)
-        _fold_prefix[(triton.cdiv(v, bv), reqs.numel(), layers * hv)](
-            self.ssm_state,
-            output,
-            self.raw_keys,
-            self.raw_values,
-            self.gates,
-            self.betas,
-            self.cursors,
-            reqs,
-            slots,
-            hv,
-            self.num_key_heads,
-            k,
-            v,
-            self.capacity,
-            self.hold_req_id,
-            triton.next_power_of_2(k),
-            bv,
-            snapshot,
-            True,
-            FLUSH_EXPORT=flush_export,
-            OUTPUT_STRIDES=output_strides,
-            STRIDE_LAYER=layer_stride,
-            STRIDE_SLOT=slot_stride,
-            STRIDE_HEAD=head_stride,
-            STRIDE_K=key_stride,
-            STRIDE_V=value_stride,
-            num_warps=num_warps,
-            num_stages=num_stages,
-        )

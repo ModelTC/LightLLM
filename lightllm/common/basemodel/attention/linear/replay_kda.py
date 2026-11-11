@@ -195,8 +195,8 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
             self.b_conv_buffer_idx,
             self.b1_mtp_cu_q_seq_len,
         )
-        if backend.mtp_step == 0:
-            state.finish_decode_token(layer_num, self.b_conv_buffer_idx)
+        # 各层都读到了本步开始时的 cursor。最后一层返回后再按整窗全接受推进。
+        state.finish_decode_token(layer_num, self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
         return output
 
     def _init_indices(self, mtp_step: int, mtp_index: torch.Tensor | None) -> None:
