@@ -10,7 +10,11 @@ def _bound_swa_replay(
     INDICES,
     LENGTHS,
     POS,
+    TOKEN_TO_BATCH,
     STARTS,
+    COMMIT_STARTS,
+    MEM_INDEX,
+    WRITE_SLOTS,
     IMAGE_LEFT,
     IMAGE_RIGHT,
     STRIDE: tl.constexpr,
@@ -21,7 +25,13 @@ def _bound_swa_replay(
 ):
     row = tl.program_id(0)
     col = tl.arange(0, BLOCK)
-    pos, start = tl.load(POS + row), tl.load(STARTS + row)
+    batch = tl.load(TOKEN_TO_BATCH + row)
+    pos, start = tl.load(POS + row), tl.load(STARTS + batch)
+    if WRITE_SLOTS is not None:
+        commit_start = tl.load(COMMIT_STARTS + batch)
+        slot = tl.load(MEM_INDEX + row)
+        tl.store(WRITE_SLOTS + row, tl.where(pos < commit_start, -1, slot))
+        start = tl.where(start < commit_start, start, 0)
     length = tl.load(LENGTHS + row)
     shift = 0
     if HAS_IMAGE:
@@ -37,13 +47,18 @@ def _bound_swa_replay(
     tl.store(LENGTHS + row, length)
 
 
-def bound_swa_replay(state, starts):
+def bound_swa_replay(state, *, write_slots=None):
+    """Bound SWA at each request's replay start and optionally mask global KV writes."""
     width = state.dsv4_swa_indices.shape[1]
     _bound_swa_replay[(state.position_ids.numel(),)](
         state.dsv4_swa_indices,
         state.dsv4_swa_lengths,
         state.position_ids,
-        starts,
+        state._dsv4_token_to_batch_idx,
+        state.b_ready_cache_len,
+        state.b_prefill_commit_start if write_slots is not None else None,
+        state.mem_index if write_slots is not None else None,
+        write_slots,
         state.dsv4_image_left,
         state.dsv4_image_right,
         state.dsv4_swa_indices.stride(0),

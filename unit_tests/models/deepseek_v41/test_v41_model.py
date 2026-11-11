@@ -1056,6 +1056,37 @@ def test_decoder_replay_rows_and_swa_floor_preserve_encoder_state(starts, query_
     assert state.b_ready_cache_len.tolist() == starts
 
 
+def test_replay_masks_global_writes_and_bounds_swa_only_for_replayed_requests():
+    from lightllm.models.deepseek_v41.triton_kernel.attention import bound_swa_replay
+
+    def cuda_int(values):
+        return torch.tensor(values, dtype=torch.int32, device="cuda")
+
+    state = SimpleNamespace(
+        position_ids=cuda_int([10, 11, 12, 20, 21, 22]),
+        _dsv4_token_to_batch_idx=cuda_int([0, 0, 0, 1, 1, 1]),
+        b_ready_cache_len=cuda_int([10, 20]),
+        b_prefill_commit_start=cuda_int([12, 20]),
+        mem_index=cuda_int([100, 101, 102, 200, 201, 202]),
+        dsv4_swa_indices=torch.arange(24, dtype=torch.int32, device="cuda").view(6, 4),
+        dsv4_swa_lengths=cuda_int([4] * 6),
+        dsv4_image_left=None,
+        dsv4_image_right=None,
+        req_manager=SimpleNamespace(cache_config=SimpleNamespace(sliding_window=4)),
+    )
+    write_slots = torch.empty_like(state.mem_index)
+    bound_swa_replay(state, write_slots=write_slots)
+    torch.testing.assert_close(write_slots, cuda_int([-1, -1, 102, 200, 201, 202]))
+    torch.testing.assert_close(state.mem_index, cuda_int([100, 101, 102, 200, 201, 202]))
+    torch.testing.assert_close(state.dsv4_swa_lengths, cuda_int([1, 2, 3, 4, 4, 4]))
+    torch.testing.assert_close(
+        state.dsv4_swa_indices,
+        cuda_int(
+            [[0, -1, -1, -1], [4, 5, -1, -1], [8, 9, 10, -1], [12, 13, 14, 15], [16, 17, 18, 19], [20, 21, 22, 23]]
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     "expert_dtype,block_size,o_groups,vision,dspark",
     [
