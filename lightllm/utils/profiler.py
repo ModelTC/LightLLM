@@ -25,8 +25,8 @@ def _get_thread_id() -> int:
     return threading.get_ident()
 
 
-class DecodeTimeLog:
-    """Sample DSpark phases; finish only after the caller's normal CUDA sync."""
+class DecodeTimeLog(threading.local):
+    """Sample DSpark phases in each inference thread after its normal CUDA sync."""
 
     def __init__(self, every: int, rank: int):
         assert every > 0
@@ -54,10 +54,17 @@ class DecodeTimeLog:
         if not self.active:
             return
         phases = ("target", "kv_commit", "draft")
-        sample = {
-            name + "_ms": self.events[name + "_start"].elapsed_time(self.events[name + "_end"]) for name in phases
-        }
-        sample["gpu_round_ms"] = self.events["round_start"].elapsed_time(self.events["round_end"])
+        try:
+            sample = {
+                name + "_ms": self.events[name + "_start"].elapsed_time(self.events[name + "_end"]) for name in phases
+            }
+            sample["gpu_round_ms"] = self.events["round_start"].elapsed_time(self.events["round_end"])
+        except RuntimeError as exc:
+            # Timing events can still be unready after the decode completion wait.
+            # Drop this sample without adding a GPU wait or failing the request.
+            if "Both events must be completed before calculating elapsed time" not in str(exc):
+                raise
+            return
         sample["wall_round_ms"] = (time.perf_counter() - self.wall_start) * 1000
         sample.update(requests=requests, verify_rows=verify_rows, accepted_tokens=accepted_tokens)
         self.samples.append(sample)

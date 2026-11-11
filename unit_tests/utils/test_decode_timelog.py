@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
 import pytest
@@ -72,6 +73,42 @@ def test_profiler_diagnostics_can_disable_expensive_capture(monkeypatch, tmp_pat
     p.is_active = True
     p.phase("dspark.target_verify")
     record.assert_called_once_with("dspark.target_verify")
+
+
+def test_timelog_skips_unready_event_and_keeps_sampling():
+    timer = profiler.DecodeTimeLog(every=1, rank=0)
+    timer.events = {
+        f"{phase}_{boundary}": Mock()
+        for phase in ("round", "target", "kv_commit", "draft")
+        for boundary in ("start", "end")
+    }
+    for event in timer.events.values():
+        event.elapsed_time.return_value = 2.0
+    timer.events["kv_commit_start"].elapsed_time.side_effect = RuntimeError(
+        "Both events must be completed before calculating elapsed time."
+    )
+    timer.begin()
+    timer.finish(requests=1, verify_rows=4, accepted_tokens=2)
+    assert not timer.samples
+
+    timer.events["kv_commit_start"].elapsed_time.side_effect = None
+    timer.begin()
+    timer.finish(requests=1, verify_rows=4, accepted_tokens=2)
+    assert len(timer.samples) == 1
+    assert timer.samples[0]["kv_commit_ms"] == 2.0
+
+
+def test_timelog_sampling_state_is_local_to_each_inference_thread():
+    timer = profiler.DecodeTimeLog(every=2, rank=0)
+    timer.begin()
+
+    def sample_in_other_thread():
+        timer.begin()
+        return timer.active, timer.steps
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        assert pool.submit(sample_in_other_thread).result() == (True, 1)
+    assert timer.active and timer.steps == 1
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
