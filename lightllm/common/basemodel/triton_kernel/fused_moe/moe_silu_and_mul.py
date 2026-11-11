@@ -4,7 +4,7 @@ import triton
 import triton.language as tl
 from lightllm.common.triton_utils.autotuner import autotune
 from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
-from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import _ceil_to_ue8m0
+from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import _ceil_to_ue8m0, _pack_ue8m0_scales
 
 
 @triton.jit
@@ -17,19 +17,31 @@ def _silu_and_mul_quant_fp8(
     groups,
     scale_stride_n: tl.constexpr,
     limit,
+    eps: tl.constexpr,
     fp8_max: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     GROUPS_PER_CTA: tl.constexpr,
     USE_LIMIT: tl.constexpr,
     USE_GELU: tl.constexpr,
     USE_UE8M0_SCALE: tl.constexpr,
+    USE_PACKED_UE8M0: tl.constexpr,
 ):
-    ids = tl.program_id(0) * GROUPS_PER_CTA + tl.arange(0, GROUPS_PER_CTA)
-    rows = ids // (size_n // GROUP_SIZE)
-    group_cols = ids % (size_n // GROUP_SIZE)
+    groups_per_row: tl.constexpr = size_n // GROUP_SIZE
+    lane = tl.arange(0, GROUPS_PER_CTA)
+    if USE_PACKED_UE8M0:
+        row = tl.program_id(0)
+        rows = row + tl.zeros((GROUPS_PER_CTA,), tl.int32)
+        group_cols = tl.program_id(1) * GROUPS_PER_CTA + lane
+        ids = rows * groups_per_row + group_cols
+        valid = group_cols < groups_per_row
+    else:
+        ids = tl.program_id(0) * GROUPS_PER_CTA + lane
+        rows = ids // groups_per_row
+        group_cols = ids % groups_per_row
+        valid = ids < groups
     cols = tl.arange(0, GROUP_SIZE)[None, :]
     offsets = rows[:, None] * input_stride + group_cols[:, None] * GROUP_SIZE + cols
-    mask = ids[:, None] < groups
+    mask = valid[:, None]
     gate = tl.load(input_ptr + offsets, mask, 0).to(tl.float32)
     up = tl.load(input_ptr + offsets + size_n, mask, 0).to(tl.float32)
     if USE_LIMIT:
@@ -44,12 +56,18 @@ def _silu_and_mul_quant_fp8(
     gate = gate.to(input_ptr.dtype.element_ty)
     # Preserve both rounding boundaries of activation -> BF16 buffer -> FP8.
     value = (up * gate.to(tl.float32)).to(input_ptr.dtype.element_ty).to(tl.float32)
-    scale = tl.maximum(tl.max(tl.abs(value), axis=1), 1e-10) / fp8_max
-    if USE_UE8M0_SCALE:
+    scale = tl.maximum(tl.max(tl.abs(value), axis=1), eps) / fp8_max
+    if USE_UE8M0_SCALE or USE_PACKED_UE8M0:
         scale = _ceil_to_ue8m0(scale)
     quant = tl.clamp(value / scale[:, None], -fp8_max, fp8_max).to(quant_ptr.dtype.element_ty)
     tl.store(quant_ptr + ids[:, None] * GROUP_SIZE + cols, quant, mask)
-    tl.store(scale_ptr + rows + group_cols * scale_stride_n, scale, ids < groups)
+    if USE_PACKED_UE8M0:
+        packs_per_cta: tl.constexpr = GROUPS_PER_CTA // 4
+        packed_cols = tl.program_id(1) * packs_per_cta + tl.arange(0, packs_per_cta)
+        packed = _pack_ue8m0_scales(scale, valid, GROUPS_PER_CTA)
+        tl.store(scale_ptr + row + packed_cols * scale_stride_n, packed, packed_cols < tl.cdiv(groups_per_row, 4))
+    else:
+        tl.store(scale_ptr + rows + group_cols * scale_stride_n, scale, valid)
 
 
 @autotune(
@@ -57,7 +75,7 @@ def _silu_and_mul_quant_fp8(
     configs_gen_func=lambda: [
         {"GROUPS_PER_CTA": g, "num_warps": w} for g, w in [(1, 1), (4, 1), (4, 4), (8, 4), (16, 4)]
     ],
-    static_key_func=lambda input, group_size, dtype, limit, use_ue8m0_scales: {
+    static_key_func=lambda input, group_size, dtype, limit, use_ue8m0_scales, use_packed_ue8m0: {
         "N": input.shape[1] // 2,
         "input_dtype": str(input.dtype),
         "output_dtype": str(dtype),
@@ -65,11 +83,20 @@ def _silu_and_mul_quant_fp8(
         "clamp": limit is not None,
         "gelu": ffn_use_tanh_approximate_gelu(),
         "ue8m0": use_ue8m0_scales,
+        **({"packed_ue8m0": True} if use_packed_ue8m0 else {}),
     },
     run_key_func=lambda input: input.shape[0],
 )
 def silu_and_mul_quant_fp8(
-    input, group_size, dtype, limit=None, alloc_func=torch.empty, run_config=None, use_ue8m0_scales=True
+    input,
+    group_size,
+    dtype,
+    limit=None,
+    alloc_func=torch.empty,
+    run_config=None,
+    use_ue8m0_scales=True,
+    use_packed_ue8m0=False,
+    eps=1e-10,
 ):
     """Fuse blocked activation with FP8 quantization and TMA-aligned column-major scales."""
     assert input.ndim == 2 and input.stride(1) == 1
@@ -77,25 +104,36 @@ def silu_and_mul_quant_fp8(
     m, n = input.shape[0], input.shape[1] // 2
     quant = alloc_func((m, n), device=input.device, dtype=dtype)
     aligned_m = triton.cdiv(m, 4) * 4
-    scale = alloc_func((n // group_size, aligned_m), device=input.device, dtype=torch.float32).T[:m, :]
+    groups_per_row = n // group_size
+    scale_cols = triton.cdiv(groups_per_row, 4) if use_packed_ue8m0 else groups_per_row
+    scale_dtype = torch.int32 if use_packed_ue8m0 else torch.float32
+    scale = alloc_func((scale_cols, aligned_m), device=input.device, dtype=scale_dtype).T[:m, :]
     if run_config is None:
-        run_config = {"GROUPS_PER_CTA": 4, "num_warps": 4}
-    groups = m * n // group_size
-    _silu_and_mul_quant_fp8[(triton.cdiv(groups, run_config["GROUPS_PER_CTA"]),)](
+        run_config = {"GROUPS_PER_CTA": 16 if use_packed_ue8m0 else 4, "num_warps": 4}
+    groups_per_cta = run_config["GROUPS_PER_CTA"]
+    if use_packed_ue8m0:
+        groups_per_cta = max(groups_per_cta, 4)
+        grid = (m, triton.cdiv(groups_per_row, groups_per_cta))
+    else:
+        grid = (triton.cdiv(m * groups_per_row, groups_per_cta),)
+    _silu_and_mul_quant_fp8[grid](
         input,
         quant,
         scale,
         input.stride(0),
         n,
-        groups,
+        m * groups_per_row,
         scale.stride(1),
         limit,
+        eps,
         torch.finfo(dtype).max,
         group_size,
         USE_LIMIT=limit is not None,
         USE_GELU=ffn_use_tanh_approximate_gelu(),
         USE_UE8M0_SCALE=use_ue8m0_scales,
-        **run_config,
+        USE_PACKED_UE8M0=use_packed_ue8m0,
+        GROUPS_PER_CTA=groups_per_cta,
+        num_warps=run_config["num_warps"],
     )
     return quant, scale
 

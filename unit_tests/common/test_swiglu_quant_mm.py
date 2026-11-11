@@ -3,21 +3,30 @@ import torch
 
 from lightllm.common.basemodel.triton_kernel.fused_moe import moe_silu_and_mul as activation
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
-from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightTpl
-from lightllm.common.quantization.deepgemm import DeepGEMMFP8w8a8B128QuantizationMethod
+from lightllm.common.quantization.deepgemm import (
+    DeepGEMMFP8w8a8B32QuantizationMethod,
+    DeepGEMMFP8w8a8B128QuantizationMethod,
+)
 from lightllm.common.quantization.no_quant import NoQuantization
 from lightllm.common.quantization.quantize_method import WeightPack
+from lightllm.utils.device_utils import is_sm100_gpu
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
-def unfused_quant(input, limit):
+def unfused_quant(input, limit, group_size=128, eps=1e-10, packed=False):
     output = torch.empty((input.shape[0], input.shape[1] // 2), device=input.device, dtype=input.dtype)
     activation.silu_and_mul_fwd(input, output, limit=limit)
     return per_token_group_quant_fp8(
-        output, 128, column_major_scales=True, scale_tma_aligned=True, use_ue8m0_scales=True
+        output,
+        group_size,
+        eps=eps,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+        use_ue8m0_scales=True,
+        use_packed_ue8m0=packed,
     )
 
 
@@ -37,6 +46,22 @@ def test_activation_quant_preserves_bytes_scales_and_existing_activation_selecto
     assert q.is_contiguous() and s.stride() == (1, ((m + 3) // 4) * 4)
 
 
+@pytest.mark.parametrize("m,n", [(1, 32), (7, 224), (64, 2304), (384, 2304)])
+@pytest.mark.parametrize("limit", [None, 10.0])
+def test_packed_activation_quant_preserves_bytes_and_padding(m, n, limit):
+    torch.manual_seed(1013)
+    input = torch.randn(m, 2 * n, dtype=torch.bfloat16, device="cuda") * 10
+    input[:, :32] = 1e-7
+    input[0].zero_()
+    expected_q, expected_s = unfused_quant(input, limit, group_size=32, eps=1e-4, packed=True)
+    q, s = activation.silu_and_mul_quant_fp8(
+        input, 32, torch.float8_e4m3fn, limit=limit, use_packed_ue8m0=True, eps=1e-4
+    )
+    torch.testing.assert_close(q.view(torch.uint8), expected_q.view(torch.uint8), rtol=0, atol=0)
+    torch.testing.assert_close(s, expected_s, rtol=0, atol=0)
+    assert s.dtype == torch.int32 and s.stride() == (1, ((m + 3) // 4) * 4)
+
+
 def test_fused_activation_graph_replay():
     input = torch.zeros(7, 512, dtype=torch.bfloat16, device="cuda")
     activation.silu_and_mul_quant_fp8(input, 128, torch.float8_e4m3fn, limit=7.0)
@@ -52,14 +77,19 @@ def test_fused_activation_graph_replay():
 
 
 @pytest.mark.parametrize("m", [7, 64, 256])
-def test_selected_deepgemm_weight_gives_identical_real_w2_output(m):
+@pytest.mark.parametrize("block_size", [32, 128])
+def test_selected_deepgemm_weight_gives_identical_real_w2_output(m, block_size):
+    if block_size == 32 and not is_sm100_gpu():
+        pytest.skip("32x32 DeepGEMM requires Blackwell")
     torch.manual_seed(1013)
     gate_up = torch.randn(m, 4096, dtype=torch.bfloat16, device="cuda") * 10
     weight = torch.randn(4096, 2048, dtype=torch.bfloat16, device="cuda")
-    q, s = weight_quant(weight, 128, use_ue8m0_scales=True)
     owner = MMWeightTpl.__new__(MMWeightTpl)
-    owner.quant_method = DeepGEMMFP8w8a8B128QuantizationMethod()
-    owner.mm_param = WeightPack(weight=q, weight_scale=s)
+    method = DeepGEMMFP8w8a8B32QuantizationMethod if block_size == 32 else DeepGEMMFP8w8a8B128QuantizationMethod
+    owner.quant_method = method()
+    owner.quant_method.hf_quantization_config = {"scale_fmt": "ue8m0"}
+    owner.mm_param, _ = owner.quant_method.create_weight([4096], 2048, torch.bfloat16, torch.cuda.current_device())
+    owner.quant_method.quantize(weight, owner.mm_param)
     owner.bias = None
     activated = torch.empty((m, 2048), dtype=gate_up.dtype, device=gate_up.device)
     activation.silu_and_mul_fwd(gate_up, activated, limit=7.0)

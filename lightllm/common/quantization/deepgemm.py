@@ -134,7 +134,8 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def apply_swiglu(self, input_tensor, weight_pack, limit=None, out=None, use_custom_tensor_mananger=True, bias=None):
         from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_quant_fp8
 
-        if self.use_packed_ue8m0:
+        if self.use_packed_ue8m0 and self.gemm_recipe is None:
+            # Keep the block-128 packed path on its existing SGLang quantizer.
             return super().apply_swiglu(input_tensor, weight_pack, limit, out, use_custom_tensor_mananger, bias)
         alloc_func = self.cache_manager.empty if use_custom_tensor_mananger else torch.empty
         quant, scale = silu_and_mul_quant_fp8(
@@ -144,6 +145,8 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
             limit=limit,
             alloc_func=alloc_func,
             use_ue8m0_scales=self.use_ue8m0_scales,
+            use_packed_ue8m0=self.use_packed_ue8m0,
+            eps=self.activation_quant_eps,
         )
         if out is None:
             out = alloc_func(
@@ -151,7 +154,9 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
                 dtype=input_tensor.dtype,
                 device=input_tensor.device,
             )
-        _deepgemm_fp8_nt((quant, scale), (weight_pack.weight, weight_pack.weight_scale), out)
+        if self.gemm_recipe is not None:
+            assert bias is None, f"Bias addition is not supported in {self.method_name}"
+        _deepgemm_fp8_nt((quant, scale), (weight_pack.weight, weight_pack.weight_scale), out, recipe=self.gemm_recipe)
         return out
 
     def _create_weight(

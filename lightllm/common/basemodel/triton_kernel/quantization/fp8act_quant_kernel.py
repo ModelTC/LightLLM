@@ -22,6 +22,14 @@ def _ceil_to_ue8m0(x):
     return (exp << 23).to(tl.float32, bitcast=True)
 
 
+@triton.jit
+def _pack_ue8m0_scales(scales, valid_groups, GROUPS_PER_CTA: tl.constexpr):
+    groups = tl.arange(0, GROUPS_PER_CTA)
+    exponents = (scales.to(tl.int32, bitcast=True) >> 23) & 255
+    bytes_ = tl.where(valid_groups, exponents << ((groups % 4) * 8), 0)
+    return tl.sum(tl.reshape(bytes_, (GROUPS_PER_CTA // 4, 4)), axis=1)
+
+
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/quantization/fp8_kernel.py
 @triton.jit
 def _per_token_group_quant_fp8(
@@ -64,10 +72,8 @@ def _per_token_group_quant_fp8(
         y_s = _ceil_to_ue8m0(y_s)
         y_q = tl.clamp(y / y_s[:, None], fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
         tl.store(y_q_ptr + offsets, y_q, mask=mask)
-        exponents = (y_s.to(tl.int32, bitcast=True) >> 23) & 255
-        bytes_ = tl.where(group_ids < xs_n, exponents << ((groups % 4) * 8), 0)
         packs_per_cta: tl.constexpr = GROUPS_PER_CTA // 4
-        packed = tl.sum(tl.reshape(bytes_, (packs_per_cta, 4)), axis=1)
+        packed = _pack_ue8m0_scales(y_s, group_ids < xs_n, GROUPS_PER_CTA)
         packed_col = tl.program_id(1) * packs_per_cta + tl.arange(0, packs_per_cta)
         scale_offset = row_id * xs_stride_m + packed_col * xs_stride_n
         tl.store(y_s_ptr + scale_offset, packed, mask=packed_col < tl.cdiv(xs_n, 4))
