@@ -447,7 +447,7 @@ def test_new_configs_are_warmed_on_later_calls_and_state_is_not_persisted(tmp_pa
     assert reload_calls == [(16, {"block": 2})]
 
 
-def test_warmup_preserves_mutated_input_and_skips_repeated_execution():
+def test_warmup_preserves_mutated_input_and_skips_repeated_execution(monkeypatch):
     executions = []
 
     @autotune(
@@ -466,6 +466,10 @@ def test_warmup_preserves_mutated_input_and_skips_repeated_execution():
     kernel.kernel_warmup(static_key, state, run_config={"block": 1})
     torch.testing.assert_close(state, torch.zeros(4))
 
+    def unexpected_clone(*args, **kwargs):
+        pytest.fail("an already warmed config must not clone output buffers")
+
+    monkeypatch.setattr(kernel, "_mutate_args_clone", unexpected_clone)
     kernel.kernel_warmup(static_key, state, run_config={"block": 1})
     assert executions == [{"block": 1}]
     torch.testing.assert_close(state, torch.zeros(4))
