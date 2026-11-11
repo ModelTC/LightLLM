@@ -46,10 +46,10 @@ def test_rotary_cache_keeps_unscaled_swa_and_yarn_compression():
 
     positions = torch.tensor([0, 1, 127, 1023, 8192], device="cuda")
     exponents = torch.arange(0, 64, 2, device="cuda", dtype=torch.float32) / 64
-    angles = torch.outer(positions.float(), 1.0 / (10000**exponents))
+    angles = torch.outer(positions.float(), 1.0 / (10000 ** exponents))
     expected = torch.complex(angles.cos(), angles.sin())
     torch.testing.assert_close(model._freqs_cis_sliding[positions], expected, rtol=1e-6, atol=1e-6)
-    unscaled_compress = torch.outer(positions.float(), 1.0 / (160000**exponents))
+    unscaled_compress = torch.outer(positions.float(), 1.0 / (160000 ** exponents))
     assert not torch.allclose(
         model._freqs_cis_compress[positions], torch.complex(unscaled_compress.cos(), unscaled_compress.sin())
     )

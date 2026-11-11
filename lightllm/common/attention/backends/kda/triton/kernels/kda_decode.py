@@ -50,7 +50,7 @@ def _kda_decode(
         q = tl.load(Q + token * SQ + head * D + ki).to(tl.float32)
         k = tl.load(K + token * SK + head * D + ki).to(tl.float32)
         v = tl.load(V + token * SV + head * D + vi).to(tl.float32)
-        q *= tl.rsqrt(tl.sum(q * q, 0) + 1e-6) * (D**-0.5)
+        q *= tl.rsqrt(tl.sum(q * q, 0) + 1e-6) * (D ** -0.5)
         k *= tl.rsqrt(tl.sum(k * k, 0) + 1e-6)
         gate = tl.load(G + token * SG + head * D + ki).to(tl.float32)
         decay = tl.exp(LOWER * tl.sigmoid(amplitude * (gate + bias)))

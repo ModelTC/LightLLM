@@ -51,7 +51,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         self.is_moe = bool(network_config.get("enable_moe_block", False))
         self.num_experts_per_tok = network_config.get("num_experts_per_tok", network_config.get("top_k_experts", 0))
         self.norm_topk_prob = network_config.get("norm_topk_prob", True)
-        self.router_root_scale = self.embed_dim_**-0.5
+        self.router_root_scale = self.embed_dim_ ** -0.5
 
         layer_type = network_config["layer_types"][layer_num]
         self.is_sliding = layer_type == "sliding_attention"

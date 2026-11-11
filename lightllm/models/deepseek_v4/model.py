@@ -301,7 +301,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         orig_max = rs.get("original_max_position_embeddings", 0)
 
         def build_inv_freq(base):
-            freqs = 1.0 / (base**freq_exponents)
+            freqs = 1.0 / (base ** freq_exponents)
             if rope_type == "yarn" and orig_max > 0:
                 beta_fast = rs.get("beta_fast", 32)
                 beta_slow = rs.get("beta_slow", 1)

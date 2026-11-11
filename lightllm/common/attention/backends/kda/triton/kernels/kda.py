@@ -1283,7 +1283,7 @@ def chunk_kda(
     assert cu_seqlens is not None, "cu_seqlens is required for packed KDA prefill"
     if scale is None:
         head_dim = k.shape[-1]
-        scale = head_dim**-0.5
+        scale = head_dim ** -0.5
 
     if use_qk_l2norm_in_kernel:
         q = l2norm_fwd(q.contiguous())
@@ -1395,7 +1395,7 @@ def chunk_kda_with_fused_gate(
     assert cu_seqlens is not None, "cu_seqlens is required for packed KDA prefill"
     if scale is None:
         head_dim = k.shape[-1]
-        scale = head_dim**-0.5
+        scale = head_dim ** -0.5
 
     if use_qk_l2norm_in_kernel:
         q = l2norm_fwd(q.contiguous())

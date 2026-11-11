@@ -420,7 +420,7 @@ def gqa_token_decode_attention_flash_decoding_vsm(
     batch_size, q_head_num, q_head_dim = q.shape
     kv_head_num = k.shape[1]
     gqa_group_size = q_head_num // kv_head_num
-    sm_scale = 1.0 / (q_head_dim**0.5)
+    sm_scale = 1.0 / (q_head_dim ** 0.5)
 
     if not run_config:
         if torch.cuda.is_current_stream_capturing():

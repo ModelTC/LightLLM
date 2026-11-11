@@ -319,7 +319,7 @@ def mtp_diverse_stage1_single_token(
 
     grid_num = mid_out.shape[2]
 
-    sm_scale = 1.0 / (Lk**0.5)
+    sm_scale = 1.0 / (Lk ** 0.5)
     # 固定 grid（graph friendly）
     grid = (grid_num, kv_head_num, batch)
     _fwd_kernel_mtp_diverse_stage1_single_token[grid](

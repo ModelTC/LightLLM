@@ -75,7 +75,7 @@ def probe_dense(backend_cls, spec, runtime):
         q = query[start : start + q_length].float()
         k = key[request * stride : request * stride + length].float().repeat_interleave(q_heads // kv_heads, dim=1)
         v = value[request * stride : request * stride + length].float().repeat_interleave(q_heads // kv_heads, dim=1)
-        logits = torch.einsum("qhd,khd->hqk", q, k) * dim**-0.5
+        logits = torch.einsum("qhd,khd->hqk", q, k) * dim ** -0.5
         if spec.causal:
             mask = torch.arange(length, device=device)[None, :] <= (
                 length - q_length + torch.arange(q_length, device=device)[:, None]

@@ -127,7 +127,7 @@ def _case(heads, ratio):
     params = dict(
         compress_ratio=ratio,
         head_dim_v=512,
-        softmax_scale=512**-0.5,
+        softmax_scale=512 ** -0.5,
         swa_indices=indices,
         swa_lengths=lengths,
         attn_sink=attn_sink.weight,

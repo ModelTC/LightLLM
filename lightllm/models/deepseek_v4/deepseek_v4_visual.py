@@ -57,7 +57,7 @@ class PatchEmbed(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.proj = nn.Linear(
-            3 * args.vision_patch_size**2,
+            3 * args.vision_patch_size ** 2,
             args.vision_dim,
             dtype=torch.bfloat16,
         )
@@ -144,7 +144,7 @@ class Aligner(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.downsample_ratio = args.vision_downsample_ratio
-        in_dim = args.vision_dim * self.downsample_ratio**2
+        in_dim = args.vision_dim * self.downsample_ratio ** 2
         self.w1 = nn.Linear(in_dim, args.hidden_size, dtype=torch.bfloat16)
         self.w2 = nn.Linear(args.hidden_size, args.hidden_size, dtype=torch.bfloat16)
 

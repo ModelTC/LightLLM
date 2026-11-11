@@ -51,9 +51,7 @@ class NsaFlashMlaSparseAttBackend(BaseAttentionBackend):
 
     def _update_prefill(self, plan):
         batch = plan.batch
-        plan.ragged_mem_index = torch.empty(
-            batch.total_token_num, dtype=torch.int32, device=get_current_device_id()
-        )
+        plan.ragged_mem_index = torch.empty(batch.total_token_num, dtype=torch.int32, device=get_current_device_id())
         from lightllm.common.basemodel.triton_kernel.gen_nsa_ks_ke import gen_nsa_ks_ke
 
         plan.ks, plan.ke, plan.lengths = gen_nsa_ks_ke(
@@ -90,9 +88,7 @@ class NsaFlashMlaSparseAttBackend(BaseAttentionBackend):
             )
             position_ids = starts + torch.arange(batch.token_num, device=batch.device, dtype=starts.dtype) - row_starts
         plan.q_kv_seq_len = position_ids + 1
-        plan.q_req_idx = torch.repeat_interleave(
-            batch.b_req_idx, batch.b_q_seq_len, output_size=batch.token_num
-        )
+        plan.q_req_idx = torch.repeat_interleave(batch.b_req_idx, batch.b_q_seq_len, output_size=batch.token_num)
         plan.q_kv_start_loc = torch.repeat_interleave(
             batch.b1_cu_kv_seq_len[:-1], batch.b_q_seq_len, output_size=batch.token_num
         )

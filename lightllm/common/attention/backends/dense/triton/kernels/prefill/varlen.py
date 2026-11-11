@@ -110,7 +110,7 @@ if triton.__version__ >= "2.1.0":
         _, head_num, head_dim = q.shape
         batch_size = cu_seqlens.numel() - 1
 
-        sm_scale = 1.0 / (head_dim**0.5)  # 计算scale系数
+        sm_scale = 1.0 / (head_dim ** 0.5)  # 计算scale系数
         d_pad = triton.next_power_of_2(head_dim)
         grid = (triton.cdiv(max_seqlen, BLOCK), head_num, batch_size)  # batch, head,
         num_warps = 4

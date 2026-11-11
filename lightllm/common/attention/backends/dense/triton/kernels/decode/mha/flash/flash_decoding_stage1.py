@@ -113,7 +113,7 @@ def flash_decode_stage1(
     Lq, Lk = q.shape[-1], k.shape[-1]
     assert Lq == Lk
     assert Lk in {16, 32, 64, 128, 256}
-    sm_scale = 1.0 / (Lk**0.5)
+    sm_scale = 1.0 / (Lk ** 0.5)
     batch, head_num = B_req_idx.shape[0], q.shape[1]
     grid = (batch, head_num, triton.cdiv(max_len_in_batch, BLOCK_SEQ))
     gqa_group_size = q.shape[1] // k.shape[1]

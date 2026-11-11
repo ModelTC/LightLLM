@@ -279,7 +279,7 @@ def int4kv_flash_decode_stage1(
     if Lk == 256:
         BLOCK_N = min(BLOCK_N, 16)
     assert BLOCK_SEQ % BLOCK_N == 0
-    sm_scale = 1.0 / (Lk**0.5)
+    sm_scale = 1.0 / (Lk ** 0.5)
     batch, kv_head_num = B_req_idx.shape[0], k.shape[1]
     grid_block_num = mid_out.shape[2]
     grid = (batch, kv_head_num, grid_block_num)

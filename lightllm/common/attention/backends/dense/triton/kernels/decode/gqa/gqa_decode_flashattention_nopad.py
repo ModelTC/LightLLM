@@ -121,7 +121,7 @@ def gqa_decode_attention_fwd(q, k, v, o, req_to_tokens, b_req_idx, b_seq_len):
     assert Lk in {16, 32, 64, 128, 256}
     BLOCK = 16 if Lk == 256 else 32
 
-    sm_scale = 1.0 / (Lq**0.5)  # 计算scale系数
+    sm_scale = 1.0 / (Lq ** 0.5)  # 计算scale系数
     batch = b_req_idx.shape[0]
     kv_group_num = q.shape[1] // k.shape[1]
     kv_head_num = k.shape[1]

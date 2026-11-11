@@ -61,7 +61,7 @@ def gqa_attention_reference(
 
             # Compute attention scores
             att = torch.matmul(q_h, k_h.transpose(0, 1))  # [seq_len]
-            att = att / (head_dim**0.5)
+            att = att / (head_dim ** 0.5)
             att = torch.softmax(att, dim=-1)
             out_h = torch.matmul(att, v_h)  # [head_dim]
 

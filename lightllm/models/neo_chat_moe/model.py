@@ -77,7 +77,7 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
             max_pixels=img.extra_params.get("max_pixels", self.max_pixel),
         )
         grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
-        token_num = int((grid_h * grid_w) * (self.downsample_ratio**2))
+        token_num = int((grid_h * grid_w) * (self.downsample_ratio ** 2))
         # 这里的grid_h和grid_w需要* self.downsample_ratio么？再仔细看下代码
         img.grid_thwd = (1, int(grid_h * self.downsample_ratio), int(grid_w * self.downsample_ratio), 1 - token_num)
         return token_num
@@ -88,7 +88,7 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
         ), "width and height should be greater than 0 and divisible by patch_size"
 
         grid_h, grid_w = height // self.patch_size, width // self.patch_size
-        token_num = int((grid_h * grid_w) * (self.downsample_ratio**2))
+        token_num = int((grid_h * grid_w) * (self.downsample_ratio ** 2))
         return token_num
 
     # only change the impl of the encode func:

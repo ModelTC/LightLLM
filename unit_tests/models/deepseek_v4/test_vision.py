@@ -105,7 +105,7 @@ def test_tokenizer_spans_match_reference_blocks(reference_processor, prefix_len,
     expected_cache = []
     for index, (image, (height, width)) in enumerate(zip(params.images, grids)):
         canonical_types, _ = reference_processor.build_image_block(height, width, start_pos=0)
-        image.token_id = 2**62 + (0 if reuse_image and index == 2 else index * 1024)
+        image.token_id = 2 ** 62 + (0 if reuse_image and index == 2 else index * 1024)
         image.token_num = len(canonical_types)
         image.start_index_in_embed_cache = 100 + (0 if reuse_image and index == 2 else index * 1024)
         expected_cache.append((image.token_id, image.token_num, image.start_index_in_embed_cache))

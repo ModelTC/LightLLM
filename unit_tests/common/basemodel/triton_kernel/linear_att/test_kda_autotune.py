@@ -46,7 +46,7 @@ def wrapper_inputs(kernel, tokens=65):
         R=torch.empty(1, tokens, 2, 64, dtype=q.dtype),
         h=torch.empty(1, len(chunk_indices), 2, 128, 80, dtype=q.dtype),
         o=torch.empty_like(v),
-        scale=128**-0.5,
+        scale=128 ** -0.5,
         cu_seqlens=torch.tensor([0, 3, tokens]),
         chunk_indices=chunk_indices,
     )

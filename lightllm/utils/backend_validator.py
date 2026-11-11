@@ -47,7 +47,7 @@ def _validate_fa3(dtype=torch.bfloat16, spec=None):
         cu_seqlens_k=cu_seqlens,
         max_seqlen_q=seq,
         max_seqlen_k=seq,
-        softmax_scale=1.0 / (dim**0.5),
+        softmax_scale=1.0 / (dim ** 0.5),
         causal=True,
     )
     out = out.reshape(batch, seq, heads, dim).transpose(1, 2)
@@ -285,7 +285,7 @@ def _validate_flashmla_sparse(dtype=torch.bfloat16, spec=None):
 
     topk_indices = topk_indices.view(batch * seq, 1, index_topk)
 
-    softmax_scale = 1.0 / (qk_dim**0.5)
+    softmax_scale = 1.0 / (qk_dim ** 0.5)
 
     try:
         mla_out, _, _ = flash_mla_sparse_fwd(

@@ -96,7 +96,7 @@ class Fa3AttBackend(BaseAttentionBackend):
             sink_weight = None
         k_descale, v_descale = (None, None)
         Lq = q.shape[-1]
-        sm_scale = 1.0 / Lq**0.5
+        sm_scale = 1.0 / Lq ** 0.5
         o = flash_attn_with_kvcache(
             q=q,
             k_cache=k.view(-1, self.infer_page_size, k.shape[1], k.shape[2]),
@@ -205,7 +205,7 @@ class Fa3AttBackend(BaseAttentionBackend):
             sink_weight = None
         k_descale, v_descale = (None, None)
         Lq = q.shape[-1]
-        sm_scale = 1.0 / Lq**0.5
+        sm_scale = 1.0 / Lq ** 0.5
         o = flash_attn_with_kvcache_autotune(
             q=q,
             k_cache=k.view(-1, self.infer_page_size, k.shape[1], k.shape[2]),

@@ -74,7 +74,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             self.q_lora_rank = network_config["q_lora_rank"]
             self.kv_lora_rank = network_config["kv_lora_rank"]
             self.v_head_dim = network_config["v_head_dim"]
-            self.softmax_scale = self.qk_nope_head_dim**-0.5
+            self.softmax_scale = self.qk_nope_head_dim ** -0.5
             self.indexer = Glm5NextNsaInfer(
                 layer_idx=self.layer_num_,
                 network_config=self.network_config_,

@@ -123,7 +123,7 @@ class Qwen2_5_VLVisionBlock(nn.Module):
 class Qwen2_5_VLPatchMerger(nn.Module):
     def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2) -> None:
         super().__init__()
-        self.hidden_size = context_dim * (spatial_merge_size**2)
+        self.hidden_size = context_dim * (spatial_merge_size ** 2)
         self.ln_q = Qwen2RMSNorm(context_dim, eps=1e-6)
         self.mlp = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
@@ -390,7 +390,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                 raise Exception("Unsupported input types: {} for {}".format(type(img), img))
 
             # must devide merge_length
-            cur_num = img_tensors[-1].shape[0] // (self.spatial_merge_size**2)
+            cur_num = img_tensors[-1].shape[0] // (self.spatial_merge_size ** 2)
 
             valid_ids.append([valid_id, valid_id + cur_num])
             valid_id += cur_num

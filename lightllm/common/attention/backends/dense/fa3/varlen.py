@@ -23,7 +23,7 @@ class Fa3VarlenAttentionBackend(BaseVarlenAttentionBackend):
             import sgl_kernel.flash_attn
 
             self._op = torch.ops.sgl_kernel.fwd.default
-        softmax_scale = head_dim**-0.5
+        softmax_scale = head_dim ** -0.5
         window_size = (-1, -1)
         self._op(
             q,
