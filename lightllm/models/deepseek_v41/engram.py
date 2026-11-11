@@ -370,6 +370,7 @@ class EngramEmbeddingWeight(BaseWeightTpl):
             self.end,
             self.dim,
             triton.next_power_of_2(self.dim),
+            num_warps=1 if self.dim == 256 else 4,
         )
         return out.flatten(1)
 
