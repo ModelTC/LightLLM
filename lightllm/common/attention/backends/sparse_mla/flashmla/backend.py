@@ -78,9 +78,18 @@ class NsaFlashMlaSparseAttBackend(BaseAttentionBackend):
         read of the GPU-side query lengths.
         """
         batch = plan.batch
-        if batch.position_ids is None:
-            raise ValueError("sparse MLA prefill requires AttentionBatch.position_ids")
-        plan.q_kv_seq_len = batch.position_ids + 1
+        position_ids = batch.position_ids
+        if position_ids is None:
+            # Unit-level callers may construct an AttentionBatch directly.
+            # The runtime always supplies position_ids, but contiguous query
+            # ranges are an unambiguous fallback for those callers.
+            history = batch.b_seq_len - batch.b_q_seq_len
+            starts = torch.repeat_interleave(history, batch.b_q_seq_len, output_size=batch.token_num)
+            row_starts = torch.repeat_interleave(
+                batch.b1_cu_q_seq_len[:-1], batch.b_q_seq_len, output_size=batch.token_num
+            )
+            position_ids = starts + torch.arange(batch.token_num, device=batch.device, dtype=starts.dtype) - row_starts
+        plan.q_kv_seq_len = position_ids + 1
         plan.q_req_idx = torch.repeat_interleave(
             batch.b_req_idx, batch.b_q_seq_len, output_size=batch.token_num
         )
