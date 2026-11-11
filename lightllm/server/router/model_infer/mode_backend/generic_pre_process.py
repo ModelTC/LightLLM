@@ -70,6 +70,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     max_kv_seq_len = max(b_seq_len, default=0)
     max_cache_len = max(b_ready_cache_len, default=0)
     max_q_seq_len = max(b_q_seq_len, default=0)
+    has_replay = b_ready_cache_len != b_prefill_commit_start
 
     input_ids = np.concatenate(input_ids, dtype=np.int64) if input_ids else np.empty((0,), dtype=np.int64)
     input_ids = torch.tensor(input_ids, dtype=torch.int64, device="cpu")
@@ -98,7 +99,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_prefill_has_output_cpu=b_prefill_has_output,
         multimodal_params=batch_multimodal_params,
         token_lookback=token_lookback or None,
-        b_prefill_commit_start=(torch.tensor(b_prefill_commit_start, dtype=torch.int32) if replay_window else None),
+        b_prefill_commit_start=(torch.tensor(b_prefill_commit_start, dtype=torch.int32) if has_replay else None),
     )
 
     return model_input, run_reqs

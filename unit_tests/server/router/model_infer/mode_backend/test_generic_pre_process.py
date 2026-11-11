@@ -95,7 +95,10 @@ def test_v41_replay_keeps_commit_boundary_and_accounts_for_compute(monkeypatch, 
     start = max(0, hit - 128) if suffix < 128 else hit
     model_input, _ = generic_pre_process.prepare_prefill_inputs([req], True)
     assert model_input.b_ready_cache_len.tolist() == [start]
-    assert model_input.b_prefill_commit_start.tolist() == [hit]
+    if start < hit:
+        assert model_input.b_prefill_commit_start.tolist() == [hit]
+    else:
+        assert model_input.b_prefill_commit_start is None
     assert model_input.input_ids.tolist() == ids[start:].tolist()
     assert req.prefill_need_token_num(True) == (len(ids) - start, 0)
     assert req.cur_kv_len == hit

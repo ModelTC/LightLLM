@@ -1313,7 +1313,7 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                 b_seq_len=tensor(end),
                 b_is_decode_req=torch.tensor([False]),
                 b_ready_cache_len=tensor(start),
-                b_prefill_commit_start=tensor(commit_start) if model.prefill_replay_window else None,
+                b_prefill_commit_start=tensor(commit_start) if start < commit_start else None,
                 b_prefill_start_loc=tensor(0),
                 b_prefill_has_output_cpu=[True],
                 is_prefill=True,
