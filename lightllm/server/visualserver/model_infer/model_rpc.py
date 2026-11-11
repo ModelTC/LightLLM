@@ -34,6 +34,7 @@ from lightllm.server.visualserver import set_vit_att_backend
 from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.visualserver.model_infer.vision_peak_vram_hold import VisionPeakVramHolder
+from ..objs import ImageReadyEvent
 
 
 logger = init_logger(__name__)
@@ -188,7 +189,7 @@ class VisualModelRpcServer(rpyc.Service):
                 f"Vision model on device {self.device_id} held " f"{held_vram_bytes / 1024 ** 3:.2f} GB peak VRAM."
             )
 
-    def exposed_run_task(self, images: List["ImageItem"], ref_event_list: List[threading.Event]):
+    def exposed_run_task(self, images: List["ImageItem"], ref_event_list: List[ImageReadyEvent]):
         try:
             images = obtain(images)
             for i in range(len(images)):

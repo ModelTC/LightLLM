@@ -1,9 +1,9 @@
 import asyncio
 import rpyc
-import threading
 from typing import Dict, List, Tuple, Deque, Optional, Union
 from lightllm.server.multimodal_params import ImageItem
 from .model_rpc import VisualModelRpcServer
+from ..objs import ImageReadyEvent
 
 
 class VisualModelRpcClient:
@@ -31,6 +31,6 @@ class VisualModelRpcClient:
         await ans
         return
 
-    async def run_task(self, images: List[ImageItem], ref_event_list: List[threading.Event]):
+    async def run_task(self, images: List[ImageItem], ref_event_list: List[ImageReadyEvent]):
         ans = self._run_task(images, ref_event_list)
         return await ans

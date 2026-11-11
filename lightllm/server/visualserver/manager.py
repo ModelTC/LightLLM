@@ -7,7 +7,6 @@ import socket
 import pickle
 import inspect
 import setproctitle
-import threading
 import collections
 from typing import List
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
@@ -16,6 +15,7 @@ from lightllm.server.core.objs import ShmReqManager, StartArgs
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from .model_infer import start_model_process, VisualModelRpcClient
+from .objs import ImageReadyEvent
 from lightllm.common.basemodel.attention_vit.create_utils import init_vit_att_backend
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
@@ -144,7 +144,7 @@ class VisualManager:
         for image in images_need_infer:
             self.cur_dp_index += 1
             select_dp = self.cur_dp_index % self.vit_dp
-            dp_to_handle_images[select_dp].append((image, threading.Event()))
+            dp_to_handle_images[select_dp].append((image, ImageReadyEvent()))
 
         taskes = []
         for dp_index in range(self.vit_dp):
@@ -165,7 +165,7 @@ class VisualManager:
         for dp_index in range(self.vit_dp):
             _images = dp_to_handle_images[dp_index]
             if _images:
-                await asyncio.to_thread(_images[-1][1].wait)
+                await _images[-1][1].wait()
         return
 
     async def infer_images(self, dp_index: int, images, events):
