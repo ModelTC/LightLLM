@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """ReplaySSM decode kernels.
 
-`_decode_replay` is the entry. It projects the verify window when asked, then
-solves a GDN or KDA window, or walks tokens one by one. Neither path writes the
-canonical SSM.
+`_decode_replay` is the entry. When the accepted prefix does not fit, it folds
+that prefix into the SSM and then replays the new tokens from the rounded
+state. The output is either a precomputed GDN or KDA window, or a token walk.
 """
 
 import triton
 import triton.language as tl
 
-from .replayssm_delta import _delta_rule_step
+from .replayssm_delta import _apply_accepted_prefix
 
 
 @triton.jit
@@ -102,17 +102,7 @@ def _decode_replay(
     state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
     # 和半区方案一样：放不下时先折回，再在同一 kernel 里重放新 token。各层只读 cursor。
     if n + (end - start) > L:
-        for j in range(L):
-            active = j < n
-            raw_k = tl.load(RawKeys + (key_slot * L + j) * K + kk, active & (kk < K), 0).to(tl.float32)
-            raw_v = tl.load(RawValues + (slot * L + j) * V + vv, active & (vv < V), 0).to(tl.float32)
-            if KDA:
-                g = tl.load(Gates + (slot * L + j) * K + kk, active & (kk < K), 0).to(tl.float32)
-            else:
-                g = tl.load(Gates + slot * L + j, active, 0).to(tl.float32)
-            beta = tl.load(Betas + slot * L + j, active, 0).to(tl.float32)
-            updated = _delta_rule_step(state, raw_k, raw_v, g, beta, KDA)
-            state = tl.where(active, updated, state)
+        state = _apply_accepted_prefix(state, RawKeys, RawValues, Gates, Betas, key_slot, slot, kk, vv, n, K, V, L, KDA)
         state = state.to(State.dtype.element_ty).to(tl.float32)
         tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
         n = 0
