@@ -548,6 +548,9 @@ class InferSamplingParams:
 
 
 class InferReq:
+    # P 端调度为当前轮次选定的 chunk 终点，提交 KV 长度后清除。
+    prefill_chunk_end: Optional[int] = None
+
     class _CpuCacheTaskStatus(enum.Enum):
         NOT_STARTED = 0
         RUNNING = 1
@@ -902,44 +905,33 @@ class InferReq:
         return start
 
     def get_chuncked_input_token_ids(self):
-        chunked_start = self.cur_kv_len
-        chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
-        chunked_end = adjust_mm_chunk_end(chunked_start, chunked_end, self.mm_input_spans)
-        return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
+        return self.shm_req.shm_prompt_ids.arr[: self.get_chuncked_input_token_len()]
 
     def get_chuncked_input_token_ids_for_hybrid_att(self):
-        big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
+        return self.shm_req.shm_prompt_ids.arr[: self.get_chuncked_input_token_len_for_hybrid_att()]
 
+    def get_chuncked_input_token_len(self, chunk_size: Optional[int] = None):
+        if self.prefill_chunk_end is not None:
+            return self.prefill_chunk_end
+        chunk_size = self.args.chunked_prefill_size if chunk_size is None else chunk_size
         chunked_start = self.cur_kv_len
-        chunked_end = chunked_start + self.args.chunked_prefill_size
+        chunked_end = min(self.get_cur_total_len(), chunked_start + chunk_size)
+        return adjust_mm_chunk_end(chunked_start, chunked_end, self.mm_input_spans)
+
+    def get_chuncked_input_token_len_for_hybrid_att(self, chunk_size: Optional[int] = None):
+        if self.prefill_chunk_end is not None:
+            return self.prefill_chunk_end
+        chunk_size = self.args.chunked_prefill_size if chunk_size is None else chunk_size
+        big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
+        chunked_start = self.cur_kv_len
+        chunked_end = chunked_start + chunk_size
         big_page_end = ((chunked_start // big_page_token_num) + 1) * big_page_token_num
         total_end = self.get_cur_total_len()
         end = min(total_end, chunked_end, big_page_end)
-
         if chunked_start < self.hybrid_cache_len < end and not any(
             start < self.hybrid_cache_len < stop for start, stop in self.mm_input_spans
         ):
             # 多模态块内部不会保存 checkpoint，不能为它额外切分。
-            end = self.hybrid_cache_len
-
-        end = adjust_mm_chunk_end(chunked_start, end, self.mm_input_spans)
-        return self.shm_req.shm_prompt_ids.arr[0:end]
-
-    def get_chuncked_input_token_len(self):
-        chunked_start = self.cur_kv_len
-        chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
-        return adjust_mm_chunk_end(chunked_start, chunked_end, self.mm_input_spans)
-
-    def get_chuncked_input_token_len_for_hybrid_att(self):
-        big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
-        chunked_start = self.cur_kv_len
-        chunked_end = chunked_start + self.args.chunked_prefill_size
-        big_page_end = ((chunked_start // big_page_token_num) + 1) * big_page_token_num
-        total_end = self.get_cur_total_len()
-        end = min(total_end, chunked_end, big_page_end)
-        if chunked_start < self.hybrid_cache_len < end and not any(
-            start < self.hybrid_cache_len < stop for start, stop in self.mm_input_spans
-        ):
             end = self.hybrid_cache_len
         return adjust_mm_chunk_end(chunked_start, end, self.mm_input_spans)
 

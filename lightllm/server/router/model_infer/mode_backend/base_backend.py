@@ -769,6 +769,7 @@ class ModeBackend:
         pause_max_req_num = 2
         wait_pause_count = 0
         prefill_tokens = 0
+        deferred_prefill_req = None
 
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
@@ -845,6 +846,13 @@ class ModeBackend:
                     is_chuncked_prefill=not self.disable_chunked_prefill
                 )
                 if prefill_tokens + token_num > self.batch_max_tokens:
+                    if (
+                        no_decode
+                        and not self.disable_chunked_prefill
+                        and deferred_prefill_req is None
+                        and req_obj.cur_kv_len > 0
+                    ):
+                        deferred_prefill_req = req_obj
                     continue
                 if alloc_token_num <= can_alloc_token_num:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
@@ -855,6 +863,19 @@ class ModeBackend:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True
                         wait_pause_count += 1
+
+        # P 端先按原顺序装入完整 chunk，再用剩余预算推进一个已开始的请求。
+        remaining = self.batch_max_tokens - prefill_tokens
+        if deferred_prefill_req is not None and remaining >= self.args.page_size:
+            req = deferred_prefill_req
+            end = req.get_chuncked_input_token_len(chunk_size=min(remaining, self.args.chunked_prefill_size))
+            token_num = end - req.get_prefill_input_start(end)
+            alloc_token_num = req._kv_cache_alloc_need(end)
+            if end > req.cur_kv_len and token_num <= remaining and alloc_token_num <= can_alloc_token_num:
+                self._alloc_req_kv_mem(req, alloc_token_num, no_blcoking_copy=True)
+                req.prefill_chunk_end = end
+                prefill_reqs.append(req)
+                prefill_tokens += token_num
 
         # 先由控制器确定请求需要写入的缓存层级。
         cache_controller = g_infer_context.cache_placement_controller
@@ -904,6 +925,8 @@ class ModeBackend:
                 cpu_store_reqs.append(req_obj)
             if is_chuncked_mode:
                 new_kv_len = req_obj.get_chuncked_input_token_len()
+                if req_obj.prefill_chunk_end is not None:
+                    del req_obj.prefill_chunk_end
             else:
                 new_kv_len = req_obj.get_cur_total_len()
             req_obj.cur_kv_len = new_kv_len

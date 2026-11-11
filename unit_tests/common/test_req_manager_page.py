@@ -3,8 +3,8 @@ from types import MethodType, SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.req_manager import ReqManager
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process
+from lightllm.common.req_manager import ReqManager
 from lightllm.server.router.model_infer import infer_batch
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferenceContext
 from lightllm.server.router.model_infer.mode_backend import base_backend
@@ -238,6 +238,70 @@ def test_prefill_scheduler_checks_compute_and_kv_budgets_separately(
     assert reqs[1].hold_kv_len == hold_kv_len
     assert reqs[1].wait_pause is second_req_wait_pause
     assert copy_modes == [True]
+
+
+@pytest.mark.parametrize(
+    "image_spans, long_end",
+    [([], 12288), ([(11264, 13312)], 11264), ([(8192, 13312)], 8192)],
+)
+def test_pd_prefill_uses_remaining_budget_after_full_chunks(monkeypatch, image_spans, long_end):
+    context, backend = _make_context(monkeypatch)
+    monkeypatch.setattr(infer_batch, "g_infer_context", context)
+    context.backend.model.prefill_replay_window = 128
+    args = backend.args
+    args.run_mode = "prefill"
+    args.page_size = 256
+    args.chunked_prefill_size = 8192
+    args.linear_att_hash_page_size = 512
+    args.linear_att_page_block_num = 16
+    args.enable_cpu_cache = args.enable_prefill_decode_mixed = False
+    backend.batch_max_tokens = 8192
+    backend.support_overlap = backend.disable_chunked_prefill = False
+    backend.is_master_in_dp = True
+    backend._timer_merge_radix_tree = lambda: None
+    backend.prefill_queue_strategy = SimpleNamespace(reorder=lambda reqs, **kwargs: reqs)
+    context.get_can_alloc_token_num = lambda: 8192
+    context.cache_placement_controller = SimpleNamespace(set_req_cache_way=lambda reqs: None)
+    context.filter_reqs = lambda finished_reqs: None
+    context.pause_reqs = lambda reqs, is_master_in_dp: None
+    context.req_manager.req_to_token_indexs = torch.full((3, 24576), -1, dtype=torch.int32)
+
+    reqs = []
+    for index, (input_len, cur_len, spans) in enumerate(((2048, 0, []), (24576, 8192, image_spans), (2048, 0, []))):
+        req = InferReq.__new__(InferReq)
+        req.args = args
+        req.req_idx = index
+        req.cur_kv_len = req.hold_kv_len = cur_len
+        req.cur_output_len = 0
+        req.hybrid_cache_len = input_len
+        req.mm_input_spans = spans
+        req.multimodal_params = None
+        req.shm_req = SimpleNamespace(input_len=input_len, shm_prompt_ids=SimpleNamespace(arr=list(range(input_len))))
+        req.get_chuncked_input_token_len = req.get_chuncked_input_token_len_for_hybrid_att
+        req.get_chuncked_input_token_ids = req.get_chuncked_input_token_ids_for_hybrid_att
+        req.filter_mark = req.wait_pause = req.paused = req.infer_aborted = False
+        req.finish_status = infer_batch.FinishStatus()
+        req.is_slave_req = lambda: False
+        reqs.append(req)
+    backend._filter_not_ready_reqs = lambda req_ids: reqs
+
+    prefill_reqs, decode_reqs, token_num = backend._get_classed_reqs(req_ids=[0, 1, 2], no_decode=True)
+
+    expected = [reqs[0], reqs[2]]
+    if long_end > 8192:
+        expected.append(reqs[1])
+    assert prefill_reqs == expected and not decode_reqs
+    assert token_num == 4096 + long_end - 8192
+    assert reqs[1].hold_kv_len == long_end
+    model_input, run_reqs = generic_pre_process.prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=True)
+    assert model_input.input_ids.numel() == token_num
+    if long_end > 8192:
+        assert model_input.b_seq_len[-1] == long_end
+    updates = backend._pre_post_handle(run_reqs, is_chuncked_mode=True)
+    assert reqs[1].cur_kv_len == long_end
+    if long_end > 8192:
+        assert updates[-1].output_len == 0
+    assert reqs[1].get_chuncked_input_token_len() == 16384
 
 
 def test_decode_scheduler_uses_non_blocking_request_table_copy(monkeypatch):
