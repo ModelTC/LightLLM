@@ -170,7 +170,7 @@ def test_prefill_task_exports_the_aligned_checkpoint(source_kind):
             small_page_buffer_idx=7,
             big_page_buffer_idx=9,
         )
-    task = node._create_pd_trans_task(req, 1023, 1023, "att_state")
+    task = node._create_pd_trans_task(req, [], 1023, 1023, "att_state")
     assert task.checkpoint_len == (0 if source_kind == "missing" else 512)
     assert task.checkpoint_buffer_id == (None if source_kind == "missing" else 9 if "big" in source_kind else 7)
     assert task.createRetObj().checkpoint_len == task.checkpoint_len

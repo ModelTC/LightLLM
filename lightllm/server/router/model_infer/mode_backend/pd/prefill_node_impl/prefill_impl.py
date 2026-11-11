@@ -73,27 +73,40 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         page_size = self.args.pd_kv_page_size
         assert page_size % self.args.page_size == 0, "pd_kv_page_size must be divisible by page_size"
         prefill_finished = req_obj.cur_kv_len == input_len
-        trans_task_list: List[PDChunckedTransTask] = []
-        while req_obj.pd_trans_kv_start_index < req_obj.cur_kv_len:
-            cur_page_size = min(page_size, req_obj.cur_kv_len - req_obj.pd_trans_kv_start_index)
-            # 生成页面传输任务， 放入kv move manager 的处理队列中
-            if cur_page_size == page_size or prefill_finished:
-                trans_task = self._create_pd_trans_task(
-                    req_obj=req_obj,
-                    kv_start_index=req_obj.pd_trans_kv_start_index,
-                    kv_end_index=req_obj.pd_trans_kv_start_index + cur_page_size,
-                )
-                req_obj.pd_trans_kv_start_index += cur_page_size
-                trans_task_list.append(trans_task)
-            else:
-                break
+        start_index = req_obj.pd_trans_kv_start_index
+        end_index = req_obj.cur_kv_len
+        if not prefill_finished:
+            end_index = start_index + (end_index - start_index) // page_size * page_size
+        if start_index >= end_index:
+            return
 
-        if prefill_finished and len(trans_task_list) != 0 and output_len == 1:
+        # Copy the ready range once, then split the host indices into transfer pages.
+        mem_indexes = (
+            self.model.req_manager.req_to_token_indexs[req_obj.req_idx, start_index:end_index].detach().cpu().tolist()
+        )
+        single_page = end_index - start_index <= page_size
+        trans_task_list: List[PDChunckedTransTask] = []
+        for page_start in range(start_index, end_index, page_size):
+            page_end = min(page_start + page_size, end_index)
+            trans_task_list.append(
+                self._create_pd_trans_task(
+                    req_obj=req_obj,
+                    mem_indexes=(
+                        mem_indexes if single_page else mem_indexes[page_start - start_index : page_end - start_index]
+                    ),
+                    kv_start_index=page_start,
+                    kv_end_index=page_end,
+                )
+            )
+            req_obj.pd_trans_kv_start_index = page_end
+
+        if prefill_finished and output_len == 1:
             if g_infer_context.is_hybrid_att_model:
                 # 混合注意力模型除 KV 外，还需传输 prefill 完成时的请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
                 trans_task_list.append(
                     self._create_pd_trans_task(
                         req_obj=req_obj,
+                        mem_indexes=[],
                         kv_start_index=input_len,
                         kv_end_index=input_len,
                         page_kind="att_state",
@@ -110,6 +123,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
     def _create_pd_trans_task(
         self,
         req_obj: InferReq,
+        mem_indexes: List[int],
         kv_start_index: int,
         kv_end_index: int,
         page_kind: str = "kv",
@@ -123,15 +137,8 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
 
         pd_decode_node_info = req_obj.sampling_param.pd_decode_node
         if page_kind == "kv":
-            mem_indexes = (
-                self.model.req_manager.req_to_token_indexs[req_obj.req_idx, kv_start_index:kv_end_index]
-                .detach()
-                .cpu()
-                .tolist()
-            )
             req_idx = None
         elif page_kind == "att_state":
-            mem_indexes = []
             req_idx = req_obj.req_idx
         else:
             raise ValueError(f"unknown PD trans page kind {page_kind}")

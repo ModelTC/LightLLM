@@ -31,11 +31,12 @@ class PDDPChunkedForPrefillNode(DPChunkedPrefillBackend):
         )
 
     def _create_pd_trans_task(
-        self, req_obj: InferReq, kv_start_index: int, kv_end_index: int, page_kind: str = "kv"
+        self, req_obj: InferReq, mem_indexes: List[int], kv_start_index: int, kv_end_index: int, page_kind: str = "kv"
     ) -> PDChunckedTransTask:
         return PDChunkedPrefillForPrefillNode._create_pd_trans_task(
             self,
             req_obj=req_obj,
+            mem_indexes=mem_indexes,
             kv_start_index=kv_start_index,
             kv_end_index=kv_end_index,
             page_kind=page_kind,
