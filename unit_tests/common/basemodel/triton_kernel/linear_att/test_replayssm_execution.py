@@ -1,17 +1,9 @@
 import pytest
 import torch
 
-
-def ReplaySSMExecutor(*args, **kwargs):
-    kda = kwargs.pop("kda", False)
-    if kda:
-        from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import _history_owner
-    else:
-        from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import _history_owner
-
-    return _history_owner(*args, **kwargs)
-
-
+from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
+    attach_replay_history as ReplaySSMExecutor,
+)
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import replay_layer
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
     build_dynamic_mtp_linear_att_state_params,
@@ -56,7 +48,7 @@ def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
         count = ids.numel()
         backend.prepare_decode(ids)
         out = replay_layer(backend, 0, q[:count], k[:count], v[:count], a[:count], beta[:count], alog, bias, ids)[0]
-        backend.accept_single_token(ids)
+        backend.accept_updates(ids, ids, width=1)
         return out
 
     graphs = {}
@@ -465,8 +457,10 @@ def test_full_prefix_does_not_address_past_capacity(kda):
     assert torch.isfinite(backend.ssm_state).all()
     for _ in range(12):
         replay_layer(backend, 0, q, k, v, a, beta, alog, bias, reqs)
-        backend.accept_single_token(reqs)
-        backend.maybe_compress_prefix(reqs)
+        backend.accept_updates(reqs, reqs, width=1)
+        overflow = reqs[backend.cursors[reqs.long()] + backend.verify_width > backend.capacity]
+        if overflow.numel():
+            backend.merge_accepted_updates(overflow)
     torch.cuda.synchronize()
     assert int(backend.cursors[reqs.long()].max()) <= capacity
     assert torch.isfinite(backend.ssm_state).all()

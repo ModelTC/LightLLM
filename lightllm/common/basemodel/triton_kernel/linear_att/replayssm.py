@@ -14,7 +14,7 @@ from .replayssm_decode import (
     _replay_each_token,
 )
 from .replayssm_delta import _apply_accepted_prefix, _delta_rule_step
-from .replayssm_cursor import _advance_cursor, _clear_cursor_if_full
+from .replayssm_cursor import _advance_cursor
 from .replayssm_fold import _fold_prefix
 
 __all__ = [
@@ -26,6 +26,5 @@ __all__ = [
     "_apply_accepted_prefix",
     "_delta_rule_step",
     "_advance_cursor",
-    "_clear_cursor_if_full",
     "_fold_prefix",
 ]

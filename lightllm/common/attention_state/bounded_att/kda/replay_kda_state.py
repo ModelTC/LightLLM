@@ -15,7 +15,6 @@ import triton
 
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import (
     _advance_cursor,
-    _clear_cursor_if_full,
     _fold_prefix,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
@@ -92,18 +91,41 @@ class ReplayKDAState(BoundedAttentionState):
         self.small_pages_pool = None
         replay_config = dict(ssm_replay_config or {})
         capacity = int(replay_config.get("cache_len", 16))
+        # 宽度为 1 逐 token 重放。开了 MTP 时默认先投影整个验证窗口。
         compute_mode = replay_config.get("compute_mode", "precompute" if mtp_step > 0 else "inline")
-        _bind_history(
-            self,
-            self.ssm_state,
-            capacity,
-            mtp_step + 1,
-            config.conv_dtype,
-            config.num_k_heads,
-            gate_lower_bound,
-            compute_mode,
-            None,
-        )
+        verify_width = mtp_step + 1
+        # 连续前缀挂在上面的 canonical SSM 上，不再另分配状态。
+        # capacity 是 2 的幂，并且不小于一次验证窗口。
+        assert self.ssm_state.dtype in (torch.float32, torch.bfloat16), "KDA replay requires FP32 or BF16 SSM state"
+        assert verify_width > 0 and capacity >= max(4, verify_width) and capacity & (capacity - 1) == 0
+        assert compute_mode in ("inline", "precompute")
+        self.kda = True
+        self.capacity = capacity
+        self.verify_width = verify_width
+        self.compute_mode = compute_mode
+        self.run_config = None
+        self._config_is_fixed = False
+        self.batch_configs = {}
+        layers, slots, hv, k, v = self.ssm_state.shape
+        self.num_key_heads = config.num_k_heads
+        assert self.num_key_heads > 0 and hv % self.num_key_heads == 0
+        # 最后一个 slot 是 HOLD，replay 写零并且不记 history。
+        self.hold_req_id = slots - 1
+        # cursor 是已接受、尚未折回的长度，各层只读。
+        # write_bases 是本步 replay 的写入起点：层内折回后为 0，否则等于进入 kernel 时的 cursor。
+        self.cursors = torch.zeros(slots, dtype=torch.int32, device=device)
+        self.write_bases = torch.zeros(slots, dtype=torch.int32, device=device)
+        # 输出重建用归一化 k 和 d。bf16 激活用 fp16，尾数更多。
+        # 折回不用这份 d，而用下面的原始 k/v，避免把重建误差写进 SSM。g、beta 保持 fp32。
+        # KDA 的 g 按 key 通道存。
+        reconstruction_dtype = torch.float16 if config.conv_dtype == torch.bfloat16 else torch.float32
+        key_shape = (layers, slots, self.num_key_heads, capacity, k)
+        self.keys = torch.empty(key_shape, dtype=reconstruction_dtype, device=device)
+        self.deltas = torch.empty((layers, slots, hv, capacity, v), dtype=reconstruction_dtype, device=device)
+        self.gates = torch.empty((layers, slots, hv, capacity, k), dtype=torch.float32, device=device)
+        self.raw_keys = torch.empty(key_shape, dtype=config.conv_dtype, device=device)
+        self.raw_values = torch.empty((layers, slots, hv, capacity, v), dtype=config.conv_dtype, device=device)
+        self.betas = torch.empty((layers, slots, hv, capacity), dtype=torch.float32, device=device)
 
     def get_state_type(self) -> str:
         """返回算法名和 Conv/SSM 存储精度。"""
@@ -411,16 +433,21 @@ class ReplayKDAState(BoundedAttentionState):
         """最后一层把已接受前缀整段压进 SSM。"""
 
         layers = () if self.config is None else self.config.logical_layer_ids
-        if layers and logical_layer_id == layers[-1]:
-            self.compress_prefix(reqs)
+        if not layers or logical_layer_id != layers[-1] or reqs.numel() == 0:
+            return
+        if self.ssm_state.is_cuda:
+            self.merge_accepted_updates(reqs)
+        else:
+            self.clear_history(reqs)
 
     def finish_decode_token(self, logical_layer_id: int, reqs: torch.Tensor) -> None:
         """最后一层记下这 1 个 token。前缀放不下时，折回发生在下一次 replay kernel 里。"""
 
         layers = () if self.config is None else self.config.logical_layer_ids
-        if not layers or logical_layer_id != layers[-1]:
+        if not layers or logical_layer_id != layers[-1] or reqs.numel() == 0:
             return
-        self.accept_single_token(reqs)
+        # width=1 不读 index。仍传 reqs，kernel 不能收到空指针。
+        self.accept_updates(reqs, reqs, width=1)
 
     def clear_history(self, req: int | torch.Tensor) -> None:
         """清空复用或恢复请求的临时 history，保留 canonical SSM。"""
@@ -455,14 +482,6 @@ class ReplayKDAState(BoundedAttentionState):
             256,
         )
 
-    def accept_single_token(self, reqs: torch.Tensor) -> None:
-        """把一个已接受 token 记入前缀长度。"""
-
-        if reqs.numel() == 0:
-            return
-        # width=1 不读 index。仍传 reqs，kernel 不能收到空指针。
-        self.accept_updates(reqs, reqs, width=1)
-
     def merge_accepted_updates(self, reqs: torch.Tensor) -> None:
         """把 cursor 覆盖的已接受前缀整段折回 canonical SSM，并清空 cursor。"""
 
@@ -470,33 +489,6 @@ class ReplayKDAState(BoundedAttentionState):
             return
         self._materialize_accepted(reqs, self.ssm_state, snapshot=False)
         self.cursors.index_fill_(0, reqs.long(), 0)
-
-    def compress_prefix(self, reqs: torch.Tensor) -> None:
-        """把 cursor 覆盖的已接受前缀整段压进 SSM。长度为 0 时 kernel 直接返回。"""
-
-        if reqs.numel() == 0:
-            return
-        if self.ssm_state.is_cuda:
-            self.merge_accepted_updates(reqs)
-        else:
-            self.clear_history(reqs)
-
-    def maybe_compress_prefix(self, reqs: torch.Tensor) -> None:
-        """长度加上一次最大 verify_width 放不下时，整段压缩，并在折回结束后清掉这些请求的 cursor。"""
-
-        if reqs.numel() == 0 or not self.ssm_state.is_cuda:
-            return
-        self._materialize_accepted(reqs, self.ssm_state, snapshot=False, when_full=True)
-        _clear_cursor_if_full[(triton.cdiv(reqs.numel(), 256),)](
-            self.cursors,
-            self.write_bases,
-            reqs,
-            reqs.numel(),
-            self.hold_req_id,
-            self.capacity,
-            self.verify_width,
-            256,
-        )
 
     def accepted_ssm(self, req_idx: int) -> torch.Tensor:
         """返回不修改 canonical SSM 和 history 的单请求快照。"""
@@ -715,7 +707,6 @@ class ReplayKDAState(BoundedAttentionState):
         snapshot: bool,
         output_strides=None,
         flush_export: bool = False,
-        when_full: bool = False,
     ) -> None:
         """将请求的 accepted prefix 写入 canonical SSM 或调用方提供的输出页。"""
 
@@ -746,8 +737,6 @@ class ReplayKDAState(BoundedAttentionState):
             True,
             FLUSH_EXPORT=flush_export,
             OUTPUT_STRIDES=output_strides,
-            WHEN_FULL=when_full,
-            NEXT=self.verify_width,
             STRIDE_LAYER=layer_stride,
             STRIDE_SLOT=slot_stride,
             STRIDE_HEAD=head_stride,
@@ -756,83 +745,3 @@ class ReplayKDAState(BoundedAttentionState):
             num_warps=config["num_warps"],
             num_stages=config["num_stages"],
         )
-
-
-def _history_owner(
-    ssm: torch.Tensor,
-    capacity: int,
-    verify_width: int,
-    activation_dtype: torch.dtype = torch.bfloat16,
-    num_key_heads: int | None = None,
-    gate_lower_bound: float = -5.0,
-    compute_mode: str = "inline",
-    run_config: dict[str, int] | None = None,
-) -> ReplayKDAState:
-    """把 history 挂到调用方已有的 SSM 上，不再分配第二份状态。供保持原 stride 的 kernel 测试使用。"""
-
-    owner = ReplayKDAState.__new__(ReplayKDAState)
-    owner.config = None
-    owner.state_name = None
-    owner.request_capacity = ssm.shape[1]
-    owner.mtp_step = verify_width - 1
-    owner._algorithm = "kda"
-    owner._logical_to_storage_layer = {}
-    owner.conv_state = None
-    owner.mtp_state_index = None
-    owner.big_pages_pool = None
-    owner.small_pages_pool = None
-    _bind_history(
-        owner,
-        ssm,
-        capacity,
-        verify_width,
-        activation_dtype,
-        num_key_heads,
-        gate_lower_bound,
-        compute_mode,
-        run_config,
-    )
-    return owner
-
-
-def _bind_history(
-    owner,
-    ssm: torch.Tensor,
-    capacity: int,
-    verify_width: int,
-    activation_dtype: torch.dtype,
-    num_key_heads: int | None,
-    gate_lower_bound: float,
-    compute_mode: str,
-    run_config: dict[str, int] | None,
-) -> None:
-    """在 owner 上创建 KDA replay 的连续前缀 history 和 cursor。"""
-
-    assert ssm.dtype in (torch.float32, torch.bfloat16), "KDA replay requires FP32 or BF16 SSM state"
-    assert verify_width > 0 and capacity >= max(4, verify_width) and capacity & (capacity - 1) == 0
-    assert compute_mode in ("inline", "precompute")
-    owner.ssm_state = ssm
-    owner.kda = True
-    owner.gate_lower_bound = gate_lower_bound
-    owner.capacity = capacity
-    owner.verify_width = verify_width
-    owner.compute_mode = compute_mode
-    owner.run_config = run_config
-    owner._config_is_fixed = run_config is not None
-    owner.batch_configs = {}
-    layers, slots, hv, k, v = ssm.shape
-    owner.num_key_heads = hv if num_key_heads is None else num_key_heads
-    assert owner.num_key_heads > 0 and hv % owner.num_key_heads == 0
-    owner.hold_req_id = slots - 1
-    owner.cursors = torch.zeros(slots, dtype=torch.int32, device=ssm.device)
-    owner.write_bases = torch.zeros(slots, dtype=torch.int32, device=ssm.device)
-    # 输出重建用归一化 k 和 d。bf16 激活时这两份用 fp16，尾数比 bf16 多，和当前精度更好的重建缓存一致。
-    # 原始 k/v 保持激活精度。g 和 beta 保持 fp32。压缩在 fp32 里从原始值折回。
-    reconstruction_dtype = torch.float16 if activation_dtype == torch.bfloat16 else torch.float32
-    key_shape = (layers, slots, owner.num_key_heads, capacity, k)
-    owner.keys = torch.empty(key_shape, dtype=reconstruction_dtype, device=ssm.device)
-    owner.deltas = torch.empty((layers, slots, hv, capacity, v), dtype=reconstruction_dtype, device=ssm.device)
-    owner.gates = torch.empty((layers, slots, hv, capacity, k), dtype=torch.float32, device=ssm.device)
-    owner.raw_keys = torch.empty(key_shape, dtype=activation_dtype, device=ssm.device)
-    owner.raw_values = torch.empty((layers, slots, hv, capacity, v), dtype=activation_dtype, device=ssm.device)
-    owner.betas = torch.empty((layers, slots, hv, capacity), dtype=torch.float32, device=ssm.device)

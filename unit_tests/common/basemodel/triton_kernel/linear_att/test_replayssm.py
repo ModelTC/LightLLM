@@ -1,15 +1,9 @@
 import pytest
 import torch
 
-
-def ReplaySSMExecutor(*args, **kwargs):
-    kda = kwargs.pop("kda", False)
-    if kda:
-        from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import _history_owner
-    else:
-        from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import _history_owner
-
-    return _history_owner(*args, **kwargs)
+from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
+    attach_replay_history as ReplaySSMExecutor,
+)
 
 
 def ssm_snapshot(backend, req):
@@ -433,7 +427,9 @@ def test_large_bf16_state_precompute_matches_inline():
             torch.testing.assert_close(outputs[0], outputs[1], atol=5e-4, rtol=5e-4)
             for backend in backends:
                 backend.accept_updates(reqs, accepted, width=width)
-                backend.maybe_compress_prefix(reqs)
+                overflow = reqs[backend.cursors[reqs.long()] + backend.verify_width > backend.capacity]
+                if overflow.numel():
+                    backend.merge_accepted_updates(overflow)
         for backend in backends:
             backend.merge_accepted_updates(reqs)
         torch.testing.assert_close(backends[0].ssm_state, backends[1].ssm_state, atol=0, rtol=0)
@@ -476,8 +472,8 @@ def test_overflow_folds_inside_replay_for_gdn_and_kda(kda, dtype, capacity):
                 assert int(backend.write_bases[0]) == 0
         for actual, expected in zip(outs, twin_outs):
             torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-        backend.accept_single_token(reqs)
-        twin.accept_single_token(reqs)
+        backend.accept_updates(reqs, reqs, width=1)
+        twin.accept_updates(reqs, reqs, width=1)
     assert int(backend.cursors[0]) == 1
     assert int(twin.cursors[0]) == 1
     # bf16 两条路径都先舍入到同一状态。fp32 的独立 kernel 与层内 kernel 归约顺序可差几个 ulp。

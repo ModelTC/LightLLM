@@ -30,26 +30,19 @@ def _fold_prefix(
     KDA: tl.constexpr,
     FLUSH_EXPORT: tl.constexpr = False,
     OUTPUT_STRIDES: tl.constexpr = None,
-    WHEN_FULL: tl.constexpr = False,
-    NEXT: tl.constexpr = 1,
     STRIDE_LAYER: tl.constexpr = 0,
     STRIDE_SLOT: tl.constexpr = 0,
     STRIDE_HEAD: tl.constexpr = 0,
     STRIDE_K: tl.constexpr = 0,
     STRIDE_V: tl.constexpr = 1,
 ):
-    # 将 cursor 指向的 accepted history 应用到 canonical state。SNAPSHOT
-    # 只写独立输出。WHEN_FULL 只压缩「长度 + 下一次最大宽度」放不下的请求。
-    # cursor 清零由随后的 kernel 完成，避免和还在读 cursor 的线程块竞争。
+    # 将 cursor 指向的 accepted history 应用到 canonical state。SNAPSHOT 只写独立输出。
     iv, row, lh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     req = tl.load(Reqs + row).to(tl.int64)
     if req == HOLD:
         return
     n = tl.load(Cursors + req)
-    if WHEN_FULL:
-        if n == 0 or n + NEXT <= L:
-            return
-    elif n == 0 and not SNAPSHOT and not FLUSH_EXPORT:
+    if n == 0 and not SNAPSHOT and not FLUSH_EXPORT:
         return
     linear_layer_idx, head = lh // HV, lh % HV
     # history 是连续分配的。canonical SSM 可能带大于 int32 的层距，地址必须用真实 stride 的 int64。

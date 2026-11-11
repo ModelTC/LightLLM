@@ -2,16 +2,9 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.triton_kernel.linear_att import ssm_autotune as tuning
-
-
-def ReplaySSMExecutor(*args, **kwargs):
-    kda = kwargs.pop("kda", False)
-    if kda:
-        from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import _history_owner
-    else:
-        from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import _history_owner
-
-    return _history_owner(*args, **kwargs)
+from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
+    attach_replay_history as ReplaySSMExecutor,
+)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
