@@ -621,7 +621,8 @@ class DPChunkedPrefillBackend(ModeBackend):
             self._post_handle(
                 run_reqs=verify_ok_reqs,
                 next_token_ids=next_token_ids_cpu[select_mask],
-                next_token_logprobs=next_token_logprobs_cpu[select_mask],
+                next_token_logprobs=next_token_logprobs_cpu,
+                logprobs_row_mask=select_mask,
                 next_token_ranks=next_token_ranks_cpu[select_mask],
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
@@ -893,7 +894,8 @@ class DPChunkedPrefillBackend(ModeBackend):
             self._post_handle(
                 run_reqs=verify_ok_reqs,
                 next_token_ids=next_token_ids_cpu[select_mask],
-                next_token_logprobs=next_token_logprobs_cpu[select_mask],
+                next_token_logprobs=next_token_logprobs_cpu,
+                logprobs_row_mask=select_mask,
                 next_token_ranks=next_token_ranks_cpu[select_mask],
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,

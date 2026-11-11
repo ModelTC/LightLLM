@@ -25,6 +25,7 @@ from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, JSONResponse
 from lightllm.server.core.objs import FinishStatus
+from lightllm.server.core.objs.logprob_utils import chat_token_logprob
 from lightllm.server.core.objs.sampling_params import SamplingParams, StopStrMatchMode
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
@@ -66,6 +67,7 @@ from .api_models import (
     ChatMessage,
     ChatCompletionResponseChoice,
     ChatCompletionResponse,
+    ChatLogprobs,
     DeltaMessage,
     ChatCompletionStreamResponse,
     ChatCompletionStreamResponseChoice,
@@ -122,7 +124,7 @@ async def _safe_stream_wrapper(stream_generator):
         return
 
 
-def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):
+def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=(), logprobs=None):
     """Serialize a streaming chunk, explicitly including specified null fields."""
     d = chunk.model_dump(exclude_none=True)
     if choice_nulls and d.get("choices"):
@@ -131,7 +133,65 @@ def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):
                 choice[field] = None
     for field in response_nulls:
         d[field] = None
+    if logprobs is not None:
+        d["choices"][0]["logprobs"] = logprobs
     return json.dumps(d, ensure_ascii=False)
+
+
+class _ChatLogprobBuffer:
+    """Keep token metadata aligned when detokenization or parsers buffer text."""
+
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+        self.pending = collections.deque()
+
+    def append(self, text, metadata, finish_status):
+        # 先把文本和对应的 token 概率存起来，等解析器确定要输出哪些文本后再取。
+        token_id, score = metadata.get("id"), metadata.get("logprob")
+        token = None
+        # 只有结束通知、没有实际文本的消息，不当作输出 token。
+        if token_id is not None and score is not None and (text or not finish_status.is_finished()):
+            token = chat_token_logprob(self.tokenizer, token_id, score)
+        # 一个汉字可能拆成几个 token：还没凑齐时 text 为空，也要保留这些字节的概率。
+        if text or (token is not None and token["bytes"] and "\ufffd" in token["token"]):
+            # 每条记录保存：本次解码出的文本、token 信息、top-k 候选。
+            self.pending.append((text, token, metadata.get("output_top_logprobs", ())))
+
+    def take(self, text, *, from_end=False, reasoning_start=None):
+        if not text:
+            return []
+        # 思考/工具解析器可能暂存文本或去掉标记，所以按最终要输出的 text 查找对应区间。
+        pending_text = "".join(part for part, _, _ in self.pending)
+        search_from = 0
+        # 查找思考正文时，跳过开头的 <think> 等标记，避免匹配到标记里的文字。
+        if reasoning_start and pending_text.lstrip().startswith(reasoning_start):
+            search_from = len(pending_text) - len(pending_text.lstrip()) + len(reasoning_start)
+        # 文本可能重复；from_end=True 时取最后一次匹配，否则取前面的匹配。
+        start = pending_text.rfind(text) if from_end else pending_text.find(text, search_from)
+        if start < 0:
+            return []
+        end = start + len(text)
+        offset = 0
+        tokens = []
+        # 从队首消费到目标区间末尾；目标之前被解析器去掉的文本也一起丢弃。
+        while self.pending and offset < end:
+            part, token, candidates = self.pending.popleft()
+            next_offset = offset + len(part)
+            # 收集与目标区间重叠的 token；区间内暂未解码出文字的字节 token 也要带上。
+            if token is not None and (next_offset > start or (not part and offset >= start)):
+                token["top_logprobs"] = [
+                    chat_token_logprob(self.tokenizer, token_id, score) for token_id, score in candidates
+                ]
+                tokens.append(token)
+            if next_offset > end:
+                # 这条文本还有剩余，放回队首；概率已经取过，清空 token 避免下次重复返回。
+                self.pending.appendleft((part[end - offset :], None, ()))
+            offset = next_offset
+        return tokens
+
+    def content(self, text, reasoning_prefix, reasoning_logprobs, *, from_end=False):
+        tokens = reasoning_logprobs + self.take(text.removeprefix(reasoning_prefix), from_end=from_end)
+        return {"content": tokens, "reasoning_content": None} if tokens else None
 
 
 def _process_tool_call_id(
@@ -374,6 +434,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "add_special_tokens": False,
         "seed": request.seed,
         "include_stop_str_in_output": request.include_stop_str_in_output,
+        "output_top_logprobs": (request.top_logprobs or 0) if request.logprobs else -1,
     }
 
     # Gemma-4's reasoning delimiters (<|channel>=100, <channel|>=101) are
@@ -422,6 +483,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
     )
+    logprob_buffers = (
+        collections.defaultdict(lambda: _ChatLogprobBuffer(g_objs.httpserver_manager.tokenizer))
+        if request.logprobs
+        else None
+    )
 
     # Non-streaming case
     if not request.stream:
@@ -441,6 +507,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             count_output_tokens_dict[sub_req_id] += 1
             final_output_dict[sub_req_id].append(request_output)
+            if logprob_buffers is not None:
+                logprob_buffers[sub_req_id].append(request_output, metadata, finish_status)
             if reasoning_parser:
                 parser = reasoning_parser_dict.get(sub_req_id)
                 if parser is None:
@@ -473,6 +541,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
             # Handle reasoning content
             reasoning_text = None
+            reasoning_prefix = ""
+            reasoning_logprobs = []
             if reasoning_parser:
                 try:
                     parser = reasoning_parser_dict[sub_req_id]
@@ -483,8 +553,13 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         HTTPStatus.BAD_REQUEST,
                         "Failed to parse fc related info to json format!",
                     )
+                if logprob_buffers is not None:
+                    reasoning_logprobs = logprob_buffers[sub_req_id].take(
+                        reasoning_text, reasoning_start=parser.detector.think_start_token
+                    )
                 if not request.separate_reasoning:
-                    text = (reasoning_text or "") + (text or "")
+                    reasoning_prefix = reasoning_text or ""
+                    text = reasoning_prefix + (text or "")
                     reasoning_text = None
 
             # Handle tool_calls parsing
@@ -517,6 +592,17 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     )
             if tool_calls and finish_reason == "stop":
                 finish_reason = "tool_calls"
+            choice_logprobs = None
+            if logprob_buffers is not None:
+                content_logprobs = logprob_buffers[sub_req_id].take(
+                    (text or "").removeprefix(reasoning_prefix), from_end=not tool_calls
+                )
+                if not request.separate_reasoning:
+                    content_logprobs = reasoning_logprobs + content_logprobs
+                    reasoning_logprobs = []
+                choice_logprobs = ChatLogprobs(
+                    content=content_logprobs or None, reasoning_content=reasoning_logprobs or None
+                )
             chat_message = ChatMessage(
                 role="assistant",
                 content=text if text else "",
@@ -527,6 +613,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 index=i,
                 message=chat_message,
                 finish_reason=finish_reason,
+                logprobs=choice_logprobs,
             )
             choices.append(choice)
         completion_tokens_details = None
@@ -575,6 +662,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             choice_index = sub_req_id - group_request_id
 
             delta = request_output
+            logprob_buffer = None
+            reasoning_logprobs = []
+            reasoning_prefix = ""
+            if logprob_buffers is not None:
+                logprob_buffer = logprob_buffers[sub_req_id]
+                logprob_buffer.append(delta, metadata, finish_status)
             current_finish_reason = finish_status.get_finish_reason()
             if current_finish_reason == "error" and completion_tokens == 1:
                 raise GenerationError("Generation failed before producing output")
@@ -602,6 +695,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     choice_index, delta, reasoning_parser_dict, metadata, request
                 )
                 if reasoning_text:
+                    if logprob_buffer is not None:
+                        reasoning_logprobs = logprob_buffer.take(
+                            reasoning_text,
+                            reasoning_start=reasoning_parser_dict[choice_index].detector.think_start_token,
+                        )
                     if request.separate_reasoning:
                         choice_data = ChatCompletionStreamResponseChoice(
                             index=choice_index,
@@ -614,8 +712,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             choices=[choice_data],
                             model=request.model,
                         )
-                        yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls)}\n\n"
+                        choice_logprobs = (
+                            {"content": None, "reasoning_content": reasoning_logprobs} if reasoning_logprobs else None
+                        )
+                        yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls, logprobs=choice_logprobs)}\n\n"
                     else:
+                        reasoning_prefix = reasoning_text
                         delta = reasoning_text + (delta or "")
 
             if request.tool_choice != "none" and request.tools:
@@ -637,7 +739,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         choices=[choice_data],
                         model=request.model,
                     )
-                    yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls)}\n\n"
+                    choice_logprobs = (
+                        logprob_buffer.content(normal_text, reasoning_prefix, reasoning_logprobs)
+                        if logprob_buffer is not None
+                        else None
+                    )
+                    yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls, logprobs=choice_logprobs)}\n\n"
 
                 # 2) if we found calls, we output them as separate chunk(s)
                 history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
@@ -747,6 +854,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls)}\n\n"
             else:
                 if delta:
+                    content_logprobs = (
+                        logprob_buffer.content(delta, reasoning_prefix, reasoning_logprobs, from_end=True)
+                        if logprob_buffer is not None
+                        else None
+                    )
                     # If this is the final token, merge content with finish_reason
                     if current_finish_reason is not None:
                         if has_emitted_tool_calls[sub_req_id] and current_finish_reason == "stop":
@@ -761,7 +873,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             model=request.model,
                             choices=[stream_choice],
                         )
-                        yield f"data: {_serialize_sse_chunk(stream_resp, _final_choice_nulls)}\n\n"
+                        payload = _serialize_sse_chunk(stream_resp, _final_choice_nulls, logprobs=content_logprobs)
+                        yield f"data: {payload}\n\n"
                         # Skip the separate final-chunk logic below
                         continue
                     else:
@@ -775,7 +888,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             model=request.model,
                             choices=[stream_choice],
                         )
-                        yield f"data: {_serialize_sse_chunk(stream_resp, _choice_nulls)}\n\n"
+                        payload = _serialize_sse_chunk(stream_resp, _choice_nulls, logprobs=content_logprobs)
+                        yield f"data: {payload}\n\n"
 
             # Emit a per-choice final chunk with finish_reason (for tool_calls path
             # or when no delta was emitted alongside finish_reason).
@@ -787,6 +901,16 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     if parser is not None:
                         flush_reasoning, flush_text = parser.flush()
                         if flush_reasoning:
+                            flush_logprobs = None
+                            if logprob_buffer is not None:
+                                tokens = logprob_buffer.take(
+                                    flush_reasoning, reasoning_start=parser.detector.think_start_token
+                                )
+                                if tokens:
+                                    flush_logprobs = {
+                                        "content": None if request.separate_reasoning else tokens,
+                                        "reasoning_content": tokens if request.separate_reasoning else None,
+                                    }
                             if request.separate_reasoning:
                                 flush_choice = ChatCompletionStreamResponseChoice(
                                     index=choice_index,
@@ -806,7 +930,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 model=request.model,
                                 choices=[flush_choice],
                             )
-                            yield f"data: {_serialize_sse_chunk(flush_chunk, _choice_nulls)}\n\n"
+                            payload = _serialize_sse_chunk(flush_chunk, _choice_nulls, logprobs=flush_logprobs)
+                            yield f"data: {payload}\n\n"
                         if flush_text:
                             flush_choice = ChatCompletionStreamResponseChoice(
                                 index=choice_index,
@@ -819,7 +944,13 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 model=request.model,
                                 choices=[flush_choice],
                             )
-                            yield f"data: {_serialize_sse_chunk(flush_chunk, _choice_nulls)}\n\n"
+                            flush_logprobs = (
+                                logprob_buffer.content(flush_text, "", [], from_end=True)
+                                if logprob_buffer is not None
+                                else None
+                            )
+                            payload = _serialize_sse_chunk(flush_chunk, _choice_nulls, logprobs=flush_logprobs)
+                            yield f"data: {payload}\n\n"
                 if has_emitted_tool_calls[sub_req_id] and current_finish_reason == "stop":
                     current_finish_reason = "tool_calls"
                 final_choice = ChatCompletionStreamResponseChoice(

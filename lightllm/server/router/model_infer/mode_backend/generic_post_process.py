@@ -1,13 +1,22 @@
 import torch
-from typing import List, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
+from lightllm.common.basemodel.triton_kernel.logprobs_capture import capture_output_logprobs
 from lightllm.common.basemodel.triton_kernel.post_process.apply_constraint_mask import apply_constraint_mask
 from lightllm.common.basemodel.triton_kernel.local_vocab_topk import local_vocab_greedy_logprob
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
+
+
+class OutputLogprobs(NamedTuple):
+    """Sampled scores in batch order and flat candidate IDs and scores per row."""
+
+    sampled: torch.Tensor
+    candidates: torch.Tensor
+    offsets: List[int]
 
 
 def sample(
@@ -32,6 +41,8 @@ def sample(
         skip_top_k,
         skip_top_p,
         exist_req_use_random_seed,
+        output_logprob_rows,
+        max_output_top_logprobs,
         has_output_constraints,
     ) = _get_post_sample_tensors(reqs, sampling_params_manager, has_output)
     eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
@@ -97,21 +108,58 @@ def sample(
             b_mtp_index=b_mtp_index,
         )
     if is_all_greedy:
-        return local_vocab_greedy_logprob(logits)
-
-    probs = torch.softmax(logits, dim=-1)
-
-    if skip_top_k and skip_top_p:
-        # topk 等于整个词表，topp 等于1.0，等价于不进行topk topp过滤，直接进行随机采样，可以提升采样速度
-        batch_next_token_ids = _random_sample(probs, reqs, exist_req_use_random_seed)
-        batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
-        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
-
+        next_token_ids, next_token_logprobs = local_vocab_greedy_logprob(logits)
     else:
-        batch_next_token_ids, batch_next_token_logprobs = _top_p_top_k_sample(
-            reqs, probs, b_top_ps, b_top_ks, exist_req_use_random_seed
-        )
-        return batch_next_token_ids.view(-1), batch_next_token_logprobs.view(-1)
+        probs = torch.softmax(logits, dim=-1)
+        if skip_top_k and skip_top_p:
+            next_token_ids = _random_sample(probs, reqs, exist_req_use_random_seed)
+            next_token_logprobs = probs.gather(1, next_token_ids.view(-1, 1)).log().view(-1)
+        else:
+            next_token_ids, next_token_logprobs = _top_p_top_k_sample(
+                reqs, probs, b_top_ps, b_top_ks, exist_req_use_random_seed
+            )
+
+    if not output_logprob_rows or (is_all_greedy and max_output_top_logprobs == 0):
+        return next_token_ids, next_token_logprobs
+
+    candidate_rows = []
+    rank_only_rows = []
+    offsets = [0] * (logits.shape[0] + 1) if max_output_top_logprobs else None
+    offset = 0
+    for row, topk in output_logprob_rows:
+        if topk > 0:
+            candidate_rows.append((row, topk, offset))
+            # 该请求存 [K 个 token ID, K 个 logprob]，所以下一个起点向后移 2*K。
+            offset += 2 * topk
+            # 暂存这一行的数据长度；后面再累加成各行的边界位置。
+            offsets[row + 1] = 2 * topk
+        elif not is_all_greedy:
+            # K=0 不返回候选，但随机采样仍需检查采样 token 是否在 top-20，超出则用 -9999。
+            rank_only_rows.append((row, 0, 0))
+
+    row_count = len(candidate_rows) + len(rank_only_rows)
+    # 在 CPU 锁页内存中准备 [row_count, 3] 的表，每行放 (logits 行号, K, 候选存储起点)。
+    rows = g_pin_mem_manager.alloc_pin_tensor("output_logprob_rows", 3 * row_count, torch.int32).view(-1, 3)
+    # 需要候选的行放前面，GPU 用 len(candidate_rows) 区分两类任务。
+    rows.numpy()[:] = candidate_rows + rank_only_rows
+    # 有候选时 candidates 是一维 GPU tensor，长度为各请求的 2*K 之和；采样概率会按需原地更新。
+    candidates = capture_output_logprobs(
+        logits,
+        next_token_ids,
+        next_token_logprobs,
+        rows.to(device=logits.device, non_blocking=True),
+        len(candidate_rows),
+        max_output_top_logprobs,
+        offset,
+        check_rank=not is_all_greedy,
+    )
+    if offsets is None:
+        return next_token_ids, next_token_logprobs
+    # CPU 上累加各行长度：例如 [0, 4, 0, 6] 变成边界位置 [0, 4, 4, 10]。
+    for row in range(logits.shape[0]):
+        offsets[row + 1] += offsets[row]
+    # 返回采样概率、候选数据和边界表；第 r 行的候选是 candidates[offsets[r]:offsets[r+1]]。
+    return next_token_ids, OutputLogprobs(next_token_logprobs, candidates, offsets)
 
 
 def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor):
@@ -185,6 +233,8 @@ def _get_post_sample_tensors(reqs: List[InferReq], sampling_params_manager, has_
     skip_top_p = True
     exist_req_use_random_seed = False
     has_output_constraints = False
+    output_logprob_rows = []
+    max_output_top_logprobs = 0
     # 仅在服务启用 XGrammar 输出约束时，按请求分组并为 MTP 验证位置准备语法掩码。
     if sampling_params_manager.req_to_bitmask_enabled is not None:
         request_groups = _group_contiguous_requests(reqs, has_output)
@@ -203,6 +253,9 @@ def _get_post_sample_tensors(reqs: List[InferReq], sampling_params_manager, has_
     for i, req_obj in enumerate(reqs):
         sample_param = req_obj.sampling_param
         shm_param = sample_param.shm_param
+        if shm_param.output_top_logprobs >= 0 and (has_output is None or has_output[i]):
+            output_logprob_rows.append((i, shm_param.output_top_logprobs))
+            max_output_top_logprobs = max(max_output_top_logprobs, shm_param.output_top_logprobs)
         exponential_decay_length_penalty = shm_param.exponential_decay_length_penalty.to_tuple()
         out_token_len = req_obj.get_cur_total_len() - req_obj.shm_req.input_len
         length_penalty_param.append(max(out_token_len - exponential_decay_length_penalty[0], 0))
@@ -258,6 +311,8 @@ def _get_post_sample_tensors(reqs: List[InferReq], sampling_params_manager, has_
         skip_top_k,
         skip_top_p,
         exist_req_use_random_seed,
+        output_logprob_rows,
+        max_output_top_logprobs,
         has_output_constraints,
     )
 

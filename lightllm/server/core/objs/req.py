@@ -317,26 +317,41 @@ class Req(ctypes.Structure):
 
     def create_logprobs_shm_array(self):
         name = f"shm_logprobs_{self.index_in_shm_mem}"
+        # Candidate rows follow the original logprob/rank array and cover only output positions.
+        topk = max(0, self.sample_params.output_top_logprobs)
+        num_entries = self.alloc_shm_numpy_len + self.sample_params.max_new_tokens * topk
         self.shm_logprobs = ShmArray(
             name,
-            (self.alloc_shm_numpy_len,),
+            (num_entries,),
             dtype=[("logprob", np.float32), ("rank", np.int32)],
         )
         self.shm_logprobs.create_shm()
         # rank=-1 表示该位置没有请求或没有计算 rank 元信息。
-        self.shm_logprobs.arr["logprob"][:] = 0.0
-        self.shm_logprobs.arr["rank"][:] = -1
+        token_logprobs = self.shm_logprobs.arr[: self.alloc_shm_numpy_len]
+        token_logprobs["logprob"][:] = 0.0
+        token_logprobs["rank"][:] = -1
+        if topk > 0:
+            # D may replay P's first token without sampling it locally.
+            self.output_top_logprobs_row(0)[0].fill(-1)
         return
 
     def link_logprobs_shm_array(self):
         name = f"shm_logprobs_{self.index_in_shm_mem}"
+        topk = max(0, self.sample_params.output_top_logprobs)
+        num_entries = self.alloc_shm_numpy_len + self.sample_params.max_new_tokens * topk
         self.shm_logprobs = ShmArray(
             name,
-            (self.alloc_shm_numpy_len,),
+            (num_entries,),
             dtype=[("logprob", np.float32), ("rank", np.int32)],
         )
         self.shm_logprobs.link_shm()
         return
+
+    def output_top_logprobs_row(self, output_index: int):
+        topk = self.sample_params.output_top_logprobs
+        start = self.alloc_shm_numpy_len + output_index * topk
+        # Each 8-byte slot in the tail holds two float32 values.
+        return self.shm_logprobs.arr[start : start + topk].view(np.float32).reshape(2, topk)
 
     def detach_shm_arrays(self):
         """Detach process-local request-scoped SHM handles before slot reuse."""

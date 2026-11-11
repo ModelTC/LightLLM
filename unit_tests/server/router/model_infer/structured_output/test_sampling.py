@@ -13,6 +13,7 @@ from unit_tests.server.grammar_helpers import (
 from lightllm.common.req_manager import req_sampling_params
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
 from lightllm.server.router.model_infer.mode_backend import generic_post_process as sampling
+from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mtp_speculative.utils import scatter_mtp_next_tokens
 
 
@@ -53,6 +54,7 @@ def sampling_req(compiler, sampling_manager, req_idx=5, **constraints):
         temperature=1.0,
         top_p=1.0,
         top_k=1,
+        output_top_logprobs=-1,
     )
     req.get_last_gen_token = lambda: req.shm_req.shm_prompt_ids.arr[-1]
     init_request(compiler, req)
@@ -77,6 +79,114 @@ def test_sample_disables_stale_constraint_mask_for_ordinary_requests(compiler, s
     assert torch.isfinite(logprobs).all()
     assert not sampling_manager.req_to_bitmask_enabled[req.req_idx]
     assert not compiler._cache
+
+
+@pytest.mark.parametrize("topk", [0, 3, 20])
+@pytest.mark.parametrize("sampling_case", ["greedy", "random", "top_k_top_p"])
+def test_sample_returns_requested_output_logprobs(compiler, sampling_manager, monkeypatch, topk, sampling_case):
+    req = sampling_req(compiler, sampling_manager, regular_constraint=None)
+    req.sampling_param.shm_param.output_top_logprobs = topk
+    req.sampling_param.shm_param.top_k = 1 if sampling_case == "greedy" else req.vocab_size
+    if sampling_case == "top_k_top_p":
+        req.sampling_param.shm_param.top_k = 50
+        req.sampling_param.shm_param.top_p = 0.8
+        monkeypatch.setattr(sampling, "get_env_start_args", lambda: SimpleNamespace(sampling_backend="triton"))
+    logits = torch.linspace(-2, 2, req.vocab_size, device="cuda").view(1, -1)
+    token_ids, result = sampling.sample(logits, [req], [256])
+    reference = logits.log_softmax(dim=-1)
+    sampled_id = int(token_ids[0])
+    expected = reference[0, sampled_id] if sampled_id >= req.vocab_size - 20 else reference.new_tensor(-9999.0)
+    selected = result.sampled[0] if topk else result[0]
+    torch.testing.assert_close(selected, expected)
+    if topk:
+        top_ids = result.candidates[:topk].long()
+        assert top_ids.tolist() == list(range(req.vocab_size - 1, req.vocab_size - 1 - topk, -1))
+        torch.testing.assert_close(result.candidates[topk:], reference[0, top_ids])
+
+
+def test_sample_candidate_logprobs_follow_mtp_row_selection(compiler, sampling_manager, monkeypatch):
+    req = sampling_req(compiler, sampling_manager, req_idx=0, regular_constraint=None)
+    ordinary = sampling_req(compiler, sampling_manager, req_idx=1, regular_constraint=None)
+    tail = sampling_req(compiler, sampling_manager, req_idx=2, regular_constraint=None)
+    for request in (req, ordinary, tail):
+        request.sampling_param.shm_param.top_k = request.vocab_size
+        request.sampling_param.shm_param.output_top_logprobs = 3
+    ordinary.sampling_param.shm_param.output_top_logprobs = -1
+    tail.sampling_param.shm_param.output_top_logprobs = 2
+    logits = torch.arange(req.vocab_size, dtype=torch.float32, device="cuda").repeat(4, 1) / 10
+    logits[3, :-2] = -torch.inf
+    token_ids = torch.tensor([256, 0, 10, 256], device="cuda")
+    monkeypatch.setattr(sampling, "_random_sample", lambda *args: token_ids)
+    ids, result = sampling.sample(logits, [req, req, ordinary, tail], [256])
+    assert result.offsets == [0, 6, 12, 12, 16]
+    assert result.candidates.numel() == 16
+    backend = SimpleNamespace(args=SimpleNamespace(enable_rl=False), eos_id=[256], is_master_in_dp=True)
+    ids_cpu, result_cpu, ranks_cpu = ModeBackend._async_copy_next_token_infos_to_pin_mem(backend, ids, result, ids)
+    torch.cuda.current_stream().synchronize()
+    # MTP drops row 1 and keeps an ordinary request with logprobs disabled in row 2.
+    keep = torch.tensor([True, False, True, True])
+    packs = [MagicMock() for _ in range(3)]
+    monkeypatch.setattr(sampling_manager, "update_reqs_token_counter", MagicMock())
+    ModeBackend._post_handle(
+        backend, [req, ordinary, tail], ids_cpu[keep], result_cpu, ranks_cpu[keep], packs, logprobs_row_mask=keep
+    )
+    first, middle, last = [pack.handle.call_args.kwargs for pack in packs]
+    assert first["output_top_logprobs"][0] == [256, 255, 254]
+    assert middle["output_top_logprobs"] is None
+    assert last["output_top_logprobs"][0] == [256, 255]
+    reference = logits.log_softmax(dim=-1).cpu()
+    assert middle["next_token_logprob"] == pytest.approx(reference[2, 10].item())
+    assert first["output_top_logprobs"][1] == pytest.approx(reference[0, [256, 255, 254]].tolist())
+    assert last["output_top_logprobs"][1] == pytest.approx(reference[3, [256, 255]].tolist())
+    assert result_cpu.sampled[1].item() == -9999.0
+
+
+@pytest.mark.parametrize("topk", [0, 3, 20])
+@pytest.mark.parametrize("rows", [[0, 1, 2, 3], [0, 2]])
+@pytest.mark.parametrize("greedy", [False, True])
+def test_sample_reuses_sampled_normalization(compiler, sampling_manager, monkeypatch, topk, rows, greedy):
+    reqs = [sampling_req(compiler, sampling_manager, req_idx=i, regular_constraint=None) for i in range(4)]
+    for req in reqs:
+        req.sampling_param.shm_param.top_k = 1 if greedy else req.vocab_size
+        req.sampling_param.shm_param.output_top_logprobs = topk
+    logits = torch.arange(257, dtype=torch.float32, device="cuda").repeat(4, 1) / 10
+    if not greedy:
+        # Cover sampled tokens both inside and outside the top 20.
+        ids = torch.tensor([256, 230, 0, 250], device="cuda")
+        monkeypatch.setattr(sampling, "_random_sample", lambda *args: ids)
+    ids, result = sampling.sample(logits, reqs, [256], has_output=[i in rows for i in range(4)])
+    reference = logits.log_softmax(dim=-1)
+    for row in range(4):
+        selected = result.sampled[row] if topk else result[row]
+        expected = reference[row, ids[row]]
+        if row in rows and ids[row] < 237:
+            expected = expected.new_tensor(-9999.0)
+        torch.testing.assert_close(selected, expected)
+        if topk and row in rows:
+            start, end = result.offsets[row : row + 2]
+            top_ids = result.candidates[start : start + topk].long()
+            assert top_ids.tolist() == list(range(256, 256 - topk, -1))
+            torch.testing.assert_close(result.candidates[start + topk : end], reference[row, top_ids])
+
+
+def test_sample_rank_cutoff_keeps_ties_and_skips_zero_width_candidates(compiler, sampling_manager, monkeypatch):
+    reqs = [sampling_req(compiler, sampling_manager, req_idx=i, regular_constraint=None) for i in range(4)]
+    for req, topk in zip(reqs, [0, 0, 3, -1]):
+        req.sampling_param.shm_param.top_k = req.vocab_size
+        req.sampling_param.shm_param.output_top_logprobs = topk
+    logits = torch.zeros(4, 257, device="cuda")
+    logits[0, :19] = 1.0
+    logits[1:, :20] = 1.0
+    ids = torch.full((4,), 256, dtype=torch.int64, device="cuda")
+    monkeypatch.setattr(sampling, "_random_sample", lambda *args: ids)
+    _, result = sampling.sample(logits, reqs, [256])
+    assert result.offsets == [0, 0, 0, 6, 6]
+    assert result.sampled[1:3].tolist() == [-9999.0, -9999.0]
+    reference = logits.log_softmax(dim=-1)
+    torch.testing.assert_close(result.sampled[[0, 3]], reference[[0, 3], 256])
+    candidate_ids = result.candidates[:3].long()
+    assert len(set(candidate_ids.tolist())) == 3 and (candidate_ids < 20).all()
+    torch.testing.assert_close(result.candidates[3:], reference[2, candidate_ids])
 
 
 @pytest.mark.parametrize("sampling_manager", ["cpu_counter", "pin_mem_counter", "gpu_counter"], indirect=True)

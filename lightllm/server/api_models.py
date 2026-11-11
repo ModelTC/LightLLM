@@ -208,6 +208,8 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
+    logprobs: Optional[bool] = Field(default=False, strict=True)
+    top_logprobs: Optional[int] = Field(default=None, ge=0, le=20, strict=True)
     user: Optional[str] = None
     response_format: Optional[ResponseFormat] = Field(
         default=None,
@@ -289,6 +291,12 @@ class ChatCompletionRequest(BaseModel):
             self.chat_template_kwargs["enable_thinking"] = self.chat_template_kwargs["thinking"]
         return self
 
+    @model_validator(mode="after")
+    def validate_logprobs(self):
+        if self.top_logprobs is not None and self.logprobs is not True:
+            raise ValueError("top_logprobs requires logprobs=true")
+        return self
+
 
 class PromptTokensDetails(BaseModel):
     cached_tokens: int = 0
@@ -315,9 +323,25 @@ class ChatMessage(BaseModel):
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
 
 
+class ChatTopLogprob(BaseModel):
+    token: str
+    logprob: float
+    bytes: Optional[List[int]]
+
+
+class ChatTokenLogprob(ChatTopLogprob):
+    top_logprobs: List[ChatTopLogprob]
+
+
+class ChatLogprobs(BaseModel):
+    content: Optional[List[ChatTokenLogprob]] = None
+    reasoning_content: Optional[List[ChatTokenLogprob]] = None
+
+
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
+    logprobs: Optional[ChatLogprobs] = None
     finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
 
 
@@ -345,6 +369,7 @@ class DeltaMessage(BaseModel):
 class ChatCompletionStreamResponseChoice(BaseModel):
     index: int
     delta: DeltaMessage
+    logprobs: Optional[ChatLogprobs] = None
     finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
 
 
