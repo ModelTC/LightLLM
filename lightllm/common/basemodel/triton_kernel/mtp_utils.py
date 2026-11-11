@@ -185,6 +185,65 @@ def mtp_verify(
 
 
 @triton.jit
+def _build_dspark_draft_rows_kernel(
+    starts,
+    accepted,
+    next_token_ids,
+    req_idx,
+    seq_len,
+    position_delta,
+    shared_seq_len,
+    radix_node_id,
+    draft_token_ids,
+    draft_req_idx,
+    draft_seq_len,
+    draft_position_delta,
+    draft_shared_seq_len,
+    draft_radix_node_id,
+    num_rows,
+    mask_token_id,
+    BLOCK_SIZE: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    rows = tl.program_id(0) * TILE + tl.arange(0, TILE)
+    valid = rows < num_rows
+    req = rows // BLOCK_SIZE
+    position = rows % BLOCK_SIZE
+    tail = tl.load(starts + req, valid, 0) + tl.load(accepted + req, valid, 0) - 1
+    anchor = tl.load(next_token_ids + tail, valid & (position == 0), 0)
+    tl.store(draft_token_ids + rows, tl.where(position == 0, anchor, mask_token_id), valid)
+    tl.store(draft_req_idx + rows, tl.load(req_idx + tail, valid, 0), valid)
+    tl.store(draft_seq_len + rows, tl.load(seq_len + tail, valid, 0) + position + 1, valid)
+    tl.store(draft_position_delta + rows, tl.load(position_delta + tail, valid, 0), valid)
+    tl.store(draft_shared_seq_len + rows, tl.load(shared_seq_len + tail, valid, 0), valid)
+    tl.store(draft_radix_node_id + rows, tl.load(radix_node_id + tail, valid, 0), valid)
+
+
+def build_dspark_draft_rows(
+    starts: torch.Tensor,
+    accepted: torch.Tensor,
+    next_token_ids: torch.Tensor,
+    req_idx: torch.Tensor,
+    seq_len: torch.Tensor,
+    position_delta: torch.Tensor,
+    shared_seq_len: torch.Tensor,
+    radix_node_id: torch.Tensor,
+    block_size: int,
+    mask_token_id: int,
+):
+    """Expand each accepted target tail into one anchor-and-mask draft block."""
+    num_rows = starts.numel() * block_size
+    inputs = (next_token_ids, req_idx, seq_len, position_delta, shared_seq_len, radix_node_id)
+    outputs = tuple(tensor.new_empty((num_rows,)) for tensor in inputs)
+    if num_rows:
+        tile = 128
+        _build_dspark_draft_rows_kernel[(triton.cdiv(num_rows, tile),)](
+            starts, accepted, *inputs, *outputs, num_rows, mask_token_id, block_size, tile, num_warps=4
+        )
+    return outputs
+
+
+@triton.jit
 def _fwd_kernel_mtp_scatter_next_token_ids(
     req_to_next_token_ids,
     req_to_next_token_ids_stride,

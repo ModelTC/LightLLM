@@ -6,6 +6,7 @@ from contextlib import nullcontext
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.triton_kernel.mtp_utils import build_dspark_draft_rows
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import (
@@ -93,8 +94,6 @@ class DSparkProposer(BaseSpecProposer):
         assert target_model_input.b_position_delta is not None
         assert len(self.backend.draft_models) == 1
 
-        accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
-
         # target verify 的行布局和 mem_indexes 已经对应本轮所有被验证 token。
         # 仅附加 target hidden 后执行一次 draft forward，即可把这些行提交到
         # DSpark KV cache；浅副本保证 target_model_input 本身不被修改。
@@ -112,52 +111,36 @@ class DSparkProposer(BaseSpecProposer):
         # DSpark 每个请求固定展开一个完整 block。block 第一行是
         # accepted-tail anchor，其余行使用 mask token，由 parallel backbone
         # 一次并行计算；KV 位置由请求页表和序列位置确定。
-        block_input_ids = target_next_token_ids.new_full(
-            (req_num * block_size,),
-            fill_value=draft_model.mask_token_id,
-        )
-        block_input_ids[::block_size] = target_next_token_ids.index_select(0, accepted_tail_rows)
-
-        block_offsets = torch.arange(
-            block_size,
-            dtype=target_model_input.b_seq_len.dtype,
-            device=target_next_token_ids.device,
-        )
         draft_input = copy.copy(target_model_input)
-        draft_input.input_ids = block_input_ids
+        (
+            draft_input.input_ids,
+            draft_input.b_req_idx,
+            draft_input.b_seq_len,
+            draft_input.b_position_delta,
+            draft_input.b_shared_seq_len,
+            draft_input.b_shared_radix_node_id,
+        ) = build_dspark_draft_rows(
+            b_req_mtp_start_loc,
+            accept_len,
+            target_next_token_ids,
+            target_model_input.b_req_idx,
+            target_model_input.b_seq_len,
+            target_model_input.b_position_delta,
+            target_model_input.b_shared_seq_len,
+            target_model_input.b_shared_radix_node_id,
+            block_size,
+            draft_model.mask_token_id,
+        )
         draft_input.mtp_draft_input_hiddens = None
         draft_input.total_token_num = req_num * block_size
         draft_input.batch_size = draft_input.total_token_num
         draft_input.max_q_seq_len = 1
         draft_input.max_kv_seq_len = target_model_input.max_kv_seq_len + block_size
-        draft_input.b_req_idx = (
-            target_model_input.b_req_idx.index_select(0, accepted_tail_rows).repeat_interleave(block_size).contiguous()
-        )
         draft_input.b_mtp_index = g_pin_mem_manager.get_const_gpu_tensor(
             key="dspark_decode_b_mtp_index",
             shape=draft_input.b_req_idx.shape,
             fill_value=0,
             dtype=target_model_input.b_mtp_index.dtype,
-        )
-        draft_input.b_seq_len = (
-            (target_model_input.b_seq_len.index_select(0, accepted_tail_rows)[:, None] + block_offsets[None, :] + 1)
-            .reshape(-1)
-            .contiguous()
-        )
-        draft_input.b_position_delta = (
-            target_model_input.b_position_delta.index_select(0, accepted_tail_rows)
-            .repeat_interleave(block_size)
-            .contiguous()
-        )
-        draft_input.b_shared_seq_len = (
-            target_model_input.b_shared_seq_len.index_select(0, accepted_tail_rows)
-            .repeat_interleave(block_size)
-            .contiguous()
-        )
-        draft_input.b_shared_radix_node_id = (
-            target_model_input.b_shared_radix_node_id.index_select(0, accepted_tail_rows)
-            .repeat_interleave(block_size)
-            .contiguous()
         )
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(draft_input.batch_size)]
         if timelog is not None:
