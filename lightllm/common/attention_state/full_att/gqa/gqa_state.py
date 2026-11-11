@@ -181,7 +181,7 @@ class GQAFullAttentionState(FullAttentionState):
     def check_execution(self, caps, execution):
         from lightllm.common.attention.api import CapabilityResult
 
-        if caps.platform not in (Platform.CUDA, Platform.MUSA, Platform.ASCEND, Platform.CPU):
+        if caps.platform not in (Platform.CUDA, Platform.CPU):
             return CapabilityResult.reject("GQA state operations are unavailable on this platform")
         if caps.platform is not Platform.CUDA and execution.transfer_paths:
             return CapabilityResult.reject("GQA CPU/DP/PD transfer operations currently require CUDA")

@@ -10,8 +10,6 @@ class CudaRuntime(DeviceRuntime):
 
     def __init__(self, device):
         super().__init__(device, torch.cuda)
-        if getattr(torch.version, "hip", None):
-            self.platform = Platform.ROCM
 
     def capture_graph(self, graph, *, pool=None, memory_saver=None):
         if memory_saver is not None:

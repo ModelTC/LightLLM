@@ -128,23 +128,13 @@ def select_attention_backend(*, family, phase, model, requested="auto", candidat
             },
             AttentionFamily.KDA: {"None": {"triton": "backends.kda.triton.backend:KDALinearAttBackend"}},
         }
-        if caps.platform is Platform.MUSA:
-            tables = {AttentionFamily.DENSE: {"None": {"triton": "backends.dense.triton.musa:MusaTritonAttBackend"}}}
-        elif caps.platform is Platform.ASCEND:
-            tables = {
-                AttentionFamily.DENSE: {"None": {"torch_npu": "backends.dense.torch_npu.backend:TorchNpuAttBackend"}}
-            }
-        elif caps.platform is not Platform.CUDA:
+        if caps.platform is not Platform.CUDA:
             tables = {}
         candidates = tables.get(family, {})
     encoding = "None" if family in (AttentionFamily.GDN, AttentionFamily.KDA) else args.llm_kv_type
     available = candidates.get(encoding, {})
     if priority is None:
-        if caps.platform is Platform.ASCEND:
-            priority = ["torch_npu"]
-        elif caps.platform is Platform.MUSA:
-            priority = ["triton"]
-        elif family is AttentionFamily.GDN:
+        if family is AttentionFamily.GDN:
             priority = ["flashqla", "triton"] if phase is AttentionPhase.PREFILL else ["triton"]
         elif family is AttentionFamily.KDA:
             priority = ["triton"]

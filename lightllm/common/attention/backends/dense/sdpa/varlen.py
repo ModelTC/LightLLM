@@ -6,7 +6,7 @@ from lightllm.common.attention.backends.dense.varlen import BaseVarlenAttentionB
 
 class SdpaVarlenAttentionBackend(BaseVarlenAttentionBackend):
     provider = "sdpa"
-    supported_platforms = frozenset({Platform.CPU, Platform.CUDA, Platform.ROCM, Platform.MUSA, Platform.ASCEND})
+    supported_platforms = frozenset({Platform.CPU, Platform.CUDA})
 
     def forward(self, inputs, *, out):
         q, k, v, cu_seqlens, max_seqlen = inputs

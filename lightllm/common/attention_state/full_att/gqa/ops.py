@@ -39,6 +39,6 @@ class TorchKVOperations:
 def get_kv_operations(runtime):
     if runtime.platform is Platform.CUDA:
         return TritonKVOperations
-    if runtime.platform in (Platform.CPU, Platform.MUSA, Platform.ASCEND):
+    if runtime.platform is Platform.CPU:
         return TorchKVOperations
     raise ValueError(f"GQA KV writes are not implemented on {runtime.platform.value}")
