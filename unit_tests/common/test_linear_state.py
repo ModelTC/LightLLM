@@ -85,11 +85,10 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
         if mode == "replay":
             state.cursors[dst] = 3
         restore()
+        actual_conv = state.conv_state[:, dst, ..., :3]
         if mode == "replay":
-            actual = state.get_accepted_state(dst)
-            actual_conv, actual_ssm = actual.conv, actual.ssm
+            actual_ssm = state.ssm_state[:, dst]
         else:
-            actual_conv = state.conv_state[:, dst, ..., :3]
             actual_ssm = state.ssm_state[:, dst * (state.mtp_step + 1)]
         torch.testing.assert_close(actual_conv, expected_conv, rtol=0, atol=0)
         torch.testing.assert_close(actual_ssm, expected_ssm, rtol=2e-5, atol=2e-5)
@@ -116,7 +115,7 @@ def copy_on_cpu(*, copies):
 @pytest.mark.parametrize("mode", ["native", "replay"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("destination", ["cpu", "cuda"])
-def test_checkpoint_batch_export(runtime_start_args, monkeypatch, cls, mode, dtype, destination):
+def test_checkpoint_batch_export(runtime_start_args, cls, mode, dtype, destination):
     state, _, _ = make_state(cls, mode, 2, dtype)
     state.initialize_page_pools(3, device=destination)
     state.conv_state.copy_(torch.arange(5, device="cuda").to(torch.bfloat16))
@@ -144,14 +143,6 @@ def test_checkpoint_batch_export(runtime_start_args, monkeypatch, cls, mode, dty
     before = state.ssm_state.clone()
     history = getattr(state, "runtime", state)
     cursors = history.cursors.clone() if mode == "replay" else None
-
-    def no_snapshot(*args):
-        raise AssertionError("batch export must write directly to the destination")
-
-    if mode == "replay":
-        monkeypatch.setattr(state, "get_accepted_state", no_snapshot)
-        if history is not state:
-            monkeypatch.setattr(history, "get_accepted_state", no_snapshot)
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
@@ -169,11 +160,10 @@ def test_checkpoint_batch_export(runtime_start_args, monkeypatch, cls, mode, dty
         target.mtp_state_index.fill_(2)
     target.copy_runtime_state_from_dp(requests, [0, 1, 2], state)
     for req, (conv, ssm) in enumerate(expected):
+        actual_conv = target.conv_state[:, req, :, : target.config.conv_width]
         if mode == "replay":
-            actual = target.get_accepted_state(req)
-            actual_conv, actual_ssm = actual.conv, actual.ssm
+            actual_ssm = target.ssm_state[:, req]
         else:
-            actual_conv = target.conv_state[:, req, :, : target.config.conv_width]
             actual_ssm = target.ssm_state[:, req * (target.mtp_step + 1)]
         torch.testing.assert_close(actual_conv, conv, atol=0, rtol=0)
         torch.testing.assert_close(actual_ssm, ssm, atol=0, rtol=0)

@@ -24,11 +24,9 @@ def _assert_received_manager_roundtrip(payload, state_name, mode, expected):
     block = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
     state.write_to_pd_page(1, block, 0, 8, layout)
     state.read_from_pd_page(block, 2, 0, 8, layout)
-    if hasattr(state, "get_accepted_state"):
-        actual = state.get_accepted_state(2)
-    else:
-        width = state.config.conv_width
-        actual = (state.conv_state[:, 2, :, :width], state.ssm_state[:, 2 * (state.mtp_step + 1)])
+    width = state.config.conv_width
+    ssm_index = 2 if mode == "replay" else 2 * (state.mtp_step + 1)
+    actual = (state.conv_state[:, 2, :, :width], state.ssm_state[:, ssm_index])
     for tensor, values in zip(actual, expected):
         torch.testing.assert_close(tensor, torch.tensor(values, dtype=tensor.dtype, device="cuda"), rtol=0, atol=0)
     assert state.mtp_state_index[2] == 0
@@ -95,7 +93,7 @@ def test_pd_export_copy_keeps_worker_pools_and_runtime_identity(cls, mode):
 @pytest.mark.parametrize("mode", ["native", "replay"])
 @pytest.mark.parametrize("fail_serialization", [False, True])
 def test_shared_attention_state_roundtrip_preserves_worker_resources(
-    monkeypatch, pd_receiver, cls, mode, fail_serialization
+    runtime_start_args, monkeypatch, pd_receiver, cls, mode, fail_serialization
 ):
     state, resources, _ = make_state(cls=cls, mode=mode)
     state.initialize_page_pools(big_page_capacity=2, small_page_capacity=2)

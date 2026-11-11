@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from functools import lru_cache
 from math import prod
-from typing import NamedTuple
 
 import torch
 import triton
@@ -29,11 +28,6 @@ from ..transfer_utils import bounded_att_buffer_copies
 from .gdn_pages_pool import GDNPagesPool
 
 logger = init_logger(__name__)
-
-
-class _AcceptedTensors(NamedTuple):
-    conv: torch.Tensor
-    ssm: torch.Tensor
 
 
 class ReplayGDNState(BoundedAttentionState):
@@ -239,10 +233,6 @@ class ReplayGDNState(BoundedAttentionState):
             return
         self.commit_accepted(self.mtp_state_index, req_indices, accepted_steps)
 
-    def get_accepted_state(self, req_idx: int) -> _AcceptedTensors:
-        """返回已接受 Conv 窗口和物化 SSM，不改写 canonical state。"""
-        return _AcceptedTensors(self._accepted_conv(req_idx), self.accepted_ssm(req_idx))
-
     # ========================================================================
     # 三、CPU Cache 数据交换
     # ========================================================================
@@ -431,17 +421,6 @@ class ReplayGDNState(BoundedAttentionState):
     # ========================================================================
     # 六、Replay history
     # ========================================================================
-
-    def finish_prefill(self, logical_layer_id: int, reqs: torch.Tensor) -> None:
-        """最后一层把已接受前缀整段压进 SSM。"""
-
-        layers = () if self.config is None else self.config.logical_layer_ids
-        if not layers or logical_layer_id != layers[-1] or reqs.numel() == 0:
-            return
-        if self.ssm_state.is_cuda:
-            self.merge_accepted_updates(reqs)
-        else:
-            self.clear_history(reqs)
 
     def finish_decode_token(self, logical_layer_id: int, reqs: torch.Tensor) -> None:
         """最后一层记下这 1 个 token。前缀放不下时，折回发生在下一次 replay kernel 里。"""
@@ -650,15 +629,6 @@ class ReplayGDNState(BoundedAttentionState):
             "conv": TensorField(tensor=conv, axes=("layer", "channel", "window")),
             "ssm": TensorField(tensor=ssm, axes=("layer", "head", "key_dim", "value_dim")),
         }
-
-    def _accepted_conv(self, req_idx: int) -> torch.Tensor:
-        """取出该请求已接受的 Conv 窗口，不包含 MTP 候选区。"""
-        width = self.config.conv_width
-        conv = self.conv_state[:, req_idx]
-        if self.mtp_state_index is None:
-            return conv[:, :, :width]
-        offset = self.mtp_state_index[req_idx]
-        return conv.index_select(-1, torch.arange(width, device=conv.device) + offset)
 
     def _materialize_accepted(
         self,

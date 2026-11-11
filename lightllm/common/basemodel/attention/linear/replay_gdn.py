@@ -118,7 +118,6 @@ class ReplayGDNPrefillAttState(BasePrefillAttState):
             conv_states = conv_states[:, :, : -backend.mtp_step]
         mixed_qkv, z, b, a = _split_qkvzba(backend, params["mixed_qkvzba"])
         core_attn_out = self._prefill(mixed_qkv, conv_states, ssm_states, a, b, layer_weight)
-        state.finish_prefill(layer_num, self.b_conv_buffer_idx)
         return core_attn_out, z
 
     def _prefill(self, mixed_qkv, conv_states, ssm_states, a, b, layer_weight):

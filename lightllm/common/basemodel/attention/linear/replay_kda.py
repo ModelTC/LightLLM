@@ -123,7 +123,6 @@ class ReplayKDAPrefillAttState(BasePrefillAttState):
             lower_bound=backend.lower_bound,
         )
         ssm_states[self.b_ssm_buffer_idx] = final_state.to(ssm_states.dtype, copy=False)
-        state.finish_prefill(layer_num, self.b_conv_buffer_idx)
         return output
 
 
