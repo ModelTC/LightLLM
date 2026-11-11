@@ -1,6 +1,7 @@
 import torch.multiprocessing as mp
 import random
-from typing import List, Tuple
+from typing import List, Tuple, Union
+from numpy import ndarray
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.log_utils import init_logger
@@ -80,20 +81,17 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         if start_index >= end_index:
             return
 
-        # Copy the ready range once, then split the host indices into transfer pages.
+        # Keep the copied indices in their native dtype through the local IPC queues.
         mem_indexes = (
-            self.model.req_manager.req_to_token_indexs[req_obj.req_idx, start_index:end_index].detach().cpu().tolist()
+            self.model.req_manager.req_to_token_indexs[req_obj.req_idx, start_index:end_index].detach().cpu().numpy()
         )
-        single_page = end_index - start_index <= page_size
         trans_task_list: List[PDChunckedTransTask] = []
         for page_start in range(start_index, end_index, page_size):
             page_end = min(page_start + page_size, end_index)
             trans_task_list.append(
                 self._create_pd_trans_task(
                     req_obj=req_obj,
-                    mem_indexes=(
-                        mem_indexes if single_page else mem_indexes[page_start - start_index : page_end - start_index]
-                    ),
+                    mem_indexes=mem_indexes[page_start - start_index : page_end - start_index],
                     kv_start_index=page_start,
                     kv_end_index=page_end,
                 )
@@ -123,7 +121,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
     def _create_pd_trans_task(
         self,
         req_obj: InferReq,
-        mem_indexes: List[int],
+        mem_indexes: Union[List[int], ndarray],
         kv_start_index: int,
         kv_end_index: int,
         page_kind: str = "kv",

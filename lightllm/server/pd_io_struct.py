@@ -3,7 +3,8 @@ import enum
 import time
 import copy
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
+from numpy import ndarray
 from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from fastapi import WebSocket
 
@@ -325,7 +326,7 @@ class PDChunckedTransTask:
     src_device_id: Optional[int]  # 传输设备 id
     dst_device_id: Optional[int]  # 接收设备 id
 
-    mem_indexes: List[int]
+    mem_indexes: Union[List[int], ndarray]
 
     prefill_agent_name: Optional[str]
     prefill_agent_metadata: Optional[bytes]

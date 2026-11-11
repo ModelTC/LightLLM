@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 import pytest
 
@@ -56,7 +57,7 @@ def test_pd_prefill_reads_ready_kv_indices_once_per_chunk(monkeypatch):
     )
 
     reads, tasks = [], []
-    indices = torch.arange(20).flip(0).view(1, -1)
+    indices = torch.arange(20, dtype=torch.int32).flip(0).view(1, -1)
 
     class IndexTable:
         def __getitem__(self, key):
@@ -102,7 +103,9 @@ def test_pd_prefill_reads_ready_kv_indices_once_per_chunk(monkeypatch):
         (16, 17),
         (17, 17),
     ]
-    assert [task.mem_indexes for task in tasks] == [[15, 14, 13, 12], [11, 10, 9, 8], [7, 6, 5, 4], [3], []]
+    assert all(task.mem_indexes.dtype == np.int32 for task in tasks[:-1])
+    assert [task.mem_indexes.tolist() for task in tasks[:-1]] == [[15, 14, 13, 12], [11, 10, 9, 8], [7, 6, 5, 4], [3]]
+    assert tasks[-1].mem_indexes == []
     assert [task.first_gen_token_id for task in tasks] == [None, None, None, None, 17]
     assert tasks[-1].page_kind == "att_state"
     assert tasks[-1].first_gen_token_logprob == -0.2

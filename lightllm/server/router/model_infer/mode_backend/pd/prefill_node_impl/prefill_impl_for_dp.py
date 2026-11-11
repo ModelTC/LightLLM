@@ -1,5 +1,6 @@
 import torch.multiprocessing as mp
-from typing import List, Tuple
+from typing import List, Tuple, Union
+from numpy import ndarray
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.utils.log_utils import init_logger
 from .prefill_impl import PDChunkedPrefillForPrefillNode, PDChunckedTransTask
@@ -31,7 +32,12 @@ class PDDPChunkedForPrefillNode(DPChunkedPrefillBackend):
         )
 
     def _create_pd_trans_task(
-        self, req_obj: InferReq, mem_indexes: List[int], kv_start_index: int, kv_end_index: int, page_kind: str = "kv"
+        self,
+        req_obj: InferReq,
+        mem_indexes: Union[List[int], ndarray],
+        kv_start_index: int,
+        kv_end_index: int,
+        page_kind: str = "kv",
     ) -> PDChunckedTransTask:
         return PDChunkedPrefillForPrefillNode._create_pd_trans_task(
             self,
