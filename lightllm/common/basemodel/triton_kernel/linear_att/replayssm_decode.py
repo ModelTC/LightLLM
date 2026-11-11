@@ -115,7 +115,7 @@ def _decode_replay(
     key_slot = req * KH + hv // (HV // KH)
     sp = State + slot * K * V + kk[:, None] * V + vv[None, :]
     state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
-    # 和半区方案一样：放不下时先折回，再在同一 kernel 里重放新 token。各层只读 cursor。
+    # 放不下时先折回，再在同一 kernel 里重放新 token。各层只读 cursor。
     if n + (end - start) > L:
         state = _apply_accepted_prefix(state, RawKeys, RawValues, Gates, Betas, key_slot, slot, kk, vv, n, K, V, L, KDA)
         state = state.to(State.dtype.element_ty).to(tl.float32)
@@ -158,8 +158,6 @@ def _decode_replay(
             start,
             state,
         )
-    else:
-        projections, tt = None, None
 
     if PRECOMPUTE_PROJECTIONS and KDA:
         _kda_precomputed_window(
@@ -276,8 +274,6 @@ def _decode_replay(
             K,
             V,
             L,
-            PRECOMPUTE_PROJECTIONS,
-            BW,
             KDA,
             LOWER,
             BK,
@@ -289,11 +285,9 @@ def _decode_replay(
             kk,
             ll,
             n,
-            projections,
             slot,
             start,
             state,
-            tt,
             vv,
         )
 
@@ -709,8 +703,6 @@ def _replay_each_token(
     K: tl.constexpr,
     V: tl.constexpr,
     L: tl.constexpr,
-    PRECOMPUTE_PROJECTIONS: tl.constexpr,
-    BW: tl.constexpr,
     KDA: tl.constexpr,
     LOWER: tl.constexpr,
     BK: tl.constexpr,
@@ -722,14 +714,12 @@ def _replay_each_token(
     kk,
     ll,
     n,
-    projections,
     slot,
     start,
     state,
-    tt,
     vv,
 ):
-    # KDA、inline 以及不满足 precompute 条件的路径使用逐 token 递推。
+    # 逐 token 递推。precompute 走单独的窗口 kernel，不会进这里。
     history = ll < n
     keys = tl.load(
         Keys + (key_slot * L) * K + ll[:, None] * K + kk[None, :],
@@ -777,12 +767,8 @@ def _replay_each_token(
             keys *= tl.exp(g)[None, :]
             hk = _history_coeff(keys, k, BK)
             hq = _history_coeff(keys, q, BK)
-            if PRECOMPUTE_PROJECTIONS:
-                checkpoint_sk = tl.sum(tl.where((tt == BW + t - start)[:, None], projections, 0), 0)
-                checkpoint_sq = tl.sum(tl.where((tt == t - start)[:, None], projections, 0), 0)
-            else:
-                checkpoint_sk = tl.sum(state * (k * tl.exp(total_g))[:, None], axis=0)
-                checkpoint_sq = tl.sum(state * (q * tl.exp(total_g))[:, None], axis=0)
+            checkpoint_sk = tl.sum(state * (k * tl.exp(total_g))[:, None], axis=0)
+            checkpoint_sq = tl.sum(state * (q * tl.exp(total_g))[:, None], axis=0)
             sk = checkpoint_sk + _apply_deltas(hk, deltas, L, BV)
             sq = checkpoint_sq + _apply_deltas(hq, deltas, L, BV)
         else:

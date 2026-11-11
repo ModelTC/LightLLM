@@ -8,7 +8,7 @@ from __future__ import annotations
 import torch
 import triton
 
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import _decode_replay
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_decode import _decode_replay
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import _replay_config, resolve_run_config
 
 

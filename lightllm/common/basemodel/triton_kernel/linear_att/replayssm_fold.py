@@ -26,11 +26,11 @@ def _fold_prefix(
     BK: tl.constexpr,
     BV: tl.constexpr,
     KDA: tl.constexpr,
-    STRIDE_LAYER: tl.constexpr = 0,
-    STRIDE_SLOT: tl.constexpr = 0,
-    STRIDE_HEAD: tl.constexpr = 0,
-    STRIDE_K: tl.constexpr = 0,
-    STRIDE_V: tl.constexpr = 1,
+    STRIDE_LAYER: tl.constexpr,
+    STRIDE_SLOT: tl.constexpr,
+    STRIDE_HEAD: tl.constexpr,
+    STRIDE_K: tl.constexpr,
+    STRIDE_V: tl.constexpr,
 ):
     # 将 cursor 指向的 accepted history 写回 canonical state。
     iv, row, lh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -44,20 +44,16 @@ def _fold_prefix(
     # history 是连续分配的。canonical SSM 可能带大于 int32 的层距，地址必须用真实 stride 的 int64。
     layer64 = linear_layer_idx.to(tl.int64)
     head64 = head.to(tl.int64)
-    stride_layer: tl.constexpr = STRIDE_LAYER if STRIDE_LAYER != 0 else SLOTS * HV * K * V
-    stride_slot: tl.constexpr = STRIDE_SLOT if STRIDE_SLOT != 0 else HV * K * V
-    stride_head: tl.constexpr = STRIDE_HEAD if STRIDE_HEAD != 0 else K * V
-    stride_k: tl.constexpr = STRIDE_K if STRIDE_K != 0 else V
     slot = (linear_layer_idx * SLOTS + req) * HV + head
     key_slot = (linear_layer_idx * SLOTS + req) * KH + head // (HV // KH)
     kk = tl.arange(0, BK)
     vv = iv * BV + tl.arange(0, BV)
     sp = (
         State
-        + layer64 * stride_layer
-        + req * stride_slot
-        + head64 * stride_head
-        + kk[:, None].to(tl.int64) * stride_k
+        + layer64 * STRIDE_LAYER
+        + req * STRIDE_SLOT
+        + head64 * STRIDE_HEAD
+        + kk[:, None].to(tl.int64) * STRIDE_K
         + vv[None, :].to(tl.int64) * STRIDE_V
     )
     state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
