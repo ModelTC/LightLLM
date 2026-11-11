@@ -24,7 +24,7 @@ def rope_reference(x, freqs, positions):
 
 
 @pytest.mark.parametrize("tokens,heads,dim_stride", [(0, 8, 1), (1, 3, 1), (7, 16, 2), (129, 64, 1)])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
 def test_inverse_rotary_emb_strides_and_unwritten_channels(tokens, heads, dim_stride, dtype):
     freqs, positions = freqs_and_positions(tokens)
     padded = torch.randn(tokens, heads + 2, 512 * dim_stride, device="cuda", dtype=dtype)
@@ -34,7 +34,7 @@ def test_inverse_rotary_emb_strides_and_unwritten_channels(tokens, heads, dim_st
     rotation = freqs[positions]
     # Independent table strides: complex real view for cos, contiguous sin.
     inverse_rotary_emb(attention[..., -64:], rotation.real, rotation.imag.contiguous())
-    tolerance = 0.01 if dtype == torch.bfloat16 else 1e-5
+    tolerance = 0.01 if dtype != torch.float32 else 1e-5
     torch.testing.assert_close(attention[..., -64:], expected, rtol=tolerance, atol=tolerance)
     torch.testing.assert_close(attention[..., :-64], before[:, :heads, ::dim_stride][..., :-64], rtol=0, atol=0)
     torch.testing.assert_close(padded[:, heads:], before[:, heads:], rtol=0, atol=0)
