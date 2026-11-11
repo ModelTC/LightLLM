@@ -127,10 +127,12 @@ class DiversehBackend(ChunkedPrefillBackend):
         # 一些可以复用的通用功能函数
 
     def _diverse_pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
+        # TODO: beam_prefill 的 event.synchronize() 与这里的 wait_stream、current_stream().synchronize()
+        # 同步点偏多，以后可以尝试减少这些同步点来提升效率。
         # diverse 会把 master/slave 已有前缀重新指向共享 KV，属于旧索引重写。
-        # 先在默认流等待上一轮模型读取结束，随后 CPU 缓存模式的批量上传、纯 GPU
-        # 模式的直接写入都沿默认流排序；普通请求仅追加新索引，不需要这一等待。
-        torch.cuda.default_stream().wait_stream(g_infer_context.get_overlap_stream())
+        # 先在当前流等待上一轮模型读取结束，随后 CPU 缓存模式的批量上传、纯 GPU
+        # 模式的直接写入都沿当前流排序；普通请求仅追加新索引，不需要这一等待。
+        torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
         update_func_objs: List[InferReqUpdatePack] = []
         # 通用状态预先填充
         is_master_in_dp = self.is_master_in_dp
