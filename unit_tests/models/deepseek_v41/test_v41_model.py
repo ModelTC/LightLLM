@@ -272,6 +272,8 @@ def test_q_rope_writes_padded_buffer_without_per_head_norm(tokens, heads, positi
     torch.testing.assert_close(padded[:, heads:], expected[:, heads:], atol=0, rtol=0)
     # RoPE kernels can choose different FP32 FMA order at BF16 rounding boundaries.
     torch.testing.assert_close(padded[:, :heads, 448:], expected[:, :heads, 448:], atol=0.015625, rtol=0.01)
+    fused_q_norm_rope(q, q, 1e-20, freqs, positions, apply_norm=False)
+    torch.testing.assert_close(q, padded[:, :heads], atol=0, rtol=0)
 
 
 def test_pure_swa_uses_base_rope_while_compressed_attention_keeps_yarn():

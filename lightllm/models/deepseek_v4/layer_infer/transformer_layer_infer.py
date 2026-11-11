@@ -380,7 +380,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             q[:, self.tp_q_head_num_ :, :].zero_()
         fused_q_norm_rope(
             q_in,
-            q[:, : self.tp_q_head_num_, :],
+            q if q is q_in else q[:, : self.tp_q_head_num_, :],
             self.eps_,
             self.freqs_cis,
             infer_state.position_ids,

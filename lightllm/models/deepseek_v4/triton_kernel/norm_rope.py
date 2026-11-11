@@ -23,6 +23,7 @@ def _q_norm_rope_kernel(
     NUM_HEADS: tl.constexpr,
     EPS: tl.constexpr,
     APPLY_NORM: tl.constexpr,
+    COPY_NOPE: tl.constexpr,
     BLOCK_R: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
@@ -32,16 +33,19 @@ def _q_norm_rope_kernel(
     head = row % NUM_HEADS
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
-    x = tl.load(
-        q_input + batch[:, None] * q_input_stride + head[:, None] * 512 + dim[None, :],
-        mask=row[:, None] < num_rows,
-        other=0,
-    ).to(tl.float32)
-    norm = tl.rsqrt(tl.sum(x * x, axis=1) / 512 + EPS) if APPLY_NORM else tl.full((BLOCK_R,), 1.0, tl.float32)
-    # Main Q rounds RMSNorm to BF16 before applying RoPE.
-    x = (x * norm[:, None]).to(tl.bfloat16).to(tl.float32)
+    norm = tl.full((BLOCK_R,), 1.0, tl.float32)
     out_base = q_output + batch[:, None] * q_output_stride + head[:, None] * 512
-    tl.store(out_base + dim[None, :], x, mask=(row[:, None] < num_rows) & (dim[None, :] < 448))
+    if COPY_NOPE:
+        x = tl.load(
+            q_input + batch[:, None] * q_input_stride + head[:, None] * 512 + dim[None, :],
+            mask=row[:, None] < num_rows,
+            other=0,
+        ).to(tl.float32)
+        if APPLY_NORM:
+            norm = tl.rsqrt(tl.sum(x * x, axis=1) / 512 + EPS)
+        # Main Q rounds RMSNorm to BF16 before applying RoPE.
+        x = (x * norm[:, None]).to(tl.bfloat16).to(tl.float32)
+        tl.store(out_base + dim[None, :], x, mask=(row[:, None] < num_rows) & (dim[None, :] < 448))
     pair = tl.arange(0, 32)
     rope_dim = tl.arange(0, 64)
     rope_base = q_input + batch[:, None] * q_input_stride + head[:, None] * 512 + 448
@@ -182,10 +186,15 @@ def fused_q_norm_rope(q_input, q_output, eps, freqs_cis, position_ids, apply_nor
 
     freqs_cis is contiguous complex64 [max_position, 32]; position_ids is int32/int64 [T].
     RMSNorm rounds to BF16 before interleaved RoPE on the last 64 dimensions.
+    With an in-place BF16 output and no RMSNorm, only the rotary dimensions are written.
     """
     rows = q_input.shape[0] * q_input.shape[1]
     if rows:
-        block_r, warps = (1, 1) if rows <= 256 else (4, 2)
+        copy_nope = apply_norm or q_input is not q_output or q_input.dtype != torch.bfloat16
+        if rows <= 256:
+            block_r, warps = 1, 1
+        else:
+            block_r, warps = (4, 2) if copy_nope else (16, 4)
         _q_norm_rope_kernel[(triton.cdiv(rows, block_r),)](
             q_input,
             q_output,
@@ -197,6 +206,7 @@ def fused_q_norm_rope(q_input, q_output, eps, freqs_cis, position_ids, apply_nor
             NUM_HEADS=q_input.shape[1],
             EPS=float(eps),
             APPLY_NORM=apply_norm,
+            COPY_NOPE=copy_nope,
             BLOCK_R=block_r,
             num_warps=warps,
             num_stages=1,
