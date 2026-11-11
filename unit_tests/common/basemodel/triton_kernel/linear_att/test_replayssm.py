@@ -442,14 +442,87 @@ def test_large_bf16_state_precompute_matches_inline():
     check(16, 2, 4)
 
 
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("capacity", [4, 8])
+def test_overflow_folds_inside_replay_for_gdn_and_kda(kda, dtype, capacity):
+    # 放不下时，GDN 和 KDA 都在 replay kernel 内折回。cursor 等两层都算完才改。
+    torch.manual_seed(11 + capacity + int(kda))
+    hv, kh, dim = 2, 2, 32
+    state = torch.randn(2, 2, hv, dim, dim, device="cuda", dtype=dtype) * 0.05
+    config = {"BV": 32, "num_warps": 1, "num_stages": 1}
+    backend = ReplaySSMExecutor(state, capacity, 1, dtype, num_key_heads=kh, kda=kda, run_config=config)
+    twin = ReplaySSMExecutor(state.clone(), capacity, 1, dtype, num_key_heads=kh, kda=kda, run_config=config)
+    assert backend.gates.shape[-1] == (dim if kda else capacity)
+    assert twin.write_bases.shape == backend.cursors.shape
+    reqs = torch.tensor([0], device="cuda", dtype=torch.int32)
+    alog = torch.zeros(hv, device="cuda")
+    bias = torch.zeros(hv * dim if kda else hv, device="cuda")
+    for step in range(capacity + 1):
+        q = torch.randn(1, kh, dim, device="cuda", dtype=dtype)
+        k = torch.randn_like(q)
+        v = torch.randn(1, hv, dim, device="cuda", dtype=dtype)
+        a = (torch.randn(1, hv * dim if kda else hv, device="cuda", dtype=dtype) - 1).contiguous()
+        b = torch.randn(1, hv, device="cuda", dtype=dtype)
+        if step == capacity:
+            twin.merge_accepted_updates(reqs)
+            assert int(backend.cursors[0]) == capacity
+        outs, twin_outs = [], []
+        for layer in range(2):
+            outs.append(replay_layer(backend, layer, q, k, v, a, b, alog, bias, reqs)[0])
+            twin_outs.append(replay_layer(twin, layer, q, k, v, a, b, alog, bias, reqs)[0])
+            if step == capacity:
+                assert int(backend.cursors[0]) == capacity
+                assert int(backend.write_bases[0]) == 0
+        for actual, expected in zip(outs, twin_outs):
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        backend.accept_single_token(reqs)
+        twin.accept_single_token(reqs)
+    assert int(backend.cursors[0]) == 1
+    assert int(twin.cursors[0]) == 1
+    # bf16 两条路径都先舍入到同一状态。fp32 的独立 kernel 与层内 kernel 归约顺序可差几个 ulp。
+    state_atol = 0 if dtype == torch.bfloat16 else 1e-6
+    torch.testing.assert_close(backend.ssm_state, twin.ssm_state, atol=state_atol, rtol=0)
+
+
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+def test_empty_window_keeps_cursor_for_gdn_and_kda(kda):
+    state = torch.randn(1, 3, 2, 32, 32, device="cuda")
+    backend = ReplaySSMExecutor(
+        state, 8, 4, torch.float32, num_key_heads=2, kda=kda, run_config={"BV": 32, "num_warps": 1}
+    )
+    backend.cursors[0] = 3
+    reqs = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
+    cu = torch.tensor([0, 0, 0], device="cuda", dtype=torch.int32)
+    q = torch.randn(1, 1, 2, 32, device="cuda")
+    k = torch.randn_like(q)
+    v = torch.randn(1, 1, 2, 32, device="cuda")
+    a = torch.zeros(1, 2 * 32 if kda else 2, device="cuda")
+    b = torch.zeros(1, 2, device="cuda")
+    bias = torch.zeros(2 * 32 if kda else 2, device="cuda")
+    replay_layer(backend, 0, q, k, v, a, b, bias, bias, reqs, cu)
+    assert int(backend.write_bases[0]) == 3
+    accepted = torch.tensor([-1, -1, -1], device="cuda", dtype=torch.int32)
+    backend.accept_updates(reqs, accepted)
+    assert backend.cursors.tolist() == [3, 0, 0]
+
+
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
 @pytest.mark.parametrize("capture_metadata", [False, True])
-def test_dynamic_verify_lengths_fill_history_before_folding(dtype, compute_mode, capture_metadata):
+def test_dynamic_verify_lengths_fill_history_before_folding(kda, dtype, compute_mode, capture_metadata):
     torch.manual_seed(31)
     state = (torch.randn(2, 4, 4, 128, 128, device="cuda") * 0.01).to(dtype)
     ssm_backend = ReplaySSMExecutor(
-        state, 8, 4, dtype, num_key_heads=2, compute_mode=compute_mode, run_config={"BV": 32, "num_warps": 1}
+        state,
+        8,
+        4,
+        dtype,
+        num_key_heads=2,
+        kda=kda,
+        compute_mode=compute_mode,
+        run_config={"BV": 32, "num_warps": 1},
     )
     expected = state.float().clone()
     pending = [0, 0]
@@ -459,12 +532,13 @@ def test_dynamic_verify_lengths_fill_history_before_folding(dtype, compute_mode,
     q = torch.randn(1, 8, 2, 128, dtype=dtype, device="cuda")
     k = torch.randn_like(q)
     v = torch.randn(1, 8, 4, 128, dtype=dtype, device="cuda")
-    a = torch.full((8, 4), -3.0, dtype=dtype, device="cuda")
-    b = torch.randn_like(a)
+    a = torch.full((8, 4 * 128 if kda else 4), -3.0, dtype=dtype, device="cuda")
+    b = torch.randn(8, 4, dtype=dtype, device="cuda")
     alog = torch.zeros(4, device="cuda")
+    bias = torch.zeros(4 * 128 if kda else 4, device="cuda")
 
     def forward():
-        return [replay_layer(ssm_backend, layer, q, k, v, a, b, alog, alog, reqs, cu)[0] for layer in range(2)]
+        return [replay_layer(ssm_backend, layer, q, k, v, a, b, alog, bias, reqs, cu)[0] for layer in range(2)]
 
     def step():
         positions = ssm_backend.prepare_decode(reqs, cu)
@@ -513,7 +587,7 @@ def test_dynamic_verify_lengths_fill_history_before_folding(dtype, compute_mode,
                 current = expected[layer, req].clone()
                 for j in range(width):
                     t = (0 if seq == 0 else widths[0]) + j
-                    out, current = reference(q[0, t], k[0, t], v[0, t], a[t], b[t], alog, alog, current)
+                    out, current = reference(q[0, t], k[0, t], v[0, t], a[t], b[t], alog, bias, current, kda=kda)
                     torch.testing.assert_close(outputs[layer][0, t].float(), out, atol=0.006, rtol=0.02)
                     if j + 1 == count:
                         expected[layer, req].copy_(current)
@@ -725,3 +799,37 @@ def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, sepa
     backend.merge_accepted_updates(reqs[:live])
     torch.testing.assert_close(backend.ssm_state[0, :live], expected, atol=3e-4, rtol=3e-4)
     assert torch.equal(backend.ssm_state[0, live], initial[0, live])
+
+
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+@pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
+def test_mtp_commit_keeps_folded_prefix_length(kda, compute_mode):
+    # 验证窗口放不下时，replay 先折回并把写起点记为 0。提交必须用写起点，不能再把旧 cursor 加上去。
+    torch.manual_seed(19 + int(kda))
+    hv, kh, dim = 2, 2, 32
+    dtype = torch.bfloat16
+    state = torch.randn(1, 2, hv, dim, dim, device="cuda", dtype=dtype) * 0.05
+    backend = ReplaySSMExecutor(
+        state, 4, 2, dtype, num_key_heads=kh, kda=kda, compute_mode=compute_mode, run_config={"BV": 32, "num_warps": 1}
+    )
+    reqs = torch.tensor([0], device="cuda", dtype=torch.int32)
+    indices = torch.zeros(2, device="cuda", dtype=torch.int32)
+    alog = torch.zeros(hv, device="cuda")
+    bias = torch.zeros(hv * dim if kda else hv, device="cuda")
+    cu = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
+    for step in range(3):
+        q = torch.randn(1, 2, kh, dim, device="cuda", dtype=dtype)
+        k = torch.randn_like(q)
+        v = torch.randn(1, 2, hv, dim, device="cuda", dtype=dtype)
+        a = torch.full((2, hv * dim if kda else hv), -2.0, device="cuda", dtype=dtype)
+        b = torch.randn(2, hv, device="cuda", dtype=dtype)
+        replay_layer(backend, 0, q, k, v, a, b, alog, bias, reqs, cu)
+        lengths = torch.tensor([2], device="cuda", dtype=torch.int32)
+        backend.commit_accepted(indices, reqs, lengths)
+        if step < 2:
+            assert int(backend.cursors[0]) == 2 * (step + 1)
+            assert int(backend.write_bases[0]) == 2 * step
+        else:
+            assert int(backend.write_bases[0]) == 0
+            assert int(backend.cursors[0]) == 2
+    assert torch.isfinite(backend.ssm_state).all()

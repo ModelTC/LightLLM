@@ -15,6 +15,7 @@ import triton
 
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import (
     _advance_cursor,
+    _clear_cursor_if_full,
     _fold_prefix,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
@@ -92,7 +93,6 @@ class ReplayKDAState(BoundedAttentionState):
         replay_config = dict(ssm_replay_config or {})
         capacity = int(replay_config.get("cache_len", 16))
         compute_mode = replay_config.get("compute_mode", "precompute" if mtp_step > 0 else "inline")
-        force_compress = bool(replay_config.get("force_compress", False))
         _bind_history(
             self,
             self.ssm_state,
@@ -103,7 +103,6 @@ class ReplayKDAState(BoundedAttentionState):
             gate_lower_bound,
             compute_mode,
             None,
-            force_compress,
         )
 
     def get_state_type(self) -> str:
@@ -214,11 +213,10 @@ class ReplayKDAState(BoundedAttentionState):
                 self.mtp_state_index[req_idx].fill_(0)
 
     def commit_bounded_att_state(self, req_indices: torch.Tensor, accepted_steps: torch.Tensor) -> None:
-        """提交已接受长度，再按容量或 force_compress 决定是否整段压缩。"""
+        """提交已接受长度。前缀放不下时，折回发生在下一次 replay kernel 里。"""
         if self.mtp_state_index is None:
             return
         self.commit_accepted(self.mtp_state_index, req_indices, accepted_steps)
-        self.maybe_compress_prefix(req_indices)
 
     def get_accepted_state(self, req_idx: int) -> _AcceptedTensors:
         """返回已接受 Conv 窗口和物化 SSM，不改写 canonical state。"""
@@ -417,13 +415,12 @@ class ReplayKDAState(BoundedAttentionState):
             self.compress_prefix(reqs)
 
     def finish_decode_token(self, logical_layer_id: int, reqs: torch.Tensor) -> None:
-        """最后一层记下这 1 个 token，再按容量决定是否整段压缩。"""
+        """最后一层记下这 1 个 token。前缀放不下时，折回发生在下一次 replay kernel 里。"""
 
         layers = () if self.config is None else self.config.logical_layer_ids
         if not layers or logical_layer_id != layers[-1]:
             return
         self.accept_single_token(reqs)
-        self.maybe_compress_prefix(reqs)
 
     def clear_history(self, req: int | torch.Tensor) -> None:
         """清空复用或恢复请求的临时 history，保留 canonical SSM。"""
@@ -431,8 +428,10 @@ class ReplayKDAState(BoundedAttentionState):
         if type(req) is int:
             # 标量赋值会把 CPU tensor 复制到 CUDA slot。
             self.cursors[req].zero_()
+            self.write_bases[req].zero_()
         else:
             self.cursors[req] = 0
+            self.write_bases[req] = 0
 
     def prepare_decode(self, reqs: torch.Tensor, cu_seqlens: torch.Tensor | None = None) -> torch.Tensor:
         """返回本步写入前的前缀长度。decode 不在这里修改 SSM。"""
@@ -447,6 +446,7 @@ class ReplayKDAState(BoundedAttentionState):
 
         _advance_cursor[(triton.cdiv(reqs.numel(), 256),)](
             self.cursors,
+            self.write_bases,
             reqs,
             accepted_state_indices,
             reqs.numel(),
@@ -482,14 +482,21 @@ class ReplayKDAState(BoundedAttentionState):
             self.clear_history(reqs)
 
     def maybe_compress_prefix(self, reqs: torch.Tensor) -> None:
-        """长度加上一次最大 verify_width 放不下，或 force_compress 打开时，整段压缩。"""
+        """长度加上一次最大 verify_width 放不下时，整段压缩，并在折回结束后清掉这些请求的 cursor。"""
 
         if reqs.numel() == 0 or not self.ssm_state.is_cuda:
             return
-        if self.force_compress:
-            self.compress_prefix(reqs)
-            return
         self._materialize_accepted(reqs, self.ssm_state, snapshot=False, when_full=True)
+        _clear_cursor_if_full[(triton.cdiv(reqs.numel(), 256),)](
+            self.cursors,
+            self.write_bases,
+            reqs,
+            reqs.numel(),
+            self.hold_req_id,
+            self.capacity,
+            self.verify_width,
+            256,
+        )
 
     def accepted_ssm(self, req_idx: int) -> torch.Tensor:
         """返回不修改 canonical SSM 和 history 的单请求快照。"""
@@ -524,12 +531,16 @@ class ReplayKDAState(BoundedAttentionState):
             flush_export=flush,
             output_strides=strides,
         )
+        if flush:
+            slots = torch.tensor(req_indices, dtype=torch.int64, device=device)
+            self.cursors.index_fill_(0, slots, 0)
+            self.write_bases.index_fill_(0, slots, 0)
 
     def commit_accepted(self, indices: torch.Tensor, reqs: torch.Tensor, lengths: torch.Tensor) -> None:
-        """把接受长度写入 MTP 槽位索引，并推进本请求的 replay cursor。"""
+        """把接受长度写入 MTP 槽位索引，并把 cursor 设为这次 replay 的写起点加接受长度。"""
 
         if self.verify_width > 1:
-            commit_ssm_prefix(indices, reqs, lengths, self.cursors)
+            commit_ssm_prefix(indices, reqs, lengths, self.cursors, self.write_bases)
         else:
             commit_ssm_prefix(indices, reqs, lengths)
             self.accept_updates(reqs, indices)
@@ -710,6 +721,7 @@ class ReplayKDAState(BoundedAttentionState):
 
         assert not (snapshot and flush_export), "flush export must update the canonical state"
         layers, slots, hv, k, v = self.ssm_state.shape
+        layer_stride, slot_stride, head_stride, key_stride, value_stride = self.ssm_state.stride()
         config = self.run_config or {"BV": 32, "num_warps": 4, "num_stages": 3}
         bv = config["BV"]
         _fold_prefix[(triton.cdiv(v, bv), reqs.numel(), layers * hv)](
@@ -736,6 +748,11 @@ class ReplayKDAState(BoundedAttentionState):
             OUTPUT_STRIDES=output_strides,
             WHEN_FULL=when_full,
             NEXT=self.verify_width,
+            STRIDE_LAYER=layer_stride,
+            STRIDE_SLOT=slot_stride,
+            STRIDE_HEAD=head_stride,
+            STRIDE_K=key_stride,
+            STRIDE_V=value_stride,
             num_warps=config["num_warps"],
             num_stages=config["num_stages"],
         )
@@ -788,7 +805,6 @@ def _bind_history(
     gate_lower_bound: float,
     compute_mode: str,
     run_config: dict[str, int] | None,
-    force_compress: bool = False,
 ) -> None:
     """在 owner 上创建 KDA replay 的连续前缀 history 和 cursor。"""
 
@@ -800,7 +816,6 @@ def _bind_history(
     owner.gate_lower_bound = gate_lower_bound
     owner.capacity = capacity
     owner.verify_width = verify_width
-    owner.force_compress = bool(force_compress)
     owner.compute_mode = compute_mode
     owner.run_config = run_config
     owner._config_is_fixed = run_config is not None
@@ -810,6 +825,7 @@ def _bind_history(
     assert owner.num_key_heads > 0 and hv % owner.num_key_heads == 0
     owner.hold_req_id = slots - 1
     owner.cursors = torch.zeros(slots, dtype=torch.int32, device=ssm.device)
+    owner.write_bases = torch.zeros(slots, dtype=torch.int32, device=ssm.device)
     # 输出重建用归一化 k 和 d。bf16 激活时这两份用 fp16，尾数比 bf16 多，和当前精度更好的重建缓存一致。
     # 原始 k/v 保持激活精度。g 和 beta 保持 fp32。压缩在 fp32 里从原始值折回。
     reconstruction_dtype = torch.float16 if activation_dtype == torch.bfloat16 else torch.float32

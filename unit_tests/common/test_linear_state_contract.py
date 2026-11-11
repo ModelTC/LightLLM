@@ -194,6 +194,7 @@ def test_acceptance_keeps_request_order_with_strided_inputs(device):
     owner.mtp_state_index.fill_(2)
     history = getattr(owner, "runtime", owner)
     history.cursors.fill_(8)
+    history.write_bases.copy_(history.cursors)
     reqs = torch.tensor([2, -99, 0, -99, 3, -99], device=device)[::2]
     lengths = torch.tensor([1, -99, 3, -99, 2, -99], dtype=torch.int32, device=device)[::2]
     owner.commit_accepted(owner.mtp_state_index, reqs, lengths)

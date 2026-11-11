@@ -9,6 +9,8 @@ canonical SSM.
 import triton
 import triton.language as tl
 
+from .replayssm_delta import _delta_rule_step
+
 
 @triton.jit
 def _history_coeff(rows, vec, BK: tl.constexpr):
@@ -44,6 +46,7 @@ def _decode_replay(
     Betas,
     Reqs,
     Cursors,
+    WriteBase,
     Cu,
     Out,
     SQ: tl.constexpr,
@@ -70,9 +73,8 @@ def _decode_replay(
 ):
     """执行一个请求窗口的 replay decode，并写入 history。
 
-    只把本步 token 追加到长度为 L 的连续前缀，不写 canonical SSM。
-    cursor 是已有前缀长度，本步从那里接着写。请求数属于运行时布局，
-    不应因为 eager batch 改变而形成新的 kernel 变体。
+    前缀放不下本步 token 时，先在本 kernel 里把已有前缀从原始 k/v 折进 checkpoint，
+    舍入成 SSM 的 dtype，再从这份状态重放本步。cursor 本 kernel 不修改，写起点记到 WriteBase。
     """
     iv, seq, hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     req = tl.load(Reqs + seq).to(tl.int64)
@@ -85,16 +87,37 @@ def _decode_replay(
         for t in range(start, end):
             tl.store(Out + (t * HV + hv) * V + vv, 0, vv < V)
         return
+    n = tl.load(Cursors + req)
     if start == end:
+        # 本步没有 token。写起点保持原 cursor，接受 0 个 token 时长度不变。
+        if iv == 0 and hv == 0:
+            tl.store(WriteBase + req, n)
         return
 
     kk = tl.arange(0, BK)
     ll = tl.arange(0, L)
     slot = req * HV + hv
     key_slot = req * KH + hv // (HV // KH)
-    n = tl.load(Cursors + req)
     sp = State + slot * K * V + kk[:, None] * V + vv[None, :]
     state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
+    # 和半区方案一样：放不下时先折回，再在同一 kernel 里重放新 token。各层只读 cursor。
+    if n + (end - start) > L:
+        for j in range(L):
+            active = j < n
+            raw_k = tl.load(RawKeys + (key_slot * L + j) * K + kk, active & (kk < K), 0).to(tl.float32)
+            raw_v = tl.load(RawValues + (slot * L + j) * V + vv, active & (vv < V), 0).to(tl.float32)
+            if KDA:
+                g = tl.load(Gates + (slot * L + j) * K + kk, active & (kk < K), 0).to(tl.float32)
+            else:
+                g = tl.load(Gates + slot * L + j, active, 0).to(tl.float32)
+            beta = tl.load(Betas + slot * L + j, active, 0).to(tl.float32)
+            updated = _delta_rule_step(state, raw_k, raw_v, g, beta, KDA)
+            state = tl.where(active, updated, state)
+        state = state.to(State.dtype.element_ty).to(tl.float32)
+        tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
+        n = 0
+    if iv == 0 and hv == 0:
+        tl.store(WriteBase + req, n)
 
     if PRECOMPUTE_PROJECTIONS:
         # 输出用 tf32x3 tensor core 从冻结的 checkpoint 和 history 重建。

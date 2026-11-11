@@ -319,7 +319,8 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
         )
 
 
-def test_cross_layer_fold_with_state_offset_above_int32():
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+def test_cross_layer_fold_with_state_offset_above_int32(kda):
     if torch.cuda.mem_get_info()[0] < 6 * 1024 ** 3:
         pytest.skip("large-stride regression requires 6 GiB of free device memory")
     torch.manual_seed(791)
@@ -331,15 +332,16 @@ def test_cross_layer_fold_with_state_offset_above_int32():
     sparse.copy_(dense)
     config = {"BV": 32, "num_warps": 1, "num_stages": 1}
     ssm_backends = [
-        ReplaySSMExecutor(state, 8, 4, torch.bfloat16, num_key_heads=4, run_config=config) for state in [dense, sparse]
+        ReplaySSMExecutor(state, 8, 4, torch.bfloat16, num_key_heads=4, kda=kda, run_config=config)
+        for state in [dense, sparse]
     ]
     q = torch.randn(1, 8, 4, 128, device="cuda", dtype=torch.bfloat16)
     k = torch.randn_like(q)
     v = torch.randn(1, 8, 12, 128, device="cuda", dtype=torch.bfloat16)
-    a = torch.full((8, 12), -3.0, device="cuda", dtype=torch.bfloat16)
-    beta = torch.randn_like(a)
+    a = torch.full((8, 12 * 128 if kda else 12), -3.0, device="cuda", dtype=torch.bfloat16)
+    beta = torch.randn(8, 12, device="cuda", dtype=torch.bfloat16)
     alog = torch.zeros(12, device="cuda")
-    bias = torch.zeros_like(alog)
+    bias = torch.zeros(12 * 128 if kda else 12, device="cuda")
     reqs = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
     cu = reqs.new_tensor([0, 4, 8])
 

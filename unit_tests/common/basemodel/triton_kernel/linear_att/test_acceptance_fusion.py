@@ -40,6 +40,7 @@ def make(n, width):
     args = [tensor(starts), tensor(reqs), tensor(mtps), tensor([1] * len(reqs)), width]
     ssm_backend = ReplayGDNState.__new__(ReplayGDNState)
     ssm_backend.cursors = tensor([7] * (hold + 1))
+    ssm_backend.write_bases = ssm_backend.cursors.clone()
     ssm_backend.hold_req_id = hold
     ssm_backend.capacity = max(4, triton.next_power_of_2(width))
     ssm_backend.verify_width = width
@@ -113,6 +114,8 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
             ref.mtp_state_index.fill_(-9)
             m._ssm_executor.cursors.fill_(7)
             ref._ssm_executor.cursors.fill_(7)
+            m._ssm_executor.write_bases.fill_(7)
+            ref._ssm_executor.write_bases.fill_(7)
             for step in range(24):
                 mask = []
                 for i, (r, l) in enumerate(zip(ids, lengths)):
@@ -122,6 +125,9 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
                     if r != m._ssm_executor.hold_req_id:
                         expected_cursor[r] += count if width > 1 else 1
                 args[3].copy_(torch.tensor(mask, device="cuda", dtype=torch.int32))
+                # replay 没有折回时，写起点就是当前 cursor。提交把它加上本步接受数。
+                m._ssm_executor.write_bases.copy_(m._ssm_executor.cursors)
+                ref._ssm_executor.write_bases.copy_(ref._ssm_executor.cursors)
                 accept_unfused(ref, args)
                 if step % 2:
                     graph.replay()
