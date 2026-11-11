@@ -53,7 +53,8 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
         expected_conv = state.conv_state[:, src, ..., :3].clone()
         expected_ssm = state.ssm_state[:, src * (state.mtp_step + 1)].clone()
     else:
-        expected_conv = state.conv_state[:, src, ..., offset : offset + 3].clone()
+        # prefill 页只保存基准窗口和 canonical SSM，不按 MTP 偏移取窗口，也不折回 history。
+        expected_conv = state.conv_state[:, src, ..., :3].clone()
         expected_ssm = state.ssm_state[:, src].clone()
     if mode == "replay":
         state.raw_keys.zero_()
@@ -61,7 +62,6 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
         state.gates.fill_(-0.5)
         state.betas.zero_()
         state.cursors[src] = 1
-        expected_ssm = (expected_ssm.float() * torch.exp(torch.tensor(-0.5))).to(dtype)
     before = state.ssm_state.clone()
     block = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
     state.write_to_pd_page(src, block, 0, 8, layout)
@@ -130,12 +130,13 @@ def test_checkpoint_batch_export(runtime_start_args, monkeypatch, cls, mode, dty
         state.betas.zero_()
         state.cursors.copy_(torch.tensor([1, 2, 3, 0], device="cuda"))
     requests = [2, 0, 1]
+    width = state.config.conv_width
     if mode == "replay":
-        expected = [(item.conv.clone(), item.ssm.clone()) for item in map(state.get_accepted_state, requests)]
+        expected = [(state.conv_state[:, req, :, :width].clone(), state.ssm_state[:, req].clone()) for req in requests]
     else:
         expected = [
             (
-                state.conv_state[:, req, :, : state.config.conv_width].clone(),
+                state.conv_state[:, req, :, :width].clone(),
                 state.ssm_state[:, req * (state.mtp_step + 1)].clone(),
             )
             for req in requests

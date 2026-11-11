@@ -109,10 +109,13 @@ def test_shared_attention_state_roundtrip_preserves_worker_resources(
         state.gates.fill_(-0.5)
         state.betas.zero_()
         state.cursors[1], state.cursors[2] = 1, 3
-    if hasattr(state, "get_accepted_state"):
-        expected = [tensor.cpu().tolist() for tensor in state.get_accepted_state(1)]
+    width = state.config.conv_width
+    if mode == "replay":
+        expected = [
+            state.conv_state[:, 1, :, :width].cpu().tolist(),
+            state.ssm_state[:, 1].cpu().tolist(),
+        ]
     else:
-        width = state.config.conv_width
         expected = [
             state.conv_state[:, 1, :, :width].cpu().tolist(),
             state.ssm_state[:, state.mtp_step + 1].cpu().tolist(),

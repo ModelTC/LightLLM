@@ -198,17 +198,17 @@ class ReplayGDNState(BoundedAttentionState):
         page_kind,
         page_slot_ids: list[int],
     ) -> None:
-        """把已接受 Conv 窗口和物化 SSM 写入页，不改 canonical state。"""
+        """把 prefill 基准 Conv 窗口和 canonical SSM 写入页。history 与 MTP 候选区不参与。"""
         assert isinstance(req_indices, list) and isinstance(page_slot_ids, list), "indices must be lists"
         assert len(req_indices) == len(state_token_lens) == len(page_slot_ids), "request, length and page counts differ"
         pool = self._pool(page_kind)
-        copy_bounded_att_tensors(
-            copies=[
-                (self._accepted_conv(req_idx), pool.conv_state[slot_id])
-                for req_idx, slot_id in zip(req_indices, page_slot_ids)
-            ]
-        )
-        self.export_ssm(req_indices, [pool.ssm_state[slot_id] for slot_id in page_slot_ids])
+        width = self.config.conv_width
+        conv_copies, ssm_copies = [], []
+        for req_idx, slot_id in zip(req_indices, page_slot_ids):
+            conv_copies.append((self.conv_state[:, req_idx, :, :width], pool.conv_state[slot_id]))
+            ssm_copies.append((self.ssm_state[:, req_idx], pool.ssm_state[slot_id]))
+        copy_bounded_att_tensors(copies=conv_copies)
+        copy_bounded_att_tensors(copies=ssm_copies)
 
     def restore_bounded_att_runtime_from_pages(
         self,
@@ -344,24 +344,25 @@ class ReplayGDNState(BoundedAttentionState):
         dst_req_indices: list[int],
         remote_dp_bounded_state: "ReplayGDNState",
     ) -> None:
-        """复制已接受运行态到目标单槽，并清空目标 history。"""
+        """复制 prefill 基准 Conv/SSM 到目标单槽，并清空目标 history。"""
         assert isinstance(src_req_indices, list) and isinstance(dst_req_indices, list), "request indices must be lists"
         assert len(src_req_indices) == len(dst_req_indices), "source and destination request counts differ"
         assert (
             type(remote_dp_bounded_state) is type(self) and remote_dp_bounded_state.config == self.config
         ), "DP copy requires the same algorithm and equivalent TP state configurations"
         width = self.config.conv_width
-        conv_copies = []
+        conv_copies, ssm_copies = [], []
         for src_req, dst_req in zip(src_req_indices, dst_req_indices):
             self.clear_history(dst_req)
             conv_copies.append(
                 (
-                    remote_dp_bounded_state._accepted_conv(src_req),
+                    remote_dp_bounded_state.conv_state[:, src_req, :, :width],
                     self.conv_state[:, dst_req, :, :width],
                 )
             )
+            ssm_copies.append((remote_dp_bounded_state.ssm_state[:, src_req], self.ssm_state[:, dst_req]))
         copy_bounded_att_tensors(copies=conv_copies)
-        remote_dp_bounded_state.export_ssm(src_req_indices, [self.ssm_state[:, dst_req] for dst_req in dst_req_indices])
+        copy_bounded_att_tensors(copies=ssm_copies)
         if self.mtp_state_index is not None:
             for dst_req in dst_req_indices:
                 self.mtp_state_index[dst_req].fill_(0)
@@ -384,11 +385,13 @@ class ReplayGDNState(BoundedAttentionState):
         state_token_len: int,
         layout: StateTransferLayout,
     ) -> None:
-        """写出已接受 Conv 窗口和物化 SSM，不改写源 history。"""
+        """写出 prefill 基准 Conv 窗口和 canonical SSM。源 history 不参与。"""
         assert layout.state_name == self.state_name, "transfer layout does not describe this resource"
         assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
-        accepted = self.get_accepted_state(req_idx)
-        fields = self._tensor_fields(accepted.conv, accepted.ssm)
+        fields = self._tensor_fields(
+            self.conv_state[:, req_idx, :, : self.config.conv_width],
+            self.ssm_state[:, req_idx],
+        )
         for copies in bounded_att_buffer_copies(
             page_fields=[fields],
             page_buffers=pd_page_buffers,
@@ -530,22 +533,6 @@ class ReplayGDNState(BoundedAttentionState):
         else:
             commit_ssm_prefix(indices, reqs, lengths)
             self.accept_updates(reqs, indices)
-
-    def export_ssm(self, req_indices: list[int], targets: list[torch.Tensor], flush: bool = False) -> None:
-        """把已接受 SSM 写入调用方页面。CUDA 目标直接写指针，其他设备先物化再拷贝。"""
-
-        if not req_indices:
-            return
-        target = targets[0]
-        if target.is_cuda and target.device == self.ssm_state.device:
-            self.export_accepted_state(req_indices, targets, flush=flush)
-            return
-        for req, dst in zip(req_indices, targets):
-            snap = self.accepted_ssm(req)
-            dst.copy_(snap)
-            if flush:
-                self.ssm_state[:, req].copy_(snap)
-                self.clear_history(req)
 
     # ========================================================================
     # 七、私有辅助实现

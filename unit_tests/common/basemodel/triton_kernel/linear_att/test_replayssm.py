@@ -643,7 +643,7 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(runtime_start_arg
     state.gates.uniform_(-0.1, -0.01)
     state.betas.uniform_(0.1, 0.9)
     active_before = state.ssm_state[:, 1].clone()
-    conv_expected = state.conv_state[:, 1, :, 1:4].clone()
+    conv_expected = state.conv_state[:, 1, :, :3].clone()
     block = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
     kind = "big" if save_big else "small"
     pool = state.big_pages_pool if save_big else state.small_pages_pool
@@ -663,7 +663,7 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(runtime_start_arg
         state.save_bounded_att_runtime_to_pages([1], [8], kind, [0])
         state.write_to_pd_page(1, block, 0, 8, layout)
         torch.cuda.synchronize()
-        torch.testing.assert_close(pool.ssm_state[0], materialized.cpu(), rtol=0, atol=0)
+        torch.testing.assert_close(pool.ssm_state[0], active_before.cpu(), rtol=0, atol=0)
         torch.testing.assert_close(pool.conv_state[0], conv_expected.cpu(), rtol=0, atol=0)
         torch.testing.assert_close(state.ssm_state[:, 1], active_before, rtol=0, atol=0)
         assert state.cursors[1].item() == count
@@ -675,7 +675,7 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(runtime_start_arg
             state.mtp_state_index[2] = 2
             restore()
             assert state.cursors[2].item() == state.mtp_state_index[2].item() == 0
-            torch.testing.assert_close(state.ssm_state[:, 2], materialized, rtol=0, atol=0)
+            torch.testing.assert_close(state.ssm_state[:, 2], active_before, rtol=0, atol=0)
             torch.testing.assert_close(state.conv_state[:, 2, :, :3], conv_expected, rtol=0, atol=0)
     state.reset_bounded_att_state([2])
     assert not state.ssm_state[:, 2].any()
