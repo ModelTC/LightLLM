@@ -291,10 +291,11 @@ def _candidate_indexer_logits(
 
 
 def candidate_indexer_logits(query, cache, weights, pages, candidates, lengths):
-    """Score the producer's sorted, -1-padded eight-key blocks in Hopper FP8 slabs."""
+    """Score the producer's sorted, -1-padded eight-key blocks in FP8 slabs."""
     assert query.shape[-1] == 128
+    block_n = 256 if query.shape[0] >= 32 else 64
     logits = torch.empty((query.shape[0], candidates.shape[1] * 8), dtype=torch.float32, device=query.device)
-    _candidate_indexer_logits[(query.shape[0], triton.cdiv(logits.shape[1], 64))](
+    _candidate_indexer_logits[(query.shape[0], triton.cdiv(logits.shape[1], block_n))](
         query,
         cache,
         weights,
@@ -310,7 +311,7 @@ def candidate_indexer_logits(query, cache, weights, pages, candidates, lengths):
         candidates.stride(0),
         query.shape[1],
         max(16, triton.next_power_of_2(query.shape[1])),
-        64,
+        block_n,
         num_warps=4,
     )
     return logits

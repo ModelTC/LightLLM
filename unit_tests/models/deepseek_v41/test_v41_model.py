@@ -2162,12 +2162,13 @@ def test_engram_bounded_prefill_matches_serial_and_reuses_two_buffers(monkeypatc
     assert len(set(allocations)) == 2
 
 
-def test_candidate_indexer_fixed_capacity_short_rows_and_updated_graph():
+@pytest.mark.parametrize("row_repeats", [1, 8])
+def test_candidate_indexer_fixed_capacity_short_rows_and_updated_graph(row_repeats):
     from lightllm.models.deepseek_v41.triton_kernel.attention import (
         candidate_indexer_logits,
     )
 
-    rows, context, width = 4, 8192, 2048
+    rows, context, width = 4 * row_repeats, 8192, 2048
     storage = torch.empty((context // 64, 64 * 132), dtype=torch.uint8, device="cuda")
     storage[:, : 64 * 128].view(torch.float8_e4m3fn).fill_(1)
     storage[:, 64 * 128 :].view(torch.float32).fill_(0.5)
@@ -2175,7 +2176,7 @@ def test_candidate_indexer_fixed_capacity_short_rows_and_updated_graph():
     pages = torch.randperm(context // 64, dtype=torch.int32, device="cuda").expand(rows, -1).contiguous()
     query = torch.ones(rows, 32, 128, dtype=torch.float8_e4m3fn, device="cuda")
     weights = torch.ones(rows, 32, device="cuda")
-    lengths = torch.tensor([0, 1024, 1081, 8192], dtype=torch.int32, device="cuda")
+    lengths = torch.tensor([0, 1024, 1081, 8192], dtype=torch.int32, device="cuda").repeat(row_repeats)
     candidates = torch.full((rows, width), -1, dtype=torch.int32, device="cuda")
     candidates[:, : context // 8] = torch.arange(context // 8, device="cuda")
 
@@ -2189,6 +2190,6 @@ def test_candidate_indexer_fixed_capacity_short_rows_and_updated_graph():
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         actual = candidate_indexer_logits(query, cache, weights, pages, candidates, lengths)
-    lengths.copy_(torch.tensor([8192, 0, 1, 1024], device="cuda", dtype=torch.int32))
+    lengths.copy_(torch.tensor([8192, 0, 1, 1024], device="cuda", dtype=torch.int32).repeat(row_repeats))
     graph.replay()
     check(actual)
