@@ -233,60 +233,68 @@ class MultiLevelKvCacheModule(object):
         page_tokens = self.args.cpu_cache_token_page_size
         store_pages = []
         closing_sessions = {}
-        self.cpu_cache_client.lock.acquire_sleep1ms()
-        try:
-            for req in reqs:
-                session = self.dsv4_sessions.get(req.req_id)
-                if session is None or session.closing:
-                    continue
-                if req.shm_req.group_req_id != req.shm_req.request_id:
-                    session.closing = True
-                    continue
-                page_lens = req.shm_req.token_hash_page_len_list.get_all()
-                target = bisect.bisect_right(page_lens, req.cur_kv_len)
-                target = self._handle_hybrid_att_last_page(req, target, page_lens)
-                start = session.next_page_index
-                if target <= start:
-                    # A complete CPU hit has no new pages to store, but still
-                    # owns match references until its load event completes.
-                    if start == len(page_lens):
-                        closing_sessions[session.request_id] = session
-                    continue
-                hashes = req.shm_req.token_hash_list.get_all()
-                pages, owners = self.cpu_cache_client.allocate_pages(
-                    hashes[start:target], disk_offload_enable=False, return_ownership=True
-                )
-                shared_ids = g_infer_context.radix_cache.get_big_page_ids_by_node(req.shared_kv_node)
-                for index, (cpu_page, owner) in enumerate(zip(pages, owners), start):
-                    if cpu_page == -1:
-                        closing_sessions[session.request_id] = session
-                        break
-                    session.leased_pages.append(cpu_page)
-                    session.next_page_index += 1
-                    session.token_num = page_lens[index]
-                    if not owner:
-                        continue
-                    end = page_lens[index]
-                    if end % page_tokens:
-                        pool, checkpoint_id = req_manager.small_page_buffers, req.tail_small_page_buffer_id
-                    else:
-                        pool = mem_manager.big_page_buffers
-                        checkpoint_id = (
-                            shared_ids[index] if index < len(shared_ids) else req.hybrid_len_to_big_page_id[end]
-                        )
-                    store_pages.append(
-                        Dsv4StorePage(
-                            session=session,
-                            cpu_page_index=cpu_page,
-                            source_mem_indexes=req_manager.req_to_token_indexs[req.req_idx, index * page_tokens : end],
-                            checkpoint_pool=pool,
-                            checkpoint_id=checkpoint_id,
+        pending = []
+        for req in reqs:
+            session = self.dsv4_sessions.get(req.req_id)
+            if session is None or session.closing:
+                continue
+            if req.shm_req.group_req_id != req.shm_req.request_id:
+                session.closing = True
+                continue
+            page_lens = req.shm_req.token_hash_page_len_list.get_all()
+            target = bisect.bisect_right(page_lens, req.cur_kv_len)
+            target = self._handle_hybrid_att_last_page(req, target, page_lens)
+            start = session.next_page_index
+            if target <= start:
+                # A complete CPU hit still owns match references until its load event completes.
+                if start == len(page_lens):
+                    closing_sessions[session.request_id] = session
+                continue
+            hashes = req.shm_req.token_hash_list.get_all()
+            pending.append((req, session, page_lens, hashes[start:target], len(hashes)))
+
+        allocations = []
+        if pending:
+            self.cpu_cache_client.lock.acquire_sleep1ms()
+            try:
+                for _, _, _, hash_keys, _ in pending:
+                    allocations.append(
+                        self.cpu_cache_client.allocate_pages(
+                            hash_keys, disk_offload_enable=False, return_ownership=True
                         )
                     )
-                if session.next_page_index == len(hashes):
+            finally:
+                self.cpu_cache_client.lock.release()
+
+        # The acquired CPU page references keep the pages live while we build local copy descriptors.
+        for (req, session, page_lens, _, hash_count), (pages, owners) in zip(pending, allocations):
+            shared_ids = g_infer_context.radix_cache.get_big_page_ids_by_node(req.shared_kv_node)
+            for index, (cpu_page, owner) in enumerate(zip(pages, owners), session.next_page_index):
+                if cpu_page == -1:
                     closing_sessions[session.request_id] = session
-        finally:
-            self.cpu_cache_client.lock.release()
+                    break
+                session.leased_pages.append(cpu_page)
+                session.next_page_index += 1
+                session.token_num = page_lens[index]
+                if not owner:
+                    continue
+                end = page_lens[index]
+                if end % page_tokens:
+                    pool, checkpoint_id = req_manager.small_page_buffers, req.tail_small_page_buffer_id
+                else:
+                    pool = mem_manager.big_page_buffers
+                    checkpoint_id = shared_ids[index] if index < len(shared_ids) else req.hybrid_len_to_big_page_id[end]
+                store_pages.append(
+                    Dsv4StorePage(
+                        session=session,
+                        cpu_page_index=cpu_page,
+                        source_mem_indexes=req_manager.req_to_token_indexs[req.req_idx, index * page_tokens : end],
+                        checkpoint_pool=pool,
+                        checkpoint_id=checkpoint_id,
+                    )
+                )
+            if session.next_page_index == hash_count:
+                closing_sessions[session.request_id] = session
 
         for start in range(0, len(store_pages), self.dsv4_max_pages_per_task):
             self._submit_dsv4_store_batch(store_pages[start : start + self.dsv4_max_pages_per_task], producer_stream)

@@ -1,5 +1,7 @@
 from collections import deque
+from threading import Lock
 from types import SimpleNamespace as NS
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -186,10 +188,22 @@ def test_incremental_store_only_passes_new_owners_to_pack(monkeypatch, owners):
     obj.backend.model = NS(
         mem_manager=NS(big_page_buffers=pool), req_manager=NS(req_to_token_indexs=torch.arange(8192).view(1, -1))
     )
-    obj.cpu_cache_client.allocate_pages = lambda hashes, **kwargs: ([11, 12, 13], owners)
+    lock = Lock()
+    obj.cpu_cache_client.lock = NS(acquire_sleep1ms=lock.acquire, release=lock.release)
+
+    def allocate(hashes, **kwargs):
+        assert lock.locked()
+        assert hashes == [1, 2, 3]
+        return [11, 12, 13], owners
+
+    def get_big_page_ids(node):
+        assert not lock.locked()
+        return []
+
+    obj.cpu_cache_client.allocate_pages = allocate
     obj.dsv4_max_pages_per_task = 1
     obj._handle_hybrid_att_last_page = lambda req, target, lens: target
-    monkeypatch.setattr(cache_module.g_infer_context, "radix_cache", NS(get_big_page_ids_by_node=lambda _: []))
+    monkeypatch.setattr(cache_module.g_infer_context, "radix_cache", NS(get_big_page_ids_by_node=get_big_page_ids))
     session = Dsv4CpuCacheSession(7)
     obj.dsv4_sessions[7] = session
     req = NS(
@@ -313,7 +327,9 @@ def test_full_cpu_hit_releases_match_pages_before_decode_finishes(page_lens, dis
         cur_kv_len=page_lens[-1] + 1,
         shm_req=NS(group_req_id=7, request_id=7, token_hash_page_len_list=values(page_lens)),
     )
+    obj.cpu_cache_client.lock = Mock(wraps=obj.cpu_cache_client.lock)
     obj.store_completed_prefill_pages([req], None)
+    obj.cpu_cache_client.lock.acquire_sleep1ms.assert_not_called()
     assert session.closing
     obj.update_cpu_cache_task_states()
     if loading:
