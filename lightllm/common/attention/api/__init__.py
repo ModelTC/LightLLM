@@ -10,9 +10,8 @@ KV / Conv / SSM 的分配、回收和迁移仍由 AttentionStateManager 管理�
 初始化集成见 common.basemodel.attention，运行时入口见 InferStateInfo.prepare_attention。
 """
 
-from .backend import AttentionBackend, LayerBinding, VarlenAttentionBackend
+from .backend import AttentionBackend, CapabilityResult, LayerBinding, VarlenAttentionBackend
 from .batch import AttentionBatch, PlanCapacity
-from .capability import CapabilityResult
 from .inputs import VarlenAttentionInputs
 from .spec import AttentionFamily, AttentionPhase, CacheLayout, LayerSpec
 from .execution import ExecutionRequirements, BackendResources

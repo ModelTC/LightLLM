@@ -5,9 +5,8 @@ from types import MappingProxyType
 
 import torch
 
-from lightllm.common.attention.api.backend import AttentionBackend, LayerBinding
+from lightllm.common.attention.api.backend import AttentionBackend, CapabilityResult, LayerBinding
 from lightllm.common.attention.api.batch import AttentionBatch, PlanCapacity
-from lightllm.common.attention.api.capability import CapabilityResult
 from lightllm.common.attention.api.spec import AttentionFamily, AttentionPhase, LayerSpec
 from lightllm.platform import DeviceCaps, Platform
 
@@ -151,6 +150,8 @@ class BaseAttentionBackend(AttentionBackend):
         pass
 
     def update(self, plan: PreparedPlan) -> None:
+        if plan.backend_identity is not self:
+            raise ValueError("plan belongs to a different attention backend")
         if plan.batch is None:
             raise RuntimeError("prepare attention inputs before update")
         if plan.capacity.phase is AttentionPhase.PREFILL:

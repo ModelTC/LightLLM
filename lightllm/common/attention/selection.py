@@ -172,8 +172,8 @@ def select_attention_backend(*, family, phase, model, requested="auto", candidat
                     break
             if name in failures:
                 continue
-        except (ImportError, OSError) as exc:
-            failures[name] = f"provider unavailable: {exc}"
+        except Exception as exc:
+            failures[name] = f"provider check failed: {type(exc).__name__}: {exc}"
             continue
         logger.info("Selected %s %s attention on %s: %s", family.value, phase.value, caps.device, name)
         _check_rank_selection(family, phase, None)

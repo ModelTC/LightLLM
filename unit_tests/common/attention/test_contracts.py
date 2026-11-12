@@ -40,6 +40,14 @@ def test_plan_capacity_and_backend_identity(capture):
         backend.prepare(plan, make_batch((17, 2)))
     with pytest.raises(ValueError, match="different attention backend"):
         make_backend().prepare(plan, make_batch())
+    with pytest.raises(ValueError, match="different attention backend"):
+        make_backend().update(plan)
+
+
+def test_capability_result_legacy_import_is_the_public_type():
+    from lightllm.common.attention.api.capability import CapabilityResult as LegacyCapabilityResult
+
+    assert LegacyCapabilityResult is CapabilityResult
 
 
 @pytest.mark.parametrize("requested", ["auto", "triton"])
@@ -64,7 +72,7 @@ def test_selection_never_falls_back_to_a_rejected_backend(monkeypatch, requested
 
 @pytest.mark.parametrize("requested", ["auto", "triton"])
 def test_environment_checks_apply_to_explicit_and_auto(monkeypatch, requested):
-    from lightllm.common.attention.api.capability import CapabilityResult
+    from lightllm.common.attention.api import CapabilityResult
 
     monkeypatch.setattr("lightllm.common.basemodel.attention.describe_attention_layers", lambda *args: (make_spec(),))
     monkeypatch.setattr(
@@ -81,6 +89,54 @@ def test_environment_checks_apply_to_explicit_and_auto(monkeypatch, requested):
             candidates={"None": {"triton": BaseAttentionBackend}},
             priority=["triton"],
         )
+
+
+def _backend_check_exception_candidates(monkeypatch):
+    class BrokenBackend(BaseAttentionBackend):
+        provider = "broken"
+
+        @classmethod
+        def check_environment(cls, caps):
+            raise RuntimeError("provider ABI mismatch")
+
+    class WorkingBackend(BaseAttentionBackend):
+        provider = "working"
+
+        @classmethod
+        def check_environment(cls, caps):
+            return CapabilityResult.ok()
+
+    monkeypatch.setattr("lightllm.common.basemodel.attention.describe_attention_layers", lambda *args: (make_spec(),))
+    monkeypatch.setattr("lightllm.common.attention.selection.validate", lambda *args, **kwargs: True)
+    return {"None": {"broken": BrokenBackend, "working": WorkingBackend}}
+
+
+def test_backend_check_exception_allows_auto_fallback(monkeypatch):
+    candidates = _backend_check_exception_candidates(monkeypatch)
+    selected = selection.select_attention_backend(
+        family=AttentionFamily.DENSE,
+        phase=AttentionPhase.DECODE,
+        model=model_stub(),
+        requested="auto",
+        candidates=candidates,
+        priority=["broken", "working"],
+    )
+    assert selected.provider == "working"
+
+
+def test_backend_check_exception_is_reported_for_explicit_selection(monkeypatch):
+    candidates = _backend_check_exception_candidates(monkeypatch)
+    with pytest.raises(selection.BackendSelectionError) as error:
+        selection.select_attention_backend(
+            family=AttentionFamily.DENSE,
+            phase=AttentionPhase.DECODE,
+            model=model_stub(),
+            requested="broken",
+            candidates=candidates,
+            priority=["broken", "working"],
+        )
+
+    assert "provider check failed: RuntimeError: provider ABI mismatch" in str(error.value)
 
 
 @pytest.mark.parametrize("format,provider", [("fp8kv_sph", "flashinfer"), ("fp8kv_spt", "fa3")])
