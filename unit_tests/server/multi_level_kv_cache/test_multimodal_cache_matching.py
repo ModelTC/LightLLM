@@ -8,6 +8,29 @@ from lightllm.server.multi_level_kv_cache.manager import MultiLevelKVCacheManage
 from lightllm.utils.kv_cache_utils import CpuKVCacheMeta
 
 
+def test_disk_suffix_keeps_the_block_containing_the_cpu_hit_boundary():
+    light_mem = pytest.importorskip("light_mem")
+    from lightllm.server.multi_level_kv_cache.disk_cache_worker import DiskCacheWorker
+
+    hashes = list(range(100, 111))
+    page_indexes = list(range(11))
+    worker = DiskCacheWorker.__new__(DiskCacheWorker)
+
+    def query(hash_128s):
+        assert hash_128s == hashes[3:]
+        return [True, True, False]
+
+    def create(hash_128s, kv_page_indexer, mode):
+        assert hash_128s == hashes[3:9]
+        assert kv_page_indexer.tolist() == page_indexes[3:9]
+        assert mode == "r"
+        return SimpleNamespace(ready=lambda: True, state=lambda: [light_mem.PyState.Finished] * 2)
+
+    worker.service = SimpleNamespace(_n=3, query=query, create=create)
+    assert worker.query_loadable_pages(hashes, start_pos=4) == 5
+    assert worker.load_pages(hashes[:9], page_indexes[:9], start_pos=4)
+
+
 def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_factory, tmp_path, monkeypatch):
     light_mem = pytest.importorskip("light_mem")
     from lightllm.server.multi_level_kv_cache.disk_cache_worker import DiskCacheWorker

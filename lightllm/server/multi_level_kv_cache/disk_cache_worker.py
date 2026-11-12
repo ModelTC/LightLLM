@@ -175,11 +175,12 @@ class DiskCacheWorker:
         if not hashs or start_pos < 0 or start_pos >= len(hashs):
             return 0
 
-        query_result = self.service.query(hashs)
         n = self.service._n
         start_block = start_pos // n
+        # Page hashes are cumulative, so complete CPU-hit blocks can be skipped.
+        query_result = self.service.query(hashs[start_block * n :] if start_block else hashs)
         try:
-            first_false_idx = start_block + query_result[start_block:].index(False)
+            first_false_idx = start_block + query_result.index(False)
         except ValueError:
             return len(hashs) - start_pos
         first_missing_pos = first_false_idx * n
@@ -197,8 +198,12 @@ class DiskCacheWorker:
         #     logger.warning("disk cache worker is busy writing, skip load_pages")
         #     return False
 
+        start_pos -= start_pos % self.service._n
+        if start_pos:
+            hashs = hashs[start_pos:]
+            page_indexes = page_indexes[start_pos:]
         kv_indexer = torch.tensor(page_indexes, dtype=torch.int32, device="cpu")
-        task = self.service.create(hash_128s=hashs, kv_page_indexer=kv_indexer, mode="r", start_pos=start_pos)
+        task = self.service.create(hash_128s=hashs, kv_page_indexer=kv_indexer, mode="r")
         if not self._wait_task(task, "ready"):
             return False
         return all(state == PyState.Finished for state in task.state())
