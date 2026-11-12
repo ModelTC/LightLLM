@@ -197,22 +197,30 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         # LightLLM's scorers can map each query to its request's pages. DeepGEMM's
         # paged scorer consumes one page-table row per query.
         page_table_rows = self._dsv4_token_to_batch_idx if request_pages else None
+        page_req_idx = self.b_req_idx if request_pages else self.dsv4_sparse_req_idx
+        entries = config.compressed_kv_token_alignment // ratio
+        logits_page_table = None
+        logits_page_layout = (1, 0, 0)
+        if entries > INDEXER_PAGE_SIZE:
+            packed = get_indexer_k_buffer(self.mem_manager, layer_index)
+            logits_page_table = torch.empty(
+                (page_req_idx.numel(), capacity // INDEXER_PAGE_SIZE), dtype=torch.int32, device=page_req_idx.device
+            )
+            logits_page_layout = (
+                entries // INDEXER_PAGE_SIZE,
+                packed.stride(0) // config.indexer_head_dim,
+                INDEXER_PAGE_SIZE * config.indexer_bytes // config.indexer_head_dim,
+            )
         page_table = build_indexer_page_table(
-            self.b_req_idx if request_pages else self.dsv4_sparse_req_idx,
+            page_req_idx,
             self.b_seq_len // ratio if request_pages else valid_len,
             capacity,
             self.req_manager.req_to_token_indexs,
             self.req_manager.HOLD_REQUEST_ID,
             compress_ratio=ratio,
+            logits_out=logits_page_table,
+            logits_page_layout=logits_page_layout,
         )
-        logits_page_table = page_table
-        entries = config.compressed_kv_token_alignment // ratio
-        if entries > INDEXER_PAGE_SIZE:
-            packed = get_indexer_k_buffer(self.mem_manager, layer_index)
-            slabs = entries // INDEXER_PAGE_SIZE
-            logits_page_table = (page_table // slabs) * (packed.stride(0) // config.indexer_head_dim) + (
-                page_table % slabs
-            ) * (INDEXER_PAGE_SIZE * config.indexer_bytes // config.indexer_head_dim)
         rows_per_chunk = max(1, self.position_ids.numel())
         if self.is_prefill:
             aligned_capacity = ((capacity + 255) // 256) * 256
@@ -231,7 +239,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.indexer_metadata = PagedIndexerMetadata(
             compress_ratio=ratio,
             page_table=page_table,
-            logits_page_table=logits_page_table,
+            logits_page_table=page_table if logits_page_table is None else logits_page_table,
             page_table_rows=page_table_rows,
             valid_lengths=valid_len,
             context_lengths=ctx_lens,

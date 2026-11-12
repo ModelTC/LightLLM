@@ -10,11 +10,15 @@ def _build_indexer_page_table_kernel(
     req_to_token_indexs,
     req_to_token_stride,
     page_table,  # [query rows, page_cap] int32
+    logits_out,
     token_num,
     page_cap,
     hold_req_id,
     COMPRESS_RATIO: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
+    SLABS: tl.constexpr,
+    PACKED_PAGE_STRIDE: tl.constexpr,
+    PACKED_SLAB_STRIDE: tl.constexpr,
     BLOCK_PAGES: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
 ):
@@ -34,12 +38,13 @@ def _build_indexer_page_table_kernel(
         other=0,
     ).to(tl.int64)
     compressed_kv_slot = mem_index // COMPRESS_RATIO
-    physical_page_idx = compressed_kv_slot // PAGE_SIZE
-    tl.store(
-        page_table + row[:, None] * page_cap + page_idx[None, :],
-        tl.where(active, physical_page_idx, 0).to(tl.int32),
-        in_table,
-    )
+    physical_page_idx = tl.where(active, compressed_kv_slot // PAGE_SIZE, 0).to(tl.int32)
+    out_idx = row[:, None] * page_cap + page_idx[None, :]
+    tl.store(page_table + out_idx, physical_page_idx, in_table)
+    if logits_out is not None:
+        packed_idx = (physical_page_idx // SLABS) * PACKED_PAGE_STRIDE
+        packed_idx += (physical_page_idx % SLABS) * PACKED_SLAB_STRIDE
+        tl.store(logits_out + out_idx, packed_idx, in_table)
 
 
 @torch.no_grad()
@@ -51,6 +56,9 @@ def build_indexer_page_table(
     hold_req_id: int,
     out: torch.Tensor = None,
     compress_ratio: int = 4,
+    *,
+    logits_out: torch.Tensor = None,
+    logits_page_layout: tuple[int, int, int] = (1, 0, 0),
 ):
     """Build DeepGEMM's query-row page table directly from the request token mapping.
 
@@ -60,6 +68,9 @@ def build_indexer_page_table(
     Safe only when each logical c4 page maps to a physical page with matching offsets:
         c4_slot(entry page_idx*64 + o) == page_table[page_idx] * 64 + o
     which the current token-slot allocator guarantees.
+
+    With a logits output, also map pages into packed K storage using
+    (slabs per physical page, packed page stride, packed slab stride).
     """
     page_size = 64
     token_num = token_req_idx.shape[0]
@@ -77,11 +88,15 @@ def build_indexer_page_table(
         req_to_token_indexs,
         req_to_token_indexs.stride(0),
         out,
+        logits_out,
         token_num,
         page_cap,
         int(hold_req_id),
         COMPRESS_RATIO=compress_ratio,
         PAGE_SIZE=page_size,
+        SLABS=logits_page_layout[0],
+        PACKED_PAGE_STRIDE=logits_page_layout[1],
+        PACKED_SLAB_STRIDE=logits_page_layout[2],
         BLOCK_PAGES=block_pages,
         BLOCK_ROWS=block_rows,
         num_warps=4,
