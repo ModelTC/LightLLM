@@ -30,7 +30,7 @@ from lightllm.utils.net_utils import validate_ports
 from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.shm_size_check import check_recommended_shm_size
-from lightllm.utils.start_utils import process_manager
+from lightllm.utils.start_utils import configure_decode_open_file_limit, process_manager
 
 from .detokenization.manager import start_detokenization_process
 from .embed_cache.manager import start_cache_manager
@@ -47,6 +47,7 @@ def _set_envs_and_config(args: StartArgs):
 
 def _launch_subprocesses(args: StartArgs):
     _validate_pd_features(args)
+    configure_decode_open_file_limit(args)
     _set_envs_and_config(args)
 
     if args.target_vocab_topk_sampling is not None:
