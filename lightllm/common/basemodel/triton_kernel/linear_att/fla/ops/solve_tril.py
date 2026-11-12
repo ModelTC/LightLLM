@@ -199,14 +199,20 @@ def merge_16x16_to_32x32_inverse_kernel(
         desc_o.store([i_t * BT + 16, 16], b_Ai_22.to(desc_o.dtype, fp_downcast_rounding="rtne"))
 
 
-@triton.jit
-def _invert_64_diagonal_tiles(A, Diag, cu_seqlens, chunk_indices, H: tl.constexpr):
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.jit(do_not_specialize=["T"])
+def _invert_64_diagonal_tiles(A, Diag, cu_seqlens, chunk_indices, T, H: tl.constexpr, IS_VARLEN: tl.constexpr):
     """Invert the four independent 16x16 blocks before the full inverse merge."""
-    i_t, h, d = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
-    chunk = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-    bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-    eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+    i_t, i_bh, d = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_b, h = i_bh // H, i_bh % H
+    if IS_VARLEN:
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+        chunk = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+    else:
+        bos, eos = i_b * T, (i_b + 1) * T
+        chunk = i_t
     row = chunk * 64 + d * 16
     i = tl.arange(0, 16)
     base = A + ((bos + row).to(tl.int64) * H + h) * 64 + d * 16
@@ -217,7 +223,7 @@ def _invert_64_diagonal_tiles(A, Diag, cu_seqlens, chunk_indices, H: tl.constexp
         a += tl.sum(a[:, None] * inv, 0)
         inv = tl.where((i == j)[:, None], a, inv)
     inv += i[:, None] == i[None, :]
-    tl.store(Diag + ((i_t.to(tl.int64) * H + h) * 4 + d) * 256 + i[:, None] * 16 + i[None, :], inv)
+    tl.store(Diag + ((i_t.to(tl.int64) * tl.num_programs(1) + i_bh) * 4 + d) * 256 + i[:, None] * 16 + i[None, :], inv)
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -261,7 +267,9 @@ def merge_16x16_to_64x64_inverse_kernel(
         desc = make_tensor_descriptor(A, [T, BT], [H * BT, 1], [16, 16])
         desc_o = make_tensor_descriptor(Ai, [T, BT], [H * BT, 1], [16, 16])
     if PREINVERTED:
-        base = Diag + (tl.program_id(0).to(tl.int64) * H + i_bh) * 1024 + o_i[:, None] * 16 + o_i[None, :]
+        base = (
+            Diag + (tl.program_id(0).to(tl.int64) * tl.num_programs(1) + i_bh) * 1024 + o_i[:, None] * 16 + o_i[None, :]
+        )
         b_Ai_11 = tl.load(base)
         b_Ai_22 = tl.load(base + 256)
         b_Ai_33 = tl.load(base + 512)
@@ -459,8 +467,8 @@ def solve_tril(
             The dtype of the output tensor. Default: `torch.float`.
             If `None`, the output dtype will be the same as the input dtype.
         split_diagonal (bool):
-            Split the four diagonal solves for packed 64-token chunks with
-            ``cu_seqlens`` and enough work to offset the extra kernel launch.
+            Split the four diagonal solves for 64-token chunks. Small inputs
+            and batches with excessive FP32 workspace use the original solver.
 
     Returns:
         (I + A)^-1 with the same shape as A
@@ -473,24 +481,24 @@ def solve_tril(
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
 
     Ai = torch.zeros_like(A, dtype=output_dtype)
+    # Ensure Triton allocator is set for TMA kernels that require scratch memory
+    if is_tma_supported:
+        _ensure_triton_allocator()
+
+    split_args = {}
     if BT == 16:
         merge_fn = solve_tril_16x16_kernel
     elif BT == 32:
         merge_fn = merge_16x16_to_32x32_inverse_kernel
     elif BT == 64:
         merge_fn = merge_16x16_to_64x64_inverse_kernel
-
-    # Ensure Triton allocator is set for TMA kernels that require scratch memory
-    if is_tma_supported:
-        _ensure_triton_allocator()
-
-    split_args = {}
-    # Bound diagonal scratch by the FP32 input size and skip sub-chunk batches.
-    if split_diagonal and (B, BT) == (1, 64) and T >= max(BT, 16 * NT):
-        # Keep diagonal inverses in FP32 until the final output conversion.
-        diag = torch.empty((NT, H, 4, 16, 16), dtype=torch.float32, device=A.device)
-        _invert_64_diagonal_tiles[NT, H, 4](A, diag, cu_seqlens, chunk_indices, H=H, num_warps=4)
-        split_args = {"Diag": diag, "PREINVERTED": True}
+        # Bound the FP32 workspace by the FP32 input size and skip sub-chunk inputs.
+        diag_numel = NT * B * H * 4 * 16 * 16
+        if split_diagonal and T >= BT and diag_numel <= A.numel():
+            # Keep diagonal inverses in FP32 until the final output conversion.
+            diag = torch.empty((NT, B * H, 4, 16, 16), dtype=torch.float32, device=A.device)
+            _invert_64_diagonal_tiles[NT, B * H, 4](A, diag, cu_seqlens, chunk_indices, T, H=H, num_warps=4)
+            split_args = {"Diag": diag, "PREINVERTED": True}
 
     merge_fn[NT, B * H](
         A=A,

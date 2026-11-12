@@ -234,6 +234,27 @@ def test_split_diagonal_matches_unsplit(monkeypatch, heads, input_dtype, output_
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("batch,tokens,heads", [(1, 64, 2), (2, 65, 3), (3, 129, 2)])
+def test_split_diagonal_matches_unsplit_dense(monkeypatch, batch, tokens, heads):
+    solver = importlib.import_module("lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.solve_tril")
+    rows = torch.arange(tokens, device="cuda") % 64
+    matrix = torch.randn(batch, tokens, heads, 64, device="cuda") * 0.025
+    matrix.mul_((rows[:, None] > torch.arange(64, device="cuda"))[None, :, None, :])
+    expected = solver.solve_tril(matrix, output_dtype=torch.bfloat16)
+    launches = []
+    original = solver._invert_64_diagonal_tiles.run
+
+    def observe(*args, **kwargs):
+        launches.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(solver._invert_64_diagonal_tiles, "run", observe)
+    actual = solver.solve_tril(matrix, output_dtype=torch.bfloat16, split_diagonal=True)
+    assert len(launches) == 1
+    assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize(
     "lengths,expect_split",
     [
