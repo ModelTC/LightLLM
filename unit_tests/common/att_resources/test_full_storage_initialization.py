@@ -5,6 +5,7 @@ from __future__ import annotations
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
 from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
+from unit_tests.common.att_resources.model_helpers import full_state_test_token_stride
 
 from unit_tests.common.att_resources.model_helpers import read_kv_storage
 
@@ -17,6 +18,7 @@ import pytest
 import torch
 
 from lightllm.common.attention_state.full_att import MLAFullAttentionState, PackedMLAFullAttentionState
+from lightllm.common.attention_state.full_att.packed_mla.pooled_mla_state import PooledMLAState
 from lightllm.utils.envs_utils import get_env_start_args
 from unit_tests.common.att_resources.test_capacity import allocated_bytes
 from unit_tests.server.router.model_infer.test_cpu_resource_layout import CASES, make_runtime, runtime
@@ -53,7 +55,12 @@ def test_model_storage_write_and_copy_preserve_all_fields(
     for storage_buffer in full_state_test_buffers(state).values():
         storage_buffer.zero_()
     ids = torch.tensor([0, 4], dtype=torch.int32, device="cuda")
-    is_mla = isinstance(state, (MLAFullAttentionState, PackedMLAFullAttentionState))
+    dst_ids = torch.tensor([1, 5], dtype=torch.int32, device="cuda")
+    if isinstance(state, PooledMLAState):
+        # Close two pools and move them to distinct destination pools.
+        ids, dst_ids = ids + 3, dst_ids + 10
+        state.indexer_storage[:, :2].fill_(17)
+    is_mla = isinstance(state, (MLAFullAttentionState, PackedMLAFullAttentionState, PooledMLAState))
     dim = config.latent_dim if is_mla else config.head_dim
     kv = torch.randn(
         size=(2, 1 if is_mla else 2 * config.head_num, dim),
@@ -63,12 +70,13 @@ def test_model_storage_write_and_copy_preserve_all_fields(
     state.write_full_att_kv(config.logical_layer_groups[-1][0], ids, kv)
     if len(config.logical_layer_groups) > 1:
         assert not read_kv_storage(state)[0].any()
-    resources.copy_full_att_tokens(ids, torch.tensor([1, 5], dtype=torch.int32, device="cuda"))
+    resources.copy_full_att_tokens(ids, dst_ids)
     for name, field in full_state_test_fields(state, full_state_test_buffers(state)).items():
         if "token" in field.axes:
+            stride = full_state_test_token_stride(state, name)
             assert torch.equal(
-                field.tensor[:, ids].contiguous().view(torch.uint8),
-                field.tensor[:, [1, 5]].contiguous().view(torch.uint8),
+                field.tensor[:, ids // stride].contiguous().view(torch.uint8),
+                field.tensor[:, dst_ids // stride].contiguous().view(torch.uint8),
             ), name
     assert state.capacity == resources.full_att_allocator.size == 16
     assert read_kv_storage(state).shape[1] == 20  # Includes the whole HOLD page.

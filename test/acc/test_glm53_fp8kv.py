@@ -91,7 +91,11 @@ def main():
                 deadline = time.monotonic() + 10
                 while True:
                     lines = args.server_log.read_text().splitlines()
-                    completed = [line for line in lines if f"X-Request-Id:{row['reloaded']['request_id']} " in line]
+                    completed = [
+                        line
+                        for line in lines
+                        if f"X-Request-Id:{row['reloaded']['request_id']} " in line and "cpu_prompt_cache_len:" in line
+                    ]
                     if completed:
                         break
                     if time.monotonic() >= deadline:

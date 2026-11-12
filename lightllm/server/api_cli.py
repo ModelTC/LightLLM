@@ -555,6 +555,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                 fp8kv_dsa: use dynamic per-token/group FlashMLA FP8 sparse KV cache
                 for DeepSeek-V3.2 or GLM-5.3 Flash.
                 nvfp4kv: E2M1 block16 KV with dynamic E4M3 scales and unit global scales.
+                         Supports GQA, dense MLA and GLM-5.3 Flash sparse MLA; Q remains unquantized.
                 Keeps Q in BF16/FP16; no calibration file is required.
                 fp8kv_sph and fp8kv_spt requires --kv_quant_calibration_config_path
                 to load pre-computed FP8 scales.

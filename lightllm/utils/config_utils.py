@@ -25,8 +25,12 @@ def get_generation_config_dict(model_path: str) -> Dict[str, Any]:
 
 def auto_set_page_size(args) -> None:
     """Select the model's default KV page size."""
-    if args.page_size == 1 and get_model_type(args.model_dir) == "deepseek_v4":
-        args.page_size = 256
+    if args.page_size == 1:
+        model_type = get_model_type(args.model_dir)
+        if model_type == "deepseek_v4":
+            args.page_size = 256
+        elif model_type == "glm5_next":
+            args.page_size = 4
 
 
 def auto_set_cpu_cache_token_page_size(args, is_hybrid_model: bool) -> None:

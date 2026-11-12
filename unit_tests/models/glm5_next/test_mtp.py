@@ -74,13 +74,14 @@ def test_kda_mtp_matches_single_token_decode_and_restores_accepted_state(mtp_ste
 
 @pytest.mark.parametrize("mtp_step", [1, 2, 3, 5])
 @pytest.mark.parametrize("prefix", [1, 2, 3, 4, 7, 15])
-def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
+@pytest.mark.parametrize("indexer_token_stride", [1, 4])
+def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix, indexer_token_stride):
     torch.manual_seed(53)
     width, capacity = mtp_step + 1, 128
     raw = torch.randn(capacity, 256, device="cuda", dtype=torch.bfloat16)
     ape = torch.randn(4, 128, device="cuda", dtype=torch.bfloat16)
     ring = torch.zeros(2, 4 + mtp_step, 256, device="cuda", dtype=torch.bfloat16)
-    packed = torch.zeros(capacity, 132, device="cuda", dtype=torch.uint8)
+    packed = torch.zeros(capacity // indexer_token_stride, 132, device="cuda", dtype=torch.uint8)
     ragged = torch.arange(capacity, device="cuda", dtype=torch.int32)
 
     def prefill(values, destination, tail):
@@ -96,6 +97,7 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
             torch.tensor([0, count], device="cuda", dtype=torch.int32),
             torch.tensor([count], device="cuda", dtype=torch.int32),
             count,
+            indexer_token_stride=indexer_token_stride,
         )
 
     prefill(raw[:prefix], packed, ring)
@@ -115,12 +117,13 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
             lengths,
             1,
             b_mtp_index=torch.arange(count, device="cuda", dtype=torch.int32),
+            indexer_token_stride=indexer_token_stride,
         )
         expected = torch.zeros_like(packed)
         prefill(raw[: start + count], expected, torch.zeros(2, 4, 256, device="cuda", dtype=torch.bfloat16))
         closing = torch.arange(start, start + count, device="cuda")
         closing = closing[(closing + 1) % 4 == 0]
-        assert torch.equal(packed[closing], expected[closing])
+        assert torch.equal(packed[closing // indexer_token_stride], expected[closing // indexer_token_stride])
 
 
 @pytest.mark.parametrize("dynamic", [False, True])

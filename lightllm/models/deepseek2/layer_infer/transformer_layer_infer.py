@@ -61,6 +61,11 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _bind_func(self):
         super()._bind_func()
         self._bind_ffn()
+        self._context_attention_impl = (
+            self._context_attention_kernel_nvfp4
+            if get_env_start_args().llm_kv_type == "nvfp4kv"
+            else self._context_attention_kernel_decompressed
+        )
         return
 
     def _bind_ffn(self):
@@ -74,6 +79,43 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
 
     def _context_attention_kernel(
+        self,
+        q: torch.Tensor,
+        kv,
+        infer_state: Deepseek2InferStateInfo,
+        layer_weight: Deepseek2TransformerLayerWeight,
+        out=None,
+    ) -> torch.Tensor:
+        return self._context_attention_impl(q, kv, infer_state, layer_weight, out=out)
+
+    def _context_attention_kernel_nvfp4(
+        self,
+        q: torch.Tensor,
+        kv,
+        infer_state: Deepseek2InferStateInfo,
+        layer_weight: Deepseek2TransformerLayerWeight,
+        out=None,
+    ) -> torch.Tensor:
+        q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="mla",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
+        return infer_state.prefill_att_state.prefill_att(
+            q=(q_nope, q_rope),
+            k=state.get_layer_view(self.layer_num_),
+            v=None,
+            att_control=AttControl(
+                mla_prefill=True,
+                mla_prefill_dict={"softmax_scale": self.softmax_scale, "prefill_cache_kv": kv},
+            ),
+            alloc_func=self.alloc_tensor,
+        )
+
+    def _context_attention_kernel_decompressed(
         self,
         q: torch.Tensor,
         kv,

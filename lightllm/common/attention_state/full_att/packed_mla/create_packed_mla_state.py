@@ -16,6 +16,37 @@ def create_packed_mla_state(
 ) -> FullAttentionState:
     """Create a packed MLA State; packed formats always include an indexer field."""
     assert type(config) is PackedMLALogicalConfig, "packed MLA creation requires PackedMLALogicalConfig"
+    if config.indexer_pool_size > 1:
+        from .pooled_mla_state import PooledMLAConfig, PooledMLAState
+
+        assert config.rope_dim == 0, "pooled MLA supports NoPE latent only"
+        return PooledMLAState(
+            layout_config=PooledMLAConfig(
+                logical_layer_groups=config.logical_layer_groups,
+                format=config.format,
+                latent_dim=config.latent_dim,
+                indexer_dim=config.indexer_dim,
+                tp_rank=config.tp_rank,
+                tp_world_size=config.tp_world_size,
+            ),
+            page_size=page_size,
+            device=device,
+        )
+    if config.format == "packed_nvfp4":
+        from ..mla.nvfp4_state import NVFP4MLAConfig, NVFP4MLAState
+
+        return NVFP4MLAState(
+            layout_config=NVFP4MLAConfig(
+                logical_layer_groups=config.logical_layer_groups,
+                latent_dim=config.latent_dim - config.rope_dim,
+                rope_dim=config.rope_dim,
+                indexer_dim=config.indexer_dim,
+                tp_rank=config.tp_rank,
+                tp_world_size=config.tp_world_size,
+            ),
+            page_size=page_size,
+            device=device,
+        )
     if config.format == "packed_group64_e8m0":
         assert config.latent_dim == FP8E8M0PackedMLAConfig.LATENT_DIM, "FP8/E8M0 MLA requires a 512-dimensional latent"
         return FP8E8M0PackedMLAState(

@@ -95,7 +95,16 @@ def test_kda_projections_need_no_sparse_attention_config(config):
     weight = Glm5NextTransformerLayerWeight(0, torch.bfloat16, config, Quantcfg(config))
     projections = {
         name: random_weight(size, 128)
-        for name, size in {"q": 512, "k": 512, "v": 512, "b": 4, "f_a": 128, "g_a": 128, "f_b": 512, "g_b": 512}.items()
+        for name, size in {
+            "q": 512,
+            "k": 512,
+            "v": 512,
+            "b": 4,
+            "f_a": 128,
+            "g_a": 128,
+            "f_b": 512,
+            "g_b": 512,
+        }.items()
     }
     weight.load_hf_weights(
         {f"model.language_model.layers.0.self_attn.{name}_proj.weight": value for name, value in projections.items()}
@@ -382,7 +391,10 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
     main = object.__new__(Glm5NextTpPartModel)
     main.config = dict(config, mhc=True)
     main.tp_world_size_ = 1
-    main.args, main.load_way = StartArgs(data_type="bfloat16", mtp_mode="vanilla_with_att", mtp_step=2), "HF"
+    main.args, main.load_way = (
+        StartArgs(data_type="bfloat16", page_size=4, mtp_mode="vanilla_with_att", mtp_step=2),
+        "HF",
+    )
     main._verify_params()
     main._init_some_value()
     main.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(config["num_hidden_layers"])]
@@ -428,12 +440,12 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
         draft.prepare_attention_states()
         assert draft.att_state_manager is main.att_state_manager
         draft._init_att_backend1()
-        state = getattr(draft.att_state_manager, f"draft{step}_mla_packed_bf16_state")
-        assert state is not main.att_state_manager.main_mla_packed_bf16_state
+        state = getattr(draft.att_state_manager, f"draft{step}_mla_pooled4_bf16_state")
+        assert state is not main.att_state_manager.main_mla_pooled4_bf16_state
         assert not hasattr(draft, "full_att_state")
         assert state.storage is None
         assert state.config.logical_layer_groups == ((4 + step,),)
-        assert state.state_name == f"draft{step}_mla_packed_bf16_state"
+        assert state.state_name == f"draft{step}_mla_pooled4_bf16_state"
         assert draft.prefill_att_backend1 is None and draft.decode_att_backend1 is None
         assert getattr(draft.att_state_manager, f"draft{step}_compressor_indexer_w4_s4_bf16_state").buffer.is_cuda
 

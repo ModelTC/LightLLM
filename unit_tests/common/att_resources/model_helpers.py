@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import torch
 from lightllm.common.attention_state.types import TensorField
+from lightllm.common.attention_state.full_att.packed_mla.pooled_mla_state import PooledMLAState
 from lightllm.common.attention_state.bounded_att import GDNState, KDAState, WindowCompressorState
 from lightllm.common.attention_state.full_att import (
     FullAttentionState,
@@ -188,7 +189,7 @@ def create_full_attention_roles(
 
 def read_kv_storage(state: FullAttentionState) -> torch.Tensor | None:
     """测试只读比较用：按 K、V 顺序拼接；修改数据须直接操作 State 的真实 buffer。"""
-    if isinstance(state, (MLAFullAttentionState, PackedMLAFullAttentionState)):
+    if isinstance(state, (MLAFullAttentionState, PackedMLAFullAttentionState, PooledMLAState)):
         return state.storage
     if state.k_storage is None:
         return None
@@ -197,6 +198,8 @@ def read_kv_storage(state: FullAttentionState) -> torch.Tensor | None:
 
 def full_state_test_buffers(state: FullAttentionState) -> dict[str, torch.Tensor | None]:
     """仅供多方案参数化测试枚举实际存储，检查容量、独立分配及字节一致性。"""
+    if isinstance(state, PooledMLAState):
+        return {"kv": state.storage, "indexer_k": state.indexer_storage}
     if isinstance(state, GroupQuantizedFullAttentionState):
         return {
             "k": state.k_storage,
@@ -210,6 +213,11 @@ def full_state_test_buffers(state: FullAttentionState) -> dict[str, torch.Tensor
     return {"kv": state.storage}
 
 
+def full_state_test_token_stride(state: FullAttentionState, field_name: str) -> int:
+    """Number of logical tokens represented by a row of the test field."""
+    return 4 if isinstance(state, PooledMLAState) and field_name == "indexer_k" else 1
+
+
 def full_state_test_fields(
     state: FullAttentionState,
     buffers: dict[str, torch.Tensor] | None = None,
@@ -217,6 +225,13 @@ def full_state_test_fields(
     """测试中独立描述实际数据，用于校验不同存储方案的传输内容。"""
     buffers = full_state_test_buffers(state) if buffers is None else buffers
     axes = ("layer", "token", "head", "dim")
+    if isinstance(state, PooledMLAState):
+        return {
+            "kv": TensorField(
+                tensor=buffers["kv"][..., : state.config.kv_bytes // state.config.dtype.itemsize], axes=axes
+            ),
+            "indexer_k": TensorField(tensor=buffers["indexer_k"][..., : state.config.indexer_dim + 4], axes=axes),
+        }
     if isinstance(state, PackedMLAFullAttentionState):
         storage = buffers["kv"]
         raw = storage.view(torch.uint8)

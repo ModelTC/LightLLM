@@ -57,7 +57,8 @@ class Glm5NextNsaInfer:
             logical_layer_id=self.layer_idx,
             state_class=FullAttentionState,
         )
-        indexer_k = full_att_state.get_layer_view(logical_layer_id=self.layer_idx).indexer_k
+        view = full_att_state.get_layer_view(logical_layer_id=self.layer_idx)
+        indexer_k = view.indexer_k
         compress_pools(
             k_and_gate=k_and_gate,
             indexer_tail=indexer_tail,
@@ -70,6 +71,7 @@ class Glm5NextNsaInfer:
             b_seq_len=infer_state.b_seq_len,
             max_q_seq_len=infer_state.max_q_seq_len,
             b_mtp_index=None if infer_state.is_prefill else infer_state.b_mtp_index,
+            indexer_token_stride=view.indexer_token_stride,
         )
 
         if infer_state.max_kv_seq_len <= self.index_topk:
@@ -92,9 +94,13 @@ class Glm5NextNsaInfer:
         # Prefill usually has many queries: parallelize over Q and reuse K within each query tile.
         # Decode has few queries, so paged MQA also splits K across SMs for parallelism.
         if infer_state.is_prefill:
-            topk_pool_indices = self._get_prefill_indices(q_fp8, weights, indexer_k, infer_state, att_state, max_pools)
+            topk_pool_indices = self._get_prefill_indices(
+                q_fp8, weights, indexer_k, infer_state, att_state, max_pools, view.indexer_token_stride
+            )
         else:
-            topk_pool_indices = self._get_decode_indices(q_fp8, weights, indexer_k, infer_state, att_state, max_pools)
+            topk_pool_indices = self._get_decode_indices(
+                q_fp8, weights, indexer_k, infer_state, att_state, max_pools, view.indexer_token_stride
+            )
         return expand_topk(
             topk_pool_indices,
             att_state.q_kv_seq_len,
@@ -110,13 +116,16 @@ class Glm5NextNsaInfer:
         query_tiles = max(1, 512 * 1024 ** 2 // (query_tile * logits_row_bytes))
         return query_tiles * query_tile
 
-    def _get_prefill_indices(self, q_fp8, weights, indexer_k, infer_state, att_state, max_pools):
+    def _get_prefill_indices(
+        self, q_fp8, weights, indexer_k, infer_state, att_state, max_pools, indexer_token_stride=1
+    ):
         k_fp8_and_scale = gather_pools(
             indexer_k,
             infer_state.req_manager.req_to_token_indexs,
             infer_state.b_req_idx,
             infer_state.b_seq_len,
             max_pools,
+            indexer_token_stride=indexer_token_stride,
         )
         ks, ke, q_pool_seq_len = get_pool_ranges(
             att_state.q_kv_seq_len, infer_state.b1_cu_q_seq_len, infer_state.max_q_seq_len, max_pools
@@ -141,7 +150,7 @@ class Glm5NextNsaInfer:
             del logits
         return topk_pool_indices
 
-    def _get_decode_indices(self, q_fp8, weights, indexer_k, infer_state, att_state, max_pools):
+    def _get_decode_indices(self, q_fp8, weights, indexer_k, infer_state, att_state, max_pools, indexer_token_stride=1):
         import deep_gemm
 
         q_pool_seq_len = (att_state.q_kv_seq_len // 4).view(-1, 1)
@@ -151,6 +160,7 @@ class Glm5NextNsaInfer:
             infer_state.b_req_idx,
             q_pool_seq_len,
             max_pools,
+            indexer_token_stride=indexer_token_stride,
         )
         mqa_logits_metadata = deep_gemm.get_paged_mqa_logits_metadata(q_pool_seq_len, 64, deep_gemm.get_num_sms())
         # Each MTP position has its own pool length; HOLD rows have no valid pools.

@@ -122,12 +122,12 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         super()._verify_params()
         assert self.config["qk_rope_head_dim"] == 0, "GLM-5.3 Flash uses NoPE attention"
         assert not self.args.enable_tpsp_mix_mode, "GLM-5.3 Flash does not support TP/SP mixed mode"
-        if self.args.llm_kv_type not in ("None", "fp8kv_dsa"):
-            raise ValueError("GLM-5.3 Flash supports only unquantized KV or dynamic fp8kv_dsa")
-        if self.args.llm_kv_type == "fp8kv_dsa":
+        if self.args.llm_kv_type not in ("None", "fp8kv_dsa", "nvfp4kv"):
+            raise ValueError("GLM-5.3 Flash supports unquantized KV, fp8kv_dsa, or nvfp4kv")
+        if self.args.llm_kv_type in ("fp8kv_dsa", "nvfp4kv"):
             # group64/E8M0 编码与稀疏 attention 算子要求 BF16 输入和固定的 512 维 latent。
             if self.data_type != torch.bfloat16 or self.config["kv_lora_rank"] != 512:
-                raise ValueError("GLM-5.3 Flash FP8 KV requires BF16 computation and kv_lora_rank=512")
+                raise ValueError("GLM-5.3 Flash quantized MLA KV requires BF16 computation and kv_lora_rank=512")
 
     def autotune_layers(self):
         return 4
@@ -169,9 +169,12 @@ class Glm5NextTpPartModel(TpPartBaseModel):
                 latent_dim=cfg.full_att_head_dim,
                 tp_rank=tp_rank,
                 tp_world_size=tp_world_size,
-                format="packed_group64_e8m0"
-                if args.llm_kv_type == "fp8kv_dsa"
-                else ("packed_fp16" if get_torch_dtype(args.data_type) == torch.float16 else "packed_bf16"),
+                format={"fp8kv_dsa": "packed_group64_e8m0", "nvfp4kv": "packed_nvfp4"}.get(
+                    args.llm_kv_type,
+                    "packed_fp16" if get_torch_dtype(args.data_type) == torch.float16 else "packed_bf16",
+                ),
+                rope_dim=0,
+                indexer_pool_size=config["index_kpool"],
             ),
             page_size=args.page_size,
             device="meta",
@@ -190,10 +193,12 @@ class Glm5NextTpPartModel(TpPartBaseModel):
 
     def _init_att_backend(self):
         from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+        from lightllm.common.basemodel.attention.nsa.nvfp4_glm5_next import NVFP4Glm5NextSparseAttBackend
 
-        backend_class = (
-            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
-        )
+        backend_class = {
+            "fp8kv_dsa": Fp8Glm5NextSparseAttBackend,
+            "nvfp4kv": NVFP4Glm5NextSparseAttBackend,
+        }.get(self.args.llm_kv_type, Glm5NextSparseAttBackend)
         self.prefill_att_backend = backend_class(model=self)
         self.decode_att_backend = self.prefill_att_backend
 

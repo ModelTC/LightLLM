@@ -5,6 +5,7 @@ from __future__ import annotations
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
 from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
+from unit_tests.common.att_resources.model_helpers import full_state_test_token_stride
 
 from typing import TYPE_CHECKING
 import dataclasses
@@ -282,7 +283,10 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
         torch.cuda.synchronize()
         expected.append(
             {
-                name: f.tensor[:, :8].contiguous().view(torch.uint8).clone()
+                name: f.tensor[:, : 8 // full_state_test_token_stride(full, name)]
+                .contiguous()
+                .view(torch.uint8)
+                .clone()
                 for name, f in full_state_test_fields(full, full_state_test_buffers(full)).items()
                 if "token" in f.axes
             }
@@ -297,8 +301,9 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
     torch.cuda.synchronize()
     for resources, fields in zip(managers, expected):
         (full,) = resources.get_full_attention_states("main")
-        for storage_buffer in full_state_test_buffers(full).values():
-            storage_buffer[:, 8:16].zero_()
+        for name, storage_buffer in full_state_test_buffers(full).items():
+            stride = full_state_test_token_stride(full, name)
+            storage_buffer[:, 8 // stride : 16 // stride].zero_()
         kwargs = {}
         if resources.bounded_att_big_page_allocator is not None:
             slot = resources.bounded_att_big_page_allocator.alloc(1)[0]
@@ -324,7 +329,10 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
             assert (main_linear_state(resources).ssm_state[:, 1] == 5).all()
         for name, field in full_state_test_fields(full, full_state_test_buffers(full)).items():
             if "token" in field.axes:
-                assert torch.equal(field.tensor[:, 8:16].contiguous().view(torch.uint8), fields[name])
+                stride = full_state_test_token_stride(full, name)
+                assert torch.equal(
+                    field.tensor[:, 8 // stride : 16 // stride].contiguous().view(torch.uint8), fields[name]
+                )
     assert not buffer[:2].any()
 
 
