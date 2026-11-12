@@ -50,13 +50,14 @@ def reference(q, k, v, a, b, a_log, bias, state, kda=False, gate_lower_bound=-5.
 @pytest.mark.parametrize("bv", [8, 32], ids=["small_bv_fallback", "precomputed"])
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
-def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state_dtype, kda):
+@pytest.mark.parametrize("activation_dtype", [torch.float16, torch.bfloat16])
+def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state_dtype, kda, activation_dtype):
     state = torch.zeros(1, 2, 1, 128, 128, dtype=state_dtype, device="cuda")
     ssm_backend = ReplaySSMExecutor(
         state,
         capacity,
         2,
-        torch.float16,
+        activation_dtype,
         num_key_heads=1,
         kda=kda,
         compute_mode="precompute",
@@ -64,15 +65,15 @@ def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state
     reqs = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
     cu = torch.tensor([0, 2, 4], dtype=torch.int32, device="cuda")
     accepted = torch.tensor([1, 0], dtype=torch.int32, device="cuda")
-    q = torch.zeros(4, 1, 128, dtype=torch.float16, device="cuda")
+    q = torch.zeros(4, 1, 128, dtype=activation_dtype, device="cuda")
     q[:2, 0, 0] = 1
     k = torch.zeros_like(q)
     k[0, 0, 0] = -0.25
     k[1, 0, 0] = 1
     v = torch.zeros_like(q)
     v[:2, 0, 0] = 60000
-    a = torch.full((4, 128 if kda else 1), -20, dtype=torch.float16, device="cuda")
-    b = torch.full((4, 1), 20, dtype=torch.float16, device="cuda")
+    a = torch.full((4, 128 if kda else 1), -20, dtype=activation_dtype, device="cuda")
+    b = torch.full((4, 1), 20, dtype=activation_dtype, device="cuda")
     alog = torch.zeros(1, device="cuda")
     bias = torch.zeros(128 if kda else 1, device="cuda")
     expected_state = state[0, 0].float().clone()
@@ -104,7 +105,12 @@ def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state
             expected.append(output)
         assert torch.isfinite(expected_state).all()
         assert torch.isfinite(actual).all()
-        torch.testing.assert_close(actual[:2].float(), torch.stack(expected), atol=4, rtol=1e-3)
+        torch.testing.assert_close(
+            actual[:2].float(),
+            torch.stack(expected),
+            atol=32 if activation_dtype == torch.bfloat16 else 4,
+            rtol=4e-3 if activation_dtype == torch.bfloat16 else 1e-3,
+        )
         accept_replay_window(ssm_backend, reqs, accepted, cu)
     # The correction is larger than FP16 can represent even though the
     # recurrent state, inputs, and attention outputs are all finite.

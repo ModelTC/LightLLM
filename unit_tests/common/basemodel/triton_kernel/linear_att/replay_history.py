@@ -55,12 +55,12 @@ def attach_replay_history(
     owner.hold_req_id = slots - 1
     owner.cursors = torch.zeros(slots, dtype=torch.int32, device=ssm.device)
     owner.tile_sync_mark = torch.zeros((slots * (owner.mtp_step + 6), hv), dtype=torch.int32, device=ssm.device)
-    # 重建用 k/d：bf16 激活用 fp16。折回仍用原始 k/v。KDA 的 g 按 key 通道存。
+    # 重建用归一化 k：bf16 激活用 fp16；d 使用 fp32。折回仍用原始 k/v。KDA 的 g 按 key 通道存。
     reconstruction_dtype = torch.float16 if activation_dtype == torch.bfloat16 else torch.float32
     key_shape = (layers, slots, owner.num_key_heads, capacity, k)
     gate_shape = (layers, slots, hv, capacity, k) if kda else (layers, slots, hv, capacity)
     owner.keys = torch.empty(key_shape, dtype=reconstruction_dtype, device=ssm.device)
-    owner.deltas = torch.empty((layers, slots, hv, capacity, v), dtype=reconstruction_dtype, device=ssm.device)
+    owner.deltas = torch.empty((layers, slots, hv, capacity, v), dtype=torch.float32, device=ssm.device)
     owner.gates = torch.empty(gate_shape, dtype=torch.float32, device=ssm.device)
     owner.raw_keys = torch.empty(key_shape, dtype=activation_dtype, device=ssm.device)
     owner.raw_values = torch.empty((layers, slots, hv, capacity, v), dtype=activation_dtype, device=ssm.device)

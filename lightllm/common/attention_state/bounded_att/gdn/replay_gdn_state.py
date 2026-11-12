@@ -103,13 +103,13 @@ class ReplayGDNState(BoundedAttentionState):
         self.cursors = torch.zeros(slots, dtype=torch.int32, device=device)
         # 按 launch 行号同步 V tile。每个请求槽留 mtp_step + 6 行，盖住验证窗口和重复的 HOLD。
         self.tile_sync_mark = torch.zeros((slots * (mtp_step + 6), hv), dtype=torch.int32, device=device)
-        # 输出重建用归一化 k 和 d。bf16 激活用 fp16，尾数更多。
+        # 归一化 k 有范围保证，bf16 激活用 fp16 保留更多尾数；d 无此保证，使用 fp32。
         # 折回不用这份 d，而用下面的原始 k/v，避免把重建误差写进 SSM。g、beta 保持 fp32。
         # GDN 的 g 是每个头一个标量。
         reconstruction_dtype = torch.float16 if config.conv_dtype == torch.bfloat16 else torch.float32
         key_shape = (layers, slots, self.num_key_heads, capacity, k)
         self.keys = torch.empty(key_shape, dtype=reconstruction_dtype, device=device)
-        self.deltas = torch.empty((layers, slots, hv, capacity, v), dtype=reconstruction_dtype, device=device)
+        self.deltas = torch.empty((layers, slots, hv, capacity, v), dtype=torch.float32, device=device)
         self.gates = torch.empty((layers, slots, hv, capacity), dtype=torch.float32, device=device)
         self.raw_keys = torch.empty(key_shape, dtype=config.conv_dtype, device=device)
         self.raw_values = torch.empty((layers, slots, hv, capacity, v), dtype=config.conv_dtype, device=device)
@@ -206,7 +206,7 @@ class ReplayGDNState(BoundedAttentionState):
         page_kind,
         page_slot_ids: list[int],
     ) -> None:
-        """从页恢复基准 Conv/SSM。prefill 时 cursor 仍是 0。"""
+        """从页恢复基准 Conv/SSM。使目标槽的旧 history 失效。"""
         assert isinstance(req_indices, list) and isinstance(page_slot_ids, list), "indices must be lists"
         assert len(req_indices) == len(state_token_lens) == len(page_slot_ids), "request, length and page counts differ"
         pool = self._pool(page_kind)
@@ -217,8 +217,9 @@ class ReplayGDNState(BoundedAttentionState):
             ssm_copies.append((pool.ssm_state[slot_id], self.ssm_state[:, req_idx]))
         copy_bounded_att_tensors(copies=conv_copies)
         copy_bounded_att_tensors(copies=ssm_copies)
-        if self.mtp_enabled:
-            for req_idx in req_indices:
+        for req_idx in req_indices:
+            self.cursors[req_idx].zero_()
+            if self.mtp_enabled:
                 self.mtp_state_index[req_idx].fill_(0)
 
     def commit_bounded_att_state(
@@ -333,7 +334,7 @@ class ReplayGDNState(BoundedAttentionState):
         dst_req_indices: list[int],
         remote_dp_bounded_state: "ReplayGDNState",
     ) -> None:
-        """复制 prefill 基准 Conv/SSM 到目标单槽。prefill 时目标 cursor 仍是 0。"""
+        """复制 prefill 基准 Conv/SSM 到目标单槽。使目标槽的旧 history 失效。"""
         assert isinstance(src_req_indices, list) and isinstance(dst_req_indices, list), "request indices must be lists"
         assert len(src_req_indices) == len(dst_req_indices), "source and destination request counts differ"
         assert (
@@ -351,8 +352,9 @@ class ReplayGDNState(BoundedAttentionState):
             ssm_copies.append((remote_dp_bounded_state.ssm_state[:, src_req], self.ssm_state[:, dst_req]))
         copy_bounded_att_tensors(copies=conv_copies)
         copy_bounded_att_tensors(copies=ssm_copies)
-        if self.mtp_enabled:
-            for dst_req in dst_req_indices:
+        for dst_req in dst_req_indices:
+            self.cursors[dst_req].zero_()
+            if self.mtp_enabled:
                 self.mtp_state_index[dst_req].fill_(0)
 
     # ========================================================================
@@ -397,7 +399,7 @@ class ReplayGDNState(BoundedAttentionState):
         state_token_len: int,
         layout: StateTransferLayout,
     ) -> None:
-        """读入基准 Conv/SSM。prefill 时 cursor 仍是 0。"""
+        """读入基准 Conv/SSM。使目标槽的旧 history 失效。"""
         assert layout.state_name == self.state_name, "transfer layout does not describe this resource"
         assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
         fields = self._tensor_fields(
@@ -412,6 +414,7 @@ class ReplayGDNState(BoundedAttentionState):
             write=False,
         ):
             copy_bounded_att_tensors(copies=copies)
+        self.cursors[req_idx].zero_()
         if self.mtp_enabled:
             self.mtp_state_index[req_idx].fill_(0)
 

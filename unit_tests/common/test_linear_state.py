@@ -79,6 +79,9 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
         lambda: state.restore_bounded_att_runtime_from_pages([dst], [8], "small", [0]),
         lambda: state.restore_bounded_att_runtime_from_pages([dst], [8], "big", [0]),
         lambda: state.read_from_pd_page(block, dst, 0, 8, layout),
+        lambda: state.copy_runtime_state_from_dp(
+            src_req_indices=[src], dst_req_indices=[dst], remote_dp_bounded_state=state
+        ),
     ):
         if state.mtp_enabled:
             state.mtp_state_index[dst] = step
@@ -96,6 +99,7 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
             assert state.mtp_state_index[dst].item() == 0
         if mode == "replay":
             assert state.cursors[dst].item() == 0
+            assert state.cursors[src].item() == 1
     state.reset_bounded_att_state([dst])
     assert not state.conv_state[:, dst].any()
     if mode == "replay":
@@ -257,3 +261,74 @@ def test_pd_block_roundtrip_preserves_replicated_heads_and_accepted_mtp_state(mo
         other_slots = (other_requests[:, None] * 3 + torch.arange(3)).flatten()
         torch.testing.assert_close(state.ssm_state[:, other_slots], ssm_before[:, other_slots])
     assert torch.equal(block, exported)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("cls", [GDNState, KDAState])
+@pytest.mark.parametrize("step", [0, 2])
+@pytest.mark.parametrize("restore_kind", ["checkpoint", "pd", "dp"])
+def test_replay_restored_slot_decodes_like_clean_slot(runtime_start_args, cls, step, restore_kind):
+    from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import replay_layer
+
+    torch.manual_seed(1690)
+    state, _, layout = make_state(cls=cls, mode="replay", step=step)
+    state.initialize_page_pools(big_page_capacity=1)
+    state.ssm_state.normal_(mean=0, std=0.02)
+    state.conv_state.normal_(mean=0, std=0.1)
+    block = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
+    state.save_bounded_att_runtime_to_pages(req_indices=[0], state_token_lens=[8], page_kind="big", page_slot_ids=[0])
+    state.write_to_pd_page(req_idx=0, pd_page_buffers=block, pd_page_index=0, state_token_len=8, layout=layout)
+    hv, kd, vd = state.ssm_state.shape[-3:]
+    kh = state.num_key_heads
+    width = step + 1
+    q = torch.randn(width, kh, kd, device="cuda", dtype=torch.bfloat16).repeat(2, 1, 1)
+    k = torch.randn_like(q[:width]).repeat(2, 1, 1)
+    v = torch.randn(width, hv, vd, device="cuda", dtype=torch.bfloat16).repeat(2, 1, 1)
+    a = torch.full((2 * width, hv * kd if state.kda else hv), -3.0, device="cuda")
+    b = torch.zeros(2 * width, hv, device="cuda")
+    alog = torch.zeros(hv, device="cuda")
+    bias = torch.zeros(a.shape[-1], device="cuda")
+    reqs = torch.tensor([1, 2], dtype=torch.int32, device="cuda")
+    cu = torch.arange(3, dtype=torch.int32, device="cuda") * width
+
+    def decode():
+        outputs = []
+        for layer in state.config.logical_layer_ids:
+            outputs.append(
+                replay_layer(
+                    state=state,
+                    layer_idx=layer,
+                    q=q,
+                    k=k,
+                    v=v,
+                    a=a,
+                    b=b,
+                    a_log=alog,
+                    bias=bias,
+                    reqs=reqs,
+                    cu_seqlens=cu,
+                    run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
+                )
+            )
+            state.finish_decode_token(logical_layer_id=layer, reqs=reqs, cu_seqlens=cu)
+        return outputs
+
+    decode()
+    assert state.cursors[1].item() == width
+    state.reset_bounded_att_state(req_indices=[2])
+    state.restore_bounded_att_runtime_from_pages(
+        req_indices=[2], state_token_lens=[8], page_kind="big", page_slot_ids=[0]
+    )
+    if restore_kind == "checkpoint":
+        state.restore_bounded_att_runtime_from_pages(
+            req_indices=[1], state_token_lens=[8], page_kind="big", page_slot_ids=[0]
+        )
+    elif restore_kind == "pd":
+        state.read_from_pd_page(pd_page_buffers=block, req_idx=1, pd_page_index=0, state_token_len=8, layout=layout)
+    else:
+        state.copy_runtime_state_from_dp(src_req_indices=[0], dst_req_indices=[1], remote_dp_bounded_state=state)
+    assert state.cursors[1].item() == 0
+    for _ in range(3):
+        for output in decode():
+            torch.testing.assert_close(output[:width], output[width:], rtol=0, atol=0)
+    torch.testing.assert_close(state.ssm_state[:, 1], state.ssm_state[:, 2], rtol=0, atol=0)
