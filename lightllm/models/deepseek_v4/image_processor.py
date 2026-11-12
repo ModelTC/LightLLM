@@ -154,7 +154,10 @@ def load_image(image: Image.Image, args, *, rgb_lookup: Optional[torch.Tensor] =
     if rgb_lookup is not None:
         from lightllm.models.deepseek_v4.triton_kernel.image_patches import pack_rgb_patches
 
-        pixels = torch.from_numpy(np.array(image, dtype=np.uint8)).to(device=rgb_lookup.device, non_blocking=True)
+        # NumPy can advise huge pages for large allocations. Stage writable RGB bytes directly.
+        rgb_bytes = bytearray(image.tobytes())
+        pixels = torch.frombuffer(rgb_bytes, dtype=torch.uint8)
+        pixels = pixels.to(device=rgb_lookup.device, non_blocking=True)
         patches = pack_rgb_patches(pixels, rgb_lookup, n_vit_w, patch_size)
         return patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w
 

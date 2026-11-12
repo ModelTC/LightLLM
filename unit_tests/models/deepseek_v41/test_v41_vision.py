@@ -90,7 +90,9 @@ def test_image_preprocessing_and_layout_match_checkpoint(reference, width, heigh
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA patch packing requires a GPU")
-@pytest.mark.parametrize("row_major,width,height", [(False, 41, 512), (True, 800, 600), (True, 30000, 1)])
+@pytest.mark.parametrize(
+    "row_major,width,height", [(False, 41, 512), (True, 800, 600), (True, 1344, 1344), (True, 30000, 1)]
+)
 def test_gpu_image_preprocessing_matches_cpu(row_major, width, height):
     args = SimpleNamespace(
         vision_row_major=row_major,
