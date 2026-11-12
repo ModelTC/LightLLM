@@ -76,7 +76,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         prefill_tail_token_num = sum(min(length, replay_window) for length in b_q_seq_len)
 
     input_ids = np.concatenate(input_ids, dtype=np.int64) if input_ids else np.empty((0,), dtype=np.int64)
-    input_ids = torch.tensor(input_ids, dtype=torch.int64, device="cpu")
+    input_ids = torch.from_numpy(input_ids)
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_is_decode_req = torch.tensor(b_is_decode_req, dtype=torch.bool, device="cpu")
