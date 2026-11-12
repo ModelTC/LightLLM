@@ -199,5 +199,5 @@ def _check_rank_selection(family, phase, selected_name, failure):
         rejected = {f"rank {rank}": item["failure"] for rank, item in enumerate(selections) if item["failure"]}
         if len(selected) > 1:
             rejected["backend selection"] = ", ".join(sorted(selected))
-        if selected and rejected or (not selected and rejected):
+        if rejected:
             raise BackendSelectionError(family, phase, rejected)

@@ -153,6 +153,20 @@ def test_rank_selection_checks_all_ranks_after_local_selection(monkeypatch):
         selection._check_rank_selection(AttentionFamily.DENSE, AttentionPhase.DECODE, "fa3", None)
 
 
+def test_rank_selection_propagates_remote_failure(monkeypatch):
+    import torch.distributed as dist
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(
+        dist,
+        "all_gather_object",
+        lambda output, value: output.__setitem__(slice(None), [value, {"backend": None, "failure": "probe failed"}]),
+    )
+    with pytest.raises(selection.BackendSelectionError, match="rank 1: probe failed"):
+        selection._check_rank_selection(AttentionFamily.DENSE, AttentionPhase.DECODE, "fa3", None)
+
+
 @pytest.mark.parametrize("format,provider", [("fp8kv_sph", "flashinfer"), ("fp8kv_spt", "fa3")])
 def test_fp8_scale_layouts_are_not_interchangeable(format, provider):
     candidates = selection.data_type_to_backend[format]
