@@ -368,8 +368,8 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         T = input.shape[0]
 
         qkv = layer_weight.wq_a_wkv_.mm(input)
-        qa = layer_weight.q_norm_(qkv[:, : -self.head_dim_], eps=self.eps_)
-        q_in = layer_weight.wq_b_.mm(qa).view(T, self.tp_q_head_num_, self.head_dim_)
+        qa, q_in = layer_weight.wq_b_.mm_rmsnorm(qkv[:, : -self.head_dim_], layer_weight.q_norm_, self.eps_)
+        q_in = q_in.view(T, self.tp_q_head_num_, self.head_dim_)
 
         if self.tp_q_head_num_ == self.flashmla_q_head_num_:
             q = q_in

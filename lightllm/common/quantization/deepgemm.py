@@ -219,6 +219,23 @@ class DeepGEMMFP8w8a8B32QuantizationMethod(DeepGEMMFP8w8a8B128QuantizationMethod
             raise ValueError("fp8w8a8-b32-deepgemm requires SM100 and UE8M0 weight scales")
         return super()._create_weight(out_dims, in_dim, dtype, device_id, num_experts)
 
+    def apply_rmsnorm(self, input_tensor, weight_pack, norm_weight, eps, bias=None):
+        # Small batches save a launch. Large prefill batches use the separate kernels.
+        if input_tensor.shape[0] > 512:
+            return super().apply_rmsnorm(input_tensor, weight_pack, norm_weight, eps, bias=bias)
+
+        from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import rmsnorm_quant_mxfp8
+
+        assert bias is None, f"Bias addition is not supported in {self.method_name}"
+        normalized, quant, scale = rmsnorm_quant_mxfp8(
+            input_tensor, norm_weight.weight, eps, self.activation_quant_eps, self.cache_manager.empty
+        )
+        out = self.cache_manager.empty(
+            (input_tensor.shape[0], weight_pack.weight.shape[0]), dtype=input_tensor.dtype, device=input_tensor.device
+        )
+        _deepgemm_fp8_nt((quant, scale), (weight_pack.weight, weight_pack.weight_scale), out, recipe=self.gemm_recipe)
+        return normalized, out
+
     def load_weight_scale(self, weight_scale, weight_pack):
         if weight_scale is not None:
             super().load_weight_scale(weight_scale.float(), weight_pack)

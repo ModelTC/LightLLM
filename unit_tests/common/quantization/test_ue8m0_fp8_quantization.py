@@ -58,6 +58,26 @@ def test_sgl_dispatch_uses_ue8m0_flag(monkeypatch, use_ue8m0_scales, use_packed_
         torch.testing.assert_close(actual, torch.full_like(actual, 2.0 ** -8), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("rows", [1, 383])
+def test_rmsnorm_mxfp8_matches_separate_kernels(rows):
+    from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
+
+    x = torch.randn((rows, 1792), device="cuda", dtype=torch.bfloat16)[:, :1280]
+    x[-1, :32] *= 1e-5
+    norm_weight = torch.randn(1280, device="cuda", dtype=torch.bfloat16)
+    normalized = rmsnorm_forward(x, norm_weight, 1e-6)
+    quant, scales = activation.per_token_group_quant_fp8(
+        normalized, 32, eps=1e-4, use_ue8m0_scales=True, use_packed_ue8m0=True
+    )
+
+    fused_norm, fused_quant, fused_scales = activation.rmsnorm_quant_mxfp8(x, norm_weight, 1e-6, 1e-4, torch.empty)
+
+    assert torch.equal(fused_norm.view(torch.uint8), normalized.view(torch.uint8))
+    assert torch.equal(fused_quant.view(torch.uint8), quant.view(torch.uint8))
+    assert fused_scales.stride() == scales.stride()
+    assert torch.equal(fused_scales, scales)
+
+
 @pytest.mark.parametrize("use_packed_ue8m0", [False, True])
 def test_ue8m0_rounding_at_power_of_two_boundaries(monkeypatch, use_packed_ue8m0):
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")

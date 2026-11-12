@@ -76,6 +76,10 @@ class QuantizationMethod(ABC):
             activation, weight_pack, out, use_custom_tensor_mananger=use_custom_tensor_mananger, bias=bias
         )
 
+    def apply_rmsnorm(self, input_tensor, weight_pack, norm_weight, eps, bias=None):
+        normalized = norm_weight(input_tensor, eps=eps)
+        return normalized, self.apply(normalized, weight_pack, bias=bias)
+
     def create_weight(
         self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int
     ) -> Tuple[WeightPack, List[WeightPack]]:

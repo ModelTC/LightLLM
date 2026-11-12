@@ -70,6 +70,9 @@ class MMWeightTpl(BaseWeightTpl):
             bias=self.bias,
         )
 
+    def mm_rmsnorm(self, input_tensor, norm_weight, eps):
+        return self.quant_method.apply_rmsnorm(input_tensor, self.mm_param, norm_weight, eps, bias=self.bias)
+
     def gen_weight_quant_param_names(self):
         self.quanted_weight_names = [None] * len(self.weight_names)
         self.weight_zero_point_names = [None] * len(self.weight_names)

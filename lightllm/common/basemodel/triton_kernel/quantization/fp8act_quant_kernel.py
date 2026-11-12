@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_num_warps
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
 from frozendict import frozendict
@@ -222,6 +223,61 @@ def lightllm_per_token_group_quant_fp8(
     return
 
 
+@triton.jit
+def _rmsnorm_quant_mxfp8(
+    X, W, Y, Q, S, x_stride_m, x_stride_n, scale_stride, width, eps, quant_eps, BLOCK_SIZE: tl.constexpr
+):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK_SIZE)
+    x = tl.load(X + row * x_stride_m + cols * x_stride_n, cols < width, 0).to(tl.float32)
+    w = tl.load(W + cols, cols < width, 0).to(tl.float32)
+    var = tl.sum(x * x, axis=0) / width
+    rstd = 1 / tl.sqrt(var + eps)
+    # Quantize the same rounded values that the indexer reads.
+    normalized = ((x * rstd) * w).to(Y.dtype.element_ty)
+    tl.store(Y + row * width + cols, normalized, cols < width)
+
+    groups: tl.constexpr = BLOCK_SIZE // 32
+    grouped = tl.reshape(normalized.to(tl.float32), (groups, 32))
+    scales = _ceil_to_ue8m0(tl.maximum(tl.max(tl.abs(grouped), axis=1), quant_eps) / 448.0)
+    quant = tl.clamp(grouped / scales[:, None], -448.0, 448.0)
+    tl.store(Q + row * width + cols, tl.reshape(quant, (BLOCK_SIZE,)), cols < width)
+    packed = _pack_ue8m0_scales(scales, tl.arange(0, groups) < width // 32, groups)
+    pack_ids = tl.arange(0, groups // 4)
+    tl.store(S + row + pack_ids * scale_stride, packed, pack_ids < tl.cdiv(width, 128))
+
+
+def _alloc_packed_ue8m0_scales(x, group_size, alloc_func):
+    rows, width = x.shape[-2:]
+    aligned_rows = triton.cdiv(rows, 4) * 4
+    return alloc_func((triton.cdiv(width // group_size, 4), aligned_rows), device=x.device, dtype=torch.int32).t()[
+        :rows
+    ]
+
+
+def rmsnorm_quant_mxfp8(x, weight, eps, quant_eps, alloc_func):
+    rows, width = x.shape
+    normalized = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+    quant = alloc_func(x.shape, dtype=torch.float8_e4m3fn, device=x.device)
+    scale = _alloc_packed_ue8m0_scales(x, 32, alloc_func)
+    _rmsnorm_quant_mxfp8[(rows,)](
+        x,
+        weight,
+        normalized,
+        quant,
+        scale,
+        x.stride(0),
+        x.stride(1),
+        scale.stride(1),
+        width,
+        eps,
+        quant_eps,
+        BLOCK_SIZE=max(128, triton.next_power_of_2(width)),
+        num_warps=rmsnorm_num_warps,
+    )
+    return normalized, quant, scale
+
+
 def per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
@@ -235,9 +291,7 @@ def per_token_group_quant_fp8(
 ):
     x_q = alloc_func(x.shape, dtype=dtype, device=x.device)
     if use_packed_ue8m0:
-        groups = x.shape[-1] // group_size
-        aligned_size = (x.shape[-2] + 3) // 4 * 4
-        x_s = alloc_func(((groups + 3) // 4, aligned_size), device=x.device, dtype=torch.int32).t()[: x.shape[-2], :]
+        x_s = _alloc_packed_ue8m0_scales(x, group_size, alloc_func)
     elif column_major_scales:
         if scale_tma_aligned:
             aligned_size = (x.shape[-2] + 3) // 4 * 4
