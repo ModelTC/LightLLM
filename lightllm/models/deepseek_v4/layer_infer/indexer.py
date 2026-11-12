@@ -251,12 +251,16 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         )
 
     def _build_v41_metadata(self, x, q_lora, infer_state, layer_weight, use_custom_tensor_manager):
-        capacity = triton.cdiv(max(1, infer_state.max_kv_seq_len // self.compress_ratio), 64) * 64
-        sparse_candidates = self.uses_candidate_blocks and capacity > self.candidate_topk_blocks * 8
+        max_seq_len = infer_state.max_kv_seq_len
+        capacity = triton.cdiv(max(1, max_seq_len // self.compress_ratio), 64) * 64
+        candidate_capacity = self.candidate_topk_blocks * 8
+        sparse_candidates = self.uses_candidate_blocks and capacity > candidate_capacity
+        # A downstream ratio-1 indexer has the largest possible key capacity.
+        build_candidates = self.is_candidate_source and triton.cdiv(max(1, max_seq_len), 64) * 64 > candidate_capacity
         alloc = self.alloc_tensor if use_custom_tensor_manager else torch.empty
         slots = alloc((x.shape[0], self.index_topk), dtype=torch.int32, device=x.device)
         lengths = alloc((x.shape[0],), dtype=torch.int32, device=x.device)
-        if capacity <= self.index_topk and not (self.is_candidate_source or sparse_candidates):
+        if capacity <= self.index_topk and not (build_candidates or sparse_candidates):
             from ..triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
 
             build_compressed_kv_indices(
@@ -320,7 +324,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                 max(1, infer_state.total_token_num // self.compress_ratio),
                 capacity,
             )
-        if self.is_candidate_source:
+        if build_candidates:
             infer_state.candidate_block_indices = torch.empty(
                 (x.shape[0], min(self.candidate_topk_blocks, triton.cdiv(capacity, 8))),
                 dtype=torch.int32,
@@ -352,7 +356,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                     False,
                 )
             valid = metadata.valid_lengths[start:end]
-            if self.is_candidate_source:
+            if build_candidates:
                 select_indexer_candidates(logits, valid, infer_state.candidate_block_indices[start:end])
             select_indexer_topk(logits, valid, metadata.row_page_table[start:end], slots[start:end], lengths[start:end])
             del logits

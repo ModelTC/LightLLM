@@ -411,7 +411,8 @@ def test_candidate_indexer_large_cache_offsets_and_graph(byte_offset):
 
 
 @pytest.mark.parametrize("ratio", [1, 2])
-def test_short_v41_indexer_returns_all_closed_groups(ratio):
+@pytest.mark.parametrize("candidate_source", [False, True])
+def test_short_v41_indexer_returns_all_closed_groups(ratio, candidate_source):
     from lightllm.models.deepseek_v4.layer_infer.indexer import DeepseekV4IndexInfer
 
     topk = 512
@@ -432,12 +433,12 @@ def test_short_v41_indexer_returns_all_closed_groups(ratio):
         dict(
             model_type="deepseek_v41",
             rms_norm_eps=1e-6,
-            compress_ratios=[0, ratio],
+            compress_ratios=[1, ratio],
             index_topk=topk,
             index_head_dim=128,
-            index_n_heads=64,
+            index_n_heads=32,
             index_source_layer_ids=[1],
-            candidate_source_layer_id=0,
+            candidate_source_layer_id=1 if candidate_source else 0,
             candidate_topk_blocks=2048,
         ),
         1,
@@ -455,7 +456,7 @@ def test_short_v41_indexer_returns_all_closed_groups(ratio):
 
 @pytest.mark.parametrize("ratio", [1, 2])
 @pytest.mark.parametrize("mode", ["decode", "prefill", "prefill_paged"])
-@pytest.mark.parametrize("candidates", ["none", "source", "consumer"])
+@pytest.mark.parametrize("candidates", ["none", "source", "source_unused", "consumer"])
 def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monkeypatch):
     from lightllm.models.deepseek_v4.layer_infer import indexer as indexer_module
     from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_indexer_k_buffer
@@ -500,7 +501,7 @@ def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monke
     state.__dict__.update(
         position_ids=query_pos,
         dsv4_sparse_req_idx=req,
-        max_kv_seq_len=capacity,
+        max_kv_seq_len=keys * ratio if candidates == "source_unused" else capacity,
         indexer_metadata=None,
         is_prefill=mode != "decode",
         max_q_seq_len=3,
@@ -510,7 +511,11 @@ def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monke
         b_seq_len=lengths if mode != "decode" else lengths[req.long()],
         _dsv4_token_to_batch_idx=req.long(),
         req_manager=SimpleNamespace(cache_config=config, req_to_token_indexs=table, HOLD_REQUEST_ID=1),
-        candidate_block_indices=torch.tensor([[0, 2, 17, 100]] * 4, dtype=torch.int32, device="cuda"),
+        candidate_block_indices=(
+            None
+            if candidates == "source_unused"
+            else torch.tensor([[0, 2, 17, 100]] * 4, dtype=torch.int32, device="cuda")
+        ),
     )
     indexer = indexer_module.DeepseekV4IndexInfer(
         0,
@@ -523,8 +528,8 @@ def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monke
             qk_rope_head_dim=64,
             index_n_heads=heads,
             index_source_layer_ids=[0],
-            candidate_source_layer_id=0 if candidates == "source" else 20,
-            candidate_topk_blocks=4,
+            candidate_source_layer_id=0 if candidates in ("source", "source_unused") else 20,
+            candidate_topk_blocks=2048 if candidates == "source_unused" else 4,
         ),
         1,
     )
@@ -573,6 +578,8 @@ def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monke
                 if recent >= 0:
                     assert recent in candidate_mask[row].tolist()
                 assert (candidate_mask[row] >= 0).sum().item() == min(4, (valid[row].item() + 7) // 8)
+        if candidates == "source_unused":
+            assert candidate_mask is None
 
     check(run(), state.candidate_block_indices)
     state.indexer_metadata = None
