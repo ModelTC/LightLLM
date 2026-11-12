@@ -109,7 +109,8 @@ def _decode_replay(
     前缀放不下本步 token 时，先在本 kernel 里把已有前缀从原始 k/v 折进 checkpoint，
     舍入成 SSM 的 dtype，再从这份状态重放本步。cursor 本 kernel 不修改，留给最后一层返回后更新。
     """
-    iv, seq, hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    # grid 是 (V tile, value head, launch 行)。同一 V tile 上相邻 program 对应连续的 value head。
+    iv, hv, seq = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     req = tl.load(Reqs + seq).to(tl.int64)
     start, end = tl.load(Cu + seq), tl.load(Cu + seq + 1)
     vv = iv * BV + tl.arange(0, BV)

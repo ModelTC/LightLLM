@@ -153,7 +153,7 @@ def replay(
         value_heads=hv,
         key_heads=state.num_key_heads,
     )
-    _decode_replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](
+    _decode_replay[(triton.cdiv(vd, bv), hv, reqs.numel())](
         Q=q,
         StepK=k,
         StepV=v,
