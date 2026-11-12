@@ -8,7 +8,7 @@ from lightllm.common.attention.api.batch import AttentionBatch
 from lightllm.common.attention.api.inputs import GDNInputs
 from lightllm.common.attention.api.spec import AttentionFamily
 from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_fn
-from lightllm.common.attention.backends._shared.linear.mtp_state_params import build_dynamic_mtp_linear_att_state_params
+from lightllm.common.attention.backends._shared.linear.layout import LinearDecodeContext, update_linear_decode
 from lightllm.common.attention.backends.base import AttentionExecutionContext, BaseAttentionBackend
 from lightllm.common.attention.backends.gdn.triton.kernels.fused_gdn_gating import fused_gdn_gating
 from lightllm.common.attention.backends.gdn.triton.kernels.fused_recurrent import fused_recurrent_gated_delta_rule
@@ -22,18 +22,15 @@ if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class LinearAttPrefillContext(AttentionExecutionContext):
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
 
-@dataclasses.dataclass
-class LinearAttDecodeContext(AttentionExecutionContext):
-    b_conv_buffer_idx: torch.Tensor = None
-    b_ssm_buffer_idx: torch.Tensor = None
-    b1_mtp_cu_q_seq_len: torch.Tensor = None
-    b_num_accepted_tokens: torch.Tensor = None
+@dataclasses.dataclass(slots=True)
+class LinearAttDecodeContext(LinearDecodeContext):
+    pass
 
 
 class TritonLinearAttBackend(BaseAttentionBackend):
@@ -166,60 +163,7 @@ class TritonLinearAttBackend(BaseAttentionBackend):
         return core_attn_out
 
     def _update_decode(self, context):
-        draft_step = self.decode_draft_step
-        if draft_step == 0:
-            self._decode_init_normal_decode_state(context)
-            return
-        if self.uses_dynamic_spec_verify_layout():
-            self._decode_init_dynamic_mtp_decode_state(
-                context, draft_step + 1, req_to_mtp_state_index=self.mtp_state_index
-            )
-        else:
-            self._decode_init_fixed_mtp_decode_state(context, draft_step, req_to_mtp_state_index=self.mtp_state_index)
-
-    def _decode_init_normal_decode_state(self, context):
-        context.b_conv_buffer_idx = context.batch.b_req_idx
-        context.b_ssm_buffer_idx = context.batch.b_req_idx
-
-    def _decode_init_dynamic_mtp_decode_state(
-        self, context, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor
-    ) -> None:
-        (
-            context.b1_mtp_cu_q_seq_len,
-            context.b_conv_buffer_idx,
-            context.b_num_accepted_tokens,
-        ) = build_dynamic_mtp_linear_att_state_params(
-            b_req_idx=context.batch.b_req_idx,
-            b_mtp_index=context.batch.b_mtp_index,
-            req_to_mtp_state_index=req_to_mtp_state_index,
-            hold_req_id=context.batch.hold_req_id,
-        )
-        self._decode_init_mtp_ssm_buffer_idx(context, mtp_size)
-
-    def _decode_init_fixed_mtp_decode_state(
-        self, context, draft_step: int, *, req_to_mtp_state_index: torch.Tensor
-    ) -> None:
-        mtp_size = draft_step + 1
-        batch_size = context.batch.batch_size
-        assert batch_size % mtp_size == 0, (
-            "GDN fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
-            f"got batch_size={batch_size}, draft_step={draft_step}."
-        )
-        att_batch_size = batch_size // mtp_size
-        context.b1_mtp_cu_q_seq_len = torch.arange(
-            0, batch_size + 1, mtp_size, dtype=torch.int32, device=context.batch.b_req_idx.device
-        )
-        context.b_conv_buffer_idx = context.batch.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        context.b_num_accepted_tokens = req_to_mtp_state_index[context.b_conv_buffer_idx] + 1
-        self._decode_init_mtp_ssm_buffer_idx(context, mtp_size)
-
-    def _decode_init_mtp_ssm_buffer_idx(self, context, mtp_size: int):
-        att_batch_size = context.b_conv_buffer_idx.shape[0]
-        b_ssm_buffer_start_idx = (context.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
-        state_offsets = torch.arange(
-            mtp_size, device=context.batch.b_req_idx.device, dtype=context.batch.b_req_idx.dtype
-        ).view(1, mtp_size)
-        context.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets
+        update_linear_decode(context, self.decode_draft_step, self.uses_dynamic_spec_verify_layout(), replay=False)
 
     def _forward_decode(self, layer: LayerAttentionBinding, context, inputs: GDNInputs, *, out=None) -> torch.Tensor:
         mixed_qkvzba = inputs.mixed_qkvzba
@@ -306,7 +250,7 @@ class TritonLinearAttBackend(BaseAttentionBackend):
             bias=layer.params.conv_bias,
             activation=backend.activation,
             conv_state_indices=context.b_conv_buffer_idx,
-            num_accepted_tokens=context.b_num_accepted_tokens,
+            num_accepted_tokens=context.accepted_tokens(layer.params.mtp_state_index),
             query_start_loc=cu_seqlens_q,
         )
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
@@ -319,7 +263,7 @@ class TritonLinearAttBackend(BaseAttentionBackend):
             cu_seqlens=cu_seqlens_q.to(torch.long),
             ssm_state_indices=context.b_ssm_buffer_idx,
             ssm_state_write_indices=context.b_ssm_buffer_idx,
-            num_accepted_tokens=context.b_num_accepted_tokens,
+            num_accepted_tokens=context.accepted_tokens(layer.params.mtp_state_index),
             A_log=layer.params.a_log,
             dt_bias=layer.params.dt_bias,
             a_raw=a,

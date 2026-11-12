@@ -5,13 +5,14 @@ from typing import List, Optional
 
 import torch
 
-from lightllm.common.attention.api import AttentionBatch, AttentionPhase, ContextCapacity
+from lightllm.common.attention.api import AttentionPhase, ContextCapacity
 from lightllm.common.attention_state.manager import AttentionStateManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
 from lightllm.utils.dist_utils import get_dp_world_size, get_global_dp_rank
 from lightllm.utils.envs_utils import get_env_start_args
 
+from .attention_batch import AttentionBatchBuilder
 from .triton_kernel.gen_decode_params import gen_decode_params
 from .triton_kernel.gen_prefill_params import gen_prefill_params
 
@@ -138,29 +139,7 @@ class InferStateInfo:
         if model._attention_storage_generation != self.att_state_manager.storage_generation:
             raise RuntimeError("attention storage changed; rebind layers and recapture CUDA graphs")
         phase = AttentionPhase.PREFILL if self.is_prefill else AttentionPhase.DECODE
-        self.attention_batch = AttentionBatch(
-            phase=phase,
-            batch_size=self.batch_size,
-            token_num=self.input_ids.shape[0],
-            total_token_num=self.total_token_num,
-            max_q_seq_len=self.max_q_seq_len,
-            max_kv_seq_len=self.max_kv_seq_len,
-            max_cache_len=self.max_cache_len or 0,
-            b_req_idx=self.b_req_idx,
-            b_seq_len=self.b_seq_len,
-            b_q_seq_len=self.b_q_seq_len,
-            b1_cu_q_seq_len=self.b1_cu_q_seq_len,
-            b1_cu_kv_seq_len=self.b1_cu_kv_seq_len,
-            req_to_token_indexs=self.req_manager.req_to_token_indexs,
-            hold_req_id=self.req_manager.HOLD_REQUEST_ID,
-            b_ready_cache_len=self.b_ready_cache_len,
-            b_mtp_index=self.b_mtp_index,
-            b_shared_seq_len=self.b_shared_seq_len,
-            b_shared_radix_node_id=self.b_shared_radix_node_id,
-            mem_index=self.mem_index,
-            position_ids=self.position_ids,
-            b_image_token_end=getattr(self, "b_image_token_end", None),
-        )
+        self.attention_batch = AttentionBatchBuilder.from_infer_state(self)
         if self.is_cuda_graph_replay:
             return
         capacity = ContextCapacity(
@@ -180,6 +159,12 @@ class InferStateInfo:
             context = backend.allocate_context(capacity, capture=self.is_cuda_graph_capture, workspace=workspace)
             backend.prepare(context, self.attention_batch)
             self.attention_contexts[group_id] = context
+
+    def attention_context(self, binding):
+        context = self.attention_contexts[binding.group_id]
+        if context.backend_identity is not binding.backend or context.capacity.phase is not binding.spec.phase:
+            raise ValueError("layer binding does not belong to this attention execution")
+        return context
 
     def update_attention(self):
         for group_id, context in self.attention_contexts.items():

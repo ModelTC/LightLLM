@@ -9,7 +9,7 @@ from lightllm.common.attention.backends.base import AttentionExecutionContext
 from lightllm.common.attention.backends.sparse_mla.flashmla.backend import NsaFlashMlaSparseAttBackend
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class NsaFlashMlaFp8SparsePrefillContext(AttentionExecutionContext):
     ks: torch.Tensor = None
     ke: torch.Tensor = None
@@ -20,7 +20,7 @@ class NsaFlashMlaFp8SparsePrefillContext(AttentionExecutionContext):
     q_kv_start_loc: torch.Tensor = None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class NsaFlashMlaFp8SparseDecodeContext(AttentionExecutionContext):
     ks: torch.Tensor = None
     ke: torch.Tensor = None

@@ -6,7 +6,7 @@
 """
 
 from dataclasses import dataclass
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Protocol
 
 import torch
 
@@ -31,6 +31,33 @@ class MLAParams:
     qk_rope_head_dim: int
 
 
+class ReplaySSMState(Protocol):
+    """Borrowed replay storage; State retains allocation, checkpoint and release ownership."""
+
+    ssm_state: torch.Tensor
+    keys: torch.Tensor
+    deltas: torch.Tensor
+    gates: torch.Tensor
+    raw_keys: torch.Tensor
+    raw_values: torch.Tensor
+    betas: torch.Tensor
+    cursors: torch.Tensor
+    tile_sync_mark: torch.Tensor
+    num_key_heads: int
+    capacity: int
+    verify_width: int
+    compute_mode: str
+    gate_lower_bound: float
+    hold_req_id: int
+    kda: bool
+
+    def storage_layer(self, logical_layer_id: int) -> int:
+        ...
+
+    def finish_decode_token(self, logical_layer_id: int, reqs: torch.Tensor, cu_seqlens: torch.Tensor) -> None:
+        ...
+
+
 @dataclass(frozen=True)
 class GDNParams:
     conv: torch.Tensor
@@ -39,7 +66,8 @@ class GDNParams:
     conv_bias: Optional[torch.Tensor]
     a_log: torch.Tensor
     dt_bias: torch.Tensor
-    state: object = None
+    mtp_state_index: torch.Tensor | None = None
+    replay_state: ReplaySSMState | None = None
 
 
 @dataclass(frozen=True)
@@ -49,7 +77,8 @@ class KDAParams:
     conv_weight: torch.Tensor
     a_log: torch.Tensor
     dt_bias: torch.Tensor
-    state: object = None
+    mtp_state_index: torch.Tensor | None = None
+    replay_state: ReplaySSMState | None = None
 
 
 @dataclass(frozen=True)

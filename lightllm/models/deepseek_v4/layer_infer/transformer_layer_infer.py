@@ -517,9 +517,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         inputs = DeepseekV4Inputs(
             q, meta["swa_indices"], meta["swa_lengths"], meta.get("extra_indices"), meta.get("extra_lengths")
         )
-        return self.prefill_attention.forward(
-            infer_state.attention_contexts[self.prefill_attention.group_id], inputs, out=out
-        )
+        return self.prefill_attention.forward(self.prefill_attention.context(infer_state), inputs, out=out)
 
     # ------------------------------------------------------------------ attention (decode)
     def token_attention_forward(
@@ -534,9 +532,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         inputs = DeepseekV4Inputs(
             q, meta["swa_indices"], meta["swa_lengths"], meta.get("extra_indices"), meta.get("extra_lengths")
         )
-        return self.decode_attention.forward(
-            infer_state.attention_contexts[self.decode_attention.group_id], inputs, out=out
-        )
+        return self.decode_attention.forward(self.decode_attention.context(infer_state), inputs, out=out)
 
     # ------------------------------------------------------------------ moe
     def _ffn_shared_expert(

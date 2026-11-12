@@ -9,12 +9,12 @@ from lightllm.common.basemodel.triton_kernel.diverse_utils import build_diverse_
 from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel, get_env_start_args
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Int8kvTritonPrefillContext(AttentionExecutionContext):
     b_kv_start_loc: torch.Tensor = None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Int8kvTritonDecodeContext(AttentionExecutionContext):
     b_shared_seq_len: torch.Tensor = None
     b_mark_shared_group: torch.Tensor = None
@@ -154,7 +154,7 @@ class Int8kvTritonAttBackend(BaseAttentionBackend):
             alloc_tensor_func=alloc_func,
             b_shared_seq_len=context.b_shared_seq_len,
             b_mark_shared_group=context.b_mark_shared_group,
-            shared_streams_dict=context.workspace.objects,
+            shared_streams_dict=context.workspace.get_object("int8_decode_streams", dict),
         )
 
     def _decode_normal_decode_att(

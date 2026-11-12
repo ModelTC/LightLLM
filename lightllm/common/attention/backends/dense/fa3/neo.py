@@ -33,7 +33,7 @@ except ImportError as exc:
     HAS_FLASH_ATTN_INTERFACE = False
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class NeoFa3PrefillContext(Fa3PrefillContext):
     pass
 

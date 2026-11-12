@@ -246,7 +246,6 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
         head_dim=dim,
         tp_hidden_size=hidden,
         lower_bound=-5.0,
-        mtp_state_index=accepted_offsets,
     )
     batch = make_batch(
         (1,) * tokens, device="cuda", b_req_idx=infer.b_req_idx, b_mtp_index=infer.b_mtp_index, hold_req_id=3
@@ -254,7 +253,16 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
     context = make_context(executor, batch)
     executor.update(context)
     attention = make_layer_attention(
-        executor, context, KDAParams(*selected.get_layer_view(0), conv_weight, a, bias, state=selected)
+        executor,
+        context,
+        KDAParams(
+            *selected.get_layer_view(0),
+            conv_weight,
+            a,
+            bias,
+            mtp_state_index=selected.mtp_state_index,
+            replay_state=selected if mode == "replay" else None,
+        ),
     )
     actual = attention.forward(context, KDAInputs(mixed, gate, beta))
     torch.testing.assert_close(actual.reshape(tokens, heads, dim)[:row], torch.cat(expected), atol=2e-3, rtol=1e-2)

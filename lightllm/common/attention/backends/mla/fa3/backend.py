@@ -2,33 +2,30 @@ import dataclasses
 from typing import Tuple
 
 import torch
-import triton
 
 from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import MLADecodeInputs, MLAPrefillInputs
 from lightllm.common.attention.api.spec import AttentionFamily
 from lightllm.common.attention.backends.base import AttentionExecutionContext
 from lightllm.common.attention.backends.dense.fa3.backend import Fa3AttBackend
-from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params, page_table_copy
-from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
-from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
 from lightllm.utils.sgl_utils import flash_attn_varlen_func, flash_attn_with_kvcache
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class MlaFa3PrefillContext(AttentionExecutionContext):
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
     causal: bool = None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class MlaFa3DecodeContext(AttentionExecutionContext):
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
     page_table: torch.Tensor = None
     b_att_seq_len: torch.Tensor = None
     decode_max_q_seq_len: int = None
+    decode_max_kv_seq_len: int = None
     causal: bool = None
 
 
@@ -79,74 +76,6 @@ class MlaFa3AttBackend(Fa3AttBackend):
             return_softmax_lse=False,
         )
         return o_tensor
-
-    def _update_decode(self, context):
-        context.causal = self.uses_causal_attention()
-        draft_step = self.decode_draft_step
-        if self.uses_dynamic_spec_verify_layout():
-            b_att_req_idx = self._decode_init_dynamic_spec_verify_state(context, draft_step)
-        elif draft_step > 0:
-            b_att_req_idx = self._decode_init_fixed_spec_decode_state(context, draft_step)
-        else:
-            b_att_req_idx = self._decode_init_normal_decode_state(context)
-        self._decode_init_page_table(context, b_att_req_idx)
-
-    def _decode_init_dynamic_spec_verify_state(self, context, draft_step: int) -> torch.Tensor:
-        b_mark_mtp_shared_group = build_mtp_shared_group_markers(context.batch.b_req_idx, hold_req_id=self.hold_req_id)
-        b_q_seq_len, b_kv_seq_len, b_att_req_idx, context.b_att_seq_len = build_dynamic_spec_fa3_decode_params(
-            b_req_idx=context.batch.b_req_idx,
-            b_seq_len=context.batch.b_seq_len,
-            b_mark_mtp_shared_group=b_mark_mtp_shared_group,
-            att_batch_size=context.batch.batch_size,
-            hold_req_id=self.hold_req_id,
-        )
-        self._decode_init_spec_decode_cu_seqlens(context, b_q_seq_len, b_kv_seq_len)
-        context.decode_max_q_seq_len = draft_step + 1
-        return b_att_req_idx
-
-    def _decode_init_fixed_spec_decode_state(self, context, draft_step: int) -> torch.Tensor:
-        mtp_size = draft_step + 1
-        assert context.batch.batch_size % mtp_size == 0, (
-            "FA3 fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
-            f"got batch_size={context.batch.batch_size}, draft_step={draft_step}."
-        )
-        b_q_seq_len = torch.full(
-            (context.batch.b_seq_len.shape[0] // mtp_size,),
-            fill_value=mtp_size,
-            dtype=torch.int32,
-            device=context.batch.b_seq_len.device,
-        )
-        b_kv_seq_len = context.batch.b_seq_len[draft_step::mtp_size]
-        b_att_req_idx = context.batch.b_req_idx[draft_step::mtp_size]
-        context.b_att_seq_len = b_kv_seq_len.contiguous()
-        self._decode_init_spec_decode_cu_seqlens(context, b_q_seq_len, b_kv_seq_len)
-        context.decode_max_q_seq_len = mtp_size
-        return b_att_req_idx
-
-    def _decode_init_normal_decode_state(self, context) -> torch.Tensor:
-        context.cu_seqlens_q = context.batch.b1_cu_q_seq_len.int()
-        context.cu_seqlens_k = context.batch.b1_cu_kv_seq_len.int()
-        context.b_att_seq_len = context.batch.b_seq_len
-        context.decode_max_q_seq_len = 1
-        return context.batch.b_req_idx
-
-    def _decode_init_spec_decode_cu_seqlens(self, context, b_q_seq_len: torch.Tensor, b_kv_seq_len: torch.Tensor):
-        b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_kv_seq_len)
-        context.cu_seqlens_q = b1_cu_q_seq_len.int()
-        context.cu_seqlens_k = b1_cu_kv_seq_len.int()
-
-    def _decode_init_page_table(self, context, b_att_req_idx):
-        context.decode_max_kv_seq_len = context.batch.max_kv_seq_len
-        width = triton.cdiv(context.capacity.max_kv_seq_len, self.infer_page_size)
-        context.page_table = context.workspace.get("fa3_page_table", b_att_req_idx.numel() * width, torch.int32)[
-            : b_att_req_idx.numel() * width
-        ].view(b_att_req_idx.numel(), width)
-        page_table_copy(
-            page_table=context.page_table,
-            req_to_token_indexs=context.batch.req_to_token_indexs,
-            b_req_idx=b_att_req_idx,
-            page_size=self.infer_page_size,
-        )
 
     def _forward_decode(self, layer: LayerAttentionBinding, context, inputs: MLADecodeInputs, *, out=None):
         alloc_func = layer.alloc_tensor

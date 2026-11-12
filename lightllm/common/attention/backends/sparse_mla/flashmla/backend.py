@@ -10,7 +10,7 @@ from lightllm.common.attention.backends.base import AttentionExecutionContext, B
 from lightllm.utils.dist_utils import get_current_device_id
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class NsaFlashMlaSparsePrefillContext(AttentionExecutionContext):
     ks: torch.Tensor = None
     ke: torch.Tensor = None
@@ -23,7 +23,7 @@ class NsaFlashMlaSparsePrefillContext(AttentionExecutionContext):
     q_kv_start_loc: torch.Tensor = None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class NsaFlashMlaSparseDecodeContext(AttentionExecutionContext):
     ks: torch.Tensor = None
     ke: torch.Tensor = None

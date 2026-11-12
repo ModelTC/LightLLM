@@ -179,8 +179,6 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     backend = make_backend(Glm5NextSparseAttBackend)
     phase = AttentionPhase.PREFILL
     context = make_context(backend, make_batch((2, 3, 5), phase=phase, device="cuda"))
-    context.nsa_cache_seqlens = lengths
-    context.nsa_cu_seqlens_k_new = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
     state.b1_cu_q_seq_len = context.batch.b1_cu_q_seq_len
     state.max_q_seq_len = 1
     state.attention_contexts = {0: context}

@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Generic, TypeVar
+from typing import Callable, Generic, Protocol, TypeVar
 
 import torch
 
@@ -18,8 +18,13 @@ class UnsupportedAttention(ValueError):
     """当前环境或输入不满足此 attention 实现的要求。"""
 
 
+class AttentionExecution(Protocol):
+    def attention_context(self, binding: "LayerAttentionBinding[Params, Context, Inputs, Output]") -> Context:
+        ...
+
+
 @dataclass(frozen=True)
-class LayerAttentionBinding(Generic[Params]):
+class LayerAttentionBinding(Generic[Params, Context, Inputs, Output]):
     """一个逻辑层在 prefill 或 decode 阶段的 attention 执行入口。
 
     权重和存储准备完成后构造；backend 是同组层共享的实现，params 借用本层的
@@ -31,10 +36,13 @@ class LayerAttentionBinding(Generic[Params]):
     logical_layer_id: int
     spec: LayerSpec
     params: Params
-    backend: "AttentionBackend"
+    backend: "AttentionBackend[Context, Inputs, Output]"
     alloc_tensor: Callable
 
-    def forward(self, context, inputs, *, out=None):
+    def context(self, execution: AttentionExecution) -> Context:
+        return execution.attention_context(self)
+
+    def forward(self, context: Context, inputs: Inputs, *, out: torch.Tensor | None = None) -> Output:
         return self.backend.forward(self, context, inputs, out=out)
 
 
@@ -77,7 +85,10 @@ class AttentionBackend(ABC, Generic[Context, Inputs, Output]):
     ) -> Output:
         """使用已准备的 context 执行一层，允许写入 params 借用的 KV / Conv / SSM 存储。
 
-        out 指定 attention 结果的目标缓冲区；返回 tuple 时只对应首项，
+        out 是调用方拥有的目标缓冲区，dtype、device 必须与输出一致。
+        provider 直接写入时可返回其中有效部分的 view（例如去掉 head padding）；
+        返回独立 tensor 时元素数必须一致，由基类按 out 的形状复制。
+        provider 可直接写入，或返回临时结果由基类复制；不承诺零分配。返回 tuple 时只对应首项，
         其余项保留模型所需的附加输出，例如 GDN 的 gate 输入。
         """
         pass

@@ -120,7 +120,8 @@ def create_layer_attention_params(model, layer, weight, family):
                 weight.linear_conv1d.bias,
                 weight.linear_A_log.weight,
                 weight.linear_dt_bias.weight,
-                state=state,
+                mtp_state_index=state.mtp_state_index,
+                replay_state=state if model.args.ssm_state_mode == "replay" else None,
             )
         return KDAParams(
             conv,
@@ -128,7 +129,8 @@ def create_layer_attention_params(model, layer, weight, family):
             weight.get_merged_kda_conv_weight(),
             weight.linear_A_log.weight,
             weight.linear_dt_bias.weight,
-            state=state,
+            mtp_state_index=state.mtp_state_index,
+            replay_state=state if model.args.ssm_state_mode == "replay" else None,
         )
     if family is AttentionFamily.DENSE:
         state = manager.get_state(role, "gqa", layer_id)
@@ -196,13 +198,16 @@ def initialize_attention_groups(model):
                 cls = select_attention_backend(
                     family=family,
                     phase=spec.phase,
-                    model=model,
+                    caps=caps,
+                    execution=model.attention_execution,
+                    encoding=model.args.llm_kv_type,
+                    ssm_state_mode=model.args.ssm_state_mode,
                     requested=getattr(model.args, option),
                     candidates=candidates,
                     priority=priority,
                     specs=(spec,),
                 )
-                backends.append(cls(model).for_spec(spec))
+                backends.append(cls.create(model, spec))
             keys[specs] = len(groups)
             groups.append(AttentionGroup(*backends, *specs))
         routes.append(keys[specs])
@@ -258,12 +263,6 @@ def initialize_layer_attention(model):
             backend=group.decode_backend,
             alloc_tensor=_alloc_tensor,
         )
-        if group.prefill_spec.family in (AttentionFamily.GDN, AttentionFamily.KDA):
-            state = model.att_state_manager.get_state(
-                model.att_state_role, group.prefill_spec.family.value, layer.layer_num_
-            )
-            group.prefill_backend.mtp_state_index = state.mtp_state_index
-            group.decode_backend.mtp_state_index = state.mtp_state_index
     model._attention_storage_generation = model.att_state_manager.storage_generation
 
 

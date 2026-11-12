@@ -88,7 +88,7 @@ def test_dense_provider_reference_and_decode_graph(provider, phase, head_dim, kv
         cache=CacheLayout("None", 4, torch.bfloat16, kv_heads, head_dim, head_dim),
         sliding_window=window,
     )
-    backend = cls(model).for_spec(spec)
+    backend = cls.create(model, spec)
     key, value = (torch.randn((32, kv_heads, head_dim), dtype=torch.bfloat16, device="cuda") for _ in range(2))
     q_lengths = (2, 3) if phase is AttentionPhase.PREFILL else (1, 1)
     query = torch.randn((sum(q_lengths), 4, head_dim), dtype=torch.bfloat16, device="cuda")

@@ -8,12 +8,12 @@ from lightllm.common.attention.backends.base import AttentionExecutionContext, B
 from lightllm.utils.envs_utils import get_env_start_args
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Int4kvTritonPrefillContext(AttentionExecutionContext):
     b_kv_start_loc: torch.Tensor = None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Int4kvTritonDecodeContext(AttentionExecutionContext):
     decode_max_kv_seq_len: int = None
 

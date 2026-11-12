@@ -1,4 +1,7 @@
 from dataclasses import dataclass
+from typing import NamedTuple
+
+import torch
 
 from .spec import AttentionPhase
 
@@ -43,6 +46,12 @@ class ExecutionRequirements:
         )
 
 
+class WorkspaceRequirement(NamedTuple):
+    name: str
+    elements: int
+    dtype: torch.dtype
+
+
 @dataclass(frozen=True)
 class BackendResources:
     """捕获前的资源上界；workspace 项为 (名称, 元素数, dtype)。
@@ -51,6 +60,6 @@ class BackendResources:
     它的实现中创建；持久存储的初始化由 State 执行，不能在 forward 中反复清零。
     """
 
-    workspace: tuple = ()
+    workspace: tuple[WorkspaceRequirement, ...] = ()
     needs_host_lengths: bool = False
     zero_initialize_cache: bool = False

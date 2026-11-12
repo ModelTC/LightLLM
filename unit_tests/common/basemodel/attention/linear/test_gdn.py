@@ -45,11 +45,14 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
 def test_decode_and_fixed_mtp_state_routes(provider):
     requests = torch.tensor([2, 2, 2, 4, 4, 4], dtype=torch.int32)
     cursor = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
-    backend = make_backend(provider, decode_draft_step=2, mtp_state_index=cursor)
+    backend = make_backend(
+        provider,
+        decode_draft_step=2,
+    )
     context = make_context(backend, make_batch((3,) * 6, b_req_idx=requests))
     backend.update(context)
     assert context.b_conv_buffer_idx.tolist() == [2, 4]
-    assert context.b_num_accepted_tokens.tolist() == [2, 3]
+    assert context.accepted_tokens(cursor).tolist() == [2, 3]
     assert context.b_ssm_buffer_idx.tolist() == [[6, 7, 8], [12, 13, 14]]
     backend.decode_draft_step = 0
     context = make_context(backend, make_batch((3, 3), b_req_idx=torch.tensor([2, 4])))
@@ -62,15 +65,19 @@ def test_dynamic_mtp_layout_uses_bound_state_cursor(monkeypatch):
 
     def build(**kwargs):
         calls.append(kwargs)
-        return torch.tensor([0, 1, 3]), torch.tensor([2, 4]), torch.tensor([2, 3])
+        return torch.tensor([0, 1, 3]), torch.tensor([2, 4])
 
-    monkeypatch.setattr(gdn, "build_dynamic_mtp_linear_att_state_params", build)
+    monkeypatch.setattr("lightllm.common.attention.backends._shared.linear.layout.build_dynamic_mtp_layout", build)
     cursor = torch.zeros(8, dtype=torch.int32)
-    backend = make_backend(TritonLinearAttBackend, decode_draft_step=2, dynamic_verify=True, mtp_state_index=cursor)
+    backend = make_backend(
+        TritonLinearAttBackend,
+        decode_draft_step=2,
+        dynamic_verify=True,
+    )
     batch = make_batch((3, 3, 3), b_req_idx=torch.tensor([2, 4, 4]), b_mtp_index=torch.tensor([0, 0, 1]))
     context = make_context(backend, batch)
     backend.update(context)
-    assert calls[0]["req_to_mtp_state_index"] is cursor
+    assert context.accepted_tokens(cursor).tolist() == [1, 1]
     assert calls[0]["hold_req_id"] == 7
     assert context.b_ssm_buffer_idx.tolist() == [[6, 7, 8], [12, 13, 14]]
 

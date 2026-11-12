@@ -563,7 +563,7 @@ def test_fp8_h64_direct_smallq_state_workspace_reuse_and_fresh_state():
         return run_sparse(active_state, request, q, packed[..., :584], control)
 
     torch.testing.assert_close(run().float(), expected(), atol=0.012, rtol=0.015)
-    cache = backend._test_workspace.objects["glm_smallq"]
+    cache = backend._test_workspace.get_object("glm_smallq", dict)
     assert not hasattr(infer_state, "_glm5_fp8_smallq_workspace_cache")
     workspace = cache["direct"]
     pointers = {name: tensor.data_ptr() for name, tensor in workspace.items()}
@@ -579,7 +579,7 @@ def test_fp8_h64_direct_smallq_state_workspace_reuse_and_fresh_state():
         Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged
     )
     torch.testing.assert_close(run(fresh_state, fresh_infer_state).float(), expected(), atol=0.012, rtol=0.015)
-    fresh_workspace = backend._test_workspace.objects["glm_smallq"]["direct"]
+    fresh_workspace = backend._test_workspace.get_object("glm_smallq", dict)["direct"]
     assert fresh_workspace["partial_o"].data_ptr() == workspace["partial_o"].data_ptr()
 
     q.normal_()
@@ -626,7 +626,7 @@ def test_fp8_h64_selected_prefill_state_workspace_reuse(num_q):
 
     eager = run()
     torch.testing.assert_close(eager.float(), expected(), atol=0.012, rtol=0.015)
-    cache = backend._test_workspace.objects["glm_smallq"]
+    cache = backend._test_workspace.get_object("glm_smallq", dict)
     assert not hasattr(infer_state, "_glm5_fp8_smallq_workspace_cache")
     workspace = cache["selected"]
     pointers = {name: tensor.data_ptr() for name, tensor in workspace.items()}
@@ -643,7 +643,7 @@ def test_fp8_h64_selected_prefill_state_workspace_reuse(num_q):
         Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged
     )
     torch.testing.assert_close(run(fresh_state, fresh_infer_state).float(), expected(), atol=0.012, rtol=0.015)
-    fresh_workspace = backend._test_workspace.objects["glm_smallq"]["selected"]
+    fresh_workspace = backend._test_workspace.get_object("glm_smallq", dict)["selected"]
     assert fresh_workspace["compact"].data_ptr() == workspace["compact"].data_ptr()
 
     source.normal_()

@@ -15,12 +15,12 @@ from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 logger = init_logger(__name__)
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Fp8Fa3PrefillContext(Fa3PrefillContext):
     pass
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Fp8Fa3DecodeContext(Fa3DecodeContext):
     pass
 
@@ -30,15 +30,9 @@ class Fp8Fa3AttBackend(Fa3AttBackend):
     supports_sliding_window = False
     cache_formats = frozenset({"fp8kv_sph"})
 
-    def _init_infer_page_size(self):
-        self.infer_page_size = 1
-        assert (
-            self.page_size % self.infer_page_size == 0
-        ), f"model page_size {self.page_size} must be divisible by infer_page_size {self.infer_page_size}"
-        logger.warning(
-            f"Fp8Fa3AttBackend temporarily uses infer_page_size=1 with model page_size={self.page_size}; "
-            "multi-token FP8 inference pages are not implemented yet."
-        )
+    @property
+    def infer_page_size(self) -> int:
+        return 1
 
     def _allocate_prefill_context(self, capacity, capture, workspace):
         return Fp8Fa3PrefillContext(capacity, capture, workspace)

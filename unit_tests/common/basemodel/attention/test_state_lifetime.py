@@ -1,9 +1,5 @@
 import gc
 import weakref
-from dataclasses import replace
-
-import pytest
-import torch
 
 from lightllm.common.attention.backends.base import BaseAttentionBackend
 from unit_tests.common.attention.helpers import make_backend, make_batch, make_context, model_stub
@@ -16,10 +12,8 @@ def test_context_does_not_retain_runner_or_model():
     context = make_context(backend)
     gc.disable()
     try:
-        context_ref = weakref.ref(context)
         batch_ref = weakref.ref(context.batch)
         del context
-        assert context_ref() is None
         assert batch_ref() is None
     finally:
         gc.enable()

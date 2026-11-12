@@ -1,6 +1,10 @@
+from typing import Callable, TypeVar, cast
+
 import torch
 
 from lightllm.platform import get_device_runtime
+
+T = TypeVar("T")
 
 
 class AttentionWorkspace:
@@ -8,7 +12,7 @@ class AttentionWorkspace:
         self.runtime = runtime if runtime is not None else get_device_runtime(device)
         self.device = self.runtime.device
         self._buffers = {}
-        self.objects = {}
+        self._objects = {}
         self._completion = None
         self._last_stream = None
         self._frozen = False
@@ -22,8 +26,16 @@ class AttentionWorkspace:
         """
         workspace = AttentionWorkspace(runtime=self.runtime)
         workspace._pool = self._pool or self
-        workspace.objects = self.objects
+        workspace._objects = self._objects
         return workspace
+
+    def get_object(self, name: str, factory: Callable[[], T]) -> T:
+        """Share provider resources across mutually exclusive contexts in this execution slot."""
+        if name not in self._objects:
+            if self._frozen:
+                raise RuntimeError(f"captured workspace object {name} must be created before capture")
+            self._objects[name] = factory()
+        return cast(T, self._objects[name])
 
     def begin(self):
         if self._pool is not None:

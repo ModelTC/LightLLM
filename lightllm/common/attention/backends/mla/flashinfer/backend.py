@@ -1,11 +1,14 @@
+from __future__ import annotations
+
 import dataclasses
-from typing import Tuple
+from typing import TYPE_CHECKING, Tuple
 
 import torch
 import triton
 
 from lightllm.common.attention.api import BackendResources
 from lightllm.common.attention.api.backend import LayerAttentionBinding
+from lightllm.common.attention.api.execution import WorkspaceRequirement
 from lightllm.common.attention.api.inputs import MLADecodeInputs, MLAPrefillInputs
 from lightllm.common.attention.api.spec import AttentionFamily
 from lightllm.common.attention.backends._flashinfer import set_flashinfer_envs
@@ -15,18 +18,22 @@ from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsu
 from lightllm.common.basemodel.triton_kernel.repack_kv_index import repack_kv_index
 from lightllm.utils.dist_utils import get_dp_world_size
 
+if TYPE_CHECKING:
+    from flashinfer.mla import BatchMLAPagedAttentionWrapper
+    from flashinfer.prefill import BatchPrefillWithRaggedKVCacheWrapper
 
-@dataclasses.dataclass
+
+@dataclasses.dataclass(slots=True)
 class MlaFlashInferPrefillContext(AttentionExecutionContext):
-    prefill_wrapper: object = None
+    prefill_wrapper: BatchPrefillWithRaggedKVCacheWrapper | None = None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class MlaFlashInferDecodeContext(AttentionExecutionContext):
     kv_indices: torch.Tensor = None
     kv_starts: torch.Tensor = None
     q_indptr: torch.Tensor = None
-    decode_wrapper: object = None
+    decode_wrapper: BatchMLAPagedAttentionWrapper | None = None
 
 
 class MlaFlashInferAttBackend(BaseAttentionBackend):
@@ -42,7 +49,6 @@ class MlaFlashInferAttBackend(BaseAttentionBackend):
     def __init__(self, model):
         set_flashinfer_envs()
         super().__init__(model=model)
-        self._init_infer_page_size()
         num_heads = model.config["num_attention_heads"]
         self.tp_q_head_num = num_heads // get_dp_world_size()
         self.qk_nope_head_dim = model.qk_nope_head_dim
@@ -65,19 +71,13 @@ class MlaFlashInferAttBackend(BaseAttentionBackend):
                 self.softmax_scale = self.softmax_scale * mscale * mscale
         return
 
-    def for_spec(self, spec):
-        backend = super().for_spec(spec)
-        backend.tp_q_head_num = spec.num_q_heads
-        return backend
+    def configure_spec(self, spec):
+        self.tp_q_head_num = spec.num_q_heads
 
     def resource_requirements(self, capacity, *, capture):
-        return BackendResources(((self.workspace_buffer_key, self.workspace_buffer_size, torch.uint8),))
-
-    def _init_infer_page_size(self):
-        self.infer_page_size = self.page_size
-        assert (
-            self.page_size % self.infer_page_size == 0
-        ), f"model page_size {self.page_size} must be divisible by infer_page_size {self.infer_page_size}"
+        return BackendResources(
+            (WorkspaceRequirement(self.workspace_buffer_key, self.workspace_buffer_size, torch.uint8),)
+        )
 
     def _allocate_prefill_context(self, capacity, capture, workspace):
         return MlaFlashInferPrefillContext(capacity, capture, workspace)
@@ -126,7 +126,7 @@ class MlaFlashInferAttBackend(BaseAttentionBackend):
         alloc_func=torch.empty,
     ) -> torch.Tensor:
         k_nope, k_rope = k
-        o_tensor = alloc_func((q.shape[0], q.shape[1], v.shape[-1]), q.dtype, device="cuda")
+        o_tensor = alloc_func((q.shape[0], q.shape[1], v.shape[-1]), q.dtype, device=q.device)
         q_head_num = q.shape[1]
         k = torch.cat([k_nope, torch.repeat_interleave(k_rope, q_head_num, dim=-2)], dim=-1)
         context.prefill_wrapper.run(q, k, v, out=o_tensor)

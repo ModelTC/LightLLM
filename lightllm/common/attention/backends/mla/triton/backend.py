@@ -9,12 +9,12 @@ from lightllm.common.attention.api.spec import AttentionFamily
 from lightllm.common.attention.backends.base import AttentionExecutionContext, BaseAttentionBackend
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class MlaTritonPrefillContext(AttentionExecutionContext):
     pass
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class MlaTritonDecodeContext(AttentionExecutionContext):
     block_seq: torch.Tensor = None
     batch_start: torch.Tensor = None
@@ -63,7 +63,7 @@ class MlaTritonAttBackend(BaseAttentionBackend):
 
         qk_rope_head_dim = layer.params.qk_rope_head_dim
         q_nope, q_rope = (q[:, :, :-qk_rope_head_dim], q[:, :, -qk_rope_head_dim:])
-        o_tensor = alloc_func((q_nope.shape[0], q_nope.shape[1], v.shape[-1]), dtype=q_nope.dtype, device=q.device)
+        o_tensor = alloc_func((q_nope.shape[0], q_nope.shape[1], v.shape[-1]), dtype=q_nope.dtype, device=q_nope.device)
         k_nope, k_rope = k
         softmax_scale = layer.params.softmax_scale
         context_attention_fwd_with_v(

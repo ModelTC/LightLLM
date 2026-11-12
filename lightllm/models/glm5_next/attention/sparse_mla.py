@@ -10,12 +10,12 @@ from lightllm.common.attention.backends.sparse_mla.flashmla.backend import (
 )
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Glm5NextSparsePrefillContext(NsaFlashMlaSparsePrefillContext):
     pass
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Glm5NextSparseDecodeContext(NsaFlashMlaSparseDecodeContext):
     pass
 

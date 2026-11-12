@@ -68,15 +68,15 @@ def make_backend(cls=BaseAttentionBackend, **kwargs):
     backend = cls.__new__(cls)
     values = dict(
         page_size=1,
-        infer_page_size=1,
         causal=True,
         dynamic_verify=False,
         decode_draft_step=0,
         is_draft_model=False,
         hold_req_id=7,
-        mtp_state_index=None,
     )
     values.update(kwargs)
+    if "infer_page_size" in values:
+        values["page_size"] = values.pop("infer_page_size")
     vars(backend).update(values)
     return backend
 
@@ -192,7 +192,8 @@ def backend_context(cls, phase, settings=None, **values):
     context = make_context(backend, make_batch((1,), phase=phase))
     if hasattr(backend, "_test_workspace"):
         context.workspace = backend._test_workspace
-    vars(context).update(values)
+    for name, value in values.items():
+        setattr(context, name, value)
     return context
 
 

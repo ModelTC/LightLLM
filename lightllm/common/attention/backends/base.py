@@ -1,6 +1,6 @@
-import copy
 from dataclasses import dataclass, replace
 from types import MappingProxyType
+from typing import Generic, TypeVar
 
 import torch
 
@@ -8,20 +8,26 @@ from lightllm.common.attention._environment import check_attention_environment
 from lightllm.common.attention.api.backend import AttentionBackend, LayerAttentionBinding, UnsupportedAttention
 from lightllm.common.attention.api.batch import AttentionBatch, ContextCapacity
 from lightllm.common.attention.api.spec import AttentionFamily, AttentionPhase, LayerSpec
+from lightllm.common.attention.backends._workspace import AttentionWorkspace
 from lightllm.platform import DeviceCaps, Platform
 
 
-@dataclass
+@dataclass(slots=True)
 class AttentionExecutionContext:
     capacity: ContextCapacity
     capture: bool
-    workspace: object
+    workspace: AttentionWorkspace
     batch: AttentionBatch | None = None
     current_max_kv_seq_len: int = 0
-    backend_identity: object = None
+    backend_identity: AttentionBackend | None = None
 
 
-class BaseAttentionBackend(AttentionBackend):
+Context = TypeVar("Context", bound=AttentionExecutionContext)
+Inputs = TypeVar("Inputs")
+Output = TypeVar("Output")
+
+
+class BaseAttentionBackend(AttentionBackend[Context, Inputs, Output], Generic[Context, Inputs, Output]):
     requires_cpu_cache_sync = False
     family = AttentionFamily.DENSE
     provider = "triton"
@@ -50,12 +56,16 @@ class BaseAttentionBackend(AttentionBackend):
         self.dynamic_verify = not self.is_draft_model and self.decode_draft_step > 0 and model.args.mtp_dynamic_verify
         self.causal = not (self.is_draft_model and model.args.mtp_mode in ("dspark", "dflash", "dflash2"))
         self.hold_req_id = model.req_manager.HOLD_REQUEST_ID
-        self.mtp_state_index = None
 
-    def for_spec(self, spec):
-        backend = copy.copy(self)
-        backend.spec = spec
+    @classmethod
+    def create(cls, model, spec: LayerSpec):
+        backend = cls(model)
+        backend.configure_spec(spec)
         return backend
+
+    def configure_spec(self, spec: LayerSpec) -> None:
+        """Apply per-group dimensions before allocating contexts; default backends use layer params."""
+        pass
 
     @classmethod
     def check_environment(cls, caps: DeviceCaps) -> None:
@@ -136,9 +146,11 @@ class BaseAttentionBackend(AttentionBackend):
             self._prepare_decode(context)
 
     def _prepare_prefill(self, context):
+        """Optional host planning; kernels without provider plans need no preparation."""
         pass
 
     def _prepare_decode(self, context):
+        """Optional host planning, including updates before Graph replay."""
         pass
 
     def update(self, context: AttentionExecutionContext) -> None:
@@ -152,9 +164,11 @@ class BaseAttentionBackend(AttentionBackend):
             self._update_decode(context)
 
     def _update_prefill(self, context):
+        """Optional derived metadata; direct consumers of batch tensors need no update."""
         pass
 
     def _update_decode(self, context):
+        """Optional GPU metadata generation, captured alongside layer execution."""
         pass
 
     def forward(self, layer: LayerAttentionBinding, context: AttentionExecutionContext, inputs, *, out=None):
@@ -169,11 +183,26 @@ class BaseAttentionBackend(AttentionBackend):
         if out is None:
             return result
         attention = result[0] if isinstance(result, tuple) else result
-        if attention.data_ptr() == out.data_ptr():
+        if attention.dtype != out.dtype or attention.device != out.device:
+            raise ValueError("out must match the attention result dtype and device")
+        if attention.untyped_storage().data_ptr() == out.untyped_storage().data_ptr():
+            # Providers may return the valid heads of a padded output buffer.
+            begin = attention.storage_offset()
+            end = begin + sum((size - 1) * stride for size, stride in zip(attention.shape, attention.stride())) + 1
+            out_end = (
+                out.storage_offset() + sum((size - 1) * stride for size, stride in zip(out.shape, out.stride())) + 1
+            )
+            if attention.numel() and (begin < out.storage_offset() or end > out_end):
+                raise ValueError("attention result view extends beyond out")
             return result
-        out.copy_(attention.view(out.shape))
-
+        if attention.numel() != out.numel():
+            raise ValueError("out must match the attention result element count")
+        out.copy_(attention.reshape(out.shape))
         return (out, *result[1:]) if isinstance(result, tuple) else out
+
+    @property
+    def infer_page_size(self) -> int:
+        return self.page_size
 
     def uses_dynamic_spec_verify_layout(self):
         return self.dynamic_verify

@@ -1,6 +1,3 @@
-from types import SimpleNamespace
-from unittest.mock import patch
-
 import pytest
 
 from lightllm.common.attention.backends.dense.fa3 import fp8 as fa3_fp8
@@ -21,8 +18,6 @@ def test_default_infer_page_size_matches_model_page_size(backend_class):
     backend = object.__new__(backend_class)
     backend.page_size = 16
 
-    backend._init_infer_page_size()
-
     assert backend.infer_page_size == 16
 
 
@@ -37,9 +32,4 @@ def test_fp8_attention_backend_uses_single_token_infer_pages(backend_class, back
     backend = object.__new__(backend_class)
     backend.page_size = 16
 
-    with patch.object(backend_module.logger, "warning") as warning:
-        backend._init_infer_page_size()
-
     assert backend.infer_page_size == 1
-    warning.assert_called_once()
-    assert "infer_page_size=1" in warning.call_args.args[0]

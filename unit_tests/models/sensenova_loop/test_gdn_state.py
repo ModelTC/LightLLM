@@ -101,7 +101,6 @@ def test_gdn_decode_keeps_logical_layer_state(
             recurrent,
         )
 
-    backend.mtp_state_index = resource.mtp_state_index
     params = GDNParams(
         conv_view,
         ssm_view,
@@ -109,6 +108,7 @@ def test_gdn_decode_keeps_logical_layer_state(
         None,
         weight.linear_A_log.weight,
         weight.linear_dt_bias.weight,
+        mtp_state_index=resource.mtp_state_index,
     )
     mixed_dim = backend.tp_qkvz_dim + backend.tp_ba_dim
     if device == "cuda":

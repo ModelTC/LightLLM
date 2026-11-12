@@ -5,11 +5,11 @@ import pytest
 import torch
 
 from lightllm.common.attention.api import AttentionFamily, AttentionPhase
-from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention.backends.dense.fa3 import fp8 as fa3_fp8
 from lightllm.common.attention.backends.dense.flashinfer import fp8 as flashinfer_fp8
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.basemodel.attention import create_layer_attention_params
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.server.core.objs.start_args_type import StartArgs
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state, replace_logical_layer_groups
@@ -46,10 +46,10 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     cls = fa3_fp8.Fp8Fa3AttBackend if backend_name == "fa3" else flashinfer_fp8.Fp8FlashInferAttBackend
     backend = make_backend(cls)
     context = make_context(backend, make_batch((1,), phase=phase))
-    context.page_table = context.cu_seqlens_q = context.cu_seqlens_k = None
-    context.b_att_seq_len = context.batch.b_seq_len
-    context.decode_max_q_seq_len = 1
-    context.causal = True
+    if backend_name == "fa3" and operation == "decode":
+        context.b_att_seq_len = context.batch.b_seq_len
+        context.decode_max_q_seq_len = 1
+        context.causal = True
     calls = []
     if backend_name == "fa3":
         state.q_scales[0].fill_(3)
@@ -77,7 +77,7 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
             calls.append(operation)
             out.copy_(q)
 
-        context.prefill_wrapper = context.decode_wrapper = SimpleNamespace(run=run)
+        setattr(context, operation + "_wrapper", SimpleNamespace(run=run))
     layer = LlamaTransformerLayerInfer.__new__(LlamaTransformerLayerInfer)
     layer.layer_num_ = logical_layer_id
     layer.tp_q_head_num_ = layer.tp_k_head_num_ = state.config.head_num
@@ -95,7 +95,8 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
         alloc_tensor=lambda shape, dtype, device: torch.empty(shape, dtype=dtype, device="cpu"),
     )
     setattr(layer, operation + "_attention", attention)
-    infer = SimpleNamespace(attention_contexts={0: context})
+    infer = InferStateInfo()
+    infer.attention_contexts = {0: context}
     monkeypatch.setattr(manager, "get_state", lambda *args: pytest.fail("forward must not look up storage owners"))
     q = torch.ones((1, state.config.head_num, state.config.head_dim))
     if operation == "prefill":

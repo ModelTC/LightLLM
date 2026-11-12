@@ -14,6 +14,7 @@ def _build_dynamic_mtp_linear_att_state_params_kernel(
     batch_size,
     hold_req_id,
     BLOCK_SIZE: tl.constexpr,
+    SELECT_ACCEPTED: tl.constexpr = True,
 ):
     offsets = tl.arange(0, BLOCK_SIZE)
     token_mask = offsets < batch_size
@@ -30,21 +31,18 @@ def _build_dynamic_mtp_linear_att_state_params_kernel(
     # replay arbitrary compact per-request widths at the same token batch size.
     tl.store(out_cu_q_seq_len + offsets, actual_token_num, mask=cu_mask)
     tl.store(out_conv_buffer_idx + offsets, hold_req_id, mask=token_mask)
-    tl.store(out_num_accepted_tokens + offsets, 1, mask=token_mask)
+    if SELECT_ACCEPTED:
+        tl.store(out_num_accepted_tokens + offsets, 1, mask=token_mask)
     tl.debug_barrier()
 
     # mtp_index restarts at zero on the first row of every request group.
     is_start = valid_row & (mtp_index == 0)
     sequence_index = tl.cumsum(tl.where(is_start, 1, 0), axis=0) - 1
-    accepted_state_index = tl.load(
-        req_to_mtp_state_index + req_idx,
-        mask=is_start,
-        other=0,
-    )
-
     tl.store(out_cu_q_seq_len + sequence_index, offsets, mask=is_start)
     tl.store(out_conv_buffer_idx + sequence_index, req_idx, mask=is_start)
-    tl.store(out_num_accepted_tokens + sequence_index, accepted_state_index + 1, mask=is_start)
+    if SELECT_ACCEPTED:
+        accepted_state_index = tl.load(req_to_mtp_state_index + req_idx, mask=is_start, other=0)
+        tl.store(out_num_accepted_tokens + sequence_index, accepted_state_index + 1, mask=is_start)
 
 
 def build_dynamic_mtp_linear_att_state_params(
@@ -109,3 +107,24 @@ def build_dynamic_mtp_linear_att_state_params(
         num_stages=1,
     )
     return b1_cu_q_seq_len, b_conv_buffer_idx, b_num_accepted_tokens
+
+
+def build_dynamic_mtp_layout(b_req_idx: torch.Tensor, b_mtp_index: torch.Tensor, hold_req_id: int):
+    batch_size = b_req_idx.numel()
+    cu = torch.empty(batch_size + 1, dtype=torch.int32, device=b_req_idx.device)
+    requests = torch.empty_like(b_req_idx)
+    _build_dynamic_mtp_linear_att_state_params_kernel[(1,)](
+        b_req_idx=b_req_idx,
+        b_mtp_index=b_mtp_index,
+        req_to_mtp_state_index=None,
+        out_cu_q_seq_len=cu,
+        out_conv_buffer_idx=requests,
+        out_num_accepted_tokens=None,
+        batch_size=batch_size,
+        hold_req_id=hold_req_id,
+        BLOCK_SIZE=triton.next_power_of_2(batch_size + 1),
+        SELECT_ACCEPTED=False,
+        num_warps=8,
+        num_stages=1,
+    )
+    return cu, requests

@@ -14,7 +14,7 @@ from lightllm.common.attention.backends._shared.linear.causal_conv1d_mtp import 
     causal_conv1d_update as causal_conv1d_update_mtp,
 )
 from lightllm.common.attention.backends._shared.linear.causal_conv1d_qkv import causal_conv1d_qkv
-from lightllm.common.attention.backends._shared.linear.mtp_state_params import build_dynamic_mtp_linear_att_state_params
+from lightllm.common.attention.backends._shared.linear.layout import LinearDecodeContext, update_linear_decode
 from lightllm.common.attention.backends.base import AttentionExecutionContext, BaseAttentionBackend
 from lightllm.common.attention.backends.kda.triton.kernels.kda import chunk_kda_with_fused_gate
 from lightllm.common.attention.backends.kda.triton.kernels.kda_decode import fused_recurrent_kda
@@ -23,18 +23,15 @@ if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class KDAPrefillContext(AttentionExecutionContext):
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
 
-@dataclasses.dataclass
-class KDADecodeContext(AttentionExecutionContext):
-    b_conv_buffer_idx: torch.Tensor = None
-    b_ssm_buffer_idx: torch.Tensor = None
-    b1_mtp_cu_q_seq_len: torch.Tensor = None
-    b_num_accepted_tokens: torch.Tensor = None
+@dataclasses.dataclass(slots=True)
+class KDADecodeContext(LinearDecodeContext):
+    pass
 
 
 class KDALinearAttBackend(BaseAttentionBackend):
@@ -104,60 +101,7 @@ class KDALinearAttBackend(BaseAttentionBackend):
         return output
 
     def _update_decode(self, context):
-        mtp_step = self.mtp_step
-        if mtp_step == 0:
-            self._decode_init_normal_decode_state(context)
-            return
-        if self.uses_dynamic_spec_verify_layout():
-            self._decode_init_dynamic_mtp_decode_state(
-                context, mtp_step + 1, req_to_mtp_state_index=self.mtp_state_index
-            )
-        else:
-            self._decode_init_fixed_mtp_decode_state(context, mtp_step, req_to_mtp_state_index=self.mtp_state_index)
-
-    def _decode_init_normal_decode_state(self, context):
-        context.b_conv_buffer_idx = context.batch.b_req_idx
-        context.b_ssm_buffer_idx = context.batch.b_req_idx
-
-    def _decode_init_dynamic_mtp_decode_state(
-        self, context, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor
-    ) -> None:
-        (
-            context.b1_mtp_cu_q_seq_len,
-            context.b_conv_buffer_idx,
-            context.b_num_accepted_tokens,
-        ) = build_dynamic_mtp_linear_att_state_params(
-            b_req_idx=context.batch.b_req_idx,
-            b_mtp_index=context.batch.b_mtp_index,
-            req_to_mtp_state_index=req_to_mtp_state_index,
-            hold_req_id=context.batch.hold_req_id,
-        )
-        self._decode_init_mtp_ssm_buffer_idx(context, mtp_size)
-
-    def _decode_init_fixed_mtp_decode_state(
-        self, context, mtp_step: int, *, req_to_mtp_state_index: torch.Tensor
-    ) -> None:
-        mtp_size = mtp_step + 1
-        batch_size = context.batch.batch_size
-        assert batch_size % mtp_size == 0, (
-            "KDA fixed-layout decode requires batch_size to be divisible by mtp_step + 1, "
-            f"got batch_size={batch_size}, mtp_step={mtp_step}."
-        )
-        att_batch_size = batch_size // mtp_size
-        context.b1_mtp_cu_q_seq_len = torch.arange(
-            0, batch_size + 1, mtp_size, dtype=torch.int32, device=context.batch.b_req_idx.device
-        )
-        context.b_conv_buffer_idx = context.batch.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        context.b_num_accepted_tokens = req_to_mtp_state_index[context.b_conv_buffer_idx] + 1
-        self._decode_init_mtp_ssm_buffer_idx(context, mtp_size)
-
-    def _decode_init_mtp_ssm_buffer_idx(self, context, mtp_size: int):
-        att_batch_size = context.b_conv_buffer_idx.shape[0]
-        b_ssm_buffer_start_idx = (context.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
-        state_offsets = torch.arange(
-            mtp_size, device=context.batch.b_req_idx.device, dtype=context.batch.b_req_idx.dtype
-        ).view(1, mtp_size)
-        context.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets
+        update_linear_decode(context, self.mtp_step, self.uses_dynamic_spec_verify_layout(), replay=False)
 
     def _forward_decode(self, layer: LayerAttentionBinding, context, inputs: KDAInputs, *, out=None):
         mixed_qkv = inputs.mixed_qkv
@@ -171,7 +115,7 @@ class KDALinearAttBackend(BaseAttentionBackend):
             conv_update = causal_conv1d_update_mtp
             conv_kwargs.update(
                 mtp_step=backend.mtp_step,
-                num_accepted_tokens=context.b_num_accepted_tokens,
+                num_accepted_tokens=context.accepted_tokens(layer.params.mtp_state_index),
                 query_start_loc=context.b1_mtp_cu_q_seq_len,
             )
         mixed_qkv = conv_update(mixed_qkv, conv_states, layer.params.conv_weight, **conv_kwargs)
@@ -195,6 +139,6 @@ class KDALinearAttBackend(BaseAttentionBackend):
             inplace_final_state=True,
             ssm_state_indices=context.b_ssm_buffer_idx,
             cu_seqlens=context.b1_mtp_cu_q_seq_len,
-            num_accepted_tokens=context.b_num_accepted_tokens,
+            num_accepted_tokens=(context.accepted_tokens(layer.params.mtp_state_index) if backend.mtp_step else None),
         )
         return output

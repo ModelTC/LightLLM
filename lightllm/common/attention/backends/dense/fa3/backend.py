@@ -13,7 +13,7 @@ from lightllm.utils.envs_utils import enable_env_vars
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache, flash_attn_with_kvcache_autotune
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Fa3PrefillContext(AttentionExecutionContext):
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
@@ -21,7 +21,7 @@ class Fa3PrefillContext(AttentionExecutionContext):
     causal: bool = None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Fa3DecodeContext(AttentionExecutionContext):
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
@@ -43,17 +43,6 @@ class Fa3AttBackend(BaseAttentionBackend):
     supports_noncausal_decode = True
     max_head_size = 256
     cache_formats = frozenset({"None"})
-    """Common fixed page-table storage for FA3 attention backends."""
-
-    def __init__(self, model):
-        super().__init__(model=model)
-        self._init_infer_page_size()
-
-    def _init_infer_page_size(self):
-        self.infer_page_size = self.page_size
-        assert (
-            self.page_size % self.infer_page_size == 0
-        ), f"model page_size {self.page_size} must be divisible by infer_page_size {self.infer_page_size}"
 
     def _allocate_prefill_context(self, capacity, capture, workspace):
         return Fa3PrefillContext(capacity, capture, workspace)
@@ -82,10 +71,10 @@ class Fa3AttBackend(BaseAttentionBackend):
         q = inputs.query
         k = layer.params.key
         v = layer.params.value
-        return self._prefill_nomarl_prefill_att(layer, context, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func)
+        return self._prefill_paged(layer, context, q=q, k=k, v=v, alloc_func=alloc_func)
 
-    def _prefill_nomarl_prefill_att(
-        self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, inputs, alloc_func=torch.empty
+    def _prefill_paged(
+        self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty
     ) -> torch.Tensor:
         if layer.params.sliding_window is not None:
             window_size = layer.params.sliding_window
@@ -191,10 +180,10 @@ class Fa3AttBackend(BaseAttentionBackend):
         q = inputs.query
         k = layer.params.key
         v = layer.params.value
-        return self._decode_normal_decode_att(layer, context, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func)
+        return self._decode_normal_decode_att(layer, context, q=q, k=k, v=v, alloc_func=alloc_func)
 
     def _decode_normal_decode_att(
-        self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, inputs, alloc_func=torch.empty
+        self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty
     ):
         if layer.params.sliding_window is not None:
             window_size = layer.params.sliding_window

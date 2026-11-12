@@ -3,7 +3,7 @@ import dataclasses
 import torch
 
 from lightllm.common.attention.api import AttentionPhase
-from lightllm.common.attention.api.execution import BackendResources
+from lightllm.common.attention.api.execution import BackendResources, WorkspaceRequirement
 from lightllm.common.attention.api.inputs import SparseMLAPrefillInputs
 from lightllm.common.attention.backends.sparse_mla.flashmla.fp8 import (
     NsaFlashMlaFp8SparseAttBackend,
@@ -13,14 +13,14 @@ from lightllm.common.attention.backends.sparse_mla.flashmla.fp8 import (
 from .sparse_mla import Glm5NextSparsePrefillContext
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Fp8Glm5NextSparsePrefillContext(Glm5NextSparsePrefillContext):
     smallq_workspace: object = None
     generic_workspace: object = None
     generic_binding: object = None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Fp8Glm5NextSparseDecodeContext(NsaFlashMlaFp8SparseDecodeContext):
     decode_topk_bound: int = None
 
@@ -46,10 +46,10 @@ class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
         topk = (self.network_config["index_topk"] + 3 + 127) // 128 * 128
         return BackendResources(
             workspace=(
-                ("glm_gathered_kv", gather_tokens * 512, torch.bfloat16),
-                ("glm_chunk_indices", tokens * topk, torch.int32),
-                ("glm_chunk_lengths", tokens, torch.int32),
-                ("glm_cu_q", tokens + 1, torch.int32),
+                WorkspaceRequirement("glm_gathered_kv", gather_tokens * 512, torch.bfloat16),
+                WorkspaceRequirement("glm_chunk_indices", tokens * topk, torch.int32),
+                WorkspaceRequirement("glm_chunk_lengths", tokens, torch.int32),
+                WorkspaceRequirement("glm_cu_q", tokens + 1, torch.int32),
             )
         )
 
@@ -59,13 +59,13 @@ class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
             allocate_selected_prefill_workspace,
         )
 
-        slot = context.workspace.objects
-        if "glm_smallq" not in slot:
-            slot["glm_smallq"] = {
+        context.smallq_workspace = context.workspace.get_object(
+            "glm_smallq",
+            lambda: {
                 "direct": allocate_direct_smallq_workspace(q[:1]),
                 "selected": allocate_selected_prefill_workspace(q, batch_capacity=8),
-            }
-        context.smallq_workspace = slot["glm_smallq"]
+            },
+        )
         if q.shape[0] == 1:
             return context.smallq_workspace["direct"]
         batch = q.shape[0]

@@ -32,7 +32,7 @@ def probe_dense(backend_cls, spec, runtime):
         max_seq_length=stride,
         data_type=spec.dtype,
     )
-    backend = backend_cls(model).for_spec(spec)
+    backend = backend_cls.create(model, spec)
     device = runtime.device
     lengths = (7, 13)
     q_lengths = (2, 3) if spec.phase is AttentionPhase.PREFILL else (1, 1)

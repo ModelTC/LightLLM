@@ -38,9 +38,7 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         # DFlash2 attention is non-causal, so its local window must retain both
         # the visible prefix on the left and the complete draft block on the right.
 
-        output = self.decode_attention.forward(
-            infer_state.attention_contexts[self.decode_attention.group_id], DenseInputs(q)
-        )
+        output = self.decode_attention.forward(self.decode_attention.context(infer_state), DenseInputs(q))
         return output.view(-1, self.tp_q_head_num_ * self.head_dim_)
 
     def _post_cache_kv(self, cache_kv, infer_state, layer_weight):

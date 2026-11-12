@@ -106,7 +106,7 @@ def test_attention_backend_selects_causality(monkeypatch, mtp_mode, is_draft_mod
 @pytest.mark.parametrize("state_class", [Fa3AttBackend, MlaFa3AttBackend])
 def test_fa3_prefill_state_owns_causality(monkeypatch, state_class):
     backend = make_backend(state_class, causal=False)
-    monkeypatch.setattr(import_module(state_class.__module__), "page_table_copy", lambda **kwargs: None)
+    monkeypatch.setattr(import_module(Fa3AttBackend.__module__), "page_table_copy", lambda **kwargs: None)
     context = make_context(backend, make_batch(phase=AttentionPhase.PREFILL))
     backend.update(context)
     assert context.causal is False

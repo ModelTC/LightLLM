@@ -1,10 +1,14 @@
+from __future__ import annotations
+
 import dataclasses
+from typing import TYPE_CHECKING
 
 import torch
 import triton
 
 from lightllm.common.attention.api import BackendResources
 from lightllm.common.attention.api.backend import LayerAttentionBinding
+from lightllm.common.attention.api.execution import WorkspaceRequirement
 from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention.backends._flashinfer import set_flashinfer_envs
 from lightllm.common.attention.backends.base import AttentionExecutionContext, BaseAttentionBackend
@@ -12,18 +16,22 @@ from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsu
 from lightllm.common.basemodel.triton_kernel.repack_kv_index import repack_kv_index
 from lightllm.utils.dist_utils import get_dp_world_size
 
+if TYPE_CHECKING:
+    from flashinfer.decode import BatchDecodeWithPagedKVCacheWrapper
+    from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
 
-@dataclasses.dataclass
+
+@dataclasses.dataclass(slots=True)
 class FlashInferPrefillContext(AttentionExecutionContext):
-    prefill_wrapper: object = None
+    prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class FlashInferDecodeContext(AttentionExecutionContext):
     kv_last_page_len_buffer: torch.Tensor = None
     kv_indices: torch.Tensor = None
     kv_starts: torch.Tensor = None
-    decode_wrapper: object = None
+    decode_wrapper: BatchDecodeWithPagedKVCacheWrapper | None = None
 
 
 class FlashInferAttBackend(BaseAttentionBackend):
@@ -38,7 +46,6 @@ class FlashInferAttBackend(BaseAttentionBackend):
     def __init__(self, model):
         set_flashinfer_envs()
         super().__init__(model=model)
-        self._init_infer_page_size()
         tp_world_size = get_dp_world_size()
         self.tp_q_head_num = model.config["num_attention_heads"] // tp_world_size
         self.tp_kv_head_num = max(model.config["num_key_value_heads"] // tp_world_size, 1)
@@ -49,21 +56,15 @@ class FlashInferAttBackend(BaseAttentionBackend):
         self.q_data_type = model.data_type
         self.kv_data_type = model.data_type
 
-    def for_spec(self, spec):
-        backend = super().for_spec(spec)
-        backend.tp_q_head_num = spec.num_q_heads
-        backend.tp_kv_head_num = spec.cache.key_heads
-        backend.head_dim = spec.head_size
-        return backend
+    def configure_spec(self, spec):
+        self.tp_q_head_num = spec.num_q_heads
+        self.tp_kv_head_num = spec.cache.key_heads
+        self.head_dim = spec.head_size
 
     def resource_requirements(self, capacity, *, capture):
-        return BackendResources(((self.workspace_buffer_key, self.workspace_buffer_size, torch.uint8),))
-
-    def _init_infer_page_size(self):
-        self.infer_page_size = self.page_size
-        assert (
-            self.page_size % self.infer_page_size == 0
-        ), f"model page_size {self.page_size} must be divisible by infer_page_size {self.infer_page_size}"
+        return BackendResources(
+            (WorkspaceRequirement(self.workspace_buffer_key, self.workspace_buffer_size, torch.uint8),)
+        )
 
     def _allocate_prefill_context(self, capacity, capture, workspace):
         return FlashInferPrefillContext(capacity, capture, workspace)
@@ -76,12 +77,12 @@ class FlashInferAttBackend(BaseAttentionBackend):
         q = inputs.query
         k = layer.params.key
         v = layer.params.value
-        return self._prefill_nomarl_prefill_att(layer, context, q=q, k=k, v=v, alloc_func=alloc_func)
+        return self._prefill_paged(layer, context, q=q, k=k, v=v, alloc_func=alloc_func)
 
-    def _prefill_nomarl_prefill_att(
+    def _prefill_paged(
         self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty
     ) -> torch.Tensor:
-        o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
+        o_tensor = alloc_func(q.shape, q.dtype, device=q.device)
         context.prefill_wrapper.run(
             q,
             (

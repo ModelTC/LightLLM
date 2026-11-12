@@ -56,7 +56,7 @@ def prepare_swa_workspace(swa_state, buffer, capacity, batch, slot):
     return metadata
 
 
-@dataclass
+@dataclass(slots=True)
 class DeepseekV4Context(AttentionExecutionContext):
     sched_meta_by_ratio: dict | None = None
     capture_sched_meta_by_ratio: dict | None = None

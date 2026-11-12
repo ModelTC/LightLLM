@@ -112,12 +112,20 @@ neo_data_type_to_backend = {
 }
 
 
-def select_attention_backend(*, family, phase, model, requested="auto", candidates=None, priority=None, specs=None):
-    from lightllm.common.basemodel.attention import describe_attention_layers
-
-    args = model.args
-    caps = model.device_runtime.caps
-    execution = model.attention_execution
+def select_attention_backend(
+    *,
+    family,
+    phase,
+    specs,
+    caps,
+    execution,
+    requested="auto",
+    candidates=None,
+    priority=None,
+    encoding="None",
+    ssm_state_mode="native",
+):
+    specs = tuple(specs)
     if candidates is None:
         tables = {
             AttentionFamily.DENSE: data_type_to_backend,
@@ -131,7 +139,7 @@ def select_attention_backend(*, family, phase, model, requested="auto", candidat
             },
             AttentionFamily.KDA: {"None": {"triton": "backends.kda.triton.backend:KDALinearAttBackend"}},
         }
-        if args.ssm_state_mode == "replay":
+        if ssm_state_mode == "replay":
             tables[AttentionFamily.GDN] = {
                 "None": {
                     "flashqla": "backends.gdn.replay.backend:ReplayGDNFlashQlaAttBackend",
@@ -146,7 +154,7 @@ def select_attention_backend(*, family, phase, model, requested="auto", candidat
         if caps.platform is not Platform.CUDA:
             tables = {}
         candidates = tables.get(family, {})
-    encoding = "None" if family in (AttentionFamily.GDN, AttentionFamily.KDA) else args.llm_kv_type
+    encoding = "None" if family in (AttentionFamily.GDN, AttentionFamily.KDA) else encoding
     available = candidates.get(encoding, {})
     if priority is None:
         if family is AttentionFamily.GDN:
@@ -157,10 +165,9 @@ def select_attention_backend(*, family, phase, model, requested="auto", candidat
             priority = ["flashmla_sparse"]
         else:
             priority = ["fa3", "flashinfer", "triton"]
-            if phase is AttentionPhase.DECODE and not args.mtp_step:
+            if phase is AttentionPhase.DECODE and not any(spec.use_mtp for spec in specs):
                 priority = ["flashinfer", "fa3", "triton"]
     ordered = [requested] if requested != "auto" else list(priority)
-    specs = describe_attention_layers(model, family, phase) if specs is None else specs
     if not specs:
         raise ValueError(f"model has no {family.value} attention layers")
     failures = {}

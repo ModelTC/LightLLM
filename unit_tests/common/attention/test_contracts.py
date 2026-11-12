@@ -7,14 +7,18 @@ import torch
 from lightllm.common.attention import selection
 from lightllm.common.attention.api import AttentionFamily, AttentionPhase, UnsupportedAttention
 from lightllm.common.attention.backends.base import BaseAttentionBackend
-from unit_tests.common.attention.helpers import (
-    make_backend,
-    make_batch,
-    make_context,
-    make_layer_attention,
-    make_spec,
-    model_stub,
-)
+from unit_tests.common.attention.helpers import make_batch, make_context, make_layer_attention, make_spec, model_stub
+
+
+def _select(*, model, specs=None, **kwargs):
+    return selection.select_attention_backend(
+        specs=specs or (make_spec(kwargs["family"], kwargs["phase"]),),
+        caps=model.device_runtime.caps,
+        execution=model.attention_execution,
+        encoding=model.args.llm_kv_type,
+        ssm_state_mode=model.args.ssm_state_mode,
+        **kwargs,
+    )
 
 
 def test_graph_copy_validates_all_inputs_before_writing():
@@ -40,22 +44,22 @@ def test_graph_copy_keeps_tensor_addresses_and_uses_new_lengths():
 
 @pytest.mark.parametrize("capture", [False, True])
 def test_context_capacity_and_backend_identity(capture):
-    backend = make_backend()
+    backend = BaseAttentionBackend(model_stub())
     context = make_context(backend, capture=capture, max_length=16)
     backend.prepare(context, make_batch(req_to_token_indexs=context.batch.req_to_token_indexs))
     with pytest.raises(ValueError, match="capacity"):
         backend.prepare(context, make_batch((17, 2)))
     with pytest.raises(ValueError, match="different attention backend"):
-        make_backend().prepare(context, make_batch())
+        BaseAttentionBackend(model_stub()).prepare(context, make_batch())
     with pytest.raises(ValueError, match="different attention backend"):
-        make_backend().update(context)
-    attention = make_layer_attention(make_backend(), context, params=None)
+        BaseAttentionBackend(model_stub()).update(context)
+    attention = make_layer_attention(BaseAttentionBackend(model_stub()), context, params=None)
     with pytest.raises(ValueError, match="different attention backend"):
         attention.forward(context, inputs=None)
 
 
 def test_layer_attention_rejects_wrong_phase():
-    backend = make_backend()
+    backend = BaseAttentionBackend(model_stub())
     context = make_context(backend, prepare=True)
     attention = make_layer_attention(backend, context, params=None)
     attention = replace(attention, spec=replace(attention.spec, phase=AttentionPhase.PREFILL))
@@ -66,17 +70,17 @@ def test_layer_attention_rejects_wrong_phase():
 @pytest.mark.parametrize("requested", ["auto", "triton"])
 def test_selection_never_falls_back_to_a_rejected_backend(monkeypatch, requested):
     spec = make_spec(cache=replace(make_spec().cache, format="fp8kv_sph"))
-    monkeypatch.setattr("lightllm.common.basemodel.attention.describe_attention_layers", lambda *args: (spec,))
     monkeypatch.setattr(
         BaseAttentionBackend,
         "check_environment",
         classmethod(lambda cls, caps: None),
     )
     with pytest.raises(selection.BackendSelectionError, match="encoding fp8kv_sph"):
-        selection.select_attention_backend(
+        _select(
             family=spec.family,
             phase=spec.phase,
             model=model_stub(),
+            specs=(spec,),
             requested=requested,
             candidates={"None": {"triton": BaseAttentionBackend}},
             priority=["triton"],
@@ -85,14 +89,12 @@ def test_selection_never_falls_back_to_a_rejected_backend(monkeypatch, requested
 
 @pytest.mark.parametrize("requested", ["auto", "triton"])
 def test_environment_checks_apply_to_explicit_and_auto(monkeypatch, requested):
-    monkeypatch.setattr("lightllm.common.basemodel.attention.describe_attention_layers", lambda *args: (make_spec(),))
-
     def reject(cls, caps):
         raise UnsupportedAttention("missing extension")
 
     monkeypatch.setattr(BaseAttentionBackend, "check_environment", classmethod(reject))
     with pytest.raises(selection.BackendSelectionError, match="missing extension"):
-        selection.select_attention_backend(
+        _select(
             family=AttentionFamily.DENSE,
             phase=AttentionPhase.DECODE,
             model=model_stub(),
@@ -117,7 +119,6 @@ def _backend_check_exception_candidates(monkeypatch, error_type=RuntimeError):
         def check_environment(cls, caps):
             return None
 
-    monkeypatch.setattr("lightllm.common.basemodel.attention.describe_attention_layers", lambda *args: (make_spec(),))
     monkeypatch.setattr("lightllm.common.attention.selection.validate", lambda *args, **kwargs: True)
     return {"None": {"broken": BrokenBackend, "working": WorkingBackend}}
 
@@ -125,7 +126,7 @@ def _backend_check_exception_candidates(monkeypatch, error_type=RuntimeError):
 @pytest.mark.parametrize("error_type", [UnsupportedAttention, ValueError, RuntimeError])
 def test_backend_check_exception_allows_auto_fallback(monkeypatch, error_type):
     candidates = _backend_check_exception_candidates(monkeypatch, error_type)
-    selected = selection.select_attention_backend(
+    selected = _select(
         family=AttentionFamily.DENSE,
         phase=AttentionPhase.DECODE,
         model=model_stub(),
@@ -140,7 +141,7 @@ def test_backend_check_exception_allows_auto_fallback(monkeypatch, error_type):
 def test_backend_check_exception_is_reported_for_explicit_selection(monkeypatch, error_type):
     candidates = _backend_check_exception_candidates(monkeypatch, error_type)
     with pytest.raises(selection.BackendSelectionError) as error:
-        selection.select_attention_backend(
+        _select(
             family=AttentionFamily.DENSE,
             phase=AttentionPhase.DECODE,
             model=model_stub(),
@@ -163,12 +164,12 @@ def test_rejection_reaches_rank_consensus(monkeypatch, requested):
     monkeypatch.setattr(selection, "validate", lambda *args, **kwargs: pytest.fail("probed rejected inputs"))
     monkeypatch.setattr(selection, "_check_rank_selection", lambda *args: ranks.append(args))
     with pytest.raises(selection.BackendSelectionError, match="activation dtype"):
-        selection.select_attention_backend(
+        _select(
             family=spec.family,
             phase=spec.phase,
             model=model_stub(),
-            requested=requested,
             specs=(spec,),
+            requested=requested,
             candidates={"None": {"triton": BaseAttentionBackend}},
             priority=["triton"],
         )
@@ -214,9 +215,12 @@ def test_fp8_scale_layouts_are_not_interchangeable(format, provider):
 def test_layer_shape_configures_group_planner():
     from lightllm.common.attention.backends.dense.flashinfer.backend import FlashInferAttBackend
 
-    original = make_backend(FlashInferAttBackend)
-    small = original.for_spec(make_spec(num_q_heads=8, head_size=64))
-    large = original.for_spec(make_spec(num_q_heads=16, head_size=128))
+    model = model_stub(page_size=16)
+    model.config = {"num_attention_heads": 16, "num_key_value_heads": 4, "hidden_size": 2048}
+    model.max_seq_length = 128
+    model.data_type = torch.bfloat16
+    small = FlashInferAttBackend.create(model, make_spec(num_q_heads=8, head_size=64))
+    large = FlashInferAttBackend.create(model, make_spec(num_q_heads=16, head_size=128))
     assert (small.tp_q_head_num, small.head_dim) == (8, 64)
     assert (large.tp_q_head_num, large.head_dim) == (16, 128)
 
@@ -234,7 +238,7 @@ def test_groups_follow_each_layers_family_and_shape(monkeypatch):
 
     def select(**kwargs):
         calls.append(kwargs)
-        return lambda model: SimpleNamespace(for_spec=lambda spec: SimpleNamespace(spec=spec))
+        return SimpleNamespace(create=lambda model, spec: SimpleNamespace())
 
     monkeypatch.setattr(selection, "select_attention_backend", select)
     monkeypatch.setattr(
@@ -281,3 +285,73 @@ def test_replay_flashqla_rejects_decode_and_fp32():
         ReplayGDNFlashQlaAttBackend.check_support(spec)
     with pytest.raises(UnsupportedAttention, match="dtype"):
         ReplayGDNFlashQlaAttBackend.check_support(replace(spec, phase=AttentionPhase.PREFILL, dtype=torch.float32))
+
+
+class _OutputBackend(BaseAttentionBackend):
+    def _forward_decode(self, layer, context, inputs, *, out=None):
+        return inputs
+
+
+@pytest.mark.parametrize("strided", [False, True])
+def test_output_copy_and_padded_view_preserve_auxiliary_result(strided):
+    backend = _OutputBackend(model_stub())
+    context = make_context(backend, prepare=True)
+    layer = make_layer_attention(backend, context, params=None)
+    out = torch.empty(2, 8 if strided else 4, 8)[:, :4]
+    gate = torch.ones(2)
+    output, actual_gate = layer.forward(context, (torch.ones(2, 32), gate), out=out)
+    assert output is out and actual_gate is gate
+    assert torch.all(out == 1)
+    valid_heads = out[:, :2]
+    output, actual_gate = layer.forward(context, (valid_heads, gate), out=out)
+    assert output is valid_heads and actual_gate is gate
+
+
+@pytest.mark.parametrize("invalid", ["dtype", "device", "size", "view_bounds"])
+def test_output_rejects_incompatible_buffer(invalid):
+    backend = _OutputBackend(model_stub())
+    context = make_context(backend, prepare=True)
+    layer = make_layer_attention(backend, context, params=None)
+    out = torch.empty(2, 4)
+    result = torch.ones_like(out)
+    if invalid == "dtype":
+        result = result.double()
+    elif invalid == "device":
+        result = result.to("meta")
+    elif invalid == "size":
+        result = result[:1]
+    else:
+        result, out = out, out[:1]
+    with pytest.raises(ValueError, match="out"):
+        layer.forward(context, result, out=out)
+
+
+def test_batch_builder_borrows_runtime_inputs_and_binding_checks_owner():
+    from lightllm.common.basemodel.attention_batch import AttentionBatchBuilder
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+
+    state = InferStateInfo()
+    batch = make_batch()
+    for name, value in vars(batch).items():
+        if hasattr(state, name):
+            setattr(state, name, value)
+    state.input_ids = torch.zeros(batch.token_num, dtype=torch.long)
+    state.is_prefill = False
+    state.b_image_token_end = torch.tensor([1, 2])
+    state.req_manager = SimpleNamespace(
+        req_to_token_indexs=batch.req_to_token_indexs, HOLD_REQUEST_ID=batch.hold_req_id
+    )
+    borrowed = AttentionBatchBuilder.from_infer_state(state)
+    assert borrowed.b_req_idx is state.b_req_idx
+    assert borrowed.b1_cu_q_seq_len is state.b1_cu_q_seq_len
+    assert borrowed.req_to_token_indexs is state.req_manager.req_to_token_indexs
+    assert borrowed.b_image_token_end is state.b_image_token_end
+    backend = BaseAttentionBackend(model_stub())
+    context = make_context(backend, borrowed, prepare=True)
+    state.attention_contexts = {0: context}
+    layer = make_layer_attention(backend, context, params=None)
+    assert layer.context(state) is context
+    with pytest.raises(ValueError, match="binding"):
+        replace(layer, backend=BaseAttentionBackend(model_stub())).context(state)
+    with pytest.raises(AttributeError):
+        context.b_requ_idx = borrowed.b_req_idx

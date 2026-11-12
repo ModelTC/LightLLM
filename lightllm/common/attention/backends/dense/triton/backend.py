@@ -8,12 +8,12 @@ from lightllm.common.attention.backends.base import AttentionExecutionContext, B
 from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TritonPrefillContext(AttentionExecutionContext):
     pass
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TritonDecodeContext(AttentionExecutionContext):
     b_mark_mtp_shared_group: torch.Tensor = None
     decode_max_kv_seq_len: int = None
@@ -41,13 +41,11 @@ class TritonAttBackend(BaseAttentionBackend):
         k = layer.params.key
         v = layer.params.value
         if layer.params.alibi is not None:
-            return self._prefill_alibi_prefill_att(layer, context, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func)
+            return self._prefill_alibi(layer, context, q=q, k=k, v=v, alloc_func=alloc_func)
         else:
-            return self._prefill_nomarl_prefill_att(layer, context, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func)
+            return self._prefill_paged(layer, context, q=q, k=k, v=v, alloc_func=alloc_func)
 
-    def _prefill_alibi_prefill_att(
-        self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, inputs, alloc_func=torch.empty
-    ):
+    def _prefill_alibi(self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty):
         out = alloc_func(q.shape, q.dtype)
         from lightllm.common.basemodel.triton_kernel.alibi_att.context_flashattention_nopad import context_attention_fwd
 
@@ -66,9 +64,7 @@ class TritonAttBackend(BaseAttentionBackend):
         )
         return out
 
-    def _prefill_nomarl_prefill_att(
-        self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, inputs=None, alloc_func=torch.empty
-    ):
+    def _prefill_paged(self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty):
         from lightllm.common.attention.backends._shared.prefill.context_flashattention_nopad import (
             context_attention_fwd,
         )
@@ -107,7 +103,7 @@ class TritonAttBackend(BaseAttentionBackend):
         k = layer.params.key
         v = layer.params.value
         if layer.params.alibi is not None:
-            return self._decode_alibi_decode_att(layer, context, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func)
+            return self._decode_alibi(layer, context, q=q, k=k, v=v, alloc_func=alloc_func)
         else:
             draft_step = self.decode_draft_step
             q_head_num = q.shape[1]
@@ -116,19 +112,13 @@ class TritonAttBackend(BaseAttentionBackend):
                 assert q_head_num >= k_head_num, "speculative decode requires q_head_num >= k_head_num"
                 return self._decode_spec_decode_gqa_att(layer, context, q=q, k=k, v=v, alloc_func=alloc_func)
             elif q_head_num == k_head_num and layer.params.sliding_window is None:
-                return self._decode_normal_decode_flash_decoding_att(
-                    layer, context, q=q, k=k, v=v, alloc_func=alloc_func
-                )
+                return self._decode_mha(layer, context, q=q, k=k, v=v, alloc_func=alloc_func)
             elif q_head_num >= k_head_num:
-                return self._decode_normal_decode_gqa_flash_decoding_att(
-                    layer, context, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func
-                )
+                return self._decode_gqa(layer, context, q=q, k=k, v=v, alloc_func=alloc_func)
             else:
                 raise NotImplementedError("error")
 
-    def _decode_alibi_decode_att(
-        self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, inputs, alloc_func=torch.empty
-    ):
+    def _decode_alibi(self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty):
         from lightllm.common.basemodel.triton_kernel.alibi_att.token_flashattention_nopad import token_attention_fwd
 
         out = alloc_func(q.shape, q.dtype)
@@ -148,9 +138,7 @@ class TritonAttBackend(BaseAttentionBackend):
         )
         return out
 
-    def _decode_normal_decode_flash_decoding_att(
-        self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty
-    ):
+    def _decode_mha(self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty):
         from lightllm.common.attention.backends.dense.triton.kernels.decode.mha.flash.flash_decoding import (
             token_decode_attention_flash_decoding,
         )
@@ -161,9 +149,7 @@ class TritonAttBackend(BaseAttentionBackend):
         )
         return out
 
-    def _decode_normal_decode_gqa_flash_decoding_att(
-        self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, inputs=None, alloc_func=torch.empty
-    ):
+    def _decode_gqa(self, layer, context, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty):
         from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.flash.gqa_flash_decoding import (
             gqa_token_decode_attention_flash_decoding,
         )

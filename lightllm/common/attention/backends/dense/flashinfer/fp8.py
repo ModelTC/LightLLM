@@ -15,12 +15,12 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Fp8FlashInferPrefillContext(FlashInferPrefillContext):
     pass
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class Fp8FlashInferDecodeContext(FlashInferDecodeContext):
     pass
 
@@ -34,15 +34,9 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
         super().__init__(model=model)
         self.kv_data_type = torch.float8_e4m3fn
 
-    def _init_infer_page_size(self):
-        self.infer_page_size = 1
-        assert (
-            self.page_size % self.infer_page_size == 0
-        ), f"model page_size {self.page_size} must be divisible by infer_page_size {self.infer_page_size}"
-        logger.warning(
-            f"Fp8FlashInferAttBackend temporarily uses infer_page_size=1 with model page_size={self.page_size}; "
-            "multi-token FP8 inference pages are not implemented yet."
-        )
+    @property
+    def infer_page_size(self) -> int:
+        return 1
 
     def _allocate_prefill_context(self, capacity, capture, workspace):
         return Fp8FlashInferPrefillContext(capacity, capture, workspace)
@@ -69,7 +63,7 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
         logical_layer_id: int,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
+        o_tensor = alloc_func(q.shape, q.dtype, device=q.device)
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
         k_descale = layer.params.key_scale
@@ -96,7 +90,7 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
         logical_layer_id: int,
         alloc_func=torch.empty,
     ):
-        o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
+        o_tensor = alloc_func(q.shape, q.dtype, device=q.device)
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
         k_descale = layer.params.key_scale

@@ -113,7 +113,7 @@ def test_kda_option_reaches_the_shared_selector(monkeypatch, requested):
 
     def select(**kwargs):
         calls.append(kwargs)
-        return lambda model: SimpleNamespace(for_spec=lambda spec: sentinel)
+        return SimpleNamespace(create=lambda model, spec: sentinel)
 
     monkeypatch.setattr(selection, "select_attention_backend", select)
     monkeypatch.setattr(

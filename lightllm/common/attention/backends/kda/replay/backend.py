@@ -11,26 +11,22 @@ from lightllm.common.attention.backends._shared.linear.causal_conv1d import caus
 from lightllm.common.attention.backends._shared.linear.causal_conv1d_mtp import (
     causal_conv1d_update as causal_conv1d_update_mtp,
 )
-from lightllm.common.attention.backends._shared.linear.mtp_state_params import build_dynamic_mtp_linear_att_state_params
+from lightllm.common.attention.backends._shared.linear.layout import LinearDecodeContext, update_linear_decode
 from lightllm.common.attention.backends.base import AttentionExecutionContext, BaseAttentionBackend
 from lightllm.common.attention.backends.kda.triton.kernels.kda import chunk_kda_with_fused_gate
 
 from .decode import replay
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class ReplayKDAPrefillContext(AttentionExecutionContext):
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
 
-@dataclasses.dataclass
-class ReplayKDADecodeContext(AttentionExecutionContext):
-    b_conv_buffer_idx: torch.Tensor = None
-    b_ssm_buffer_idx: torch.Tensor = None
-    b1_mtp_cu_q_seq_len: torch.Tensor = None
-    b_cu_seqlens: torch.Tensor = None
-    b_num_accepted_tokens: torch.Tensor = None
+@dataclasses.dataclass(slots=True)
+class ReplayKDADecodeContext(LinearDecodeContext):
+    pass
 
 
 class ReplayKDALinearAttBackend(BaseAttentionBackend):
@@ -66,8 +62,7 @@ class ReplayKDALinearAttBackend(BaseAttentionBackend):
 
     def _forward_prefill(self, layer: LayerAttentionBinding, context, inputs: KDAInputs, *, out=None):
         backend: ReplayKDALinearAttBackend = self
-        state = layer.params.state
-        conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer.logical_layer_id)
+        conv_states, ssm_states = layer.params.conv, layer.params.ssm
         conv_states = conv_states[..., : backend.conv_kernel_size - 1]
         mixed_qkv = causal_conv1d_fn(
             inputs.mixed_qkv.transpose(0, 1),
@@ -104,20 +99,19 @@ class ReplayKDALinearAttBackend(BaseAttentionBackend):
         return output
 
     def _update_decode(self, context):
-        self._init_indices(context, self.decode_draft_step, self.mtp_state_index)
-        context.b_ssm_buffer_idx = context.b_conv_buffer_idx
+        update_linear_decode(context, self.decode_draft_step, self.uses_dynamic_spec_verify_layout(), replay=True)
 
     def _forward_decode(self, layer: LayerAttentionBinding, context, inputs: KDAInputs, *, out=None):
         backend: ReplayKDALinearAttBackend = self
-        state = layer.params.state
-        conv_states, _ = state.get_layer_view(logical_layer_id=layer.logical_layer_id)
+        state = layer.params.replay_state
+        conv_states = layer.params.conv
         conv_kwargs = dict(bias=None, activation="silu", conv_state_indices=context.b_conv_buffer_idx)
         conv_update = causal_conv1d_update
         if backend.decode_draft_step > 0:
             conv_update = causal_conv1d_update_mtp
             conv_kwargs.update(
                 mtp_step=backend.decode_draft_step,
-                num_accepted_tokens=context.b_num_accepted_tokens,
+                num_accepted_tokens=context.accepted_tokens(layer.params.mtp_state_index),
                 query_start_loc=context.b1_mtp_cu_q_seq_len,
             )
         mixed_qkv = conv_update(
@@ -159,40 +153,3 @@ class ReplayKDALinearAttBackend(BaseAttentionBackend):
         # 各层都读到了本步开始时的 cursor。最后一层返回后再按整窗全接受推进。
         state.finish_decode_token(layer.logical_layer_id, context.b_conv_buffer_idx, context.b_cu_seqlens)
         return output
-
-    def _init_indices(self, context, mtp_step: int, mtp_index: torch.Tensor | None) -> None:
-        infer = context.batch
-        if mtp_step == 0:
-            context.b_conv_buffer_idx = infer.b_req_idx
-            context.b1_mtp_cu_q_seq_len = None
-            context.b_num_accepted_tokens = None
-            # 每行一个 token。replay 和 cursor 共用这份前缀和。
-            context.b_cu_seqlens = torch.arange(
-                infer.b_req_idx.numel() + 1, dtype=torch.int32, device=infer.b_req_idx.device
-            )
-            return
-        if self.uses_dynamic_spec_verify_layout():
-            cu, conv_idx, accepted = build_dynamic_mtp_linear_att_state_params(
-                b_req_idx=infer.b_req_idx,
-                b_mtp_index=infer.b_mtp_index,
-                req_to_mtp_state_index=mtp_index,
-                hold_req_id=infer.hold_req_id,
-            )
-            context.b1_mtp_cu_q_seq_len = cu
-            context.b_cu_seqlens = cu
-            context.b_conv_buffer_idx = conv_idx
-            context.b_num_accepted_tokens = accepted
-            return
-        width = mtp_step + 1
-        batch_size = infer.batch_size
-        if batch_size % width:
-            raise ValueError(
-                "KDA replay decode requires batch_size divisible by mtp_step + 1, "
-                f"got batch_size={batch_size}, mtp_step={mtp_step}."
-            )
-        context.b1_mtp_cu_q_seq_len = torch.arange(
-            0, batch_size + 1, width, dtype=torch.int32, device=infer.b_req_idx.device
-        )
-        context.b_cu_seqlens = context.b1_mtp_cu_q_seq_len
-        context.b_conv_buffer_idx = infer.b_req_idx.view(-1, width)[:, 0].contiguous()
-        context.b_num_accepted_tokens = mtp_index[context.b_conv_buffer_idx] + 1

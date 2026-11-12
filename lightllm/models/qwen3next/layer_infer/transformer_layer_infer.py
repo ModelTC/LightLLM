@@ -214,7 +214,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         def gdn_prefill_func(new_infer_state: "Qwen3NextInferStateInfo"):
             # 使用 runtime 上 init_att_state() 更新过的 buffer idx，而不是
             tmp_o, tmp_z = self.prefill_attention.forward(
-                new_infer_state.attention_contexts[self.prefill_attention.group_id], GDNInputs(_mixed_qkvzba)
+                self.prefill_attention.context(new_infer_state), GDNInputs(_mixed_qkvzba)
             )
             tmp_o = tmp_o.view(_o.shape)
             _o.copy_(tmp_o)
@@ -240,7 +240,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             core_attn_out, z = self._linear_prefill_cuda_graph_wrapper(mixed_qkvzba, infer_state, layer_weight)
         else:
             core_attn_out, z = self.prefill_attention.forward(
-                infer_state.attention_contexts[self.prefill_attention.group_id], GDNInputs(mixed_qkvzba)
+                self.prefill_attention.context(infer_state), GDNInputs(mixed_qkvzba)
             )
 
         gdn_out = self._linear_post(core_attn_out, z, layer_weight)
@@ -260,7 +260,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         mixed_qkvzba = self._linear_in_proj(input_embdings, layer_weight)
         core_attn_out, z = self.decode_attention.forward(
-            infer_state.attention_contexts[self.decode_attention.group_id], GDNInputs(mixed_qkvzba)
+            self.decode_attention.context(infer_state), GDNInputs(mixed_qkvzba)
         )
         gdn_out = self._linear_post(core_attn_out, z, layer_weight)
 

@@ -7,7 +7,7 @@ from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention.backends.dense.triton.backend import TritonAttBackend, TritonPrefillContext
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class NeoTritonPrefillContext(TritonPrefillContext):
     pass
 

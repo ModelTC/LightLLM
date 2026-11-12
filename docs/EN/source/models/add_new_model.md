@@ -135,7 +135,7 @@ Layers call `.forward(...)` explicitly. `LayerAttentionBinding` holds the layer 
 
 ```python
 attention = self.decode_attention
-context = infer_state.attention_contexts[attention.group_id]
+context = attention.context(infer_state)
 output = attention.forward(context, DenseInputs(q))
 ```
 
