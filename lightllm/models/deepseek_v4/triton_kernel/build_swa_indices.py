@@ -6,6 +6,30 @@ from .swa_cache import get_swa_token_index
 
 
 @triton.jit
+def _build_prefill_token_maps(
+    REQ, START, LENGTH, TOKEN_REQ, TOKEN_BATCH, REQ_STRIDE: tl.constexpr, BLOCK: tl.constexpr
+):
+    batch = tl.program_id(0)
+    req = tl.load(REQ + batch * REQ_STRIDE)
+    start = tl.load(START + batch)
+    length = tl.load(LENGTH + batch)
+    for tile in range(0, length, BLOCK):
+        offset = tile + tl.arange(0, BLOCK)
+        valid = offset < length
+        tl.store(TOKEN_REQ + start + offset, req, valid)
+        tl.store(TOKEN_BATCH + start + offset, batch, valid)
+
+
+def build_prefill_token_maps(b_req_idx, b_q_start_loc, b_q_seq_len, token_num):
+    token_req = b_req_idx.new_empty((token_num,))
+    token_batch = b_req_idx.new_empty((token_num,), dtype=torch.int32)
+    _build_prefill_token_maps[(b_req_idx.numel(),)](
+        b_req_idx, b_q_start_loc, b_q_seq_len, token_req, token_batch, b_req_idx.stride(0), BLOCK=1024
+    )
+    return token_req, token_batch
+
+
+@triton.jit
 def _build_image_visibility_kernel(
     image_spans,  # (num_images, 3): batch index, absolute image start, visible image length
     b_q_start_loc,

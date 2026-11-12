@@ -5,6 +5,7 @@ from lightllm.common.basemodel import InferStateInfo
 from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
 
+from .triton_kernel.build_swa_indices import build_prefill_token_maps
 from .workspace import C4_PREFILL_LOGITS_BUDGET_BYTES
 
 
@@ -74,13 +75,8 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         # Per-token request id (decode: one token per req; prefill: ragged -> repeat by q-len).
         # Layer-independent; the swa kernel + build_metadata's c4/c128 readers all reuse it.
         if self.is_prefill:
-            self.dsv4_sparse_req_idx = torch.repeat_interleave(
-                self.b_req_idx, self.b_q_seq_len, output_size=pos.numel()
-            )
-            self._dsv4_token_to_batch_idx = torch.repeat_interleave(
-                torch.arange(self.b_req_idx.shape[0], dtype=torch.int32, device=self.b_req_idx.device),
-                self.b_q_seq_len,
-                output_size=pos.numel(),
+            self.dsv4_sparse_req_idx, self._dsv4_token_to_batch_idx = build_prefill_token_maps(
+                self.b_req_idx, self.b_q_start_loc, self.b_q_seq_len, pos.numel()
             )
         else:
             self.dsv4_sparse_req_idx = self.b_req_idx
