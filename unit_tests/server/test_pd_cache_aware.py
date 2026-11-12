@@ -319,3 +319,85 @@ def test_cache_aware_matches_cache_only_within_idle_workers():
     selected_worker, _ = asyncio.run(policy.select_worker([other_idle_worker, busy_worker, cache_idle_worker], prompt))
 
     assert selected_worker is cache_idle_worker
+
+
+@pytest.mark.parametrize("other_requests", [0, 1])
+@pytest.mark.parametrize("cached_load,expect_cache", [(80000, True), (250000, False)])
+def test_long_prefix_selection_accounts_for_suffix_and_still_sheds_load(
+    other_requests: int, cached_load: int, expect_cache: bool
+) -> None:
+    selector = LoadBalancedCacheAwareSelector(pd_manager=None)
+    cached = _worker(address="cached", dispatched_prompt_chars=cached_load, dispatched_req_num=1)
+    other = _worker(address="other", dispatched_prompt_chars=other_requests * 1000, dispatched_req_num=other_requests)
+    decode = SimpleNamespace(client_ip_port="decode", run_status=SimpleNamespace(total_token_usage_rate=0.0))
+    selector.update_nodes(prefill_nodes=[other, cached], decode_nodes=[decode])
+    prefix = "a" * 90001
+    prompt = prefix + "b" * 10000
+    _insert_prompt(policy=selector.policy, prompt=prefix, worker=cached)
+
+    selected, selected_decode, info = asyncio.run(
+        main=selector.select_p_d_node(prompt=prompt, sampling_params=None, multimodal_params=None)
+    )
+
+    assert selected is (cached if expect_cache else other)
+    assert selected_decode is decode
+    if expect_cache:
+        match = _prefix_match(policy=selector.policy, prompt=prompt)
+        assert info == PDSelectionExtraInfo(
+            estimated_cache_hit_rate=match.matched_char_count / len(prompt),
+            cache_last_insert_time=match.last_insert_time,
+        )
+    else:
+        assert info == PDSelectionExtraInfo()
+
+
+@pytest.mark.parametrize(
+    "prefix_chars,prompt_chars,cached_load,balance_threshold,expect_cache",
+    [
+        (16, 20, 1, 1.5, True),  # Both long-prefix gates are inclusive.
+        (15, 18, 1, 1.5, False),  # High hit rate, but the matched prefix is too short.
+        (16, 21, 1, 1.5, False),  # Long prefix, but the hit rate is too low.
+        (16, 20, 16, 1.0, True),
+        (16, 20, 17, 1.0, False),
+        (16, 20, 26, 1.5, True),
+        (16, 20, 27, 1.5, False),
+        (16, 20, 36, 2.0, True),
+        (16, 20, 37, 2.0, False),
+        (20, 20, 20, 1.0, False),  # A full prefix match still has nonzero work.
+    ],
+)
+def test_long_prefix_affinity_respects_hit_and_load_boundaries(
+    prefix_chars: int, prompt_chars: int, cached_load: int, balance_threshold: float, expect_cache: bool
+) -> None:
+    policy = _local_policy(
+        config=CacheAwareConfig(sample_stride=1, long_prefix_min_chars=16, balance_rel_threshold=balance_threshold)
+    )
+    cached = _worker(address="cached", dispatched_prompt_chars=cached_load, dispatched_req_num=1)
+    idle = _worker(address="idle")
+    prefix = "a" * prefix_chars
+    _insert_prompt(policy=policy, prompt=prefix, worker=cached)
+
+    selected, _ = asyncio.run(
+        main=policy.select_worker(workers=[idle, cached], request_text=prefix + "b" * (prompt_chars - prefix_chars))
+    )
+
+    assert selected is (cached if expect_cache else idle)
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_long_prefix_affinity_requires_an_eligible_online_cache_worker(available: bool) -> None:
+    policy = _local_policy(config=CacheAwareConfig(sample_stride=1, long_prefix_min_chars=16, cache_threshold=0.9))
+    cached = _worker(address="cached", dispatched_prompt_chars=1, dispatched_req_num=1)
+    idle = _worker(address="idle")
+    # The offline case has a full hit; the online case fails the configured cache threshold.
+    prefix = "a" * (20 if not available else 16)
+    _insert_prompt(policy=policy, prompt=prefix, worker=cached)
+
+    selected, info = asyncio.run(
+        main=policy.select_worker(
+            workers=[idle, cached] if available else [idle], request_text=prefix + "b" * (20 - len(prefix))
+        )
+    )
+
+    assert selected is idle
+    assert info == PDSelectionExtraInfo()
