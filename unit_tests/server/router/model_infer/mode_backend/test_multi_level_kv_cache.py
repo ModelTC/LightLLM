@@ -179,11 +179,14 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         req.hold_kv_len = new_hold_kv_len
         return mem_indexes
 
-    operator = SimpleNamespace(
-        load_cpu_cache_to_gpu=lambda mem_indexes, **kwargs: loaded_indexes.extend(mem_indexes.tolist())
-    )
+    def load_cpu_cache_to_gpu(mem_indexes, **kwargs):
+        assert mem_indexes.data_ptr() == table[0].data_ptr()
+        loaded_indexes.extend(mem_indexes.tolist())
+
+    operator = SimpleNamespace(load_cpu_cache_to_gpu=load_cpu_cache_to_gpu)
     backend = SimpleNamespace(
         is_master_in_dp=False,
+        is_deepseek_v4=False,
         radix_cache=None,
         model=SimpleNamespace(
             mem_manager=SimpleNamespace(operator=operator),

@@ -91,7 +91,6 @@ class MultiLevelKvCacheModule(object):
                 continue
 
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
-            page_len_start_list = [0] + page_len_list
             assert len(page_list) <= len(page_len_list)
 
             matched_page_num = len(page_list)
@@ -127,8 +126,7 @@ class MultiLevelKvCacheModule(object):
                     assert ready_page_num <= matched_page_num
                     need_pages = page_list[ready_page_num:matched_page_num]
 
-                    mem_indexes = self.backend._alloc_req_kv_mem(req, need_token_num)
-                    assert mem_indexes is not None
+                    self.backend._alloc_req_kv_mem(req, need_token_num)
 
                     if self.need_sync_compute_stream():
                         # TODO fa3 现在必须使用同步模式, 未来需要移除
@@ -138,21 +136,12 @@ class MultiLevelKvCacheModule(object):
                     mem_manager = self.backend.model.mem_manager
                     req_manager = self.backend.model.req_manager
 
-                    mem_indexes_cuda = mem_indexes.cuda(non_blocking=True)
                     page_indexes_cuda = torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(
                         non_blocking=True
                     )
-                    # hybrid 页面加载必须按完整 page 处理，否则可能缺失恢复运行态所需的 checkpoint，所以
-                    # 这里需要进行pad操作，使操作的页面是完整的。
-                    _start = page_len_start_list[ready_page_num]
-
-                    _end = req.cur_kv_len
-                    assert 0 <= _start <= _end, f"invalid pad range [{_start}, {_end}]"
-                    mem_indexes_cuda = torch.cat(
-                        [req_manager.req_to_token_indexs[req.req_idx, _start:_end], mem_indexes_cuda]
-                    )
-
-                    assert len(mem_indexes_cuda) == match_tokens - page_len_start_list[ready_page_num]
+                    # Include the GPU-resident beginning of the first page to restore its checkpoint.
+                    page_start = page_len_list[ready_page_num - 1] if ready_page_num else 0
+                    mem_indexes_cuda = req_manager.req_to_token_indexs[req.req_idx, page_start:match_tokens]
 
                     # 更新 req 状态。
                     idle_token_num -= need_token_num
