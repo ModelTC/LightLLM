@@ -46,9 +46,11 @@ def test_req_init(req):
     assert req.input_len == 3
 
 
-@pytest.mark.parametrize("hybrid", [False, True])
-@pytest.mark.parametrize("length", [1024, 1025])
-def test_req_prompt_cache_hashes_keep_existing_page_digests(monkeypatch, hybrid, length):
+@pytest.mark.parametrize(
+    "hybrid,length,hash_limit",
+    [(False, 1024, None), (False, 1025, None), (True, 1024, None), (True, 1025, None), (True, 1025, 3)],
+)
+def test_req_prompt_cache_hashes_keep_existing_page_digests(monkeypatch, hybrid, length, hash_limit):
     args = get_env_start_args()
     monkeypatch.setitem(args, "enable_cpu_cache", True)
     monkeypatch.setitem(args, "cpu_cache_token_page_size", 512)
@@ -61,6 +63,11 @@ def test_req_prompt_cache_hashes_keep_existing_page_digests(monkeypatch, hybrid,
     ends = list(range(hash_page, length, hash_page))
     expected = [xxhash.xxh3_128(np.asarray(tokens[:end], dtype=np.uint64)).intdigest() for end in ends]
     assert compute_token_list_hash(tokens, hash_page) == expected
+    if hash_limit is not None:
+        monkeypatch.setattr(
+            "lightllm.server.core.objs.token_chunck_hash_list.LIGHTLLM_TOKEN_HASH_LIST_SIZE", hash_limit
+        )
+        expected, ends = expected[:hash_limit], ends[:hash_limit]
 
     req = Req()
     req.init(1, tokens, {"max_new_tokens": 1}, None, chunked_prefill_size=128)

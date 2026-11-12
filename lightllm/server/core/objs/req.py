@@ -214,9 +214,11 @@ class Req(ctypes.Structure):
 
         args = get_env_start_args()
         if is_hybrid_att_model(args.model_dir):
-            self._fill_hybrid_token_hash()
+            token_hash_list = self._fill_hybrid_token_hash()
             if args.enable_cpu_cache:
-                cpu_cache_hash_list, cpu_cache_page_len_list = self._calcu_hybrid_cpu_cache_page_len_list()
+                cpu_cache_hash_list, cpu_cache_page_len_list = self._calcu_hybrid_cpu_cache_page_len_list(
+                    token_hash_list
+                )
                 self.token_hash_list = TokenHashList()
                 self.token_hash_list.clear()
                 self.token_hash_list.fill(cpu_cache_hash_list)
@@ -240,26 +242,19 @@ class Req(ctypes.Structure):
         # 子类继承进行一些额外的初始化操作
         pass
 
-    def _calcu_hybrid_cpu_cache_page_len_list(self):
-        token_hash_list = self.hybrid_token_hash_list.get_all()
-        hash_page_size = get_env_start_args().linear_att_hash_page_size
-        block_num = get_env_start_args().linear_att_page_block_num
-        cpu_cache_page_size = get_env_start_args().cpu_cache_token_page_size
-        assert cpu_cache_page_size == hash_page_size * block_num
-        cpu_cache_hash_list = []
-        cpu_cache_page_len_list = []
-        cum_sum_len = 0
-        for i in range(len(token_hash_list)):
-            if i % block_num == (block_num - 1):
-                cpu_cache_hash_list.append(token_hash_list[i])
-                cum_sum_len += cpu_cache_page_size
-                cpu_cache_page_len_list.append(cum_sum_len)
-            elif i == len(token_hash_list) - 1:
-                cpu_cache_hash_list.append(token_hash_list[len(token_hash_list) - 1])
-                page_num = (i % block_num) + 1
-                cum_sum_len += page_num * hash_page_size
-                cpu_cache_page_len_list.append(cum_sum_len)
-
+    def _calcu_hybrid_cpu_cache_page_len_list(self, token_hash_list):
+        args = get_env_start_args()
+        hash_page_size = args.linear_att_hash_page_size
+        block_num = args.linear_att_page_block_num
+        assert args.cpu_cache_token_page_size == hash_page_size * block_num
+        # Use the count retained in the shared hash list, which may be capped.
+        page_count = self.hybrid_token_hash_list.size
+        full_page_ends = range(block_num, page_count + 1, block_num)
+        cpu_cache_hash_list = [token_hash_list[end - 1] for end in full_page_ends]
+        cpu_cache_page_len_list = [end * hash_page_size for end in full_page_ends]
+        if page_count % block_num:
+            cpu_cache_hash_list.append(token_hash_list[page_count - 1])
+            cpu_cache_page_len_list.append(page_count * hash_page_size)
         return cpu_cache_hash_list, cpu_cache_page_len_list
 
     def _fill_input_token_hash(self):
@@ -278,7 +273,7 @@ class Req(ctypes.Structure):
             self.get_prompt_ids_numpy(), get_env_start_args().linear_att_hash_page_size
         )
         self.hybrid_token_hash_list.fill(hash_values)
-        return
+        return hash_values
 
     def set_compiled_grammar(self, payload: bytes) -> None:
         """在请求转发 Router 前，将 HTTP 侧编译好的语法写入当前请求槽的共享内存。"""
