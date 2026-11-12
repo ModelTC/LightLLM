@@ -6,21 +6,38 @@ that prefix into the SSM and then replays the new tokens from the rounded
 state. The output is either a precomputed GDN or KDA window, or a token walk.
 """
 
+import torch
 import triton
 import triton.language as tl
 
 from .replayssm_delta import _apply_accepted_prefix
 
 
+def check_replay_sync_mark(
+    sync_mark: torch.Tensor,
+    reqs: torch.Tensor,
+    value_heads: int,
+    key_heads: int,
+) -> None:
+    """确认 SyncMark 按 [launch 行, key head] 连续存放，并且盖住这次启动的每一行。"""
+
+    assert key_heads > 0 and value_heads % key_heads == 0, "value heads must be a multiple of key heads"
+    assert sync_mark.dtype == torch.int32 and sync_mark.dim() == 2, "sync mark must be a 2D int32 tensor"
+    assert sync_mark.shape[1] == key_heads, "sync mark columns must equal key heads"
+    assert sync_mark.shape[0] >= reqs.numel(), "sync mark rows must cover every launch row"
+    assert sync_mark.stride(1) == 1 and sync_mark.stride(0) == key_heads, "sync mark must be contiguous by key head"
+
+
 @triton.jit
-def _arrive_value_tiles(SyncMark, seq, hv, HV: tl.constexpr, NV: tl.constexpr):
-    # 同一个 launch 行、同一个 value head 的 V/BV 个 tile 都读完旧前缀后，才允许写新窗口。
+def _arrive_value_tiles(SyncMark, seq, hv, HV: tl.constexpr, KH: tl.constexpr, NV: tl.constexpr):
+    # 同一 launch 行、同一 key head 的全部 value head 和 V tile 都读完旧 RawKeys 后，才允许写新窗口。
     # 行号不是请求槽。HOLD 会在一批里重复出现，用请求槽做下标会撞到同一格。
-    # 最后到达的 tile 把计数写回 0，这个 0 就是放行信号。其余 tile 已经加过 1，
-    # 之后再看见 0 只可能是这次复原。
-    idx = seq * HV + hv
+    # SyncMark 每行长度是 KH。最后到达的 tile 把计数写回 0，这个 0 就是放行信号。
+    group: tl.constexpr = HV // KH
+    key_head = hv // group
+    idx = seq * KH + key_head
     arrived = tl.atomic_add(SyncMark + idx, 1, sem="acq_rel", scope="gpu")
-    if arrived == NV - 1:
+    if arrived == NV * group - 1:
         tl.atomic_xchg(SyncMark + idx, 0, sem="release", scope="gpu")
     else:
         seen = arrived + 1
@@ -117,8 +134,8 @@ def _decode_replay(
         state = state.to(State.dtype.element_ty).to(tl.float32)
         tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
         n = 0
-        # 新 token 会从槽 0 覆盖刚读过的 RawKeys、Gates、Betas。等这一组 V tile 都读完再往下走。
-        _arrive_value_tiles(SyncMark, seq, hv, HV, NV)
+        # 新 token 会从槽 0 覆盖刚读过的 RawKeys。等同一 key head 的全部 value tile 都读完再往下走。
+        _arrive_value_tiles(SyncMark, seq, hv, HV, KH, NV)
 
     if PRECOMPUTE_PROJECTIONS:
         # 输出用 tf32x3 tensor core 从冻结的 checkpoint 和 history 重建。

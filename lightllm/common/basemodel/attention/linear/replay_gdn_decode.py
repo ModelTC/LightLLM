@@ -11,7 +11,10 @@ import torch
 import triton
 
 from lightllm.common.attention_state.bounded_att.conv_ssm_types import ConvSSMStateConfig
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_decode import _decode_replay
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_decode import (
+    _decode_replay,
+    check_replay_sync_mark,
+)
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, autotune
 
 
@@ -144,6 +147,12 @@ def replay(
     # mtp_step == 0 时 verify_width 为 1。compute_mode=precompute 仍然投影；BV < 16 才退回逐 token。
     precompute_projections = state.compute_mode == "precompute" and bv >= 16
     padded_verify_width = triton.next_power_of_2(state.verify_width)
+    check_replay_sync_mark(
+        sync_mark=state.tile_sync_mark,
+        reqs=reqs,
+        value_heads=hv,
+        key_heads=state.num_key_heads,
+    )
     _decode_replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](
         Q=q,
         StepK=k,

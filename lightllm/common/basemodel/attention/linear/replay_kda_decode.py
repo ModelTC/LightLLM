@@ -10,7 +10,10 @@ import ast
 import torch
 import triton
 
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_decode import _decode_replay
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_decode import (
+    _decode_replay,
+    check_replay_sync_mark,
+)
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, autotune
 
 
@@ -116,7 +119,7 @@ def rebuild_inputs(
         state_raw_values=torch.empty(slots, hv, capacity, vd, device=device, dtype=state_raw_values.dtype),
         state_betas=torch.empty(slots, hv, capacity, device=device, dtype=state_betas.dtype),
         state_cursors=torch.zeros(slots, dtype=torch.int32, device=device),
-        state_tile_sync_mark=torch.zeros((slots * rows_per_slot, hv), dtype=torch.int32, device=device),
+        state_tile_sync_mark=torch.zeros((slots * rows_per_slot, key_heads), dtype=torch.int32, device=device),
         q=copied[0],
         k=copied[1],
         v=copied[2],
@@ -190,6 +193,12 @@ def replay(
     # mtp_step == 0 时 verify_width 为 1。compute_mode=precompute 仍然投影；BV < 16 才退回逐 token。
     precompute_projections = state_compute_mode == "precompute" and bv >= 16
     padded_verify_width = triton.next_power_of_2(state_verify_width)
+    check_replay_sync_mark(
+        sync_mark=state_tile_sync_mark,
+        reqs=reqs,
+        value_heads=hv,
+        key_heads=key_heads,
+    )
     _decode_replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](
         Q=q,
         StepK=k,

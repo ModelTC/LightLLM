@@ -101,8 +101,10 @@ class ReplayGDNState(BoundedAttentionState):
         self.hold_req_id = slots - 1
         # cursor 是已接受、尚未折回的长度。各层只读，最后一层返回后才按整窗推进。
         self.cursors = torch.zeros(slots, dtype=torch.int32, device=device)
-        # 按 launch 行号同步 V tile。每个请求槽留 mtp_step + 6 行，盖住验证窗口和重复的 HOLD。
-        self.tile_sync_mark = torch.zeros((slots * (mtp_step + 6), hv), dtype=torch.int32, device=device)
+        # 按 launch 行和 key head 同步。每个请求槽留 mtp_step + 6 行，盖住验证窗口和重复的 HOLD。
+        self.tile_sync_mark = torch.zeros(
+            (slots * (mtp_step + 6), self.num_key_heads), dtype=torch.int32, device=device
+        )
         # 归一化 k 有范围保证，bf16 激活用 fp16 保留更多尾数；d 无此保证，使用 fp32。
         # 折回不用这份 d，而用下面的原始 k/v，避免把重建误差写进 SSM。g、beta 保持 fp32。
         # GDN 的 g 是每个头一个标量。
