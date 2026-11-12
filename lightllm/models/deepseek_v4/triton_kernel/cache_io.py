@@ -46,6 +46,7 @@ def _copy_compressed_kv_kernel(
     TO_PAGES: tl.constexpr,
     ROUND_TAIL: tl.constexpr,
     BLOCK_BYTES: tl.constexpr,
+    BLOCK_TOKENS: tl.constexpr,
 ):
     layer = tl.program_id(1)
     kv_address = tl.full((), 0, tl.int64)
@@ -58,7 +59,7 @@ def _copy_compressed_kv_kernel(
         layer_byte_offset = tl.where(layer == i, offset, layer_byte_offset)
         offset += PAGE_TOKENS * SLOT_BYTES[i]
     kv_buffer = kv_address.to(tl.pointer_type(tl.uint8))
-    tokens = tl.program_id(0) * 32 + tl.arange(0, 32)
+    tokens = tl.program_id(0) * BLOCK_TOKENS + tl.arange(0, BLOCK_TOKENS)
     slot = tl.load(mem_indexes + tokens, tokens < TOKEN_NUM, -1).to(tl.int64)
     if ROUND_TAIL:
         # Packed page tails include scales for earlier tokens. PD also carries
@@ -100,7 +101,8 @@ def copy_compressed_kv_pages(
         else mem_indexes.numel()
     )
     slot_bytes = config.compressed_kv_slot_bytes
-    _copy_compressed_kv_kernel[(triton.cdiv(copy_num, 32), len(slot_bytes))](
+    block_tokens = 16 if page_indexes is None else 32
+    _copy_compressed_kv_kernel[(triton.cdiv(copy_num, block_tokens), len(slot_bytes))](
         tuple(mem_manager.kv_buffer),
         kv_move_buffer,
         mem_indexes,
@@ -113,6 +115,7 @@ def copy_compressed_kv_pages(
         TO_PAGES=to_pages,
         ROUND_TAIL=round_tail,
         BLOCK_BYTES=triton.next_power_of_2(max(slot_bytes)),
+        BLOCK_TOKENS=block_tokens,
         num_warps=4,
     )
 
