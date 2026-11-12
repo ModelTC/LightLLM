@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from lightllm.common.basemodel.triton_kernel.linear_att import ssm_autotune as tuning
+from lightllm.common.basemodel.attention.linear import replay_gdn_decode as tuning
 from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
     attach_replay_history as ReplaySSMExecutor,
 )
@@ -17,7 +17,8 @@ def test_rebuild_uses_one_layer_scratch(width):
     gates = torch.zeros((tokens, 2), dtype=torch.bfloat16, device="cuda")
     a_log = torch.zeros(2, device="cuda")
     cu = torch.arange(4, device="cuda", dtype=torch.int32) * width
-    _, kwargs = tuning.rebuild_inputs(ssm_backend, "replay", q, q, q, gates, gates, a_log, a_log, cu_seqlens=cu)
+    reqs = torch.arange(3, device="cuda", dtype=torch.int32)
+    _, kwargs = tuning.rebuild_inputs(ssm_backend, 0, q, q, q, gates, gates, a_log, a_log, reqs, cu)
     scratch = kwargs["state"]
     assert scratch is not ssm_backend
     assert scratch.ssm_state.shape[0] == 1
@@ -42,15 +43,13 @@ def test_rebuild_failure_leaves_serving_state_unchanged(monkeypatch, tmp_path, w
     a_log = torch.zeros(2, device="cuda")
     bias = torch.zeros(2, device="cuda")
     cu = torch.arange(4, device="cuda", dtype=torch.int32) * width
-    inputs = dict(
-        state=ssm_backend, mode="replay", q=q, k=q, v=q, a=gates, b=gates, a_log=a_log, bias=bias, cu_seqlens=cu
-    )
+    reqs = torch.arange(3, device="cuda", dtype=torch.int32)
     before = {name: x.clone() for name, x in vars(ssm_backend).items() if isinstance(x, torch.Tensor)}
 
     def oom(*args, **kwargs):
         raise torch.cuda.OutOfMemoryError("scratch")
 
-    tuner = tuning.select_config
+    tuner = tuning.replay
     monkeypatch.setattr(tuner, "rebuild_input_func", oom)
     monkeypatch.setattr(tuner, "_cache_dir", str(tmp_path), raising=False)
     monkeypatch.setattr(tuner, "cached_configs", {})
@@ -61,12 +60,11 @@ def test_rebuild_failure_leaves_serving_state_unchanged(monkeypatch, tmp_path, w
     )
     with pytest.raises(torch.cuda.OutOfMemoryError, match="scratch"):
         with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
-            tuning.resolve_run_config(**inputs)
+            tuning.replay(ssm_backend, 0, q, q, q, gates, gates, a_log, bias, reqs, cu)
     assert not list(tmp_path.iterdir())
     config = {"BV": 32, "num_warps": 1, "num_stages": 3}
     for name, expected in before.items():
         torch.testing.assert_close(getattr(ssm_backend, name), expected, atol=0, rtol=0)
 
-    reqs = torch.arange(3, device="cuda", dtype=torch.int32)
-    tuning.replay_layer(ssm_backend, 0, q, q, q, gates, gates, a_log, bias, reqs, cu, run_config=config)
+    tuning.replay(ssm_backend, 0, q, q, q, gates, gates, a_log, bias, reqs, cu, run_config=config)
     torch.cuda.synchronize()

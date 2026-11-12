@@ -14,7 +14,7 @@ import torch
 import triton
 
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
-from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs, replay_layer
+from lightllm.common.basemodel.attention.linear.replay_kda_decode import get_configs, replay
 from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
     accept_replay_window,
     attach_replay_history as ReplaySSMExecutor,
@@ -74,7 +74,7 @@ def workload(args, batch, width, dtype, mode, acceptance):
                         num_accepted_tokens=counts if cu is not None else None,
                     )
                 else:
-                    replay_layer(ssm_backend, layer, q, k, v, gate, beta, alog, bias, reqs, replay_cu)
+                    replay(ssm_backend, layer, q, k, v, gate, beta, alog, bias, reqs, replay_cu)
             if ssm_backend is not None:
                 accept_replay_window(ssm_backend, reqs, accepted, replay_cu)
         if isinstance(ssm_backend, ReplaySSMExecutor):

@@ -51,7 +51,6 @@ def attach_replay_history(
     owner.compute_mode = compute_mode
     owner.run_config = run_config
     owner._config_is_fixed = run_config is not None
-    owner.batch_configs = {}
     layers, slots, hv, k, v = ssm.shape
     owner.num_key_heads = hv if num_key_heads is None else num_key_heads
     assert owner.num_key_heads > 0 and hv % owner.num_key_heads == 0
@@ -90,6 +89,16 @@ def _trim_rejected_index(
     accepted = tl.load(accepted_index + r, valid, 0) + 1
     cursor = tl.load(cursors + r, valid, 0)
     tl.store(cursors + r, cursor - (window - accepted), valid)
+
+
+def replay_layer(state, *args, **kwargs):
+    """按测试 state 的类型调用对应的 replay decode。"""
+
+    if state.kda:
+        from lightllm.common.basemodel.attention.linear.replay_kda_decode import replay
+    else:
+        from lightllm.common.basemodel.attention.linear.replay_gdn_decode import replay
+    return replay(state, *args, **kwargs)
 
 
 def accept_replay_window(history, reqs, accepted_state_indices=None, cu_seqlens=None) -> None:

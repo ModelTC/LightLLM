@@ -253,7 +253,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         query = query.view(query.shape[0], query.shape[-2], query.shape[-1])
         key = key.view(key.shape[0], key.shape[-2], key.shape[-1])
         value = value.view(value.shape[0], value.shape[-2], value.shape[-1])
-        output, _ = replay(
+        output = replay(
             state,
             state.storage_layer(layer_num),
             query,
@@ -289,7 +289,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         query = query.view(-1, backend.tp_num_k_heads, backend.head_k_dim)
         key = key.view(-1, backend.tp_num_k_heads, backend.head_k_dim)
         value = value.view(-1, backend.tp_num_v_heads, backend.head_v_dim)
-        output, _ = replay(
+        output = replay(
             state,
             state.storage_layer(layer_num),
             query,

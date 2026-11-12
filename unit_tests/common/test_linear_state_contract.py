@@ -5,7 +5,6 @@ from lightllm.common.attention_state.bounded_att import KDAState
 from unit_tests.common.test_linear_state import make_state
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
-from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import resolve_run_config
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
@@ -68,17 +67,6 @@ def test_model_configuration_retains_nondefault_kda_gate_bound():
 def test_kda_backend_receives_gate_bound_at_construction(linear_config):
     owner = ReplayKDAState(linear_config, 3, mtp_step=2, gate_lower_bound=-2.5, device="cpu")
     assert owner.gate_lower_bound == -2.5
-
-
-def test_replay_backend_publishes_detached_run_config():
-    ssm_backend = object.__new__(ReplayGDNState)
-    tuning = {"BV": 32, "num_warps": 2}
-    ssm_backend.run_config = tuning
-    ssm_backend._config_is_fixed = True
-    ssm_backend.compute_mode = "inline"
-    config = resolve_run_config(ssm_backend, "replay", *([None] * 7), None)
-    tuning["BV"] = 128
-    assert config == {"BV": 32, "num_warps": 2, "num_stages": 3}
 
 
 @pytest.mark.parametrize("cls", [GDNState, KDAState])

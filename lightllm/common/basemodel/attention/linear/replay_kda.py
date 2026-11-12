@@ -182,7 +182,7 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
         v = v.view(-1, backend.tp_num_heads, backend.head_dim)
         raw_gate = params["raw_gate"].reshape(-1, backend.tp_hidden_size)
         raw_beta = params["raw_beta"].reshape(-1, backend.tp_num_heads)
-        output, _ = replay(
+        output = replay(
             state,
             state.storage_layer(layer_num),
             q,
