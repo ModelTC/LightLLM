@@ -152,7 +152,10 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         return q, cache_kv
 
     def _context_attention_kernel(self, q, kv, infer_state, layer_weight, out=None):
-        q = layer_weight.k_b_proj_.bmm(q.transpose(0, 1)).transpose(0, 1).contiguous()
+        q_nope = self.alloc_tensor((q.shape[0], self.tp_q_head_num_, self.kv_lora_rank), dtype=q.dtype, device=q.device)
+        # Write [tokens, heads, latent] directly for sparse prefill attention.
+        layer_weight.k_b_proj_.bmm(q.transpose(0, 1), out=q_nope.transpose(0, 1))
+        q = q_nope
         topk_mem_indices, topk_indices = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
@@ -273,9 +276,12 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
     def _get_o(self, input, infer_state, layer_weight):
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_balance_get(data=input)
-        # Both sparse prefill and decode return attention in MLA latent space.
-        input = layer_weight.v_b_proj_.bmm(input.transpose(0, 1)).transpose(0, 1)
-        output = layer_weight.o_weight_.mm(input.reshape(-1, self.tp_q_head_num_ * self.v_head_dim))
+        values = self.alloc_tensor(
+            (input.shape[0], self.tp_q_head_num_, self.v_head_dim), dtype=input.dtype, device=input.device
+        )
+        # Token-major output lets prefill and decode flatten the heads without copying.
+        layer_weight.v_b_proj_.bmm(input.transpose(0, 1), out=values.transpose(0, 1))
+        output = layer_weight.o_weight_.mm(values.view(-1, self.tp_q_head_num_ * self.v_head_dim))
         return self._tpsp_reduce(input=output, infer_state=infer_state)
 
     def _kda_projections(self, hidden_states, infer_state, layer_weight):
