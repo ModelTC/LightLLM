@@ -97,6 +97,31 @@ def bound_swa_replay(state, *, write_slots=None, rows=None):
     )
 
 
+@triton.jit(do_not_specialize=["n_reqs"])
+def _build_decoder_lengths(
+    QUERY_LENGTHS, SEQ_LENGTHS, LENGTHS, READY_LENGTHS, OFFSETS, n_reqs, WINDOW: tl.constexpr, BLOCK: tl.constexpr
+):
+    req = tl.arange(0, BLOCK)
+    valid = req < n_reqs
+    length = tl.minimum(tl.load(QUERY_LENGTHS + req, valid, 0), WINDOW)
+    seq_len = tl.load(SEQ_LENGTHS + req, valid, 0)
+    tl.store(LENGTHS + req, length, valid)
+    tl.store(READY_LENGTHS + req, seq_len - length, valid)
+    tl.store(OFFSETS, 0)
+    tl.store(OFFSETS + req + 1, tl.cumsum(length), valid)
+
+
+def build_decoder_lengths(query_lengths, seq_lengths, window):
+    n_reqs = query_lengths.numel()
+    lengths = torch.empty_like(query_lengths)
+    ready_lengths = torch.empty_like(seq_lengths)
+    offsets = query_lengths.new_empty(n_reqs + 1)
+    _build_decoder_lengths[(1,)](
+        query_lengths, seq_lengths, lengths, ready_lengths, offsets, n_reqs, window, triton.next_power_of_2(n_reqs)
+    )
+    return lengths, ready_lengths, offsets
+
+
 @triton.jit
 def _build_decoder_tail_rows(Q_OFFSETS, DECODER_OFFSETS, ROWS, BLOCK: tl.constexpr):
     req = tl.program_id(0)

@@ -4,7 +4,7 @@ import torch
 
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 
-from .triton_kernel.attention import bound_swa_replay, build_decoder_tail_rows
+from .triton_kernel.attention import bound_swa_replay, build_decoder_lengths, build_decoder_tail_rows
 
 
 class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
@@ -45,10 +45,9 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
         if self.max_q_seq_len <= window:
             rows = slice(None)
         else:
-            lengths = self.b_q_seq_len.clamp_max(window)
-            state.b_q_seq_len = lengths
-            state.b_ready_cache_len = self.b_seq_len - lengths
-            state.b1_cu_q_seq_len = torch.cat((lengths.new_zeros(1), lengths.cumsum(0, dtype=lengths.dtype)))
+            state.b_q_seq_len, state.b_ready_cache_len, state.b1_cu_q_seq_len = build_decoder_lengths(
+                self.b_q_seq_len, self.b_seq_len, window
+            )
             state.b_q_start_loc = state.b1_cu_q_seq_len[:-1]
             if self.b_seq_len.numel() == 1:
                 rows = slice(-window, None)
