@@ -451,19 +451,26 @@ def _indexer_topk_transform(
 ):
     row = tl.program_id(0)
     col = tl.arange(0, BLOCK)
-    index = tl.load(RAW + row * TOPK + col, col < TOPK, -1)
-    width = CANDIDATE_STRIDE * 8 if SPARSE else tl.load(VALID_LENGTHS + row)
+    length = tl.load(VALID_LENGTHS + row)
+    width = tl.minimum(length, CANDIDATE_STRIDE * 8) if SPARSE else length
+    fits = width <= TOPK
+    if fits:
+        index = col
+    else:
+        index = tl.load(RAW + row * TOPK + col, col < TOPK, -1)
     valid = (col < TOPK) & (index >= 0) & (index < width)
     score = tl.load(LOGITS + row * LOGIT_STRIDE + index, valid, -float("inf"))
     valid &= score > -float("inf")
     if SPARSE:
         block = tl.load(CANDIDATES + row * CANDIDATE_STRIDE + index // 8, valid, -1)
         index = block * 8 + index % 8
-        valid &= (block >= 0) & (index < tl.load(VALID_LENGTHS + row))
-    # Native top-k can repeat its dummy index when fewer than TOPK scores are finite.
-    index = tl.sort(tl.where(valid, index, 2147483647))
-    previous = tl.gather(index, tl.maximum(col - 1, 0), axis=0)
-    valid = (index != 2147483647) & ((col == 0) | (index != previous))
+        valid &= (block >= 0) & (index < length)
+    # Dense keys and the sorted, unique candidate blocks are already in logical
+    # order when every score fits. The selected top-k can contain dummy repeats.
+    if not fits:
+        index = tl.sort(tl.where(valid, index, 2147483647))
+        previous = tl.gather(index, tl.maximum(col - 1, 0), axis=0)
+        valid = (index != 2147483647) & ((col == 0) | (index != previous))
     rank = tl.cumsum(valid.to(tl.int32)) - 1
     count = tl.sum(valid.to(tl.int32))
     page_row = tl.load(PAGE_ROWS + row) if PAGE_ROWS is not None else row
