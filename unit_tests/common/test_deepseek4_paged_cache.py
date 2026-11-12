@@ -8,6 +8,7 @@ from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
 from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig
 from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
+from lightllm.server.core.objs.token_chunck_hash_list import TokenHashList
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_compressed_kv_buffer, get_indexer_k_buffer
 from lightllm.models.deepseek_v4.triton_kernel.swa_cache import get_swa_token_indices as _get_swa_token_indices
@@ -1501,6 +1502,8 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         update_pages_status_to_ready=lambda **kwargs: published.append(kwargs),
         deref_pages=lambda page_list: released.extend(page_list),
     )
+    token_hash_list = TokenHashList()
+    token_hash_list.fill(list(range(len(ends))))
     req = SimpleNamespace(
         req_idx=source,
         req_id=42,
@@ -1516,7 +1519,7 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
             group_req_id=42,
             request_id=42,
             input_len=length + 1,
-            token_hash_list=SimpleNamespace(get_all=lambda: list(range(len(ends)))),
+            token_hash_list=token_hash_list,
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: ends),
         ),
     )

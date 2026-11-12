@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from lightllm.server.core.objs.token_chunck_hash_list import TokenHashList
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as cache_module
 from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import (
@@ -190,10 +191,13 @@ def test_incremental_store_only_passes_new_owners_to_pack(monkeypatch, owners):
     )
     lock = Lock()
     obj.cpu_cache_client.lock = NS(acquire_sleep1ms=lock.acquire, release=lock.release)
+    expected_hashes = [(1 << 100) + i for i in (1, 2, 3)]
+    token_hash_list = TokenHashList()
+    token_hash_list.fill(expected_hashes)
 
     def allocate(hashes, **kwargs):
         assert lock.locked()
-        assert hashes == [1, 2, 3]
+        assert hashes == expected_hashes
         return [11, 12, 13], owners
 
     def get_big_page_ids(node):
@@ -215,7 +219,7 @@ def test_incremental_store_only_passes_new_owners_to_pack(monkeypatch, owners):
         shm_req=NS(
             group_req_id=7,
             request_id=7,
-            token_hash_list=values([1, 2, 3]),
+            token_hash_list=token_hash_list,
             token_hash_page_len_list=values([2048, 4096, 6144]),
         ),
     )

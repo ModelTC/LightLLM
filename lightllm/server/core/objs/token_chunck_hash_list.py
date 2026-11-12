@@ -51,11 +51,11 @@ class TokenHashList(ctypes.Structure):
     def get_all(self):
         if self.size == 0:
             return []
-        items_array = np.array(self.items[0 : self.size * 2], dtype=np.uint64)
-        low = items_array[0::2]
-        high = items_array[1::2]
-        result = (high.astype(object) << 64) | low.astype(object)
-        return result.tolist()
+        return self.get_range(0, self.size)
+
+    def get_range(self, start: int, end: int) -> List[int]:
+        items = self.items[2 * start : 2 * min(end, self.size)]
+        return [(items[i + 1] << 64) | items[i] for i in range(0, len(items), 2)]
 
 
 class CpuCachePageList(ctypes.Structure):

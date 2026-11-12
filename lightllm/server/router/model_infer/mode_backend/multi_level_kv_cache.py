@@ -250,8 +250,8 @@ class MultiLevelKvCacheModule(object):
                 if start == len(page_lens):
                     closing_sessions[session.request_id] = session
                 continue
-            hashes = req.shm_req.token_hash_list.get_all()
-            pending.append((req, session, page_lens, hashes[start:target], len(hashes)))
+            hashes = req.shm_req.token_hash_list
+            pending.append((req, session, page_lens, hashes.get_range(start, target), hashes.size))
 
         allocations = []
         if pending:
