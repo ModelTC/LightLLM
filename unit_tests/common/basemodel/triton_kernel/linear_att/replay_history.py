@@ -93,12 +93,38 @@ def _trim_rejected_index(
 def replay_layer(state, *args, **kwargs):
     """按测试 state 的类型调用对应的 replay decode。"""
 
-    if state.kda:
-        from lightllm.common.basemodel.attention.linear.replay_kda_decode import replay
-    else:
-        from lightllm.common.basemodel.attention.linear.replay_gdn_decode import replay
     if "run_config" not in kwargs and state.run_config is not None:
         kwargs["run_config"] = state.run_config
+    if state.kda:
+        from lightllm.common.basemodel.attention.linear.replay_kda_decode import replay
+
+        layer_idx, q, k, v, a, b, a_log, bias, reqs, cu_seqlens = args
+        return replay(
+            state_ssm=state.ssm_state[layer_idx],
+            state_keys=state.keys[layer_idx],
+            state_deltas=state.deltas[layer_idx],
+            state_gates=state.gates[layer_idx],
+            state_raw_keys=state.raw_keys[layer_idx],
+            state_raw_values=state.raw_values[layer_idx],
+            state_betas=state.betas[layer_idx],
+            state_cursors=state.cursors,
+            state_tile_sync_mark=state.tile_sync_mark,
+            q=q,
+            k=k,
+            v=v,
+            a=a,
+            b=b,
+            a_log=a_log,
+            bias=bias,
+            reqs=reqs,
+            cu_seqlens=cu_seqlens,
+            state_verify_width=state.verify_width,
+            state_compute_mode=state.compute_mode,
+            state_gate_lower_bound=state.gate_lower_bound,
+            run_config=kwargs.get("run_config"),
+        )
+    from lightllm.common.basemodel.attention.linear.replay_gdn_decode import replay
+
     return replay(state, *args, **kwargs)
 
 

@@ -182,18 +182,29 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
         v = v.view(-1, backend.tp_num_heads, backend.head_dim)
         raw_gate = params["raw_gate"].reshape(-1, backend.tp_hidden_size)
         raw_beta = params["raw_beta"].reshape(-1, backend.tp_num_heads)
+        layer = state.storage_layer(layer_num)
         output = replay(
-            state,
-            state.storage_layer(layer_num),
-            q,
-            k,
-            v,
-            raw_gate,
-            raw_beta,
-            layer_weight.linear_A_log.weight,
-            layer_weight.linear_dt_bias.weight,
-            self.b_conv_buffer_idx,
-            self.b_cu_seqlens,
+            state_ssm=state.ssm_state[layer],
+            state_keys=state.keys[layer],
+            state_deltas=state.deltas[layer],
+            state_gates=state.gates[layer],
+            state_raw_keys=state.raw_keys[layer],
+            state_raw_values=state.raw_values[layer],
+            state_betas=state.betas[layer],
+            state_cursors=state.cursors,
+            state_tile_sync_mark=state.tile_sync_mark,
+            q=q,
+            k=k,
+            v=v,
+            a=raw_gate,
+            b=raw_beta,
+            a_log=layer_weight.linear_A_log.weight,
+            bias=layer_weight.linear_dt_bias.weight,
+            reqs=self.b_conv_buffer_idx,
+            cu_seqlens=self.b_cu_seqlens,
+            state_verify_width=state.verify_width,
+            state_compute_mode=state.compute_mode,
+            state_gate_lower_bound=state.gate_lower_bound,
         )
         # 各层都读到了本步开始时的 cursor。最后一层返回后再按整窗全接受推进。
         state.finish_decode_token(layer_num, self.b_conv_buffer_idx, self.b_cu_seqlens)

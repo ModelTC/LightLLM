@@ -101,6 +101,7 @@ class _CaptureKernel:
     def __getitem__(self, grid):
         def launch(*args, **kwargs):
             self.args = args
+            self.kwargs = kwargs
 
         return launch
 
@@ -131,22 +132,53 @@ def test_mtp0_precompute_reaches_replay_kernel(monkeypatch, linear_config, modul
     q = torch.zeros(1, heads, linear_config.key_dim)
     v = torch.zeros(1, owner.ssm_state.shape[-3], linear_config.value_dim)
     gate = v.shape[-3] * linear_config.key_dim if cls is ReplayKDAState else v.shape[-3]
-    decode.replay(
-        owner,
-        0,
-        q,
-        q,
-        v,
-        torch.zeros(1, gate),
-        torch.zeros(1, v.shape[-3]),
-        torch.zeros(v.shape[-3]),
-        torch.zeros(gate),
-        torch.zeros(1, dtype=torch.int32),
-        torch.arange(2, dtype=torch.int32),
-        run_config={"BV": bv, "num_warps": 1, "num_stages": 1},
-    )
-    assert captured.args[33] is precompute
-    assert captured.args[35] is (cls is ReplayKDAState)
+    run_config = {"BV": bv, "num_warps": 1, "num_stages": 1}
+    if cls is ReplayKDAState:
+        decode.replay(
+            state_ssm=owner.ssm_state[0],
+            state_keys=owner.keys[0],
+            state_deltas=owner.deltas[0],
+            state_gates=owner.gates[0],
+            state_raw_keys=owner.raw_keys[0],
+            state_raw_values=owner.raw_values[0],
+            state_betas=owner.betas[0],
+            state_cursors=owner.cursors,
+            state_tile_sync_mark=owner.tile_sync_mark,
+            q=q,
+            k=q,
+            v=v,
+            a=torch.zeros(1, gate),
+            b=torch.zeros(1, v.shape[-3]),
+            a_log=torch.zeros(v.shape[-3]),
+            bias=torch.zeros(gate),
+            reqs=torch.zeros(1, dtype=torch.int32),
+            cu_seqlens=torch.arange(2, dtype=torch.int32),
+            state_verify_width=owner.verify_width,
+            state_compute_mode=owner.compute_mode,
+            state_gate_lower_bound=owner.gate_lower_bound,
+            run_config=run_config,
+        )
+    else:
+        decode.replay(
+            owner,
+            0,
+            q,
+            q,
+            v,
+            torch.zeros(1, gate),
+            torch.zeros(1, v.shape[-3]),
+            torch.zeros(v.shape[-3]),
+            torch.zeros(gate),
+            torch.zeros(1, dtype=torch.int32),
+            torch.arange(2, dtype=torch.int32),
+            run_config=run_config,
+        )
+    if cls is ReplayKDAState:
+        assert captured.kwargs["PRECOMPUTE_PROJECTIONS"] is precompute
+        assert captured.kwargs["KDA"] is True
+    else:
+        assert captured.args[33] is precompute
+        assert captured.args[35] is False
 
 
 @pytest.mark.parametrize("cls", [GDNState, KDAState])
