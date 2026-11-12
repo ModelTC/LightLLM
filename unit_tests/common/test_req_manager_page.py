@@ -321,47 +321,41 @@ def test_pd_prefill_fits_started_chunk_in_queue_order(monkeypatch, image_spans, 
 
 
 @pytest.mark.parametrize(
-    "image_spans, short_len, kv_budget, chunking, expected_first",
+    "image_spans, kv_budget, chunking, selected, first_chunk_end",
     [
-        ([], 2048, 8192, True, 1),
-        ([(0, 6144)], 2048, 8192, True, 2),
-        ([], 2048, 6144, True, None),
-        ([], 6144, 8192, True, None),
-        ([], 2048, 8192, False, None),
+        ([], 8192, True, [0, 1], 6144),
+        ([(0, 7168)], 8192, True, [0, 2], 6144),
+        ([(3072, 7168)], 8192, True, [0, 1, 3], 3072),
+        ([], 6144, True, [0, 3], None),
+        ([], 8192, False, [0, 3], None),
     ],
 )
-def test_pd_prefill_uses_spare_budget_for_one_long_first_chunk(
-    monkeypatch, image_spans, short_len, kv_budget, chunking, expected_first
+def test_pd_prefill_fits_one_long_first_chunk_in_queue_order(
+    monkeypatch, image_spans, kv_budget, chunking, selected, first_chunk_end
 ):
     context, backend, reqs = _make_pd_prefill_batch(
-        monkeypatch, [(2048, 0, []), (24576, 0, image_spans), (24576, 0, []), (short_len, 0, [])]
+        monkeypatch, [(2048, 0, []), (24576, 0, image_spans), (24576, 0, []), (2048, 0, [])]
     )
     context.get_can_alloc_token_num = lambda: kv_budget
     backend.disable_chunked_prefill = not chunking
 
     prefill_reqs, decode_reqs, token_num = backend._get_classed_reqs(req_ids=list(range(4)), no_decode=True)
 
-    short_tokens = 2048 + short_len
-    assert not decode_reqs
-    assert prefill_reqs[:2] == [reqs[0], reqs[3]]
+    assert [req.req_idx for req in prefill_reqs] == selected and not decode_reqs
+    assert token_num == 2048 * (1 + int(3 in selected)) + (first_chunk_end or 0)
     assert all(not req.wait_pause for req in reqs)
     for index in (1, 2):
-        expected_end = 8192 - short_tokens if index == expected_first else None
+        expected_end = first_chunk_end if index in selected else None
         assert reqs[index].prefill_chunk_end == expected_end
         assert reqs[index].hold_kv_len == (expected_end or 0)
-    if expected_first is None:
-        assert len(prefill_reqs) == 2
-        assert token_num == short_tokens
-    else:
-        assert prefill_reqs[2:] == [reqs[expected_first]]
-        assert token_num == 8192
+    if first_chunk_end is not None:
         model_input, run_reqs = generic_pre_process.prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=True)
-        assert model_input.input_ids.numel() == 8192
-        assert model_input.b_seq_len[2] == 8192 - short_tokens
+        assert model_input.input_ids.numel() == token_num
+        assert model_input.b_seq_len[1] == first_chunk_end
         updates = backend._pre_post_handle(run_reqs, is_chuncked_mode=True)
-        assert reqs[expected_first].cur_kv_len == 8192 - short_tokens
-        assert reqs[expected_first].prefill_chunk_end is None
-        assert updates[2].output_len == 0
+        assert run_reqs[1].cur_kv_len == first_chunk_end
+        assert run_reqs[1].prefill_chunk_end is None
+        assert updates[1].output_len == 0
 
 
 def test_decode_scheduler_uses_non_blocking_request_table_copy(monkeypatch):
