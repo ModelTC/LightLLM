@@ -9,10 +9,11 @@ import torch
 from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import KDAInputs
 from lightllm.common.attention.api.spec import AttentionFamily
-from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_update
 from lightllm.common.attention.backends._shared.linear.causal_conv1d_mtp import (
     causal_conv1d_update as causal_conv1d_update_mtp,
 )
+from lightllm.common.attention.backends._shared.linear.causal_conv1d_qkv import causal_conv1d_qkv
 from lightllm.common.attention.backends._shared.linear.mtp_state_params import build_dynamic_mtp_linear_att_state_params
 from lightllm.common.attention.backends.base import AttentionExecutionContext, BaseAttentionBackend
 from lightllm.common.attention.backends.kda.triton.kernels.kda import chunk_kda_with_fused_gate
@@ -73,21 +74,15 @@ class KDALinearAttBackend(BaseAttentionBackend):
         backend: KDALinearAttBackend = self
         conv_states, ssm_states = (layer.params.conv, layer.params.ssm)
         conv_states = conv_states[..., : backend.conv_kernel_size - 1]
-        mixed_qkv = causal_conv1d_fn(
-            mixed_qkv.transpose(0, 1),
+        q, k, v = causal_conv1d_qkv(
+            mixed_qkv,
             layer.params.conv_weight,
-            bias=None,
-            query_start_loc=context.batch.b1_cu_q_seq_len,
-            cache_indices=context.b_conv_buffer_idx,
-            has_initial_state=context.batch.b_ready_cache_len > 0,
-            conv_states=conv_states,
-            activation="silu",
-        ).transpose(0, 1)
-        q, k, v = backend.split_qkv(mixed_qkv)
-        q = q.view(1, -1, backend.tp_num_heads, backend.head_dim)
-        k = k.view(1, -1, backend.tp_num_heads, backend.head_dim)
-        v = v.view(1, -1, backend.tp_num_heads, backend.head_dim)
-        raw_gate = raw_gate.view(1, -1, backend.tp_hidden_size)
+            conv_states,
+            context.batch.b1_cu_q_seq_len,
+            context.b_conv_buffer_idx,
+            context.batch.b_ready_cache_len,
+            context.batch.max_q_seq_len,
+        )
         raw_beta = raw_beta.view(1, -1, backend.tp_num_heads)
         initial_state = ssm_states[context.b_ssm_buffer_idx].contiguous()
         output, final_state = chunk_kda_with_fused_gate(
@@ -100,7 +95,7 @@ class KDALinearAttBackend(BaseAttentionBackend):
             g_bias=layer.params.dt_bias,
             initial_state=initial_state,
             output_final_state=True,
-            use_qk_l2norm_in_kernel=True,
+            use_qk_l2norm_in_kernel=False,
             cu_seqlens=context.batch.b1_cu_q_seq_len,
             safe_gate=True,
             lower_bound=backend.lower_bound,
