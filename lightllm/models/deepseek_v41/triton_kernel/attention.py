@@ -173,7 +173,7 @@ def _commit_pair_state(
 
 def pool_pairs(kv, score, req, positions, state, hold_request):
     out = torch.empty_like(kv, dtype=torch.bfloat16)
-    rows = 4 if kv.shape[0] >= 1024 else 1
+    rows = 2 if kv.shape[0] >= 1024 else 1
     grid = (triton.cdiv(kv.shape[0], rows),)
     _pool_pairs[grid](
         kv,
