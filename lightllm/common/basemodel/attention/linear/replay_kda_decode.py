@@ -136,9 +136,7 @@ def replay(
 
     assert state.kda, "KDA replay step requires the KDA gate"
     _check_replay_inputs(q, k, v, reqs, cu_seqlens)
-    if state._config_is_fixed and state.run_config is not None:
-        run_config = state.run_config
-    elif run_config is None:
+    if run_config is None:
         run_config = {"BV": 32, "num_warps": 1, "num_stages": 3}
     hv, kd, vd = state.ssm_state.shape[-3:]
     assert state.num_key_heads in (q.shape[-2], hv)

@@ -43,8 +43,6 @@ def workload(args, batch, width, dtype, mode, acceptance):
     if mode != "native":
         capacity = max(8, triton.next_power_of_2(width))
         ssm_backend = ReplaySSMExecutor(state, capacity, width, q.dtype, kda=True, compute_mode=mode)
-    if ssm_backend is not None:
-        ssm_backend._config_is_fixed = True
     indexes = reqs[:, None] * width + torch.arange(width, device="cuda", dtype=torch.int32)
     if width == 1:
         indexes = reqs
@@ -74,7 +72,20 @@ def workload(args, batch, width, dtype, mode, acceptance):
                         num_accepted_tokens=counts if cu is not None else None,
                     )
                 else:
-                    replay(ssm_backend, layer, q, k, v, gate, beta, alog, bias, reqs, replay_cu)
+                    replay(
+                        ssm_backend,
+                        layer,
+                        q,
+                        k,
+                        v,
+                        gate,
+                        beta,
+                        alog,
+                        bias,
+                        reqs,
+                        replay_cu,
+                        run_config=ssm_backend.run_config,
+                    )
             if ssm_backend is not None:
                 accept_replay_window(ssm_backend, reqs, accepted, replay_cu)
         if isinstance(ssm_backend, ReplaySSMExecutor):

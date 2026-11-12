@@ -94,8 +94,6 @@ class ReplayKDAState(BoundedAttentionState):
         self.capacity = capacity
         self.verify_width = verify_width
         self.compute_mode = compute_mode
-        self.run_config = None
-        self._config_is_fixed = False
         layers, slots, hv, k, v = self.ssm_state.shape
         self.num_key_heads = config.num_k_heads
         assert self.num_key_heads > 0 and hv % self.num_key_heads == 0

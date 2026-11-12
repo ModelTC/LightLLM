@@ -50,7 +50,6 @@ def attach_replay_history(
     owner.verify_width = verify_width
     owner.compute_mode = compute_mode
     owner.run_config = run_config
-    owner._config_is_fixed = run_config is not None
     layers, slots, hv, k, v = ssm.shape
     owner.num_key_heads = hv if num_key_heads is None else num_key_heads
     assert owner.num_key_heads > 0 and hv % owner.num_key_heads == 0
@@ -98,6 +97,8 @@ def replay_layer(state, *args, **kwargs):
         from lightllm.common.basemodel.attention.linear.replay_kda_decode import replay
     else:
         from lightllm.common.basemodel.attention.linear.replay_gdn_decode import replay
+    if "run_config" not in kwargs and state.run_config is not None:
+        kwargs["run_config"] = state.run_config
     return replay(state, *args, **kwargs)
 
 
