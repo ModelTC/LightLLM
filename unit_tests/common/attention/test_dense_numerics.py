@@ -11,7 +11,7 @@ from lightllm.common.attention.selection import data_type_to_backend, load_backe
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.basemodel.graph import GraphExecution
 from lightllm.platform import get_device_runtime
-from unit_tests.common.attention.helpers import bind, make_batch, make_spec, model_stub
+from unit_tests.common.attention.helpers import make_batch, make_layer_attention, make_spec, model_stub
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -117,13 +117,13 @@ def test_dense_provider_reference_and_decode_graph(provider, phase, head_dim, kv
     capacity = PlanCapacity(phase, batch.batch_size, batch.token_num, 16, batch.max_q_seq_len)
     plan = backend.allocate_plan(capacity, capture=capture, workspace=pool.fork() if capture else pool)
     backend.prepare(plan, batch)
-    layer = replace(bind(backend, plan, DenseParams(key, value, sliding_window=window)), spec=spec)
+    attention = replace(make_layer_attention(backend, plan, DenseParams(key, value, sliding_window=window)), spec=spec)
     inputs = DenseInputs(query)
     output = torch.empty_like(query)
 
     def run():
         backend.update(plan)
-        return layer(plan, inputs, out=output)
+        return attention.forward(plan, inputs, out=output)
 
     actual = run()
     assert actual.data_ptr() == output.data_ptr()

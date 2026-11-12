@@ -9,12 +9,12 @@ from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention.backends.dense.fa3 import fp8 as fa3_fp8
 from lightllm.common.attention.backends.dense.flashinfer import fp8 as flashinfer_fp8
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.basemodel.attention import make_layer_params
+from lightllm.common.basemodel.attention import create_layer_attention_params
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.server.core.objs.start_args_type import StartArgs
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state, replace_logical_layer_groups
 from unit_tests.common.att_resources.test_capacity import definition
-from unit_tests.common.attention.helpers import bind, make_backend, make_batch, make_plan
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_layer_attention, make_plan
 
 
 @pytest.mark.parametrize("backend_name", ["fa3", "flashinfer"])
@@ -87,14 +87,14 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
         att_state_role=role,
         args=StartArgs(llm_kv_type="fp8kv_sph" if backend_name == "fa3" else "fp8kv_spt"),
     )
-    params = make_layer_params(model, layer, None, AttentionFamily.DENSE)
-    binding = bind(backend, plan, params)
-    binding = replace(
-        binding,
+    params = create_layer_attention_params(model, layer, None, AttentionFamily.DENSE)
+    attention = make_layer_attention(backend, plan, params)
+    attention = replace(
+        attention,
         logical_layer_id=logical_layer_id,
         alloc_tensor=lambda shape, dtype, device: torch.empty(shape, dtype=dtype, device="cpu"),
     )
-    setattr(layer, operation + "_attention", binding)
+    setattr(layer, operation + "_attention", attention)
     infer = SimpleNamespace(attention_plans={0: plan})
     monkeypatch.setattr(manager, "get_state", lambda *args: pytest.fail("forward must not look up storage owners"))
     q = torch.ones((1, state.config.head_num, state.config.head_dim))

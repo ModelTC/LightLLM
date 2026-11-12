@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import torch
 
-from .api import AttentionBatch, AttentionPhase, ExecutionRequirements, LayerBinding, PlanCapacity
+from .api import AttentionBatch, AttentionPhase, ExecutionRequirements, LayerAttention, PlanCapacity
 from .api.inputs import DenseInputs, DenseParams
 from .backends._workspace import AttentionWorkspace
 
@@ -61,15 +61,15 @@ def probe_dense(backend_cls, spec, runtime):
     plan = backend.allocate_plan(capacity, capture=False, workspace=workspace)
     backend.prepare(plan, batch)
     backend.update(plan)
-    binding = LayerBinding(
-        0,
-        0,
-        spec,
-        DenseParams(key, value),
-        backend.forward,
-        lambda shape, dtype, **kwargs: torch.empty(shape, dtype=dtype, device=device),
+    attention = LayerAttention(
+        group_id=0,
+        logical_layer_id=0,
+        spec=spec,
+        params=DenseParams(key, value),
+        backend=backend,
+        alloc_tensor=lambda shape, dtype, **kwargs: torch.empty(shape, dtype=dtype, device=device),
     )
-    actual = binding(plan, DenseInputs(query), out=torch.empty_like(query))
+    actual = attention.forward(plan, DenseInputs(query), out=torch.empty_like(query))
     expected, start = [], 0
     for request, (length, q_length) in enumerate(zip(lengths, q_lengths)):
         q = query[start : start + q_length].float()

@@ -2,7 +2,7 @@ import dataclasses
 
 import torch
 
-from lightllm.common.attention.api.backend import LayerBinding
+from lightllm.common.attention.api.backend import LayerAttention
 from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
 from lightllm.common.basemodel.triton_kernel.diverse_utils import build_diverse_shared_group_markers
@@ -42,7 +42,7 @@ class Int8kvTritonAttBackend(BaseAttentionBackend):
             torch.cumsum(plan.batch.b_seq_len, dim=0, dtype=plan.batch.b_seq_len.dtype) - plan.batch.b_seq_len
         )
 
-    def _forward_prefill(self, layer: LayerBinding, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(self, layer: LayerAttention, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key
@@ -113,7 +113,7 @@ class Int8kvTritonAttBackend(BaseAttentionBackend):
             )
             plan.b_shared_seq_len = torch.where(plan.b_mark_shared_group == 1, 0, plan.batch.b_shared_seq_len)
 
-    def _forward_decode(self, layer: LayerBinding, plan, inputs: DenseInputs, *, out=None):
+    def _forward_decode(self, layer: LayerAttention, plan, inputs: DenseInputs, *, out=None):
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key

@@ -157,7 +157,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         )
         del infer_state.get_topk_indices_params
 
-        return self.prefill_attention(
+        return self.prefill_attention.forward(
             infer_state.attention_plans[self.prefill_attention.group_id],
             SparseMLAPrefillInputs(q, topk_mem_indices, topk_indices, kv),
         )
@@ -228,7 +228,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         del infer_state.get_topk_indices_params
         q_rope = q_nope[..., :0]
 
-        return self.decode_attention(
+        return self.decode_attention.forward(
             infer_state.attention_plans[self.decode_attention.group_id],
             SparseMLADecodeInputs(q_nope, q_rope, topk_mem_indices),
         )
@@ -311,7 +311,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         _output = tensor_to_no_ref_tensor(output)
 
         def kda_prefill_func(new_infer_state):
-            tmp_output = self.prefill_attention(
+            tmp_output = self.prefill_attention.forward(
                 new_infer_state.attention_plans[self.prefill_attention.group_id],
                 KDAInputs(_mixed_qkv, _raw_decay_gate, _beta_logits),
             )
@@ -339,7 +339,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 layer_weight,
             )
         else:
-            core_output = self.prefill_attention(
+            core_output = self.prefill_attention.forward(
                 infer_state.attention_plans[self.prefill_attention.group_id],
                 KDAInputs(qkv, raw_decay_gate, beta_logits),
             )
@@ -351,7 +351,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         qkv, raw_decay_gate, beta_logits, raw_output_gate = self._kda_projections(
             input_embeddings, infer_state, layer_weight
         )
-        core_output = self.decode_attention(
+        core_output = self.decode_attention.forward(
             infer_state.attention_plans[self.decode_attention.group_id], KDAInputs(qkv, raw_decay_gate, beta_logits)
         )
         return self._kda_post(core_output, raw_output_gate, infer_state, layer_weight)

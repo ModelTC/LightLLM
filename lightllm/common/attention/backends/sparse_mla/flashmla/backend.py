@@ -3,7 +3,7 @@ from typing import Tuple
 
 import torch
 
-from lightllm.common.attention.api.backend import LayerBinding
+from lightllm.common.attention.api.backend import LayerAttention
 from lightllm.common.attention.api.inputs import SparseMLADecodeInputs, SparseMLAPrefillInputs
 from lightllm.common.attention.api.spec import AttentionFamily
 from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
@@ -93,7 +93,9 @@ class NsaFlashMlaSparseAttBackend(BaseAttentionBackend):
             batch.b1_cu_kv_seq_len[:-1], batch.b_q_seq_len, output_size=batch.token_num
         )
 
-    def _forward_prefill(self, layer: LayerBinding, plan, inputs: SparseMLAPrefillInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(
+        self, layer: LayerAttention, plan, inputs: SparseMLAPrefillInputs, *, out=None
+    ) -> torch.Tensor:
         q = inputs.query
         k = layer.params.kv
         return self._prefill_nsa_prefill_att(layer, plan, q=q, kv=k, inputs=inputs)
@@ -136,7 +138,7 @@ class NsaFlashMlaSparseAttBackend(BaseAttentionBackend):
         padded_seq_lens[1:].copy_(plan.nsa_cache_seqlens, non_blocking=True)
         plan.nsa_cu_seqlens_k_new = padded_seq_lens.cumsum(dim=0, dtype=torch.int32)
 
-    def _forward_decode(self, layer: LayerBinding, plan, inputs: SparseMLADecodeInputs, *, out=None) -> torch.Tensor:
+    def _forward_decode(self, layer: LayerAttention, plan, inputs: SparseMLADecodeInputs, *, out=None) -> torch.Tensor:
         q = (inputs.query_nope, inputs.query_rope)
         k = layer.params.kv
         return self._decode_nsa_decode_att(layer, plan, q=q, kv=k, inputs=inputs)

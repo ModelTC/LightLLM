@@ -5,7 +5,7 @@ import warnings
 import torch
 
 from lightllm.common.attention.api import UnsupportedAttention
-from lightllm.common.attention.api.backend import LayerBinding
+from lightllm.common.attention.api.backend import LayerAttention
 from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention.backends.dense.fa3.backend import Fa3AttBackend, Fa3PrefillPlan
 
@@ -51,7 +51,7 @@ class NeoFa3AttBackend(Fa3AttBackend):
     def _allocate_prefill_plan(self, capacity, capture, workspace):
         return NeoFa3PrefillPlan(capacity, capture, workspace)
 
-    def _forward_prefill(self, layer: LayerBinding, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(self, layer: LayerAttention, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
         q = inputs.query
         k = layer.params.key
         v = layer.params.value

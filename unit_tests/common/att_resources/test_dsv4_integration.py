@@ -121,7 +121,7 @@ def test_backend_reads_owned_state_views(cache):
         adapter.layer_num_, adapter.compress_ratio = layer, model.config["compress_ratios"][layer]
         adapter.v_head_dim, adapter.softmax_scale = 512, 512 ** -0.5
         weight = SimpleNamespace(attn_sink_=SimpleNamespace(weight=torch.zeros(64, device="cuda")))
-        params = adapter.bind_attention_params(model, weight, AttentionFamily.SPARSE_MLA)
+        params = adapter.create_attention_params(model, weight, AttentionFamily.SPARSE_MLA)
         swa, compressed = params.swa, params.compressed
         assert params.prefill_swa.data_ptr() == model.swa_prefill_workspace[0][layer].data_ptr()
         assert swa.shape[1] == 74880
@@ -210,7 +210,7 @@ def test_long_prefill_keeps_swa_prefix_and_runtime_tail(cache):
     layer.compress_ratio, layer.v_head_dim, layer.softmax_scale = 0, 512, 512 ** -0.5
     from lightllm.common.attention.api import AttentionFamily
 
-    params = layer.bind_attention_params(
+    params = layer.create_attention_params(
         model,
         SimpleNamespace(attn_sink_=SimpleNamespace(weight=torch.zeros(64, device="cuda"))),
         AttentionFamily.SPARSE_MLA,

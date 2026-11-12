@@ -29,10 +29,10 @@ class BaseLayerInfer:
     def attention_kv_view(self, state):
         return state.get_layer_view(self.layer_num_)
 
-    def bind_attention_params(self, model, weight, family):
-        from lightllm.common.basemodel.attention import make_layer_params
+    def create_attention_params(self, model, weight, family):
+        from lightllm.common.basemodel.attention import create_layer_attention_params
 
-        return make_layer_params(model, self, weight, family)
+        return create_layer_attention_params(model, self, weight, family)
 
     def __init__(self) -> None:
         self.tp_rank_ = get_current_rank_in_dp()

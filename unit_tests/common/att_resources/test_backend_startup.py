@@ -171,10 +171,10 @@ def test_backend_allocates_all_roles_before_warmup(
         )
         model.backends_bound = True
 
-    def bind_layers(model):
+    def initialize_layer_attention(model):
         assert model.att_state_manager.full_att_allocator is not None
         assert all(item.backends_bound for item in models)
-        model.layers_bound = True
+        model.layer_attention_initialized = True
 
     def reserve_resources(model):
         assert all(item.backends_bound for item in models)
@@ -182,10 +182,10 @@ def test_backend_allocates_all_roles_before_warmup(
         model.attention_resources_reserved = True
 
     monkeypatch.setattr("lightllm.common.basemodel.attention.reserve_attention_resources", reserve_resources)
-    monkeypatch.setattr("lightllm.common.basemodel.attention.bind_attention_layers", bind_layers)
+    monkeypatch.setattr("lightllm.common.basemodel.attention.initialize_layer_attention", initialize_layer_attention)
 
     def warmup(model: TpPartBaseModel):
-        assert model.layers_bound
+        assert model.layer_attention_initialized
         assert model.backends_bound
         assert all(item.req_manager is mapping for item in models)
         assert all(item.attention_resources_reserved for item in models)
@@ -304,7 +304,7 @@ def test_backend_allocates_all_roles_before_warmup(
             assert all(item.max_total_token_num is None for item in models)
             for index, item in enumerate(models):
                 item.init_runtime()
-                assert all(not getattr(other, "layers_bound", False) for other in models[index + 1 :])
+                assert all(not getattr(other, "layer_attention_initialized", False) for other in models[index + 1 :])
                 assert warmed == padded == captured == prefill_captured == {id(other) for other in models[: index + 1]}
 
     start_runtime()

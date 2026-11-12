@@ -24,7 +24,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
 
     attention_uses_sink = True
 
-    def bind_attention_params(self, model, weight, family):
+    def create_attention_params(self, model, weight, family):
         manager, role, layer_id = model.att_state_manager, model.att_state_role, self.layer_num_
         state = manager.get_state(role, "swa_", layer_id)
         config = state.config
@@ -517,7 +517,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         inputs = DeepseekV4Inputs(
             q, meta["swa_indices"], meta["swa_lengths"], meta.get("extra_indices"), meta.get("extra_lengths")
         )
-        return self.prefill_attention(infer_state.attention_plans[self.prefill_attention.group_id], inputs, out=out)
+        return self.prefill_attention.forward(
+            infer_state.attention_plans[self.prefill_attention.group_id], inputs, out=out
+        )
 
     # ------------------------------------------------------------------ attention (decode)
     def token_attention_forward(
@@ -532,7 +534,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         inputs = DeepseekV4Inputs(
             q, meta["swa_indices"], meta["swa_lengths"], meta.get("extra_indices"), meta.get("extra_lengths")
         )
-        return self.decode_attention(infer_state.attention_plans[self.decode_attention.group_id], inputs, out=out)
+        return self.decode_attention.forward(
+            infer_state.attention_plans[self.decode_attention.group_id], inputs, out=out
+        )
 
     # ------------------------------------------------------------------ moe
     def _ffn_shared_expert(

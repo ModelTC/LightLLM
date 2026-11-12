@@ -344,13 +344,15 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
     from dataclasses import replace
 
     from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4Params
-    from unit_tests.common.attention.helpers import bind
+    from unit_tests.common.attention.helpers import make_layer_attention
 
-    params_binding = DeepseekV4Params(
+    attention_params = DeepseekV4Params(
         packed_kv[0], packed_kv[0], packed_kv[1], ratio, 512, params["softmax_scale"], params["attn_sink"]
     )
-    binding_plan = backend_plan(type(backend), "prefill", settings=backend)
-    layer.prefill_attention = replace(bind(backend, binding_plan, params_binding), alloc_tensor=alloc_output)
+    attention_plan = backend_plan(type(backend), "prefill", settings=backend)
+    layer.prefill_attention = replace(
+        make_layer_attention(backend, attention_plan, attention_params), alloc_tensor=alloc_output
+    )
     layer._compress_and_index = compress_and_index
     q_lora = torch.empty((q.shape[0], 4), dtype=q.dtype, device=q.device)
     x = torch.empty((q.shape[0], 8), dtype=q.dtype, device=q.device)

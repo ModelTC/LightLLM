@@ -1234,10 +1234,10 @@ def init_deferred_cudagraph(args: SimpleNamespace, cases: Sequence[BenchmarkCase
     # Attention backends may size persistent graph buffers during construction.
     # Rebuild them after replacing the temporary profile-time batch limit.
     model.prepare_attention_backends()
-    from lightllm.common.basemodel.attention import bind_attention_layers, reserve_attention_resources
+    from lightllm.common.basemodel.attention import initialize_layer_attention, reserve_attention_resources
 
     reserve_attention_resources(model)
-    bind_attention_layers(model)
+    initialize_layer_attention(model)
     torch.cuda.empty_cache()
     model._init_cudagraph()
 
@@ -1275,7 +1275,7 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         model, _ = get_model(model_cfg, model_kvargs)
         draft_models = init_mtp_draft_models(args, model_kvargs, model)
         from lightllm.common.attention_state import AttentionStateManager
-        from lightllm.common.basemodel.attention import bind_attention_layers, reserve_attention_resources
+        from lightllm.common.basemodel.attention import initialize_layer_attention, reserve_attention_resources
         from lightllm.common.req_manager import ReqManager
         from lightllm.utils.envs_utils import set_model_init_status
         from lightllm.utils.torch_memory_saver_utils import MemoryTag
@@ -1319,7 +1319,7 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
                 draft.disable_cudagraph = False
                 draft.prepare_attention_backends()
                 reserve_attention_resources(draft)
-                bind_attention_layers(draft)
+                initialize_layer_attention(draft)
                 draft._init_cudagraph()
         token_source = TokenSource(args)
         executor = StaticBenchmarkExecutor(args, model, draft_models, token_source)

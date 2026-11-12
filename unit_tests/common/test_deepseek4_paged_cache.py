@@ -1743,7 +1743,7 @@ def test_prefill_fused_writer_preserves_old_prefix_and_runtime_tail(cache):
             from lightllm.common.attention.api import AttentionFamily
 
             layer.prefill_attention = SimpleNamespace(
-                params=layer.bind_attention_params(requests._test_model, layer_weight, AttentionFamily.SPARSE_MLA)
+                params=layer.create_attention_params(requests._test_model, layer_weight, AttentionFamily.SPARSE_MLA)
             )
         positions = torch.arange(start, end, device="cuda", dtype=torch.int32)
         indices = torch.empty((positions.numel(), 128), dtype=torch.int32, device="cuda")

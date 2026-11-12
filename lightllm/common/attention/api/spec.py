@@ -49,7 +49,7 @@ class LayerSpec:
     """一个层在一个 phase 下的静态计算需求，用于能力检查和分组。
 
     初始化按完整的 (prefill_spec, decode_spec) 分组，只有相同需求的层才共享 backend / plan。
-    层权重和存储视图放在 LayerBinding.params，批次长度与请求索引放在 AttentionBatch。
+    层权重和存储视图放在 LayerAttention.params，批次长度与请求索引放在 AttentionBatch。
     """
 
     family: AttentionFamily

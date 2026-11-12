@@ -4,7 +4,7 @@ from .api import (
     AttentionFamily,
     AttentionPhase,
     CacheLayout,
-    LayerBinding,
+    LayerAttention,
     LayerSpec,
     PlanCapacity,
     UnsupportedAttention,

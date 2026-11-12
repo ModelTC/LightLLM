@@ -12,7 +12,7 @@ from lightllm.common.attention.backends.gdn.flashqla.backend import FlashQlaLine
 from lightllm.common.attention.backends.gdn.triton import backend as gdn
 from lightllm.common.attention.backends.gdn.triton.backend import TritonLinearAttBackend
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
-from unit_tests.common.attention.helpers import bind, make_backend, make_batch, make_plan
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_layer_attention, make_plan
 
 
 @pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float32])
@@ -34,7 +34,8 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
     plan = make_plan(backend, batch)
     backend.update(plan)
     params = GDNParams(torch.zeros((1, 3)), ssm, None, None, None, None)
-    result, z = bind(backend, plan, params)(plan, GDNInputs(torch.zeros((1, 3), dtype=cache_dtype)))
+    attention = make_layer_attention(backend, plan, params)
+    result, z = attention.forward(plan, GDNInputs(torch.zeros((1, 3), dtype=cache_dtype)))
     assert result is q and z is q
     assert ssm.dtype == cache_dtype
     torch.testing.assert_close(ssm, final.to(cache_dtype))

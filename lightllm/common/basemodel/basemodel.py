@@ -186,9 +186,9 @@ class TpPartBaseModel:
         """Initialize this model's backends, warmup and graphs after shared allocation."""
         self.req_manager.bind_hold_page(self.att_state_manager.full_att_allocator.hold_token_indices)
         self._check_mem_size()
-        from lightllm.common.basemodel.attention import bind_attention_layers
+        from lightllm.common.basemodel.attention import initialize_layer_attention
 
-        bind_attention_layers(self)
+        initialize_layer_attention(self)
         self._init_hidden_collector()
         role = self.att_state_role
         for group_id, group in enumerate(self.attention_groups):
@@ -269,9 +269,9 @@ class TpPartBaseModel:
         self.pre_post_weight.verify_load()
         [weight.verify_load() for weight in self.trans_layers_weight]
         if hasattr(self, "_attention_storage_generation"):
-            from lightllm.common.basemodel.attention import bind_attention_layers
+            from lightllm.common.basemodel.attention import initialize_layer_attention
 
-            bind_attention_layers(self)
+            initialize_layer_attention(self)
         return
 
     @classmethod

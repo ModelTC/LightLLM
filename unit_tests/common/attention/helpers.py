@@ -9,7 +9,7 @@ from lightllm.common.attention.api import (
     AttentionPhase,
     CacheLayout,
     ExecutionRequirements,
-    LayerBinding,
+    LayerAttention,
     LayerSpec,
     PlanCapacity,
 )
@@ -95,14 +95,14 @@ def make_plan(backend, batch=None, *, capture=False, max_length=None, prepare=Fa
     return plan
 
 
-def bind(backend, plan, params, **spec_kwargs):
-    return LayerBinding(
-        0,
-        0,
-        make_spec(backend.family, plan.capacity.phase, **spec_kwargs),
-        params,
-        backend.forward,
-        lambda shape, dtype, device="cpu": torch.empty(shape, dtype=dtype, device=plan.batch.device),
+def make_layer_attention(backend, plan, params, **spec_kwargs):
+    return LayerAttention(
+        group_id=0,
+        logical_layer_id=0,
+        spec=make_spec(backend.family, plan.capacity.phase, **spec_kwargs),
+        params=params,
+        backend=backend,
+        alloc_tensor=lambda shape, dtype, device="cpu": torch.empty(shape, dtype=dtype, device=plan.batch.device),
     )
 
 
@@ -252,9 +252,9 @@ def run_sparse(plan, fixture, query, kv, parameters, *, out=None, alloc_func=Non
             )
         else:
             inputs = SparseMLADecodeInputs(q, query[1], parameters["topk_mem_indices"])
-    layer = bind(backend, plan, params)
+    attention = make_layer_attention(backend, plan, params)
     if alloc_func is not None:
-        layer = replace(layer, alloc_tensor=alloc_func)
+        attention = replace(attention, alloc_tensor=alloc_func)
 
     if (
         hasattr(plan, "capture_flashmla_sched_meta")
@@ -264,7 +264,7 @@ def run_sparse(plan, fixture, query, kv, parameters, *, out=None, alloc_func=Non
         import flash_mla
 
         plan.capture_flashmla_sched_meta = flash_mla.get_mla_metadata()[0]
-    return layer(plan, inputs, out=out)
+    return attention.forward(plan, inputs, out=out)
 
 
 def run_dense(plan, fixture, query, key, value, *, out=None, alloc_func=None, params=None):
@@ -277,7 +277,7 @@ def run_dense(plan, fixture, query, key, value, *, out=None, alloc_func=None, pa
             key, ks = key
             value, vs = value
         params = DenseParams(key, value, key_scale=ks, value_scale=vs)
-    layer = bind(plan.backend_identity, plan, params)
+    attention = make_layer_attention(plan.backend_identity, plan, params)
     if alloc_func is not None:
-        layer = replace(layer, alloc_tensor=alloc_func)
-    return layer(plan, DenseInputs(query), out=out)
+        attention = replace(attention, alloc_tensor=alloc_func)
+    return attention.forward(plan, DenseInputs(query), out=out)

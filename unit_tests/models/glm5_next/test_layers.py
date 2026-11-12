@@ -18,7 +18,7 @@ from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import get_env_start_args
-from unit_tests.common.attention.helpers import bind, make_backend, make_batch, make_plan
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_layer_attention, make_plan
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -184,8 +184,8 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     state.b1_cu_q_seq_len = plan.batch.b1_cu_q_seq_len
     state.max_q_seq_len = 1
     state.attention_plans = {0: plan}
-    binding = bind(backend, plan, MLAParams(kv, layer.softmax_scale, layer.kv_lora_rank, 0))
-    layer.prefill_attention = layer.decode_attention = binding
+    attention = make_layer_attention(backend, plan, MLAParams(kv, layer.softmax_scale, layer.kv_lora_rank, 0))
+    layer.prefill_attention = layer.decode_attention = attention
     projected = torch.bmm(q.transpose(0, 1), kv_b.view(4, 256, 512)[:, :128]).transpose(0, 1)
     expected = []
     for row, length in enumerate(lengths.tolist()):
@@ -199,7 +199,9 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     plan.nsa_cache_seqlens = lengths
     plan.nsa_cu_seqlens_k_new = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
     state.attention_plans = {0: plan}
-    layer.decode_attention = bind(backend, plan, MLAParams(kv, layer.softmax_scale, layer.kv_lora_rank, 0))
+    layer.decode_attention = make_layer_attention(
+        backend, plan, MLAParams(kv, layer.softmax_scale, layer.kv_lora_rank, 0)
+    )
     decode = layer._token_attention_kernel(q, state, weight)
     for output in (prefill, decode):
         torch.testing.assert_close(output.float(), expected, atol=1e-3, rtol=0.015)

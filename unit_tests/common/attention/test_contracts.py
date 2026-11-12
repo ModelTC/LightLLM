@@ -7,7 +7,14 @@ import torch
 from lightllm.common.attention import selection
 from lightllm.common.attention.api import AttentionFamily, AttentionPhase, UnsupportedAttention
 from lightllm.common.attention.backends.base import BaseAttentionBackend
-from unit_tests.common.attention.helpers import make_backend, make_batch, make_plan, make_spec, model_stub
+from unit_tests.common.attention.helpers import (
+    make_backend,
+    make_batch,
+    make_layer_attention,
+    make_plan,
+    make_spec,
+    model_stub,
+)
 
 
 def test_graph_copy_validates_all_inputs_before_writing():
@@ -42,6 +49,18 @@ def test_plan_capacity_and_backend_identity(capture):
         make_backend().prepare(plan, make_batch())
     with pytest.raises(ValueError, match="different attention backend"):
         make_backend().update(plan)
+    attention = make_layer_attention(make_backend(), plan, params=None)
+    with pytest.raises(ValueError, match="different attention backend"):
+        attention.forward(plan, inputs=None)
+
+
+def test_layer_attention_rejects_wrong_phase():
+    backend = make_backend()
+    plan = make_plan(backend, prepare=True)
+    attention = make_layer_attention(backend, plan, params=None)
+    attention = replace(attention, spec=replace(attention.spec, phase=AttentionPhase.PREFILL))
+    with pytest.raises(ValueError, match="phases differ"):
+        attention.forward(plan, inputs=None)
 
 
 @pytest.mark.parametrize("requested", ["auto", "triton"])

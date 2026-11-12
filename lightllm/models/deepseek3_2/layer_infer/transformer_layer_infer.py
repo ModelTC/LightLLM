@@ -94,7 +94,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
 
         # Use NSA backend for attention computation
 
-        mla_out = self.prefill_attention(
+        mla_out = self.prefill_attention.forward(
             infer_state.attention_plans[self.prefill_attention.group_id],
             SparseMLAPrefillInputs(q_all, topk_mem_indices, topk_indices, kv),
         )
@@ -124,7 +124,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
 
         # Use NSA backend for attention computation
 
-        o_tensor = self.decode_attention(
+        o_tensor = self.decode_attention.forward(
             infer_state.attention_plans[self.decode_attention.group_id],
             SparseMLADecodeInputs(q_nope, q_rope, topk_mem_indices),
         )

@@ -2,7 +2,7 @@ import dataclasses
 
 import torch
 
-from lightllm.common.attention.api.backend import LayerBinding
+from lightllm.common.attention.api.backend import LayerAttention
 from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention.backends._flashinfer import set_flashinfer_envs
 from lightllm.common.attention.backends.dense.flashinfer.backend import (
@@ -50,7 +50,7 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
     def _allocate_decode_plan(self, capacity, capture, workspace):
         return Fp8FlashInferDecodePlan(capacity, capture, workspace)
 
-    def _forward_prefill(self, layer: LayerBinding, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(self, layer: LayerAttention, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key
@@ -77,7 +77,7 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
         plan.prefill_wrapper.run(q=q, paged_kv_cache=(k, v), k_scale=k_descale, v_scale=v_descale, out=o_tensor)
         return o_tensor
 
-    def _forward_decode(self, layer: LayerBinding, plan, inputs: DenseInputs, *, out=None):
+    def _forward_decode(self, layer: LayerAttention, plan, inputs: DenseInputs, *, out=None):
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key

@@ -6,7 +6,7 @@ from lightllm.common.attention.api import (
     AttentionFamily,
     AttentionPhase,
     CacheLayout,
-    LayerBinding,
+    LayerAttention,
     LayerSpec,
     PlanCapacity,
 )
@@ -107,7 +107,7 @@ def describe_attention_layers(model, family, phase):
     )
 
 
-def make_layer_params(model, layer, weight, family):
+def create_layer_attention_params(model, layer, weight, family):
     manager, role, layer_id = model.att_state_manager, model.att_state_role, layer.layer_num_
     if family in (AttentionFamily.GDN, AttentionFamily.KDA):
         state = manager.get_state(role, family.value, layer_id)
@@ -223,22 +223,32 @@ def reserve_attention_resources(model):
                             state.require_zero_initialization()
 
 
-def bind_attention_layers(model):
+def initialize_layer_attention(model):
     for layer, weight, group_id in zip(model.layers_infer, model.trans_layers_weight, model._attention_layer_groups):
         if group_id is None:
             continue
         group = model.attention_groups[group_id]
-        params = layer.bind_attention_params(model, weight, group.prefill_spec.family)
+        params = layer.create_attention_params(model, weight, group.prefill_spec.family)
         prefill_params = (
             replace(params, sliding_window=group.prefill_spec.sliding_window)
             if isinstance(params, DenseParams)
             else params
         )
-        layer.prefill_attention = LayerBinding(
-            group_id, layer.layer_num_, group.prefill_spec, prefill_params, group.prefill_backend.forward, _alloc_tensor
+        layer.prefill_attention = LayerAttention(
+            group_id=group_id,
+            logical_layer_id=layer.layer_num_,
+            spec=group.prefill_spec,
+            params=prefill_params,
+            backend=group.prefill_backend,
+            alloc_tensor=_alloc_tensor,
         )
-        layer.decode_attention = LayerBinding(
-            group_id, layer.layer_num_, group.decode_spec, params, group.decode_backend.forward, _alloc_tensor
+        layer.decode_attention = LayerAttention(
+            group_id=group_id,
+            logical_layer_id=layer.layer_num_,
+            spec=group.decode_spec,
+            params=params,
+            backend=group.decode_backend,
+            alloc_tensor=_alloc_tensor,
         )
         if group.prefill_spec.family in (AttentionFamily.GDN, AttentionFamily.KDA):
             state = model.att_state_manager.get_state(

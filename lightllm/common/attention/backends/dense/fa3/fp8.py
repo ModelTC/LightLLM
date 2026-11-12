@@ -2,7 +2,7 @@ import dataclasses
 
 import torch
 
-from lightllm.common.attention.api.backend import LayerBinding
+from lightllm.common.attention.api.backend import LayerAttention
 from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention.backends.dense.fa3.backend import Fa3AttBackend, Fa3DecodePlan, Fa3PrefillPlan
 from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import (
@@ -49,7 +49,7 @@ class Fp8Fa3AttBackend(Fa3AttBackend):
     def _update_prefill(self, plan):
         super()._update_prefill(plan)
 
-    def _forward_prefill(self, layer: LayerBinding, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(self, layer: LayerAttention, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key
@@ -106,7 +106,7 @@ class Fp8Fa3AttBackend(Fa3AttBackend):
     def _update_decode(self, plan):
         super()._update_decode(plan)
 
-    def _forward_decode(self, layer: LayerBinding, plan, inputs: DenseInputs, *, out=None):
+    def _forward_decode(self, layer: LayerAttention, plan, inputs: DenseInputs, *, out=None):
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key
