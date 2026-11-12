@@ -6,9 +6,8 @@ from lightllm.common.attention_state.full_att import FullAttentionState
 
 import torch
 
-from lightllm.common.basemodel import InferStateInfo, TransformerLayerInferTpl
+from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import BMMWeightTpl
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
     silu_and_mul_fwd,
@@ -21,7 +20,6 @@ from lightllm.common.basemodel.triton_kernel.mhc import (
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.models.glm5_next.indexer import Glm5NextNsaInfer
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.device_utils import is_hopper
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
@@ -63,19 +61,6 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             self.kv_lora_rank = network_config["kv_lora_rank"]
             self.v_head_dim = network_config["v_head_dim"]
             self.softmax_scale = self.qk_nope_head_dim ** -0.5
-            args = get_env_start_args()
-            self.prefill_token_major_mla_bmm = (
-                args.run_mode == "prefill"
-                and args.ssm_state_mode == "native"
-                and self.tp_world_size_ == 1
-                and args.enable_ep_moe
-                and not args.enable_prefill_cudagraph
-                and not args.enable_prefill_microbatch_overlap
-                and not args.enable_tpsp_mix_mode
-                and (self.tp_q_head_num_, self.qk_nope_head_dim, self.kv_lora_rank, self.v_head_dim)
-                == (64, 256, 512, 256)
-                and is_hopper()
-            )
             self.indexer = Glm5NextNsaInfer(
                 layer_idx=self.layer_num_,
                 network_config=self.network_config_,
@@ -166,33 +151,11 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         )
         return q, cache_kv
 
-    def _sparse_mla_bmm(
-        self, x: torch.Tensor, projection: BMMWeightTpl, infer_state: InferStateInfo, out_features: int
-    ) -> torch.Tensor:
-        # Preserve the reference arithmetic for short, entirely cold waves.
-        if (
-            self.prefill_token_major_mla_bmm
-            and infer_state.is_prefill
-            and not infer_state.is_cuda_graph_capture
-            and not infer_state.need_dp_prefill_balance
-            and not (infer_state.max_cache_len == 0 and 0 < infer_state.max_kv_seq_len <= 2048)
-            and x.is_cuda
-            and x.dtype == projection.weight.dtype == torch.bfloat16
-            and 1024 <= x.shape[0] <= 8192
-            and x.is_contiguous()
-            and projection.weight.is_contiguous()
-            and projection.weight.shape == (x.shape[1], x.shape[2], out_features)
-        ):
-            # Write directly in the layout consumed by attention/the output projection.
-            output = self.alloc_tensor(shape=(x.shape[0], x.shape[1], out_features), dtype=x.dtype, device=x.device)
-            projection.bmm(input_tensor=x.transpose(0, 1), out=output.transpose(0, 1))
-            return output
-        return projection.bmm(input_tensor=x.transpose(0, 1)).transpose(0, 1)
-
     def _context_attention_kernel(self, q, kv, infer_state, layer_weight, out=None):
-        q = self._sparse_mla_bmm(
-            x=q, projection=layer_weight.k_b_proj_, infer_state=infer_state, out_features=self.kv_lora_rank
-        ).contiguous()
+        q_nope = self.alloc_tensor((q.shape[0], self.tp_q_head_num_, self.kv_lora_rank), dtype=q.dtype, device=q.device)
+        # Write [tokens, heads, latent] directly for sparse prefill attention.
+        layer_weight.k_b_proj_.bmm(q.transpose(0, 1), out=q_nope.transpose(0, 1))
+        q = q_nope
         topk_mem_indices, topk_indices = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
@@ -313,11 +276,12 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
     def _get_o(self, input, infer_state, layer_weight):
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_balance_get(data=input)
-        # Both sparse prefill and decode return attention in MLA latent space.
-        input = self._sparse_mla_bmm(
-            x=input, projection=layer_weight.v_b_proj_, infer_state=infer_state, out_features=self.v_head_dim
+        values = self.alloc_tensor(
+            (input.shape[0], self.tp_q_head_num_, self.v_head_dim), dtype=input.dtype, device=input.device
         )
-        output = layer_weight.o_weight_.mm(input.reshape(-1, self.tp_q_head_num_ * self.v_head_dim))
+        # Token-major output lets prefill and decode flatten the heads without copying.
+        layer_weight.v_b_proj_.bmm(input.transpose(0, 1), out=values.transpose(0, 1))
+        output = layer_weight.o_weight_.mm(values.view(-1, self.tp_q_head_num_ * self.v_head_dim))
         return self._tpsp_reduce(input=output, infer_state=infer_state)
 
     def _kda_projections(self, hidden_states, infer_state, layer_weight):
