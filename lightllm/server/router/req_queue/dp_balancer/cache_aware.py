@@ -115,14 +115,17 @@ class DpCacheAwareBalancer(DpBalancer):
         if not reqs_waiting_for_dp_index:
             return
 
-        if self.run_mode == "prefill":
+        prefill = self.run_mode == "prefill"
+        all_dp_indexes = range(self.dp_size_in_node)
+        if prefill:
             # Queued requests have not matched real KV yet; dispatch history is only a routing hint.
             total_load_per_dp = [sum(req.input_len for req in queue.waiting_req_list) for queue in self.inner_queues]
+            free_req_slots = [queue.running_max_req_size - len(queue.waiting_req_list) for queue in self.inner_queues]
             if current_batch is not None:
                 for req in current_batch.reqs:
-                    total_load_per_dp[req.sample_params.suggested_dp_index] += max(
-                        0, req.input_len - req.shm_cur_kv_len
-                    )
+                    dp_index = req.sample_params.suggested_dp_index
+                    total_load_per_dp[dp_index] += max(0, req.input_len - req.shm_cur_kv_len)
+                    free_req_slots[dp_index] -= 1
         else:
             current_load_per_dp = [0 for _ in range(self.dp_size_in_node)]
             if current_batch is not None:
@@ -134,7 +137,12 @@ class DpCacheAwareBalancer(DpBalancer):
 
         for req_group in reqs_waiting_for_dp_index:
             first_req = req_group[0]
-            group_load = sum(req.input_len for req in req_group) if self.run_mode == "prefill" else len(req_group)
+            group_size = len(req_group)
+            group_load = sum(req.input_len for req in req_group) if prefill else group_size
+            dp_indexes = all_dp_indexes
+            if prefill:
+                # Prefer ranks that can admit the whole group. Queue by token load if all ranks are full.
+                dp_indexes = [dp for dp in all_dp_indexes if free_req_slots[dp] >= group_size] or all_dp_indexes
             linked_prompt_ids = False
             if not hasattr(first_req, "shm_prompt_ids"):
                 first_req.link_prompt_ids_shm_array()
@@ -151,20 +159,18 @@ class DpCacheAwareBalancer(DpBalancer):
             if not first_req.sample_params.disable_prompt_cache:
                 matched_dp_index, matched_token_count = self.prefix_cache.match(prefix_hashes)
                 match_rate = matched_token_count / first_req.input_len if first_req.input_len else 0.0
-                if match_rate > self.config.cache_threshold:
+                if match_rate > self.config.cache_threshold and matched_dp_index in dp_indexes:
                     cache_dp_index = matched_dp_index
 
-            idle_dp_indexes = [dp_index for dp_index, load in enumerate(total_load_per_dp) if load == 0]
+            idle_dp_indexes = [dp for dp in dp_indexes if total_load_per_dp[dp] == 0]
             if idle_dp_indexes:
                 if cache_dp_index in idle_dp_indexes:
                     selected_dp_index = cache_dp_index
                 else:
                     selected_dp_index = random.choice(idle_dp_indexes)
             else:
-                min_load = min(total_load_per_dp)
-                least_loaded_dp_indexes = [
-                    dp_index for dp_index, load in enumerate(total_load_per_dp) if load == min_load
-                ]
+                min_load = min(total_load_per_dp[dp] for dp in dp_indexes)
+                least_loaded_dp_indexes = [dp for dp in dp_indexes if total_load_per_dp[dp] == min_load]
                 least_loaded_dp_index = random.choice(least_loaded_dp_indexes)
                 if cache_dp_index is None:
                     selected_dp_index = least_loaded_dp_index
@@ -180,6 +186,8 @@ class DpCacheAwareBalancer(DpBalancer):
                 req.sample_params.suggested_dp_index = selected_dp_index
             self.inner_queues[selected_dp_index].extend(req_group)
             total_load_per_dp[selected_dp_index] += group_load
+            if prefill:
+                free_req_slots[selected_dp_index] -= group_size
             insert_start_index = 0
             if cache_dp_index == selected_dp_index:
                 insert_start_index = (matched_token_count + self.config.block_size - 1) // self.config.block_size
