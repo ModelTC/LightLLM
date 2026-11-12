@@ -12,6 +12,39 @@ from lightllm.utils.custom_kernel_utis import get_pdl_launch_kwargs
 
 
 @triton.jit
+def _gather_rope_tables_kernel(
+    position_ids,
+    tables,
+    out,
+    rows,
+    POS_STRIDE: tl.constexpr,
+    WIDTH: tl.constexpr,
+    TABLE_STRIDES: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    size = rows * WIDTH
+    valid = offset < size
+    position = tl.load(position_ids + (offset // WIDTH) * POS_STRIDE, mask=valid, other=0)
+    column = offset % WIDTH
+    for index in tl.static_range(4):
+        stride_row, stride_col = TABLE_STRIDES[index]
+        value = tl.load(tables[index] + position * stride_row + column * stride_col, mask=valid, other=0)
+        tl.store(out + index * size + offset, value, mask=valid)
+
+
+def gather_rope_tables(position_ids: torch.Tensor, tables: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
+    rows, width = position_ids.numel(), tables[0].shape[1]
+    out = torch.empty((4, rows, width), dtype=tables[0].dtype, device=position_ids.device)
+    block = 256
+    if rows:
+        _gather_rope_tables_kernel[(triton.cdiv(rows * width, block),)](
+            position_ids, tables, out, rows, position_ids.stride(0), width, tuple(t.stride() for t in tables), block
+        )
+    return out.unbind(0)
+
+
+@triton.jit
 def _q_norm_rope_kernel(
     q_input,
     q_output,

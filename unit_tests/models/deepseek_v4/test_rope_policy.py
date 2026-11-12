@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+from lightllm.models.deepseek_v4.triton_kernel.norm_rope import gather_rope_tables
 
 
 @pytest.fixture(params=["type", "rope_type"])
@@ -64,3 +65,26 @@ def test_compressed_layers_keep_yarn_for_local_attention_and_indexer(model):
         assert layer.cos_compress_table is model._cos_cached_compress
         assert layer.sin_compress_table is model._sin_cached_compress
     assert model.layers_infer[1].index_infer.freqs_cis is model._freqs_cis_compress
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("rows", [0, 1, 385])
+def test_gather_rope_tables(rows):
+    sliding = torch.randn((512, 32), dtype=torch.complex64, device="cuda")
+    compress = torch.randn_like(sliding)
+    tables = (sliding.real, sliding.imag, compress.real.contiguous(), compress.imag)
+    positions = torch.arange(rows * 2, dtype=torch.int32, device="cuda").remainder_(512)[::2]
+
+    def check(outputs):
+        for output, table in zip(outputs, tables):
+            assert output.is_contiguous()
+            torch.testing.assert_close(output, table.index_select(0, positions), atol=0, rtol=0)
+
+    check(gather_rope_tables(positions, tables))
+    if rows:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = gather_rope_tables(positions, tables)
+        positions.add_(3).remainder_(512)
+        graph.replay()
+        check(captured)
