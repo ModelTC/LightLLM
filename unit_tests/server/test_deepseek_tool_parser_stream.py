@@ -82,6 +82,53 @@ def test_dsml_emits_buffered_invoke_on_next_delta():
     assert json.loads(arguments[1]) == {"location": "Paris"}
 
 
+def _v3_call(name, payload):
+    return "<｜tool▁call▁begin｜>function<｜tool▁sep｜>" + name + "\n```json\n" + payload + "\n```<｜tool▁call▁end｜>"
+
+
+def test_deepseekv3_streams_long_arguments_in_small_deltas():
+    arguments = {"content": "print(1)\n" * 500}
+    payload = json.dumps(arguments)
+    call = _v3_call("write_file", payload)
+    deltas = ["<｜tool▁calls▁begin｜>"] + [call[i : i + 4] for i in range(0, len(call), 4)]
+
+    parser = FunctionCallParser(TOOLS, "deepseekv3")
+    names, streamed = _stream(parser, deltas)
+
+    assert names == ["write_file"]
+    assert json.loads(streamed[0]) == arguments
+
+
+def test_deepseekv3_holds_arguments_until_the_json_fence_closes():
+    payload = json.dumps({"content": "x" * 200})
+    head = "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>write_file\n```json\n"
+    parser = FunctionCallParser(TOOLS, "deepseekv3")
+    names, streamed = _stream(parser, [head] + [payload[i : i + 4] for i in range(0, len(payload), 4)])
+    assert names == []
+    assert streamed == {}
+
+    # The closing fence is split across deltas. The name is emitted on the delta that
+    # completes it, and the arguments follow on the next delta, same as one regex search.
+    names, streamed = _stream(parser, ["\n", "``", "`<｜tool▁call▁end｜>", "<｜tool▁calls▁end｜>"])
+    assert names == ["write_file"]
+    assert json.loads(streamed[0]) == {"content": "x" * 200}
+
+
+def test_deepseekv3_keeps_a_fence_inside_the_argument():
+    content = "line1\n```\nline2\n```python\ncode"
+    payload = json.dumps({"content": content})
+    text = "<｜tool▁calls▁begin｜>" + _v3_call("write_file", payload)
+    deltas = [text[: len("<｜tool▁calls▁begin｜>")]] + [
+        text[i : i + 4] for i in range(len("<｜tool▁calls▁begin｜>"), len(text), 4)
+    ]
+
+    parser = FunctionCallParser(TOOLS, "deepseekv3")
+    names, streamed = _stream(parser, deltas)
+
+    assert names == ["write_file"]
+    assert json.loads(streamed[0]) == {"content": content}
+
+
 def test_deepseekv31_streams_long_arguments_in_small_deltas():
     arguments = {"content": "print(1)\n" * 500}
     payload = json.dumps(arguments)

@@ -1107,11 +1107,16 @@ class DeepSeekV3Detector(BaseFormatDetector):
 
         calls: list[ToolCallItem] = []
         try:
-            partial_match = re.search(
-                pattern=r"<｜tool▁call▁begin｜>(.*)<｜tool▁sep｜>(.*)\n```json\n(.*)\n```.*",
-                string=current_text,
-                flags=re.DOTALL,
-            )
+            # The pattern needs a closing ``` fence after ```json, so skip the scan until then.
+            partial_match = None
+            json_header = "\n```json\n"
+            header_at = current_text.find(json_header)
+            if header_at != -1 and current_text.find("\n```", header_at + len(json_header)) != -1:
+                partial_match = re.search(
+                    pattern=r"<｜tool▁call▁begin｜>(.*)<｜tool▁sep｜>(.*)\n```json\n(.*)\n```.*",
+                    string=current_text,
+                    flags=re.DOTALL,
+                )
             if partial_match:
                 func_name = partial_match.group(2).strip()
                 func_args_raw = partial_match.group(3).strip()
