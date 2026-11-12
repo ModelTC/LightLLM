@@ -75,7 +75,7 @@ class HiddenCollector(ABC):
         """
         return
 
-    def add_final_hidden(self, final_hidden: torch.Tensor) -> None:
+    def add_final_hidden(self, final_hidden: Optional[torch.Tensor]) -> None:
         """接收完成模型输出侧 gather 后的最终层 hidden tensor。
 
         BaseModel 在 logits 计算完成后、调用 :meth:`finish_output` 前调用该接口。基类
@@ -165,7 +165,8 @@ class FinalHiddenCollector(HiddenCollector):
     def new_instance(self) -> HiddenCollector:
         return FinalHiddenCollector()
 
-    def add_final_hidden(self, final_hidden: torch.Tensor) -> None:
+    def add_final_hidden(self, final_hidden: Optional[torch.Tensor]) -> None:
+        assert final_hidden is not None, "post layer must return the requested final hidden"
         self.final_hidden = final_hidden
 
     def finish_output(self, infer_state) -> ModelMtpOutputCollector:

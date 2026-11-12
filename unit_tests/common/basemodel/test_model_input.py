@@ -4,7 +4,10 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.mtp_config import FinalHiddenPolicy
 from lightllm.common.basemodel.batch_objs import ModelInput
+from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.mtp_manager import MtpManager
 
 
 def _create_model_input(*, is_prefill=False):
@@ -210,3 +213,37 @@ def test_padded_decode_builds_internal_request_from_empty_token_tensor():
     assert padded_input.b_seq_len.tolist() == [2]
     assert padded_input.b_shared_seq_len.tolist() == [0]
     assert padded_input.b_shared_radix_node_id.tolist() == [-1]
+
+
+@pytest.mark.parametrize("is_prefill", [False, True])
+@pytest.mark.parametrize("policy", [FinalHiddenPolicy.PRE_NORM, FinalHiddenPolicy.POST_NORM])
+@pytest.mark.parametrize(
+    "mode,draft", [(None, False), ("vanilla_with_att", False), ("vanilla_with_att", True), ("dspark", True)]
+)
+def test_infer_state_carries_effective_final_hidden_policy(monkeypatch, is_prefill, policy, mode, draft):
+    from lightllm.common.basemodel import basemodel
+
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.infer_state_class = InferStateInfo
+    model.is_mtp_draft_model = draft
+    model.weight_dir_ = "/models/draft"
+    model.mtp_manager = MtpManager.__new__(MtpManager)
+    model.mtp_manager.args = SimpleNamespace(mtp_mode=mode, mtp_draft_model_dir=["/models/draft"])
+    effective_policy = policy if mode == "vanilla_with_att" else FinalHiddenPolicy.NONE
+    model.mtp_manager._get_pair_config = lambda _: SimpleNamespace(
+        main_final_hidden_policy=effective_policy, draft_final_hidden_policy=effective_policy
+    )
+    model._init_hidden_collector()
+    model.return_all_prompt_logics = False
+    model.mem_manager = model.req_manager = None
+    model._select_mem_indexes = lambda model_input: None
+    model.prefill_att_backend = SimpleNamespace(create_att_prefill_state=lambda **kwargs: None)
+    model.decode_att_backend = SimpleNamespace(create_att_decode_state=lambda **kwargs: None)
+    model.prefill_att_backend1 = model.decode_att_backend1 = None
+    monkeypatch.setattr(basemodel.dist_group_manager, "get_group", lambda _: None)
+
+    state = model._create_inferstate(_create_model_input(is_prefill=is_prefill))
+
+    expected = policy if mode == "vanilla_with_att" else FinalHiddenPolicy.NONE
+    assert state.final_hidden_policy is expected
+    assert not hasattr(state.hidden_collector, "final_hidden_policy")

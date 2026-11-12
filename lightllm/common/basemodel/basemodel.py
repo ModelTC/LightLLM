@@ -31,6 +31,7 @@ from lightllm.utils.envs_utils import (
     get_llm_data_type,
 )
 from lightllm.distributed.communication_op import dist_group_manager
+from lightllm.common.mtp_config import FinalHiddenPolicy
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput, PostLayerOutput
 from lightllm.common.basemodel.hidden_collector import (
     NoopHiddenCollector,
@@ -431,6 +432,7 @@ class TpPartBaseModel:
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
         infer_state.hidden_collector = self.hidden_collector_prototype.new_instance()
+        infer_state.final_hidden_policy = self.mtp_manager.get_final_hidden_policy(self)
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
         infer_state.is_draft_model = self.is_mtp_draft_model
@@ -722,7 +724,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -733,6 +734,7 @@ class TpPartBaseModel:
         input_tensors = [input_embs]
         if Autotuner.is_autotune_warmup():
             infer_state.hidden_collector = NoopHiddenCollector()
+            infer_state.final_hidden_policy = FinalHiddenPolicy.NONE
 
         def prefill_func(input_tensors, _infer_state):
             hidden_collector = _infer_state.hidden_collector
@@ -778,7 +780,7 @@ class TpPartBaseModel:
 
         post_output = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
         hidden_collector = infer_state.hidden_collector
-        hidden_collector.add_final_hidden(last_input_embs)
+        hidden_collector.add_final_hidden(post_output.final_hidden)
         model_output = self._create_model_output(post_output, infer_state)
         del post_output
 
@@ -804,7 +806,7 @@ class TpPartBaseModel:
             last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
         )
 
-        hidden_collector.add_final_hidden(last_input_embs)
+        hidden_collector.add_final_hidden(post_output.final_hidden)
         model_output = self._create_model_output(post_output, infer_state)
         del post_output
 
@@ -1009,8 +1011,8 @@ class TpPartBaseModel:
         )
         g_cache_manager.cache_env_out()
 
-        hidden_collector0.add_final_hidden(last_input_embs)
-        hidden_collector1.add_final_hidden(last_input_embs1)
+        hidden_collector0.add_final_hidden(post_output.final_hidden)
+        hidden_collector1.add_final_hidden(post_output1.final_hidden)
         model_output = self._create_model_output(post_output, infer_state)
         model_output1 = self._create_model_output(post_output1, infer_state1)
         del post_output, post_output1
@@ -1051,8 +1053,8 @@ class TpPartBaseModel:
             last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
 
-        hidden_collector0.add_final_hidden(last_input_embs)
-        hidden_collector1.add_final_hidden(last_input_embs1)
+        hidden_collector0.add_final_hidden(post_output.final_hidden)
+        hidden_collector1.add_final_hidden(post_output1.final_hidden)
         model_output = self._create_model_output(post_output, infer_state)
         model_output1 = self._create_model_output(post_output1, infer_state1)
         del post_output, post_output1
