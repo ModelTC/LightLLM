@@ -4,6 +4,7 @@ import time
 import threading
 import psutil
 import signal
+from typing import Optional
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -42,10 +43,11 @@ def kill_child_processes(parent_pid):
             logger.warning(f"kill pid {child.pid} failed {str(e)}")
 
 
-def check_parent_alive():
+def check_parent_alive(parent_pid: Optional[int] = None):
     # A late-starting worker may already have been reparented after its parent exited.
-    parent = mp.parent_process()
-    parent_pid = parent.pid if parent is not None else os.getppid()
+    if parent_pid is None:
+        parent = mp.parent_process()
+        parent_pid = parent.pid if parent is not None else os.getppid()
     while True:
         if not is_process_active(parent_pid):
             logger.warning(f"parent is dead, kill self {os.getpid()}")
@@ -56,9 +58,9 @@ def check_parent_alive():
     return
 
 
-def start_parent_check_thread():
+def start_parent_check_thread(parent_pid: Optional[int] = None):
     """
     检测父进程是否健康，如果出现问题，清理退出所有进程
     """
-    thread = threading.Thread(target=check_parent_alive, daemon=True)
+    thread = threading.Thread(target=check_parent_alive, kwargs={"parent_pid": parent_pid}, daemon=True)
     thread.start()
