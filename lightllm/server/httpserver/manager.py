@@ -33,6 +33,7 @@ from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.pd_timeout_utils import get_pd_handshake_timeout_seconds
 from lightllm.server.metrics.manager import MetricClient
 from .rl_controller import HttpRlController
 from .manager_ext import HttpRlManagerHelper
@@ -422,10 +423,15 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await pd_upload_websocket.send(
                     pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, array("q", prompt_ids)))
                 )
+                handshake_timeout = get_pd_handshake_timeout_seconds(
+                    resource_wait_seconds=sampling_params.pd_node_resource_wait_timeout_seconds, prefill=True
+                )
                 try:
-                    await asyncio.wait_for(pd_event.wait(), timeout=180)
+                    await asyncio.wait_for(pd_event.wait(), timeout=handshake_timeout)
                 except asyncio.TimeoutError:
-                    logger.error(f"pd prefill node wait pd_event 180s time out, group_req_id {group_request_id}")
+                    logger.error(
+                        f"pd prefill node wait pd_event {handshake_timeout}s time out, group_req_id {group_request_id}"
+                    )
                     raise Exception(f"group_req_id {group_request_id} wait pd_event time out")
 
                 decode_node_info: PDDecodeNodeInfo = pd_event.decode_node_info
