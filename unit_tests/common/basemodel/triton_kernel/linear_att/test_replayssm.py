@@ -512,6 +512,76 @@ def test_overflow_folds_inside_replay_for_gdn_and_kda(kda, dtype, capacity):
 
 
 @pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+@pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
+@pytest.mark.parametrize("bv", [32, 128])
+@pytest.mark.parametrize("width", [1, 3])
+def test_overflow_preserves_shared_keys_across_heads_and_graph(kda, compute_mode, bv, width):
+    torch.manual_seed(123)
+    batch, kh, hv, dim, capacity = 64, 4, 16, 128, 4
+    dtype = torch.bfloat16
+    initial = torch.randn(2, batch + 1, hv, dim, dim, device="cuda", dtype=dtype) * 0.05
+    config = {"BV": bv, "num_warps": 4 if bv == 128 else 1, "num_stages": 1}
+    backend, reference_backend = [
+        ReplaySSMExecutor(
+            initial.clone(),
+            capacity,
+            width,
+            dtype,
+            num_key_heads=kh,
+            kda=kda,
+            compute_mode=compute_mode,
+        )
+        for _ in range(2)
+    ]
+    reqs = torch.arange(batch, device="cuda", dtype=torch.int32)
+    reqs[-2:] = batch
+    windows = (torch.arange(reqs.numel(), device="cuda", dtype=torch.int32) % width) + 1
+    windows[0] = 0
+    cu = torch.cat((windows.new_zeros(1), windows.cumsum(0).int()))
+    tokens = int(cu[-1])
+    q = torch.randn(tokens, kh, dim, device="cuda", dtype=dtype)
+    k = torch.randn_like(q)
+    v = torch.randn(tokens, hv, dim, device="cuda", dtype=dtype)
+    a = torch.full((tokens, hv * dim if kda else hv), -2.0, device="cuda", dtype=dtype)
+    b = torch.randn(tokens, hv, device="cuda", dtype=dtype)
+    alog = torch.zeros(hv, device="cuda")
+    bias = torch.zeros(hv * dim if kda else hv, device="cuda")
+
+    def step(owner):
+        outputs = [
+            replay_layer(owner, layer, q, k, v, a, b, alog, bias, reqs, cu, run_config=config) for layer in range(2)
+        ]
+        accept_replay_window(owner, reqs, cu_seqlens=cu)
+        return outputs
+
+    step(backend)
+    backend.ssm_state.copy_(initial)
+    backend.cursors.zero_()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = step(backend)
+    backend.ssm_state.copy_(initial)
+    backend.cursors.zero_()
+    for _ in range(2 * capacity + 1):
+        for tensor in (q, k, v, b):
+            tensor.normal_()
+        lengths = reference_backend.cursors[reqs[:-2].long()]
+        overflow = reqs[:-2][(windows[:-2] > 0) & (lengths + windows[:-2] > capacity)]
+        if overflow.numel():
+            fold_prefix(state=reference_backend, reqs=overflow, run_config=config)
+            reference_backend.cursors.index_fill_(0, overflow.long(), 0)
+        expected = step(reference_backend)
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(backend.ssm_state, reference_backend.ssm_state, rtol=0, atol=0)
+        for left, right in zip(actual, expected):
+            torch.testing.assert_close(left, right, rtol=torch.finfo(dtype).eps, atol=2e-5)
+        assert torch.equal(backend.cursors, reference_backend.cursors)
+    torch.testing.assert_close(backend.ssm_state[:, 0], initial[:, 0], rtol=0, atol=0)
+    torch.testing.assert_close(backend.ssm_state[:, batch], initial[:, batch], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
 def test_empty_window_keeps_cursor_for_gdn_and_kda(kda):
     state = torch.randn(1, 3, 2, 32, 32, device="cuda")
     backend = ReplaySSMExecutor(state, 8, 4, torch.float32, num_key_heads=2, kda=kda)
@@ -645,7 +715,7 @@ def test_dynamic_verify_lengths_fill_history_before_folding(kda, dtype, compute_
             pending[req] += count
         assert ssm_backend.cursors.tolist() == pending + [0, 0]
         for output in outputs:
-            assert torch.count_nonzero(output[:, sum(widths) :]).item() == 0
+            assert torch.count_nonzero(output[sum(widths) :]).item() == 0
         torch.testing.assert_close(state[:, 2:], before[:, 2:], atol=0, rtol=0)
         if iteration == 2:
             assert pending[0] == 8

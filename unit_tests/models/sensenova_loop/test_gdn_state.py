@@ -58,7 +58,9 @@ def test_gdn_decode_keeps_logical_layer_state(
     resources = AttentionStateManager(request_capacity=3)
     resources.register_state("main", resource)
     resources.finish_state_registration()
-    assert resource.get_storage_layer_index(logical_layer) == storage_layer
+    conv_view, ssm_view = resource.get_layer_view(logical_layer_id=logical_layer)
+    assert conv_view.data_ptr() == resource.conv_state[storage_layer].data_ptr()
+    assert ssm_view.data_ptr() == resource.ssm_state[storage_layer].data_ptr()
     physical_weights = [
         SimpleNamespace(
             layer_num_=i,
@@ -94,11 +96,10 @@ def test_gdn_decode_keeps_logical_layer_state(
             "lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp.causal_conv1d_update", conv_mtp
         )
         monkeypatch.setattr(
-            "lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.fused_recurrent_gated_delta_rule", recurrent
+            "lightllm.common.basemodel.attention.linear.gdn.fused_recurrent_gated_delta_rule", recurrent
         )
         monkeypatch.setattr(
-            "lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent."
-            "mtp_fused_recurrent_gated_delta_rule",
+            "lightllm.common.basemodel.attention.linear.gdn.mtp_fused_recurrent_gated_delta_rule",
             recurrent,
         )
 
