@@ -17,10 +17,8 @@ from lightllm.common.basemodel.attention.base_att import (
     BaseDecodeAttState,
     BasePrefillAttState,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
-    causal_conv1d_fn,
-    causal_conv1d_update,
-)
+from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_update
+from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_qkv import causal_conv1d_qkv
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
@@ -92,22 +90,15 @@ class KDAPrefillAttState(BasePrefillAttState):
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         conv_states = conv_states[..., : backend.conv_kernel_size - 1]
-        mixed_qkv = causal_conv1d_fn(
-            mixed_qkv.transpose(0, 1),
+        q, k, v = causal_conv1d_qkv(
+            mixed_qkv,
             layer_weight.get_merged_kda_conv_weight(),
-            bias=None,
-            query_start_loc=self.infer_state.b1_cu_q_seq_len,
-            cache_indices=self.b_conv_buffer_idx,
-            has_initial_state=self.infer_state.b_ready_cache_len > 0,
-            conv_states=conv_states,
-            activation="silu",
-        ).transpose(0, 1)
-
-        q, k, v = backend.split_qkv(mixed_qkv)
-        q = q.view(1, -1, backend.tp_num_heads, backend.head_dim)
-        k = k.view(1, -1, backend.tp_num_heads, backend.head_dim)
-        v = v.view(1, -1, backend.tp_num_heads, backend.head_dim)
-        raw_gate = raw_gate.view(1, -1, backend.tp_hidden_size)
+            conv_states,
+            self.infer_state.b1_cu_q_seq_len,
+            self.b_conv_buffer_idx,
+            self.infer_state.b_ready_cache_len,
+            self.infer_state.max_q_seq_len,
+        )
         raw_beta = raw_beta.view(1, -1, backend.tp_num_heads)
 
         initial_state = ssm_states[self.b_ssm_buffer_idx].contiguous()
@@ -121,7 +112,7 @@ class KDAPrefillAttState(BasePrefillAttState):
             g_bias=layer_weight.linear_dt_bias.weight,
             initial_state=initial_state,
             output_final_state=True,
-            use_qk_l2norm_in_kernel=True,
+            use_qk_l2norm_in_kernel=False,
             cu_seqlens=self.infer_state.b1_cu_q_seq_len,
             safe_gate=True,
             lower_bound=backend.lower_bound,
