@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, List
 
 import torch
 
-from lightllm.common.attention.api import CapabilityResult
+from lightllm.common.attention.api import UnsupportedAttention
 from lightllm.platform import Platform, get_device_runtime
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
@@ -178,12 +178,11 @@ class GQAFullAttentionState(FullAttentionState):
     def require_zero_initialization(self):
         self.zero_initialize_cache = True
 
-    def check_execution(self, caps, execution):
+    def check_execution(self, caps, execution) -> None:
         if caps.platform not in (Platform.CUDA, Platform.CPU):
-            return CapabilityResult.reject("GQA state operations are unavailable on this platform")
+            raise UnsupportedAttention("GQA state operations are unavailable on this platform")
         if caps.platform is not Platform.CUDA and execution.transfer_paths:
-            return CapabilityResult.reject("GQA CPU/DP/PD transfer operations currently require CUDA")
-        return CapabilityResult.ok()
+            raise UnsupportedAttention("GQA CPU/DP/PD transfer operations currently require CUDA")
 
     # ========================================================================
     # 三、CPU Cache 数据交换

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import fields
 
-from lightllm.common.attention.api import CapabilityResult
+from lightllm.common.attention.api import UnsupportedAttention
 from lightllm.platform import Platform
 
 from .interface import CoreInterface, CpuCacheInterface, DpCopyInterface, PdInterface
@@ -26,7 +26,6 @@ class BoundedAttentionState(CoreInterface, CpuCacheInterface, DpCopyInterface, P
             ),
         )
 
-    def check_execution(self, caps, execution):
+    def check_execution(self, caps, execution) -> None:
         if caps.platform is not Platform.CUDA:
-            return CapabilityResult.reject(f"{self.storage_layout[0]} state operations require CUDA")
-        return CapabilityResult.ok()
+            raise UnsupportedAttention(f"{self.storage_layout[0]} state operations require CUDA")

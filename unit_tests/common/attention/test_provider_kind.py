@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from lightllm.common.attention.api.spec import AttentionFamily
+from lightllm.common.attention.api import AttentionFamily, UnsupportedAttention
 from lightllm.common.attention.selection import load_backend_class
 from lightllm.platform import DeviceCaps, Platform
 from unit_tests.common.attention.helpers import make_spec
@@ -30,6 +30,7 @@ def test_family_is_explicit_and_survives_adapter_relocation(reference, family):
     [
         "backends.sparse_mla.flashmla.fp8:NsaFlashMlaFp8SparseAttBackend",
         "lightllm.models.glm5_next.attention.fp8_sparse_mla:Fp8Glm5NextSparseAttBackend",
+        "lightllm.models.deepseek_v4.attention.sparse_mla:DeepseekV4FlashMlaFp8SparseAttBackend",
     ],
 )
 def test_fp8_sparse_capabilities(monkeypatch, reference):
@@ -37,7 +38,8 @@ def test_fp8_sparse_capabilities(monkeypatch, reference):
 
     backend = load_backend_class(reference)
     caps = DeviceCaps(Platform.CUDA, torch.device("cuda:0"), capability=(8, 0))
-    assert not backend.check_environment(caps).supported
+    with pytest.raises(UnsupportedAttention, match="device capability"):
+        backend.check_environment(caps)
     caps = replace(caps, capability=(9, 0))
     imported = []
 
@@ -46,12 +48,12 @@ def test_fp8_sparse_capabilities(monkeypatch, reference):
         raise ImportError("missing FlashMLA")
 
     monkeypatch.setattr("lightllm.common.attention.backends.base.importlib.import_module", import_provider)
-    result = backend.check_environment(caps)
-    assert not result.supported
+    with pytest.raises(UnsupportedAttention, match="missing FlashMLA"):
+        backend.check_environment(caps)
     assert imported == ["flash_mla"]
-    assert "missing FlashMLA" in result.reason
 
     spec = make_spec(AttentionFamily.SPARSE_MLA)
     spec = replace(spec, cache=replace(spec.cache, format="fp8kv_dsa"))
-    assert backend.check_support(spec).supported
-    assert not backend.check_support(replace(spec, dtype=torch.float32)).supported
+    assert backend.check_support(spec) is None
+    with pytest.raises(UnsupportedAttention, match="activation dtype"):
+        backend.check_support(replace(spec, dtype=torch.float32))

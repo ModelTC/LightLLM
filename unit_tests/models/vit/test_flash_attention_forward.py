@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from lightllm.common.attention.api import CapabilityResult, VarlenAttentionInputs
+from lightllm.common.attention.api import UnsupportedAttention, VarlenAttentionInputs
 from lightllm.common.attention.selection import get_varlen_backend_class
 from lightllm.common.attention.varlen import AutoVarlenAttention
 from lightllm.platform import get_device_runtime
@@ -30,7 +30,7 @@ def reference_attention(inputs):
     return out
 
 
-@pytest.mark.parametrize("error_type", [None, RuntimeError, TypeError, AssertionError])
+@pytest.mark.parametrize("error_type", [None, UnsupportedAttention, RuntimeError, TypeError, AssertionError])
 def test_audio_fallback_overwrites_partial_output(monkeypatch, error_type):
     from lightllm.common.attention import varlen
 
@@ -39,11 +39,11 @@ def test_audio_fallback_overwrites_partial_output(monkeypatch, error_type):
     class FakeBackend:
         @classmethod
         def check_environment(cls, caps):
-            return CapabilityResult.ok()
+            return None
 
         @classmethod
         def check_support(cls, inputs, caps=None):
-            return CapabilityResult.ok()
+            return None
 
         def forward(self, inputs, *, out):
             calls.append("fa3")
@@ -92,9 +92,10 @@ def test_sdpa_preserves_sequence_boundaries_and_output_storage(lengths):
 @pytest.mark.parametrize("head_dim,strided", [(64, False), (80, True), (128, False)])
 def test_varlen(provider, dtype, atol, head_dim, strided):
     backend = get_varlen_backend_class(provider)
-    environment = backend.check_environment(get_device_runtime().caps)
-    if not environment.supported:
-        pytest.skip(environment.reason)
+    try:
+        backend.check_environment(get_device_runtime().caps)
+    except UnsupportedAttention as exc:
+        pytest.skip(str(exc))
     torch.manual_seed(0)
     inputs = make_inputs((1, 0, 65, 129), device="cuda", dtype=dtype, head_dim=head_dim, strided=strided)
     storage = torch.full((*inputs.query.shape[:2], head_dim * 2), -123, device="cuda", dtype=dtype)
@@ -112,9 +113,10 @@ def test_varlen(provider, dtype, atol, head_dim, strided):
 @pytest.mark.parametrize("provider", ["fa3", "triton", "sdpa", "xformers"])
 def test_empty_batch(provider):
     backend = get_varlen_backend_class(provider)
-    environment = backend.check_environment(get_device_runtime().caps)
-    if not environment.supported:
-        pytest.skip(environment.reason)
+    try:
+        backend.check_environment(get_device_runtime().caps)
+    except UnsupportedAttention as exc:
+        pytest.skip(str(exc))
     inputs = make_inputs((0, 0), device="cuda", dtype=torch.bfloat16)
     out = torch.empty_like(inputs.query)
     assert backend().forward(inputs, out=out) is out
@@ -124,9 +126,10 @@ def test_empty_batch(provider):
 @pytest.mark.parametrize("provider", ["fa3", "triton"])
 def test_graph_replay_uses_new_inputs(provider):
     backend_cls = get_varlen_backend_class(provider)
-    environment = backend_cls.check_environment(get_device_runtime().caps)
-    if not environment.supported:
-        pytest.skip(environment.reason)
+    try:
+        backend_cls.check_environment(get_device_runtime().caps)
+    except UnsupportedAttention as exc:
+        pytest.skip(str(exc))
     backend = backend_cls()
     assert backend.supports_graph
     inputs = make_inputs((3, 5), device="cuda", dtype=torch.bfloat16)

@@ -1,7 +1,7 @@
 from lightllm.platform import get_device_runtime
 from lightllm.utils.log_utils import init_logger
 
-from .api import AttentionFamily, AttentionPhase
+from .api import AttentionFamily, AttentionPhase, UnsupportedAttention
 from .selection import BackendSelectionError, get_varlen_backend_class
 
 logger = init_logger(__name__)
@@ -23,16 +23,12 @@ class AutoVarlenAttention:
                 if name not in self.backends:
                     backend = get_varlen_backend_class(name)
                     caps = get_device_runtime(inputs.query.device).caps
-                    environment = backend.check_environment(caps)
-                    if not environment.supported:
-                        self.failures[name] = environment.reason
-                        continue
-                    support = backend.check_support(inputs, caps)
-                    if not support.supported:
-                        self.failures[name] = support.reason
-                        continue
+                    backend.check_environment(caps)
+                    backend.check_support(inputs, caps)
                     self.backends[name] = backend()
                 return self.backends[name].forward(inputs, out=out)
+            except UnsupportedAttention as exc:
+                self.failures[name] = str(exc)
             except Exception as exc:
                 self.failures[name] = str(exc)
                 logger.warning("Disabling %s varlen attention for this encoder: %s", name, exc)

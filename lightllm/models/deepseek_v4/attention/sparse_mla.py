@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import torch
 import triton
 
-from lightllm.common.attention.api import AttentionFamily, CapabilityResult
+from lightllm.common.attention.api import AttentionFamily, UnsupportedAttention
 from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
 
 
@@ -73,20 +73,17 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttentionBackend):
     cache_formats = frozenset({"fp8kv_dsa"})
 
     @classmethod
-    def check_environment(cls, caps):
-        result = super().check_environment(caps)
-        if not result.supported:
-            return result
+    def check_environment(cls, caps) -> None:
+        super().check_environment(caps)
         import flash_mla
 
         parameters = inspect.signature(flash_mla.flash_mla_with_kvcache).parameters
         required = {"out", "attn_sink", "indices", "topk_length", "extra_k_cache", "extra_topk_length"}
         missing = required.difference(parameters)
         if missing:
-            return CapabilityResult.reject(
+            raise UnsupportedAttention(
                 "DSV4 requires the FlashMLA version pinned in docker/Dockerfile; missing: " + ", ".join(sorted(missing))
             )
-        return result
 
     def __init__(self, model):
         super().__init__(model=model)

@@ -172,9 +172,7 @@ def initialize_attention_groups(model):
         *model.att_state_manager.get_full_attention_states(model.att_state_role),
         *model.att_state_manager.get_bounded_attention_states(model.att_state_role),
     ):
-        support = state.check_execution(caps, model.attention_execution)
-        if not support.supported:
-            raise ValueError(support.reason)
+        state.check_execution(caps, model.attention_execution)
     from lightllm.common.attention.selection import select_attention_backend
 
     groups, keys, routes = [], {}, []

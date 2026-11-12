@@ -1,6 +1,7 @@
 import pytest
 
 from lightllm.common.attention import selection
+from lightllm.common.attention.api import UnsupportedAttention
 from lightllm.utils import backend_validator
 
 
@@ -45,16 +46,16 @@ def test_varlen_probe_exercises_selected_backend(monkeypatch):
     assert "mismatch" in reason
 
 
-def test_rejected_probe_does_not_execute_backend(monkeypatch):
-    from lightllm.common.attention.api import CapabilityResult
+@pytest.mark.parametrize("check", ["check_environment", "check_support"])
+def test_rejected_probe_does_not_execute_backend(monkeypatch, check):
     from lightllm.common.attention.backends.dense.sdpa.varlen import SdpaVarlenAttentionBackend
 
     monkeypatch.setattr(backend_validator.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(
-        SdpaVarlenAttentionBackend,
-        "check_support",
-        classmethod(lambda cls, inputs, caps=None: CapabilityResult.reject("layout")),
-    )
+
+    def reject(cls, *args):
+        raise UnsupportedAttention("layout")
+
+    monkeypatch.setattr(SdpaVarlenAttentionBackend, check, classmethod(reject))
     monkeypatch.setattr(
         SdpaVarlenAttentionBackend, "forward", lambda *args, **kwargs: pytest.fail("rejected backend ran")
     )

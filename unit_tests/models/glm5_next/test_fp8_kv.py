@@ -5,30 +5,29 @@ import pytest
 import torch
 import triton
 
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.models.glm5_next.attention.sparse_mla import Glm5NextSparseAttBackend
-from lightllm.models.glm5_next.attention.fp8_sparse_mla import Fp8Glm5NextSparseAttBackend
-from lightllm.models.glm5_next.triton_kernel.fp8_sparse_decode import (
-    can_use_fp8_sparse_direct_decode,
-    fp8_sparse_direct_decode,
-)
-from lightllm.models.glm5_next.triton_kernel.pad_query_heads import _fused_strided_qpad_kernel
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
+from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.models.glm5_next.attention.fp8_sparse_mla import Fp8Glm5NextSparseAttBackend
+from lightllm.models.glm5_next.attention.sparse_mla import Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.triton_kernel import context_flashattention_nopad_fp8 as fp8_prefill
 from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
     _build_prefill_row_table_kernel,
     _gather_prefill_kv_kernel,
 )
+from lightllm.models.glm5_next.triton_kernel.fp8_sparse_decode import (
+    can_use_fp8_sparse_direct_decode,
+    fp8_sparse_direct_decode,
+)
+from lightllm.models.glm5_next.triton_kernel.pad_query_heads import _fused_strided_qpad_kernel
 from unit_tests.common.attention.helpers import (
     backend_plan,
-    update_plan,
-    run_sparse,
-    run_dense,
-    make_plan,
-    make_batch,
     make_backend,
+    make_batch,
+    make_plan,
+    run_dense,
+    run_sparse,
+    update_plan,
 )
-
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 pytest.importorskip("flash_mla")
@@ -53,13 +52,11 @@ def _make_workspace_backend(batch_max_tokens):
 @pytest.mark.parametrize("draft", [False, True])
 @pytest.mark.parametrize("kv_type", ["None", "fp8kv_dsa"])
 def test_main_and_native_mtp_backend_selection(monkeypatch, draft, kv_type):
+    from lightllm.common.attention.api import AttentionFamily, AttentionPhase, CacheLayout
+    from lightllm.common.basemodel import attention
     from lightllm.models.glm5_next.model import Glm5NextTpPartModel
     from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
-
-    from lightllm.common.attention.api import AttentionFamily, AttentionPhase, CacheLayout
-    from lightllm.common.attention.api.capability import CapabilityResult
-    from unit_tests.common.attention.helpers import model_stub, make_spec
-    from lightllm.common.basemodel import attention
+    from unit_tests.common.attention.helpers import make_spec, model_stub
 
     model = object.__new__(Glm5NextMTPModel if draft else Glm5NextTpPartModel)
     vars(model).update(
@@ -75,7 +72,7 @@ def test_main_and_native_mtp_backend_selection(monkeypatch, draft, kv_type):
     model.batch_max_tokens = 8
     expected = Fp8Glm5NextSparseAttBackend if kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
     monkeypatch.setattr("lightllm.common.attention.selection.validate", lambda *args, **kwargs: True)
-    monkeypatch.setattr(expected, "check_environment", classmethod(lambda cls, caps: CapabilityResult.ok()))
+    monkeypatch.setattr(expected, "check_environment", classmethod(lambda cls, caps: None))
     monkeypatch.setattr(
         attention,
         "describe_attention_layer",

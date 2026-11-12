@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.attention.api import AttentionPhase, CacheLayout, PlanCapacity
+from lightllm.common.attention.api import AttentionPhase, CacheLayout, PlanCapacity, UnsupportedAttention
 from lightllm.common.attention.api.inputs import DenseInputs, DenseParams
 from lightllm.common.attention.backends._workspace import AttentionWorkspace
 from lightllm.common.attention.selection import data_type_to_backend, load_backend_class
@@ -44,9 +44,10 @@ def test_startup_probe_runs_the_selected_dense_implementation(provider, phase):
 
     cls = load_backend_class(data_type_to_backend["None"][provider])
     runtime = get_device_runtime()
-    availability = cls.check_environment(runtime.caps)
-    if not availability.supported:
-        pytest.skip(availability.reason)
+    try:
+        cls.check_environment(runtime.caps)
+    except UnsupportedAttention as exc:
+        pytest.skip(str(exc))
     spec = make_spec(
         phase=phase, head_size=64, value_head_size=64, cache=CacheLayout("None", 16, torch.bfloat16, 2, 64, 64)
     )
@@ -69,9 +70,10 @@ def test_startup_probe_runs_the_selected_dense_implementation(provider, phase):
 @pytest.mark.parametrize("head_dim", [64, 128])
 def test_dense_provider_reference_and_decode_graph(provider, phase, head_dim, kv_heads, window):
     cls = load_backend_class(data_type_to_backend["None"][provider])
-    availability = cls.check_environment(get_device_runtime().caps)
-    if not availability.supported:
-        pytest.skip(availability.reason)
+    try:
+        cls.check_environment(get_device_runtime().caps)
+    except UnsupportedAttention as exc:
+        pytest.skip(str(exc))
     torch.manual_seed(616)
     model = model_stub(page_size=4)
     model.config = dict(

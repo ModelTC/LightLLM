@@ -5,7 +5,7 @@ from types import MappingProxyType
 
 import torch
 
-from lightllm.common.attention.api.backend import AttentionBackend, CapabilityResult, LayerBinding
+from lightllm.common.attention.api.backend import AttentionBackend, LayerBinding, UnsupportedAttention
 from lightllm.common.attention.api.batch import AttentionBatch, PlanCapacity
 from lightllm.common.attention.api.spec import AttentionFamily, AttentionPhase, LayerSpec
 from lightllm.platform import DeviceCaps, Platform
@@ -58,54 +58,52 @@ class BaseAttentionBackend(AttentionBackend):
         return backend
 
     @classmethod
-    def check_environment(cls, caps: DeviceCaps) -> CapabilityResult:
+    def check_environment(cls, caps: DeviceCaps) -> None:
         if caps.platform not in cls.supported_platforms:
-            return CapabilityResult.reject(f"{cls.provider} does not support platform {caps.platform.value}")
+            raise UnsupportedAttention(f"{cls.provider} does not support platform {caps.platform.value}")
         if not caps.available:
-            return CapabilityResult.reject(f"device {caps.device} is unavailable")
+            raise UnsupportedAttention(f"device {caps.device} is unavailable")
         if cls.min_device_capability is not None and (
             caps.capability is None or caps.capability < cls.min_device_capability
         ):
-            return CapabilityResult.reject(f"requires device capability {cls.min_device_capability}")
+            raise UnsupportedAttention(f"requires device capability {cls.min_device_capability}")
         try:
             if cls.dependency:
                 importlib.import_module(cls.dependency)
         except (ImportError, OSError) as exc:
-            return CapabilityResult.reject(str(exc))
-        return CapabilityResult.ok()
+            raise UnsupportedAttention(str(exc)) from exc
 
     @classmethod
-    def check_support(cls, spec: LayerSpec, caps=None, execution=None) -> CapabilityResult:
+    def check_support(cls, spec: LayerSpec, caps=None, execution=None) -> None:
         if spec.family is not cls.family:
-            return CapabilityResult.reject(f"{cls.__name__} does not implement {spec.family.value}")
+            raise UnsupportedAttention(f"{cls.__name__} does not implement {spec.family.value}")
         if spec.phase not in cls.supported_phases:
-            return CapabilityResult.reject(f"{cls.provider} does not implement {spec.phase.value}")
+            raise UnsupportedAttention(f"{cls.provider} does not implement {spec.phase.value}")
         if spec.cache.format not in cls.cache_formats:
-            return CapabilityResult.reject(f"cache encoding {spec.cache.format} is unsupported")
+            raise UnsupportedAttention(f"cache encoding {spec.cache.format} is unsupported")
         if spec.dtype not in cls.activation_dtypes:
-            return CapabilityResult.reject(f"activation dtype {spec.dtype} is unsupported")
+            raise UnsupportedAttention(f"activation dtype {spec.dtype} is unsupported")
         if spec.use_alibi and not cls.supports_alibi:
-            return CapabilityResult.reject("this backend does not support ALiBi")
+            raise UnsupportedAttention("this backend does not support ALiBi")
         if spec.use_alibi and spec.sliding_window is not None:
-            return CapabilityResult.reject("ALiBi with sliding-window attention is unsupported")
+            raise UnsupportedAttention("ALiBi with sliding-window attention is unsupported")
         if spec.use_sink and not cls.supports_attention_sink:
-            return CapabilityResult.reject("this backend does not support attention sinks")
+            raise UnsupportedAttention("this backend does not support attention sinks")
         if spec.sliding_window is not None and not cls.supports_sliding_window:
-            return CapabilityResult.reject("this backend does not support sliding-window attention")
+            raise UnsupportedAttention("this backend does not support sliding-window attention")
         if cls.max_head_size is not None and spec.head_size > cls.max_head_size:
-            return CapabilityResult.reject(f"head size exceeds {cls.max_head_size}")
+            raise UnsupportedAttention(f"head size exceeds {cls.max_head_size}")
         if spec.phase is AttentionPhase.DECODE and not spec.causal and not cls.supports_noncausal_decode:
-            return CapabilityResult.reject("this backend does not support non-causal block decode")
+            raise UnsupportedAttention("this backend does not support non-causal block decode")
         if spec.use_mtp and spec.sliding_window is not None and not cls.supports_speculative_window:
-            return CapabilityResult.reject("speculative decode does not implement sliding windows")
+            raise UnsupportedAttention("speculative decode does not implement sliding windows")
         if execution is not None:
             if execution.expert_parallel and not cls.supports_expert_parallel:
-                return CapabilityResult.reject("this backend is incompatible with expert-parallel MoE execution")
+                raise UnsupportedAttention("this backend is incompatible with expert-parallel MoE execution")
             if spec.phase in execution.graph_phases and (
                 spec.phase not in cls.supported_graph_phases or (caps is not None and not caps.supports_graph)
             ):
-                return CapabilityResult.reject(f"{spec.phase.value} Graph is unsupported")
-        return CapabilityResult.ok()
+                raise UnsupportedAttention(f"{spec.phase.value} Graph is unsupported")
 
     def allocate_plan(self, capacity: PlanCapacity, *, capture: bool, workspace) -> PreparedPlan:
         if capacity.phase is AttentionPhase.PREFILL:

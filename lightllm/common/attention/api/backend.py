@@ -15,26 +15,8 @@ Output = TypeVar("Output")
 Params = TypeVar("Params")
 
 
-@dataclass(frozen=True)
-class CapabilityResult:
-    """后端对运行环境或 LayerSpec 的支持结论，供初始化时的 selector 使用。
-
-    不支持是正常的候选筛选结果；reason 用于汇总各候选的拒绝原因。
-    auto 可以继续尝试候选，显式选择不支持的后端则报错，不静默回退。
-    """
-
-    supported: bool
-    reason: str = ""
-
-    @classmethod
-    def ok(cls):
-        return cls(True)
-
-    @classmethod
-    def reject(cls, reason: str):
-        if not reason:
-            raise ValueError("a rejected capability needs a reason")
-        return cls(False, reason)
+class UnsupportedAttention(ValueError):
+    """当前环境或输入不满足此 attention 实现的要求。"""
 
 
 @dataclass(frozen=True)
@@ -119,13 +101,14 @@ class VarlenAttentionBackend(ABC):
 
     @classmethod
     @abstractmethod
-    def check_environment(cls, caps) -> CapabilityResult:
+    def check_environment(cls, caps) -> None:
+        """检查运行环境；不支持时抛出 UnsupportedAttention。"""
         pass
 
     @classmethod
     @abstractmethod
-    def check_support(cls, inputs: VarlenAttentionInputs, caps=None) -> CapabilityResult:
-        """初始化或独立探针使用；forward 依赖输入契约，避免逐层重复能力检查。"""
+    def check_support(cls, inputs: VarlenAttentionInputs, caps=None) -> None:
+        """初始化或探针校验输入；不支持时抛出 UnsupportedAttention。"""
         pass
 
     @abstractmethod

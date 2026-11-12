@@ -305,24 +305,26 @@ def _validate_flashmla_sparse(dtype=torch.bfloat16, spec=None):
 
 
 def _validate_varlen(backend_name, dtype=None, device=None, head_dim=80):
-    from lightllm.common.attention.api import VarlenAttentionInputs
+    from lightllm.common.attention.api import UnsupportedAttention, VarlenAttentionInputs
     from lightllm.common.attention.selection import get_varlen_backend_class
     from lightllm.platform import get_device_runtime
 
     runtime = get_device_runtime(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     backend_cls = get_varlen_backend_class(backend_name)
-    environment = backend_cls.check_environment(runtime.caps)
-    if not environment.supported:
-        return False, environment.reason
+    try:
+        backend_cls.check_environment(runtime.caps)
+    except UnsupportedAttention as exc:
+        return False, str(exc)
     device = runtime.device
     dtype = dtype or (torch.float32 if device.type == "cpu" else torch.bfloat16)
     q, k, v = [torch.randn(8, 2, head_dim, dtype=dtype, device=device) for _ in range(3)]
     cu = torch.tensor([0, 3, 8], dtype=torch.int32, device=device)
     out = torch.empty_like(q)
     inputs = VarlenAttentionInputs(q, k, v, cu, 5)
-    support = backend_cls.check_support(inputs, runtime.caps)
-    if not support.supported:
-        return False, support.reason
+    try:
+        backend_cls.check_support(inputs, runtime.caps)
+    except UnsupportedAttention as exc:
+        return False, str(exc)
     backend_cls().forward(inputs, out=out)
     expected = torch.empty_like(q)
     for start, end in ((0, 3), (3, 8)):

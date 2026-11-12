@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from lightllm.common.attention import selection
-from lightllm.common.attention.api import AttentionFamily, AttentionPhase, CapabilityResult
+from lightllm.common.attention.api import AttentionFamily, AttentionPhase, UnsupportedAttention
 from lightllm.common.attention.backends.base import BaseAttentionBackend
 from unit_tests.common.attention.helpers import make_backend, make_batch, make_plan, make_spec, model_stub
 
@@ -44,12 +44,6 @@ def test_plan_capacity_and_backend_identity(capture):
         make_backend().update(plan)
 
 
-def test_capability_result_legacy_import_is_the_public_type():
-    from lightllm.common.attention.api.capability import CapabilityResult as LegacyCapabilityResult
-
-    assert LegacyCapabilityResult is CapabilityResult
-
-
 @pytest.mark.parametrize("requested", ["auto", "triton"])
 def test_selection_never_falls_back_to_a_rejected_backend(monkeypatch, requested):
     spec = make_spec(cache=replace(make_spec().cache, format="fp8kv_sph"))
@@ -57,7 +51,7 @@ def test_selection_never_falls_back_to_a_rejected_backend(monkeypatch, requested
     monkeypatch.setattr(
         BaseAttentionBackend,
         "check_environment",
-        classmethod(lambda cls, caps: CapabilityResult.ok()),
+        classmethod(lambda cls, caps: None),
     )
     with pytest.raises(selection.BackendSelectionError, match="encoding fp8kv_sph"):
         selection.select_attention_backend(
@@ -72,14 +66,12 @@ def test_selection_never_falls_back_to_a_rejected_backend(monkeypatch, requested
 
 @pytest.mark.parametrize("requested", ["auto", "triton"])
 def test_environment_checks_apply_to_explicit_and_auto(monkeypatch, requested):
-    from lightllm.common.attention.api import CapabilityResult
-
     monkeypatch.setattr("lightllm.common.basemodel.attention.describe_attention_layers", lambda *args: (make_spec(),))
-    monkeypatch.setattr(
-        BaseAttentionBackend,
-        "check_environment",
-        classmethod(lambda cls, caps: CapabilityResult.reject("missing extension")),
-    )
+
+    def reject(cls, caps):
+        raise UnsupportedAttention("missing extension")
+
+    monkeypatch.setattr(BaseAttentionBackend, "check_environment", classmethod(reject))
     with pytest.raises(selection.BackendSelectionError, match="missing extension"):
         selection.select_attention_backend(
             family=AttentionFamily.DENSE,
@@ -91,28 +83,29 @@ def test_environment_checks_apply_to_explicit_and_auto(monkeypatch, requested):
         )
 
 
-def _backend_check_exception_candidates(monkeypatch):
+def _backend_check_exception_candidates(monkeypatch, error_type=RuntimeError):
     class BrokenBackend(BaseAttentionBackend):
         provider = "broken"
 
         @classmethod
         def check_environment(cls, caps):
-            raise RuntimeError("provider ABI mismatch")
+            raise error_type("provider ABI mismatch")
 
     class WorkingBackend(BaseAttentionBackend):
         provider = "working"
 
         @classmethod
         def check_environment(cls, caps):
-            return CapabilityResult.ok()
+            return None
 
     monkeypatch.setattr("lightllm.common.basemodel.attention.describe_attention_layers", lambda *args: (make_spec(),))
     monkeypatch.setattr("lightllm.common.attention.selection.validate", lambda *args, **kwargs: True)
     return {"None": {"broken": BrokenBackend, "working": WorkingBackend}}
 
 
-def test_backend_check_exception_allows_auto_fallback(monkeypatch):
-    candidates = _backend_check_exception_candidates(monkeypatch)
+@pytest.mark.parametrize("error_type", [UnsupportedAttention, ValueError, RuntimeError])
+def test_backend_check_exception_allows_auto_fallback(monkeypatch, error_type):
+    candidates = _backend_check_exception_candidates(monkeypatch, error_type)
     selected = selection.select_attention_backend(
         family=AttentionFamily.DENSE,
         phase=AttentionPhase.DECODE,
@@ -124,8 +117,9 @@ def test_backend_check_exception_allows_auto_fallback(monkeypatch):
     assert selected.provider == "working"
 
 
-def test_backend_check_exception_is_reported_for_explicit_selection(monkeypatch):
-    candidates = _backend_check_exception_candidates(monkeypatch)
+@pytest.mark.parametrize("error_type", [UnsupportedAttention, ValueError, RuntimeError])
+def test_backend_check_exception_is_reported_for_explicit_selection(monkeypatch, error_type):
+    candidates = _backend_check_exception_candidates(monkeypatch, error_type)
     with pytest.raises(selection.BackendSelectionError) as error:
         selection.select_attention_backend(
             family=AttentionFamily.DENSE,
@@ -136,7 +130,32 @@ def test_backend_check_exception_is_reported_for_explicit_selection(monkeypatch)
             priority=["broken", "working"],
         )
 
-    assert "provider check failed: RuntimeError: provider ABI mismatch" in str(error.value)
+    reason = "provider ABI mismatch"
+    if error_type is not UnsupportedAttention:
+        reason = f"provider check failed: {error_type.__name__}: {reason}"
+    assert error.value.failures == {"broken": reason}
+
+
+@pytest.mark.parametrize("requested", ["auto", "triton"])
+def test_rejection_reaches_rank_consensus(monkeypatch, requested):
+    spec = make_spec(dtype=torch.float64)
+    ranks = []
+    monkeypatch.setattr(BaseAttentionBackend, "check_environment", classmethod(lambda cls, caps: None))
+    monkeypatch.setattr(selection, "validate", lambda *args, **kwargs: pytest.fail("probed rejected inputs"))
+    monkeypatch.setattr(selection, "_check_rank_selection", lambda *args: ranks.append(args))
+    with pytest.raises(selection.BackendSelectionError, match="activation dtype"):
+        selection.select_attention_backend(
+            family=spec.family,
+            phase=spec.phase,
+            model=model_stub(),
+            requested=requested,
+            specs=(spec,),
+            candidates={"None": {"triton": BaseAttentionBackend}},
+            priority=["triton"],
+        )
+    assert len(ranks) == 1
+    assert ranks[0][:3] == (spec.family, spec.phase, None)
+    assert "activation dtype" in ranks[0][3]
 
 
 def test_rank_selection_checks_all_ranks_after_local_selection(monkeypatch):

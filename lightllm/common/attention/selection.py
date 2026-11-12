@@ -3,6 +3,7 @@ import importlib
 import torch
 import torch.distributed as dist
 
+from lightllm.common.attention.api.backend import UnsupportedAttention
 from lightllm.common.attention.api.spec import AttentionFamily, AttentionPhase
 from lightllm.platform import Platform
 from lightllm.utils import backend_validator
@@ -159,23 +160,18 @@ def select_attention_backend(*, family, phase, model, requested="auto", candidat
             continue
         try:
             backend = load_backend_class(available[name])
-            environment = backend.check_environment(caps)
-            if not environment.supported:
-                failures[name] = environment.reason
-                continue
+            backend.check_environment(caps)
             for spec in specs:
-                result = backend.check_support(spec, caps, execution)
-                if not result.supported:
-                    failures[name] = result.reason
-                    break
-            if name in failures:
-                continue
+                backend.check_support(spec, caps, execution)
             for spec in specs:
                 if not validate(available[name], device=str(caps.device), dtype=spec.dtype, spec=spec):
                     failures[name] = "provider numerical probe failed on the assigned device/dtype"
                     break
             if name in failures:
                 continue
+        except UnsupportedAttention as exc:
+            failures[name] = str(exc)
+            continue
         except Exception as exc:
             failures[name] = f"provider check failed: {type(exc).__name__}: {exc}"
             continue
