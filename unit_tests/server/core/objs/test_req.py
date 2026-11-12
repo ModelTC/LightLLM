@@ -1,10 +1,13 @@
 import pytest
 import easydict
+import numpy as np
+import xxhash
 from types import SimpleNamespace
 from lightllm.server.core.objs.req import Req, ChunkedPrefillReq, SamplingParams
 from lightllm.server.core.objs.token_metadata import ReqFinalTokenMetadata
 from lightllm.utils import shm_utils
 from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args
+from lightllm.utils.kv_cache_utils import compute_token_list_hash
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -41,6 +44,39 @@ def req():
 def test_req_init(req):
     assert req.request_id == 1
     assert req.input_len == 3
+
+
+@pytest.mark.parametrize("hybrid", [False, True])
+@pytest.mark.parametrize("length", [1024, 1025])
+def test_req_prompt_cache_hashes_keep_existing_page_digests(monkeypatch, hybrid, length):
+    args = get_env_start_args()
+    monkeypatch.setitem(args, "enable_cpu_cache", True)
+    monkeypatch.setitem(args, "cpu_cache_token_page_size", 512)
+    monkeypatch.setitem(args, "linear_att_hash_page_size", 256)
+    monkeypatch.setitem(args, "linear_att_page_block_num", 2)
+    monkeypatch.setattr("lightllm.server.core.objs.req.is_hybrid_att_model", lambda _: hybrid)
+    tokens = list(range(length))
+    tokens[11] = 2 ** 40
+    hash_page = 256 if hybrid else 512
+    ends = list(range(hash_page, length, hash_page))
+    expected = [xxhash.xxh3_128(np.asarray(tokens[:end], dtype=np.uint64)).intdigest() for end in ends]
+    assert compute_token_list_hash(tokens, hash_page) == expected
+
+    req = Req()
+    req.init(1, tokens, {"max_new_tokens": 1}, None, chunked_prefill_size=128)
+    try:
+        if hybrid:
+            assert req.hybrid_token_hash_list.get_all() == expected
+            if ends[-1] % 512:
+                cpu_ends, cpu_hashes = ends[1::2] + ends[-1:], expected[1::2] + expected[-1:]
+            else:
+                cpu_ends, cpu_hashes = ends[1::2], expected[1::2]
+        else:
+            cpu_ends, cpu_hashes = ends, expected
+        assert req.token_hash_page_len_list.get_all() == cpu_ends
+        assert req.token_hash_list.get_all() == cpu_hashes
+    finally:
+        req.detach_shm_arrays()
 
 
 def test_req_init_validates_dictionary_params():
