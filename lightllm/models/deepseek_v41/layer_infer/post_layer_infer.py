@@ -6,6 +6,11 @@ class DeepseekV41PostLayerInfer(LlamaPostLayerInfer):
     def token_forward(self, input_embdings, infer_state, layer_weight):
         if infer_state.is_prefill and infer_state.decoder_state is not None:
             infer_state = infer_state.decoder_state
+        return super().token_forward(input_embdings, infer_state, layer_weight)
+
+    def _slice_get_last_input(self, input_embdings, infer_state):
         streams, pre_mix = input_embdings
-        collapsed = hc_combine(streams, pre_mix)
-        return super().token_forward(collapsed, infer_state, layer_weight)
+        if infer_state.is_prefill and not infer_state.return_all_prompt_logics:
+            last_input = hc_combine(streams, pre_mix, cu_q_lens=infer_state.b1_cu_q_seq_len)
+            return last_input, infer_state.batch_size
+        return super()._slice_get_last_input(hc_combine(streams, pre_mix), infer_state)

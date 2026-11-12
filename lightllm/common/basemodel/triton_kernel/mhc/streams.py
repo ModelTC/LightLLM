@@ -37,6 +37,7 @@ def _hc_combine_kernel(
     residual,
     gates,
     output,
+    cu_q_lens,
     residual_row_stride,
     residual_col_stride,
     gate_row_stride,
@@ -44,11 +45,15 @@ def _hc_combine_kernel(
     HIDDEN: tl.constexpr,
     STREAMS: tl.constexpr,
     BLOCK: tl.constexpr,
+    PREFILL_LAST_ROWS: tl.constexpr,
 ):
     row = tl.program_id(0)
+    input_row = row
+    if PREFILL_LAST_ROWS:
+        input_row = tl.load(cu_q_lens + row + 1) - 1
     cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    residual_row = residual + row * residual_row_stride
-    gate_row = gates + row * gate_row_stride
+    residual_row = residual + input_row * residual_row_stride
+    gate_row = gates + input_row * gate_row_stride
     combined = tl.zeros((BLOCK,), dtype=tl.float32)
     for stream in tl.static_range(STREAMS):
         values = tl.load(residual_row + (stream * HIDDEN + cols) * residual_col_stride, cols < HIDDEN, 0).to(tl.float32)
@@ -58,14 +63,25 @@ def _hc_combine_kernel(
     tl.store(output + row * HIDDEN + cols, combined, cols < HIDDEN)
 
 
-def hc_combine(x: torch.Tensor, gates: torch.Tensor) -> torch.Tensor:
-    """Combine flattened residual streams with existing FP32 gates."""
+def hc_combine(x: torch.Tensor, gates: torch.Tensor, *, cu_q_lens: torch.Tensor | None = None) -> torch.Tensor:
+    """Combine flattened streams, selecting just the final row of each query when given offsets."""
     tokens, flattened_hidden = x.shape
     streams = gates.shape[1]
     hidden = flattened_hidden // streams
-    out = torch.empty((tokens, hidden), dtype=x.dtype, device=x.device)
+    output_rows = tokens if cu_q_lens is None else cu_q_lens.shape[0] - 1
+    out = torch.empty((output_rows, hidden), dtype=x.dtype, device=x.device)
     block = 512
-    _hc_combine_kernel[(tokens, triton.cdiv(hidden, block))](
-        x, gates, out, *x.stride(), *gates.stride(), hidden, streams, block, enable_fp_fusion=False
+    _hc_combine_kernel[(output_rows, triton.cdiv(hidden, block))](
+        x,
+        gates,
+        out,
+        cu_q_lens,
+        *x.stride(),
+        *gates.stride(),
+        hidden,
+        streams,
+        block,
+        PREFILL_LAST_ROWS=cu_q_lens is not None,
+        enable_fp_fusion=False,
     )
     return out

@@ -56,6 +56,15 @@ def test_hc_combine_rounds_fp32_product_before_sum():
     torch.testing.assert_close(hc_combine(residual, gates), expected, atol=0, rtol=0)
 
 
+def test_hc_combine_selects_ragged_prefill_last_rows():
+    residual = torch.randn(129, 4 * 5120, device="cuda", dtype=torch.bfloat16)
+    gates = torch.rand(129, 4, device="cuda")
+    offsets = torch.tensor([0, 2, 12, 127, 129], device="cuda", dtype=torch.int32)
+    expected = hc_combine(residual, gates)[offsets[1:] - 1]
+    actual = hc_combine(residual, gates, cu_q_lens=offsets)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
 @pytest.mark.parametrize("tokens", [1, 6, 16, 17, 64, 128])
 @pytest.mark.parametrize("hidden", [128, 5120])
 @pytest.mark.parametrize("disable_deepgemm", [False, True])
