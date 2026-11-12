@@ -12,7 +12,7 @@ from lightllm.common.attention.backends.gdn.flashqla.backend import FlashQlaLine
 from lightllm.common.attention.backends.gdn.triton import backend as gdn
 from lightllm.common.attention.backends.gdn.triton.backend import TritonLinearAttBackend
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
-from unit_tests.common.attention.helpers import make_backend, make_batch, make_layer_attention, make_plan
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_context, make_layer_attention
 
 
 @pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float32])
@@ -31,11 +31,11 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
         _split_qkvzba=lambda mixed: (mixed, q, q, q),
     )
     batch = make_batch((1,), phase=AttentionPhase.PREFILL)
-    plan = make_plan(backend, batch)
-    backend.update(plan)
+    context = make_context(backend, batch)
+    backend.update(context)
     params = GDNParams(torch.zeros((1, 3)), ssm, None, None, None, None)
-    attention = make_layer_attention(backend, plan, params)
-    result, z = attention.forward(plan, GDNInputs(torch.zeros((1, 3), dtype=cache_dtype)))
+    attention = make_layer_attention(backend, context, params)
+    result, z = attention.forward(context, GDNInputs(torch.zeros((1, 3), dtype=cache_dtype)))
     assert result is q and z is q
     assert ssm.dtype == cache_dtype
     torch.testing.assert_close(ssm, final.to(cache_dtype))
@@ -46,15 +46,15 @@ def test_decode_and_fixed_mtp_state_routes(provider):
     requests = torch.tensor([2, 2, 2, 4, 4, 4], dtype=torch.int32)
     cursor = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
     backend = make_backend(provider, decode_draft_step=2, mtp_state_index=cursor)
-    plan = make_plan(backend, make_batch((3,) * 6, b_req_idx=requests))
-    backend.update(plan)
-    assert plan.b_conv_buffer_idx.tolist() == [2, 4]
-    assert plan.b_num_accepted_tokens.tolist() == [2, 3]
-    assert plan.b_ssm_buffer_idx.tolist() == [[6, 7, 8], [12, 13, 14]]
+    context = make_context(backend, make_batch((3,) * 6, b_req_idx=requests))
+    backend.update(context)
+    assert context.b_conv_buffer_idx.tolist() == [2, 4]
+    assert context.b_num_accepted_tokens.tolist() == [2, 3]
+    assert context.b_ssm_buffer_idx.tolist() == [[6, 7, 8], [12, 13, 14]]
     backend.decode_draft_step = 0
-    plan = make_plan(backend, make_batch((3, 3), b_req_idx=torch.tensor([2, 4])))
-    backend.update(plan)
-    assert plan.b_ssm_buffer_idx.tolist() == [2, 4]
+    context = make_context(backend, make_batch((3, 3), b_req_idx=torch.tensor([2, 4])))
+    backend.update(context)
+    assert context.b_ssm_buffer_idx.tolist() == [2, 4]
 
 
 def test_dynamic_mtp_layout_uses_bound_state_cursor(monkeypatch):
@@ -68,11 +68,11 @@ def test_dynamic_mtp_layout_uses_bound_state_cursor(monkeypatch):
     cursor = torch.zeros(8, dtype=torch.int32)
     backend = make_backend(TritonLinearAttBackend, decode_draft_step=2, dynamic_verify=True, mtp_state_index=cursor)
     batch = make_batch((3, 3, 3), b_req_idx=torch.tensor([2, 4, 4]), b_mtp_index=torch.tensor([0, 0, 1]))
-    plan = make_plan(backend, batch)
-    backend.update(plan)
+    context = make_context(backend, batch)
+    backend.update(context)
     assert calls[0]["req_to_mtp_state_index"] is cursor
     assert calls[0]["hold_req_id"] == 7
-    assert plan.b_ssm_buffer_idx.tolist() == [[6, 7, 8], [12, 13, 14]]
+    assert context.b_ssm_buffer_idx.tolist() == [[6, 7, 8], [12, 13, 14]]
 
 
 def test_triton_backend_supplies_chunk_kernel():

@@ -8,7 +8,7 @@ flashinfer = pytest.importorskip("flashinfer")
 
 from lightllm.common.attention.backends.mla.flashinfer.backend import MlaFlashInferAttBackend
 from lightllm.common.basemodel.infer_struct import InferStateInfo  # noqa: E402
-from unit_tests.common.attention.helpers import backend_plan
+from unit_tests.common.attention.helpers import backend_context
 
 
 def _make_wrapper(
@@ -127,7 +127,7 @@ def test_mla_cuda_graph_triton_plan_matches_flashinfer_plan(lengths, num_heads, 
     captured_owner = InferStateInfo()
     captured_owner.batch_size = batch_size
     captured_owner.b_seq_len = graph_wrapper._kv_len_arr_buf
-    graph_state = backend_plan(
+    graph_state = backend_context(
         MlaFlashInferAttBackend,
         "decode",
         settings=backend,
@@ -143,7 +143,7 @@ def test_mla_cuda_graph_triton_plan_matches_flashinfer_plan(lengths, num_heads, 
     with torch.cuda.graph(graph):
         graph_wrapper.run(q_nope, q_pe, ckv, kpe, out=graph_out, return_lse=False)
 
-    # 复用同一 graph，覆盖页表变化、末页空位及 split/exact 切换后的 plan 更新。
+    # 复用同一 graph，覆盖页表变化、末页空位及 split/exact 切换后的 context 更新。
     for replay_lengths in (lengths, [1] * batch_size, lengths):
         replay_lens = torch.tensor(replay_lengths, dtype=torch.int32, device="cuda")
         replay_indptr = torch.zeros_like(kv_indptr)

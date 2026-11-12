@@ -152,13 +152,13 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=infer_state.attention_plans[self.prefill_attention.group_id],
+            att_state=infer_state.attention_contexts[self.prefill_attention.group_id],
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
 
         return self.prefill_attention.forward(
-            infer_state.attention_plans[self.prefill_attention.group_id],
+            infer_state.attention_contexts[self.prefill_attention.group_id],
             SparseMLAPrefillInputs(q, topk_mem_indices, topk_indices, kv),
         )
 
@@ -222,14 +222,14 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=infer_state.attention_plans[self.decode_attention.group_id],
+            att_state=infer_state.attention_contexts[self.decode_attention.group_id],
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
         q_rope = q_nope[..., :0]
 
         return self.decode_attention.forward(
-            infer_state.attention_plans[self.decode_attention.group_id],
+            infer_state.attention_contexts[self.decode_attention.group_id],
             SparseMLADecodeInputs(q_nope, q_rope, topk_mem_indices),
         )
 
@@ -312,7 +312,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
 
         def kda_prefill_func(new_infer_state):
             tmp_output = self.prefill_attention.forward(
-                new_infer_state.attention_plans[self.prefill_attention.group_id],
+                new_infer_state.attention_contexts[self.prefill_attention.group_id],
                 KDAInputs(_mixed_qkv, _raw_decay_gate, _beta_logits),
             )
             assert tmp_output.shape == _output.shape
@@ -340,7 +340,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             )
         else:
             core_output = self.prefill_attention.forward(
-                infer_state.attention_plans[self.prefill_attention.group_id],
+                infer_state.attention_contexts[self.prefill_attention.group_id],
                 KDAInputs(qkv, raw_decay_gate, beta_logits),
             )
         return self._kda_post(core_output, raw_output_gate, infer_state, layer_weight)
@@ -352,7 +352,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             input_embeddings, infer_state, layer_weight
         )
         core_output = self.decode_attention.forward(
-            infer_state.attention_plans[self.decode_attention.group_id], KDAInputs(qkv, raw_decay_gate, beta_logits)
+            infer_state.attention_contexts[self.decode_attention.group_id], KDAInputs(qkv, raw_decay_gate, beta_logits)
         )
         return self._kda_post(core_output, raw_output_gate, infer_state, layer_weight)
 

@@ -13,13 +13,13 @@ flashmla = pytest.importorskip("flash_mla")
 from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
 from lightllm.models.deepseek_v4.attention import sparse_mla as attention
 from unit_tests.common.attention.helpers import (
-    backend_plan,
+    backend_context,
     make_backend,
     make_batch,
-    make_plan,
+    make_context,
     run_dense,
     run_sparse,
-    update_plan,
+    update_context,
 )
 
 
@@ -161,8 +161,8 @@ def _reference(q, decoded, extra_decoded, params, heads):
 @pytest.mark.parametrize("provide_out", [False, True])
 def test_prefill_matches_reference_and_preserves_out(monkeypatch, heads, ratio, provide_out):
     backend, state_info, q, pool, decoded, extra_decoded, params = _case(heads, ratio)
-    state = backend_plan(type(backend), "prefill", settings=backend)
-    update_plan(state, state_info)
+    state = backend_context(type(backend), "prefill", settings=backend)
+    update_context(state, state_info)
     allocations = []
 
     def alloc_output(shape, **kwargs):
@@ -217,9 +217,9 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
         state_info.q = q
         state_info.packed_kv = packed_kv
         state_info.att_control = params
-        state_info.attention_plans = {0: backend_plan(type(backend), "decode", settings=backend)}
+        state_info.attention_contexts = {0: backend_context(type(backend), "decode", settings=backend)}
         state_info.attention_groups = (SimpleNamespace(backend_for=lambda phase, backend=backend: backend),)
-        update_plan(state_info.attention_plans[0], state_info)
+        update_context(state_info.attention_contexts[0], state_info)
         state_info.b_req_idx = torch.arange(q.shape[0], dtype=torch.int32, device=q.device)
         from lightllm.common.attention_state import AttentionStateManager
 
@@ -230,7 +230,8 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
 
     def decode_func(*states):
         outputs = tuple(
-            run_sparse(state.attention_plans[0], state, state.q, state.packed_kv, state.att_control) for state in states
+            run_sparse(state.attention_contexts[0], state, state.q, state.packed_kv, state.att_control)
+            for state in states
         )
         return outputs if overlap else outputs[0]
 
@@ -238,7 +239,7 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
     outputs = runner.capture_decode(decode_func, *(case[0] for case in cases))
     outputs = outputs if overlap else (outputs,)
     for state_info, _, _, _ in cases:
-        state = state_info.attention_plans[0]
+        state = state_info.attention_contexts[0]
         eager_meta = state.sched_meta_by_ratio[ratio]
         capture_meta = state.capture_sched_meta_by_ratio[ratio]
         assert eager_meta.tile_scheduler_metadata.data_ptr() != capture_meta.tile_scheduler_metadata.data_ptr()
@@ -269,8 +270,8 @@ def test_prefill_out_supports_strided_scratch_buffer(heads):
     backend, state_info, q, pool, decoded, extra_decoded, params = _case(heads, 4)
     storage = torch.full((q.shape[0], backend.padded_q_head_num, 1024), float("nan"), dtype=q.dtype, device=q.device)
     out = storage[..., :512]
-    state = backend_plan(type(backend), "prefill", settings=backend)
-    update_plan(state, state_info)
+    state = backend_context(type(backend), "prefill", settings=backend)
+    update_context(state, state_info)
     actual = run_sparse(state, state_info, q, pool, params, out=out)
     assert actual.data_ptr() == out.data_ptr()
     assert actual.stride() == out.stride()
@@ -315,8 +316,8 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         infer_state.attn_params = dict(params, swa_lengths=torch.full_like(params["swa_lengths"], length))
         if ratio:
             infer_state.attn_params["extra_lengths"] = torch.full_like(params["extra_lengths"], length)
-        infer_state.attention_plans = {0: backend_plan(type(backend), "prefill", settings=backend)}
-        update_plan(infer_state.attention_plans[0], infer_state)
+        infer_state.attention_contexts = {0: backend_context(type(backend), "prefill", settings=backend)}
+        update_context(infer_state.attention_contexts[0], infer_state)
         return infer_state
 
     allocations = []
@@ -349,9 +350,9 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
     attention_params = DeepseekV4Params(
         packed_kv[0], packed_kv[0], packed_kv[1], ratio, 512, params["softmax_scale"], params["attn_sink"]
     )
-    attention_plan = backend_plan(type(backend), "prefill", settings=backend)
+    attention_context = backend_context(type(backend), "prefill", settings=backend)
     layer.prefill_attention = replace(
-        make_layer_attention(backend, attention_plan, attention_params), alloc_tensor=alloc_output
+        make_layer_attention(backend, attention_context, attention_params), alloc_tensor=alloc_output
     )
     layer._compress_and_index = compress_and_index
     q_lora = torch.empty((q.shape[0], 4), dtype=q.dtype, device=q.device)
@@ -376,11 +377,11 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         atol=5e-4,
     )
     assert len(infer_state.prefill_cuda_graph_exe_list) == 3
-    previous_meta = infer_state.attention_plans[0].sched_meta_by_ratio[ratio]
+    previous_meta = infer_state.attention_contexts[0].sched_meta_by_ratio[ratio]
     for length in (128, 64, 1, 64):
         q.mul_(1.25)
         infer_state = new_request(length)
-        current_meta = infer_state.attention_plans[0].sched_meta_by_ratio[ratio]
+        current_meta = infer_state.attention_contexts[0].sched_meta_by_ratio[ratio]
         assert current_meta.tile_scheduler_metadata is None
         actual = runner.replay([q, q_lora, x], infer_state)[0]
         assert callback_states[-1] is infer_state

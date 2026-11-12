@@ -64,7 +64,7 @@ def test_ffn_only_draft_has_no_state_or_attention_backend(monkeypatch: pytest.Mo
     assert not hasattr(state, "full_att_state")
     assert state.att_state_manager is resources
     assert state.is_draft_model
-    assert state.attention_groups == () and state.attention_plans == {}
+    assert state.attention_groups == () and state.attention_contexts == {}
     assert state.req_manager is draft.req_manager
     from lightllm.common.attention.api import AttentionPhase
     from unit_tests.common.attention.helpers import batch_from_fixture

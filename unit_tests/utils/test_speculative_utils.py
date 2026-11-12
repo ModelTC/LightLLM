@@ -17,7 +17,7 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 from lightllm.utils import envs_utils
-from unit_tests.common.attention.helpers import make_backend, make_batch, make_plan, model_stub
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_context, model_stub
 
 
 @pytest.mark.parametrize(
@@ -107,18 +107,18 @@ def test_attention_backend_selects_causality(monkeypatch, mtp_mode, is_draft_mod
 def test_fa3_prefill_state_owns_causality(monkeypatch, state_class):
     backend = make_backend(state_class, causal=False)
     monkeypatch.setattr(import_module(state_class.__module__), "page_table_copy", lambda **kwargs: None)
-    plan = make_plan(backend, make_batch(phase=AttentionPhase.PREFILL))
-    backend.update(plan)
-    assert plan.causal is False
+    context = make_context(backend, make_batch(phase=AttentionPhase.PREFILL))
+    backend.update(context)
+    assert context.causal is False
 
 
 @pytest.mark.parametrize("state_class", [Fa3AttBackend, MlaFa3AttBackend])
 def test_fa3_decode_state_owns_causality(state_class):
     backend = make_backend(state_class, causal=False)
     backend._decode_init_page_table = lambda *args: None
-    plan = make_plan(backend)
-    backend.update(plan)
-    assert plan.causal is False
+    context = make_context(backend)
+    backend.update(context)
+    assert context.causal is False
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -130,9 +130,9 @@ def test_triton_mtp_decode_state_builds_group_markers():
         b_req_idx=torch.tensor([7, 7, -1, -1], device="cuda", dtype=torch.int32),
         hold_req_id=-1,
     )
-    plan = make_plan(backend, batch)
-    backend.update(plan)
-    assert plan.b_mark_mtp_shared_group.cpu().tolist() == [0, 2, 1, 1]
+    context = make_context(backend, batch)
+    backend.update(context)
+    assert context.b_mark_mtp_shared_group.cpu().tolist() == [0, 2, 1, 1]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -145,12 +145,12 @@ def test_fa3_dynamic_decode_state_builds_group_markers(state_class):
         b_req_idx=torch.tensor([7, 7, -1, -1], device="cuda", dtype=torch.int32),
         hold_req_id=-1,
     )
-    plan = make_plan(backend, batch)
-    b_att_req_idx = backend._decode_init_dynamic_spec_verify_state(plan, draft_step=2)
+    context = make_context(backend, batch)
+    b_att_req_idx = backend._decode_init_dynamic_spec_verify_state(context, draft_step=2)
     torch.cuda.synchronize()
     assert b_att_req_idx.cpu().tolist() == [7, -1, -1, -1]
-    assert plan.b_att_seq_len.cpu().tolist() == [4, 2, 2, 0]
-    assert plan.cu_seqlens_q.cpu().tolist() == [0, 2, 3, 4, 4]
+    assert context.b_att_seq_len.cpu().tolist() == [4, 2, 2, 0]
+    assert context.cu_seqlens_q.cpu().tolist() == [0, 2, 3, 4, 4]
 
 
 @pytest.mark.parametrize(

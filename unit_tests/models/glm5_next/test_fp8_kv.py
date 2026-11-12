@@ -20,13 +20,13 @@ from lightllm.models.glm5_next.triton_kernel.fp8_sparse_decode import (
 )
 from lightllm.models.glm5_next.triton_kernel.pad_query_heads import _fused_strided_qpad_kernel
 from unit_tests.common.attention.helpers import (
-    backend_plan,
+    backend_context,
     make_backend,
     make_batch,
-    make_plan,
+    make_context,
     run_dense,
     run_sparse,
-    update_plan,
+    update_context,
 )
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -85,10 +85,10 @@ def test_main_and_native_mtp_backend_selection(monkeypatch, draft, kv_type):
     for phase in AttentionPhase:
         backend = model.attention_groups[0].backend_for(phase)
         assert type(backend) is expected
-        plan = backend_plan(type(backend), phase.value, settings=backend)
-        assert plan.backend_identity is backend
+        context = backend_context(type(backend), phase.value, settings=backend)
+        assert context.backend_identity is backend
         assert not hasattr(backend, "model")
-        assert not hasattr(plan, "request")
+        assert not hasattr(context, "request")
 
 
 def _dequantize_kv_cache(packed_kv):
@@ -196,7 +196,7 @@ def test_fp8_nope_decode_and_cuda_graph(num_heads):
     indices.masked_fill_(lanes[None, :] >= lengths[:, None], -1)
     control = {"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
     infer_state = _make_infer_state()
-    state = backend_plan(Fp8Glm5NextSparseAttBackend, "decode", flashmla_sched_meta=flash_mla.get_mla_metadata()[0])
+    state = backend_context(Fp8Glm5NextSparseAttBackend, "decode", flashmla_sched_meta=flash_mla.get_mla_metadata()[0])
 
     def run():
         return run_sparse(state, infer_state, (q, q[..., :0]), packed_kv[..., :584], control)
@@ -254,7 +254,7 @@ def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chun
         "kv_lora_rank": 512,
     }
     infer_state = _make_infer_state(max_cache_len=prefix_len, mem_index=prefill_mem_index)
-    state = backend_plan(
+    state = backend_context(
         Fp8Glm5NextSparseAttBackend,
         "prefill",
         settings=_make_workspace_backend(q.shape[0]),
@@ -315,7 +315,7 @@ def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softm
         "kv_lora_rank": 512,
     }
     infer_state = _make_infer_state(mem_index=prefill_mem_index)
-    state = backend_plan(
+    state = backend_context(
         Fp8Glm5NextSparseAttBackend,
         "prefill",
         settings=_make_workspace_backend(q.shape[0]),
@@ -550,7 +550,9 @@ def test_fp8_h64_direct_smallq_state_workspace_reuse_and_fresh_state():
     control = {"topk_indices": topk, "prefill_cache_kv": prefill_kv, "softmax_scale": 0.0625, "kv_lora_rank": 512}
     infer_state = _make_infer_state(mem_index=prefill_mem)
     backend = _make_workspace_backend(q.shape[0])
-    state = backend_plan(Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged)
+    state = backend_context(
+        Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged
+    )
 
     def expected():
         values = _dequantize_kv_cache(packed)[ragged.long()]
@@ -566,14 +568,14 @@ def test_fp8_h64_direct_smallq_state_workspace_reuse_and_fresh_state():
     workspace = cache["direct"]
     pointers = {name: tensor.data_ptr() for name, tensor in workspace.items()}
     for _ in range(10):
-        layer_state = backend_plan(
+        layer_state = backend_context(
             Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged
         )
         torch.testing.assert_close(run(layer_state).float(), expected(), atol=0.012, rtol=0.015)
     assert {name: tensor.data_ptr() for name, tensor in cache["direct"].items()} == pointers
 
     fresh_infer_state = _make_infer_state(mem_index=prefill_mem.clone())
-    fresh_state = backend_plan(
+    fresh_state = backend_context(
         Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged
     )
     torch.testing.assert_close(run(fresh_state, fresh_infer_state).float(), expected(), atol=0.012, rtol=0.015)
@@ -609,7 +611,9 @@ def test_fp8_h64_selected_prefill_state_workspace_reuse(num_q):
     control = {"topk_indices": topk, "prefill_cache_kv": prefill_kv, "softmax_scale": 0.0625, "kv_lora_rank": 512}
     infer_state = _make_infer_state(mem_index=prefill_mem)
     backend = _make_workspace_backend(q.shape[0])
-    state = backend_plan(Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged)
+    state = backend_context(
+        Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged
+    )
 
     def expected():
         values = _dequantize_kv_cache(packed)[ragged.long()]
@@ -628,14 +632,14 @@ def test_fp8_h64_selected_prefill_state_workspace_reuse(num_q):
     pointers = {name: tensor.data_ptr() for name, tensor in workspace.items()}
     # All 11 DSA layers share the backend allocation and rewrite its contents.
     for _ in range(10):
-        layer_state = backend_plan(
+        layer_state = backend_context(
             Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged
         )
         torch.testing.assert_close(run(layer_state).float(), expected(), atol=0.012, rtol=0.015)
     assert {name: tensor.data_ptr() for name, tensor in cache["selected"].items()} == pointers
 
     fresh_infer_state = _make_infer_state(mem_index=prefill_mem.clone())
-    fresh_state = backend_plan(
+    fresh_state = backend_context(
         Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged
     )
     torch.testing.assert_close(run(fresh_state, fresh_infer_state).float(), expected(), atol=0.012, rtol=0.015)
@@ -675,7 +679,7 @@ def test_fp8_h64_b1_decode_uses_native_eager_and_direct_graph():
     indices[:, :2049] = torch.randint(0, capacity, (1, 2049), device="cuda", dtype=torch.int32)
     control = {"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
     infer = _make_infer_state(is_cuda_graph_capture=False)
-    state = backend_plan(
+    state = backend_context(
         Fp8Glm5NextSparseAttBackend,
         "decode",
         decode_topk_bound=2051,
@@ -742,7 +746,7 @@ def test_fp8_decode_infer_state_graph_qpad_and_mutation(num_heads):
     indices[:, :2049] = torch.randint(0, capacity, (batch, 2049), device="cuda", dtype=torch.int32)
     control = {"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
     infer_state = _make_infer_state(is_cuda_graph_capture=False)
-    state = backend_plan(Fp8Glm5NextSparseAttBackend, "decode", flashmla_sched_meta=flash_mla.get_mla_metadata()[0])
+    state = backend_context(Fp8Glm5NextSparseAttBackend, "decode", flashmla_sched_meta=flash_mla.get_mla_metadata()[0])
 
     def run():
         return run_sparse(state, infer_state, (q, q[..., :0]), packed[..., :584], control)
@@ -769,11 +773,11 @@ def test_fp8_decode_infer_state_graph_qpad_and_mutation(num_heads):
 def test_fp8_sparse_direct_decode_factory_bound_guard():
     backend = object.__new__(Fp8Glm5NextSparseAttBackend)
     backend.network_config = {"index_topk": 2048, "index_kpool": 4}
-    assert backend_plan(type(backend), "decode", settings=backend).decode_topk_bound == 2051
+    assert backend_context(type(backend), "decode", settings=backend).decode_topk_bound == 2051
     backend.network_config = {"index_topk": 2048, "index_kpool": 8}
-    assert backend_plan(type(backend), "decode", settings=backend).decode_topk_bound is None
+    assert backend_context(type(backend), "decode", settings=backend).decode_topk_bound is None
     backend.network_config = {"index_topk": 2047, "index_kpool": 4}
-    assert backend_plan(type(backend), "decode", settings=backend).decode_topk_bound is None
+    assert backend_context(type(backend), "decode", settings=backend).decode_topk_bound is None
 
 
 @pytest.mark.parametrize("batch", [1, 8])
@@ -801,7 +805,7 @@ def test_fp8_sparse_direct_decode_actual_entry_edges_and_graph(monkeypatch, batc
     assert torch.equal(indices[:, 2051:], torch.full_like(indices[:, 2051:], -1))
     control = {"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
     state_owner = _make_infer_state(is_cuda_graph_capture=False)
-    state = backend_plan(
+    state = backend_context(
         Fp8Glm5NextSparseAttBackend,
         "decode",
         flashmla_sched_meta=flash_mla.get_mla_metadata()[0],
@@ -892,11 +896,11 @@ def test_fp8_sparse_direct_decode_general_graph_factory_entry(monkeypatch, num_h
     backend = object.__new__(Fp8Glm5NextSparseAttBackend)
     backend.network_config = {"index_topk": 2048, "index_kpool": 4}
     infer_state = _make_infer_state(is_cuda_graph_capture=False)
-    state = backend_plan(type(backend), "decode", settings=backend)
+    state = backend_context(type(backend), "decode", settings=backend)
     state.flashmla_sched_meta = flash_mla.get_mla_metadata()[0]
     assert state.decode_topk_bound == 2051
     native_state_owner = _make_infer_state(is_cuda_graph_capture=False)
-    native_state = backend_plan(
+    native_state = backend_context(
         Fp8Glm5NextSparseAttBackend,
         "decode",
         flashmla_sched_meta=flash_mla.get_mla_metadata()[0],
@@ -969,7 +973,7 @@ def test_fp8_sparse_direct_decode_unknown_bound_fallback_and_strided_q(monkeypat
 
     monkeypatch.setattr(flash_mla, "flash_mla_with_kvcache", native)
     unknown_owner = _make_infer_state(is_cuda_graph_capture=False)
-    unknown = backend_plan(
+    unknown = backend_context(
         Fp8Glm5NextSparseAttBackend,
         "decode",
         flashmla_sched_meta=flash_mla.get_mla_metadata()[0],
@@ -1015,7 +1019,7 @@ def test_fp8_sparse_direct_decode_strided_inputs_and_packed_row_padding(monkeypa
 
     if (num_heads, batch) in ((1, 3), (7, 5)):
         infer = _make_infer_state(is_cuda_graph_capture=True)
-        state = backend_plan(Fp8Glm5NextSparseAttBackend, "decode", decode_topk_bound=2051)
+        state = backend_context(Fp8Glm5NextSparseAttBackend, "decode", decode_topk_bound=2051)
 
         def native_must_not_run(*args, **kwargs):
             raise AssertionError("supported strided decode took native fallback")
@@ -1107,7 +1111,7 @@ def test_fp8_sparse_direct_decode_large_workload_retains_native_graph(monkeypatc
         "lightllm.models.glm5_next.triton_kernel.fp8_sparse_decode.fp8_sparse_direct_decode", direct_must_not_run
     )
     infer = _make_infer_state(is_cuda_graph_capture=True)
-    state = backend_plan(
+    state = backend_context(
         Fp8Glm5NextSparseAttBackend,
         "decode",
         decode_topk_bound=2051,
@@ -1153,14 +1157,16 @@ def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallba
     def run(active, request=infer):
         return run_sparse(active, request, q, packed[..., :584], control)
 
-    state = backend_plan(Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged)
+    state = backend_context(
+        Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged
+    )
     torch.testing.assert_close(run(state).float(), expected(), atol=0.012, rtol=0.015)
     cache = backend._test_workspace.objects
     assert not hasattr(infer, "_fp8_sparse_generic_prefill_workspace_cache")
     workspace = state.generic_workspace
     pointers = {k: v.data_ptr() for k, v in workspace.items() if isinstance(v, torch.Tensor)}
     for _ in range(10):
-        layer = backend_plan(
+        layer = backend_context(
             Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged
         )
         torch.testing.assert_close(run(layer).float(), expected(), atol=0.012, rtol=0.015)
@@ -1177,21 +1183,21 @@ def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallba
     fresh_ragged = ragged.roll(1)
     fresh_mem = fresh_ragged[(starts + current_local).long()].clone()
     fresh = _make_infer_state(mem_index=fresh_mem)
-    fresh_state = backend_plan(
+    fresh_state = backend_context(
         Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=fresh_ragged
     )
     torch.testing.assert_close(run(fresh_state, fresh).float(), expected(fresh_ragged), atol=0.012, rtol=0.015)
     assert cache["glm_generic"]["prefill_row_table"].data_ptr() == workspace["prefill_row_table"].data_ptr()
 
     graph_infer = _make_infer_state(mem_index=prefill_mem, prefill_cuda_graph_exe_list=[])
-    graph_state = backend_plan(
+    graph_state = backend_context(
         Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged, capture=True
     )
     torch.testing.assert_close(run(graph_state, graph_infer).float(), expected(), atol=0.012, rtol=0.015)
     assert not hasattr(graph_infer, "_fp8_sparse_generic_prefill_workspace_cache")
 
     explicit_graph_infer = _make_infer_state(mem_index=prefill_mem, is_cuda_graph_capture=True)
-    explicit_graph_state = backend_plan(
+    explicit_graph_state = backend_context(
         Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged
     )
     torch.testing.assert_close(
@@ -1232,7 +1238,7 @@ def test_fp8_generic_prefill_workspace_graph_query_is_generic_h64_only(monkeypat
         backend.get_smallq_workspace = lambda active_infer, active_q, kind="direct" if direct else "selected": {
             "kind": kind
         }
-        state = backend_plan(
+        state = backend_context(
             Fp8Glm5NextSparseAttBackend,
             "prefill",
             settings=backend,

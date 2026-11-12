@@ -16,13 +16,13 @@ class GraphExecution:
             for state in self.states:
                 manager = state.att_state_manager
                 self.generations.append((manager, manager.storage_generation))
-                for group_id, plan in state.attention_plans.items():
-                    backend = state.attention_groups[group_id].backend_for(plan.capacity.phase)
-                    binding = backend.bind_graph(plan)
+                for group_id, context in state.attention_contexts.items():
+                    backend = state.attention_groups[group_id].backend_for(context.capacity.phase)
+                    binding = backend.bind_graph(context)
                     if binding is not None:
                         self.bindings.append(binding)
-                    if plan.workspace not in self.workspaces:
-                        self.workspaces.append(plan.workspace)
+                    if context.workspace not in self.workspaces:
+                        self.workspaces.append(context.workspace)
                 manager.register_graph(self)
             for workspace in self.workspaces:
                 workspace.freeze()

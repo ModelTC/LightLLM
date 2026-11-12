@@ -89,12 +89,12 @@ def test_graph_orders_host_reuse_submission_update_and_destruction():
 
     runtime = Runtime("cpu")
     manager = AttentionStateManager(request_capacity=2)
-    backend = SimpleNamespace(bind_graph=lambda plan: Binding())
+    backend = SimpleNamespace(bind_graph=lambda context: Binding())
     state = SimpleNamespace(
         input_ids=torch.zeros(1),
         att_state_manager=manager,
         attention_groups=(SimpleNamespace(backend_for=lambda phase: backend),),
-        attention_plans={
+        attention_contexts={
             0: SimpleNamespace(
                 capacity=SimpleNamespace(phase=AttentionPhase.DECODE), workspace=AttentionWorkspace(runtime=runtime)
             )
@@ -118,7 +118,7 @@ def test_storage_generation_invalidates_graph_before_copy():
     state = SimpleNamespace(
         input_ids=torch.zeros(1),
         att_state_manager=manager,
-        attention_plans={},
+        attention_contexts={},
         attention_groups=(),
         copy_for_cuda_graph=lambda source: pytest.fail("copied into a stale graph"),
     )
@@ -137,8 +137,8 @@ def test_graph_binding_failure_releases_previously_bound_resources():
         def close(self):
             events.append("binding_close")
 
-    def bind_graph(plan):
-        if plan.fail:
+    def bind_graph(context):
+        if context.fail:
             raise ValueError("unsupported graph task")
         return Binding()
 
@@ -147,7 +147,7 @@ def test_graph_binding_failure_releases_previously_bound_resources():
     state = SimpleNamespace(
         att_state_manager=manager,
         attention_groups=(SimpleNamespace(backend_for=lambda phase: backend),) * 2,
-        attention_plans={
+        attention_contexts={
             i: SimpleNamespace(
                 fail=bool(i), capacity=SimpleNamespace(phase=AttentionPhase.DECODE), workspace=AttentionWorkspace("cpu")
             )

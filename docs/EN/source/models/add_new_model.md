@@ -129,14 +129,14 @@ Commonly used interfaces that need to be inherited and implemented
 
 After all main/draft models are constructed, `ModeBackend.init_model` creates one `ReqManager` using the largest `get_req_manager_max_seq_len()`, binds it to every model through `bind_req_manager()`, and calls each model's `prepare_attention_states()` to register its States. After `finish_state_registration()`, it calls `prepare_attention_backends()` for each model: layers are grouped by their prefill/decode `LayerSpec`, device/layout/execution requirements are checked, and backend numerical probes run. It then calls `reserve_attention_resources(model)` to reserve workspace for each execution slot before loading calibration and calling `initialize_storage()`. Reserving before capacity estimation accounts for backend scratch memory.
 
-`init_runtime()` runs sequentially on the main model and each draft, binding the HOLD page and creating each `LayerAttentionBinding` through `initialize_layer_attention()` before warmup, padded-request setup and CUDA Graph initialization. The main model also checks maximum-length inference. Readiness is published only after every model succeeds. Each batch owns a plan containing metadata and provider wrappers, executed through `allocate_plan → prepare → update → forward`; States continue to own KV/Conv/SSM storage and restoration.
+`init_runtime()` runs sequentially on the main model and each draft, binding the HOLD page and creating each `LayerAttentionBinding` through `initialize_layer_attention()` before warmup, padded-request setup and CUDA Graph initialization. The main model also checks maximum-length inference. Readiness is published only after every model succeeds. Each batch owns a context containing metadata and provider wrappers, executed through `allocate_context → prepare → update → forward`; States continue to own KV/Conv/SSM storage and restoration.
 
-Layers call `.forward(...)` explicitly. `LayerAttentionBinding` holds the layer parameters and shared backend; the plan comes from the current batch:
+Layers call `.forward(...)` explicitly. `LayerAttentionBinding` holds the layer parameters and shared backend; the context comes from the current batch:
 
 ```python
 attention = self.decode_attention
-plan = infer_state.attention_plans[attention.group_id]
-output = attention.forward(plan, DenseInputs(q))
+context = infer_state.attention_contexts[attention.group_id]
+output = attention.forward(context, DenseInputs(q))
 ```
 
 New model layers describe computation and resource views through `attention_family`, `attention_window(phase)`, `attention_uses_alibi`, `attention_uses_sink`, and, when needed, `create_attention_params()`. The model's `attention_backend_candidates()` can specify candidate implementations. Dense/MLA/sparse MLA use `--llm_prefill_att_backend` / `--llm_decode_att_backend`; GDN/KDA use the separate `--llm_prefill_linear_att_backend` / `--llm_decode_linear_att_backend` options. An unsupported explicit backend raises an error; only `auto` tries the remaining candidates.

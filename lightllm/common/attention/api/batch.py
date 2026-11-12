@@ -94,8 +94,8 @@ class AttentionBatch:
 
 
 @dataclass(frozen=True)
-class PlanCapacity:
-    """plan 的形状契约：batch_size / token_num 要与输入批次逐项一致，序列长度只检查上界。
+class ContextCapacity:
+    """context 的形状契约：batch_size / token_num 要与输入批次逐项一致，序列长度只检查上界。
 
     runner 负责选择 Graph bucket 和 padding；backend 不自行改变批次形状。
     """
@@ -108,6 +108,6 @@ class PlanCapacity:
 
     def check(self, batch: AttentionBatch):
         if self.phase is not batch.phase or self.batch_size != batch.batch_size or self.token_num != batch.token_num:
-            raise ValueError("attention plan capacity does not match the batch shape")
+            raise ValueError("attention context capacity does not match the batch shape")
         if batch.max_kv_seq_len > self.max_kv_seq_len or batch.max_q_seq_len > self.max_q_seq_len:
-            raise ValueError("attention batch exceeds plan sequence capacity")
+            raise ValueError("attention batch exceeds context sequence capacity")

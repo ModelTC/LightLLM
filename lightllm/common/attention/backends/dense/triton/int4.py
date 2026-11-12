@@ -4,17 +4,17 @@ import torch
 
 from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import DenseInputs
-from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
+from lightllm.common.attention.backends.base import AttentionExecutionContext, BaseAttentionBackend
 from lightllm.utils.envs_utils import get_env_start_args
 
 
 @dataclasses.dataclass
-class Int4kvTritonPrefillPlan(PreparedPlan):
+class Int4kvTritonPrefillContext(AttentionExecutionContext):
     b_kv_start_loc: torch.Tensor = None
 
 
 @dataclasses.dataclass
-class Int4kvTritonDecodePlan(PreparedPlan):
+class Int4kvTritonDecodeContext(AttentionExecutionContext):
     decode_max_kv_seq_len: int = None
 
 
@@ -28,18 +28,18 @@ class Int4kvTritonAttBackend(BaseAttentionBackend):
         super().__init__(model)
         self.quant_group_size: int = get_env_start_args().llm_kv_quant_group_size
 
-    def _allocate_prefill_plan(self, capacity, capture, workspace):
-        return Int4kvTritonPrefillPlan(capacity, capture, workspace)
+    def _allocate_prefill_context(self, capacity, capture, workspace):
+        return Int4kvTritonPrefillContext(capacity, capture, workspace)
 
-    def _allocate_decode_plan(self, capacity, capture, workspace):
-        return Int4kvTritonDecodePlan(capacity, capture, workspace)
+    def _allocate_decode_context(self, capacity, capture, workspace):
+        return Int4kvTritonDecodeContext(capacity, capture, workspace)
 
-    def _update_prefill(self, plan):
-        plan.b_kv_start_loc = (
-            torch.cumsum(plan.batch.b_seq_len, dim=0, dtype=plan.batch.b_seq_len.dtype) - plan.batch.b_seq_len
+    def _update_prefill(self, context):
+        context.b_kv_start_loc = (
+            torch.cumsum(context.batch.b_seq_len, dim=0, dtype=context.batch.b_seq_len.dtype) - context.batch.b_seq_len
         )
 
-    def _forward_prefill(self, layer: LayerAttentionBinding, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(self, layer: LayerAttentionBinding, context, inputs: DenseInputs, *, out=None) -> torch.Tensor:
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key
@@ -49,14 +49,14 @@ class Int4kvTritonAttBackend(BaseAttentionBackend):
         k, k_scale = k
         v, v_scale = v
         o = self._prefill_groupsize_quant_prefill_att(
-            layer, plan, q=q, k=k, k_scale=k_scale, v=v, v_scale=v_scale, alloc_func=alloc_func
+            layer, context, q=q, k=k, k_scale=k_scale, v=v, v_scale=v_scale, alloc_func=alloc_func
         )
         return o
 
     def _prefill_groupsize_quant_prefill_att(
         self,
         layer,
-        plan,
+        context,
         q: torch.Tensor,
         k: torch.Tensor,
         k_scale: torch.Tensor,
@@ -64,12 +64,12 @@ class Int4kvTritonAttBackend(BaseAttentionBackend):
         v_scale: torch.Tensor,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        total_token_num = plan.batch.total_token_num
+        total_token_num = context.batch.total_token_num
         head_dim = k.shape[2] * 2
         k_dequant = alloc_func((total_token_num, k.shape[1], head_dim), dtype=q.dtype, device=q.device)
         v_dequant = alloc_func((total_token_num, v.shape[1], head_dim), dtype=q.dtype, device=q.device)
         o_tensor = alloc_func(q.shape, dtype=q.dtype, device=q.device)
-        max_kv_seq_len = plan.batch.max_kv_seq_len
+        max_kv_seq_len = context.batch.max_kv_seq_len
         from lightllm.common.basemodel.triton_kernel.kv_copy.ppl_int4kv_copy_kv import dequantize_int4kv
 
         dequantize_int4kv(
@@ -77,10 +77,10 @@ class Int4kvTritonAttBackend(BaseAttentionBackend):
             k_scale=k_scale,
             v=v,
             v_scale=v_scale,
-            req_to_token_indexs=plan.batch.req_to_token_indexs,
-            b_seq_len=plan.batch.b_seq_len,
-            b_req_idx=plan.batch.b_req_idx,
-            b_kv_start_loc=plan.b_kv_start_loc,
+            req_to_token_indexs=context.batch.req_to_token_indexs,
+            b_seq_len=context.batch.b_seq_len,
+            b_req_idx=context.batch.b_req_idx,
+            b_kv_start_loc=context.b_kv_start_loc,
             k_out=k_dequant,
             v_out=v_dequant,
             max_len_in_batch=max_kv_seq_len,
@@ -95,18 +95,18 @@ class Int4kvTritonAttBackend(BaseAttentionBackend):
             k=k_dequant,
             v=v_dequant,
             o=o_tensor,
-            b_start_loc=plan.batch.b_q_start_loc,
-            b_kv_start_loc=plan.b_kv_start_loc,
-            b_seq_len=plan.batch.b_seq_len,
-            max_q_input_len=plan.batch.max_q_seq_len,
-            b_prompt_cache_len=plan.batch.b_ready_cache_len,
+            b_start_loc=context.batch.b_q_start_loc,
+            b_kv_start_loc=context.b_kv_start_loc,
+            b_seq_len=context.batch.b_seq_len,
+            max_q_input_len=context.batch.max_q_seq_len,
+            b_prompt_cache_len=context.batch.b_ready_cache_len,
         )
         return o_tensor
 
-    def _update_decode(self, plan):
-        plan.decode_max_kv_seq_len = plan.batch.max_kv_seq_len
+    def _update_decode(self, context):
+        context.decode_max_kv_seq_len = context.batch.max_kv_seq_len
 
-    def _forward_decode(self, layer: LayerAttentionBinding, plan, inputs: DenseInputs, *, out=None):
+    def _forward_decode(self, layer: LayerAttentionBinding, context, inputs: DenseInputs, *, out=None):
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key
@@ -116,13 +116,13 @@ class Int4kvTritonAttBackend(BaseAttentionBackend):
         k, k_scale = k
         v, v_scale = v
         return self._decode_ppl_int4kv_decode_att(
-            layer, plan, q=q, k=k, k_scale=k_scale, v=v, v_scale=v_scale, alloc_func=alloc_func
+            layer, context, q=q, k=k, k_scale=k_scale, v=v, v_scale=v_scale, alloc_func=alloc_func
         )
 
     def _decode_ppl_int4kv_decode_att(
         self,
         layer,
-        plan,
+        context,
         q: torch.Tensor,
         k: torch.Tensor,
         k_scale: torch.Tensor,
@@ -136,11 +136,11 @@ class Int4kvTritonAttBackend(BaseAttentionBackend):
 
         return token_decode_attention_flash_decoding(
             q=q,
-            batch=plan.batch,
+            batch=context.batch,
             cache_k=k,
             cache_k_scale=k_scale,
             cache_v=v,
             cache_v_scale=v_scale,
-            max_kv_seq_len=plan.decode_max_kv_seq_len,
+            max_kv_seq_len=context.decode_max_kv_seq_len,
             alloc_tensor_func=alloc_func,
         )

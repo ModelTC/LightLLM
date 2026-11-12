@@ -8,10 +8,10 @@ from lightllm.common.attention.api import (
     AttentionFamily,
     AttentionPhase,
     CacheLayout,
+    ContextCapacity,
     ExecutionRequirements,
     LayerAttentionBinding,
     LayerSpec,
-    PlanCapacity,
 )
 from lightllm.common.attention.backends._workspace import AttentionWorkspace
 from lightllm.common.attention.backends.base import BaseAttentionBackend
@@ -81,28 +81,28 @@ def make_backend(cls=BaseAttentionBackend, **kwargs):
     return backend
 
 
-def make_plan(backend, batch=None, *, capture=False, max_length=None, prepare=False):
+def make_context(backend, batch=None, *, capture=False, max_length=None, prepare=False):
     batch = make_batch() if batch is None else batch
-    capacity = PlanCapacity(
+    capacity = ContextCapacity(
         batch.phase, batch.batch_size, batch.token_num, max_length or batch.max_kv_seq_len, batch.max_q_seq_len
     )
-    plan = backend.allocate_plan(capacity, capture=capture, workspace=AttentionWorkspace(batch.device))
+    context = backend.allocate_context(capacity, capture=capture, workspace=AttentionWorkspace(batch.device))
     if prepare:
-        backend.prepare(plan, batch)
+        backend.prepare(context, batch)
     else:
-        plan.batch = batch
-        plan.current_max_kv_seq_len = batch.max_kv_seq_len
-    return plan
+        context.batch = batch
+        context.current_max_kv_seq_len = batch.max_kv_seq_len
+    return context
 
 
-def make_layer_attention(backend, plan, params, **spec_kwargs):
+def make_layer_attention(backend, context, params, **spec_kwargs):
     return LayerAttentionBinding(
         group_id=0,
         logical_layer_id=0,
-        spec=make_spec(backend.family, plan.capacity.phase, **spec_kwargs),
+        spec=make_spec(backend.family, context.capacity.phase, **spec_kwargs),
         params=params,
         backend=backend,
-        alloc_tensor=lambda shape, dtype, device="cpu": torch.empty(shape, dtype=dtype, device=plan.batch.device),
+        alloc_tensor=lambda shape, dtype, device="cpu": torch.empty(shape, dtype=dtype, device=context.batch.device),
     )
 
 
@@ -161,7 +161,7 @@ def batch_from_fixture(fixture, phase, token_count=None, device=None):
     return replace(defaults, **values)
 
 
-def backend_plan(cls, phase, settings=None, **values):
+def backend_context(cls, phase, settings=None, **values):
     phase = AttentionPhase(phase)
     if isinstance(settings, BaseAttentionBackend):
         backend = settings
@@ -188,38 +188,38 @@ def backend_plan(cls, phase, settings=None, **values):
     for name, value in defaults.items():
         if not hasattr(backend, name):
             setattr(backend, name, value)
-    plan = make_plan(backend, make_batch((1,), phase=phase))
+    context = make_context(backend, make_batch((1,), phase=phase))
     if hasattr(backend, "_test_workspace"):
-        plan.workspace = backend._test_workspace
-    vars(plan).update(values)
-    return plan
+        context.workspace = backend._test_workspace
+    vars(context).update(values)
+    return context
 
 
-def update_plan(plan, fixture):
-    plan.batch = batch_from_fixture(fixture, plan.capacity.phase)
-    plan.capacity = PlanCapacity(
-        plan.batch.phase,
-        plan.batch.batch_size,
-        plan.batch.token_num,
-        plan.batch.max_kv_seq_len,
-        plan.batch.max_q_seq_len,
+def update_context(context, fixture):
+    context.batch = batch_from_fixture(fixture, context.capacity.phase)
+    context.capacity = ContextCapacity(
+        context.batch.phase,
+        context.batch.batch_size,
+        context.batch.token_num,
+        context.batch.max_kv_seq_len,
+        context.batch.max_q_seq_len,
     )
-    plan.backend_identity.prepare(plan, plan.batch)
-    plan.backend_identity.update(plan)
+    context.backend_identity.prepare(context, context.batch)
+    context.backend_identity.update(context)
 
 
-def run_sparse(plan, fixture, query, kv, parameters, *, out=None, alloc_func=None):
+def run_sparse(context, fixture, query, kv, parameters, *, out=None, alloc_func=None):
     from lightllm.common.attention.api.inputs import MLAParams, SparseMLADecodeInputs, SparseMLAPrefillInputs
 
     q = query[0] if isinstance(query, tuple) else query
-    plan.capture = bool(getattr(fixture, "is_cuda_graph_capture", plan.capture))
+    context.capture = bool(getattr(fixture, "is_cuda_graph_capture", context.capture))
     if getattr(fixture, "prefill_cuda_graph_exe_list", None) is not None:
-        plan.capture = True
-    plan.batch = batch_from_fixture(fixture, plan.capacity.phase, q.shape[0], q.device)
-    backend = plan.backend_identity
-    if plan.workspace.device != q.device:
-        plan.workspace = AttentionWorkspace(q.device)
-        backend._test_workspace = plan.workspace
+        context.capture = True
+    context.batch = batch_from_fixture(fixture, context.capacity.phase, q.shape[0], q.device)
+    backend = context.backend_identity
+    if context.workspace.device != q.device:
+        context.workspace = AttentionWorkspace(q.device)
+        backend._test_workspace = context.workspace
     if backend.__class__.__module__.startswith("lightllm.models.deepseek_v4"):
         from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4Inputs, DeepseekV4Params
 
@@ -243,7 +243,7 @@ def run_sparse(plan, fixture, query, kv, parameters, *, out=None, alloc_func=Non
         params = MLAParams(
             kv, parameters["softmax_scale"], parameters["kv_lora_rank"], parameters.get("qk_rope_head_dim", 0)
         )
-        if plan.capacity.phase is AttentionPhase.PREFILL:
+        if context.capacity.phase is AttentionPhase.PREFILL:
             inputs = SparseMLAPrefillInputs(
                 q,
                 parameters.get("topk_mem_indices"),
@@ -252,32 +252,32 @@ def run_sparse(plan, fixture, query, kv, parameters, *, out=None, alloc_func=Non
             )
         else:
             inputs = SparseMLADecodeInputs(q, query[1], parameters["topk_mem_indices"])
-    attention = make_layer_attention(backend, plan, params)
+    attention = make_layer_attention(backend, context, params)
     if alloc_func is not None:
         attention = replace(attention, alloc_tensor=alloc_func)
 
     if (
-        hasattr(plan, "capture_flashmla_sched_meta")
-        and plan.capture_flashmla_sched_meta is None
+        hasattr(context, "capture_flashmla_sched_meta")
+        and context.capture_flashmla_sched_meta is None
         and torch.cuda.is_available()
     ):
         import flash_mla
 
-        plan.capture_flashmla_sched_meta = flash_mla.get_mla_metadata()[0]
-    return attention.forward(plan, inputs, out=out)
+        context.capture_flashmla_sched_meta = flash_mla.get_mla_metadata()[0]
+    return attention.forward(context, inputs, out=out)
 
 
-def run_dense(plan, fixture, query, key, value, *, out=None, alloc_func=None, params=None):
+def run_dense(context, fixture, query, key, value, *, out=None, alloc_func=None, params=None):
     from lightllm.common.attention.api.inputs import DenseInputs, DenseParams
 
-    plan.batch = batch_from_fixture(fixture, plan.capacity.phase, query.shape[0], query.device)
+    context.batch = batch_from_fixture(fixture, context.capacity.phase, query.shape[0], query.device)
     if params is None:
         ks = vs = None
         if isinstance(key, tuple):
             key, ks = key
             value, vs = value
         params = DenseParams(key, value, key_scale=ks, value_scale=vs)
-    attention = make_layer_attention(plan.backend_identity, plan, params)
+    attention = make_layer_attention(context.backend_identity, context, params)
     if alloc_func is not None:
         attention = replace(attention, alloc_tensor=alloc_func)
-    return attention.forward(plan, DenseInputs(query), out=out)
+    return attention.forward(context, DenseInputs(query), out=out)

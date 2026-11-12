@@ -7,8 +7,8 @@ from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention.backends._flashinfer import set_flashinfer_envs
 from lightllm.common.attention.backends.dense.flashinfer.backend import (
     FlashInferAttBackend,
-    FlashInferDecodePlan,
-    FlashInferPrefillPlan,
+    FlashInferDecodeContext,
+    FlashInferPrefillContext,
 )
 from lightllm.utils.log_utils import init_logger
 
@@ -16,12 +16,12 @@ logger = init_logger(__name__)
 
 
 @dataclasses.dataclass
-class Fp8FlashInferPrefillPlan(FlashInferPrefillPlan):
+class Fp8FlashInferPrefillContext(FlashInferPrefillContext):
     pass
 
 
 @dataclasses.dataclass
-class Fp8FlashInferDecodePlan(FlashInferDecodePlan):
+class Fp8FlashInferDecodeContext(FlashInferDecodeContext):
     pass
 
 
@@ -44,25 +44,25 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
             "multi-token FP8 inference pages are not implemented yet."
         )
 
-    def _allocate_prefill_plan(self, capacity, capture, workspace):
-        return Fp8FlashInferPrefillPlan(capacity, capture, workspace)
+    def _allocate_prefill_context(self, capacity, capture, workspace):
+        return Fp8FlashInferPrefillContext(capacity, capture, workspace)
 
-    def _allocate_decode_plan(self, capacity, capture, workspace):
-        return Fp8FlashInferDecodePlan(capacity, capture, workspace)
+    def _allocate_decode_context(self, capacity, capture, workspace):
+        return Fp8FlashInferDecodeContext(capacity, capture, workspace)
 
-    def _forward_prefill(self, layer: LayerAttentionBinding, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(self, layer: LayerAttentionBinding, context, inputs: DenseInputs, *, out=None) -> torch.Tensor:
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key
         v = layer.params.value
         return self._prefill_fp8_prefill_att(
-            layer, plan, q=q, k=k, v=v, alloc_func=alloc_func, logical_layer_id=layer.logical_layer_id
+            layer, context, q=q, k=k, v=v, alloc_func=alloc_func, logical_layer_id=layer.logical_layer_id
         )
 
     def _prefill_fp8_prefill_att(
         self,
         layer,
-        plan,
+        context,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
@@ -74,22 +74,22 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
         k_descale = layer.params.key_scale
         v_descale = layer.params.value_scale
-        plan.prefill_wrapper.run(q=q, paged_kv_cache=(k, v), k_scale=k_descale, v_scale=v_descale, out=o_tensor)
+        context.prefill_wrapper.run(q=q, paged_kv_cache=(k, v), k_scale=k_descale, v_scale=v_descale, out=o_tensor)
         return o_tensor
 
-    def _forward_decode(self, layer: LayerAttentionBinding, plan, inputs: DenseInputs, *, out=None):
+    def _forward_decode(self, layer: LayerAttentionBinding, context, inputs: DenseInputs, *, out=None):
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key
         v = layer.params.value
         return self._decode_fp8_decode_att(
-            layer, plan, q=q, k=k, v=v, alloc_func=alloc_func, logical_layer_id=layer.logical_layer_id
+            layer, context, q=q, k=k, v=v, alloc_func=alloc_func, logical_layer_id=layer.logical_layer_id
         )
 
     def _decode_fp8_decode_att(
         self,
         layer,
-        plan,
+        context,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
@@ -101,5 +101,5 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
         k_descale = layer.params.key_scale
         v_descale = layer.params.value_scale
-        plan.decode_wrapper.run(q=q, paged_kv_cache=(k, v), k_scale=k_descale, v_scale=v_descale, out=o_tensor)
+        context.decode_wrapper.run(q=q, paged_kv_cache=(k, v), k_scale=k_descale, v_scale=v_descale, out=o_tensor)
         return o_tensor

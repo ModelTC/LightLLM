@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from lightllm.common.attention.api import AttentionBatch, AttentionPhase, PlanCapacity
+from lightllm.common.attention.api import AttentionBatch, AttentionPhase, ContextCapacity
 from lightllm.common.attention.backends._workspace import AttentionWorkspace
 from lightllm.models.glm5_next.triton_kernel.kpool import expand_topk, prefill_nsa_params
 
@@ -69,7 +69,7 @@ def test_topk_request_lookup_preserves_strided_tables(dense):
         "lightllm.models.glm5_next.attention.fp8_sparse_mla:Fp8Glm5NextSparseAttBackend",
     ],
 )
-def test_sparse_plan_owns_query_metadata(reference):
+def test_sparse_context_owns_query_metadata(reference):
     from lightllm.common.attention.selection import load_backend_class
 
     lengths = torch.tensor([5, 4], device="cuda", dtype=torch.int32)
@@ -93,11 +93,11 @@ def test_sparse_plan_owns_query_metadata(reference):
         position_ids=tensor([3, 4, 3]),
     )
     backend = object.__new__(load_backend_class(reference))
-    plan = backend.allocate_plan(
-        PlanCapacity(AttentionPhase.PREFILL, 2, 3, 5, 2), capture=False, workspace=AttentionWorkspace("cuda")
+    context = backend.allocate_context(
+        ContextCapacity(AttentionPhase.PREFILL, 2, 3, 5, 2), capture=False, workspace=AttentionWorkspace("cuda")
     )
-    backend.prepare(plan, batch)
-    backend.update(plan)
-    torch.testing.assert_close(plan.q_kv_seq_len, tensor([4, 5, 4]))
-    torch.testing.assert_close(plan.q_req_idx, tensor([0, 0, 1]))
-    torch.testing.assert_close(plan.q_kv_start_loc, tensor([0, 0, 5]))
+    backend.prepare(context, batch)
+    backend.update(context)
+    torch.testing.assert_close(context.q_kv_seq_len, tensor([4, 5, 4]))
+    torch.testing.assert_close(context.q_req_idx, tensor([0, 0, 1]))
+    torch.testing.assert_close(context.q_kv_start_loc, tensor([0, 0, 5]))

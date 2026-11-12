@@ -33,7 +33,7 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
     ) -> torch.Tensor:
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         o_tensor = self.prefill_attention.forward(
-            infer_state.attention_plans[self.prefill_attention.group_id], DenseInputs(_q)
+            infer_state.attention_contexts[self.prefill_attention.group_id], DenseInputs(_q)
         )
         o_tensor = o_tensor.view(q.shape)
         return o_tensor
@@ -43,7 +43,7 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
     ) -> torch.Tensor:
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         o_tensor = self.decode_attention.forward(
-            infer_state.attention_plans[self.decode_attention.group_id], DenseInputs(_q)
+            infer_state.attention_contexts[self.decode_attention.group_id], DenseInputs(_q)
         )
         return o_tensor.view(q.shape)
 

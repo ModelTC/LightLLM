@@ -209,7 +209,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
     infer.att_state_manager = resources
     infer.att_state_role = role
     from lightllm.common.attention.api.inputs import KDAInputs, KDAParams
-    from unit_tests.common.attention.helpers import make_backend, make_batch, make_layer_attention, make_plan
+    from unit_tests.common.attention.helpers import make_backend, make_batch, make_context, make_layer_attention
 
     executor = make_backend(
         KDALinearAttBackend,
@@ -225,10 +225,10 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
     batch = make_batch(
         (1,) * tokens, device="cuda", b_req_idx=infer.b_req_idx, b_mtp_index=infer.b_mtp_index, hold_req_id=3
     )
-    plan = make_plan(executor, batch)
-    executor.update(plan)
-    attention = make_layer_attention(executor, plan, KDAParams(conv, ssm, conv_weight, a, bias))
-    actual = attention.forward(plan, KDAInputs(mixed, gate, beta))
+    context = make_context(executor, batch)
+    executor.update(context)
+    attention = make_layer_attention(executor, context, KDAParams(conv, ssm, conv_weight, a, bias))
+    actual = attention.forward(context, KDAInputs(mixed, gate, beta))
     torch.testing.assert_close(actual.reshape(tokens, heads, dim)[:row], torch.cat(expected), atol=2e-3, rtol=1e-2)
     torch.testing.assert_close(ssm, expected_ssm, atol=2e-3, rtol=1e-2)
     if dynamic:

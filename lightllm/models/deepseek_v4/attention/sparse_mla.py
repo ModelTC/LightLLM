@@ -5,7 +5,7 @@ import torch
 import triton
 
 from lightllm.common.attention.api import AttentionFamily, UnsupportedAttention
-from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
+from lightllm.common.attention.backends.base import AttentionExecutionContext, BaseAttentionBackend
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,7 @@ def prepare_swa_workspace(swa_state, buffer, capacity, batch, slot):
 
 
 @dataclass
-class DeepseekV4Plan(PreparedPlan):
+class DeepseekV4Context(AttentionExecutionContext):
     sched_meta_by_ratio: dict | None = None
     capture_sched_meta_by_ratio: dict | None = None
 
@@ -140,23 +140,25 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttentionBackend):
         model.swa_prefill_workspace = buffer.view(layer_count, token_num, slot_bytes), capacity
         return model.swa_prefill_workspace
 
-    def _allocate_prefill_plan(self, capacity, capture, workspace):
-        return DeepseekV4Plan(capacity, capture, workspace)
+    def _allocate_prefill_context(self, capacity, capture, workspace):
+        return DeepseekV4Context(capacity, capture, workspace)
 
-    def _allocate_decode_plan(self, capacity, capture, workspace):
-        return DeepseekV4Plan(capacity, capture, workspace)
+    def _allocate_decode_context(self, capacity, capture, workspace):
+        return DeepseekV4Context(capacity, capture, workspace)
 
-    def _prepare_prefill(self, plan):
-        self._prepare_decode(plan)
+    def _prepare_prefill(self, context):
+        self._prepare_decode(context)
 
-    def _prepare_decode(self, plan):
+    def _prepare_decode(self, context):
         import flash_mla as flashmla
 
-        if plan.sched_meta_by_ratio is None:
-            plan.sched_meta_by_ratio = {ratio: flashmla.get_mla_metadata()[0] for ratio in self.compress_ratios}
-            plan.capture_sched_meta_by_ratio = {ratio: flashmla.get_mla_metadata()[0] for ratio in self.compress_ratios}
+        if context.sched_meta_by_ratio is None:
+            context.sched_meta_by_ratio = {ratio: flashmla.get_mla_metadata()[0] for ratio in self.compress_ratios}
+            context.capture_sched_meta_by_ratio = {
+                ratio: flashmla.get_mla_metadata()[0] for ratio in self.compress_ratios
+            }
 
-    def _run(self, layer, plan, inputs, swa, out):
+    def _run(self, layer, context, inputs, swa, out):
         import flash_mla as flashmla
 
         params = layer.params
@@ -164,7 +166,9 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttentionBackend):
         if params.compressed is not None:
             compressed = self.compressed_configs[params.compress_ratio].get_attention_view(packed_kv=params.compressed)
         scheduler = (
-            plan.capture_sched_meta_by_ratio if torch.cuda.is_current_stream_capturing() else plan.sched_meta_by_ratio
+            context.capture_sched_meta_by_ratio
+            if torch.cuda.is_current_stream_capturing()
+            else context.sched_meta_by_ratio
         )
         q = inputs.query
         if out is None:
@@ -190,11 +194,11 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttentionBackend):
         )
         return padded_out[:, 0, : self.tp_q_head_num]
 
-    def _forward_prefill(self, layer, plan, inputs: DeepseekV4Inputs, *, out=None):
-        return self._run(layer, plan, inputs, layer.params.prefill_swa, out)
+    def _forward_prefill(self, layer, context, inputs: DeepseekV4Inputs, *, out=None):
+        return self._run(layer, context, inputs, layer.params.prefill_swa, out)
 
-    def _forward_decode(self, layer, plan, inputs: DeepseekV4Inputs, *, out=None):
-        return self._run(layer, plan, inputs, layer.params.swa, out)
+    def _forward_decode(self, layer, context, inputs: DeepseekV4Inputs, *, out=None):
+        return self._run(layer, context, inputs, layer.params.swa, out)
 
 
 DSV4_NSA_BACKENDS = {

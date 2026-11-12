@@ -14,7 +14,7 @@ from lightllm.common.attention.backends._shared.linear.causal_conv1d_mtp import 
     causal_conv1d_update as causal_conv1d_update_mtp,
 )
 from lightllm.common.attention.backends._shared.linear.mtp_state_params import build_dynamic_mtp_linear_att_state_params
-from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
+from lightllm.common.attention.backends.base import AttentionExecutionContext, BaseAttentionBackend
 from lightllm.common.attention.backends.kda.triton.kernels.kda import chunk_kda_with_fused_gate
 from lightllm.common.attention.backends.kda.triton.kernels.kda_decode import fused_recurrent_kda
 
@@ -23,13 +23,13 @@ if TYPE_CHECKING:
 
 
 @dataclasses.dataclass
-class KDAPrefillPlan(PreparedPlan):
+class KDAPrefillContext(AttentionExecutionContext):
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
 
 @dataclasses.dataclass
-class KDADecodePlan(PreparedPlan):
+class KDADecodeContext(AttentionExecutionContext):
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
@@ -53,20 +53,20 @@ class KDALinearAttBackend(BaseAttentionBackend):
         self.lower_bound = config.get("gate_lower_bound", -5.0)
         self.mtp_step = model.args.mtp_step
 
-    def _allocate_prefill_plan(self, capacity, capture, workspace):
-        return KDAPrefillPlan(capacity, capture, workspace)
+    def _allocate_prefill_context(self, capacity, capture, workspace):
+        return KDAPrefillContext(capacity, capture, workspace)
 
-    def _allocate_decode_plan(self, capacity, capture, workspace):
-        return KDADecodePlan(capacity, capture, workspace)
+    def _allocate_decode_context(self, capacity, capture, workspace):
+        return KDADecodeContext(capacity, capture, workspace)
 
     def split_qkv(self, mixed_qkv: torch.Tensor):
         return mixed_qkv.split(self.tp_hidden_size, dim=-1)
 
-    def _update_prefill(self, plan):
-        plan.b_conv_buffer_idx = plan.batch.b_req_idx
-        plan.b_ssm_buffer_idx = plan.batch.b_req_idx * (self.mtp_step + 1)
+    def _update_prefill(self, context):
+        context.b_conv_buffer_idx = context.batch.b_req_idx
+        context.b_ssm_buffer_idx = context.batch.b_req_idx * (self.mtp_step + 1)
 
-    def _forward_prefill(self, layer: LayerAttentionBinding, plan, inputs: KDAInputs, *, out=None):
+    def _forward_prefill(self, layer: LayerAttentionBinding, context, inputs: KDAInputs, *, out=None):
         mixed_qkv = inputs.mixed_qkv
         raw_gate = inputs.raw_gate
         raw_beta = inputs.raw_beta
@@ -77,9 +77,9 @@ class KDALinearAttBackend(BaseAttentionBackend):
             mixed_qkv.transpose(0, 1),
             layer.params.conv_weight,
             bias=None,
-            query_start_loc=plan.batch.b1_cu_q_seq_len,
-            cache_indices=plan.b_conv_buffer_idx,
-            has_initial_state=plan.batch.b_ready_cache_len > 0,
+            query_start_loc=context.batch.b1_cu_q_seq_len,
+            cache_indices=context.b_conv_buffer_idx,
+            has_initial_state=context.batch.b_ready_cache_len > 0,
             conv_states=conv_states,
             activation="silu",
         ).transpose(0, 1)
@@ -89,7 +89,7 @@ class KDALinearAttBackend(BaseAttentionBackend):
         v = v.view(1, -1, backend.tp_num_heads, backend.head_dim)
         raw_gate = raw_gate.view(1, -1, backend.tp_hidden_size)
         raw_beta = raw_beta.view(1, -1, backend.tp_num_heads)
-        initial_state = ssm_states[plan.b_ssm_buffer_idx].contiguous()
+        initial_state = ssm_states[context.b_ssm_buffer_idx].contiguous()
         output, final_state = chunk_kda_with_fused_gate(
             q=q,
             k=k,
@@ -101,79 +101,83 @@ class KDALinearAttBackend(BaseAttentionBackend):
             initial_state=initial_state,
             output_final_state=True,
             use_qk_l2norm_in_kernel=True,
-            cu_seqlens=plan.batch.b1_cu_q_seq_len,
+            cu_seqlens=context.batch.b1_cu_q_seq_len,
             safe_gate=True,
             lower_bound=backend.lower_bound,
         )
-        ssm_states[plan.b_ssm_buffer_idx] = final_state.to(ssm_states.dtype, copy=False)
+        ssm_states[context.b_ssm_buffer_idx] = final_state.to(ssm_states.dtype, copy=False)
         return output
 
-    def _update_decode(self, plan):
+    def _update_decode(self, context):
         mtp_step = self.mtp_step
         if mtp_step == 0:
-            self._decode_init_normal_decode_state(plan)
+            self._decode_init_normal_decode_state(context)
             return
         if self.uses_dynamic_spec_verify_layout():
-            self._decode_init_dynamic_mtp_decode_state(plan, mtp_step + 1, req_to_mtp_state_index=self.mtp_state_index)
+            self._decode_init_dynamic_mtp_decode_state(
+                context, mtp_step + 1, req_to_mtp_state_index=self.mtp_state_index
+            )
         else:
-            self._decode_init_fixed_mtp_decode_state(plan, mtp_step, req_to_mtp_state_index=self.mtp_state_index)
+            self._decode_init_fixed_mtp_decode_state(context, mtp_step, req_to_mtp_state_index=self.mtp_state_index)
 
-    def _decode_init_normal_decode_state(self, plan):
-        plan.b_conv_buffer_idx = plan.batch.b_req_idx
-        plan.b_ssm_buffer_idx = plan.batch.b_req_idx
+    def _decode_init_normal_decode_state(self, context):
+        context.b_conv_buffer_idx = context.batch.b_req_idx
+        context.b_ssm_buffer_idx = context.batch.b_req_idx
 
     def _decode_init_dynamic_mtp_decode_state(
-        self, plan, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor
+        self, context, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor
     ) -> None:
         (
-            plan.b1_mtp_cu_q_seq_len,
-            plan.b_conv_buffer_idx,
-            plan.b_num_accepted_tokens,
+            context.b1_mtp_cu_q_seq_len,
+            context.b_conv_buffer_idx,
+            context.b_num_accepted_tokens,
         ) = build_dynamic_mtp_linear_att_state_params(
-            b_req_idx=plan.batch.b_req_idx,
-            b_mtp_index=plan.batch.b_mtp_index,
+            b_req_idx=context.batch.b_req_idx,
+            b_mtp_index=context.batch.b_mtp_index,
             req_to_mtp_state_index=req_to_mtp_state_index,
-            hold_req_id=plan.batch.hold_req_id,
+            hold_req_id=context.batch.hold_req_id,
         )
-        self._decode_init_mtp_ssm_buffer_idx(plan, mtp_size)
+        self._decode_init_mtp_ssm_buffer_idx(context, mtp_size)
 
-    def _decode_init_fixed_mtp_decode_state(self, plan, mtp_step: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
+    def _decode_init_fixed_mtp_decode_state(
+        self, context, mtp_step: int, *, req_to_mtp_state_index: torch.Tensor
+    ) -> None:
         mtp_size = mtp_step + 1
-        batch_size = plan.batch.batch_size
+        batch_size = context.batch.batch_size
         assert batch_size % mtp_size == 0, (
             "KDA fixed-layout decode requires batch_size to be divisible by mtp_step + 1, "
             f"got batch_size={batch_size}, mtp_step={mtp_step}."
         )
         att_batch_size = batch_size // mtp_size
-        plan.b1_mtp_cu_q_seq_len = torch.arange(
-            0, batch_size + 1, mtp_size, dtype=torch.int32, device=plan.batch.b_req_idx.device
+        context.b1_mtp_cu_q_seq_len = torch.arange(
+            0, batch_size + 1, mtp_size, dtype=torch.int32, device=context.batch.b_req_idx.device
         )
-        plan.b_conv_buffer_idx = plan.batch.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        plan.b_num_accepted_tokens = req_to_mtp_state_index[plan.b_conv_buffer_idx] + 1
-        self._decode_init_mtp_ssm_buffer_idx(plan, mtp_size)
+        context.b_conv_buffer_idx = context.batch.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
+        context.b_num_accepted_tokens = req_to_mtp_state_index[context.b_conv_buffer_idx] + 1
+        self._decode_init_mtp_ssm_buffer_idx(context, mtp_size)
 
-    def _decode_init_mtp_ssm_buffer_idx(self, plan, mtp_size: int):
-        att_batch_size = plan.b_conv_buffer_idx.shape[0]
-        b_ssm_buffer_start_idx = (plan.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
+    def _decode_init_mtp_ssm_buffer_idx(self, context, mtp_size: int):
+        att_batch_size = context.b_conv_buffer_idx.shape[0]
+        b_ssm_buffer_start_idx = (context.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
         state_offsets = torch.arange(
-            mtp_size, device=plan.batch.b_req_idx.device, dtype=plan.batch.b_req_idx.dtype
+            mtp_size, device=context.batch.b_req_idx.device, dtype=context.batch.b_req_idx.dtype
         ).view(1, mtp_size)
-        plan.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets
+        context.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets
 
-    def _forward_decode(self, layer: LayerAttentionBinding, plan, inputs: KDAInputs, *, out=None):
+    def _forward_decode(self, layer: LayerAttentionBinding, context, inputs: KDAInputs, *, out=None):
         mixed_qkv = inputs.mixed_qkv
         raw_gate = inputs.raw_gate
         raw_beta = inputs.raw_beta
         backend: KDALinearAttBackend = self
         conv_states, ssm_states = (layer.params.conv, layer.params.ssm)
-        conv_kwargs = dict(bias=None, activation="silu", conv_state_indices=plan.b_conv_buffer_idx)
+        conv_kwargs = dict(bias=None, activation="silu", conv_state_indices=context.b_conv_buffer_idx)
         conv_update = causal_conv1d_update
         if backend.mtp_step > 0:
             conv_update = causal_conv1d_update_mtp
             conv_kwargs.update(
                 mtp_step=backend.mtp_step,
-                num_accepted_tokens=plan.b_num_accepted_tokens,
-                query_start_loc=plan.b1_mtp_cu_q_seq_len,
+                num_accepted_tokens=context.b_num_accepted_tokens,
+                query_start_loc=context.b1_mtp_cu_q_seq_len,
             )
         mixed_qkv = conv_update(mixed_qkv, conv_states, layer.params.conv_weight, **conv_kwargs)
         q, k, v = backend.split_qkv(mixed_qkv)
@@ -194,8 +198,8 @@ class KDALinearAttBackend(BaseAttentionBackend):
             initial_state=ssm_states,
             lower_bound=backend.lower_bound,
             inplace_final_state=True,
-            ssm_state_indices=plan.b_ssm_buffer_idx,
-            cu_seqlens=plan.b1_mtp_cu_q_seq_len,
-            num_accepted_tokens=plan.b_num_accepted_tokens,
+            ssm_state_indices=context.b_ssm_buffer_idx,
+            cu_seqlens=context.b1_mtp_cu_q_seq_len,
+            num_accepted_tokens=context.b_num_accepted_tokens,
         )
         return output

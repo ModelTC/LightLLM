@@ -245,7 +245,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         # Full-attn layers: head_dim=512, no SWA, no image bidi — standard
         # triton via backend1.
         o_tensor = self.prefill_attention.forward(
-            infer_state.attention_plans[self.prefill_attention.group_id], DenseInputs(_q)
+            infer_state.attention_contexts[self.prefill_attention.group_id], DenseInputs(_q)
         )
         return o_tensor.view(q.shape)
 
@@ -259,7 +259,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
 
         o_tensor = self.decode_attention.forward(
-            infer_state.attention_plans[self.decode_attention.group_id], DenseInputs(_q)
+            infer_state.attention_contexts[self.decode_attention.group_id], DenseInputs(_q)
         )
         return o_tensor.view(q.shape)
 

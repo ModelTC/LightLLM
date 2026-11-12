@@ -199,7 +199,7 @@ def test_full_tuning_graph_and_cache_reuse(tmp_path, monkeypatch, length):
         b_req_idx=torch.arange(2, device="cuda", dtype=torch.int32),
         att_state_manager=resources,
         att_state_role="main",
-        attention_plans={},
+        attention_contexts={},
         attention_groups=(),
     )
     graph.capture_decode(decode, state)

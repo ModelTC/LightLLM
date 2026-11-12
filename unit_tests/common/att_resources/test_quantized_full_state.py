@@ -23,13 +23,13 @@ from unit_tests.common.att_resources.model_helpers import (
     read_kv_storage,
 )
 from unit_tests.common.attention.helpers import (
-    backend_plan,
+    backend_context,
     make_backend,
     make_batch,
-    make_plan,
+    make_context,
     run_dense,
     run_sparse,
-    update_plan,
+    update_context,
 )
 
 if TYPE_CHECKING:
@@ -370,8 +370,8 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
     owner.b_req_idx = torch.tensor([0], dtype=torch.int32, device=device)
     owner.b_ready_cache_len = owner.b_q_start_loc = torch.zeros(1, dtype=torch.int32, device=device)
     owner.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(8, device=device).view(1, -1))
-    prefill = backend_plan(Int4kvTritonAttBackend, "prefill", settings=SimpleNamespace(quant_group_size=8))
-    update_plan(prefill, owner)
+    prefill = backend_context(Int4kvTritonAttBackend, "prefill", settings=SimpleNamespace(quant_group_size=8))
+    update_context(prefill, owner)
     if device == "cpu":
 
         def dequantize(**kwargs):

@@ -9,7 +9,7 @@ import torch
 from lightllm.common.attention.backends.dense.flashinfer import backend as fp
 from lightllm.common.attention.backends.dense.flashinfer.fp8 import Fp8FlashInferAttBackend
 from lightllm.common.attention.backends.mla.flashinfer import backend as mla
-from unit_tests.common.attention.helpers import make_backend, make_batch, make_plan
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_context
 
 
 @pytest.fixture(params=[fp.FlashInferAttBackend, Fp8FlashInferAttBackend, mla.MlaFlashInferAttBackend])
@@ -62,14 +62,14 @@ def decode_case(request, monkeypatch):
 
 
 @pytest.mark.parametrize("capture", [False, True])
-def test_decode_plan_creates_wrapper_once_with_explicit_graph_mode(decode_case, capture):
+def test_decode_context_creates_wrapper_once_with_explicit_graph_mode(decode_case, capture):
     case = decode_case
     batch = make_batch()
-    plan = make_plan(case.backend, batch, capture=capture, max_length=64, prepare=True)
-    assert plan.decode_wrapper is case.wrapper
+    context = make_context(case.backend, batch, capture=capture, max_length=64, prepare=True)
+    assert context.decode_wrapper is case.wrapper
     case.create.assert_called_once()
     assert case.create.call_args.kwargs["use_cuda_graph"] is capture
-    assert plan.kv_starts.tolist() == ([0, 5, 7] if case.backend.infer_page_size == 1 else [0, 2, 3])
+    assert context.kv_starts.tolist() == ([0, 5, 7] if case.backend.infer_page_size == 1 else [0, 2, 3])
     case.wrapper.plan.assert_called_once()
     case.repack.assert_called_once()
 
@@ -77,14 +77,18 @@ def test_decode_plan_creates_wrapper_once_with_explicit_graph_mode(decode_case, 
 def test_graph_replay_refreshes_existing_wrapper_with_current_lengths(decode_case):
     case = decode_case
     batch = make_batch()
-    plan = make_plan(case.backend, batch, capture=True, max_length=64, prepare=True)
-    pointers = (plan.kv_starts.data_ptr(), plan.kv_indices.data_ptr(), plan.batch.b_seq_len.data_ptr())
+    context = make_context(case.backend, batch, capture=True, max_length=64, prepare=True)
+    pointers = (context.kv_starts.data_ptr(), context.kv_indices.data_ptr(), context.batch.b_seq_len.data_ptr())
     for lengths in ((17, 5), (1, 1), (60, 3)):
         runtime = make_batch(lengths, req_to_token_indexs=batch.req_to_token_indexs)
-        case.backend.prepare(plan, runtime)
-        assert pointers == (plan.kv_starts.data_ptr(), plan.kv_indices.data_ptr(), plan.batch.b_seq_len.data_ptr())
-        assert plan.batch.b_seq_len.tolist() == list(lengths)
-        assert plan.kv_indices[0] == lengths[0]
+        case.backend.prepare(context, runtime)
+        assert pointers == (
+            context.kv_starts.data_ptr(),
+            context.kv_indices.data_ptr(),
+            context.batch.b_seq_len.data_ptr(),
+        )
+        assert context.batch.b_seq_len.tolist() == list(lengths)
+        assert context.kv_indices[0] == lengths[0]
         args = case.refresh.call_args.kwargs
         if case.mla:
             assert args["max_kv_len"] == max(lengths)

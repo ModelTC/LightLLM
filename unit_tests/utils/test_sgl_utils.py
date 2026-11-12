@@ -15,13 +15,13 @@ from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneL
 from lightllm.utils import sgl_utils
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
 from unit_tests.common.attention.helpers import (
-    backend_plan,
+    backend_context,
     make_backend,
     make_batch,
-    make_plan,
+    make_context,
     run_dense,
     run_sparse,
-    update_plan,
+    update_context,
 )
 
 
@@ -123,7 +123,7 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, pa
     infer_state.b_seq_len = torch.tensor([4096, actual_kv_len], dtype=torch.int32)
     infer_state.b1_cu_q_seq_len = torch.tensor([0, 1, 2], dtype=torch.int32)
     infer_state.b1_cu_kv_seq_len = torch.tensor([0, 4096, 4096 + actual_kv_len], dtype=torch.int32)
-    state = backend_plan(
+    state = backend_context(
         fa3_module.Fa3AttBackend,
         "decode",
         settings=SimpleNamespace(
@@ -138,7 +138,7 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, pa
     )
     copy_calls = []
     monkeypatch.setattr(fa3_module, "page_table_copy", lambda **kwargs: copy_calls.append(kwargs))
-    update_plan(state, infer_state)
+    update_context(state, infer_state)
     # 模拟 CudaGraph._capture_decode 对 infer_state 的修改。
     infer_state.max_kv_seq_len = graph.graph_max_len_in_batch
     calls = []

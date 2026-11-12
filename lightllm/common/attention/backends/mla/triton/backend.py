@@ -6,16 +6,16 @@ import torch
 from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import MLADecodeInputs, MLAPrefillInputs
 from lightllm.common.attention.api.spec import AttentionFamily
-from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
+from lightllm.common.attention.backends.base import AttentionExecutionContext, BaseAttentionBackend
 
 
 @dataclasses.dataclass
-class MlaTritonPrefillPlan(PreparedPlan):
+class MlaTritonPrefillContext(AttentionExecutionContext):
     pass
 
 
 @dataclasses.dataclass
-class MlaTritonDecodePlan(PreparedPlan):
+class MlaTritonDecodeContext(AttentionExecutionContext):
     block_seq: torch.Tensor = None
     batch_start: torch.Tensor = None
     indices_initialized: bool = False
@@ -26,17 +26,17 @@ class MlaTritonAttBackend(BaseAttentionBackend):
     cache_formats = frozenset({"None"})
     family = AttentionFamily.MLA
 
-    def _allocate_prefill_plan(self, capacity, capture, workspace):
-        return MlaTritonPrefillPlan(capacity, capture, workspace)
+    def _allocate_prefill_context(self, capacity, capture, workspace):
+        return MlaTritonPrefillContext(capacity, capture, workspace)
 
-    def _allocate_decode_plan(self, capacity, capture, workspace):
-        return MlaTritonDecodePlan(capacity, capture, workspace)
+    def _allocate_decode_context(self, capacity, capture, workspace):
+        return MlaTritonDecodeContext(capacity, capture, workspace)
 
-    def _update_prefill(self, plan):
+    def _update_prefill(self, context):
         pass
 
     def _forward_prefill(
-        self, layer: LayerAttentionBinding, plan, inputs: MLAPrefillInputs, *, out=None
+        self, layer: LayerAttentionBinding, context, inputs: MLAPrefillInputs, *, out=None
     ) -> torch.Tensor:
         alloc_func = layer.alloc_tensor
         q = inputs.query
@@ -44,15 +44,15 @@ class MlaTritonAttBackend(BaseAttentionBackend):
         v = inputs.value
         if q.shape[2] == 256:
             return self._prefill_contiguous_kv_prefill_att(
-                layer, plan, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func
+                layer, context, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func
             )
         else:
-            return self._prefill_mla_prefill_att(layer, plan, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func)
+            return self._prefill_mla_prefill_att(layer, context, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func)
 
     def _prefill_mla_prefill_att(
         self,
         layer,
-        plan,
+        context,
         q: torch.Tensor,
         k: Tuple[torch.Tensor, torch.Tensor],
         v: torch.Tensor,
@@ -73,11 +73,11 @@ class MlaTritonAttBackend(BaseAttentionBackend):
             k_rope,
             v,
             o_tensor,
-            plan.batch.b_q_start_loc,
-            plan.batch.b1_cu_kv_seq_len,
-            plan.batch.b_seq_len,
-            plan.batch.b_ready_cache_len,
-            plan.batch.max_q_seq_len,
+            context.batch.b_q_start_loc,
+            context.batch.b1_cu_kv_seq_len,
+            context.batch.b_seq_len,
+            context.batch.b_ready_cache_len,
+            context.batch.max_q_seq_len,
             softmax_scale,
         )
         return o_tensor
@@ -85,7 +85,7 @@ class MlaTritonAttBackend(BaseAttentionBackend):
     def _prefill_contiguous_kv_prefill_att(
         self,
         layer,
-        plan,
+        context,
         q: torch.Tensor,
         k: Tuple[torch.Tensor, torch.Tensor],
         v: torch.Tensor,
@@ -105,31 +105,31 @@ class MlaTritonAttBackend(BaseAttentionBackend):
             k_merged,
             v,
             o_tensor,
-            plan.batch.b_q_start_loc,
-            plan.batch.b1_cu_kv_seq_len,
-            plan.batch.b_seq_len,
-            plan.batch.max_q_seq_len,
-            plan.batch.b_ready_cache_len,
+            context.batch.b_q_start_loc,
+            context.batch.b1_cu_kv_seq_len,
+            context.batch.b_seq_len,
+            context.batch.max_q_seq_len,
+            context.batch.b_ready_cache_len,
         )
         return o_tensor
 
-    def _update_decode(self, plan):
-        plan.block_seq = torch.empty((1,), dtype=torch.int64, device=plan.batch.device)
-        plan.batch_start = torch.empty((plan.batch.batch_size,), dtype=torch.int64, device=plan.batch.device)
-        plan.indices_initialized = False
+    def _update_decode(self, context):
+        context.block_seq = torch.empty((1,), dtype=torch.int64, device=context.batch.device)
+        context.batch_start = torch.empty((context.batch.batch_size,), dtype=torch.int64, device=context.batch.device)
+        context.indices_initialized = False
 
-    def _forward_decode(self, layer: LayerAttentionBinding, plan, inputs: MLADecodeInputs, *, out=None):
+    def _forward_decode(self, layer: LayerAttentionBinding, context, inputs: MLADecodeInputs, *, out=None):
         alloc_func = layer.alloc_tensor
         q = (inputs.query_nope, inputs.query_rope)
         k = layer.params.kv
         v = None
         assert v is None
-        return self._decode_mla_decode_att(layer, plan, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func)
+        return self._decode_mla_decode_att(layer, context, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func)
 
     def _decode_mla_decode_att(
         self,
         layer,
-        plan,
+        context,
         q: Tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         v: torch.Tensor,
@@ -149,12 +149,12 @@ class MlaTritonAttBackend(BaseAttentionBackend):
             q_rope=q_rope,
             kv_nope=kv[:, :, :-qk_rope_head_dim],
             kv_rope=kv[:, :, -qk_rope_head_dim:],
-            batch=plan.batch,
+            batch=context.batch,
             softmax_scale=softmax_scale,
             alloc_tensor_func=alloc_func,
-            block_seq=plan.block_seq,
-            batch_start=plan.batch_start,
-            initialize=not plan.indices_initialized,
+            block_seq=context.block_seq,
+            batch_start=context.batch_start,
+            initialize=not context.indices_initialized,
         )
-        plan.indices_initialized = True
+        context.indices_initialized = True
         return out

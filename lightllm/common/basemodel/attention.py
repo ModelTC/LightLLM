@@ -6,9 +6,9 @@ from lightllm.common.attention.api import (
     AttentionFamily,
     AttentionPhase,
     CacheLayout,
+    ContextCapacity,
     LayerAttentionBinding,
     LayerSpec,
-    PlanCapacity,
 )
 from lightllm.common.attention.api.execution import ExecutionRequirements
 from lightllm.common.attention.api.inputs import DenseParams, GDNParams, KDAParams, MLAParams
@@ -210,7 +210,9 @@ def reserve_attention_resources(model):
     for group_id, group in enumerate(model.attention_groups):
         for phase in AttentionPhase:
             backend = group.backend_for(phase)
-            capacity = PlanCapacity(phase, execution.max_batch_size, execution.max_batch_size, execution.max_seq_len, 1)
+            capacity = ContextCapacity(
+                phase, execution.max_batch_size, execution.max_batch_size, execution.max_seq_len, 1
+            )
             resources = backend.resource_requirements(capacity, capture=phase in execution.graph_phases)
             for slot in range(execution.microbatch_count):
                 get_attention_workspace(model, group_id, slot, model.device_runtime.device).reserve(resources)

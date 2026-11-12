@@ -5,7 +5,7 @@ from typing import List, Optional
 
 import torch
 
-from lightllm.common.attention.api import AttentionBatch, AttentionPhase, PlanCapacity
+from lightllm.common.attention.api import AttentionBatch, AttentionPhase, ContextCapacity
 from lightllm.common.attention_state.manager import AttentionStateManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
@@ -23,7 +23,7 @@ class InferStateInfo:
 
     def __init__(self):
         self.attention_groups = ()
-        self.attention_plans = {}
+        self.attention_contexts = {}
         self.attention_batch = None
 
         self.input_ids: torch.Tensor = None
@@ -163,7 +163,7 @@ class InferStateInfo:
         )
         if self.is_cuda_graph_replay:
             return
-        capacity = PlanCapacity(
+        capacity = ContextCapacity(
             phase,
             self.batch_size,
             self.input_ids.shape[0],
@@ -177,17 +177,17 @@ class InferStateInfo:
             if self.is_cuda_graph_capture:
                 workspace = workspace.fork()
             workspace.reserve(backend.resource_requirements(capacity, capture=self.is_cuda_graph_capture))
-            plan = backend.allocate_plan(capacity, capture=self.is_cuda_graph_capture, workspace=workspace)
-            backend.prepare(plan, self.attention_batch)
-            self.attention_plans[group_id] = plan
+            context = backend.allocate_context(capacity, capture=self.is_cuda_graph_capture, workspace=workspace)
+            backend.prepare(context, self.attention_batch)
+            self.attention_contexts[group_id] = context
 
     def update_attention(self):
-        for group_id, plan in self.attention_plans.items():
-            self.attention_groups[group_id].backend_for(plan.capacity.phase).update(plan)
+        for group_id, context in self.attention_contexts.items():
+            self.attention_groups[group_id].backend_for(context.capacity.phase).update(context)
 
     def finish_attention(self):
-        for plan in self.attention_plans.values():
-            plan.workspace.finish()
+        for context in self.attention_contexts.values():
+            context.workspace.finish()
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
         if (
@@ -214,8 +214,8 @@ class InferStateInfo:
                     ):
                         raise ValueError(f"captured input {attr_name} changed shape, dtype or device")
                     copies.append((target, attr_value))
-        for plan in self.attention_plans.values():
-            plan.workspace.begin()
+        for context in self.attention_contexts.values():
+            context.workspace.begin()
         self.attention_batch.copy_inputs(new_infer_state.attention_batch)
         for target, source in copies:
             target.copy_(source, non_blocking=True)
@@ -225,8 +225,8 @@ class InferStateInfo:
             max_q_seq_len=new_infer_state.max_q_seq_len,
             total_token_num=new_infer_state.total_token_num,
         )
-        for group_id, plan in self.attention_plans.items():
-            self.attention_groups[group_id].decode_backend.prepare(plan, batch)
+        for group_id, context in self.attention_contexts.items():
+            self.attention_groups[group_id].decode_backend.prepare(context, batch)
         return
 
     def call_overlap_hook(self):

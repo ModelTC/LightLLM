@@ -39,7 +39,7 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         # the visible prefix on the left and the complete draft block on the right.
 
         output = self.decode_attention.forward(
-            infer_state.attention_plans[self.decode_attention.group_id], DenseInputs(q)
+            infer_state.attention_contexts[self.decode_attention.group_id], DenseInputs(q)
         )
         return output.view(-1, self.tp_q_head_num_ * self.head_dim_)
 

@@ -104,7 +104,7 @@ def test_decode_attention_tunes_before_capture_only(capture_env, tmp_path, monke
             b_req_idx=torch.tensor([0, 1]),
             att_state_role="main",
             att_state_manager=manager,
-            attention_plans={},
+            attention_contexts={},
             attention_groups=(),
         )
         for _ in range(2 if overlap else 1)
@@ -153,7 +153,7 @@ def test_warmup_failure_restores_phase_without_capturing(capture_env, overlap):
             b_req_idx=torch.tensor([0, 1]),
             att_state_role="main",
             att_state_manager=manager,
-            attention_plans={},
+            attention_contexts={},
             attention_groups=(),
         )
         for _ in range(2 if overlap else 1)
@@ -187,7 +187,7 @@ def test_capture_failure_restores_state_and_releases_native_graph(capture_env, o
         restore_capture_state=lambda snapshot: persistent.copy_(snapshot),
     )
 
-    def bind_graph(plan):
+    def bind_graph(context):
         raise ValueError("failed binding")
 
     backend = SimpleNamespace(bind_graph=bind_graph)
@@ -197,7 +197,7 @@ def test_capture_failure_restores_state_and_releases_native_graph(capture_env, o
             b_req_idx=torch.tensor([0, 1]),
             att_state_role="main",
             att_state_manager=manager,
-            attention_plans={0: SimpleNamespace(capacity=SimpleNamespace(phase=AttentionPhase.DECODE))}
+            attention_contexts={0: SimpleNamespace(capacity=SimpleNamespace(phase=AttentionPhase.DECODE))}
             if fail_binding
             else {},
             attention_groups=(SimpleNamespace(backend_for=lambda phase: backend),),

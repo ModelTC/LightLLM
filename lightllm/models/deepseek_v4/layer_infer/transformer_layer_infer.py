@@ -518,7 +518,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             q, meta["swa_indices"], meta["swa_lengths"], meta.get("extra_indices"), meta.get("extra_lengths")
         )
         return self.prefill_attention.forward(
-            infer_state.attention_plans[self.prefill_attention.group_id], inputs, out=out
+            infer_state.attention_contexts[self.prefill_attention.group_id], inputs, out=out
         )
 
     # ------------------------------------------------------------------ attention (decode)
@@ -535,7 +535,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             q, meta["swa_indices"], meta["swa_lengths"], meta.get("extra_indices"), meta.get("extra_lengths")
         )
         return self.decode_attention.forward(
-            infer_state.attention_plans[self.decode_attention.group_id], inputs, out=out
+            infer_state.attention_contexts[self.decode_attention.group_id], inputs, out=out
         )
 
     # ------------------------------------------------------------------ moe

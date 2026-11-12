@@ -18,7 +18,7 @@ from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import get_env_start_args
-from unit_tests.common.attention.helpers import make_backend, make_batch, make_layer_attention, make_plan
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_context, make_layer_attention
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -178,13 +178,13 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     )
     backend = make_backend(Glm5NextSparseAttBackend)
     phase = AttentionPhase.PREFILL
-    plan = make_plan(backend, make_batch((2, 3, 5), phase=phase, device="cuda"))
-    plan.nsa_cache_seqlens = lengths
-    plan.nsa_cu_seqlens_k_new = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
-    state.b1_cu_q_seq_len = plan.batch.b1_cu_q_seq_len
+    context = make_context(backend, make_batch((2, 3, 5), phase=phase, device="cuda"))
+    context.nsa_cache_seqlens = lengths
+    context.nsa_cu_seqlens_k_new = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
+    state.b1_cu_q_seq_len = context.batch.b1_cu_q_seq_len
     state.max_q_seq_len = 1
-    state.attention_plans = {0: plan}
-    attention = make_layer_attention(backend, plan, MLAParams(kv, layer.softmax_scale, layer.kv_lora_rank, 0))
+    state.attention_contexts = {0: context}
+    attention = make_layer_attention(backend, context, MLAParams(kv, layer.softmax_scale, layer.kv_lora_rank, 0))
     layer.prefill_attention = layer.decode_attention = attention
     projected = torch.bmm(q.transpose(0, 1), kv_b.view(4, 256, 512)[:, :128]).transpose(0, 1)
     expected = []
@@ -195,12 +195,12 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     expected = torch.stack(expected)
     prefill = layer._context_attention_kernel(q, None, state, weight)
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
-    plan = make_plan(backend, make_batch((2, 3, 5), phase=AttentionPhase.DECODE, device="cuda"))
-    plan.nsa_cache_seqlens = lengths
-    plan.nsa_cu_seqlens_k_new = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
-    state.attention_plans = {0: plan}
+    context = make_context(backend, make_batch((2, 3, 5), phase=AttentionPhase.DECODE, device="cuda"))
+    context.nsa_cache_seqlens = lengths
+    context.nsa_cu_seqlens_k_new = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
+    state.attention_contexts = {0: context}
     layer.decode_attention = make_layer_attention(
-        backend, plan, MLAParams(kv, layer.softmax_scale, layer.kv_lora_rank, 0)
+        backend, context, MLAParams(kv, layer.softmax_scale, layer.kv_lora_rank, 0)
     )
     decode = layer._token_attention_kernel(q, state, weight)
     for output in (prefill, decode):

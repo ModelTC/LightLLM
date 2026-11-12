@@ -5,12 +5,12 @@ import torch
 
 from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import SparseMLADecodeInputs, SparseMLAPrefillInputs
-from lightllm.common.attention.backends.base import PreparedPlan
+from lightllm.common.attention.backends.base import AttentionExecutionContext
 from lightllm.common.attention.backends.sparse_mla.flashmla.backend import NsaFlashMlaSparseAttBackend
 
 
 @dataclasses.dataclass
-class NsaFlashMlaFp8SparsePrefillPlan(PreparedPlan):
+class NsaFlashMlaFp8SparsePrefillContext(AttentionExecutionContext):
     ks: torch.Tensor = None
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
@@ -21,7 +21,7 @@ class NsaFlashMlaFp8SparsePrefillPlan(PreparedPlan):
 
 
 @dataclasses.dataclass
-class NsaFlashMlaFp8SparseDecodePlan(PreparedPlan):
+class NsaFlashMlaFp8SparseDecodeContext(AttentionExecutionContext):
     ks: torch.Tensor = None
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
@@ -35,20 +35,22 @@ class NsaFlashMlaFp8SparseDecodePlan(PreparedPlan):
 class NsaFlashMlaFp8SparseAttBackend(NsaFlashMlaSparseAttBackend):
     cache_formats = frozenset({"fp8kv_dsa"})
 
-    def _allocate_prefill_plan(self, capacity, capture, workspace):
-        return NsaFlashMlaFp8SparsePrefillPlan(capacity, capture, workspace)
+    def _allocate_prefill_context(self, capacity, capture, workspace):
+        return NsaFlashMlaFp8SparsePrefillContext(capacity, capture, workspace)
 
-    def _allocate_decode_plan(self, capacity, capture, workspace):
-        return NsaFlashMlaFp8SparseDecodePlan(capacity, capture, workspace)
+    def _allocate_decode_context(self, capacity, capture, workspace):
+        return NsaFlashMlaFp8SparseDecodeContext(capacity, capture, workspace)
 
     def _forward_prefill(
-        self, layer: LayerAttentionBinding, plan, inputs: SparseMLAPrefillInputs, *, out=None
+        self, layer: LayerAttentionBinding, context, inputs: SparseMLAPrefillInputs, *, out=None
     ) -> torch.Tensor:
         q = inputs.query
         k = layer.params.kv
-        return self._prefill_nsa_prefill_att(layer, plan, q=q, packed_kv=k, inputs=inputs)
+        return self._prefill_nsa_prefill_att(layer, context, q=q, packed_kv=k, inputs=inputs)
 
-    def _prefill_nsa_prefill_att(self, layer, plan, q: torch.Tensor, packed_kv: torch.Tensor, inputs) -> torch.Tensor:
+    def _prefill_nsa_prefill_att(
+        self, layer, context, q: torch.Tensor, packed_kv: torch.Tensor, inputs
+    ) -> torch.Tensor:
         import flash_mla
 
         topk_indices = inputs.topk_indices
@@ -56,7 +58,7 @@ class NsaFlashMlaFp8SparseAttBackend(NsaFlashMlaSparseAttBackend):
         kv_lora_rank = layer.params.kv_lora_rank
         topk_mem_indices = inputs.topk_mem_indices
         prefill_cache_kv = inputs.prefill_cache_kv
-        if plan.batch.max_cache_len > 0:
+        if context.batch.max_cache_len > 0:
             from lightllm.common.basemodel.triton_kernel.kv_copy.prefill_compact_kv_flashmla_fp8 import (
                 get_prefill_kv_cache_and_remap_indices_triton,
             )
@@ -64,7 +66,7 @@ class NsaFlashMlaFp8SparseAttBackend(NsaFlashMlaSparseAttBackend):
             kv, topk_indices = get_prefill_kv_cache_and_remap_indices_triton(
                 packed_kv=packed_kv,
                 topk_mem_indices=topk_mem_indices,
-                prefill_mem_index=plan.batch.mem_index,
+                prefill_mem_index=context.batch.mem_index,
                 prefill_cache_kv=prefill_cache_kv,
                 prefill_dtype=prefill_cache_kv.dtype,
             )
@@ -77,34 +79,34 @@ class NsaFlashMlaFp8SparseAttBackend(NsaFlashMlaSparseAttBackend):
         )
         return mla_out
 
-    def _update_decode(self, plan):
-        plan.q_kv_seq_len = plan.batch.b_seq_len
-        plan.q_req_idx = plan.batch.b_req_idx
-        plan.ragged_mem_index = plan.workspace.get(
-            "sparse_ragged", max(1, plan.capacity.batch_size * plan.capacity.max_kv_seq_len), torch.int32
+    def _update_decode(self, context):
+        context.q_kv_seq_len = context.batch.b_seq_len
+        context.q_req_idx = context.batch.b_req_idx
+        context.ragged_mem_index = context.workspace.get(
+            "sparse_ragged", max(1, context.capacity.batch_size * context.capacity.max_kv_seq_len), torch.int32
         )
         from lightllm.common.basemodel.triton_kernel.gen_nsa_ks_ke import gen_nsa_ks_ke
 
-        plan.ks, plan.ke, plan.lengths = gen_nsa_ks_ke(
-            b_seq_len=plan.batch.b_seq_len,
-            b_q_seq_len=plan.batch.b_q_seq_len,
-            b_req_idx=plan.batch.b_req_idx,
-            req_to_token_index=plan.batch.req_to_token_indexs,
-            q_token_num=plan.batch.b_seq_len.shape[0],
-            ragged_mem_index=plan.ragged_mem_index,
-            hold_req_idx=plan.batch.hold_req_id,
+        context.ks, context.ke, context.lengths = gen_nsa_ks_ke(
+            b_seq_len=context.batch.b_seq_len,
+            b_q_seq_len=context.batch.b_q_seq_len,
+            b_req_idx=context.batch.b_req_idx,
+            req_to_token_index=context.batch.req_to_token_indexs,
+            q_token_num=context.batch.b_seq_len.shape[0],
+            ragged_mem_index=context.ragged_mem_index,
+            hold_req_idx=context.batch.hold_req_id,
         )
         return
 
     def _forward_decode(
-        self, layer: LayerAttentionBinding, plan, inputs: SparseMLADecodeInputs, *, out=None
+        self, layer: LayerAttentionBinding, context, inputs: SparseMLADecodeInputs, *, out=None
     ) -> torch.Tensor:
         q = (inputs.query_nope, inputs.query_rope)
         k = layer.params.kv
-        return self._decode_nsa_decode_att(layer, plan, q=q, packed_kv=k, inputs=inputs)
+        return self._decode_nsa_decode_att(layer, context, q=q, packed_kv=k, inputs=inputs)
 
     def _decode_nsa_decode_att(
-        self, layer, plan, q: Tuple[torch.Tensor, torch.Tensor], packed_kv: torch.Tensor, inputs
+        self, layer, context, q: Tuple[torch.Tensor, torch.Tensor], packed_kv: torch.Tensor, inputs
     ) -> torch.Tensor:
         import flash_mla
 
@@ -128,9 +130,9 @@ class NsaFlashMlaFp8SparseAttBackend(NsaFlashMlaSparseAttBackend):
             cache_seqlens=None,
             head_dim_v=kv_lora_rank,
             tile_scheduler_metadata=(
-                plan.capture_flashmla_sched_meta
+                context.capture_flashmla_sched_meta
                 if torch.cuda.is_current_stream_capturing()
-                else plan.flashmla_sched_meta
+                else context.flashmla_sched_meta
             ),
             softmax_scale=softmax_scale,
             causal=False,
@@ -139,9 +141,9 @@ class NsaFlashMlaFp8SparseAttBackend(NsaFlashMlaSparseAttBackend):
         )
         return o_tensor[:, 0, :, :]
 
-    def _prepare_decode(self, plan):
+    def _prepare_decode(self, context):
         import flash_mla
 
-        if plan.flashmla_sched_meta is None:
-            plan.flashmla_sched_meta = flash_mla.get_mla_metadata()[0]
-            plan.capture_flashmla_sched_meta = flash_mla.get_mla_metadata()[0]
+        if context.flashmla_sched_meta is None:
+            context.flashmla_sched_meta = flash_mla.get_mla_metadata()[0]
+            context.capture_flashmla_sched_meta = flash_mla.get_mla_metadata()[0]

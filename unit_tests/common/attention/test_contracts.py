@@ -10,8 +10,8 @@ from lightllm.common.attention.backends.base import BaseAttentionBackend
 from unit_tests.common.attention.helpers import (
     make_backend,
     make_batch,
+    make_context,
     make_layer_attention,
-    make_plan,
     make_spec,
     model_stub,
 )
@@ -39,28 +39,28 @@ def test_graph_copy_keeps_tensor_addresses_and_uses_new_lengths():
 
 
 @pytest.mark.parametrize("capture", [False, True])
-def test_plan_capacity_and_backend_identity(capture):
+def test_context_capacity_and_backend_identity(capture):
     backend = make_backend()
-    plan = make_plan(backend, capture=capture, max_length=16)
-    backend.prepare(plan, make_batch(req_to_token_indexs=plan.batch.req_to_token_indexs))
+    context = make_context(backend, capture=capture, max_length=16)
+    backend.prepare(context, make_batch(req_to_token_indexs=context.batch.req_to_token_indexs))
     with pytest.raises(ValueError, match="capacity"):
-        backend.prepare(plan, make_batch((17, 2)))
+        backend.prepare(context, make_batch((17, 2)))
     with pytest.raises(ValueError, match="different attention backend"):
-        make_backend().prepare(plan, make_batch())
+        make_backend().prepare(context, make_batch())
     with pytest.raises(ValueError, match="different attention backend"):
-        make_backend().update(plan)
-    attention = make_layer_attention(make_backend(), plan, params=None)
+        make_backend().update(context)
+    attention = make_layer_attention(make_backend(), context, params=None)
     with pytest.raises(ValueError, match="different attention backend"):
-        attention.forward(plan, inputs=None)
+        attention.forward(context, inputs=None)
 
 
 def test_layer_attention_rejects_wrong_phase():
     backend = make_backend()
-    plan = make_plan(backend, prepare=True)
-    attention = make_layer_attention(backend, plan, params=None)
+    context = make_context(backend, prepare=True)
+    attention = make_layer_attention(backend, context, params=None)
     attention = replace(attention, spec=replace(attention.spec, phase=AttentionPhase.PREFILL))
     with pytest.raises(ValueError, match="phases differ"):
-        attention.forward(plan, inputs=None)
+        attention.forward(context, inputs=None)
 
 
 @pytest.mark.parametrize("requested", ["auto", "triton"])

@@ -89,7 +89,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         )
 
         o_tensor = self.prefill_attention.forward(
-            infer_state.attention_plans[self.prefill_attention.group_id], MLAPrefillInputs(q, k_nope, k_rope, v)
+            infer_state.attention_contexts[self.prefill_attention.group_id], MLAPrefillInputs(q, k_nope, k_rope, v)
         )
         return o_tensor
 
@@ -104,7 +104,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
 
         out = self.decode_attention.forward(
-            infer_state.attention_plans[self.decode_attention.group_id], MLADecodeInputs(q_nope, q_rope)
+            infer_state.attention_contexts[self.decode_attention.group_id], MLADecodeInputs(q_nope, q_rope)
         )
         return out
 

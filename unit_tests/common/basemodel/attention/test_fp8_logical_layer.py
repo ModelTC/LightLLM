@@ -14,7 +14,7 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.server.core.objs.start_args_type import StartArgs
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state, replace_logical_layer_groups
 from unit_tests.common.att_resources.test_capacity import definition
-from unit_tests.common.attention.helpers import make_backend, make_batch, make_layer_attention, make_plan
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_context, make_layer_attention
 
 
 @pytest.mark.parametrize("backend_name", ["fa3", "flashinfer"])
@@ -45,11 +45,11 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     phase = AttentionPhase(operation)
     cls = fa3_fp8.Fp8Fa3AttBackend if backend_name == "fa3" else flashinfer_fp8.Fp8FlashInferAttBackend
     backend = make_backend(cls)
-    plan = make_plan(backend, make_batch((1,), phase=phase))
-    plan.page_table = plan.cu_seqlens_q = plan.cu_seqlens_k = None
-    plan.b_att_seq_len = plan.batch.b_seq_len
-    plan.decode_max_q_seq_len = 1
-    plan.causal = True
+    context = make_context(backend, make_batch((1,), phase=phase))
+    context.page_table = context.cu_seqlens_q = context.cu_seqlens_k = None
+    context.b_att_seq_len = context.batch.b_seq_len
+    context.decode_max_q_seq_len = 1
+    context.causal = True
     calls = []
     if backend_name == "fa3":
         state.q_scales[0].fill_(3)
@@ -77,7 +77,7 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
             calls.append(operation)
             out.copy_(q)
 
-        plan.prefill_wrapper = plan.decode_wrapper = SimpleNamespace(run=run)
+        context.prefill_wrapper = context.decode_wrapper = SimpleNamespace(run=run)
     layer = LlamaTransformerLayerInfer.__new__(LlamaTransformerLayerInfer)
     layer.layer_num_ = logical_layer_id
     layer.tp_q_head_num_ = layer.tp_k_head_num_ = state.config.head_num
@@ -88,14 +88,14 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
         args=StartArgs(llm_kv_type="fp8kv_sph" if backend_name == "fa3" else "fp8kv_spt"),
     )
     params = create_layer_attention_params(model, layer, None, AttentionFamily.DENSE)
-    attention = make_layer_attention(backend, plan, params)
+    attention = make_layer_attention(backend, context, params)
     attention = replace(
         attention,
         logical_layer_id=logical_layer_id,
         alloc_tensor=lambda shape, dtype, device: torch.empty(shape, dtype=dtype, device="cpu"),
     )
     setattr(layer, operation + "_attention", attention)
-    infer = SimpleNamespace(attention_plans={0: plan})
+    infer = SimpleNamespace(attention_contexts={0: context})
     monkeypatch.setattr(manager, "get_state", lambda *args: pytest.fail("forward must not look up storage owners"))
     q = torch.ones((1, state.config.head_num, state.config.head_dim))
     if operation == "prefill":

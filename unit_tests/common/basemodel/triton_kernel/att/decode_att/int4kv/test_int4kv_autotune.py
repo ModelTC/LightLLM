@@ -23,13 +23,13 @@ from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
 from unit_tests.common.attention.helpers import (
-    backend_plan,
+    backend_context,
     make_backend,
     make_batch,
-    make_plan,
+    make_context,
     run_dense,
     run_sparse,
-    update_plan,
+    update_context,
 )
 
 
@@ -151,8 +151,8 @@ def test_decode_passes_saved_length_to_stage1(monkeypatch):
     infer_state.b_seq_len = inputs["B_Seqlen"]
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"])
     infer_state.req_to_token_indexs = infer_state.req_manager.req_to_token_indexs
-    state = backend_plan(Int4kvTritonAttBackend, "decode", settings=SimpleNamespace())
-    update_plan(state, infer_state)
+    state = backend_context(Int4kvTritonAttBackend, "decode", settings=SimpleNamespace())
+    update_context(state, infer_state)
     infer_state.max_kv_seq_len = 32768
     calls = []
     monkeypatch.setattr(stage1_module, "int4kv_flash_decode_stage1", lambda **kwargs: calls.append(kwargs))

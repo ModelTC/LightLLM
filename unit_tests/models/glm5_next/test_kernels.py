@@ -24,13 +24,13 @@ from lightllm.models.glm5_next.triton_kernel.kpool import (
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import set_env_start_args
 from unit_tests.common.attention.helpers import (
-    backend_plan,
+    backend_context,
     make_backend,
     make_batch,
-    make_plan,
+    make_context,
     run_dense,
     run_sparse,
-    update_plan,
+    update_context,
 )
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -533,14 +533,14 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
 
     expected = reference()
     control = {"topk_mem_indices": indexes, "softmax_scale": 0.0625, "kv_lora_rank": kv.shape[-1]}
-    prefill_state = backend_plan(Glm5NextSparseAttBackend, "prefill")
+    prefill_state = backend_context(Glm5NextSparseAttBackend, "prefill")
     prefill_batch = SimpleNamespace()
     prefill = run_sparse(prefill_state, prefill_batch, q, kv, control)
     torch.testing.assert_close(prefill.float(), expected, atol=0.012, rtol=0.015)
     infer_state = InferStateInfo()
     infer_state.b1_cu_q_seq_len = torch.arange(10, dtype=torch.int32, device="cuda")
     infer_state.max_q_seq_len = 1
-    decode = backend_plan(
+    decode = backend_context(
         Glm5NextSparseAttBackend,
         "decode",
         nsa_cache_seqlens=lengths,

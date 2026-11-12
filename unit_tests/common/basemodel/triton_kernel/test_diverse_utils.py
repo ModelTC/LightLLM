@@ -12,13 +12,13 @@ from lightllm.common.attention.backends.dense.triton.int8 import Int8kvTritonAtt
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel import diverse_utils
 from unit_tests.common.attention.helpers import (
-    backend_plan,
+    backend_context,
     make_backend,
     make_batch,
-    make_plan,
+    make_context,
     run_dense,
     run_sparse,
-    update_plan,
+    update_context,
 )
 
 
@@ -49,9 +49,9 @@ def test_int8kv_decode_state_rebuilds_diverse_metadata(monkeypatch):
     infer_state.max_kv_seq_len = 8192
     infer_state.b_shared_seq_len = torch.tensor([8, 8, 5, 0], dtype=torch.int32, device="cuda")
     infer_state.b_shared_radix_node_id = torch.tensor([10, 10, 20, -1], dtype=torch.int64, device="cuda")
-    state = backend_plan(Int8kvTritonAttBackend, "decode", settings=SimpleNamespace())
+    state = backend_context(Int8kvTritonAttBackend, "decode", settings=SimpleNamespace())
 
-    update_plan(state, infer_state)
+    update_context(state, infer_state)
 
     assert state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
     assert state.b_shared_seq_len.cpu().tolist() == [8, 8, 0, 0]

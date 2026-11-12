@@ -7,7 +7,7 @@ import torch
 from lightllm.common.attention.api import UnsupportedAttention
 from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import DenseInputs
-from lightllm.common.attention.backends.dense.fa3.backend import Fa3AttBackend, Fa3PrefillPlan
+from lightllm.common.attention.backends.dense.fa3.backend import Fa3AttBackend, Fa3PrefillContext
 
 _NEO_FA3_INSTALL_HINT = (
     "Install the Neo FA3 build from source in the current Python environment:\n"
@@ -34,7 +34,7 @@ except ImportError as exc:
 
 
 @dataclasses.dataclass
-class NeoFa3PrefillPlan(Fa3PrefillPlan):
+class NeoFa3PrefillContext(Fa3PrefillContext):
     pass
 
 
@@ -48,33 +48,33 @@ class NeoFa3AttBackend(Fa3AttBackend):
     provider = "fa3"
     cache_formats = frozenset({"None"})
 
-    def _allocate_prefill_plan(self, capacity, capture, workspace):
-        return NeoFa3PrefillPlan(capacity, capture, workspace)
+    def _allocate_prefill_context(self, capacity, capture, workspace):
+        return NeoFa3PrefillContext(capacity, capture, workspace)
 
-    def _forward_prefill(self, layer: LayerAttentionBinding, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(self, layer: LayerAttentionBinding, context, inputs: DenseInputs, *, out=None) -> torch.Tensor:
         q = inputs.query
         k = layer.params.key
         v = layer.params.value
         if not HAS_FLASH_ATTN_INTERFACE:
             raise ImportError("Neo prefill requires FA3 with image_token_end support.\n" + _NEO_FA3_INSTALL_HINT)
-        if plan.batch.b_image_token_end is None:
+        if context.batch.b_image_token_end is None:
             raise ValueError("Neo prefill requires b_image_token_end to describe image attention spans")
         o = flash_attn_with_kvcache_neo(
             q=q,
             k_cache=k.view(-1, self.infer_page_size, k.shape[1], k.shape[2]),
             v_cache=v.view(-1, self.infer_page_size, v.shape[1], v.shape[2]),
-            page_table=plan.page_table,
-            cache_seqlens=plan.batch.b_seq_len,
-            cu_seqlens_q=plan.cu_seqlens_q,
-            cu_seqlens_k_new=plan.cu_seqlens_k,
-            max_seqlen_q=plan.batch.max_q_seq_len,
+            page_table=context.page_table,
+            cache_seqlens=context.batch.b_seq_len,
+            cu_seqlens_q=context.cu_seqlens_q,
+            cu_seqlens_k_new=context.cu_seqlens_k,
+            max_seqlen_q=context.batch.max_q_seq_len,
             softmax_scale=1.0 / q.shape[-1] ** 0.5,
-            causal=plan.causal,
+            causal=context.causal,
             window_size=(-1, -1),
             softcap=0.0,
             k_descale=None,
             v_descale=None,
             return_softmax_lse=False,
-            image_token_end=plan.batch.b_image_token_end,
+            image_token_end=context.batch.b_image_token_end,
         )
         return o

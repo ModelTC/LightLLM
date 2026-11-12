@@ -23,13 +23,13 @@ from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
 from unit_tests.common.attention.helpers import (
-    backend_plan,
+    backend_context,
     make_backend,
     make_batch,
-    make_plan,
+    make_context,
     run_dense,
     run_sparse,
-    update_plan,
+    update_context,
 )
 
 
@@ -155,8 +155,8 @@ def test_decode_passes_saved_length_and_selected_block_n(monkeypatch):
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
     )
     monkeypatch.setattr(state_module, "build_mtp_shared_group_markers", lambda *a, **kw: inputs["b_mark_shared_group"])
-    state = backend_plan(state_module.TritonAttBackend, "decode", settings=SimpleNamespace(model=model))
-    update_plan(state, infer_state)
+    state = backend_context(state_module.TritonAttBackend, "decode", settings=SimpleNamespace(model=model))
+    update_context(state, infer_state)
     infer_state.max_kv_seq_len = 32768
     calls = []
 
@@ -280,7 +280,7 @@ def test_full_autotune_before_graph_and_cached_reuse(tmp_path, monkeypatch, kv_l
         b_req_idx=torch.arange(7, device="cuda", dtype=torch.int32),
         att_state_manager=resources,
         att_state_role="main",
-        attention_plans={},
+        attention_contexts={},
         attention_groups=(),
     )
     graph.capture_decode(decode, state)

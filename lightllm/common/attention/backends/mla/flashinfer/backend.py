@@ -9,7 +9,7 @@ from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import MLADecodeInputs, MLAPrefillInputs
 from lightllm.common.attention.api.spec import AttentionFamily
 from lightllm.common.attention.backends._flashinfer import set_flashinfer_envs
-from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
+from lightllm.common.attention.backends.base import AttentionExecutionContext, BaseAttentionBackend
 from lightllm.common.basemodel.triton_kernel.flashinfer_mla_plan import fill_mla_decode_plan_for_cuda_graph
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from lightllm.common.basemodel.triton_kernel.repack_kv_index import repack_kv_index
@@ -17,12 +17,12 @@ from lightllm.utils.dist_utils import get_dp_world_size
 
 
 @dataclasses.dataclass
-class MlaFlashInferPrefillPlan(PreparedPlan):
+class MlaFlashInferPrefillContext(AttentionExecutionContext):
     prefill_wrapper: object = None
 
 
 @dataclasses.dataclass
-class MlaFlashInferDecodePlan(PreparedPlan):
+class MlaFlashInferDecodeContext(AttentionExecutionContext):
     kv_indices: torch.Tensor = None
     kv_starts: torch.Tensor = None
     q_indptr: torch.Tensor = None
@@ -79,22 +79,22 @@ class MlaFlashInferAttBackend(BaseAttentionBackend):
             self.page_size % self.infer_page_size == 0
         ), f"model page_size {self.page_size} must be divisible by infer_page_size {self.infer_page_size}"
 
-    def _allocate_prefill_plan(self, capacity, capture, workspace):
-        return MlaFlashInferPrefillPlan(capacity, capture, workspace)
+    def _allocate_prefill_context(self, capacity, capture, workspace):
+        return MlaFlashInferPrefillContext(capacity, capture, workspace)
 
-    def _allocate_decode_plan(self, capacity, capture, workspace):
-        return MlaFlashInferDecodePlan(capacity, capture, workspace)
+    def _allocate_decode_context(self, capacity, capture, workspace):
+        return MlaFlashInferDecodeContext(capacity, capture, workspace)
 
-    def _prepare_prefill(self, plan):
+    def _prepare_prefill(self, context):
         import flashinfer
 
-        q_starts = plan.batch.b1_cu_q_seq_len.int()
-        kv_starts = plan.batch.b1_cu_kv_seq_len.int()
-        if plan.prefill_wrapper is None:
-            plan.prefill_wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
-                plan.workspace.get(self.workspace_buffer_key, self.workspace_buffer_size), "NHD"
+        q_starts = context.batch.b1_cu_q_seq_len.int()
+        kv_starts = context.batch.b1_cu_kv_seq_len.int()
+        if context.prefill_wrapper is None:
+            context.prefill_wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
+                context.workspace.get(self.workspace_buffer_key, self.workspace_buffer_size), "NHD"
             )
-        plan.prefill_wrapper.plan(
+        context.prefill_wrapper.plan(
             qo_indptr=q_starts,
             kv_indptr=kv_starts,
             num_qo_heads=self.tp_q_head_num,
@@ -108,18 +108,18 @@ class MlaFlashInferAttBackend(BaseAttentionBackend):
         return
 
     def _forward_prefill(
-        self, layer: LayerAttentionBinding, plan, inputs: MLAPrefillInputs, *, out=None
+        self, layer: LayerAttentionBinding, context, inputs: MLAPrefillInputs, *, out=None
     ) -> torch.Tensor:
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = (inputs.key_nope, inputs.key_rope)
         v = inputs.value
-        return self._prefill_mla_prefill_att(layer, plan, q=q, k=k, v=v, alloc_func=alloc_func)
+        return self._prefill_mla_prefill_att(layer, context, q=q, k=k, v=v, alloc_func=alloc_func)
 
     def _prefill_mla_prefill_att(
         self,
         layer,
-        plan,
+        context,
         q: torch.Tensor,
         k: Tuple[torch.Tensor, torch.Tensor],
         v: torch.Tensor,
@@ -129,31 +129,31 @@ class MlaFlashInferAttBackend(BaseAttentionBackend):
         o_tensor = alloc_func((q.shape[0], q.shape[1], v.shape[-1]), q.dtype, device="cuda")
         q_head_num = q.shape[1]
         k = torch.cat([k_nope, torch.repeat_interleave(k_rope, q_head_num, dim=-2)], dim=-1)
-        plan.prefill_wrapper.run(q, k, v, out=o_tensor)
+        context.prefill_wrapper.run(q, k, v, out=o_tensor)
         return o_tensor
 
-    def _decode_refresh_cuda_graph_decode_plan(self, plan, kv_lens: torch.Tensor, max_kv_len: int):
+    def _decode_refresh_cuda_graph_decode_plan(self, context, kv_lens: torch.Tensor, max_kv_len: int):
         fill_mla_decode_plan_for_cuda_graph(
-            decode_wrapper=plan.decode_wrapper,
-            kv_page_indptr=plan.kv_starts,
+            decode_wrapper=context.decode_wrapper,
+            kv_page_indptr=context.kv_starts,
             kv_lens=kv_lens,
-            batch_size=plan.batch.batch_size,
+            batch_size=context.batch.batch_size,
             num_heads=self.tp_q_head_num,
             max_kv_len=max_kv_len,
         )
 
-    def _forward_decode(self, layer: LayerAttentionBinding, plan, inputs: MLADecodeInputs, *, out=None):
+    def _forward_decode(self, layer: LayerAttentionBinding, context, inputs: MLADecodeInputs, *, out=None):
         alloc_func = layer.alloc_tensor
         q = (inputs.query_nope, inputs.query_rope)
         k = layer.params.kv
         v = None
         assert v is None
-        return self._decode_mla_decode_att(layer, plan, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func)
+        return self._decode_mla_decode_att(layer, context, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func)
 
     def _decode_mla_decode_att(
         self,
         layer,
-        plan,
+        context,
         q: Tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         v: torch.Tensor,
@@ -163,7 +163,7 @@ class MlaFlashInferAttBackend(BaseAttentionBackend):
         qk_rope_head_dim = layer.params.qk_rope_head_dim
         q_nope, q_rope = q
         o_tensor = alloc_func(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
-        plan.decode_wrapper.run(
+        context.decode_wrapper.run(
             q_nope,
             q_rope,
             k[:, :, :-qk_rope_head_dim].view(-1, self.infer_page_size, 1, k.shape[-1] - qk_rope_head_dim),
@@ -173,42 +173,42 @@ class MlaFlashInferAttBackend(BaseAttentionBackend):
         )
         return o_tensor
 
-    def _prepare_decode(self, plan):
+    def _prepare_decode(self, context):
         import flashinfer
 
-        batch = plan.batch
+        batch = context.batch
         b_page_len = (batch.b_seq_len + self.infer_page_size - 1) // self.infer_page_size
         starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
-        if plan.kv_starts is None:
-            plan.kv_starts = starts
-            plan.kv_indices = plan.workspace.get(
+        if context.kv_starts is None:
+            context.kv_starts = starts
+            context.kv_indices = context.workspace.get(
                 "flashinfer_indices", max(1, batch.batch_size * self.max_page_num), torch.int32
             )
-            plan.q_indptr = torch.arange(batch.batch_size + 1, dtype=torch.int32, device=batch.device)
+            context.q_indptr = torch.arange(batch.batch_size + 1, dtype=torch.int32, device=batch.device)
         else:
-            plan.kv_starts.copy_(starts, non_blocking=True)
+            context.kv_starts.copy_(starts, non_blocking=True)
         repack_kv_index(
             req_to_token_indexs=batch.req_to_token_indexs,
             b_req_idx=batch.b_req_idx,
             b_token_len=batch.b_seq_len,
-            b_page_start_loc=plan.kv_starts[:-1],
-            max_token_len=plan.current_max_kv_seq_len,
-            out_page_indices=plan.kv_indices,
+            b_page_start_loc=context.kv_starts[:-1],
+            max_token_len=context.current_max_kv_seq_len,
+            out_page_indices=context.kv_indices,
             page_size=self.infer_page_size,
         )
-        if plan.decode_wrapper is None:
-            plan.decode_wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(
-                plan.workspace.get(self.workspace_buffer_key, self.workspace_buffer_size),
-                use_cuda_graph=plan.capture,
-                qo_indptr=plan.q_indptr,
-                kv_indices=plan.kv_indices,
-                kv_indptr=plan.kv_starts,
+        if context.decode_wrapper is None:
+            context.decode_wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(
+                context.workspace.get(self.workspace_buffer_key, self.workspace_buffer_size),
+                use_cuda_graph=context.capture,
+                qo_indptr=context.q_indptr,
+                kv_indices=context.kv_indices,
+                kv_indptr=context.kv_starts,
                 kv_len_arr=batch.b_seq_len,
             )
-            plan.decode_wrapper.plan(
-                plan.q_indptr,
-                plan.kv_starts,
-                plan.kv_indices,
+            context.decode_wrapper.plan(
+                context.q_indptr,
+                context.kv_starts,
+                context.kv_indices,
                 batch.b_seq_len,
                 self.tp_q_head_num,
                 self.kv_lora_rank,
@@ -220,4 +220,4 @@ class MlaFlashInferAttBackend(BaseAttentionBackend):
                 self.kv_data_type,
             )
         else:
-            self._decode_refresh_cuda_graph_decode_plan(plan, batch.b_seq_len, plan.current_max_kv_seq_len)
+            self._decode_refresh_cuda_graph_decode_plan(context, batch.b_seq_len, context.current_max_kv_seq_len)

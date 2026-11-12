@@ -6,14 +6,14 @@ from types import MappingProxyType
 import torch
 
 from lightllm.common.attention.api.backend import AttentionBackend, LayerAttentionBinding, UnsupportedAttention
-from lightllm.common.attention.api.batch import AttentionBatch, PlanCapacity
+from lightllm.common.attention.api.batch import AttentionBatch, ContextCapacity
 from lightllm.common.attention.api.spec import AttentionFamily, AttentionPhase, LayerSpec
 from lightllm.platform import DeviceCaps, Platform
 
 
 @dataclass
-class PreparedPlan:
-    capacity: PlanCapacity
+class AttentionExecutionContext:
+    capacity: ContextCapacity
     capture: bool
     workspace: object
     batch: AttentionBatch | None = None
@@ -105,73 +105,73 @@ class BaseAttentionBackend(AttentionBackend):
             ):
                 raise UnsupportedAttention(f"{spec.phase.value} Graph is unsupported")
 
-    def allocate_plan(self, capacity: PlanCapacity, *, capture: bool, workspace) -> PreparedPlan:
+    def allocate_context(self, capacity: ContextCapacity, *, capture: bool, workspace) -> AttentionExecutionContext:
         if capacity.phase is AttentionPhase.PREFILL:
-            plan = self._allocate_prefill_plan(capacity, capture, workspace)
+            context = self._allocate_prefill_context(capacity, capture, workspace)
         else:
-            plan = self._allocate_decode_plan(capacity, capture, workspace)
-        plan.backend_identity = self
-        return plan
+            context = self._allocate_decode_context(capacity, capture, workspace)
+        context.backend_identity = self
+        return context
 
-    def _allocate_prefill_plan(self, capacity, capture, workspace):
-        return PreparedPlan(capacity, capture, workspace)
+    def _allocate_prefill_context(self, capacity, capture, workspace):
+        return AttentionExecutionContext(capacity, capture, workspace)
 
-    def _allocate_decode_plan(self, capacity, capture, workspace):
-        return PreparedPlan(capacity, capture, workspace)
+    def _allocate_decode_context(self, capacity, capture, workspace):
+        return AttentionExecutionContext(capacity, capture, workspace)
 
-    def prepare(self, plan: PreparedPlan, batch: AttentionBatch) -> None:
-        if plan.backend_identity is not self:
-            raise ValueError("plan belongs to a different attention backend")
+    def prepare(self, context: AttentionExecutionContext, batch: AttentionBatch) -> None:
+        if context.backend_identity is not self:
+            raise ValueError("context belongs to a different attention backend")
         batch.validate()
-        plan.capacity.check(batch)
-        plan.current_max_kv_seq_len = batch.max_kv_seq_len
-        if plan.capture and plan.batch is not None:
-            plan.batch.copy_inputs(batch)
-        elif plan.capture:
+        context.capacity.check(batch)
+        context.current_max_kv_seq_len = batch.max_kv_seq_len
+        if context.capture and context.batch is not None:
+            context.batch.copy_inputs(batch)
+        elif context.capture:
             # 图内分配和 launch 使用容量上界；图外 provider planning 仍用 current_max_kv_seq_len。
-            plan.batch = replace(
+            context.batch = replace(
                 batch,
-                max_kv_seq_len=plan.capacity.max_kv_seq_len,
-                total_token_num=plan.capacity.batch_size * plan.capacity.max_kv_seq_len,
+                max_kv_seq_len=context.capacity.max_kv_seq_len,
+                total_token_num=context.capacity.batch_size * context.capacity.max_kv_seq_len,
             )
         else:
-            plan.batch = batch
+            context.batch = batch
         if batch.phase is AttentionPhase.PREFILL:
-            self._prepare_prefill(plan)
+            self._prepare_prefill(context)
         else:
-            self._prepare_decode(plan)
+            self._prepare_decode(context)
 
-    def _prepare_prefill(self, plan):
+    def _prepare_prefill(self, context):
         pass
 
-    def _prepare_decode(self, plan):
+    def _prepare_decode(self, context):
         pass
 
-    def update(self, plan: PreparedPlan) -> None:
-        if plan.backend_identity is not self:
-            raise ValueError("plan belongs to a different attention backend")
-        if plan.batch is None:
+    def update(self, context: AttentionExecutionContext) -> None:
+        if context.backend_identity is not self:
+            raise ValueError("context belongs to a different attention backend")
+        if context.batch is None:
             raise RuntimeError("prepare attention inputs before update")
-        if plan.capacity.phase is AttentionPhase.PREFILL:
-            self._update_prefill(plan)
+        if context.capacity.phase is AttentionPhase.PREFILL:
+            self._update_prefill(context)
         else:
-            self._update_decode(plan)
+            self._update_decode(context)
 
-    def _update_prefill(self, plan):
+    def _update_prefill(self, context):
         pass
 
-    def _update_decode(self, plan):
+    def _update_decode(self, context):
         pass
 
-    def forward(self, layer: LayerAttentionBinding, plan: PreparedPlan, inputs, *, out=None):
-        if plan.batch is None:
+    def forward(self, layer: LayerAttentionBinding, context: AttentionExecutionContext, inputs, *, out=None):
+        if context.batch is None:
             raise RuntimeError("prepare attention inputs before forward")
-        if plan.backend_identity is not self:
-            raise ValueError("plan belongs to a different attention backend")
-        if layer.spec.phase is not plan.capacity.phase:
-            raise ValueError("layer attention and plan phases differ")
-        method = self._forward_prefill if plan.capacity.phase is AttentionPhase.PREFILL else self._forward_decode
-        result = method(layer, plan, inputs, out=out)
+        if context.backend_identity is not self:
+            raise ValueError("context belongs to a different attention backend")
+        if layer.spec.phase is not context.capacity.phase:
+            raise ValueError("layer attention and context phases differ")
+        method = self._forward_prefill if context.capacity.phase is AttentionPhase.PREFILL else self._forward_decode
+        result = method(layer, context, inputs, out=out)
         if out is None:
             return result
         attention = result[0] if isinstance(result, tuple) else result

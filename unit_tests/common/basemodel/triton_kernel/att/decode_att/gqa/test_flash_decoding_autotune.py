@@ -23,13 +23,13 @@ from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
 from unit_tests.common.attention.helpers import (
-    backend_plan,
+    backend_context,
     make_backend,
     make_batch,
-    make_plan,
+    make_context,
     run_dense,
     run_sparse,
-    update_plan,
+    update_context,
 )
 
 
@@ -136,7 +136,7 @@ def test_rebuild_preserves_layout_and_bounds_indices(monkeypatch, num_tokens):
 def test_state_retains_actual_length_before_graph_capture(monkeypatch):
     infer_state = InferStateInfo()
     infer_state.max_kv_seq_len = 8193
-    state = backend_plan(
+    state = backend_context(
         TritonAttBackend,
         "decode",
         settings=SimpleNamespace(
@@ -145,7 +145,7 @@ def test_state_retains_actual_length_before_graph_capture(monkeypatch):
             )
         ),
     )
-    update_plan(state, infer_state)
+    update_context(state, infer_state)
     infer_state.max_kv_seq_len = 32768
     calls = []
     monkeypatch.setattr(

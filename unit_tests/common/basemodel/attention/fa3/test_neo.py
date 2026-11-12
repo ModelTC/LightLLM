@@ -8,13 +8,13 @@ import torch
 from lightllm.common.attention.backends.dense.fa3 import backend as fp, neo as neo
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from unit_tests.common.attention.helpers import (
-    backend_plan,
+    backend_context,
     make_backend,
     make_batch,
-    make_plan,
+    make_context,
     run_dense,
     run_sparse,
-    update_plan,
+    update_context,
 )
 
 
@@ -92,8 +92,8 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
     infer_state.b_image_token_end = image_ends
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token_indexs)
     backend = SimpleNamespace(uses_causal_attention=lambda: True, infer_page_size=page_size)
-    state = backend_plan(neo.NeoFa3AttBackend, "prefill", settings=backend)
-    update_plan(state, infer_state)
+    state = backend_context(neo.NeoFa3AttBackend, "prefill", settings=backend)
+    update_context(state, infer_state)
 
     q = torch.randn(3, 2, 16, device="cuda")
     k = torch.randn(4 * page_size, 1, 16, device="cuda")
@@ -123,7 +123,7 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
 
 def test_prefill_missing_extension_reports_install_instructions(monkeypatch):
     monkeypatch.setattr(neo, "HAS_FLASH_ATTN_INTERFACE", False)
-    state = backend_plan(neo.NeoFa3AttBackend, "prefill")
+    state = backend_context(neo.NeoFa3AttBackend, "prefill")
     with pytest.raises(ImportError, match="WANDY666/flash-attention"):
         state.backend_identity._forward_prefill(
             SimpleNamespace(alloc_tensor=torch.empty, params=SimpleNamespace(key=None, value=None)),

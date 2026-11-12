@@ -9,7 +9,7 @@ from lightllm.common.attention.api.inputs import GDNInputs
 from lightllm.common.attention.api.spec import AttentionFamily
 from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_fn
 from lightllm.common.attention.backends._shared.linear.mtp_state_params import build_dynamic_mtp_linear_att_state_params
-from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
+from lightllm.common.attention.backends.base import AttentionExecutionContext, BaseAttentionBackend
 from lightllm.common.attention.backends.gdn.triton.kernels.fused_gdn_gating import fused_gdn_gating
 from lightllm.common.attention.backends.gdn.triton.kernels.fused_recurrent import fused_recurrent_gated_delta_rule
 from lightllm.common.attention.backends.gdn.triton.kernels.gdn_decode_pack import conv_pack_gdn_decode_inputs
@@ -23,13 +23,13 @@ if TYPE_CHECKING:
 
 
 @dataclasses.dataclass
-class LinearAttPrefillPlan(PreparedPlan):
+class LinearAttPrefillContext(AttentionExecutionContext):
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
 
 @dataclasses.dataclass
-class LinearAttDecodePlan(PreparedPlan):
+class LinearAttDecodeContext(AttentionExecutionContext):
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
@@ -99,20 +99,20 @@ class TritonLinearAttBackend(BaseAttentionBackend):
             value = value.view(1, seq_len, self.tp_num_v_heads, self.head_v_dim)
             return (query, key, value)
 
-    def _allocate_prefill_plan(self, capacity, capture, workspace):
-        return LinearAttPrefillPlan(capacity, capture, workspace)
+    def _allocate_prefill_context(self, capacity, capture, workspace):
+        return LinearAttPrefillContext(capacity, capture, workspace)
 
-    def _allocate_decode_plan(self, capacity, capture, workspace):
-        return LinearAttDecodePlan(capacity, capture, workspace)
+    def _allocate_decode_context(self, capacity, capture, workspace):
+        return LinearAttDecodeContext(capacity, capture, workspace)
 
-    def _update_prefill(self, plan):
+    def _update_prefill(self, context):
         backend: TritonLinearAttBackend = self
         mtp_step = backend.mtp_step
-        plan.b_conv_buffer_idx = plan.batch.b_req_idx
-        plan.b_ssm_buffer_idx = plan.batch.b_req_idx * (mtp_step + 1)
+        context.b_conv_buffer_idx = context.batch.b_req_idx
+        context.b_ssm_buffer_idx = context.batch.b_req_idx * (mtp_step + 1)
         return
 
-    def _forward_prefill(self, layer: LayerAttentionBinding, plan, inputs: GDNInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(self, layer: LayerAttentionBinding, context, inputs: GDNInputs, *, out=None) -> torch.Tensor:
         mixed_qkvzba: torch.Tensor = inputs.mixed_qkvzba
         backend: TritonLinearAttBackend = self
         conv_states, ssm_states = (layer.params.conv, layer.params.ssm)
@@ -120,14 +120,14 @@ class TritonLinearAttBackend(BaseAttentionBackend):
             conv_states = conv_states[:, :, : -backend.mtp_step]
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
         core_attn_out = self._prefill_gdn_prefill_kernel(
-            layer, plan, mixed_qkv, conv_states, ssm_states, a, b, plan.batch
+            layer, context, mixed_qkv, conv_states, ssm_states, a, b, context.batch
         )
         return (core_attn_out, z)
 
     def _prefill_gdn_prefill_kernel(
         self,
         layer,
-        plan,
+        context,
         mixed_qkv: torch.Tensor,
         conv_states: torch.Tensor,
         ssm_states: torch.Tensor,
@@ -143,14 +143,14 @@ class TritonLinearAttBackend(BaseAttentionBackend):
             layer.params.conv_weight,
             bias=layer.params.conv_bias,
             query_start_loc=batch.b1_cu_q_seq_len,
-            cache_indices=plan.b_conv_buffer_idx,
+            cache_indices=context.b_conv_buffer_idx,
             has_initial_state=batch.b_ready_cache_len > 0,
             conv_states=conv_states,
             activation=backend.activation,
         )
         mixed_qkv = out_tensor.transpose(0, 1)
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv)
-        initial_state = ssm_states[plan.b_ssm_buffer_idx]
+        initial_state = ssm_states[context.b_ssm_buffer_idx]
         core_attn_out, last_recurrent_state = backend.prefill_kernel(
             q=query,
             k=key,
@@ -162,66 +162,66 @@ class TritonLinearAttBackend(BaseAttentionBackend):
             cu_seqlens=batch.b1_cu_q_seq_len,
             use_qk_l2norm_in_kernel=True,
         )
-        ssm_states[plan.b_ssm_buffer_idx] = last_recurrent_state.to(ssm_states.dtype, copy=False)
+        ssm_states[context.b_ssm_buffer_idx] = last_recurrent_state.to(ssm_states.dtype, copy=False)
         return core_attn_out
 
-    def _update_decode(self, plan):
+    def _update_decode(self, context):
         draft_step = self.decode_draft_step
         if draft_step == 0:
-            self._decode_init_normal_decode_state(plan)
+            self._decode_init_normal_decode_state(context)
             return
         if self.uses_dynamic_spec_verify_layout():
             self._decode_init_dynamic_mtp_decode_state(
-                plan, draft_step + 1, req_to_mtp_state_index=self.mtp_state_index
+                context, draft_step + 1, req_to_mtp_state_index=self.mtp_state_index
             )
         else:
-            self._decode_init_fixed_mtp_decode_state(plan, draft_step, req_to_mtp_state_index=self.mtp_state_index)
+            self._decode_init_fixed_mtp_decode_state(context, draft_step, req_to_mtp_state_index=self.mtp_state_index)
 
-    def _decode_init_normal_decode_state(self, plan):
-        plan.b_conv_buffer_idx = plan.batch.b_req_idx
-        plan.b_ssm_buffer_idx = plan.batch.b_req_idx
+    def _decode_init_normal_decode_state(self, context):
+        context.b_conv_buffer_idx = context.batch.b_req_idx
+        context.b_ssm_buffer_idx = context.batch.b_req_idx
 
     def _decode_init_dynamic_mtp_decode_state(
-        self, plan, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor
+        self, context, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor
     ) -> None:
         (
-            plan.b1_mtp_cu_q_seq_len,
-            plan.b_conv_buffer_idx,
-            plan.b_num_accepted_tokens,
+            context.b1_mtp_cu_q_seq_len,
+            context.b_conv_buffer_idx,
+            context.b_num_accepted_tokens,
         ) = build_dynamic_mtp_linear_att_state_params(
-            b_req_idx=plan.batch.b_req_idx,
-            b_mtp_index=plan.batch.b_mtp_index,
+            b_req_idx=context.batch.b_req_idx,
+            b_mtp_index=context.batch.b_mtp_index,
             req_to_mtp_state_index=req_to_mtp_state_index,
-            hold_req_id=plan.batch.hold_req_id,
+            hold_req_id=context.batch.hold_req_id,
         )
-        self._decode_init_mtp_ssm_buffer_idx(plan, mtp_size)
+        self._decode_init_mtp_ssm_buffer_idx(context, mtp_size)
 
     def _decode_init_fixed_mtp_decode_state(
-        self, plan, draft_step: int, *, req_to_mtp_state_index: torch.Tensor
+        self, context, draft_step: int, *, req_to_mtp_state_index: torch.Tensor
     ) -> None:
         mtp_size = draft_step + 1
-        batch_size = plan.batch.batch_size
+        batch_size = context.batch.batch_size
         assert batch_size % mtp_size == 0, (
             "GDN fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
             f"got batch_size={batch_size}, draft_step={draft_step}."
         )
         att_batch_size = batch_size // mtp_size
-        plan.b1_mtp_cu_q_seq_len = torch.arange(
-            0, batch_size + 1, mtp_size, dtype=torch.int32, device=plan.batch.b_req_idx.device
+        context.b1_mtp_cu_q_seq_len = torch.arange(
+            0, batch_size + 1, mtp_size, dtype=torch.int32, device=context.batch.b_req_idx.device
         )
-        plan.b_conv_buffer_idx = plan.batch.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        plan.b_num_accepted_tokens = req_to_mtp_state_index[plan.b_conv_buffer_idx] + 1
-        self._decode_init_mtp_ssm_buffer_idx(plan, mtp_size)
+        context.b_conv_buffer_idx = context.batch.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
+        context.b_num_accepted_tokens = req_to_mtp_state_index[context.b_conv_buffer_idx] + 1
+        self._decode_init_mtp_ssm_buffer_idx(context, mtp_size)
 
-    def _decode_init_mtp_ssm_buffer_idx(self, plan, mtp_size: int):
-        att_batch_size = plan.b_conv_buffer_idx.shape[0]
-        b_ssm_buffer_start_idx = (plan.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
+    def _decode_init_mtp_ssm_buffer_idx(self, context, mtp_size: int):
+        att_batch_size = context.b_conv_buffer_idx.shape[0]
+        b_ssm_buffer_start_idx = (context.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
         state_offsets = torch.arange(
-            mtp_size, device=plan.batch.b_req_idx.device, dtype=plan.batch.b_req_idx.dtype
+            mtp_size, device=context.batch.b_req_idx.device, dtype=context.batch.b_req_idx.dtype
         ).view(1, mtp_size)
-        plan.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets
+        context.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets
 
-    def _forward_decode(self, layer: LayerAttentionBinding, plan, inputs: GDNInputs, *, out=None) -> torch.Tensor:
+    def _forward_decode(self, layer: LayerAttentionBinding, context, inputs: GDNInputs, *, out=None) -> torch.Tensor:
         mixed_qkvzba = inputs.mixed_qkvzba
         backend: TritonLinearAttBackend = self
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
@@ -229,18 +229,18 @@ class TritonLinearAttBackend(BaseAttentionBackend):
         draft_step = self.decode_draft_step
         if draft_step > 0:
             core_attn_out = self._decode_gdn_mtp_kernel(
-                layer, plan, mixed_qkv, conv_states, ssm_states, a, b, plan.batch
+                layer, context, mixed_qkv, conv_states, ssm_states, a, b, context.batch
             )
         else:
             core_attn_out, z = self._decode_gdn_decode_kernel(
-                layer, plan, mixed_qkv, z, conv_states, ssm_states, a, b, plan.batch
+                layer, context, mixed_qkv, z, conv_states, ssm_states, a, b, context.batch
             )
         return (core_attn_out, z)
 
     def _decode_gdn_decode_kernel(
         self,
         layer,
-        plan,
+        context,
         mixed_qkv: torch.Tensor,
         z: torch.Tensor,
         conv_states: torch.Tensor,
@@ -258,7 +258,7 @@ class TritonLinearAttBackend(BaseAttentionBackend):
             conv_states,
             layer.params.conv_weight,
             layer.params.conv_bias,
-            plan.b_conv_buffer_idx,
+            context.b_conv_buffer_idx,
             backend.activation,
             backend.conv_kernel_dim,
             backend.tp_num_k_heads,
@@ -272,7 +272,7 @@ class TritonLinearAttBackend(BaseAttentionBackend):
             v=value,
             initial_state=ssm_states,
             inplace_final_state=True,
-            ssm_state_indices=plan.b_ssm_buffer_idx,
+            ssm_state_indices=context.b_ssm_buffer_idx,
             use_qk_l2norm_in_kernel=True,
             A_log=layer.params.a_log,
             dt_bias=layer.params.dt_bias,
@@ -284,7 +284,7 @@ class TritonLinearAttBackend(BaseAttentionBackend):
     def _decode_gdn_mtp_kernel(
         self,
         layer,
-        plan,
+        context,
         mixed_qkv: torch.Tensor,
         conv_states: torch.Tensor,
         ssm_states: torch.Tensor,
@@ -297,7 +297,7 @@ class TritonLinearAttBackend(BaseAttentionBackend):
         )
 
         backend: TritonLinearAttBackend = self
-        cu_seqlens_q = plan.b1_mtp_cu_q_seq_len
+        cu_seqlens_q = context.b1_mtp_cu_q_seq_len
         mixed_qkv = causal_conv1d_update_mtp(
             mixed_qkv,
             conv_states,
@@ -305,21 +305,21 @@ class TritonLinearAttBackend(BaseAttentionBackend):
             mtp_step=backend.decode_draft_step,
             bias=layer.params.conv_bias,
             activation=backend.activation,
-            conv_state_indices=plan.b_conv_buffer_idx,
-            num_accepted_tokens=plan.b_num_accepted_tokens,
+            conv_state_indices=context.b_conv_buffer_idx,
+            num_accepted_tokens=context.b_num_accepted_tokens,
             query_start_loc=cu_seqlens_q,
         )
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
-        assert plan.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"
+        assert context.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"
         core_attn_out, _ = mtp_fused_recurrent_gated_delta_rule(
             q=query,
             k=key,
             v=value,
             initial_state=ssm_states,
             cu_seqlens=cu_seqlens_q.to(torch.long),
-            ssm_state_indices=plan.b_ssm_buffer_idx,
-            ssm_state_write_indices=plan.b_ssm_buffer_idx,
-            num_accepted_tokens=plan.b_num_accepted_tokens,
+            ssm_state_indices=context.b_ssm_buffer_idx,
+            ssm_state_write_indices=context.b_ssm_buffer_idx,
+            num_accepted_tokens=context.b_num_accepted_tokens,
             A_log=layer.params.a_log,
             dt_bias=layer.params.dt_bias,
             a_raw=a,

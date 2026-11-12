@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import torch
 
-from .api import AttentionBatch, AttentionPhase, ExecutionRequirements, LayerAttentionBinding, PlanCapacity
+from .api import AttentionBatch, AttentionPhase, ContextCapacity, ExecutionRequirements, LayerAttentionBinding
 from .api.inputs import DenseInputs, DenseParams
 from .backends._workspace import AttentionWorkspace
 
@@ -55,12 +55,12 @@ def probe_dense(backend_cls, spec, runtime):
         hold_req_id=2,
         b_ready_cache_len=torch.tensor([n - q for n, q in zip(lengths, q_lengths)], dtype=torch.int32, device=device),
     )
-    capacity = PlanCapacity(spec.phase, 2, sum(q_lengths), stride, max(q_lengths))
+    capacity = ContextCapacity(spec.phase, 2, sum(q_lengths), stride, max(q_lengths))
     workspace = AttentionWorkspace(runtime=runtime)
     workspace.reserve(backend.resource_requirements(capacity, capture=False))
-    plan = backend.allocate_plan(capacity, capture=False, workspace=workspace)
-    backend.prepare(plan, batch)
-    backend.update(plan)
+    context = backend.allocate_context(capacity, capture=False, workspace=workspace)
+    backend.prepare(context, batch)
+    backend.update(context)
     attention = LayerAttentionBinding(
         group_id=0,
         logical_layer_id=0,
@@ -69,7 +69,7 @@ def probe_dense(backend_cls, spec, runtime):
         backend=backend,
         alloc_tensor=lambda shape, dtype, **kwargs: torch.empty(shape, dtype=dtype, device=device),
     )
-    actual = attention.forward(plan, DenseInputs(query), out=torch.empty_like(query))
+    actual = attention.forward(context, DenseInputs(query), out=torch.empty_like(query))
     expected, start = [], 0
     for request, (length, q_length) in enumerate(zip(lengths, q_lengths)):
         q = query[start : start + q_length].float()

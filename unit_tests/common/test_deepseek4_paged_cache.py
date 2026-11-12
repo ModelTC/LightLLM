@@ -9,7 +9,7 @@ from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices impor
 from lightllm.models.deepseek_v4.triton_kernel.swa_cache import get_swa_token_indices as _get_swa_token_indices
 from lightllm.platform import get_device_runtime
 from lightllm.utils.envs_utils import get_env_start_args
-from unit_tests.common.attention.helpers import backend_plan, run_sparse, update_plan
+from unit_tests.common.attention.helpers import backend_context, run_sparse, update_context
 from unit_tests.common.dsv4_test_utils import DeepseekV4CacheConfig, DeepseekV4MemoryManager, DeepseekV4ReqManager
 from unit_tests.common.req_token_index_test_utils import attach_req_token_index
 
@@ -995,8 +995,8 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
 
     backend = _test_backend(requests)
     state_info = SimpleNamespace(mem_manager=manager)
-    state = backend_plan(type(backend), "decode", settings=backend)
-    update_plan(state, state_info)
+    state = backend_context(type(backend), "decode", settings=backend)
+    update_context(state, state_info)
     params = dict(
         compress_ratio=0,
         head_dim_v=512,
@@ -1022,8 +1022,8 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     with torch.cuda.graph(graph, stream=stream):
         actual = forward()
 
-    reference_state = backend_plan(type(backend), "decode", settings=backend)
-    update_plan(reference_state, state_info)
+    reference_state = backend_context(type(backend), "decode", settings=backend)
+    update_context(reference_state, state_info)
     reference_kv = (requests._test_prefill_states[source].swa_buffer[2].view(-1, 74880), None)
     committed_end = 512
     # Both sides of page boundaries, repeated retries, and several complete ring wraps.
