@@ -502,7 +502,14 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 f"{[(req_obj.request_id, req_obj.index_in_shm_mem) for req_obj in req_objs]}"
             )
 
-            req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
+            req_status = ReqStatus(
+                group_request_id,
+                multimodal_params,
+                req_objs,
+                start_time,
+                return_output_logprobs=pd_upload_websocket is None
+                or getattr(sampling_params, "return_output_logprobs", True),
+            )
             self._register_req_status(group_request_id, req_status)
             # RL：请求已登记到 req_id_to_out_inf 并即将转发下游，从 admission gate
             # 注销，避免 pause 统计里仍把它算作“等待准入”的 pending 请求。
@@ -1068,6 +1075,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                         continue
 
                     token_list = []
+                    return_output_logprobs = req_status.return_output_logprobs
                     for req in req_status.group_req_objs.shm_req_objs:
                         req_id = req.request_id
                         read_token_count = 1
@@ -1077,13 +1085,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
                         for _ in range(read_token_count):
                             if not req.out_tokens_queue.is_empty():
                                 text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
-                                token_logprob = float(req.shm_logprobs.arr["logprob"][src_index])
-                                req.cumlogprob += token_logprob
                                 metadata = {
                                     "id": int(req.shm_prompt_ids.arr[src_index]),
-                                    "logprob": token_logprob,
-                                    "cumlogprob": float(req.cumlogprob) / count_output_tokens,
-                                    "special": special,
                                     "count_output_tokens": count_output_tokens,
                                     "prompt_cache_len": req.prompt_cache_len,
                                     "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
@@ -1092,7 +1095,15 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                     "mtp_verify_token_num": req.mtp_verify_token_num,
                                     "mtp_verify_step_num": req.mtp_verify_step_num,
                                 }
-                                metadata["logprobs"] = req.get_output_logprobs_metadata(src_index, self.tokenizer)
+                                if return_output_logprobs:
+                                    token_logprob = float(req.shm_logprobs.arr["logprob"][src_index])
+                                    req.cumlogprob += token_logprob
+                                    metadata.update(
+                                        logprob=token_logprob,
+                                        cumlogprob=float(req.cumlogprob) / count_output_tokens,
+                                        special=special,
+                                        logprobs=req.get_output_logprobs_metadata(src_index, self.tokenizer),
+                                    )
                                 if self.args.use_reward_model:
                                     metadata["score"] = float(req.reward_score)
 
@@ -1113,8 +1124,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                     if finish_status.status == FinishStatus.FINISHED_ABORTED:
                                         text = ""
                                         metadata["id"] = None
-                                        metadata["logprob"] = None
-                                        metadata["logprobs"] = {}
+                                        if return_output_logprobs:
+                                            metadata["logprob"] = None
+                                            metadata["logprobs"] = {}
 
                                 req.out_tokens_queue.pop_no_ret()
                                 token_list.append((req_id, text, metadata, finish_status))
@@ -1150,7 +1162,16 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
 
 class ReqStatus:
-    def __init__(self, group_request_id, multimodal_params, req_objs: List[Req], start_time) -> None:
+    def __init__(
+        self,
+        group_request_id,
+        multimodal_params,
+        req_objs: List[Req],
+        start_time,
+        *,
+        return_output_logprobs: bool = True,
+    ) -> None:
+        self.return_output_logprobs = return_output_logprobs
         self.lock = asyncio.Lock()
         self.event = asyncio.Event()
         self.group_req_objs = GroupReqObjs(

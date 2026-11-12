@@ -203,6 +203,34 @@ def test_http_forwards_packaged_tokens_and_preserves_stop_policy(mode, include, 
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    "via_pd_master,wants_logprobs,expected",
+    [(False, False, True), (True, False, False), (True, True, True)],
+)
+def test_http_keeps_output_logprobs_only_when_pd_master_requests_them(via_pd_master, wants_logprobs, expected):
+    async def run():
+        manager = _make_manager(NodeRole.D)
+        manager.tokenizer = None
+        manager.enable_multimodal = False
+        manager.args.chunked_prefill_size = 1
+        manager._alloc_shm_req_indexes = AsyncMock(return_value=[0])
+        manager.shm_req_manager.async_get_req_obj_by_index = AsyncMock(return_value=MagicMock())
+        manager.transfer_to_next_module_or_node = AsyncMock()
+
+        async def results(start_time, prompt_ids, group_request_id, params, req_status, request):
+            assert req_status.return_output_logprobs is expected
+            yield group_request_id, "", {"id": 42}, FinishStatus(FinishStatus.FINISHED_STOP)
+
+        manager._wait_to_token_package = results
+        params = _sampling_params()
+        params.return_output_logprobs = wants_logprobs
+        websocket = AsyncMock() if via_pd_master else None
+        outputs = [output async for output in manager.generate("prompt", params, _multimodal_params(), None, websocket)]
+        assert [output[2]["id"] for output in outputs] == [42]
+
+    asyncio.run(run())
+
+
 def _req_status(reqs):
     return ReqStatus(123, None, reqs, 0)
 
