@@ -137,10 +137,14 @@ def test_store_allocations_do_not_overwrite_another_loading_owner():
     assert obj.allocate_pages([1, 2, 3], False) == ([10, 20, 30], [False, True, False])
 
 
-@pytest.mark.parametrize("is_dsv4", [False, True])
-def test_loader_uses_events_for_dsv4_and_keeps_other_models_synchronous(monkeypatch, is_dsv4):
+@pytest.mark.parametrize(
+    "is_dsv4, tp_size, expected_calls",
+    [(False, 1, ["load", "sync", "barrier"]), (True, 1, ["load"]), (True, 2, ["load", "barrier"])],
+)
+def test_loader_uses_events_for_dsv4_and_keeps_other_models_synchronous(monkeypatch, is_dsv4, tp_size, expected_calls):
     obj = module()
     obj.backend.is_deepseek_v4 = is_dsv4
+    obj.backend.dp_world_size = tp_size
     obj.init_sync_group = None
     obj.need_sync_compute_stream = lambda: False
     calls = []
@@ -173,7 +177,7 @@ def test_loader_uses_events_for_dsv4_and_keeps_other_models_synchronous(monkeypa
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: NS(synchronize=lambda: calls.append("sync")))
     obj.load_cpu_cache_to_reqs([req])
     assert req.cur_kv_len == 2048
-    assert calls == (["load", "barrier"] if is_dsv4 else ["load", "sync", "barrier"])
+    assert calls == expected_calls
     assert obj.cpu_cache_client.released == ([] if is_dsv4 else [11])
     if is_dsv4:
         assert leases == [([3], obj.dsv4_sessions[7].load_event)]

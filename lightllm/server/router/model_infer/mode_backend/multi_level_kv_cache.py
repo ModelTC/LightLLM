@@ -169,7 +169,9 @@ class MultiLevelKvCacheModule(object):
 
             all_page_list.extend(page_list)
 
-        dist.barrier(group=self.init_sync_group)
+        # V4 retains the pages until its load event, and the forward stream waits for the restore.
+        if not self.backend.is_deepseek_v4 or self.backend.dp_world_size > 1:
+            dist.barrier(group=self.init_sync_group)
 
         if self.backend.is_master_in_dp and not self.backend.is_deepseek_v4:
             self.cpu_cache_client.lock.acquire_sleep1ms()

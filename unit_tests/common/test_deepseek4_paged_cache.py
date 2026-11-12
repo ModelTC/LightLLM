@@ -1,4 +1,5 @@
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -1629,8 +1630,12 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         busy_small_slots = requests.small_page_buffers.alloc_state_cache(
             requests.small_page_buffers.get_free_cache_num()
         )
-    module.load_cpu_cache_to_reqs([restored])
-    torch.cuda.synchronize()
+    load_stream = torch.cuda.Stream()
+    load_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(load_stream):
+        module.load_cpu_cache_to_reqs([restored])
+    torch.cuda.current_stream().wait_stream(load_stream)
+    torch.cuda.current_stream().synchronize()
     assert restored.cur_kv_len == restored.hold_kv_len == length
     assert released == list(reversed(range(1, len(ends) + 1)))
     assert module.offload_finished_reqs_to_cpu_cache([restored]) == [restored]
@@ -1670,10 +1675,12 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         [x for x in (tail, restored.tail_small_page_buffer_id) if x is not None] + busy_small_slots
     )
     assert manager.allocator.can_use_mem_size == manager.size
-    assert (
-        manager.big_page_buffers.get_free_cache_num()
-        == manager.big_page_buffers.size - manager.big_page_buffers.keep_num
-    )
+    pool = manager.big_page_buffers
+    capacity = pool.size - pool.keep_num
+    deadline = time.monotonic() + 5
+    while pool.get_free_cache_num() != capacity and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert pool.get_free_cache_num() == capacity
 
 
 def test_prefill_fused_writer_preserves_old_prefix_and_runtime_tail(cache):
