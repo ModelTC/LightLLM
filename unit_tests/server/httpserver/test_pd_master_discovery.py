@@ -11,6 +11,22 @@ from lightllm.server.httpserver import pd_loop
 from lightllm.server.pd_io_struct import PD_Master_Obj
 
 
+@pytest.mark.parametrize(
+    "host,compression",
+    [("127.0.0.1", None), ("[::1]", None), ("localhost", None), ("10.1.2.3", "deflate"), ("pd-master", "deflate")],
+)
+def test_pd_worker_negotiates_compression_only_off_loopback(monkeypatch, host, compression):
+    calls = []
+
+    def connect(uri, **kwargs):
+        calls.append((uri, kwargs["compression"]))
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(pd_loop.websockets, "connect", connect)
+    asyncio.run(pd_loop._pd_handle_task(None, PD_Master_Obj(node_id=1, host_ip_port=f"{host}:8000")))
+    assert calls == [(f"ws://{host}:8000/pd_register", compression)]
+
+
 def _registry_payload(masters):
     return {"data": base64.b64encode(pickle.dumps(masters)).decode("ascii")}
 

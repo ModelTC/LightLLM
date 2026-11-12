@@ -11,6 +11,7 @@ import signal
 import sys
 import uuid
 from typing import Dict, Optional, Union, List
+from urllib.parse import urlsplit
 from websockets import ClientConnection
 from lightllm.server.pd_io_struct import (
     NodeRole,
@@ -95,8 +96,11 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
         generation_tasks: Dict[int, asyncio.Task] = {}
         try:
             uri = f"ws://{pd_master_obj.host_ip_port}/pd_register"
+            # Loopback prompt arrays share the master event loop with token forwarding.
+            compression = None if urlsplit(uri).hostname in ("127.0.0.1", "::1", "localhost") else "deflate"
             async with websockets.connect(
                 uri,
+                compression=compression,
                 max_size=get_lightllm_websocket_max_message_size(),
                 max_queue=(2048 * 1024, 2048 * 1023),  # 关键修改
                 # 下方应用层心跳已负责存活检测，禁用协议层 keepalive，避免繁忙连接被误断。
