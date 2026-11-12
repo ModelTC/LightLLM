@@ -17,7 +17,6 @@ def attach_replay_history(
     num_key_heads: int | None = None,
     gate_lower_bound: float = -5.0,
     compute_mode: str = "inline",
-    run_config: dict[str, int] | None = None,
     *,
     kda: bool = False,
 ):
@@ -49,7 +48,6 @@ def attach_replay_history(
     owner.capacity = capacity
     owner.verify_width = verify_width
     owner.compute_mode = compute_mode
-    owner.run_config = run_config
     layers, slots, hv, k, v = ssm.shape
     owner.num_key_heads = hv if num_key_heads is None else num_key_heads
     assert owner.num_key_heads > 0 and hv % owner.num_key_heads == 0
@@ -90,15 +88,25 @@ def _trim_rejected_index(
     tl.store(cursors + r, cursor - (window - accepted), valid)
 
 
-def replay_layer(state, *args, **kwargs):
+def replay_layer(
+    state: ReplayGDNState | ReplayKDAState,
+    layer_idx: int,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_log: torch.Tensor,
+    bias: torch.Tensor,
+    reqs: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    run_config: dict[str, int] | None = None,
+):
     """按测试 state 的类型调用对应的 replay decode。"""
 
-    if "run_config" not in kwargs and state.run_config is not None:
-        kwargs["run_config"] = state.run_config
     if state.kda:
         from lightllm.common.basemodel.attention.linear.replay_kda_decode import replay
 
-        layer_idx, q, k, v, a, b, a_log, bias, reqs, cu_seqlens = args
         return replay(
             state_ssm=state.ssm_state[layer_idx],
             state_keys=state.keys[layer_idx],
@@ -121,11 +129,24 @@ def replay_layer(state, *args, **kwargs):
             state_verify_width=state.verify_width,
             state_compute_mode=state.compute_mode,
             state_gate_lower_bound=state.gate_lower_bound,
-            run_config=kwargs.get("run_config"),
+            run_config=run_config,
         )
     from lightllm.common.basemodel.attention.linear.replay_gdn_decode import replay
 
-    return replay(state, *args, **kwargs)
+    return replay(
+        state=state,
+        linear_layer_idx=layer_idx,
+        q=q,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        a_log=a_log,
+        bias=bias,
+        reqs=reqs,
+        cu_seqlens=cu_seqlens,
+        run_config=run_config,
+    )
 
 
 def accept_replay_window(history, reqs, accepted_state_indices=None, cu_seqlens=None) -> None:

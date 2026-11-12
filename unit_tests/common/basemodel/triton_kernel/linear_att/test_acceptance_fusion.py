@@ -173,7 +173,6 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
             torch.bfloat16,
             num_key_heads=2,
             compute_mode=compute_mode,
-            run_config={"BV": 32, "num_warps": 1, "num_stages": 1},
         )
         for _ in range(2)
     ]
@@ -198,7 +197,23 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
 
     def cycle(i):
         ssm_backend = ssm_backends[i]
-        outputs = [replay_layer(ssm_backend, layer, q, k, v, a, b, alog, alog, reqs, cu) for layer in range(2)]
+        outputs = [
+            replay_layer(
+                ssm_backend,
+                layer,
+                q,
+                k,
+                v,
+                a,
+                b,
+                alog,
+                alog,
+                reqs,
+                cu,
+                run_config={"BV": 32, "num_warps": 1, "num_stages": 1},
+            )
+            for layer in range(2)
+        ]
         (accept_unfused if i == 0 else accept_fused)(managers[i], args)
         return outputs
 

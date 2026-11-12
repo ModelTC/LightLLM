@@ -60,7 +60,6 @@ def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state
         num_key_heads=1,
         kda=kda,
         compute_mode="precompute",
-        run_config={"BV": bv, "num_warps": 1, "num_stages": 3},
     )
     reqs = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
     cu = torch.tensor([0, 2, 4], dtype=torch.int32, device="cuda")
@@ -83,7 +82,20 @@ def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state
         # an overflowed history correction by reconstructing from raw inputs.
         assert ssm_backend.cursors[0].item() == 2 * round_idx
         assert not state.any()
-        actual = replay_layer(ssm_backend, 0, q, k, v, a, b, alog, bias, reqs, cu)
+        actual = replay_layer(
+            ssm_backend,
+            0,
+            q,
+            k,
+            v,
+            a,
+            b,
+            alog,
+            bias,
+            reqs,
+            cu,
+            run_config={"BV": bv, "num_warps": 1, "num_stages": 3},
+        )
         expected = []
         for token in range(2):
             output, expected_state = reference(
@@ -110,7 +122,6 @@ def test_flush_export_updates_checkpoint_and_clears_history(dtype):
         capacity=4,
         verify_width=1,
         activation_dtype=torch.bfloat16,
-        run_config={"BV": 32, "num_warps": 1, "num_stages": 1},
     )
     backend.raw_keys.normal_(0, 0.1)
     backend.raw_values.normal_(0, 0.1)
@@ -162,7 +173,6 @@ def test_replay_acceptance_flush_and_graph(
         kda=kda,
         gate_lower_bound=gate_lower_bound,
         compute_mode=compute_mode,
-        run_config=run_config,
         activation_dtype=activation_dtype,
     )
     expected = state.float().clone()
@@ -186,7 +196,10 @@ def test_replay_acceptance_flush_and_graph(
     accepted = torch.zeros(slots, dtype=torch.int32, device="cuda")
 
     def step():
-        out = [replay_layer(ssm_backend, layer, q, k, v, a, b, alog, bias, reqs, cu) for layer in range(2)]
+        out = [
+            replay_layer(ssm_backend, layer, q, k, v, a, b, alog, bias, reqs, cu, run_config=run_config)
+            for layer in range(2)
+        ]
         accept_replay_window(ssm_backend, reqs, accepted, cu)
         return out
 
@@ -324,7 +337,6 @@ def test_precomputed_projections_preserve_precision(warps, decay, state_dtype, d
             dtype,
             num_key_heads=2,
             compute_mode=mode,
-            run_config=config,
         )
         for mode in ("inline", "precompute")
     ]
@@ -358,7 +370,7 @@ def test_precomputed_projections_preserve_precision(warps, decay, state_dtype, d
             for ssm_backend in ssm_backends:
                 ssm_backend.fold_accepted_prefix(overflow_reqs)
         for ssm_backend in ssm_backends:
-            outputs.append(replay_layer(ssm_backend, 0, q, k, v, a, b, alog, alog, reqs, cu))
+            outputs.append(replay_layer(ssm_backend, 0, q, k, v, a, b, alog, alog, reqs, cu, run_config=config))
             accept_replay_window(ssm_backend, reqs, accepted, cu)
         if dtype == torch.float32:
             torch.testing.assert_close(outputs[0], outputs[1], atol=2e-6, rtol=2e-5)
@@ -420,7 +432,6 @@ def test_large_bf16_state_precompute_matches_inline():
                 torch.bfloat16,
                 num_key_heads=heads,
                 compute_mode=mode,
-                run_config=config,
             )
             for mode in ("inline", "precompute")
         ]
@@ -433,7 +444,9 @@ def test_large_bf16_state_precompute_matches_inline():
             v = torch.randn((width, heads, 128), device="cuda", dtype=torch.bfloat16)
             a = torch.randn((width, heads), device="cuda", dtype=torch.bfloat16) - 1
             b = torch.randn_like(a)
-            outputs = [replay_layer(backend, 0, q, k, v, a, b, alog, bias, reqs, cu) for backend in backends]
+            outputs = [
+                replay_layer(backend, 0, q, k, v, a, b, alog, bias, reqs, cu, run_config=config) for backend in backends
+            ]
             # 重建用的 k/d 在 bf16 激活下是 fp16。两条路径在存入前的舍入可以差一个 fp16 单位。
             torch.testing.assert_close(outputs[0], outputs[1], atol=5e-4, rtol=5e-4)
             for backend in backends:
@@ -458,8 +471,8 @@ def test_overflow_folds_inside_replay_for_gdn_and_kda(kda, dtype, capacity):
     hv, kh, dim = 2, 2, 32
     state = torch.randn(2, 2, hv, dim, dim, device="cuda", dtype=dtype) * 0.05
     config = {"BV": 32, "num_warps": 1, "num_stages": 1}
-    backend = ReplaySSMExecutor(state, capacity, 1, dtype, num_key_heads=kh, kda=kda, run_config=config)
-    twin = ReplaySSMExecutor(state.clone(), capacity, 1, dtype, num_key_heads=kh, kda=kda, run_config=config)
+    backend = ReplaySSMExecutor(state, capacity, 1, dtype, num_key_heads=kh, kda=kda)
+    twin = ReplaySSMExecutor(state.clone(), capacity, 1, dtype, num_key_heads=kh, kda=kda)
     assert backend.gates.shape[-1] == (dim if kda else capacity)
     reqs = torch.tensor([0], device="cuda", dtype=torch.int32)
     cu = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
@@ -477,8 +490,8 @@ def test_overflow_folds_inside_replay_for_gdn_and_kda(kda, dtype, capacity):
             assert int(backend.cursors[0]) == capacity
         outs, twin_outs = [], []
         for layer in range(2):
-            outs.append(replay_layer(backend, layer, q, k, v, a, b, alog, bias, reqs, cu))
-            twin_outs.append(replay_layer(twin, layer, q, k, v, a, b, alog, bias, reqs, cu))
+            outs.append(replay_layer(backend, layer, q, k, v, a, b, alog, bias, reqs, cu, run_config=config))
+            twin_outs.append(replay_layer(twin, layer, q, k, v, a, b, alog, bias, reqs, cu, run_config=config))
             if step == capacity:
                 assert int(backend.cursors[0]) == capacity
         for actual, expected in zip(outs, twin_outs):
@@ -495,9 +508,7 @@ def test_overflow_folds_inside_replay_for_gdn_and_kda(kda, dtype, capacity):
 @pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
 def test_empty_window_keeps_cursor_for_gdn_and_kda(kda):
     state = torch.randn(1, 3, 2, 32, 32, device="cuda")
-    backend = ReplaySSMExecutor(
-        state, 8, 4, torch.float32, num_key_heads=2, kda=kda, run_config={"BV": 32, "num_warps": 1, "num_stages": 3}
-    )
+    backend = ReplaySSMExecutor(state, 8, 4, torch.float32, num_key_heads=2, kda=kda)
     backend.cursors[0] = 3
     reqs = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
     cu = torch.tensor([0, 0, 0], device="cuda", dtype=torch.int32)
@@ -507,7 +518,20 @@ def test_empty_window_keeps_cursor_for_gdn_and_kda(kda):
     a = torch.zeros(1, 2 * 32 if kda else 2, device="cuda")
     b = torch.zeros(1, 2, device="cuda")
     bias = torch.zeros(2 * 32 if kda else 2, device="cuda")
-    replay_layer(backend, 0, q, k, v, a, b, bias, bias, reqs, cu)
+    replay_layer(
+        backend,
+        0,
+        q,
+        k,
+        v,
+        a,
+        b,
+        bias,
+        bias,
+        reqs,
+        cu,
+        run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
+    )
     accepted = torch.tensor([-1, -1, -1], device="cuda", dtype=torch.int32)
     accept_replay_window(backend, reqs, accepted, cu)
     assert backend.cursors.tolist() == [3, 0, 0]
@@ -528,7 +552,6 @@ def test_dynamic_verify_lengths_fill_history_before_folding(kda, dtype, compute_
         num_key_heads=2,
         kda=kda,
         compute_mode=compute_mode,
-        run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
     )
     expected = state.float().clone()
     pending = [0, 0]
@@ -544,7 +567,23 @@ def test_dynamic_verify_lengths_fill_history_before_folding(kda, dtype, compute_
     bias = torch.zeros(4 * 128 if kda else 4, device="cuda")
 
     def forward():
-        return [replay_layer(ssm_backend, layer, q, k, v, a, b, alog, bias, reqs, cu) for layer in range(2)]
+        return [
+            replay_layer(
+                ssm_backend,
+                layer,
+                q,
+                k,
+                v,
+                a,
+                b,
+                alog,
+                bias,
+                reqs,
+                cu,
+                run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
+            )
+            for layer in range(2)
+        ]
 
     def step():
         positions = ssm_backend.cursors.index_select(0, reqs.long())
@@ -751,9 +790,7 @@ def test_kda_tuning_candidates_match_reference(config, compute_mode):
 def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, separate, kda):
     torch.manual_seed(72)
     initial = torch.randn(1, live + 1, 1, 32, 32, device="cuda") * 0.01
-    backend = ReplaySSMExecutor(
-        initial.clone(), 8, 4, torch.float32, kda=kda, run_config={"BV": 32, "num_warps": 1, "num_stages": 3}
-    )
+    backend = ReplaySSMExecutor(initial.clone(), 8, 4, torch.float32, kda=kda)
     reqs = torch.cat(
         (
             torch.arange(live, device="cuda", dtype=torch.int32),
@@ -787,6 +824,7 @@ def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, sepa
             bias,
             reqs,
             cu,
+            run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
         ).reshape(live, query_width, 1, 32)
         for token in range(query_width):
             output, expected = reference(
@@ -825,7 +863,6 @@ def test_mtp_commit_keeps_folded_prefix_length(kda, compute_mode):
         num_key_heads=kh,
         kda=kda,
         compute_mode=compute_mode,
-        run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
     )
     reqs = torch.tensor([0], device="cuda", dtype=torch.int32)
     indices = torch.zeros(2, device="cuda", dtype=torch.int32)
@@ -838,7 +875,20 @@ def test_mtp_commit_keeps_folded_prefix_length(kda, compute_mode):
         v = torch.randn(2, hv, dim, device="cuda", dtype=dtype)
         a = torch.full((2, hv * dim if kda else hv), -2.0, device="cuda", dtype=dtype)
         b = torch.randn(2, hv, device="cuda", dtype=dtype)
-        replay_layer(backend, 0, q, k, v, a, b, alog, bias, reqs, cu)
+        replay_layer(
+            backend,
+            0,
+            q,
+            k,
+            v,
+            a,
+            b,
+            alog,
+            bias,
+            reqs,
+            cu,
+            run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
+        )
         lengths = torch.tensor([2], device="cuda", dtype=torch.int32)
         advance_cursor(backend, reqs, cu)
         commit_ssm_prefix(indices, reqs, lengths, lengths, backend.cursors)

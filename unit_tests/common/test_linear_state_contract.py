@@ -173,12 +173,8 @@ def test_mtp0_precompute_reaches_replay_kernel(monkeypatch, linear_config, modul
             torch.arange(2, dtype=torch.int32),
             run_config=run_config,
         )
-    if cls is ReplayKDAState:
-        assert captured.kwargs["PRECOMPUTE_PROJECTIONS"] is precompute
-        assert captured.kwargs["KDA"] is True
-    else:
-        assert captured.args[33] is precompute
-        assert captured.args[35] is False
+    assert captured.kwargs["PRECOMPUTE_PROJECTIONS"] is precompute
+    assert captured.kwargs["KDA"] is (cls is ReplayKDAState)
 
 
 @pytest.mark.parametrize("cls", [GDNState, KDAState])

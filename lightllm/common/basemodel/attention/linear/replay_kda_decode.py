@@ -44,12 +44,18 @@ def get_static_key(
     }
 
 
-def get_run_key(q, cu_seqlens) -> tuple[int, int]:
+def get_run_key(q: torch.Tensor, cu_seqlens: torch.Tensor) -> tuple[int, int]:
     """调优键是 token 数和请求数。q 是 [tokens, heads, dim]。"""
     return q.shape[0], cu_seqlens.numel() - 1
 
 
-def _check_replay_inputs(q, k, v, reqs, cu_seqlens) -> None:
+def _check_replay_inputs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    reqs: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+) -> None:
     assert q.dim() == k.dim() == v.dim() == 3, "q, k, v must be [tokens, heads, dim]"
     assert q.shape[0] == k.shape[0] == v.shape[0], "q, k, v must cover the same tokens"
     assert cu_seqlens.numel() == reqs.numel() + 1, "cu_seqlens must cover every request"
@@ -81,7 +87,7 @@ def rebuild_inputs(
 ) -> tuple[tuple, dict[str, object]]:
     """为一层 scratch 和同形状激活分配调优输入。不复制服务状态池。"""
     del state_cursors, reqs, run_config
-    tokens, run_count = get_run_key(q, cu_seqlens)
+    tokens, run_count = get_run_key(q=q, cu_seqlens=cu_seqlens)
     # 一行一个 token 时请求数就是 token 数。打包窗口再用 verify_width 折成请求数。
     batch = run_count if tokens == run_count else min(run_count, triton.cdiv(tokens, state_verify_width))
     slots = batch + 1
@@ -172,7 +178,7 @@ def replay(
     宽度为 1 时它是 0, 1, 2, ...。
     """
 
-    _check_replay_inputs(q, k, v, reqs, cu_seqlens)
+    _check_replay_inputs(q=q, k=k, v=v, reqs=reqs, cu_seqlens=cu_seqlens)
     if run_config is None:
         run_config = {"BV": 32, "num_warps": 1, "num_stages": 3}
     _, hv, kd, vd = state_ssm.shape

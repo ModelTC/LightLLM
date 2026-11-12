@@ -36,12 +36,7 @@ def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
 
     torch.manual_seed(137)
     initial = torch.randn(1, 513, 1, 32, 32, device="cuda") * 0.01
-    eager, captured = [
-        ReplaySSMExecutor(
-            initial.clone(), 8, 1, torch.float32, kda=kda, run_config={"BV": 32, "num_warps": 1, "num_stages": 3}
-        )
-        for _ in range(2)
-    ]
+    eager, captured = [ReplaySSMExecutor(initial.clone(), 8, 1, torch.float32, kda=kda) for _ in range(2)]
     reqs = torch.arange(512, device="cuda", dtype=torch.int32)
     q = torch.randn(512, 1, 32, device="cuda") * 0.2
     k, v = torch.randn_like(q), torch.randn_like(q)
@@ -52,7 +47,20 @@ def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
     def cycle(backend, ids):
         count = ids.numel()
         cu = torch.arange(count + 1, dtype=torch.int32, device=ids.device)
-        out = replay_layer(backend, 0, q[:count], k[:count], v[:count], a[:count], beta[:count], alog, bias, ids, cu)
+        out = replay_layer(
+            backend,
+            0,
+            q[:count],
+            k[:count],
+            v[:count],
+            a[:count],
+            beta[:count],
+            alog,
+            bias,
+            ids,
+            cu,
+            run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
+        )
         accept_replay_window(backend, ids, cu_seqlens=cu)
         return out
 
@@ -106,7 +114,6 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
             num_key_heads=2,
             kda=kda,
             compute_mode="precompute",
-            run_config=config,
         )
         for cls in [ReplaySSMExecutor, ReplaySSMExecutor]
     ]
@@ -155,7 +162,10 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
 
     def forward_accept(index, cu, reqs):
         ssm_backend = ssm_backends[index]
-        out = [replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, reqs, cu) for layer in range(3)]
+        out = [
+            replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, reqs, cu, run_config=config)
+            for layer in range(3)
+        ]
         if index == 0:
             accept_replay_window(ssm_backend, reqs, accepted, cu)
         else:
@@ -247,7 +257,6 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
             dtype,
             num_key_heads=2,
             kda=kda,
-            run_config={"BV": 32, "num_warps": 1, "num_stages": 1},
         )
         for _ in range(2)
     ]
@@ -265,7 +274,23 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
     cu = torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device)
 
     def forward(ssm_backend):
-        return [replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, reqs, cu) for layer in range(3)]
+        return [
+            replay_layer(
+                ssm_backend,
+                layer,
+                q,
+                k,
+                v,
+                a,
+                beta,
+                alog,
+                bias,
+                reqs,
+                cu,
+                run_config={"BV": 32, "num_warps": 1, "num_stages": 1},
+            )
+            for layer in range(3)
+        ]
 
     def warm(ssm_backend):
         out = forward(ssm_backend)
@@ -336,8 +361,7 @@ def test_cross_layer_fold_with_state_offset_above_int32(kda):
     sparse.copy_(dense)
     config = {"BV": 32, "num_warps": 1, "num_stages": 1}
     ssm_backends = [
-        ReplaySSMExecutor(state, 8, 4, torch.bfloat16, num_key_heads=4, kda=kda, run_config=config)
-        for state in [dense, sparse]
+        ReplaySSMExecutor(state, 8, 4, torch.bfloat16, num_key_heads=4, kda=kda) for state in [dense, sparse]
     ]
     q = torch.randn(8, 4, 128, device="cuda", dtype=torch.bfloat16)
     k = torch.randn_like(q)
@@ -354,7 +378,10 @@ def test_cross_layer_fold_with_state_offset_above_int32(kda):
         if overflow:
             ssm_backend.fold_accepted_prefix(reqs.new_tensor(overflow))
         pos = ssm_backend.cursors.index_select(0, reqs.long())
-        out = [replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, reqs, cu) for layer in range(48)]
+        out = [
+            replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, reqs, cu, run_config=config)
+            for layer in range(48)
+        ]
         accept_replay_window(ssm_backend, reqs, accepted, cu)
         return pos, out
 
@@ -383,8 +410,7 @@ def test_small_batch_matches_larger_graph_padding(batch, dtype, kda):
     initial = torch.randn(2, 14, 4, 128, 128, device="cuda", dtype=dtype) * 0.01
     config = {"BV": 32, "num_warps": 1, "num_stages": 1}
     ssm_backends = [
-        ReplaySSMExecutor(initial.clone(), 8, 4, num_key_heads=2, kda=kda, compute_mode="precompute", run_config=config)
-        for _ in range(2)
+        ReplaySSMExecutor(initial.clone(), 8, 4, num_key_heads=2, kda=kda, compute_mode="precompute") for _ in range(2)
     ]
     reqs = torch.arange(batch, device="cuda", dtype=torch.int32)
     padded = torch.cat((reqs, reqs.new_full((13 - batch,), 13)))
@@ -402,7 +428,10 @@ def test_small_batch_matches_larger_graph_padding(batch, dtype, kda):
     for ssm_backend, ids, offsets in zip(ssm_backends, [reqs, padded], [cu, padded_cu]):
 
         def step():
-            out = [replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, ids, offsets) for layer in range(2)]
+            out = [
+                replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, ids, offsets, run_config=config)
+                for layer in range(2)
+            ]
             accept_replay_window(ssm_backend, ids, accepted, offsets)
             return out
 
@@ -446,7 +475,6 @@ def test_full_prefix_does_not_address_past_capacity(kda):
         1,
         torch.bfloat16,
         kda=kda,
-        run_config={"BV": 32, "num_warps": 1, "num_stages": 1},
     )
     reqs = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
     cu = torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device)
@@ -460,13 +488,39 @@ def test_full_prefix_does_not_address_past_capacity(kda):
     for name in ("keys", "deltas", "gates", "raw_keys", "raw_values", "betas"):
         getattr(backend, name).zero_()
     backend.cursors[reqs.long()] = capacity + 2
-    replay_layer(backend, 0, q, k, v, a, beta, alog, bias, reqs, cu)
+    replay_layer(
+        backend,
+        0,
+        q,
+        k,
+        v,
+        a,
+        beta,
+        alog,
+        bias,
+        reqs,
+        cu,
+        run_config={"BV": 32, "num_warps": 1, "num_stages": 1},
+    )
     backend.fold_accepted_prefix(reqs)
     torch.cuda.synchronize()
     assert torch.equal(backend.cursors[reqs.long()], torch.zeros(2, device="cuda", dtype=torch.int32))
     assert torch.isfinite(backend.ssm_state).all()
     for _ in range(12):
-        replay_layer(backend, 0, q, k, v, a, beta, alog, bias, reqs, cu)
+        replay_layer(
+            backend,
+            0,
+            q,
+            k,
+            v,
+            a,
+            beta,
+            alog,
+            bias,
+            reqs,
+            cu,
+            run_config={"BV": 32, "num_warps": 1, "num_stages": 1},
+        )
         accept_replay_window(backend, reqs)
         overflow = reqs[backend.cursors[reqs.long()] + backend.verify_width > backend.capacity]
         if overflow.numel():

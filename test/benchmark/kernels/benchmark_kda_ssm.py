@@ -53,6 +53,7 @@ def workload(args, batch, width, dtype, mode, acceptance):
     )
 
     native_index = 0 if acceptance == "partial" else width - 1
+    pinned_config = {"value": None}
 
     def cycle():
         for _ in range(args.rounds):
@@ -94,7 +95,7 @@ def workload(args, batch, width, dtype, mode, acceptance):
                         state_verify_width=ssm_backend.verify_width,
                         state_compute_mode=ssm_backend.compute_mode,
                         state_gate_lower_bound=ssm_backend.gate_lower_bound,
-                        run_config=ssm_backend.run_config,
+                        run_config=pinned_config["value"],
                     )
             if ssm_backend is not None:
                 accept_replay_window(ssm_backend, reqs, accepted, replay_cu)
@@ -104,7 +105,7 @@ def workload(args, batch, width, dtype, mode, acceptance):
         else:
             snapshot.copy_(state[:, native_index] if ssm_backend is None else state[:, 0])
 
-    return ssm_backend, cycle, bytes_used
+    return ssm_backend, cycle, bytes_used, pinned_config
 
 
 def main():
@@ -133,7 +134,7 @@ def main():
             for width in args.width:
                 for acceptance in ["full", "partial"] if width > 1 else ["full"]:
                     for mode in ["native", "inline", "precompute"] if width > 1 else ["native", "inline"]:
-                        ssm_backend, cycle, size = workload(
+                        ssm_backend, cycle, size, pinned_config = workload(
                             args, batch, width, getattr(torch, dtype_name), mode, acceptance
                         )
                         candidates = []
@@ -141,11 +142,11 @@ def main():
                             for config in get_configs() if args.tune else [{"BV": 32, "num_warps": 2, "num_stages": 1}]:
                                 if mode == "precompute" and config["BV"] < 16:
                                     continue
-                                ssm_backend.run_config = config
+                                pinned_config["value"] = config
                                 cycle()
                                 ms = triton.testing.do_bench_cudagraph(cycle, rep=50)
                                 candidates.append(dict(config=config, ms=ms))
-                            ssm_backend.run_config = min(candidates, key=lambda r: r["ms"])["config"]
+                            pinned_config["value"] = min(candidates, key=lambda r: r["ms"])["config"]
                         cycle()
                         samples = [
                             triton.testing.do_bench_cudagraph(cycle, rep=100) / args.rounds for _ in range(args.repeats)
@@ -160,7 +161,7 @@ def main():
                             state_history_bytes=size,
                             ms_per_round=statistics.median(samples),
                             samples_ms=samples,
-                            config=dict(ssm_backend.run_config) if ssm_backend and ssm_backend.run_config else None,
+                            config=dict(pinned_config["value"]) if pinned_config["value"] else None,
                             candidates=candidates,
                         )
                         rows.append(row)
