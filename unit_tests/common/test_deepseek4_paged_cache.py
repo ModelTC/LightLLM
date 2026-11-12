@@ -2164,6 +2164,9 @@ def test_cross_dp_probe_uses_current_multimodal_span_metadata(monkeypatch, whole
     module = shared.DPKVSharedMoudle.__new__(shared.DPKVSharedMoudle)
     module.backend = SimpleNamespace(args=SimpleNamespace(disable_chunked_mm_input=whole_mm_blocks), radix_cache=None)
     mm = SimpleNamespace(to_dict=lambda: {"images": [{"start_idx": 1, "token_id": 1000, "token_num": 8}], "audios": []})
-    module.probe_dsv4_matches([(123, 0, mm, 0)])
+    module.dp_rank_in_node = 1
+    matches = module.probe_dsv4_matches([(122, 7, mm, 1), (123, 0, mm, 0)])
+    assert list(matches) == [123]
+    manager.get_req_obj_by_index.assert_called_once_with(0)
     retain.assert_called_once_with(req, 8, [(1, 7)] if whole_mm_blocks else [], pin_checkpoint=True)
     manager.put_back_req_obj.assert_called_once_with(req)

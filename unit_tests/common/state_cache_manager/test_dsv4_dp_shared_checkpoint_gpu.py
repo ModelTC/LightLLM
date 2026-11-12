@@ -145,9 +145,9 @@ def _rank(rank, rendezvous, service_name, model_dir, model_type, end, start, mtp
         transfer.g_infer_context = NS(req_manager=requests, get_can_alloc_token_num=lambda: 1536 - start)
         node = NS(small_page_buffer_idx=ids[-1]) if rank == 1 else None
         reqs = [(7, 0, None, 0)]
-        matches = {7: NS(node=node, matched_len=start if rank == 0 else end)}
+        matches = {} if rank == 0 else {7: NS(node=node, matched_len=end)}
         match_lens = module.gather_dsv4_match_lens(reqs, matches)
-        np.testing.assert_array_equal(match_lens, [[start, end]])
+        np.testing.assert_array_equal(match_lens, [[0, end]])
         tasks, plan = module.build_dsv4_trans_tasks(reqs, [req] if rank == 0 else [], match_lens)
         assert len(tasks) == (1 if rank == 0 else 0)
         assert plan == [[(1, 7, start, end)], []]

@@ -85,10 +85,13 @@ class DPKVSharedMoudle:
         return
 
     def probe_dsv4_matches(self, reqs: List[tuple]) -> Dict[int, PrefixCacheMatch]:
-        """Retain radix history and its terminal checkpoint without allocating request slots."""
+        """Retain prefixes this DP can send to other request owners."""
         matches = {}
         try:
-            for req_id, shm_index, multimodal_params, _ in reqs:
+            for req_id, shm_index, multimodal_params, owner_dp in reqs:
+                if owner_dp == self.dp_rank_in_node:
+                    # Local requests restore their prefix when they acquire a request slot.
+                    continue
                 shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(shm_index)
                 try:
                     shm_req.link_prompt_ids_shm_array()
@@ -116,7 +119,11 @@ class DPKVSharedMoudle:
         return gathered.numpy()
 
     def gather_dsv4_match_lens(self, reqs: List[tuple], matches: Dict[int, PrefixCacheMatch]):
-        local = torch.tensor([matches[req[0]].matched_len for req in reqs], dtype=torch.int64, device="cpu")
+        local = torch.tensor(
+            [0 if req[3] == self.dp_rank_in_node else matches[req[0]].matched_len for req in reqs],
+            dtype=torch.int64,
+            device="cpu",
+        )
         tp_size = self.backend.dp_world_size
         by_shard = self._gather_dsv4_int_metadata(local).reshape(self.backend.dp_size_in_node, tp_size, len(reqs))
         match_lens = by_shard[:, 0]
@@ -184,12 +191,8 @@ class DPKVSharedMoudle:
         if self.backend.dp_size_in_node == 1:
             return [], []
 
-        # All ranks have the same hit lengths and request owners.
-        hit_count = np.count_nonzero(match_lens)
-        if hit_count == 0:
-            return [], []
-        owners = [req[3] for req in reqs]
-        if hit_count == np.count_nonzero(match_lens[np.arange(len(reqs)), owners]):
+        # The owner already restored its local prefix. Only remote hits are advertised.
+        if not match_lens.any():
             return [], []
 
         # ---------------------------------------------------------------------
