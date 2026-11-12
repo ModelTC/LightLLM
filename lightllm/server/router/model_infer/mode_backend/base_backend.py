@@ -840,12 +840,15 @@ class ModeBackend:
                 if req_obj.is_slave_req():
                     continue
 
+                remaining = self.batch_max_tokens - prefill_tokens
+                if no_decode and remaining == 0 and req_obj.cur_kv_len < req_obj.shm_req.input_len:
+                    continue
+
                 # 计算预算按本轮实际处理的 token 数累计，KV 预算按需要额外分配的页容量扣减。
                 token_num, alloc_token_num = req_obj.prefill_need_token_num(
                     is_chuncked_prefill=not self.disable_chunked_prefill
                 )
                 chunk_end = None
-                remaining = self.batch_max_tokens - prefill_tokens
                 if token_num > remaining:
                     if not (
                         no_decode

@@ -291,9 +291,18 @@ def test_pd_prefill_fits_started_chunk_in_queue_order(monkeypatch, image_spans, 
         reqs.append(req)
     backend._filter_not_ready_reqs = lambda req_ids: reqs
 
+    later_budget_checks = []
+    later_need = reqs[2].prefill_need_token_num
+
+    def later_prefill_need_token_num(is_chuncked_prefill):
+        later_budget_checks.append(is_chuncked_prefill)
+        return later_need(is_chuncked_prefill)
+
+    reqs[2].prefill_need_token_num = later_prefill_need_token_num
     prefill_reqs, decode_reqs, token_num = backend._get_classed_reqs(req_ids=[0, 1, 2], no_decode=True)
 
     assert [req.req_idx for req in prefill_reqs] == selected and not decode_reqs
+    assert later_budget_checks == ([True] if 2 in selected else [])
     assert token_num == 2048 + long_end - 8192 + (later_len if 2 in selected else 0)
     assert reqs[1].hold_kv_len == long_end
     model_input, run_reqs = generic_pre_process.prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=True)
