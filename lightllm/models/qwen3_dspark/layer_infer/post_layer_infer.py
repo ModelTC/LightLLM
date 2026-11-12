@@ -97,11 +97,13 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
         """Run sequential Markov decoding over TP-local vocabulary logits."""
 
         num_reqs = anchor_token_ids.shape[0]
-        local_start = layer_weight.markov_w2_weight_.tp_vocab_start_id
+        sharded_vocab = self.tp_world_size_ > 1
+        if sharded_vocab:
+            local_start = layer_weight.markov_w2_weight_.tp_vocab_start_id
+            req_rows = torch.arange(num_reqs, dtype=torch.long, device=local_logits.device)
         prev_token_ids = anchor_token_ids
         state = None
         sampled_tokens = []
-        req_rows = torch.arange(num_reqs, dtype=torch.long, device=local_logits.device)
         for step_idx in range(self.block_size_):
             prev_embeddings = self._markov_prev_embeddings(prev_token_ids, layer_weight)
             state, markov_latent = self._markov_step_latent(
@@ -116,11 +118,10 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
             local_max_values, local_max_indexes = local_vocab_bias_max(
                 local_base_logits, local_markov_bias, alloc_func=self.alloc_tensor
             )
-            local_token_ids = local_max_indexes + local_start
-
-            if self.tp_world_size_ == 1:
-                next_token_ids = local_token_ids
+            if not sharded_vocab:
+                next_token_ids = local_max_indexes
             else:
+                local_token_ids = local_max_indexes + local_start
                 local_winners = torch.stack(
                     [local_max_values, local_token_ids.to(dtype=torch.float32)],
                     dim=-1,
