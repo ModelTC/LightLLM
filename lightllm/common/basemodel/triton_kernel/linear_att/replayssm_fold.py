@@ -37,8 +37,8 @@ def _fold_prefix(
     req = tl.load(Reqs + row).to(tl.int64)
     if req == HOLD:
         return
-    n = tl.load(Cursors + req)
-    if n == 0:
+    prefix_len = tl.load(Cursors + req)
+    if prefix_len == 0:
         return
     linear_layer_idx, head = lh // HV, lh % HV
     # history 是连续分配的。canonical SSM 可能带大于 int32 的层距，地址必须用真实 stride 的 int64。
@@ -58,13 +58,15 @@ def _fold_prefix(
     )
     state = tl.load(sp, (kk[:, None] < K) & (vv[None, :] < V), 0).to(tl.float32)
     # cursor 可能暂时超过容量。循环只走容量内的槽，越界步不读 history，也不更新 state。
-    state = _apply_accepted_prefix(state, RawKeys, RawValues, Gates, Betas, key_slot, slot, kk, vv, n, K, V, L, KDA)
+    state = _apply_accepted_prefix(
+        state, RawKeys, RawValues, Gates, Betas, key_slot, slot, kk, vv, prefix_len, K, V, L, KDA
+    )
     tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
     # cursor 不在这里清。和折回并行的其他线程块还要读原来的长度，清零放到 kernel 结束之后。
 
 
-def fold_prefix(history, reqs, run_config=None) -> None:
-    """把 history 上 cursor 覆盖的已接受前缀折进 canonical SSM。
+def fold_prefix(state, reqs, run_config=None) -> None:
+    """把 cursor 覆盖的已接受前缀折进 canonical SSM。
 
     没传入 run_config 时用 BV=32、4 个 warp、3 个 stage。
     """
@@ -74,27 +76,27 @@ def fold_prefix(history, reqs, run_config=None) -> None:
     bv = run_config["BV"]
     num_warps = run_config["num_warps"]
     num_stages = run_config["num_stages"]
-    state = history.ssm_state
-    layers, slots, hv, k, v = state.shape
-    layer_stride, slot_stride, head_stride, key_stride, value_stride = state.stride()
+    ssm = state.ssm_state
+    layers, slots, hv, k, v = ssm.shape
+    layer_stride, slot_stride, head_stride, key_stride, value_stride = ssm.stride()
     _fold_prefix[(triton.cdiv(v, bv), reqs.numel(), layers * hv)](
-        state,
-        history.raw_keys,
-        history.raw_values,
-        history.gates,
-        history.betas,
-        history.cursors,
+        ssm,
+        state.raw_keys,
+        state.raw_values,
+        state.gates,
+        state.betas,
+        state.cursors,
         reqs,
         slots,
         hv,
-        history.num_key_heads,
+        state.num_key_heads,
         k,
         v,
-        history.capacity,
-        history.hold_req_id,
+        state.capacity,
+        state.hold_req_id,
         triton.next_power_of_2(k),
         bv,
-        history.kda,
+        state.kda,
         STRIDE_LAYER=layer_stride,
         STRIDE_SLOT=slot_stride,
         STRIDE_HEAD=head_stride,

@@ -32,15 +32,15 @@ def _apply_accepted_prefix(
     slot,
     kk,
     vv,
-    n,
+    prefix_len,
     K: tl.constexpr,
     V: tl.constexpr,
     L: tl.constexpr,
     KDA: tl.constexpr,
 ):
-    # 按 history 槽位顺序把已接受前缀折进 state。j >= n 的槽不读、不更新。
+    # 按 history 槽位顺序把已接受前缀折进 state。j >= prefix_len 的槽不读、不更新。
     for j in range(L):
-        active = j < n
+        active = j < prefix_len
         raw_k = tl.load(RawKeys + (key_slot * L + j) * K + kk, active & (kk < K), 0).to(tl.float32)
         raw_v = tl.load(RawValues + (slot * L + j) * V + vv, active & (vv < V), 0).to(tl.float32)
         if KDA:

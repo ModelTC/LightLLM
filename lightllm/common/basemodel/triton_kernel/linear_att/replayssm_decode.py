@@ -47,8 +47,8 @@ def _apply_deltas(coeff, deltas, R: tl.constexpr, BV: tl.constexpr):
 @triton.jit
 def _decode_replay(
     Q,
-    Kp,
-    Vp,
+    StepK,
+    StepV,
     A,
     B,
     Alog,
@@ -131,7 +131,7 @@ def _decode_replay(
         projection_precision: tl.constexpr = "tf32x3"
         qk, projections, tt, tokens, valid, h = _project_qk(
             Q,
-            Kp,
+            StepK,
             A,
             Alog,
             Bias,
@@ -161,8 +161,8 @@ def _decode_replay(
 
     if PRECOMPUTE_PROJECTIONS and KDA:
         _kda_precomputed_window(
-            Kp,
-            Vp,
+            StepK,
+            StepV,
             A,
             B,
             Alog,
@@ -204,8 +204,8 @@ def _decode_replay(
         )
     elif PRECOMPUTE_PROJECTIONS:
         _gdn_precomputed_window(
-            Kp,
-            Vp,
+            StepK,
+            StepV,
             A,
             B,
             Alog,
@@ -250,8 +250,8 @@ def _decode_replay(
     else:
         _replay_each_token(
             Q,
-            Kp,
-            Vp,
+            StepK,
+            StepV,
             A,
             B,
             Alog,
@@ -295,7 +295,7 @@ def _decode_replay(
 @triton.jit
 def _project_qk(
     Q,
-    Kp,
+    StepK,
     A,
     Alog,
     Bias,
@@ -334,7 +334,7 @@ def _project_qk(
         0,
     ).to(tl.float32)
     k_rows = tl.load(
-        Kp + safe_tokens[:, None] * SK + h * K + kk[None, :],
+        StepK + safe_tokens[:, None] * SK + h * K + kk[None, :],
         (valid & (tt >= BW))[:, None] & (kk[None, :] < K),
         0,
     ).to(tl.float32)
@@ -385,8 +385,8 @@ def _project_qk(
 
 @triton.jit
 def _gdn_precomputed_window(
-    Kp,
-    Vp,
+    StepK,
+    StepV,
     A,
     B,
     Alog,
@@ -444,7 +444,7 @@ def _gdn_precomputed_window(
         0,
     ).to(tl.float32)
     raw_keys = tl.load(
-        Kp + safe_fresh[:, None] * SK + h * K + kk[None, :],
+        StepK + safe_fresh[:, None] * SK + h * K + kk[None, :],
         fresh[:, None] & (kk[None, :] < K),
         0,
     ).to(tl.float32)
@@ -452,7 +452,7 @@ def _gdn_precomputed_window(
     fresh_keys = tl.where(fresh[:, None], fresh_keys, 0)
     all_keys = cached_keys + fresh_keys
     values = tl.load(
-        Vp + safe_fresh[:, None] * SV + hv * V + vv[None, :],
+        StepV + safe_fresh[:, None] * SV + hv * V + vv[None, :],
         fresh[:, None] & (vv[None, :] < V),
         0,
     ).to(tl.float32)
@@ -524,8 +524,8 @@ def _gdn_precomputed_window(
 
 @triton.jit
 def _kda_precomputed_window(
-    Kp,
-    Vp,
+    StepK,
+    StepV,
     A,
     B,
     Alog,
@@ -581,7 +581,7 @@ def _kda_precomputed_window(
         0,
     ).to(tl.float32)
     raw_keys = tl.load(
-        Kp + safe_fresh[:, None] * SK + h * K + kk[None, :],
+        StepK + safe_fresh[:, None] * SK + h * K + kk[None, :],
         fresh[:, None] & (kk[None, :] < K),
         0,
     ).to(tl.float32)
@@ -589,7 +589,7 @@ def _kda_precomputed_window(
     fresh_keys = tl.where(fresh[:, None], fresh_keys, 0)
     all_keys = tl.where(old[:, None], cached_keys, 0) + fresh_keys
     values = tl.load(
-        Vp + safe_fresh[:, None] * SV + hv * V + vv[None, :],
+        StepV + safe_fresh[:, None] * SV + hv * V + vv[None, :],
         fresh[:, None] & (vv[None, :] < V),
         0,
     ).to(tl.float32)
@@ -679,8 +679,8 @@ def _kda_precomputed_window(
 @triton.jit
 def _replay_each_token(
     Q,
-    Kp,
-    Vp,
+    StepK,
+    StepV,
     A,
     B,
     Alog,
@@ -749,8 +749,8 @@ def _replay_each_token(
 
     for t in range(start, end):
         q = tl.load(Q + t * SQ + h * K + kk, kk < K, 0).to(tl.float32)
-        raw_k = tl.load(Kp + t * SK + h * K + kk, kk < K, 0).to(tl.float32)
-        v = tl.load(Vp + t * SV + hv * V + vv, vv < V, 0).to(tl.float32)
+        raw_k = tl.load(StepK + t * SK + h * K + kk, kk < K, 0).to(tl.float32)
+        v = tl.load(StepV + t * SV + hv * V + vv, vv < V, 0).to(tl.float32)
         q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K ** -0.5)
         k = raw_k / tl.sqrt(tl.sum(raw_k * raw_k) + 1.0e-6)
         if KDA:

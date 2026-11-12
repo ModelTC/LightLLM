@@ -18,7 +18,7 @@ def test_rebuild_uses_one_layer_scratch(width):
     a_log = torch.zeros(2, device="cuda")
     cu = torch.arange(4, device="cuda", dtype=torch.int32) * width if width > 1 else None
     _, kwargs = tuning.rebuild_inputs(ssm_backend, "replay", q, q, q, gates, gates, a_log, a_log, cu_seqlens=cu)
-    scratch = kwargs["ssm_backend"]
+    scratch = kwargs["state"]
     assert scratch is not ssm_backend
     assert scratch.ssm_state.shape[0] == 1
     assert scratch.capacity == ssm_backend.capacity
@@ -45,7 +45,7 @@ def test_rebuild_failure_leaves_serving_state_unchanged(monkeypatch, tmp_path, w
     if cu is not None:
         q = q.unsqueeze(0)
     inputs = dict(
-        ssm_backend=ssm_backend, mode="replay", q=q, k=q, v=q, a=gates, b=gates, a_log=a_log, bias=bias, cu_seqlens=cu
+        state=ssm_backend, mode="replay", q=q, k=q, v=q, a=gates, b=gates, a_log=a_log, bias=bias, cu_seqlens=cu
     )
     before = {name: x.clone() for name, x in vars(ssm_backend).items() if isinstance(x, torch.Tensor)}
 
