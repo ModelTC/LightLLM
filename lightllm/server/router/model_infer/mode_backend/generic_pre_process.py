@@ -113,60 +113,66 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     lookback_depth = g_infer_context.backend.model.token_lookback_depth
     token_lookback = []
     run_reqs: List[InferReq] = []
-    total_token_num = 0
     b_req_idx = []
     b_mtp_index = []
     b_seq_len = []
-    b_q_seq_len = []
     multimodal_params = []
+    b_position_delta = []
+    b_shared_seq_len = []
+    b_shared_radix_node_id = []
     for req in req_objs:
         if lookback_depth:
             history = req.get_token_lookback(lookback_depth)
             if history is not None:
                 token_lookback.append(history)
+
+        seq_len = req.get_cur_total_len()
+        assert req.cur_kv_len == seq_len - 1, f"{req.cur_kv_len} != {seq_len}"
+        params = req.multimodal_params
+        position_delta = 0
+        for image in params.get("images", []):
+            grid_thwd = image.get("grid_thwd")
+            if grid_thwd is not None:
+                position_delta += grid_thwd[3]
+        shared_seq_len = req.get_radix_cache_shared_len()
+        node = req.shared_kv_node
+        node_id = -1 if node is None else node.time_id % INT64_MAX
+
         run_reqs.append(req)
         b_req_idx.append(req.req_idx)
-        seq_len = req.get_cur_total_len()
-        assert req.cur_kv_len == seq_len - 1, f"{req.cur_kv_len} {seq_len}"
         b_seq_len.append(seq_len)
-        b_q_seq_len.append(1)
-        total_token_num += seq_len
         b_mtp_index.append(0)
-        multimodal_params.append(req.multimodal_params)
-        # process the draft tokens.
-        for step in range(req.mtp_step):
+        multimodal_params.append(params)
+        b_position_delta.append(position_delta)
+        b_shared_seq_len.append(shared_seq_len)
+        b_shared_radix_node_id.append(node_id)
+
+        # Draft rows share the anchor's request metadata.
+        for step in range(1, req.mtp_step + 1):
             run_reqs.append(req)
             b_req_idx.append(req.req_idx)
-            seq_len += 1
-            b_seq_len.append(seq_len)
-            total_token_num += seq_len
-            b_mtp_index.append(step + 1)
-            multimodal_params.append(req.multimodal_params)
-            b_q_seq_len.append(1)
+            b_seq_len.append(seq_len + step)
+            b_mtp_index.append(step)
+            multimodal_params.append(params)
+            b_position_delta.append(position_delta)
+            b_shared_seq_len.append(shared_seq_len)
+            b_shared_radix_node_id.append(node_id)
 
     # 空 DP rank 同样构建完整的 decode ModelInput；BaseModel 会在 token
     # gather 和 attention 初始化之前补入内部 dummy request。
+    total_token_num = sum(b_seq_len)
     max_kv_seq_len = max(b_seq_len, default=0)
-    max_q_seq_len = max(b_q_seq_len, default=1)
-
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
-    b_position_delta = build_b_position_delta(multimodal_params)
-
-    b_shared_seq_len = torch.tensor(
-        [req.get_radix_cache_shared_len() for req in run_reqs], dtype=torch.int32, device="cpu"
-    )
-    b_shared_radix_node_id = torch.tensor(
-        [-1 if req.shared_kv_node is None else req.shared_kv_node.time_id % INT64_MAX for req in run_reqs],
-        dtype=torch.int64,
-        device="cpu",
-    )
+    b_position_delta = torch.tensor(b_position_delta, dtype=torch.int32, device="cpu")
+    b_shared_seq_len = torch.tensor(b_shared_seq_len, dtype=torch.int32, device="cpu")
+    b_shared_radix_node_id = torch.tensor(b_shared_radix_node_id, dtype=torch.int64, device="cpu")
 
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
         total_token_num=total_token_num,
-        max_q_seq_len=max_q_seq_len,
+        max_q_seq_len=1,
         max_kv_seq_len=max_kv_seq_len,
         input_ids=None,
         b_req_idx=b_req_idx,
@@ -230,15 +236,3 @@ def overlap_prepare_prefill_inputs(req_objs: List[InferReq]):
         is_chuncked_mode=True,
     )
     return model_input0, run_reqs0, model_input1, run_reqs1
-
-
-def build_b_position_delta(multimodal_params: List[dict]) -> torch.Tensor:
-    b_position_delta = []
-    for params in multimodal_params:
-        position_delta = 0
-        for image in params.get("images", []):
-            grid_thwd = image.get("grid_thwd")
-            if grid_thwd is not None:
-                position_delta += grid_thwd[3]
-        b_position_delta.append(position_delta)
-    return torch.tensor(b_position_delta, dtype=torch.int32, device="cpu")

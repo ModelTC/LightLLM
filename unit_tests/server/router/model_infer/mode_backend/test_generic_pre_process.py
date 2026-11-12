@@ -148,6 +148,27 @@ def test_prepare_decode_inputs_allows_empty_batch(monkeypatch):
     assert model_input.max_kv_seq_len == 0
 
 
+def test_prepare_decode_inputs_reuses_request_metadata_for_draft_rows(monkeypatch):
+    _patch_empty_input_context(monkeypatch)
+    text, vision = _make_decode_req(0), _make_decode_req(1)
+    vision.mtp_step = 2
+    vision.multimodal_params = {"images": [{"grid_thwd": (1, 8, 8, 9)}, {}, {"grid_thwd": (1, 4, 4, -2)}]}
+    vision.shared_kv_node = SimpleNamespace(time_id=2 ** 63 + 3, node_prefix_total_len=2)
+    vision.get_radix_cache_shared_len = lambda: 2
+
+    model_input, run_reqs = generic_pre_process.prepare_decode_inputs([text, vision])
+
+    assert run_reqs == [text, vision, vision, vision]
+    assert model_input.b_req_idx.tolist() == [0, 1, 1, 1]
+    assert model_input.b_seq_len.tolist() == [4, 4, 5, 6]
+    assert model_input.total_token_num == 19
+    assert model_input.b_mtp_index.tolist() == [0, 0, 1, 2]
+    assert model_input.b_position_delta.tolist() == [0, 7, 7, 7]
+    assert model_input.b_shared_seq_len.tolist() == [0, 2, 2, 2]
+    assert model_input.b_shared_radix_node_id.tolist() == [-1, 4, 4, 4]
+    assert model_input.multimodal_params == [text.multimodal_params] + [vision.multimodal_params] * 3
+
+
 def test_overlap_prefill_balances_request_token_load_without_padding(monkeypatch):
     _patch_overlap_input_context(monkeypatch)
     reqs = [
