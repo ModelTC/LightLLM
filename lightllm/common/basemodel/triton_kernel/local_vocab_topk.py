@@ -55,7 +55,10 @@ def local_vocab_bias_max(base_logits: torch.Tensor, bias: torch.Tensor, alloc_fu
     assert base_logits.shape == bias.shape and base_logits.ndim == 2
     batch, vocab = base_logits.shape
     if run_config is None:
-        run_config = {"BLOCK_V": 256, "BLOCK_B": 8, "num_warps": 4}
+        # Markov reads every draft position from a vocab-major logits buffer.
+        strided_batch = 1 < base_logits.stride(0) < base_logits.stride(1)
+        block_v = 128 if strided_batch and bias.stride(1) == 1 and batch >= 8 and vocab >= 16_384 else 256
+        run_config = {"BLOCK_V": block_v, "BLOCK_B": 8, "num_warps": 4}
     chunks = triton.cdiv(vocab, run_config["BLOCK_V"])
     partial_values = alloc_func((batch, chunks), dtype=torch.float32, device=base_logits.device)
     partial_indexes = alloc_func((batch, chunks), dtype=torch.int32, device=base_logits.device)
