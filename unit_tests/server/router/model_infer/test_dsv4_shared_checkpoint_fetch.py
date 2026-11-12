@@ -113,7 +113,9 @@ def test_transfer_plan_does_not_allocate_or_require_checkpoint_capacity(monkeypa
     monkeypatch.setattr(transfer, "g_infer_context", NS(get_can_alloc_token_num=lambda: 4096))
     monkeypatch.setattr(transfer.dist, "get_world_size", lambda group: 2)
     monkeypatch.setattr(
-        transfer.dist, "all_gather_object", lambda output, local, group: output.__setitem__(slice(None), [local, {}])
+        transfer.dist,
+        "all_gather_into_tensor",
+        lambda output, local, group: output.copy_(torch.cat((local, torch.tensor([-1, 0, 0])))),
     )
     big = module.backend.model.mem_manager.big_page_buffers
     small = module.backend.small_page_buffers

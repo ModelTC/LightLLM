@@ -144,12 +144,14 @@ def _rank(rank, rendezvous, service_name, model_dir, model_type, end, start, mtp
         module.init_dsv4_cache_transfer(memories)
         transfer.g_infer_context = NS(req_manager=requests, get_can_alloc_token_num=lambda: 1536 - start)
         node = NS(small_page_buffer_idx=ids[-1]) if rank == 1 else None
-        tasks, plan = module.build_dsv4_trans_tasks(
-            [(7, 0, None, 0)], [req] if rank == 0 else [], np.array([[start, end]])
-        )
+        reqs = [(7, 0, None, 0)]
+        matches = {7: NS(node=node, matched_len=start if rank == 0 else end)}
+        match_lens = module.gather_dsv4_match_lens(reqs, matches)
+        np.testing.assert_array_equal(match_lens, [[start, end]])
+        tasks, plan = module.build_dsv4_trans_tasks(reqs, [req] if rank == 0 else [], match_lens)
         assert len(tasks) == (1 if rank == 0 else 0)
         assert plan == [[(1, 7, start, end)], []]
-        module.kv_trans_dsv4(tasks, {7: NS(node=node, matched_len=end)}, plan)
+        module.kv_trans_dsv4(tasks, matches, plan)
         dist.barrier()
         if rank == 1:
             for pool, slot in owned:

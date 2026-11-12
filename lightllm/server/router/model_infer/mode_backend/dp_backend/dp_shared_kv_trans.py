@@ -109,20 +109,21 @@ class DPKVSharedMoudle:
             raise
         return matches
 
-    def gather_dsv4_match_lens(self, reqs: List[tuple], matches: Dict[int, PrefixCacheMatch]):
-        local_info = [matches[req[0]].matched_len for req in reqs]
+    def _gather_dsv4_int_metadata(self, local: torch.Tensor) -> np.ndarray:
         group = self.backend.node_gloo_group
-        all_rank_info = [None] * dist.get_world_size(group=group)
-        dist.all_gather_object(all_rank_info, local_info, group=group)
-        match_lens = np.zeros((len(reqs), self.backend.dp_size_in_node), dtype=np.int64)
-        # Every TP rank must hold a resumable checkpoint at the advertised end.
-        # If their cache states differ, this DP offers no remote prefix this round.
-        for dp_rank in range(self.backend.dp_size_in_node):
-            rank_info = all_rank_info[dp_rank * self.backend.dp_world_size : (dp_rank + 1) * self.backend.dp_world_size]
-            for req_index, lengths in enumerate(zip(*rank_info)):
-                consistent_len = lengths[0] if len(set(lengths)) == 1 else 0
-                match_lens[req_index, dp_rank] = consistent_len
-        return match_lens
+        gathered = torch.empty((dist.get_world_size(group=group), *local.shape), dtype=local.dtype, device="cpu")
+        dist.all_gather_into_tensor(gathered.view(-1), local.view(-1), group=group)
+        return gathered.numpy()
+
+    def gather_dsv4_match_lens(self, reqs: List[tuple], matches: Dict[int, PrefixCacheMatch]):
+        local = torch.tensor([matches[req[0]].matched_len for req in reqs], dtype=torch.int64, device="cpu")
+        tp_size = self.backend.dp_world_size
+        by_shard = self._gather_dsv4_int_metadata(local).reshape(self.backend.dp_size_in_node, tp_size, len(reqs))
+        match_lens = by_shard[:, 0]
+        # Every TP shard must hold a resumable checkpoint at the same end.
+        if tp_size > 1:
+            match_lens = np.where((by_shard == match_lens[:, None]).all(axis=1), match_lens, 0)
+        return match_lens.T
 
     def build_shared_kv_trans_tasks(
         self,
@@ -188,7 +189,7 @@ class DPKVSharedMoudle:
         # ---------------------------------------------------------------------
         by_id = {req.req_id: req for req in local_reqs}
         token_capacity = g_infer_context.get_can_alloc_token_num()
-        local_plans = {}
+        local_plans = [(-1, 0, 0)] * len(reqs)
         for index, (req_id, _, _, owner_dp) in enumerate(reqs):
             if owner_dp != self.dp_rank_in_node:
                 continue
@@ -213,9 +214,7 @@ class DPKVSharedMoudle:
         # ---------------------------------------------------------------------
         # 阶段 2：收集节点内所有 rank 的候选计划，供同一 DP 的 TP ranks 达成一致。
         # ---------------------------------------------------------------------
-        group = self.backend.node_gloo_group
-        all_rank_plans = [None] * dist.get_world_size(group=group)
-        dist.all_gather_object(all_rank_plans, local_plans, group=group)
+        all_rank_plans = self._gather_dsv4_int_metadata(torch.tensor(local_plans, dtype=torch.int64, device="cpu"))
 
         # ---------------------------------------------------------------------
         # 阶段 3：构造逐 rank 的收发计划，并在请求所属 DP 上实际分配目标资源。
@@ -224,10 +223,10 @@ class DPKVSharedMoudle:
         transfer_plan = [[] for _ in all_rank_plans]
         for index, (req_id, _, _, owner_dp) in enumerate(reqs):
             owner_ranks = range(owner_dp * self.backend.dp_world_size, (owner_dp + 1) * self.backend.dp_world_size)
-            plans = [all_rank_plans[rank].get(index) for rank in owner_ranks]
-            if plans[0] is None or any(plan != plans[0] for plan in plans):
+            plans = all_rank_plans[owner_ranks.start : owner_ranks.stop, index]
+            source_dp, start, end = map(int, plans[0])
+            if source_dp < 0 or (len(owner_ranks) > 1 and not (plans == plans[0]).all()):
                 continue
-            source_dp, start, end = plans[0]
 
             # 源、目标使用相同的 rank_in_dp，使每个 TP shard 与对应 shard 配对。
             for destination in owner_ranks:
