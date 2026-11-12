@@ -3,6 +3,7 @@ import asyncio
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
+import os
 import inspect
 import pickle
 import time
@@ -49,6 +50,7 @@ class MultiLevelKVCacheManager:
         # ZeroMQ sockets are not thread-safe. Cache workers enqueue completed
         # requests so the recv_loop thread remains the sole socket owner.
         self.send_to_router_queue = Queue()
+        self.finished_req_fd = os.eventfd(0, os.EFD_CLOEXEC | os.EFD_NONBLOCK)
         self.cpu_cache_thread = threading.Thread(target=self.cpu_cache_hanle_loop, daemon=True)
         self.cpu_cache_thread.start()
 
@@ -148,7 +150,7 @@ class MultiLevelKVCacheManager:
         # 超时时，放弃进行 cache page 的匹配。
         current_time = time.time()
         if current_time - start_time >= self.cpu_cache_time_out:
-            self.send_to_router_queue.put(group_req_indexes)
+            self._queue_finished_group_req(group_req_indexes)
             logger.warning(
                 f"cache matching time out {current_time - start_time}s, "
                 f"group_req_id: {group_req_indexes.group_req_id}"
@@ -212,8 +214,12 @@ class MultiLevelKVCacheManager:
         for req in reqs:
             self.shm_req_manager.put_back_req_obj(req)
 
-        self.send_to_router_queue.put(group_req_indexes)
+        self._queue_finished_group_req(group_req_indexes)
         return
+
+    def _queue_finished_group_req(self, group_req_indexes: GroupReqIndexes):
+        self.send_to_router_queue.put(group_req_indexes)
+        os.eventfd_write(self.finished_req_fd, 1)
 
     def _send_finished_group_reqs(self):
         while True:
@@ -224,11 +230,20 @@ class MultiLevelKVCacheManager:
             self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
 
     def recv_loop(self):
+        poller = zmq.Poller()
+        poller.register(self.zmq_recv_socket, zmq.POLLIN)
+        poller.register(self.finished_req_fd, zmq.POLLIN)
         try:
             recv_max_count = 128
 
             while True:
-                self._send_finished_group_reqs()
+                ready = dict(poller.poll())
+                if self.finished_req_fd in ready:
+                    os.eventfd_read(self.finished_req_fd)
+                    self._send_finished_group_reqs()
+                if self.zmq_recv_socket not in ready:
+                    continue
+
                 recv_objs = []
                 try:
                     # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
@@ -245,15 +260,12 @@ class MultiLevelKVCacheManager:
 
                     # 当队列中存在较多的请求时，将一次接受的数量上调
                     recv_max_count = min(int(recv_max_count * 1.3), 256)
-                except zmq.ZMQError:
+                except zmq.Again:
                     # 当队列已经开始清空的时候，将一次接受的数量下调
                     recv_max_count = 128
 
                 for recv_obj in recv_objs:
                     self.recv_queue.put(recv_obj)
-
-                if len(recv_objs) == 0:
-                    time.sleep(0.01)
 
         except Exception as e:
             logger.exception(f"detoken process has exception {str(e)}")

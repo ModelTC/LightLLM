@@ -1,11 +1,38 @@
+import os
 import time
+from queue import Queue
 from types import SimpleNamespace
 
 import pytest
 import torch
+import zmq
 
+from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.server.multi_level_kv_cache.manager import MultiLevelKVCacheManager
 from lightllm.utils.kv_cache_utils import CpuKVCacheMeta
+
+
+def test_cache_match_completion_wakes_router_without_new_requests():
+    manager = MultiLevelKVCacheManager.__new__(MultiLevelKVCacheManager)
+    manager.cpu_cache_time_out = 0.5
+    manager.send_to_router_queue = Queue()
+    manager.finished_req_fd = os.eventfd(0, os.EFD_CLOEXEC | os.EFD_NONBLOCK)
+    delivered = []
+    manager.send_to_router = SimpleNamespace(send_pyobj=lambda group, protocol: delivered.append(group))
+    expired = GroupReqIndexes(1, None, [], time.time())
+    done = GroupReqIndexes(2, None, [], time.time())
+    poller = zmq.Poller()
+    poller.register(manager.finished_req_fd, zmq.POLLIN)
+    try:
+        manager._handle_group_req_multi_cache_match(expired, time.time() - 1)
+        manager._handle_group_req_multi_cache_match(done, time.time())
+        assert manager.finished_req_fd in dict(poller.poll(100))
+        assert os.eventfd_read(manager.finished_req_fd) == 2
+        manager._send_finished_group_reqs()
+        assert delivered == [expired, done]
+        assert not poller.poll(0)
+    finally:
+        os.close(manager.finished_req_fd)
 
 
 def test_disk_suffix_keeps_the_block_containing_the_cpu_hit_boundary():
