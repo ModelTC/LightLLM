@@ -1,5 +1,6 @@
 import os
 import ctypes
+import resource
 import signal
 import subprocess
 import sys
@@ -251,6 +252,25 @@ def kill_recursive(proc):
         except psutil.NoSuchProcess:
             # A concurrent exit must not skip the remaining children or parent.
             logger.warning(f"Process {process.pid} does not exist.")
+
+
+def configure_decode_open_file_limit(args):
+    if args.run_mode != "decode":
+        return
+
+    # Each admitted request keeps several shared memory mappings open.
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    preferred = 65536
+    target = preferred if hard == resource.RLIM_INFINITY else min(preferred, hard)
+    if soft != resource.RLIM_INFINITY and soft < target:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+        except (OSError, ValueError):
+            logger.warning("Could not raise Decode open-file soft limit from %d to %d", soft, target, exc_info=True)
+        else:
+            logger.info("Raised the Decode open-file soft limit from %d to %d", soft, target)
+    if hard != resource.RLIM_INFINITY and hard < preferred:
+        logger.warning("Decode open-file hard limit is %d; a burst of requests may exhaust it", hard)
 
 
 process_manager = SubmoduleManager()

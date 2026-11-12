@@ -3,7 +3,7 @@ import os
 import uuid
 import subprocess
 import math
-from lightllm.utils.start_utils import process_manager
+from lightllm.utils.start_utils import configure_decode_open_file_limit, process_manager
 from .metrics.manager import start_metric_manager
 from .httpserver.req_id_generator_server import start_req_id_generator_server
 from .embed_cache.manager import start_cache_manager
@@ -45,6 +45,7 @@ def _set_envs_and_config(args: StartArgs):
 
 def _launch_subprocesses(args: StartArgs):
     _validate_pd_features(args)
+    configure_decode_open_file_limit(args)
     _set_envs_and_config(args)
 
     if args.target_vocab_topk_sampling is not None:
