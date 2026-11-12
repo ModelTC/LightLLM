@@ -1,9 +1,12 @@
 import dataclasses
+import inspect
+
 import torch
+
 from lightllm.common.attention.backends.sparse_mla.flashmla.backend import (
     NsaFlashMlaSparseAttBackend,
-    NsaFlashMlaSparsePrefillPlan,
     NsaFlashMlaSparseDecodePlan,
+    NsaFlashMlaSparsePrefillPlan,
 )
 
 
@@ -56,7 +59,6 @@ class Glm5NextSparseAttBackend(NsaFlashMlaSparseAttBackend):
 
     def _decode_nsa_decode_att(self, layer, plan, q, kv, inputs):
         from sgl_kernel.flash_attn import flash_attn_with_kvcache
-        import inspect
 
         q_nope, _ = q
         kv_nope = kv.view(-1, 1, 1, layer.params.kv_lora_rank)

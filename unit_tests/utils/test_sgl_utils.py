@@ -1,27 +1,27 @@
-import weakref
 import collections
 import inspect
 import math
+import weakref
 from types import SimpleNamespace
 
 import pytest
 import torch
 from frozendict import frozendict
 
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention.backends.dense.fa3 import backend as fa3_module
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils import sgl_utils
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
 from unit_tests.common.attention.helpers import (
     backend_plan,
-    update_plan,
-    run_sparse,
-    run_dense,
-    make_plan,
-    make_batch,
     make_backend,
+    make_batch,
+    make_plan,
+    run_dense,
+    run_sparse,
+    update_plan,
 )
 
 

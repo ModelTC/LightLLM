@@ -8,7 +8,6 @@ from lightllm.models.deepseek_v4.workspace import DeepseekV4C4PrefillWorkspace, 
 from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
 from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
 
-
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 

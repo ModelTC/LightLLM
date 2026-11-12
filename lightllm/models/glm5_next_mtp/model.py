@@ -1,22 +1,25 @@
-from typing import TYPE_CHECKING
 from copy import deepcopy
+from typing import TYPE_CHECKING
+
 import torch
 
+from lightllm.common.attention.api import AttentionFamily
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.models.glm5_next.attention.sparse_mla import Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.attention.fp8_sparse_mla import Fp8Glm5NextSparseAttBackend
+from lightllm.models.glm5_next.attention.sparse_mla import Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
+
 from .layer_infer.pre_layer_infer import Glm5NextMTPPreLayerInfer
 from .layer_weights.pre_and_post_layer_weight import Glm5NextMTPPreAndPostLayerWeight
 
-
 if TYPE_CHECKING:
     from easydict import EasyDict
-    from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.attention_state.full_att import FullAttentionState
+
     from lightllm.common.attention_state.bounded_att import BoundedAttentionState
+    from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.server.core.objs.start_args_type import StartArgs
 
 
 class Glm5NextMTPModel(TpPartBaseModel):
@@ -117,8 +120,8 @@ class Glm5NextMTPModel(TpPartBaseModel):
     ) -> list["BoundedAttentionState"]:
         """直接选择本模型的 K-pool 窗口层，不依赖 full State 创建过程。"""
         from lightllm.common.attention_state.bounded_att import (
-            create_window_compressor_state,
             WindowCompressorStateConfig,
+            create_window_compressor_state,
         )
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
@@ -154,8 +157,6 @@ class Glm5NextMTPModel(TpPartBaseModel):
         return config
 
     def attention_backend_candidates(self, family, phase):
-        from lightllm.common.attention.api import AttentionFamily
-
         if family is AttentionFamily.KDA:
             return None, ["triton"]
         backend = Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend

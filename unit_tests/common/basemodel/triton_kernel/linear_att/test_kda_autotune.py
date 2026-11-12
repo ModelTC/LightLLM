@@ -11,8 +11,7 @@ import triton
 from lightllm.common.attention.backends.kda.triton.kernels import kda
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.common.triton_utils import autotuner as autotuner_module
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneLevel
-
+from lightllm.common.triton_utils.autotuner import AutotuneLevel, Autotuner
 
 KERNELS = [
     ("_chunk_kda_scaled_dot_kkt_sub_inter", "chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter"),

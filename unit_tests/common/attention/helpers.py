@@ -8,15 +8,15 @@ from lightllm.common.attention.api import (
     AttentionFamily,
     AttentionPhase,
     CacheLayout,
+    ExecutionRequirements,
     LayerBinding,
     LayerSpec,
     PlanCapacity,
 )
 from lightllm.common.attention.backends._workspace import AttentionWorkspace
 from lightllm.common.attention.backends.base import BaseAttentionBackend
-from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.platform import get_device_runtime
-from lightllm.common.attention.api import ExecutionRequirements
+from lightllm.server.core.objs.start_args_type import StartArgs
 
 
 def make_batch(lengths=(5, 2), *, phase=AttentionPhase.DECODE, device="cpu", **kwargs):
@@ -209,7 +209,7 @@ def update_plan(plan, fixture):
 
 
 def run_sparse(plan, fixture, query, kv, parameters, *, out=None, alloc_func=None):
-    from lightllm.common.attention.api.inputs import MLAParams, SparseMLAPrefillInputs, SparseMLADecodeInputs
+    from lightllm.common.attention.api.inputs import MLAParams, SparseMLADecodeInputs, SparseMLAPrefillInputs
 
     q = query[0] if isinstance(query, tuple) else query
     plan.capture = bool(getattr(fixture, "is_cuda_graph_capture", plan.capture))
@@ -221,7 +221,7 @@ def run_sparse(plan, fixture, query, kv, parameters, *, out=None, alloc_func=Non
         plan.workspace = AttentionWorkspace(q.device)
         backend._test_workspace = plan.workspace
     if backend.__class__.__module__.startswith("lightllm.models.deepseek_v4"):
-        from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4Params, DeepseekV4Inputs
+        from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4Inputs, DeepseekV4Params
 
         params = DeepseekV4Params(
             kv[0],
@@ -268,7 +268,7 @@ def run_sparse(plan, fixture, query, kv, parameters, *, out=None, alloc_func=Non
 
 
 def run_dense(plan, fixture, query, key, value, *, out=None, alloc_func=None, params=None):
-    from lightllm.common.attention.api.inputs import DenseParams, DenseInputs
+    from lightllm.common.attention.api.inputs import DenseInputs, DenseParams
 
     plan.batch = batch_from_fixture(fixture, plan.capacity.phase, query.shape[0], query.device)
     if params is None:

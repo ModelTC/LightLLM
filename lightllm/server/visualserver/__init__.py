@@ -1,6 +1,6 @@
 from lightllm.common.attention.api import VarlenAttentionBackend
-from lightllm.common.attention.selection import get_varlen_backend_class
-from lightllm.common.attention.selection import select_varlen_attention_backend
+from lightllm.common.attention.selection import get_varlen_backend_class, select_varlen_attention_backend
+from lightllm.platform import get_device_runtime
 
 VIT_ATTN_BACKEND: VarlenAttentionBackend = None
 
@@ -16,8 +16,6 @@ class _InitializingVarlenAttention:
         self.requested = requested
 
     def forward(self, inputs, *, out):
-        from lightllm.platform import get_device_runtime
-
         runtime = get_device_runtime(inputs.query.device)
         if runtime.is_capturing():
             raise RuntimeError("warm up vision attention before Graph capture")

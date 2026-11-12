@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
-from typing import TYPE_CHECKING, List
 from dataclasses import dataclass
+from functools import lru_cache
 from math import lcm, prod
+from typing import TYPE_CHECKING, List
 
 import torch
 
 from lightllm.utils.envs_utils import get_env_start_args
 
-from ...utils import deepcopy_result
 from ...types import AxisMapping, TransferRegion
+from ...utils import deepcopy_result
 from ..base_state import FullAttentionState
-from ..packed_mla.packed_transfer import transfer_packed_pages
 from ..dp_transfer import copy_packed_tokens
+from ..packed_mla.packed_transfer import transfer_packed_pages
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout

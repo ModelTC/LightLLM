@@ -7,15 +7,15 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention_state.full_att import GQAAttentionConfig, FullAttentionState, GQAFullAttentionState
-from lightllm.common.attention_state.bounded_att import KDAState, GDNState
-from unit_tests.common.att_resources.test_bounded_state import make_state
-from unit_tests.common.att_resources.test_window_compressor_state import make_window
-from unit_tests.common.att_resources.test_capacity import definition
-from unit_tests.common.att_resources.model_helpers import replace_logical_layer_groups
+from lightllm.common.attention_state.bounded_att import GDNState, KDAState
+from lightllm.common.attention_state.full_att import FullAttentionState, GQAAttentionConfig, GQAFullAttentionState
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.basemodel.layer_infer.transformer_layer_infer import TransformerLayerInfer
+from lightllm.models.llama.model import LlamaTpPartModel
+from unit_tests.common.att_resources.model_helpers import replace_logical_layer_groups
+from unit_tests.common.att_resources.test_bounded_state import make_state
+from unit_tests.common.att_resources.test_capacity import definition
+from unit_tests.common.att_resources.test_window_compressor_state import make_window
 
 
 def test_creation_does_not_bind_layers(monkeypatch: pytest.MonkeyPatch) -> None:

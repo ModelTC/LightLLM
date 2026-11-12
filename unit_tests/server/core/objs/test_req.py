@@ -1,7 +1,9 @@
-import pytest
-import easydict
 from types import SimpleNamespace
-from lightllm.server.core.objs.req import Req, ChunkedPrefillReq, SamplingParams
+
+import easydict
+import pytest
+
+from lightllm.server.core.objs.req import ChunkedPrefillReq, Req, SamplingParams
 from lightllm.server.core.objs.token_metadata import ReqFinalTokenMetadata
 from lightllm.utils import shm_utils
 from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args

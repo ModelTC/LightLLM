@@ -1,11 +1,13 @@
+from functools import lru_cache
+from typing import Dict
+
 import torch
 import triton
 import triton.language as tl
+from frozendict import frozendict
+
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.device_utils import calcu_kernel_best_vsm_count
-from frozendict import frozendict
-from functools import lru_cache
-from typing import Dict
 
 
 class GQAVSMDecodeAttentionKernelConfig(KernelConfigs):

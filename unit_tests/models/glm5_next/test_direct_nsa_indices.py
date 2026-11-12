@@ -5,7 +5,6 @@ from lightllm.common.attention.api import AttentionBatch, AttentionPhase, PlanCa
 from lightllm.common.attention.backends._workspace import AttentionWorkspace
 from lightllm.models.glm5_next.triton_kernel.kpool import expand_topk, prefill_nsa_params
 
-
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 

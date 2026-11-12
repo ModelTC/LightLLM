@@ -1,7 +1,8 @@
-from .api import AttentionFamily, AttentionPhase
 from lightllm.platform import get_device_runtime
-from .selection import BackendSelectionError, get_varlen_backend_class
 from lightllm.utils.log_utils import init_logger
+
+from .api import AttentionFamily, AttentionPhase
+from .selection import BackendSelectionError, get_varlen_backend_class
 
 logger = init_logger(__name__)
 

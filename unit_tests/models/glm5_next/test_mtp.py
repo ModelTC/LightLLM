@@ -1,13 +1,13 @@
 import weakref
+
 import pytest
 import torch
 
+from lightllm.common.attention.backends.kda.triton.kernels.kda_decode import fused_recurrent_kda
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, KDAState
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.attention.backends.kda.triton.kernels.kda_decode import fused_recurrent_kda
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
-
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -128,8 +128,8 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
 def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
     from types import SimpleNamespace
 
-    from lightllm.common.attention.backends.kda.triton.backend import KDALinearAttBackend
     from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_update
+    from lightllm.common.attention.backends.kda.triton.backend import KDALinearAttBackend
 
     torch.manual_seed(53)
     heads, dim, width = 2, 128, 3
@@ -208,8 +208,8 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
     infer.req_manager = manager
     infer.att_state_manager = resources
     infer.att_state_role = role
-    from unit_tests.common.attention.helpers import make_backend, make_batch, make_plan, bind
-    from lightllm.common.attention.api.inputs import KDAParams, KDAInputs
+    from lightllm.common.attention.api.inputs import KDAInputs, KDAParams
+    from unit_tests.common.attention.helpers import bind, make_backend, make_batch, make_plan
 
     executor = make_backend(
         KDALinearAttBackend,

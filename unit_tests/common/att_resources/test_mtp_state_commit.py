@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention_state.bounded_att import GDNState
 from lightllm.common.attention_state.allocators import StatePageAllocator
+from lightllm.common.attention_state.bounded_att import GDNState
 from lightllm.server.router.model_infer.mtp_speculative.utils import verify_mtp_tokens
 from unit_tests.common.att_resources.test_bounded_state import make_state
 

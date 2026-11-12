@@ -2,7 +2,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 # Bound the temporary BF16 gather buffer to 2 GiB (2097152 × 1 × 512 × 2 bytes).
 KV_GATHER_CHUNK_SIZE = 2097152
 

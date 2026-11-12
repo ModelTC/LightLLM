@@ -1253,7 +1253,6 @@ def test_fp8_state_preserves_kv_and_indexer_across_cpu_and_pd(monkeypatch):
     from lightllm.common.attention_state.full_att import PackedMLALogicalConfig, create_packed_mla_state
 
     args = SimpleNamespace(cpu_cache_token_page_size=4, pd_kv_page_size=4)
-    monkeypatch.setattr("lightllm.common.attention_state.manager.get_env_start_args", lambda: args)
     monkeypatch.setattr("lightllm.common.attention_state.cpu_cache_operator.get_env_start_args", lambda: args)
     monkeypatch.setattr("lightllm.common.attention_state.pd_operator.get_env_start_args", lambda: args)
     monkeypatch.setattr(

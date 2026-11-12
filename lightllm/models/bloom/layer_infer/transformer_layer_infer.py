@@ -1,18 +1,10 @@
-from lightllm.common.attention.api.inputs import (
-    DenseInputs,
-    MLAPrefillInputs,
-    MLADecodeInputs,
-    SparseMLAPrefillInputs,
-    SparseMLADecodeInputs,
-    GDNInputs,
-    KDAInputs,
-)
-from lightllm.common.attention_state.full_att import FullAttentionState
-import torch
 from typing import Tuple
-from lightllm.common.basemodel import TransformerLayerInferTpl
+
+import torch
+
+from lightllm.common.attention.api.inputs import DenseInputs
+from lightllm.common.basemodel import InferStateInfo, TransformerLayerInferTpl
 from lightllm.models.bloom.layer_weights.transformer_layer_weight import BloomTransformerLayerWeight
-from lightllm.common.basemodel import InferStateInfo
 
 
 class BloomTransformerLayerInfer(TransformerLayerInferTpl):

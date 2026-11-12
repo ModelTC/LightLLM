@@ -2,10 +2,7 @@ import torch
 
 from lightllm.common.attention.api import AttentionPhase, PlanCapacity
 from lightllm.common.attention.backends._workspace import AttentionWorkspace
-from lightllm.models.glm5_next.attention.fp8_sparse_mla import (
-    Fp8Glm5NextSparseAttBackend,
-    Fp8Glm5NextSparsePrefillPlan,
-)
+from lightllm.models.glm5_next.attention.fp8_sparse_mla import Fp8Glm5NextSparseAttBackend, Fp8Glm5NextSparsePrefillPlan
 
 
 def test_fp8_prefill_plan_is_owned_by_the_backend():

@@ -1,26 +1,19 @@
-from lightllm.common.attention.api.inputs import (
-    DenseInputs,
-    MLAPrefillInputs,
-    MLADecodeInputs,
-    SparseMLAPrefillInputs,
-    SparseMLADecodeInputs,
-    GDNInputs,
-    KDAInputs,
-)
-from lightllm.common.attention_state.full_att import FullAttentionState
-import torch
 from typing import Any
+
+import torch
+
+from lightllm.common.attention.api.inputs import SparseMLADecodeInputs, SparseMLAPrefillInputs
+from lightllm.common.attention_state.full_att import FullAttentionState
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
+from lightllm.distributed import all_gather_into_tensor
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
-from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
-from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
-
+from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
 from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
 from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.distributed import all_gather_into_tensor
 
 
 class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):

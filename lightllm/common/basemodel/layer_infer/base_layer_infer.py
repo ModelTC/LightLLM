@@ -1,13 +1,17 @@
+from typing import Iterable, Union
+
 import torch
 import torch.distributed as dist
-from typing import Dict, Iterable, Literal, Tuple, Union, List
+
+from lightllm.common.attention.api import AttentionFamily
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.layer_weights.base_layer_weight import BaseLayerWeight
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
-from .cache_tensor_manager import g_cache_manager
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor, all_reduce
 from lightllm.common.basemodel.triton_kernel.sp_pad_copy import sp_pad_copy
+from lightllm.distributed.communication_op import all_gather_into_tensor, all_reduce, reduce_scatter_tensor
+from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
+from lightllm.utils.envs_utils import get_env_start_args
+
+from .cache_tensor_manager import g_cache_manager
 
 
 class BaseLayerInfer:
@@ -17,8 +21,6 @@ class BaseLayerInfer:
     attention_variant = ""
 
     def get_attention_family(self):
-        from lightllm.common.attention.api import AttentionFamily
-
         return AttentionFamily(self.attention_family)
 
     def attention_window(self, phase):

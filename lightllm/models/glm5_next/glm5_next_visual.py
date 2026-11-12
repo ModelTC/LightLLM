@@ -9,11 +9,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from safetensors import safe_open
 
+from lightllm.common.attention.api import VarlenAttentionInputs
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
 from lightllm.models.vit.triton_kernel.rms_norm_vit import qk_rms_norm, rms_norm
-from lightllm.common.attention.api import VarlenAttentionInputs
 from lightllm.server.visualserver import get_vit_attn_backend
+
 from .vision_process import Glm5NextImageProcessor
 
 

@@ -2,10 +2,12 @@
 
 import multiprocessing as mp
 import os
-import torch
-from lightllm.utils.log_utils import init_logger
-from lightllm.utils.dist_utils import get_global_rank
 from functools import lru_cache
+
+import torch
+
+from lightllm.utils.dist_utils import get_global_rank
+from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
@@ -305,7 +307,6 @@ def _validate_flashmla_sparse(dtype=torch.bfloat16, spec=None):
 def _validate_varlen(backend_name, dtype=None, device=None, head_dim=80):
     from lightllm.common.attention.api import VarlenAttentionInputs
     from lightllm.common.attention.selection import get_varlen_backend_class
-
     from lightllm.platform import get_device_runtime
 
     runtime = get_device_runtime(device or ("cuda" if torch.cuda.is_available() else "cpu"))

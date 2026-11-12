@@ -1,8 +1,8 @@
 import gc
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -10,16 +10,16 @@ import torch
 
 flashmla = pytest.importorskip("flash_mla")
 
-from lightllm.models.deepseek_v4.attention import sparse_mla as attention
 from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
+from lightllm.models.deepseek_v4.attention import sparse_mla as attention
 from unit_tests.common.attention.helpers import (
     backend_plan,
-    update_plan,
-    run_sparse,
-    run_dense,
-    make_plan,
-    make_batch,
     make_backend,
+    make_batch,
+    make_plan,
+    run_dense,
+    run_sparse,
+    update_plan,
 )
 
 
@@ -342,8 +342,9 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
 
     layer.alloc_tensor = alloc_output
     from dataclasses import replace
-    from unit_tests.common.attention.helpers import bind
+
     from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4Params
+    from unit_tests.common.attention.helpers import bind
 
     params_binding = DeepseekV4Params(
         packed_kv[0], packed_kv[0], packed_kv[1], ratio, 512, params["softmax_scale"], params["attn_sink"]

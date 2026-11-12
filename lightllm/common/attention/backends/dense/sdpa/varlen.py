@@ -1,7 +1,8 @@
-from lightllm.platform import Platform
 import torch
 import torch.nn.functional as F
+
 from lightllm.common.attention.backends.dense.varlen import BaseVarlenAttentionBackend
+from lightllm.platform import Platform
 
 
 class SdpaVarlenAttentionBackend(BaseVarlenAttentionBackend):

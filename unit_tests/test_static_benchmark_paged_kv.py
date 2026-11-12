@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 import torch
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATIC_BENCHMARK_DIR = REPO_ROOT / "test" / "benchmark" / "static_inference"
 for path in (REPO_ROOT, STATIC_BENCHMARK_DIR):
@@ -159,6 +158,7 @@ def test_profile_capacity_uses_page_aligned_per_request_cost():
 @pytest.mark.parametrize("fail", [False, True])
 def test_benchmark_shared_memory_cleanup(monkeypatch, fail):
     from multiprocessing import shared_memory
+
     from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 
     monkeypatch.delenv("LIGHTLLM_UNIQUE_SERVICE_NAME_ID", raising=False)

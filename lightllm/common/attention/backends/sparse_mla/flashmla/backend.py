@@ -1,13 +1,13 @@
-from lightllm.common.attention.backends.base import BaseAttentionBackend
-from lightllm.common.attention.api.spec import AttentionFamily
 import dataclasses
-import torch
 from typing import Tuple
-from lightllm.utils.dist_utils import get_current_device_id
 
-from lightllm.common.attention.backends.base import PreparedPlan
+import torch
+
 from lightllm.common.attention.api.backend import LayerBinding
-from lightllm.common.attention.api.inputs import SparseMLAPrefillInputs, SparseMLADecodeInputs
+from lightllm.common.attention.api.inputs import SparseMLADecodeInputs, SparseMLAPrefillInputs
+from lightllm.common.attention.api.spec import AttentionFamily
+from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
+from lightllm.utils.dist_utils import get_current_device_id
 
 
 @dataclasses.dataclass

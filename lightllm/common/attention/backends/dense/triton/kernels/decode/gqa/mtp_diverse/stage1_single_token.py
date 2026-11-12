@@ -12,11 +12,13 @@ MTP Diverse Attention Stage1 Kernel - Single Token Per Request Mode
 - 每个请求单独做可见性检查（基于各自的 seq_len）
 - 中间结果按 kv block 存储，供 Stage2 聚合
 """
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
-from typing import Optional
-from lightllm.common.triton_utils.autotuner import autotune, Autotuner, AutotuneKernelType, AutotuneLevel
+
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner, autotune
 from lightllm.utils.device_utils import is_hopper
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len, get_triton_autotune_level
 

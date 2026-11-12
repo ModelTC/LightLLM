@@ -1,38 +1,26 @@
-from lightllm.common.attention.api.inputs import (
-    DenseInputs,
-    MLAPrefillInputs,
-    MLADecodeInputs,
-    SparseMLAPrefillInputs,
-    SparseMLADecodeInputs,
-    GDNInputs,
-    KDAInputs,
-)
-import torch
+from functools import partial
+from typing import Tuple
 
+import torch
 import torch.distributed as dist
-from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
-    Qwen3NextTransformerLayerWeight,
-)
+
+from lightllm.common.attention.api import AttentionFamily
+from lightllm.common.attention.api.inputs import GDNInputs
+from lightllm.distributed import all_reduce
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
+from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
+from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import Qwen3NextTransformerLayerWeight
+from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
-
-from typing import Tuple
-from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
-from lightllm.distributed import all_reduce
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-from lightllm.utils.envs_utils import get_env_start_args
-from functools import partial
-
 
 logger = init_logger(__name__)
 
 
 class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     def get_attention_family(self):
-        from lightllm.common.attention.api import AttentionFamily
-
         return AttentionFamily.GDN if self.is_linear_attention_layer else AttentionFamily.DENSE
 
     def __init__(self, layer_num, network_config):
@@ -225,7 +213,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         def gdn_prefill_func(new_infer_state: "Qwen3NextInferStateInfo"):
             # 使用 runtime 上 init_att_state() 更新过的 buffer idx，而不是
-
             tmp_o, tmp_z = self.prefill_attention(
                 new_infer_state.attention_plans[self.prefill_attention.group_id], GDNInputs(_mixed_qkvzba)
             )

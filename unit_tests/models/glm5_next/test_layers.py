@@ -1,25 +1,24 @@
-from unit_tests.common.attention.helpers import make_backend, make_batch, make_plan, bind
-from lightllm.common.attention.api import AttentionPhase
-from lightllm.common.attention.api.inputs import MLAParams
-import weakref
 import dataclasses
 import json
+import weakref
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn.functional as F
 
+from lightllm.common.attention.api import AttentionPhase
+from lightllm.common.attention.api.inputs import MLAParams
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.models.glm5_next.attention.sparse_mla import Glm5NextSparseAttBackend
 from lightllm.common.quantization import Quantcfg
+from lightllm.models.glm5_next.attention.sparse_mla import Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import get_env_start_args
-
+from unit_tests.common.attention.helpers import bind, make_backend, make_batch, make_plan
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 

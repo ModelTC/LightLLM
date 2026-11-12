@@ -1,55 +1,59 @@
+import threading
+import time
+from typing import Callable, List, Optional, Tuple
+
 import numpy as np
 import torch
-import time
-import threading
 import torch.distributed as dist
-from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
-from lightllm.utils.infer_utils import set_random_seed
-from lightllm.utils.log_utils import init_logger
-from lightllm.models import get_draft_model_class, get_model
-from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
-from lightllm.server.router.model_infer.req_token_index import ReqTokenIndex
-from lightllm.server.router.token_load import TokenLoad
+
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.cuda_wrapper import cuda_memcpy_pinned_h2d_batch_async
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
-from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
-from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
-from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
-from lightllm.utils.dist_utils import init_distributed_env
+from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
+from lightllm.common.cuda_wrapper import cuda_memcpy_pinned_h2d_batch_async
+from lightllm.distributed import dist_group_manager
+from lightllm.distributed.communication_op import all_gather_into_tensor, all_reduce, broadcast
+from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.core.objs.io_objs import AbortedReqCmd
-from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
+from lightllm.server.multi_level_kv_cache import CacheTier, create_cache_placement_controller
+from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
+from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
+from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
+from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack, g_infer_context
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
+from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
-from lightllm.utils.dist_utils import get_dp_world_size, get_global_dp_rank, get_current_rank_in_dp
-from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_node, get_node_world_size
-from lightllm.utils.dist_utils import get_dp_rank_in_node, create_new_group_for_current_node
+from lightllm.server.router.model_infer.req_token_index import ReqTokenIndex
+from lightllm.server.router.token_load import TokenLoad
+from lightllm.utils.dist_utils import (
+    create_new_group_for_current_node,
+    get_current_device_id,
+    get_current_rank_in_dp,
+    get_current_rank_in_node,
+    get_dp_rank_in_node,
+    get_dp_size,
+    get_dp_world_size,
+    get_global_dp_rank,
+    get_global_rank,
+    get_global_world_size,
+    get_node_world_size,
+    init_distributed_env,
+)
 from lightllm.utils.envs_utils import (
-    get_env_start_args,
     enable_radix_tree_timer_merge,
+    get_env_start_args,
     get_radix_tree_merge_update_delta,
 )
-from lightllm.distributed import dist_group_manager
-from lightllm.distributed.communication_op import (
-    all_gather_into_tensor,
-    all_reduce,
-    broadcast,
-)
-from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
-from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
-from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
-from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
-from lightllm.server.multi_level_kv_cache import (
-    CacheTier,
-    create_cache_placement_controller,
-)
-from .prefill_queue_strategy import create_prefill_queue_strategy
-from .multi_level_kv_cache import MultiLevelKvCacheModule
+from lightllm.utils.infer_utils import set_random_seed
+from lightllm.utils.log_utils import init_logger
 from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
+
+from .multi_level_kv_cache import MultiLevelKvCacheModule
+from .prefill_queue_strategy import create_prefill_queue_strategy
 
 
 class ModeBackend:
@@ -149,10 +153,10 @@ class ModeBackend:
         self.draft_models = []
         if self.args.mtp_mode is not None:
             self.init_mtp_draft_model(model_kvargs)
-        from lightllm.utils.envs_utils import set_model_init_status
-        from lightllm.utils.torch_memory_saver_utils import MemoryTag
         from lightllm.common.attention_state import AttentionStateManager
         from lightllm.common.req_manager import ReqManager
+        from lightllm.utils.envs_utils import set_model_init_status
+        from lightllm.utils.torch_memory_saver_utils import MemoryTag
 
         models = (self.model, *self.draft_models)
         assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"

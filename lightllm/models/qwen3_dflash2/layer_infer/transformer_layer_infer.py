@@ -1,22 +1,12 @@
-from lightllm.common.attention.api.inputs import (
-    DenseInputs,
-    MLAPrefillInputs,
-    MLADecodeInputs,
-    SparseMLAPrefillInputs,
-    SparseMLADecodeInputs,
-    GDNInputs,
-    KDAInputs,
-)
+from lightllm.common.attention.api import AttentionPhase
+from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention_state.full_att import FullAttentionState
-
-from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
 from lightllm.models.qwen3_dflash2.triton_kernel import grouped_dynamic_conv
+from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
 
 
 class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
     def attention_window(self, phase):
-        from lightllm.common.attention.api import AttentionPhase
-
         if phase is AttentionPhase.DECODE and self.sliding_window_ > 0:
             return (self.sliding_window_ - 1, self.sliding_window_ - 1)
         return None

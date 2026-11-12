@@ -13,10 +13,8 @@ from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from lightllm.common.attention.backends.dense.sdpa.varlen import SdpaVarlenAttentionBackend
-from lightllm.models.deepseek_v4 import deepseek_v4_visual as visual
-from lightllm.models.deepseek_v4 import image_processor as ours
+from lightllm.models.deepseek_v4 import deepseek_v4_visual as visual, image_processor as ours
 from lightllm.server import visualserver
-
 
 REFERENCE_DIR = "/mtc/models/DeepSeek-V4-Flash-Vision-Exp/inference"
 REFERENCE_PROCESSOR_PATH = os.path.join(REFERENCE_DIR, "image_processor.py")

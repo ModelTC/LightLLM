@@ -11,12 +11,13 @@
 # https://github.com/fla-org/flash-linear-attention
 # ruff: noqa: E501
 
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
-from typing import Optional
-from lightllm.common.triton_utils.autotuner import autotune, AutotuneKernelType
 
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, autotune
 
 # ---------------------------------------------------------------------------
 # Triton kernel

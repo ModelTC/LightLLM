@@ -1,18 +1,20 @@
 from dataclasses import replace
 from types import SimpleNamespace
+
 import pytest
 import torch
+
 from lightllm.common.attention.api import AttentionFamily, AttentionPhase
 from lightllm.common.attention.api.inputs import DenseInputs
-from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention.backends.dense.fa3 import fp8 as fa3_fp8
 from lightllm.common.attention.backends.dense.flashinfer import fp8 as flashinfer_fp8
+from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.basemodel.attention import make_layer_params
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.server.core.objs.start_args_type import StartArgs
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state, replace_logical_layer_groups
 from unit_tests.common.att_resources.test_capacity import definition
-from unit_tests.common.attention.helpers import make_backend, make_batch, make_plan, bind
+from unit_tests.common.attention.helpers import bind, make_backend, make_batch, make_plan
 
 
 @pytest.mark.parametrize("backend_name", ["fa3", "flashinfer"])

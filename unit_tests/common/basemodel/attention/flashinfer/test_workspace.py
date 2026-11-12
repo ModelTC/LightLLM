@@ -1,7 +1,9 @@
-from lightllm.platform import get_device_runtime
-import torch
 from types import SimpleNamespace
+
+import torch
+
 from lightllm.common.basemodel.attention import get_attention_workspace
+from lightllm.platform import get_device_runtime
 
 
 def test_workspace_isolated_by_model_group_and_slot():

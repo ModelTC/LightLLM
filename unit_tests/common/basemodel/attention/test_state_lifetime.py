@@ -4,8 +4,9 @@ from dataclasses import replace
 
 import pytest
 import torch
-from unit_tests.common.attention.helpers import make_batch, make_backend, make_plan, model_stub
+
 from lightllm.common.attention.backends.base import BaseAttentionBackend
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_plan, model_stub
 
 
 def test_plan_does_not_retain_runner_or_model():

@@ -3,7 +3,6 @@ from lightllm.models.gpt_oss.layer_weights.transformer_layer_weight import GptOs
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.attention.backends.base import BaseAttentionBackend
 
 logger = init_logger(__name__)
 

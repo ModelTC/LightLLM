@@ -1,6 +1,6 @@
-from types import SimpleNamespace
-from pathlib import Path
 import importlib.util
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 

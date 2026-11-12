@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 from dataclasses import dataclass
+from functools import lru_cache
 from math import prod
 
 import torch
 
-from ...utils import deepcopy_result
 from ...types import PageKind, StateTransferLayout, TensorField, TransferRegion
+from ...utils import deepcopy_result
 from ..base_state import BoundedAttentionState
 from ..copy_kernel import copy_bounded_att_tensors
 from ..transfer_utils import bounded_att_buffer_copies

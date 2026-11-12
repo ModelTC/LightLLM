@@ -13,14 +13,10 @@ from PIL import Image
 from safetensors import safe_open
 from torch import nn
 
-from lightllm.models.deepseek_v4.image_processor import (
-    IMAGE,
-    build_canonical_image_block,
-    load_image,
-)
+from lightllm.common.attention.api import VarlenAttentionInputs
+from lightllm.models.deepseek_v4.image_processor import IMAGE, build_canonical_image_block, load_image
 from lightllm.server.embed_cache.utils import get_shm_name_data, read_shm
 from lightllm.server.multimodal_params import ImageItem
-from lightllm.common.attention.api import VarlenAttentionInputs
 from lightllm.server.visualserver import get_vit_attn_backend
 
 

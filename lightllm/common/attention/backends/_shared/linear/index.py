@@ -8,7 +8,6 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 import torch
-
 import triton
 
 from lightllm.common.attention.backends._shared.linear.utils import tensor_cache

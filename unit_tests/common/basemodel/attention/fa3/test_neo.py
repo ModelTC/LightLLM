@@ -5,17 +5,16 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.attention.backends.dense.fa3 import backend as fp, neo as neo
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.attention.backends.dense.fa3 import backend as fp
-from lightllm.common.attention.backends.dense.fa3 import neo as neo
 from unit_tests.common.attention.helpers import (
     backend_plan,
-    update_plan,
-    run_sparse,
-    run_dense,
-    make_plan,
-    make_batch,
     make_backend,
+    make_batch,
+    make_plan,
+    run_dense,
+    run_sparse,
+    update_plan,
 )
 
 

@@ -7,11 +7,11 @@ from dataclasses import replace
 import pytest
 import torch
 
-from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
-from unit_tests.common.att_resources.test_state_identity import allocated_state
-from unit_tests.common.att_resources.test_quantized_full_state import transfer_layout
-from lightllm.common.attention_state.types import AxisMapping
 from lightllm.common.attention_state.full_att import GQAAttentionConfig, GQAFullAttentionState
+from lightllm.common.attention_state.types import AxisMapping
+from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
+from unit_tests.common.att_resources.test_quantized_full_state import transfer_layout
+from unit_tests.common.att_resources.test_state_identity import allocated_state
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

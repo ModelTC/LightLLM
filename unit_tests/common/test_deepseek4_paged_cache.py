@@ -4,14 +4,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from unit_tests.common.dsv4_test_utils import DeepseekV4MemoryManager, DeepseekV4CacheConfig, DeepseekV4ReqManager
-from unit_tests.common.req_token_index_test_utils import attach_req_token_index
-from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.models.deepseek_v4.triton_kernel.swa_cache import get_swa_token_indices as _get_swa_token_indices
 from lightllm.common.attention.api import ExecutionRequirements
+from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
+from lightllm.models.deepseek_v4.triton_kernel.swa_cache import get_swa_token_indices as _get_swa_token_indices
 from lightllm.platform import get_device_runtime
-from unit_tests.common.attention.helpers import backend_plan, update_plan, run_sparse
+from lightllm.utils.envs_utils import get_env_start_args
+from unit_tests.common.attention.helpers import backend_plan, run_sparse, update_plan
+from unit_tests.common.dsv4_test_utils import DeepseekV4CacheConfig, DeepseekV4MemoryManager, DeepseekV4ReqManager
+from unit_tests.common.req_token_index_test_utils import attach_req_token_index
 
 
 def _compressed_kv_pools(manager):
@@ -442,8 +442,8 @@ def test_speculative_retry_reuses_swa_without_freeing_token_pages(cache):
 def test_model_selects_held_slots_without_allocating_swa(cache, model_kind):
     from lightllm.common.basemodel.batch_objs import ModelInput
     from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
-    from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
     from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+    from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
 
     manager, requests = cache
     req_idx, slots = _reserve(manager, requests, 512)
@@ -950,8 +950,8 @@ def test_swa_index_cuda_graph_reads_updated_private_pages(cache):
 )
 def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, dspark):
     from lightllm.models.deepseek_v4.attention import sparse_mla as attention
-    from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
     from lightllm.models.deepseek_v4.triton_kernel.build_dspark_swa_indices import build_dspark_swa_indices
+    from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
 
     torch.manual_seed(1593)
     manager, requests = cache
@@ -1071,8 +1071,9 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
 @pytest.mark.parametrize("hit_extra_page", [False, True])
 def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash_page_size, hit_extra_page):
     from sortedcontainers import SortedDict
-    from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context, CacheTier
+
     from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
+    from lightllm.server.router.model_infer.infer_batch import CacheTier, InferReq, g_infer_context
     from lightllm.utils.kv_cache_utils import compute_token_list_hash
 
     manager, requests = cache
@@ -1391,9 +1392,9 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
 
     import lightllm.models.deepseek_v4.triton_kernel.build_swa_indices as swa_kernel
     import lightllm.models.deepseek_v4_dspark.infer_struct as dspark_state
+    from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4FlashMlaFp8SparseAttBackend
     from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
     from lightllm.models.deepseek_v4_dspark.infer_struct import DeepseekV4DSparkInferStateInfo
-    from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4FlashMlaFp8SparseAttBackend
 
     manager, requests = cache
     req_idx, slots = _reserve(manager, requests, 512)
@@ -1504,6 +1505,7 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
 ):
     """Offload after the runtime ring is overwritten, then resume through the common loader."""
     from collections import deque
+
     from lightllm.server.multi_level_kv_cache import CacheTier
     from lightllm.server.router.model_infer.infer_batch import InferReq
     from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as common
@@ -1718,8 +1720,8 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
 
 def test_prefill_fused_writer_preserves_old_prefix_and_runtime_tail(cache):
     from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
-    from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
     from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
+    from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
 
     manager, requests = cache
     req, held = _reserve(manager, requests, 2048)

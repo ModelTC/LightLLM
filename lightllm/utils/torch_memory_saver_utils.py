@@ -1,13 +1,12 @@
-import torch
 from contextlib import contextmanager
 from enum import Enum
+
+import torch
+
 from lightllm.utils.log_utils import init_logger
 
 try:
-    from torch_memory_saver import (
-        torch_memory_saver,
-        configure_subprocess as tms_configure_subprocess,
-    )
+    from torch_memory_saver import configure_subprocess as tms_configure_subprocess, torch_memory_saver
 
     HAS_TORCH_MEMORY_SAVER = True
 

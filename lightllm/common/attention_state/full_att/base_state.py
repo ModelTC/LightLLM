@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import fields
+
+from lightllm.common.attention.api import CapabilityResult
+from lightllm.platform import Platform
+
 from .interface import CoreInterface, CpuCacheInterface, DpCopyInterface, PdInterface
 
 
@@ -13,8 +18,6 @@ class FullAttentionState(CoreInterface, CpuCacheInterface, DpCopyInterface, PdIn
 
     def describe_layout(self):
         """显式布局标识与配置，不用 Python 类名判断物理兼容性。"""
-        from dataclasses import fields
-
         return self.storage_layout + (
             tuple(
                 (field.name, getattr(self.config, field.name))
@@ -24,9 +27,6 @@ class FullAttentionState(CoreInterface, CpuCacheInterface, DpCopyInterface, PdIn
         )
 
     def check_execution(self, caps, execution):
-        from lightllm.platform import Platform
-        from lightllm.common.attention.api import CapabilityResult
-
         if caps.platform is not Platform.CUDA:
             return CapabilityResult.reject(f"{self.storage_layout[0]} state operations require CUDA")
         return CapabilityResult.ok()

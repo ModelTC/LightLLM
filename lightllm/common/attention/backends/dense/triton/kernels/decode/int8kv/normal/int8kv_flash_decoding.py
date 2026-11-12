@@ -1,6 +1,9 @@
-import torch
 from typing import Optional
+
+import torch
+
 from lightllm.common.attention.api.batch import AttentionBatch
+
 from .int8kv_flash_decoding_stage1 import flash_decode_stage1
 from .int8kv_flash_decoding_stage2 import flash_decode_stage2
 

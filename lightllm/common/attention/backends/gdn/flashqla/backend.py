@@ -1,6 +1,6 @@
 import torch
-from lightllm.common.attention.api import AttentionPhase
 
+from lightllm.common.attention.api import AttentionPhase
 from lightllm.common.attention.backends.gdn.triton.backend import TritonLinearAttBackend
 
 

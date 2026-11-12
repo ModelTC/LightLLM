@@ -1,16 +1,18 @@
 import dataclasses
+
 import torch
+
+from lightllm.common.attention.api.backend import LayerBinding
+from lightllm.common.attention.api.inputs import DenseInputs
+from lightllm.common.attention.backends._flashinfer import set_flashinfer_envs
 from lightllm.common.attention.backends.dense.flashinfer.backend import (
     FlashInferAttBackend,
-    FlashInferPrefillPlan,
     FlashInferDecodePlan,
+    FlashInferPrefillPlan,
 )
-from lightllm.common.attention.backends._flashinfer import set_flashinfer_envs
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
-from lightllm.common.attention.api.backend import LayerBinding
-from lightllm.common.attention.api.inputs import DenseInputs
 
 
 @dataclasses.dataclass

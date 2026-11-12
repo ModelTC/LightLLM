@@ -1,11 +1,12 @@
+from functools import lru_cache
+from typing import Dict, Optional
+
 import torch
 import triton
 import triton.language as tl
-from typing import Optional
-from lightllm.common.kernel_config import KernelConfigs
 from frozendict import frozendict
-from functools import lru_cache
-from typing import Dict
+
+from lightllm.common.kernel_config import KernelConfigs
 
 
 class GQADiverseDecodeStage1KernelConfig(KernelConfigs):

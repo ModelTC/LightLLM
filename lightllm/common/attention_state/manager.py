@@ -1,27 +1,27 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+import weakref
 from functools import lru_cache
-from typing import List
+from typing import TYPE_CHECKING, List
 
 import torch
 
 from lightllm.common.attention_state.types import PageKind
-
-from lightllm.utils.dist_utils import get_current_device_id
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.platform import get_device_runtime
 from lightllm.utils.log_utils import init_logger
 
-from .allocators import StatePageAllocator, FullAttKVAllocator
+from .allocators import FullAttKVAllocator, StatePageAllocator
+from .bounded_att import BoundedAttentionState
 from .cpu_cache_operator import CpuCacheOperator
 from .dp_shared_operator import DPSharedOperator
 from .full_att import FullAttentionState
-from .bounded_att import BoundedAttentionState
 from .pd_operator import PDOperator
 from .utils import MODEL_ROLES
 
 if TYPE_CHECKING:
     from easydict import EasyDict
+
     from lightllm.server.core.objs.start_args_type import StartArgs
 
 
@@ -140,7 +140,6 @@ class AttentionStateManager:
         排序，State 内保留 logical_layer_groups 顺序。非静态 FP8 的 full State 同样占用
         对应物理行区间，共享逻辑层只占一行；CPU 布局创建不需要调用本流程。
         """
-        import json
         from .full_att.gqa.static_fp8_state import StaticFP8FullAttentionState
 
         full_states = self.get_full_attention_states()
@@ -183,8 +182,6 @@ class AttentionStateManager:
         )
 
     def register_graph(self, graph):
-        import weakref
-
         if not hasattr(self, "_graphs"):
             self._graphs = weakref.WeakSet()
         self._graphs.add(graph)
@@ -219,8 +216,6 @@ class AttentionStateManager:
             pd_reserved_bytes = self.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
         if token_capacity is None:
             # 权重和固定运行态已分配，用当前设备剩余显存扣除保留比例及 PD buffer。
-            from lightllm.platform import get_device_runtime
-
             runtime = getattr(self, "device_runtime", None) or get_device_runtime(device)
             runtime.empty_cache()
             gpu_device = runtime.device

@@ -49,8 +49,8 @@ def capture_env(monkeypatch):
 
     monkeypatch.setattr(torch.cuda, "CUDAGraph", FakeGraph)
     monkeypatch.setattr(torch.cuda, "graph", capture)
-    from lightllm.platform.cuda import CudaRuntime
     from lightllm.platform import DeviceCaps, Platform
+    from lightllm.platform.cuda import CudaRuntime
 
     runtime = CudaRuntime("cuda:0")
     runtime.caps = DeviceCaps(Platform.CUDA, torch.device("cuda:0"), supports_graph=True)

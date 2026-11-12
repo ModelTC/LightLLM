@@ -1,7 +1,5 @@
 import torch
 
-from lightllm.common.attention.backends.dense.fa3.backend import Fa3AttBackend
-from lightllm.common.attention.backends.dense.fa3.fp8 import Fp8Fa3AttBackend
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.models.llama.model import LlamaTpPartModel

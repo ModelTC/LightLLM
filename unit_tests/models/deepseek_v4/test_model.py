@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
+from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 
 
 @pytest.mark.parametrize("capture", [False, True], ids=["eager", "capture"])

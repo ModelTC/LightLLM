@@ -1,8 +1,10 @@
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
-from typing import Optional
-from lightllm.common.triton_utils.autotuner import autotune, Autotuner, AutotuneKernelType, AutotuneLevel
+
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner, autotune
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len, get_triton_autotune_level
 
 

@@ -14,11 +14,11 @@ MTP uses identical candidate packets with varying accepted widths, not sampling.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 import json
-from pathlib import Path
 import socket
 import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -35,6 +35,7 @@ from lightllm.utils.service_shm_cleanup import ServiceShmCleanup
 if TYPE_CHECKING:
     from argparse import Namespace
     from collections.abc import Sequence
+
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 
@@ -332,11 +333,11 @@ def main():
         config, _ = PretrainedConfig.get_config_dict(args.model_dir)
         model, _ = get_model(config, kvargs)
         draft_models = init_mtp_draft_models(args, kvargs, model)
-        from lightllm.utils.envs_utils import set_model_init_status
-        from lightllm.utils.torch_memory_saver_utils import MemoryTag
         from lightllm.common.attention_state import AttentionStateManager
         from lightllm.common.basemodel.attention import reserve_attention_resources
         from lightllm.common.req_manager import ReqManager
+        from lightllm.utils.envs_utils import set_model_init_status
+        from lightllm.utils.torch_memory_saver_utils import MemoryTag
 
         models = (model, *draft_models)
         assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"

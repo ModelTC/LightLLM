@@ -1,9 +1,11 @@
 from dataclasses import replace
+
 import pytest
 import torch
+
+from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState, KDAState
 from lightllm.common.attention_state.commit import BoundedStateCommit
 from lightllm.common.attention_state.manager import AttentionStateManager
-from lightllm.common.attention_state.bounded_att import GDNState, KDAState, ConvSSMStateConfig
 
 
 def test_commit_owns_mapping_and_detects_recycled_requests():

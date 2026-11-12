@@ -3,43 +3,29 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
-from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.models.deepseek_v4.layer_weights.pre_and_post_layer_weight import (
-    DeepseekV4PreAndPostLayerWeight,
-)
-from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import (
-    DeepseekV4TransformerLayerWeight,
-)
-from lightllm.models.deepseek_v4.layer_infer.pre_layer_infer import (
-    DeepseekV4PreLayerInfer,
-)
-from lightllm.models.deepseek_v4.layer_infer.post_layer_infer import (
-    DeepseekV4PostLayerInfer,
-)
-from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
-    DeepseekV4TransformerLayerInfer,
-)
-from lightllm.models.deepseek_v4.attention.sparse_mla import (
-    DSV4_NSA_BACKENDS,
-    DeepseekV4FlashMlaFp8SparseAttBackend,
-)
+
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
 from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post
+from lightllm.distributed.communication_op import dist_group_manager
+from lightllm.models.deepseek_v4.attention.sparse_mla import DSV4_NSA_BACKENDS, DeepseekV4FlashMlaFp8SparseAttBackend
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+from lightllm.models.deepseek_v4.layer_infer.post_layer_infer import DeepseekV4PostLayerInfer
+from lightllm.models.deepseek_v4.layer_infer.pre_layer_infer import DeepseekV4PreLayerInfer
+from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
+from lightllm.models.deepseek_v4.layer_weights.pre_and_post_layer_weight import DeepseekV4PreAndPostLayerWeight
+from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
 from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
-from lightllm.models.llama.yarn_rotary_utils import (
-    find_correction_range,
-    linear_ramp_mask,
-)
+from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.llama.yarn_rotary_utils import find_correction_range, linear_ramp_mask
 from lightllm.utils.envs_utils import get_env_start_args, get_redundancy_expert_num
 from lightllm.utils.log_utils import init_logger
-from lightllm.distributed.communication_op import dist_group_manager
 
 if TYPE_CHECKING:
     from easydict import EasyDict
-    from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.attention_state.full_att.base_state import FullAttentionState
+
     from lightllm.common.attention_state.bounded_att.base_state import BoundedAttentionState
+    from lightllm.common.attention_state.full_att.base_state import FullAttentionState
+    from lightllm.server.core.objs.start_args_type import StartArgs
 
 logger = init_logger(__name__)
 
@@ -106,6 +92,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         from lightllm.common.attention_state.full_att.compressed_att.create_compressed_att_state import (
             create_compressed_att_state,
         )
+
         from .config import create_attention_config
 
         assert args.llm_kv_type in ("None", "fp8kv_dsa"), f"unsupported V4 KV encoding: {args.llm_kv_type}"
@@ -142,9 +129,10 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         """创建本模型的 SWA/compressor 请求运行态，大小页容量由管理器后续确定。"""
         from lightllm.common.attention_state.bounded_att import (
             WindowCompressorStateConfig,
-            create_window_compressor_state,
             create_sliding_window_state,
+            create_window_compressor_state,
         )
+
         from .config import create_attention_config
 
         config = create_attention_config(

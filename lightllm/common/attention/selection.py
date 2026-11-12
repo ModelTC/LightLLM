@@ -1,9 +1,13 @@
 import importlib
 
+import torch
+import torch.distributed as dist
+
 from lightllm.common.attention.api.spec import AttentionFamily, AttentionPhase
+from lightllm.platform import Platform
+from lightllm.utils import backend_validator
 from lightllm.utils.backend_validator import validate
 from lightllm.utils.log_utils import init_logger
-from lightllm.platform import Platform
 
 logger = init_logger(__name__)
 
@@ -39,10 +43,6 @@ def get_varlen_backend_class(name):
 
 
 def select_varlen_attention_backend(requested="auto", *, device=None, devices=None, dtype=None, head_dim=80):
-    from lightllm.utils.backend_validator import _validate
-
-    import torch
-
     if isinstance(dtype, str):
         aliases = {"fp16": "float16", "bf16": "bfloat16", "fp32": "float32"}
         dtype = getattr(torch, aliases.get(dtype, dtype))
@@ -56,7 +56,9 @@ def select_varlen_attention_backend(requested="auto", *, device=None, devices=No
             failures[name] = "unknown varlen attention backend"
             continue
         # 在子进程中检查实际 Q/K/V 路径，避免父进程初始化 CUDA 或误用文本 attention 探针。
-        if not all(_validate(name, varlen=True, device=d, dtype=dtype, head_dim=head_dim) for d in devices):
+        if not all(
+            backend_validator._validate(name, varlen=True, device=d, dtype=dtype, head_dim=head_dim) for d in devices
+        ):
             failures[name] = "varlen environment or numerical probe failed on an assigned device"
             continue
         logger.info("Selected %s varlen attention", name)
@@ -190,8 +192,6 @@ def select_attention_backend(*, family, phase, model, requested="auto", candidat
 
 
 def _check_rank_selection(family, phase, selected_name, failure):
-    import torch.distributed as dist
-
     if dist.is_initialized() and dist.get_world_size() > 1:
         selections = [None] * dist.get_world_size()
         dist.all_gather_object(selections, {"backend": selected_name, "failure": failure})

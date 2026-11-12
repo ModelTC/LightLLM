@@ -1,19 +1,19 @@
-import torch
-from contextlib import contextmanager
-import triton
 import collections
+from contextlib import contextmanager
+from dataclasses import replace
+from typing import List, Optional
+
+import torch
+
+from lightllm.common.attention.api import AttentionBatch, AttentionPhase, PlanCapacity
 from lightllm.common.attention_state.manager import AttentionStateManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
-from typing import Tuple, Any, Optional, List
-from .triton_kernel.gen_prefill_params import gen_prefill_params
-from .triton_kernel.gen_decode_params import gen_decode_params
-from .triton_kernel.multimodal_emb import mark_multimodal_obj
-from .batch_objs import ModelInput
+from lightllm.utils.dist_utils import get_dp_world_size, get_global_dp_rank
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
-from dataclasses import replace
-from lightllm.common.attention.api import AttentionBatch, AttentionPhase, PlanCapacity
+
+from .triton_kernel.gen_decode_params import gen_decode_params
+from .triton_kernel.gen_prefill_params import gen_prefill_params
 
 
 class InferStateInfo:
@@ -372,6 +372,7 @@ class InferStateInfo:
             self.__change_to_balance()
         dp_rank = get_global_dp_rank()
         import torch.distributed as dist
+
         from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
         old_shape = data.shape
@@ -403,6 +404,7 @@ class InferStateInfo:
 
         dp_rank = get_global_dp_rank()
         import torch.distributed as dist
+
         from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
         old_shape = data.shape

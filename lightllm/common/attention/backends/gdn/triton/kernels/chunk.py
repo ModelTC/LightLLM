@@ -11,12 +11,12 @@ import torch
 from einops import rearrange
 
 from lightllm.common.attention.backends._shared.linear.chunk_delta_h import chunk_gated_delta_rule_fwd_h
-from lightllm.common.attention.backends.gdn.triton.kernels.chunk_o import chunk_fwd_o
-from lightllm.common.attention.backends.gdn.triton.kernels.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from lightllm.common.attention.backends._shared.linear.cumsum import chunk_local_cumsum
 from lightllm.common.attention.backends._shared.linear.l2norm import l2norm_fwd
 from lightllm.common.attention.backends._shared.linear.solve_tril import solve_tril
 from lightllm.common.attention.backends._shared.linear.utils import SUPPRESS_LEVEL, input_guard
+from lightllm.common.attention.backends.gdn.triton.kernels.chunk_o import chunk_fwd_o
+from lightllm.common.attention.backends.gdn.triton.kernels.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from lightllm.common.attention.backends.gdn.triton.kernels.wy_fast import recompute_w_u_fwd
 
 

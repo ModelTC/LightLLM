@@ -1,38 +1,37 @@
-import weakref
 import dataclasses
 import math
+import weakref
 from types import SimpleNamespace
 
 import pytest
 import torch
 import triton
 
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.utils.envs_utils import set_env_start_args
 from lightllm.common.attention.backends.kda.triton.kernels.kda import (
     chunk_kda_with_fused_gate,
     fused_kda_gate_chunk_cumsum,
 )
 from lightllm.common.attention.backends.kda.triton.kernels.kda_decode import fused_recurrent_kda
+from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.models.glm5_next.triton_kernel.index_quant import hadamard_transform_quant_fp8
 from lightllm.models.glm5_next.triton_kernel.kpool import (
     compress_pools,
-    gather_pools,
-    gather_paged_pools,
-    get_pool_ranges,
     expand_topk,
+    gather_paged_pools,
+    gather_pools,
+    get_pool_ranges,
 )
-from lightllm.models.glm5_next.triton_kernel.index_quant import hadamard_transform_quant_fp8
+from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.utils.envs_utils import set_env_start_args
 from unit_tests.common.attention.helpers import (
     backend_plan,
-    update_plan,
-    run_sparse,
-    run_dense,
-    make_plan,
-    make_batch,
     make_backend,
+    make_batch,
+    make_plan,
+    run_dense,
+    run_sparse,
+    update_plan,
 )
-
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -424,7 +423,7 @@ def test_mhc_keeps_streams_through_decode_autotuning(monkeypatch, tp_world_size)
     deep_gemm = pytest.importorskip("deep_gemm")
     if not hasattr(deep_gemm, "tf32_hc_prenorm_gemm"):
         pytest.skip("installed DeepGEMM does not provide mHC projection kernels")
-    from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
+    from lightllm.common.triton_utils.autotuner import AutotuneKernelType, Autotuner
     from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
     from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 

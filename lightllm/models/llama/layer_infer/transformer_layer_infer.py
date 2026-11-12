@@ -1,26 +1,17 @@
-from lightllm.common.attention.api.inputs import (
-    DenseInputs,
-    MLAPrefillInputs,
-    MLADecodeInputs,
-    SparseMLAPrefillInputs,
-    SparseMLADecodeInputs,
-    GDNInputs,
-    KDAInputs,
-)
-from lightllm.common.attention_state.full_att import FullAttentionState
+from functools import partial
 
 import torch
-import triton
 import torch.distributed as dist
-from functools import partial
+import triton
+
+from lightllm.common.attention.api.inputs import DenseInputs
+from lightllm.common.basemodel import TransformerLayerInferTpl
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
+from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
-from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 from lightllm.utils.log_utils import init_logger
-
 
 logger = init_logger(__name__)
 

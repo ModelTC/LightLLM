@@ -8,10 +8,9 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState
-from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.utils.envs_utils import get_env_start_args
-
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -80,7 +79,6 @@ def cache(monkeypatch):
         args=SimpleNamespace(run_mode="normal", enable_prefill_microbatch_overlap=True),
     )
     from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4FlashMlaFp8SparseAttBackend
-
     from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 
     workspace = DeepseekV4Workspace(model)
@@ -116,8 +114,8 @@ def test_backend_reads_owned_state_views(cache):
     assert infer.swa_state is window
     infer.is_prefill = False
     for layer in range(3):
-        from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
         from lightllm.common.attention.api import AttentionFamily
+        from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
 
         adapter = DeepseekV4TransformerLayerInfer.__new__(DeepseekV4TransformerLayerInfer)
         adapter.layer_num_, adapter.compress_ratio = layer, model.config["compress_ratios"][layer]
@@ -199,8 +197,8 @@ def test_real_compressor_continues_after_checkpoint_restore(cache, ratio, layer,
 
 def test_long_prefill_keeps_swa_prefix_and_runtime_tail(cache):
     from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
-    from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
     from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
+    from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
 
     manager, window, model = cache
     reference = torch.zeros((17, 74880), dtype=torch.uint8, device="cuda")
@@ -260,8 +258,9 @@ def test_long_prefill_keeps_swa_prefix_and_runtime_tail(cache):
 @pytest.mark.parametrize("draft_kind", ["mtp", "dspark"])
 def test_models_prepare_owned_states_in_one_manager(cache, draft_kind):
     from contextlib import nullcontext
-    from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
+
     from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+    from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
 
     _, _, model = cache
     config = dict(

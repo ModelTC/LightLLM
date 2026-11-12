@@ -1,10 +1,10 @@
-from lightllm.platform import get_device_runtime
 import pytest
 import torch
 
 from lightllm.common.attention.api import CapabilityResult, VarlenAttentionInputs
 from lightllm.common.attention.selection import get_varlen_backend_class
 from lightllm.common.attention.varlen import AutoVarlenAttention
+from lightllm.platform import get_device_runtime
 
 
 def make_inputs(lengths=(3, 0, 5), *, device="cpu", dtype=torch.float32, head_dim=80, strided=False):

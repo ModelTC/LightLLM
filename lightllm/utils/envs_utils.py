@@ -1,11 +1,12 @@
-import os
 import json
-import torch
+import os
 import uuid
-from easydict import EasyDict
 from functools import lru_cache
-from lightllm.utils.log_utils import init_logger
 
+import torch
+from easydict import EasyDict
+
+from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 

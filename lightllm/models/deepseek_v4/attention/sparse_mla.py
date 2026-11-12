@@ -1,9 +1,10 @@
+import inspect
 from dataclasses import dataclass
 
 import torch
 import triton
 
-from lightllm.common.attention.api import AttentionFamily
+from lightllm.common.attention.api import AttentionFamily, CapabilityResult
 from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
 
 
@@ -76,9 +77,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttentionBackend):
         result = super().check_environment(caps)
         if not result.supported:
             return result
-        import inspect
         import flash_mla
-        from lightllm.common.attention.api import CapabilityResult
 
         parameters = inspect.signature(flash_mla.flash_mla_with_kvcache).parameters
         required = {"out", "attn_sink", "indices", "topk_length", "extra_k_cache", "extra_topk_length"}

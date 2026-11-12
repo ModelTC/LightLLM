@@ -102,11 +102,10 @@ def test_mtp_kernel_uses_exact_regular_decode_backend(monkeypatch, decode, linea
 
 @pytest.mark.parametrize("requested", ["auto", "triton", "flashqla"])
 def test_kda_option_reaches_the_shared_selector(monkeypatch, requested):
-    from lightllm.models.glm5_next import model as glm5
     from lightllm.common.attention import selection
     from lightllm.common.attention.api import AttentionFamily
-
     from lightllm.common.basemodel import attention
+    from lightllm.models.glm5_next import model as glm5
     from unit_tests.common.attention.helpers import make_spec
 
     calls = []

@@ -1,18 +1,21 @@
-import torch.distributed as dist
-import torch
-import dataclasses
 import bisect
-from functools import lru_cache
-from typing import Optional, List, Deque
+import dataclasses
 from collections import deque
+from functools import lru_cache
+from typing import Deque, List, Optional
+
+import torch
+import torch.distributed as dist
+
 from lightllm.server.multi_level_kv_cache import CacheTier
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
-from lightllm.utils.envs_utils import get_env_start_args
-from ..infer_batch import InferReq
-from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.utils.dist_utils import create_new_group_for_current_dp
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.multimodal_chunk_utils import clamp_mm_cache_len
+
+from ..infer_batch import InferReq
 
 logger = init_logger(__name__)
 
@@ -45,7 +48,6 @@ class MultiLevelKvCacheModule(object):
     @lru_cache()
     def need_sync_compute_stream(self) -> bool:
         """不支持异步 CPU cache 的 backend（目前是 FA3）仍要等计算流，否则搬运可能崩溃。"""
-
         model = self.backend.model
         for group in model.attention_groups:
             for backend in (group.prefill_backend, group.decode_backend):

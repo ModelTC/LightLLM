@@ -6,10 +6,10 @@ import pytest
 from lightllm.common.attention.backends.dense.fa3 import fp8 as fa3_fp8
 from lightllm.common.attention.backends.dense.fa3.backend import Fa3AttBackend
 from lightllm.common.attention.backends.dense.fa3.fp8 import Fp8Fa3AttBackend
-from lightllm.common.attention.backends.mla.fa3.backend import MlaFa3AttBackend
 from lightllm.common.attention.backends.dense.flashinfer import fp8 as flashinfer_fp8
 from lightllm.common.attention.backends.dense.flashinfer.backend import FlashInferAttBackend
 from lightllm.common.attention.backends.dense.flashinfer.fp8 import Fp8FlashInferAttBackend
+from lightllm.common.attention.backends.mla.fa3.backend import MlaFa3AttBackend
 from lightllm.common.attention.backends.mla.flashinfer.backend import MlaFlashInferAttBackend
 
 

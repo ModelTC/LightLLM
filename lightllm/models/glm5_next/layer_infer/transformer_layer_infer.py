@@ -1,31 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
-from lightllm.common.attention.api.inputs import (
-    DenseInputs,
-    MLAPrefillInputs,
-    MLADecodeInputs,
-    SparseMLAPrefillInputs,
-    SparseMLADecodeInputs,
-    GDNInputs,
-    KDAInputs,
-)
-
-from lightllm.common.attention_state.full_att import FullAttentionState
 
 import torch
 
+from lightllm.common.attention.api import AttentionFamily
+from lightllm.common.attention.api.inputs import KDAInputs, SparseMLADecodeInputs, SparseMLAPrefillInputs
 from lightllm.common.basemodel import TransformerLayerInferTpl
-
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post, hc_pre_norm
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
-    silu_and_mul_fwd,
-)
-from lightllm.common.basemodel.triton_kernel.mhc import (
-    hc_contract,
-    hc_post,
-    hc_pre_norm,
-)
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.models.glm5_next.indexer import Glm5NextNsaInfer
 from lightllm.utils.envs_utils import get_env_start_args
@@ -34,8 +18,6 @@ from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
     def get_attention_family(self):
-        from lightllm.common.attention.api import AttentionFamily
-
         return AttentionFamily.KDA if self.is_linear_attention_layer else AttentionFamily.SPARSE_MLA
 
     def __init__(self, layer_num, network_config):
@@ -100,7 +82,6 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
 
     def _ffn_tp(self, input, infer_state, layer_weight):
         """Dense/shared GLM FFN with the checkpoint's clamp semantics."""
-
         input = input.view(-1, self.embed_dim_)
         up_gate_out = layer_weight.gate_up_proj.mm(input)
         ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)

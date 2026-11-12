@@ -5,7 +5,6 @@ import torch
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
-
 logger = init_logger("lightllm.common.req_manager")
 
 

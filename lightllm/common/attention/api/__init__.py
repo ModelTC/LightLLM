@@ -12,7 +12,7 @@ KV / Conv / SSM 的分配、回收和迁移仍由 AttentionStateManager 管理�
 
 from .backend import AttentionBackend, CapabilityResult, LayerBinding, VarlenAttentionBackend
 from .batch import AttentionBatch, PlanCapacity
+from .execution import BackendResources, ExecutionRequirements
+from .graph import GraphBinding
 from .inputs import VarlenAttentionInputs
 from .spec import AttentionFamily, AttentionPhase, CacheLayout, LayerSpec
-from .execution import ExecutionRequirements, BackendResources
-from .graph import GraphBinding

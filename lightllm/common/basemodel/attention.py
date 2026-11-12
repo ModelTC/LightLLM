@@ -1,4 +1,4 @@
-from dataclasses import dataclass, replace, fields
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -10,9 +10,9 @@ from lightllm.common.attention.api import (
     LayerSpec,
     PlanCapacity,
 )
-from lightllm.common.attention.api.inputs import DenseParams, MLAParams, GDNParams, KDAParams
-from lightllm.common.attention.backends._workspace import AttentionWorkspace
 from lightllm.common.attention.api.execution import ExecutionRequirements
+from lightllm.common.attention.api.inputs import DenseParams, GDNParams, KDAParams, MLAParams
+from lightllm.common.attention.backends._workspace import AttentionWorkspace
 
 
 @dataclass(frozen=True)

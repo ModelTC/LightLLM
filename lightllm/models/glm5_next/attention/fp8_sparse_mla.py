@@ -1,11 +1,14 @@
 import dataclasses
+
 import torch
+
+from lightllm.common.attention.api.inputs import SparseMLAPrefillInputs
 from lightllm.common.attention.backends.sparse_mla.flashmla.fp8 import (
     NsaFlashMlaFp8SparseAttBackend,
     NsaFlashMlaFp8SparseDecodePlan,
 )
+
 from .sparse_mla import Glm5NextSparsePrefillPlan
-from lightllm.common.attention.api.inputs import SparseMLAPrefillInputs
 
 
 @dataclasses.dataclass
@@ -151,6 +154,7 @@ class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
 
     def _decode_nsa_decode_att(self, layer, plan, q, packed_kv, inputs):
         import flash_mla
+
         from lightllm.models.glm5_next.triton_kernel import fp8_sparse_decode
         from lightllm.models.glm5_next.triton_kernel.pad_query_heads import pad_query_heads
 

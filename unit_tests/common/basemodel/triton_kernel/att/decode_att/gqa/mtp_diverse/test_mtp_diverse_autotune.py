@@ -1,8 +1,8 @@
-import weakref
 import collections
 import inspect
 import json
 import math
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -10,26 +10,26 @@ import torch
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel import cuda_graph as graph_module
-from lightllm.common.attention_state.manager import AttentionStateManager
 from lightllm.common.attention.backends.dense.triton import backend as state_module
 from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.mtp_diverse import (
     mtp_diverse_attn as decode_module,
     stage1_single_token as stage1_module,
     stage2_single_token as stage2_module,
 )
+from lightllm.common.attention_state.manager import AttentionStateManager
+from lightllm.common.basemodel import cuda_graph as graph_module
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.triton_utils import autotuner as autotuner_module
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType, AutotuneLevel
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
 from unit_tests.common.attention.helpers import (
     backend_plan,
-    update_plan,
-    run_sparse,
-    run_dense,
-    make_plan,
-    make_batch,
     make_backend,
+    make_batch,
+    make_plan,
+    run_dense,
+    run_sparse,
+    update_plan,
 )
 
 

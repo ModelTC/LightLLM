@@ -1,23 +1,22 @@
-from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4Inputs, DeepseekV4Params
 import torch
 import triton
+
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_post_pre_norm, hc_pre_norm
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_sm100_mega_moe
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
-    silu_and_mul_fwd,
-    silu_and_mul_quant_fp8,
-)
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd, silu_and_mul_quant_fp8
+from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_post_pre_norm, hc_pre_norm
 from lightllm.common.quantization.deepgemm import DeepGEMMFP8w8a8B128QuantizationMethod
+from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4Inputs, DeepseekV4Params
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_softplus_sqrt
 from lightllm.utils.dist_utils import get_global_world_size
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+
+from ..infer_struct import DeepseekV4InferStateInfo
+from ..triton_kernel.rotary_emb import inverse_rotary_emb
 from .compressor import CompressorInfer
 from .indexer import DeepseekV4IndexInfer
-from ..triton_kernel.rotary_emb import inverse_rotary_emb
-from ..infer_struct import DeepseekV4InferStateInfo
-from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_softplus_sqrt
 
 
 class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):

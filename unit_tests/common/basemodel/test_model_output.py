@@ -1,8 +1,8 @@
-from types import SimpleNamespace
 import weakref
+from types import SimpleNamespace
 
-import torch
 import pytest
+import torch
 
 from lightllm.common.basemodel import basemodel
 from lightllm.common.basemodel.basemodel import TpPartBaseModel

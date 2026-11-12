@@ -1,14 +1,16 @@
-from lightllm.common.attention.backends.base import BaseAttentionBackend
 import dataclasses
+
 import torch
 import triton
-from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
-from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
-from lightllm.common.basemodel.triton_kernel.repack_kv_index import repack_kv_index
-from lightllm.common.attention.backends._flashinfer import set_flashinfer_envs
-from lightllm.common.attention.backends.base import PreparedPlan
+
+from lightllm.common.attention.api import BackendResources
 from lightllm.common.attention.api.backend import LayerBinding
 from lightllm.common.attention.api.inputs import DenseInputs
+from lightllm.common.attention.backends._flashinfer import set_flashinfer_envs
+from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
+from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
+from lightllm.common.basemodel.triton_kernel.repack_kv_index import repack_kv_index
+from lightllm.utils.dist_utils import get_dp_world_size
 
 
 @dataclasses.dataclass
@@ -55,8 +57,6 @@ class FlashInferAttBackend(BaseAttentionBackend):
         return backend
 
     def resource_requirements(self, capacity, *, capture):
-        from lightllm.common.attention.api import BackendResources
-
         return BackendResources(((self.workspace_buffer_key, self.workspace_buffer_size, torch.uint8),))
 
     def _init_infer_page_size(self):

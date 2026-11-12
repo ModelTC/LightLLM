@@ -1,23 +1,23 @@
-import weakref
 import json
+import weakref
 from importlib import import_module
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.attention.backends.base as base_att_module
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
+from lightllm.common.attention.api import AttentionPhase
 from lightllm.common.attention.backends.base import BaseAttentionBackend
 from lightllm.common.attention.backends.dense.fa3.backend import Fa3AttBackend
-from lightllm.common.attention.backends.mla.fa3.backend import MlaFa3AttBackend
 from lightllm.common.attention.backends.dense.triton.backend import TritonAttBackend
+from lightllm.common.attention.backends.mla.fa3.backend import MlaFa3AttBackend
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 from lightllm.utils import envs_utils
-from unit_tests.common.attention.helpers import model_stub, make_backend, make_plan, make_batch
-from lightllm.common.attention.api import AttentionPhase
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_plan, model_stub
 
 
 @pytest.mark.parametrize(

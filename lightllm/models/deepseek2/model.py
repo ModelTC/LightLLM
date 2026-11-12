@@ -1,21 +1,23 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, final
+
 import torch
-from typing import final
+
+from lightllm.distributed.communication_op import dist_group_manager
+from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
-from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
-from lightllm.distributed.communication_op import dist_group_manager
+from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 
 if TYPE_CHECKING:
     from easydict import EasyDict
-    from lightllm.server.core.objs.start_args_type import StartArgs
+
     from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.server.core.objs.start_args_type import StartArgs
 
 
 class Deepseek2TpPartModel(LlamaTpPartModel):
@@ -89,7 +91,7 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         return [state]
 
     def _init_to_get_yarn_rotary(self):
-        from lightllm.models.llama.yarn_rotary_utils import find_correction_range, linear_ramp_mask, get_deepseek_mscale
+        from lightllm.models.llama.yarn_rotary_utils import find_correction_range, get_deepseek_mscale, linear_ramp_mask
 
         dim = self.qk_rope_head_dim
         max_position_embeddings = self.config.get("max_position_embeddings", 2048)

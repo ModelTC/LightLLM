@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from unit_tests.common.att_resources.model_helpers import read_kv_storage
-
 from contextlib import nullcontext
 from types import SimpleNamespace
 
@@ -9,9 +7,10 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.server.core.objs.start_args_type import StartArgs
+from unit_tests.common.att_resources.model_helpers import read_kv_storage
 from unit_tests.common.att_resources.test_capacity import definition
 from unit_tests.common.basemodel.test_overlap_utils import _make_decode_input, _make_prefill_input
 
@@ -67,8 +66,8 @@ def test_ffn_only_draft_has_no_state_or_attention_backend(monkeypatch: pytest.Mo
     assert state.is_draft_model
     assert state.attention_groups == () and state.attention_plans == {}
     assert state.req_manager is draft.req_manager
-    from unit_tests.common.attention.helpers import batch_from_fixture
     from lightllm.common.attention.api import AttentionPhase
+    from unit_tests.common.attention.helpers import batch_from_fixture
 
     state.attention_batch = batch_from_fixture(state, AttentionPhase.PREFILL if prefill else AttentionPhase.DECODE)
     if not prefill:

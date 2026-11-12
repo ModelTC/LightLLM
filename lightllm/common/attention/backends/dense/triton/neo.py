@@ -1,12 +1,10 @@
 import dataclasses
+
 import torch
-from lightllm.common.attention.backends.dense.triton.backend import (
-    TritonAttBackend,
-    TritonPrefillPlan,
-    TritonDecodePlan,
-)
+
 from lightllm.common.attention.api.backend import LayerBinding
 from lightllm.common.attention.api.inputs import DenseInputs
+from lightllm.common.attention.backends.dense.triton.backend import TritonAttBackend, TritonPrefillPlan
 
 
 @dataclasses.dataclass

@@ -2,12 +2,13 @@ import dataclasses
 from typing import Literal
 
 import torch
-from lightllm.common.basemodel import InferStateInfo
+
 from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState, WindowCompressorState
 from lightllm.common.attention_state.full_att.compressed_att.compressed_att_state import (
-    CompressedAttentionState,
     CompressedAttentionLayerView,
+    CompressedAttentionState,
 )
+from lightllm.common.basemodel import InferStateInfo
 
 C4_PREFILL_LOGITS_BUDGET_BYTES = 512 * 1024 * 1024
 
@@ -219,6 +220,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         if self.c4_indexer_metadata is not None:
             return self.c4_indexer_metadata
         import deep_gemm
+
         from .triton_kernel.build_c4_indexer_page_table import build_c4_indexer_page_table
 
         valid_len = ((self.position_ids + 1) // 4).to(torch.int32)

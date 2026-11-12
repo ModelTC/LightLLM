@@ -1,14 +1,16 @@
-import torch
 import time
-import pytest
-import numpy as np
-import torch.nn.functional as F
+
 import flashinfer
-from lightllm.utils.log_utils import init_logger
+import numpy as np
+import pytest
+import torch
+import torch.nn.functional as F
+
 from lightllm.common.attention.backends.mla.triton.kernels.decode.gqa_flash_decoding import (
     gqa_token_decode_attention_flash_decoding,
 )
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
+from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 

@@ -1,9 +1,10 @@
-import torch
+import math
 
+import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
-import math
-import torch.nn.functional as F
+
 from lightllm.utils.device_utils import is_tesla
 
 
@@ -203,8 +204,8 @@ def context_attention_fwd_with_v(
 
 
 if __name__ == "__main__":
-    import torch
     import flashinfer
+    import torch
 
     Z, N_CTX, H, D_HEAD, ROPE_HEAD = 32, 1024, 16, 128, 64
     dtype = torch.bfloat16

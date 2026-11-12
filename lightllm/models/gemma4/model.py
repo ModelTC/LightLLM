@@ -1,27 +1,30 @@
-from typing import TYPE_CHECKING
-import os
 import json
+import os
+from typing import TYPE_CHECKING
+
 import torch
+
 from lightllm.common.attention.backends.dense.triton.backend import TritonAttBackend
 from lightllm.common.build_utils import repair_config
-from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.models.gemma4.infer_struct import Gemma4InferStateInfo
-from lightllm.models.gemma4.layer_infer.pre_layer_infer import Gemma4PreLayerInfer
 from lightllm.models.gemma4.layer_infer.post_layer_infer import Gemma4PostLayerInfer
+from lightllm.models.gemma4.layer_infer.pre_layer_infer import Gemma4PreLayerInfer
 from lightllm.models.gemma4.layer_infer.transformer_layer_infer import Gemma4TransformerLayerInfer
 from lightllm.models.gemma4.layer_weights.pre_and_post_layer_weight import Gemma4PreAndPostLayerWeight
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
+from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
-from lightllm.distributed.communication_op import dist_group_manager
 
 logger = init_logger(__name__)
 
 
 if TYPE_CHECKING:
     from easydict import EasyDict
-    from lightllm.server.core.objs.start_args_type import StartArgs
+
     from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.server.core.objs.start_args_type import StartArgs
 
 
 class Gemma4TpPartModel(LlamaTpPartModel):

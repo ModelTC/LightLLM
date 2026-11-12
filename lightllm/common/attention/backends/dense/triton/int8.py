@@ -1,12 +1,12 @@
-from lightllm.common.attention.backends.base import BaseAttentionBackend
 import dataclasses
+
 import torch
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
-from lightllm.common.basemodel.triton_kernel.diverse_utils import build_diverse_shared_group_markers
-from lightllm.common.attention.backends.base import PreparedPlan
+
 from lightllm.common.attention.api.backend import LayerBinding
 from lightllm.common.attention.api.inputs import DenseInputs
+from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
+from lightllm.common.basemodel.triton_kernel.diverse_utils import build_diverse_shared_group_markers
+from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel, get_env_start_args
 
 
 @dataclasses.dataclass
@@ -142,9 +142,7 @@ class Int8kvTritonAttBackend(BaseAttentionBackend):
         v_scale: torch.Tensor,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        from .kernels.decode.int8kv.int8kv_flash_decoding_diverse import (
-            token_decode_attention_flash_decoding,
-        )
+        from .kernels.decode.int8kv.int8kv_flash_decoding_diverse import token_decode_attention_flash_decoding
 
         return token_decode_attention_flash_decoding(
             q=q,

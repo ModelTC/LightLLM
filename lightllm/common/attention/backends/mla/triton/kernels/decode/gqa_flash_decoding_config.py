@@ -1,7 +1,9 @@
-from lightllm.common.kernel_config import KernelConfigs
-from frozendict import frozendict
 from functools import lru_cache
 from typing import Dict
+
+from frozendict import frozendict
+
+from lightllm.common.kernel_config import KernelConfigs
 
 
 class MlaDecodeAttentionKernelConfig(KernelConfigs):

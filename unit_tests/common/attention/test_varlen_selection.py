@@ -63,9 +63,10 @@ def test_rejected_probe_does_not_execute_backend(monkeypatch):
 
 def test_worker_initialization_uses_actual_inputs_and_removes_dispatch(monkeypatch):
     import torch
-    from lightllm.server import visualserver
+
     from lightllm.common.attention.api import VarlenAttentionInputs
     from lightllm.common.attention.backends.dense.sdpa.varlen import SdpaVarlenAttentionBackend
+    from lightllm.server import visualserver
 
     calls = []
 
@@ -87,8 +88,10 @@ def test_worker_initialization_uses_actual_inputs_and_removes_dispatch(monkeypat
 
 
 def test_probe_cache_separates_device_dtype_and_layout(monkeypatch):
-    import torch
     from dataclasses import replace
+
+    import torch
+
     from unit_tests.common.attention.helpers import make_spec
 
     calls = []

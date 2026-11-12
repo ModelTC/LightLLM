@@ -2,41 +2,38 @@
 
 from __future__ import annotations
 
-from unit_tests.common.att_resources.model_helpers import read_kv_storage
-
-from unit_tests.common.att_resources.model_helpers import rebuild_full_state
-
-from typing import TYPE_CHECKING
 import dataclasses
 import json
 from functools import partial
-
-from unit_tests.common.att_resources.model_helpers import prepare_model_states
+from typing import TYPE_CHECKING
 
 import pytest
 import torch
 
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.allocators import FullAttKVAllocator
 from lightllm.models.bloom.model import BloomTpPartModel
-from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.models.qwen2.model import Qwen2TpPartModel
-from lightllm.models.starcoder.model import StarcoderTpPartModel
-from lightllm.models.starcoder2.model import Starcoder2TpPartModel
-from lightllm.models.mistral.model import MistralTpPartModel
-from lightllm.models.mixtral.model import MixtralTpPartModel
-from lightllm.models.gemma_2b.model import Gemma_2bTpPartModel
 from lightllm.models.gemma3.model import Gemma3TpPartModel
 from lightllm.models.gemma4.model import Gemma4TpPartModel
+from lightllm.models.gemma_2b.model import Gemma_2bTpPartModel
+from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.mistral.model import MistralTpPartModel
+from lightllm.models.mixtral.model import MixtralTpPartModel
+from lightllm.models.qwen2.model import Qwen2TpPartModel
+from lightllm.models.starcoder2.model import Starcoder2TpPartModel
+from lightllm.models.starcoder.model import StarcoderTpPartModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.cpu_cache_layout import build_cpu_cache_layouts
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention_state.allocators import FullAttKVAllocator
+from unit_tests.common.att_resources.model_helpers import prepare_model_states, read_kv_storage, rebuild_full_state
 from unit_tests.common.att_resources.test_quantized_full_state import KINDS, make_quant_state
 
 if TYPE_CHECKING:
-    from easydict import EasyDict
-    from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from pathlib import Path
+
+    from easydict import EasyDict
+
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 
 @pytest.fixture
@@ -187,7 +184,6 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(torch.cuda, "mem_get_info", memory_info)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
-    monkeypatch.setattr("lightllm.common.attention_state.manager.get_current_device_id", lambda: 3)
     monkeypatch.setattr(
         "lightllm.common.attention_state.manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
     )

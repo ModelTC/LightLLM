@@ -1,24 +1,21 @@
-import os
+import bisect
+import copy
+import math
+from typing import Optional
+
 import torch
 import torch.distributed as dist
-import copy
-import bisect
-import math
 import triton
-from typing import Optional
-from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.distributed import dist_group_manager
-from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
-from lightllm.utils.torch_memory_saver_utils import (
-    TorchMemorySaverWrapper,
-    MemoryTag,
-)
-from .infer_struct import InferStateInfo
-from .graph import GraphExecution
-from lightllm.platform import get_device_runtime
 
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, Autotuner
+from lightllm.platform import get_device_runtime
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.log_utils import init_logger
+from lightllm.utils.torch_memory_saver_utils import TorchMemorySaverWrapper
+
+from .graph import GraphExecution
+from .infer_struct import InferStateInfo
 
 logger = init_logger(__name__)
 

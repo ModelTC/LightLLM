@@ -1,19 +1,9 @@
-from lightllm.common.attention.api.inputs import (
-    DenseInputs,
-    MLAPrefillInputs,
-    MLADecodeInputs,
-    SparseMLAPrefillInputs,
-    SparseMLADecodeInputs,
-    GDNInputs,
-    KDAInputs,
-)
-from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
+
+from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.models.gpt_oss.layer_weights.transformer_layer_weight import GptOssTransformerLayerWeight
-from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer, LlamaInferStateInfo
-
+from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaInferStateInfo, LlamaTransformerLayerInfer
 from lightllm.utils.log_utils import init_logger
-
 
 logger = init_logger(__name__)
 

@@ -1,11 +1,12 @@
-from lightllm.common.attention.backends.sparse_mla.flashmla.backend import NsaFlashMlaSparseAttBackend
 import dataclasses
-import torch
 from typing import Tuple
 
-from lightllm.common.attention.backends.base import PreparedPlan
+import torch
+
 from lightllm.common.attention.api.backend import LayerBinding
-from lightllm.common.attention.api.inputs import SparseMLAPrefillInputs, SparseMLADecodeInputs
+from lightllm.common.attention.api.inputs import SparseMLADecodeInputs, SparseMLAPrefillInputs
+from lightllm.common.attention.backends.base import PreparedPlan
+from lightllm.common.attention.backends.sparse_mla.flashmla.backend import NsaFlashMlaSparseAttBackend
 
 
 @dataclasses.dataclass

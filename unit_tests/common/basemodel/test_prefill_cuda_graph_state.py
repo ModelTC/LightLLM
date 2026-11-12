@@ -1,14 +1,14 @@
-from types import SimpleNamespace
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph, PrefillGraphExecution
 from lightllm.platform import DeviceRuntime
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
 class _GraphInferState:

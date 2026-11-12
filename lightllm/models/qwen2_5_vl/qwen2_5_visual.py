@@ -1,22 +1,24 @@
-import os
 import json
+import os
+from io import BytesIO
+from typing import List, Optional
+
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-from typing import List, Optional
-from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
-from io import BytesIO
-import torch.nn as nn
-from transformers.activations import ACT2FN
-from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
 from safetensors import safe_open
-from lightllm.server.multimodal_params import ImageItem
-from lightllm.models.qwen2_vl.qwen2_visual import PatchEmbed, VisionRotaryEmbedding
-from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
+from transformers.activations import ACT2FN
+
 from lightllm.common.attention.api import VarlenAttentionInputs
-from lightllm.server.visualserver import get_vit_attn_backend
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+from lightllm.models.qwen2_vl.qwen2_visual import PatchEmbed, VisionRotaryEmbedding
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
+from lightllm.models.qwen2_vl.vision_process import Qwen2VLImageProcessor, resize_image
+from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
+from lightllm.server.embed_cache.utils import get_shm_name_data, read_shm
+from lightllm.server.multimodal_params import ImageItem
+from lightllm.server.visualserver import get_vit_attn_backend
 
 
 class Qwen2RMSNorm(nn.Module):

@@ -10,9 +10,9 @@
 import os
 
 import torch
-
 import triton
 import triton.language as tl
+
 from lightllm.common.triton_utils.autotuner import autotune
 
 BT_LIST = [8, 16, 32, 64, 128]

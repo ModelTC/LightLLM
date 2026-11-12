@@ -1,4 +1,3 @@
-from lightllm.platform import get_device_runtime
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -6,12 +5,13 @@ import pytest
 import torch
 
 from lightllm.common.attention.api import AttentionPhase, CacheLayout, PlanCapacity
+from lightllm.common.attention.api.inputs import DenseInputs, DenseParams
 from lightllm.common.attention.backends._workspace import AttentionWorkspace
-from lightllm.common.attention.api.inputs import DenseParams, DenseInputs
-from lightllm.common.attention.selection import load_backend_class, data_type_to_backend
+from lightllm.common.attention.selection import data_type_to_backend, load_backend_class
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.basemodel.graph import GraphExecution
-from unit_tests.common.attention.helpers import make_batch, make_spec, model_stub, bind
+from lightllm.platform import get_device_runtime
+from unit_tests.common.attention.helpers import bind, make_batch, make_spec, model_stub
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 

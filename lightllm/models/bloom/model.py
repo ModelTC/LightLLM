@@ -1,17 +1,18 @@
 from typing import TYPE_CHECKING
-from lightllm.models.bloom.layer_infer.pre_layer_infer import BloomPreLayerInfer
+
+from lightllm.common.attention.backends.dense.triton.backend import TritonAttBackend
+from lightllm.common.basemodel import InferStateInfo, TpPartBaseModel
 from lightllm.models.bloom.layer_infer.post_layer_infer import BloomPostLayerInfer
+from lightllm.models.bloom.layer_infer.pre_layer_infer import BloomPreLayerInfer
 from lightllm.models.bloom.layer_infer.transformer_layer_infer import BloomTransformerLayerInfer
 from lightllm.models.bloom.layer_weights.pre_and_post_layer_weight import BloomPreAndPostLayerWeight
 from lightllm.models.bloom.layer_weights.transformer_layer_weight import BloomTransformerLayerWeight
-from lightllm.common.basemodel import InferStateInfo, TpPartBaseModel
-from lightllm.common.attention.backends.dense.triton.backend import TritonAttBackend
-
 
 if TYPE_CHECKING:
     from easydict import EasyDict
-    from lightllm.server.core.objs.start_args_type import StartArgs
+
     from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.server.core.objs.start_args_type import StartArgs
 
 
 class BloomTpPartModel(TpPartBaseModel):

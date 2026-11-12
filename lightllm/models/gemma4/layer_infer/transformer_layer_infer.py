@@ -1,25 +1,15 @@
-from lightllm.common.attention.api.inputs import (
-    DenseInputs,
-    MLAPrefillInputs,
-    MLADecodeInputs,
-    SparseMLAPrefillInputs,
-    SparseMLADecodeInputs,
-    GDNInputs,
-    KDAInputs,
-)
-from lightllm.common.attention_state.full_att import FullAttentionState
 import math
+
 import torch
 import torch.nn as nn
 
-
+from lightllm.common.attention.api.inputs import DenseInputs
+from lightllm.common.attention_state.full_att import FullAttentionState
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
-from lightllm.models.gemma4.triton_kernel.context_attention_fwd_gemma4_mm import (
-    context_attention_fwd_gemma4_mm,
-)
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.models.gemma4.triton_kernel.context_attention_fwd_gemma4_mm import context_attention_fwd_gemma4_mm
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 

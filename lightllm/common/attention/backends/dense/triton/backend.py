@@ -1,10 +1,11 @@
-from lightllm.common.attention.backends.base import BaseAttentionBackend
 import dataclasses
+
 import torch
-from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
-from lightllm.common.attention.backends.base import PreparedPlan
+
 from lightllm.common.attention.api.backend import LayerBinding
 from lightllm.common.attention.api.inputs import DenseInputs
+from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
+from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
 
 
 @dataclasses.dataclass

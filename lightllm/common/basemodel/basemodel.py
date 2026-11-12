@@ -1,56 +1,52 @@
-import os
-
-# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-import gc
-from functools import cached_property
 import copy
-import math
+import gc
 import json
+import math
+import os
+from functools import cached_property
+from typing import TYPE_CHECKING, List, final
+
 import torch
 import torch.nn.functional as F
 import triton
-from typing import final, List, TYPE_CHECKING
 from tqdm import tqdm
 
-from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.req_manager import ReqManager
 from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.commit import BoundedStateCommit
+from lightllm.common.attention_state.utils import MAX_DRAFT_MODELS
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput, PostLayerOutput
+from lightllm.common.basemodel.cuda_graph import CudaGraph
+from lightllm.common.basemodel.hidden_collector import NoopHiddenCollector
+from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
+from lightllm.common.basemodel.mtp_manager import MtpManager
+from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
     select_kv_index_from_req,
     select_kv_index_from_req_prefill,
 )
-from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
-from lightllm.common.basemodel.cuda_graph import CudaGraph
-from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
-from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
-from lightllm.utils.log_utils import init_logger
-from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
-from lightllm.utils.envs_utils import (
-    get_env_start_args,
-    get_llm_data_type,
-)
+from lightllm.common.quantization import Quantcfg
+from lightllm.common.req_manager import ReqManager
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, Autotuner
 from lightllm.distributed.communication_op import dist_group_manager
-from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput, PostLayerOutput
-from lightllm.common.basemodel.hidden_collector import (
-    NoopHiddenCollector,
-)
-from lightllm.common.basemodel.mtp_manager import MtpManager
+from lightllm.platform import get_device_runtime
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
+from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
+from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
 from lightllm.utils.infer_utils import post_empty_cache
-from lightllm.utils.torch_memory_saver_utils import (
-    TorchMemorySaverWrapper,
-    MemoryTag,
-)
-from lightllm.common.attention.backends.base import BaseAttentionBackend
+from lightllm.utils.log_utils import init_logger
+from lightllm.utils.torch_memory_saver_utils import MemoryTag, TorchMemorySaverWrapper
 
 if TYPE_CHECKING:
     from easydict import EasyDict
-    from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.attention_state.full_att import FullAttentionState
+
     from lightllm.common.attention_state.bounded_att import BoundedAttentionState
+    from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 logger = init_logger(__name__)
 
@@ -60,8 +56,6 @@ torch.backends.cudnn.enabled = True
 class TpPartBaseModel:
     @cached_property
     def device_runtime(self):
-        from lightllm.platform import get_device_runtime
-
         return get_device_runtime(platform=self.args.hardware_platform)
 
     def prepare_attention_backends(self):
@@ -136,8 +130,6 @@ class TpPartBaseModel:
     @property
     def att_state_role(self) -> str:
         """当前模型的资源前缀；每个 draft 独立拥有 State。"""
-        from lightllm.common.attention_state.utils import MAX_DRAFT_MODELS
-
         if not self.is_mtp_draft_model:
             return "main"
         draft_index = len(self.mtp_previous_draft_models)
@@ -580,7 +572,6 @@ class TpPartBaseModel:
     def _attach_attention_commit(self, output, infer_state, batch_size):
         if not self.args.mtp_step:
             return output
-        from lightllm.common.attention_state.commit import BoundedStateCommit
 
         output = copy.copy(output)
         output.attention_commit = BoundedStateCommit.capture(
@@ -829,7 +820,6 @@ class TpPartBaseModel:
     @torch.no_grad()
     def microbatch_overlap_prefill(self, model_input0: ModelInput, model_input1: ModelInput):
         """执行由调用方提前构建好的两个 prefill microbatch。"""
-
         for model_input in (model_input0, model_input1):
             model_input.to_cuda()
             if self.args.enable_prefill_decode_mixed and model_input.input_ids.shape[0] > 0:
@@ -900,7 +890,6 @@ class TpPartBaseModel:
     @torch.no_grad()
     def microbatch_overlap_decode(self, model_input0: ModelInput, model_input1: ModelInput):
         """执行由调用方提前构建好的两个 decode microbatch。"""
-
         for model_input in (model_input0, model_input1):
             model_input.to_cuda()
             if model_input.input_ids is None:

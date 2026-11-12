@@ -16,7 +16,6 @@ from enum import Enum
 from typing import Any, Literal
 
 import torch
-
 import triton
 
 logger = logging.getLogger(__name__)

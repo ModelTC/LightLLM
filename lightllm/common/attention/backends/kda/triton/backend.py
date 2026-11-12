@@ -1,24 +1,25 @@
 """KDA attention backend for GLM-5-Next."""
 from __future__ import annotations
-from lightllm.common.attention.backends.base import BaseAttentionBackend
-from lightllm.common.attention.api.spec import AttentionFamily
+
 import dataclasses
 from typing import TYPE_CHECKING
+
 import torch
-from lightllm.common.attention_state.bounded_att import KDAState
+
+from lightllm.common.attention.api.backend import LayerBinding
+from lightllm.common.attention.api.inputs import KDAInputs
+from lightllm.common.attention.api.spec import AttentionFamily
 from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-from lightllm.common.attention.backends.kda.triton.kernels.kda import chunk_kda_with_fused_gate
-from lightllm.common.attention.backends.kda.triton.kernels.kda_decode import fused_recurrent_kda
 from lightllm.common.attention.backends._shared.linear.causal_conv1d_mtp import (
     causal_conv1d_update as causal_conv1d_update_mtp,
 )
 from lightllm.common.attention.backends._shared.linear.mtp_state_params import build_dynamic_mtp_linear_att_state_params
+from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
+from lightllm.common.attention.backends.kda.triton.kernels.kda import chunk_kda_with_fused_gate
+from lightllm.common.attention.backends.kda.triton.kernels.kda_decode import fused_recurrent_kda
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.attention.backends.base import PreparedPlan
-from lightllm.common.attention.api.backend import LayerBinding
-from lightllm.common.attention.api.inputs import KDAInputs
 
 
 @dataclasses.dataclass

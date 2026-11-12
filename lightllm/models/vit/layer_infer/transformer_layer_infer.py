@@ -1,14 +1,15 @@
+from typing import Tuple
+
 import torch
 import torch.distributed as dist
 
-from typing import Tuple
+from lightllm.common.attention.api import VarlenAttentionInputs
+from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.vit.layer_weights.transformer_layer_weight import ViTTransformerLayerWeight
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from lightllm.models.vit.triton_kernel.gelu_vit import gelu_fwd
 from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
-from lightllm.common.attention.api import VarlenAttentionInputs
 from lightllm.server.visualserver import get_vit_attn_backend
-from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 
 
 class ViTTransformerLayerInfer:

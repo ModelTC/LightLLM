@@ -1,5 +1,5 @@
-from types import SimpleNamespace
 import weakref
+from types import SimpleNamespace
 
 import pytest
 import torch

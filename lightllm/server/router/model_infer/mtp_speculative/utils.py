@@ -5,10 +5,11 @@ from typing import TYPE_CHECKING, List, Tuple
 
 import torch
 
+from lightllm.common.attention_state.commit import BoundedStateCommit
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
+    gen_b_req_mtp_start_loc,
     mtp_scatter_next_token_ids,
     mtp_verify,
-    gen_b_req_mtp_start_loc,
 )
 
 if TYPE_CHECKING:
@@ -18,8 +19,6 @@ if TYPE_CHECKING:
 
 
 def verify_mtp_tokens(backend: ModeBackend, next_token_ids: torch.Tensor, model_output, num_reqs: int):
-    from lightllm.common.attention_state.commit import BoundedStateCommit
-
     outputs = model_output if isinstance(model_output, tuple) else (model_output,)
     commits = tuple(output.attention_commit for output in outputs)
     if any(commit is None for commit in commits):
@@ -50,7 +49,6 @@ def scatter_mtp_next_tokens(
     mtp_accept_len: torch.Tensor,  # [req_num]
 ) -> None:
     """Persist the next MTP proposal and optional scheduling scores by request."""
-
     schedule_scores = getattr(proposal, "schedule_scores", None)
     if schedule_scores is not None and 0 in schedule_scores.shape:
         schedule_scores = None
@@ -83,7 +81,6 @@ def record_request_mtp_metrics(
     verify_run_reqs: List[InferReq],
 ) -> None:
     """Accumulate user-visible MTP metrics on each request."""
-
     if not backend.is_master_in_dp:
         return
 

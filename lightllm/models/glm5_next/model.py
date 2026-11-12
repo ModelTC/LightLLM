@@ -5,23 +5,24 @@ from typing import TYPE_CHECKING
 import torch
 import triton
 
+from lightllm.common.attention.api import AttentionFamily
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.attention.backends.kda.triton.backend import KDALinearAttBackend
+from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.models.glm5_next.attention.sparse_mla import Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
-from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
+
 from .layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
 from .layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from .layer_weights.pre_and_post_layer_weight import Glm5NextPreAndPostLayerWeight
 from .layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 
-
 if TYPE_CHECKING:
     from easydict import EasyDict
-    from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.attention_state.full_att import FullAttentionState
+
     from lightllm.common.attention_state.bounded_att import BoundedAttentionState
+    from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.server.core.objs.start_args_type import StartArgs
 
 
 class Glm5NextTpPartModel(TpPartBaseModel):
@@ -179,7 +180,6 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         return [state]
 
     def attention_backend_candidates(self, family, phase):
-        from lightllm.common.attention.api import AttentionFamily
         from lightllm.models.glm5_next.attention.fp8_sparse_mla import Fp8Glm5NextSparseAttBackend
 
         if family is AttentionFamily.KDA:

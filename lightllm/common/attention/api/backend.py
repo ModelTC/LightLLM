@@ -5,6 +5,7 @@ from typing import Callable, Generic, TypeVar
 import torch
 
 from .batch import AttentionBatch, PlanCapacity
+from .execution import BackendResources
 from .inputs import VarlenAttentionInputs
 from .spec import LayerSpec
 
@@ -99,8 +100,6 @@ class AttentionBackend(ABC, Generic[Plan, Inputs, Output]):
 
     def resource_requirements(self, capacity: PlanCapacity, *, capture: bool):
         """返回分配前可计算的资源上界，供共享容量规划和捕获前预留使用。"""
-        from .execution import BackendResources
-
         return BackendResources()
 
     def bind_graph(self, plan: Plan):

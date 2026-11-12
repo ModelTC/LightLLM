@@ -4,10 +4,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.attention import selection
 from lightllm.common.attention.api import AttentionFamily, AttentionPhase, CapabilityResult
 from lightllm.common.attention.backends.base import BaseAttentionBackend
-from lightllm.common.attention import selection
-from unit_tests.common.attention.helpers import make_batch, make_spec, make_backend, make_plan, model_stub
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_plan, make_spec, model_stub
 
 
 def test_graph_copy_validates_all_inputs_before_writing():

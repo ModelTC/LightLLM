@@ -1,11 +1,11 @@
 # From : https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html
 
-import torch
+import math
 
+import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
-import math
-import torch.nn.functional as F
 
 from lightllm.utils.device_utils import is_tesla
 
@@ -604,8 +604,8 @@ def torch_context_attention_fwd(q, k, v, o, b_req_idx, b_start_loc, b_seq_len, b
 
 
 def test():
-    import torch
     import numpy as np
+    import torch
 
     Z, H, N_CTX, D_HEAD = 16, 16, 2048, 128
     dtype = torch.float16

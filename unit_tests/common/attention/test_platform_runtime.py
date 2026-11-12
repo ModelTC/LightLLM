@@ -6,7 +6,7 @@ import torch
 from lightllm.common.attention.api import AttentionPhase, GraphBinding
 from lightllm.common.attention.backends._workspace import AttentionWorkspace
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention_state.full_att.gqa.gqa_state import GQAFullAttentionState, GQAAttentionConfig
+from lightllm.common.attention_state.full_att.gqa.gqa_state import GQAAttentionConfig, GQAFullAttentionState
 from lightllm.common.basemodel.graph import GraphExecution
 from lightllm.platform import DeviceRuntime, get_device_runtime
 

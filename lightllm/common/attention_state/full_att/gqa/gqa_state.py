@@ -1,23 +1,23 @@
 from __future__ import annotations
 
-from lightllm.platform import get_device_runtime, Platform
-from .ops import get_kv_operations
-
-from functools import lru_cache
-from typing import TYPE_CHECKING, List
-from math import prod
 from dataclasses import dataclass
+from functools import lru_cache
+from math import prod
+from typing import TYPE_CHECKING, List
 
 import torch
 
+from lightllm.common.attention.api import CapabilityResult
+from lightllm.platform import Platform, get_device_runtime
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
-from ...utils import deepcopy_result, dtype_name
 from ...types import AxisMapping, TransferRegion
+from ...utils import deepcopy_result, dtype_name
 from ..base_state import FullAttentionState
-from .gqa_transfer import transfer_gqa_pages
 from ..dp_transfer import copy_gqa_tokens
+from .gqa_transfer import transfer_gqa_pages
+from .ops import get_kv_operations
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
@@ -179,8 +179,6 @@ class GQAFullAttentionState(FullAttentionState):
         self.zero_initialize_cache = True
 
     def check_execution(self, caps, execution):
-        from lightllm.common.attention.api import CapabilityResult
-
         if caps.platform not in (Platform.CUDA, Platform.CPU):
             return CapabilityResult.reject("GQA state operations are unavailable on this platform")
         if caps.platform is not Platform.CUDA and execution.transfer_paths:

@@ -22,7 +22,6 @@ import torch
 import torch.multiprocessing as mp
 from transformers import PretrainedConfig
 
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
@@ -36,7 +35,6 @@ from lightllm.utils.config_utils import auto_set_fused_shared_experts, get_dtype
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name, set_env_start_args, set_unique_server_name
 from lightllm.utils.service_shm_cleanup import ServiceShmCleanup
-
 
 DEFAULT_BATCH_SIZES = [2, 8, 16, 32, 64, 128]
 MTP_MODES = {"vanilla_with_att", "eagle_with_att", "vanilla_no_att", "eagle_no_att"}
@@ -597,7 +595,6 @@ class StaticBenchmarkExecutor:
 
     def _split_prefill_input(self, model_input: ModelInput):
         """在 benchmark 调用侧按请求构造两个 prefill microbatch。"""
-
         split_batch = model_input.batch_size // 2
         q_lens = model_input.b_seq_len - model_input.b_ready_cache_len
         split_tokens = int(q_lens[:split_batch].sum().item())
@@ -1251,8 +1248,9 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         cases = [BenchmarkCase(**case) for case in case_dicts]
         set_env_start_args(args)
 
-        from lightllm.distributed import dist_group_manager
         import torch.distributed as dist
+
+        from lightllm.distributed import dist_group_manager
 
         model_kvargs = build_model_kvargs(args, rank_id)
         defer_cudagraph = (
@@ -1276,11 +1274,11 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         torch.cuda.empty_cache()
         model, _ = get_model(model_cfg, model_kvargs)
         draft_models = init_mtp_draft_models(args, model_kvargs, model)
-        from lightllm.utils.envs_utils import set_model_init_status
-        from lightllm.utils.torch_memory_saver_utils import MemoryTag
         from lightllm.common.attention_state import AttentionStateManager
         from lightllm.common.basemodel.attention import bind_attention_layers, reserve_attention_resources
         from lightllm.common.req_manager import ReqManager
+        from lightllm.utils.envs_utils import set_model_init_status
+        from lightllm.utils.torch_memory_saver_utils import MemoryTag
 
         models = (model, *draft_models)
         assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"

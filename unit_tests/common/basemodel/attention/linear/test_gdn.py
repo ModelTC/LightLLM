@@ -1,16 +1,18 @@
 import sys
 from types import ModuleType, SimpleNamespace
+
 import pytest
 import torch
+
+import lightllm.common.attention.backends.gdn.triton.kernels.chunk as fla_ops
+import lightllm.utils.backend_validator as backend_validator
 from lightllm.common.attention.api import AttentionPhase
 from lightllm.common.attention.api.inputs import GDNInputs, GDNParams
+from lightllm.common.attention.backends.gdn.flashqla.backend import FlashQlaLinearAttBackend
 from lightllm.common.attention.backends.gdn.triton import backend as gdn
 from lightllm.common.attention.backends.gdn.triton.backend import TritonLinearAttBackend
-from lightllm.common.attention.backends.gdn.flashqla.backend import FlashQlaLinearAttBackend
-import lightllm.common.attention.backends.gdn.triton.kernels.chunk as fla_ops
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
-import lightllm.utils.backend_validator as backend_validator
-from unit_tests.common.attention.helpers import make_backend, make_batch, make_plan, bind
+from unit_tests.common.attention.helpers import bind, make_backend, make_batch, make_plan
 
 
 @pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float32])

@@ -1,26 +1,27 @@
-import os
 import json
+import os
+
+from lightllm.common.attention.api import AttentionPhase
+from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.common.build_utils import repair_config
+from lightllm.models.internvl.model import InternvlTokenizer
+from lightllm.models.llama.infer_struct import LlamaInferStateInfo
+from lightllm.models.neo_chat.model import NeoModelBase
+from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
+from lightllm.models.neo_chat_moe.layer_infer.transformer_layer_infer import NeoChatMOETransformerLayerInfer
+from lightllm.models.neo_chat_moe.layer_weights.pre_and_post_layer_weight import NeoChatMOEPreAndPostLayerWeight
+from lightllm.models.neo_chat_moe.layer_weights.transformer_layer_weight import NeoChatMOETransformerLayerWeight
+from lightllm.models.neo_chat_moe.vision_process import smart_resize
+from lightllm.models.qwen2_vl.model import QWen2VLTokenizer
+from lightllm.models.qwen3.model import Qwen3TpPartModel
+from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
 from lightllm.models.qwen3_vl.layer_infer.transformer_layer_infer import Qwen3VLTransformerLayerInfer
 from lightllm.models.qwen3_vl.layer_weights.pre_and_post_layer_weight import Qwen3VLPreAndPostLayerWeight
-from lightllm.models.qwen2_vl.model import QWen2VLTokenizer
-from lightllm.models.qwen3.model import Qwen3TpPartModel
-from lightllm.server.core.objs import SamplingParams
-from lightllm.models.qwen3_moe.model import Qwen3MOEModel
-from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
-from lightllm.models.neo_chat_moe.vision_process import smart_resize
-from lightllm.models.internvl.model import InternvlTokenizer
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
-from lightllm.models.neo_chat_moe.layer_infer.transformer_layer_infer import NeoChatMOETransformerLayerInfer
-from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.models.neo_chat_moe.layer_weights.transformer_layer_weight import NeoChatMOETransformerLayerWeight
-from lightllm.models.neo_chat_moe.layer_weights.pre_and_post_layer_weight import NeoChatMOEPreAndPostLayerWeight
-from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
-from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
-from lightllm.common.attention.backends.base import BaseAttentionBackend
-from lightllm.models.neo_chat.model import NeoModelBase
+from lightllm.server.core.objs import SamplingParams
+from lightllm.server.multimodal_params import AudioItem, ImageItem, MultimodalParams
 
 IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"
@@ -178,7 +179,6 @@ class NeoTpMOEPartModel(NeoModelBase, Qwen3MOEModel):
         pass
 
     def attention_backend_candidates(self, family, phase):
-        from lightllm.common.attention.api import AttentionPhase
         from lightllm.common.attention.selection import neo_data_type_to_backend
 
         if phase is AttentionPhase.PREFILL:

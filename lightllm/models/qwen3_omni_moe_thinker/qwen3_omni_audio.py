@@ -1,20 +1,21 @@
-import os
 import json
 import math
-import torch
+import os
+from typing import Callable, List, Optional, Union
+
 import numpy as np
-from torch import Tensor, nn
+import torch
 from safetensors import safe_open
+from torch import Tensor, nn
 from torch.nn import functional as F
-from typing import Callable, Optional, Union, List
 from transformers.activations import ACT2FN
 
-from lightllm.server.multimodal_params import AudioItem
-from lightllm.utils.log_utils import init_logger
-from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.attention.api import VarlenAttentionInputs
 from lightllm.common.attention.varlen import AutoVarlenAttention
+from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.qwen3_omni_moe_thinker.audio_process import WhisperFeatureExtractor
+from lightllm.server.multimodal_params import AudioItem
+from lightllm.utils.log_utils import init_logger
 
 QWEN3_OMNI_CONV_CHUNKSIZE = int(os.getenv("LIGHTLLM_QWEN3_OMNI_CONV_CHUNKSIZE", 200))
 
@@ -25,7 +26,6 @@ def _get_feat_extract_output_lengths(input_lengths):
     """
     Computes the output length of the convolutional layers and the output length of the audio encoder
     """
-
     input_lengths_leave = input_lengths % 100
     feat_lengths = (input_lengths_leave - 1) // 2 + 1
     output_lengths = ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
@@ -118,7 +118,6 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
-
         seq_length, _ = hidden_states.size()
 
         q = self.q_proj(hidden_states).reshape(seq_length, self.num_heads, -1)

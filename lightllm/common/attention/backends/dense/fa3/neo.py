@@ -1,7 +1,12 @@
 import dataclasses
 import inspect
 import warnings
+
 import torch
+
+from lightllm.common.attention.api import CapabilityResult
+from lightllm.common.attention.api.backend import LayerBinding
+from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention.backends.dense.fa3.backend import Fa3AttBackend, Fa3PrefillPlan
 
 _NEO_FA3_INSTALL_HINT = (
@@ -26,8 +31,6 @@ except ImportError as exc:
     )
     flash_attn_with_kvcache_neo = None
     HAS_FLASH_ATTN_INTERFACE = False
-from lightllm.common.attention.api.backend import LayerBinding
-from lightllm.common.attention.api.inputs import DenseInputs
 
 
 @dataclasses.dataclass
@@ -40,8 +43,6 @@ class NeoFa3AttBackend(Fa3AttBackend):
     def check_support(cls, spec, caps=None, execution=None):
         result = super().check_support(spec, caps, execution)
         if result.supported and spec.phase.value == "prefill" and not HAS_FLASH_ATTN_INTERFACE:
-            from lightllm.common.attention.api import CapabilityResult
-
             return CapabilityResult.reject("Neo FA3 requires the image-token flash attention interface")
         return result
 
