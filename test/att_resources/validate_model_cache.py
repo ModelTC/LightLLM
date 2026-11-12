@@ -307,8 +307,10 @@ def main():
         linear_att_hash_page_size=64,
         linear_att_page_block_num=1,
         linear_att_cache_size=16,
-        llm_prefill_att_backend=["fa3", "triton"],
-        llm_decode_att_backend=["fa3", "triton"],
+        llm_prefill_att_backend="fa3",
+        llm_prefill_linear_att_backend="triton",
+        llm_decode_att_backend="fa3",
+        llm_decode_linear_att_backend="triton",
         disable_cudagraph=False,
         pd_kv_page_size=2048,
     )
@@ -333,6 +335,7 @@ def main():
         from lightllm.utils.envs_utils import set_model_init_status
         from lightllm.utils.torch_memory_saver_utils import MemoryTag
         from lightllm.common.attention_state import AttentionStateManager
+        from lightllm.common.basemodel.attention import reserve_attention_resources
         from lightllm.common.req_manager import ReqManager
 
         models = (model, *draft_models)
@@ -350,6 +353,9 @@ def main():
         assert all(item.att_state_manager is manager for item in models), "models must share one resource manager"
         with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             manager.finish_state_registration()
+            for item in models:
+                item.prepare_attention_backends()
+                reserve_attention_resources(item)
             manager.load_full_att_calibration(args=model.args)
             manager.initialize_storage(
                 model.args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction

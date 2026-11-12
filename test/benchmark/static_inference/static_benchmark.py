@@ -34,7 +34,8 @@ from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.config_utils import auto_set_fused_shared_experts, get_dtype, get_vocab_size
 from lightllm.utils.dist_utils import init_distributed_env
-from lightllm.utils.envs_utils import set_env_start_args
+from lightllm.utils.envs_utils import get_unique_server_name, set_env_start_args, set_unique_server_name
+from lightllm.utils.service_shm_cleanup import ServiceShmCleanup
 
 
 DEFAULT_BATCH_SIZES = [2, 8, 16, 32, 64, 128]
@@ -1171,6 +1172,8 @@ def build_model_kvargs(args: SimpleNamespace, rank_id: int) -> Dict:
         "disable_cudagraph": args.disable_cudagraph,
         "llm_prefill_att_backend": args.llm_prefill_att_backend,
         "llm_decode_att_backend": args.llm_decode_att_backend,
+        "llm_prefill_linear_att_backend": args.llm_prefill_linear_att_backend,
+        "llm_decode_linear_att_backend": args.llm_decode_linear_att_backend,
         "vit_att_backend": args.vit_att_backend,
         "llm_kv_type": args.llm_kv_type,
         "llm_kv_quant_group_size": args.llm_kv_quant_group_size,
@@ -1233,8 +1236,11 @@ def init_deferred_cudagraph(args: SimpleNamespace, cases: Sequence[BenchmarkCase
     model.disable_cudagraph = False
     # Attention backends may size persistent graph buffers during construction.
     # Rebuild them after replacing the temporary profile-time batch limit.
-    model._init_att_backend()
-    model._init_att_backend1()
+    model.prepare_attention_backends()
+    from lightllm.common.basemodel.attention import bind_attention_layers, reserve_attention_resources
+
+    reserve_attention_resources(model)
+    bind_attention_layers(model)
     torch.cuda.empty_cache()
     model._init_cudagraph()
 
@@ -1273,6 +1279,7 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         from lightllm.utils.envs_utils import set_model_init_status
         from lightllm.utils.torch_memory_saver_utils import MemoryTag
         from lightllm.common.attention_state import AttentionStateManager
+        from lightllm.common.basemodel.attention import bind_attention_layers, reserve_attention_resources
         from lightllm.common.req_manager import ReqManager
 
         models = (model, *draft_models)
@@ -1290,6 +1297,9 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         assert all(item.att_state_manager is manager for item in models), "models must share one resource manager"
         with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             manager.finish_state_registration()
+            for item in models:
+                item.prepare_attention_backends()
+                reserve_attention_resources(item)
             manager.load_full_att_calibration(args=model.args)
             manager.initialize_storage(
                 model.args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
@@ -1309,8 +1319,9 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
                 batch_size *= draft.mtp_manager.get_decode_tokens_per_request(True)
                 draft.graph_max_batch_size = draft._align_decode_batch_size(batch_size)
                 draft.disable_cudagraph = False
-                draft._init_att_backend()
-                draft._init_att_backend1()
+                draft.prepare_attention_backends()
+                reserve_attention_resources(draft)
+                bind_attention_layers(draft)
                 draft._init_cudagraph()
         token_source = TokenSource(args)
         executor = StaticBenchmarkExecutor(args, model, draft_models, token_source)
@@ -1642,9 +1653,13 @@ def main(argv: Optional[Sequence[str]] = None):
     if not cases:
         raise ValueError("no benchmark cases were generated")
     args = normalize_args(args, cases)
+    set_unique_server_name(args)
     set_env_start_args(args)
 
-    run_benchmark(args, cases)
+    try:
+        run_benchmark(args, cases)
+    finally:
+        ServiceShmCleanup(get_unique_server_name()).cleanup_service_resources()
 
 
 if __name__ == "__main__":
