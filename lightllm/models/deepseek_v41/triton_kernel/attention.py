@@ -96,7 +96,7 @@ def build_decoder_tail_rows(q_offsets, decoder_offsets, token_num, window):
     return rows
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["T"])
 def _pool_pairs(
     KV,
     SCORE,
@@ -104,32 +104,40 @@ def _pool_pairs(
     POS,
     STATE,
     OUT,
+    T,
     D: tl.constexpr,
     STATE_STRIDE: tl.constexpr,
     STATE_SLOT_STRIDE: tl.constexpr,
     STATE_SLOTS: tl.constexpr,
     KV_STRIDE: tl.constexpr,
     SCORE_STRIDE: tl.constexpr,
+    ROWS: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
     cols = tl.arange(0, D)
-    req = tl.load(REQ + row)
-    pos = tl.load(POS + row)
-    previous_req = tl.load(REQ + row - 1, row > 0, -1)
-    in_batch = (row > 0) & (previous_req == req)
-    previous_kv = tl.load(KV + (row - 1) * KV_STRIDE + cols, in_batch, 0.0)
-    previous_score = tl.load(SCORE + (row - 1) * SCORE_STRIDE + cols, in_batch, 0.0)
+    valid = (row < T) | (ROWS == 1)
+    pos = tl.load(POS + row, valid, 0)
+    req = tl.load(REQ + row, valid, -1)
+    pair_end = valid & (pos % 2 == 1)
+    load_row = valid if ROWS == 1 else pair_end
+    previous_req = tl.load(REQ + row - 1, load_row & (row > 0), -1)
+    in_batch = load_row & (row > 0) & (previous_req == req)
+    previous_kv = tl.load(KV + (row[:, None] - 1) * KV_STRIDE + cols[None, :], in_batch[:, None], 0.0)
+    previous_score = tl.load(SCORE + (row[:, None] - 1) * SCORE_STRIDE + cols[None, :], in_batch[:, None], 0.0)
     previous_state = STATE + req * STATE_STRIDE + (pos - 1) % STATE_SLOTS * STATE_SLOT_STRIDE
-    previous_kv += tl.load(previous_state + cols, ~in_batch & (pos % 2 == 1), 0.0)
-    previous_score += tl.load(previous_state + D + cols, ~in_batch & (pos % 2 == 1), 0.0)
-    current_kv = tl.load(KV + row * KV_STRIDE + cols)
-    current_score = tl.load(SCORE + row * SCORE_STRIDE + cols)
+    from_state = (pair_end & ~in_batch)[:, None]
+    previous_kv += tl.load(previous_state[:, None] + cols[None, :], from_state, 0.0)
+    previous_score += tl.load(previous_state[:, None] + D + cols[None, :], from_state, 0.0)
+    current_kv = tl.load(KV + row[:, None] * KV_STRIDE + cols[None, :], load_row[:, None], 0.0)
+    current_score = tl.load(SCORE + row[:, None] * SCORE_STRIDE + cols[None, :], load_row[:, None], 0.0)
     gate = tl.sigmoid(current_score - previous_score)
     pooled = previous_kv + (current_kv - previous_kv) * gate
-    tl.store(OUT + row * D + cols, tl.where((pos + 1) % 2 == 0, pooled, 0.0))
+    if ROWS == 1:
+        pooled = tl.where(pair_end[:, None], pooled, 0.0)
+    tl.store(OUT + row[:, None] * D + cols[None, :], pooled, valid[:, None])
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["T"])
 def _commit_pair_state(
     KV,
     SCORE,
@@ -144,38 +152,47 @@ def _commit_pair_state(
     STATE_SLOTS: tl.constexpr,
     KV_STRIDE: tl.constexpr,
     SCORE_STRIDE: tl.constexpr,
+    ROWS: tl.constexpr,
 ):
-    row = tl.program_id(0)
-    req = tl.load(REQ + row)
-    pos = tl.load(POS + row)
+    row = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
+    valid = (row < T) | (ROWS == 1)
+    req = tl.load(REQ + row, valid, -1)
+    pos = tl.load(POS + row, valid, 0)
     # Keep the newest even position for each ring slot. The period doubles for odd-sized rings.
     period: tl.constexpr = STATE_SLOTS if STATE_SLOTS % 2 == 0 else 2 * STATE_SLOTS
     next_req = tl.load(REQ + row + period, row + period < T, -1)
-    commit = (req != HOLD) & (next_req != req) & (pos % 2 == 0)
+    commit = (valid & (req != HOLD) & (next_req != req) & (pos % 2 == 0))[:, None]
     cols = tl.arange(0, D)
     dest = STATE + req * STATE_STRIDE + pos % STATE_SLOTS * STATE_SLOT_STRIDE
-    tl.store(dest + cols, tl.load(KV + row * KV_STRIDE + cols), commit)
-    tl.store(dest + D + cols, tl.load(SCORE + row * SCORE_STRIDE + cols), commit)
+    load_row = valid[:, None] if ROWS == 1 else commit
+    kv = tl.load(KV + row[:, None] * KV_STRIDE + cols[None, :], load_row, 0.0)
+    score = tl.load(SCORE + row[:, None] * SCORE_STRIDE + cols[None, :], load_row, 0.0)
+    tl.store(dest[:, None] + cols[None, :], kv, commit)
+    tl.store(dest[:, None] + D + cols[None, :], score, commit)
 
 
 def pool_pairs(kv, score, req, positions, state, hold_request):
     out = torch.empty_like(kv, dtype=torch.bfloat16)
-    _pool_pairs[(kv.shape[0],)](
+    rows = 4 if kv.shape[0] >= 1024 else 1
+    grid = (triton.cdiv(kv.shape[0], rows),)
+    _pool_pairs[grid](
         kv,
         score,
         req,
         positions,
         state,
         out,
+        kv.shape[0],
         kv.shape[1],
         state.stride(0),
         state.stride(1),
         state.shape[1],
         kv.stride(0),
         score.stride(0),
+        rows,
     )
     # Commit after scoring so current rows cannot overwrite another query's previous-step history.
-    _commit_pair_state[(kv.shape[0],)](
+    _commit_pair_state[grid](
         kv,
         score,
         req,
@@ -189,6 +206,7 @@ def pool_pairs(kv, score, req, positions, state, hold_request):
         state.shape[1],
         kv.stride(0),
         score.stride(0),
+        rows,
     )
     return out
 
