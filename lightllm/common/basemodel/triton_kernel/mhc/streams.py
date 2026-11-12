@@ -7,6 +7,7 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 
 def hc_expand(x: torch.Tensor, streams: int) -> torch.Tensor:
@@ -52,7 +53,8 @@ def _hc_combine_kernel(
     for stream in tl.static_range(STREAMS):
         values = tl.load(residual_row + (stream * HIDDEN + cols) * residual_col_stride, cols < HIDDEN, 0).to(tl.float32)
         gate = tl.load(gate_row + stream * gate_col_stride)
-        combined += values * gate
+        # Round the product before adding, as in the unfused PyTorch reduction.
+        combined = libdevice.add_rn(combined, libdevice.mul_rn(values, gate))
     tl.store(output + row * HIDDEN + cols, combined, cols < HIDDEN)
 
 

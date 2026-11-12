@@ -44,6 +44,18 @@ def test_hc_combine_matches_fp32_reduction_in_graph(tokens, hidden):
     check(captured)
 
 
+def test_hc_combine_rounds_fp32_product_before_sum():
+    values = torch.tensor([-0.376953125, -0.453125, 0.734375, -0.1513671875], device="cuda", dtype=torch.bfloat16)
+    gates = torch.tensor(
+        [[0.6933943033218384, 0.21298180520534515, 0.1639794409275055, 0.5925081372261047]],
+        device="cuda",
+        dtype=torch.float32,
+    )
+    residual = values[:, None].expand(4, 5120).reshape(1, -1)
+    expected = (residual.view(1, 4, 5120).float() * gates[..., None]).sum(1).to(residual.dtype)
+    torch.testing.assert_close(hc_combine(residual, gates), expected, atol=0, rtol=0)
+
+
 @pytest.mark.parametrize("tokens", [1, 6, 16, 17, 64, 128])
 @pytest.mark.parametrize("hidden", [128, 5120])
 @pytest.mark.parametrize("disable_deepgemm", [False, True])
