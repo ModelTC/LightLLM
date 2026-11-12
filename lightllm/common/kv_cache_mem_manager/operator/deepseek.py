@@ -186,13 +186,10 @@ class DeepseekV4MemOperator(BaseMemManagerOperator):
 
         big_page_num = len(mem_indexes) // page_token_num
         max_kv_len = (req.cur_kv_len // page_token_num) * page_token_num
-        big_page_buffer_ids_cpu = []
-        for _ in range(big_page_num):
-            page_id = mem_manager.big_page_buffers.alloc_one_state_cache()
-            assert page_id is not None
-            req.hybrid_len_to_big_page_id[max_kv_len] = page_id
-            big_page_buffer_ids_cpu.append(page_id)
-            max_kv_len -= page_token_num
+        big_page_buffer_ids_cpu = mem_manager.big_page_buffers.alloc_state_cache(big_page_num)
+        assert big_page_buffer_ids_cpu is not None
+        for offset, page_id in enumerate(big_page_buffer_ids_cpu):
+            req.hybrid_len_to_big_page_id[max_kv_len - offset * page_token_num] = page_id
         big_page_buffer_ids_cpu.reverse()
         checkpoint_leases = [(mem_manager.big_page_buffers, list(big_page_buffer_ids_cpu))]
 
