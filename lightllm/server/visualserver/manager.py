@@ -8,6 +8,7 @@ import pickle
 import inspect
 import setproctitle
 import collections
+from functools import partial
 from typing import List
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager, StartArgs
@@ -55,6 +56,8 @@ class VisualManager:
         self.model_weightdir = args.model_dir
         self.vit_dp = args.visual_dp
         self.vit_tp = args.visual_tp
+        self.pending_images_by_dp = [0] * self.vit_dp
+        self.cur_dp_index = 1 % self.vit_dp
         # image 最大推理 batch size
         self.infer_batch_size = args.visual_infer_batch_size
         self.send_batch_size = args.visual_send_batch_size
@@ -137,43 +140,48 @@ class VisualManager:
             return
 
     async def handle_images(self, images_need_infer: List[ImageItem]):
-        if not hasattr(self, "cur_dp_index"):
-            self.cur_dp_index = 0
-
-        dp_to_handle_images = collections.defaultdict(list)
-        for image in images_need_infer:
-            self.cur_dp_index += 1
-            select_dp = self.cur_dp_index % self.vit_dp
-            dp_to_handle_images[select_dp].append((image, ImageReadyEvent()))
-
-        taskes = []
-        for dp_index in range(self.vit_dp):
-            _images = dp_to_handle_images[dp_index]
-            if _images:
-                taskes.append(
-                    self.infer_images(dp_index, images=[e[0] for e in _images], events=[e[1] for e in _images])
-                )
-
         async with self.lock:
+            dp_to_handle_images = collections.defaultdict(list)
+            for image in images_need_infer:
+                select_dp = min(
+                    range(self.vit_dp),
+                    key=lambda dp: (self.pending_images_by_dp[dp], (dp - self.cur_dp_index) % self.vit_dp),
+                )
+                self.cur_dp_index = (select_dp + 1) % self.vit_dp
+                self.pending_images_by_dp[select_dp] += 1
+                event = ImageReadyEvent(partial(self._release_dp_image, select_dp))
+                dp_to_handle_images[select_dp].append((image, event))
+
             try:
-                await asyncio.gather(*taskes)
+                await asyncio.gather(
+                    *(
+                        self.infer_images(dp_index, images=[e[0] for e in items], events=[e[1] for e in items])
+                        for dp_index, items in dp_to_handle_images.items()
+                    )
+                )
             except BaseException as e:
                 logger.exception(str(e))
                 raise e
 
         # 等待推理通知已经 ok
-        for dp_index in range(self.vit_dp):
-            _images = dp_to_handle_images[dp_index]
-            if _images:
-                await _images[-1][1].wait()
+        for items in dp_to_handle_images.values():
+            await items[-1][1].wait()
         return
+
+    def _release_dp_image(self, dp_index: int):
+        self.pending_images_by_dp[dp_index] -= 1
 
     async def infer_images(self, dp_index: int, images, events):
         taskes = []
         for vit_tp_rank in range(self.vit_tp):
             task = self.model_rpcs[dp_index][vit_tp_rank].run_task(images, events)
             taskes.append(task)
-        await asyncio.gather(*taskes)
+        try:
+            await asyncio.gather(*taskes)
+        except BaseException:
+            for event in events:
+                event.release_assignment()
+            raise
 
     async def loop_for_netio_req(self):
         try:
