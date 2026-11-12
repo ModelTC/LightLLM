@@ -139,6 +139,20 @@ def test_backend_check_exception_is_reported_for_explicit_selection(monkeypatch)
     assert "provider check failed: RuntimeError: provider ABI mismatch" in str(error.value)
 
 
+def test_rank_selection_checks_all_ranks_after_local_selection(monkeypatch):
+    import torch.distributed as dist
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+
+    def gather(output, value):
+        output[:] = [value, {"backend": "triton", "failure": None}]
+
+    monkeypatch.setattr(dist, "all_gather_object", gather)
+    with pytest.raises(selection.BackendSelectionError, match="backend selection"):
+        selection._check_rank_selection(AttentionFamily.DENSE, AttentionPhase.DECODE, "fa3", None)
+
+
 @pytest.mark.parametrize("format,provider", [("fp8kv_sph", "flashinfer"), ("fp8kv_spt", "fa3")])
 def test_fp8_scale_layouts_are_not_interchangeable(format, provider):
     candidates = selection.data_type_to_backend[format]

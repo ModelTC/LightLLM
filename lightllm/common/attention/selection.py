@@ -149,6 +149,8 @@ def select_attention_backend(*, family, phase, model, requested="auto", candidat
     if not specs:
         raise ValueError(f"model has no {family.value} attention layers")
     failures = {}
+    selected_backend = None
+    selected_name = None
     for name in ordered:
         if name not in available:
             failures[name] = f"no implementation for cache encoding {encoding}"
@@ -176,19 +178,26 @@ def select_attention_backend(*, family, phase, model, requested="auto", candidat
             failures[name] = f"provider check failed: {type(exc).__name__}: {exc}"
             continue
         logger.info("Selected %s %s attention on %s: %s", family.value, phase.value, caps.device, name)
-        _check_rank_selection(family, phase, None)
-        return backend
-    error = BackendSelectionError(family, phase, failures)
-    _check_rank_selection(family, phase, str(error))
-    raise error
+        selected_backend = backend
+        selected_name = name
+        break
+
+    error = None if selected_backend is not None else BackendSelectionError(family, phase, failures)
+    _check_rank_selection(family, phase, selected_name, None if error is None else str(error))
+    if error is not None:
+        raise error
+    return selected_backend
 
 
-def _check_rank_selection(family, phase, failure):
+def _check_rank_selection(family, phase, selected_name, failure):
     import torch.distributed as dist
 
     if dist.is_initialized() and dist.get_world_size() > 1:
-        failures = [None] * dist.get_world_size()
-        dist.all_gather_object(failures, failure)
-        rejected = {f"rank {rank}": reason for rank, reason in enumerate(failures) if reason is not None}
-        if rejected:
+        selections = [None] * dist.get_world_size()
+        dist.all_gather_object(selections, {"backend": selected_name, "failure": failure})
+        selected = {item["backend"] for item in selections if item["backend"] is not None}
+        rejected = {f"rank {rank}": item["failure"] for rank, item in enumerate(selections) if item["failure"]}
+        if len(selected) > 1:
+            rejected["backend selection"] = ", ".join(sorted(selected))
+        if selected and rejected or (not selected and rejected):
             raise BackendSelectionError(family, phase, rejected)
