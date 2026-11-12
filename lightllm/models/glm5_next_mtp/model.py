@@ -169,9 +169,10 @@ class Glm5NextMTPModel(TpPartBaseModel):
 
     def prepare_attention_states(self) -> None:
         super().prepare_attention_states()
-        if self.args.llm_kv_type == "fp8kv_dsa" and self.att_state_manager.get_full_attention_states(
-            self.att_state_role
-        ):
+        # The shared State registry is finalized only after all MTP models
+        # have registered their States.  Workspace sizing does not need a
+        # registry query and must remain valid during this preparation phase.
+        if self.args.llm_kv_type == "fp8kv_dsa":
             # Reserve fixed scratch space before the shared KV capacity is profiled.
             Fp8Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
 

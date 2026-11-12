@@ -157,9 +157,10 @@ class Glm5NextTpPartModel(TpPartBaseModel):
 
     def prepare_attention_states(self) -> None:
         super().prepare_attention_states()
-        if self.args.llm_kv_type == "fp8kv_dsa" and self.att_state_manager.get_full_attention_states(
-            self.att_state_role
-        ):
+        # The State registry is finalized after main and MTP models have all
+        # prepared their States.  Workspace sizing only depends on model
+        # dimensions, so do not query the registry during this phase.
+        if self.args.llm_kv_type == "fp8kv_dsa":
             from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
 
             # Reserve fixed scratch space before the shared KV capacity is profiled.
