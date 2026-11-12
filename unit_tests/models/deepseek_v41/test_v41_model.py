@@ -411,6 +411,49 @@ def test_candidate_indexer_large_cache_offsets_and_graph(byte_offset):
 
 
 @pytest.mark.parametrize("ratio", [1, 2])
+def test_short_v41_indexer_returns_all_closed_groups(ratio):
+    from lightllm.models.deepseek_v4.layer_infer.indexer import DeepseekV4IndexInfer
+
+    topk = 512
+    max_seq_len = topk * ratio + ratio - 1
+    offsets = torch.arange(256, device="cuda", dtype=torch.int32)
+    physical = (torch.tensor([3, 0, 4, 2, 1], device="cuda")[:, None] * 256 + offsets).flatten().int()
+    table = torch.stack((physical, physical.view(-1, 256).flip(0).flatten()))
+    req = torch.tensor([0, 1, 0, 2], dtype=torch.int32, device="cuda")
+    positions = torch.tensor([0, 129 * ratio - 1, max_seq_len - 1, max_seq_len - 1], device="cuda")
+    state = SimpleNamespace(
+        max_kv_seq_len=max_seq_len,
+        dsv4_sparse_req_idx=req,
+        position_ids=positions,
+        req_manager=SimpleNamespace(req_to_token_indexs=table, HOLD_REQUEST_ID=2),
+    )
+    indexer = DeepseekV4IndexInfer(
+        1,
+        dict(
+            model_type="deepseek_v41",
+            rms_norm_eps=1e-6,
+            compress_ratios=[0, ratio],
+            index_topk=topk,
+            index_head_dim=128,
+            index_n_heads=64,
+            index_source_layer_ids=[1],
+            candidate_source_layer_id=0,
+            candidate_topk_blocks=2048,
+        ),
+        1,
+    )
+    x = torch.empty((len(req), 0), device="cuda")
+    result = indexer._build_v41_metadata(x, None, state, None, False)
+
+    counts = [1 // ratio, 129, topk, 0]
+    expected = torch.full((len(req), 1, topk), -1, device="cuda", dtype=torch.int32)
+    for row, count in enumerate(counts[:-1]):
+        expected[row, 0, :count] = table[int(req[row]), ratio - 1 : count * ratio : ratio] // ratio
+    torch.testing.assert_close(result["extra_indices"], expected, rtol=0, atol=0)
+    torch.testing.assert_close(result["extra_lengths"].tolist(), counts)
+
+
+@pytest.mark.parametrize("ratio", [1, 2])
 @pytest.mark.parametrize("mode", ["decode", "prefill", "prefill_paged"])
 @pytest.mark.parametrize("candidates", ["none", "source", "consumer"])
 def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monkeypatch):

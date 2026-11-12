@@ -251,6 +251,26 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         )
 
     def _build_v41_metadata(self, x, q_lora, infer_state, layer_weight, use_custom_tensor_manager):
+        capacity = triton.cdiv(max(1, infer_state.max_kv_seq_len // self.compress_ratio), 64) * 64
+        sparse_candidates = self.uses_candidate_blocks and capacity > self.candidate_topk_blocks * 8
+        alloc = self.alloc_tensor if use_custom_tensor_manager else torch.empty
+        slots = alloc((x.shape[0], self.index_topk), dtype=torch.int32, device=x.device)
+        lengths = alloc((x.shape[0],), dtype=torch.int32, device=x.device)
+        if capacity <= self.index_topk and not (self.is_candidate_source or sparse_candidates):
+            from ..triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
+
+            build_compressed_kv_indices(
+                infer_state.dsv4_sparse_req_idx,
+                infer_state.position_ids,
+                infer_state.req_manager.req_to_token_indexs,
+                self.compress_ratio,
+                slots,
+                lengths,
+                hold_req_id=infer_state.req_manager.HOLD_REQUEST_ID,
+                min_length=0,
+            )
+            return {"extra_indices": slots.unsqueeze(1), "extra_lengths": lengths}
+
         from lightllm.models.deepseek_v41.triton_kernel.attention import (
             candidate_indexer_logits,
             select_indexer_candidates,
@@ -262,15 +282,10 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         query, weights = self._indexer_q_weight(
             x, q_lora, infer_state, layer_weight, use_custom_tensor_manager=use_custom_tensor_manager
         )
-        capacity = triton.cdiv(max(1, infer_state.max_kv_seq_len // self.compress_ratio), 64) * 64
-        sparse_candidates = self.uses_candidate_blocks and capacity > self.candidate_topk_blocks * 8
         dense_prefill = self._use_dense_prefill(infer_state)
         metadata = infer_state.get_indexer_metadata(
             self.layer_idx_, capacity, dense_prefill=dense_prefill or sparse_candidates
         )
-        alloc = self.alloc_tensor if use_custom_tensor_manager else torch.empty
-        slots = alloc((x.shape[0], self.index_topk), dtype=torch.int32, device=x.device)
-        lengths = alloc((x.shape[0],), dtype=torch.int32, device=x.device)
         if sparse_candidates:
             logits = candidate_indexer_logits(
                 query,

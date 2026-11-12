@@ -14,6 +14,8 @@ def _build_compressed_kv_indices_kernel(
     compressed_kv_lengths,
     compressed_kv_capacity,
     COMPRESS_RATIO: tl.constexpr,
+    HOLD_REQ_ID: tl.constexpr,
+    MIN_LENGTH: tl.constexpr,
     BLOCK_E: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -21,6 +23,8 @@ def _build_compressed_kv_indices_kernel(
     req_idx = tl.load(token_req_idx + token_idx).to(tl.int64)
     pos = tl.load(position_ids + token_idx).to(tl.int64)
     raw_len = (pos + 1) // COMPRESS_RATIO
+    if HOLD_REQ_ID is not None:
+        raw_len = tl.where(req_idx == HOLD_REQ_ID, 0, raw_len)
 
     compressed_token_idx = block_idx * BLOCK_E + tl.arange(0, BLOCK_E)
     capacity_mask = compressed_token_idx < compressed_kv_capacity
@@ -39,7 +43,7 @@ def _build_compressed_kv_indices_kernel(
     )
 
     if block_idx == 0:
-        tl.store(compressed_kv_lengths + token_idx, tl.maximum(raw_len, 1).to(tl.int32))
+        tl.store(compressed_kv_lengths + token_idx, tl.maximum(raw_len, MIN_LENGTH).to(tl.int32))
 
 
 def build_compressed_kv_indices(
@@ -49,6 +53,9 @@ def build_compressed_kv_indices(
     compress_ratio: int,
     compressed_kv_indices: torch.Tensor,
     compressed_kv_lengths: torch.Tensor,
+    *,
+    hold_req_id: int | None = None,
+    min_length: int = 1,
 ):
     """Derive compressed entries from group-end full slots in aligned allocation pages.
 
@@ -71,6 +78,8 @@ def build_compressed_kv_indices(
         compressed_kv_lengths,
         compressed_kv_capacity,
         COMPRESS_RATIO=compress_ratio,
+        HOLD_REQ_ID=hold_req_id,
+        MIN_LENGTH=min_length,
         BLOCK_E=BLOCK_E,
         num_warps=4,
     )
