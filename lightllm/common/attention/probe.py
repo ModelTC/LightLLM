@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import torch
 
-from .api import AttentionBatch, AttentionPhase, ExecutionRequirements, LayerAttention, PlanCapacity
+from .api import AttentionBatch, AttentionPhase, ExecutionRequirements, LayerAttentionBinding, PlanCapacity
 from .api.inputs import DenseInputs, DenseParams
 from .backends._workspace import AttentionWorkspace
 
@@ -61,7 +61,7 @@ def probe_dense(backend_cls, spec, runtime):
     plan = backend.allocate_plan(capacity, capture=False, workspace=workspace)
     backend.prepare(plan, batch)
     backend.update(plan)
-    attention = LayerAttention(
+    attention = LayerAttentionBinding(
         group_id=0,
         logical_layer_id=0,
         spec=spec,

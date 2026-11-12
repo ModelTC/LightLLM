@@ -20,7 +20,7 @@ class UnsupportedAttention(ValueError):
 
 
 @dataclass(frozen=True)
-class LayerAttention(Generic[Params]):
+class LayerAttentionBinding(Generic[Params]):
     """一个逻辑层在 prefill 或 decode 阶段的 attention 执行入口。
 
     权重和存储准备完成后构造；backend 是同组层共享的实现，params 借用本层的
@@ -44,7 +44,7 @@ class AttentionBackend(ABC, Generic[Plan, Inputs, Output]):
 
     Plan 的具体类型由 backend 定义，实例由 InferStateInfo 保存，不能跨 backend
     或并发 microbatch 共用。调用顺序为 allocate_plan -> prepare -> update，
-    随后同组各层用各自的 LayerAttention / Inputs 调用 forward。
+    随后同组各层用各自的 LayerAttentionBinding / Inputs 调用 forward。
     """
 
     @abstractmethod
@@ -73,7 +73,9 @@ class AttentionBackend(ABC, Generic[Plan, Inputs, Output]):
         pass
 
     @abstractmethod
-    def forward(self, layer: LayerAttention, plan: Plan, inputs: Inputs, *, out: torch.Tensor | None = None) -> Output:
+    def forward(
+        self, layer: LayerAttentionBinding, plan: Plan, inputs: Inputs, *, out: torch.Tensor | None = None
+    ) -> Output:
         """使用已准备的 plan 执行一层，允许写入 params 借用的 KV / Conv / SSM 存储。
 
         out 指定 attention 结果的目标缓冲区；返回 tuple 时只对应首项，

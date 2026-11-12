@@ -9,7 +9,7 @@ from lightllm.common.attention.api import (
     AttentionPhase,
     CacheLayout,
     ExecutionRequirements,
-    LayerAttention,
+    LayerAttentionBinding,
     LayerSpec,
     PlanCapacity,
 )
@@ -96,7 +96,7 @@ def make_plan(backend, batch=None, *, capture=False, max_length=None, prepare=Fa
 
 
 def make_layer_attention(backend, plan, params, **spec_kwargs):
-    return LayerAttention(
+    return LayerAttentionBinding(
         group_id=0,
         logical_layer_id=0,
         spec=make_spec(backend.family, plan.capacity.phase, **spec_kwargs),

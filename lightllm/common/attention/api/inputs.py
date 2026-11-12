@@ -1,6 +1,6 @@
 """区分初始化时绑定的层资源与每次 forward 的 tensor 输入。
 
-*Params 随 LayerAttention 保存，借用权重以及 State 管理的 KV / Conv / SSM 视图；
+*Params 随 LayerAttentionBinding 保存，借用权重以及 State 管理的 KV / Conv / SSM 视图；
 *Inputs 由模型层为当前调用构造，批次级请求索引和 provider 派生 metadata 则由 plan 提供。
 这些数据结构只固定字段绑定，不禁止 backend 原地更新所借用的状态 tensor。
 """

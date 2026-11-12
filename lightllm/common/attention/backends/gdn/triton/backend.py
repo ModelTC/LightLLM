@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from lightllm.common.attention.api.backend import LayerAttention
+from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.batch import AttentionBatch
 from lightllm.common.attention.api.inputs import GDNInputs
 from lightllm.common.attention.api.spec import AttentionFamily
@@ -112,7 +112,7 @@ class TritonLinearAttBackend(BaseAttentionBackend):
         plan.b_ssm_buffer_idx = plan.batch.b_req_idx * (mtp_step + 1)
         return
 
-    def _forward_prefill(self, layer: LayerAttention, plan, inputs: GDNInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(self, layer: LayerAttentionBinding, plan, inputs: GDNInputs, *, out=None) -> torch.Tensor:
         mixed_qkvzba: torch.Tensor = inputs.mixed_qkvzba
         backend: TritonLinearAttBackend = self
         conv_states, ssm_states = (layer.params.conv, layer.params.ssm)
@@ -221,7 +221,7 @@ class TritonLinearAttBackend(BaseAttentionBackend):
         ).view(1, mtp_size)
         plan.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets
 
-    def _forward_decode(self, layer: LayerAttention, plan, inputs: GDNInputs, *, out=None) -> torch.Tensor:
+    def _forward_decode(self, layer: LayerAttentionBinding, plan, inputs: GDNInputs, *, out=None) -> torch.Tensor:
         mixed_qkvzba = inputs.mixed_qkvzba
         backend: TritonLinearAttBackend = self
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)

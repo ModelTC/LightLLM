@@ -5,7 +5,7 @@ from types import MappingProxyType
 
 import torch
 
-from lightllm.common.attention.api.backend import AttentionBackend, LayerAttention, UnsupportedAttention
+from lightllm.common.attention.api.backend import AttentionBackend, LayerAttentionBinding, UnsupportedAttention
 from lightllm.common.attention.api.batch import AttentionBatch, PlanCapacity
 from lightllm.common.attention.api.spec import AttentionFamily, AttentionPhase, LayerSpec
 from lightllm.platform import DeviceCaps, Platform
@@ -163,7 +163,7 @@ class BaseAttentionBackend(AttentionBackend):
     def _update_decode(self, plan):
         pass
 
-    def forward(self, layer: LayerAttention, plan: PreparedPlan, inputs, *, out=None):
+    def forward(self, layer: LayerAttentionBinding, plan: PreparedPlan, inputs, *, out=None):
         if plan.batch is None:
             raise RuntimeError("prepare attention inputs before forward")
         if plan.backend_identity is not self:

@@ -129,9 +129,9 @@ Commonly used interfaces that need to be inherited and implemented
 
 After all main/draft models are constructed, `ModeBackend.init_model` creates one `ReqManager` using the largest `get_req_manager_max_seq_len()`, binds it to every model through `bind_req_manager()`, and calls each model's `prepare_attention_states()` to register its States. After `finish_state_registration()`, it calls `prepare_attention_backends()` for each model: layers are grouped by their prefill/decode `LayerSpec`, device/layout/execution requirements are checked, and backend numerical probes run. It then calls `reserve_attention_resources(model)` to reserve workspace for each execution slot before loading calibration and calling `initialize_storage()`. Reserving before capacity estimation accounts for backend scratch memory.
 
-`init_runtime()` runs sequentially on the main model and each draft, binding the HOLD page and creating each `LayerAttention` through `initialize_layer_attention()` before warmup, padded-request setup and CUDA Graph initialization. The main model also checks maximum-length inference. Readiness is published only after every model succeeds. Each batch owns a plan containing metadata and provider wrappers, executed through `allocate_plan → prepare → update → forward`; States continue to own KV/Conv/SSM storage and restoration.
+`init_runtime()` runs sequentially on the main model and each draft, binding the HOLD page and creating each `LayerAttentionBinding` through `initialize_layer_attention()` before warmup, padded-request setup and CUDA Graph initialization. The main model also checks maximum-length inference. Readiness is published only after every model succeeds. Each batch owns a plan containing metadata and provider wrappers, executed through `allocate_plan → prepare → update → forward`; States continue to own KV/Conv/SSM storage and restoration.
 
-Layers call `.forward(...)` explicitly. `LayerAttention` holds the layer parameters and shared backend; the plan comes from the current batch:
+Layers call `.forward(...)` explicitly. `LayerAttentionBinding` holds the layer parameters and shared backend; the plan comes from the current batch:
 
 ```python
 attention = self.decode_attention

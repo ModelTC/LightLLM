@@ -3,7 +3,7 @@ from typing import Tuple
 
 import torch
 
-from lightllm.common.attention.api.backend import LayerAttention
+from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import SparseMLADecodeInputs, SparseMLAPrefillInputs
 from lightllm.common.attention.backends.base import PreparedPlan
 from lightllm.common.attention.backends.sparse_mla.flashmla.backend import NsaFlashMlaSparseAttBackend
@@ -42,7 +42,7 @@ class NsaFlashMlaFp8SparseAttBackend(NsaFlashMlaSparseAttBackend):
         return NsaFlashMlaFp8SparseDecodePlan(capacity, capture, workspace)
 
     def _forward_prefill(
-        self, layer: LayerAttention, plan, inputs: SparseMLAPrefillInputs, *, out=None
+        self, layer: LayerAttentionBinding, plan, inputs: SparseMLAPrefillInputs, *, out=None
     ) -> torch.Tensor:
         q = inputs.query
         k = layer.params.kv
@@ -96,7 +96,9 @@ class NsaFlashMlaFp8SparseAttBackend(NsaFlashMlaSparseAttBackend):
         )
         return
 
-    def _forward_decode(self, layer: LayerAttention, plan, inputs: SparseMLADecodeInputs, *, out=None) -> torch.Tensor:
+    def _forward_decode(
+        self, layer: LayerAttentionBinding, plan, inputs: SparseMLADecodeInputs, *, out=None
+    ) -> torch.Tensor:
         q = (inputs.query_nope, inputs.query_rope)
         k = layer.params.kv
         return self._decode_nsa_decode_att(layer, plan, q=q, packed_kv=k, inputs=inputs)

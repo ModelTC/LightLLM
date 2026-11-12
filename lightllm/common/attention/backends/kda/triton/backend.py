@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from lightllm.common.attention.api.backend import LayerAttention
+from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import KDAInputs
 from lightllm.common.attention.api.spec import AttentionFamily
 from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -66,7 +66,7 @@ class KDALinearAttBackend(BaseAttentionBackend):
         plan.b_conv_buffer_idx = plan.batch.b_req_idx
         plan.b_ssm_buffer_idx = plan.batch.b_req_idx * (self.mtp_step + 1)
 
-    def _forward_prefill(self, layer: LayerAttention, plan, inputs: KDAInputs, *, out=None):
+    def _forward_prefill(self, layer: LayerAttentionBinding, plan, inputs: KDAInputs, *, out=None):
         mixed_qkv = inputs.mixed_qkv
         raw_gate = inputs.raw_gate
         raw_beta = inputs.raw_beta
@@ -160,7 +160,7 @@ class KDALinearAttBackend(BaseAttentionBackend):
         ).view(1, mtp_size)
         plan.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets
 
-    def _forward_decode(self, layer: LayerAttention, plan, inputs: KDAInputs, *, out=None):
+    def _forward_decode(self, layer: LayerAttentionBinding, plan, inputs: KDAInputs, *, out=None):
         mixed_qkv = inputs.mixed_qkv
         raw_gate = inputs.raw_gate
         raw_beta = inputs.raw_beta

@@ -3,7 +3,7 @@ import dataclasses
 import torch
 import triton
 
-from lightllm.common.attention.api.backend import LayerAttention
+from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
 from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params, page_table_copy
@@ -77,7 +77,7 @@ class Fa3AttBackend(BaseAttentionBackend):
             page_size=self.infer_page_size,
         )
 
-    def _forward_prefill(self, layer: LayerAttention, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(self, layer: LayerAttentionBinding, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key
@@ -186,7 +186,7 @@ class Fa3AttBackend(BaseAttentionBackend):
             page_size=self.infer_page_size,
         )
 
-    def _forward_decode(self, layer: LayerAttention, plan, inputs: DenseInputs, *, out=None):
+    def _forward_decode(self, layer: LayerAttentionBinding, plan, inputs: DenseInputs, *, out=None):
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key

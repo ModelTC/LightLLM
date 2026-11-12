@@ -129,9 +129,9 @@ class TpPartBaseModel:
 
 全部 main/draft 模型构造完成后，`ModeBackend.init_model` 按各模型 `get_req_manager_max_seq_len()` 的最大值创建一份 `ReqManager`，通过 `bind_req_manager()` 绑定给全部模型，再调用各模型的 `prepare_attention_states()` 注册自身 State。管理器完成 `finish_state_registration()` 后，逐模型调用 `prepare_attention_backends()`：按 prefill/decode 的 `LayerSpec` 分组，检查设备、存储布局和执行模式，并运行后端数值探针。随后调用 `reserve_attention_resources(model)` 预留各执行槽位的 workspace，再加载标定并执行 `initialize_storage()`。预留必须在容量估算之前完成，使后端临时显存计入可用容量。
 
-按 main、各 draft 的顺序调用 `init_runtime()`，绑定 HOLD 页并调用 `initialize_layer_attention()` 创建各层的 `LayerAttention`，然后执行 warmup、padded-request 与 CUDA Graph 初始化；main 还在末尾执行最大长度检查。全部模型完成后才发布就绪标志。每批次的 metadata 和 provider wrapper 由 plan 持有，按 `allocate_plan → prepare → update → forward` 执行；KV/Conv/SSM 的存储与恢复仍由 State 管理。
+按 main、各 draft 的顺序调用 `init_runtime()`，绑定 HOLD 页并调用 `initialize_layer_attention()` 创建各层的 `LayerAttentionBinding`，然后执行 warmup、padded-request 与 CUDA Graph 初始化；main 还在末尾执行最大长度检查。全部模型完成后才发布就绪标志。每批次的 metadata 和 provider wrapper 由 plan 持有，按 `allocate_plan → prepare → update → forward` 执行；KV/Conv/SSM 的存储与恢复仍由 State 管理。
 
-层内显式调用 `.forward(...)`。`LayerAttention` 保存本层的参数和共享 backend；plan 来自当前批次：
+层内显式调用 `.forward(...)`。`LayerAttentionBinding` 保存本层的参数和共享 backend；plan 来自当前批次：
 
 ```python
 attention = self.decode_attention

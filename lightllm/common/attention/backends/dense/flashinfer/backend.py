@@ -4,7 +4,7 @@ import torch
 import triton
 
 from lightllm.common.attention.api import BackendResources
-from lightllm.common.attention.api.backend import LayerAttention
+from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention.backends._flashinfer import set_flashinfer_envs
 from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
@@ -71,7 +71,7 @@ class FlashInferAttBackend(BaseAttentionBackend):
     def _allocate_decode_plan(self, capacity, capture, workspace):
         return FlashInferDecodePlan(capacity, capture, workspace)
 
-    def _forward_prefill(self, layer: LayerAttention, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(self, layer: LayerAttentionBinding, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key
@@ -114,7 +114,7 @@ class FlashInferAttBackend(BaseAttentionBackend):
         )
         return
 
-    def _forward_decode(self, layer: LayerAttention, plan, inputs: DenseInputs, *, out=None):
+    def _forward_decode(self, layer: LayerAttentionBinding, plan, inputs: DenseInputs, *, out=None):
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key

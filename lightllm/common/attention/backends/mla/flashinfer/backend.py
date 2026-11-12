@@ -5,7 +5,7 @@ import torch
 import triton
 
 from lightllm.common.attention.api import BackendResources
-from lightllm.common.attention.api.backend import LayerAttention
+from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import MLADecodeInputs, MLAPrefillInputs
 from lightllm.common.attention.api.spec import AttentionFamily
 from lightllm.common.attention.backends._flashinfer import set_flashinfer_envs
@@ -107,7 +107,9 @@ class MlaFlashInferAttBackend(BaseAttentionBackend):
         )
         return
 
-    def _forward_prefill(self, layer: LayerAttention, plan, inputs: MLAPrefillInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(
+        self, layer: LayerAttentionBinding, plan, inputs: MLAPrefillInputs, *, out=None
+    ) -> torch.Tensor:
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = (inputs.key_nope, inputs.key_rope)
@@ -140,7 +142,7 @@ class MlaFlashInferAttBackend(BaseAttentionBackend):
             max_kv_len=max_kv_len,
         )
 
-    def _forward_decode(self, layer: LayerAttention, plan, inputs: MLADecodeInputs, *, out=None):
+    def _forward_decode(self, layer: LayerAttentionBinding, plan, inputs: MLADecodeInputs, *, out=None):
         alloc_func = layer.alloc_tensor
         q = (inputs.query_nope, inputs.query_rope)
         k = layer.params.kv

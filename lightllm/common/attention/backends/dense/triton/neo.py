@@ -2,7 +2,7 @@ import dataclasses
 
 import torch
 
-from lightllm.common.attention.api.backend import LayerAttention
+from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention.backends.dense.triton.backend import TritonAttBackend, TritonPrefillPlan
 
@@ -22,7 +22,7 @@ class NeoTritonAttBackend(TritonAttBackend):
     def _update_prefill(self, plan):
         pass
 
-    def _forward_prefill(self, layer: LayerAttention, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(self, layer: LayerAttentionBinding, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key

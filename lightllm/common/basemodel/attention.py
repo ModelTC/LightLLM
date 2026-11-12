@@ -6,7 +6,7 @@ from lightllm.common.attention.api import (
     AttentionFamily,
     AttentionPhase,
     CacheLayout,
-    LayerAttention,
+    LayerAttentionBinding,
     LayerSpec,
     PlanCapacity,
 )
@@ -234,7 +234,7 @@ def initialize_layer_attention(model):
             if isinstance(params, DenseParams)
             else params
         )
-        layer.prefill_attention = LayerAttention(
+        layer.prefill_attention = LayerAttentionBinding(
             group_id=group_id,
             logical_layer_id=layer.layer_num_,
             spec=group.prefill_spec,
@@ -242,7 +242,7 @@ def initialize_layer_attention(model):
             backend=group.prefill_backend,
             alloc_tensor=_alloc_tensor,
         )
-        layer.decode_attention = LayerAttention(
+        layer.decode_attention = LayerAttentionBinding(
             group_id=group_id,
             logical_layer_id=layer.layer_num_,
             spec=group.decode_spec,

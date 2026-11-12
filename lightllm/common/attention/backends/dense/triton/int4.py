@@ -2,7 +2,7 @@ import dataclasses
 
 import torch
 
-from lightllm.common.attention.api.backend import LayerAttention
+from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import DenseInputs
 from lightllm.common.attention.backends.base import BaseAttentionBackend, PreparedPlan
 from lightllm.utils.envs_utils import get_env_start_args
@@ -39,7 +39,7 @@ class Int4kvTritonAttBackend(BaseAttentionBackend):
             torch.cumsum(plan.batch.b_seq_len, dim=0, dtype=plan.batch.b_seq_len.dtype) - plan.batch.b_seq_len
         )
 
-    def _forward_prefill(self, layer: LayerAttention, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(self, layer: LayerAttentionBinding, plan, inputs: DenseInputs, *, out=None) -> torch.Tensor:
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key
@@ -106,7 +106,7 @@ class Int4kvTritonAttBackend(BaseAttentionBackend):
     def _update_decode(self, plan):
         plan.decode_max_kv_seq_len = plan.batch.max_kv_seq_len
 
-    def _forward_decode(self, layer: LayerAttention, plan, inputs: DenseInputs, *, out=None):
+    def _forward_decode(self, layer: LayerAttentionBinding, plan, inputs: DenseInputs, *, out=None):
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = layer.params.key

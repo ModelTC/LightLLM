@@ -4,7 +4,7 @@ from typing import Tuple
 import torch
 import triton
 
-from lightllm.common.attention.api.backend import LayerAttention
+from lightllm.common.attention.api.backend import LayerAttentionBinding
 from lightllm.common.attention.api.inputs import MLADecodeInputs, MLAPrefillInputs
 from lightllm.common.attention.api.spec import AttentionFamily
 from lightllm.common.attention.backends.base import PreparedPlan
@@ -49,7 +49,9 @@ class MlaFa3AttBackend(Fa3AttBackend):
         plan.cu_seqlens_q = plan.batch.b1_cu_q_seq_len.int()
         plan.cu_seqlens_k = plan.batch.b1_cu_kv_seq_len.int()
 
-    def _forward_prefill(self, layer: LayerAttention, plan, inputs: MLAPrefillInputs, *, out=None) -> torch.Tensor:
+    def _forward_prefill(
+        self, layer: LayerAttentionBinding, plan, inputs: MLAPrefillInputs, *, out=None
+    ) -> torch.Tensor:
         alloc_func = layer.alloc_tensor
         q = inputs.query
         k = (inputs.key_nope, inputs.key_rope)
@@ -146,7 +148,7 @@ class MlaFa3AttBackend(Fa3AttBackend):
             page_size=self.infer_page_size,
         )
 
-    def _forward_decode(self, layer: LayerAttention, plan, inputs: MLADecodeInputs, *, out=None):
+    def _forward_decode(self, layer: LayerAttentionBinding, plan, inputs: MLADecodeInputs, *, out=None):
         alloc_func = layer.alloc_tensor
         q = (inputs.query_nope, inputs.query_rope)
         k = layer.params.kv
