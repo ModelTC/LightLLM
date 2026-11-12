@@ -77,7 +77,7 @@ class MultiLevelKVCacheManager:
 
     def _cpu_cache_match(self, token_hash_list: List[int]) -> List[int]:
         """
-        匹配CPU cache,返回命中的pages列表(最长前缀)
+        匹配 CPU cache，返回持有引用且数据已就绪的最长前缀。
         Returns:
             all_pages: 命中的page索引列表,len(all_pages)即为命中长度
         """
@@ -93,7 +93,7 @@ class MultiLevelKVCacheManager:
 
     def _disk_cache_match(self, token_hash_list: List[int], all_pages: List[int]) -> tuple[List[int], int]:
         """
-        匹配disk cache并加载缺失的页面,直接append到all_pages
+        加载缺失的磁盘缓存页，返回持有引用且数据已就绪的最长前缀。
         Returns:
             (finded_page_indexes, disk_page_num): 最终匹配到的页面索引列表(最长前缀)和从disk加载的页面数量
         """
@@ -206,9 +206,6 @@ class MultiLevelKVCacheManager:
                     # 日志无法记录， 无法排查问题。
                     logger.exception(f"calculate disk prompt cache len has exception {str(e)}")
                     raise e
-
-            while not self.cpu_cache_client.check_allpages_ready(finded_page_indexes):
-                time.sleep(0.01)
 
             req.cpu_cache_match_page_indexes.fill(finded_page_indexes)
 
