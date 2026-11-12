@@ -184,6 +184,14 @@ class DPKVSharedMoudle:
         if self.backend.dp_size_in_node == 1:
             return [], []
 
+        # All ranks have the same hit lengths and request owners.
+        hit_count = np.count_nonzero(match_lens)
+        if hit_count == 0:
+            return [], []
+        owners = [req[3] for req in reqs]
+        if hit_count == np.count_nonzero(match_lens[np.arange(len(reqs)), owners]):
+            return [], []
+
         # ---------------------------------------------------------------------
         # 阶段 1：获取当前 rank 的资源容量，生成本 DP 所属请求的候选传输计划。
         # ---------------------------------------------------------------------

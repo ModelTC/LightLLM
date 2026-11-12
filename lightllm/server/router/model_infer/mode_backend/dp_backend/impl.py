@@ -104,7 +104,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                 trans_tasks, transfer_plan = self.dp_kv_shared_module.build_dsv4_trans_tasks(
                     reqs, infer_reqs, match_lens
                 )
-                self.dp_kv_shared_module.kv_trans_dsv4(trans_tasks, matches, transfer_plan)
+                # All ranks see the same plan. An empty plan has no remote readers to fence.
+                if any(transfer_plan):
+                    self.dp_kv_shared_module.kv_trans_dsv4(trans_tasks, matches, transfer_plan)
             finally:
                 # P2P kernels and checkpoint restores must finish before any source pin is dropped.
                 torch.cuda.current_stream().synchronize()
