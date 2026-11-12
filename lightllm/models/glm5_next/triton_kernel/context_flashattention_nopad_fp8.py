@@ -645,8 +645,10 @@ def context_attention_fwd_fp8(
                 prefill_mem_index, prefill_row_table, prefill_mem_index.numel(), BLOCK=256
             )
             generic_workspace["row_table_built"] = True
-        # Keep this potentially 2 GiB buffer local to a DSA layer.
-        gathered_kv = q.new_empty((gather_chunk_size, 1, 512))
+        gathered_kv = generic_workspace.get("gathered_kv")
+        if gathered_kv is None:
+            gathered_kv = q.new_empty((gather_chunk_size, 1, 512))
+        gather_chunk_size = min(gather_chunk_size, gathered_kv.shape[0])
     output = lse = None
     for chunk_start in range(0, ragged_mem_index.numel(), gather_chunk_size):
         num_chunk_tokens = min(gather_chunk_size, ragged_mem_index.numel() - chunk_start)
@@ -667,7 +669,7 @@ def context_attention_fwd_fp8(
             num_q_tokens > 8
             and num_heads == 64
             and ragged_mem_index.numel() > num_q_tokens
-            and ragged_mem_index.numel() <= KV_GATHER_CHUNK_SIZE
+            and ragged_mem_index.numel() <= gather_chunk_size
             and q.dtype == torch.bfloat16
             and q.is_contiguous()
             and packed_kv.dtype == torch.uint8

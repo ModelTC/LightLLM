@@ -1161,17 +1161,30 @@ def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallba
         Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged
     )
     torch.testing.assert_close(run(state).float(), expected(), atol=0.012, rtol=0.015)
-    cache = backend._test_workspace.objects
+    cache = backend._test_workspace._buffers
     assert not hasattr(infer, "_fp8_sparse_generic_prefill_workspace_cache")
     workspace = state.generic_workspace
     pointers = {k: v.data_ptr() for k, v in workspace.items() if isinstance(v, torch.Tensor)}
+    bounded = dict(workspace, gathered_kv=workspace["gathered_kv"][:4096], row_table_built=False)
+    actual = fp8_prefill.context_attention_fwd_fp8(
+        q,
+        packed[..., :584],
+        ragged,
+        prefill_mem,
+        prefill_kv,
+        starts,
+        topk,
+        0.0625,
+        generic_workspace=bounded,
+    )
+    torch.testing.assert_close(actual.float(), expected(), atol=0.012, rtol=0.015)
     for _ in range(10):
         layer = backend_context(
             Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=ragged
         )
         torch.testing.assert_close(run(layer).float(), expected(), atol=0.012, rtol=0.015)
     assert workspace["row_table_built"]
-    assert {k: v.data_ptr() for k, v in cache["glm_generic"].items() if isinstance(v, torch.Tensor)} == pointers
+    assert {k: v.data_ptr() for k, v in layer.generic_workspace.items() if isinstance(v, torch.Tensor)} == pointers
 
     # Change raw KV/top-k in place: reusable metadata must not cache either.
     q.normal_()
@@ -1187,7 +1200,7 @@ def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallba
         Fp8Glm5NextSparseAttBackend, "prefill", settings=backend, ks=starts, ragged_mem_index=fresh_ragged
     )
     torch.testing.assert_close(run(fresh_state, fresh).float(), expected(fresh_ragged), atol=0.012, rtol=0.015)
-    assert cache["glm_generic"]["prefill_row_table"].data_ptr() == workspace["prefill_row_table"].data_ptr()
+    assert cache[("glm_prefill_rows", torch.int32)].data_ptr() == workspace["prefill_row_table"].data_ptr()
 
     graph_infer = _make_infer_state(mem_index=prefill_mem, prefill_cuda_graph_exe_list=[])
     graph_state = backend_context(
@@ -1226,7 +1239,7 @@ def test_fp8_generic_prefill_workspace_graph_query_is_generic_h64_only(monkeypat
     }
     control = params
 
-    def fake_context(*args):
+    def fake_context(*args, **kwargs):
         return args[0]
 
     monkeypatch.setattr(fp8_prefill, "context_attention_fwd_fp8", fake_context)

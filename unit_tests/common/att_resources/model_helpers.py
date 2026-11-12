@@ -2,37 +2,38 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import torch
-from lightllm.common.attention_state.types import TensorField
+
 from lightllm.common.attention_state.bounded_att import GDNState, KDAState, WindowCompressorState
 from lightllm.common.attention_state.full_att import (
-    FullAttentionState,
-    GQAAttentionConfig,
-    MLAConfig,
-    GroupQuantizedAttentionConfig,
-    StaticFP8AttentionConfig,
-    PackedMLAAttentionConfig,
     CompressedAttentionConfig,
     FP8E8M0PackedMLAConfig,
-    StaticFP8FullAttentionState,
+    FullAttentionState,
+    GQAAttentionConfig,
     GQAFullAttentionState,
+    GroupQuantizedAttentionConfig,
     GroupQuantizedFullAttentionState,
+    MLAConfig,
     MLAFullAttentionState,
+    PackedMLAAttentionConfig,
     PackedMLAFullAttentionState,
+    StaticFP8AttentionConfig,
+    StaticFP8FullAttentionState,
 )
-
+from lightllm.common.attention_state.types import TensorField
 
 if TYPE_CHECKING:
-    from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
-    from lightllm.common.attention_state.allocators import FullAttKVAllocator
     from collections.abc import Mapping, Sequence
+
+    from lightllm.common.attention_state.allocators import FullAttKVAllocator
     from lightllm.common.attention_state.manager import AttentionStateManager
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
+    from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 
 
 def bind_test_fp8_calibration(
@@ -253,12 +254,19 @@ def build_hybrid_resources(
     small_page_capacity: int,
     draft_full_state: FullAttentionState | None = None,
     tp_rank: int = 0,
+    ssm_state_mode: str = "native",
+    ssm_replay_config: dict | None = None,
 ) -> AttentionStateManager:
     """测试按既定几何参数组装通用管理器，不依赖旧模型管理器的构造/绑定流程。"""
     from lightllm.common.attention_state import AttentionStateManager
     from lightllm.common.attention_state.allocators import StatePageAllocator
-    from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, create_gdn_state, create_kda_state
-    from lightllm.common.attention_state.bounded_att import WindowCompressorStateConfig, create_window_compressor_state
+    from lightllm.common.attention_state.bounded_att import (
+        ConvSSMStateConfig,
+        WindowCompressorStateConfig,
+        create_gdn_state,
+        create_kda_state,
+        create_window_compressor_state,
+    )
     from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 
     manager = AttentionStateManager(request_capacity=request_capacity)
@@ -282,6 +290,9 @@ def build_hybrid_resources(
         request_capacity=request_capacity,
         mtp_step=mtp_step,
         device="cuda",
+        ssm_state_mode=ssm_state_mode,
+        ssm_replay_config=ssm_replay_config,
+        gate_lower_bound=config.gate_lower_bound if glm else -5.0,
     )
     bounded_state.initialize_page_pools(
         big_page_capacity=big_page_capacity,

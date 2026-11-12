@@ -131,6 +131,18 @@ def select_attention_backend(*, family, phase, model, requested="auto", candidat
             },
             AttentionFamily.KDA: {"None": {"triton": "backends.kda.triton.backend:KDALinearAttBackend"}},
         }
+        if args.ssm_state_mode == "replay":
+            tables[AttentionFamily.GDN] = {
+                "None": {
+                    "flashqla": "backends.gdn.replay.backend:ReplayGDNFlashQlaAttBackend",
+                    "triton": "backends.gdn.replay.backend:ReplayGDNTritonAttBackend",
+                }
+            }
+            tables[AttentionFamily.KDA] = {
+                "None": {
+                    "triton": "backends.kda.replay.backend:ReplayKDALinearAttBackend",
+                }
+            }
         if caps.platform is not Platform.CUDA:
             tables = {}
         candidates = tables.get(family, {})

@@ -80,25 +80,13 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             request_capacity=request_capacity,
             mtp_step=args.mtp_step,
             device=device,
+            ssm_state_mode=args.ssm_state_mode,
+            ssm_replay_config=args.ssm_replay_config,
         )
         return [state]
 
-    def _init_triton(self):
-        def _triton_allocator(size: int, alignment: int, stream: Optional[int]) -> torch.Tensor:
-            return torch.empty(size, device="cuda", dtype=torch.int8)
-
-        # Set Triton allocator for TMA descriptors
-        # This is required for kernels in common/.../linear_att/fla/ops/solve_tril.py
-        triton.set_allocator(_triton_allocator)
-        logger.info("Triton allocator set for Qwen3Next model")
-        return
-
     def autotune_layers(self):
         return self.config["full_attention_interval"]
-
-    def _init_config(self):
-        super()._init_config()
-        self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
 
     @classmethod
     def create_full_att_states(
@@ -133,3 +121,17 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             device="meta",
         )
         return [state]
+
+    def _init_triton(self):
+        def _triton_allocator(size: int, alignment: int, stream: Optional[int]) -> torch.Tensor:
+            return torch.empty(size, device="cuda", dtype=torch.int8)
+
+        # Set Triton allocator for TMA descriptors
+        # This is required for kernels in common/.../linear_att/fla/ops/solve_tril.py
+        triton.set_allocator(_triton_allocator)
+        logger.info("Triton allocator set for Qwen3Next model")
+        return
+
+    def _init_config(self):
+        super()._init_config()
+        self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)

@@ -120,9 +120,15 @@ def create_layer_attention_params(model, layer, weight, family):
                 weight.linear_conv1d.bias,
                 weight.linear_A_log.weight,
                 weight.linear_dt_bias.weight,
+                state=state,
             )
         return KDAParams(
-            conv, ssm, weight.get_merged_kda_conv_weight(), weight.linear_A_log.weight, weight.linear_dt_bias.weight
+            conv,
+            ssm,
+            weight.get_merged_kda_conv_weight(),
+            weight.linear_A_log.weight,
+            weight.linear_dt_bias.weight,
+            state=state,
         )
     if family is AttentionFamily.DENSE:
         state = manager.get_state(role, "gqa", layer_id)

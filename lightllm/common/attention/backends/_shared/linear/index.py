@@ -20,6 +20,7 @@ def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
 
 @tensor_cache
 def prepare_chunk_indices(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
+    # TODO: tolist() 会把 chunk 数同步回 CPU。以后改成在设备上构造索引，去掉这次同步。
     indices = torch.cat([torch.arange(n) for n in triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()])
     return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
 

@@ -39,6 +39,7 @@ class GDNParams:
     conv_bias: Optional[torch.Tensor]
     a_log: torch.Tensor
     dt_bias: torch.Tensor
+    state: object = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ class KDAParams:
     conv_weight: torch.Tensor
     a_log: torch.Tensor
     dt_bias: torch.Tensor
+    state: object = None
 
 
 @dataclass(frozen=True)

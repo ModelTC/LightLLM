@@ -237,10 +237,12 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
             if draft_models and hybrid:
                 cuda_req_indices = request.cuda(non_blocking=True)
                 accepted_steps = torch.full_like(cuda_req_indices, accepted_width, dtype=torch.int32)
+                req_verify_width = torch.full_like(cuda_req_indices, step_width, dtype=torch.int32)
                 for item in (model, *draft_models):
                     resources.commit_bounded_att_state(
                         req_indices=cuda_req_indices,
                         accepted_steps=accepted_steps,
+                        req_verify_width=req_verify_width,
                         role=item.att_state_role,
                     )
             return logits

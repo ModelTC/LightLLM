@@ -271,3 +271,13 @@ def test_runner_graph_copy_rejects_before_mutating_batch(invalid):
         captured.copy_for_cuda_graph(incoming)
     torch.testing.assert_close(captured.attention_batch.b_seq_len, before)
     assert captured.input_ids.tolist() == [0, 0]
+
+
+def test_replay_flashqla_rejects_decode_and_fp32():
+    from lightllm.common.attention.backends.gdn.replay.backend import ReplayGDNFlashQlaAttBackend
+
+    spec = make_spec(family=AttentionFamily.GDN)
+    with pytest.raises(UnsupportedAttention, match="decode"):
+        ReplayGDNFlashQlaAttBackend.check_support(spec)
+    with pytest.raises(UnsupportedAttention, match="dtype"):
+        ReplayGDNFlashQlaAttBackend.check_support(replace(spec, phase=AttentionPhase.PREFILL, dtype=torch.float32))

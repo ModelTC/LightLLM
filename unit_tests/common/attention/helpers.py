@@ -179,6 +179,7 @@ def backend_context(cls, phase, settings=None, **values):
     defaults = dict(
         network_config={"index_topk": 2048, "index_kpool": 4},
         prefill_graph_enabled=False,
+        decode_only=False,
         prefill_token_capacity=0,
         mtp_step=0,
         decode_draft_step=0,

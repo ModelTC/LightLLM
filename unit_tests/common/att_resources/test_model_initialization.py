@@ -1,20 +1,16 @@
 from __future__ import annotations
 
-from unit_tests.common.att_resources.model_helpers import read_kv_storage
-
-from unit_tests.common.att_resources.model_helpers import main_linear_state, prepare_model_states
-from lightllm.common.attention_state.full_att import FullAttentionState
-from unit_tests.common.att_resources.model_helpers import owned_states
 import dataclasses
 
 import pytest
 import torch
 
+from lightllm.common.attention_state.full_att import FullAttentionState
 from lightllm.common.req_manager import ReqManager
 from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
-from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
 from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
+from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
@@ -23,7 +19,12 @@ from lightllm.utils.envs_utils import (
     set_env_start_args,
     set_unique_server_name,
 )
-
+from unit_tests.common.att_resources.model_helpers import (
+    main_linear_state,
+    owned_states,
+    prepare_model_states,
+    read_kv_storage,
+)
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -162,7 +163,9 @@ def test_real_model_resource_hooks_and_shared_draft(
     assert resources.bounded_att_big_page_allocator.size == 6
     assert resources.bounded_att_small_page_allocator.size == 2
     assert not hasattr(model, "mtp_state_cursors")
-    assert (main_linear_state(resources).mtp_state_index is not None) == bool(mtp)
+    linear_state = main_linear_state(resources)
+    assert linear_state.mtp_state_index is not None
+    assert linear_state.mtp_enabled == bool(mtp)
     if mode == "prefill":
         assert resources.get_pd_operator().get_pd_full_att_page_layouts()
         assert resources.get_pd_operator().get_pd_bounded_att_page_layouts()

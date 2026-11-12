@@ -1,0 +1,976 @@
+import pytest
+import torch
+
+from lightllm.common.attention.backends.gdn.replay.decode import get_configs
+from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
+    accept_replay_window,
+    attach_replay_history as ReplaySSMExecutor,
+    replay_layer,
+)
+
+
+def ssm_snapshot(backend, req):
+    """折进一份 SSM 副本再读出这个请求。不改 canonical SSM，也不动 cursor。"""
+
+    saved = backend.ssm_state
+    clone = saved.clone()
+    backend.ssm_state = clone
+    try:
+        fold_prefix(backend, torch.tensor([req], dtype=torch.int32, device=saved.device))
+    finally:
+        backend.ssm_state = saved
+    return clone[:, req]
+
+
+from lightllm.common.attention.backends._shared.linear.replayssm_cursor import advance_cursor
+from lightllm.common.attention.backends._shared.linear.replayssm_fold import fold_prefix
+from lightllm.common.attention.backends._shared.linear.ssm_acceptance import commit_ssm_prefix
+
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+
+
+def reference(q, k, v, a, b, a_log, bias, state, kda=False, gate_lower_bound=-5.0):
+    q, k, v = q.float(), k.float(), v.float()
+    q = q / (q.square().sum(-1, keepdim=True) + 1e-6).sqrt() * (q.shape[-1] ** -0.5)
+    k = k / (k.square().sum(-1, keepdim=True) + 1e-6).sqrt()
+    q = q.repeat_interleave(v.shape[-2] // q.shape[-2], -2)
+    k = k.repeat_interleave(v.shape[-2] // k.shape[-2], -2)
+    if kda:
+        g = gate_lower_bound * torch.sigmoid(a_log.exp()[:, None] * (a.float().view_as(k) + bias.view_as(k)))
+        state = state * g.exp()[..., None]
+    else:
+        g = -a_log.exp() * torch.nn.functional.softplus(a.float() + bias)
+        state = state * g.exp()[..., None, None]
+    d = b.float().sigmoid()[..., None] * (v - torch.einsum("...kv,...k->...v", state, k))
+    state = state + k[..., None] * d[..., None, :]
+    return torch.einsum("...kv,...k->...v", state, q), state
+
+
+@pytest.mark.parametrize("capacity", [4, 8])
+@pytest.mark.parametrize("bv", [8, 32], ids=["small_bv_fallback", "precomputed"])
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+@pytest.mark.parametrize("activation_dtype", [torch.float16, torch.bfloat16])
+def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state_dtype, kda, activation_dtype):
+    state = torch.zeros(1, 2, 1, 128, 128, dtype=state_dtype, device="cuda")
+    ssm_backend = ReplaySSMExecutor(
+        state,
+        capacity,
+        2,
+        activation_dtype,
+        num_key_heads=1,
+        kda=kda,
+        compute_mode="precompute",
+    )
+    reqs = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+    cu = torch.tensor([0, 2, 4], dtype=torch.int32, device="cuda")
+    accepted = torch.tensor([1, 0], dtype=torch.int32, device="cuda")
+    q = torch.zeros(4, 1, 128, dtype=activation_dtype, device="cuda")
+    q[:2, 0, 0] = 1
+    k = torch.zeros_like(q)
+    k[0, 0, 0] = -0.25
+    k[1, 0, 0] = 1
+    v = torch.zeros_like(q)
+    v[:2, 0, 0] = 60000
+    a = torch.full((4, 128 if kda else 1), -20, dtype=activation_dtype, device="cuda")
+    b = torch.full((4, 1), 20, dtype=activation_dtype, device="cuda")
+    alog = torch.zeros(1, device="cuda")
+    bias = torch.zeros(128 if kda else 1, device="cuda")
+    expected_state = state[0, 0].float().clone()
+    for round_idx in range(2):
+        # The second round must consume the first round's accepted history.
+        # For capacity 4 the next span exactly fills it, so no fold should hide
+        # an overflowed history correction by reconstructing from raw inputs.
+        assert ssm_backend.cursors[0].item() == 2 * round_idx
+        assert not state.any()
+        actual = replay_layer(
+            ssm_backend,
+            0,
+            q,
+            k,
+            v,
+            a,
+            b,
+            alog,
+            bias,
+            reqs,
+            cu,
+            run_config={"BV": bv, "num_warps": 1, "num_stages": 3},
+        )
+        expected = []
+        for token in range(2):
+            output, expected_state = reference(
+                q[token], k[token], v[token], a[token], b[token], alog, bias, expected_state, kda=kda
+            )
+            expected.append(output)
+        assert torch.isfinite(expected_state).all()
+        assert torch.isfinite(actual).all()
+        torch.testing.assert_close(
+            actual[:2].float(),
+            torch.stack(expected),
+            atol=32 if activation_dtype == torch.bfloat16 else 4,
+            rtol=4e-3 if activation_dtype == torch.bfloat16 else 1e-3,
+        )
+        accept_replay_window(ssm_backend, reqs, accepted, cu)
+    # The correction is larger than FP16 can represent even though the
+    # recurrent state, inputs, and attention outputs are all finite.
+    assert ssm_backend.deltas[0, 0, 0, 1, 0].item() > torch.finfo(torch.float16).max
+    assert torch.isfinite(ssm_backend.deltas[0, 0, :, :4]).all()
+    assert ssm_backend.cursors[1].item() == 0
+    torch.testing.assert_close(ssm_snapshot(ssm_backend, 0)[0].float(), expected_state, atol=128, rtol=0.01)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_flush_export_updates_checkpoint_and_clears_history(dtype):
+    state = torch.randn(1, 2, 1, 32, 64, device="cuda", dtype=dtype) * 0.01
+    backend = ReplaySSMExecutor(
+        state,
+        capacity=4,
+        verify_width=1,
+        activation_dtype=torch.bfloat16,
+    )
+    backend.raw_keys.normal_(0, 0.1)
+    backend.raw_values.normal_(0, 0.1)
+    backend.gates.fill_(-0.1)
+    backend.betas.fill_(0.5)
+    backend.cursors[0] = 2
+    expected = ssm_snapshot(backend, 0).clone()
+    target = ssm_snapshot(backend, 0)
+    reqs = torch.tensor([0], dtype=torch.int32, device="cuda")
+    backend.fold_accepted_prefix(reqs)
+    torch.cuda.synchronize()
+
+    assert backend.cursors[0].item() == 0
+    torch.testing.assert_close(target, expected, atol=0, rtol=0)
+    torch.testing.assert_close(state[:, 0], expected, atol=0, rtol=0)
+
+    empty_history_target = ssm_snapshot(backend, 0)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(empty_history_target, expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("capacity", [16, 32, 64])
+@pytest.mark.parametrize("width", [1, 3, 5, 16])
+@pytest.mark.parametrize("dims", [(32, 64), (128, 128)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_replay_acceptance_flush_and_graph(
+    width,
+    dims,
+    capacity,
+    dtype,
+    run_config=None,
+    compute_mode="inline",
+    activation_dtype=torch.bfloat16,
+    gate_shift=-3,
+    head_geometry=(2, 4),
+    kda=False,
+    gate_lower_bound=-5.0,
+):
+    torch.manual_seed(21)
+    kdim, vdim = dims
+    h, hv = head_geometry
+    slots = 5
+    state = (torch.randn(2, slots, hv, kdim, vdim, device="cuda") * 0.01).to(dtype)
+    ssm_backend = ReplaySSMExecutor(
+        state,
+        capacity,
+        width,
+        num_key_heads=h,
+        kda=kda,
+        gate_lower_bound=gate_lower_bound,
+        compute_mode=compute_mode,
+        activation_dtype=activation_dtype,
+    )
+    expected = state.float().clone()
+    pending = [0, 0]
+    state_atol = 2e-5 if dtype == torch.float32 else 0.002
+    # Independent FP32 reductions can straddle a BF16 rounding boundary.
+    # Allow one relative BF16 spacing as well as accumulated near-zero error.
+    state_rtol = 2e-4 if dtype == torch.float32 else torch.finfo(dtype).eps
+    reqs = torch.tensor([2, 0, slots - 1], device="cuda", dtype=torch.int32)
+    cu = torch.tensor([0, width, 2 * width - 1, 2 * width - 1], device="cuda", dtype=torch.int32)
+    if width == 1:
+        cu = torch.tensor([0, 1, 2, 2], device="cuda", dtype=torch.int32)
+    tokens = 3 * width
+    q = torch.randn(tokens, h, kdim, device="cuda", dtype=activation_dtype)
+    k = torch.randn_like(q)
+    v = torch.randn(tokens, hv, vdim, device="cuda", dtype=activation_dtype)
+    a = torch.randn(tokens, hv * kdim if kda else hv, device="cuda", dtype=activation_dtype) + gate_shift
+    b = torch.randn(tokens, hv, device="cuda", dtype=activation_dtype)
+    alog = torch.randn(hv, device="cuda") * 0.1
+    bias = torch.randn(hv * kdim if kda else hv, device="cuda") * 0.1
+    accepted = torch.zeros(slots, dtype=torch.int32, device="cuda")
+
+    def step():
+        out = [
+            replay_layer(ssm_backend, layer, q, k, v, a, b, alog, bias, reqs, cu, run_config=run_config)
+            for layer in range(2)
+        ]
+        accept_replay_window(ssm_backend, reqs, accepted, cu)
+        return out
+
+    # Compile on disposable state, then capture with the HOLD slot only.
+    saved = state.clone()
+    step()
+    state.copy_(saved)
+    ssm_backend.cursors.zero_()
+    reqs.fill_(slots - 1)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        outputs = step()
+    reqs.copy_(torch.tensor([2, 0, slots - 1], device="cuda", dtype=torch.int32))
+    for iteration in range(3 * capacity + 5):
+        counts = [iteration % width + 1, min((iteration + 1) % width + 1, max(width - 1, 1))]
+        accepted[2] = counts[0] - 1
+        accepted[0] = counts[1] - 1
+        for seq, req in enumerate([2, 0]):
+            query_len = width if seq == 0 else max(width - 1, 1)
+            if pending[seq] + query_len > capacity:
+                ssm_backend.fold_accepted_prefix(torch.tensor([req], dtype=torch.int32, device="cuda"))
+                expected[:, req] = expected[:, req].to(dtype).float()
+                pending[seq] = 0
+            pending[seq] += counts[seq]
+        graph.replay()
+        for layer in range(2):
+            for seq, req in enumerate([2, 0]):
+                start = seq * width
+                length = width if seq == 0 else max(width - 1, 1)
+                cur = expected[layer, req].clone()
+                for j in range(length):
+                    t = start + j
+                    out, cur = reference(
+                        q[t],
+                        k[t],
+                        v[t],
+                        a[t],
+                        b[t],
+                        alog,
+                        bias,
+                        cur,
+                        kda=kda,
+                        gate_lower_bound=gate_lower_bound,
+                    )
+                    torch.testing.assert_close(outputs[layer][t].float(), out, atol=0.006, rtol=0.02)
+                    if j + 1 == counts[seq]:
+                        expected[layer, req].copy_(cur)
+        if iteration == 2 * capacity + 1:
+            ssm_backend.fold_accepted_prefix(reqs[:2])
+            expected = expected.to(dtype).float()
+            pending = [0, 0]
+            torch.testing.assert_close(state[:, :4].float(), expected[:, :4], atol=state_atol, rtol=state_rtol)
+    ssm_backend.fold_accepted_prefix(reqs[:2])
+    torch.testing.assert_close(state.float(), expected.to(dtype).float(), atol=state_atol, rtol=state_rtol)
+
+
+@pytest.mark.parametrize(
+    "state_dtype,activation_dtype",
+    [(torch.float32, torch.float32), (torch.float32, torch.bfloat16), (torch.bfloat16, torch.bfloat16)],
+)
+@pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
+@pytest.mark.parametrize("dims", [(32, 64), (128, 128)])
+@pytest.mark.parametrize("width", [1, 4])
+@pytest.mark.parametrize("gate_shift", [-3, -10])
+def test_fold_matches_reference_across_precisions(
+    state_dtype,
+    activation_dtype,
+    compute_mode,
+    dims,
+    width,
+    gate_shift,
+):
+    test_replay_acceptance_flush_and_graph(
+        width,
+        dims,
+        8,
+        state_dtype,
+        run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
+        compute_mode=compute_mode,
+        activation_dtype=activation_dtype,
+        gate_shift=gate_shift,
+    )
+
+
+@pytest.mark.parametrize("capacity,width", [(4, 1), (4, 3), (4, 4), (8, 1), (8, 3), (8, 4), (8, 5)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_short_replay_history_matches_independent_reference(capacity, width, dtype):
+    test_replay_acceptance_flush_and_graph(width, (128, 128), capacity, dtype)
+
+
+@pytest.mark.parametrize("capacity,width", [(4, 1), (4, 3), (4, 4), (8, 1), (8, 4), (8, 5), (16, 4), (16, 16), (32, 4)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_precomputed_projections_match_independent_reference(capacity, width, dtype):
+    test_replay_acceptance_flush_and_graph(
+        width,
+        (128, 128),
+        capacity,
+        dtype,
+        run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
+        compute_mode="precompute",
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_production_gdn_geometry_matches_independent_reference(dtype):
+    test_replay_acceptance_flush_and_graph(
+        4,
+        (128, 128),
+        8,
+        dtype,
+        run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
+        compute_mode="precompute",
+        head_geometry=(4, 12),
+    )
+
+
+@pytest.mark.parametrize("warps", [1, 4])
+@pytest.mark.parametrize("decay", [-3, -10])
+@pytest.mark.parametrize(
+    "state_dtype,dtype",
+    [(torch.float32, torch.float32), (torch.bfloat16, torch.bfloat16), (torch.float32, torch.bfloat16)],
+)
+@pytest.mark.parametrize("bv", [8, 32])
+@pytest.mark.parametrize("width", [1, 4])
+def test_precomputed_projections_preserve_precision(warps, decay, state_dtype, dtype, width, bv):
+    torch.manual_seed(35)
+    state = (torch.randn((1, 3, 4, 128, 128), device="cuda") * 0.1).to(state_dtype)
+    config = {"BV": bv, "num_warps": warps, "num_stages": 3}
+    ssm_backends = [
+        ReplaySSMExecutor(
+            state.clone(),
+            16 if width == 1 else 8,
+            width,
+            dtype,
+            num_key_heads=2,
+            compute_mode=mode,
+        )
+        for mode in ("inline", "precompute")
+    ]
+    reqs = torch.tensor([1, 0], dtype=torch.int32, device="cuda")
+    tokens = 2 if width == 1 else 7
+    cu = torch.tensor([0, 1, 2] if width == 1 else [0, 4, 7], dtype=torch.int32, device="cuda")
+    q = torch.randn((tokens, 2, 128), device="cuda", dtype=dtype)
+    k = torch.randn_like(q)
+    v = torch.randn((tokens, 4, 128), device="cuda", dtype=dtype)
+    a = torch.randn((tokens, 4), device="cuda", dtype=dtype) + decay
+    b = torch.randn_like(a)
+    alog = torch.zeros(4, device="cuda")
+    accepted = torch.zeros(3, dtype=torch.int32, device="cuda")
+    for step in range(64):
+        for tensor in (q, k, v, b):
+            tensor.normal_()
+        accepted[0] = step % max(1, width - 1)
+        accepted[1] = step % width
+        outputs = []
+        step_lengths = (cu[1:] - cu[:-1]).tolist()
+        if any(
+            ssm_backends[0].cursors[req] + length > ssm_backends[0].capacity
+            for req, length in zip(reqs.tolist(), step_lengths)
+        ):
+            overflow = [
+                req
+                for req, length in zip(reqs.tolist(), step_lengths)
+                if ssm_backends[0].cursors[req] + length > ssm_backends[0].capacity
+            ]
+            overflow_reqs = torch.tensor(overflow, dtype=torch.int32, device="cuda")
+            for ssm_backend in ssm_backends:
+                ssm_backend.fold_accepted_prefix(overflow_reqs)
+        for ssm_backend in ssm_backends:
+            outputs.append(replay_layer(ssm_backend, 0, q, k, v, a, b, alog, alog, reqs, cu, run_config=config))
+            accept_replay_window(ssm_backend, reqs, accepted, cu)
+        if dtype == torch.float32:
+            torch.testing.assert_close(outputs[0], outputs[1], atol=2e-6, rtol=2e-5)
+        else:
+            torch.testing.assert_close(outputs[0], outputs[1], atol=5e-4, rtol=0.01)
+            error = torch.linalg.vector_norm(outputs[0].float() - outputs[1].float())
+            scale = torch.linalg.vector_norm(outputs[0].float())
+            assert error < scale * (torch.finfo(dtype).eps / 2)
+    for ssm_backend in ssm_backends:
+        ssm_backend.fold_accepted_prefix(reqs)
+    torch.testing.assert_close(ssm_backends[0].ssm_state, ssm_backends[1].ssm_state, atol=0, rtol=0)
+
+
+def test_bf16_commit_rounds_before_the_next_token():
+    # 前缀写满后先压回 SSM，下一 token 从长度 0 重写。两次 commit 必须得到同一块 BF16 状态。
+    state = torch.full((1, 2, 1, 32, 64), 0.123, device="cuda", dtype=torch.bfloat16)
+    ssm_backends = [ReplaySSMExecutor(state.clone(), 16, 1, torch.float32) for _ in range(2)]
+    reqs = torch.tensor([0], device="cuda", dtype=torch.int32)
+    for ssm_backend in ssm_backends:
+        ssm_backend.raw_keys.zero_()
+        ssm_backend.raw_values.zero_()
+        ssm_backend.gates.fill_(-0.01)
+        ssm_backend.betas.zero_()
+        ssm_backend.cursors[0] = 16
+        ssm_backend.fold_accepted_prefix(reqs)
+    q = torch.ones((1, 1, 32), device="cuda")
+    k = torch.zeros_like(q)
+    v = torch.zeros((1, 1, 64), device="cuda")
+    a = torch.full((1, 1), -3.0, device="cuda")
+    b = torch.zeros_like(a)
+    alog = torch.zeros(1, device="cuda")
+    bias = torch.zeros_like(alog)
+    outputs = []
+    cu = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+    for ssm_backend in ssm_backends:
+        assert ssm_backend.cursors[0].item() == 0
+        outputs.append(replay_layer(ssm_backend, 0, q, k, v, a, b, alog, bias, reqs, cu))
+    torch.testing.assert_close(outputs[0], outputs[1], atol=1e-7, rtol=1e-6)
+    torch.testing.assert_close(ssm_backends[0].ssm_state, ssm_backends[1].ssm_state, atol=0, rtol=0)
+
+
+def test_large_bf16_state_precompute_matches_inline():
+    # 输出投影用 tf32x3。重建缓存的 k/d 在 bf16 激活下是 fp16，输出允许一个 fp16 单位。
+    # 折回 SSM 仍从原始 k/v 在 fp32 中计算，两条路径的 checkpoint 必须一致。
+    heads = 16
+    config = {"BV": 32, "num_warps": 1, "num_stages": 1}
+    reqs = torch.tensor([0], dtype=torch.int32, device="cuda")
+    alog = torch.zeros(heads, device="cuda")
+    bias = torch.zeros_like(alog)
+
+    def check(capacity, width, steps):
+        torch.manual_seed(7)
+        state = (torch.randn((1, 2, heads, 128, 128), device="cuda") * 10).bfloat16()
+        backends = [
+            ReplaySSMExecutor(
+                state.clone(),
+                capacity,
+                width,
+                torch.bfloat16,
+                num_key_heads=heads,
+                compute_mode=mode,
+            )
+            for mode in ("inline", "precompute")
+        ]
+        cu = torch.tensor([0, width], dtype=torch.int32, device="cuda")
+        accepted = torch.tensor([width - 1], dtype=torch.int32, device="cuda")
+        for step in range(steps):
+            torch.manual_seed(100 + step)
+            q = torch.randn((width, heads, 128), device="cuda", dtype=torch.bfloat16)
+            k = torch.randn_like(q)
+            v = torch.randn((width, heads, 128), device="cuda", dtype=torch.bfloat16)
+            a = torch.randn((width, heads), device="cuda", dtype=torch.bfloat16) - 1
+            b = torch.randn_like(a)
+            outputs = [
+                replay_layer(backend, 0, q, k, v, a, b, alog, bias, reqs, cu, run_config=config) for backend in backends
+            ]
+            # 重建用的 k/d 在 bf16 激活下是 fp16。两条路径在存入前的舍入可以差一个 fp16 单位。
+            torch.testing.assert_close(outputs[0], outputs[1], atol=5e-4, rtol=5e-4)
+            for backend in backends:
+                accept_replay_window(backend, reqs, accepted, cu)
+                overflow = reqs[backend.cursors[reqs.long()] + backend.verify_width > backend.capacity]
+                if overflow.numel():
+                    backend.fold_accepted_prefix(overflow)
+        for backend in backends:
+            backend.fold_accepted_prefix(reqs)
+        torch.testing.assert_close(backends[0].ssm_state, backends[1].ssm_state, atol=0, rtol=0)
+
+    check(4, 1, 16)
+    check(16, 2, 4)
+
+
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("capacity", [4, 8])
+def test_overflow_folds_inside_replay_for_gdn_and_kda(kda, dtype, capacity):
+    # 放不下时，GDN 和 KDA 都在 replay kernel 内折回。cursor 等两层都算完才改。
+    torch.manual_seed(11 + capacity + int(kda))
+    hv, kh, dim = 2, 2, 32
+    state = torch.randn(2, 2, hv, dim, dim, device="cuda", dtype=dtype) * 0.05
+    config = {"BV": 32, "num_warps": 1, "num_stages": 1}
+    backend = ReplaySSMExecutor(state, capacity, 1, dtype, num_key_heads=kh, kda=kda)
+    twin = ReplaySSMExecutor(state.clone(), capacity, 1, dtype, num_key_heads=kh, kda=kda)
+    assert backend.gates.shape[-1] == (dim if kda else capacity)
+    reqs = torch.tensor([0], device="cuda", dtype=torch.int32)
+    cu = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+    alog = torch.zeros(hv, device="cuda")
+    bias = torch.zeros(hv * dim if kda else hv, device="cuda")
+    for step in range(capacity + 1):
+        q = torch.randn(1, kh, dim, device="cuda", dtype=dtype)
+        k = torch.randn_like(q)
+        v = torch.randn(1, hv, dim, device="cuda", dtype=dtype)
+        a = (torch.randn(1, hv * dim if kda else hv, device="cuda", dtype=dtype) - 1).contiguous()
+        b = torch.randn(1, hv, device="cuda", dtype=dtype)
+        if step == capacity:
+            fold_prefix(twin, reqs, config)
+            twin.cursors.index_fill_(0, reqs.long(), 0)
+            assert int(backend.cursors[0]) == capacity
+        outs, twin_outs = [], []
+        for layer in range(2):
+            outs.append(replay_layer(backend, layer, q, k, v, a, b, alog, bias, reqs, cu, run_config=config))
+            twin_outs.append(replay_layer(twin, layer, q, k, v, a, b, alog, bias, reqs, cu, run_config=config))
+            if step == capacity:
+                assert int(backend.cursors[0]) == capacity
+        for actual, expected in zip(outs, twin_outs):
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        accept_replay_window(backend, reqs)
+        accept_replay_window(twin, reqs)
+    assert int(backend.cursors[0]) == 1
+    assert int(twin.cursors[0]) == 1
+    # bf16 两条路径都先舍入到同一状态。fp32 的独立 kernel 与层内 kernel 归约顺序可差几个 ulp。
+    state_atol = 0 if dtype == torch.bfloat16 else 1e-6
+    torch.testing.assert_close(backend.ssm_state, twin.ssm_state, atol=state_atol, rtol=0)
+
+
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+@pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
+@pytest.mark.parametrize("bv", [32, 128])
+@pytest.mark.parametrize("width", [1, 3])
+def test_overflow_preserves_shared_keys_across_heads_and_graph(kda, compute_mode, bv, width):
+    torch.manual_seed(123)
+    batch, kh, hv, dim, capacity = 64, 4, 16, 128, 4
+    dtype = torch.bfloat16
+    initial = torch.randn(2, batch + 1, hv, dim, dim, device="cuda", dtype=dtype) * 0.05
+    config = {"BV": bv, "num_warps": 4 if bv == 128 else 1, "num_stages": 1}
+    backend, reference_backend = [
+        ReplaySSMExecutor(
+            initial.clone(),
+            capacity,
+            width,
+            dtype,
+            num_key_heads=kh,
+            kda=kda,
+            compute_mode=compute_mode,
+        )
+        for _ in range(2)
+    ]
+    reqs = torch.arange(batch, device="cuda", dtype=torch.int32)
+    reqs[-2:] = batch
+    windows = (torch.arange(reqs.numel(), device="cuda", dtype=torch.int32) % width) + 1
+    windows[0] = 0
+    cu = torch.cat((windows.new_zeros(1), windows.cumsum(0).int()))
+    tokens = int(cu[-1])
+    q = torch.randn(tokens, kh, dim, device="cuda", dtype=dtype)
+    k = torch.randn_like(q)
+    v = torch.randn(tokens, hv, dim, device="cuda", dtype=dtype)
+    a = torch.full((tokens, hv * dim if kda else hv), -2.0, device="cuda", dtype=dtype)
+    b = torch.randn(tokens, hv, device="cuda", dtype=dtype)
+    alog = torch.zeros(hv, device="cuda")
+    bias = torch.zeros(hv * dim if kda else hv, device="cuda")
+
+    def step(owner):
+        outputs = [
+            replay_layer(owner, layer, q, k, v, a, b, alog, bias, reqs, cu, run_config=config) for layer in range(2)
+        ]
+        accept_replay_window(owner, reqs, cu_seqlens=cu)
+        return outputs
+
+    step(backend)
+    backend.ssm_state.copy_(initial)
+    backend.cursors.zero_()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = step(backend)
+    backend.ssm_state.copy_(initial)
+    backend.cursors.zero_()
+    for _ in range(2 * capacity + 1):
+        for tensor in (q, k, v, b):
+            tensor.normal_()
+        lengths = reference_backend.cursors[reqs[:-2].long()]
+        overflow = reqs[:-2][(windows[:-2] > 0) & (lengths + windows[:-2] > capacity)]
+        if overflow.numel():
+            fold_prefix(state=reference_backend, reqs=overflow, run_config=config)
+            reference_backend.cursors.index_fill_(0, overflow.long(), 0)
+        expected = step(reference_backend)
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(backend.ssm_state, reference_backend.ssm_state, rtol=0, atol=0)
+        for left, right in zip(actual, expected):
+            torch.testing.assert_close(left, right, rtol=torch.finfo(dtype).eps, atol=2e-5)
+        assert torch.equal(backend.cursors, reference_backend.cursors)
+    torch.testing.assert_close(backend.ssm_state[:, 0], initial[:, 0], rtol=0, atol=0)
+    torch.testing.assert_close(backend.ssm_state[:, batch], initial[:, batch], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+def test_empty_window_keeps_cursor_for_gdn_and_kda(kda):
+    state = torch.randn(1, 3, 2, 32, 32, device="cuda")
+    backend = ReplaySSMExecutor(state, 8, 4, torch.float32, num_key_heads=2, kda=kda)
+    backend.cursors[0] = 3
+    reqs = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
+    cu = torch.tensor([0, 0, 0], device="cuda", dtype=torch.int32)
+    q = torch.randn(1, 2, 32, device="cuda")
+    k = torch.randn_like(q)
+    v = torch.randn(1, 2, 32, device="cuda")
+    a = torch.zeros(1, 2 * 32 if kda else 2, device="cuda")
+    b = torch.zeros(1, 2, device="cuda")
+    bias = torch.zeros(2 * 32 if kda else 2, device="cuda")
+    replay_layer(
+        backend,
+        0,
+        q,
+        k,
+        v,
+        a,
+        b,
+        bias,
+        bias,
+        reqs,
+        cu,
+        run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
+    )
+    accepted = torch.tensor([-1, -1, -1], device="cuda", dtype=torch.int32)
+    accept_replay_window(backend, reqs, accepted, cu)
+    assert backend.cursors.tolist() == [3, 0, 0]
+
+
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
+@pytest.mark.parametrize("capture_metadata", [False, True])
+def test_dynamic_verify_lengths_fill_history_before_folding(kda, dtype, compute_mode, capture_metadata):
+    torch.manual_seed(31)
+    state = (torch.randn(2, 4, 4, 128, 128, device="cuda") * 0.01).to(dtype)
+    ssm_backend = ReplaySSMExecutor(
+        state,
+        8,
+        4,
+        dtype,
+        num_key_heads=2,
+        kda=kda,
+        compute_mode=compute_mode,
+    )
+    expected = state.float().clone()
+    pending = [0, 0]
+    reqs = torch.full((3,), 3, dtype=torch.int32, device="cuda")
+    cu = torch.tensor([0, 4, 8, 8], dtype=torch.int32, device="cuda")
+    accepted = torch.zeros(4, dtype=torch.int32, device="cuda")
+    q = torch.randn(8, 2, 128, dtype=dtype, device="cuda")
+    k = torch.randn_like(q)
+    v = torch.randn(8, 4, 128, dtype=dtype, device="cuda")
+    a = torch.full((8, 4 * 128 if kda else 4), -3.0, dtype=dtype, device="cuda")
+    b = torch.randn(8, 4, dtype=dtype, device="cuda")
+    alog = torch.zeros(4, device="cuda")
+    bias = torch.zeros(4 * 128 if kda else 4, device="cuda")
+
+    def forward():
+        return [
+            replay_layer(
+                ssm_backend,
+                layer,
+                q,
+                k,
+                v,
+                a,
+                b,
+                alog,
+                bias,
+                reqs,
+                cu,
+                run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
+            )
+            for layer in range(2)
+        ]
+
+    def step():
+        positions = ssm_backend.cursors.index_select(0, reqs.long())
+        out = forward()
+        accept_replay_window(ssm_backend, reqs, accepted, cu)
+        return positions, out
+
+    step()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    positions = torch.zeros_like(reqs)
+    with torch.cuda.graph(graph):
+        if capture_metadata:
+            positions, outputs = step()
+        else:
+            outputs = forward()
+    lengths = [(3, 4), (2, 1), (3, 2), (1, 4), (4, 3), (0, 2), (2, 0), (4, 4)]
+    for iteration in range(24):
+        ids = [0, 1] if iteration < 3 or iteration % 2 == 0 else [1, 0]
+        widths = lengths[iteration % len(lengths)]
+        counts = (
+            list(widths) if iteration < 3 else [min(width, 1 + (iteration + i) % 4) for i, width in enumerate(widths)]
+        )
+        reqs.copy_(reqs.new_tensor(ids + [3]))
+        cu.copy_(cu.new_tensor([0, widths[0], sum(widths), 8]))
+        accepted.fill_(-1)
+        for req, count in zip(ids, counts):
+            accepted[req] = count - 1
+        for tensor in (q, k, v, b):
+            tensor.normal_()
+        before = state.clone()
+        for req, width in zip(ids, widths):
+            if pending[req] + width > 8:
+                ssm_backend.fold_accepted_prefix(torch.tensor([req], dtype=torch.int32, device="cuda"))
+                expected[:, req] = expected[:, req].to(dtype).float()
+                pending[req] = 0
+        old_cursors = [pending[req] for req in ids] + [0]
+        if not capture_metadata:
+            positions.copy_(ssm_backend.cursors.index_select(0, reqs.long()))
+        graph.replay()
+        if not capture_metadata:
+            accept_replay_window(ssm_backend, reqs, accepted, cu)
+        assert positions.tolist() == old_cursors
+        for seq, (req, width, count) in enumerate(zip(ids, widths, counts)):
+            for layer in range(2):
+                current = expected[layer, req].clone()
+                for j in range(width):
+                    t = (0 if seq == 0 else widths[0]) + j
+                    out, current = reference(q[t], k[t], v[t], a[t], b[t], alog, bias, current, kda=kda)
+                    torch.testing.assert_close(outputs[layer][t].float(), out, atol=0.006, rtol=0.02)
+                    if j + 1 == count:
+                        expected[layer, req].copy_(current)
+            pending[req] += count
+        assert ssm_backend.cursors.tolist() == pending + [0, 0]
+        for output in outputs:
+            assert torch.count_nonzero(output[sum(widths) :]).item() == 0
+        torch.testing.assert_close(state[:, 2:], before[:, 2:], atol=0, rtol=0)
+        if iteration == 2:
+            assert pending[0] == 8
+            torch.testing.assert_close(state[:, 0], before[:, 0], atol=0, rtol=0)
+    ssm_backend.fold_accepted_prefix(reqs[:2])
+    torch.testing.assert_close(
+        state.float(),
+        expected.to(dtype).float(),
+        atol=2e-5 if dtype == torch.float32 else 0.002,
+        rtol=2e-4 if dtype == torch.float32 else torch.finfo(dtype).eps,
+    )
+
+
+def test_snapshot_without_history_copies_active_state():
+    state = torch.randn((2, 3, 2, 32, 64), device="cuda", dtype=torch.bfloat16)
+    ssm_backend = ReplaySSMExecutor(state, 4, 3)
+    snapshot = ssm_snapshot(ssm_backend, 1)
+    torch.testing.assert_close(snapshot, state[:, 1], rtol=0, atol=0)
+    assert ssm_backend.cursors[1].item() == 0
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("run_config", get_configs(), ids=lambda c: f"bv{c['BV']}-w{c['num_warps']}-s{c['num_stages']}")
+def test_autotune_candidates_match_recurrence(dtype, run_config):
+    test_replay_acceptance_flush_and_graph(3, (32, 64), 8, dtype, run_config)
+
+
+@pytest.mark.parametrize("save_big", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_checkpoint_restores_pending_history_and_accepted_conv(runtime_start_args, save_big, dtype):
+    from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig
+    from unit_tests.common.test_linear_state import make_state
+
+    torch.manual_seed(42)
+    state_rtol = 2e-5 if dtype == torch.float32 else torch.finfo(dtype).eps
+    config = ConvSSMStateConfig(
+        logical_layer_ids=(0, 1),
+        global_k_heads=2,
+        global_v_heads=2,
+        key_dim=32,
+        value_dim=64,
+        conv_width=3,
+        conv_dtype=torch.bfloat16,
+        ssm_dtype=dtype,
+    )
+    state, _, layout = make_state(mode="replay", config=config)
+    state.initialize_page_pools(big_page_capacity=2, small_page_capacity=2)
+    state.mtp_state_index[1] = 1
+    state.conv_state.normal_()
+    state.ssm_state.zero_()
+    state.raw_keys.normal_()
+    state.raw_values.normal_()
+    state.gates.uniform_(-0.1, -0.01)
+    state.betas.uniform_(0.1, 0.9)
+    active_before = state.ssm_state[:, 1].clone()
+    conv_expected = state.conv_state[:, 1, :, :3].clone()
+    block = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
+    kind = "big" if save_big else "small"
+    pool = state.big_pages_pool if save_big else state.small_pages_pool
+    for count in (2, 1):
+        state.cursors[1] = count
+        expected = active_before.float().clone()
+        for i in range(count):
+            key = state.raw_keys[:, 1, :, i].float()
+            key /= (key.square().sum(-1, keepdim=True) + 1e-6).sqrt()
+            expected *= state.gates[:, 1, :, i].exp()[..., None, None]
+            delta = state.betas[:, 1, :, i, None] * (
+                state.raw_values[:, 1, :, i].float() - torch.einsum("lhkv,lhk->lhv", expected, key)
+            )
+            expected += key[..., None] * delta[..., None, :]
+        materialized = ssm_snapshot(state, 1)
+        torch.testing.assert_close(materialized, expected.to(dtype), rtol=state_rtol, atol=2e-5)
+        state.save_bounded_att_runtime_to_pages([1], [8], kind, [0])
+        state.write_to_pd_page(1, block, 0, 8, layout)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(pool.ssm_state[0], active_before.cpu(), rtol=0, atol=0)
+        torch.testing.assert_close(pool.conv_state[0], conv_expected.cpu(), rtol=0, atol=0)
+        torch.testing.assert_close(state.ssm_state[:, 1], active_before, rtol=0, atol=0)
+        assert state.cursors[1].item() == count
+        for restore in (
+            lambda: state.restore_bounded_att_runtime_from_pages([2], [8], kind, [0]),
+            lambda: state.read_from_pd_page(block, 2, 0, 8, layout),
+        ):
+            state.cursors[2] = 3
+            state.mtp_state_index[2] = 2
+            restore()
+            assert state.cursors[2].item() == state.mtp_state_index[2].item() == 0
+            torch.testing.assert_close(state.ssm_state[:, 2], active_before, rtol=0, atol=0)
+            torch.testing.assert_close(state.conv_state[:, 2, :, :3], conv_expected, rtol=0, atol=0)
+    state.reset_bounded_att_state([2])
+    assert not state.ssm_state[:, 2].any()
+    assert not state.conv_state[:, 2].any()
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("capacity,width", [(4, 1), (4, 3), (8, 4), (16, 5), (32, 4), (64, 4)])
+@pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
+@pytest.mark.parametrize("gate_lower_bound,gate_shift", [(-5.0, 0), (-2.5, -6)])
+@pytest.mark.parametrize("activation_dtype", [torch.float32, torch.bfloat16])
+def test_kda_replay_reference_fold_and_graph(
+    dtype, capacity, width, compute_mode, gate_lower_bound, gate_shift, activation_dtype
+):
+    test_replay_acceptance_flush_and_graph(
+        width,
+        (128, 128),
+        capacity,
+        dtype,
+        run_config={"BV": 32, "num_warps": 2, "num_stages": 1},
+        compute_mode=compute_mode,
+        gate_shift=gate_shift,
+        activation_dtype=activation_dtype,
+        head_geometry=(2, 2),
+        kda=True,
+        gate_lower_bound=gate_lower_bound,
+    )
+
+
+@pytest.mark.parametrize("config", get_configs())
+@pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
+def test_kda_tuning_candidates_match_reference(config, compute_mode):
+    test_replay_acceptance_flush_and_graph(
+        3,
+        (128, 128),
+        4,
+        torch.bfloat16,
+        run_config=config,
+        compute_mode=compute_mode,
+        head_geometry=(2, 2),
+        kda=True,
+        gate_shift=-3,
+    )
+
+
+@pytest.mark.parametrize("kda", [False, True])
+@pytest.mark.parametrize(
+    "bucket,live,folding,width,separate",
+    [
+        (12, 12, 12, 4, True),
+        (13, 13, 13, 4, False),
+        (255, 255, 127, 4, True),
+        (256, 256, 128, 4, False),
+        (257, 257, 128, 4, False),
+        (256, 256, 128, 3, True),
+        (256, 12, 12, 4, True),
+        (256, 13, 4, 4, True),
+    ],
+)
+def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, separate, kda):
+    torch.manual_seed(72)
+    initial = torch.randn(1, live + 1, 1, 32, 32, device="cuda") * 0.01
+    backend = ReplaySSMExecutor(initial.clone(), 8, 4, torch.float32, kda=kda)
+    backend.tile_sync_mark = torch.zeros((bucket, backend.num_key_heads), dtype=torch.int32, device="cuda")
+    reqs = torch.cat(
+        (
+            torch.arange(live, device="cuda", dtype=torch.int32),
+            torch.full((bucket - live,), live, device="cuda", dtype=torch.int32),
+        )
+    )
+    indices = torch.zeros(live + 1, device="cuda", dtype=torch.int32)
+    expected = initial[0, :live].clone()
+    alog = torch.zeros(1, device="cuda")
+    bias = torch.zeros(32 if kda else 1, device="cuda")
+    for step, query_width in enumerate((4, 4, width)):
+        if step == 2:
+            backend.cursors.index_fill_(0, reqs[folding:live].long(), 0)
+            expected[folding:] = initial[0, folding:live]
+        cu = (torch.arange(bucket + 1, device="cuda", dtype=torch.int32) * query_width).clamp_max(live * query_width)
+        q = torch.randn(live, query_width, 1, 32, device="cuda") * 0.2
+        k, v = torch.randn_like(q), torch.randn_like(q)
+        a = torch.full((live, query_width, 32 if kda else 1), -2.0, device="cuda")
+        b = torch.randn(live, query_width, 1, device="cuda")
+        if (backend.cursors[:live] + query_width > backend.capacity).any():
+            backend.fold_accepted_prefix(reqs[:live])
+        actual = replay_layer(
+            backend,
+            0,
+            q.reshape(-1, 1, 32),
+            k.reshape(-1, 1, 32),
+            v.reshape(-1, 1, 32),
+            a.flatten(0, 1),
+            b.flatten(0, 1),
+            alog,
+            bias,
+            reqs,
+            cu,
+            run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
+        ).reshape(live, query_width, 1, 32)
+        for token in range(query_width):
+            output, expected = reference(
+                q[:, token],
+                k[:, token],
+                v[:, token],
+                a[:, token],
+                b[:, token],
+                alog,
+                bias.expand(live, 1, 32) if kda else bias,
+                expected,
+                kda=kda,
+            )
+            torch.testing.assert_close(actual[:, token], output, atol=3e-4, rtol=3e-4)
+        lengths = torch.full((live,), query_width, device="cuda", dtype=torch.int32)
+        advance_cursor(backend, reqs[:live], cu[: live + 1])
+        commit_ssm_prefix(indices, reqs[:live], lengths, lengths, backend.cursors)
+    backend.fold_accepted_prefix(reqs[:live])
+    torch.testing.assert_close(backend.ssm_state[0, :live], expected, atol=3e-4, rtol=3e-4)
+    assert torch.equal(backend.ssm_state[0, live], initial[0, live])
+
+
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+@pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
+def test_mtp_commit_keeps_folded_prefix_length(kda, compute_mode):
+    # 最后一层按整窗全接受推进 cursor。放不下时 cursor 变成窗口长度，而不是旧 cursor 加窗口。
+    torch.manual_seed(19 + int(kda))
+    hv, kh, dim = 2, 2, 32
+    dtype = torch.bfloat16
+    state = torch.randn(1, 2, hv, dim, dim, device="cuda", dtype=dtype) * 0.05
+    backend = ReplaySSMExecutor(
+        state,
+        4,
+        2,
+        dtype,
+        num_key_heads=kh,
+        kda=kda,
+        compute_mode=compute_mode,
+    )
+    reqs = torch.tensor([0], device="cuda", dtype=torch.int32)
+    indices = torch.zeros(2, device="cuda", dtype=torch.int32)
+    alog = torch.zeros(hv, device="cuda")
+    bias = torch.zeros(hv * dim if kda else hv, device="cuda")
+    cu = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
+    for step in range(3):
+        q = torch.randn(2, kh, dim, device="cuda", dtype=dtype)
+        k = torch.randn_like(q)
+        v = torch.randn(2, hv, dim, device="cuda", dtype=dtype)
+        a = torch.full((2, hv * dim if kda else hv), -2.0, device="cuda", dtype=dtype)
+        b = torch.randn(2, hv, device="cuda", dtype=dtype)
+        replay_layer(
+            backend,
+            0,
+            q,
+            k,
+            v,
+            a,
+            b,
+            alog,
+            bias,
+            reqs,
+            cu,
+            run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
+        )
+        lengths = torch.tensor([2], device="cuda", dtype=torch.int32)
+        advance_cursor(backend, reqs, cu)
+        commit_ssm_prefix(indices, reqs, lengths, lengths, backend.cursors)
+        if step < 2:
+            assert int(backend.cursors[0]) == 2 * (step + 1)
+        else:
+            assert int(backend.cursors[0]) == 2
+    assert torch.isfinite(backend.ssm_state).all()

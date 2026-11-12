@@ -8,8 +8,9 @@ from typing import Any, List
 
 import torch
 
-from ..utils import deepcopy_result
 from lightllm.common.attention_state.types import PageKind, StateTransferLayout, TransferRegion
+
+from ..utils import deepcopy_result
 
 
 class CoreInterface(ABC):
@@ -102,8 +103,12 @@ class CoreInterface(ABC):
         self,
         req_indices: torch.Tensor,
         accepted_steps: torch.Tensor,
+        req_verify_width: torch.Tensor,
     ) -> None:
-        """两个输入均为 CUDA Tensor；int32 接受步数包含基准输入步，候选区与游标由实现管理。"""
+        """两个输入均为 CUDA Tensor；int32 接受步数包含基准输入步，候选区与游标由实现管理。
+
+        req_verify_width 与请求逐行对齐，是每个请求这次送去验证的 token 数。Replay 用它从全接受后的 cursor 上剪掉未接受尾部。
+        """
         ...
 
 

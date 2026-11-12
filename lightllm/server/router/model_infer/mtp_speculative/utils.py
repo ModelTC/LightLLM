@@ -34,10 +34,30 @@ def verify_mtp_tokens(backend: ModeBackend, next_token_ids: torch.Tensor, model_
         new_next_token_ids=next_token_ids,
         b_req_idx=commit.request_indices,
     )
+    # 最后一层已经按这个窗口全接受推进了 cursor。这里剪掉没通过验证的尾部。
     backend.model.att_state_manager.commit_bounded_att_state(
-        commit.request_indices[starts.long()], accept_lengths, role=commit.role
+        commit.request_indices[starts.long()],
+        accept_lengths,
+        role=commit.role,
+        req_verify_width=_req_verify_width(starts, commit.request_indices.shape[0]),
     )
     return accept_lengths, accepted_index
+
+
+def _req_verify_width(starts: torch.Tensor, num_verify_tokens: int) -> torch.Tensor:
+    """每个请求这次送去验证的 token 数，与 b_req_mtp_start_loc 逐行对齐。
+
+    num_verify_tokens 是验证 batch 的 token 数，用作最后一个请求的结束位置。
+    TODO: 并进 MTP verify 的同一个算子，直接用 b_req_mtp_start_loc 裁剪 cursor，省掉这次单独的宽度计算。
+    """
+
+    req_verify_width = torch.empty_like(starts)
+    if starts.numel() == 0:
+        return req_verify_width
+    if starts.numel() > 1:
+        req_verify_width[:-1].copy_(starts[1:] - starts[:-1])
+    req_verify_width[-1] = num_verify_tokens - starts[-1]
+    return req_verify_width
 
 
 def scatter_mtp_next_tokens(

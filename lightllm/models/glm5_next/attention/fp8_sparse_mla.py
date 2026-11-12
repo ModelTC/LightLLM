@@ -2,6 +2,8 @@ import dataclasses
 
 import torch
 
+from lightllm.common.attention.api import AttentionPhase
+from lightllm.common.attention.api.execution import BackendResources
 from lightllm.common.attention.api.inputs import SparseMLAPrefillInputs
 from lightllm.common.attention.backends.sparse_mla.flashmla.fp8 import (
     NsaFlashMlaFp8SparseAttBackend,
@@ -31,6 +33,25 @@ class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
         super().__init__(model)
         self.prefill_graph_enabled = model.args.enable_prefill_cudagraph
         self.prefill_token_capacity = model.batch_max_tokens or 0
+        self.decode_only = model.args.run_mode == "decode"
+
+    def resource_requirements(self, capacity, *, capture):
+        from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import KV_GATHER_CHUNK_SIZE
+
+        if capacity.phase is not AttentionPhase.PREFILL:
+            return super().resource_requirements(capacity, capture=capture)
+        tokens = max(1, self.prefill_token_capacity, capacity.token_num)
+        kv_tokens = tokens if self.decode_only else capacity.batch_size * capacity.max_kv_seq_len + tokens
+        gather_tokens = min(KV_GATHER_CHUNK_SIZE, kv_tokens)
+        topk = (self.network_config["index_topk"] + 3 + 127) // 128 * 128
+        return BackendResources(
+            workspace=(
+                ("glm_gathered_kv", gather_tokens * 512, torch.bfloat16),
+                ("glm_chunk_indices", tokens * topk, torch.int32),
+                ("glm_chunk_lengths", tokens, torch.int32),
+                ("glm_cu_q", tokens + 1, torch.int32),
+            )
+        )
 
     def get_smallq_workspace(self, context, q):
         from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
@@ -60,34 +81,35 @@ class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
         }
 
     def get_generic_prefill_workspace(self, context, q, packed_kv, topk_indices):
-        from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
-            allocate_generic_prefill_workspace,
-        )
+        from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import KV_GATHER_CHUNK_SIZE
 
         rows, columns = topk_indices.shape
-        buffers = context.workspace.objects.get("glm_generic")
-        if (
-            buffers is None
-            or buffers["chunk_indices"].shape[0] < rows
-            or buffers["chunk_indices"].shape[1] != columns
-            or buffers["chunk_indices"].dtype != topk_indices.dtype
-            or buffers["prefill_row_table"].numel() < packed_kv.shape[0]
-        ):
-            buffers = allocate_generic_prefill_workspace(
-                q, packed_kv, topk_indices, query_capacity=max(self.prefill_token_capacity, rows)
-            )
-            context.workspace.objects["glm_generic"] = buffers
-        binding = (columns, topk_indices.dtype, packed_kv.shape[0], id(buffers))
+        workspace = context.workspace
+        tokens = max(self.prefill_token_capacity, rows)
+        binding = (rows, columns, topk_indices.dtype, packed_kv.shape[0])
         if context.generic_workspace is None or context.generic_binding != binding:
-            buffers["prefill_row_table"].fill_(-1)
+            row_table = workspace.get("glm_prefill_rows", packed_kv.shape[0], torch.int32)[: packed_kv.shape[0]]
+            row_table.fill_(-1)
+            cu_q = workspace.get("glm_cu_q", tokens + 1, torch.int32)[: rows + 1]
+            torch.arange(rows + 1, device=q.device, dtype=torch.int32, out=cu_q)
             context.generic_workspace = {
-                "prefill_row_table": buffers["prefill_row_table"][: packed_kv.shape[0]],
-                "chunk_indices": buffers["chunk_indices"][:rows],
-                "chunk_lengths": buffers["chunk_lengths"][:rows],
-                "cu_seqlens_q": buffers["cu_seqlens_q"][: rows + 1],
+                "prefill_row_table": row_table,
+                "chunk_indices": workspace.get("glm_chunk_indices", tokens * columns, topk_indices.dtype)[
+                    : rows * columns
+                ].view(rows, columns),
+                "chunk_lengths": workspace.get("glm_chunk_lengths", tokens, torch.int32)[:rows],
+                "cu_seqlens_q": cu_q,
                 "row_table_built": False,
             }
             context.generic_binding = binding
+        gather_tokens = min(KV_GATHER_CHUNK_SIZE, context.ragged_mem_index.numel())
+        if self.decode_only:
+            gather_tokens = min(gather_tokens, max(1, self.prefill_token_capacity, rows))
+        context.generic_workspace["gathered_kv"] = workspace.get(
+            "glm_gathered_kv", max(1, gather_tokens) * 512, q.dtype
+        )[: gather_tokens * 512].view(gather_tokens, 1, 512)
+        context.generic_workspace["prefill_row_table"].fill_(-1)
+        context.generic_workspace["row_table_built"] = False
         return context.generic_workspace
 
     def _allocate_prefill_context(self, capacity, capture, workspace):
@@ -116,6 +138,7 @@ class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
                 context.ks,
                 inputs.topk_indices,
                 layer.params.softmax_scale,
+                generic_workspace=self.get_generic_prefill_workspace(context, q, kv, inputs.topk_indices),
             )
         from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
             can_use_direct_smallq,
@@ -135,9 +158,7 @@ class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
         workspace = self.get_smallq_workspace(context, q) if selected_eligible else None
         generic_workspace = None
         if direct_workspace is None and (not selected_eligible):
-            graph_guard = context.capture or self.prefill_graph_enabled
-            if not graph_guard and (not torch.cuda.is_current_stream_capturing()):
-                generic_workspace = self.get_generic_prefill_workspace(context, q, kv, inputs.topk_indices)
+            generic_workspace = self.get_generic_prefill_workspace(context, q, kv, inputs.topk_indices)
         return context_attention_fwd_fp8(
             q,
             kv,

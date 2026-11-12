@@ -23,6 +23,20 @@ def single_rank_environment(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
+def runtime_start_args(monkeypatch: pytest.MonkeyPatch):
+    import json
+    from dataclasses import asdict
+
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.utils.envs_utils import get_env_start_args
+
+    monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(asdict(StartArgs())))
+    get_env_start_args.cache_clear()
+    yield
+    get_env_start_args.cache_clear()
+
+
+@pytest.fixture
 def kv_allocator_environment(monkeypatch: pytest.MonkeyPatch):
     """Provide a service identity and reclaim the allocator's real shared counters."""
     from lightllm.common.attention_state import AttentionStateManager
