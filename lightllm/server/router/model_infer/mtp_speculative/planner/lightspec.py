@@ -104,6 +104,10 @@ class LightSpecPlanner(BaseMtpPlanner):
         max_batch_size = min(origin_batch_size, available_batch_size)
         all_reqs_have_proposals = req_num_with_proposals == req_num
 
+        if not all_reqs_have_proposals:
+            self.progress_ema_by_config.clear()
+            self.prefix_survival_by_depth = [None] * self.max_draft_step
+
         if not self.progress_ema_by_config:
             # Costs come from CUDA Graph capture, while progress requires one
             # real verification batch. Keep the available proposal intact until

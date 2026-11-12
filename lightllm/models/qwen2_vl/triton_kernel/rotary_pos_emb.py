@@ -1,4 +1,3 @@
-import math
 import torch
 import triton
 import triton.language as tl
@@ -13,6 +12,9 @@ def rotary_kernel(
     stride_l,
     stride_h,
     stride_d,
+    out_stride_l,
+    out_stride_h,
+    out_stride_d,
     stride_cos_l,
     stride_cos_d,
     stride_sin_l,
@@ -53,7 +55,7 @@ def rotary_kernel(
 
             y = x * cos + rotated * sin
 
-            out_ptr_ = out_ptr + base + d * stride_d
+            out_ptr_ = out_ptr + pid_l * out_stride_l + pid_h * out_stride_h + d * out_stride_d
             tl.store(out_ptr_, y, mask=mask)
 
 
@@ -89,6 +91,9 @@ def apply_rotary_pos_emb_triton(
         stride_l=x.stride(0),
         stride_h=x.stride(1),
         stride_d=x.stride(2),
+        out_stride_l=y.stride(0),
+        out_stride_h=y.stride(1),
+        out_stride_d=y.stride(2),
         stride_cos_l=cos.stride(0),
         stride_cos_d=cos.stride(1),
         stride_sin_l=sin.stride(0),

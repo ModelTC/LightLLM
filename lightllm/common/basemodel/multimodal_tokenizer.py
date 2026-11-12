@@ -40,6 +40,9 @@ class BaseMultiModalTokenizer(ABC):
             return obj_dict[name]
         return getattr(self.tokenizer, name)
 
+    def count_prompt_tokens(self, text_tokens, image_tokens, image_count, audio_tokens, audio_count):
+        return text_tokens + image_tokens + image_count + audio_tokens + audio_count
+
     @abstractmethod
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
         pass

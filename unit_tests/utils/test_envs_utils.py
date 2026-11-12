@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from lightllm.utils import envs_utils
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank,
@@ -177,3 +179,42 @@ def test_deepep_buffer_capacity_keeps_explicit_environment_override(monkeypatch)
 
     get_deepep_num_max_dispatch_tokens_per_rank_prefill.cache_clear()
     get_deepep_num_max_dispatch_tokens_per_rank_decode.cache_clear()
+
+
+@pytest.mark.parametrize("tp,dp", [(8, 1), (8, 2), (8, 8)])
+@pytest.mark.parametrize("mtp_step", [0, 2, 3])
+@pytest.mark.parametrize("tokens,requests", [(8192, 256), (8195, 257), (1, 1)])
+def test_deepep_capacity_covers_sequence_parallel_padding(monkeypatch, tp, dp, mtp_step, tokens, requests):
+    import math
+
+    monkeypatch.delenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_PREFILL", raising=False)
+    monkeypatch.delenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", raising=False)
+    monkeypatch.setattr(
+        envs_utils,
+        "get_env_start_args",
+        lambda: SimpleNamespace(
+            batch_max_tokens=tokens,
+            running_max_req_size=requests,
+            mtp_step=mtp_step,
+            enable_tpsp_mix_mode=True,
+            tp=tp,
+            dp=dp,
+        ),
+    )
+    get_deepep_num_max_dispatch_tokens_per_rank_prefill.cache_clear()
+    get_deepep_num_max_dispatch_tokens_per_rank_decode.cache_clear()
+    try:
+        prefill = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
+        decode = get_deepep_num_max_dispatch_tokens_per_rank_decode()
+        world = tp // dp
+        alignment = math.lcm(world, mtp_step + 1)
+        verify_rows = requests * (mtp_step + 1)
+        padded_rows = (verify_rows + alignment - 1) // alignment * alignment
+        assert prefill >= (tokens + world - 1) // world + 128
+        assert decode >= padded_rows // world
+        assert prefill % 8 == decode % 8 == 0
+        if tp == 8 and dp == 1 and tokens == 8192 and mtp_step == 3:
+            assert (prefill, decode) == (1152, 144)
+    finally:
+        get_deepep_num_max_dispatch_tokens_per_rank_prefill.cache_clear()
+        get_deepep_num_max_dispatch_tokens_per_rank_decode.cache_clear()

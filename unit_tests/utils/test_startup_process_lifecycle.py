@@ -4,6 +4,7 @@ import multiprocessing as mp
 import os
 import signal
 import sys
+import threading
 import time
 import traceback
 from types import SimpleNamespace
@@ -133,3 +134,48 @@ def test_metrics_cleanup_on_launcher_failure(failure_mode):
         controller.close()
         result_reader.close()
         result_writer.close()
+
+
+def _run_model_thread(fail, started):
+    model_rpc = importlib.import_module("lightllm.server.router.model_infer.model_rpc")
+    threading.excepthook = threading.__excepthook__
+    model_rpc.graceful_registry = lambda _: None
+    model_rpc.start_parent_check_thread = lambda: None
+    model_rpc.get_unique_server_name = lambda: "model-thread-regression"
+    model_rpc.get_model_infer_recursion_limit = lambda: 3000
+
+    def infer():
+        started.set()
+        if fail:
+            raise RuntimeError("injected inference thread failure")
+
+    class Server:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            thread = threading.Thread(target=infer, daemon=True)
+            thread.start()
+            thread.join()
+
+    model_rpc.ThreadedServer = Server
+    model_rpc._init_env(SimpleNamespace(), 0, 0, 1, None, "unused", mp.get_context("fork").Event())
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_model_worker_exits_on_inference_thread_failure(fail):
+    importlib.import_module("lightllm.server.router.model_infer.model_rpc")
+    ctx = mp.get_context("fork")
+    started = ctx.Event()
+    worker = ctx.Process(target=_run_model_thread, args=(fail, started))
+    worker.start()
+    try:
+        worker.join(timeout=5)
+        assert started.is_set(), "inference thread did not start"
+        assert not worker.is_alive(), "model worker survived a failed inference thread"
+        assert worker.exitcode == (1 if fail else 0)
+    finally:
+        if worker.is_alive():
+            worker.kill()
+            worker.join(timeout=5)
+        worker.close()

@@ -126,6 +126,30 @@ async def _read_http_tokens(manager, req):
     return status.out_token_info_list
 
 
+@pytest.mark.parametrize("count", [1, 3, 7])
+@pytest.mark.parametrize("start", [0, 6])
+def test_http_notification_drains_ready_tokens(count, start):
+    async def run():
+        manager = _http_manager()
+        req = _req(list(range(10, 10 + count)), finish=FinishStatus.FINISHED_LENGTH)
+        req.out_tokens_queue.head = req.out_tokens_queue.tail = start
+        for index in range(count):
+            req.out_tokens_queue.push(str(index), 2 + index, False, index + 1)
+
+        results = await _read_http_tokens(manager, req)
+
+        assert req.out_tokens_queue.is_empty()
+        assert [result[1] for result in results] == [str(index) for index in range(count)]
+        assert [result[2]["id"] for result in results] == list(range(10, 10 + count))
+        assert [result[2]["count_output_tokens"] for result in results] == list(range(1, count + 1))
+        assert [result[2]["logprob"] for result in results] == [-0.5] * count
+        assert all(not result[3].is_finished() for result in results[:-1])
+        assert results[-1][3].is_finished_length()
+        req.merge_final_token_metadata.assert_awaited_once()
+
+    asyncio.run(run())
+
+
 def _match_http_stream(manager, generator, params, prompt_ids, reqs):
     for req in reqs:
         manager.req_id_to_out_inf[convert_sub_id_to_group_id(req.request_id)] = SimpleNamespace(

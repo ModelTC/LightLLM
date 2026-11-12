@@ -1,8 +1,9 @@
-import math
 import torch
 import pytest
 
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
+
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
 
 def rotate_half(x):
@@ -49,6 +50,22 @@ def test_triton_matches_reference(shape):
     assert out.dtype == tensor.dtype, "输出 dtype 应与输入一致"
     assert out.shape == tensor.shape, "输出形状应与输入一致"
     assert torch.allclose(out, ref, rtol=1e-2, atol=1e-2), "Triton 与参考实现不一致"
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_strided_qkv_view_uses_output_strides(dtype):
+    torch.manual_seed(1907)
+    qkv = torch.randn(37, 3, 3, 72, device="cuda", dtype=dtype)
+    tensor = qkv[:, 1]
+    assert not tensor.is_contiguous()
+    original = qkv.clone()
+    angles = torch.randn(37, 36, device="cuda", dtype=torch.float32)
+    cos, sin = angles.cos(), angles.sin()
+    expected = apply_rotary_pos_emb_vision(tensor.unsqueeze(0), cos, sin).squeeze(0)
+    actual = apply_rotary_pos_emb_triton(tensor, cos, sin)
+    tolerance = 0.016 if dtype == torch.bfloat16 else 2e-5
+    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+    torch.testing.assert_close(qkv, original, atol=0, rtol=0)
 
 
 if __name__ == "__main__":

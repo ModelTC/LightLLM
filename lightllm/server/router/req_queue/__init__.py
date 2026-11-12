@@ -13,6 +13,14 @@ def _get_req_queue_class(args, router, dp_size_in_node: int):
 
     if args.diverse_mode:
         return ChunkedBeamContinuesBatchQueue
+    from .chunked_prefill.cached_prefix_queue import (
+        CachedPrefixChunkedPrefillQueue,
+        supports_cached_prefix_reservations,
+    )
+    from lightllm.utils.config_utils import get_model_type
+
+    if get_model_type(args.model_dir) in {"qwen4_exp", "qwen4_exp_text"} and supports_cached_prefix_reservations(args):
+        return CachedPrefixChunkedPrefillQueue
     if args.disable_chunked_prefill:
         # 虽然也使用chuncked prefill queue 但是由于 args.chunked_prefill_size = args.max_req_total_len
         # 所以调度的实际行为类似过去的 continues batch 调度，所以将两种调度的实现统一为一种实现，减少代码重复。

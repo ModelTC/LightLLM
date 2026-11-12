@@ -31,6 +31,9 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         return layer_weight.final_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
     def _slice_get_last_input(self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo):
+        indices = getattr(infer_state, "logits_indices", None)
+        if indices is not None:
+            return input_embdings.index_select(0, indices), indices.numel()
         embed_dim_ = input_embdings.shape[1]
         if infer_state.is_prefill:
             # logits 始终只取每个请求最后一个位置的 hidden state，用于正常采样。

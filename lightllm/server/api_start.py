@@ -33,6 +33,7 @@ from lightllm.utils.config_utils import (
     auto_set_response_parsers,
     get_running_max_req_size_per_dp,
     get_default_disable_chunked_mm_input,
+    get_model_type,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -163,7 +164,11 @@ def _launch_subprocesses(args: StartArgs):
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
     # FP8 KV cache mode checks
-    if args.llm_kv_type in ["fp8kv_sph", "fp8kv_spt"]:
+    unit_scale_qsa = args.llm_kv_type == "fp8kv_spt" and get_model_type(args.model_dir) in (
+        "qwen4_exp",
+        "qwen4_exp_text",
+    )
+    if args.llm_kv_type in ["fp8kv_sph", "fp8kv_spt"] and not unit_scale_qsa:
         assert (
             args.kv_quant_calibration_config_path is not None
         ), "fp8kv inference mode requires --kv_quant_calibration_config_path. "
@@ -185,10 +190,12 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.enable_ep_moe:
         allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}
-        for backend in args.llm_prefill_att_backend:
+        for index, backend in enumerate(args.llm_prefill_att_backend):
+            if index == 1 and backend == "flashinfer":
+                continue
             assert backend in allowed_ep_prefill_att_backends, (
                 "When --enable_ep_moe is enabled, --llm_prefill_att_backend must be one of "
-                f"{sorted(allowed_ep_prefill_att_backends)}; flashinfer is not supported."
+                f"{sorted(allowed_ep_prefill_att_backends)}; flashinfer is only supported for linear prefill."
             )
         allowed_ep_decode_att_backends = {"auto", "fa3", "triton"}
         for backend in args.llm_decode_att_backend:
@@ -782,6 +789,8 @@ def _validate_and_normalize_ssm_config(args: StartArgs):
         "qwen3_5_moe",
         "qwen3_5_text",
         "qwen3_5_moe_text",
+        "qwen4_exp",
+        "qwen4_exp_text",
         "sensenova_loop",
     )
     if is_gdn_or_kda:

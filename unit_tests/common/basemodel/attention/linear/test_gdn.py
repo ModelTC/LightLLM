@@ -74,6 +74,7 @@ def test_decode_state_initializes_normal_layout():
     assert state.b_ssm_buffer_idx is b_req_idx
     assert state.b1_mtp_cu_q_seq_len is None
     assert state.b_num_accepted_tokens is None
+    assert state.b1_mtp_cu_q_seq_len_int64 is None
 
 
 @pytest.mark.parametrize("role", ["main", "draft0"])
@@ -91,6 +92,7 @@ def test_decode_state_initializes_fixed_mtp_layout(role: str):
     state.init_state()
 
     torch.testing.assert_close(state.b1_mtp_cu_q_seq_len, torch.tensor([0, 3, 6], dtype=torch.int32))
+    torch.testing.assert_close(state.b1_mtp_cu_q_seq_len_int64, torch.tensor([0, 3, 6], dtype=torch.int64))
     torch.testing.assert_close(state.b_conv_buffer_idx, torch.tensor([2, 4], dtype=torch.int32))
     torch.testing.assert_close(state.b_num_accepted_tokens, torch.tensor([2, 3], dtype=torch.int32))
     torch.testing.assert_close(
@@ -124,6 +126,7 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch, role: str):
     state.init_state()
 
     assert state.b1_mtp_cu_q_seq_len is expected_cu_q_seq_len
+    torch.testing.assert_close(state.b1_mtp_cu_q_seq_len_int64, expected_cu_q_seq_len.to(torch.int64))
     assert state.b_conv_buffer_idx is expected_conv_buffer_idx
     assert state.b_num_accepted_tokens is expected_num_accepted_tokens
     torch.testing.assert_close(
@@ -138,6 +141,89 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch, role: str):
     assert build_calls[0]["b_mtp_index"] is state.infer_state.b_mtp_index
     assert build_calls[0]["req_to_mtp_state_index"] is req_to_mtp_state_index
     assert build_calls[0]["hold_req_id"] == 5
+
+
+def test_mtp_recurrent_layers_reuse_converted_offsets(monkeypatch):
+    import lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp as conv_mtp
+
+    state, infer_state = _create_decode_state(
+        draft_step=2,
+        dynamic_layout=False,
+        b_req_idx=torch.tensor([0, 0, 0], dtype=torch.int32),
+        req_to_mtp_state_index=torch.tensor([0, 0], dtype=torch.int32),
+    )
+    state.init_state()
+    state.backend.activation = "silu"
+    state.backend._rearrange_mixed_qkv = lambda mixed, decode: (mixed, mixed, mixed)
+    offsets = []
+    monkeypatch.setattr(conv_mtp, "causal_conv1d_update", lambda mixed, *args, **kwargs: mixed)
+
+    def recurrent(**kwargs):
+        offsets.append(kwargs["cu_seqlens"])
+        return kwargs["q"], None
+
+    monkeypatch.setattr(gdn, "mtp_fused_recurrent_gated_delta_rule", recurrent)
+    weight = SimpleNamespace(
+        linear_conv1d=SimpleNamespace(mm_param=SimpleNamespace(weight=None), bias=None),
+        linear_A_log=SimpleNamespace(weight=None),
+        linear_dt_bias=SimpleNamespace(weight=None),
+    )
+    tensor = torch.zeros((3, 1))
+    for _ in range(2):
+        state._gdn_mtp_kernel(tensor, tensor, tensor, tensor, tensor, state.infer_state, weight)
+    assert len(offsets) == 2
+    assert all(value is state.b1_mtp_cu_q_seq_len_int64 for value in offsets)
+    torch.testing.assert_close(offsets[0], torch.tensor([0, 3], dtype=torch.int64))
+
+
+@pytest.mark.parametrize(
+    "device",
+    ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required"))],
+)
+def test_graph_state_copy_refreshes_cached_mtp_offsets(monkeypatch, device):
+    layouts = [
+        torch.tensor([0, 2, 3, 3], dtype=torch.int32, device=device),
+        torch.tensor([0, 1, 3, 3], dtype=torch.int32, device=device),
+    ]
+    current = [0]
+
+    def build_params(**kwargs):
+        return (
+            layouts[current[0]],
+            torch.tensor([0, 1, 2], dtype=torch.int32, device=device),
+            torch.ones(3, dtype=torch.int32, device=device),
+        )
+
+    monkeypatch.setattr(gdn, "build_dynamic_mtp_linear_att_state_params", build_params)
+
+    def create():
+        state, infer_state = _create_decode_state(
+            draft_step=2,
+            dynamic_layout=True,
+            b_req_idx=torch.tensor([0, 0, 1] if current[0] == 0 else [0, 1, 1], dtype=torch.int32, device=device),
+            req_to_mtp_state_index=torch.zeros(3, dtype=torch.int32, device=device),
+        )
+        state.init_state()
+        return state
+
+    captured = create()
+    cached = captured.b1_mtp_cu_q_seq_len_int64
+    graph = None
+    if device == "cuda":
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            observed = cached.clone()
+    current[0] = 1
+    fresh = create()
+    captured.copy_for_decode_cuda_graph(fresh)
+    assert captured.b1_mtp_cu_q_seq_len_int64 is cached
+    expected = torch.tensor([0, 1, 3, 3], dtype=torch.int64, device=device)
+    torch.testing.assert_close(cached, expected)
+    assert captured.b1_mtp_cu_q_seq_len.dtype == torch.int32
+    if graph is not None:
+        graph.replay()
+        torch.testing.assert_close(observed, expected)
+        graph.reset()
 
 
 def test_linear_backend_is_abstract_and_triton_supplies_chunk_kernel():
@@ -178,12 +264,13 @@ def test_missing_linear_backend_arg_uses_auto_selection(monkeypatch, auto_linear
     assert validate_calls == ["flashqla"]
 
 
-def test_replay_mode_selects_standalone_gdn_backends(monkeypatch):
+@pytest.mark.parametrize("prefill_name", ["flashqla", "flashinfer"])
+def test_replay_mode_selects_standalone_gdn_backends(monkeypatch, prefill_name):
     monkeypatch.setattr(
         linear_create_utils,
         "get_env_start_args",
         lambda: SimpleNamespace(
-            llm_prefill_att_backend=["fa3", "flashqla"],
+            llm_prefill_att_backend=["fa3", prefill_name],
             llm_decode_att_backend=["flashinfer", "triton"],
             ssm_state_mode="replay",
         ),
@@ -192,13 +279,15 @@ def test_replay_mode_selects_standalone_gdn_backends(monkeypatch):
     from lightllm.common.basemodel.attention.linear.gdn import LinearAttBackend
     from lightllm.common.basemodel.attention.linear.replay_gdn import (
         ReplayGDNFlashQlaAttBackend,
+        ReplayGDNFlashInferAttBackend,
         ReplayGDNTritonAttBackend,
     )
 
     prefill_backend = linear_create_utils.get_gdn_linear_prefill_att_backend_class(index=1)
     decode_backend = linear_create_utils.get_gdn_linear_decode_att_backend_class(index=1)
 
-    assert prefill_backend is ReplayGDNFlashQlaAttBackend
+    expected = {"flashqla": ReplayGDNFlashQlaAttBackend, "flashinfer": ReplayGDNFlashInferAttBackend}
+    assert prefill_backend is expected[prefill_name]
     assert decode_backend is ReplayGDNTritonAttBackend
     assert prefill_backend.__bases__ == (BaseAttBackend,)
     assert decode_backend.__bases__ == (BaseAttBackend,)
@@ -349,7 +438,7 @@ def test_gdn_decode_backend_uses_priority_list(monkeypatch, auto_linear_backend_
     monkeypatch.setattr(
         linear_create_utils,
         "gdn_decode_backends",
-        {"optimized": FlashQlaLinearAttBackend, "triton": TritonLinearAttBackend},
+        {"optimized": "linear.flashqla:FlashQlaLinearAttBackend", "triton": "linear.triton:TritonLinearAttBackend"},
     )
     monkeypatch.setattr(
         linear_create_utils,
@@ -378,7 +467,7 @@ def test_gdn_prefill_backend_tries_candidates_in_order(monkeypatch, auto_linear_
     monkeypatch.setattr(
         linear_create_utils,
         "gdn_prefill_backends",
-        {"flashqla2": TritonLinearAttBackend, "flashqla3": FlashQlaLinearAttBackend},
+        {"flashqla2": "linear.triton:TritonLinearAttBackend", "flashqla3": "linear.flashqla:FlashQlaLinearAttBackend"},
     )
     monkeypatch.setattr(
         linear_create_utils,

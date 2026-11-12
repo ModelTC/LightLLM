@@ -5,6 +5,38 @@ from typing import Optional
 import torch
 
 
+def _load_causal_conv1d_fwd():
+    try:
+        from sgl_kernel import causal_conv1d_fwd
+
+        return causal_conv1d_fwd
+    except (ImportError, OSError):
+        try:
+            from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+                causal_conv1d_fn as vllm_causal_conv1d_fn,
+            )
+
+            return vllm_causal_conv1d_fn
+        except (ImportError, OSError):
+            return None
+
+
+def _load_causal_conv1d_update():
+    try:
+        from sgl_kernel import causal_conv1d_update
+
+        return causal_conv1d_update
+    except (ImportError, OSError):
+        try:
+            from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+                causal_conv1d_update,
+            )
+
+            return causal_conv1d_update
+        except (ImportError, OSError):
+            return None
+
+
 def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -48,23 +80,52 @@ def causal_conv1d_fn(
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
-    from sgl_kernel import causal_conv1d_fwd
+    optimized_causal_conv1d = _load_causal_conv1d_fwd()
+    if optimized_causal_conv1d is None:
+        from .causal_conv1d_triton import causal_conv1d_fn as triton_causal_conv1d_fn
+
+        return triton_causal_conv1d_fn(
+            x,
+            weight,
+            bias,
+            query_start_loc=query_start_loc,
+            cache_indices=cache_indices,
+            has_initial_state=has_initial_state,
+            conv_states=conv_states,
+            activation=activation,
+            pad_slot_id=pad_slot_id,
+            **kwargs,
+        )
 
     if x.stride(-1) != 1:
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
 
-    causal_conv1d_fwd(
-        x,
-        weight,
-        bias,
-        conv_states,
-        query_start_loc,
-        cache_indices,
-        has_initial_state,
-        activation in ["silu", "swish"],
-        pad_slot_id,
-    )
+    if optimized_causal_conv1d.__module__.startswith("sgl_kernel"):
+        optimized_causal_conv1d(
+            x,
+            weight,
+            bias,
+            conv_states,
+            query_start_loc,
+            cache_indices,
+            has_initial_state,
+            activation in ["silu", "swish"],
+            pad_slot_id,
+        )
+    else:
+        return optimized_causal_conv1d(
+            x,
+            weight,
+            bias,
+            conv_states,
+            query_start_loc,
+            cache_indices=cache_indices,
+            has_initial_state=has_initial_state,
+            activation=activation,
+            pad_slot_id=pad_slot_id,
+            null_block_id=None,
+        )
     return x
 
 
@@ -102,22 +163,57 @@ def causal_conv1d_update(
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError(f"activation must be None, silu, or swish, actual: {activation}")
-    from sgl_kernel import causal_conv1d_update as causal_conv1d_update_kernel
+    optimized_causal_conv1d_update = _load_causal_conv1d_update()
+    if optimized_causal_conv1d_update is None:
+        from .causal_conv1d_triton import causal_conv1d_update as triton_causal_conv1d_update
+
+        return triton_causal_conv1d_update(
+            x,
+            conv_state,
+            weight,
+            bias,
+            activation=activation,
+            cache_seqlens=cache_seqlens,
+            conv_state_indices=conv_state_indices,
+            pad_slot_id=pad_slot_id,
+        )
+
+    if cache_seqlens is not None:
+        from .causal_conv1d_triton import causal_conv1d_update as triton_causal_conv1d_update
+
+        return triton_causal_conv1d_update(
+            x,
+            conv_state,
+            weight,
+            bias,
+            activation=activation,
+            cache_seqlens=cache_seqlens,
+            conv_state_indices=conv_state_indices,
+            pad_slot_id=pad_slot_id,
+        )
 
     activation_val = activation in ["silu", "swish"]
-    unsqueeze = x.dim() == 2
-    if unsqueeze:
-        x = x.unsqueeze(-1)
-    causal_conv1d_update_kernel(
+    if optimized_causal_conv1d_update.__module__.startswith("sgl_kernel"):
+        unsqueeze = x.dim() == 2
+        if unsqueeze:
+            x = x.unsqueeze(-1)
+        optimized_causal_conv1d_update(
+            x,
+            conv_state,
+            weight,
+            bias,
+            activation_val,
+            None,
+            conv_state_indices,
+            pad_slot_id=pad_slot_id,
+        )
+        return x.squeeze(-1) if unsqueeze else x
+    return optimized_causal_conv1d_update(
         x,
         conv_state,
         weight,
         bias,
-        activation_val,
-        cache_seqlens,
-        conv_state_indices,
-        pad_slot_id,
+        activation=activation,
+        conv_state_indices=conv_state_indices,
+        null_block_id=pad_slot_id,
     )
-    if unsqueeze:
-        x = x.squeeze(-1)
-    return x

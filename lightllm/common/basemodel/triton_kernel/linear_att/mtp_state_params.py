@@ -3,7 +3,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["batch_size"])
 def _build_dynamic_mtp_linear_att_state_params_kernel(
     b_req_idx,
     b_mtp_index,

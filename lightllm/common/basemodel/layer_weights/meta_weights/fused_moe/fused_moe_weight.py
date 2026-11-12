@@ -129,6 +129,8 @@ class FusedMoeWeight(BaseWeightTpl):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        token_mask: Optional[torch.Tensor] = None,
+        shared_expert_func=None,
     ) -> torch.Tensor:
         assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         # Captures MoE topk expert ids for routed-experts metadata when enabled.
@@ -152,6 +154,8 @@ class FusedMoeWeight(BaseWeightTpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            token_mask=token_mask,
+            shared_expert_func=shared_expert_func,
         )
 
     def experts_with_topk(

@@ -86,6 +86,89 @@ def test_capture_observes_logical_ids_before_execution_mapping():
     assert torch.equal(executed["topk_ids"], torch.tensor([[0, 2, 4]], device="cuda"))
 
 
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("execution_index_dtype", [None, torch.int64])
+def test_padding_mask_preserves_captured_routes_and_replays(index_dtype, execution_index_dtype):
+    logical_ids = torch.tensor([[0, 2], [1, 3]], dtype=index_dtype, device="cuda")
+    logical_weights = torch.tensor([[0.2, 0.8], [0.4, 0.6]], device="cuda")
+    impl = FuseMoeTriton.__new__(FuseMoeTriton)
+    impl.n_routed_experts = 4
+    impl.num_fused_shared_experts = 1
+    impl.execution_index_dtype = execution_index_dtype
+    impl._select_experts = lambda **kwargs: (logical_weights, logical_ids)
+    impl._fused_experts = lambda **kwargs: (kwargs["topk_weights"], kwargs["topk_ids"])
+    hidden = torch.ones(2, 4, device="cuda")
+    mask = torch.tensor([True, False], device="cuda")
+    captured = {}
+
+    def run():
+        return impl(
+            input_tensor=hidden,
+            router_logits=hidden,
+            w13=None,
+            w2=None,
+            correction_bias=None,
+            scoring_func="softmax",
+            top_k=2,
+            renormalize=False,
+            use_grouped_topk=False,
+            topk_group=0,
+            num_expert_group=0,
+            is_prefill=False,
+            moe_capture_callback=lambda ids: captured.setdefault("ids", ids),
+            token_mask=mask,
+        )
+
+    for _ in range(3):
+        run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        weights, ids = run()
+    for values in ([True, False], [False, True], [False, False], [True, True]):
+        mask.copy_(torch.tensor(values, device="cuda"))
+        graph.replay()
+        expected_ids = torch.tensor(
+            [[0, 2, 4], [1, 3, 4]], dtype=execution_index_dtype or index_dtype, device="cuda"
+        ).masked_fill(~mask[:, None], -1)
+        expected_weights = torch.tensor([[0.2, 0.8, 1.0], [0.4, 0.6, 1.0]], device="cuda")
+        torch.testing.assert_close(ids, expected_ids, atol=0, rtol=0)
+        torch.testing.assert_close(weights, expected_weights.masked_fill(~mask[:, None], 0), atol=0, rtol=0)
+    assert captured["ids"] is logical_ids
+    torch.testing.assert_close(
+        logical_ids, torch.tensor([[0, 2], [1, 3]], dtype=index_dtype, device="cuda"), atol=0, rtol=0
+    )
+    torch.testing.assert_close(logical_weights, torch.tensor([[0.2, 0.8], [0.4, 0.6]], device="cuda"))
+
+
+@pytest.mark.parametrize("rows,topk,strided", [(0, 10, False), (17, 3, True), (129, 10, False), (1024, 10, False)])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+def test_mask_topk_preserves_inputs_and_dynamic_graph(rows, topk, strided, dtype, index_dtype):
+    from lightllm.common.basemodel.triton_kernel.fused_moe.mask_topk import mask_topk
+
+    stride = 2 if strided else 1
+    ids = torch.randint(512, (rows, topk * stride), dtype=index_dtype, device="cuda")[:, ::stride]
+    weights = torch.randn(rows, topk * stride, dtype=dtype, device="cuda")[:, ::stride]
+    mask = torch.arange(rows * stride, device="cuda").remainder(3).bool()[::stride]
+    saved_ids, saved_weights = ids.clone(), weights.clone()
+
+    def run():
+        return mask_topk(weights, ids, mask, torch.int64)
+
+    graph = torch.cuda.CUDAGraph()
+    run()
+    with torch.cuda.graph(graph):
+        output_weights, output_ids = run()
+    for active in (True, False, True):
+        mask.fill_(active)
+        graph.replay()
+        torch.testing.assert_close(output_weights, weights.masked_fill(~mask[:, None], 0), atol=0, rtol=0)
+        torch.testing.assert_close(output_ids, ids.masked_fill(~mask[:, None], -1).long(), atol=0, rtol=0)
+        torch.testing.assert_close(ids, saved_ids, atol=0, rtol=0)
+        torch.testing.assert_close(weights, saved_weights, atol=0, rtol=0)
+    graph.reset()
+
+
 def test_redundancy_repair_does_not_overwrite_logical_ids(monkeypatch):
     from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.deepgemm_impl import (
         FuseMoeDeepGEMM,

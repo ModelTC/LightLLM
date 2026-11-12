@@ -58,6 +58,7 @@ torch.backends.cudnn.enabled = True
 
 
 class TpPartBaseModel:
+    decode_graph_class = CudaGraph
     is_mtp_draft_model = False
 
     # weight class
@@ -368,7 +369,7 @@ class TpPartBaseModel:
         self.graph = (
             None
             if self.disable_cudagraph
-            else CudaGraph(
+            else self.decode_graph_class(
                 batch_step_size_before_split=cuda_graph_grow_step_size,
                 split_batch_size=self.args.graph_split_batch_size * decode_tokens_per_request,
                 batch_step_size_after_split=self.args.graph_grow_step_size * cuda_graph_grow_step_size,
@@ -466,6 +467,7 @@ class TpPartBaseModel:
 
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
+        infer_state.logits_indices = model_input.logits_indices
 
         if infer_state.is_prefill:
             infer_state.prefill_att_state = (
@@ -585,14 +587,19 @@ class TpPartBaseModel:
         )
         return output
 
-    def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
+    def _create_unpad_decode_model_output(
+        self, model_output: ModelOutput, origin_batch_size: int, origin_logits_num=None
+    ):
         padded_batch_size = model_output.logits.shape[0]
-        if padded_batch_size == origin_batch_size:
+        if origin_logits_num is not None:
+            padded_batch_size = model_output.mtp_collector.spec_hidden.shape[0]
+        if padded_batch_size == origin_batch_size and origin_logits_num is None:
             return model_output
+        logits_num = origin_batch_size if origin_logits_num is None else origin_logits_num
         new_model_output = copy.copy(model_output)
-        new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        new_model_output.logits = new_model_output.logits[:logits_num]
         if new_model_output.logits_token_ids is not None:
-            new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
+            new_model_output.logits_token_ids = new_model_output.logits_token_ids[:logits_num]
         new_model_output.mtp_collector = model_output.mtp_collector.unpad_decode(
             padded_batch_size=padded_batch_size,
             origin_batch_size=origin_batch_size,
@@ -686,6 +693,8 @@ class TpPartBaseModel:
                 )
 
         origin_batch_size = model_input.batch_size
+        origin_logits_num = None if model_input.logits_indices is None else model_input.logits_indices.numel()
+        padded_logits_num = None if origin_logits_num is None else triton.next_power_of_2(max(1, origin_logits_num))
         # 空 DP rank 也需要完整的 dummy verify group；TP/SP 切分不能破坏 MTP 分组。
         infer_batch_size = self._align_decode_batch_size(max(1, origin_batch_size))
 
@@ -699,9 +708,15 @@ class TpPartBaseModel:
         need_capture = False
         if use_cuda_graph:
             infer_batch_size = self.graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
-            need_capture = self.graph.need_capture(infer_batch_size)
+            if origin_logits_num is None:
+                need_capture = self.graph.need_capture(infer_batch_size)
+            else:
+                need_capture = self.graph.need_capture(infer_batch_size, padded_logits_num)
 
         model_input = self._create_padded_decode_model_input(model_input=model_input, new_batch_size=infer_batch_size)
+        if origin_logits_num is not None:
+            model_input = copy.copy(model_input)
+            model_input.logits_indices = F.pad(model_input.logits_indices, (0, padded_logits_num - origin_logits_num))
         infer_state = self._create_inferstate(model_input)
         # attention backend 会根据执行方式准备 capture、replay 或 eager 状态，
         # 因此必须在 init_att_state 之前完成赋值。
@@ -718,7 +733,9 @@ class TpPartBaseModel:
         else:
             model_output = self._token_forward(infer_state)
 
-        return self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
+        return self._create_unpad_decode_model_output(
+            model_output, origin_batch_size=origin_batch_size, origin_logits_num=origin_logits_num
+        )
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
