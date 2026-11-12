@@ -362,8 +362,8 @@ class HybridAttPagedRadixCache:
         ans_node_list: List[HybridAttPagedTreeNode] = []
         self._match_prefix_helper(
             self.root_node,
-            key=key,
             block_hashs=block_hashs,
+            block_index=0,
             ans_node_list=ans_node_list,
             update_refs=update_refs,
         )
@@ -402,8 +402,8 @@ class HybridAttPagedRadixCache:
     def _match_prefix_helper(
         self,
         node: HybridAttPagedTreeNode,
-        key: torch.Tensor,
-        block_hashs: Optional[List[int]],
+        block_hashs: List[int],
+        block_index: int,
         ans_node_list: list,
         update_refs: bool = False,
     ):
@@ -417,39 +417,23 @@ class HybridAttPagedRadixCache:
                 if node.ref_counter == 1:
                     self.refed_tokens_num.arr[0] += len(node.token_mem_index_value)
 
-            if len(block_hashs) == 0:
+            if block_index == len(block_hashs):
                 return
 
-            if len(block_hashs) >= self.big_page_num:
-                # 大页的匹配
-                big_page_block_hash = block_hashs[self.big_page_num - 1]
-                if big_page_block_hash in node.children:
-                    child = node.children[big_page_block_hash]
+            next_big_index = block_index + self.big_page_num
+            if next_big_index <= len(block_hashs):
+                big_page_hash = block_hashs[next_big_index - 1]
+                child = node.children.get(big_page_hash)
+                if child is not None:
                     assert child.is_big_page_node()
                     ans_node_list.append(child)
-                    self._match_prefix_helper(
-                        child,
-                        key[self.big_page_tokens :],
-                        block_hashs[self.big_page_num :],
-                        ans_node_list,
-                        update_refs,
-                    )
+                    self._match_prefix_helper(child, block_hashs, next_big_index, ans_node_list, update_refs)
                     return
 
-            # 小页匹配的情况
-            if block_hashs[0] in node.children:
-                child = node.children[block_hashs[0]]
+            child = node.children.get(block_hashs[block_index])
+            if child is not None:
                 ans_node_list.append(child)
-                self._match_prefix_helper(
-                    child,
-                    key[(self.hash_page_size) :],
-                    block_hashs[1:],
-                    ans_node_list,
-                    update_refs,
-                )
-                return
-            else:
-                return
+                self._match_prefix_helper(child, block_hashs, block_index + 1, ans_node_list, update_refs)
 
         finally:
             self._add_node(node)

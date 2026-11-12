@@ -164,7 +164,7 @@ class InferenceContext:
         block_hashs = block_hashs[: match_tokens // hash_page_size]
         if match_tokens <= 1:
             return None
-        key = torch.tensor(shm_req.shm_prompt_ids.arr[:match_tokens], dtype=torch.int64, device="cpu")
+        key = torch.as_tensor(shm_req.shm_prompt_ids.arr[:match_tokens], dtype=torch.int64, device="cpu")
         while block_hashs:
             node, matched_len, _ = cache.match_prefix(
                 key,
