@@ -6,7 +6,7 @@ import triton
 from .mem_manager import MemoryManager
 from .operator import DeepseekV4MemOperator
 from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig, DeepseekV4StateCacheManager
-from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_compressed_kv_pages
+from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_compressed_kv_pages, copy_pd_attention_state
 from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
 
 
@@ -219,14 +219,20 @@ class DeepseekV4AttStatePageHelper:
                 state.copy_(page[nbytes : nbytes + state.numel()], non_blocking=True)
 
     def _copy_req_state(self, page, mem, req_idx, *, write):
-        data = page.reshape(-1)
+        buffers = tuple(
+            buffer
+            for buffer in (mem.req_to_swa, mem.req_to_c4_state, mem.req_to_c4_indexer_state, mem.req_to_c128_state)
+            if buffer is not None and buffer.numel()
+        )
+        # The PD P2P rebuild maps CUDA IPC tensors onto the copy worker's device.
+        if page.device == mem.req_to_swa.device:
+            return copy_pd_attention_state(page, buffers, req_idx, to_page=write)
+
         offset = 0
-        for buffer in (mem.req_to_swa, mem.req_to_c4_state, mem.req_to_c4_indexer_state, mem.req_to_c128_state):
-            if buffer is None:
-                continue
+        for buffer in buffers:
             state = buffer[:, req_idx]
             nbytes = state.numel() * state.element_size()
-            page_state = data[offset : offset + nbytes].view(state.dtype).view(state.shape)
+            page_state = page[offset : offset + nbytes].view(state.dtype).view(state.shape)
             if write:
                 page_state.copy_(state, non_blocking=True)
             else:

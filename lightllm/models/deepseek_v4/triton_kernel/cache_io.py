@@ -117,6 +117,53 @@ def copy_compressed_kv_pages(
     )
 
 
+@triton.jit(do_not_specialize=["req_idx"])
+def _copy_pd_attention_state_kernel(
+    page,
+    buffers,
+    req_idx,
+    LAYERS: tl.constexpr,
+    ROW_BYTES: tl.constexpr,
+    LAYER_STRIDES: tl.constexpr,
+    TO_PAGE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    block = tl.program_id(0)
+    columns = tl.arange(0, BLOCK)
+    page_offset = 0
+    block_offset = 0
+    for index in tl.static_range(len(LAYERS)):
+        layer_blocks = tl.cdiv(ROW_BYTES[index], BLOCK)
+        num_blocks = LAYERS[index] * layer_blocks
+        if block >= block_offset and block < block_offset + num_blocks:
+            layer = (block - block_offset) // layer_blocks
+            offset = ((block - block_offset) % layer_blocks) * BLOCK + columns
+            state = buffers[index].to(tl.pointer_type(tl.uint8))
+            state += layer.to(tl.int64) * LAYER_STRIDES[index] + req_idx.to(tl.int64) * ROW_BYTES[index] + offset
+            packed = page + page_offset + layer * ROW_BYTES[index] + offset
+            valid = offset < ROW_BYTES[index]
+            if TO_PAGE:
+                tl.store(packed, tl.load(state, valid, 0), valid)
+            else:
+                tl.store(state, tl.load(packed, valid, 0), valid)
+        page_offset += LAYERS[index] * ROW_BYTES[index]
+        block_offset += num_blocks
+
+
+def copy_pd_attention_state(page, buffers, req_idx, *, to_page):
+    """Copy contiguous request rows into the existing layer-major page layout."""
+    layers = tuple(buffer.shape[0] for buffer in buffers)
+    row_bytes = tuple(buffer.stride(1) * buffer.element_size() for buffer in buffers)
+    layer_strides = tuple(buffer.stride(0) * buffer.element_size() for buffer in buffers)
+    block = 4096
+    num_blocks = sum(n * triton.cdiv(width, block) for n, width in zip(layers, row_bytes))
+
+    _copy_pd_attention_state_kernel[(num_blocks,)](
+        page, buffers, req_idx, layers, row_bytes, layer_strides, to_page, block
+    )
+    return sum(n * width for n, width in zip(layers, row_bytes))
+
+
 @triton.jit(do_not_specialize=["TOKEN_NUM"])
 def _copy_cpu_cache_kernel(
     kv_buffer,

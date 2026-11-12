@@ -740,6 +740,7 @@ def test_pd_transport_completion_covers_peer_gpu_state(cache, length):
         transport.write_mem_to_page_kv_move_buffer([], 0, 1, mem_managers, 1, "att_state", source)
         with torch.cuda.device(1):
             torch.cuda._sleep(20_000_000)
+            requests.req_to_swa[:, destination].zero_()
         transport.read_page_kv_move_buffer_to_mem([], 0, 1, mem_managers, 1, "att_state", destination)
         completed = torch.cuda.Event()
         completed.record(copy_stream)
