@@ -1,7 +1,6 @@
 import json
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 
@@ -10,15 +9,9 @@ from unit_tests.common.req_token_index_test_utils import attach_req_token_index
 from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.deepseek_v4.triton_kernel.swa_cache import get_swa_token_indices as _get_swa_token_indices
-from unit_tests.common.attention.helpers import (
-    backend_plan,
-    update_plan,
-    run_sparse,
-    run_dense,
-    make_plan,
-    make_batch,
-    make_backend,
-)
+from lightllm.common.attention.api import ExecutionRequirements
+from lightllm.platform import get_device_runtime
+from unit_tests.common.attention.helpers import backend_plan, update_plan, run_sparse
 
 
 def _compressed_kv_pools(manager):
@@ -259,6 +252,8 @@ def _test_backend(requests, token_capacity=8192):
     model = type("TestModel", (), {})()
     model.req_manager = requests
     model.att_state_manager = requests.memory.manager
+    model.device_runtime = get_device_runtime("cuda")
+    model.attention_execution = ExecutionRequirements()
     model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(requests.cache_config.layer_num)]
     model.tp_rank_ = 0
     model.mtp_previous_draft_models = []
@@ -459,6 +454,8 @@ def test_model_selects_held_slots_without_allocating_swa(cache, model_kind):
     model = model_cls.__new__(model_cls)
     model.req_manager = requests
     model.att_state_manager = requests.memory.manager
+    model.device_runtime = get_device_runtime("cuda")
+    model.attention_execution = ExecutionRequirements()
     model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(requests.cache_config.layer_num)]
     model.tp_rank_ = 0
     model.mtp_previous_draft_models = []
@@ -808,13 +805,9 @@ def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, l
     from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 
     manager, requests = cache
-    workspace = DeepseekV4Workspace(SimpleNamespace(tp_world_size_=1, batch_max_tokens=length))
-    workspace.c128_compress_scratch = torch.empty((1, length, 512), dtype=torch.float32, device="cuda")
     source, src = _reserve(manager, requests, length)
     destination, dst = _reserve(manager, requests, length)
     _prepare_swa(requests, source, 0, length)
-    from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
-
     model = requests._test_model
     model.disable_cudagraph = True
     model._align_decode_batch_size = lambda count: count
@@ -1007,7 +1000,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     params = dict(
         compress_ratio=0,
         head_dim_v=512,
-        softmax_scale=512 ** -0.5,
+        softmax_scale=512**-0.5,
         swa_indices=indices.unsqueeze(1),
         swa_lengths=lengths,
         attn_sink=torch.zeros(64, device="cuda"),
@@ -1737,7 +1730,7 @@ def test_prefill_fused_writer_preserves_old_prefix_and_runtime_tail(cache):
     freqs = torch.complex(angles.cos(), angles.sin())
     layer = DeepseekV4TransformerLayerInfer.__new__(DeepseekV4TransformerLayerInfer)
     layer.layer_num_, layer.eps_, layer.freqs_cis = 2, 1e-6, freqs
-    layer.compress_ratio, layer.v_head_dim, layer.softmax_scale = 0, 512, 512 ** -0.5
+    layer.compress_ratio, layer.v_head_dim, layer.softmax_scale = 0, 512, 512**-0.5
     layer_weight = SimpleNamespace(
         kv_norm_=SimpleNamespace(weight=weight),
         attn_sink_=SimpleNamespace(weight=torch.zeros(64, device="cuda")),
@@ -1860,7 +1853,7 @@ def test_image_metadata_and_embeddings_preserve_canonical_cache(cache, prefix_le
         SimpleNamespace(convert_tokens_to_ids=lambda token: 99), "/unused", {"vision_n_layers": 1}
     )
     params = MultimodalParams(images=[{"type": "url", "data": "unused"} for _ in range(3)])
-    token_base, canonical_length = 2 ** 62, 13
+    token_base, canonical_length = 2**62, 13
     for image in params.images:
         image.token_id, image.token_num, image.start_index_in_embed_cache = token_base, canonical_length, 0
     input_ids = tokenizer.encode([7] * prefix_len + [99, 99, 8, 99, 8], params)
