@@ -137,7 +137,7 @@ class DSparkProposer(BaseSpecProposer):
             fill_value=0,
             dtype=target_model_input.b_mtp_index.dtype,
         )
-        draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(draft_input.batch_size)]
+        draft_input.multimodal_params = [{"images": [], "audios": []}] * draft_input.batch_size
         if timelog is not None:
             timelog.mark("draft_start")
         with profiler.phase("dspark.draft_proposal") if profiler is not None else nullcontext():
