@@ -57,6 +57,32 @@ def test_decode_carries_raw_shared_radix_metadata():
     assert torch.equal(model_input.b_shared_radix_node_id, torch.tensor([10, 10], dtype=torch.int64))
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+@pytest.mark.parametrize("position_dtype", [torch.int32, torch.int64])
+def test_decode_cuda_transfer_preserves_row_metadata(position_dtype):
+    model_input = _create_model_input()
+    model_input.b_position_delta = torch.tensor([5, -3], dtype=position_dtype)
+    model_input.b_shared_radix_node_id = torch.tensor([2 ** 48, -1], dtype=torch.int64)
+    model_input.input_ids = torch.tensor([1234, 4321], dtype=torch.int64)
+    fields = (
+        "b_req_idx",
+        "b_seq_len",
+        "b_mtp_index",
+        "b_position_delta",
+        "b_shared_seq_len",
+        "b_shared_radix_node_id",
+        "input_ids",
+    )
+    expected = [getattr(model_input, name) for name in fields]
+
+    for _ in range(2):
+        model_input.to_cuda()
+        for name, cpu in zip(fields, expected):
+            actual = getattr(model_input, name)
+            assert actual.is_cuda and actual.is_contiguous()
+            torch.testing.assert_close(actual.cpu(), cpu, rtol=0, atol=0)
+
+
 def test_prefill_does_not_require_shared_radix_metadata():
     model_input = _create_model_input(is_prefill=True)
 
