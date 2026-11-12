@@ -8,7 +8,6 @@ from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, 
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
 from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import fused_gdn_gating
-from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import conv_pack_gdn_decode_inputs
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
     mtp_fused_recurrent_gated_delta_rule,
 )
@@ -16,7 +15,7 @@ from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import 
     build_dynamic_mtp_linear_att_state_params,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
-    fused_recurrent_gated_delta_rule,
+    fused_recurrent_gated_delta_rule_packed_decode,
 )
 
 if TYPE_CHECKING:
@@ -37,7 +36,6 @@ class LinearAttBackend(BaseAttBackend, ABC):
         pass
 
     def _init_linear_layer_metadata(self, network_config, tp_world_size):
-
         self.mtp_step = get_env_start_args().mtp_step
 
         # Linear attention specific dimensions
@@ -109,7 +107,6 @@ class LinearAttBackend(BaseAttBackend, ABC):
 
 @dataclasses.dataclass
 class LinearAttPrefillAttState(BasePrefillAttState):
-
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
@@ -180,6 +177,7 @@ class LinearAttPrefillAttState(BasePrefillAttState):
             has_initial_state=infer_state.b_ready_cache_len > 0,
             conv_states=conv_states,
             activation=backend.activation,
+            max_seqlen=infer_state.max_q_seq_len,
         )
         mixed_qkv = out_tensor.transpose(0, 1)
 
@@ -207,11 +205,11 @@ class LinearAttPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class LinearAttDecodeAttState(BaseDecodeAttState):
-
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
     b_num_accepted_tokens: torch.Tensor = None
+    b1_mtp_cu_q_seq_len_int64: torch.Tensor = None
 
     def init_state(self):
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
@@ -232,6 +230,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             self._init_dynamic_mtp_decode_state(draft_step + 1, req_to_mtp_state_index=state.mtp_state_index)
         else:
             self._init_fixed_mtp_decode_state(draft_step, req_to_mtp_state_index=state.mtp_state_index)
+        self.b1_mtp_cu_q_seq_len_int64 = self.b1_mtp_cu_q_seq_len.to(torch.int64)
 
     def _init_normal_decode_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
@@ -345,37 +344,26 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
     ):
         backend: LinearAttBackend = self.backend
 
-        # Recurrent processing with fused gating. Decode uses a specialized
-        # conv+pack kernel to avoid materializing the post-conv qkv tensor
-        # before immediately splitting it into q/k/v.
-        query, key, value, z, a, b = conv_pack_gdn_decode_inputs(
+        from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_update
+
+        mixed_qkv = causal_conv1d_update(
             mixed_qkv,
-            z,
-            a,
-            b,
             conv_states,
             layer_weight.linear_conv1d.mm_param.weight,
             layer_weight.linear_conv1d.bias,
-            self.b_conv_buffer_idx,
-            backend.activation,
-            backend.conv_kernel_dim,
-            backend.tp_num_k_heads,
-            backend.head_k_dim,
-            backend.tp_num_v_heads,
-            backend.head_v_dim,
+            activation=backend.activation,
+            conv_state_indices=self.b_conv_buffer_idx,
         )
-        core_attn_out, _ = fused_recurrent_gated_delta_rule(
-            q=query,
-            k=key,
-            v=value,
-            initial_state=ssm_states,
-            inplace_final_state=True,
-            ssm_state_indices=self.b_ssm_buffer_idx,
-            use_qk_l2norm_in_kernel=True,
+        core_attn_out, _ = fused_recurrent_gated_delta_rule_packed_decode(
+            mixed_qkv=mixed_qkv,
+            a=a,
+            b=b,
             A_log=layer_weight.linear_A_log.weight,
             dt_bias=layer_weight.linear_dt_bias.weight,
-            a_raw=a,
-            b_raw=b,
+            scale=backend.head_k_dim ** -0.5,
+            initial_state=ssm_states,
+            ssm_state_indices=self.b_ssm_buffer_idx,
+            use_qk_l2norm_in_kernel=True,
         )
         return core_attn_out, z
 
@@ -418,7 +406,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             k=key,
             v=value,
             initial_state=ssm_states,
-            cu_seqlens=cu_seqlens_q.to(torch.long),
+            cu_seqlens=self.b1_mtp_cu_q_seq_len_int64,
             ssm_state_indices=self.b_ssm_buffer_idx,
             ssm_state_write_indices=self.b_ssm_buffer_idx,
             num_accepted_tokens=self.b_num_accepted_tokens,
@@ -426,5 +414,10 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             dt_bias=layer_weight.linear_dt_bias.weight,
             a_raw=a,
             b_raw=b,
+            run_config=(
+                {"BV": 32, "num_warps": 4, "num_stages": 1}
+                if getattr(backend.model, "linear_att_mtp_match_decode", False)
+                else None
+            ),
         )
         return core_attn_out

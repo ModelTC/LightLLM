@@ -100,6 +100,21 @@ class CustomProcessGroup:
         return dist.all_reduce(input_, group=self.device_group)
 
     def all_gather_into_tensor(self, output_: torch.Tensor, input_: torch.Tensor, async_op: bool = False) -> None:
+        if (
+            not async_op
+            and self.symm_mem_reduce is not None
+            and output_.is_contiguous()
+            and output_.device == input_.device
+            and output_.dtype == input_.dtype
+            and output_.numel() == input_.numel() * self.dp_world_size
+        ):
+            gather_input = input_
+            if input_.dtype in (torch.int32, torch.int64) and input_.is_contiguous():
+                gather_input = input_.view(-1).view(self.symm_mem_reduce.dtype)
+            gathered = self.symm_mem_reduce.ordered_all_gather(gather_input)
+            if gathered is not None:
+                output_.view(-1).copy_(gathered.view(-1).view(input_.dtype))
+                return
         return dist.all_gather_into_tensor(output_, input_, group=self.device_group, async_op=async_op)
 
 
@@ -204,7 +219,7 @@ class DistributeGroupManager:
             num_max_tokens_per_rank=self.ll_num_tokens,
             hidden=self.ll_hidden,
             num_topk=num_experts_per_tok,
-            use_fp8_dispatch=True,
+            use_fp8_dispatch="none" not in expert_quant_method_names,
             allow_multiple_reduction=True,
         )
         self.ep_mega_moe_buffer = None
@@ -306,7 +321,7 @@ def all_gather_into_tensor(
         output_.copy_(input_)
         return
     if isinstance(group, CustomProcessGroup):
-        return group.all_gather_into_tensor(output_, input_)
+        return group.all_gather_into_tensor(output_, input_, async_op=async_op)
     else:
         return dist.all_gather_into_tensor(output_, input_, group, async_op)
 

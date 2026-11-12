@@ -163,5 +163,57 @@ def test_variable_length_cu_seqlens(seed):
         )
 
 
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("steps", [1, 2, 3, 4])
+def test_match_decode_preserves_every_sequential_snapshot(state_dtype, steps):
+    torch.manual_seed(3107)
+    batch, heads, value_heads, width = 2, 4, 12, 128
+    count = batch * steps
+    q = torch.randn(batch, steps, heads, width, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn(batch, steps, value_heads, width, device="cuda", dtype=torch.bfloat16)
+    a = torch.randn(batch, steps, value_heads, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn_like(a)
+    indices = torch.arange(count, device="cuda", dtype=torch.int32).view(batch, steps)
+    accepted = torch.tensor([1, steps], device="cuda", dtype=torch.int32)
+    initial = torch.randn(count, value_heads, width, width, device="cuda", dtype=state_dtype) * 0.1
+    state = initial[indices.gather(1, accepted.long()[:, None] - 1).flatten().long()].clone()
+    expected_states = initial.clone()
+    gates = dict(A_log=torch.zeros(value_heads, device="cuda"), dt_bias=torch.zeros(value_heads, device="cuda"))
+    outputs = []
+    for step in range(steps):
+        output, _ = fused_recurrent_gated_delta_rule(
+            q=q[:, step : step + 1],
+            k=k[:, step : step + 1],
+            v=v[:, step : step + 1],
+            initial_state=state,
+            inplace_final_state=True,
+            ssm_state_indices=torch.arange(batch, device="cuda", dtype=torch.int32),
+            use_qk_l2norm_in_kernel=True,
+            a_raw=a[:, step],
+            b_raw=b[:, step],
+            **gates,
+        )
+        outputs.append(output)
+        expected_states.index_copy_(0, indices[:, step].long(), state)
+    actual, actual_states = mtp_fused_recurrent_gated_delta_rule(
+        q=q.reshape(1, count, heads, width),
+        k=k.reshape(1, count, heads, width),
+        v=v.reshape(1, count, value_heads, width),
+        initial_state=initial.clone(),
+        cu_seqlens=torch.arange(batch + 1, device="cuda", dtype=torch.int64) * steps,
+        ssm_state_indices=indices,
+        ssm_state_write_indices=indices,
+        num_accepted_tokens=accepted,
+        a_raw=a.reshape(count, value_heads),
+        b_raw=b.reshape(count, value_heads),
+        run_config={"BV": 32, "num_warps": 4, "num_stages": 1},
+        **gates,
+    )
+    expected = torch.cat(outputs, dim=1).reshape_as(actual)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    torch.testing.assert_close(actual_states, expected_states, atol=0, rtol=0)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

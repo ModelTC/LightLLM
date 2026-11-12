@@ -127,6 +127,8 @@ ModelRegistry.register(
 ModelRegistry.register(["qwen3_vl"], "lightllm.models.qwen3_vl.model:Qwen3VLTpPartModel", is_multimodal=True)
 ModelRegistry.register(["qwen3_vl_moe"], "lightllm.models.qwen3_vl_moe.model:Qwen3VLMOETpPartModel", is_multimodal=True)
 ModelRegistry.register("qwen3_next", "lightllm.models.qwen3next.model:Qwen3NextTpPartModel")
+ModelRegistry.register("qwen4_exp", "lightllm.models.qwen4_exp.model:Qwen4ExpTpPartModel", is_multimodal=True)
+ModelRegistry.register("qwen4_exp_text", "lightllm.models.qwen4_exp.model:Qwen4ExpTpPartModel")
 ModelRegistry.register(
     "qwen",
     "lightllm.models.qwen_vl.model:QWenVLTpPartModel",
@@ -199,6 +201,9 @@ DraftModelRegistry.register("qwen3", "dspark", "lightllm.models.qwen3_dspark.mod
 DraftModelRegistry.register("qwen3", "eagle3", "lightllm.models.qwen3_eagle.model:Qwen3EagleModel")
 DraftModelRegistry.register(
     "qwen3_moe", ("vanilla_no_att", "eagle_no_att"), "lightllm.models.qwen3_moe_mtp.model:Qwen3MOEMTPModel"
+)
+DraftModelRegistry.register(
+    ("qwen4_exp", "qwen4_exp_text"), "eagle_with_att", "lightllm.models.qwen4_exp.mtp.model:Qwen4ExpMTPModel"
 )
 
 

@@ -2,6 +2,7 @@ import os
 import json
 import torch
 import uuid
+import math
 from easydict import EasyDict
 from functools import lru_cache
 from lightllm.utils.log_utils import init_logger
@@ -85,18 +86,22 @@ def is_stop_matching_in_reasoning_enabled() -> bool:
 
 @lru_cache(maxsize=None)
 def get_deepep_num_max_dispatch_tokens_per_rank_prefill():
-    # 在单卡最大 prefill batch 之外额外保留 128 个 token，并向上对齐到 8，
+    # 在 SP 分片后的单卡最大 prefill batch 之外保留 128 个 token，并向上对齐到 8，
     # 避免 autotune warmup 或调度边界波动使实际输入超过 DeepEP buffer 上限。
     # 显式设置 NUM_MAX_DISPATCH_TOKENS_PER_RANK_PREFILL 时仍使用该覆盖值。
     configured = os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_PREFILL", None)
     if configured is not None:
         return int(configured)
 
-    batch_max_tokens = get_env_start_args().batch_max_tokens or 256
-    capacity = ((int(batch_max_tokens) + 128 + 7) // 8) * 8
+    args = get_env_start_args()
+    batch_max_tokens = int(args.batch_max_tokens or 256)
+    sp_world_size = args.tp // args.dp if getattr(args, "enable_tpsp_mix_mode", False) else 1
+    rank_tokens = (batch_max_tokens + sp_world_size - 1) // sp_world_size
+    capacity = ((rank_tokens + 128 + 7) // 8) * 8
     logger.info(
-        "DeepEP prefill buffer capacity: batch_max_tokens=%s, safety_margin=128, capacity=%s",
+        "DeepEP prefill buffer capacity: batch_max_tokens=%s, sp_world_size=%s, safety_margin=128, capacity=%s",
         batch_max_tokens,
+        sp_world_size,
         capacity,
     )
     return capacity
@@ -113,13 +118,18 @@ def get_deepep_num_max_dispatch_tokens_per_rank_decode():
 
     args = get_env_start_args()
     required_tokens = int(args.running_max_req_size) * (int(args.mtp_step) + 1)
-    capacity = ((required_tokens + 12 + 7) // 8) * 8
+    sp_world_size = args.tp // args.dp if getattr(args, "enable_tpsp_mix_mode", False) else 1
+    alignment = math.lcm(sp_world_size, int(args.mtp_step) + 1)
+    padded_tokens = (required_tokens + alignment - 1) // alignment * alignment
+    rank_tokens = padded_tokens // sp_world_size
+    capacity = ((rank_tokens + 12 + 7) // 8) * 8
     logger.info(
         "DeepEP decode buffer capacity: running_max_req_size=%s, mtp_step=%s, "
-        "required_tokens=%s, safety_margin=12, capacity=%s",
+        "required_tokens=%s, sp_world_size=%s, safety_margin=12, capacity=%s",
         args.running_max_req_size,
         args.mtp_step,
         required_tokens,
+        sp_world_size,
         capacity,
     )
     return capacity

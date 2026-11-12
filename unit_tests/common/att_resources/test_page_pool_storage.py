@@ -58,9 +58,9 @@ def test_shared_registration_lives_until_last_view(
     unregistered = []
     unregister = utils._unregister_page_pool_storage
 
-    def record_unregister(ptr: int, device_id: int) -> None:
-        unregistered.append(ptr)
-        unregister(ptr=ptr, device_id=device_id)
+    def record_unregister(addresses: tuple[int, ...], device_id: int) -> None:
+        unregistered.extend(addresses)
+        unregister(addresses=addresses, device_id=device_id)
 
     monkeypatch.setattr(utils, "_unregister_page_pool_storage", record_unregister)
     tensor = utils.create_page_pool_tensor(size=(4096,), dtype=torch.float32)
@@ -73,6 +73,92 @@ def test_shared_registration_lives_until_last_view(
     del view
     gc.collect()
     assert unregistered == [ptr]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_chunked_shared_pages_keep_dma_boundaries_and_lifetime(cpu_args, monkeypatch, dtype) -> None:
+    cpu_args.enable_dp_prompt_cache_fetch = True
+    monkeypatch.setattr(utils, "_HOST_REGISTRATION_BYTES", 16384)
+    runtime = torch.cuda.cudart()
+    registered, released = [], []
+
+    class RecordingRuntime:
+        def cudaHostRegister(self, address, size, flags):
+            status = runtime.cudaHostRegister(address, size, flags)
+            if int(status) == 0:
+                registered.append((address, size))
+            return status
+
+        def cudaHostUnregister(self, address):
+            released.append(address)
+            return runtime.cudaHostUnregister(address)
+
+    monkeypatch.setattr(torch.cuda, "cudart", lambda: RecordingRuntime())
+    tensor = utils.create_page_pool_tensor(size=(7, 3, 512), dtype=dtype)
+    cell_bytes = tensor[0].numel() * tensor.element_size()
+    assert len(registered) > 1
+    assert all((address - tensor.data_ptr()) % cell_bytes == 0 for address, _ in registered)
+    assert all(size <= 16384 for _, size in registered)
+    destination = torch.empty((3, 5, 512), dtype=dtype, device="cuda")
+    for index in range(tensor.shape[0]):
+        tensor[index].fill_(index + 1)
+        destination[:, 1].copy_(tensor[index], non_blocking=True)
+        torch.cuda.synchronize()
+        assert torch.equal(destination[:, 1].cpu(), tensor[index])
+
+    view = tensor[-1]
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        destination[:, 1].copy_(view, non_blocking=True)
+    view.fill_(17)
+    del tensor
+    gc.collect()
+    assert not released
+    assert view.is_shared() and view.is_pinned()
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(destination[:, 1].cpu(), view)
+    graph.reset()
+    del view
+    gc.collect()
+    assert released == [address for address, _ in reversed(registered)]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_private_storage_keeps_whole_tensor_dma(monkeypatch) -> None:
+    monkeypatch.setattr(utils, "_HOST_REGISTRATION_BYTES", 16384)
+    tensor = torch.full((7, 3, 512), 7, dtype=torch.float32)
+    utils.register_page_pool_tensor(tensor)
+    destination = tensor.to("cuda", non_blocking=True)
+    torch.cuda.synchronize()
+    assert torch.equal(destination.cpu(), tensor)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_shared_pool_partial_registration_failure_rolls_back(cpu_args, monkeypatch) -> None:
+    cpu_args.enable_dp_prompt_cache_fetch = True
+    monkeypatch.setattr(utils, "_HOST_REGISTRATION_BYTES", 16384)
+    runtime = torch.cuda.cudart()
+    registered, released = [], []
+
+    class FailingRuntime:
+        def cudaHostRegister(self, address, size, flags):
+            if registered:
+                return 1
+            status = runtime.cudaHostRegister(address, size, flags)
+            if int(status) == 0:
+                registered.append(address)
+            return status
+
+        def cudaHostUnregister(self, address):
+            released.append(address)
+            return runtime.cudaHostUnregister(address)
+
+    monkeypatch.setattr(torch.cuda, "cudart", lambda: FailingRuntime())
+    with pytest.raises(torch.cuda.CudaError):
+        utils.create_page_pool_tensor(size=(7, 3, 512), dtype=torch.float32)
+    assert registered and released == registered
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

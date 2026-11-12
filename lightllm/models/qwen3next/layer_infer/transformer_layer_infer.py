@@ -266,9 +266,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         gdn_out = self._linear_post(core_attn_out, z, layer_weight)
 
-        if self.tp_world_size_ > 1:
-            all_reduce(gdn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        return gdn_out
+        return self._reduce_linear_output(gdn_out, infer_state)
 
     def token_attention_forward(
         self,
@@ -296,9 +294,12 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         gdn_out = self._linear_post(core_attn_out, z, layer_weight)
 
+        return self._reduce_linear_output(gdn_out, infer_state)
+
+    def _reduce_linear_output(self, output, infer_state):
         if self.tp_world_size_ > 1:
-            all_reduce(gdn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        return gdn_out
+            all_reduce(output, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+        return output
 
     def _linear_in_proj(
         self,
@@ -316,7 +317,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> torch.Tensor:
         num_tokens = z.shape[0]
         core_attn_out = core_attn_out.view(-1, core_attn_out.shape[-1])
-        z = z.contiguous().view(-1, z.shape[-1])
         norm_out = layer_weight.linear_norm(core_attn_out, z, self.eps_)
         core_attn_out = norm_out.view(num_tokens, -1)
         output = layer_weight.linear_out_proj.mm(core_attn_out)

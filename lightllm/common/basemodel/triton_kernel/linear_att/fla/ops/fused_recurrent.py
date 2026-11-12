@@ -380,6 +380,160 @@ def fused_recurrent_gated_delta_rule_fwd(
     return o, final_state
 
 
+@triton.jit
+def _fused_recurrent_gated_delta_rule_packed_decode_kernel(
+    mixed_qkv,
+    a,
+    b,
+    A_log,
+    dt_bias,
+    o,
+    h0,
+    ssm_state_indices,
+    scale,
+    stride_mixed_qkv_tok: tl.constexpr,
+    stride_a_tok: tl.constexpr,
+    stride_b_tok: tl.constexpr,
+    stride_state_slot: tl.constexpr,
+    stride_indices: tl.constexpr,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    SOFTPLUS_THRESHOLD: tl.constexpr,
+    USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+):
+    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    i_n, i_hv = i_nh // HV, i_nh % HV
+    i_h = i_hv // (HV // H)
+
+    o_k = tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    mask_k = o_k < K
+    mask_v = o_v < V
+    mask_h = mask_k[:, None] & mask_v[None, :]
+
+    state_idx = tl.load(ssm_state_indices + i_n * stride_indices).to(tl.int64)
+    p_h0 = h0 + state_idx * stride_state_slot
+    p_h0 += i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+    b_h = tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+
+    p_mixed = mixed_qkv + i_n * stride_mixed_qkv_tok
+    q_off = i_h * K + o_k
+    k_off = H * K + i_h * K + o_k
+    v_off = 2 * H * K + i_hv * V + o_v
+    b_q = tl.load(p_mixed + q_off, mask=mask_k, other=0).to(tl.float32)
+    b_k = tl.load(p_mixed + k_off, mask=mask_k, other=0).to(tl.float32)
+    b_v = tl.load(p_mixed + v_off, mask=mask_v, other=0).to(tl.float32)
+
+    if USE_QK_L2NORM_IN_KERNEL:
+        b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
+        b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+    b_q = b_q * scale
+
+    a_val = tl.load(a + i_n * stride_a_tok + i_hv).to(tl.float32)
+    b_val = tl.load(b + i_n * stride_b_tok + i_hv).to(tl.float32)
+    A_log_val = tl.load(A_log + i_hv).to(tl.float32)
+    dt_bias_val = tl.load(dt_bias + i_hv).to(tl.float32)
+    x = a_val + dt_bias_val
+    softplus_x = tl.where(x <= SOFTPLUS_THRESHOLD, tl.log(1.0 + tl.exp(x)), x)
+    g_val = -tl.exp(A_log_val) * softplus_x
+    beta_val = tl.sigmoid(b_val)
+
+    b_h *= exp(g_val)
+    b_v -= tl.sum(b_h * b_k[:, None], 0)
+    b_v *= beta_val
+    b_h += b_k[:, None] * b_v[None, :]
+    b_o = tl.sum(b_h * b_q[:, None], 0)
+
+    p_o = o + (i_n * HV + i_hv) * V + o_v
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
+    tl.store(p_h0, b_h.to(p_h0.dtype.element_ty), mask=mask_h)
+
+
+def fused_recurrent_gated_delta_rule_packed_decode(
+    mixed_qkv: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor,
+    ssm_state_indices: torch.Tensor,
+    use_qk_l2norm_in_kernel: bool = False,
+    out: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if mixed_qkv.ndim != 2 or mixed_qkv.stride(-1) != 1:
+        raise ValueError("mixed_qkv must be a 2D tensor contiguous in its last dimension")
+    if a.ndim != 2 or b.ndim != 2 or a.stride(-1) != 1 or b.stride(-1) != 1:
+        raise ValueError("a and b must be 2D tensors contiguous in their last dimension")
+    if A_log.ndim != 1 or dt_bias.ndim != 1 or A_log.stride(0) != 1 or dt_bias.stride(0) != 1:
+        raise ValueError("A_log and dt_bias must be contiguous 1D tensors")
+    if ssm_state_indices.ndim != 1 or not ssm_state_indices.is_contiguous():
+        raise ValueError("ssm_state_indices must be a contiguous 1D tensor")
+    if initial_state.ndim != 4 or initial_state.stride(-1) != 1:
+        raise ValueError("initial_state must be a 4D tensor contiguous in its last dimension")
+
+    batch = mixed_qkv.shape[0]
+    num_v_heads, key_dim, value_dim = initial_state.shape[-3:]
+    if a.shape != (batch, num_v_heads) or b.shape != (batch, num_v_heads):
+        raise ValueError("a and b must have shape [batch, num_v_heads]")
+    if ssm_state_indices.shape[0] != batch:
+        raise ValueError("ssm_state_indices must have one entry per batch row")
+    if A_log.numel() != num_v_heads or dt_bias.numel() != num_v_heads:
+        raise ValueError("A_log and dt_bias must match num_v_heads")
+
+    qk_dim = mixed_qkv.shape[1] - num_v_heads * value_dim
+    if qk_dim <= 0 or qk_dim % 2 != 0:
+        raise ValueError("mixed_qkv does not contain a valid q/k/v layout")
+    query_dim = qk_dim // 2
+    if query_dim % key_dim != 0:
+        raise ValueError("query dimension must be divisible by key head dimension")
+    num_k_heads = query_dim // key_dim
+    if num_k_heads <= 0 or num_v_heads % num_k_heads != 0:
+        raise ValueError("invalid GQA head configuration")
+
+    block_k = triton.next_power_of_2(key_dim)
+    if triton.cdiv(key_dim, block_k) != 1:
+        raise ValueError("packed decode currently supports one key tile")
+    block_v = min(triton.next_power_of_2(value_dim), 32)
+    if out is None:
+        out = mixed_qkv.new_empty((batch, num_v_heads, value_dim))
+    elif out.shape != (batch, num_v_heads, value_dim) or not out.is_contiguous():
+        raise ValueError("out must be contiguous with shape [batch, num_v_heads, value_dim]")
+
+    grid = (triton.cdiv(value_dim, block_v), batch * num_v_heads)
+    _fused_recurrent_gated_delta_rule_packed_decode_kernel[grid](
+        mixed_qkv=mixed_qkv,
+        a=a,
+        b=b,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        o=out,
+        h0=initial_state,
+        ssm_state_indices=ssm_state_indices,
+        scale=scale,
+        stride_mixed_qkv_tok=mixed_qkv.stride(0),
+        stride_a_tok=a.stride(0),
+        stride_b_tok=b.stride(0),
+        stride_state_slot=initial_state.stride(0),
+        stride_indices=ssm_state_indices.stride(0),
+        H=num_k_heads,
+        HV=num_v_heads,
+        K=key_dim,
+        V=value_dim,
+        BK=block_k,
+        BV=block_v,
+        SOFTPLUS_THRESHOLD=20.0,
+        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        num_warps=1,
+        num_stages=3,
+    )
+    return out.unsqueeze(1), initial_state
+
+
 class FusedRecurrentFunction(torch.autograd.Function):
     @staticmethod
     def forward(

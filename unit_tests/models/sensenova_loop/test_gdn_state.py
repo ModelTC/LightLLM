@@ -79,10 +79,6 @@ def test_gdn_decode_keeps_logical_layer_state(
 
     if device == "cpu":
 
-        def conv_pack(mixed, z, a, b, conv, *args):
-            conv[1].add_(1)
-            return (*backend._rearrange_mixed_qkv(mixed, decode=True), z, a, b)
-
         def conv_mtp(mixed, conv, *args, **kwargs):
             conv[1].add_(1)
             return mixed
@@ -91,12 +87,19 @@ def test_gdn_decode_keeps_logical_layer_state(
             initial_state[mtp_step + 1 : 2 * (mtp_step + 1)].add_(1)
             return v, None
 
-        monkeypatch.setattr("lightllm.common.basemodel.attention.linear.gdn.conv_pack_gdn_decode_inputs", conv_pack)
+        def packed_recurrent(*, mixed_qkv, initial_state, **kwargs):
+            _, _, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=True)
+            return recurrent(initial_state=initial_state, v=value)
+
+        monkeypatch.setattr(
+            "lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d.causal_conv1d_update", conv_mtp
+        )
         monkeypatch.setattr(
             "lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp.causal_conv1d_update", conv_mtp
         )
         monkeypatch.setattr(
-            "lightllm.common.basemodel.attention.linear.gdn.fused_recurrent_gated_delta_rule", recurrent
+            "lightllm.common.basemodel.attention.linear.gdn.fused_recurrent_gated_delta_rule_packed_decode",
+            packed_recurrent,
         )
         monkeypatch.setattr(
             "lightllm.common.basemodel.attention.linear.gdn.mtp_fused_recurrent_gated_delta_rule",
