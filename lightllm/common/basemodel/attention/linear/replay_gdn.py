@@ -201,7 +201,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             self.b_conv_buffer_idx = infer.b_req_idx
             self.b1_mtp_cu_q_seq_len = None
             self.b_num_accepted_tokens = None
-            # 每行一个 token。replay kernel 仍用这个布局，cursor 需要现成的前缀和。
+            # 每行一个 token。replay 和 cursor 共用这份前缀和。
             self.b_cu_seqlens = torch.arange(
                 infer.b_req_idx.numel() + 1, dtype=torch.int32, device=infer.b_req_idx.device
             )
@@ -250,6 +250,9 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             backend.tp_num_v_heads,
             backend.head_v_dim,
         )
+        query = query.view(query.shape[0], query.shape[-2], query.shape[-1])
+        key = key.view(key.shape[0], key.shape[-2], key.shape[-1])
+        value = value.view(value.shape[0], value.shape[-2], value.shape[-1])
         output, _ = replay(
             state,
             state.storage_layer(layer_num),
@@ -261,7 +264,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             layer_weight.linear_A_log.weight,
             layer_weight.linear_dt_bias.weight,
             self.b_conv_buffer_idx,
-            self.b1_mtp_cu_q_seq_len,
+            self.b_cu_seqlens,
         )
         return output, z
 
@@ -278,7 +281,14 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             num_accepted_tokens=self.b_num_accepted_tokens,
             query_start_loc=self.b1_mtp_cu_q_seq_len,
         )
-        query, key, value = _rearrange_mixed_qkv(backend, mixed_qkv, decode=False)
+        query, key, value = torch.split(
+            mixed_qkv,
+            [backend.tp_key_dim, backend.tp_key_dim, backend.tp_value_dim],
+            dim=-1,
+        )
+        query = query.view(-1, backend.tp_num_k_heads, backend.head_k_dim)
+        key = key.view(-1, backend.tp_num_k_heads, backend.head_k_dim)
+        value = value.view(-1, backend.tp_num_v_heads, backend.head_v_dim)
         output, _ = replay(
             state,
             state.storage_layer(layer_num),
@@ -290,7 +300,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             layer_weight.linear_A_log.weight,
             layer_weight.linear_dt_bias.weight,
             self.b_conv_buffer_idx,
-            self.b1_mtp_cu_q_seq_len,
+            self.b_cu_seqlens,
         )
         return output
 

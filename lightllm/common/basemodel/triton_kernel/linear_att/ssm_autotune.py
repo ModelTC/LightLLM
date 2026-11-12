@@ -48,12 +48,11 @@ def static_key(state, mode, q, cu_seqlens) -> dict[str, object]:
     # 保持文件名较短，同时区分 packed projection、TP 布局、状态精度、递推规则和 history 容量。
     key = {
         "mode": mode,
-        "v": 8,
+        "v": 10,
         "shape": str((q.shape[-2], hv, state.num_key_heads, kd, vd, state.verify_width)),
         "dtype": str((q.dtype, state.ssm_state.dtype)),
         "capacity": state.capacity,
         "kda": int(state.kda),
-        "varlen": cu_seqlens is not None,
     }
     if state.kda:
         key["lower"] = state.gate_lower_bound
@@ -63,8 +62,8 @@ def static_key(state, mode, q, cu_seqlens) -> dict[str, object]:
 
 
 def run_key(q, cu_seqlens) -> tuple[int, int]:
-    """返回调优键：token 数，以及请求数。没有 cu_seqlens 时第二项也是 token 数，因为一行一个请求。"""
-    tokens = q.shape[1 if cu_seqlens is not None else 0]
+    """返回调优键：token 数，以及请求数。q 是 [tokens, heads, dim]。没传前缀和时一行一个请求。"""
+    tokens = q.shape[0]
     return tokens, cu_seqlens.numel() - 1 if cu_seqlens is not None else tokens
 
 
@@ -73,7 +72,8 @@ def rebuild_inputs(
 ) -> tuple[tuple[object, ...], dict[str, object]]:
     """为一层 scratch 和同形状的紧凑激活分配调优输入。不复制服务状态池。"""
     tokens, run_count = run_key(q, cu_seqlens)
-    batch = min(run_count, triton.cdiv(tokens, state.verify_width)) if cu_seqlens is not None else tokens
+    # 一行一个 token 时请求数就是 token 数。打包窗口再用 verify_width 折成请求数。
+    batch = run_count if tokens == run_count else min(run_count, triton.cdiv(tokens, state.verify_width))
     _, _, hv, kd, vd = state.ssm_state.shape
     from lightllm.common.attention_state.bounded_att.conv_ssm_types import ConvSSMStateConfig
 
@@ -107,7 +107,9 @@ def rebuild_inputs(
             torch.full((run_count - batch,), batch, dtype=torch.int32, device=q.device),
         )
     )
-    cu = (torch.arange(run_count + 1, dtype=torch.int32, device=q.device) * state.verify_width).clamp_max(tokens)
+    # 计时用均匀窗口，不读调用方的前缀和。宽度为 1 时 verify_width 就是 1。
+    cu = torch.arange(run_count + 1, dtype=torch.int32, device=q.device)
+    cu = (cu * state.verify_width).clamp_max(tokens)
     return (), dict(
         state=scratch,
         mode=mode,
@@ -118,7 +120,7 @@ def rebuild_inputs(
         b=inputs[4],
         a_log=inputs[5],
         bias=inputs[6],
-        cu_seqlens=cu if cu_seqlens is not None else None,
+        cu_seqlens=cu,
         workload=(reqs,),
     )
 
@@ -158,15 +160,11 @@ def select_config(
     (reqs,) = workload
     state.cursors.zero_()
     # 把前缀写满但不越出 capacity。replay kernel 自己读 cursor。调优窗口全部接受。
-    tokens = q.shape[1 if cu_seqlens is not None else 0]
+    tokens = run_key(q, cu_seqlens)[0]
     rounds = max(1, state.capacity // min(state.verify_width, tokens))
     for _ in range(rounds):
         replay_layer(state, 0, q, k, v, a, b, a_log, bias, reqs, cu_seqlens)
-        # 宽度为 1 时 replay 不用 cu_seqlens，cursor 仍要一份每行一个 token 的前缀和。
-        cursor_cu = cu_seqlens
-        if cursor_cu is None:
-            cursor_cu = torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device)
-        advance_cursor(state, reqs, cursor_cu)
+        advance_cursor(state, reqs, cu_seqlens)
     return run_config
 
 

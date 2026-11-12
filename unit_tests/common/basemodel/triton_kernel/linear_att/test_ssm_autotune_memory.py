@@ -13,10 +13,10 @@ def test_rebuild_uses_one_layer_scratch(width):
     state = torch.zeros((4, 3, 2, 32, 32), dtype=torch.bfloat16, device="cuda")
     ssm_backend = ReplaySSMExecutor(state, 8, width, num_key_heads=2)
     tokens = 3 * width
-    q = torch.ones((1, tokens, 2, 32) if width > 1 else (tokens, 2, 32), dtype=torch.bfloat16, device="cuda")
+    q = torch.ones((tokens, 2, 32), dtype=torch.bfloat16, device="cuda")
     gates = torch.zeros((tokens, 2), dtype=torch.bfloat16, device="cuda")
     a_log = torch.zeros(2, device="cuda")
-    cu = torch.arange(4, device="cuda", dtype=torch.int32) * width if width > 1 else None
+    cu = torch.arange(4, device="cuda", dtype=torch.int32) * width
     _, kwargs = tuning.rebuild_inputs(ssm_backend, "replay", q, q, q, gates, gates, a_log, a_log, cu_seqlens=cu)
     scratch = kwargs["state"]
     assert scratch is not ssm_backend
@@ -41,9 +41,7 @@ def test_rebuild_failure_leaves_serving_state_unchanged(monkeypatch, tmp_path, w
     gates = torch.zeros((tokens, 2), dtype=torch.bfloat16, device="cuda")
     a_log = torch.zeros(2, device="cuda")
     bias = torch.zeros(2, device="cuda")
-    cu = torch.arange(4, device="cuda", dtype=torch.int32) * width if width > 1 else None
-    if cu is not None:
-        q = q.unsqueeze(0)
+    cu = torch.arange(4, device="cuda", dtype=torch.int32) * width
     inputs = dict(
         state=ssm_backend, mode="replay", q=q, k=q, v=q, a=gates, b=gates, a_log=a_log, bias=bias, cu_seqlens=cu
     )

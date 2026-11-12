@@ -49,8 +49,9 @@ def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
 
     def cycle(backend, ids):
         count = ids.numel()
-        out = replay_layer(backend, 0, q[:count], k[:count], v[:count], a[:count], beta[:count], alog, bias, ids)[0]
-        accept_replay_window(backend, ids)
+        cu = torch.arange(count + 1, dtype=torch.int32, device=ids.device)
+        out = replay_layer(backend, 0, q[:count], k[:count], v[:count], a[:count], beta[:count], alog, bias, ids, cu)[0]
+        accept_replay_window(backend, ids, cu_seqlens=cu)
         return out
 
     graphs = {}
@@ -115,9 +116,9 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
     flags = torch.zeros_like(rows)
     starts = torch.zeros(3, device="cuda", dtype=torch.int32)
     accepted = torch.full((5,), -1, device="cuda", dtype=torch.int32)
-    q = torch.randn(1, 12, 2, 128, device="cuda", dtype=torch.bfloat16)
+    q = torch.randn(12, 2, 128, device="cuda", dtype=torch.bfloat16)
     k = torch.randn_like(q)
-    v = torch.randn(1, 12, 4, 128, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(12, 4, 128, device="cuda", dtype=torch.bfloat16)
     a = torch.full((12, 4 * 128 if kda else 4), -3.0, device="cuda", dtype=torch.bfloat16)
     beta = torch.randn(a.shape[0], 4, device="cuda", dtype=a.dtype)
     alog = torch.zeros(4, device="cuda")
@@ -259,8 +260,10 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
     alog = torch.zeros(4, device="cuda")
     bias = torch.zeros(4 * 128 if kda else 4, device="cuda")
 
+    cu = torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device)
+
     def forward(ssm_backend):
-        return [replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, reqs)[0] for layer in range(3)]
+        return [replay_layer(ssm_backend, layer, q, k, v, a, beta, alog, bias, reqs, cu)[0] for layer in range(3)]
 
     def warm(ssm_backend):
         out = forward(ssm_backend)
@@ -334,9 +337,9 @@ def test_cross_layer_fold_with_state_offset_above_int32(kda):
         ReplaySSMExecutor(state, 8, 4, torch.bfloat16, num_key_heads=4, kda=kda, run_config=config)
         for state in [dense, sparse]
     ]
-    q = torch.randn(1, 8, 4, 128, device="cuda", dtype=torch.bfloat16)
+    q = torch.randn(8, 4, 128, device="cuda", dtype=torch.bfloat16)
     k = torch.randn_like(q)
-    v = torch.randn(1, 8, 12, 128, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(8, 12, 128, device="cuda", dtype=torch.bfloat16)
     a = torch.full((8, 12 * 128 if kda else 12), -3.0, device="cuda", dtype=torch.bfloat16)
     beta = torch.randn(8, 12, device="cuda", dtype=torch.bfloat16)
     alog = torch.zeros(12, device="cuda")
@@ -385,9 +388,9 @@ def test_small_batch_matches_larger_graph_padding(batch, dtype, kda):
     padded = torch.cat((reqs, reqs.new_full((13 - batch,), 13)))
     cu = torch.arange(batch + 1, device="cuda", dtype=torch.int32) * 4
     padded_cu = torch.cat((cu, cu.new_full((13 - batch,), batch * 4)))
-    q = torch.randn(1, batch * 4, 2, 128, device="cuda", dtype=torch.bfloat16)
+    q = torch.randn(batch * 4, 2, 128, device="cuda", dtype=torch.bfloat16)
     k = torch.randn_like(q)
-    v = torch.randn(1, batch * 4, 4, 128, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(batch * 4, 4, 128, device="cuda", dtype=torch.bfloat16)
     a = torch.full((batch * 4, 4 * 128 if kda else 4), -3.0, device="cuda", dtype=torch.bfloat16)
     beta = torch.randn(a.shape[0], 4, device="cuda", dtype=a.dtype)
     alog = torch.zeros(4, device="cuda")
@@ -446,6 +449,7 @@ def test_full_prefix_does_not_address_past_capacity(kda):
         run_config={"BV": 32, "num_warps": 1, "num_stages": 1},
     )
     reqs = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+    cu = torch.arange(reqs.numel() + 1, dtype=torch.int32, device=reqs.device)
     q = torch.randn(2, 1, 32, device="cuda") * 0.2
     k, v = torch.randn_like(q), torch.randn_like(q)
     a = torch.full((2, 32 if kda else 1), -3.0, device="cuda")
@@ -456,13 +460,13 @@ def test_full_prefix_does_not_address_past_capacity(kda):
     for name in ("keys", "deltas", "gates", "raw_keys", "raw_values", "betas"):
         getattr(backend, name).zero_()
     backend.cursors[reqs.long()] = capacity + 2
-    replay_layer(backend, 0, q, k, v, a, beta, alog, bias, reqs)
+    replay_layer(backend, 0, q, k, v, a, beta, alog, bias, reqs, cu)
     backend.fold_accepted_prefix(reqs)
     torch.cuda.synchronize()
     assert torch.equal(backend.cursors[reqs.long()], torch.zeros(2, device="cuda", dtype=torch.int32))
     assert torch.isfinite(backend.ssm_state).all()
     for _ in range(12):
-        replay_layer(backend, 0, q, k, v, a, beta, alog, bias, reqs)
+        replay_layer(backend, 0, q, k, v, a, beta, alog, bias, reqs, cu)
         accept_replay_window(backend, reqs)
         overflow = reqs[backend.cursors[reqs.long()] + backend.verify_width > backend.capacity]
         if overflow.numel():

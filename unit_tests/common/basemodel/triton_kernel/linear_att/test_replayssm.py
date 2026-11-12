@@ -64,13 +64,13 @@ def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state
     reqs = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
     cu = torch.tensor([0, 2, 4], dtype=torch.int32, device="cuda")
     accepted = torch.tensor([1, 0], dtype=torch.int32, device="cuda")
-    q = torch.zeros(1, 4, 1, 128, dtype=torch.float16, device="cuda")
-    q[0, :2, 0, 0] = 1
+    q = torch.zeros(4, 1, 128, dtype=torch.float16, device="cuda")
+    q[:2, 0, 0] = 1
     k = torch.zeros_like(q)
-    k[0, 0, 0, 0] = -0.25
-    k[0, 1, 0, 0] = 1
+    k[0, 0, 0] = -0.25
+    k[1, 0, 0] = 1
     v = torch.zeros_like(q)
-    v[0, :2, 0, 0] = 60000
+    v[:2, 0, 0] = 60000
     a = torch.full((4, 128 if kda else 1), -20, dtype=torch.float16, device="cuda")
     b = torch.full((4, 1), 20, dtype=torch.float16, device="cuda")
     alog = torch.zeros(1, device="cuda")
@@ -86,12 +86,12 @@ def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state
         expected = []
         for token in range(2):
             output, expected_state = reference(
-                q[0, token], k[0, token], v[0, token], a[token], b[token], alog, bias, expected_state, kda=kda
+                q[token], k[token], v[token], a[token], b[token], alog, bias, expected_state, kda=kda
             )
             expected.append(output)
         assert torch.isfinite(expected_state).all()
         assert torch.isfinite(actual).all()
-        torch.testing.assert_close(actual[0, :2].float(), torch.stack(expected), atol=4, rtol=1e-3)
+        torch.testing.assert_close(actual[:2].float(), torch.stack(expected), atol=4, rtol=1e-3)
         accept_replay_window(ssm_backend, reqs, accepted, cu)
     # The correction is larger than FP16 can represent even though the
     # recurrent state, inputs, and attention outputs are all finite.
@@ -175,9 +175,9 @@ def test_replay_acceptance_flush_and_graph(
     if width == 1:
         cu = torch.tensor([0, 1, 2, 2], device="cuda", dtype=torch.int32)
     tokens = 3 * width
-    q = torch.randn(1, tokens, h, kdim, device="cuda", dtype=activation_dtype)
+    q = torch.randn(tokens, h, kdim, device="cuda", dtype=activation_dtype)
     k = torch.randn_like(q)
-    v = torch.randn(1, tokens, hv, vdim, device="cuda", dtype=activation_dtype)
+    v = torch.randn(tokens, hv, vdim, device="cuda", dtype=activation_dtype)
     a = torch.randn(tokens, hv * kdim if kda else hv, device="cuda", dtype=activation_dtype) + gate_shift
     b = torch.randn(tokens, hv, device="cuda", dtype=activation_dtype)
     alog = torch.randn(hv, device="cuda") * 0.1
@@ -220,9 +220,9 @@ def test_replay_acceptance_flush_and_graph(
                 for j in range(length):
                     t = start + j
                     out, cur = reference(
-                        q[0, t],
-                        k[0, t],
-                        v[0, t],
+                        q[t],
+                        k[t],
+                        v[t],
                         a[t],
                         b[t],
                         alog,
@@ -231,7 +231,7 @@ def test_replay_acceptance_flush_and_graph(
                         kda=kda,
                         gate_lower_bound=gate_lower_bound,
                     )
-                    torch.testing.assert_close(outputs[layer][0, t].float(), out, atol=0.006, rtol=0.02)
+                    torch.testing.assert_close(outputs[layer][t].float(), out, atol=0.006, rtol=0.02)
                     if j + 1 == counts[seq]:
                         expected[layer, req].copy_(cur)
         if iteration == 2 * capacity + 1:
@@ -330,9 +330,9 @@ def test_precomputed_projections_preserve_precision(warps, decay, state_dtype, d
     reqs = torch.tensor([1, 0], dtype=torch.int32, device="cuda")
     tokens = 2 if width == 1 else 7
     cu = torch.tensor([0, 1, 2] if width == 1 else [0, 4, 7], dtype=torch.int32, device="cuda")
-    q = torch.randn((1, tokens, 2, 128), device="cuda", dtype=dtype)
+    q = torch.randn((tokens, 2, 128), device="cuda", dtype=dtype)
     k = torch.randn_like(q)
-    v = torch.randn((1, tokens, 4, 128), device="cuda", dtype=dtype)
+    v = torch.randn((tokens, 4, 128), device="cuda", dtype=dtype)
     a = torch.randn((tokens, 4), device="cuda", dtype=dtype) + decay
     b = torch.randn_like(a)
     alog = torch.zeros(4, device="cuda")
@@ -391,9 +391,10 @@ def test_bf16_commit_rounds_before_the_next_token():
     alog = torch.zeros(1, device="cuda")
     bias = torch.zeros_like(alog)
     outputs = []
+    cu = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
     for ssm_backend in ssm_backends:
         assert ssm_backend.cursors[0].item() == 0
-        outputs.append(replay_layer(ssm_backend, 0, q, k, v, a, b, alog, bias, reqs)[0])
+        outputs.append(replay_layer(ssm_backend, 0, q, k, v, a, b, alog, bias, reqs, cu)[0])
     torch.testing.assert_close(outputs[0], outputs[1], atol=1e-7, rtol=1e-6)
     torch.testing.assert_close(ssm_backends[0].ssm_state, ssm_backends[1].ssm_state, atol=0, rtol=0)
 
@@ -422,13 +423,13 @@ def test_large_bf16_state_precompute_matches_inline():
             )
             for mode in ("inline", "precompute")
         ]
-        cu = None if width == 1 else torch.tensor([0, width], dtype=torch.int32, device="cuda")
+        cu = torch.tensor([0, width], dtype=torch.int32, device="cuda")
         accepted = torch.tensor([width - 1], dtype=torch.int32, device="cuda")
         for step in range(steps):
             torch.manual_seed(100 + step)
-            q = torch.randn((1, width, heads, 128), device="cuda", dtype=torch.bfloat16)
+            q = torch.randn((width, heads, 128), device="cuda", dtype=torch.bfloat16)
             k = torch.randn_like(q)
-            v = torch.randn((1, width, heads, 128), device="cuda", dtype=torch.bfloat16)
+            v = torch.randn((width, heads, 128), device="cuda", dtype=torch.bfloat16)
             a = torch.randn((width, heads), device="cuda", dtype=torch.bfloat16) - 1
             b = torch.randn_like(a)
             outputs = [replay_layer(backend, 0, q, k, v, a, b, alog, bias, reqs, cu)[0] for backend in backends]
@@ -460,6 +461,7 @@ def test_overflow_folds_inside_replay_for_gdn_and_kda(kda, dtype, capacity):
     twin = ReplaySSMExecutor(state.clone(), capacity, 1, dtype, num_key_heads=kh, kda=kda, run_config=config)
     assert backend.gates.shape[-1] == (dim if kda else capacity)
     reqs = torch.tensor([0], device="cuda", dtype=torch.int32)
+    cu = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
     alog = torch.zeros(hv, device="cuda")
     bias = torch.zeros(hv * dim if kda else hv, device="cuda")
     for step in range(capacity + 1):
@@ -474,8 +476,8 @@ def test_overflow_folds_inside_replay_for_gdn_and_kda(kda, dtype, capacity):
             assert int(backend.cursors[0]) == capacity
         outs, twin_outs = [], []
         for layer in range(2):
-            outs.append(replay_layer(backend, layer, q, k, v, a, b, alog, bias, reqs)[0])
-            twin_outs.append(replay_layer(twin, layer, q, k, v, a, b, alog, bias, reqs)[0])
+            outs.append(replay_layer(backend, layer, q, k, v, a, b, alog, bias, reqs, cu)[0])
+            twin_outs.append(replay_layer(twin, layer, q, k, v, a, b, alog, bias, reqs, cu)[0])
             if step == capacity:
                 assert int(backend.cursors[0]) == capacity
         for actual, expected in zip(outs, twin_outs):
@@ -498,9 +500,9 @@ def test_empty_window_keeps_cursor_for_gdn_and_kda(kda):
     backend.cursors[0] = 3
     reqs = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
     cu = torch.tensor([0, 0, 0], device="cuda", dtype=torch.int32)
-    q = torch.randn(1, 1, 2, 32, device="cuda")
+    q = torch.randn(1, 2, 32, device="cuda")
     k = torch.randn_like(q)
-    v = torch.randn(1, 1, 2, 32, device="cuda")
+    v = torch.randn(1, 2, 32, device="cuda")
     a = torch.zeros(1, 2 * 32 if kda else 2, device="cuda")
     b = torch.zeros(1, 2, device="cuda")
     bias = torch.zeros(2 * 32 if kda else 2, device="cuda")
@@ -532,9 +534,9 @@ def test_dynamic_verify_lengths_fill_history_before_folding(kda, dtype, compute_
     reqs = torch.full((3,), 3, dtype=torch.int32, device="cuda")
     cu = torch.tensor([0, 4, 8, 8], dtype=torch.int32, device="cuda")
     accepted = torch.zeros(4, dtype=torch.int32, device="cuda")
-    q = torch.randn(1, 8, 2, 128, dtype=dtype, device="cuda")
+    q = torch.randn(8, 2, 128, dtype=dtype, device="cuda")
     k = torch.randn_like(q)
-    v = torch.randn(1, 8, 4, 128, dtype=dtype, device="cuda")
+    v = torch.randn(8, 4, 128, dtype=dtype, device="cuda")
     a = torch.full((8, 4 * 128 if kda else 4), -3.0, dtype=dtype, device="cuda")
     b = torch.randn(8, 4, dtype=dtype, device="cuda")
     alog = torch.zeros(4, device="cuda")
@@ -590,8 +592,8 @@ def test_dynamic_verify_lengths_fill_history_before_folding(kda, dtype, compute_
                 current = expected[layer, req].clone()
                 for j in range(width):
                     t = (0 if seq == 0 else widths[0]) + j
-                    out, current = reference(q[0, t], k[0, t], v[0, t], a[t], b[t], alog, bias, current, kda=kda)
-                    torch.testing.assert_close(outputs[layer][0, t].float(), out, atol=0.006, rtol=0.02)
+                    out, current = reference(q[t], k[t], v[t], a[t], b[t], alog, bias, current, kda=kda)
+                    torch.testing.assert_close(outputs[layer][t].float(), out, atol=0.006, rtol=0.02)
                     if j + 1 == count:
                         expected[layer, req].copy_(current)
             pending[req] += count
@@ -773,9 +775,9 @@ def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, sepa
         actual = replay_layer(
             backend,
             0,
-            q.reshape(1, -1, 1, 32),
-            k.reshape(1, -1, 1, 32),
-            v.reshape(1, -1, 1, 32),
+            q.reshape(-1, 1, 32),
+            k.reshape(-1, 1, 32),
+            v.reshape(-1, 1, 32),
             a.flatten(0, 1),
             b.flatten(0, 1),
             alog,
@@ -821,9 +823,9 @@ def test_mtp_commit_keeps_folded_prefix_length(kda, compute_mode):
     bias = torch.zeros(hv * dim if kda else hv, device="cuda")
     cu = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
     for step in range(3):
-        q = torch.randn(1, 2, kh, dim, device="cuda", dtype=dtype)
+        q = torch.randn(2, kh, dim, device="cuda", dtype=dtype)
         k = torch.randn_like(q)
-        v = torch.randn(1, 2, hv, dim, device="cuda", dtype=dtype)
+        v = torch.randn(2, hv, dim, device="cuda", dtype=dtype)
         a = torch.full((2, hv * dim if kda else hv), -2.0, device="cuda", dtype=dtype)
         b = torch.randn(2, hv, device="cuda", dtype=dtype)
         replay_layer(backend, 0, q, k, v, a, b, alog, bias, reqs, cu)

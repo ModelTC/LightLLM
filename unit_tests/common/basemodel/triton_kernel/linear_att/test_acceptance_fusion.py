@@ -188,9 +188,9 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
     token_reqs = torch.full((12,), 7, dtype=torch.int32, device="cuda")
     mtp_indexes = torch.arange(12, dtype=torch.int32, device="cuda") % 3
     accepted_mask = torch.ones(12, dtype=torch.int32, device="cuda")
-    q = torch.randn(1, 12, 2, 32, dtype=torch.bfloat16, device="cuda")
+    q = torch.randn(12, 2, 32, dtype=torch.bfloat16, device="cuda")
     k = torch.randn_like(q)
-    v = torch.randn(1, 12, 4, 32, dtype=torch.bfloat16, device="cuda")
+    v = torch.randn(12, 4, 32, dtype=torch.bfloat16, device="cuda")
     a = torch.full((12, 4), -3.0, dtype=torch.bfloat16, device="cuda")
     b = torch.randn_like(a)
     alog = torch.zeros(4, device="cuda")

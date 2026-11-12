@@ -79,7 +79,6 @@ def _decode_replay(
     HOLD: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    VARLEN: tl.constexpr,
     PRECOMPUTE_PROJECTIONS: tl.constexpr,
     BW: tl.constexpr,
     KDA: tl.constexpr,
@@ -95,10 +94,7 @@ def _decode_replay(
     """
     iv, seq, hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     req = tl.load(Reqs + seq).to(tl.int64)
-    if VARLEN:
-        start, end = tl.load(Cu + seq), tl.load(Cu + seq + 1)
-    else:
-        start, end = seq, seq + 1
+    start, end = tl.load(Cu + seq), tl.load(Cu + seq + 1)
     vv = iv * BV + tl.arange(0, BV)
     if req == HOLD:
         for t in range(start, end):

@@ -23,15 +23,17 @@ from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import 
 
 def workload(args, batch, width, dtype, mode, acceptance):
     layers, heads, dim = args.layers, args.heads, 128
-    shape = (1, batch * width, heads, dim) if width > 1 else (batch, 1, heads, dim)
     packed = torch.randn(batch * width, heads * dim * 3, dtype=torch.bfloat16, device="cuda")
-    q, k, v = [x.view(shape) for x in packed.split(heads * dim, -1)]
+    q, k, v = [x.view(batch * width, heads, dim) for x in packed.split(heads * dim, -1)]
+    native_shape = (1, batch * width) if width > 1 else (batch, 1)
     gate = torch.randn(batch * width, heads * dim, dtype=q.dtype, device="cuda") - 3
     beta = torch.randn(batch * width, heads, dtype=q.dtype, device="cuda")
     alog = torch.zeros(heads, device="cuda")
     bias = torch.zeros(heads * dim, device="cuda")
     reqs = torch.arange(batch, dtype=torch.int32, device="cuda")
-    cu = torch.arange(batch + 1, dtype=torch.int32, device="cuda") * width if width > 1 else None
+    # 原生 decode 在宽度为 1 时不收前缀和。replay 始终要，一行一个 token 时就是 0, 1, 2, ...。
+    replay_cu = torch.arange(batch + 1, dtype=torch.int32, device="cuda") * width
+    cu = replay_cu if width > 1 else None
     counts = reqs % width + 1 if acceptance == "partial" else torch.full_like(reqs, width)
     accepted = torch.cat((counts - 1, counts.new_zeros(1)))
     snapshot = torch.empty(layers, heads, dim, dim, dtype=dtype, device="cuda")
@@ -59,11 +61,11 @@ def workload(args, batch, width, dtype, mode, acceptance):
             for layer in range(layers):
                 if ssm_backend is None:
                     fused_recurrent_kda(
-                        q,
-                        k,
-                        v,
-                        gate.view(*shape[:2], -1),
-                        beta.view(*shape[:2], heads),
+                        q.view(*native_shape, heads, dim),
+                        k.view(*native_shape, heads, dim),
+                        v.view(*native_shape, heads, dim),
+                        gate.view(*native_shape, -1),
+                        beta.view(*native_shape, heads),
                         alog,
                         bias,
                         state[layer],
@@ -72,12 +74,9 @@ def workload(args, batch, width, dtype, mode, acceptance):
                         num_accepted_tokens=counts if cu is not None else None,
                     )
                 else:
-                    replay_layer(ssm_backend, layer, q, k, v, gate, beta, alog, bias, reqs, cu)
+                    replay_layer(ssm_backend, layer, q, k, v, gate, beta, alog, bias, reqs, replay_cu)
             if ssm_backend is not None:
-                if cu is None:
-                    accept_replay_window(ssm_backend, reqs)
-                else:
-                    accept_replay_window(ssm_backend, reqs, accepted, cu)
+                accept_replay_window(ssm_backend, reqs, accepted, replay_cu)
         if isinstance(ssm_backend, ReplaySSMExecutor):
             ssm_backend._materialize_accepted_state(reqs[:1], snapshot, snapshot=True)
             ssm_backend.fold_accepted_prefix(reqs)

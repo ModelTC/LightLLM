@@ -140,8 +140,8 @@ def test_mtp0_precompute_reaches_replay_kernel(monkeypatch, linear_config, modul
         ssm_replay_config={"cache_len": 8, "compute_mode": "precompute"},
     )
     heads = owner.num_key_heads
-    q = torch.zeros(1, 1, heads, linear_config.key_dim)
-    v = torch.zeros(1, 1, owner.ssm_state.shape[-3], linear_config.value_dim)
+    q = torch.zeros(1, heads, linear_config.key_dim)
+    v = torch.zeros(1, owner.ssm_state.shape[-3], linear_config.value_dim)
     gate = v.shape[-3] * linear_config.key_dim if cls is ReplayKDAState else v.shape[-3]
     decode.replay(
         owner,
@@ -154,7 +154,7 @@ def test_mtp0_precompute_reaches_replay_kernel(monkeypatch, linear_config, modul
         torch.zeros(v.shape[-3]),
         torch.zeros(gate),
         torch.zeros(1, dtype=torch.int32),
-        None,
+        torch.arange(2, dtype=torch.int32),
         run_config={"BV": bv, "num_warps": 1, "num_stages": 1},
     )
     assert captured.args[33] is precompute

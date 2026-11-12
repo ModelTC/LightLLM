@@ -23,12 +23,18 @@ def replay(
     a_log: torch.Tensor,
     bias: torch.Tensor,
     reqs: torch.Tensor,
-    cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens: torch.Tensor,
     run_config: dict[str, int] | None = None,
 ) -> tuple[torch.Tensor, dict[str, int]]:
-    """执行一层 GDN replay decode。Kernel 接收这一层的 SSM 和 history；state 提供共用的 cursor 与配置。"""
+    """执行一层 GDN replay decode。Kernel 接收这一层的 SSM 和 history；state 提供共用的 cursor 与配置。
+
+    q、k、v 是 [tokens, heads, dim]。cu_seqlens 与 reqs 逐行对齐，长度是请求数加一。宽度为 1 时它是 0, 1, 2, ...。
+    """
 
     assert not state.kda, "GDN replay step does not use the KDA gate"
+    assert q.dim() == k.dim() == v.dim() == 3, "q, k, v must be [tokens, heads, dim]"
+    assert q.shape[0] == k.shape[0] == v.shape[0], "q, k, v must cover the same tokens"
+    assert cu_seqlens.numel() == reqs.numel() + 1, "cu_seqlens must cover every request"
     # 没传入时走 autotune 或默认 BV/warp/stage。传入的缺项也在这里补，不在 state 上改写。
     config = (
         _replay_config(run_config)
@@ -37,7 +43,6 @@ def replay(
     )
     hv, kd, vd = state.ssm_state.shape[-3:]
     assert state.num_key_heads in (q.shape[-2], hv)
-    token_axis = 1 if cu_seqlens is not None else 0
     out = torch.empty_like(v)
     bv = config["BV"]
     # mtp_step == 0 时 verify_width 为 1。compute_mode=precompute 仍然投影；BV < 16 才退回逐 token。
@@ -65,9 +70,9 @@ def replay(
         sync_mark,
         cu_seqlens,
         out,
-        q.stride(token_axis),
-        k.stride(token_axis),
-        v.stride(token_axis),
+        q.stride(0),
+        k.stride(0),
+        v.stride(0),
         a.stride(0),
         b.stride(0),
         q.shape[-2],
@@ -79,7 +84,6 @@ def replay(
         state.hold_req_id,
         triton.next_power_of_2(kd),
         bv,
-        cu_seqlens is not None,
         precompute_projections,
         padded_verify_width,
         False,

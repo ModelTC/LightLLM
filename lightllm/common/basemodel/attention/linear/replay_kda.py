@@ -177,24 +177,23 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
             **conv_kwargs,
         )
         q, k, v = backend.split_qkv(mixed_qkv)
-        shape = (1, -1) if backend.mtp_step > 0 else (-1, 1)
-        q = q.view(*shape, backend.tp_num_heads, backend.head_dim)
-        k = k.view(*shape, backend.tp_num_heads, backend.head_dim)
-        v = v.view(*shape, backend.tp_num_heads, backend.head_dim)
-        raw_gate = params["raw_gate"].view(*shape, backend.tp_hidden_size)
-        raw_beta = params["raw_beta"].view(*shape, backend.tp_num_heads)
+        q = q.view(-1, backend.tp_num_heads, backend.head_dim)
+        k = k.view(-1, backend.tp_num_heads, backend.head_dim)
+        v = v.view(-1, backend.tp_num_heads, backend.head_dim)
+        raw_gate = params["raw_gate"].reshape(-1, backend.tp_hidden_size)
+        raw_beta = params["raw_beta"].reshape(-1, backend.tp_num_heads)
         output, _ = replay(
             state,
             state.storage_layer(layer_num),
             q,
             k,
             v,
-            raw_gate.reshape(-1, backend.tp_hidden_size),
-            raw_beta.reshape(-1, backend.tp_num_heads),
+            raw_gate,
+            raw_beta,
             layer_weight.linear_A_log.weight,
             layer_weight.linear_dt_bias.weight,
             self.b_conv_buffer_idx,
-            self.b1_mtp_cu_q_seq_len,
+            self.b_cu_seqlens,
         )
         # 各层都读到了本步开始时的 cursor。最后一层返回后再按整窗全接受推进。
         state.finish_decode_token(layer_num, self.b_conv_buffer_idx, self.b_cu_seqlens)
@@ -206,7 +205,7 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
             self.b_conv_buffer_idx = infer.b_req_idx
             self.b1_mtp_cu_q_seq_len = None
             self.b_num_accepted_tokens = None
-            # 每行一个 token。replay kernel 仍用这个布局，cursor 需要现成的前缀和。
+            # 每行一个 token。replay 和 cursor 共用这份前缀和。
             self.b_cu_seqlens = torch.arange(
                 infer.b_req_idx.numel() + 1, dtype=torch.int32, device=infer.b_req_idx.device
             )
