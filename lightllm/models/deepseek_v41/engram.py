@@ -23,6 +23,7 @@ from lightllm.utils.shm_utils import create_or_link_shm, create_or_link_sysv_shm
 from lightllm.common.weight_cache import is_preloading_weights, initializing_weight_client
 
 logger = init_logger(__name__)
+ENGRAM_PREFILL_CHUNK_ROWS = 2048
 
 
 def build_compressed_token_map(tokenizer):
@@ -425,7 +426,7 @@ def engram_forward(
     prefetch_stream=None,
 ):
     # Two bounded buffers: 48 MiB total at 24 heads x 256 BF16 dimensions.
-    chunk_rows = 2048
+    chunk_rows = ENGRAM_PREFILL_CHUNK_ROWS
     if prefetch_stream is not None and streams.shape[0] > chunk_rows:
         if out is None:
             out = torch.empty_like(streams)

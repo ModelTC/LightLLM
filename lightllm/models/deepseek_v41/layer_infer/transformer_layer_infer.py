@@ -6,7 +6,7 @@ from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_post_pre_nor
 from lightllm.models.deepseek_v4.triton_kernel.cache_io import (
     get_compressed_kv_buffer,
 )
-from ..engram import engram_forward
+from ..engram import ENGRAM_PREFILL_CHUNK_ROWS, engram_forward
 from ..infer_struct import DeepseekV41InferStateInfo
 from ..layer_weights.transformer_layer_weight import DeepseekV41TransformerLayerWeight
 from ..triton_kernel.attention import (
@@ -23,6 +23,7 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
         super().__init__(layer_num, network_config)
         self.is_kv_source = layer_num in network_config["kv_source_layer_ids"]
         self.next_engram = None
+        self.prefill_next_engram = None
         self.decoder_start_layer = max(network_config["kv_source_layer_ids"])
         self.engram_index = (
             network_config["engram_layer_ids"].index(layer_num)
@@ -128,6 +129,10 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
                 value[rows] for value in (x, residual, res_mix, post_mix, attn_pre)
             )
             infer_state = infer_state.decoder_state
+        # Use the same row layout that the next layer will see after CED selection.
+        if self.prefill_next_engram is not None and infer_state.input_ids.shape[0] <= ENGRAM_PREFILL_CHUNK_ROWS:
+            index, weight = self.prefill_next_engram
+            infer_state.prefetch_engram(weight, index)
         x = self.context_attention_forward(x, infer_state, layer_weight)
         x, residual, res_mix, post_mix, ffn_pre = self._hc_ffn_in(
             x, residual, res_mix, post_mix, attn_pre, layer_weight

@@ -1102,7 +1102,11 @@ def test_replay_masks_global_writes_and_bounds_swa_only_for_replayed_requests():
         ("fp8", 128, 64, True, True),  # Unpadded FlashMLA Q, including the DSpark path.
     ],
 )
-@pytest.mark.parametrize("engram_layers", [[0], [1], [1, 3]], ids=["first-engram", "one-engram", "two-engrams"])
+@pytest.mark.parametrize(
+    "engram_layers",
+    [[0], [1], [1, 3], [1, 4]],
+    ids=["first-engram", "one-engram", "two-engrams", "decoder-engram"],
+)
 def test_text_model_constructs_and_chunked_prefill_matches_full(
     tmp_path, monkeypatch, o_groups, expert_dtype, block_size, vision, dspark, engram_layers
 ):

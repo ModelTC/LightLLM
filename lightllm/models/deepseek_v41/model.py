@@ -178,6 +178,9 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
             layers = self.config["engram_layer_ids"]
             for index in range(1, len(layers)):
                 self.layers_infer[layers[index - 1]].next_engram = (index, self.trans_layers_weight[layers[index]])
+            for index, layer in enumerate(layers):
+                if layer > 0:
+                    self.layers_infer[layer - 1].prefill_next_engram = (index, self.trans_layers_weight[layer])
 
 
 class DeepseekV41VisionTpPartModel(DeepseekV41TpPartModel):
