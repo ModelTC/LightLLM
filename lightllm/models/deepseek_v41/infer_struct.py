@@ -73,8 +73,6 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
             "position_cos_compress",
             "position_sin_compress",
             "dsv4_sparse_req_idx",
-            "dsv4_swa_indices",
-            "dsv4_swa_lengths",
             "dsv4_swa_write_slots",
             "dsv4_swa_runtime_write_slots",
             "_dsv4_token_to_batch_idx",
@@ -85,8 +83,8 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
             value = getattr(self, name)
             if value is not None:
                 setattr(state, name, value[rows])
-        # Sliced SWA metadata still aliases the encoder's buffers.
-        bound_swa_replay(state, copy_swa=isinstance(rows, slice))
+        # Read encoder SWA slots directly when bounding the decoder rows.
+        bound_swa_replay(state, rows=rows)
         state.v41_sparse_selection = {name: value[rows] for name, value in self.v41_sparse_selection.items()}
         # The first decoder indexer produces the candidates after this trim.
         if self.candidate_block_indices is not None:

@@ -14,6 +14,7 @@ def _bound_swa_replay(
     LENGTHS,
     OUT_INDICES,
     OUT_LENGTHS,
+    SOURCE_ROWS,
     POS,
     TOKEN_TO_BATCH,
     STARTS,
@@ -27,9 +28,11 @@ def _bound_swa_replay(
     WIDTH: tl.constexpr,
     WINDOW: tl.constexpr,
     HAS_IMAGE: tl.constexpr,
+    IN_PLACE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0)
+    source_row = tl.load(SOURCE_ROWS + row) if SOURCE_ROWS is not None else row
     col = tl.arange(0, BLOCK)
     batch = tl.load(TOKEN_TO_BATCH + row)
     pos, start = tl.load(POS + row), tl.load(STARTS + batch)
@@ -38,7 +41,7 @@ def _bound_swa_replay(
         slot = tl.load(MEM_INDEX + row)
         tl.store(WRITE_SLOTS + row, tl.where(pos < commit_start, -1, slot))
         start = tl.where(start < commit_start, start, 0)
-    length = tl.load(LENGTHS + row)
+    length = tl.load(LENGTHS + source_row)
     shift = 0
     if HAS_IMAGE:
         left, right = tl.load(IMAGE_LEFT + row), tl.load(IMAGE_RIGHT + row)
@@ -48,23 +51,34 @@ def _bound_swa_replay(
         length = tl.where(is_image, tl.maximum(length - shift, 0), tl.minimum(length, pos - start + 1))
     else:
         length = tl.minimum(length, pos - start + 1)
-    value = tl.load(INDICES + row * STRIDE + col + shift, (col < length) & (col + shift < WIDTH), -1)
+    value = tl.load(INDICES + source_row * STRIDE + col + shift, (col < length) & (col + shift < WIDTH), -1)
+    if HAS_IMAGE and IN_PLACE:
+        if shift > 0:
+            # Warps must finish reading overlapping source columns before shifting the row.
+            tl.debug_barrier()
     tl.store(OUT_INDICES + row * OUT_STRIDE + col, value, col < WIDTH)
     tl.store(OUT_LENGTHS + row, length)
 
 
-def bound_swa_replay(state, *, write_slots=None, copy_swa=False):
+def bound_swa_replay(state, *, write_slots=None, rows=None):
     """Bound SWA at each request's replay start and optionally mask global KV writes."""
     indices, lengths = state.dsv4_swa_indices, state.dsv4_swa_lengths
-    if copy_swa:
-        state.dsv4_swa_indices = torch.empty_like(indices)
-        state.dsv4_swa_lengths = torch.empty_like(lengths)
+    source_rows = None
+    if rows is not None:
+        if isinstance(rows, slice):
+            indices, lengths = indices[rows], lengths[rows]
+        else:
+            source_rows = rows
+        row_count = state.position_ids.numel()
+        state.dsv4_swa_indices = indices.new_empty((row_count, indices.shape[1]))
+        state.dsv4_swa_lengths = lengths.new_empty((row_count,))
     width = indices.shape[1]
     _bound_swa_replay[(state.position_ids.numel(),)](
         indices,
         lengths,
         state.dsv4_swa_indices,
         state.dsv4_swa_lengths,
+        source_rows,
         state.position_ids,
         state._dsv4_token_to_batch_idx,
         state.b_ready_cache_len,
@@ -78,6 +92,7 @@ def bound_swa_replay(state, *, write_slots=None, copy_swa=False):
         width,
         state.req_manager.cache_config.sliding_window,
         state.dsv4_image_left is not None,
+        rows is None,
         triton.next_power_of_2(width),
     )
 

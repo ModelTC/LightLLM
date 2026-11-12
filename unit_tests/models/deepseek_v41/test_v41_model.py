@@ -1120,6 +1120,46 @@ def test_decoder_replay_rows_and_swa_floor_preserve_encoder_state(starts, query_
     assert state.b_ready_cache_len.tolist() == starts
 
 
+@pytest.mark.parametrize("in_place", [False, True])
+def test_replay_shift_preserves_image_swa_sources(in_place):
+    from lightllm.models.deepseek_v41.triton_kernel.attention import bound_swa_replay
+
+    tokens, width = 512, 1152
+    source_rows = tokens if in_place else 2 * tokens
+    indices = torch.arange(source_rows * width, device="cuda", dtype=torch.int32).reshape(source_rows, width)
+    lengths = torch.full((source_rows,), 255, device="cuda", dtype=torch.int32)
+    rows = None if in_place else torch.arange(0, source_rows, 2, device="cuda")
+
+    def full(value):
+        return torch.full((tokens,), value, device="cuda", dtype=torch.int32)
+
+    state = SimpleNamespace(
+        position_ids=full(1024),
+        _dsv4_token_to_batch_idx=torch.arange(tokens, device="cuda", dtype=torch.int32),
+        b_ready_cache_len=full(960 if in_place else 1024),
+        b_prefill_commit_start=full(1152),
+        mem_index=full(17),
+        dsv4_swa_indices=indices,
+        dsv4_swa_lengths=lengths,
+        dsv4_image_left=full(64),
+        dsv4_image_right=full(127),
+        req_manager=SimpleNamespace(cache_config=SimpleNamespace(sliding_window=128)),
+    )
+    shift = 63 if in_place else 127
+    source = indices.clone()
+    expected = torch.full((tokens, width), -1, device="cuda", dtype=torch.int32)
+    expected[:, : 255 - shift] = (source if in_place else source[rows])[:, shift:255]
+    write_slots = torch.empty_like(state.mem_index) if in_place else None
+    bound_swa_replay(state, write_slots=write_slots, rows=rows)
+
+    torch.testing.assert_close(state.dsv4_swa_indices, expected)
+    torch.testing.assert_close(state.dsv4_swa_lengths, full(255 - shift))
+    if in_place:
+        torch.testing.assert_close(write_slots, full(-1))
+    else:
+        torch.testing.assert_close(indices, source)
+
+
 def test_replay_masks_global_writes_and_bounds_swa_only_for_replayed_requests():
     from lightllm.models.deepseek_v41.triton_kernel.attention import bound_swa_replay
 
