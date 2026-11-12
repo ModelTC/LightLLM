@@ -271,6 +271,30 @@ def test_prefill_full_cache_hit_never_enters_running_request_count():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("resource_wait,expected", [(60, 195), (200, 430), (-1, None)])
+def test_prefill_assignment_wait_encloses_master_budget(resource_wait: int, expected: int | None) -> None:
+    async def run() -> None:
+        manager = _make_manager(mode=NodeRole.P)
+        params = _sampling_params()
+        params.pd_node_resource_wait_timeout_seconds = resource_wait
+        event = asyncio.Event()
+        event.decode_node_info = SimpleNamespace(ready_kv_len=2)
+        event.set()
+        with patch(target="lightllm.server.httpserver.manager.asyncio.wait_for", wraps=asyncio.wait_for) as wait:
+            with pytest.raises(expected_exception=PDPrefillNodeStopGenToken):
+                await _drain_generate(
+                    manager=manager,
+                    sampling_params=params,
+                    multimodal_params=_multimodal_params(),
+                    websocket=AsyncMock(),
+                    pd_event=event,
+                )
+            assert wait.call_args.kwargs["timeout"] == expected
+        manager._register_running_request.assert_not_awaited()
+
+    asyncio.run(main=run())
+
+
 def test_prefill_upload_preserves_int64_multimodal_prompt_ids():
     async def run():
         manager = _make_manager(NodeRole.P)
