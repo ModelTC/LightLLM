@@ -16,16 +16,21 @@ from unit_tests.common.attention.helpers import make_batch, make_spec, model_stu
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
-def _reference(query, key, value, lengths, q_lengths):
+def _reference(query, key, value, lengths, q_lengths, window=None):
     rows, start = [], 0
+    groups = query.shape[1] // key.shape[1]
     for request, (length, q_length) in enumerate(zip(lengths, q_lengths)):
-        k = key[request * 16 : request * 16 + length].float().repeat_interleave(2, dim=1)
-        v = value[request * 16 : request * 16 + length].float().repeat_interleave(2, dim=1)
+        k = key[request * 16 : request * 16 + length].float().repeat_interleave(groups, dim=1)
+        v = value[request * 16 : request * 16 + length].float().repeat_interleave(groups, dim=1)
         q = query[start : start + q_length].float()
         logits = torch.einsum("qhd,khd->hqk", q, k) * query.shape[-1] ** -0.5
         causal = torch.arange(length, device=q.device)[None, :] <= (
             length - q_length + torch.arange(q_length, device=q.device)[:, None]
         )
+        if window is not None:
+            causal &= torch.arange(length, device=q.device)[None, :] >= (
+                length - q_length + torch.arange(q_length, device=q.device)[:, None] - window[0]
+            )
         probs = logits.masked_fill(~causal, -torch.inf).softmax(-1)
         rows.append(torch.einsum("hqk,khd->qhd", probs, v))
         start += q_length
@@ -49,27 +54,40 @@ def test_startup_probe_runs_the_selected_dense_implementation(provider, phase):
     assert success, error
 
 
-@pytest.mark.parametrize("provider", ["triton", "fa3", "flashinfer"])
+@pytest.mark.parametrize(
+    "provider,kv_heads,window",
+    [
+        ("triton", 2, None),
+        ("fa3", 2, None),
+        ("flashinfer", 2, None),
+        ("triton", 4, None),
+        ("triton", 4, (3, 0)),
+        ("fa3", 4, (3, 0)),
+    ],
+)
 @pytest.mark.parametrize("phase", list(AttentionPhase))
 @pytest.mark.parametrize("head_dim", [64, 128])
-def test_dense_provider_reference_and_decode_graph(provider, phase, head_dim):
+def test_dense_provider_reference_and_decode_graph(provider, phase, head_dim, kv_heads, window):
     cls = load_backend_class(data_type_to_backend["None"][provider])
     availability = cls.check_environment(get_device_runtime().caps)
     if not availability.supported:
         pytest.skip(availability.reason)
     torch.manual_seed(616)
     model = model_stub(page_size=4)
-    model.config = dict(num_attention_heads=4, num_key_value_heads=2, hidden_size=4 * head_dim, head_dim=head_dim)
+    model.config = dict(
+        num_attention_heads=4, num_key_value_heads=kv_heads, hidden_size=4 * head_dim, head_dim=head_dim
+    )
     model.max_seq_length, model.data_type = 16, torch.bfloat16
     spec = make_spec(
         phase=phase,
         num_q_heads=4,
         head_size=head_dim,
         value_head_size=head_dim,
-        cache=CacheLayout("None", 4, torch.bfloat16, 2, head_dim, head_dim),
+        cache=CacheLayout("None", 4, torch.bfloat16, kv_heads, head_dim, head_dim),
+        sliding_window=window,
     )
     backend = cls(model).for_spec(spec)
-    key, value = (torch.randn((32, 2, head_dim), dtype=torch.bfloat16, device="cuda") for _ in range(2))
+    key, value = (torch.randn((32, kv_heads, head_dim), dtype=torch.bfloat16, device="cuda") for _ in range(2))
     q_lengths = (2, 3) if phase is AttentionPhase.PREFILL else (1, 1)
     query = torch.randn((sum(q_lengths), 4, head_dim), dtype=torch.bfloat16, device="cuda")
     table = torch.arange(32, device="cuda", dtype=torch.int32).view(2, 16)
@@ -97,7 +115,7 @@ def test_dense_provider_reference_and_decode_graph(provider, phase, head_dim):
     capacity = PlanCapacity(phase, batch.batch_size, batch.token_num, 16, batch.max_q_seq_len)
     plan = backend.allocate_plan(capacity, capture=capture, workspace=pool.fork() if capture else pool)
     backend.prepare(plan, batch)
-    layer = replace(bind(backend, plan, DenseParams(key, value)), spec=spec)
+    layer = replace(bind(backend, plan, DenseParams(key, value, sliding_window=window)), spec=spec)
     inputs = DenseInputs(query)
     output = torch.empty_like(query)
 
@@ -107,7 +125,7 @@ def test_dense_provider_reference_and_decode_graph(provider, phase, head_dim):
 
     actual = run()
     assert actual.data_ptr() == output.data_ptr()
-    torch.testing.assert_close(actual, _reference(query, key, value, (7, 13), q_lengths), rtol=0.02, atol=0.015)
+    torch.testing.assert_close(actual, _reference(query, key, value, (7, 13), q_lengths, window), rtol=0.02, atol=0.015)
     if not capture:
         return
     stream = torch.cuda.Stream()
@@ -146,7 +164,7 @@ def test_dense_provider_reference_and_decode_graph(provider, phase, head_dim):
                 assert plan.batch.b_seq_len.data_ptr() == captured_pointer
                 assert {key: tensor.data_ptr() for key, tensor in plan.workspace._buffers.items()} == captured_buffers
                 torch.testing.assert_close(
-                    output, _reference(query, key, value, lengths, q_lengths), rtol=0.02, atol=0.015
+                    output, _reference(query, key, value, lengths, q_lengths, window), rtol=0.02, atol=0.015
                 )
     finally:
         manager.close_graphs()

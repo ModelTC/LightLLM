@@ -114,9 +114,9 @@ class TritonAttBackend(BaseAttentionBackend):
             if draft_step > 0:
                 assert q_head_num >= k_head_num, "speculative decode requires q_head_num >= k_head_num"
                 return self._decode_spec_decode_gqa_att(layer, plan, q=q, k=k, v=v, alloc_func=alloc_func)
-            elif q_head_num == k_head_num:
+            elif q_head_num == k_head_num and layer.params.sliding_window is None:
                 return self._decode_normal_decode_flash_decoding_att(layer, plan, q=q, k=k, v=v, alloc_func=alloc_func)
-            elif q_head_num > k_head_num:
+            elif q_head_num >= k_head_num:
                 return self._decode_normal_decode_gqa_flash_decoding_att(
                     layer, plan, q=q, k=k, v=v, inputs=inputs, alloc_func=alloc_func
                 )
