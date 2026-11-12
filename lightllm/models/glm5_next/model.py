@@ -6,7 +6,6 @@ import torch
 import triton
 
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.distributed.communication_op import dist_group_manager
@@ -79,6 +78,9 @@ class Glm5NextTpPartModel(TpPartBaseModel):
                     request_capacity=request_capacity,
                     mtp_step=args.mtp_step,
                     device=device,
+                    ssm_state_mode=args.ssm_state_mode,
+                    ssm_replay_config=args.ssm_replay_config,
+                    gate_lower_bound=cfg.gate_lower_bound,
                 )
             )
         full_layers = tuple(model_logical_layer_ids[index] for index in cfg.get_full_att_layer_indices())
@@ -114,36 +116,8 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         config["autotune_layer_num"] = 4
         return config
 
-    def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json")) as f:
-            self.config = self.normalize_model_config(json.load(f))
-
-    def _verify_params(self):
-        super()._verify_params()
-        assert self.config["qk_rope_head_dim"] == 0, "GLM-5.3 Flash uses NoPE attention"
-        assert not self.args.enable_tpsp_mix_mode, "GLM-5.3 Flash does not support TP/SP mixed mode"
-        if self.args.llm_kv_type not in ("None", "fp8kv_dsa"):
-            raise ValueError("GLM-5.3 Flash supports only unquantized KV or dynamic fp8kv_dsa")
-        if self.args.llm_kv_type == "fp8kv_dsa":
-            # group64/E8M0 编码与稀疏 attention 算子要求 BF16 输入和固定的 512 维 latent。
-            if self.data_type != torch.bfloat16 or self.config["kv_lora_rank"] != 512:
-                raise ValueError("GLM-5.3 Flash FP8 KV requires BF16 computation and kv_lora_rank=512")
-
     def autotune_layers(self):
         return 4
-
-    def _init_some_value(self):
-        self.layers_num = self.config["n_layer"]
-        self.vocab_size = self.config["vocab_size"]
-        # MLA stores one replicated latent KV vector per token on every TP rank.
-        self.tp_k_head_num_ = 1
-        self.tp_v_head_num_ = 0
-        self.qk_nope_head_dim = self.config["qk_nope_head_dim"]
-        self.qk_rope_head_dim = self.config["qk_rope_head_dim"]
-        self.q_lora_rank = self.config["q_lora_rank"]
-        self.kv_lora_rank = self.config["kv_lora_rank"]
-        self.v_head_dim = self.config.get("v_head_dim", self.qk_nope_head_dim)
-        self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
 
     @classmethod
     def create_full_att_states(
@@ -155,7 +129,10 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """GLM full-attention 层采用 NoPE packed MLA，并保存压缩 indexer 字段。"""
-        from lightllm.common.attention_state.full_att import PackedMLALogicalConfig, create_packed_mla_state
+        from lightllm.common.attention_state.full_att import (
+            PackedMLALogicalConfig,
+            create_packed_mla_state,
+        )
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -188,8 +165,38 @@ class Glm5NextTpPartModel(TpPartBaseModel):
             # Reserve fixed scratch space before the shared KV capacity is profiled.
             Fp8Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
 
+    def _init_config(self):
+        with open(os.path.join(self.weight_dir_, "config.json")) as f:
+            self.config = self.normalize_model_config(json.load(f))
+
+    def _verify_params(self):
+        super()._verify_params()
+        assert self.config["qk_rope_head_dim"] == 0, "GLM-5.3 Flash uses NoPE attention"
+        assert not self.args.enable_tpsp_mix_mode, "GLM-5.3 Flash does not support TP/SP mixed mode"
+        if self.args.llm_kv_type not in ("None", "fp8kv_dsa"):
+            raise ValueError("GLM-5.3 Flash supports only unquantized KV or dynamic fp8kv_dsa")
+        if self.args.llm_kv_type == "fp8kv_dsa":
+            # group64/E8M0 编码与稀疏 attention 算子要求 BF16 输入和固定的 512 维 latent。
+            if self.data_type != torch.bfloat16 or self.config["kv_lora_rank"] != 512:
+                raise ValueError("GLM-5.3 Flash FP8 KV requires BF16 computation and kv_lora_rank=512")
+
+    def _init_some_value(self):
+        self.layers_num = self.config["n_layer"]
+        self.vocab_size = self.config["vocab_size"]
+        # MLA stores one replicated latent KV vector per token on every TP rank.
+        self.tp_k_head_num_ = 1
+        self.tp_v_head_num_ = 0
+        self.qk_nope_head_dim = self.config["qk_nope_head_dim"]
+        self.qk_rope_head_dim = self.config["qk_rope_head_dim"]
+        self.q_lora_rank = self.config["q_lora_rank"]
+        self.kv_lora_rank = self.config["kv_lora_rank"]
+        self.v_head_dim = self.config.get("v_head_dim", self.qk_nope_head_dim)
+        self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
+
     def _init_att_backend(self):
-        from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+        from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import (
+            Fp8Glm5NextSparseAttBackend,
+        )
 
         backend_class = (
             Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
@@ -198,7 +205,12 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.decode_att_backend = self.prefill_att_backend
 
     def _init_att_backend1(self):
-        self.prefill_att_backend1 = KDALinearAttBackend(model=self)
+        from lightllm.common.basemodel.attention.create_linear_utils import (
+            get_kda_linear_att_backend_class,
+        )
+
+        backend_cls = get_kda_linear_att_backend_class()
+        self.prefill_att_backend1 = backend_cls(model=self)
         self.decode_att_backend1 = self.prefill_att_backend1
 
     def _init_custom(self):

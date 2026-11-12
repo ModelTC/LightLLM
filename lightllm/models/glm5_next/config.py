@@ -14,15 +14,17 @@ if TYPE_CHECKING:
 
 @dataclasses.dataclass
 class Glm5NextResourceConfig(Qwen3NextResourceConfig):
-    """Replicated MLA/index KV plus TP-sharded KDA checkpoints."""
+    """描述复制式 MLA/index KV 与 TP 分片 KDA checkpoint 的资源配置。"""
 
     # Indexer 池化步长，单位为原始 token；同时决定 K-pool tail 的基准 ring 长度和恢复边界。
+    gate_lower_bound: float = -5.0
     index_kpool: int = 4
     # 单个 indexer key 的特征维度；原始 key/gate tail 的 channel 宽度为该值的两倍。
     index_head_dim: int = 128
 
     @classmethod
     def from_model_config(cls, config: dict[str, object], args: StartArgs | EasyDict) -> "Glm5NextResourceConfig":
+        """从模型配置和启动参数构造 GLM5.3 Flash 资源配置。"""
         config = config.get("text_config", config)
         linear = config["linear_attn_config"]
         tp = args.tp // args.dp
@@ -45,6 +47,7 @@ class Glm5NextResourceConfig(Qwen3NextResourceConfig):
             ssm_state_dtype=get_torch_dtype(args.linear_att_ssm_data_type),
             full_attention_interval=4,
             all_layer_num=layers,
+            gate_lower_bound=linear.get("gate_lower_bound", -5.0),
             index_kpool=config["index_kpool"],
             index_head_dim=config["index_head_dim"],
         )

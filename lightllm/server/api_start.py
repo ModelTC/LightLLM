@@ -355,6 +355,8 @@ def _launch_subprocesses(args: StartArgs):
 
         s3_model_prepare(args.model_dir)
 
+    _validate_and_normalize_ssm_config(args)
+
     # 如果args.eos_id 是 None, 从 config.json 中读取 eos_token_id 相关的信息，赋值给 args
     if args.eos_id is None:
         from lightllm.utils.config_utils import get_eos_token_ids
@@ -744,3 +746,54 @@ def _auto_set_prefill_queue_strategy(args: StartArgs) -> None:
     if args.prefill_queue_strategy == "auto":
         args.prefill_queue_strategy = "hrrn" if args.run_mode == "prefill" else "default"
         logger.info(f"run_mode={args.run_mode}, auto set prefill_queue_strategy to {args.prefill_queue_strategy}")
+
+
+def _validate_and_normalize_ssm_config(args: StartArgs):
+    assert args.ssm_state_mode in ("native", "replay"), "Invalid ssm_state_mode"
+    config = args.ssm_replay_config
+    assert isinstance(config, dict), "ssm_replay_config must be a JSON object"
+    assert args.ssm_state_mode == "replay" or not config, "ssm_replay_config requires ssm_state_mode=replay"
+    if args.ssm_state_mode == "replay":
+        defaults = {"cache_len": 16, "compute_mode": "precompute" if args.mtp_step > 0 else "inline"}
+        unknown = config.keys() - defaults.keys()
+        assert not unknown, f"Unknown ssm_replay_config fields: {unknown}"
+        config = {**defaults, **config}
+        assert type(config["cache_len"]) is int and config["cache_len"] in (
+            4,
+            8,
+            16,
+            32,
+            64,
+        ), "ReplaySSM capacity must be a power of two and at least 4, up to 64"
+        assert config["compute_mode"] in ("inline", "precompute"), "Invalid replay compute_mode"
+        args.ssm_replay_config = config
+        logger.info(f"SSM mode: replay, config: {config}")
+    else:
+        logger.info(f"SSM mode: {args.ssm_state_mode}")
+    from lightllm.utils.config_utils import get_model_type
+
+    model_type = get_model_type(args.model_dir)
+    is_gdn_or_kda = model_type in (
+        "glm5_next",
+        "glm5_next_text",
+        "qwen3_next",
+        "qwen3_5",
+        "qwen3_5_moe",
+        "qwen3_5_text",
+        "qwen3_5_moe_text",
+        "sensenova_loop",
+    )
+    if is_gdn_or_kda:
+        assert args.mtp_step <= 15, (
+            "GDN/KDA requires mtp_step <= 15: " "linear attention MTP state acceptance supports verify width <= 16"
+        )
+    if args.ssm_state_mode == "native":
+        return
+    assert args.linear_att_ssm_data_type in (
+        "float32",
+        "bfloat16",
+    ), "Non-native SSM state modes require FP32 or BF16 state"
+    assert is_gdn_or_kda, "Non-native SSM state modes currently require a GDN or KDA model"
+    assert args.mtp_step >= 0, "ssm_state_mode=replay requires mtp_step >= 0"
+    capacity = config["cache_len"]
+    assert capacity >= args.mtp_step + 1, "ReplaySSM capacity must cover the verify width"

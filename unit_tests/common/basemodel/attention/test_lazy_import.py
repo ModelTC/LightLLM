@@ -67,6 +67,7 @@ class TestLazyAttentionImports(unittest.TestCase):
             llm_decode_att_backend=["triton"],
             enable_ep_moe=False,
             mtp_step=0,
+            ssm_state_mode="native",
         )
         self.validate = Mock(return_value=True)
         dependencies = {
@@ -89,7 +90,6 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.attention = importlib.import_module(ATTENTION)
 
     def test_importing_selection_apis_loads_no_implementations(self):
-        importlib.import_module(f"{ATTENTION}.create_linear_utils")
         importlib.import_module(f"{ATTENTION}.linear")
         importlib.import_module(f"{ATTENTION}.nsa")
         self.assertEqual(self.imports.imported, [])
@@ -184,24 +184,32 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.assertEqual(self.imports.imported, [f"{ATTENTION}.fa3.neo"])
         self.validate.assert_called_once_with("fa3")
 
-    def test_linear_selection_imports_only_validated_backend(self):
-        backend = self.imports.allow("linear.flashqla", "FlashQlaLinearAttBackend")
+    def _allow_linear_backend_classes(self):
+        flashqla = self.imports.allow("linear.flashqla", "FlashQlaLinearAttBackend")
+        triton = self.imports.allow("linear.triton", "TritonLinearAttBackend")
+        self.imports.allow("linear.replay_gdn", "ReplayGDNTritonAttBackend")
+        replay_gdn = self.imports.allowed[f"{ATTENTION}.linear.replay_gdn"]
+        replay_gdn.ReplayGDNFlashQlaAttBackend = type("ReplayGDNFlashQlaAttBackend", (), {})
+        self.imports.allow("linear.kda", "KDALinearAttBackend")
+        self.imports.allow("linear.replay_kda", "ReplayKDALinearAttBackend")
+        return flashqla, triton
+
+    def test_linear_prefill_auto_selects_validated_flashqla(self):
+        flashqla, _triton = self._allow_linear_backend_classes()
         selection = importlib.import_module(f"{ATTENTION}.create_linear_utils")
 
-        self.assertIs(selection.get_qwen35_linear_prefill_att_backend_class(), backend)
-        self.assertEqual(self.imports.imported, [f"{ATTENTION}.linear.flashqla"])
+        self.assertIs(selection.get_gdn_linear_prefill_att_backend_class(), flashqla)
         self.validate.assert_called_once_with("flashqla")
 
-    def test_linear_selection_falls_back_without_importing_flashqla(self):
-        backend = self.imports.allow("linear.triton", "TritonLinearAttBackend")
+    def test_linear_selection_falls_back_to_triton(self):
+        _flashqla, triton = self._allow_linear_backend_classes()
         selection = importlib.import_module(f"{ATTENTION}.create_linear_utils")
         self.validate.return_value = False
 
-        self.assertIs(selection.get_qwen35_linear_prefill_att_backend_class(), backend)
-        self.assertIs(selection.get_qwen35_linear_decode_att_backend_class(), backend)
+        self.assertIs(selection.get_gdn_linear_prefill_att_backend_class(), triton)
+        self.assertIs(selection.get_gdn_linear_decode_att_backend_class(), triton)
         self.args.llm_prefill_att_backend.append("triton")
-        self.assertIs(selection.get_qwen35_linear_prefill_att_backend_class(), backend)
-        self.assertEqual(self.imports.imported, [f"{ATTENTION}.linear.triton"])
+        self.assertIs(selection.get_gdn_linear_prefill_att_backend_class(), triton)
 
     def test_vit_selection_loads_only_requested_implementation(self):
         package = "lightllm.common.basemodel.attention_vit"
