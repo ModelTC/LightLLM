@@ -290,30 +290,37 @@ def destindex_copy_kv_dsv41(kv, freqs, full_slots, positions, cache, ratio, page
 
 
 @triton.jit
-def _candidate_scores(LOGITS, LENGTHS, OUT, STRIDE, WIDTH, BLOCK: tl.constexpr):
+def _candidate_scores(LOGITS, LENGTHS, OUT, TOPK_LENGTHS, STRIDE, WIDTH, TOPK: tl.constexpr, BLOCK: tl.constexpr):
     row, tile = tl.program_id(0), tl.program_id(1)
     length = tl.load(LENGTHS + row)
-    if tile * BLOCK * 8 < length:
+    block_length = tl.cdiv(length, 8)
+    needs_topk = block_length > TOPK
+    tl.store(TOPK_LENGTHS + row, tl.where(needs_topk, block_length, 0), tile == 0)
+    if needs_topk & (tile * BLOCK < block_length):
         block = tile * BLOCK + tl.arange(0, BLOCK)
         col = block[:, None] * 8 + tl.arange(0, 8)[None, :]
         value = tl.load(LOGITS + row * STRIDE + col, col < length, -float("inf"))
         score = tl.max(value, 1)
-        score = tl.where(block == (length - 1) // 8, float("inf"), score)
-        tl.store(OUT + row * WIDTH + block, score, (block < WIDTH) & (block < tl.cdiv(length, 8)))
+        score = tl.where(block == block_length - 1, float("inf"), score)
+        tl.store(OUT + row * WIDTH + block, score, (block < WIDTH) & (block < block_length))
 
 
 @triton.jit
 def _sort_candidates(INDICES, LENGTHS, TOPK: tl.constexpr, BLOCK: tl.constexpr):
     row = tl.program_id(0)
     col = tl.arange(0, BLOCK)
-    index = tl.load(INDICES + row * TOPK + col, col < TOPK, -1)
-    valid = (index >= 0) & (index < tl.cdiv(tl.load(LENGTHS + row), 8))
-    index = tl.sort(tl.where(valid, index, 2147483647))
-    valid = (index != 2147483647) & ((col == 0) | (index != tl.gather(index, tl.maximum(col - 1, 0), axis=0)))
-    rank = tl.cumsum(valid.to(tl.int32)) - 1
-    count = tl.sum(valid.to(tl.int32))
-    tl.store(INDICES + row * TOPK + col, -1, (col < TOPK) & (col >= count))
-    tl.store(INDICES + row * TOPK + rank, index, valid)
+    block_length = tl.cdiv(tl.load(LENGTHS + row), 8)
+    if block_length <= TOPK:
+        tl.store(INDICES + row * TOPK + col, tl.where(col < block_length, col, -1), col < TOPK)
+    else:
+        index = tl.load(INDICES + row * TOPK + col, col < TOPK, -1)
+        valid = (index >= 0) & (index < block_length)
+        index = tl.sort(tl.where(valid, index, 2147483647))
+        valid = (index != 2147483647) & ((col == 0) | (index != tl.gather(index, tl.maximum(col - 1, 0), axis=0)))
+        rank = tl.cumsum(valid.to(tl.int32)) - 1
+        count = tl.sum(valid.to(tl.int32))
+        tl.store(INDICES + row * TOPK + col, -1, (col < TOPK) & (col >= count))
+        tl.store(INDICES + row * TOPK + rank, index, valid)
 
 
 @triton.jit
@@ -446,19 +453,23 @@ def select_indexer_candidates(logits, lengths, indices):
 
     topk = indices.shape[1]
     scores = torch.empty((logits.shape[0], triton.cdiv(logits.shape[1], 8)), dtype=torch.float32, device=logits.device)
+    # Rows that fit are written directly by _sort_candidates. Report zero valid
+    # scores to the top-k operator for those rows.
+    topk_lengths = torch.empty_like(lengths)
     _candidate_scores[(logits.shape[0], triton.cdiv(scores.shape[1], 128))](
         logits,
         lengths,
         scores,
+        topk_lengths,
         logits.stride(0),
         scores.shape[1],
+        topk,
         128,
     )
-    block_lengths = (lengths + 7) // 8
     vllm_ops.top_k_per_row_decode(
         scores,
         1,
-        block_lengths,
+        topk_lengths,
         indices,
         scores.shape[0],
         scores.stride(0),

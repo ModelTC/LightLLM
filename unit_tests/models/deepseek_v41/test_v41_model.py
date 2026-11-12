@@ -662,9 +662,9 @@ def test_dense_prefill_gather_and_request_relative_logits(ratio):
 def test_candidate_selection_2048_blocks_and_recent_block():
     from lightllm.models.deepseek_v41.triton_kernel.attention import select_indexer_candidates
 
-    scores = torch.randn(4, 65536, device="cuda")
-    lengths = torch.tensor([0, 7, 20000, 60000], dtype=torch.int32, device="cuda")
-    indices = torch.empty(4, 2048, dtype=torch.int32, device="cuda")
+    scores = torch.randn(6, 65536, device="cuda")
+    lengths = torch.tensor([0, 7, 16384, 16385, 20000, 60000], dtype=torch.int32, device="cuda")
+    indices = torch.empty(6, 2048, dtype=torch.int32, device="cuda")
     select_indexer_candidates(scores, lengths, indices)
     for row, length in enumerate(lengths.tolist()):
         blocks = (length + 7) // 8
