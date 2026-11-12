@@ -50,6 +50,7 @@ def copy_packed_tokens(
     dst_storage: torch.Tensor,
     src_token_indices: torch.Tensor,
     dst_token_indices: torch.Tensor,
+    token_divisor: int = 1,
 ) -> None:
     """复制单字段存储的完整 token 槽位，包含编码数据、scale、indexer 和 padding。
 
@@ -60,6 +61,7 @@ def copy_packed_tokens(
         dst_storages=(dst_storage,),
         src_token_indices=src_token_indices,
         dst_token_indices=dst_token_indices,
+        token_divisor=token_divisor,
     )
 
 
@@ -68,6 +70,7 @@ def _copy_token_storages(
     dst_storages: tuple[torch.Tensor, ...],
     src_token_indices: torch.Tensor,
     dst_token_indices: torch.Tensor,
+    token_divisor: int = 1,
 ) -> None:
     """共享的四维 token 布局搬运，不创建 payload 或索引的中间 Tensor。
 
@@ -107,6 +110,7 @@ def _copy_token_storages(
         SRC_STRIDES=tuple(tensor.stride() for tensor in sources),
         DST_STRIDES=tuple(tensor.stride() for tensor in destinations),
         ELEMENT_BYTES=tuple(tensor.element_size() for tensor in sources),
+        TOKEN_DIVISOR=token_divisor,
         BLOCK_ELEMENTS=4096,
         NUM_STAGES=1,
         num_warps=8,
@@ -130,6 +134,7 @@ def _copy_indexed_token_storages(
     ELEMENT_BYTES: tl.constexpr,
     BLOCK_ELEMENTS: tl.constexpr,
     NUM_STAGES: tl.constexpr,
+    TOKEN_DIVISOR: tl.constexpr = 1,
 ):
     token_count = tl.cast(token_count, tl.int64)
     program_start = tl.program_id(0).to(tl.int64) * BLOCK_ELEMENTS
@@ -165,6 +170,12 @@ def _copy_indexed_token_storages(
             # 阶段二：读取两端物理槽位；索引值及后续地址乘法使用 int64 防止溢出。
             src_token = tl.load(SRC_TOKEN_IDS + token * SRC_INDEX_STRIDE, mask=valid, other=0).to(tl.int64)
             dst_token = tl.load(DST_TOKEN_IDS + token * DST_INDEX_STRIDE, mask=valid, other=0).to(tl.int64)
+            if TOKEN_DIVISOR > 1:
+                valid &= (src_token % TOKEN_DIVISOR == TOKEN_DIVISOR - 1) & (
+                    dst_token % TOKEN_DIVISOR == TOKEN_DIVISOR - 1
+                )
+                src_token //= TOKEN_DIVISOR
+                dst_token //= TOKEN_DIVISOR
             src_offset = (
                 layer * tl.cast(SRC_STRIDES[field][0], tl.int64)
                 + src_token * tl.cast(SRC_STRIDES[field][1], tl.int64)

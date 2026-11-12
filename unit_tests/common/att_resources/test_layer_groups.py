@@ -49,7 +49,12 @@ def test_shared_layers_use_two_physical_stores(kind: str, pd_args: "EasyDict") -
         view = state.get_layer_view(logical_layer_id=layer_id)
         if is_dataclass(view):
             view = tuple(vars(view).values())
-        views.append([(tensor.data_ptr(), tensor.shape, tensor.stride()) for tensor in tree_leaves(view)])
+        views.append(
+            [
+                (value.data_ptr(), value.shape, value.stride()) if isinstance(value, torch.Tensor) else value
+                for value in tree_leaves(view)
+            ]
+        )
     assert views[0] == views[1]
     assert views[2] == views[3]
     assert views[0] != views[2]

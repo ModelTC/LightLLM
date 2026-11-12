@@ -24,6 +24,8 @@ def transfer_packed_pages(
     page_readies: list[bool] | None = None,
     num_warps: int = 8,
     num_stages: int = 1,
+    indexer_storage: torch.Tensor | None = None,
+    indexer_token_stride: int = 1,
 ) -> None:
     """直接搬运 packed 存储；CPU 传入页列表，PD 传入 [pd_page_index]，同步由调用方负责。
 
@@ -79,9 +81,16 @@ def transfer_packed_pages(
             continue
         if region.field == "kv":
             local = kv_storage
-            axes = ("layer", "token", "head", "dim")
+            token_divisor = 1
+        elif region.field == "indexer_k":
+            assert indexer_storage is not None
+            local = indexer_storage
+            token_divisor = indexer_token_stride
         else:
             raise AssertionError(f"unknown transfer field {region.field}")
+        axes = ("layer", "token", "head", "dim")
+        assert page_tokens % token_divisor == 0
+        assert region.shape[region.axes.index("token")] == page_tokens // token_divisor
         # 从各页中取字段的字节区间，按 dtype 和布局形状解释，不搬运数据。
         external = page_bytes[:, region.byte_start : region.byte_end].view(region.dtype)
         external = external.view(page_buffers.shape[0], *region.shape)
@@ -106,13 +115,13 @@ def transfer_packed_pages(
             external.shape[3],
             external.shape[4],
         ), "local and external copy views must have the same shape"
-        copy_views.append((local, external))
+        copy_views.append((local, external, token_divisor))
 
     # 阶段三：每个 传输字段一次 launch，覆盖全部层、有效 token 和外部页。
     # elements 是转换后搬运单元数，不是字节数；每个字段固定发射 grid_num 个 program。
     # 超出一轮 grid 覆盖范围的数据由 kernel 跳步处理，没有 gather/scatter 中间存储。
     # stream/event 同步由调用方负责，函数返回不表示 CPU 页已经可读取或复用。
-    for local, external in copy_views:
+    for local, external, token_divisor in copy_views:
         # 先合并连续的 head/width，保留 layer/token/page；不能合并时沿用原视图。
         # head 轴保留为 1，继续使用原来的四维/五维 kernel 接口，再选择最大搬运 dtype。
         local, external = merge_contiguous_tail_dims(
@@ -121,7 +130,10 @@ def transfer_packed_pages(
             keepdim=True,
         )[0]
         local, external = view_max_copy_dtype(copies=[(local, external)])[0]
-        elements = local.shape[0] * token_count * local.shape[2] * local.shape[3]
+        field_tokens = token_count // token_divisor
+        if field_tokens == 0:
+            continue
+        elements = local.shape[0] * field_tokens * local.shape[2] * local.shape[3]
         _copy_packed_pages[(grid_num,)](
             LOCAL=local,
             EXTERNAL=external,
@@ -130,11 +142,12 @@ def transfer_packed_pages(
             PAGE_IDS=page_ids,
             PAGE_READIES=page_readies_tensor,
             HAS_PAGE_READIES=page_readies_tensor is not None,
-            token_count=token_count,
+            token_count=field_tokens,
             element_count=elements,
             LOCAL_STRIDES=local.stride(),
             EXTERNAL_STRIDES=external.stride(),
-            PAGE_TOKENS=page_tokens,
+            PAGE_TOKENS=page_tokens // token_divisor,
+            TOKEN_DIVISOR=token_divisor,
             HEADS=local.shape[2],
             WIDTH=local.shape[3],
             ELEMENT_BYTES=local.element_size(),
@@ -175,6 +188,7 @@ def _copy_packed_pages(
     WRITE: tl.constexpr,  # True：KV→外部页；False：外部页→KV。
     BLOCK: tl.constexpr,  # 每个 program 每轮处理的搬运单元数。
     NUM_STAGES: tl.constexpr,  # tl.range 的循环流水深度，不是 launch 的同名选项。
+    TOKEN_DIVISOR: tl.constexpr = 1,
 ):
     # 阶段一：把两侧指针解释为同宽整数指针，逐位保留数据（包括 NaN 位模式）。
     # 这里只改变指针类型，不进行数值转换；元素宽度不变，因此原 stride 仍然有效。
@@ -219,7 +233,14 @@ def _copy_packed_pages(
             dim = offsets % WIDTH
             head = offsets // WIDTH % HEADS
             storage_layer_index = offsets // (WIDTH * HEADS * token_count)
-            slot = tl.load(pointer=TOKEN_IDS + token * TOKEN_STRIDE, mask=valid, other=0).to(dtype=tl.int64)
+            slot = (
+                tl.load(
+                    pointer=TOKEN_IDS + (token * TOKEN_DIVISOR + TOKEN_DIVISOR - 1) * TOKEN_STRIDE,
+                    mask=valid,
+                    other=0,
+                ).to(dtype=tl.int64)
+                // TOKEN_DIVISOR
+            )
             page = tl.load(pointer=PAGE_IDS + token // PAGE_TOKENS, mask=valid, other=0).to(dtype=tl.int64)
 
             # 阶段四：按各轴真实 stride 计算元素偏移，兼容 TP 切片及轴顺序调整后的视图。

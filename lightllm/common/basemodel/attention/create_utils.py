@@ -35,6 +35,7 @@ data_type_to_backend = {
 }
 
 mla_data_type_to_backend = {
+    "nvfp4kv": {"triton": "triton.nvfp4_mla:NVFP4MlaTritonAttBackend"},
     "None": {
         "triton": "triton.mla:MlaTritonAttBackend",
         "fa3": "fa3.mla:MlaFa3AttBackend",

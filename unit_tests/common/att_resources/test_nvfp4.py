@@ -346,17 +346,19 @@ def test_gqa5_mtp_graph_replay_updates_queries_lengths_and_request_slots():
     torch.testing.assert_close(output.float(), expected, atol=0.014, rtol=0.014)
 
 
-def test_nvfp4_backend_selection_is_limited_to_gqa(monkeypatch):
+def test_nvfp4_backend_selection_supports_gqa_and_mla(monkeypatch):
     from lightllm.common.basemodel.attention import create_utils
     from lightllm.common.basemodel.attention.triton.nvfp4 import NVFP4TritonAttBackend
+    from lightllm.common.basemodel.attention.triton.nvfp4_mla import NVFP4MlaTritonAttBackend
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args = StartArgs(llm_kv_type="nvfp4kv", llm_prefill_att_backend=["triton"], llm_decode_att_backend=["triton"])
     monkeypatch.setattr(create_utils, "get_env_start_args", lambda: args)
     assert create_utils.get_prefill_att_backend_class() is NVFP4TritonAttBackend
     assert create_utils.get_decode_att_backend_class() is NVFP4TritonAttBackend
+    assert create_utils.get_mla_prefill_att_backend_class() is NVFP4MlaTritonAttBackend
+    assert create_utils.get_mla_decode_att_backend_class() is NVFP4MlaTritonAttBackend
     for mapping in (
-        create_utils.mla_data_type_to_backend,
         create_utils.nsa_data_type_to_backend,
         create_utils.neo_data_type_to_backend,
     ):

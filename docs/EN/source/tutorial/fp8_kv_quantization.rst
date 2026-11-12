@@ -1,9 +1,9 @@
 .. _tutorial/fp8_kv_quantization_en:
 
-FP8 KV Quantization Guide
-=========================
+KV Cache Quantization Guide
+===========================
 
-Select an FP8 KV cache quantization mode with ``--llm_kv_type``.
+Select a KV cache quantization mode with ``--llm_kv_type``.
 Prepare the environment using the :doc:`installation guide <../getting_started/installation>`.
 
 Choose a Mode
@@ -23,6 +23,9 @@ Choose a Mode
      - ``per_tensor``
    * - ``fp8kv_dsa``
      - DeepSeek-V3.2 and GLM-5.3 Flash
+     - Not required
+   * - ``nvfp4kv``
+     - Dynamic NVFP4; see MLA usage below
      - Not required
 
 Static FP8 KV
@@ -69,6 +72,33 @@ The following example uses GLM-5.3 Flash, which requires ``bfloat16`` and suppor
     $ python -m lightllm.server.api_server \
         --model_dir /path/to/GLM-5.3-Flash --tp 4 \
         --data_type bfloat16 --llm_kv_type fp8kv_dsa
+
+NVFP4 MLA KV
+------------
+
+Use ``--llm_kv_type nvfp4kv`` for standard DeepSeek/GLM MLA or GLM-5.3 Flash sparse MLA.
+Latents are dynamically quantized to E2M1 with one E4M3 scale per 16 elements;
+no calibration file is required. Q retains the computation precision, and MLA with
+RoPE retains its original RoPE precision. Standard MLA uses the ``triton`` backend.
+
+GLM-5.3 Flash uses BF16 computation and retains its K-pool indexing and linear attention state:
+
+.. code-block:: console
+
+    $ python -m lightllm.server.api_server \
+        --model_dir /path/to/GLM-5.3-Flash --disable_vision --tp 4 \
+        --data_type bfloat16 --llm_kv_type nvfp4kv --page_size 16 \
+        --chunked_prefill_size 4096
+
+The GLM NVFP4 attention path requires a Hopper GPU and compatible FlashMLA and FA3
+installations; follow the installation guide. KV remains compressed in storage;
+attention uses temporary BF16 workspace as needed. Actual token capacity depends on
+weights, runtime allocations, and the GPU memory budget.
+
+GLM KV pages must be a multiple of four tokens. The default ``--page_size 1`` is
+automatically adjusted to four; you can explicitly select a larger value such as 16.
+CPU cache and P/D transfer pages must also be aligned to four tokens.
+GLM native MTP uses the same NVFP4 encoding as the main model.
 
 Disaggregated P/D Deployment
 ----------------------------

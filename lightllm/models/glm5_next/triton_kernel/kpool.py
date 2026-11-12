@@ -85,6 +85,7 @@ def _compress_pools(
     SINGLE_QUERY: tl.constexpr,
     TAIL_SIZE: tl.constexpr,
     HAS_MTP_INDEX: tl.constexpr,
+    INDEXER_TOKEN_STRIDE: tl.constexpr = 1,
 ):
     if SINGLE_QUERY:
         batch = tl.program_id(0)
@@ -133,6 +134,7 @@ def _compress_pools(
         pooled_k = tl.minimum(tl.maximum(pooled_k / k_scale[:, None], -448.0), 448.0).to(tl.float8e4nv)
         # A completed pool lives at its closing token, which is a current query row.
         loc = tl.load(mem_index + row).to(tl.int64)
+        loc //= INDEXER_TOKEN_STRIDE
         dest = indexer_k + loc * indexer_k_stride
         tl.store(dest + cols, pooled_k.reshape(128).to(tl.uint8, bitcast=True))
         tl.store((dest + 128).to(tl.pointer_type(tl.float32)), tl.sum(k_scale, 0))
@@ -187,6 +189,7 @@ def compress_pools(
     b_seq_len,
     max_q_seq_len,
     b_mtp_index=None,
+    indexer_token_stride=1,
 ):
     batch_size = b_req_idx.numel()
     single_query = max_q_seq_len == 1 and q_kv_seq_len.numel() == batch_size
@@ -210,6 +213,7 @@ def compress_pools(
         single_query,
         indexer_tail.shape[1],
         b_mtp_index is not None,
+        INDEXER_TOKEN_STRIDE=indexer_token_stride,
         num_warps=4,
     )
     # Complete all boundary pools before replacing the previous chunk's tail.
@@ -291,6 +295,7 @@ def _gather_pools(
     req_to_token_indexs_stride_b: tl.constexpr,
     max_pools,
     POOLS_PER_BLOCK: tl.constexpr,
+    INDEXER_TOKEN_STRIDE: tl.constexpr = 1,
 ):
     batch_row = tl.program_id(1)
     pool_indices = tl.program_id(0) * POOLS_PER_BLOCK + tl.arange(0, POOLS_PER_BLOCK)
@@ -301,6 +306,7 @@ def _gather_pools(
     token_slots = tl.load(
         req_to_token_indexs + cur_req_idx * req_to_token_indexs_stride_b + pool_indices * 4 + 3, valid_pools, 0
     ).to(tl.int64)
+    token_slots //= INDEXER_TOKEN_STRIDE
     key_offsets = tl.arange(0, 128)
     key_bytes = tl.load(
         indexer_k + token_slots[:, None] * indexer_k_stride + key_offsets[None, :], valid_pools[:, None], 0
@@ -317,7 +323,7 @@ def _gather_pools(
     tl.store(k_scale + output_rows, pool_scales, pool_indices < max_pools)
 
 
-def gather_pools(indexer_k, req_to_token_indexs, b_req_idx, b_seq_len, max_pools):
+def gather_pools(indexer_k, req_to_token_indexs, b_req_idx, b_seq_len, max_pools, indexer_token_stride=1):
     """Gather FP8 keys and FP32 scales for prefill.
 
     b_seq_len counts tokens; max_pools is the pool capacity per row.
@@ -340,6 +346,7 @@ def gather_pools(indexer_k, req_to_token_indexs, b_req_idx, b_seq_len, max_pools
         req_to_token_indexs.stride(0),
         max_pools,
         POOLS_PER_BLOCK=32,
+        INDEXER_TOKEN_STRIDE=indexer_token_stride,
         num_warps=4,
     )
     return k_fp8, k_scale
@@ -357,6 +364,7 @@ def _gather_paged_pools(
     req_to_token_indexs_stride_b: tl.constexpr,
     max_pages_per_row,
     REUSE_GROUP_SIZE: tl.constexpr,
+    INDEXER_TOKEN_STRIDE: tl.constexpr = 1,
 ):
     batch_row = tl.program_id(1)
     # Avoid compiling a separate kernel for each batch size.
@@ -392,6 +400,7 @@ def _gather_paged_pools(
             token_slots = tl.load(
                 req_to_token_indexs + cur_req_idx * req_to_token_indexs_stride_b + pool_indices * 4 + 3, valid_pools, 0
             ).to(tl.int64)
+            token_slots //= INDEXER_TOKEN_STRIDE
             key_bytes = tl.load(
                 indexer_k + token_slots[:, None] * indexer_k_stride + key_offsets[None, :],
                 valid_pools[:, None],
@@ -408,7 +417,9 @@ def _gather_paged_pools(
             tl.store((output_page_ptr + 64 * 128).to(tl.pointer_type(tl.float32)) + pool_offsets, pool_scales)
 
 
-def gather_paged_pools(indexer_k, req_to_token_indexs, b_req_idx, q_pool_seq_len, max_pools, reuse_group=4):
+def gather_paged_pools(
+    indexer_k, req_to_token_indexs, b_req_idx, q_pool_seq_len, max_pools, reuse_group=4, indexer_token_stride=1
+):
     """Gather decode pages and the page table.
 
     q_pool_seq_len counts valid pools; max_pools is the pool capacity per row.
@@ -437,6 +448,7 @@ def gather_paged_pools(indexer_k, req_to_token_indexs, b_req_idx, q_pool_seq_len
         req_to_token_indexs.stride(0),
         max_pages_per_row,
         REUSE_GROUP_SIZE=reuse_group if batch_size >= reuse_group else 1,
+        INDEXER_TOKEN_STRIDE=indexer_token_stride,
         num_warps=4,
     )
     return indexer_k_pages, block_table
