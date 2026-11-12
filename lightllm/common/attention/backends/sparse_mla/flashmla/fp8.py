@@ -1,9 +1,7 @@
-from lightllm.common.attention.backends.base import BaseAttentionBackend
-from lightllm.common.attention.api.spec import AttentionFamily
+from lightllm.common.attention.backends.sparse_mla.flashmla.backend import NsaFlashMlaSparseAttBackend
 import dataclasses
 import torch
 from typing import Tuple
-from lightllm.utils.dist_utils import get_current_device_id
 
 from lightllm.common.attention.backends.base import PreparedPlan
 from lightllm.common.attention.api.backend import LayerBinding
@@ -33,50 +31,14 @@ class NsaFlashMlaFp8SparseDecodePlan(PreparedPlan):
     q_req_idx: torch.Tensor = None
 
 
-class NsaFlashMlaFp8SparseAttBackend(BaseAttentionBackend):
-    provider = "flashmla_sparse"
+class NsaFlashMlaFp8SparseAttBackend(NsaFlashMlaSparseAttBackend):
     cache_formats = frozenset({"fp8kv_dsa"})
-    family = AttentionFamily.SPARSE_MLA
 
     def _allocate_prefill_plan(self, capacity, capture, workspace):
         return NsaFlashMlaFp8SparsePrefillPlan(capacity, capture, workspace)
 
     def _allocate_decode_plan(self, capacity, capture, workspace):
         return NsaFlashMlaFp8SparseDecodePlan(capacity, capture, workspace)
-
-    def _update_prefill(self, plan):
-        batch = plan.batch
-        plan.ragged_mem_index = torch.empty(batch.total_token_num, dtype=torch.int32, device=get_current_device_id())
-        from lightllm.common.basemodel.triton_kernel.gen_nsa_ks_ke import gen_nsa_ks_ke
-
-        plan.ks, plan.ke, plan.lengths = gen_nsa_ks_ke(
-            b_seq_len=batch.b_seq_len,
-            b_q_seq_len=batch.b_q_seq_len,
-            b_req_idx=batch.b_req_idx,
-            req_to_token_index=batch.req_to_token_indexs,
-            q_token_num=batch.token_num,
-            ragged_mem_index=plan.ragged_mem_index,
-            hold_req_idx=batch.hold_req_id,
-        )
-        self._update_query_metadata(plan)
-        return
-
-    @staticmethod
-    def _update_query_metadata(plan):
-        batch = plan.batch
-        position_ids = batch.position_ids
-        if position_ids is None:
-            history = batch.b_seq_len - batch.b_q_seq_len
-            starts = torch.repeat_interleave(history, batch.b_q_seq_len, output_size=batch.token_num)
-            row_starts = torch.repeat_interleave(
-                batch.b1_cu_q_seq_len[:-1], batch.b_q_seq_len, output_size=batch.token_num
-            )
-            position_ids = starts + torch.arange(batch.token_num, device=batch.device, dtype=starts.dtype) - row_starts
-        plan.q_kv_seq_len = position_ids + 1
-        plan.q_req_idx = torch.repeat_interleave(batch.b_req_idx, batch.b_q_seq_len, output_size=batch.token_num)
-        plan.q_kv_start_loc = torch.repeat_interleave(
-            batch.b1_cu_kv_seq_len[:-1], batch.b_q_seq_len, output_size=batch.token_num
-        )
 
     def _forward_prefill(self, layer: LayerBinding, plan, inputs: SparseMLAPrefillInputs, *, out=None) -> torch.Tensor:
         q = inputs.query

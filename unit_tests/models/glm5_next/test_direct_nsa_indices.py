@@ -3,7 +3,6 @@ import torch
 
 from lightllm.common.attention.api import AttentionBatch, AttentionPhase, PlanCapacity
 from lightllm.common.attention.backends._workspace import AttentionWorkspace
-from lightllm.models.glm5_next.attention.sparse_mla import Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.triton_kernel.kpool import expand_topk, prefill_nsa_params
 
 
@@ -63,8 +62,17 @@ def test_topk_request_lookup_preserves_strided_tables(dense):
     torch.testing.assert_close(actual_relative, expected_relative, rtol=0, atol=0)
 
 
-def test_sparse_plan_owns_query_metadata():
-    """The indexer reads query metadata from its plan, never from a legacy state object."""
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "backends.sparse_mla.flashmla.fp8:NsaFlashMlaFp8SparseAttBackend",
+        "lightllm.models.glm5_next.attention.sparse_mla:Glm5NextSparseAttBackend",
+        "lightllm.models.glm5_next.attention.fp8_sparse_mla:Fp8Glm5NextSparseAttBackend",
+    ],
+)
+def test_sparse_plan_owns_query_metadata(reference):
+    from lightllm.common.attention.selection import load_backend_class
+
     lengths = torch.tensor([5, 4], device="cuda", dtype=torch.int32)
     q_lengths = torch.tensor([2, 1], device="cuda", dtype=torch.int32)
     batch = AttentionBatch(
@@ -85,7 +93,7 @@ def test_sparse_plan_owns_query_metadata():
         b_ready_cache_len=tensor([3, 3]),
         position_ids=tensor([3, 4, 3]),
     )
-    backend = object.__new__(Glm5NextSparseAttBackend)
+    backend = object.__new__(load_backend_class(reference))
     plan = backend.allocate_plan(
         PlanCapacity(AttentionPhase.PREFILL, 2, 3, 5, 2), capture=False, workspace=AttentionWorkspace("cuda")
     )
