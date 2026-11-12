@@ -74,6 +74,7 @@ def test_pd_prefill_reads_ready_kv_indices_once_per_chunk(monkeypatch):
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
     backend = PDDPChunkedForPrefillNode.__new__(PDDPChunkedForPrefillNode)
     backend.args = SimpleNamespace(pd_kv_page_size=4, page_size=2)
+    backend.processed_prefill_tokens = 30
     backend.model = SimpleNamespace(req_manager=SimpleNamespace(req_to_token_indexs=IndexTable()))
     backend.is_master_in_dp = True
     backend.is_deepseek_v4, backend.dp_rank_in_node, backend.node_world_size = False, 0, 4
@@ -84,6 +85,7 @@ def test_pd_prefill_reads_ready_kv_indices_once_per_chunk(monkeypatch):
         cur_kv_len=7,
         shm_req=SimpleNamespace(input_len=17),
         pd_trans_kv_start_index=4,
+        pd_last_page_processed_tokens=None,
         pd_trans_device_id=-1,
         pd_task_num=0,
         sampling_param=SimpleNamespace(
@@ -94,15 +96,18 @@ def test_pd_prefill_reads_ready_kv_indices_once_per_chunk(monkeypatch):
 
     backend._prefill_chuncked_handle_func(req, next_token_id=17, next_token_prob=-0.2, output_len=0)
     assert reads == [] and tasks == []
+    assert req.pd_last_page_processed_tokens is None
 
     req.cur_kv_len = 15
     backend._prefill_chuncked_handle_func(req, next_token_id=17, next_token_prob=-0.2, output_len=0)
     assert reads == [(0, slice(4, 12))]
     assert req.pd_trans_kv_start_index == 12
+    assert req.pd_last_page_processed_tokens == 30
 
     req.cur_kv_len = 17
     backend._prefill_chuncked_handle_func(req, next_token_id=17, next_token_prob=-0.2, output_len=1)
     assert reads == [(0, slice(4, 12)), (0, slice(12, 17))]
+    assert req.pd_last_page_processed_tokens is None
     assert [(task.start_kv_index, task.end_kv_index) for task in tasks] == [
         (4, 8),
         (8, 12),

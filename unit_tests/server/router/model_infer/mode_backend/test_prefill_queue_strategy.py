@@ -324,6 +324,27 @@ def test_hrrn_aging_starts_at_first_sort_and_survives_later_sorts():
     assert policy.reorder(requests) == [short_request, long_request]
 
 
+def test_hrrn_ages_pd_continuation_since_last_published_page():
+    long_request = req(1, 192293, kv_len=8192)
+    cached_request = req(2, 192293, kv_len=8192)
+    short_request = req(3, 1024)
+    policy = strategy("hrrn", processed_prefill_tokens=980000)
+    policy.backend.args.chunked_prefill_size = 8192
+    policy.reorder([long_request, cached_request], no_decode=True)
+    policy.backend.processed_prefill_tokens = 999488
+    policy.reorder([short_request], no_decode=True)
+
+    policy.backend.processed_prefill_tokens = 1000000
+    requests = [cached_request, long_request, short_request]
+    assert policy.reorder(requests, no_decode=True) == [short_request, long_request, cached_request]
+
+    long_request.pd_last_page_processed_tokens = 991808
+    assert policy.reorder(requests, no_decode=True) == [long_request, short_request, cached_request]
+
+    long_request.pd_last_page_processed_tokens = 1000000
+    assert policy.reorder(requests, no_decode=True) == [short_request, long_request, cached_request]
+
+
 def test_hrrn_binds_uncached_tokens_once_and_uses_request_id_tiebreaker():
     less_cached = req(2, 100, kv_len=0)
     equally_cached_later_id = req(3, 100, kv_len=90)

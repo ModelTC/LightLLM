@@ -116,6 +116,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         if self.is_master_in_dp:
             for trans_task in trans_task_list:
                 self.info_queue.put(trans_task)
+        req_obj.pd_last_page_processed_tokens = None if prefill_finished else self.processed_prefill_tokens
         return
 
     def _create_pd_trans_task(

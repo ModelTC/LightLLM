@@ -49,7 +49,7 @@ class HRRNPrefillStrategy(PrefillQueueStrategy):
     负优先级请求仍按原始相对顺序排在最前面。普通请求按
     ``waited_prefill_tokens / uncached_prefill_tokens`` 从大到小排列；等待越久或
     首次参与 HRRN 排序时需要计算的 token 越少，越早获得调度。请求 ID 用作相同比率下的
-    确定性次级排序键。
+    确定性次级排序键。PD Prefill 已发出 KV 页时，还按发页后的等待量和下一段成本排序。
     """
 
     def reorder_prefill(self, prefill_reqs: List["InferReq"]) -> List["InferReq"]:
@@ -69,7 +69,14 @@ class HRRNPrefillStrategy(PrefillQueueStrategy):
                 req.uncached_prefill_tokens = max(1, prompt_len - prefill_start)
             uncached_prefill_tokens = req.uncached_prefill_tokens
             waited_tokens = max(0, processed_prefill_tokens - req.arrival_processed_prefill_tokens)
-            return (-waited_tokens / uncached_prefill_tokens, req.req_id)
+            score = waited_tokens / uncached_prefill_tokens
+            last_page_tokens = req.pd_last_page_processed_tokens
+            if last_page_tokens is not None:
+                remaining = req.shm_req.input_len - req.cur_kv_len
+                if remaining > 0:
+                    chunk_cost = min(self.backend.args.chunked_prefill_size, remaining)
+                    score = max(score, (processed_prefill_tokens - last_page_tokens) / chunk_cost)
+            return (-score, req.req_id)
 
         normal_reqs.sort(key=hrrn_key)
         high_priority_reqs.extend(normal_reqs)

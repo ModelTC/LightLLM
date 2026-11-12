@@ -550,6 +550,8 @@ class InferSamplingParams:
 class InferReq:
     # P 端调度为当前轮次选定的 chunk 终点，提交 KV 长度后清除。
     prefill_chunk_end: Optional[int] = None
+    # P 发出最近一批 KV 页时的累计 prefill token 数。
+    pd_last_page_processed_tokens: Optional[int] = None
 
     class _CpuCacheTaskStatus(enum.Enum):
         NOT_STARTED = 0
