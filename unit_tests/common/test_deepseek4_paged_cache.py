@@ -133,7 +133,8 @@ def test_copy_mem_to_mem_preserves_token_slot_indices(cache):
         torch.testing.assert_close(buffer[destination], buffer[source], rtol=0, atol=0)
 
 
-def test_cache_io_copies_individual_token_slots(cache):
+@pytest.mark.parametrize("single_page", [False, True])
+def test_cache_io_copies_individual_token_slots(cache, single_page):
     from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_compressed_kv_pages
 
     manager, _ = cache
@@ -142,11 +143,13 @@ def test_cache_io_copies_individual_token_slots(cache):
     for buffer in manager.kv_buffer:
         buffer.zero_()
         buffer[source] = torch.arange(1, 5, device="cuda", dtype=torch.uint8)[:, None, None]
-    pages = torch.empty((1, 4 * manager.get_cell_size()), dtype=torch.uint8, pin_memory=True)
-    page_ids = torch.zeros(1, dtype=torch.int32, device="cuda")
-    copy_compressed_kv_pages(manager, source, page_ids, pages, to_pages=True, page_size=4)
-    copy_compressed_kv_pages(manager, destination, page_ids, pages, to_pages=False, page_size=4)
+    pages = torch.zeros((2, 4 * manager.get_cell_size()), dtype=torch.uint8, pin_memory=True)
+    page_ids = None if single_page else torch.ones(1, dtype=torch.int32, device="cuda")
+    staging = pages[1:] if single_page else pages
+    copy_compressed_kv_pages(manager, source, page_ids, staging, to_pages=True, page_size=4)
+    copy_compressed_kv_pages(manager, destination, page_ids, staging, to_pages=False, page_size=4)
     torch.cuda.synchronize()
+    assert pages[0].eq(0).all()
     for buffer in manager.kv_buffer:
         torch.testing.assert_close(buffer[destination], buffer[source], rtol=0, atol=0)
         assert buffer[destination - 1].eq(0).all()

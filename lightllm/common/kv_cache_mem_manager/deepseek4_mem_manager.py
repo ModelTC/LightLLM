@@ -130,18 +130,18 @@ class DeepseekV4MemoryManager(MemoryManager):
         pin_indexes = self._buffer_mem_indexes_tensors[page_index][: len(mem_indexes)]
         pin_indexes.numpy()[:] = mem_indexes
         page = self.kv_move_buffer[page_index]
+        alignment = self.cache_config.compressed_kv_token_alignment
+        page_size = triton.cdiv(len(mem_indexes), alignment) * alignment
         copy_compressed_kv_pages(
             mem_manager=mem_managers[dp_index * dp_world_size],
             mem_indexes=pin_indexes.cuda(non_blocking=True),
-            page_indexes=torch.zeros(1, dtype=torch.int32, device=page.device),
+            page_indexes=None,
             kv_move_buffer=page.view(1, -1),
             to_pages=True,
-            page_size=triton.cdiv(len(mem_indexes), self.cache_config.compressed_kv_token_alignment)
-            * self.cache_config.compressed_kv_token_alignment,
+            page_size=page_size,
             round_tail=True,
         )
-        copy_num = triton.cdiv(len(mem_indexes), self.cache_config.compressed_kv_token_alignment)
-        return copy_num * self.cache_config.compressed_kv_token_alignment * self.get_cell_size()
+        return page_size * self.get_cell_size()
 
     def read_page_kv_move_buffer_to_mem(
         self,
@@ -162,12 +162,11 @@ class DeepseekV4MemoryManager(MemoryManager):
         pin_indexes.numpy()[:] = mem_indexes
         indexes = pin_indexes.cuda(non_blocking=True)
         page = self.kv_move_buffer[page_index]
-        page_ids = torch.zeros(1, dtype=torch.int32, device=page.device)
         for mem in mem_managers[dp_index * dp_world_size : (dp_index + 1) * dp_world_size]:
             copy_compressed_kv_pages(
                 mem_manager=mem,
                 mem_indexes=indexes,
-                page_indexes=page_ids,
+                page_indexes=None,
                 kv_move_buffer=page.view(1, -1),
                 to_pages=False,
                 page_size=triton.cdiv(len(mem_indexes), self.cache_config.compressed_kv_token_alignment)

@@ -65,18 +65,21 @@ def _copy_compressed_kv_kernel(
         # the unused token slots of its final allocated compression block.
         last = tl.load(mem_indexes + TOKEN_NUM - 1).to(tl.int64)
         slot = tl.where(tokens < TOKEN_NUM, slot, last + tokens - TOKEN_NUM + 1)
-    page = tokens // PAGE_TOKENS
     valid = (tokens < COPY_NUM) & (slot >= 0)
-    page_id = tl.load(page_indexes + page, tokens < COPY_NUM, 0).to(tl.int64)
     columns = tl.arange(0, BLOCK_BYTES)
     kv_ptr = kv_buffer + slot[:, None] * slot_bytes + columns[None, :]
-    page_ptr = (
-        kv_move_buffer
-        + page_id[:, None] * PAGE_STRIDE
-        + layer_byte_offset
-        + (tokens % PAGE_TOKENS)[:, None] * slot_bytes
-        + columns[None, :]
-    )
+    if page_indexes is None:
+        page_ptr = kv_move_buffer + layer_byte_offset + tokens[:, None] * slot_bytes + columns[None, :]
+    else:
+        page = tokens // PAGE_TOKENS
+        page_id = tl.load(page_indexes + page, tokens < COPY_NUM, 0).to(tl.int64)
+        page_ptr = (
+            kv_move_buffer
+            + page_id[:, None] * PAGE_STRIDE
+            + layer_byte_offset
+            + (tokens % PAGE_TOKENS)[:, None] * slot_bytes
+            + columns[None, :]
+        )
     mask = valid[:, None] & (columns[None, :] < slot_bytes)
     if TO_PAGES:
         tl.store(page_ptr, tl.load(kv_ptr, mask, 0), mask)
@@ -87,6 +90,7 @@ def _copy_compressed_kv_kernel(
 def copy_compressed_kv_pages(
     mem_manager, mem_indexes, page_indexes, kv_move_buffer, *, to_pages, page_size, round_tail=False
 ):
+    """Pass page_indexes=None when kv_move_buffer is the selected single-page view."""
     if not mem_indexes.numel():
         return
     config = mem_manager.cache_config
