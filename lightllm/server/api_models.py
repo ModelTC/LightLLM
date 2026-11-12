@@ -561,6 +561,7 @@ class ImageGenerationRequest(BaseModel):
     response_format: Literal["b64_json"] = "b64_json"
     self_correction: Optional[bool] = False
     stream: Optional[bool] = False
+    seed: Optional[int] = None
 
     img_config: Optional[ImageConfig] = None
 
@@ -582,7 +583,7 @@ class ImageGenerationRequest(BaseModel):
             "image_type": self.output_format,
             "height": height,
             "width": width,
-            "seed": 42 + random.randint(0, 2**31-43)
+            "seed": int(self.seed) if self.seed else 42 + random.randint(0, 2**31-43)
         })
         self.img_config = ImageConfig(**conf)
         return self

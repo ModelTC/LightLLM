@@ -1,5 +1,6 @@
 import datetime
 import inspect
+import random
 import torch
 import torch.distributed as dist
 import zmq
@@ -274,8 +275,9 @@ def filter_logs():
 
         if "step_progress" in extra:
             a, b = extra["step_progress"]
-            sys.stderr.write(f"\rInference progress: {a}/{b}")
-            sys.stderr.flush()
+            if a==1 or a == b or random.random() < 0.2:
+                sys.stderr.write(f"\rInference progress: {a}/{b}")
+                sys.stderr.flush()
 
             if "step_stats" in extra:
                 sys.stderr.write("\n" + extra["step_stats"] + "\n")
