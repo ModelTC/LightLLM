@@ -1,12 +1,11 @@
-import importlib
-
 import torch
 
-from lightllm.common.attention.api import UnsupportedAttention, VarlenAttentionBackend
+from lightllm.common.attention._environment import check_attention_environment
+from lightllm.common.attention.api import UnsupportedAttention, VarlenAttentionOp
 from lightllm.platform import Platform
 
 
-class BaseVarlenAttentionBackend(VarlenAttentionBackend):
+class BaseVarlenAttentionOp(VarlenAttentionOp):
     provider = ""
 
     supported_platforms = frozenset({Platform.CUDA})
@@ -18,19 +17,13 @@ class BaseVarlenAttentionBackend(VarlenAttentionBackend):
 
     @classmethod
     def check_environment(cls, caps) -> None:
-        if caps.platform not in cls.supported_platforms:
-            raise UnsupportedAttention(f"{cls.provider} does not support platform {caps.platform.value}")
-        if not caps.available:
-            raise UnsupportedAttention(f"device {caps.device} is unavailable")
-        if cls.min_device_capability is not None and (
-            caps.capability is None or caps.capability < cls.min_device_capability
-        ):
-            raise UnsupportedAttention(f"requires device capability {cls.min_device_capability}")
-        try:
-            if cls.dependency:
-                importlib.import_module(cls.dependency)
-        except (ImportError, OSError) as exc:
-            raise UnsupportedAttention(str(exc)) from exc
+        check_attention_environment(
+            caps,
+            provider=cls.provider,
+            supported_platforms=cls.supported_platforms,
+            min_device_capability=cls.min_device_capability,
+            dependency=cls.dependency,
+        )
 
     @classmethod
     def check_support(cls, inputs, caps=None) -> None:

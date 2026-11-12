@@ -306,13 +306,13 @@ def _validate_flashmla_sparse(dtype=torch.bfloat16, spec=None):
 
 def _validate_varlen(backend_name, dtype=None, device=None, head_dim=80):
     from lightllm.common.attention.api import UnsupportedAttention, VarlenAttentionInputs
-    from lightllm.common.attention.selection import get_varlen_backend_class
+    from lightllm.common.attention.selection import get_varlen_attention_op_class
     from lightllm.platform import get_device_runtime
 
     runtime = get_device_runtime(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    backend_cls = get_varlen_backend_class(backend_name)
+    op_cls = get_varlen_attention_op_class(backend_name)
     try:
-        backend_cls.check_environment(runtime.caps)
+        op_cls.check_environment(runtime.caps)
     except UnsupportedAttention as exc:
         return False, str(exc)
     device = runtime.device
@@ -322,10 +322,10 @@ def _validate_varlen(backend_name, dtype=None, device=None, head_dim=80):
     out = torch.empty_like(q)
     inputs = VarlenAttentionInputs(q, k, v, cu, 5)
     try:
-        backend_cls.check_support(inputs, runtime.caps)
+        op_cls.check_support(inputs, runtime.caps)
     except UnsupportedAttention as exc:
         return False, str(exc)
-    backend_cls().forward(inputs, out=out)
+    op_cls().forward(inputs, out=out)
     expected = torch.empty_like(q)
     for start, end in ((0, 3), (3, 8)):
         result = _compute_ground_truth(

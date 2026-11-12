@@ -1,9 +1,9 @@
 import torch
 
-from lightllm.common.attention.backends.dense.varlen import BaseVarlenAttentionBackend
+from lightllm.common.attention.backends.dense.varlen import BaseVarlenAttentionOp
 
 
-class Fa3VarlenAttentionBackend(BaseVarlenAttentionBackend):
+class Fa3VarlenAttentionOp(BaseVarlenAttentionOp):
     provider = "fa3"
     dependency = "sgl_kernel.flash_attn"
     min_device_capability = (9, 0)

@@ -1,11 +1,11 @@
 import torch
 import torch.nn.functional as F
 
-from lightllm.common.attention.backends.dense.varlen import BaseVarlenAttentionBackend
+from lightllm.common.attention.backends.dense.varlen import BaseVarlenAttentionOp
 from lightllm.platform import Platform
 
 
-class SdpaVarlenAttentionBackend(BaseVarlenAttentionBackend):
+class SdpaVarlenAttentionOp(BaseVarlenAttentionOp):
     provider = "sdpa"
     supported_platforms = frozenset({Platform.CPU, Platform.CUDA})
 

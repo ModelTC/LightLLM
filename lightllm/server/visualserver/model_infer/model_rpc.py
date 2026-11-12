@@ -28,7 +28,7 @@ from lightllm.models.vit.model import VisionTransformer
 from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.multimodal_params import ImageItem, MultimodalParams
-from lightllm.server.visualserver import set_vit_att_backend
+from lightllm.server.visualserver import set_vit_attention_op
 from lightllm.server.visualserver.model_infer.vision_peak_vram_hold import VisionPeakVramHolder
 from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.envs_utils import get_env_start_args
@@ -68,7 +68,7 @@ class VisualModelRpcServer(rpyc.Service):
         self.is_visual_only_mode = get_env_start_args().run_mode == "visual_only"
         self.data_type = kvargs["data_type"]
         self.vit_attn_backend = kvargs["vit_attn_backend"]
-        set_vit_att_backend(self.vit_attn_backend, defer_validation=True)
+        set_vit_attention_op(self.vit_attn_backend, defer_validation=True)
         init_vision_distributed_env(kvargs)
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
 

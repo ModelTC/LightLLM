@@ -1,9 +1,9 @@
 import torch
 
-from lightllm.common.attention.backends.dense.varlen import BaseVarlenAttentionBackend
+from lightllm.common.attention.backends.dense.varlen import BaseVarlenAttentionOp
 
 
-class XformersVarlenAttentionBackend(BaseVarlenAttentionBackend):
+class XformersVarlenAttentionOp(BaseVarlenAttentionOp):
     provider = "xformers"
     dependency = "xformers.ops"
 

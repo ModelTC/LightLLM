@@ -2,8 +2,8 @@ import pytest
 import torch
 
 from lightllm.common.attention.api import UnsupportedAttention, VarlenAttentionInputs
-from lightllm.common.attention.selection import get_varlen_backend_class
-from lightllm.common.attention.varlen import AutoVarlenAttention
+from lightllm.common.attention.selection import get_varlen_attention_op_class
+from lightllm.common.attention.varlen import AutoVarlenAttentionOp
 from lightllm.platform import get_device_runtime
 
 
@@ -36,7 +36,7 @@ def test_audio_fallback_overwrites_partial_output(monkeypatch, error_type):
 
     calls = []
 
-    class FakeBackend:
+    class FakeOp:
         @classmethod
         def check_environment(cls, caps):
             return None
@@ -53,20 +53,20 @@ def test_audio_fallback_overwrites_partial_output(monkeypatch, error_type):
             out.fill_(9)
             return out
 
-    class Fallback(FakeBackend):
+    class Fallback(FakeOp):
         def forward(self, inputs, *, out):
             calls.append("triton")
             out.fill_(7)
             return out
 
-    monkeypatch.setattr(varlen, "get_varlen_backend_class", lambda name: {"fa3": FakeBackend, "triton": Fallback}[name])
-    backend = AutoVarlenAttention()
+    monkeypatch.setattr(varlen, "get_varlen_attention_op_class", lambda name: {"fa3": FakeOp, "triton": Fallback}[name])
+    op = AutoVarlenAttentionOp()
     inputs = make_inputs()
     out = torch.full_like(inputs.query, -123)
-    assert backend.forward(inputs, out=out) is out
+    assert op.forward(inputs, out=out) is out
     assert torch.equal(out, torch.full_like(out, 7 if error_type else 9))
     out.fill_(-123)
-    backend.forward(inputs, out=out)
+    op.forward(inputs, out=out)
     assert calls == (["fa3", "triton", "triton"] if error_type else ["fa3", "fa3"])
     assert torch.equal(out, torch.full_like(out, 7 if error_type else 9))
 
@@ -81,7 +81,7 @@ def test_sdpa_preserves_sequence_boundaries_and_output_storage(lengths):
         inputs.value[start : start + length].fill_(i + 1)
         start += length
     out = torch.empty_like(inputs.query)
-    result = get_varlen_backend_class("sdpa")().forward(inputs, out=out)
+    result = get_varlen_attention_op_class("sdpa")().forward(inputs, out=out)
     assert result is out
     torch.testing.assert_close(out, inputs.value)
 
@@ -91,9 +91,9 @@ def test_sdpa_preserves_sequence_boundaries_and_output_storage(lengths):
 @pytest.mark.parametrize("dtype,atol", [(torch.float16, 1e-2), (torch.bfloat16, 2e-2)])
 @pytest.mark.parametrize("head_dim,strided", [(64, False), (80, True), (128, False)])
 def test_varlen(provider, dtype, atol, head_dim, strided):
-    backend = get_varlen_backend_class(provider)
+    op = get_varlen_attention_op_class(provider)
     try:
-        backend.check_environment(get_device_runtime().caps)
+        op.check_environment(get_device_runtime().caps)
     except UnsupportedAttention as exc:
         pytest.skip(str(exc))
     torch.manual_seed(0)
@@ -101,7 +101,7 @@ def test_varlen(provider, dtype, atol, head_dim, strided):
     storage = torch.full((*inputs.query.shape[:2], head_dim * 2), -123, device="cuda", dtype=dtype)
     out = storage[..., :head_dim]
     before = [x.clone() for x in (inputs.query, inputs.key, inputs.value)]
-    result = backend().forward(inputs, out=out)
+    result = op().forward(inputs, out=out)
     assert result is out
     torch.testing.assert_close(out, reference_attention(inputs), atol=atol, rtol=0)
     assert torch.equal(storage[..., head_dim:], torch.full_like(out, -123))
@@ -112,37 +112,57 @@ def test_varlen(provider, dtype, atol, head_dim, strided):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("provider", ["fa3", "triton", "sdpa", "xformers"])
 def test_empty_batch(provider):
-    backend = get_varlen_backend_class(provider)
+    op = get_varlen_attention_op_class(provider)
     try:
-        backend.check_environment(get_device_runtime().caps)
+        op.check_environment(get_device_runtime().caps)
     except UnsupportedAttention as exc:
         pytest.skip(str(exc))
     inputs = make_inputs((0, 0), device="cuda", dtype=torch.bfloat16)
     out = torch.empty_like(inputs.query)
-    assert backend().forward(inputs, out=out) is out
+    assert op().forward(inputs, out=out) is out
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("provider", ["fa3", "triton"])
 def test_graph_replay_uses_new_inputs(provider):
-    backend_cls = get_varlen_backend_class(provider)
+    op_cls = get_varlen_attention_op_class(provider)
     try:
-        backend_cls.check_environment(get_device_runtime().caps)
+        op_cls.check_environment(get_device_runtime().caps)
     except UnsupportedAttention as exc:
         pytest.skip(str(exc))
-    backend = backend_cls()
-    assert backend.supports_graph
+    op = op_cls()
+    assert op.supports_graph
     inputs = make_inputs((3, 5), device="cuda", dtype=torch.bfloat16)
     out = torch.empty_like(inputs.query)
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        backend.forward(inputs, out=out)
+        op.forward(inputs, out=out)
     torch.cuda.current_stream().wait_stream(stream)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        backend.forward(inputs, out=out)
+        op.forward(inputs, out=out)
     inputs.value.add_(1)
     inputs.cu_seqlens.copy_(torch.tensor([0, 5, 8], device="cuda", dtype=torch.int32))
     graph.replay()
     torch.testing.assert_close(out, reference_attention(inputs), atol=2e-2, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_audio_attention_matches_projected_qkv(monkeypatch):
+    from lightllm.models.qwen3_omni_moe_thinker import qwen3_omni_audio as audio
+
+    torch.manual_seed(19)
+    attention = audio.Qwen3OmniMoeAudioAttention(128, 2, 0).cuda().to(torch.bfloat16).eval()
+    monkeypatch.setattr(
+        audio.g_cache_manager,
+        "alloc_tensor",
+        lambda shape, dtype, device: torch.empty(shape, dtype=dtype, device=device),
+    )
+    hidden = torch.randn(8, 128, dtype=torch.bfloat16, device="cuda")
+    cu = torch.tensor([0, 3, 8], dtype=torch.int32, device="cuda")
+    with torch.inference_mode():
+        q, k, v = [proj(hidden).reshape(8, 2, 64) for proj in (attention.q_proj, attention.k_proj, attention.v_proj)]
+        expected = attention.out_proj(reference_attention(VarlenAttentionInputs(q, k, v, cu, 5)).reshape(8, 128))
+        actual = attention(hidden, cu_seqlens=cu, max_seqlen=5)
+    torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)

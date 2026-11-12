@@ -2,17 +2,17 @@ from lightllm.platform import get_device_runtime
 from lightllm.utils.log_utils import init_logger
 
 from .api import AttentionFamily, AttentionPhase, UnsupportedAttention
-from .selection import BackendSelectionError, get_varlen_backend_class
+from .selection import BackendSelectionError, get_varlen_attention_op_class
 
 logger = init_logger(__name__)
 
 
-class AutoVarlenAttention:
+class AutoVarlenAttentionOp:
     """音频编码器的自动路径；失败的实现只在当前调用方禁用，并在本次调用中重算输出。"""
 
     def __init__(self, providers=("fa3", "triton")):
         self.providers = providers
-        self.backends = {}
+        self.ops = {}
         self.failures = {}
 
     def forward(self, inputs, *, out):
@@ -20,13 +20,13 @@ class AutoVarlenAttention:
             if name in self.failures:
                 continue
             try:
-                if name not in self.backends:
-                    backend = get_varlen_backend_class(name)
+                if name not in self.ops:
+                    op_cls = get_varlen_attention_op_class(name)
                     caps = get_device_runtime(inputs.query.device).caps
-                    backend.check_environment(caps)
-                    backend.check_support(inputs, caps)
-                    self.backends[name] = backend()
-                return self.backends[name].forward(inputs, out=out)
+                    op_cls.check_environment(caps)
+                    op_cls.check_support(inputs, caps)
+                    self.ops[name] = op_cls()
+                return self.ops[name].forward(inputs, out=out)
             except UnsupportedAttention as exc:
                 self.failures[name] = str(exc)
             except Exception as exc:

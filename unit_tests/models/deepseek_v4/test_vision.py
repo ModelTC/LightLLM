@@ -12,7 +12,7 @@ from PIL import Image
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from lightllm.common.attention.backends.dense.sdpa.varlen import SdpaVarlenAttentionBackend
+from lightllm.common.attention.backends.dense.sdpa.varlen import SdpaVarlenAttentionOp
 from lightllm.models.deepseek_v4 import deepseek_v4_visual as visual, image_processor as ours
 from lightllm.server import visualserver
 
@@ -199,7 +199,7 @@ def _tiny_vision_args():
 
 @pytest.mark.parametrize("n_vit_h,n_vit_w", [(4, 4), (5, 3)])
 def test_vit_matches_reference(reference_vision, n_vit_h, n_vit_w, monkeypatch):
-    monkeypatch.setattr(visualserver, "VIT_ATTN_BACKEND", SdpaVarlenAttentionBackend())
+    monkeypatch.setattr(visualserver, "VIT_ATTENTION_OP", SdpaVarlenAttentionOp())
     torch.manual_seed(0)
     args = _tiny_vision_args()
     model = visual.ViT(args).eval()
@@ -346,3 +346,23 @@ def test_encode_returns_canonical_cache_block(monkeypatch):
     assert torch.equal(types[:3], torch.full((3,), ours.IMAGE_PAD, dtype=torch.int64))
     assert types[3] == ours.IMAGE_START
     assert types[-1] == ours.IMAGE_END
+
+
+def test_attention_uses_sequence_boundaries(monkeypatch):
+    monkeypatch.setattr(visualserver, "VIT_ATTENTION_OP", SdpaVarlenAttentionOp())
+    torch.manual_seed(17)
+    attention = visual.Attention(_tiny_vision_args()).eval()
+    x = torch.randn(7, 16, dtype=torch.bfloat16)
+    cos = torch.ones(7, 1, 2)
+    sin = torch.zeros_like(cos)
+    cu = torch.tensor([0, 3, 7], dtype=torch.int32)
+    with torch.inference_mode(), sdpa_kernel(SDPBackend.MATH):
+        q, k, v = [t.reshape(7, 4, 4) for t in attention.wqkv(x).chunk(3, dim=-1)]
+        parts = []
+        for start, end in ((0, 3), (3, 7)):
+            qi, ki, vi = [t[start:end].float().transpose(0, 1) for t in (q, k, v)]
+            weights = (qi @ ki.transpose(-1, -2) * 0.5).softmax(-1)
+            parts.append((weights @ vi).transpose(0, 1).to(x.dtype))
+        expected = attention.wo(torch.cat(parts).reshape(7, 16))
+        actual = attention(x, cos, sin, cu)
+    torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)

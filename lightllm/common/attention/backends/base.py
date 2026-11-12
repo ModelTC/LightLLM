@@ -1,10 +1,10 @@
 import copy
-import importlib
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 import torch
 
+from lightllm.common.attention._environment import check_attention_environment
 from lightllm.common.attention.api.backend import AttentionBackend, LayerAttentionBinding, UnsupportedAttention
 from lightllm.common.attention.api.batch import AttentionBatch, ContextCapacity
 from lightllm.common.attention.api.spec import AttentionFamily, AttentionPhase, LayerSpec
@@ -59,19 +59,13 @@ class BaseAttentionBackend(AttentionBackend):
 
     @classmethod
     def check_environment(cls, caps: DeviceCaps) -> None:
-        if caps.platform not in cls.supported_platforms:
-            raise UnsupportedAttention(f"{cls.provider} does not support platform {caps.platform.value}")
-        if not caps.available:
-            raise UnsupportedAttention(f"device {caps.device} is unavailable")
-        if cls.min_device_capability is not None and (
-            caps.capability is None or caps.capability < cls.min_device_capability
-        ):
-            raise UnsupportedAttention(f"requires device capability {cls.min_device_capability}")
-        try:
-            if cls.dependency:
-                importlib.import_module(cls.dependency)
-        except (ImportError, OSError) as exc:
-            raise UnsupportedAttention(str(exc)) from exc
+        check_attention_environment(
+            caps,
+            provider=cls.provider,
+            supported_platforms=cls.supported_platforms,
+            min_device_capability=cls.min_device_capability,
+            dependency=cls.dependency,
+        )
 
     @classmethod
     def check_support(cls, spec: LayerSpec, caps=None, execution=None) -> None:

@@ -17,7 +17,7 @@ from lightllm.common.attention.api import VarlenAttentionInputs
 from lightllm.models.deepseek_v4.image_processor import IMAGE, build_canonical_image_block, load_image
 from lightllm.server.embed_cache.utils import get_shm_name_data, read_shm
 from lightllm.server.multimodal_params import ImageItem
-from lightllm.server.visualserver import get_vit_attn_backend
+from lightllm.server.visualserver import get_vit_attention_op
 
 
 @lru_cache(8)
@@ -76,7 +76,7 @@ class Attention(nn.Module):
         q = apply_rotary(q, cos, sin)
         k = apply_rotary(k, cos, sin)
         o = torch.empty_like(q)
-        get_vit_attn_backend().forward(VarlenAttentionInputs(q, k, v, cu_seqlens, n), out=o)
+        get_vit_attention_op().forward(VarlenAttentionInputs(q, k, v, cu_seqlens, n), out=o)
         return self.wo(o.reshape(n, -1))
 
 

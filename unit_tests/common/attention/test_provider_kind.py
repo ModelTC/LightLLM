@@ -47,7 +47,7 @@ def test_fp8_sparse_capabilities(monkeypatch, reference):
         imported.append(name)
         raise ImportError("missing FlashMLA")
 
-    monkeypatch.setattr("lightllm.common.attention.backends.base.importlib.import_module", import_provider)
+    monkeypatch.setattr("lightllm.common.attention._environment.importlib.import_module", import_provider)
     with pytest.raises(UnsupportedAttention, match="missing FlashMLA"):
         backend.check_environment(caps)
     assert imported == ["flash_mla"]
@@ -57,3 +57,32 @@ def test_fp8_sparse_capabilities(monkeypatch, reference):
     assert backend.check_support(spec) is None
     with pytest.raises(UnsupportedAttention, match="activation dtype"):
         backend.check_support(replace(spec, dtype=torch.float32))
+
+
+@pytest.mark.parametrize(
+    "reference",
+    ["backends.dense.fa3.backend:Fa3AttBackend", "backends.dense.fa3.varlen:Fa3VarlenAttentionOp"],
+)
+def test_environment_rejection_precedes_provider_import(monkeypatch, reference):
+    from dataclasses import replace
+
+    implementation = load_backend_class(reference)
+    imported = []
+
+    def import_provider(name):
+        imported.append(name)
+        raise OSError("provider library cannot load")
+
+    monkeypatch.setattr("lightllm.common.attention._environment.importlib.import_module", import_provider)
+    caps = DeviceCaps(Platform.CPU, torch.device("cpu"))
+    with pytest.raises(UnsupportedAttention, match="platform cpu"):
+        implementation.check_environment(caps)
+    caps = DeviceCaps(Platform.CUDA, torch.device("cuda:0"), available=False, capability=(9, 0))
+    with pytest.raises(UnsupportedAttention, match="unavailable"):
+        implementation.check_environment(caps)
+    with pytest.raises(UnsupportedAttention, match="device capability"):
+        implementation.check_environment(replace(caps, available=True, capability=(8, 0)))
+    assert imported == []
+    with pytest.raises(UnsupportedAttention, match="provider library cannot load"):
+        implementation.check_environment(replace(caps, available=True))
+    assert imported == ["sgl_kernel.flash_attn"]

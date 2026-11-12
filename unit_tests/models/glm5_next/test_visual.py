@@ -55,8 +55,8 @@ def test_image_patch_order_temporal_repeat_and_black_padding():
 def test_vision_attention_uses_triton_rope_with_fa3_backend(monkeypatch):
     import lightllm.models.glm5_next.glm5_next_visual as glm_visual
     import lightllm.server.visualserver as visualserver
-    from lightllm.common.attention.backends.dense.fa3.varlen import Fa3VarlenAttentionBackend
-    from lightllm.server.visualserver import set_vit_att_backend
+    from lightllm.common.attention.backends.dense.fa3.varlen import Fa3VarlenAttentionOp
+    from lightllm.server.visualserver import set_vit_attention_op
 
     rope_inputs = []
     norm_inputs = []
@@ -79,9 +79,9 @@ def test_vision_attention_uses_triton_rope_with_fa3_backend(monkeypatch):
 
     monkeypatch.setattr(glm_visual, "qk_rms_norm", fake_qk_norm)
     monkeypatch.setattr(glm_visual, "apply_rotary_pos_emb_triton", fake_rope)
-    monkeypatch.setattr(Fa3VarlenAttentionBackend, "forward", fake_fa3)
-    monkeypatch.setattr(visualserver, "VIT_ATTN_BACKEND", visualserver.VIT_ATTN_BACKEND)
-    set_vit_att_backend("fa3")
+    monkeypatch.setattr(Fa3VarlenAttentionOp, "forward", fake_fa3)
+    monkeypatch.setattr(visualserver, "VIT_ATTENTION_OP", visualserver.VIT_ATTENTION_OP)
+    set_vit_attention_op("fa3")
 
     attention = glm_visual.Glm5NextVisionAttention(hidden_size=16, num_heads=2, eps=1e-5, bias=True)
     x = torch.randn(3, 16)
@@ -151,10 +151,10 @@ def test_triton_glm_vision_norms_match_reference():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_vision_batch_preserves_independent_image_attention():
     from lightllm.models.glm5_next.glm5_next_visual import Glm5NextVisionTransformer
-    from lightllm.server.visualserver import set_vit_att_backend
+    from lightllm.server.visualserver import set_vit_attention_op
 
     torch.manual_seed(53)
-    set_vit_att_backend("sdpa")
+    set_vit_attention_op("sdpa")
     model = (
         Glm5NextVisionTransformer(
             {"data_type": "float32"},

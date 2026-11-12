@@ -18,7 +18,7 @@ from lightllm.models.qwen2_vl.vision_process import Qwen2VLImageProcessor, resiz
 from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
 from lightllm.server.embed_cache.utils import get_shm_name_data, read_shm
 from lightllm.server.multimodal_params import ImageItem
-from lightllm.server.visualserver import get_vit_attn_backend
+from lightllm.server.visualserver import get_vit_attention_op
 
 
 class Qwen2RMSNorm(nn.Module):
@@ -77,7 +77,7 @@ class Qwen2_5_VLVisionFlashAttention(nn.Module):
         k = apply_rotary_pos_emb_triton(k, rotary_cos, rotary_sin)
 
         attn_output = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
-        get_vit_attn_backend().forward(VarlenAttentionInputs(q, k, v, cu_seqlens, max_seqlen), out=attn_output)
+        get_vit_attention_op().forward(VarlenAttentionInputs(q, k, v, cu_seqlens, max_seqlen), out=attn_output)
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output

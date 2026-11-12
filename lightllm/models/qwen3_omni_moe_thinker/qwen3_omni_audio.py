@@ -11,7 +11,7 @@ from torch.nn import functional as F
 from transformers.activations import ACT2FN
 
 from lightllm.common.attention.api import VarlenAttentionInputs
-from lightllm.common.attention.varlen import AutoVarlenAttention
+from lightllm.common.attention.varlen import AutoVarlenAttentionOp
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.qwen3_omni_moe_thinker.audio_process import WhisperFeatureExtractor
 from lightllm.server.multimodal_params import AudioItem
@@ -104,7 +104,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         self.attention_dropout = 0.0
         self.is_decoder = False
         self.is_causal = False
-        self.attention_backend = AutoVarlenAttention()
+        self.attention_op = AutoVarlenAttentionOp()
         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
@@ -126,7 +126,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
 
         attn_output = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
 
-        self.attention_backend.forward(VarlenAttentionInputs(q, k, v, cu_seqlens, max_seqlen), out=attn_output)
+        self.attention_op.forward(VarlenAttentionInputs(q, k, v, cu_seqlens, max_seqlen), out=attn_output)
 
         attn_output = attn_output.reshape(seq_length, -1).contiguous()
         attn_output = self.out_proj(attn_output)

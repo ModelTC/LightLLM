@@ -139,6 +139,8 @@ context = infer_state.attention_contexts[attention.group_id]
 output = attention.forward(context, DenseInputs(q))
 ```
 
+视觉/音频编码器直接传入完整 Q/K/V 时，使用 `api.varlen.VarlenAttentionOp` 的 `forward(inputs, out=...)`，无需创建层 binding 或执行 context。`VarlenAttentionInputs` 描述非因果 self-attention 的变长序列；调用方提供输出缓冲区，算子不保留批次 tensor。通过 `select_varlen_attention_op()` 选择实现，只有声明 `supports_graph` 的实现可参与整段 Graph 捕获。启动参数 `--vit_att_backend` 保持不变。
+
 新增模型通过层上的 `attention_family`、`attention_window(phase)`、`attention_uses_alibi`、`attention_uses_sink` 和必要时的 `create_attention_params()` 描述计算需求与资源视图；模型的 `attention_backend_candidates()` 可指定候选实现。dense/MLA/sparse MLA 使用 `--llm_prefill_att_backend` / `--llm_decode_att_backend`，GDN/KDA 使用单独的 `--llm_prefill_linear_att_backend` / `--llm_decode_linear_att_backend`。显式指定不支持的后端会报错；`auto` 才会继续尝试候选。
 
 公共 `prepare_attention_states()` 为 main 创建空管理器，draft 引用 main 的实例。两个 State 创建接口均为 `classmethod`，显式接收模型配置、逻辑层号及 TP 信息；bounded 接收请求容量和设备；full 工厂只创建布局，不计算标定起点或读取标定文件。接口仅返回对象列表，不注册管理器，也不依赖模型实例。CPU cache 直接复用 full/bounded 工厂生成 meta 定义，无需加载标定。公共流程统一注册；无 attention 的 draft 不创建 State。

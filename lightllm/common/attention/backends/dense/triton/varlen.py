@@ -1,8 +1,8 @@
 from lightllm.common.attention.backends.dense.triton.kernels.prefill.varlen import _flash_attention_triton_fwd
-from lightllm.common.attention.backends.dense.varlen import BaseVarlenAttentionBackend
+from lightllm.common.attention.backends.dense.varlen import BaseVarlenAttentionOp
 
 
-class TritonVarlenAttentionBackend(BaseVarlenAttentionBackend):
+class TritonVarlenAttentionOp(BaseVarlenAttentionOp):
     provider = "triton"
     dependency = "triton"
     supports_graph = True

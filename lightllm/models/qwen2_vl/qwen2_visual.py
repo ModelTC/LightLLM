@@ -38,7 +38,7 @@ from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_p
 from lightllm.models.qwen2_vl.vision_process import Qwen2VLImageProcessor, resize_image
 from lightllm.server.embed_cache.utils import get_shm_name_data, read_shm
 from lightllm.server.multimodal_params import ImageItem
-from lightllm.server.visualserver import get_vit_attn_backend
+from lightllm.server.visualserver import get_vit_attention_op
 
 # adapted from
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
@@ -150,7 +150,7 @@ class VisionFlashAttention(nn.Module):
 
         attn_output = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
 
-        get_vit_attn_backend().forward(VarlenAttentionInputs(q, k, v, cu_seqlens, max_seqlen), out=attn_output)
+        get_vit_attention_op().forward(VarlenAttentionInputs(q, k, v, cu_seqlens, max_seqlen), out=attn_output)
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output

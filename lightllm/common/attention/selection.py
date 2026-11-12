@@ -29,32 +29,32 @@ def load_backend_class(reference):
     return getattr(importlib.import_module(module), name)
 
 
-varlen_backends = {
-    "fa3": "backends.dense.fa3.varlen:Fa3VarlenAttentionBackend",
-    "xformers": "backends.dense.xformers.varlen:XformersVarlenAttentionBackend",
-    "sdpa": "backends.dense.sdpa.varlen:SdpaVarlenAttentionBackend",
-    "triton": "backends.dense.triton.varlen:TritonVarlenAttentionBackend",
+varlen_attention_ops = {
+    "fa3": "backends.dense.fa3.varlen:Fa3VarlenAttentionOp",
+    "xformers": "backends.dense.xformers.varlen:XformersVarlenAttentionOp",
+    "sdpa": "backends.dense.sdpa.varlen:SdpaVarlenAttentionOp",
+    "triton": "backends.dense.triton.varlen:TritonVarlenAttentionOp",
 }
 
 
-def get_varlen_backend_class(name):
-    if name not in varlen_backends:
-        raise ValueError(f"unknown varlen attention backend: {name}")
-    return load_backend_class(varlen_backends[name])
+def get_varlen_attention_op_class(name):
+    if name not in varlen_attention_ops:
+        raise ValueError(f"unknown varlen attention operator: {name}")
+    return load_backend_class(varlen_attention_ops[name])
 
 
-def select_varlen_attention_backend(requested="auto", *, device=None, devices=None, dtype=None, head_dim=80):
+def select_varlen_attention_op(requested="auto", *, device=None, devices=None, dtype=None, head_dim=80):
     if isinstance(dtype, str):
         aliases = {"fp16": "float16", "bf16": "bfloat16", "fp32": "float32"}
         dtype = getattr(torch, aliases.get(dtype, dtype))
     devices = tuple(devices) if devices is not None else (device,)
     if not devices:
         raise ValueError("varlen selection requires at least one device")
-    ordered = tuple(varlen_backends) if requested == "auto" else (requested,)
+    ordered = tuple(varlen_attention_ops) if requested == "auto" else (requested,)
     failures = {}
     for name in ordered:
-        if name not in varlen_backends:
-            failures[name] = "unknown varlen attention backend"
+        if name not in varlen_attention_ops:
+            failures[name] = "unknown varlen attention operator"
             continue
         # 在子进程中检查实际 Q/K/V 路径，避免父进程初始化 CUDA 或误用文本 attention 探针。
         if not all(
