@@ -31,6 +31,7 @@ fn: [M, K]，scale: [3]，base: [M] 为可学习参数。
 
 5. hc_contract：模型末尾沿 S 维取均值，[T, K] -> [T, H]。
    hc_head：DeepSeek-V4 使用可学习的 sigmoid 门控合并 streams，[T, K] -> [T, H]。
+   hc_combine：DeepSeek-V4.1 使用最后一层的 pre 系数合并 streams。
    head 后的最终 RMSNorm 由模型调用。
 
 hc_pre_norm / hc_post 仅支持 S = 4；hc_pre_norm 要求 bf16 激活和 fp32 fn。
@@ -42,9 +43,10 @@ GENERAL warmup 阶段搜索配置，之后按 GPU、Triton 版本、hidden 和 t
 from .head import hc_head
 from .post import hc_post
 from .pre_norm import hc_post_pre_norm, hc_pre_norm
-from .streams import hc_contract, hc_expand
+from .streams import hc_combine, hc_contract, hc_expand
 
 __all__ = [
+    "hc_combine",
     "hc_contract",
     "hc_expand",
     "hc_head",

@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import triton
 
 from lightllm.common.basemodel.triton_kernel.mhc import (
+    hc_combine,
     hc_contract,
     hc_expand,
     hc_head,
@@ -21,6 +22,26 @@ from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+
+
+@pytest.mark.parametrize("tokens,hidden", [(1, 128), (24, 5120), (384, 5120), (768, 5120)])
+def test_hc_combine_matches_fp32_reduction_in_graph(tokens, hidden):
+    residual = torch.randn(tokens, hidden * 4, device="cuda", dtype=torch.bfloat16)
+    gate_storage = torch.rand(tokens, 8, device="cuda")
+    gates = gate_storage[:, ::2]
+
+    def check(output):
+        expected = (residual.view(tokens, 4, hidden).float() * gates[..., None]).sum(1).to(residual.dtype)
+        torch.testing.assert_close(output, expected, atol=0, rtol=0)
+
+    check(hc_combine(residual, gates))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = hc_combine(residual, gates)
+    residual.normal_()
+    gate_storage.uniform_()
+    graph.replay()
+    check(captured)
 
 
 @pytest.mark.parametrize("tokens", [1, 6, 16, 17, 64, 128])
