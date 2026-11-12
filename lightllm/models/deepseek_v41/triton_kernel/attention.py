@@ -3,6 +3,9 @@
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
+
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_num_warps
 
 
 @triton.jit
@@ -96,45 +99,46 @@ def build_decoder_tail_rows(q_offsets, decoder_offsets, token_num, window):
     return rows
 
 
-@triton.jit(do_not_specialize=["T"])
-def _pool_pairs(
+@triton.jit
+def _pool_and_norm_pairs(
     KV,
     SCORE,
     REQ,
     POS,
     STATE,
     OUT,
-    T,
+    NORM,
+    EPS,
     D: tl.constexpr,
     STATE_STRIDE: tl.constexpr,
     STATE_SLOT_STRIDE: tl.constexpr,
     STATE_SLOTS: tl.constexpr,
     KV_STRIDE: tl.constexpr,
     SCORE_STRIDE: tl.constexpr,
-    ROWS: tl.constexpr,
 ):
-    row = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
+    row = tl.program_id(0)
     cols = tl.arange(0, D)
-    valid = (row < T) | (ROWS == 1)
-    pos = tl.load(POS + row, valid, 0)
-    req = tl.load(REQ + row, valid, -1)
-    pair_end = valid & (pos % 2 == 1)
-    load_row = valid if ROWS == 1 else pair_end
-    previous_req = tl.load(REQ + row - 1, load_row & (row > 0), -1)
-    in_batch = load_row & (row > 0) & (previous_req == req)
-    previous_kv = tl.load(KV + (row[:, None] - 1) * KV_STRIDE + cols[None, :], in_batch[:, None], 0.0)
-    previous_score = tl.load(SCORE + (row[:, None] - 1) * SCORE_STRIDE + cols[None, :], in_batch[:, None], 0.0)
+    pos = tl.load(POS + row)
+    req = tl.load(REQ + row)
+    pair_end = pos % 2 == 1
+    previous_req = tl.load(REQ + row - 1, pair_end & (row > 0), -1)
+    in_batch = pair_end & (row > 0) & (previous_req == req)
+    previous_kv = tl.load(KV + (row - 1) * KV_STRIDE + cols, in_batch, 0.0)
+    previous_score = tl.load(SCORE + (row - 1) * SCORE_STRIDE + cols, in_batch, 0.0)
     previous_state = STATE + req * STATE_STRIDE + (pos - 1) % STATE_SLOTS * STATE_SLOT_STRIDE
-    from_state = (pair_end & ~in_batch)[:, None]
-    previous_kv += tl.load(previous_state[:, None] + cols[None, :], from_state, 0.0)
-    previous_score += tl.load(previous_state[:, None] + D + cols[None, :], from_state, 0.0)
-    current_kv = tl.load(KV + row[:, None] * KV_STRIDE + cols[None, :], load_row[:, None], 0.0)
-    current_score = tl.load(SCORE + row[:, None] * SCORE_STRIDE + cols[None, :], load_row[:, None], 0.0)
+    from_state = pair_end & ~in_batch
+    previous_kv += tl.load(previous_state + cols, from_state, 0.0)
+    previous_score += tl.load(previous_state + D + cols, from_state, 0.0)
+    current_kv = tl.load(KV + row * KV_STRIDE + cols, pair_end, 0.0)
+    current_score = tl.load(SCORE + row * SCORE_STRIDE + cols, pair_end, 0.0)
     gate = tl.sigmoid(current_score - previous_score)
     pooled = previous_kv + (current_kv - previous_kv) * gate
-    if ROWS == 1:
-        pooled = tl.where(pair_end[:, None], pooled, 0.0)
-    tl.store(OUT + row[:, None] * D + cols[None, :], pooled, valid[:, None])
+    # Match the BF16 intermediate and separately rounded FP32 squares of RMSNorm.
+    pooled = pooled.to(tl.bfloat16).to(tl.float32)
+    variance = tl.sum(libdevice.mul_rn(pooled, pooled), axis=0) / D
+    rstd = 1 / tl.sqrt(variance + EPS)
+    weight = tl.load(NORM + cols).to(tl.float32)
+    tl.store(OUT + row * D + cols, (pooled * rstd) * weight)
 
 
 @triton.jit(do_not_specialize=["T"])
@@ -171,28 +175,28 @@ def _commit_pair_state(
     tl.store(dest[:, None] + D + cols[None, :], score, commit)
 
 
-def pool_pairs(kv, score, req, positions, state, hold_request):
+def pool_and_norm_pairs(kv, score, req, positions, state, hold_request, norm_weight, eps):
     out = torch.empty_like(kv, dtype=torch.bfloat16)
-    rows = 2 if kv.shape[0] >= 1024 else 1
-    grid = (triton.cdiv(kv.shape[0], rows),)
-    _pool_pairs[grid](
+    _pool_and_norm_pairs[(kv.shape[0],)](
         kv,
         score,
         req,
         positions,
         state,
         out,
-        kv.shape[0],
+        norm_weight,
+        eps,
         kv.shape[1],
         state.stride(0),
         state.stride(1),
         state.shape[1],
         kv.stride(0),
         score.stride(0),
-        rows,
+        num_warps=rmsnorm_num_warps,
     )
     # Commit after scoring so current rows cannot overwrite another query's previous-step history.
-    _commit_pair_state[grid](
+    rows = 2 if kv.shape[0] >= 1024 else 1
+    _commit_pair_state[(triton.cdiv(kv.shape[0], rows),)](
         kv,
         score,
         req,

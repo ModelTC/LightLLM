@@ -3,8 +3,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.deepseek_v41.triton_kernel.attention import (
-    pool_pairs,
+    pool_and_norm_pairs,
     destindex_copy_kv_dsv41,
 )
 from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig
@@ -192,7 +193,6 @@ def test_indexer_fp8_rope_matches_reference(tokens, heads, position_dtype):
 @pytest.mark.parametrize("eps", [1e-6, 1e-20])
 def test_swa_fused_norm_rope_fp8_scatter_matches_reference(tokens, position_dtype, runtime_tail, eps):
     from lightllm.common.req_manager.deepseek4 import DeepseekV4ReqManager
-    from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
     from lightllm.models.deepseek_v4.triton_kernel.cache_io import view_swa_kv
 
     raw = torch.randn(tokens, 640, device="cuda", dtype=torch.bfloat16)
@@ -311,13 +311,15 @@ def test_c2_carries_partial_groups_across_chunk_boundaries(split):
     positions = torch.arange(7, dtype=torch.int32, device="cuda")
     req = torch.zeros(7, dtype=torch.int32, device="cuda")
     state = torch.zeros(2, 4, 2, 512, device="cuda")
-    first = pool_pairs(kv[:split], scores[:split], req[:split], positions[:split], state, 1)
-    second = pool_pairs(kv[split:], scores[split:], req[split:], positions[split:], state, 1)
+    weight = torch.rand(512, dtype=torch.bfloat16, device="cuda")
+    eps = 1e-6
+    first = pool_and_norm_pairs(kv[:split], scores[:split], req[:split], positions[:split], state, 1, weight, eps)
+    second = pool_and_norm_pairs(kv[split:], scores[split:], req[split:], positions[split:], state, 1, weight, eps)
     output = torch.cat((first, second))
     assert output[::2].count_nonzero() == 0
     actual = output[1::2]
     expected = (kv[:6].view(3, 2, 512) * scores[:6].view(3, 2, 512).softmax(1)).sum(1).bfloat16()
-    torch.testing.assert_close(actual, expected, atol=0.015625, rtol=0.008)
+    torch.testing.assert_close(actual, rmsnorm_forward(expected, weight, eps), atol=0.015625, rtol=0.008)
     torch.testing.assert_close(state[0, 6 % 4, 0], kv[-1])
     torch.testing.assert_close(state[0, 6 % 4, 1], scores[-1])
 
@@ -329,9 +331,13 @@ def test_c2_does_not_cross_request_boundaries_or_commit_hold():
     previous = state.clone()
     req = torch.tensor([0, 0, 1, 2], dtype=torch.int32, device="cuda")
     pos = torch.tensor([0, 1, 1, 0], dtype=torch.int32, device="cuda")
-    out = pool_pairs(kv, scores, req, pos, state, 2)
+    weight = torch.rand(512, dtype=torch.bfloat16, device="cuda")
+    eps = 1e-6
+    out = pool_and_norm_pairs(kv, scores, req, pos, state, 2, weight, eps)
     expected = previous[1, 0, 0] + (kv[2] - previous[1, 0, 0]) * torch.sigmoid(scores[2] - previous[1, 0, 1])
-    torch.testing.assert_close(out[2], expected.bfloat16(), atol=0.015625, rtol=0.008)
+    torch.testing.assert_close(
+        out[2], rmsnorm_forward(expected.bfloat16()[None], weight, eps)[0], atol=0.015625, rtol=0.008
+    )
     torch.testing.assert_close(state[2], previous[2])
 
 
@@ -341,16 +347,20 @@ def test_c2_does_not_cross_request_boundaries_or_commit_hold():
 def test_c2_keeps_accepted_history_after_rejecting_draft_rows(state_slots, start, accepted):
     kv, scores = torch.randn(start + 4, 1024, device="cuda").split(512, -1)
     state = torch.zeros(2, state_slots, 2, 512, device="cuda")
+    weight = torch.rand(512, dtype=torch.bfloat16, device="cuda")
+    eps = 1e-6
 
     def run(kv, scores, position):
         count = kv.shape[0]
-        return pool_pairs(
+        return pool_and_norm_pairs(
             kv,
             scores,
             torch.zeros(count, dtype=torch.int32, device="cuda"),
             torch.arange(position, position + count, dtype=torch.int32, device="cuda"),
             state,
             1,
+            weight,
+            eps,
         )
 
     run(kv[:start], scores[:start], 0)
@@ -362,7 +372,9 @@ def test_c2_keeps_accepted_history_after_rejecting_draft_rows(state_slots, start
         actual = run(new_kv[offset : offset + 1], new_scores[offset : offset + 1], position + offset)
         if (position + offset) % 2:
             expected = previous_kv + (new_kv[offset] - previous_kv) * torch.sigmoid(new_scores[offset] - previous_score)
-            torch.testing.assert_close(actual[0], expected.bfloat16(), atol=0.015625, rtol=0.008)
+            torch.testing.assert_close(
+                actual[0], rmsnorm_forward(expected.bfloat16()[None], weight, eps)[0], atol=0.015625, rtol=0.008
+            )
         previous_kv, previous_score = new_kv[offset], new_scores[offset]
 
 
