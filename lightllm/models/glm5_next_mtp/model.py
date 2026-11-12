@@ -5,10 +5,10 @@ import torch
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
-from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
-from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
+from .layer_infer.post_layer_infer import Glm5NextMTPPostLayerInfer
 from .layer_infer.pre_layer_infer import Glm5NextMTPPreLayerInfer
+from .layer_infer.transformer_layer_infer import Glm5NextMTPTransformerLayerInfer
 from .layer_weights.pre_and_post_layer_weight import Glm5NextMTPPreAndPostLayerWeight
 
 
@@ -24,13 +24,27 @@ class Glm5NextMTPModel(TpPartBaseModel):
     pre_and_post_weight_class = Glm5NextMTPPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight
     pre_layer_infer_class = Glm5NextMTPPreLayerInfer
-    post_layer_infer_class = LlamaPostLayerInfer
-    transformer_layer_infer_class = Glm5NextTransformerLayerInfer
+    post_layer_infer_class = Glm5NextMTPPostLayerInfer
+    transformer_layer_infer_class = Glm5NextMTPTransformerLayerInfer
 
     def __init__(self, kvargs):
         self.main_model = kvargs.pop("main_model")
         self.mtp_previous_draft_models = kvargs.pop("mtp_previous_draft_models")
         super().__init__(kvargs)
+
+    def _supports_prefill_kv_only(self):
+        args = self.args
+        # EAGLE reuses one draft model and discards its prefill output. Vanilla
+        # only does so for a single chained draft; later chains consume the
+        # preceding draft output.
+        return args.mtp_mode == "eagle_with_att" or (args.mtp_mode == "vanilla_with_att" and args.mtp_step == 1)
+
+    def _create_inferstate(self, model_input, microbatch_index=0):
+        infer_state = super()._create_inferstate(model_input, microbatch_index=microbatch_index)
+        # Keep the mode-specific marker on this model's infer state so the
+        # generic BaseModel pipeline remains unchanged.
+        infer_state.prefill_kv_only = infer_state.is_prefill and self._supports_prefill_kv_only()
+        return infer_state
 
     def _init_config(self):
         # Reuse the validated target configuration without changing its mHC layout.

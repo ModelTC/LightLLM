@@ -41,7 +41,7 @@ class Glm5NextNsaInfer:
             selected = torch.topk(logits, topk_pool_indices.shape[1], dim=-1, sorted=True).indices
             topk_pool_indices.copy_(selected.masked_fill(selected >= q_pool_seq_len[:, None], -1))
 
-    def _get_indices(self, hidden_states, q_lora, infer_state, att_state, layer_weight):
+    def write_k_pools(self, hidden_states, infer_state, att_state, layer_weight):
         k = layer_weight.k_norm_(layer_weight.wk_proj_.mm(hidden_states), eps=self.rms_norm_eps)
         gate = layer_weight.index_kpool_compress_gate.mm(hidden_states)
         k_and_gate = torch.cat((k, gate), -1)
@@ -71,6 +71,10 @@ class Glm5NextNsaInfer:
             max_q_seq_len=infer_state.max_q_seq_len,
             b_mtp_index=None if infer_state.is_prefill else infer_state.b_mtp_index,
         )
+        return indexer_k
+
+    def _get_indices(self, hidden_states, q_lora, infer_state, att_state, layer_weight):
+        indexer_k = self.write_k_pools(hidden_states, infer_state, att_state, layer_weight)
 
         if infer_state.max_kv_seq_len <= self.index_topk:
             return expand_topk(
