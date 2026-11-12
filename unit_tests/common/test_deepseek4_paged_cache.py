@@ -1509,7 +1509,7 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         req_id=42,
         cur_kv_len=length,
         hold_kv_len=src.numel(),
-        shared_kv_node=None,
+        shared_kv_node=SimpleNamespace(node_prefix_total_len=prefix) if prefix else None,
         hybrid_len_to_big_page_id=source_checkpoints,
         hybrid_cache_len=length,
         tail_small_page_buffer_id=tail,
@@ -1525,6 +1525,11 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
     )
     # 已命中的大页来自 radix，其余完整大页来自当前请求。
     shared_page_ids = [source_checkpoints.pop(end) for end in range(page_tokens, prefix + 1, page_tokens)]
+
+    def get_big_page_ids(node):
+        assert node is req.shared_kv_node and shared_page_ids
+        return shared_page_ids.copy()
+
     producer = torch.cuda.current_stream()
     context = common.g_infer_context
     monkeypatch.setattr(context, "req_manager", requests)
@@ -1532,7 +1537,7 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         context,
         "radix_cache",
         SimpleNamespace(
-            get_big_page_ids_by_node=lambda node: shared_page_ids.copy(),
+            get_big_page_ids_by_node=get_big_page_ids,
             alloc_small_page_buffer=requests.small_page_buffers.alloc_one_state_cache,
         ),
     )

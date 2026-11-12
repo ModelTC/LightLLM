@@ -268,7 +268,10 @@ class MultiLevelKvCacheModule(object):
 
         # The acquired CPU page references keep the pages live while we build local copy descriptors.
         for (req, session, page_lens, _, hash_count), (pages, owners) in zip(pending, allocations):
-            shared_ids = g_infer_context.radix_cache.get_big_page_ids_by_node(req.shared_kv_node)
+            shared_ids = ()
+            shared_node = req.shared_kv_node
+            if shared_node is not None and page_lens[session.next_page_index] <= shared_node.node_prefix_total_len:
+                shared_ids = g_infer_context.radix_cache.get_big_page_ids_by_node(shared_node)
             for index, (cpu_page, owner) in enumerate(zip(pages, owners), session.next_page_index):
                 if cpu_page == -1:
                     closing_sessions[session.request_id] = session

@@ -202,7 +202,7 @@ def test_incremental_store_only_passes_new_owners_to_pack(monkeypatch, owners):
 
     def get_big_page_ids(node):
         assert not lock.locked()
-        return []
+        return [2]
 
     obj.cpu_cache_client.allocate_pages = allocate
     obj.dsv4_max_pages_per_task = 1
@@ -214,7 +214,7 @@ def test_incremental_store_only_passes_new_owners_to_pack(monkeypatch, owners):
         req_id=7,
         req_idx=0,
         cur_kv_len=6144,
-        shared_kv_node=None,
+        shared_kv_node=NS(node_prefix_total_len=2048),
         hybrid_len_to_big_page_id={2048: 2, 4096: 4, 6144: 6},
         shm_req=NS(
             group_req_id=7,
