@@ -322,6 +322,7 @@ def _candidate_indexer_logits(
     CACHE,
     WEIGHTS,
     PAGES,
+    PAGE_ROWS,
     CANDIDATES,
     LENGTHS,
     LOGITS,
@@ -345,7 +346,8 @@ def _candidate_indexer_logits(
         block = tl.load(CANDIDATES + row * CANDIDATE_ROW + col // 8, col < CANDIDATE_ROW * 8, -1)
         position = block * 8 + col % 8
         valid = (block >= 0) & (position < length)
-        page = tl.load(PAGES + row * PAGE_ROW + position // 64, valid, 0).to(tl.int64)
+        page_row = tl.load(PAGE_ROWS + row) if PAGE_ROWS is not None else row
+        page = tl.load(PAGES + page_row * PAGE_ROW + position // 64, valid, 0).to(tl.int64)
         base = CACHE + page * CACHE_PAGE
         d = tl.arange(0, 128)
         h = tl.arange(0, BLOCK_H)
@@ -369,7 +371,7 @@ def _candidate_indexer_logits(
         tl.store(LOGITS + row * CANDIDATE_ROW * 8 + col, -float("inf"), col < CANDIDATE_ROW * 8)
 
 
-def candidate_indexer_logits(query, cache, weights, pages, candidates, lengths):
+def candidate_indexer_logits(query, cache, weights, pages, candidates, lengths, *, page_rows=None):
     """Score the producer's sorted, -1-padded eight-key blocks in FP8 slabs."""
     assert query.shape[-1] == 128
     block_n = 256 if query.shape[0] >= 32 else 64
@@ -379,6 +381,7 @@ def candidate_indexer_logits(query, cache, weights, pages, candidates, lengths):
         cache,
         weights,
         pages,
+        page_rows,
         candidates,
         lengths,
         logits,
@@ -401,6 +404,7 @@ def _indexer_topk_transform(
     LOGITS,
     RAW,
     PAGES,
+    PAGE_ROWS,
     OUT,
     VALID_LENGTHS,
     LENGTHS,
@@ -430,7 +434,8 @@ def _indexer_topk_transform(
     valid = (index != 2147483647) & ((col == 0) | (index != previous))
     rank = tl.cumsum(valid.to(tl.int32)) - 1
     count = tl.sum(valid.to(tl.int32))
-    page = tl.load(PAGES + row * PAGE_STRIDE + index // PAGE_SIZE, valid, 0)
+    page_row = tl.load(PAGE_ROWS + row) if PAGE_ROWS is not None else row
+    page = tl.load(PAGES + page_row * PAGE_STRIDE + index // PAGE_SIZE, valid, 0)
     tl.store(OUT + row * TOPK + col, -1, (col < TOPK) & (col >= count))
     tl.store(OUT + row * TOPK + rank, page * PAGE_SIZE + index % PAGE_SIZE, valid)
     tl.store(LENGTHS + row, count)
@@ -468,7 +473,7 @@ def select_indexer_candidates(logits, lengths, indices):
     )
 
 
-def select_indexer_topk(logits, lengths, pages, slots, selected_lengths, candidate_blocks=None):
+def select_indexer_topk(logits, lengths, pages, slots, selected_lengths, candidate_blocks=None, *, page_rows=None):
     from lightllm.utils.vllm_utils import vllm_ops
     from lightllm.models.deepseek_v4.triton_kernel.cache_io import INDEXER_PAGE_SIZE
 
@@ -488,6 +493,7 @@ def select_indexer_topk(logits, lengths, pages, slots, selected_lengths, candida
         logits,
         raw,
         pages,
+        page_rows,
         slots,
         lengths,
         selected_lengths,

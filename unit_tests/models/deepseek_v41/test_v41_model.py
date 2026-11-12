@@ -534,6 +534,8 @@ def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monke
         1,
     )
     indexer.uses_candidate_blocks = candidates == "consumer"
+    if mode == "prefill_paged":
+        monkeypatch.setattr(indexer, "_use_dense_prefill", lambda _: False)
     indexer._indexer_q_weight = lambda *args, **kwargs: (lambda out: (out[0], out[1].squeeze(-1)))(
         fused_q_indexer_rope_quant(query, weights, 1.0, freqs, query_pos, apply_hadamard=False)
     )
@@ -547,7 +549,12 @@ def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monke
     )
 
     def run():
-        return indexer._build_v41_metadata(query, query, state, None, False)
+        result = indexer._build_v41_metadata(query, query, state, None, False)
+        request_pages = mode == "prefill" or (mode == "prefill_paged" and candidates == "consumer")
+        metadata = state.indexer_metadata
+        assert metadata.page_table.shape[0] == (state.b_req_idx.shape[0] if request_pages else query.shape[0])
+        assert (metadata.page_table_rows is not None) == request_pages
+        return result
 
     def check(result, candidate_mask):
         q = _indexer_fp8_reference(_rope_reference(query, freqs, query_pos))

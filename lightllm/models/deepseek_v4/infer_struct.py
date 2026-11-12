@@ -14,8 +14,9 @@ class PagedIndexerMetadata:
     """Paged scorer inputs shared by layers with the same compression ratio."""
 
     compress_ratio: int
-    row_page_table: torch.Tensor
+    page_table: torch.Tensor
     logits_page_table: torch.Tensor
+    page_table_rows: torch.Tensor | None
     valid_lengths: torch.Tensor
     context_lengths: torch.Tensor
     rows_per_chunk: int
@@ -176,8 +177,14 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         """Build causal page tables and schedulers once per compression layout."""
         config = self.req_manager.cache_config
         ratio = config.compress_rates[layer_index]
-        if self.indexer_metadata is not None and self.indexer_metadata.compress_ratio == ratio:
-            return self.indexer_metadata
+        request_pages = self.is_prefill and dense_prefill
+        metadata = self.indexer_metadata
+        if (
+            metadata is not None
+            and metadata.compress_ratio == ratio
+            and (metadata.page_table_rows is not None) == request_pages
+        ):
+            return metadata
         import deep_gemm
         from .triton_kernel.build_indexer_page_table import build_indexer_page_table
         from .triton_kernel.cache_io import INDEXER_PAGE_SIZE, get_indexer_k_buffer
@@ -187,9 +194,12 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         ctx_lens = valid_len.clamp_min(1).view(-1, 1)
         if ratio == 4:
             torch.clamp(valid_len, min=1, max=self.dsv4_c4_indices.shape[1], out=self.dsv4_c4_lengths)
+        # LightLLM's scorers can map each query to its request's pages. DeepGEMM's
+        # paged scorer consumes one page-table row per query.
+        page_table_rows = self._dsv4_token_to_batch_idx if request_pages else None
         page_table = build_indexer_page_table(
-            self.dsv4_sparse_req_idx,
-            valid_len,
+            self.b_req_idx if request_pages else self.dsv4_sparse_req_idx,
+            self.b_seq_len // ratio if request_pages else valid_len,
             capacity,
             self.req_manager.req_to_token_indexs,
             self.req_manager.HOLD_REQUEST_ID,
@@ -220,8 +230,9 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         )
         self.indexer_metadata = PagedIndexerMetadata(
             compress_ratio=ratio,
-            row_page_table=page_table,
+            page_table=page_table,
             logits_page_table=logits_page_table,
+            page_table_rows=page_table_rows,
             valid_lengths=valid_len,
             context_lengths=ctx_lens,
             rows_per_chunk=rows_per_chunk,

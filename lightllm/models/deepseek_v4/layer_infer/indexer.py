@@ -233,7 +233,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             indexer_topk(
                 logits,
                 paged_meta.valid_lengths[start:end],
-                paged_meta.row_page_table[start:end],
+                paged_meta.page_table[start:end],
                 top_slots[start:end],
                 page_size,
             )
@@ -298,14 +298,16 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                 metadata.logits_page_table,
                 infer_state.candidate_block_indices,
                 metadata.valid_lengths,
+                page_rows=metadata.page_table_rows,
             )
             select_indexer_topk(
                 logits,
                 metadata.valid_lengths,
-                metadata.row_page_table,
+                metadata.page_table,
                 slots,
                 lengths,
                 candidate_blocks=infer_state.candidate_block_indices,
+                page_rows=metadata.page_table_rows,
             )
             return {"extra_indices": slots.unsqueeze(1), "extra_lengths": lengths}
         if dense_prefill:
@@ -358,6 +360,14 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             valid = metadata.valid_lengths[start:end]
             if build_candidates:
                 select_indexer_candidates(logits, valid, infer_state.candidate_block_indices[start:end])
-            select_indexer_topk(logits, valid, metadata.row_page_table[start:end], slots[start:end], lengths[start:end])
+            page_rows = metadata.page_table_rows
+            select_indexer_topk(
+                logits,
+                valid,
+                metadata.page_table[start:end] if page_rows is None else metadata.page_table,
+                slots[start:end],
+                lengths[start:end],
+                page_rows=page_rows[start:end] if page_rows is not None else None,
+            )
             del logits
         return {"extra_indices": slots.unsqueeze(1), "extra_lengths": lengths}
