@@ -769,6 +769,7 @@ class ModeBackend:
         pause_max_req_num = 2
         wait_pause_count = 0
         prefill_tokens = 0
+        first_chunk_reqs = []
 
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
@@ -850,25 +851,17 @@ class ModeBackend:
                 )
                 chunk_end = None
                 if token_num > remaining:
-                    if not (
-                        no_decode
-                        and not self.disable_chunked_prefill
-                        and req_obj.cur_kv_len > 0
-                        and remaining >= self.args.page_size
-                    ):
+                    if not (no_decode and not self.disable_chunked_prefill and remaining >= self.args.page_size):
+                        continue
+                    if req_obj.cur_kv_len == 0:
+                        if req_obj.shm_req.input_len > self.args.chunked_prefill_size:
+                            first_chunk_reqs.append(req_obj)
                         continue
                     # Fit a continuation before considering lower-ranked requests.
-                    chunk_end = req_obj.get_chuncked_input_token_len(
-                        chunk_size=min(remaining, self.args.chunked_prefill_size)
-                    )
-                    token_num = chunk_end - req_obj.get_prefill_input_start(chunk_end)
-                    alloc_token_num = req_obj._kv_cache_alloc_need(chunk_end)
-                    if (
-                        chunk_end <= req_obj.cur_kv_len
-                        or token_num > remaining
-                        or alloc_token_num > can_alloc_token_num
-                    ):
+                    fitted = req_obj.fit_prefill_chunk(remaining, can_alloc_token_num)
+                    if fitted is None:
                         continue
+                    chunk_end, token_num, alloc_token_num = fitted
                 if alloc_token_num <= can_alloc_token_num:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     if chunk_end is not None:
@@ -880,6 +873,21 @@ class ModeBackend:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True
                         wait_pause_count += 1
+
+        # Use spare compute for one new long request after ordinary batch selection.
+        if first_chunk_reqs:
+            remaining = self.batch_max_tokens - prefill_tokens
+            if remaining >= self.args.page_size:
+                for req_obj in first_chunk_reqs:
+                    fitted = req_obj.fit_prefill_chunk(remaining, can_alloc_token_num)
+                    if fitted is None:
+                        continue
+                    chunk_end, token_num, alloc_token_num = fitted
+                    self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
+                    req_obj.prefill_chunk_end = chunk_end
+                    prefill_tokens += token_num
+                    prefill_reqs.append(req_obj)
+                    break
 
         # 先由控制器确定请求需要写入的缓存层级。
         cache_controller = g_infer_context.cache_placement_controller

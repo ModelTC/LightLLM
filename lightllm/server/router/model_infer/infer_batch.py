@@ -1022,6 +1022,14 @@ class InferReq:
         alloc_token_num = self._kv_cache_alloc_need(target_kv_len)
         return token_num, alloc_token_num
 
+    def fit_prefill_chunk(self, token_budget: int, kv_budget: int) -> Optional[Tuple[int, int, int]]:
+        end = self.get_chuncked_input_token_len(chunk_size=min(token_budget, self.args.chunked_prefill_size))
+        tokens = end - self.get_prefill_input_start(end)
+        if end <= self.cur_kv_len or tokens > token_budget:
+            return None
+        alloc = self._kv_cache_alloc_need(end)
+        return (end, tokens, alloc) if alloc <= kv_budget else None
+
     def decode_need_token_num(self) -> Tuple[int, int]:
         """返回 (decode 需要的 token 数, 需要额外分配的 KV token 容量)。
 
