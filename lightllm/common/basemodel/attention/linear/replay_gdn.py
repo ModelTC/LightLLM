@@ -44,19 +44,6 @@ if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
-def replay_gdn_backend_class(name: str):
-    """按已选中的 linear kernel 名字返回对应的 replay backend。"""
-
-    classes = {
-        "triton": ReplayGDNTritonAttBackend,
-        "flashqla": ReplayGDNFlashQlaAttBackend,
-    }
-    try:
-        return classes[name]
-    except KeyError:
-        raise ValueError(f"replay GDN has no backend named {name!r}") from None
-
-
 class ReplayGDNTritonAttBackend(BaseAttBackend):
     """GDN replay 的 Triton 入口。Prefill 使用仓内 chunk kernel。"""
 

@@ -6,7 +6,6 @@ import torch
 import triton
 
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.distributed.communication_op import dist_group_manager
@@ -206,14 +205,11 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.decode_att_backend = self.prefill_att_backend
 
     def _init_att_backend1(self):
-        if getattr(self.args, "ssm_state_mode", "native") == "replay":
-            from lightllm.common.basemodel.attention.linear.replay_kda import (
-                ReplayKDALinearAttBackend,
-            )
+        from lightllm.common.basemodel.attention.create_linear_utils import (
+            get_kda_linear_att_backend_class,
+        )
 
-            backend_cls = ReplayKDALinearAttBackend
-        else:
-            backend_cls = KDALinearAttBackend
+        backend_cls = get_kda_linear_att_backend_class()
         self.prefill_att_backend1 = backend_cls(model=self)
         self.decode_att_backend1 = self.prefill_att_backend1
 
