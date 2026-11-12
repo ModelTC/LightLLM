@@ -1,4 +1,5 @@
 import torch
+import logging
 import time
 import inspect
 import threading
@@ -530,7 +531,8 @@ class _PrefillTransModule:
                 with self.waiting_dict_lock:
                     trans_task.write_submitting = False
                     self.waiting_dict[trans_task.get_key()] = trans_task
-                logger.debug(f"start WRITE to decode node: {trans_task.to_str()}")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("start WRITE to decode node: %s", trans_task.to_str())
                 continue
             except BaseException as e:
                 logger.error(f"write_blocks_paged failed: {trans_task.to_str()}")
@@ -697,10 +699,11 @@ class _PrefillTransModule:
             ret.first_gen_token_logprob = None
             self.task_out_queue.put(ret)
 
-            if trans_task.start_trans_time is not None:
-                logger.debug(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()}s")
-            else:
-                logger.debug(f"trans task ret success:{ret}")
+            if logger.isEnabledFor(logging.DEBUG):
+                if trans_task.start_trans_time is not None:
+                    logger.debug("trans task ret success:%s cost time: %ss", ret, trans_task.transfer_time())
+                else:
+                    logger.debug("trans task ret success:%s", ret)
 
     @log_exception
     def fail_loop(self):

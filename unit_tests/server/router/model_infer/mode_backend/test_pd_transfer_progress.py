@@ -1,6 +1,8 @@
+import logging
 import pickle
 import queue
 import threading
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -74,6 +76,50 @@ def make_module(*tasks):
     ):
         setattr(module, name, queue.Queue())
     return module
+
+
+@pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
+def test_decode_page_copy_always_waits_before_releasing_page(monkeypatch, level):
+    module = make_module()
+    task = make_task(1, 0)
+    task.dst_page_index = 2
+    task.start_trans_time = 1.0
+    module.ready_page_task_queue = _SequenceQueue(task)
+    module.copy_cuda_stream = object()
+    module.mem_managers = [Mock()]
+    module.dp_world_size = 1
+    module.task_out_queue = queue.Queue()
+    events = []
+
+    def make_event(enable_timing):
+        event = Mock(enable_timing=enable_timing)
+        event.elapsed_time.return_value = 0.5
+        events.append(event)
+        return event
+
+    def release_page(page_index):
+        assert page_index == 2
+        events[-1].synchronize.assert_called_once_with()
+
+    module.page_index_queue = SimpleNamespace(put=release_page)
+    monkeypatch.setattr(decode_trans_process.torch.cuda, "set_device", Mock())
+    monkeypatch.setattr(decode_trans_process.torch.cuda, "stream", lambda **kwargs: nullcontext())
+    monkeypatch.setattr(decode_trans_process.torch.cuda, "Event", make_event)
+    monkeypatch.setattr(decode_trans_process.logger, "isEnabledFor", lambda requested: requested >= level)
+
+    with pytest.raises(_StopLoop):
+        module.read_page_to_mems_loop()
+    module.success_queue = _SequenceQueue(module.success_queue.get_nowait())
+    with pytest.raises(_StopLoop):
+        module.success_loop()
+
+    events[-1].record.assert_called_once_with(module.copy_cuda_stream)
+    assert module.task_out_queue.get_nowait().request_id == task.request_id
+    if level == logging.INFO:
+        assert [event.enable_timing for event in events] == [False]
+    else:
+        assert [event.enable_timing for event in events] == [True, True]
+        events[0].elapsed_time.assert_called_once_with(events[-1])
 
 
 def test_dispatch_shares_timeout_mark_with_all_pages_in_each_group(monkeypatch):

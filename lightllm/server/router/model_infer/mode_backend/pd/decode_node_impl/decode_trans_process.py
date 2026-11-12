@@ -1,4 +1,5 @@
 import torch
+import logging
 import time
 import inspect
 import threading
@@ -387,7 +388,8 @@ class _DecodeTransModule:
                                 local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
                                 local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
                                 self.request_page_task_queue.put(local_trans_task)
-                                logger.debug(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
+                                if logger.isEnabledFor(logging.DEBUG):
+                                    logger.debug("recv WRITE request from prefill: %s", remote_trans_task.to_str())
                             else:
                                 # This does not necessarily mean the WRITE protocol state is corrupted.
                                 # A common benign case is: decode has already received an abort for this
@@ -413,7 +415,8 @@ class _DecodeTransModule:
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
                                 self.ready_page_task_queue.put(local_trans_task)
-                                logger.debug(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
+                                if logger.isEnabledFor(logging.DEBUG):
+                                    logger.debug("recv WRITE done from prefill: %s", remote_trans_task.to_str())
                             else:
                                 # Same race as the WRITE request stage: decode may have cleaned the
                                 # waiting task because the request was aborted, then a late done notify
@@ -511,10 +514,12 @@ class _DecodeTransModule:
         torch.cuda.set_device(self.device_id)
         while True:
             trans_task: PDChunckedTransTask = self.ready_page_task_queue.get()
-            copy_start_event = torch.cuda.Event(enable_timing=True)
-            copy_end_event = torch.cuda.Event(enable_timing=True)
+            log_copy_time = logger.isEnabledFor(logging.DEBUG)
+            copy_start_event = torch.cuda.Event(enable_timing=True) if log_copy_time else None
+            copy_end_event = torch.cuda.Event(enable_timing=log_copy_time)
             with torch.cuda.stream(stream=self.copy_cuda_stream):
-                copy_start_event.record(self.copy_cuda_stream)
+                if copy_start_event is not None:
+                    copy_start_event.record(self.copy_cuda_stream)
                 cur_mem = self.mem_managers[self.device_id]
                 cur_mem.read_page_kv_move_buffer_to_mem(
                     trans_task.mem_indexes,
@@ -541,10 +546,8 @@ class _DecodeTransModule:
             trans_task: PDChunckedTransTask = trans_task
             copy_end_event: Optional[torch.cuda.Event] = copy_end_event
             copy_start_event: Optional[torch.cuda.Event] = copy_start_event
-            read_page_gpu_time_ms = -1.0
             if copy_end_event is not None:
                 copy_end_event.synchronize()
-                read_page_gpu_time_ms = copy_start_event.elapsed_time(copy_end_event)
 
             if trans_task.dst_page_index is not None:
                 self.page_index_queue.put(trans_task.dst_page_index)
@@ -555,13 +558,19 @@ class _DecodeTransModule:
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
 
-            if trans_task.start_trans_time is not None:
-                logger.debug(
-                    f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
-                    f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
-                )
-            else:
-                logger.debug(f"trans task ret success:{ret}")
+            if logger.isEnabledFor(logging.DEBUG):
+                if trans_task.start_trans_time is not None:
+                    read_page_gpu_time_ms = (
+                        copy_start_event.elapsed_time(copy_end_event) if copy_start_event is not None else -1.0
+                    )
+                    logger.debug(
+                        "trans task ret success:%s cost time: %s s read_page_gpu_time: %.3f ms",
+                        ret,
+                        trans_task.transfer_time(),
+                        read_page_gpu_time_ms,
+                    )
+                else:
+                    logger.debug("trans task ret success:%s", ret)
 
     @log_exception
     def fail_loop(self):
