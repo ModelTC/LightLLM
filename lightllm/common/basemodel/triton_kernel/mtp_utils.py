@@ -244,6 +244,77 @@ def build_dspark_draft_rows(
 
 
 @triton.jit
+def _pack_dspark_confidence_kernel(
+    hidden,
+    anchors,
+    sampled,
+    embeddings,
+    output,
+    hidden_req_stride,
+    hidden_step_stride,
+    hidden_col_stride,
+    anchor_stride,
+    sampled_req_stride,
+    sampled_step_stride,
+    embedding_row_stride,
+    embedding_col_stride,
+    STEPS: tl.constexpr,
+    HIDDEN: tl.constexpr,
+    RANK: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    row = tl.program_id(0)
+    request, step = row // STEPS, row % STEPS
+    tile = tl.program_id(1)
+    cols = tl.arange(0, TILE)
+    out_row = output + row * (HIDDEN + RANK)
+    hidden_tiles: tl.constexpr = triton.cdiv(HIDDEN, TILE)
+    if tile < hidden_tiles:
+        col = tile * TILE + cols
+        hidden_ptr = hidden + request * hidden_req_stride + step * hidden_step_stride + col * hidden_col_stride
+        tl.store(out_row + col, tl.load(hidden_ptr, col < HIDDEN, 0).to(tl.float32), col < HIDDEN)
+    else:
+        col = (tile - hidden_tiles) * TILE + cols
+        anchor = tl.load(anchors + request * anchor_stride, step == 0, 0)
+        previous = tl.load(sampled + request * sampled_req_stride + (step - 1) * sampled_step_stride, step != 0, 0)
+        token = tl.where(step == 0, anchor, previous)
+        embedding_ptr = embeddings + token * embedding_row_stride + col * embedding_col_stride
+        # The original concatenation rounds the embedding to the hidden dtype first.
+        value = tl.load(embedding_ptr, col < RANK, 0).to(hidden.dtype.element_ty).to(tl.float32)
+        tl.store(out_row + HIDDEN + col, value, col < RANK)
+
+
+def pack_dspark_confidence_features(
+    block_hidden: torch.Tensor,
+    anchor_token_ids: torch.Tensor,
+    sampled_tokens: torch.Tensor,
+    embeddings: torch.Tensor,
+) -> torch.Tensor:
+    """Pack the FP32 input for the DSpark confidence projection."""
+    requests, steps, hidden = block_hidden.shape
+    rank = embeddings.shape[1]
+    features = torch.empty((requests * steps, hidden + rank), dtype=torch.float32, device=block_hidden.device)
+    tile = 512
+    grid = (requests * steps, triton.cdiv(hidden, tile) + triton.cdiv(rank, tile))
+    _pack_dspark_confidence_kernel[grid](
+        block_hidden,
+        anchor_token_ids,
+        sampled_tokens,
+        embeddings,
+        features,
+        *block_hidden.stride(),
+        anchor_token_ids.stride(0),
+        *sampled_tokens.stride(),
+        *embeddings.stride(),
+        steps,
+        hidden,
+        rank,
+        tile,
+    )
+    return features
+
+
+@triton.jit
 def _fwd_kernel_mtp_scatter_next_token_ids(
     req_to_next_token_ids,
     req_to_next_token_ids_stride,

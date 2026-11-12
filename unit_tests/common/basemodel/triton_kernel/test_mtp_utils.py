@@ -25,6 +25,30 @@ def test_build_mtp_shared_group_markers(monkeypatch, max_group_size, req_indexes
     assert markers.cpu().tolist() == expected_markers
 
 
+def test_pack_dspark_confidence_features_preserves_rounding_and_graph_inputs():
+    hidden = torch.randn(5, 3, 130, device="cuda", dtype=torch.bfloat16)[:, :, ::2]
+    anchors = torch.randint(17, (5, 3), device="cuda")[:, 0]
+    sampled = torch.randint(17, (5, 3), device="cuda")
+    embeddings = torch.randn(17, 31, device="cuda")
+
+    def run():
+        return mtp_utils.pack_dspark_confidence_features(hidden, anchors, sampled, embeddings)
+
+    def check(features):
+        prev = torch.cat((anchors[:, None], sampled[:, :-1]), dim=1)
+        expected = torch.cat((hidden, embeddings[prev].to(hidden.dtype)), dim=-1).flatten(0, 1).float()
+        torch.testing.assert_close(features, expected, atol=0, rtol=0)
+
+    check(run())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = run()
+    anchors.random_(17)
+    sampled.random_(17)
+    graph.replay()
+    check(captured)
+
+
 @pytest.mark.parametrize("pinned", [False, True])
 def test_mtp_verify_scatter_and_start_locations(pinned):
     req_to_next_token_ids = torch.tensor(

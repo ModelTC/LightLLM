@@ -2,6 +2,7 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import PostLayerOutput
 from lightllm.common.basemodel.triton_kernel.mhc import hc_head, hc_post
+from lightllm.common.basemodel.triton_kernel.mtp_utils import pack_dspark_confidence_features
 from lightllm.models.deepseek_v4_dspark.layer_weights.pre_and_post_layer_weight import (
     DeepseekV4DSparkPreAndPostLayerWeight,
 )
@@ -21,14 +22,11 @@ class DeepseekV4DSparkPostLayerInfer(Qwen3DSparkPostLayerInfer):
         sampled_tokens: torch.Tensor,
         layer_weight: DeepseekV4DSparkPreAndPostLayerWeight,
     ):
-        prev_token_ids = torch.cat(
-            [anchor_token_ids.view(-1, 1), sampled_tokens[:, :-1]],
-            dim=1,
+        features = pack_dspark_confidence_features(
+            block_hidden, anchor_token_ids, sampled_tokens, layer_weight.markov_w1_weight_.weight
         )
-        prev_embeddings = self._markov_prev_embeddings(prev_token_ids, layer_weight)
-        features = torch.cat([block_hidden, prev_embeddings.to(dtype=block_hidden.dtype)], dim=-1)
-        logits = layer_weight.confidence_head_weight_.mm(features.flatten(0, -2).float())
-        return logits.view(features.shape[:-1])
+        logits = layer_weight.confidence_head_weight_.mm(features)
+        return logits.view(block_hidden.shape[:-1])
 
     def _mix_hc_streams(self, input_embdings, layer_weight):
         cfg = layer_weight.network_config_
