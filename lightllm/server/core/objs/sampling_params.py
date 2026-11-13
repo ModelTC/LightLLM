@@ -399,8 +399,8 @@ class SamplingParams(ctypes.Structure):
         self.exponential_decay_length_penalty = ExponentialDecayLengthPenalty()
         self.exponential_decay_length_penalty.initialize(kwargs.get("exponential_decay_length_penalty", (1, 1.0)))
 
+        # The trusted PD manager populates this field after request parsing.
         self.pd_kv_trans_params = PDKVTransParamObj()
-        self.pd_kv_trans_params.set(kwargs.get("pd_kv_trans_params", None))
         self.pd_master_node_id = NodeUUId()
         self.pd_master_node_id.initialize(kwargs.get("pd_master_node_id", 0))
 
