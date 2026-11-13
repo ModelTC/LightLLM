@@ -155,12 +155,20 @@ def _pool_and_norm_pairs(
     STATE_SLOTS: tl.constexpr,
     KV_STRIDE: tl.constexpr,
     SCORE_STRIDE: tl.constexpr,
+    SKIP_OPEN_GROUPS: tl.constexpr,
 ):
     row = tl.program_id(0)
     cols = tl.arange(0, D)
     pos = tl.load(POS + row)
-    req = tl.load(REQ + row)
     pair_end = pos % 2 == 1
+    if SKIP_OPEN_GROUPS:
+        if not pair_end:
+            # The dense latent still feeds the indexer projection. Match the
+            # signed zero produced by the normal RMSNorm weight multiply.
+            weight = tl.load(NORM + cols).to(tl.float32)
+            tl.store(OUT + row * D + cols, 0.0 * weight)
+            return
+    req = tl.load(REQ + row)
     previous_req = tl.load(REQ + row - 1, pair_end & (row > 0), -1)
     in_batch = pair_end & (row > 0) & (previous_req == req)
     previous_kv = tl.load(KV + (row - 1) * KV_STRIDE + cols, in_batch, 0.0)
@@ -232,6 +240,7 @@ def pool_and_norm_pairs(kv, score, req, positions, state, hold_request, norm_wei
         state.shape[1],
         kv.stride(0),
         score.stride(0),
+        SKIP_OPEN_GROUPS=kv.shape[0] >= 1024,
         num_warps=rmsnorm_num_warps,
     )
     # Commit after scoring so current rows cannot overwrite another query's previous-step history.
