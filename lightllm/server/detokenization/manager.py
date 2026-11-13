@@ -45,7 +45,6 @@ class DeTokenizationManager:
         for req_index in recv_obj.shm_req_indexes:
             req = self.shm_req_manager.get_req_obj_by_index(req_index)
             req.link_prompt_ids_shm_array()
-            req.link_logprobs_shm_array()
 
             logger.debug(
                 f"detokenization recv req id {req.request_id} " f"cost time {time.time() - recv_obj.time_mark} s"
@@ -88,46 +87,42 @@ class DeTokenizationManager:
     def gen_token_out(self):
         exist_need_detoken = False
         exist_decode = False
+        finished_reqs: List[DecodeReq] = []
         for decode_req in self.req_id_to_out.values():
-            if decode_req.need_detoken() and not decode_req.out_queue_is_full():
-                new_token_id, src_index = decode_req.get_next_token_id_and_index()
-                decode_req.output_ids.append(new_token_id)
-                special = new_token_id in self.all_special_ids
-                count_output_tokens = len(decode_req.output_ids)
-
-                exist_decode = True
-                new_text = decode_token(
-                    self.tokenizer,
-                    decode_req,
-                    int(new_token_id),
-                    self.eos_id,
-                )
-
-                decode_req.req.out_tokens_queue.push(new_text, src_index, special, count_output_tokens)
-
             if decode_req.need_detoken():
-                exist_need_detoken = True
+                if not decode_req.out_queue_is_full():
+                    new_token_id, src_index = decode_req.get_next_token_id_and_index()
+                    decode_req.output_ids.append(new_token_id)
+                    special = new_token_id in self.all_special_ids
+                    count_output_tokens = len(decode_req.output_ids)
+
+                    exist_decode = True
+                    new_text = decode_token(
+                        self.tokenizer,
+                        decode_req,
+                        int(new_token_id),
+                        self.eos_id,
+                    )
+
+                    decode_req.req.out_tokens_queue.push(new_text, src_index, special, count_output_tokens)
+                if decode_req.need_detoken():
+                    exist_need_detoken = True
+                    continue
+
+            if decode_req.can_set_release_mark():
+                finished_reqs.append(decode_req)
 
         # 通知 httpserver 进程
         if exist_decode:
             self.pub_to_httpserver.send_pyobj(None, protocol=pickle.HIGHEST_PROTOCOL)
 
-        self.remove_finished_reqs()
-
-        return exist_need_detoken
-
-    def remove_finished_reqs(self):
-        finished_reqs: List[DecodeReq] = []
-        for decode_req in self.req_id_to_out.values():
-            if decode_req.can_set_release_mark():
-                finished_reqs.append(decode_req)
-
         for decode_req in finished_reqs:
             decode_req.req.can_released_mark = True
             logger.debug(f"detoken release req id {decode_req.req.request_id}")
             self.shm_req_manager.put_back_req_obj(decode_req.req)
-            self.req_id_to_out.pop(decode_req.request_id, None)
-        return
+            self.req_id_to_out.pop(decode_req.request_id)
+
+        return exist_need_detoken
 
 
 def start_detokenization_process(args, pipe_writer):
