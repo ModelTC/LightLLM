@@ -1,5 +1,6 @@
-import torch
 from typing import Optional
+
+import torch
 
 
 def token_decode_attention_flash_decoding(
@@ -34,7 +35,9 @@ def token_decode_attention_flash_decoding(
     mid_o = alloc_tensor_func([batch_size, q_head_num, block_num, head_dim], dtype=q.dtype, device="cuda")
     mid_o_logexpsum = alloc_tensor_func([batch_size, q_head_num, block_num], dtype=q.dtype, device="cuda")
 
-    from .int4kv_flash_decoding_stage1 import int4kv_flash_decode_stage1
+    from lightllm.common.attention.backends.dense.triton.kernels.decode.int4kv.int4kv_flash_decoding_stage1 import (
+        int4kv_flash_decode_stage1,
+    )
 
     int4kv_flash_decode_stage1(
         q=q.view(calcu_shape1),
@@ -51,7 +54,11 @@ def token_decode_attention_flash_decoding(
         block_seq=BLOCK_SEQ,
     )
 
-    from ..int8kv.normal.int8kv_flash_decoding_stage2 import flash_decode_stage2
+    from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.normal import (
+        int8kv_flash_decoding_stage2,
+    )
 
-    flash_decode_stage2(mid_o, mid_o_logexpsum, infer_state.b_seq_len, o_tensor.view(calcu_shape1), BLOCK_SEQ)
+    int8kv_flash_decoding_stage2.flash_decode_stage2(
+        mid_o, mid_o_logexpsum, infer_state.b_seq_len, o_tensor.view(calcu_shape1), BLOCK_SEQ
+    )
     return o_tensor

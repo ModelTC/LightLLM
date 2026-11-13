@@ -12,33 +12,22 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import (
-    ReplayGDNState,
+from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_fn
+from lightllm.common.attention.backends._shared.linear.causal_conv1d_mtp import (
+    causal_conv1d_update as causal_conv1d_update_mtp,
 )
+from lightllm.common.attention.backends._shared.linear.mtp_state_params import build_dynamic_mtp_linear_att_state_params
+from lightllm.common.attention.backends.gdn.replay.decode import replay
+from lightllm.common.attention.backends.gdn.triton.kernels.fused_gdn_gating import fused_gdn_gating
+from lightllm.common.attention.backends.gdn.triton.kernels.gdn_decode_pack import conv_pack_gdn_decode_inputs
+from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
     BaseAttBackend,
     BaseDecodeAttState,
     BasePrefillAttState,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
-    causal_conv1d_fn,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
-    causal_conv1d_update as causal_conv1d_update_mtp,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import (
-    fused_gdn_gating,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import (
-    conv_pack_gdn_decode_inputs,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
-    build_dynamic_mtp_linear_att_state_params,
-)
 from lightllm.utils.envs_utils import get_env_start_args
-
-from .replay_gdn_decode import replay
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo

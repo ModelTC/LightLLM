@@ -1,25 +1,24 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from lightllm.common.attention.backends._shared.linear.mtp_state_params import build_dynamic_mtp_linear_att_state_params
+from lightllm.common.attention.backends._shared.linear.replayssm_cursor import advance_cursor
+from lightllm.common.attention.backends._shared.linear.ssm_acceptance import commit_ssm_prefix
 from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
     accept_replay_window,
     attach_replay_history as ReplaySSMExecutor,
     replay_layer,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
-    build_dynamic_mtp_linear_att_state_params,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
-from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
-from types import SimpleNamespace
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
 @pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
 def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
-    from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import _advance_cursor
-    from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_decode import _decode_replay
+    from lightllm.common.attention.backends._shared.linear.replayssm_cursor import _advance_cursor
+    from lightllm.common.attention.backends._shared.linear.replayssm_decode import _decode_replay
 
     kernels = {"_decode_replay": _decode_replay, "_advance_cursor": _advance_cursor}
     hashes = {name: set() for name in kernels}
@@ -350,12 +349,12 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
 
 @pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
 def test_cross_layer_fold_with_state_offset_above_int32(kda):
-    if torch.cuda.mem_get_info()[0] < 6 * 1024 ** 3:
+    if torch.cuda.mem_get_info()[0] < 6 * 1024**3:
         pytest.skip("large-stride regression requires 6 GiB of free device memory")
     torch.manual_seed(791)
     shape = (48, 3, 12, 128, 128)
     strides = (50_528_256, 196608, 16384, 128, 1)
-    assert strides[0] < 2 ** 31 < 47 * strides[0]
+    assert strides[0] < 2**31 < 47 * strides[0]
     dense = torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.01
     sparse = torch.empty_strided(shape, strides, device="cuda", dtype=dense.dtype)
     sparse.copy_(dense)

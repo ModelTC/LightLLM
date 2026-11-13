@@ -1,8 +1,14 @@
-import torch
 from typing import Optional
+
+import torch
+
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.normal.int8kv_flash_decoding_stage1 import (
+    flash_decode_stage1,
+)
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.normal.int8kv_flash_decoding_stage2 import (
+    flash_decode_stage2,
+)
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from .int8kv_flash_decoding_stage1 import flash_decode_stage1
-from .int8kv_flash_decoding_stage2 import flash_decode_stage2
 
 
 @torch.no_grad()
@@ -17,7 +23,6 @@ def token_decode_attention_flash_decoding(
     out: Optional[torch.Tensor] = None,
     alloc_tensor_func=torch.empty,
 ):
-
     q_head_num = q.shape[1]
     head_dim = q.shape[2]
 

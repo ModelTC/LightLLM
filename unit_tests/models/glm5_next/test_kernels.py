@@ -1,29 +1,28 @@
-import weakref
 import dataclasses
 import math
+import weakref
 from types import SimpleNamespace
 
 import pytest
 import torch
 import triton
 
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.utils.envs_utils import set_env_start_args
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import (
+from lightllm.common.attention.backends.kda.triton.kernels.kda import (
     chunk_kda_with_fused_gate,
     fused_kda_gate_chunk_cumsum,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
+from lightllm.common.attention.backends.kda.triton.kernels.kda_decode import fused_recurrent_kda
+from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.models.glm5_next.triton_kernel.index_quant import hadamard_transform_quant_fp8
 from lightllm.models.glm5_next.triton_kernel.kpool import (
     compress_pools,
-    gather_pools,
-    gather_paged_pools,
-    get_pool_ranges,
     expand_topk,
+    gather_paged_pools,
+    gather_pools,
+    get_pool_ranges,
 )
-from lightllm.models.glm5_next.triton_kernel.index_quant import hadamard_transform_quant_fp8
-
+from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.utils.envs_utils import set_env_start_args
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -241,7 +240,7 @@ def test_kpool_chunk_boundaries_and_fragmented_token_kv(cuda_graph):
         for group in range(seqs[batch] // 4):
             values = source[start + group * 4 : start + group * 4 + 4]
             expected = (values[:, :128].float() * (values[:, 128:].float() + ape).softmax(0)).sum(0).bfloat16()
-            expected_key, expected_scale = hadamard_transform_quant_fp8(expected[None], scale=128 ** -0.5)
+            expected_key, expected_scale = hadamard_transform_quant_fp8(expected[None], scale=128**-0.5)
             torch.testing.assert_close(keys[batch * 3 + group].float(), expected_key[0].float(), atol=0, rtol=0)
             torch.testing.assert_close(scales[batch * 3 + group], expected_scale[0, 0], atol=0, rtol=0)
     lengths = torch.tensor(seqs, device="cuda", dtype=torch.int32)
@@ -297,7 +296,7 @@ def test_kpool_decode_cuda_graph_and_padding():
             if pending == 0:
                 values = source[batch, pos - 3 : pos + 1]
                 pooled = (values[:, :128].float() * (values[:, 128:].float() + ape).softmax(0)).sum(0).bfloat16()
-                key, scale = hadamard_transform_quant_fp8(pooled[None], 128 ** -0.5)
+                key, scale = hadamard_transform_quant_fp8(pooled[None], 128**-0.5)
                 actual = packed[table[batch, pos].long(), 0]
                 assert torch.equal(actual[:128], key.view(torch.uint8)[0])
                 assert torch.equal(actual[128:].view(torch.float32), scale.flatten())
@@ -392,7 +391,7 @@ def test_gather_pools_long_context_cuda_graph(max_pools):
 
 def test_kpool_packed_kv_above_two_gib():
     # Automatic KV sizing on H200 can put pool keys beyond a 32-bit byte offset.
-    loc = 2 ** 31 // (584 * 2) + 1
+    loc = 2**31 // (584 * 2) + 1
     storage = torch.empty(loc + 1, 1, 584, device="cuda", dtype=torch.bfloat16)
     packed = storage.view(torch.uint8)[:, :, -132:]
     raw = torch.randn(4, 256, device="cuda", dtype=torch.bfloat16)
@@ -405,14 +404,14 @@ def test_kpool_packed_kv_above_two_gib():
     compress_pools(raw, tail, packed, ape, lengths, ragged, zero[:1], cu_q_lens, lengths[-1:], max_q_seq_len=4)
     keys, scales = gather_pools(packed, ragged[None], zero[:1], lengths[-1:], 1)
     pooled = (raw[:, :128].float() * (raw[:, 128:].float() + ape).softmax(0)).sum(0).bfloat16()
-    expected_key, expected_scale = hadamard_transform_quant_fp8(pooled[None], scale=128 ** -0.5)
+    expected_key, expected_scale = hadamard_transform_quant_fp8(pooled[None], scale=128**-0.5)
     assert torch.equal(keys.view(torch.uint8), expected_key.view(torch.uint8))
     assert torch.equal(scales, expected_scale.flatten())
 
 
 @pytest.mark.parametrize("tp_world_size", [1, 4])
 def test_mhc_keeps_streams_through_decode_autotuning(monkeypatch, tp_world_size):
-    from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
+    from lightllm.common.triton_utils.autotuner import AutotuneKernelType, Autotuner
     from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
     from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 
@@ -482,7 +481,7 @@ def test_shared_chunk_kernel_preserves_gdn_natural_log_decay():
         state *= gate[:, i, :, None, None].exp()
         delta = (v[:, i].float() - torch.einsum("bhkv,bhk->bhv", state, k[:, i].float())) * beta[:, i, :, None]
         state += k[:, i, :, :, None].float() * delta[:, :, None, :]
-        expected.append(torch.einsum("bhkv,bhk->bhv", state, q[:, i].float()) / dim ** 0.5)
+        expected.append(torch.einsum("bhkv,bhk->bhv", state, q[:, i].float()) / dim**0.5)
     out, final = chunk_gated_delta_rule(
         q,
         k,
@@ -500,7 +499,7 @@ def test_shared_chunk_kernel_preserves_gdn_natural_log_decay():
 @pytest.mark.parametrize("heads", [16, 64, 128])
 def test_nope_attention_native_512_and_cuda_graph(heads):
     from lightllm.common.basemodel.attention.base_att import AttControl
-    from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparsePrefillState, Glm5NextSparseDecodeState
+    from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseDecodeState, Glm5NextSparsePrefillState
 
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("FA3 NoPE requires Hopper")
@@ -646,11 +645,11 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
     pool_count = tokens // 4
     pool_values = hidden[: pool_count * 4].view(pool_count, 4, dim)
     pooled = (pool_values.float() * (pool_values.float() * 0.25 + ape).softmax(1)).sum(1).bfloat16()
-    k_fp8, k_scale = hadamard_transform_quant_fp8(pooled, dim ** -0.5)
+    k_fp8, k_scale = hadamard_transform_quant_fp8(pooled, dim**-0.5)
     query = (hidden[-1:] @ q_weight).view(heads, dim)
-    q_fp8, q_scale = hadamard_transform_quant_fp8(query, dim ** -0.5)
+    q_fp8, q_scale = hadamard_transform_quant_fp8(query, dim**-0.5)
     logits = (q_fp8.float() @ k_fp8.float().T * k_scale.flatten()).clamp_min(0)
-    scores = (logits * q_scale * (heads ** -0.5 * dim ** -0.5)).sum(0)
+    scores = (logits * q_scale * (heads**-0.5 * dim**-0.5)).sum(0)
     expected_groups = set(scores.topk(512).indices.tolist())
     assert set((decoded[0, :2048:4] // 4).tolist()) == expected_groups
 

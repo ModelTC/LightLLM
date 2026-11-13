@@ -11,30 +11,20 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import (
-    ReplayKDAState,
+from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+from lightllm.common.attention.backends._shared.linear.causal_conv1d_mtp import (
+    causal_conv1d_update as causal_conv1d_update_mtp,
 )
+from lightllm.common.attention.backends._shared.linear.mtp_state_params import build_dynamic_mtp_linear_att_state_params
+from lightllm.common.attention.backends.kda.replay.decode import replay
+from lightllm.common.attention.backends.kda.triton.kernels.kda import chunk_kda_with_fused_gate
+from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
     BaseAttBackend,
     BaseDecodeAttState,
     BasePrefillAttState,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
-    causal_conv1d_fn,
-    causal_conv1d_update,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
-    causal_conv1d_update as causal_conv1d_update_mtp,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import (
-    chunk_kda_with_fused_gate,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
-    build_dynamic_mtp_linear_att_state_params,
-)
-
-from .replay_kda_decode import replay
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo

@@ -1,23 +1,22 @@
-from lightllm.common.attention_state.bounded_att import GDNState
 import dataclasses
 import weakref
-import torch
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
-from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import fused_gdn_gating
-from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import conv_pack_gdn_decode_inputs
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
+
+import torch
+
+from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_fn
+from lightllm.common.attention.backends._shared.linear.mtp_state_params import build_dynamic_mtp_linear_att_state_params
+from lightllm.common.attention.backends.gdn.triton.kernels.fused_gdn_gating import fused_gdn_gating
+from lightllm.common.attention.backends.gdn.triton.kernels.gdn_decode_pack import conv_pack_gdn_decode_inputs
+from lightllm.common.attention.backends.gdn.triton.kernels.mtp_fused_recurrent import (
     mtp_fused_recurrent_gated_delta_rule,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
-    build_dynamic_mtp_linear_att_state_params,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
-    fused_recurrent_gated_delta_rule,
-)
+from lightllm.common.attention_state.bounded_att import GDNState
+from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import fused_recurrent_gated_delta_rule
+from lightllm.utils.envs_utils import get_env_start_args
+
+from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -37,7 +36,6 @@ class LinearAttBackend(BaseAttBackend, ABC):
         pass
 
     def _init_linear_layer_metadata(self, network_config, tp_world_size):
-
         self.mtp_step = get_env_start_args().mtp_step
 
         # Linear attention specific dimensions
@@ -109,7 +107,6 @@ class LinearAttBackend(BaseAttBackend, ABC):
 
 @dataclasses.dataclass
 class LinearAttPrefillAttState(BasePrefillAttState):
-
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
@@ -207,7 +204,6 @@ class LinearAttPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class LinearAttDecodeAttState(BaseDecodeAttState):
-
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
@@ -389,7 +385,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
     ):
-        from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
+        from lightllm.common.attention.backends._shared.linear.causal_conv1d_mtp import (
             causal_conv1d_update as causal_conv1d_update_mtp,
         )
 

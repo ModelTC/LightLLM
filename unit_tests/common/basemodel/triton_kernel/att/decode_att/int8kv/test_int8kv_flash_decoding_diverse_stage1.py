@@ -1,6 +1,7 @@
 import pytest
 import torch
-from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.int8kv_flash_decoding_diverse_stage1 import (
+
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.int8kv_flash_decoding_diverse_stage1 import (
     flash_decode_stage1,
 )
 
@@ -95,7 +96,7 @@ def test_flash_decode_stage1_execution(setup_tensors):
     new_k = k.to(q.dtype)
     new_v = v.to(q.dtype)
 
-    from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding_stage1 import (
+    from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.flash.gqa_flash_decoding_stage1 import (
         flash_decode_stage1 as gqa_flash_decode_stage1,
     )
 
@@ -174,14 +175,14 @@ def autotune_and_benchmark():
 
             del setup_tensors
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("SUMMARY - Performance Comparison")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"{'batch_size':<8} {'seq_len':<12} {'triton_ms':<12}")
-    print(f"{'-'*80}")
+    print(f"{'-' * 80}")
     for r in results:
         print(f"{r['batch_size']:<8} {r['seq_len']:<12} {r['triton_ms']:<12.3f}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
 
 if __name__ == "__main__":

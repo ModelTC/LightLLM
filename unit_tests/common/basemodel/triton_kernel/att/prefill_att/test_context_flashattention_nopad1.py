@@ -1,15 +1,17 @@
-import torch
 import time
-import pytest
-import numpy as np
-import torch.nn.functional as F
+
 import flashinfer
-from lightllm.utils.log_utils import init_logger
-from lightllm.common.basemodel.triton_kernel.att.prefill_att.context_flashattention_nopad import (
+import numpy as np
+import pytest
+import torch
+import torch.nn.functional as F
+
+from lightllm.common.attention.backends._shared.prefill.context_flashattention_nopad import (
     context_attention_fwd,
     context_attention_fwd_no_prompt_cache,
 )
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
+from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 

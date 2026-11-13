@@ -1,8 +1,10 @@
 import dataclasses
 import weakref
-import torch
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Tuple
+
+import torch
+
+from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
 
 
 class MlaTritonAttBackend(BaseAttBackend):
@@ -77,7 +79,9 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
         att_control: AttControl,
         alloc_func=torch.empty,
     ):
-        from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
+        from lightllm.common.attention.backends._shared.prefill.context_flashattention_nopad import (
+            context_attention_fwd_contiguous_kv,
+        )
 
         k_nope, k_rope = k
         q_head_num = q.shape[1]

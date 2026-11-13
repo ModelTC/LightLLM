@@ -7,15 +7,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from lightllm.common.basemodel.triton_kernel.linear_att import (
-    mtp_fused_recurrent as kernel_module,
-)
+from lightllm.common.attention.backends.gdn.triton.kernels import mtp_fused_recurrent as kernel_module
 from lightllm.common.triton_utils import autotuner as autotuner_module
-from lightllm.common.triton_utils.autotuner import (
-    Autotuner,
-    AutotuneKernelType,
-    AutotuneLevel,
-)
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 
 
 @pytest.fixture(autouse=True)

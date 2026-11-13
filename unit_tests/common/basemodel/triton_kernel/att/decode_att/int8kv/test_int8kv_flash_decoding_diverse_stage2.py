@@ -1,6 +1,7 @@
 import pytest
 import torch
-from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.int8kv_flash_decoding_diverse_stage2 import (
+
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.int8kv_flash_decoding_diverse_stage2 import (
     flash_decode_stage2,
 )
 
@@ -104,7 +105,7 @@ def test_flash_decode_stage2_execution(shared_seq_len):
     b_seq_len = setup_tensors["b_seq_len"] - setup_tensors["b_shared_seq_len"]
     req_to_tokens = setup_tensors["Req_to_tokens"][:, setup_tensors["b_shared_seq_len"][0].item() :]
 
-    from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding_stage1 import (
+    from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.flash.gqa_flash_decoding_stage1 import (
         flash_decode_stage1 as gqa_flash_decode_stage1,
     )
 
@@ -184,9 +185,9 @@ if __name__ == "__main__":
             print(results[-1])
             del setup_tensors
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"{'batch_size':<10} {'seq_len':<10} {'flash_decode_stage2_ms':<22}")
-    print(f"{'-'*80}")
+    print(f"{'-' * 80}")
     for r in results:
         print(f"{r['batch_size']:<10} {r['seq_len']:<10} {r['flash_decode_stage2_ms']:<22.4f}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")

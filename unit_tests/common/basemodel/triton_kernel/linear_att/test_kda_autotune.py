@@ -9,11 +9,10 @@ import pytest
 import torch
 import triton
 
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import kda
+from lightllm.common.attention.backends.kda.triton.kernels import kda
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.common.triton_utils import autotuner as autotuner_module
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneLevel
-
+from lightllm.common.triton_utils.autotuner import AutotuneLevel, Autotuner
 
 KERNELS = [
     ("_chunk_kda_scaled_dot_kkt_sub_inter", "chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter"),
@@ -47,7 +46,7 @@ def wrapper_inputs(kernel, tokens=65):
         R=torch.empty(1, tokens, 2, 64, dtype=q.dtype),
         h=torch.empty(1, len(chunk_indices), 2, 128, 80, dtype=q.dtype),
         o=torch.empty_like(v),
-        scale=128 ** -0.5,
+        scale=128**-0.5,
         cu_seqlens=torch.tensor([0, 3, tokens]),
         chunk_indices=chunk_indices,
     )
@@ -212,7 +211,7 @@ def test_kda_requires_packed_inputs(fused_gate, invalid_input):
 def test_split_diagonal_matches_unsplit(monkeypatch, heads, input_dtype, output_dtype, precision):
     if precision != "ieee" and torch.cuda.get_device_capability()[0] < 8:
         pytest.skip("TF32 requires SM80+")
-    solver = importlib.import_module("lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.solve_tril")
+    solver = importlib.import_module("lightllm.common.attention.backends._shared.linear.solve_tril")
     monkeypatch.setattr(solver, "FLA_TRIL_PRECISION", precision)
     lengths = (1, 16, 1519)
     cu_seqlens = torch.tensor([0, *accumulate(lengths)], device="cuda", dtype=torch.int32)
@@ -236,7 +235,7 @@ def test_split_diagonal_matches_unsplit(monkeypatch, heads, input_dtype, output_
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("batch,tokens,heads", [(1, 64, 2), (2, 65, 3), (3, 129, 2)])
 def test_split_diagonal_matches_unsplit_dense(monkeypatch, batch, tokens, heads):
-    solver = importlib.import_module("lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.solve_tril")
+    solver = importlib.import_module("lightllm.common.attention.backends._shared.linear.solve_tril")
     rows = torch.arange(tokens, device="cuda") % 64
     matrix = torch.randn(batch, tokens, heads, 64, device="cuda") * 0.025
     matrix.mul_((rows[:, None] > torch.arange(64, device="cuda"))[None, :, None, :])
@@ -268,7 +267,7 @@ def test_split_diagonal_matches_unsplit_dense(monkeypatch, batch, tokens, heads)
     ids=["16-requests", "128-requests", "quarter-full-chunks", "16k-tokens", "mostly-empty-chunks", "tiny-batch"],
 )
 def test_split_diagonal_uses_chunk_occupancy(monkeypatch, lengths, expect_split):
-    solver = importlib.import_module("lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.solve_tril")
+    solver = importlib.import_module("lightllm.common.attention.backends._shared.linear.solve_tril")
     cu_seqlens = torch.tensor([0, *accumulate(lengths)], device="cuda", dtype=torch.int32)
     rows = torch.cat([torch.arange(length, device="cuda") % 64 for length in lengths])
     matrix = torch.randn(1, sum(lengths), 2, 64, device="cuda") * 0.025

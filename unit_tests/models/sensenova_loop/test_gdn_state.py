@@ -93,7 +93,7 @@ def test_gdn_decode_keeps_logical_layer_state(
 
         monkeypatch.setattr("lightllm.common.basemodel.attention.linear.gdn.conv_pack_gdn_decode_inputs", conv_pack)
         monkeypatch.setattr(
-            "lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp.causal_conv1d_update", conv_mtp
+            "lightllm.common.attention.backends._shared.linear.causal_conv1d_mtp.causal_conv1d_update", conv_mtp
         )
         monkeypatch.setattr(
             "lightllm.common.basemodel.attention.linear.gdn.fused_recurrent_gated_delta_rule", recurrent

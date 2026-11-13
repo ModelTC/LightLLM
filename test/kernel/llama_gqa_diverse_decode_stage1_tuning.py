@@ -1,22 +1,25 @@
-import torch
-import time
 import os
-import torch.multiprocessing as mp
+import time
 from typing import List
-from lightllm.utils.log_utils import init_logger
-from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.int8kv_flash_decoding_diverse_stage2 import (
-    flash_decode_stage1,
+
+import torch
+import torch.multiprocessing as mp
+
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.int8kv_flash_decoding_diverse_stage1 import (
     GQADiverseDecodeStage1KernelConfig,
+    flash_decode_stage1,
 )
+from lightllm.utils.log_utils import init_logger
 from lightllm.utils.watchdog_utils import Watchdog
 
 logger = init_logger(__name__)
 
 
 def set_seed():
-    import torch
     import random
+
     import numpy as np
+    import torch
 
     seed = 42
     torch.manual_seed(seed)
@@ -63,7 +66,7 @@ def test_decode_attentions(
     state.q_head_num = q_head_num
     state.q_head_dim = q_head_dim
     state.kv_head_num = kv_head_num
-    state.softmax_scale = 1 / (q_head_dim ** 0.5)
+    state.softmax_scale = 1 / (q_head_dim**0.5)
     state.total_token_num = state.batch_size * test_seq_len
 
     infer_state = state
@@ -301,8 +304,9 @@ def tuning_configs(
 if __name__ == "__main__":
     torch.multiprocessing.set_start_method("spawn")
 
-    from lightllm.utils.tuning_utils import mp_tuning
     import collections
+
+    from lightllm.utils.tuning_utils import mp_tuning
 
     block_seq = 256
 

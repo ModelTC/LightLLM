@@ -1,10 +1,11 @@
 import dataclasses
 import weakref
-import torch
 from typing import Tuple
 
+import torch
+
 from ..base_att import AttControl
-from .fp import TritonAttBackend, TritonPrefillAttState, TritonDecodeAttState
+from .fp import TritonAttBackend, TritonDecodeAttState, TritonPrefillAttState
 
 
 class NeoTritonAttBackend(TritonAttBackend):
@@ -25,7 +26,9 @@ class NeoTritonPrefillAttState(TritonPrefillAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        from ...triton_kernel.att.prefill_att.context_attention_fwd_neo import context_attention_fwd_neo
+        from lightllm.common.attention.backends.dense.triton.kernels.prefill.context_attention_fwd_neo import (
+            context_attention_fwd_neo,
+        )
         from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
 
         self.infer_state: NeoChatInferStateInfo

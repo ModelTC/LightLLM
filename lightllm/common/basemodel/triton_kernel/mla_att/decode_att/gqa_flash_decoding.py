@@ -1,12 +1,16 @@
 import os
+from typing import List
+
 import torch
 import torch.multiprocessing as mp
 import triton
 import triton.language as tl
-from typing import List
-from lightllm.utils.log_utils import init_logger
-from .gqa_flash_decoding_config import MlaDecodeAttentionKernelConfig
+
+from lightllm.common.attention.backends.mla.triton.kernels.decode.gqa_flash_decoding_config import (
+    MlaDecodeAttentionKernelConfig,
+)
 from lightllm.utils.device_utils import get_device_sm_count
+from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
@@ -41,8 +45,12 @@ def gqa_token_decode_attention_flash_decoding(
 
     BLOCK_N = run_config["BLOCK_N"]
 
-    from .gqa_flash_decoding_stage1 import flash_decode_stage1
-    from .gqa_flash_decoding_stage2 import flash_decode_stage2
+    from lightllm.common.attention.backends.mla.triton.kernels.decode.gqa_flash_decoding_stage1 import (
+        flash_decode_stage1,
+    )
+    from lightllm.common.attention.backends.mla.triton.kernels.decode.gqa_flash_decoding_stage2 import (
+        flash_decode_stage2,
+    )
 
     o_tensor = alloc_tensor_func(q_nope.shape, q_nope.dtype, q_nope.device) if out is None else out
 
@@ -63,7 +71,7 @@ def gqa_token_decode_attention_flash_decoding(
         mid_o_logexpsum,
         softmax_scale,
         get_sm_count=True,
-        **run_config
+        **run_config,
     )
 
     if not hasattr(infer_state, "decode_att_block_seq"):
@@ -111,7 +119,7 @@ def gqa_token_decode_attention_flash_decoding(
         mid_o_logexpsum,
         softmax_scale,
         get_sm_count=False,
-        **run_config
+        **run_config,
     )
 
     flash_decode_stage2(
@@ -121,7 +129,7 @@ def gqa_token_decode_attention_flash_decoding(
         mid_o_logexpsum,
         infer_state.b_seq_len,
         o_tensor.view(calcu_shape1),
-        **run_config
+        **run_config,
     )
     return o_tensor
 

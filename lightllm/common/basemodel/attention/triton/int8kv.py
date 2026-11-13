@@ -1,11 +1,13 @@
 import dataclasses
 import weakref
-import torch
-from lightllm.utils.envs_utils import get_env_start_args
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, Tuple
-from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
+
+import torch
+
 from lightllm.common.basemodel.triton_kernel.diverse_utils import build_diverse_shared_group_markers
+from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel, get_env_start_args
+
+from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
 
 
 class Int8kvTritonAttBackend(BaseAttBackend):
@@ -22,7 +24,6 @@ class Int8kvTritonAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class Int8kvTritonPrefillAttState(BasePrefillAttState):
-
     # 用于反量化的时候使用，可以减少反量化占用的显存数量。按需使用。
     b_kv_start_loc: torch.Tensor = None
 
@@ -94,7 +95,9 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
             quant_group_size=self.backend.quant_group_size,
         )
 
-        from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
+        from lightllm.common.attention.backends._shared.prefill.context_flashattention_nopad import (
+            context_attention_fwd_contiguous_kv,
+        )
 
         context_attention_fwd_contiguous_kv(
             q=q,
@@ -169,7 +172,6 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         v_scale: torch.Tensor,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-
         from ...triton_kernel.att.decode_att.int8kv.int8kv_flash_decoding_diverse import (
             token_decode_attention_flash_decoding,
         )
