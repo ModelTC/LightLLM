@@ -800,6 +800,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
         request: Request,
     ):
 
+        from lightllm.server.detokenization.decode_req import LIGHTLLM_DECODE_PREFIX_LENGTH
+
         event = req_status.event
         unfinished_count = sampling_params.best_of
         out_token_counter = 0
@@ -838,6 +840,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 for sub_req_id, out_str, metadata, finish_status in req_status.out_token_info_list:
                     # pd master 节点需要这个做统计信息， 所以放在元数据中返回给 pd master 节点
                     metadata["prompt_tokens"] = prompt_tokens
+                    if sampling_params.output_top_logprobs >= 0 and metadata.get("count_output_tokens") == 1:
+                        metadata["logprob_prompt_ids"] = prompt_ids[
+                            max(len(prompt_ids) - LIGHTLLM_DECODE_PREFIX_LENGTH, 0) :
+                        ]
 
                     gpu_prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)

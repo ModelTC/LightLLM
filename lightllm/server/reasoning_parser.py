@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Iterator, List, Tuple, Dict, Optional, Type
 
 from lightllm.utils.config_utils import get_token_id
-from lightllm.server.text_spans import TextSpan, select_text_spans
+from lightllm.server.text_spans import TextSpan, extract_text, slice_spans
 
 
 @dataclass
@@ -547,7 +547,7 @@ class TextStrategy:
             elif channel.lower() == "commentary" and emit:
                 # For commentary, stream as normal text. Preserve spaces unless holding.
                 content_out = emit if hold else emit.strip()
-                events.append(Event("normal", content_out, spans=select_text_spans(text, content_out)))
+                events.append(Event("normal", content_out, spans=extract_text(emit, m.start(2), strip=not hold)[1]))
                 if hold:
                     return events, text[: m.start(2)] + hold
                 else:
@@ -682,7 +682,9 @@ class StreamingParseResult:
         self,
         normal_text: Optional[str] = None,
         reasoning_text: Optional[str] = None,
+        spans=None,
     ):
+        self.spans = spans or []
         self.normal_text = normal_text or ""
         self.reasoning_text = reasoning_text or ""
 
@@ -703,6 +705,7 @@ class BaseReasoningFormatDetector:
         self.stream_reasoning = stream_reasoning
 
         self._buffer = ""
+        self._source_length = 0
         self.stripped_think_start = False
 
     @property
@@ -718,21 +721,29 @@ class BaseReasoningFormatDetector:
         in_reasoning = self._in_reasoning or self.think_start_token in text
 
         if not in_reasoning:
-            return StreamingParseResult(normal_text=text)
+            return StreamingParseResult(normal_text=text, spans=[TextSpan(0, len(text))])
 
         # The text is considered to be in a reasoning block.
-        processed_text = text.replace(self.think_start_token, "").strip()
+        processed_text, spans = extract_text(text, strip=True, remove=(self.think_start_token,))
 
         if self.think_end_token not in processed_text:
             # Assume reasoning was truncated before `</think>` token
-            return StreamingParseResult(reasoning_text=processed_text)
+            for span in spans:
+                span.channel = "reasoning"
+            return StreamingParseResult(reasoning_text=processed_text, spans=spans)
 
         # Extract reasoning content
         splits = processed_text.split(self.think_end_token, maxsplit=1)
         reasoning_text = splits[0]
         normal_text = splits[1].strip()
-
-        return StreamingParseResult(normal_text=normal_text, reasoning_text=reasoning_text)
+        content_start = len(reasoning_text) + len(self.think_end_token) + len(splits[1]) - len(splits[1].lstrip())
+        reasoning_spans = slice_spans(spans, 0, len(reasoning_text))
+        for span in reasoning_spans:
+            span.channel = "reasoning"
+        content_spans = slice_spans(spans, content_start, content_start + len(normal_text))
+        return StreamingParseResult(
+            normal_text=normal_text, reasoning_text=reasoning_text, spans=reasoning_spans + content_spans
+        )
 
     def flush(self) -> StreamingParseResult:
         """
@@ -745,10 +756,12 @@ class BaseReasoningFormatDetector:
             return StreamingParseResult()
         remaining = self._buffer
         self._buffer = ""
+        span = TextSpan(self._source_length - len(remaining), self._source_length)
         if self._in_reasoning:
-            return StreamingParseResult(reasoning_text=remaining)
+            span.channel = "reasoning"
+            return StreamingParseResult(reasoning_text=remaining, spans=[span])
         else:
-            return StreamingParseResult(normal_text=remaining)
+            return StreamingParseResult(normal_text=remaining, spans=[span])
 
     def parse_streaming_increment(self, new_text: str) -> StreamingParseResult:
         """
@@ -763,6 +776,8 @@ class BaseReasoningFormatDetector:
         """
         self._buffer += new_text
         current_text = self._buffer
+        offset = self._source_length - len(current_text)
+        spans = [TextSpan(offset, self._source_length)] if current_text else []
 
         # If the current text is a prefix of the think token, keep buffering
         # until we can confirm or refute the tag.
@@ -774,7 +789,7 @@ class BaseReasoningFormatDetector:
 
         # Strip `<think>` token if present
         if not self.stripped_think_start and self.think_start_token in current_text:
-            current_text = current_text.replace(self.think_start_token, "")
+            current_text, spans = extract_text(current_text, offset, remove=(self.think_start_token,))
             self.stripped_think_start = True
             self._in_reasoning = True
 
@@ -788,18 +803,27 @@ class BaseReasoningFormatDetector:
             self._in_reasoning = False
             normal_text = current_text[end_idx + len(self.think_end_token) :]
 
-            return StreamingParseResult(normal_text=normal_text, reasoning_text=reasoning_text.rstrip())
+            reasoning_text = reasoning_text.rstrip()
+            reasoning_spans = slice_spans(spans, 0, len(reasoning_text))
+            for span in reasoning_spans:
+                span.channel = "reasoning"
+            content_spans = slice_spans(spans, end_idx + len(self.think_end_token), len(current_text))
+            return StreamingParseResult(
+                normal_text=normal_text, reasoning_text=reasoning_text, spans=reasoning_spans + content_spans
+            )
 
         # Always stream reasoning content immediately.
         # stream_reasoning flag is ignored for streaming responses.
         if self._in_reasoning:
             self._buffer = ""
-            return StreamingParseResult(reasoning_text=current_text)
+            for span in spans:
+                span.channel = "reasoning"
+            return StreamingParseResult(reasoning_text=current_text, spans=spans)
 
         # If we're not in a reasoning block return as normal text
         if not self._in_reasoning:
             self._buffer = ""
-            return StreamingParseResult(normal_text=current_text)
+            return StreamingParseResult(normal_text=current_text, spans=spans)
 
         return StreamingParseResult()
 
@@ -899,9 +923,12 @@ class GptOssDetector(BaseReasoningFormatDetector):
         return "<|channel|>final<|message|>"
 
     def detect_and_parse(self, text: str) -> StreamingParseResult:
+        self.parser.track_spans = True
         events = self.parser.parse(text)
+        spans = list(self.parser.last_spans)
         # Flush the buffer for one-shot parsing
         events += self.parser.parse("")
+        spans.extend(self.parser.last_spans)
 
         reasoning_text = "".join([e.content for e in events if e.event_type == "reasoning"])
         normal_parts = []
@@ -917,10 +944,13 @@ class GptOssDetector(BaseReasoningFormatDetector):
         return StreamingParseResult(
             normal_text=normal_text,
             reasoning_text=reasoning_text,
+            spans=spans,
         )
 
     def parse_streaming_increment(self, new_text: str) -> StreamingParseResult:
+        self.parser.track_spans = True
         events = self.parser.parse(new_text)
+        spans = self.parser.last_spans
 
         reasoning_text = "".join([e.content for e in events if e.event_type == "reasoning"])
         normal_parts = []
@@ -935,6 +965,7 @@ class GptOssDetector(BaseReasoningFormatDetector):
         return StreamingParseResult(
             normal_text=normal_text,
             reasoning_text=reasoning_text,
+            spans=spans,
         )
 
 
@@ -954,13 +985,14 @@ class MiniMaxAppendThinkDetector(BaseReasoningFormatDetector):
         self.is_first_chunk = False
 
     def parse_streaming_increment(self, new_text: str) -> StreamingParseResult:
+        spans = [TextSpan(self._source_length - len(new_text), self._source_length)] if new_text else []
         if not self.is_first_chunk:
             self.is_first_chunk = True
             new_text = self.think_start_token + new_text
-        return StreamingParseResult(normal_text=new_text)
+        return StreamingParseResult(normal_text=new_text, spans=spans)
 
     def detect_and_parse(self, text: str) -> StreamingParseResult:
-        return StreamingParseResult(normal_text=self.think_start_token + text)
+        return StreamingParseResult(normal_text=self.think_start_token + text, spans=[TextSpan(0, len(text))])
 
 
 class NanoV3Detector(BaseReasoningFormatDetector):
@@ -1083,65 +1115,30 @@ class ReasoningParser:
 
     def parse_non_stream(self, full_text: str) -> Tuple[Optional[str], Optional[str]]:
         """Non-streaming call: one-time parsing"""
-        ret = self.detector.detect_and_parse(full_text)
-        return ret.reasoning_text, ret.normal_text
+        reasoning, content, _ = self.parse_non_stream_with_spans(full_text)
+        return reasoning, content
+
+    def parse_non_stream_with_spans(self, full_text: str):
+        result = self.detector.detect_and_parse(full_text)
+        spans = sorted(result.spans, key=lambda span: span.channel != "reasoning")
+        return result.reasoning_text, result.normal_text, spans
 
     def parse_stream_chunk(self, chunk_text: str) -> Tuple[Optional[str], Optional[str]]:
         """Streaming call: incremental parsing"""
-        ret = self.detector.parse_streaming_increment(chunk_text)
-        return ret.reasoning_text, ret.normal_text
+        reasoning, content, _ = self.parse_stream_chunk_with_spans(chunk_text)
+        return reasoning, content
 
     def parse_stream_chunk_with_spans(self, chunk_text: str):
-        if isinstance(self.detector, GptOssDetector):
-            self.detector.parser.track_spans = True
-            reasoning, content = self.parse_stream_chunk(chunk_text)
-            return reasoning, content, self.detector.parser.last_spans
-        source = self.detector._buffer + chunk_text
-        end = getattr(self, "_source_length", 0) + len(chunk_text)
-        self._source_length = end
-        offset = end - len(source)
-        markers = []
-        if not self.detector.stripped_think_start and self.detector.think_start_token in source:
-            markers.append(self.detector.think_start_token)
-        if self.detector._in_reasoning or markers:
-            markers.append(self.detector.think_end_token)
-        reasoning, content = self.parse_stream_chunk(chunk_text)
-        spans = self._visible_spans(source, reasoning, content, offset, markers)
-        return reasoning, content, spans
-
-    def _visible_spans(self, source, reasoning, content, offset, markers=()):
-        visible = source
-        positions = list(range(offset, offset + len(source)))
-        for marker in markers:
-            if not marker:
-                continue
-            start = visible.find(marker)
-            while start >= 0:
-                visible = visible[:start] + visible[start + len(marker) :]
-                del positions[start : start + len(marker)]
-                start = visible.find(marker)
-        spans = []
-        cursor = 0
-        for text, channel in ((reasoning, "reasoning"), (content, "content")):
-            next_cursor = cursor
-            for span in select_text_spans(visible[cursor:], text or "", channel):
-                start, end = span.start + cursor, span.end + cursor
-                next_cursor = end
-                for pos in positions[start:end]:
-                    if spans and spans[-1].end == pos and spans[-1].channel == channel:
-                        spans[-1].end += 1
-                    else:
-                        spans.append(TextSpan(pos, pos + 1, channel))
-            cursor = next_cursor
-        return spans
+        self.detector._source_length += len(chunk_text)
+        result = self.detector.parse_streaming_increment(chunk_text)
+        spans = sorted(result.spans, key=lambda span: span.channel != "reasoning")
+        return result.reasoning_text, result.normal_text, spans
 
     def flush_with_spans(self):
-        source = self.detector._buffer
-        reasoning, content = self.flush()
-        offset = getattr(self, "_source_length", 0) - len(source)
-        return reasoning, content, self._visible_spans(source, reasoning, content, offset)
+        result = self.detector.flush()
+        return result.reasoning_text, result.normal_text, result.spans
 
     def flush(self) -> Tuple[Optional[str], Optional[str]]:
         """Flush remaining buffered content when generation ends prematurely."""
-        ret = self.detector.flush()
-        return ret.reasoning_text, ret.normal_text
+        reasoning, content, _ = self.flush_with_spans()
+        return reasoning, content

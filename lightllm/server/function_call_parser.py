@@ -28,6 +28,7 @@ from partial_json_parser.core.options import Allow
 from pydantic import BaseModel, Field
 
 from .api_models import Tool
+from .text_spans import TextSpan, extract_text, slice_spans
 
 logger = logging.getLogger(__name__)
 ENABLE_TOOL_NAME_CHECK = os.getenv("LIGHTLLM_ENABLE_TOOL_NAME_CHECK", "False").upper() in ["ON", "TRUE", "1"]
@@ -55,8 +56,9 @@ class ToolCallItem(BaseModel):
 class StreamingParseResult:
     """Result of streaming incremental parsing."""
 
-    def __init__(self, normal_text: str = "", calls: Optional[List[ToolCallItem]] = None):
+    def __init__(self, normal_text: str = "", calls: Optional[List[ToolCallItem]] = None, spans=None):
         self.normal_text = normal_text
+        self.spans = spans or []
         self.calls = calls or []
 
 
@@ -117,6 +119,7 @@ class BaseFormatDetector(ABC):
         # Streaming state management
         # Buffer for accumulating incomplete patterns that arrive across multiple streaming chunks
         self._buffer = ""
+        self._source_length = 0
         # Stores complete tool call info (name and arguments) for each tool being parsed.
         # Used by serving layer for completion handling when streaming ends.
         # Format: [{"name": str, "arguments": dict}, ...]
@@ -227,11 +230,11 @@ class BaseFormatDetector(ABC):
         ):
             # Only clear buffer if we're sure no tool call is starting
             if not self._ends_with_partial_token(self._buffer, self.bot_token):
-                normal_text = self._buffer
+                normal_text, normal_spans = extract_text(
+                    self._buffer, self._source_length - len(self._buffer), remove=(self.eot_token,)
+                )
                 self._buffer = ""
-                if self.eot_token in normal_text:
-                    normal_text = normal_text.replace(self.eot_token, "")
-                return StreamingParseResult(normal_text=normal_text)
+                return StreamingParseResult(normal_text=normal_text, spans=normal_spans)
             else:
                 # Might be partial bot_token, keep buffering
                 return StreamingParseResult()
@@ -405,6 +408,7 @@ class Qwen25Detector(BaseFormatDetector):
         self.eot_token = "</tool_call>"
         self.tool_call_separator = "\n"
         self._normal_text_buffer = ""  # Buffer for handling partial end tokens
+        self._normal_text_spans = []
 
     def has_tool_call(self, text: str) -> bool:
         """Check if the text contains a Qwen 2.5 format tool call."""
@@ -419,9 +423,9 @@ class Qwen25Detector(BaseFormatDetector):
         :return: ParseResult indicating success or failure, consumed text, leftover text, and parsed calls.
         """
         idx = text.find(self.bot_token)
-        normal_text = text[:idx].strip() if idx != -1 else text
+        normal_text, normal_spans = extract_text(text[:idx], strip=True) if idx != -1 else extract_text(text)
         if self.bot_token not in text:
-            return StreamingParseResult(normal_text=normal_text, calls=[])
+            return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=[])
 
         # Find all <tool_call>\n...\n</tool_call> blocks
         pattern = rf"{re.escape(self.bot_token)}(.*?){re.escape(self.eot_token)}"
@@ -434,7 +438,7 @@ class Qwen25Detector(BaseFormatDetector):
             except json.JSONDecodeError as e:
                 logger.warning(f"Failed to parse JSON part: {match_result}, JSON parse error: {str(e)}")
                 continue
-        return StreamingParseResult(normal_text=normal_text, calls=calls)
+        return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=calls)
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
         """
@@ -446,11 +450,19 @@ class Qwen25Detector(BaseFormatDetector):
         # Handle partial end tokens that are streamed character by character
         if result.normal_text:
             self._normal_text_buffer += result.normal_text
+            self._normal_text_spans.extend(result.spans)
 
             # Check if buffer contains complete end token (without leading newline)
             end_token_without_newline = self.eot_token  # "</tool_call>"
             if end_token_without_newline in self._normal_text_buffer:
-                cleaned_text = self._normal_text_buffer.replace(end_token_without_newline, "")
+                source = self._normal_text_buffer
+                cleaned_text, relative_spans = extract_text(source, remove=(end_token_without_newline,))
+                result.spans = [
+                    part
+                    for span in relative_spans
+                    for part in slice_spans(self._normal_text_spans, span.start, span.end)
+                ]
+                self._normal_text_spans = []
                 self._normal_text_buffer = ""
                 result.normal_text = cleaned_text
             else:
@@ -459,12 +471,17 @@ class Qwen25Detector(BaseFormatDetector):
 
                 if partial_match_len:
                     # Keep potential partial match in buffer, return the rest
+                    end = len(self._normal_text_buffer) - partial_match_len
+                    result.spans = slice_spans(self._normal_text_spans, 0, end)
+                    self._normal_text_spans = slice_spans(self._normal_text_spans, end, len(self._normal_text_buffer))
                     result.normal_text = self._normal_text_buffer[:-partial_match_len]
                     self._normal_text_buffer = self._normal_text_buffer[-partial_match_len:]
                 else:
                     # No partial match, return all buffered text
                     result.normal_text = self._normal_text_buffer
+                    result.spans = self._normal_text_spans
                     self._normal_text_buffer = ""
+                    self._normal_text_spans = []
 
         return result
 
@@ -507,16 +524,16 @@ class MistralDetector(BaseFormatDetector):
         :return: ParseResult indicating success or failure, consumed text, leftover text, and parsed calls.
         """
         idx = text.find(self.bot_token)
-        normal_text = text[:idx].strip() if idx != -1 else text
+        normal_text, normal_spans = extract_text(text[:idx], strip=True) if idx != -1 else extract_text(text)
 
         if self.bot_token not in text:
-            return StreamingParseResult(normal_text=normal_text, calls=[])
+            return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=[])
 
         # Extract the JSON array part from [TOOL_CALLS] [...]
         # Use bracket counting to properly handle nested brackets in JSON content
         json_array_str = self._extract_json_array(text)
         if not json_array_str:
-            return StreamingParseResult(normal_text=normal_text, calls=[])
+            return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=[])
 
         calls = []
         try:
@@ -528,7 +545,7 @@ class MistralDetector(BaseFormatDetector):
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse JSON part: {json_array_str}, JSON parse error: {str(e)}")
 
-        return StreamingParseResult(normal_text=normal_text, calls=calls)
+        return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=calls)
 
     def _extract_json_array(self, text: str) -> str:
         """
@@ -601,7 +618,7 @@ class Llama32Detector(BaseFormatDetector):
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         """Parse function calls from text, handling multiple JSON objects."""
         if "<|python_tag|>" not in text and not text.startswith("{"):
-            return StreamingParseResult(normal_text=text, calls=[])
+            return StreamingParseResult(normal_text=text, spans=[TextSpan(0, len(text))], calls=[])
 
         if "<|python_tag|>" in text:
             normal_text, action_text = text.split("<|python_tag|>", maxsplit=1)
@@ -631,8 +648,10 @@ class Llama32Detector(BaseFormatDetector):
         # Only process if we found valid JSON objects
         calls = self.parse_base_json(all_actions, tools) if all_actions else []
         # Use safe_idx to avoid idx containing the last part of an invalid JSON object
-        trailing_text = action_text[safe_idx:].strip() if safe_idx < action_text_len else ""
-        return StreamingParseResult(normal_text=normal_text + trailing_text, calls=calls)
+        action_offset = len(text) - len(action_text)
+        trailing_text, trailing_spans = extract_text(action_text[safe_idx:], action_offset + safe_idx, strip=True)
+        spans = ([TextSpan(0, len(normal_text))] if normal_text else []) + trailing_spans
+        return StreamingParseResult(normal_text=normal_text + trailing_text, spans=spans, calls=calls)
 
 
 class KimiK2Detector(BaseFormatDetector):
@@ -684,7 +703,7 @@ class KimiK2Detector(BaseFormatDetector):
         :return: ParseResult indicating success or failure, consumed text, leftover text, and parsed calls.
         """
         if self.bot_token not in text:
-            return StreamingParseResult(normal_text=text, calls=[])
+            return StreamingParseResult(normal_text=text, spans=[TextSpan(0, len(text))], calls=[])
         try:
             # there are two possible captures - between tags, or between a
             # tag and end-of-string so the result of
@@ -715,12 +734,12 @@ class KimiK2Detector(BaseFormatDetector):
                 )
 
             content = text[: text.find(self.bot_token)]
-            return StreamingParseResult(normal_text=content, calls=tool_calls)
+            return StreamingParseResult(normal_text=content, spans=[TextSpan(0, len(content))], calls=tool_calls)
 
         except Exception as e:
             logger.error(f"Error in detect_and_parse: {e}")
             # return the normal text if parsing fails
-            return StreamingParseResult(normal_text=text)
+            return StreamingParseResult(normal_text=text, spans=[TextSpan(0, len(text))])
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
         """
@@ -734,10 +753,10 @@ class KimiK2Detector(BaseFormatDetector):
 
         if not has_tool_call:
             self._buffer = ""
-            for e_token in [self.eot_token, self.tool_call_end_token]:
-                if e_token in new_text:
-                    new_text = new_text.replace(e_token, "")
-            return StreamingParseResult(normal_text=new_text)
+            new_text, spans = extract_text(
+                new_text, self._source_length - len(new_text), remove=[self.eot_token, self.tool_call_end_token]
+            )
+            return StreamingParseResult(normal_text=new_text, spans=spans)
 
         if not hasattr(self, "_tool_indices"):
             self._tool_indices = self._get_tool_indices(tools)
@@ -829,7 +848,9 @@ class KimiK2Detector(BaseFormatDetector):
 
         except Exception as e:
             logger.error(f"Error in parse_streaming_increment: {e}")
-            return StreamingParseResult(normal_text=current_text)
+            return StreamingParseResult(
+                normal_text=current_text, spans=[TextSpan(self._source_length - len(current_text), self._source_length)]
+            )
 
 
 class DeepSeekV31Detector(BaseFormatDetector):
@@ -883,9 +904,9 @@ class DeepSeekV31Detector(BaseFormatDetector):
         :return: ParseResult indicating success or failure, consumed text, leftover text, and parsed calls.
         """
         idx = text.find(self.bot_token)
-        normal_text = text[:idx].strip() if idx != -1 else text
+        normal_text, normal_spans = extract_text(text[:idx], strip=True) if idx != -1 else extract_text(text)
         if self.bot_token not in text:
-            return StreamingParseResult(normal_text=normal_text, calls=[])
+            return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=[])
         match_result_list = re.findall(self.func_call_regex, text, re.DOTALL)
         calls = []
         try:
@@ -898,11 +919,11 @@ class DeepSeekV31Detector(BaseFormatDetector):
                 # construct match_result for parse_base_json
                 match_result = {"name": func_name, "parameters": func_args}
                 calls.extend(self.parse_base_json(match_result, tools))
-            return StreamingParseResult(normal_text=normal_text, calls=calls)
+            return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=calls)
         except Exception as e:
             logger.error(f"Error in detect_and_parse: {e}")
             # return the normal text if parsing fails
-            return StreamingParseResult(normal_text=text)
+            return StreamingParseResult(normal_text=text, spans=[TextSpan(0, len(text))])
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
         """
@@ -916,10 +937,10 @@ class DeepSeekV31Detector(BaseFormatDetector):
 
         if not has_tool_call:
             self._buffer = ""
-            for e_token in [self.eot_token, "<｜tool▁call▁end｜>"]:
-                if e_token in new_text:
-                    new_text = new_text.replace(e_token, "")
-            return StreamingParseResult(normal_text=new_text)
+            new_text, spans = extract_text(
+                new_text, self._source_length - len(new_text), remove=[self.eot_token, "<｜tool▁call▁end｜>"]
+            )
+            return StreamingParseResult(normal_text=new_text, spans=spans)
 
         if not hasattr(self, "_tool_indices"):
             self._tool_indices = self._get_tool_indices(tools)
@@ -1009,7 +1030,9 @@ class DeepSeekV31Detector(BaseFormatDetector):
 
         except Exception as e:
             logger.error(f"Error in parse_streaming_increment: {e}")
-            return StreamingParseResult(normal_text=current_text)
+            return StreamingParseResult(
+                normal_text=current_text, spans=[TextSpan(self._source_length - len(current_text), self._source_length)]
+            )
 
 
 class DeepSeekV3Detector(BaseFormatDetector):
@@ -1064,9 +1087,9 @@ class DeepSeekV3Detector(BaseFormatDetector):
         :return: ParseResult indicating success or failure, consumed text, leftover text, and parsed calls.
         """
         idx = text.find(self.bot_token)
-        normal_text = text[:idx].strip() if idx != -1 else text
+        normal_text, normal_spans = extract_text(text[:idx], strip=True) if idx != -1 else extract_text(text)
         if self.bot_token not in text:
-            return StreamingParseResult(normal_text=normal_text, calls=[])
+            return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=[])
         match_result_list = re.findall(self.func_call_regex, text, re.DOTALL)
         calls = []
         try:
@@ -1079,11 +1102,11 @@ class DeepSeekV3Detector(BaseFormatDetector):
                 # construct match_result for parse_base_json
                 match_result = {"name": func_name, "parameters": func_args}
                 calls.extend(self.parse_base_json(match_result, tools))
-            return StreamingParseResult(normal_text=normal_text, calls=calls)
+            return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=calls)
         except Exception as e:
             logger.error(f"Error in detect_and_parse: {e}")
             # return the normal text if parsing fails
-            return StreamingParseResult(normal_text=text)
+            return StreamingParseResult(normal_text=text, spans=[TextSpan(0, len(text))])
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
         """
@@ -1097,10 +1120,10 @@ class DeepSeekV3Detector(BaseFormatDetector):
 
         if not has_tool_call:
             self._buffer = ""
-            for e_token in [self.eot_token, "```", "<｜tool▁call▁end｜>"]:
-                if e_token in new_text:
-                    new_text = new_text.replace(e_token, "")
-            return StreamingParseResult(normal_text=new_text)
+            new_text, spans = extract_text(
+                new_text, self._source_length - len(new_text), remove=[self.eot_token, "```", "<｜tool▁call▁end｜>"]
+            )
+            return StreamingParseResult(normal_text=new_text, spans=spans)
 
         if not hasattr(self, "_tool_indices"):
             self._tool_indices = self._get_tool_indices(tools)
@@ -1192,7 +1215,9 @@ class DeepSeekV3Detector(BaseFormatDetector):
 
         except Exception as e:
             logger.error(f"Error in parse_streaming_increment: {e}")
-            return StreamingParseResult(normal_text=current_text)
+            return StreamingParseResult(
+                normal_text=current_text, spans=[TextSpan(self._source_length - len(current_text), self._source_length)]
+            )
 
 
 class Glm47Detector(BaseFormatDetector):
@@ -1295,10 +1320,10 @@ class Glm47Detector(BaseFormatDetector):
         :return: StreamingParseResult with normal_text and parsed calls.
         """
         idx = text.find(self.bot_token)
-        normal_text = text[:idx].strip() if idx != -1 else text
+        normal_text, normal_spans = extract_text(text[:idx], strip=True) if idx != -1 else extract_text(text)
 
         if self.bot_token not in text:
-            return StreamingParseResult(normal_text=normal_text, calls=[])
+            return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=[])
 
         tool_indices = self._get_tool_indices(tools)
         calls = []
@@ -1336,22 +1361,27 @@ class Glm47Detector(BaseFormatDetector):
                 logger.warning(f"Failed to parse GLM-4.7 tool call: {match_result}, error: {str(e)}")
                 continue
 
-        return StreamingParseResult(normal_text=normal_text, calls=calls)
+        return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=calls)
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
         """Buffer XML arguments while emitting tool deltas to keep the stream alive."""
         self._buffer += new_text
         normal_text = ""
+        normal_spans = []
         calls: List[ToolCallItem] = []
         while self._buffer:
             start = self._buffer.find(self.bot_token)
             if start == -1:
                 keep = self._ends_with_partial_token(self._buffer, self.bot_token)
                 end = len(self._buffer) - keep
+                offset = self._source_length - len(self._buffer)
+                normal_spans.extend([TextSpan(offset, offset + end)] if end else [])
                 normal_text += self._buffer[:end]
                 self._buffer = self._buffer[end:]
                 break
 
+            offset = self._source_length - len(self._buffer)
+            normal_spans.extend([TextSpan(offset, offset + start)] if start else [])
             normal_text += self._buffer[:start]
             self._buffer = self._buffer[start:]
             end = self._buffer.find(self.eot_token)
@@ -1384,7 +1414,7 @@ class Glm47Detector(BaseFormatDetector):
             self._streaming_tool_name = None
             self._buffer = self._buffer[end:]
 
-        return StreamingParseResult(normal_text=normal_text, calls=calls)
+        return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=calls)
 
 
 class DeepSeekV32Detector(BaseFormatDetector):
@@ -1462,9 +1492,9 @@ class DeepSeekV32Detector(BaseFormatDetector):
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         """One-time parsing for DSML format tool calls."""
         idx = text.find(self.bot_token)
-        normal_text = text[:idx].strip() if idx != -1 else text
+        normal_text, normal_spans = extract_text(text[:idx], strip=True) if idx != -1 else extract_text(text)
         if self.bot_token not in text:
-            return StreamingParseResult(normal_text=normal_text, calls=[])
+            return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=[])
 
         tool_indices = self._get_tool_indices(tools)
         calls = []
@@ -1486,7 +1516,7 @@ class DeepSeekV32Detector(BaseFormatDetector):
                 )
             )
 
-        return StreamingParseResult(normal_text=normal_text, calls=calls)
+        return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=calls)
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
         """Streaming incremental parsing for DSML format tool calls."""
@@ -1502,10 +1532,10 @@ class DeepSeekV32Detector(BaseFormatDetector):
                 return StreamingParseResult()
 
             self._buffer = ""
-            for e_token in [self.eot_token, self.invoke_end_token]:
-                if e_token in new_text:
-                    new_text = new_text.replace(e_token, "")
-            return StreamingParseResult(normal_text=new_text)
+            new_text, spans = extract_text(
+                new_text, self._source_length - len(new_text), remove=[self.eot_token, self.invoke_end_token]
+            )
+            return StreamingParseResult(normal_text=new_text, spans=spans)
 
         # Mark that we're inside a function_calls block
         if self.has_tool_call(current_text):
@@ -1849,10 +1879,10 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         idx = text.find(self.bot_token)
-        normal_text = text[:idx].strip() if idx != -1 else text
+        normal_text, normal_spans = extract_text(text[:idx], strip=True) if idx != -1 else extract_text(text)
 
         if "<function=" not in text:
-            return StreamingParseResult(normal_text=normal_text, calls=[])
+            return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=[])
 
         # Extract function blocks from tool_call blocks (or raw text as fallback)
         tool_call_blocks = self.tool_call_block_regex.findall(text)
@@ -1869,7 +1899,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     item.tool_index = len(calls)
                     calls.append(item)
 
-        return StreamingParseResult(normal_text=normal_text, calls=calls)
+        return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=calls)
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
         """Streaming incremental parsing for Qwen3-Coder XML tool calls."""
@@ -1878,6 +1908,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             self._tool_indices = self._get_tool_indices(tools)
 
         normal_text = ""
+        normal_spans = []
         calls: List[ToolCallItem] = []
 
         while True:
@@ -1887,13 +1918,19 @@ class Qwen3CoderDetector(BaseFormatDetector):
             if tool_call_start == -1:
                 partial_len = self._ends_with_partial_token(current_text, self.bot_token)
                 if partial_len:
-                    return StreamingParseResult(normal_text=normal_text, calls=calls)
+                    return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=calls)
                 if current_text:
-                    normal_text += current_text.replace(self.eot_token, "")
+                    visible, spans = extract_text(
+                        current_text, self._source_length - len(current_text), remove=(self.eot_token,)
+                    )
+                    normal_text += visible
+                    normal_spans.extend(spans)
                     self._buffer = ""
-                return StreamingParseResult(normal_text=normal_text, calls=calls)
+                return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=calls)
 
             if tool_call_start > 0:
+                offset = self._source_length - len(current_text)
+                normal_spans.append(TextSpan(offset, offset + tool_call_start))
                 normal_text += current_text[:tool_call_start]
                 self._buffer = current_text[tool_call_start:]
                 current_text = self._buffer
@@ -1903,7 +1940,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 if not self.current_tool_name_sent:
                     function_name = self._get_incomplete_function_name(current_text)
                     if function_name is None:
-                        return StreamingParseResult(normal_text=normal_text, calls=calls)
+                        return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=calls)
 
                     if self.current_tool_id == -1:
                         self.current_tool_id = 0
@@ -1925,7 +1962,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                             parameters="",
                         )
                     )
-                return StreamingParseResult(normal_text=normal_text, calls=calls)
+                return StreamingParseResult(normal_text=normal_text, spans=normal_spans, calls=calls)
 
             complete_block = current_text[: eot_pos + len(self.eot_token)]
             func_matches = self.function_regex.findall(complete_block)
@@ -1996,25 +2033,20 @@ class FunctionCallParser:
         self.tools = tools
 
     def parse_non_stream_with_spans(self, full_text: str):
-        from lightllm.server.text_spans import select_text_spans
-
-        normal, calls = self.parse_non_stream(full_text)
-        return normal, calls, select_text_spans(full_text, normal)
+        if not self.tools:
+            return full_text, [], [TextSpan(0, len(full_text))]
+        result = self.detector.detect_and_parse(full_text, self.tools)
+        if not result.calls:
+            return full_text, [], [TextSpan(0, len(full_text))]
+        return result.normal_text, result.calls, result.spans
 
     def parse_stream_chunk_with_spans(self, chunk_text: str):
-        from lightllm.server.text_spans import TextSpan, select_text_spans
-
-        source = self.detector._normal_text_buffer if isinstance(self.detector, Qwen25Detector) else ""
-        source += self.detector._buffer + chunk_text
-        end = getattr(self, "_source_length", 0) + len(chunk_text)
-        self._source_length = end
-        offset = end - len(source)
-        normal, calls = self.parse_stream_chunk(chunk_text)
-        marker = self.detector.eot_token
-        if marker:
-            source = source.replace(marker, "\0" * len(marker))
-        spans = [TextSpan(s.start + offset, s.end + offset) for s in select_text_spans(source, normal)]
-        return normal, calls, spans
+        self.detector._source_length += len(chunk_text)
+        if not self.tools:
+            end = self.detector._source_length
+            return chunk_text, [], [TextSpan(end - len(chunk_text), end)]
+        result = self.detector.parse_streaming_increment(chunk_text, self.tools)
+        return result.normal_text, result.calls, result.spans
 
     def has_tool_call(self, text: str) -> bool:
         """
@@ -2043,14 +2075,8 @@ class FunctionCallParser:
             - The remaining text after parsing that was not consumed by the detector (can be treated as normal text)
             - A list of tool calls parsed from the text
         """
-        if not self.tools:
-            return full_text, []
-        parsed_result = self.detector.detect_and_parse(full_text, self.tools)
-        tool_call_list = parsed_result.calls
-        if tool_call_list:
-            return parsed_result.normal_text, tool_call_list
-        else:
-            return full_text, []
+        normal, calls, _ = self.parse_non_stream_with_spans(full_text)
+        return normal, calls
 
     def parse_stream_chunk(self, chunk_text: str) -> Tuple[str, list[ToolCallItem]]:
         """
@@ -2064,16 +2090,5 @@ class FunctionCallParser:
             - The normal text that should be displayed to the user
             - A list of tool calls parsed from the chunk
         """
-        if not self.tools:
-            return chunk_text, []
-        final_normal_text = ""
-        final_calls = []
-
-        sp_result = self.detector.parse_streaming_increment(chunk_text, self.tools)
-        if sp_result.normal_text:
-            final_normal_text = sp_result.normal_text
-        if sp_result.calls:
-            final_calls.extend(sp_result.calls)
-            final_normal_text = sp_result.normal_text
-
-        return final_normal_text, final_calls
+        normal, calls, _ = self.parse_stream_chunk_with_spans(chunk_text)
+        return normal, calls

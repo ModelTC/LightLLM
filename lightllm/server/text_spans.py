@@ -9,21 +9,32 @@ class TextSpan:
     channel: str = "content"
 
 
-def select_text_spans(source: str, text: str, channel: str = "content") -> List[TextSpan]:
-    spans = []
-    cursor = 0
-    while text:
-        start = source.find(text, cursor)
-        if start >= 0:
-            spans.append(TextSpan(start, start + len(text), channel))
-            break
-        start = source.find(text[0], cursor)
-        if start < 0:
-            break
-        length = 1
-        while length < len(text) and start + length < len(source) and source[start + length] == text[length]:
-            length += 1
-        spans.append(TextSpan(start, start + length, channel))
-        cursor = start + length
-        text = text[length:]
-    return spans
+def slice_spans(spans: List[TextSpan], start: int, end: int) -> List[TextSpan]:
+    selected = []
+    offset = 0
+    for span in spans:
+        size = span.end - span.start
+        left, right = max(start - offset, 0), min(end - offset, size)
+        if left < right:
+            selected.append(TextSpan(span.start + left, span.start + right, span.channel))
+        offset += size
+    return selected
+
+
+def extract_text(text: str, offset=0, channel="content", strip=False, remove=()):
+    spans = [TextSpan(offset, offset + len(text), channel)] if text else []
+    for marker in remove:
+        if not marker:
+            continue
+        start = text.find(marker)
+        while start >= 0:
+            end = start + len(marker)
+            spans = slice_spans(spans, 0, start) + slice_spans(spans, end, len(text))
+            text = text[:start] + text[end:]
+            start = text.find(marker, start)
+    if strip:
+        start = len(text) - len(text.lstrip())
+        end = len(text.rstrip())
+        spans = slice_spans(spans, start, end)
+        text = text.strip()
+    return text, spans
