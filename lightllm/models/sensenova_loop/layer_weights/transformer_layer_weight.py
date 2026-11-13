@@ -9,6 +9,9 @@ class SenseNovaLoopTransformerLayerWeight(Qwen35TransformerLayerWeight):
         execution_index = self.network_config_["loop_physical_indices"].index(self.layer_num_)
         self.is_linear_attention_layer = self.network_config_["layer_types"][execution_index] == "linear_attention"
         super()._init_weight()
+        self.dsa = self.network_config_.get("dsa")
+        if self.dsa and not self.is_linear_attention_layer:
+            self._init_dsa()
         self.mhc = self.network_config_.get("mhc")
         if self.mhc is not None and self.mhc["start"] <= self.layer_num_ < self.mhc["end"]:
             self._init_mhc()
@@ -32,6 +35,20 @@ class SenseNovaLoopTransformerLayerWeight(Qwen35TransformerLayerWeight):
                 out_dims, weight_names = out_dims[:-2], weight_names[:-2]
 
         super()._init_gdn_in_proj(out_dims, weight_names, quant_method)
+
+    def _init_dsa(self):
+        prefix = f"model.layers.{self.layer_num_}.self_attn.indexer"
+        heads, dim = self.dsa["num_heads"], self.dsa["head_dim"]
+        self.dsa_wq = ParameterWeight(f"{prefix}.wq.weight", self.data_type_, (heads * dim, self.n_embed))
+        self.dsa_wk = ParameterWeight(f"{prefix}.wk.weight", self.data_type_, (dim, self.n_embed))
+        self.dsa_weights = ParameterWeight(f"{prefix}.weights_proj.weight", self.data_type_, (heads, self.n_embed))
+        self.dsa_norm = ParameterWeight(
+            f"{prefix}.k_norm.weight",
+            self.data_type_,
+            (dim,),
+            bias_name=f"{prefix}.k_norm.bias",
+            bias_shape=(dim,),
+        )
 
     def _init_mhc(self):
         prefix = f"model.layers.{self.layer_num_}"

@@ -3,13 +3,18 @@ import torch
 from lightllm.models.sensenova_loop.triton_kernel.mhc import hc_contract, hc_expand, hc_post, hc_pre_norm
 from lightllm.models.sensenova_loop.triton_kernel.mhc.pre_norm import has_deepgemm_mhc
 from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35TransformerLayerInfer
+from ..dsa_layer_infer import DsaAttentionMixin
 
 
-class SenseNovaLoopTransformerLayerInfer(Qwen35TransformerLayerInfer):
+class SenseNovaLoopTransformerLayerInfer(DsaAttentionMixin, Qwen35TransformerLayerInfer):
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.is_linear_attention_layer = network_config["layer_types"][layer_num] == "linear_attention"
         self.physical_layer_num = network_config["loop_physical_indices"][layer_num]
+        self.dsa = network_config.get("dsa")
+        self.use_dsa = bool(self.dsa) and not self.is_linear_attention_layer
+        rope = network_config.get("rope_parameters") or network_config.get("rope_scaling") or {}
+        self.dsa_mrope_sections = tuple(rope.get("mrope_section", [11, 11, 10]))
         self.mhc = network_config.get("mhc")
         self.use_mhc = self.mhc is not None and self.mhc["start"] <= self.physical_layer_num < self.mhc["end"]
         if not self.use_mhc:

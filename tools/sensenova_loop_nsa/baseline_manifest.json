@@ -1,0 +1,18 @@
+{
+  "baseline_entry": "/mnt/afs_agents/yankuihao/works/runs/1110_dsa519_recovery/start_dsa519_8gpu.sh",
+  "model_dir": "/mnt/afs_agents/yankuihao/model_ckpts/dsa_export_20261107/ckpt-519-bf16",
+  "runtime_source": "/mnt/afs_agents/hongjiawei/code/loop_transformers/infer_kuihao/dsa/work/original_runtime",
+  "upstream_base": "9640f76dfb61e36add0a75479edcecdcb452b6e2",
+  "files": {
+    "/mnt/afs_agents/yankuihao/works/runs/1110_dsa519_recovery/start_dsa519_8gpu.sh": "167678e219d5f869457524bf0f0438fc5cd831e7dbb6c1f01eb37426ad8b21df",
+    "/mnt/afs-toolcall/yankuihao/code/dsa_quick_perf_20261107/start_accepted_local.sh": "5793787388b084128beb0ad605b48a3b31854cfd976ca136a7dfaead27ba272c",
+    "/mnt/afs-toolcall/yankuihao/code/dsa_quick_perf_20261107/serve_2p1d.sh": "d57c64cd9c87d8fcc66cc7ef0ab01092f22637a074e2242aa59ccd9e091aa8ac",
+    "/mnt/afs-toolcall/yankuihao/code/lightllm_dsa_perf_20261107/source.tar.gz": "be06966db3abacc10ed32cf213ffcb7735de6201135b1d95d5d73a9968750b68",
+    "/mnt/afs-toolcall/yankuihao/code/lightllm_dsa_perf_20261107/original_changes.tar.gz": "2bdadf3852296a0c50037e647e1956d57f08f65e2238cca894a7dd9c3feeec91",
+    "/mnt/afs-toolcall/yankuihao/code/lightllm_dsa_perf_20261107/changes.tar.gz": "d07b2cf61b7873b7864f2fd8299042d3cf0ece6ea1c35289fbfd536cdde675b1",
+    "/mnt/afs-toolcall/yankuihao/code/dsa_quick_perf_20261107/accepted/lightllm/models/sensenova_loop/dsa_layer_infer.py": "f74be927f5c434855765459c086f696ec5beeaf22ced826551906dd43c2a9637",
+    "/mnt/afs-toolcall/yankuihao/code/dsa_quick_perf_20261107/accepted/lightllm/models/sensenova_loop/quick_rope.py": "1fc77448f1e695c650df8e673a4038ee56c3874804520a118a10438b713e1b75",
+    "/mnt/afs_agents/yankuihao/model_ckpts/dsa_export_20261107/ckpt-519-bf16/config.json": "9c4efdf7b6f96b358674d4b1ef73ff666999628309edb56516fbfbfc1d79fdbc",
+    "/mnt/afs_agents/yankuihao/model_ckpts/dsa_export_20261107/ckpt-519-bf16/model.safetensors.index.json": "0ccda8004b3db7730107da2270fae1b7d30748522ef16fe169b40b0144153511"
+  }
+}
