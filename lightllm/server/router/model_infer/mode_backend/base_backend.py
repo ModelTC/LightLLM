@@ -40,7 +40,7 @@ from lightllm.distributed.communication_op import (
 )
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import TopkLogprobRows, sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
 from lightllm.server.multi_level_kv_cache import (
@@ -914,6 +914,7 @@ class ModeBackend:
         next_token_ids: torch.Tensor,
         next_token_logprobs: torch.Tensor,
         next_token_ranks: torch.Tensor,
+        output_topk_logprobs: TopkLogprobRows,
         run_reqs_update_packs: List[InferReqUpdatePack],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
         pd_prefill_chunked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
@@ -926,11 +927,21 @@ class ModeBackend:
         next_token_logprobs = next_token_logprobs.tolist()
         next_token_ranks = next_token_ranks.tolist()
 
-        for req_obj, next_token_id, next_token_logprob, next_token_rank, pack in zip(
-            run_reqs, next_token_ids, next_token_logprobs, next_token_ranks, run_reqs_update_packs
+        for req_obj, next_token_id, next_token_logprob, next_token_rank, topk_row, pack in zip(
+            run_reqs,
+            next_token_ids,
+            next_token_logprobs,
+            next_token_ranks,
+            output_topk_logprobs,
+            run_reqs_update_packs,
         ):
             req_obj: InferReq = req_obj
             pack: InferReqUpdatePack = pack
+            output_top_logprobs = None
+            if topk_row is not None:
+                next_token_rank = int(topk_row.sampled_rank.item())
+                if topk_row.token_ids.numel():
+                    output_top_logprobs = (topk_row.token_ids.tolist(), topk_row.logprobs.tolist())
             pack.handle(
                 next_token_id=next_token_id,
                 next_token_logprob=next_token_logprob,
@@ -939,6 +950,7 @@ class ModeBackend:
                 is_master_in_dp=self.is_master_in_dp,
                 extra_post_req_handle_func=extra_post_req_handle_func,
                 pd_prefill_chunked_handle_func=pd_prefill_chunked_handle_func,
+                output_top_logprobs=output_top_logprobs,
             )
 
         g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
@@ -983,7 +995,7 @@ class ModeBackend:
         is_prefill: bool,
         b_prefill_has_output_cpu: torch.Tensor = None,
     ):
-        next_token_ids, next_token_logprobs = sample(
+        next_token_ids, next_token_logprobs, output_topk_logprobs = sample(
             logits, run_reqs, self.eos_id, has_output=b_prefill_has_output_cpu if is_prefill else None
         )
         next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
@@ -1014,7 +1026,7 @@ class ModeBackend:
             next_token_logprobs,
             next_token_ranks,
         )
-        return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu
+        return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu, output_topk_logprobs
 
     def _dp_all_gather_prefill_and_decode_req_num(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]

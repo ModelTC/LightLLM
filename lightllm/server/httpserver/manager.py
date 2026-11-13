@@ -344,7 +344,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         # 用于等待 pd_master 下发的交换信息
         pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
-
         start_time = time.time()
         # 在请求登记、编码和 PD 握手前获取语法；缓存未命中时先完成编译，避免后续流程等待或校验失败。
         compiled_grammar = await sampling_params.get_compiled_grammar(self.output_grammar_compiler)
@@ -756,7 +755,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
-
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
                 self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
@@ -799,6 +797,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
         req_status: "ReqStatus",
         request: Request,
     ):
+        from lightllm.server.detokenization.decode_req import LIGHTLLM_DECODE_PREFIX_LENGTH
 
         event = req_status.event
         unfinished_count = sampling_params.best_of
@@ -838,6 +837,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 for sub_req_id, out_str, metadata, finish_status in req_status.out_token_info_list:
                     # pd master 节点需要这个做统计信息， 所以放在元数据中返回给 pd master 节点
                     metadata["prompt_tokens"] = prompt_tokens
+                    if sampling_params.output_top_logprobs >= 0 and metadata.get("count_output_tokens") == 1:
+                        metadata["logprob_prompt_ids"] = prompt_ids[
+                            max(len(prompt_ids) - LIGHTLLM_DECODE_PREFIX_LENGTH, 0) :
+                        ]
 
                     gpu_prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
@@ -1093,6 +1096,20 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                         metadata["id"] = None
                                         metadata["logprob"] = None
                                         metadata["logprobs"] = {}
+
+                                if (
+                                    req.sample_params.output_top_logprobs > 0
+                                    and not finish_status.is_error_finished()
+                                    and not finish_status.is_finished_pd_decode_capacity()
+                                ):
+                                    token_ids, logprobs = req.output_topk_logprobs_row(
+                                        output_index=count_output_tokens - 1
+                                    )
+                                    metadata["output_top_logprobs"] = [
+                                        (int(token_id), float(score))
+                                        for token_id, score in zip(token_ids, logprobs)
+                                        if token_id >= 0
+                                    ]
 
                                 req.out_tokens_queue.pop_no_ret()
                                 token_list.append((req_id, text, metadata, finish_status))

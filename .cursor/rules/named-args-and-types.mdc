@@ -7,6 +7,8 @@ alwaysApply: true
 
 新写的函数调用使用 `param_name=value`。不要用 `*args`、`*activations`、`**kwargs` 把一组参数展开传进去。
 
+Triton 算子也按这个规则调用。`kernel[grid](...)` 里的张量、标量和 `tl.constexpr` 参数都写成 `param_name=value`，包括 `TOPK`、`BLOCK` 这类名字。`num_warps` 这类启动参数同样带名字。
+
 新写的函数参数带类型标注。
 
 修改旧代码时，原有调用和原有签名保持不动，避免把风格调整混进 review。这次改动里新加的函数、新加的调用按上面两条写。
