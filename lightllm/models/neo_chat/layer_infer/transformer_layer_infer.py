@@ -1,22 +1,30 @@
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionPhase
 import os
-import torch
 from functools import partial
 from typing import Tuple
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
-from lightllm.models.llama.triton_kernel.token_attention_nopad_att1 import token_att_fwd
-from lightllm.models.qwen3.layer_infer.transformer_layer_infer import Qwen3TransformerLayerInfer
-from lightllm.models.neo_chat.layer_weights.transformer_layer_weight import NeoChatTransformerLayerWeight
-from lightllm.distributed import all_reduce
+
+import torch
 import torch.distributed as dist
+
+from lightllm.distributed import all_reduce
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+from lightllm.models.llama.triton_kernel.token_attention_nopad_att1 import token_att_fwd
+from lightllm.models.neo_chat.layer_weights.transformer_layer_weight import NeoChatTransformerLayerWeight
+from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
+from lightllm.models.qwen3.layer_infer.transformer_layer_infer import Qwen3TransformerLayerInfer
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 
 class NeoChatTransformerLayerInfer(Qwen3TransformerLayerInfer):
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        description = replace(description, variant="neo" if phase is AttentionPhase.PREFILL else "")
+        return description
+
     def __init__(self, data_type, network_config):
         super().__init__(data_type, network_config)
         return

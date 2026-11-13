@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
+from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 
 
 @pytest.mark.parametrize("capture", [False, True], ids=["eager", "capture"])
@@ -264,6 +264,7 @@ def test_output_projection_matches_bf16_reference(monkeypatch, tp_size, rank):
     layer = DeepseekV4TransformerLayerWeight.__new__(DeepseekV4TransformerLayerWeight)
     BaseLayerWeight.__init__(layer)
     layer.prefix, layer.data_type_ = "layers.0", torch.bfloat16
+    layer.num_fused_shared_experts = 0
     layer.hidden, layer.n_heads, layer.head_dim = 128, 8, 64
     layer.q_lora_rank, layer.o_lora_rank, layer.o_groups = 128, 128, 2
     layer.get_quant_method = lambda name: None

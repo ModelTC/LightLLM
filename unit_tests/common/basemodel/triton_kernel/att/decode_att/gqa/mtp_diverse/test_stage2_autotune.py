@@ -7,10 +7,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.mtp_diverse import (
+    stage2_single_token as stage2_module,
+)
+from lightllm.common.attention_state.manager import AttentionStateManager
 from lightllm.common.basemodel import cuda_graph as graph_module
-from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.mtp_diverse import stage2_single_token as stage2_module
 from lightllm.common.triton_utils import autotuner as autotuner_module
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType, AutotuneLevel
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
 
 
@@ -189,7 +192,16 @@ def test_full_tuning_graph_and_cache_reuse(tmp_path, monkeypatch, length):
         return inputs["out"]
 
     graph = graph_module.CudaGraph(1, 2, 1, max_batch_size=2, max_len_in_batch=32768)
-    graph.capture_decode(decode, SimpleNamespace(input_ids=torch.ones(2, device="cuda")))
+    resources = AttentionStateManager(request_capacity=2)
+    resources.finish_state_registration()
+    state = SimpleNamespace(
+        input_ids=torch.ones(2, device="cuda"),
+        b_req_idx=torch.arange(2, device="cuda", dtype=torch.int32),
+        att_state_manager=resources,
+        att_state_role="main",
+        attention=SimpleNamespace(contexts={}, groups=()),
+    )
+    graph.capture_decode(decode, state)
     torch.cuda.synchronize()
     assert rebuild_count == 1 and benchmark_count == 20
     torch.testing.assert_close(inputs["out"].float(), reduction_reference(inputs), atol=2e-3, rtol=1e-2)
@@ -215,6 +227,6 @@ def test_full_tuning_graph_and_cache_reuse(tmp_path, monkeypatch, length):
     inputs["mid_out"].normal_()
     inputs["mid_out_logsumexp"].normal_()
     inputs["B_Seqlen"].fill_(length)
-    graph.graph[2][0].replay()
+    graph.graph[2].replay()
     torch.cuda.synchronize()
     torch.testing.assert_close(inputs["out"].float(), reduction_reference(inputs), atol=2e-3, rtol=1e-2)

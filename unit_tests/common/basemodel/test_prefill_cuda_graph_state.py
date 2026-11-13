@@ -1,16 +1,21 @@
+from contextlib import contextmanager
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
-from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
+from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph, PrefillGraphExecution
+from lightllm.platform import DeviceRuntime
 
 
 class _GraphInferState:
     def __init__(self, hidden_collector):
         self.hidden_collector = hidden_collector
         self.input_ids = torch.empty(4, dtype=torch.int64)
+        self.att_state_manager = SimpleNamespace(storage_generation=0, register_graph=lambda graph: None)
         self.copied_from = None
         self.replayed_with = None
 
@@ -54,7 +59,9 @@ def test_replay_restores_captured_hidden_state_into_request_collector(monkeypatc
     )
     graph_output = torch.randn(2, 3)
     prefill_graph = PrefillCudaGraph.__new__(PrefillCudaGraph)
-    prefill_graph.graph = {4: (graph_infer_state, [], [graph_output], graph_collector)}
+    prefill_graph.graph = {
+        4: PrefillGraphExecution(graph_infer_state, [], [graph_output], graph_collector, DeviceRuntime("cpu"))
+    }
 
     outputs = prefill_graph._replay(input_tensors=[], infer_state=request_infer_state)
 
@@ -73,9 +80,49 @@ def test_first_replay_replaces_capture_collector_with_runtime_instance(monkeypat
     graph_infer_state = _GraphInferState(hidden_collector=graph_collector)
     graph_output = torch.randn(2, 3)
     prefill_graph = PrefillCudaGraph.__new__(PrefillCudaGraph)
-    prefill_graph.graph = {4: (graph_infer_state, [], [graph_output], graph_collector)}
+    prefill_graph.graph = {
+        4: PrefillGraphExecution(graph_infer_state, [], [graph_output], graph_collector, DeviceRuntime("cpu"))
+    }
 
     prefill_graph._replay(input_tensors=[], infer_state=graph_infer_state)
 
     assert graph_infer_state.hidden_collector is not graph_collector
     assert graph_infer_state.hidden_collector.layer_hiddens[0] is graph_collector.layer_hiddens[0]
+
+
+@pytest.mark.parametrize("between_segments", [False, True])
+def test_failed_prefill_capture_releases_segments(between_segments):
+    events = []
+
+    class Runtime(DeviceRuntime):
+        def create_graph(self):
+            return SimpleNamespace(reset=lambda: events.append("reset"))
+
+        @contextmanager
+        def capture_graph(self, graph, **kwargs):
+            events.append("enter")
+            try:
+                yield
+            finally:
+                events.append("exit")
+
+        def synchronize(self):
+            events.append("synchronize")
+
+    prefill_graph = PrefillCudaGraph.__new__(PrefillCudaGraph)
+    prefill_graph.graph = {}
+    prefill_graph.mempool = None
+    prefill_graph.runtime = Runtime("cpu")
+    state = InferStateInfo()
+    state.input_ids = torch.empty(4, dtype=torch.int64)
+
+    def forward(inputs, state):
+        if between_segments:
+            state.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
+        raise ValueError("failed segment")
+
+    with pytest.raises(ValueError, match="failed segment"):
+        prefill_graph._capture_prefill(forward, [], state)
+    assert events == ["enter", "exit", "synchronize", "reset"]
+    assert not prefill_graph.graph
+    assert not state.prefill_cuda_graph_exe_list

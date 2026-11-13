@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.linear import replay_gdn_decode as tuning
+from lightllm.common.attention.backends.gdn.replay import decode as tuning
 from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
     attach_replay_history as ReplaySSMExecutor,
 )
@@ -30,7 +30,7 @@ def test_rebuild_uses_one_layer_scratch(width):
 @pytest.mark.parametrize("width", [1, 5])
 def test_rebuild_failure_leaves_serving_state_unchanged(monkeypatch, tmp_path, width):
     from lightllm.common.triton_utils import autotuner as autotuner_module
-    from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
+    from lightllm.common.triton_utils.autotuner import AutotuneKernelType, Autotuner
 
     state = torch.zeros((2, 4, 2, 32, 32), dtype=torch.bfloat16, device="cuda")
     ssm_backend = ReplaySSMExecutor(state, 8, width, num_key_heads=2)

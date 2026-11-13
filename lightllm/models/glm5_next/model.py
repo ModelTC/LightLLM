@@ -1,3 +1,4 @@
+from lightllm.common.attention.selection import BackendPolicy
 import json
 import os
 from typing import TYPE_CHECKING
@@ -5,22 +6,24 @@ from typing import TYPE_CHECKING
 import torch
 import triton
 
+from lightllm.common.attention.api import AttentionFamily
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
-from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.distributed.communication_op import dist_group_manager
+from lightllm.models.glm5_next.attention.sparse_mla import GlmSparseMLAPrefillBackend
+from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
+
 from .layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
 from .layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from .layer_weights.pre_and_post_layer_weight import Glm5NextPreAndPostLayerWeight
 from .layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 
-
 if TYPE_CHECKING:
     from easydict import EasyDict
-    from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.attention_state.full_att import FullAttentionState
+
     from lightllm.common.attention_state.bounded_att import BoundedAttentionState
+    from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.server.core.objs.start_args_type import StartArgs
 
 
 class Glm5NextTpPartModel(TpPartBaseModel):
@@ -129,10 +132,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """GLM full-attention 层采用 NoPE packed MLA，并保存压缩 indexer 字段。"""
-        from lightllm.common.attention_state.full_att import (
-            PackedMLALogicalConfig,
-            create_packed_mla_state,
-        )
+        from lightllm.common.attention_state.full_att import PackedMLALogicalConfig, create_packed_mla_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -155,15 +155,29 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         )
         return [state]
 
-    def prepare_attention_states(self) -> None:
-        super().prepare_attention_states()
-        if self.args.llm_kv_type == "fp8kv_dsa" and self.att_state_manager.get_full_attention_states(
-            self.att_state_role
-        ):
-            from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+    def attention_policy(self, family, phase):
+        if family.is_recurrent:
+            return BackendPolicy(prefer=("triton",))
+        return BackendPolicy(
+            prefer=("flashmla_sparse",),
+            extra=(
+                "lightllm.models.glm5_next.attention.sparse_mla:GlmSparseMLAPrefillBackend",
+                "lightllm.models.glm5_next.attention.sparse_mla:GlmSparseMLADecodeBackend",
+                "lightllm.models.glm5_next.attention.fp8_sparse_mla:GlmSparseMLAFp8PrefillBackend",
+                "lightllm.models.glm5_next.attention.fp8_sparse_mla:GlmSparseMLAFp8DecodeBackend",
+            ),
+        )
 
-            # Reserve fixed scratch space before the shared KV capacity is profiled.
-            Fp8Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
+    def _init_custom(self):
+        triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))
+        if self.args.enable_ep_moe:
+            dist_group_manager.new_deepep_group(
+                n_routed_experts=self.config["n_routed_experts"],
+                hidden_size=self.config["hidden_size"],
+                expert_quant_method_names=dist_group_manager.get_moe_quant_methods(self.trans_layers_weight),
+                num_experts_per_tok=self.config["num_experts_per_tok"],
+                moe_intermediate_size=self.config["moe_intermediate_size"],
+            )
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json")) as f:
@@ -192,34 +206,3 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.kv_lora_rank = self.config["kv_lora_rank"]
         self.v_head_dim = self.config.get("v_head_dim", self.qk_nope_head_dim)
         self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
-
-    def _init_att_backend(self):
-        from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import (
-            Fp8Glm5NextSparseAttBackend,
-        )
-
-        backend_class = (
-            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
-        )
-        self.prefill_att_backend = backend_class(model=self)
-        self.decode_att_backend = self.prefill_att_backend
-
-    def _init_att_backend1(self):
-        from lightllm.common.basemodel.attention.create_linear_utils import (
-            get_kda_linear_att_backend_class,
-        )
-
-        backend_cls = get_kda_linear_att_backend_class()
-        self.prefill_att_backend1 = backend_cls(model=self)
-        self.decode_att_backend1 = self.prefill_att_backend1
-
-    def _init_custom(self):
-        triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))
-        if self.args.enable_ep_moe:
-            dist_group_manager.new_deepep_group(
-                n_routed_experts=self.config["n_routed_experts"],
-                hidden_size=self.config["hidden_size"],
-                expert_quant_method_names=dist_group_manager.get_moe_quant_methods(self.trans_layers_weight),
-                num_experts_per_tok=self.config["num_experts_per_tok"],
-                moe_intermediate_size=self.config["moe_intermediate_size"],
-            )

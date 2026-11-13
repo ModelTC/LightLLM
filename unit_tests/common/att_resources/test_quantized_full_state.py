@@ -1,16 +1,7 @@
 from __future__ import annotations
 
-from unit_tests.common.att_resources.model_helpers import bind_test_fp8_calibration
-
-from unit_tests.common.att_resources.model_helpers import full_state_test_fields
-
-from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
-
-from unit_tests.common.att_resources.model_helpers import read_kv_storage
-
-
-from typing import TYPE_CHECKING
 from math import prod
+from typing import TYPE_CHECKING
 
 import pytest
 import torch
@@ -18,20 +9,32 @@ import torch
 from lightllm.common.attention_state.full_att import (
     GroupQuantizedAttentionConfig,
     GroupQuantizedFullAttentionState,
+    PackedMLAAttentionConfig,
+    PackedMLAFullAttentionState,
+    PackedMLALogicalConfig,
     StaticFP8AttentionConfig,
     StaticFP8FullAttentionState,
-    PackedMLAAttentionConfig,
-    PackedMLALogicalConfig,
-    PackedMLAFullAttentionState,
 )
-from lightllm.common.attention_state.types import (
-    AxisMapping,
-    StateTransferLayout,
-    TransferRegion,
+from lightllm.common.attention_state.types import AxisMapping, StateTransferLayout, TransferRegion
+from unit_tests.common.att_resources.model_helpers import (
+    bind_test_fp8_calibration,
+    full_state_test_buffers,
+    full_state_test_fields,
+    read_kv_storage,
+)
+from unit_tests.common.attention.helpers import (
+    backend_context,
+    make_backend,
+    make_batch,
+    make_context,
+    run_dense,
+    run_sparse,
+    update_context,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
     from lightllm.common.attention_state.full_att.base_state import FullAttentionState
 
 
@@ -335,10 +338,11 @@ def test_deferred_storage_preserves_real_fp8_calibration(kind: str):
 def test_int4_prefill_with_separate_storage(device, monkeypatch):
     import weakref
     from types import SimpleNamespace
-    from lightllm.common.basemodel.attention.triton.int4kv import Int4kvTritonPrefillAttState
+
+    from lightllm.common.attention.backends._shared.prefill import context_flashattention_nopad
+    from lightllm.common.attention.backends.dense.triton.int4 import TritonDenseInt4DecodeBackend
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.common.basemodel.triton_kernel.kv_copy import ppl_int4kv_copy_kv
-    from lightllm.common.basemodel.triton_kernel.att.prefill_att import context_flashattention_nopad
 
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
@@ -366,10 +370,8 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
     owner.b_req_idx = torch.tensor([0], dtype=torch.int32, device=device)
     owner.b_ready_cache_len = owner.b_q_start_loc = torch.zeros(1, dtype=torch.int32, device=device)
     owner.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(8, device=device).view(1, -1))
-    prefill = Int4kvTritonPrefillAttState(
-        backend=SimpleNamespace(quant_group_size=8), _infer_state_weak_ref=weakref.ref(owner)
-    )
-    prefill.init_state()
+    prefill = backend_context(TritonDenseInt4DecodeBackend, "prefill", settings=SimpleNamespace(quant_group_size=8))
+    update_context(prefill, owner)
     if device == "cpu":
 
         def dequantize(**kwargs):
@@ -384,5 +386,5 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
         monkeypatch.setattr(ppl_int4kv_copy_kv, "dequantize_int4kv", dequantize)
         monkeypatch.setattr(context_flashattention_nopad, "context_attention_fwd_contiguous_kv", attention)
     q = torch.randn(2, 2, 64, device=device)
-    output = prefill.prefill_att(q, (k, k_scale), (v, v_scale))
+    output = run_dense(prefill, owner, q, (k, k_scale), (v, v_scale))
     torch.testing.assert_close(output, torch.ones_like(q))

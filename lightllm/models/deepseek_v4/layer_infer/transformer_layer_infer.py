@@ -1,26 +1,38 @@
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionFamily, AttentionFeature
 import torch
 import triton
+
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_post_pre_norm, hc_pre_norm
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_sm100_mega_moe
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
-    silu_and_mul_fwd,
-    silu_and_mul_quant_fp8,
-)
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd, silu_and_mul_quant_fp8
+from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_post_pre_norm, hc_pre_norm
 from lightllm.common.quantization.deepgemm import DeepGEMMFP8w8a8B128QuantizationMethod
+from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4Inputs
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_softplus_sqrt
 from lightllm.utils.dist_utils import get_global_world_size
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+
+from ..infer_struct import DeepseekV4InferStateInfo
+from ..triton_kernel.rotary_emb import inverse_rotary_emb
 from .compressor import CompressorInfer
 from .indexer import DeepseekV4IndexInfer
-from ..triton_kernel.rotary_emb import inverse_rotary_emb
-from ..infer_struct import DeepseekV4InferStateInfo
-from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_softplus_sqrt
 
 
 class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
+    def attention_adapter(self, family):
+        from lightllm.models.deepseek_v4.attention.adapter import DeepseekV4Adapter
+
+        return DeepseekV4Adapter()
+
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        description = replace(description, family=AttentionFamily.SPARSE_MLA, variant="deepseek_v4")
+        description = replace(description, features=description.features | {AttentionFeature.SINK})
+        return description
+
     @classmethod
     def get_prefill_aux_stream(cls: type["DeepseekV4TransformerLayerInfer"]) -> torch.cuda.Stream:
         """Return the single C4 prefill auxiliary stream shared by every layer in this process."""
@@ -353,8 +365,8 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
 
         state = infer_state.swa_state
-        att_state = infer_state.prefill_att_state if infer_state.is_prefill else infer_state.decode_att_state
-        swa, _ = att_state.backend.get_att_input_params(infer_state, self.layer_num_)
+        params = self.prefill_attention.resources if infer_state.is_prefill else self.decode_attention.resources
+        swa = params.prefill_swa if infer_state.is_prefill else params.swa
         # 一次完成 RMSNorm、RoPE、FP8 打包和 SWA 写入。
         fused_kv_norm_rope_to_swa(
             kv=kv,
@@ -489,34 +501,12 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         self.index_infer.write_indexer_k(x, infer_state, layer_weight, cos_table, sin_table)
         return self.index_infer.build_metadata(x, q_lora, infer_state, layer_weight)
 
-    def _context_attention_kernel(
-        self,
-        q,
-        q_lora,
-        x,
-        infer_state: DeepseekV4InferStateInfo,
-        layer_weight: DeepseekV4TransformerLayerWeight,
-        out=None,
-    ):
+    def _context_attention_kernel(self, q, q_lora, x, infer_state, layer_weight, out=None):
         meta = self._compress_and_index(q_lora, x, infer_state, layer_weight)
-        att_control = AttControl(
-            nsa_prefill=True,
-            nsa_prefill_dict={
-                "compress_ratio": self.compress_ratio,
-                "head_dim_v": self.v_head_dim,
-                "softmax_scale": self.softmax_scale,
-                "attn_sink": layer_weight.attn_sink_.weight,
-                **meta,
-            },
+        inputs = DeepseekV4Inputs(
+            q, meta["swa_indices"], meta["swa_lengths"], meta.get("extra_indices"), meta.get("extra_lengths")
         )
-        return infer_state.prefill_att_state.prefill_att(
-            q=q,
-            k=infer_state.prefill_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
-            v=None,
-            att_control=att_control,
-            alloc_func=self.alloc_tensor,
-            out=out,
-        )
+        return self.prefill_attention.forward(infer_state.attention, inputs, out=out)
 
     # ------------------------------------------------------------------ attention (decode)
     def token_attention_forward(
@@ -526,26 +516,12 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         o = self._token_attention_kernel(q, q_lora, full_x, infer_state, layer_weight)
         return self._get_o(o, infer_state, layer_weight)
 
-    def _token_attention_kernel(
-        self, q, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
-    ):
+    def _token_attention_kernel(self, q, q_lora, x, infer_state, layer_weight, out=None):
         meta = self._compress_and_index(q_lora, x, infer_state, layer_weight)
-        att_control = AttControl(
-            nsa_decode=True,
-            nsa_decode_dict={
-                "compress_ratio": self.compress_ratio,
-                "head_dim_v": self.v_head_dim,
-                "softmax_scale": self.softmax_scale,
-                "attn_sink": layer_weight.attn_sink_.weight,
-                **meta,
-            },
+        inputs = DeepseekV4Inputs(
+            q, meta["swa_indices"], meta["swa_lengths"], meta.get("extra_indices"), meta.get("extra_lengths")
         )
-        return infer_state.decode_att_state.decode_att(
-            q=q,
-            k=infer_state.decode_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
-            v=None,
-            att_control=att_control,
-        )
+        return self.decode_attention.forward(infer_state.attention, inputs, out=out)
 
     # ------------------------------------------------------------------ moe
     def _ffn_shared_expert(

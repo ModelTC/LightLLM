@@ -1,20 +1,20 @@
-"""FP8 后端按推理层传入的逻辑层号选择标定，覆盖稀疏层号、共享层和 draft。"""
-
 from dataclasses import replace
 from types import SimpleNamespace
-import weakref
 
 import pytest
 import torch
 
+from lightllm.common.attention.api import AttentionFamily, AttentionPhase
+from lightllm.common.attention.backends.dense.fa3 import fp8 as fa3_fp8
+from lightllm.common.attention.backends.dense.flashinfer import fp8 as flashinfer_fp8
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.basemodel.attention.fa3 import fp8 as fa3_fp8
-from lightllm.common.basemodel.attention.flashinfer import fp8 as flashinfer_fp8
-from lightllm.models.llama.infer_struct import LlamaInferStateInfo
+from lightllm.common.basemodel.attention_adapters import ADAPTERS
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from unit_tests.common.att_resources.model_helpers import rebuild_full_state
-from unit_tests.common.att_resources.model_helpers import replace_logical_layer_groups
+from lightllm.server.core.objs.start_args_type import StartArgs
+from unit_tests.common.att_resources.model_helpers import rebuild_full_state, replace_logical_layer_groups
 from unit_tests.common.att_resources.test_capacity import definition
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_context, make_layer_attention
 
 
 @pytest.mark.parametrize("backend_name", ["fa3", "flashinfer"])
@@ -42,75 +42,67 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     manager = AttentionStateManager(request_capacity=1)
     manager.register_state(role, state)
     manager.finish_state_registration()
-    infer = LlamaInferStateInfo()
-    infer.att_state_manager = manager
-    infer.att_state_role = role
-    infer.b_seq_len = torch.tensor([1], dtype=torch.int32)
-    infer.max_q_seq_len = 1
+    phase = AttentionPhase(operation)
+    cls = fa3_fp8.Fa3DenseFp8DecodeBackend if backend_name == "fa3" else flashinfer_fp8.FlashInferDenseFp8DecodeBackend
+    backend = make_backend(cls)
+    context = make_context(backend, make_batch((1,), phase=phase))
+    if backend_name == "fa3" and operation == "decode":
+        context.b_att_seq_len = context.batch.b_seq_len
+        context.decode_max_q_seq_len = 1
+        context.causal = True
     calls = []
-
-    # 仅替换外部计算内核，保留推理层、公开 attention 接口及 State 标定查询链路。
     if backend_name == "fa3":
         state.q_scales[0].fill_(3)
         state.q_scales[1].fill_(7)
         expected_q_scale = 3 if storage_layer_index == 0 else 7
 
-        def quantize(q: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+        def quantize(q, scales):
             assert torch.all(scales == expected_q_scale)
             return q
 
-        def attend(**kwargs: object) -> torch.Tensor:
+        def attend(**kwargs):
             assert torch.all(kwargs["k_descale"] == expected_scale)
             assert torch.all(kwargs["v_descale"] == expected_scale)
             assert torch.all(kwargs["q_descale"] == expected_q_scale)
             calls.append(operation)
             return kwargs["q"]
 
-        monkeypatch.setattr(fa3_fp8, "q_per_head_static_fp8_quant", quantize)
-        monkeypatch.setattr(fa3_fp8, "flash_attn_with_kvcache", attend)
-        state_class = fa3_fp8.Fp8Fa3PrefillAttState if operation == "prefill" else fa3_fp8.Fp8Fa3DecodeAttState
-    else:
-        state_class = (
-            flashinfer_fp8.Fp8FlashInferPrefillAttState
-            if operation == "prefill"
-            else flashinfer_fp8.Fp8FlashInferDecodeAttState
+        monkeypatch.setattr(
+            "lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant.q_per_head_static_fp8_quant",
+            quantize,
         )
-
-    attention = state_class(backend=SimpleNamespace(), _infer_state_weak_ref=weakref.ref(infer))
-    if backend_name == "fa3":
-        attention.page_table = attention.cu_seqlens_q = attention.cu_seqlens_k = None
-        attention.b_att_seq_len = infer.b_seq_len
-        attention.decode_max_q_seq_len = 1
-        attention.causal = True
+        monkeypatch.setattr("lightllm.utils.sgl_utils.flash_attn_with_kvcache", attend)
     else:
+        state.cpu_scales = state.scales.cpu().tolist()
 
-        def run(
-            q: torch.Tensor,
-            paged_kv_cache: tuple[torch.Tensor, torch.Tensor],
-            k_scale: float,
-            v_scale: float,
-            out: torch.Tensor,
-        ) -> None:
+        def run(q, paged_kv_cache, k_scale, v_scale, out):
             assert k_scale == v_scale == expected_scale
             calls.append(operation)
             out.copy_(q)
 
-        attention.prefill_wrapper = attention.decode_wrapper = SimpleNamespace(run=run)
-
-    infer.prefill_att_state = infer.decode_att_state = attention
+        setattr(context, operation + "_wrapper", SimpleNamespace(run=run))
     layer = LlamaTransformerLayerInfer.__new__(LlamaTransformerLayerInfer)
     layer.layer_num_ = logical_layer_id
     layer.tp_q_head_num_ = layer.tp_k_head_num_ = state.config.head_num
     layer.head_dim_ = state.config.head_dim
-    layer.alloc_tensor = lambda shape, dtype, device: torch.empty(shape, dtype=dtype, device="cpu")
+    model = SimpleNamespace(
+        att_state_manager=manager,
+        att_state_role=role,
+        args=StartArgs(llm_kv_type="fp8kv_sph" if backend_name == "fa3" else "fp8kv_spt"),
+    )
+    params = ADAPTERS[AttentionFamily.DENSE].bind(model, layer, None)
+    attention = make_layer_attention(backend, context, params)
+    attention = replace(
+        attention,
+        logical_layer_id=logical_layer_id,
+    )
+    setattr(layer, operation + "_attention", attention)
+    infer = InferStateInfo()
+    infer.attention.contexts = {0: context}
+    monkeypatch.setattr(manager, "get_state", lambda *args: pytest.fail("forward must not look up storage owners"))
     q = torch.ones((1, state.config.head_num, state.config.head_dim))
     if operation == "prefill":
-        output = layer._context_attention_kernel(
-            q=q,
-            kv=None,
-            infer_state=infer,
-            layer_weight=None,
-        )
+        output = layer._context_attention_kernel(q=q, kv=None, infer_state=infer, layer_weight=None)
     else:
         output = layer._token_attention_kernel(q=q, infer_state=infer, layer_weight=None)
     assert torch.equal(output, q)

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from unit_tests.common.att_resources.model_helpers import read_kv_storage
-
 from contextlib import nullcontext
 from types import SimpleNamespace
 
@@ -9,9 +7,10 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.server.core.objs.start_args_type import StartArgs
+from unit_tests.common.att_resources.model_helpers import read_kv_storage
 from unit_tests.common.att_resources.test_capacity import definition
 from unit_tests.common.basemodel.test_overlap_utils import _make_decode_input, _make_prefill_input
 
@@ -46,8 +45,8 @@ def test_ffn_only_draft_has_no_state_or_attention_backend(monkeypatch: pytest.Mo
     draft, resources = draft_model(mode)
     draft.prepare_attention_states()
     resources.finish_state_registration()
-    draft._init_att_backend()
-    draft._init_att_backend1()
+    draft.prepare_attention_backends()
+    assert draft.attention.groups == ()
     assert draft.att_state_manager is resources
     assert not hasattr(draft, "full_att_state")
     assert not resources.get_full_attention_states("draft0")
@@ -60,15 +59,23 @@ def test_ffn_only_draft_has_no_state_or_attention_backend(monkeypatch: pytest.Mo
     draft._select_mem_indexes = lambda value: torch.zeros(value.batch_size, dtype=torch.int32)
     monkeypatch.setattr("lightllm.common.basemodel.basemodel.dist_group_manager.get_group", lambda index: None)
     model_input = _make_prefill_input([10, 11], req_idx=0, is_decode_req=False) if prefill else _make_decode_input()
+    draft.attention.groups = ()
     state = draft._create_inferstate(model_input)
     assert not hasattr(state, "full_att_state")
     assert state.att_state_manager is resources
     assert state.is_draft_model
-    assert state.prefill_att_state is None and state.decode_att_state is None
+    assert state.attention.groups == () and state.attention.contexts == {}
     assert state.req_manager is draft.req_manager
-    state.init_att_state()
+    from lightllm.common.attention.api import AttentionPhase
+    from unit_tests.common.attention.helpers import batch_from_fixture
+
+    state.attention.batch = batch_from_fixture(state, AttentionPhase.PREFILL if prefill else AttentionPhase.DECODE)
     if not prefill:
-        state.copy_for_cuda_graph(draft._create_inferstate(model_input))
+        other = draft._create_inferstate(model_input)
+        other.attention.batch = state.attention.batch
+        for target, source in state.graph_input_copies(other):
+            target.copy_(source, non_blocking=True)
+        state.attention.plan_replay(other.attention)
 
 
 @pytest.mark.parametrize("mode", ["vanilla_with_att", "eagle_with_att"])

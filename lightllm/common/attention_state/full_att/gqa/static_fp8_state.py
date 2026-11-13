@@ -1,22 +1,21 @@
 from __future__ import annotations
 
-from functools import lru_cache
-
-from typing import TYPE_CHECKING, List
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from math import prod
+from typing import TYPE_CHECKING, List
 
 import torch
 
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
-from ...utils import deepcopy_result
 from ...types import AxisMapping, TransferRegion
+from ...utils import deepcopy_result
 from ..base_state import FullAttentionState
-from .static_fp8_transfer import transfer_static_fp8_pages
 from ..dp_transfer import copy_gqa_tokens
+from .static_fp8_transfer import transfer_static_fp8_pages
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
@@ -71,6 +70,8 @@ class StaticFP8AttentionConfig:
 
 class StaticFP8FullAttentionState(FullAttentionState):
     """使用静态标定参数的 FP8 KV 存储，固定 scale 随 State 初始化，不逐 token 搬运。"""
+
+    storage_layout = ("gqa_static_fp8_token_head_dim", 1)
 
     # ========================================================================
     # 一、资源定义与初始化
@@ -225,6 +226,20 @@ class StaticFP8FullAttentionState(FullAttentionState):
         assert self.config.scale_mode == "per_head", "V descale requires per-head calibration"
         head_num = self.config.head_num
         return self.scales[storage_layer_index, head_num:].view(1, head_num).expand(batch_size, head_num)
+
+    def layer_resources(self, layer_id):
+        from lightllm.common.attention.api.inputs import DenseResources
+
+        key, value = self.get_layer_view(layer_id)
+        index = self.get_storage_layer_index(layer_id)
+        if self.config.scale_mode == "per_head":
+            heads = self.config.head_num
+            key_scale, value_scale = self.scales[index, :heads], self.scales[index, heads:]
+            query_scale = self.q_scales[index] if self.q_scales is not None else None
+        else:
+            key_scale, value_scale = map(float, self.cpu_scales[index])
+            query_scale = None
+        return DenseResources(key, value, query_scale=query_scale, key_scale=key_scale, value_scale=value_scale)
 
     def get_layer_view(self, logical_layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
         """按逻辑层号返回 K、V 视图，head 数使用当前 TP 分片配置。"""

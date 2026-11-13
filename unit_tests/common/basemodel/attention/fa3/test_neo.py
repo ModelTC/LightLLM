@@ -5,8 +5,19 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.attention.backends.dense.fa3 import neo
+from lightllm.common.attention.api import UnsupportedAttention
+from lightllm.utils import sgl_utils
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.fa3 import fp, neo
+from unit_tests.common.attention.helpers import (
+    backend_context,
+    make_backend,
+    make_batch,
+    make_context,
+    run_dense,
+    run_sparse,
+    update_context,
+)
 
 
 def _load_neo(monkeypatch, attention_func):
@@ -15,7 +26,7 @@ def _load_neo(monkeypatch, attention_func):
         interface = ModuleType("flash_attn_interface")
         interface.flash_attn_with_kvcache = attention_func
     monkeypatch.setitem(sys.modules, "flash_attn_interface", interface)
-    name = "lightllm.common.basemodel.attention.fa3._neo_import_test"
+    name = "lightllm.common.attention.backends.dense._neo_import_test"
     spec = importlib.util.spec_from_file_location(name, neo.__file__)
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, name, module)
@@ -27,12 +38,11 @@ def test_recognizes_neo_interface_without_replacing_regular_fa3(monkeypatch):
     def neo_attention(q, image_token_end=None):
         return q
 
-    regular_attention = fp.flash_attn_with_kvcache
+    regular_attention = sgl_utils.flash_attn_with_kvcache
     module = _load_neo(monkeypatch, neo_attention)
 
-    assert module.HAS_FLASH_ATTN_INTERFACE
-    assert module.flash_attn_with_kvcache_neo is neo_attention
-    assert fp.flash_attn_with_kvcache is regular_attention
+    assert module.get_neo_attention() is neo_attention
+    assert sgl_utils.flash_attn_with_kvcache is regular_attention
 
 
 @pytest.mark.parametrize("interface_kind", ["missing", "regular", "legacy_tag"])
@@ -44,17 +54,15 @@ def test_unavailable_neo_interface_provides_source_install_instructions(monkeypa
         return q
 
     attention_func = {"missing": None, "regular": regular_attention, "legacy_tag": legacy_attention}[interface_kind]
-    with pytest.warns(UserWarning, match="Neo FA3 is unavailable") as warnings:
-        module = _load_neo(monkeypatch, attention_func)
+    module = _load_neo(monkeypatch, attention_func)
+    with pytest.raises(UnsupportedAttention, match="Neo FA3 is unavailable") as error:
+        module.get_neo_attention()
 
-    assert not module.HAS_FLASH_ATTN_INTERFACE
-    assert module.flash_attn_with_kvcache_neo is None
-    message = str(warnings[0].message)
+    message = str(error.value)
     assert "https://github.com/WANDY666/flash-attention.git" in message
     assert "cd flash-attention/hopper" in message
     assert "FLASH_ATTENTION_FORCE_BUILD=TRUE" in message
     assert "--no-deps --force-reinstall" in message
-    assert "--llm_prefill_att_backend triton" in message
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
@@ -82,9 +90,9 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
     infer_state.b1_cu_kv_seq_len = indices([0, 2 * page_size, 4 * page_size - 1]).long()
     infer_state.b_image_token_end = image_ends
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token_indexs)
-    backend = SimpleNamespace(uses_causal_attention=lambda: True, infer_page_size=page_size)
-    state = neo.NeoFa3AttBackend.create_att_prefill_state(backend, infer_state)
-    state.init_state()
+    backend = SimpleNamespace(uses_causal_attention=lambda: True, kernel_page_size=page_size)
+    state = backend_context(neo.Fa3DenseNeoDecodeBackend, "prefill", settings=backend)
+    update_context(state, infer_state)
 
     q = torch.randn(3, 2, 16, device="cuda")
     k = torch.randn(4 * page_size, 1, 16, device="cuda")
@@ -107,13 +115,17 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
         assert "image_token_tag" not in kwargs
         return output
 
-    monkeypatch.setattr(neo, "HAS_FLASH_ATTN_INTERFACE", True)
-    monkeypatch.setattr(neo, "flash_attn_with_kvcache_neo", neo_attention)
-    assert state.prefill_att(q, k, v) is output
+    monkeypatch.setattr(neo, "get_neo_attention", lambda: neo_attention)
+    assert run_dense(state, infer_state, q, k, v) is output
 
 
 def test_prefill_missing_extension_reports_install_instructions(monkeypatch):
-    monkeypatch.setattr(neo, "HAS_FLASH_ATTN_INTERFACE", False)
-    state = neo.NeoFa3PrefillAttState()
-    with pytest.raises(ImportError, match="WANDY666/flash-attention"):
-        state.prefill_att(None, None, None)
+    module = _load_neo(monkeypatch, None)
+    monkeypatch.setattr(neo, "get_neo_attention", module.get_neo_attention)
+    state = backend_context(neo.Fa3DenseNeoDecodeBackend, "prefill")
+    with pytest.raises(UnsupportedAttention, match="WANDY666/flash-attention"):
+        state.backend_identity.forward(
+            SimpleNamespace(alloc_tensor=torch.empty, resources=SimpleNamespace(key=None, value=None)),
+            state,
+            SimpleNamespace(query=None),
+        )

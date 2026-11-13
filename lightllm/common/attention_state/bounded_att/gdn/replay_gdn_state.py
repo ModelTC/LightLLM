@@ -1,19 +1,20 @@
+from __future__ import annotations
+
 """GDN replay 的 bounded attention 状态。
 
 Conv、canonical SSM、replay history、页布局和已接受快照都在本类。
 一层 decode 重放在 replay_gdn_decode。
 """
 
-from __future__ import annotations
 
 from functools import lru_cache
 from math import prod
 
 import torch
 
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_fold import fold_prefix
-from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
+from lightllm.common.attention.backends._shared.linear.replayssm_cursor import advance_cursor
+from lightllm.common.attention.backends._shared.linear.replayssm_fold import fold_prefix
+from lightllm.common.attention.backends._shared.linear.ssm_acceptance import commit_ssm_prefix
 from lightllm.utils.log_utils import init_logger
 
 from ...types import AxisMapping, PageKind, StateTransferLayout, TensorField, TransferRegion
@@ -28,6 +29,8 @@ logger = init_logger(__name__)
 
 
 class ReplayGDNState(BoundedAttentionState):
+    state_mode = "replay"
+
     """GDN replay 运行态。Conv、单槽 SSM 和 history 都在本类，不沿用 native 的 MTP 槽。"""
 
     # ========================================================================
@@ -117,6 +120,29 @@ class ReplayGDNState(BoundedAttentionState):
         self.raw_values = torch.empty((layers, slots, hv, capacity, v), dtype=config.conv_dtype, device=device)
         self.betas = torch.empty((layers, slots, hv, capacity), dtype=torch.float32, device=device)
 
+    @property
+    def storage_layout(self):
+        return ("gdn_replay_conv_ssm", 1, self.capacity, self.verify_width, self.compute_mode, self.gate_lower_bound)
+
+    def capture_snapshot_views(self, req_indices):
+        views = [self.tile_sync_mark]
+        for req in req_indices:
+            views.extend(
+                tensor[:, req]
+                for tensor in (
+                    self.conv_state,
+                    self.ssm_state,
+                    self.keys,
+                    self.deltas,
+                    self.gates,
+                    self.raw_keys,
+                    self.raw_values,
+                    self.betas,
+                )
+            )
+            views.extend((self.cursors[req : req + 1], self.mtp_state_index[req : req + 1]))
+        return views
+
     def get_state_type(self) -> str:
         """返回算法名和 Conv/SSM 存储精度。"""
         return (
@@ -167,6 +193,12 @@ class ReplayGDNState(BoundedAttentionState):
         """返回逻辑层在 history 和 canonical state 里的存储下标。"""
 
         return self._logical_to_storage_layer[logical_layer_id]
+
+    def layer_resources(self, layer_id):
+        from lightllm.common.attention.api.inputs import RecurrentStorage
+
+        conv, ssm = self.get_layer_view(layer_id)
+        return RecurrentStorage(conv, ssm, self.mtp_state_index, self)
 
     def get_layer_view(self, logical_layer_id: int):
         index = self.storage_layer(logical_layer_id)

@@ -1,14 +1,13 @@
 import pytest
 import torch
 
-from lightllm.common.attention_state.bounded_att import KDAState
-from unit_tests.common.test_linear_state import make_state
-from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
+from lightllm.common.attention.backends._shared.linear.replayssm_cursor import advance_cursor
+from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState, KDAState
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
+from unit_tests.common.test_linear_state import make_state
 
 
 @pytest.fixture
@@ -118,7 +117,7 @@ class _CaptureKernel:
 def test_mtp0_precompute_reaches_replay_kernel(monkeypatch, linear_config, module_name, cls, bv, precompute):
     import importlib
 
-    decode = importlib.import_module(f"lightllm.common.basemodel.attention.linear.{module_name}")
+    decode = importlib.import_module(f"lightllm.common.attention.backends.{module_name.split('_')[1]}.replay.decode")
     captured = _CaptureKernel()
     monkeypatch.setattr(decode, "_decode_replay", captured)
     owner = cls(
@@ -239,3 +238,23 @@ def test_acceptance_keeps_request_order_with_strided_inputs(device):
         _commit_prefix_cpu(owner.mtp_state_index, reqs, lengths, lengths, history.cursors)
     assert owner.mtp_state_index.tolist() == [2, 2, 0, 1]
     assert history.cursors.tolist() == [3, 0, 1, 0]
+
+
+@pytest.mark.parametrize("cls", [ReplayGDNState, ReplayKDAState])
+def test_replay_capture_snapshot_restores_history_and_cursor(linear_config, cls):
+    from lightllm.common.attention_state import AttentionStateManager
+
+    owner = cls(linear_config, request_capacity=3, mtp_step=2, device="cpu")
+    manager = AttentionStateManager(request_capacity=3)
+    manager.register_state("main", owner)
+    manager.finish_state_registration()
+    views = owner.capture_snapshot_views([1])
+    for index, view in enumerate(views):
+        view.fill_(index + 1)
+    snapshot = manager.snapshot_capture_state(torch.tensor([1, 1]), "main")
+    for view in views:
+        view.zero_()
+    manager.restore_capture_state(snapshot)
+    for index, view in enumerate(views):
+        assert torch.all(view == index + 1)
+    assert owner.describe_layout()[0] in ("gdn_replay_conv_ssm", "kda_replay_conv_ssm")

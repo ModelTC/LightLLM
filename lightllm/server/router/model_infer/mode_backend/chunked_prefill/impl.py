@@ -1,23 +1,22 @@
-import torch
 import time
 from typing import List
+
+import torch
+
 from lightllm.common.basemodel.triton_kernel.mtp_utils import gen_b_req_mtp_start_loc
+from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
-from lightllm.server.router.model_infer.infer_batch import InferReq
-from lightllm.server.router.model_infer.mode_backend.pre import (
-    prepare_prefill_inputs,
-    prepare_decode_inputs,
-)
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
-from lightllm.server.router.model_infer.infer_batch import g_infer_context
-from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
+from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
+from lightllm.server.router.model_infer.mode_backend.pre import prepare_decode_inputs, prepare_prefill_inputs
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
-from lightllm.utils.log_utils import init_logger
+from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.dist_utils import get_current_device_id
-from .control_state import ControlState
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.log_utils import init_logger
+
+from .control_state import ControlState
 
 logger = init_logger(__name__)
 
@@ -291,11 +290,7 @@ class ChunkedPrefillBackend(ModeBackend):
 
             b_req_mtp_start_loc = gen_b_req_mtp_start_loc(model_input.b_mtp_index, num_reqs=req_num)
             mtp_accept_len, accepted_index = mtp_utils.verify_mtp_tokens(
-                backend=self,
-                next_token_ids=next_token_ids,
-                b_req_idx=model_input.b_req_idx,
-                b_req_mtp_start_loc=b_req_mtp_start_loc,
-                b_mtp_index=model_input.b_mtp_index,
+                backend=self, next_token_ids=next_token_ids, model_output=model_output, num_reqs=req_num
             )
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="accepted_index",

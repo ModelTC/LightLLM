@@ -1,9 +1,9 @@
 import pytest
 import torch
 
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_fold import fold_prefix
-from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
+from lightllm.common.attention.backends._shared.linear.replayssm_cursor import advance_cursor
+from lightllm.common.attention.backends._shared.linear.replayssm_fold import fold_prefix
+from lightllm.common.attention.backends._shared.linear.ssm_acceptance import commit_ssm_prefix
 from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update as update
 from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
     accept_replay_window,
@@ -26,6 +26,7 @@ def ssm_snapshot(backend, req):
 
 
 from types import SimpleNamespace
+
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 
 
@@ -63,7 +64,7 @@ def _replay_cu(args):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_request_counts_share_compiled_kernel(monkeypatch):
-    from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import _commit_prefix, commit_ssm_prefix
+    from lightllm.common.attention.backends._shared.linear.ssm_acceptance import _commit_prefix, commit_ssm_prefix
 
     reqs = torch.arange(512, dtype=torch.int32, device="cuda")
     lengths = reqs % 4 + 1

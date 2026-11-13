@@ -2,12 +2,13 @@ import dataclasses
 from typing import Literal
 
 import torch
-from lightllm.common.basemodel import InferStateInfo
+
 from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState, WindowCompressorState
 from lightllm.common.attention_state.full_att.compressed_att.compressed_att_state import (
-    CompressedAttentionState,
     CompressedAttentionLayerView,
+    CompressedAttentionState,
 )
+from lightllm.common.basemodel import InferStateInfo
 
 C4_PREFILL_LOGITS_BUDGET_BYTES = 512 * 1024 * 1024
 
@@ -84,7 +85,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self._dsv4_token_to_batch_idx = None
         # The first C4 layer builds metadata and later layers reuse it within this forward.
         # During CUDA Graph capture its tensor producers become graph nodes. Replay updates
-        # those captured buffers from staged inputs; copy_for_cuda_graph skips this container.
+        # those captured buffers from staged inputs; graph_input_copies skips this container.
         self.c4_indexer_metadata: C4IndexerMetadata | None = None
 
     def init_some_extra_state(self, model):
@@ -105,7 +106,10 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.dsv4_c128_lengths = None
         super().init_some_extra_state(model)  # sets position_ids, b_q_seq_len, b_q_start_loc (prefill)
         if self.is_prefill:
-            self.prefill_att_state.prepare_swa_workspace(self)
+            from .attention.sparse_mla import prepare_swa_workspace
+
+            buffer, capacity = model.swa_prefill_workspace
+            self.swa_workspace = prepare_swa_workspace(self.swa_state, buffer, capacity, self, self.microbatch_index)
         pos = self.position_ids
         self.position_cos_sliding = torch.index_select(model._cos_cached_sliding, 0, pos)  # [T, rope_dim//2]
         self.position_sin_sliding = torch.index_select(model._sin_cached_sliding, 0, pos)
@@ -196,7 +200,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             sliding_window=self.swa_state.config.window_size,
             image_left=self.dsv4_image_left,
             image_right=self.dsv4_image_right,
-            prefill_state=self.prefill_att_state if self.is_prefill else None,
+            prefill_state=self.swa_workspace if self.is_prefill else None,
             swa_runtime_write_slots=self.dsv4_swa_runtime_write_slots,
             token_to_batch_idx=self._dsv4_token_to_batch_idx,
             b_seq_len=self.b_seq_len,
@@ -204,7 +208,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
 
     def init_c4_indices(self, width):
         # Create layer outputs on first use; replay inputs leave them unset, so
-        # copy_for_cuda_graph stages only inputs into the captured infer state.
+        # graph_input_copies stages only inputs into the captured infer state.
         if self.dsv4_c4_indices is None:
             self.dsv4_c4_indices = torch.empty(
                 (self.position_ids.numel(), width), dtype=torch.int32, device=self.position_ids.device
@@ -216,6 +220,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         if self.c4_indexer_metadata is not None:
             return self.c4_indexer_metadata
         import deep_gemm
+
         from .triton_kernel.build_c4_indexer_page_table import build_c4_indexer_page_table
 
         valid_len = ((self.position_ids + 1) // 4).to(torch.int32)

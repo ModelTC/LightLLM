@@ -10,7 +10,9 @@ class Glm5NextMTPTransformerLayerInfer(Glm5NextTransformerLayerInfer):
         hidden, _, kv = self._project_sparse_qkv_a(normed, infer_state, layer_weight)
         infer_state.mtp_draft_input_hiddens = None
         self._post_cache_kv(self._normalize_sparse_kv(kv, layer_weight), infer_state, layer_weight)
-        self.indexer.write_k_pools(hidden, infer_state, infer_state.prefill_att_state, layer_weight)
+        self.indexer.write_k_pools(
+            hidden, infer_state, self.prefill_attention.context(infer_state.attention), layer_weight
+        )
         # BaseModel pads empty ranks to at least one row. An empty result marks
         # the discarded draft output for our post layer without retaining hiddens.
         return input_embeddings.new_empty((0, self.embed_dim_))

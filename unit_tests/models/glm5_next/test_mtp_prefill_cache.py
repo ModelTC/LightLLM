@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -16,6 +17,7 @@ from lightllm.common.attention_state.full_att.packed_mla.packed_mla_state import
     PackedMLALogicalConfig,
 )
 from lightllm.common.basemodel.batch_objs import ModelInput, PostLayerOutput
+from lightllm.common.attention.session import AttentionSession
 from lightllm.common.basemodel.hidden_collector import FinalHiddenCollector
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
@@ -89,7 +91,7 @@ def test_forward_uses_common_prefill(monkeypatch, tokens, mode):
     model.att_state_manager = object()
     model.hidden_collector_prototype = FinalHiddenCollector()
     model.return_all_prompt_logics = False
-    model.prefill_att_backend = model.prefill_att_backend1 = None
+    model.attention = SimpleNamespace(session=lambda state: nullcontext())
     model._select_mem_indexes = lambda model_input: torch.zeros_like(model_input.input_ids)
     batch = int(tokens > 0)
     model_input = ModelInput(
@@ -130,6 +132,8 @@ def test_forward_uses_common_prefill(monkeypatch, tokens, mode):
     layer._project_sparse_qkv_a = lambda hidden, *_: (hidden, None, hidden)
     layer._normalize_sparse_kv = lambda kv, _: kv
     layer.indexer = SimpleNamespace(write_k_pools=Mock())
+    context = object()
+    layer.prefill_attention = SimpleNamespace(context=Mock(return_value=context))
     writer = Mock()
     layer._post_cache_kv = writer
     model.layers_infer = [layer]
@@ -165,6 +169,8 @@ def test_forward_uses_common_prefill(monkeypatch, tokens, mode):
         post_forward.assert_not_called()
     allocator.cache_env_in.assert_called_once()
     allocator.cache_env_out.assert_called_once()
+    layer.prefill_attention.context.assert_called_once_with(infer.attention)
+    assert layer.indexer.write_k_pools.call_args.args[2] is context
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -237,6 +243,8 @@ def test_cache_only_matches_full_prefill_cache_writes(monkeypatch, kv_type, requ
     initial = [s.clone() for s in stores]
     q_lengths = [q for _, _, q in requests]
     lengths = torch.cat([torch.arange(past + 1, past + q + 1, device="cuda") for _, past, q in requests]).int()
+    context = SimpleNamespace(q_kv_seq_len=lengths, q_req_idx=None)
+    layer.prefill_attention = SimpleNamespace(context=lambda session: context)
     infer = SimpleNamespace(
         is_prefill=True,
         is_draft_model=True,
@@ -250,7 +258,7 @@ def test_cache_only_matches_full_prefill_cache_writes(monkeypatch, kv_type, requ
         b1_cu_q_seq_len=torch.tensor([0, *q_lengths], device="cuda", dtype=torch.int32).cumsum(0).int(),
         max_q_seq_len=max(q_lengths),
         max_kv_seq_len=2048,
-        prefill_att_state=SimpleNamespace(q_kv_seq_len=lengths, q_req_idx=None),
+        attention=AttentionSession(),
         req_manager=SimpleNamespace(req_to_token_indexs=None),
     )
     # Top-k outputs are discarded here; run the normal projections and cache writers.
@@ -259,7 +267,7 @@ def test_cache_only_matches_full_prefill_cache_writes(monkeypatch, kv_type, requ
     _, kv = layer._get_qkv(layer._att_norm(hidden, infer, weights), infer, weights)
     layer._post_cache_kv(kv, infer, weights)
     layer.indexer._get_indices(
-        **infer.get_topk_indices_params, infer_state=infer, att_state=infer.prefill_att_state, layer_weight=weights
+        **infer.get_topk_indices_params, infer_state=infer, att_state=context, layer_weight=weights
     )
     expected = [s.clone() for s in stores]
     assert not torch.equal(initial[2], expected[2])

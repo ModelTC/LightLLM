@@ -1,7 +1,7 @@
-import weakref
 import collections
 import inspect
 import math
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -10,18 +10,27 @@ import torch.nn.functional as F
 from frozendict import frozendict
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
-from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.flash_decoding import (
+from lightllm.common.attention.backends.dense.triton.backend import TritonDenseDecodeBackend
+from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.flash import (
     gqa_flash_decoding as decode_module,
     gqa_flash_decoding_stage1 as stage1_module,
 )
-from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding_stage2 import (
+from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.flash.gqa_flash_decoding_stage2 import (
     flash_decode_stage2,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.triton_utils import autotuner as autotuner_module
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType, AutotuneLevel
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
+from unit_tests.common.attention.helpers import (
+    backend_context,
+    make_backend,
+    make_batch,
+    make_context,
+    run_dense,
+    run_sparse,
+    update_context,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -127,24 +136,27 @@ def test_rebuild_preserves_layout_and_bounds_indices(monkeypatch, num_tokens):
 def test_state_retains_actual_length_before_graph_capture(monkeypatch):
     infer_state = InferStateInfo()
     infer_state.max_kv_seq_len = 8193
-    state = TritonDecodeAttState(
-        backend=SimpleNamespace(
+    state = backend_context(
+        TritonDenseDecodeBackend,
+        "decode",
+        settings=SimpleNamespace(
             model=SimpleNamespace(
                 is_mtp_draft_model=False, mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0)
             )
         ),
-        _infer_state_weak_ref=weakref.ref(infer_state),
     )
-    state.init_state()
-    state.infer_state.max_kv_seq_len = 32768
+    update_context(state, infer_state)
+    infer_state.max_kv_seq_len = 32768
     calls = []
     monkeypatch.setattr(
         decode_module, "gqa_token_decode_attention_flash_decoding", lambda **kwargs: calls.append(kwargs)
     )
-    state.decode_att(
-        q=torch.empty(2, 8, 64),
-        k=torch.empty(16, 2, 64),
-        v=torch.empty(16, 2, 64),
+    run_dense(
+        state,
+        infer_state,
+        torch.empty(2, 8, 64),
+        torch.empty(16, 2, 64),
+        torch.empty(16, 2, 64),
         alloc_func=lambda shape, dtype: torch.empty(shape, dtype=dtype),
     )
     assert calls[0]["max_len_in_batch"] == 8193
@@ -258,12 +270,14 @@ def test_autotune_rebuilds_once_and_graph_uses_original_inputs(tmp_path, monkeyp
 
     decode()
     torch.cuda.synchronize()
+    eager_output = output.clone()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         decode()
     graph.replay()
     torch.cuda.synchronize()
     torch.testing.assert_close(output.float(), reference, atol=2e-3, rtol=2e-2)
+    torch.testing.assert_close(output, eager_output, atol=0, rtol=0)
     assert rebuild_count == 1 and benchmark_count == 3
     for name, value in snapshots.items():
         if name not in ["mid_out", "mid_out_logsumexp"]:

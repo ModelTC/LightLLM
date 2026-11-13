@@ -115,10 +115,6 @@ class TestMoeRouteInfoManager:
     def test_cuda_graph_replay_uses_copied_mem_indexes(self):
         _skip_without_cuda()
 
-        class _NoopDecodeState:
-            def copy_for_decode_cuda_graph(self, other):
-                return
-
         manager = MoeRouteInfoManager(
             num_moe_layers=1,
             topk=2,
@@ -126,7 +122,9 @@ class TestMoeRouteInfoManager:
         )
         manager.init_capture_buffer(kv_cache_size=256)
         graph_infer_state = InferStateInfo()
-        graph_infer_state.decode_att_state = _NoopDecodeState()
+        from unit_tests.common.attention.helpers import make_batch
+
+        graph_infer_state.attention.batch = make_batch(device="cuda")
         graph_infer_state.mem_index = torch.tensor([10, 11], device="cuda")
         moe_capture_callback = manager.get_moe_capture_callback(0, graph_infer_state.mem_index)
         topk_ids = torch.tensor([[1, 2], [3, 4]], device="cuda")
@@ -141,10 +139,14 @@ class TestMoeRouteInfoManager:
         np.testing.assert_array_equal(result[:, 0, :], topk_ids.cpu().numpy().astype(np.uint8))
 
         new_infer_state = InferStateInfo()
-        new_infer_state.decode_att_state = _NoopDecodeState()
+        from dataclasses import replace
+
+        new_infer_state.attention.batch = replace(graph_infer_state.attention.batch)
         new_infer_state.mem_index = torch.tensor([20, 21], device="cuda")
         new_topk_ids = torch.tensor([[5, 6], [7, 8]], device="cuda")
-        graph_infer_state.copy_for_cuda_graph(new_infer_state)
+        for target, source in graph_infer_state.graph_input_copies(new_infer_state):
+            target.copy_(source, non_blocking=True)
+        graph_infer_state.attention.plan_replay(new_infer_state.attention)
         topk_ids.copy_(new_topk_ids)
 
         graph.replay()

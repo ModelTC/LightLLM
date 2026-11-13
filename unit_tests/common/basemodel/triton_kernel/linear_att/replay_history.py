@@ -4,9 +4,9 @@ import torch
 import triton
 import triton.language as tl
 
+from lightllm.common.attention.backends._shared.linear.replayssm_cursor import advance_cursor
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
 
 
 def attach_replay_history(
@@ -107,7 +107,7 @@ def replay_layer(
     """按测试 state 的类型调用对应的 replay decode。"""
 
     if state.kda:
-        from lightllm.common.basemodel.attention.linear.replay_kda_decode import replay
+        from lightllm.common.attention.backends.kda.replay.decode import replay
 
         return replay(
             state_ssm=state.ssm_state[layer_idx],
@@ -133,7 +133,7 @@ def replay_layer(
             state_gate_lower_bound=state.gate_lower_bound,
             run_config=run_config,
         )
-    from lightllm.common.basemodel.attention.linear.replay_gdn_decode import replay
+    from lightllm.common.attention.backends.gdn.replay.decode import replay
 
     return replay(
         state=state,

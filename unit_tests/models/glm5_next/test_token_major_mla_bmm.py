@@ -20,10 +20,13 @@ def make_projection(layer, heads: int, inner: int, cols: int, dtype: torch.dtype
         layer.layer_num_ = 0
         layer.softmax_scale = inner ** -0.5
         layer.indexer = SimpleNamespace(_get_indices=lambda **kwargs: (None, None))
+        layer.prefill_attention = SimpleNamespace(
+            context=lambda session: None, forward=lambda session, inputs: inputs.query
+        )
         state = SimpleNamespace(
             att_state_role="main",
             att_state_manager=Mock(),
-            prefill_att_state=SimpleNamespace(prefill_att=lambda **kwargs: kwargs["q"]),
+            attention=object(),
         )
         weight = SimpleNamespace(k_b_proj_=projection)
 

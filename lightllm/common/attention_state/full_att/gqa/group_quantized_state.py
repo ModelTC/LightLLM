@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-from functools import lru_cache
-from typing import TYPE_CHECKING, List
 from dataclasses import dataclass
+from functools import lru_cache
 from math import prod
+from typing import TYPE_CHECKING, List
 
 import torch
 
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
-from ...utils import deepcopy_result, dtype_name
 from ...types import AxisMapping, TransferRegion
+from ...utils import deepcopy_result, dtype_name
 from ..base_state import FullAttentionState
-from .group_quantized_transfer import transfer_group_quantized_pages
 from ..dp_transfer import copy_group_quantized_tokens
+from .group_quantized_transfer import transfer_group_quantized_pages
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
@@ -80,6 +80,8 @@ class GroupQuantizedAttentionConfig:
 
 class GroupQuantizedFullAttentionState(FullAttentionState):
     """管理 INT4/INT8 KV 与逐 token 分组 scale，复制和传输始终覆盖二者。"""
+
+    storage_layout = ("gqa_group_quantized_token_head_dim", 1)
 
     # ========================================================================
     # 一、资源定义与初始化
@@ -149,6 +151,12 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
     def get_storage_layer_index(self, logical_layer_id: int) -> int:
         """按逻辑层号查询存储及配套字段的物理行；共享逻辑层返回同一下标。"""
         return self._logical_to_storage_layer[logical_layer_id]
+
+    def layer_resources(self, layer_id):
+        from lightllm.common.attention.api.inputs import DenseResources
+
+        (key, key_scale), (value, value_scale) = self.get_layer_view(layer_id)
+        return DenseResources(key, value, key_scale=key_scale, value_scale=value_scale)
 
     def get_layer_view(
         self, logical_layer_id: int

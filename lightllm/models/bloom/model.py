@@ -1,17 +1,18 @@
+from lightllm.common.attention.selection import BackendPolicy
 from typing import TYPE_CHECKING
-from lightllm.models.bloom.layer_infer.pre_layer_infer import BloomPreLayerInfer
+
+from lightllm.common.basemodel import InferStateInfo, TpPartBaseModel
 from lightllm.models.bloom.layer_infer.post_layer_infer import BloomPostLayerInfer
+from lightllm.models.bloom.layer_infer.pre_layer_infer import BloomPreLayerInfer
 from lightllm.models.bloom.layer_infer.transformer_layer_infer import BloomTransformerLayerInfer
 from lightllm.models.bloom.layer_weights.pre_and_post_layer_weight import BloomPreAndPostLayerWeight
 from lightllm.models.bloom.layer_weights.transformer_layer_weight import BloomTransformerLayerWeight
-from lightllm.common.basemodel import InferStateInfo, TpPartBaseModel
-from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
-
 
 if TYPE_CHECKING:
     from easydict import EasyDict
-    from lightllm.server.core.objs.start_args_type import StartArgs
+
     from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.server.core.objs.start_args_type import StartArgs
 
 
 class BloomTpPartModel(TpPartBaseModel):
@@ -75,7 +76,5 @@ class BloomTpPartModel(TpPartBaseModel):
         self.config["num_key_value_heads"] = self.config["num_attention_heads"]
         return
 
-    def _init_att_backend(self):
-        self.prefill_att_backend = TritonAttBackend(self)
-        self.decode_att_backend = TritonAttBackend(self)
-        return
+    def attention_policy(self, family, phase):
+        return BackendPolicy(allow=frozenset({"triton"}), prefer=("triton",))

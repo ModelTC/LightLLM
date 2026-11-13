@@ -23,10 +23,13 @@ or via pytest:
 """
 
 import math
+
 import pytest
 import torch
 
-from lightllm.common.basemodel.triton_kernel.att.prefill_att.context_attention_fwd_neo import context_attention_fwd_neo
+from lightllm.common.attention.backends.dense.triton.kernels.prefill.context_attention_fwd_neo import (
+    context_attention_fwd_neo,
+)
 
 
 def torch_reference_context_attention_neo(
