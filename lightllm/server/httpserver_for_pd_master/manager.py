@@ -635,7 +635,6 @@ class HttpServerManagerForPDMaster:
             group_request_id=group_request_id,
             needs_prefill_first_token=needs_prefill_first_token,
             ready_kv_len=decode_node_info.ready_kv_len,
-            prefer_prefill_first_token=sampling_params.output_top_logprobs > 0,
         )
 
         while True:
@@ -679,7 +678,6 @@ class HttpServerManagerForPDMaster:
         group_request_id: int,
         needs_prefill_first_token: bool,
         ready_kv_len: int,
-        prefer_prefill_first_token: bool = False,
     ) -> int:
         if not needs_prefill_first_token:
             return ready_kv_len
@@ -696,27 +694,16 @@ class HttpServerManagerForPDMaster:
             if not await req_status.can_read(self.req_id_to_out_inf):
                 continue
 
-            token_list = await req_status.pop_all_tokens()
-            start = len(new_tokens)
-            new_tokens.extend(token_list)
+            new_tokens.extend(await req_status.pop_all_tokens())
 
-            for index, token in enumerate(token_list, start):
+            for index, token in enumerate(new_tokens):
                 metadata = token[2]
                 if metadata.get("node_mode") == "prefill":
                     prompt_cache_len = metadata.get("prompt_cache_len", 0)
-                    if prefer_prefill_first_token:
-                        # P has the candidate distribution. Publish its token
-                        # before any D output buffered while waiting for it.
-                        new_tokens.insert(0, new_tokens.pop(index))
+                    # prefill 采样了这个首 token，放到已缓冲的 decode 输出前面再发布。
+                    new_tokens.insert(0, new_tokens.pop(index))
                     await req_status.put_tokens_to_front(new_tokens)
                     return prompt_cache_len
-                finish_status = token[3]
-                if prefer_prefill_first_token and (
-                    finish_status.is_error_finished()
-                    or (finish_status.is_finished_pd_decode_capacity() and metadata.get("count_output_tokens") == 1)
-                ):
-                    await req_status.put_tokens_to_front(new_tokens)
-                    return ready_kv_len
 
     async def _wait_to_token_package(
         self,
