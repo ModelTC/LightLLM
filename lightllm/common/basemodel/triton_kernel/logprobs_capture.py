@@ -72,39 +72,30 @@ def scatter_prompt_logprobs_to_cpu(
 @triton.jit
 def _output_logprobs_partial(
     logits,
-    sampled_ids,
     rows,
-    counts,
     candidates,
-    candidate_rows,
     stride_row: tl.constexpr,
     vocab_size: tl.constexpr,
     tiles: tl.constexpr,
-    CHECK_RANK: tl.constexpr,
     TOPK: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
+    # 词表按 1024 一段切开。每个程序处理一行中的一段，只保留这段里分数最高的 TOPK 个键。
     index = tl.program_id(0)
     tile = tl.program_id(1)
     row = tl.load(rows + index * 3).to(tl.int64)
     row_logits = logits + row * stride_row
     ids = tile * BLOCK + tl.arange(0, BLOCK)
     scores = tl.load(row_logits + ids, ids < vocab_size, -float("inf")).to(tl.float32)
-    if CHECK_RANK:
-        sampled = tl.load(row_logits + tl.load(sampled_ids + row))
-        # A tie at the 20th score still counts as being in the top 20.
-        above = (scores > sampled) | (scores != scores)
-        tl.store(counts + index * tiles + tile, tl.sum((above & (ids < vocab_size)).to(tl.int32), 0))
-    if TOPK > 0:
-        if index < candidate_rows:
-            # Sort by float score, using the smaller token ID to break ties.
-            bits = scores.to(tl.int32, bitcast=True)
-            ordered = bits ^ tl.where(bits < 0, 0x7FFFFFFF, 0)
-            ordered = tl.where(scores != scores, 0x7FFFFFFF, ordered)
-            keys = (ordered.to(tl.int64) << 32) | (0xFFFFFFFF - ids.to(tl.int64))
-            keys = tl.where(ids < vocab_size, keys, -0x8000000000000000)
-            keys = tl.topk(keys, TOPK)
-            tl.store(candidates + (index * tiles + tile) * TOPK + tl.arange(0, TOPK), keys)
+    # tl.topk 只能比较整数。高 32 位放可排序的分数，低 32 位放反转后的 token id。
+    # 取最大的键时，分数高的在前；分数相同则 id 更小的在前。词表外的位置写成最小整数。
+    bits = scores.to(tl.int32, bitcast=True)
+    ordered = bits ^ tl.where(bits < 0, 0x7FFFFFFF, 0)
+    ordered = tl.where(scores != scores, 0x7FFFFFFF, ordered)
+    keys = (ordered.to(tl.int64) << 32) | (0xFFFFFFFF - ids.to(tl.int64))
+    keys = tl.where(ids < vocab_size, keys, -0x8000000000000000)
+    keys = tl.topk(keys, TOPK)
+    tl.store(candidates + (index * tiles + tile) * TOPK + tl.arange(0, TOPK), keys)
 
 
 @triton.jit
@@ -113,51 +104,40 @@ def _output_logprobs_finish(
     sampled_ids,
     sampled_logprobs,
     rows,
-    counts,
     candidates,
-    output,
-    dense_top_ids,
-    candidate_rows,
+    token_ids,
+    logprobs,
     stride_row: tl.constexpr,
     vocab_size: tl.constexpr,
     tiles: tl.constexpr,
-    CHECK_RANK: tl.constexpr,
     TOPK: tl.constexpr,
     TILE_BLOCK: tl.constexpr,
-    DENSE_TOPK: tl.constexpr,
 ):
+    # 每个程序处理一行：合并各段的局部 top-k，按该行请求的 K 写出结果。
     index = tl.program_id(0)
     row = tl.load(rows + index * 3).to(tl.int64)
     row_logits = logits + row * stride_row
     sampled = tl.load(row_logits + tl.load(sampled_ids + row))
     sampled_logprob = tl.load(sampled_logprobs + row)
-    if CHECK_RANK:
-        if DENSE_TOPK:
-            cutoff_id = tl.load(dense_top_ids + index * DENSE_TOPK + DENSE_TOPK - 1)
-            in_top20 = sampled >= tl.load(row_logits + cutoff_id)
-        else:
-            tile = tl.arange(0, TILE_BLOCK)
-            above = tl.load(counts + index * tiles + tile, tile < tiles, 0)
-            in_top20 = tl.sum(above, 0) < 20
-        in_top20 = in_top20 & (tl.abs(sampled) < float("inf"))
-        tl.store(sampled_logprobs + row, -9999.0, mask=~in_top20)
-    if TOPK > 0:
-        if index < candidate_rows:
-            width = tl.load(rows + index * 3 + 1)
-            offset = tl.load(rows + index * 3 + 2)
-            columns = tl.arange(0, TOPK)
-            if DENSE_TOPK:
-                ids = tl.load(dense_top_ids + index * DENSE_TOPK + columns, columns < DENSE_TOPK, vocab_size)
-            else:
-                positions = tl.arange(0, TILE_BLOCK * TOPK)
-                keys = tl.load(
-                    candidates + index * tiles * TOPK + positions, positions < tiles * TOPK, -0x8000000000000000
-                )
-                best = tl.topk(keys, TOPK)
-                ids = 0xFFFFFFFF - (best & 0xFFFFFFFF)
-            scores = tl.load(row_logits + ids, (columns < width) & (ids < vocab_size), -float("inf"))
-            tl.store(output + offset + columns, tl.where(tl.abs(scores) < float("inf"), ids, -1), columns < width)
-            tl.store(output + offset + width + columns, scores - sampled + sampled_logprob, columns < width)
+    width = tl.load(rows + index * 3 + 1)
+    offset = tl.load(rows + index * 3 + 2)
+    columns = tl.arange(0, TOPK)
+    positions = tl.arange(0, TILE_BLOCK * TOPK)
+    keys = tl.load(candidates + index * tiles * TOPK + positions, positions < tiles * TOPK, -0x8000000000000000)
+    best = tl.topk(keys, TOPK)
+    # 键的低 32 位是反转后的 token id，这里还原。结果仍按分数从高到低排列。
+    ids = 0xFFFFFFFF - (best & 0xFFFFFFFF)
+    scores = tl.load(row_logits + ids, (columns < width) & (ids < vocab_size), -float("inf"))
+    stored_ids = tl.where(tl.abs(scores) < float("inf"), ids, -1).to(tl.int64)
+    # 候选和采样 token 的 logsumexp 相同，用采样 logprob 平移即可，不必再做整词表 softmax。
+    row_logprobs = scores - sampled + sampled_logprob
+    tl.store(token_ids + offset + columns, stored_ids, columns < width)
+    tl.store(logprobs + offset + columns, row_logprobs, columns < width)
+    # 只在该行实际请求的 K 个候选里取最小值。小于它才覆盖；同分仍算在 top-k 内。
+    valid = (columns < width) & (tl.abs(scores) < float("inf"))
+    min_logprob = tl.min(tl.where(valid, row_logprobs, float("inf")))
+    outside = (sampled_logprob < min_logprob) | ~(tl.abs(sampled) < float("inf"))
+    tl.store(sampled_logprobs + row, -9999.0, mask=outside)
 
 
 def capture_output_logprobs(
@@ -165,64 +145,47 @@ def capture_output_logprobs(
     sampled_ids: torch.Tensor,
     sampled_logprobs: torch.Tensor,
     rows: torch.Tensor,
-    candidate_rows: int,
     max_topk: int,
-    output_size: int,
-    check_rank: bool,
+    output_count: int,
 ):
-    """Apply the sampled-token cutoff and write each row's requested IDs and scores.
+    """返回每行的 top-k token id 和 logprob。
 
-    Rows contain (logit row, requested K, output offset), with positive K first.
-    Each such row occupies exactly 2*K FP32 entries in the output.
+    rows 每项是 (logits 行号, K, 写入起点)。写入起点按 token 个数累加，
+    第 r 行的结果是两个数组的 [起点, 起点 + K)。采样 logprob 小于该行
+    top-k 的最小值时写成 -9999。
     """
     block = 1024
+    # 先按词表分段留下局部 top-k，再逐行合并成最终候选。
     tiles = triton.cdiv(logits.shape[1], block)
-    topk = triton.next_power_of_2(max_topk) if max_topk else 0
-    dense_top_ids = None
-    dense_topk = 0
-    counts = None
-    candidates = None
-    if candidate_rows == logits.shape[0] and topk > 8:
-        # Large dense selections use torch.topk directly on the original rows.
-        # This avoids allocating the tile candidates when every row needs them.
-        dense_topk = min(20 if check_rank else max_topk, logits.shape[1])
-        dense_top_ids = logits.topk(dense_topk, dim=-1).indices
-    else:
-        counts = rows.new_empty((rows.shape[0], tiles)) if check_rank else None
-        candidates = logits.new_empty((candidate_rows, tiles, topk), dtype=torch.int64) if topk else None
-        _output_logprobs_partial[(rows.shape[0], tiles)](
-            logits,
-            sampled_ids,
-            rows,
-            counts,
-            candidates,
-            candidate_rows,
-            logits.stride(0),
-            logits.shape[1],
-            tiles,
-            check_rank,
-            topk,
-            block,
-            num_warps=4,
-        )
-    output = logits.new_empty((output_size,), dtype=torch.float32) if topk else None
+    # Triton 的 topk 块长必须是 2 的幂。请求的 K 最大 20，这里向上取整；真正写入仍按每行的 K 截断。
+    topk = triton.next_power_of_2(max_topk)
+    candidates = logits.new_empty((rows.shape[0], tiles, topk), dtype=torch.int64)
+    _output_logprobs_partial[(rows.shape[0], tiles)](
+        logits,
+        rows,
+        candidates,
+        logits.stride(0),
+        logits.shape[1],
+        tiles,
+        topk,
+        block,
+        num_warps=4,
+    )
+    token_ids = torch.empty((output_count,), dtype=torch.int64, device=logits.device)
+    logprobs = torch.empty((output_count,), dtype=torch.float32, device=logits.device)
     _output_logprobs_finish[(rows.shape[0],)](
         logits,
         sampled_ids,
         sampled_logprobs,
         rows,
-        counts,
         candidates,
-        output,
-        dense_top_ids,
-        candidate_rows,
+        token_ids,
+        logprobs,
         logits.stride(0),
         logits.shape[1],
         tiles,
-        check_rank,
         topk,
         triton.next_power_of_2(tiles),
-        dense_topk,
         num_warps=4,
     )
-    return output
+    return token_ids, logprobs

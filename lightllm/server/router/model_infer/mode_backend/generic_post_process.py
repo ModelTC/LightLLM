@@ -1,5 +1,6 @@
 import torch
-from typing import List, NamedTuple, Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
@@ -11,12 +12,19 @@ from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
 
 
-class OutputLogprobs(NamedTuple):
-    """Sampled scores in batch order and flat candidate IDs and scores per row."""
+@dataclass
+class TopkLogprobRow:
+    """一行 top-k 候选。token_ids 与 logprobs 等长，按分数从高到低对齐。
 
-    sampled: torch.Tensor
-    candidates: torch.Tensor
-    offsets: List[int]
+    batch_index 是该行在本次采样 logits 中的下标。返回列表与 logits 行对齐，不需要候选的位置是 None。
+    """
+
+    batch_index: int
+    token_ids: torch.Tensor
+    logprobs: torch.Tensor
+
+
+TopkLogprobRows = List[Optional[TopkLogprobRow]]
 
 
 def sample(
@@ -41,8 +49,6 @@ def sample(
         skip_top_k,
         skip_top_p,
         exist_req_use_random_seed,
-        output_logprob_rows,
-        max_output_top_logprobs,
         has_output_constraints,
     ) = _get_post_sample_tensors(reqs, sampling_params_manager, has_output)
     eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
@@ -119,47 +125,74 @@ def sample(
                 reqs, probs, b_top_ps, b_top_ks, exist_req_use_random_seed
             )
 
-    if not output_logprob_rows or (is_all_greedy and max_output_top_logprobs == 0):
-        return next_token_ids, next_token_logprobs
+    output_topk_logprobs: TopkLogprobRows = [None] * len(reqs)
+    topk_logprobs_rows, max_topk = _collect_topk_logprobs_rows(reqs, has_output)
+    if topk_logprobs_rows:
+        next_token_logprobs, output_topk_logprobs = _capture_topk_logprobs(
+            logits,
+            next_token_ids,
+            next_token_logprobs,
+            topk_logprobs_rows,
+            max_topk,
+        )
+    return next_token_ids, next_token_logprobs, output_topk_logprobs
 
-    candidate_rows = []
-    rank_only_rows = []
-    offsets = [0] * (logits.shape[0] + 1) if max_output_top_logprobs else None
-    offset = 0
-    for row, topk in output_logprob_rows:
-        if topk > 0:
-            candidate_rows.append((row, topk, offset))
-            # 该请求存 [K 个 token ID, K 个 logprob]，所以下一个起点向后移 2*K。
-            offset += 2 * topk
-            # 暂存这一行的数据长度；后面再累加成各行的边界位置。
-            offsets[row + 1] = 2 * topk
-        elif not is_all_greedy:
-            # K=0 不返回候选，但随机采样仍需检查采样 token 是否在 top-20，超出则用 -9999。
-            rank_only_rows.append((row, 0, 0))
 
-    row_count = len(candidate_rows) + len(rank_only_rows)
-    # 在 CPU 锁页内存中准备 [row_count, 3] 的表，每行放 (logits 行号, K, 候选存储起点)。
-    rows = g_pin_mem_manager.alloc_pin_tensor("output_logprob_rows", 3 * row_count, torch.int32).view(-1, 3)
-    # 需要候选的行放前面，GPU 用 len(candidate_rows) 区分两类任务。
-    rows.numpy()[:] = candidate_rows + rank_only_rows
-    # 有候选时 candidates 是一维 GPU tensor，长度为各请求的 2*K 之和；采样概率会按需原地更新。
-    candidates = capture_output_logprobs(
+def _collect_topk_logprobs_rows(reqs: List[InferReq], has_output=None) -> Tuple[List[Tuple[int, int]], int]:
+    """Rows that asked for candidate topk logprobs, as (batch_index, topk), plus the maximum topk.
+
+    topk == 0 only needs the sampled token logprob and is omitted. batch_index is the position
+    in the original reqs and logits. max_topk is 0 when the list is empty.
+    """
+    rows = []
+    max_topk = 0
+    for batch_index, req_obj in enumerate(reqs):
+        topk = req_obj.sampling_param.shm_param.output_top_logprobs
+        if topk > 0 and (has_output is None or has_output[batch_index]):
+            rows.append((batch_index, topk))
+            max_topk = max(max_topk, topk)
+    return rows, max_topk
+
+
+def _capture_topk_logprobs(
+    logits: torch.Tensor,
+    next_token_ids: torch.Tensor,
+    next_token_logprobs: torch.Tensor,
+    topk_logprobs_rows: List[Tuple[int, int]],
+    max_topk: int,
+) -> Tuple[torch.Tensor, TopkLogprobRows]:
+    """Capture candidate ids and logprobs for rows with topk > 0.
+
+    A sampled logprob below that row's minimum top-k logprob is replaced with -9999.
+    """
+    capture_rows = []
+    output_count = 0
+    for batch_index, topk in topk_logprobs_rows:
+        capture_rows.append((batch_index, topk, output_count))
+        output_count += topk
+
+    rows = g_pin_mem_manager.alloc_pin_tensor("output_logprob_rows", 3 * len(capture_rows), torch.int32).view(-1, 3)
+    rows.numpy()[:] = capture_rows
+    token_ids, logprobs = capture_output_logprobs(
         logits,
         next_token_ids,
         next_token_logprobs,
         rows.to(device=logits.device, non_blocking=True),
-        len(candidate_rows),
-        max_output_top_logprobs,
-        offset,
-        check_rank=not is_all_greedy,
+        max_topk,
+        output_count,
     )
-    if offsets is None:
-        return next_token_ids, next_token_logprobs
-    # CPU 上累加各行长度：例如 [0, 4, 0, 6] 变成边界位置 [0, 4, 4, 10]。
-    for row in range(logits.shape[0]):
-        offsets[row + 1] += offsets[row]
-    # 返回采样概率、候选数据和边界表；第 r 行的候选是 candidates[offsets[r]:offsets[r+1]]。
-    return next_token_ids, OutputLogprobs(next_token_logprobs, candidates, offsets)
+    token_ids_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(key="output_topk_token_ids", gpu_tensor=token_ids)
+    logprobs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(key="output_topk_logprobs", gpu_tensor=logprobs)
+    topk_rows: TopkLogprobRows = [None] * logits.shape[0]
+    offset = 0
+    for batch_index, topk in topk_logprobs_rows:
+        topk_rows[batch_index] = TopkLogprobRow(
+            batch_index=batch_index,
+            token_ids=token_ids_cpu[offset : offset + topk],
+            logprobs=logprobs_cpu[offset : offset + topk],
+        )
+        offset += topk
+    return next_token_logprobs, topk_rows
 
 
 def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor):
@@ -233,8 +266,6 @@ def _get_post_sample_tensors(reqs: List[InferReq], sampling_params_manager, has_
     skip_top_p = True
     exist_req_use_random_seed = False
     has_output_constraints = False
-    output_logprob_rows = []
-    max_output_top_logprobs = 0
     # 仅在服务启用 XGrammar 输出约束时，按请求分组并为 MTP 验证位置准备语法掩码。
     if sampling_params_manager.req_to_bitmask_enabled is not None:
         request_groups = _group_contiguous_requests(reqs, has_output)
@@ -253,9 +284,6 @@ def _get_post_sample_tensors(reqs: List[InferReq], sampling_params_manager, has_
     for i, req_obj in enumerate(reqs):
         sample_param = req_obj.sampling_param
         shm_param = sample_param.shm_param
-        if shm_param.output_top_logprobs >= 0 and (has_output is None or has_output[i]):
-            output_logprob_rows.append((i, shm_param.output_top_logprobs))
-            max_output_top_logprobs = max(max_output_top_logprobs, shm_param.output_top_logprobs)
         exponential_decay_length_penalty = shm_param.exponential_decay_length_penalty.to_tuple()
         out_token_len = req_obj.get_cur_total_len() - req_obj.shm_req.input_len
         length_penalty_param.append(max(out_token_len - exponential_decay_length_penalty[0], 0))
@@ -311,8 +339,6 @@ def _get_post_sample_tensors(reqs: List[InferReq], sampling_params_manager, has_
         skip_top_k,
         skip_top_p,
         exist_req_use_random_seed,
-        output_logprob_rows,
-        max_output_top_logprobs,
         has_output_constraints,
     )
 

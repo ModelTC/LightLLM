@@ -61,7 +61,7 @@ class DiversehBackend(ChunkedPrefillBackend):
             logits = logits[batch_idx]
             b_mtp_index = model_input.b_mtp_index[batch_idx]
 
-            next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+            next_token_ids, next_token_logprobs, output_topk_logprobs = sample(logits, run_reqs, self.eos_id)
             next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
 
             scatter_token(
@@ -98,6 +98,7 @@ class DiversehBackend(ChunkedPrefillBackend):
             next_token_ids=next_token_ids_cpu,
             next_token_logprobs=next_token_logprobs_cpu,
             next_token_ranks=next_token_ranks_cpu,
+            output_topk_logprobs=output_topk_logprobs,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )

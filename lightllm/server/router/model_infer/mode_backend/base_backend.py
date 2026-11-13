@@ -40,7 +40,7 @@ from lightllm.distributed.communication_op import (
 )
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import OutputLogprobs, sample
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import TopkLogprobRows, sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
 from lightllm.server.multi_level_kv_cache import (
@@ -396,7 +396,7 @@ class ModeBackend:
     def _async_copy_next_token_infos_to_pin_mem(
         self,
         next_token_ids: torch.Tensor,
-        next_token_logprobs: Union[torch.Tensor, OutputLogprobs],
+        next_token_logprobs: torch.Tensor,
         next_token_ranks: torch.Tensor,
     ):
         """
@@ -407,17 +407,10 @@ class ModeBackend:
             key="next_token_ids",
             gpu_tensor=next_token_ids,
         )
-        output_logprobs = next_token_logprobs if isinstance(next_token_logprobs, OutputLogprobs) else None
         next_token_logprobs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
             key="next_token_logprobs",
-            gpu_tensor=output_logprobs.sampled if output_logprobs is not None else next_token_logprobs,
+            gpu_tensor=next_token_logprobs,
         )
-        if output_logprobs is not None:
-            candidates_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-                key="output_logprob_candidates",
-                gpu_tensor=output_logprobs.candidates,
-            )
-            next_token_logprobs_cpu = OutputLogprobs(next_token_logprobs_cpu, candidates_cpu, output_logprobs.offsets)
         # 仅 enable_rl 需要真实 rank；否则跳过 D2H，返回常量 -1。
         if self.args.enable_rl:
             next_token_ranks_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
@@ -919,44 +912,34 @@ class ModeBackend:
         self,
         run_reqs: List[InferReq],
         next_token_ids: torch.Tensor,
-        next_token_logprobs: Union[torch.Tensor, OutputLogprobs],
+        next_token_logprobs: torch.Tensor,
         next_token_ranks: torch.Tensor,
+        output_topk_logprobs: TopkLogprobRows,
         run_reqs_update_packs: List[InferReqUpdatePack],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
         pd_prefill_chunked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
-        logprobs_row_mask: Optional[torch.Tensor] = None,
     ):
         """
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
         约束输出等模式，设置自己请求内部的状态机的状态，并添加额外的停止判定条件等。
         """
         next_token_ids = next_token_ids.tolist()
-        output_logprobs = next_token_logprobs if isinstance(next_token_logprobs, OutputLogprobs) else None
-        if output_logprobs is not None:
-            next_token_logprobs = output_logprobs.sampled
-            candidates = output_logprobs.candidates.tolist()
-            offsets = output_logprobs.offsets
-            candidate_ranges = zip(offsets, offsets[1:])
-            if logprobs_row_mask is not None:
-                candidate_ranges = (
-                    bounds for bounds, keep in zip(candidate_ranges, logprobs_row_mask.tolist()) if keep
-                )
-        if logprobs_row_mask is not None:
-            next_token_logprobs = next_token_logprobs[logprobs_row_mask]
         next_token_logprobs = next_token_logprobs.tolist()
         next_token_ranks = next_token_ranks.tolist()
 
-        for req_obj, next_token_id, next_token_logprob, next_token_rank, pack in zip(
-            run_reqs, next_token_ids, next_token_logprobs, next_token_ranks, run_reqs_update_packs
+        for req_obj, next_token_id, next_token_logprob, next_token_rank, topk_row, pack in zip(
+            run_reqs,
+            next_token_ids,
+            next_token_logprobs,
+            next_token_ranks,
+            output_topk_logprobs,
+            run_reqs_update_packs,
         ):
             req_obj: InferReq = req_obj
             pack: InferReqUpdatePack = pack
             output_top_logprobs = None
-            if output_logprobs is not None:
-                start, end = next(candidate_ranges)
-                if start < end:
-                    middle = (start + end) // 2
-                    output_top_logprobs = candidates[start:middle], candidates[middle:end]
+            if topk_row is not None:
+                output_top_logprobs = (topk_row.token_ids.tolist(), topk_row.logprobs.tolist())
             pack.handle(
                 next_token_id=next_token_id,
                 next_token_logprob=next_token_logprob,
@@ -1010,7 +993,7 @@ class ModeBackend:
         is_prefill: bool,
         b_prefill_has_output_cpu: torch.Tensor = None,
     ):
-        next_token_ids, next_token_logprobs = sample(
+        next_token_ids, next_token_logprobs, output_topk_logprobs = sample(
             logits, run_reqs, self.eos_id, has_output=b_prefill_has_output_cpu if is_prefill else None
         )
         next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
@@ -1041,7 +1024,7 @@ class ModeBackend:
             next_token_logprobs,
             next_token_ranks,
         )
-        return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu
+        return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu, output_topk_logprobs
 
     def _dp_all_gather_prefill_and_decode_req_num(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
