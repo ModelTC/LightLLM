@@ -1,6 +1,7 @@
 import asyncio
 import anyio
 import pickle
+from array import array
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,7 +10,12 @@ import pytest
 from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager, ReqStatus
 from lightllm.server.pd_io_struct import NodeRole, ObjType
-from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken, ServerBusyError
+from lightllm.utils.error_utils import (
+    ClientDisconnected,
+    InvalidRequestError,
+    PDPrefillNodeStopGenToken,
+    ServerBusyError,
+)
 
 
 class _ValueMark:
@@ -338,6 +344,16 @@ def test_prefill_full_cache_hit_never_enters_running_request_count():
         websocket.send.assert_awaited_once()
 
     asyncio.run(run())
+
+
+def test_decode_reuses_prefill_int64_prompt_and_validates_other_token_inputs():
+    manager = HttpServerManager.__new__(HttpServerManager)
+    manager.pd_mode = NodeRole.D
+    manager.enable_multimodal = False
+    prompt = array("q", [10, 2 ** 32, 12])
+    assert asyncio.run(manager._encode(prompt, None, None)) is prompt
+    with pytest.raises(InvalidRequestError, match="list of token IDs"):
+        asyncio.run(manager._encode(array("d", [10.5]), None, None))
 
 
 def test_prefill_upload_preserves_int64_multimodal_prompt_ids():

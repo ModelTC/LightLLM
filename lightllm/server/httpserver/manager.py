@@ -685,6 +685,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 )
             return prompt_ids
 
+        # P uploads encoded prompts as int64 arrays, including multimodal token IDs.
+        if self.pd_mode.is_D() and isinstance(prompt, array) and prompt.typecode == "q":
+            return prompt
+
         # 这里的校验对多模态不是很充分, to do
         if all(isinstance(e, int) for e in prompt):
             if not self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
