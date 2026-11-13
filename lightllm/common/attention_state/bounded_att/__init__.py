@@ -8,6 +8,8 @@ from .kda.kda_state import KDAState
 from .base_state import BoundedAttentionState
 
 from .sliding_window.fp8_e8m0_swa_state import FP8E8M0SlidingWindowConfig, FP8E8M0SlidingWindowState
+from .sliding_window.packed_swa_state import PackedSlidingWindowConfig, PackedSlidingWindowState
+from .sliding_window.nvfp4_swa_state import NVFP4SlidingWindowConfig, NVFP4SlidingWindowState
 from .window_compressor.window_compressor_state import WindowCompressorStateConfig, WindowCompressorState
 from .sliding_window.create_sliding_window_state import create_sliding_window_state
 from .window_compressor.create_window_compressor_state import create_window_compressor_state
@@ -21,6 +23,10 @@ __all__ = [
     "KDAState",
     "KDAPagesPool",
     "create_kda_state",
+    "PackedSlidingWindowConfig",
+    "PackedSlidingWindowState",
+    "NVFP4SlidingWindowConfig",
+    "NVFP4SlidingWindowState",
     "FP8E8M0SlidingWindowConfig",
     "FP8E8M0SlidingWindowState",
     "create_sliding_window_state",

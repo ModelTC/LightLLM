@@ -25,7 +25,12 @@ FA3 prefill 和 FlashInfer decode；原生 FlashInfer 路径支持 head_dim 128/
 
 当前支持 head_dim 为 16、32、64、128、256 的 Llama/Qwen GQA/MHA/MQA，
 以及 Qwen 混合模型的 full-attention 层。支持 CUDA Graph、前缀缓存、滑动窗口
-和 MTP block decode；不支持 ALiBi、attention sink 和 MLA/DSA。
+和 MTP block decode；这些通用 GQA 路径不支持 ALiBi 和 attention sink。
+普通 DeepSeek/GLM MLA、GLM-5.3 Flash 稀疏 MLA 和 DeepSeek-V4 也支持 NVFP4，
+具体启动方式和硬件要求见 :doc:`fp8_kv_quantization`。
+DeepSeek-V4 保留 BF16 RoPE、FP8 indexer 和 attention sink；由于其压缩历史、
+滑窗及 indexer 的布局不同，上述 3.56 倍容量比例不适用于 V4 整体 KV 存储。
+DeepSeek-V3.2 的稀疏 MLA 尚未接入 NVFP4。
 这是 LightLLM 中的配方实现，不代表 vLLM 引擎本身的执行性能。
 
 精度验证使用 Qwen2.5-14B-Instruct、H200 TP2、MTP=0，完整 GSM8K 1,319 题。

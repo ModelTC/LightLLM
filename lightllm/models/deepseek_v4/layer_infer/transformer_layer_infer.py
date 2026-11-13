@@ -355,7 +355,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         state = infer_state.swa_state
         att_state = infer_state.prefill_att_state if infer_state.is_prefill else infer_state.decode_att_state
         swa, _ = att_state.backend.get_att_input_params(infer_state, self.layer_num_)
-        # 一次完成 RMSNorm、RoPE、FP8 打包和 SWA 写入。
+        # 一次完成 RMSNorm、RoPE、所选编码打包和 SWA 写入。
         fused_kv_norm_rope_to_swa(
             kv=kv,
             kv_norm_weight=layer_weight.kv_norm_.weight,
@@ -366,6 +366,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             swa_runtime_write_slots=infer_state.dsv4_swa_runtime_write_slots,
             swa_kv_buffer=swa,
             swa_page_token_num=state.config.page_token_size,
+            kv_format=state.config.kv_format,
             req_to_swa=state.get_layer_view(logical_layer_id=self.layer_num_),
         )
 
