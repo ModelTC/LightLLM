@@ -78,7 +78,6 @@ class TestDetokenization(unittest.TestCase):
 
         self.assertEqual(pieces[:2], ["", ""])
         self.assertEqual("".join(pieces), "你 world")
-        self.assertEqual(decode_req.prompt_ids, prompt_ids)
         self.assertEqual(decode_req.output_ids, output_ids)
         np.testing.assert_array_equal(decode_req.req.shm_prompt_ids.arr, original_tokens)
         self.assertEqual(decode_req.read_offset, len(original_tokens))

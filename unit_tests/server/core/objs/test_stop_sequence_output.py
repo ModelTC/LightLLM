@@ -110,6 +110,7 @@ async def _read_http_tokens(manager, req):
     status = SimpleNamespace(
         group_req_objs=SimpleNamespace(shm_req_objs=[req]),
         out_token_info_list=[],
+        return_output_logprobs=True,
         lock=asyncio.Lock(),
         event=asyncio.Event(),
     )

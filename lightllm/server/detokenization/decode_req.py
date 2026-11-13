@@ -12,14 +12,11 @@ class DecodeReq:
     ) -> None:
         self.request_id = req.request_id
         self.group_req_id = req.group_req_id
-        self.prompt_ids = req.shm_prompt_ids.arr[0 : req.input_len].tolist()
         self.output_ids = []
-        self.prefix_offset = max(len(self.prompt_ids) - LIGHTLLM_DECODE_PREFIX_LENGTH, 0)
-
-        self.read_offset = len(self.prompt_ids)
-
         self.req = req
-        self.input_len = self.req.input_len
+        self.input_len = req.input_len
+        self.prefix_offset = max(self.input_len - LIGHTLLM_DECODE_PREFIX_LENGTH, 0)
+        self.read_offset = self.input_len
 
     def need_detoken(self):
         return len(self.output_ids) < self.req.candetoken_out_len
