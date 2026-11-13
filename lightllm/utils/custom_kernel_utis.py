@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 from functools import lru_cache
@@ -123,6 +124,27 @@ def tensor_copy_3dim(dest_tensor: torch.Tensor, source_tensor: torch.Tensor):
         num_stages=3,
     )
     return
+
+
+@triton.jit
+def _pad_decode_metadata_kernel(inputs, strides, outputs, values, num_rows, padded_rows, BLOCK: tl.constexpr):
+    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    for i in tl.static_range(len(inputs)):
+        value = tl.load(inputs[i] + row * strides[i], row < num_rows, other=values[i])
+        tl.store(outputs[i] + row, value, row < padded_rows)
+
+
+def pad_decode_metadata(inputs, values, padded_rows: int):
+    num_rows = inputs[0].numel()
+    if not inputs[0].is_cuda:
+        return tuple(F.pad(tensor, (0, padded_rows - num_rows), value=value) for tensor, value in zip(inputs, values))
+
+    outputs = tuple(tensor.new_empty((padded_rows,)) for tensor in inputs)
+    block = 64
+    _pad_decode_metadata_kernel[(triton.cdiv(padded_rows, block),)](
+        inputs, tuple(tensor.stride(0) for tensor in inputs), outputs, values, num_rows, padded_rows, block, num_warps=2
+    )
+    return outputs
 
 
 def pad2dim_tensor_to_new_batch(input: torch.Tensor, new_batch_size: int):

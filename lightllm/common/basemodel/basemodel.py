@@ -42,7 +42,7 @@ from lightllm.common.basemodel.hidden_collector import (
     NoopHiddenCollector,
 )
 from lightllm.common.basemodel.mtp_manager import MtpManager
-from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
+from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch, pad_decode_metadata
 from lightllm.utils.envs_utils import set_model_init_status
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 from lightllm.utils.infer_utils import post_empty_cache
@@ -516,28 +516,30 @@ class TpPartBaseModel:
         new_model_input.batch_size = new_batch_size
         new_model_input.total_token_num += padded_batch_size * 2
         new_model_input.max_kv_seq_len = max(2, model_input.max_kv_seq_len)
-        new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_batch_size), mode="constant", value=1)
-        new_model_input.b_req_idx = F.pad(
-            new_model_input.b_req_idx, (0, padded_batch_size), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
+        (
+            new_model_input.input_ids,
+            new_model_input.b_req_idx,
+            new_model_input.b_mtp_index,
+            new_model_input.b_seq_len,
+            new_model_input.b_position_delta,
+            new_model_input.b_shared_seq_len,
+            new_model_input.b_shared_radix_node_id,
+        ) = pad_decode_metadata(
+            (
+                model_input.input_ids,
+                model_input.b_req_idx,
+                model_input.b_mtp_index,
+                model_input.b_seq_len,
+                model_input.b_position_delta,
+                model_input.b_shared_seq_len,
+                model_input.b_shared_radix_node_id,
+            ),
+            (1, self.req_manager.HOLD_REQUEST_ID, 0, 2, 0, 0, -1),
+            new_batch_size,
         )
-        new_model_input.b_mtp_index = F.pad(
-            new_model_input.b_mtp_index, (0, padded_batch_size), mode="constant", value=0
-        )
-        new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, padded_batch_size), mode="constant", value=2)
-        if new_model_input.b_position_delta is not None:
-            new_model_input.b_position_delta = F.pad(
-                new_model_input.b_position_delta, (0, padded_batch_size), mode="constant", value=0
-            )
         new_model_input.multimodal_params = new_model_input.multimodal_params + [
             {"images": [], "audios": []} for _ in range(padded_batch_size)
         ]
-
-        new_model_input.b_shared_seq_len = F.pad(
-            new_model_input.b_shared_seq_len, (0, padded_batch_size), mode="constant", value=0
-        )
-        new_model_input.b_shared_radix_node_id = F.pad(
-            new_model_input.b_shared_radix_node_id, (0, padded_batch_size), mode="constant", value=-1
-        )
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
         if new_model_input.mtp_draft_input_hiddens is not None:
