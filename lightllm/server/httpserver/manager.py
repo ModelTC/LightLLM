@@ -344,7 +344,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         # 用于等待 pd_master 下发的交换信息
         pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
-
         start_time = time.time()
         # 在请求登记、编码和 PD 握手前获取语法；缓存未命中时先完成编译，避免后续流程等待或校验失败。
         compiled_grammar = await sampling_params.get_compiled_grammar(self.output_grammar_compiler)
@@ -756,7 +755,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
-
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
                 self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
@@ -799,7 +797,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         req_status: "ReqStatus",
         request: Request,
     ):
-
         from lightllm.server.detokenization.decode_req import LIGHTLLM_DECODE_PREFIX_LENGTH
 
         event = req_status.event

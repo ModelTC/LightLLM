@@ -384,6 +384,28 @@ async def test_tool_logprobs_only_contain_message_content(chat_response, stream,
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("stream", [False, True])
+async def test_mistral_tool_parser_keeps_message_scores(chat_response, stream):
+    pieces = [
+        "Checking.",
+        "[TOOL_CALLS] [",
+        '{"name":"weather","arguments":{"city":"Paris"}}',
+        "]",
+    ]
+    tokenizer = make_tokenizer(pieces, decoders.Fuse())
+    tools = [{"type": "function", "function": {"name": "weather", "parameters": {"type": "object"}}}]
+    text, _, content, _ = await chat_response(
+        tokenizer,
+        list(enumerate(pieces)),
+        stream=stream,
+        tools=tools,
+        tool_parser="mistral",
+    )
+    assert text == "Checking."
+    assert [entry["token"] for entry in content] == ["Checking."]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("separate_reasoning", [False, True])
 @pytest.mark.parametrize("split_header", [False, True])
 async def test_harmony_headers_are_not_visible_logprobs(chat_response, stream, separate_reasoning, split_header):
@@ -448,14 +470,47 @@ async def test_harmony_repeated_header_words_are_real_content(chat_response, str
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("separate_reasoning", [False, True])
+async def test_harmony_commentary_content_keeps_its_scores(chat_response, stream, separate_reasoning):
+    pieces = [
+        "<|channel|>",
+        "commentary to=functions.weather",
+        "<|message|>",
+        "Checking.",
+        "<|end|>",
+        "<|start|>",
+        "assistant",
+        "<|channel|>",
+        "final",
+        "<|message|>",
+        "Answer",
+        "<|return|>",
+    ]
+    ids = {piece: index for index, piece in enumerate(dict.fromkeys(pieces))}
+    tokenizer = make_tokenizer(list(ids), decoders.Fuse())
+    text, _, content, reasoning = await chat_response(
+        tokenizer,
+        [(ids[piece], piece) for piece in pieces],
+        stream=stream,
+        separate_reasoning=separate_reasoning,
+        model_type="gpt-oss",
+    )
+    assert text == "Checking.Answer"
+    assert [entry["token"] for entry in content] == ["Checking.", "Answer"]
+    assert reasoning == []
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("valid_tool", [False, True])
-async def test_nonstream_tool_logprobs_follow_actual_extraction(chat_response, valid_tool):
+@pytest.mark.parametrize("stream", [False, True])
+async def test_nonstream_tool_logprobs_follow_actual_extraction(chat_response, valid_tool, stream):
     pieces = ["Checking.", '<tool_call>{"name":"weather","arguments":{"city":"Paris"}}']
     if valid_tool:
         pieces += ["</tool_call>"]
     tokenizer = make_tokenizer(pieces, decoders.Fuse())
     tools = [{"type": "function", "function": {"name": "weather", "parameters": {"type": "object"}}}]
-    text, _, content, _ = await chat_response(tokenizer, list(enumerate(pieces)), stream=False, tools=tools)
+    text, _, content, _ = await chat_response(tokenizer, list(enumerate(pieces)), stream=stream, tools=tools)
     assert text == ("Checking." if valid_tool else "".join(pieces))
     assert [entry["token"] for entry in content] == (pieces[:1] if valid_tool else pieces)
 
@@ -509,7 +564,8 @@ def test_reasoning_span_api_preserves_literal_delimiters_and_flush(monkeypatch):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("prefix", ["", "Paris"])
-async def test_tool_body_uses_generated_position(chat_response, prefix):
+@pytest.mark.parametrize("stream", [False, True])
+async def test_tool_body_uses_generated_position(chat_response, prefix, stream):
     pieces = ([prefix] if prefix else []) + [
         '<|python_tag|>{"name":"weather","arguments":{"city":"',
         "Paris",
@@ -522,7 +578,7 @@ async def test_tool_body_uses_generated_position(chat_response, prefix):
     text, _, content, _ = await chat_response(
         tokenizer,
         [(tokenizer.convert_tokens_to_ids(piece), piece) for piece in pieces],
-        stream=False,
+        stream=stream,
         tools=tools,
         tool_parser="llama3",
         scores=scores,

@@ -684,7 +684,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     )
                     yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls, logprobs=choice_logprobs)}\n\n"
                 elif logprob_buffer is not None:
-                    logprob_buffer.discard_content(content_spans)
+                    if current_finish_reason is None or not parser_dict[choice_index].detector._buffer:
+                        logprob_buffer.discard_content(content_spans)
 
                 # 2) if we found calls, we output them as separate chunk(s)
                 history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
@@ -886,6 +887,25 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             )
                             payload = _serialize_sse_chunk(flush_chunk, _choice_nulls, logprobs=flush_logprobs)
                             yield f"data: {payload}\n\n"
+                if request.tool_choice != "none" and request.tools and choice_index in parser_dict:
+                    flush_text, _, output_spans = parser_dict[choice_index].flush_with_spans()
+                    if flush_text:
+                        flush_choice = ChatCompletionStreamResponseChoice(
+                            index=choice_index,
+                            delta=DeltaMessage(content=flush_text),
+                            finish_reason=None,
+                        )
+                        flush_chunk = ChatCompletionStreamResponse(
+                            id=chat_completion_id,
+                            created=created_time,
+                            model=request.model,
+                            choices=[flush_choice],
+                        )
+                        flush_logprobs = (
+                            logprob_buffer.content_logprobs(output_spans) if logprob_buffer is not None else None
+                        )
+                        payload = _serialize_sse_chunk(flush_chunk, _choice_nulls, logprobs=flush_logprobs)
+                        yield f"data: {payload}\n\n"
                 if has_emitted_tool_calls[sub_req_id] and current_finish_reason == "stop":
                     current_finish_reason = "tool_calls"
                 final_choice = ChatCompletionStreamResponseChoice(

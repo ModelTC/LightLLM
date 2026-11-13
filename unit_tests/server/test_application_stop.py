@@ -113,6 +113,54 @@ def test_tgi_api_uses_shared_stop_wrapper(stream, include):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("output_top_logprobs", [-1, 0, 2])
+def test_tgi_num_beam_keeps_true_scores(output_top_logprobs):
+    async def run():
+        async def raw_results(
+            prompt,
+            sampling_params,
+            multimodal,
+            request,
+            pd_upload_websocket,
+            pd_event,
+        ):
+            assert sampling_params.output_top_logprobs == output_top_logprobs
+            for sub_id, scores in enumerate(((-2.302585, -3.912023), (-2.995732, -6.907755))):
+                text = "A" if sub_id == 0 else "B"
+                for index, score in enumerate(scores):
+                    cumlogprob = sum(scores[: index + 1]) / (index + 1)
+                    yield (
+                        sub_id,
+                        text,
+                        {
+                            "prompt_tokens": 1,
+                            "logprobs": {},
+                            "logprob": score,
+                            "cumlogprob": cumlogprob,
+                        },
+                        FinishStatus(FinishStatus.FINISHED_LENGTH if index else FinishStatus.NO_FINISH),
+                    )
+
+        manager = _manager(
+            SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text]),
+            SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False),
+            raw_results,
+        )
+        request = SimpleNamespace(
+            json=AsyncMock(
+                return_value={
+                    "inputs": "prompt",
+                    "num_beam": 2,
+                    "parameters": {"output_top_logprobs": output_top_logprobs},
+                }
+            )
+        )
+        response = await tgi_generate_impl(request, manager)
+        assert json.loads(response.body)["generated_text"] == "AA"
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("mode", [NodeRole.NORMAL, NodeRole.P, NodeRole.D])
 @pytest.mark.parametrize("slave", [False, True])
 def test_http_generate_only_wraps_client_output(mode, slave):

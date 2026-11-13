@@ -810,7 +810,6 @@ class KimiK2Detector(BaseFormatDetector):
                     parsed_args_diff = argument_diff.split("<|tool_call_end|>", 1)[0]
 
                     if parsed_args_diff:
-
                         calls.append(
                             ToolCallItem(
                                 tool_index=self.current_tool_id,
@@ -2031,6 +2030,7 @@ class FunctionCallParser:
 
         self.detector = detector
         self.tools = tools
+        self._emitted_calls = False
 
     def parse_non_stream_with_spans(self, full_text: str):
         if not self.tools:
@@ -2046,7 +2046,28 @@ class FunctionCallParser:
             end = self.detector._source_length
             return chunk_text, [], [TextSpan(end - len(chunk_text), end)]
         result = self.detector.parse_streaming_increment(chunk_text, self.tools)
+        if result.calls:
+            self._emitted_calls = True
         return result.normal_text, result.calls, result.spans
+
+    def flush_with_spans(self):
+        """Return buffered input as visible content when generation ends early."""
+        if not self.tools:
+            return "", [], []
+        buffered = self.detector._buffer
+        if self._emitted_calls:
+            if self.detector.eot_token:
+                buffered = buffered.replace(self.detector.eot_token, "")
+            if self.detector.tool_call_separator and buffered.startswith(self.detector.tool_call_separator):
+                buffered = buffered[len(self.detector.tool_call_separator) :]
+        else:
+            buffered = getattr(self.detector, "_normal_text_buffer", "") + buffered
+        self.detector._normal_text_buffer = ""
+        self.detector._buffer = ""
+        if not buffered:
+            return "", [], []
+        end = self.detector._source_length
+        return buffered, [], [TextSpan(end - len(buffered), end)]
 
     def has_tool_call(self, text: str) -> bool:
         """
