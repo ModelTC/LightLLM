@@ -65,15 +65,29 @@ class ModelInput:
         self.check_input()
 
         if self.is_prefill:
-            self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
-            self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
-            self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
-            # Prefill 必须提供的张量。
-            self.input_ids = self.input_ids.cuda(non_blocking=True)
-            self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
+            row_metadata = (
+                self.b_req_idx,
+                self.b_seq_len,
+                self.b_mtp_index,
+                self.b_ready_cache_len,
+                self.b_prefill_start_loc,
+            )
             if self.b_prefill_commit_start is not None:
-                self.b_prefill_commit_start = self.b_prefill_commit_start.cuda(non_blocking=True)
-            self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
+                row_metadata += (self.b_prefill_commit_start,)
+            if all(field.device.type == "cpu" and field.dtype == torch.int32 for field in row_metadata):
+                row_metadata = torch.stack(row_metadata).cuda(non_blocking=True).unbind(0)
+            else:
+                row_metadata = tuple(field.cuda(non_blocking=True) for field in row_metadata)
+            (
+                self.b_req_idx,
+                self.b_seq_len,
+                self.b_mtp_index,
+                self.b_ready_cache_len,
+                self.b_prefill_start_loc,
+            ) = row_metadata[:5]
+            if self.b_prefill_commit_start is not None:
+                self.b_prefill_commit_start = row_metadata[5]
+            self.input_ids = self.input_ids.cuda(non_blocking=True)
             self.b_is_decode_req = self.b_is_decode_req.cuda(non_blocking=True)
         else:
             # Move the int32 decode row metadata in one host-to-device copy.
