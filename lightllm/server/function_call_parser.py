@@ -1995,6 +1995,27 @@ class FunctionCallParser:
         self.detector = detector
         self.tools = tools
 
+    def parse_non_stream_with_spans(self, full_text: str):
+        from lightllm.server.text_spans import select_text_spans
+
+        normal, calls = self.parse_non_stream(full_text)
+        return normal, calls, select_text_spans(full_text, normal)
+
+    def parse_stream_chunk_with_spans(self, chunk_text: str):
+        from lightllm.server.text_spans import TextSpan, select_text_spans
+
+        source = self.detector._normal_text_buffer if isinstance(self.detector, Qwen25Detector) else ""
+        source += self.detector._buffer + chunk_text
+        end = getattr(self, "_source_length", 0) + len(chunk_text)
+        self._source_length = end
+        offset = end - len(source)
+        normal, calls = self.parse_stream_chunk(chunk_text)
+        marker = self.detector.eot_token
+        if marker:
+            source = source.replace(marker, "\0" * len(marker))
+        spans = [TextSpan(s.start + offset, s.end + offset) for s in select_text_spans(source, normal)]
+        return normal, calls, spans
+
     def has_tool_call(self, text: str) -> bool:
         """
         Check if the given text contains a tool call in the format supported by this parser.

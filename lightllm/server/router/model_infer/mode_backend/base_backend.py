@@ -939,7 +939,9 @@ class ModeBackend:
             pack: InferReqUpdatePack = pack
             output_top_logprobs = None
             if topk_row is not None:
-                output_top_logprobs = (topk_row.token_ids.tolist(), topk_row.logprobs.tolist())
+                next_token_rank = int(topk_row.sampled_rank.item())
+                if topk_row.token_ids.numel():
+                    output_top_logprobs = (topk_row.token_ids.tolist(), topk_row.logprobs.tolist())
             pack.handle(
                 next_token_id=next_token_id,
                 next_token_logprob=next_token_logprob,

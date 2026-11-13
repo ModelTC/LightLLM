@@ -96,8 +96,6 @@ def test_sample_returns_requested_output_logprobs(compiler, sampling_manager, mo
     reference = logits.log_softmax(dim=-1)
     sampled_id = int(token_ids[0])
     expected = reference[0, sampled_id]
-    if int((logits[0] > logits[0, sampled_id]).sum()) >= 20:
-        expected = expected.new_tensor(-9999.0)
     torch.testing.assert_close(logprobs[0], expected)
     if topk:
         assert len(output_topk_logprobs) == 1
@@ -106,7 +104,8 @@ def test_sample_returns_requested_output_logprobs(compiler, sampling_manager, mo
         assert row.token_ids.tolist() == list(range(req.vocab_size - 1, req.vocab_size - 1 - topk, -1))
         torch.testing.assert_close(row.logprobs, reference[0, row.token_ids].cpu())
     else:
-        assert output_topk_logprobs == [None]
+        assert output_topk_logprobs[0].token_ids.numel() == 0
+    assert output_topk_logprobs[0].sampled_rank.item() == req.vocab_size - sampled_id
 
 
 def test_sample_candidate_logprobs_follow_mtp_row_selection(compiler, sampling_manager, monkeypatch):
@@ -149,7 +148,9 @@ def test_sample_candidate_logprobs_follow_mtp_row_selection(compiler, sampling_m
     assert middle["next_token_logprob"] == pytest.approx(reference[2, 10].item())
     assert first["output_top_logprobs"][1] == pytest.approx(reference[0, [256, 255, 254]].tolist())
     assert last["output_top_logprobs"][1] == pytest.approx(reference[3, [256, 255]].tolist())
-    assert logprobs_cpu[1].item() == -9999.0
+    assert logprobs_cpu[1].item() == pytest.approx(reference[1, 0].item())
+    assert first["next_token_rank"] == 1
+    assert last["next_token_rank"] == 1
 
 
 @pytest.mark.parametrize("topk", [0, 1, 3, 20])
@@ -170,8 +171,6 @@ def test_sample_reuses_sampled_normalization(compiler, sampling_manager, monkeyp
     topk_by_index = output_topk_logprobs
     for row in range(4):
         expected = reference[row, ids[row]]
-        if row in rows and int((logits[row] > logits[row, ids[row]]).sum()) >= 20:
-            expected = expected.new_tensor(-9999.0)
         torch.testing.assert_close(logprobs[row], expected)
         if topk and row in rows:
             top_ids, top_scores = topk_by_index[row].token_ids, topk_by_index[row].logprobs
@@ -179,7 +178,7 @@ def test_sample_reuses_sampled_normalization(compiler, sampling_manager, monkeyp
             torch.testing.assert_close(top_scores, reference[row, top_ids].cpu())
 
 
-def test_sample_preserves_sampled_score_and_keeps_ties(compiler, sampling_manager, monkeypatch):
+def test_sample_rank_keeps_ties_and_includes_zero_width_candidates(compiler, sampling_manager, monkeypatch):
     reqs = [sampling_req(compiler, sampling_manager, req_idx=i, regular_constraint=None) for i in range(4)]
     for req, topk in zip(reqs, [0, 0, 3, -1]):
         req.sampling_param.shm_param.top_k = req.vocab_size
@@ -190,12 +189,10 @@ def test_sample_preserves_sampled_score_and_keeps_ties(compiler, sampling_manage
     ids = torch.full((4,), 256, dtype=torch.int64, device="cuda")
     monkeypatch.setattr(sampling, "_random_sample", lambda *args: ids)
     _, logprobs, output_topk_logprobs = sampling.sample(logits, reqs, [256])
-    assert [None if row is None else row.batch_index for row in output_topk_logprobs] == [None, None, 2, None]
+    assert [None if row is None else row.batch_index for row in output_topk_logprobs] == [0, 1, 2, None]
+    assert [row.sampled_rank.item() for row in output_topk_logprobs[:3]] == [20, 21, 21]
     reference = logits.log_softmax(dim=-1)
-    expected = reference[:, 256].clone()
-    expected[1] = -9999.0
-    expected[2] = -9999.0
-    torch.testing.assert_close(logprobs, expected)
+    torch.testing.assert_close(logprobs, reference[:, 256])
     candidate_ids, candidate_logprobs = output_topk_logprobs[2].token_ids, output_topk_logprobs[2].logprobs
     assert len(set(candidate_ids.tolist())) == 3 and (candidate_ids < 20).all()
     torch.testing.assert_close(candidate_logprobs, reference[2, candidate_ids].cpu())
@@ -442,16 +439,31 @@ def copy_snapshot_and_wait(manager):
     completed.synchronize()
 
 
+@pytest.mark.parametrize("topk", [0, 1, 3, 20])
+@pytest.mark.parametrize("sampled_rank", [2, 20, 21])
+def test_sample_rank_is_independent_of_candidate_count(compiler, sampling_manager, monkeypatch, topk, sampled_rank):
+    req = sampling_req(compiler, sampling_manager, regular_constraint=None)
+    req.sampling_param.shm_param.top_k = req.vocab_size
+    req.sampling_param.shm_param.output_top_logprobs = topk
+    logits = torch.linspace(3.0, 0.1, req.vocab_size, device="cuda").view(1, -1)
+    ids = torch.tensor([sampled_rank - 1], device="cuda")
+    monkeypatch.setattr(sampling, "_random_sample", lambda *args: ids)
+    _, logprobs, rows = sampling.sample(logits, [req], [256])
+    torch.testing.assert_close(logprobs[0], logits.log_softmax(-1)[0, ids[0]])
+    assert rows[0].sampled_rank.item() == sampled_rank
+    assert rows[0].token_ids.numel() == topk
+
+
 @pytest.mark.parametrize("vocab_size", [30, 2051, 32769])
-def test_capture_across_vocab_tiles_preserves_sampled_scores(vocab_size):
+def test_capture_rank_across_vocab_tiles_preserves_sampled_scores(vocab_size):
     logits = torch.linspace(3.0, 0.1, vocab_size, device="cuda").repeat(4, 1)
     ids = torch.tensor([1, 19, 20, vocab_size - 1], device="cuda")
     logprobs = logits.log_softmax(-1).gather(1, ids[:, None]).squeeze(1)
     original = logprobs.clone()
     rows = torch.tensor([[0, 0, 0], [1, 1, 0], [2, 3, 1], [3, 20, 4]], device="cuda", dtype=torch.int32)
-    candidate_ids, scores = sampling.capture_output_logprobs(logits, ids, logprobs, rows, 20, 24)
-    torch.testing.assert_close(logprobs[:2], original[:2], rtol=0, atol=0)
-    assert logprobs[2].item() == -9999.0 and logprobs[3].item() == -9999.0
+    candidate_ids, scores, ranks = sampling.capture_output_logprobs(logits, ids, logprobs, rows, 20, 24)
+    torch.testing.assert_close(logprobs, original, rtol=0, atol=0)
+    assert ranks.tolist() == [2, 20, 21, vocab_size]
     for row, width, offset in rows.tolist():
         assert candidate_ids[offset : offset + width].tolist() == list(range(width))
         torch.testing.assert_close(scores[offset : offset + width], logits.log_softmax(-1)[row, :width])

@@ -77,7 +77,7 @@ def _output_logprobs_partial(
     rows,
     candidates,
     sampled_ids,
-    higher_counts,
+    ranks,
     stride_row: tl.constexpr,
     vocab_size: tl.constexpr,
     tiles: tl.constexpr,
@@ -91,10 +91,9 @@ def _output_logprobs_partial(
     row_logits = logits + row * stride_row
     ids = tile * BLOCK + tl.arange(0, BLOCK)
     scores = tl.load(row_logits + ids, ids < vocab_size, -float("inf")).to(tl.float32)
-    sampled = tl.load(row_logits + tl.load(sampled_ids + row)).to(tl.float32)
-    # 只数严格更高的 logit。同分不占名次，采样 token 仍算在前 20 里。
-    higher = tl.sum(((ids < vocab_size) & (scores > sampled)).to(tl.int32), 0)
-    tl.store(higher_counts + index * tiles + tile, higher)
+    sampled = tl.load(row_logits + tl.load(sampled_ids + row))
+    rank = tl.sum(((ids < vocab_size) & (scores > sampled)).to(tl.int32), 0)
+    tl.store(ranks + index * tiles + tile, rank)
     # tl.topk 只能比较整数。高 32 位放可排序的分数，低 32 位放反转后的 token id。
     # 取最大的键时，分数高的在前；分数相同则 id 更小的在前。词表外的位置写成最小整数。
     bits = scores.to(tl.int32, bitcast=True)
@@ -115,7 +114,8 @@ def _output_logprobs_finish(
     candidates,
     token_ids,
     logprobs,
-    higher_counts,
+    partial_ranks,
+    sampled_ranks,
     stride_row: tl.constexpr,
     vocab_size: tl.constexpr,
     tiles: tl.constexpr,
@@ -142,11 +142,10 @@ def _output_logprobs_finish(
     row_logprobs = scores - sampled + sampled_logprob
     tl.store(token_ids + offset + columns, stored_ids, columns < width)
     tl.store(logprobs + offset + columns, row_logprobs, columns < width)
-    # 候选平移用的是原始采样 logprob。至少 20 个 token 严格更高时，再把采样分数写成 -9999。
-    higher_tiles = tl.arange(0, TILE_BLOCK)
-    higher = tl.sum(tl.load(higher_counts + index * tiles + higher_tiles, higher_tiles < tiles, 0), 0)
-    outside = (higher >= 20) | ~(tl.abs(sampled) < float("inf"))
-    tl.store(sampled_logprobs + row, -9999.0, mask=outside)
+    rank_tiles = tl.arange(0, TILE_BLOCK)
+    rank = 1 + tl.sum(tl.load(partial_ranks + index * tiles + rank_tiles, rank_tiles < tiles, 0), 0)
+    rank = tl.where(tl.abs(sampled) < float("inf"), rank, vocab_size + 1)
+    tl.store(sampled_ranks + index, rank)
 
 
 def capture_output_logprobs(
@@ -156,12 +155,12 @@ def capture_output_logprobs(
     rows: torch.Tensor,
     max_topk: int,
     output_count: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """返回每行的 top-k token id 和 logprob。
 
     rows 每项是 (logits 行号, K, 写入起点)。写入起点按 token 个数累加，
-    第 r 行的候选是两个数组的 [起点, 起点 + K)。至少 20 个 token 的 logit
-    严格高于采样 token 时，把 sampled_logprobs 里对应位置写成 -9999。K=0 也判断。
+    第 r 行的候选是两个数组的 [起点, 起点 + K)。另返回每行采样 token 的
+    1-based rank（同分共享排名），不修改内部采样 logprob。K=0 仍计算排名。
     """
     block = 1024
     # 先按词表分段留下局部 top-k，再逐行合并成最终候选。
@@ -169,13 +168,14 @@ def capture_output_logprobs(
     # Triton 的 topk 块长必须是 2 的幂。请求的 K 最大 20，这里向上取整；真正写入仍按每行的 K 截断。
     topk = triton.next_power_of_2(max(2, max_topk))
     candidates = logits.new_empty((rows.shape[0], tiles, topk), dtype=torch.int64)
-    higher_counts = logits.new_empty((rows.shape[0], tiles), dtype=torch.int32)
+    partial_ranks = logits.new_empty((rows.shape[0], tiles), dtype=torch.int32)
+    sampled_ranks = logits.new_empty((rows.shape[0],), dtype=torch.int32)
     _output_logprobs_partial[(rows.shape[0], tiles)](
         logits=logits,
         rows=rows,
         candidates=candidates,
         sampled_ids=sampled_ids,
-        higher_counts=higher_counts,
+        ranks=partial_ranks,
         stride_row=logits.stride(0),
         vocab_size=logits.shape[1],
         tiles=tiles,
@@ -193,7 +193,8 @@ def capture_output_logprobs(
         candidates=candidates,
         token_ids=token_ids,
         logprobs=logprobs,
-        higher_counts=higher_counts,
+        partial_ranks=partial_ranks,
+        sampled_ranks=sampled_ranks,
         stride_row=logits.stride(0),
         vocab_size=logits.shape[1],
         tiles=tiles,
@@ -201,4 +202,4 @@ def capture_output_logprobs(
         TILE_BLOCK=triton.next_power_of_2(tiles),
         num_warps=4,
     )
-    return token_ids, logprobs
+    return token_ids, logprobs, sampled_ranks

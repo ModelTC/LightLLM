@@ -17,11 +17,13 @@ class TopkLogprobRow:
     """一行 top-k 候选。token_ids 与 logprobs 等长，按分数从高到低对齐。
 
     batch_index 是该行在本次采样 logits 中的下标。返回列表与 logits 行对齐，未请求 logprobs 的位置是 None。
+    K=0 的行只有 sampled_rank，候选数组为空。
     """
 
     batch_index: int
     token_ids: torch.Tensor
     logprobs: torch.Tensor
+    sampled_rank: torch.Tensor
 
 
 TopkLogprobRows = List[Optional[TopkLogprobRow]]
@@ -143,14 +145,13 @@ def _collect_topk_logprobs_rows(
 ) -> Tuple[List[Tuple[int, int]], int]:
     """Rows that asked for candidate topk logprobs, as (batch_index, topk), plus the maximum topk.
 
-    topk == 0 still runs the fixed top-20 cutoff on the sampled logprob and writes no candidates.
-    batch_index is the position in the original reqs and logits. max_topk is 0 when the list is empty.
+    topk == 0 still needs the sampled token rank. batch_index is the position
+    in the original reqs and logits. max_topk is 0 when the list is empty.
     """
     rows = []
     max_topk = 0
     for batch_index, req_obj in enumerate(reqs):
         topk = req_obj.sampling_param.shm_param.output_top_logprobs
-        # topk == 0 也要进来：没有候选列表，但仍要把落在前 20 名之外的采样 logprob 写成 -9999。
         if topk >= 0 and (has_output is None or has_output[batch_index]):
             rows.append((batch_index, topk))
             max_topk = max(max_topk, topk)
@@ -172,7 +173,7 @@ def _capture_topk_logprobs(
 
     rows = g_pin_mem_manager.alloc_pin_tensor("output_logprob_rows", 3 * len(capture_rows), torch.int32).view(-1, 3)
     rows.numpy()[:] = capture_rows
-    token_ids, logprobs = capture_output_logprobs(
+    token_ids, logprobs, ranks = capture_output_logprobs(
         logits=logits,
         sampled_ids=next_token_ids,
         sampled_logprobs=next_token_logprobs,
@@ -182,16 +183,16 @@ def _capture_topk_logprobs(
     )
     token_ids_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(key="output_topk_token_ids", gpu_tensor=token_ids)
     logprobs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(key="output_topk_logprobs", gpu_tensor=logprobs)
+    ranks_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(key="output_sampled_ranks", gpu_tensor=ranks)
     topk_rows: TopkLogprobRows = [None] * logits.shape[0]
     offset = 0
-    for batch_index, topk in topk_logprobs_rows:
-        # topk == 0 只参与上面的采样分数改写，不返回候选。
-        if topk > 0:
-            topk_rows[batch_index] = TopkLogprobRow(
-                batch_index=batch_index,
-                token_ids=token_ids_cpu[offset : offset + topk],
-                logprobs=logprobs_cpu[offset : offset + topk],
-            )
+    for index, (batch_index, topk) in enumerate(topk_logprobs_rows):
+        topk_rows[batch_index] = TopkLogprobRow(
+            batch_index=batch_index,
+            token_ids=token_ids_cpu[offset : offset + topk],
+            logprobs=logprobs_cpu[offset : offset + topk],
+            sampled_rank=ranks_cpu[index : index + 1],
+        )
         offset += topk
     return next_token_logprobs, topk_rows
 
