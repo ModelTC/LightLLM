@@ -406,7 +406,7 @@ def test_mtp_decode_handoff_compaction_and_accepted_commits(compiler, monkeypatc
         order.append("sample")
         result = logits.argmax(-1)
         assert result.tolist() == [ord("b"), ord("c"), 256]
-        return result, torch.zeros(3)
+        return result, torch.zeros(3), [None] * result.shape[0]
 
     monkeypatch.setattr(impl, "sample", sample)
 
