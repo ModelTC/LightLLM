@@ -140,6 +140,57 @@ def build_decoder_tail_rows(q_offsets, decoder_offsets, token_num, window):
 
 
 @triton.jit
+def _gather_decoder_hidden(X, ROWS, Y, WIDTH: tl.constexpr, STRIDE: tl.constexpr, BLOCK: tl.constexpr):
+    dst = tl.program_id(0)
+    src = tl.load(ROWS + dst)
+    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    values = tl.load(X + src * STRIDE + cols, cols < WIDTH, 0)
+    tl.store(Y + dst * WIDTH + cols, values, cols < WIDTH)
+
+
+@triton.jit
+def _gather_decoder_mhc(
+    MIX, POST, PRE, ROWS, OUT_MIX, OUT_POST, OUT_PRE, size, STREAMS: tl.constexpr, BLOCK: tl.constexpr
+):
+    dst = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = dst < size
+    src = tl.load(ROWS + dst, valid, 0)
+    matrix_width: tl.constexpr = STREAMS * STREAMS
+    matrix_cols = tl.arange(0, triton.next_power_of_2(matrix_width))
+    matrix_mask = valid[:, None] & (matrix_cols[None, :] < matrix_width)
+    matrix = tl.load(MIX + src[:, None] * matrix_width + matrix_cols[None, :], matrix_mask, 0)
+    tl.store(OUT_MIX + dst[:, None] * matrix_width + matrix_cols[None, :], matrix, matrix_mask)
+    cols = tl.arange(0, triton.next_power_of_2(STREAMS))
+    mask = valid[:, None] & (cols[None, :] < STREAMS)
+    post = tl.load(POST + src[:, None] * STREAMS + cols[None, :], mask, 0)
+    pre = tl.load(PRE + src[:, None] * STREAMS + cols[None, :], mask, 0)
+    tl.store(OUT_POST + dst[:, None] * STREAMS + cols[None, :], post, mask)
+    tl.store(OUT_PRE + dst[:, None] * STREAMS + cols[None, :], pre, mask)
+
+
+def gather_decoder_activations(rows, hidden, residual, res_mix, post_mix, attn_pre):
+    if isinstance(rows, slice):
+        return tuple(value[rows] for value in (hidden, residual, res_mix, post_mix, attn_pre))
+
+    size = rows.numel()
+    out_hidden = hidden.new_empty((size, hidden.shape[1]))
+    out_residual = residual.new_empty((size, residual.shape[1]))
+    block = 2048
+    for src, dst in ((hidden, out_hidden), (residual, out_residual)):
+        width = src.shape[1]
+        _gather_decoder_hidden[(size, triton.cdiv(width, block))](src, rows, dst, width, src.stride(0), block)
+
+    streams = post_mix.shape[1]
+    out_mix = res_mix.new_empty((size, streams, streams))
+    out_post = post_mix.new_empty((size, streams))
+    out_pre = attn_pre.new_empty((size, streams))
+    _gather_decoder_mhc[(triton.cdiv(size, 16),)](
+        res_mix, post_mix, attn_pre, rows, out_mix, out_post, out_pre, size, streams, 16
+    )
+    return out_hidden, out_residual, out_mix, out_post, out_pre
+
+
+@triton.jit
 def _pool_and_norm_pairs(
     KV,
     SCORE,

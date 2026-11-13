@@ -12,6 +12,7 @@ from ..layer_weights.transformer_layer_weight import DeepseekV41TransformerLayer
 from ..triton_kernel.attention import (
     pool_and_norm_pairs,
     destindex_copy_kv_dsv41,
+    gather_decoder_activations,
 )
 
 
@@ -125,8 +126,8 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
             # The first decoder layer projects global KV for every encoder row.
             # Its Q/SWA, indexer Q, attention and FFN only need the replay tail.
             rows = infer_state.init_decoder_state()
-            x, residual, res_mix, post_mix, attn_pre = (
-                value[rows] for value in (x, residual, res_mix, post_mix, attn_pre)
+            x, residual, res_mix, post_mix, attn_pre = gather_decoder_activations(
+                rows, x, residual, res_mix, post_mix, attn_pre
             )
             infer_state = infer_state.decoder_state
         # Use the same row layout that the next layer will see after CED selection.
