@@ -16,7 +16,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 class TopkLogprobRow:
     """一行 top-k 候选。token_ids 与 logprobs 等长，按分数从高到低对齐。
 
-    batch_index 是该行在本次采样 logits 中的下标。返回列表与 logits 行对齐，不需要候选的位置是 None。
+    batch_index 是该行在本次采样 logits 中的下标。返回列表与 logits 行对齐，未请求 logprobs 的位置是 None。
     """
 
     batch_index: int
@@ -143,14 +143,15 @@ def _collect_topk_logprobs_rows(
 ) -> Tuple[List[Tuple[int, int]], int]:
     """Rows that asked for candidate topk logprobs, as (batch_index, topk), plus the maximum topk.
 
-    topk == 0 only needs the sampled token logprob and is omitted. batch_index is the position
-    in the original reqs and logits. max_topk is 0 when the list is empty.
+    topk == 0 still runs the fixed top-20 cutoff on the sampled logprob and writes no candidates.
+    batch_index is the position in the original reqs and logits. max_topk is 0 when the list is empty.
     """
     rows = []
     max_topk = 0
     for batch_index, req_obj in enumerate(reqs):
         topk = req_obj.sampling_param.shm_param.output_top_logprobs
-        if topk > 0 and (has_output is None or has_output[batch_index]):
+        # topk == 0 也要进来：没有候选列表，但仍要把落在前 20 名之外的采样 logprob 写成 -9999。
+        if topk >= 0 and (has_output is None or has_output[batch_index]):
             rows.append((batch_index, topk))
             max_topk = max(max_topk, topk)
     return rows, max_topk
@@ -163,10 +164,6 @@ def _capture_topk_logprobs(
     topk_logprobs_rows: List[Tuple[int, int]],
     max_topk: int,
 ) -> Tuple[torch.Tensor, TopkLogprobRows]:
-    """Capture candidate ids and logprobs for rows with topk > 0.
-
-    A sampled logprob below that row's minimum top-k logprob is replaced with -9999.
-    """
     capture_rows = []
     output_count = 0
     for batch_index, topk in topk_logprobs_rows:
@@ -188,11 +185,13 @@ def _capture_topk_logprobs(
     topk_rows: TopkLogprobRows = [None] * logits.shape[0]
     offset = 0
     for batch_index, topk in topk_logprobs_rows:
-        topk_rows[batch_index] = TopkLogprobRow(
-            batch_index=batch_index,
-            token_ids=token_ids_cpu[offset : offset + topk],
-            logprobs=logprobs_cpu[offset : offset + topk],
-        )
+        # topk == 0 只参与上面的采样分数改写，不返回候选。
+        if topk > 0:
+            topk_rows[batch_index] = TopkLogprobRow(
+                batch_index=batch_index,
+                token_ids=token_ids_cpu[offset : offset + topk],
+                logprobs=logprobs_cpu[offset : offset + topk],
+            )
         offset += topk
     return next_token_logprobs, topk_rows
 

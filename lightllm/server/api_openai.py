@@ -424,22 +424,30 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
     await sampling_params.verify_cpu_async(g_objs.httpserver_manager.output_grammar_compiler)
 
-    results_generator = g_objs.httpserver_manager.generate(
-        prompt, sampling_params, multimodal_params, request=raw_request
-    )
     logprob_model_type = get_env_start_args().reasoning_parser
     logprob_force_reasoning = _is_force_thinking_mode(request) if logprob_model_type else False
-    logprob_buffers = (
-        collections.defaultdict(
-            lambda: ChatLogprobBuffer(
-                tokenizer=g_objs.httpserver_manager.tokenizer,
-                model_type=logprob_model_type,
-                force_reasoning=logprob_force_reasoning,
-                separate_reasoning=bool(request.separate_reasoning),
-            )
+
+    def _new_logprob_buffer() -> ChatLogprobBuffer:
+        return ChatLogprobBuffer(
+            tokenizer=g_objs.httpserver_manager.tokenizer,
+            model_type=logprob_model_type,
+            force_reasoning=logprob_force_reasoning,
+            separate_reasoning=bool(request.separate_reasoning),
+            tools=request.tools if request.tool_choice != "none" else None,
+            tool_call_parser=getattr(g_objs.args, "tool_call_parser", None) or "llama3",
         )
-        if request.logprobs
-        else None
+
+    logprob_buffers = None
+    if request.logprobs:
+        # 构造函数会检查思维链和工具调用的分隔符能不能编成稳定的 token 序列，不合法就抛 ValueError。
+        # defaultdict 要等第一条输出 token 才创建 buffer。流式响应那时已经返回，这个错误进不了接口的 400 处理。
+        # 这里先构造一次，只为在返回前完成检查；这个对象随即丢掉，真正使用的仍是下面按子请求创建的 buffer。
+        # generate 放在这次检查之后，参数不合法时请求不会进入推理。
+        _new_logprob_buffer()
+        logprob_buffers = collections.defaultdict(_new_logprob_buffer)
+
+    results_generator = g_objs.httpserver_manager.generate(
+        prompt, sampling_params, multimodal_params, request=raw_request
     )
 
     # Non-streaming case

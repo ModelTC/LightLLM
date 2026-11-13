@@ -76,6 +76,8 @@ def _output_logprobs_partial(
     logits,
     rows,
     candidates,
+    sampled_ids,
+    higher_counts,
     stride_row: tl.constexpr,
     vocab_size: tl.constexpr,
     tiles: tl.constexpr,
@@ -89,6 +91,10 @@ def _output_logprobs_partial(
     row_logits = logits + row * stride_row
     ids = tile * BLOCK + tl.arange(0, BLOCK)
     scores = tl.load(row_logits + ids, ids < vocab_size, -float("inf")).to(tl.float32)
+    sampled = tl.load(row_logits + tl.load(sampled_ids + row)).to(tl.float32)
+    # 只数严格更高的 logit。同分不占名次，采样 token 仍算在前 20 里。
+    higher = tl.sum(((ids < vocab_size) & (scores > sampled)).to(tl.int32), 0)
+    tl.store(higher_counts + index * tiles + tile, higher)
     # tl.topk 只能比较整数。高 32 位放可排序的分数，低 32 位放反转后的 token id。
     # 取最大的键时，分数高的在前；分数相同则 id 更小的在前。词表外的位置写成最小整数。
     bits = scores.to(tl.int32, bitcast=True)
@@ -109,6 +115,7 @@ def _output_logprobs_finish(
     candidates,
     token_ids,
     logprobs,
+    higher_counts,
     stride_row: tl.constexpr,
     vocab_size: tl.constexpr,
     tiles: tl.constexpr,
@@ -135,10 +142,10 @@ def _output_logprobs_finish(
     row_logprobs = scores - sampled + sampled_logprob
     tl.store(token_ids + offset + columns, stored_ids, columns < width)
     tl.store(logprobs + offset + columns, row_logprobs, columns < width)
-    # 只在该行实际请求的 K 个候选里取最小值。小于它才覆盖；同分仍算在 top-k 内。
-    valid = (columns < width) & (tl.abs(scores) < float("inf"))
-    min_logprob = tl.min(tl.where(valid, row_logprobs, float("inf")))
-    outside = (sampled_logprob < min_logprob) | ~(tl.abs(sampled) < float("inf"))
+    # 候选平移用的是原始采样 logprob。至少 20 个 token 严格更高时，再把采样分数写成 -9999。
+    higher_tiles = tl.arange(0, TILE_BLOCK)
+    higher = tl.sum(tl.load(higher_counts + index * tiles + higher_tiles, higher_tiles < tiles, 0), 0)
+    outside = (higher >= 20) | ~(tl.abs(sampled) < float("inf"))
     tl.store(sampled_logprobs + row, -9999.0, mask=outside)
 
 
@@ -153,19 +160,22 @@ def capture_output_logprobs(
     """返回每行的 top-k token id 和 logprob。
 
     rows 每项是 (logits 行号, K, 写入起点)。写入起点按 token 个数累加，
-    第 r 行的结果是两个数组的 [起点, 起点 + K)。采样 logprob 小于该行
-    top-k 的最小值时写成 -9999。
+    第 r 行的候选是两个数组的 [起点, 起点 + K)。至少 20 个 token 的 logit
+    严格高于采样 token 时，把 sampled_logprobs 里对应位置写成 -9999。K=0 也判断。
     """
     block = 1024
     # 先按词表分段留下局部 top-k，再逐行合并成最终候选。
     tiles = triton.cdiv(logits.shape[1], block)
     # Triton 的 topk 块长必须是 2 的幂。请求的 K 最大 20，这里向上取整；真正写入仍按每行的 K 截断。
-    topk = triton.next_power_of_2(max_topk)
+    topk = triton.next_power_of_2(max(2, max_topk))
     candidates = logits.new_empty((rows.shape[0], tiles, topk), dtype=torch.int64)
+    higher_counts = logits.new_empty((rows.shape[0], tiles), dtype=torch.int32)
     _output_logprobs_partial[(rows.shape[0], tiles)](
         logits=logits,
         rows=rows,
         candidates=candidates,
+        sampled_ids=sampled_ids,
+        higher_counts=higher_counts,
         stride_row=logits.stride(0),
         vocab_size=logits.shape[1],
         tiles=tiles,
@@ -183,6 +193,7 @@ def capture_output_logprobs(
         candidates=candidates,
         token_ids=token_ids,
         logprobs=logprobs,
+        higher_counts=higher_counts,
         stride_row=logits.stride(0),
         vocab_size=logits.shape[1],
         tiles=tiles,

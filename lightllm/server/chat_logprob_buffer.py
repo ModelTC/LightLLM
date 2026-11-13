@@ -1,203 +1,258 @@
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from __future__ import annotations
+
+from typing import Any, NamedTuple
 
 from lightllm.server.core.objs import FinishStatus
-from lightllm.server.core.objs.logprob_utils import chat_token_logprob
+from lightllm.server.function_call_parser import FunctionCallParser
 from lightllm.server.reasoning_parser import ReasoningParser
 
 
-class PendingLogprob(NamedTuple):
-    """一条还没发出去的采样结果。
-
-    ``text`` 是这次解码出的增量，可以是 ``</`` 这种半截标记。
-    """
-
-    text: str
-    token: Optional[Dict[str, Any]]
-    candidates: Any
-
-
 class ChatLogprobBuffer:
-    """一个子请求的输出 logprobs。自己持有一份解析器，不读响应用的那份。
+    """按 token 序列识别分隔符，把可见文本的 logprob 放进正文或思维链。
 
-    每次 ``record`` 只进来一个增量。解析器还没收齐标记时，token 留在 ``_hold``；
-    收齐后整批进入 ``_reasoning`` 或 ``_content``。``<think>``、``</think>`` 丢掉。
-    一个 token 写成 ``先想</think>好`` 时，解析器先返回思维链，整条概率进 ``_reasoning``。
-
-    思维链帧用 ``reasoning_logprobs``，正文帧用 ``content_logprobs``，
-    非流式整段消息用 ``message_logprobs``。是否分开思考在创建时定好。
+    分隔符可以是一个或多个 token。凑齐才切换通道，分隔符本身不输出。
+    空增量的分数先累加，加到后面第一个非空文本上。生成结束时还没拼上的空增量丢掉。
     """
 
     def __init__(
         self,
         tokenizer: Any,
-        model_type: Optional[str],
+        model_type: str | None,
         force_reasoning: bool,
         separate_reasoning: bool,
+        tools: list | None = None,
+        tool_call_parser: str | None = None,
     ):
         self.tokenizer = tokenizer
         self._separate_reasoning = separate_reasoning
-        self._hold: List[PendingLogprob] = []
-        self._reasoning: List[PendingLogprob] = []
-        self._content: List[PendingLogprob] = []
-        self._parser = None
+        self._channel = "content"  # 当前输出通道：content、reasoning，或 commentary 的 drop。
+        self._in_tool = False  # 是否处在工具调用开始和结束分隔符之间。
+        self._pending_logprob = 0.0  # 尚未拼成字符的空增量分数，等下一个非空文本一起输出。
+        self._reasoning: list[dict[str, Any]] = []  # 分开思考时的思维链 logprob。
+        self._content: list[dict[str, Any]] = []  # 正文 logprob；不分开思考时思维链也放这里。
+        self._sequences: list[tuple[tuple[int, ...], str]] = []  # 分隔符 token id 序列和切换动作。
+        self._held: list[_Held] = []  # 可能是分隔符前缀、尚未判定的 token。
+        self._mode = "body"  # gpt-oss 解析位置：body 正文、header 角色头、channel 通道名。
+        self._channel_name = ""  # <|channel|> 和 <|message|> 之间拼出来的通道名。
         if model_type:
-            self._parser = ReasoningParser(
-                model_type=model_type,
-                stream_reasoning=True,
-                force_reasoning=force_reasoning,
-            )
+            self._init_reasoning(tokenizer=tokenizer, model_type=model_type, force_reasoning=force_reasoning)
+        if tools:
+            self._init_tools(tokenizer=tokenizer, tool_call_parser=tool_call_parser)
 
-    def record(self, text: str, metadata: Dict[str, Any], finish_status: FinishStatus) -> None:
-        """记下这次原始输出，并按自己的解析器把它放进思维链或正文。
+    def record(self, text: str, metadata: dict[str, Any], finish_status: FinishStatus) -> None:
+        token_id, score = metadata.get("id"), metadata.get("logprob")
+        if token_id is not None and score is not None:
+            self._held.append(_Held(token_id=token_id, text=text, score=score, metadata=metadata))
+            self._resolve_held(closing=False)
+        if finish_status.is_finished():
+            self._resolve_held(closing=True)
+            self._pending_logprob = 0.0
 
-        ``text`` 是模型刚吐出的增量。结束通知没有正文时不记概率。
-        一个汉字拆成多个 token 时，前几个增量的 ``text`` 为空、解码含 ``\\ufffd``，
-        这些字节的概率也要留下。
-
-        例如 ``record(text="<think>", ...)`` 后，这条概率被认出是纯标记，直接丢掉。
-        """
-        self._remember(text=text, metadata=metadata, finish_status=finish_status)
-        self._accept(text=text)
-
-    def reasoning_logprobs(self) -> Optional[Dict[str, Any]]:
-        """取出一帧思维链 logprobs。没有 token 时返回 None。
-
-        只在分开思考时取出。不分开时 token 留着，由 ``content_logprobs`` 接到正文前面。
-
-        例如 ``_reasoning`` 里是 ``先想一下``，分开思考时返回
-        ``{"content": None, "reasoning_content": [先想一下的 token]}``。
-        """
-        self._close_partial_marker()
-        if not self._separate_reasoning:
-            return None
+    def reasoning_logprobs(self) -> dict[str, Any] | None:
         tokens = self._drain(items=self._reasoning)
-        if not tokens:
-            return None
-        return {"content": None, "reasoning_content": tokens}
+        return {"content": None, "reasoning_content": tokens} if tokens else None
 
-    def content_logprobs(self) -> Optional[Dict[str, Any]]:
-        """取出一帧正文 logprobs。没有 token 时返回 None。
+    def content_logprobs(self) -> dict[str, Any] | None:
+        tokens = self._drain(items=self._content)
+        return {"content": tokens, "reasoning_content": None} if tokens else None
 
-        不分开思考时，把还没发出的思维链 token 接在正文前面。
+    def message_logprobs(self) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
+        return self._drain(items=self._content) or None, self._drain(items=self._reasoning) or None
 
-        例如 ``_content`` 里是 ``好的``，返回
-        ``{"content": [好的对应的 token], "reasoning_content": None}``。
-        """
-        self._close_partial_marker()
-        tokens = self._take(include_reasoning=not self._separate_reasoning, include_content=True)
-        if not tokens:
-            return None
-        return {"content": tokens, "reasoning_content": None}
-
-    def message_logprobs(self) -> Tuple[Optional[List[Dict[str, Any]]], Optional[List[Dict[str, Any]]]]:
-        """取出整段消息的 ``(content, reasoning_content)``。
-
-        不分开思考时思维链 token 在 content 里，reasoning_content 是 None。
-
-        例如分开思考且缓冲区是思维链 ``先想``、正文 ``好的``，返回 ``([好的], [先想])``。
-        """
-        self._close_partial_marker()
-        if self._separate_reasoning:
-            content_tokens = self._drain(items=self._content)
-            reasoning_tokens = self._drain(items=self._reasoning)
-            return content_tokens or None, reasoning_tokens or None
-        tokens = self._take(include_reasoning=True, include_content=True)
-        return tokens or None, None
-
-    def _remember(self, *, text: str, metadata: Dict[str, Any], finish_status: FinishStatus) -> None:
-        token_id = metadata.get("id")
-        score = metadata.get("logprob")
-        sampled = token_id is not None and score is not None
-        finish_without_text = finish_status.is_finished() and not text
-        token = None
-        if sampled and not finish_without_text:
-            token = chat_token_logprob(tokenizer=self.tokenizer, token_id=token_id, logprob=score)
-        incomplete_character = token is not None and bool(token["bytes"]) and "\ufffd" in token["token"]
-        if text or incomplete_character:
-            self._hold.append(
-                PendingLogprob(text=text, token=token, candidates=metadata.get("output_top_logprobs", ()))
-            )
-
-    def _accept(self, *, text: str) -> None:
-        if self._parser is None:
-            self._commit(
-                reasoning_text="",
-                content_text=text,
-                waiting=False,
-                in_reasoning=False,
-                start_tag="",
-                end_tag="",
-            )
+    def _init_reasoning(self, tokenizer: Any, model_type: str, force_reasoning: bool) -> None:
+        key = model_type.lower()
+        detector_class = ReasoningParser.DetectorMap.get(key)
+        if detector_class is None:
+            raise ValueError(f"logprobs does not support reasoning parser {model_type!r}")
+        if key == "gpt-oss":
+            for text, action in (
+                ("<|start|>", "harmony_start"),
+                ("<|channel|>", "harmony_channel"),
+                ("<|message|>", "harmony_message"),
+                ("<|end|>", "harmony_end"),
+                ("<|return|>", "harmony_end"),
+                ("<|call|>", "harmony_end"),
+            ):
+                # <|call|> 不是每个词表都有，缺了就跳过。
+                self._add_sequence(tokenizer=tokenizer, text=text, action=action, required=text != "<|call|>")
+            if force_reasoning:
+                self._channel = "reasoning"
             return
-        reasoning_text, content_text = self._parser.parse_stream_chunk(chunk_text=text)
-        self._commit_parser_result(reasoning_text=reasoning_text or "", content_text=content_text or "")
+        detector = detector_class(stream_reasoning=True, force_reasoning=force_reasoning)
+        self._add_sequence(tokenizer=tokenizer, text=detector.think_start_token, action="reasoning")
+        self._add_sequence(tokenizer=tokenizer, text=detector.think_end_token, action="content")
+        # 以解析器为准。Gemma 4 会忽略请求里的 force_reasoning，生成不是从已打开的思考通道开始。
+        if detector._in_reasoning:
+            self._channel = "reasoning"
 
-    def _close_partial_marker(self) -> None:
-        # 普通帧在 record 时已经放行，这里看到的缓冲是空的，不会提前丢掉半截标记。
-        if self._parser is None or not self._parser.detector._buffer:
+    def _init_tools(self, tokenizer: Any, tool_call_parser: str | None) -> None:
+        if not tool_call_parser:
+            raise ValueError("logprobs requires tool_call_parser when tools are set")
+        parser = FunctionCallParser(tools=[], tool_call_parser=tool_call_parser)
+        self._add_sequence(tokenizer=tokenizer, text=parser.detector.bot_token, action="tool_on")
+        self._add_sequence(tokenizer=tokenizer, text=parser.detector.eot_token, action="tool_off")
+
+    def _add_sequence(self, tokenizer: Any, text: str, action: str, required: bool = True) -> None:
+        token_ids = _delimiter_ids(tokenizer=tokenizer, text=text)
+        if token_ids is None:
+            if required:
+                raise ValueError(f"logprobs requires {text!r} to encode to the same token sequence")
             return
-        reasoning_text, content_text = self._parser.flush()
-        self._commit_parser_result(reasoning_text=reasoning_text or "", content_text=content_text or "")
-
-    def _commit_parser_result(self, *, reasoning_text: str, content_text: str) -> None:
-        detector = self._parser.detector
-        self._commit(
-            reasoning_text=reasoning_text,
-            content_text=content_text,
-            waiting=bool(detector._buffer),
-            in_reasoning=bool(detector._in_reasoning),
-            start_tag=detector.think_start_token or "",
-            end_tag=detector.think_end_token or "",
-        )
-
-    def _commit(
-        self,
-        *,
-        reasoning_text: str,
-        content_text: str,
-        waiting: bool,
-        in_reasoning: bool,
-        start_tag: str,
-        end_tag: str,
-    ) -> None:
-        # 只看到 ``</`` 这类前缀时，token 继续留在 ``_hold``。
-        if waiting or not self._hold:
+        sequence = tuple(token_ids)
+        for existing, existing_action in self._sequences:
+            if existing == sequence and existing_action != action:
+                raise ValueError(f"logprobs delimiter {text!r} maps to conflicting actions")
+        if any(existing == sequence for existing, _ in self._sequences):
             return
-        pending = self._hold
-        self._hold = []
-        # 返回了思维链就整批进思维链。
-        # 两边都没有可见文字时，空字节跟解析器当前所在的一侧。
-        if reasoning_text or (not content_text and in_reasoning):
-            side = self._reasoning
+        self._sequences.append((sequence, action))
+
+    def _resolve_held(self, closing: bool) -> None:
+        # 还是更长分隔符的前缀时先留着。生成结束则按已经凑齐的短分隔符结算，否则当正文。
+        while self._held:
+            token_ids = tuple(item.token_id for item in self._held)
+            exact, waiting, completed = self._lookup(token_ids=token_ids)
+            if waiting and not closing:
+                return
+            if exact is not None:
+                self._apply(action=exact)
+                self._held.clear()
+                return
+            if completed is not None:
+                action, size = completed
+                self._apply(action=action)
+                del self._held[:size]
+                continue
+            self._release(item=self._held.pop(0))
+
+    def _lookup(self, token_ids: tuple[int, ...]) -> tuple[str | None, bool, tuple[str, int] | None]:
+        exact = None
+        waiting = False
+        completed = None
+        for sequence, action in self._sequences:
+            if sequence == token_ids:
+                exact = action
+            elif sequence[: len(token_ids)] == token_ids:
+                waiting = True
+            elif token_ids[: len(sequence)] == sequence and (completed is None or len(sequence) > completed[1]):
+                completed = (action, len(sequence))
+        return exact, waiting, completed
+
+    def _apply(self, action: str) -> None:
+        match action:
+            case "reasoning":
+                # 思维链开始。这组 token 是分隔符，不输出。
+                self._channel = "reasoning"
+            case "content":
+                # 思维链结束，后面的文本回到正文。
+                self._channel = "content"
+            case "tool_on":
+                # 工具调用开始，参数不进入正文。
+                self._in_tool = True
+            case "tool_off":
+                # 工具调用结束，后面的文本回到当前通道。
+                self._in_tool = False
+            case "harmony_start":
+                # <|start|> 到下一个结构标记之间是角色头。
+                self._mode = "header"
+            case "harmony_channel":
+                # <|channel|> 后面开始收集通道名。
+                self._mode = "channel"
+                self._channel_name = ""
+            case "harmony_message":
+                # <|message|>：analysis 进入思维链，commentary 整段丢弃，其余进入正文。
+                name = self._channel_name.strip().lower()
+                self._channel = {"analysis": "reasoning", "commentary": "drop"}.get(name, "content")
+                self._mode = "body"
+                self._channel_name = ""
+            case "harmony_end":
+                # 这段消息结束。通道保持不变，下一次 <|message|> 再切换。
+                self._mode = "body"
+
+    def _release(self, item: _Held) -> None:
+        token_id, text, score, metadata = item
+        match self._mode:
+            case "channel":
+                # 通道名本身，如 analysis，不输出。
+                self._channel_name += text
+            case "header":
+                # 头部里的角色名，如 assistant，不输出。
+                return
+            case _:
+                if self._in_tool or self._channel == "drop":
+                    # 工具参数或 commentary 正文不输出。
+                    return
+                self._save(text=text, score=score, metadata=metadata, token_id=token_id)
+
+    def _save(self, text: str, score: float, metadata: dict[str, Any], token_id: int) -> None:
+        if not text:
+            # 未完成的 UTF-8 字节并进后面的字符。特殊 token 的空文本直接丢掉。
+            if not self._is_special(metadata=metadata, token_id=token_id):
+                self._pending_logprob += score
+            return
+        logprob = self._pending_logprob + score
+        self._pending_logprob = 0.0
+        token = {
+            "token": text,
+            "logprob": logprob,
+            "bytes": None if "\ufffd" in text else list(text.encode("utf-8")),
+            "top_logprobs": [
+                _candidate_logprob(tokenizer=self.tokenizer, token_id=candidate, logprob=value)
+                for candidate, value in metadata.get("output_top_logprobs", ())
+            ],
+        }
+        # 分开思考时思维链单独列出；否则和正文共用 content。
+        if self._channel == "reasoning" and self._separate_reasoning:
+            self._reasoning.append(token)
         else:
-            side = self._content
-        visible = f"{reasoning_text}{content_text}"
-        for item in pending:
-            if item.token is None:
-                continue
-            # ``</``、``<think>`` 不在解析器返回的文字里，丢掉。
-            # ``think`` 作为正文时会留在返回值里。
-            if item.text and item.text not in visible and (item.text in start_tag or item.text in end_tag):
-                continue
-            side.append(item)
+            self._content.append(token)
 
-    def _take(self, *, include_reasoning: bool, include_content: bool) -> List[Dict[str, Any]]:
-        tokens = []
-        if include_reasoning:
-            tokens.extend(self._drain(items=self._reasoning))
-        if include_content:
-            tokens.extend(self._drain(items=self._content))
-        return tokens
+    def _is_special(self, metadata: dict[str, Any], token_id: int) -> bool:
+        if "special" in metadata:
+            return bool(metadata["special"])
+        return token_id in getattr(self.tokenizer, "all_special_ids", ())
 
-    def _drain(self, *, items: List[PendingLogprob]) -> List[Dict[str, Any]]:
-        tokens = []
-        for item in items:
-            if item.token is None:
-                continue
-            item.token["top_logprobs"] = [
-                chat_token_logprob(tokenizer=self.tokenizer, token_id=token_id, logprob=score)
-                for token_id, score in item.candidates
-            ]
-            tokens.append(item.token)
+    @staticmethod
+    def _drain(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        tokens = list(items)
         items.clear()
         return tokens
+
+
+class _Held(NamedTuple):
+    token_id: int
+    text: str
+    score: float
+    metadata: dict[str, Any]
+
+
+def _candidate_logprob(tokenizer: Any, token_id: int, logprob: float) -> dict[str, Any]:
+    token = tokenizer.decode([token_id], skip_special_tokens=False)
+    raw_bytes = None if "\ufffd" in token else list(token.encode("utf-8"))
+    return {"token": token, "logprob": logprob, "bytes": raw_bytes}
+
+
+def _delimiter_ids(tokenizer: Any, text: str) -> list[int] | None:
+    if not text:
+        return None
+    encode = getattr(tokenizer, "encode", None)
+    if encode is not None:
+        token_ids = list(encode(text, add_special_tokens=False))
+        if token_ids and tokenizer.decode(token_ids, skip_special_tokens=False) == text:
+            return token_ids
+    return _longest_token_ids(tokenizer=tokenizer, text=text)
+
+
+def _longest_token_ids(tokenizer: Any, text: str) -> list[int] | None:
+    vocab = tokenizer.get_vocab()
+    pieces = sorted((piece for piece in vocab if piece), key=len, reverse=True)
+    token_ids = []
+    index = 0
+    while index < len(text):
+        piece = next((item for item in pieces if text.startswith(item, index)), None)
+        if piece is None:
+            return None
+        token_ids.append(vocab[piece])
+        index += len(piece)
+    if tokenizer.decode(token_ids, skip_special_tokens=False) != text:
+        return None
+    return token_ids

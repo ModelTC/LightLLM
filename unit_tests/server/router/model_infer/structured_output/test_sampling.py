@@ -81,7 +81,7 @@ def test_sample_disables_stale_constraint_mask_for_ordinary_requests(compiler, s
     assert not compiler._cache
 
 
-@pytest.mark.parametrize("topk", [0, 3, 20])
+@pytest.mark.parametrize("topk", [0, 1, 3, 20])
 @pytest.mark.parametrize("sampling_case", ["greedy", "random", "top_k_top_p"])
 def test_sample_returns_requested_output_logprobs(compiler, sampling_manager, monkeypatch, topk, sampling_case):
     req = sampling_req(compiler, sampling_manager, regular_constraint=None)
@@ -96,7 +96,7 @@ def test_sample_returns_requested_output_logprobs(compiler, sampling_manager, mo
     reference = logits.log_softmax(dim=-1)
     sampled_id = int(token_ids[0])
     expected = reference[0, sampled_id]
-    if topk and sampled_id < req.vocab_size - topk:
+    if int((logits[0] > logits[0, sampled_id]).sum()) >= 20:
         expected = expected.new_tensor(-9999.0)
     torch.testing.assert_close(logprobs[0], expected)
     if topk:
@@ -152,7 +152,7 @@ def test_sample_candidate_logprobs_follow_mtp_row_selection(compiler, sampling_m
     assert logprobs_cpu[1].item() == -9999.0
 
 
-@pytest.mark.parametrize("topk", [0, 3, 20])
+@pytest.mark.parametrize("topk", [0, 1, 3, 20])
 @pytest.mark.parametrize("rows", [[0, 1, 2, 3], [0, 2]])
 @pytest.mark.parametrize("greedy", [False, True])
 def test_sample_reuses_sampled_normalization(compiler, sampling_manager, monkeypatch, topk, rows, greedy):
@@ -170,7 +170,7 @@ def test_sample_reuses_sampled_normalization(compiler, sampling_manager, monkeyp
     topk_by_index = output_topk_logprobs
     for row in range(4):
         expected = reference[row, ids[row]]
-        if topk and row in rows and ids[row] < 257 - topk:
+        if row in rows and int((logits[row] > logits[row, ids[row]]).sum()) >= 20:
             expected = expected.new_tensor(-9999.0)
         torch.testing.assert_close(logprobs[row], expected)
         if topk and row in rows:
@@ -179,7 +179,7 @@ def test_sample_reuses_sampled_normalization(compiler, sampling_manager, monkeyp
             torch.testing.assert_close(top_scores, reference[row, top_ids].cpu())
 
 
-def test_sample_rank_cutoff_keeps_ties_and_skips_zero_width_candidates(compiler, sampling_manager, monkeypatch):
+def test_sample_preserves_sampled_score_and_keeps_ties(compiler, sampling_manager, monkeypatch):
     reqs = [sampling_req(compiler, sampling_manager, req_idx=i, regular_constraint=None) for i in range(4)]
     for req, topk in zip(reqs, [0, 0, 3, -1]):
         req.sampling_param.shm_param.top_k = req.vocab_size
@@ -191,9 +191,11 @@ def test_sample_rank_cutoff_keeps_ties_and_skips_zero_width_candidates(compiler,
     monkeypatch.setattr(sampling, "_random_sample", lambda *args: ids)
     _, logprobs, output_topk_logprobs = sampling.sample(logits, reqs, [256])
     assert [None if row is None else row.batch_index for row in output_topk_logprobs] == [None, None, 2, None]
-    assert logprobs[2].item() == -9999.0
     reference = logits.log_softmax(dim=-1)
-    torch.testing.assert_close(logprobs[[0, 1, 3]], reference[[0, 1, 3], 256])
+    expected = reference[:, 256].clone()
+    expected[1] = -9999.0
+    expected[2] = -9999.0
+    torch.testing.assert_close(logprobs, expected)
     candidate_ids, candidate_logprobs = output_topk_logprobs[2].token_ids, output_topk_logprobs[2].logprobs
     assert len(set(candidate_ids.tolist())) == 3 and (candidate_ids < 20).all()
     torch.testing.assert_close(candidate_logprobs, reference[2, candidate_ids].cpu())
@@ -438,3 +440,18 @@ def copy_snapshot_and_wait(manager):
     completed = torch.cuda.Event()
     completed.record()
     completed.synchronize()
+
+
+@pytest.mark.parametrize("vocab_size", [30, 2051, 32769])
+def test_capture_across_vocab_tiles_preserves_sampled_scores(vocab_size):
+    logits = torch.linspace(3.0, 0.1, vocab_size, device="cuda").repeat(4, 1)
+    ids = torch.tensor([1, 19, 20, vocab_size - 1], device="cuda")
+    logprobs = logits.log_softmax(-1).gather(1, ids[:, None]).squeeze(1)
+    original = logprobs.clone()
+    rows = torch.tensor([[0, 0, 0], [1, 1, 0], [2, 3, 1], [3, 20, 4]], device="cuda", dtype=torch.int32)
+    candidate_ids, scores = sampling.capture_output_logprobs(logits, ids, logprobs, rows, 20, 24)
+    torch.testing.assert_close(logprobs[:2], original[:2], rtol=0, atol=0)
+    assert logprobs[2].item() == -9999.0 and logprobs[3].item() == -9999.0
+    for row, width, offset in rows.tolist():
+        assert candidate_ids[offset : offset + width].tolist() == list(range(width))
+        torch.testing.assert_close(scores[offset : offset + width], logits.log_softmax(-1)[row, :width])
