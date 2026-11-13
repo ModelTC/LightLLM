@@ -82,6 +82,7 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
 
    架构介绍 <framework/framework>
    Attention Resources 架构设计 <framework/cache_manager_design>
+   Attention 执行设计 <framework/attention_execution_design>
    token attention介绍 <framework/token_attention>
    峰值显存调度器介绍 <framework/router>
    
