@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 from lightllm.server.core.objs import FinishStatus
+from lightllm.server.core.objs.logprob_utils import chat_token_logprob
 from lightllm.server.function_call_parser import FunctionCallParser
 from lightllm.server.reasoning_parser import ReasoningParser
 
@@ -88,9 +89,12 @@ class ChatLogprobBuffer:
     def _init_tools(self, tokenizer: Any, tool_call_parser: str | None) -> None:
         if not tool_call_parser:
             raise ValueError("logprobs requires tool_call_parser when tools are set")
+        if tool_call_parser == "mistral":
+            raise ValueError("logprobs does not support mistral tool_call_parser")
         parser = FunctionCallParser(tools=[], tool_call_parser=tool_call_parser)
         self._add_sequence(tokenizer=tokenizer, text=parser.detector.bot_token, action="tool_on")
-        self._add_sequence(tokenizer=tokenizer, text=parser.detector.eot_token, action="tool_off")
+        if parser.detector.eot_token:
+            self._add_sequence(tokenizer=tokenizer, text=parser.detector.eot_token, action="tool_off")
 
     def _add_sequence(self, tokenizer: Any, text: str, action: str, required: bool = True) -> None:
         token_ids = _delimiter_ids(tokenizer=tokenizer, text=text)
@@ -161,7 +165,12 @@ class ChatLogprobBuffer:
             case "harmony_message":
                 # <|message|>：analysis 进入思维链，commentary 整段丢弃，其余进入正文。
                 name = self._channel_name.strip().lower()
-                self._channel = {"analysis": "reasoning", "commentary": "drop"}.get(name, "content")
+                if name.startswith("analysis"):
+                    self._channel = "reasoning"
+                elif name.startswith("commentary"):
+                    self._channel = "drop"
+                else:
+                    self._channel = "content"
                 self._mode = "body"
                 self._channel_name = ""
             case "harmony_end":
@@ -226,9 +235,7 @@ class _Held(NamedTuple):
 
 
 def _candidate_logprob(tokenizer: Any, token_id: int, logprob: float) -> dict[str, Any]:
-    token = tokenizer.decode([token_id], skip_special_tokens=False)
-    raw_bytes = None if "\ufffd" in token else list(token.encode("utf-8"))
-    return {"token": token, "logprob": logprob, "bytes": raw_bytes}
+    return chat_token_logprob(tokenizer=tokenizer, token_id=token_id, logprob=logprob)
 
 
 def _delimiter_ids(tokenizer: Any, text: str) -> list[int] | None:

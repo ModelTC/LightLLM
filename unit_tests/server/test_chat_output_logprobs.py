@@ -494,16 +494,31 @@ def test_incomplete_delimiter_prefix_is_visible_text():
     assert [token["token"] for token in content] == ["</", "nope"]
 
 
-def test_tool_parser_without_end_token_is_rejected():
+def test_tool_parser_without_end_token_is_supported():
     from lightllm.server.chat_logprob_buffer import ChatLogprobBuffer
 
     tokenizer = make_tokenizer(["<|python_tag|>", "ok"], decoders.Fuse())
-    with pytest.raises(ValueError, match="token sequence"):
+    buffer = ChatLogprobBuffer(
+        tokenizer,
+        None,
+        False,
+        True,
+        tools=[{"type": "function", "function": {"name": "ok"}}],
+        tool_call_parser="llama3",
+    )
+    assert buffer._sequences
+
+
+def test_mistral_tool_parser_is_rejected():
+    from lightllm.server.chat_logprob_buffer import ChatLogprobBuffer
+
+    tokenizer = make_tokenizer(["[TOOL_CALLS] [", "]"], decoders.Fuse())
+    with pytest.raises(ValueError, match="mistral"):
         ChatLogprobBuffer(
             tokenizer,
             None,
             False,
             True,
             tools=[{"type": "function", "function": {"name": "ok"}}],
-            tool_call_parser="llama3",
+            tool_call_parser="mistral",
         )
