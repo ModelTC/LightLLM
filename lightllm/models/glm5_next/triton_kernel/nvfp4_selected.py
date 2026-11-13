@@ -107,6 +107,7 @@ def nvfp4_selected_attention(
     cu_q=None,
     scheduler_metadata=None,
     scheduler_offsets=(),
+    staging_buffer=None,
 ):
     """Decode each selected KV once, then use FA3 for the original query heads.
 
@@ -130,7 +131,15 @@ def nvfp4_selected_attention(
     assert physical_indices.is_contiguous()
     width = physical_indices.shape[1]
     capacity = _query_tile_size(rows)
-    staged = torch.empty((capacity * width, 1, dim), dtype=q.dtype, device=q.device)
+    if staging_buffer is None:
+        staged = torch.empty((capacity * width, 1, dim), dtype=q.dtype, device=q.device)
+    else:
+        assert staging_buffer.shape[1:] == (1, dim) and staging_buffer.dtype == q.dtype
+        capacity = min(capacity, staging_buffer.shape[0] // width)
+        assert capacity > 0
+        if scheduler_metadata is not None:
+            assert capacity == _query_tile_size(rows), "Staging must preserve the preplanned scheduler tile size"
+        staged = staging_buffer[: capacity * width]
     if cache_lengths is None:
         compact = torch.empty((capacity, width), dtype=physical_indices.dtype, device=q.device)
         lengths = torch.empty((capacity,), dtype=torch.int32, device=q.device)

@@ -59,3 +59,20 @@ def test_ep_runtime_counts_reuse_compilation(monkeypatch, aligned_chunks):
     assert all(len(values) == 1 for values in hashes["gather"].values()), hashes
     if aligned_chunks:
         assert len(set.union(*hashes["gather"].values())) == 1
+
+
+@pytest.mark.parametrize("hidden", [8, 4096], ids=["masked", "unmasked"])
+def test_ep_prefill_gather_offsets_above_int32_range(hidden):
+    if torch.cuda.mem_get_info()[0] < 32 * 1024 ** 3:
+        pytest.skip("Large-stride regression requires 32 GiB of available GPU memory")
+    row_stride = 2 ** 30
+    output = torch.empty_strided((3, hidden), (row_stride, 1), device="cuda", dtype=torch.bfloat16)
+    metadata = torch.empty_strided((3, 4), (row_stride, 1), device="cuda", dtype=torch.int32)
+    metadata.copy_(torch.tensor([[0, 0, 0, 2], [1, 0, 1, 3], [2, 0, 2, 3]], device="cuda", dtype=torch.int32))
+    weights = torch.tensor([0.5, 0.25, 0.125, 0.0625], device="cuda")
+    chunk = torch.tensor([[1] * hidden, [2] * hidden, [4] * hidden, [8] * hidden], device="cuda", dtype=output.dtype)
+    ep_gather_chunk(chunk[:2], 0, weights, metadata, output, init_output=True)
+    expected = torch.tensor([[0.5] * hidden, [0.5] * hidden, [0] * hidden], device="cuda", dtype=output.dtype)
+    torch.testing.assert_close(output, expected, atol=0, rtol=0)
+    ep_gather_chunk(chunk[2:], 2, weights, metadata, output)
+    torch.testing.assert_close(output, torch.ones_like(expected), atol=0, rtol=0)

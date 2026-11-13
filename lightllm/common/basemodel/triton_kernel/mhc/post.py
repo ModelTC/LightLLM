@@ -60,7 +60,7 @@ def _hc_post_4stream_kernel(
     hidden 元素，沿 residual_mix 的输入 stream 维归约；fp32 累加后写入 output。
     输出按 [T, 4 * H] 展平存储，不返回 Tensor。
     """
-    token = tl.program_id(0)
+    token = tl.program_id(0).to(tl.int64)
     hidden_block = tl.program_id(1)
     hidden_offsets = hidden_block * BLOCK_H + tl.arange(0, BLOCK_H)
     hidden_mask = hidden_offsets < hidden

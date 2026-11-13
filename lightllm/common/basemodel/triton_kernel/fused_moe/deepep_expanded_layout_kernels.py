@@ -182,6 +182,8 @@ def _ep_gather_chunk_kernel(
     if NEED_HIDDEN_MASK:
         hidden_mask = hidden_offsets < hidden_size
 
+    output_stride_m = output_stride_m.to(tl.int64)
+    metadata_stride_m = metadata_stride_m.to(tl.int64)
     for recv_token_id in range(start_recv_token_id, total_recv_tokens, recv_token_grid_size):
         output_ptrs = output + recv_token_id * output_stride_m + hidden_offsets * output_stride_k
         if INIT_OUTPUT:

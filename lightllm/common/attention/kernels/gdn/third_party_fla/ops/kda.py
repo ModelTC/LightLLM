@@ -700,6 +700,7 @@ def chunk_gla_fwd_kernel_o(
     All chunks can run independently after h/E are saved.
     """
     value_block_id, global_chunk_id, head_id = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    global_chunk_id = global_chunk_id.to(tl.int64)
     seq_id = tl.load(chunk_indices + global_chunk_id * 2).to(tl.int32)
     chunk_id_in_seq = tl.load(chunk_indices + global_chunk_id * 2 + 1).to(tl.int32)
     seq_start = tl.load(cu_seqlens + seq_id).to(tl.int32)

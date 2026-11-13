@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import torch
 
@@ -92,3 +94,32 @@ def test_prefill_kv_gather_reuses_kernel_across_token_counts(monkeypatch):
         expected[-1] = prefill_kv[0, 0]
         torch.testing.assert_close(output[:, 0], expected, rtol=0, atol=0)
     assert len(hashes) == 7 and len(set(hashes)) == 1
+
+
+def test_online_attention_merge_offsets_above_int32_range():
+    if torch.cuda.mem_get_info()[0] < 32 * 1024 ** 3:
+        pytest.skip("Large-offset regression requires 32 GiB of available GPU memory")
+    heads, dim = 64, 512
+    boundary = 2 ** 31 // (heads * dim)
+    rows = boundary + 128
+    output = torch.ones(rows, heads, dim, device="cuda", dtype=torch.float32)
+    chunk_output = torch.full((rows, heads, dim), 3, device="cuda", dtype=torch.bfloat16)
+    lse = torch.zeros(heads, rows, device="cuda")
+    chunk_lse = torch.zeros_like(lse)
+    fp8._merge_att_output_kernel[(rows, heads // 4)](
+        output,
+        lse,
+        chunk_output,
+        chunk_lse,
+        chunk_lse.stride(1),
+        chunk_lse.stride(0),
+        q_head_num=heads,
+        q_token_num=rows,
+        BLOCK_HEADS=4,
+        num_warps=4,
+    )
+    sample_rows = [0, boundary - 1, boundary, rows - 1]
+    torch.testing.assert_close(output[sample_rows], torch.full_like(output[sample_rows], 2), atol=0, rtol=0)
+    torch.testing.assert_close(
+        lse[:, sample_rows], torch.full_like(lse[:, sample_rows], math.log(2)), atol=1e-6, rtol=0
+    )

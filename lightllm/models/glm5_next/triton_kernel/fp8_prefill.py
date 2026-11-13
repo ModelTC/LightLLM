@@ -112,7 +112,7 @@ def _merge_att_output_kernel(
     q_token_num,
     BLOCK_HEADS: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     head = tl.program_id(1) * BLOCK_HEADS + tl.arange(0, BLOCK_HEADS)
     dim = tl.arange(0, 512)
     previous_lse = tl.load(softmax_lse + head * q_token_num + row, head < q_head_num, -float("inf"))
