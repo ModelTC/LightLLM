@@ -16,8 +16,8 @@ class GraphExecution:
             for state in self.states:
                 manager = state.att_state_manager
                 self.generations.append((manager, manager.storage_generation))
-                for group_id, context in state.attention_contexts.items():
-                    backend = state.attention_groups[group_id].backend_for(context.capacity.phase)
+                for group_id, context in state.attention_runtime.contexts.items():
+                    backend = state.attention_runtime.groups[group_id].backend_for(context.capacity.phase)
                     binding = backend.bind_graph(context)
                     if binding is not None:
                         self.bindings.append(binding)

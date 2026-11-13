@@ -1,27 +1,27 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+import weakref
 from functools import lru_cache
-from typing import List
+from typing import TYPE_CHECKING, List
 
 import torch
 
 from lightllm.common.attention_state.types import PageKind
-
-from lightllm.utils.dist_utils import get_current_device_id
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.platform import get_device_runtime
 from lightllm.utils.log_utils import init_logger
 
-from .allocators import StatePageAllocator, FullAttKVAllocator
+from .allocators import FullAttKVAllocator, StatePageAllocator
+from .bounded_att import BoundedAttentionState
 from .cpu_cache_operator import CpuCacheOperator
 from .dp_shared_operator import DPSharedOperator
 from .full_att import FullAttentionState
-from .bounded_att import BoundedAttentionState
 from .pd_operator import PDOperator
 from .utils import MODEL_ROLES
 
 if TYPE_CHECKING:
     from easydict import EasyDict
+
     from lightllm.server.core.objs.start_args_type import StartArgs
 
 
@@ -38,6 +38,8 @@ class AttentionStateManager:
     State 注册、查询和共享容量规划。Operator 只依赖本管理器提供的 State 查询
     和 allocator，不复制 State 的算法逻辑。
     """
+
+    storage_generation = 0
 
     # ========================================================================
     # 一、基础管理：共享分配器、资源初始化与聚合查询
@@ -138,7 +140,6 @@ class AttentionStateManager:
         排序，State 内保留 logical_layer_groups 顺序。非静态 FP8 的 full State 同样占用
         对应物理行区间，共享逻辑层只占一行；CPU 布局创建不需要调用本流程。
         """
-        import json
         from .full_att.gqa.static_fp8_state import StaticFP8FullAttentionState
 
         full_states = self.get_full_attention_states()
@@ -180,6 +181,16 @@ class AttentionStateManager:
             "Full-attention calibration bound: states=%d, source=%s", len(calibration_states), path or "unit scales"
         )
 
+    def register_graph(self, graph):
+        if not hasattr(self, "_graphs"):
+            self._graphs = weakref.WeakSet()
+        self._graphs.add(graph)
+
+    def close_graphs(self):
+        """释放状态前先排空依赖它的捕获实例，避免旧地址在后台继续被使用。"""
+        for graph in tuple(getattr(self, "_graphs", ())):
+            graph.close()
+
     def initialize_storage(
         self,
         args: StartArgs | EasyDict,
@@ -194,6 +205,7 @@ class AttentionStateManager:
         依次执行各模型的运行时初始化，由模型读取 allocator 中的最终容量。
         """
         assert self._state_registration_finished, "State registration must finish before resource initialization"
+        assert self.full_att_allocator is None, "resources already initialized"
 
         # 阶段一：规划共享 token 容量，并向下对齐到完整 KV 页。
         # 未指定容量时，根据剩余显存评估；固定运行态的显存已经在前面占用。
@@ -204,9 +216,10 @@ class AttentionStateManager:
             pd_reserved_bytes = self.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
         if token_capacity is None:
             # 权重和固定运行态已分配，用当前设备剩余显存扣除保留比例及 PD buffer。
-            torch.cuda.empty_cache()
-            gpu_device = torch.device("cuda", get_current_device_id())
-            free_bytes, total_bytes = torch.cuda.mem_get_info(gpu_device)
+            runtime = getattr(self, "device_runtime", None) or get_device_runtime(device)
+            runtime.empty_cache()
+            gpu_device = runtime.device
+            free_bytes, total_bytes = runtime.memory_info()
             budget = int(free_bytes - total_bytes * (1 - mem_fraction)) - pd_reserved_bytes
 
             # 按每页开销直接计算容量，预留一个 HOLD 页；静态量化参数占比较小，不单独扣减。
@@ -229,6 +242,8 @@ class AttentionStateManager:
         token_capacity = token_capacity // args.page_size * args.page_size
         assert token_capacity > 0, "attention capacity must contain at least one complete page"
 
+        self.close_graphs()
+        self.storage_generation += 1
         # 阶段二：管理器为已创建的 State 分配实际存储与共享 allocator。
         # State 对象保持不变，查询缓存继续引用相同对象；固定运行态不重复分配。
         big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
@@ -331,6 +346,18 @@ class AttentionStateManager:
     # ========================================================================
 
     # 空前缀初始化：只处理 bounded attention；无此类 State 时可为空操作。
+    def snapshot_capture_state(self, req_indices: torch.Tensor, role: str):
+        states = self.get_bounded_attention_states(role)
+        if not states:
+            return ()
+        requests = req_indices.unique().cpu().tolist()
+        return tuple((view, view.clone()) for state in states for view in state.capture_snapshot_views(requests))
+
+    @staticmethod
+    def restore_capture_state(snapshot):
+        for target, saved in snapshot:
+            target.copy_(saved)
+
     def reset_bounded_att_state(self, req_indices: List[int]) -> None:
         """将指定槽位的 bounded 运行态及控制信息恢复到长度 0，保留 KV 和状态页。"""
         for state in self.get_bounded_attention_states():

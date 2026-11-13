@@ -1,39 +1,35 @@
-import os
 import json
+import os
+
 import torch
+
+from lightllm.common.attention.api import AttentionPhase
+from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.common.build_utils import repair_config
+from lightllm.models.internvl.model import InternvlTokenizer
+from lightllm.models.llama.infer_struct import LlamaInferStateInfo
+from lightllm.models.neo_chat.layer_infer.transformer_layer_infer import NeoChatTransformerLayerInfer
+from lightllm.models.neo_chat.layer_weights.pre_and_post_layer_weight import NeoChatPreAndPostLayerWeight
+from lightllm.models.neo_chat.layer_weights.transformer_layer_weight import NeoChatTransformerLayerWeight
+from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
+from lightllm.models.neo_chat_moe.vision_process import smart_resize
+from lightllm.models.qwen2_vl.model import QWen2VLTokenizer
+from lightllm.models.qwen3.model import Qwen3TpPartModel
+from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
 from lightllm.models.qwen3_vl.layer_infer.transformer_layer_infer import Qwen3VLTransformerLayerInfer
 from lightllm.models.qwen3_vl.layer_weights.pre_and_post_layer_weight import Qwen3VLPreAndPostLayerWeight
-from lightllm.models.qwen2_vl.model import QWen2VLTokenizer
-from lightllm.models.qwen3.model import Qwen3TpPartModel
-from lightllm.server.core.objs import SamplingParams
-from lightllm.models.qwen3_moe.model import Qwen3MOEModel
-from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
-from lightllm.models.neo_chat_moe.vision_process import smart_resize
-from lightllm.models.internvl.model import InternvlTokenizer
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
-from lightllm.models.neo_chat.layer_infer.transformer_layer_infer import NeoChatTransformerLayerInfer
-from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.models.neo_chat.layer_weights.transformer_layer_weight import NeoChatTransformerLayerWeight
-from lightllm.models.neo_chat.layer_weights.pre_and_post_layer_weight import NeoChatPreAndPostLayerWeight
-from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
-from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
-from lightllm.common.basemodel.attention import (
-    get_neo_prefill_att_backend_class,
-    get_decode_att_backend_class,
-    BaseAttBackend,
-)
+from lightllm.server.core.objs import SamplingParams
+from lightllm.server.multimodal_params import AudioItem, ImageItem, MultimodalParams
 from lightllm.utils.log_utils import init_logger
-
 
 logger = init_logger(__name__)
 
 
 class NeoModelBase:
     def _init_custom(self):
-
         super()._init_custom()
 
         if "rope_theta_hw" in self.config:
@@ -123,7 +119,6 @@ class NeoModelBase:
 
 
 class NeoTpPartModel(NeoModelBase, Qwen3TpPartModel):
-
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer
     transformer_layer_infer_class = NeoChatTransformerLayerInfer
 
@@ -139,11 +134,12 @@ class NeoTpPartModel(NeoModelBase, Qwen3TpPartModel):
     def _init_inferstate_cls(self):
         pass
 
-    def _init_att_backend(self):
-        self.prefill_att_backend: BaseAttBackend = get_neo_prefill_att_backend_class(
-            index=0, priority_list=["fa3", "triton"]
-        )(model=self)
-        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0)(model=self)
+    def attention_backend_candidates(self, family, phase):
+        from lightllm.common.attention.registry import neo_cache_format_to_backend
+
+        if phase is AttentionPhase.PREFILL:
+            return neo_cache_format_to_backend, ["fa3", "triton"]
+        return None, None
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:

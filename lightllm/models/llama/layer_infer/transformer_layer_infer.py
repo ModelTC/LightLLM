@@ -1,15 +1,16 @@
-from lightllm.common.attention_state.full_att import FullAttentionState
-from lightllm.common.basemodel.attention import AttControl
-import torch
-import triton
-import torch.distributed as dist
 from functools import partial
+
+import torch
+import torch.distributed as dist
+import triton
+
+from lightllm.common.attention.api.inputs import DenseInputs
+from lightllm.common.basemodel import TransformerLayerInferTpl
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
+from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
-from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -46,21 +47,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ) -> torch.Tensor:
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = infer_state.prefill_att_state.prefill_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            att_control=AttControl(logical_layer_id=self.layer_num_),
-            alloc_func=self.alloc_tensor,
-        )
+        o_tensor = self.prefill_attention.forward(infer_state, DenseInputs(_q))
         o_tensor = o_tensor.view(q.shape)
         return o_tensor
 
@@ -70,21 +58,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ) -> torch.Tensor:
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = infer_state.decode_att_state.decode_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            att_control=AttControl(logical_layer_id=self.layer_num_),
-            alloc_func=self.alloc_tensor,
-        )
+        o_tensor = self.decode_attention.forward(infer_state, DenseInputs(_q))
         return o_tensor.view(q.shape)
 
     def _att_norm(

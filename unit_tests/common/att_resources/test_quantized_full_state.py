@@ -22,6 +22,15 @@ from unit_tests.common.att_resources.model_helpers import (
     full_state_test_fields,
     read_kv_storage,
 )
+from unit_tests.common.attention.helpers import (
+    backend_context,
+    make_backend,
+    make_batch,
+    make_context,
+    run_dense,
+    run_sparse,
+    update_context,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -331,7 +340,7 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
     from types import SimpleNamespace
 
     from lightllm.common.attention.backends._shared.prefill import context_flashattention_nopad
-    from lightllm.common.basemodel.attention.triton.int4kv import Int4kvTritonPrefillAttState
+    from lightllm.common.attention.backends.dense.triton.int4 import Int4kvTritonAttBackend
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.common.basemodel.triton_kernel.kv_copy import ppl_int4kv_copy_kv
 
@@ -361,10 +370,8 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
     owner.b_req_idx = torch.tensor([0], dtype=torch.int32, device=device)
     owner.b_ready_cache_len = owner.b_q_start_loc = torch.zeros(1, dtype=torch.int32, device=device)
     owner.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(8, device=device).view(1, -1))
-    prefill = Int4kvTritonPrefillAttState(
-        backend=SimpleNamespace(quant_group_size=8), _infer_state_weak_ref=weakref.ref(owner)
-    )
-    prefill.init_state()
+    prefill = backend_context(Int4kvTritonAttBackend, "prefill", settings=SimpleNamespace(quant_group_size=8))
+    update_context(prefill, owner)
     if device == "cpu":
 
         def dequantize(**kwargs):
@@ -379,5 +386,5 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
         monkeypatch.setattr(ppl_int4kv_copy_kv, "dequantize_int4kv", dequantize)
         monkeypatch.setattr(context_flashattention_nopad, "context_attention_fwd_contiguous_kv", attention)
     q = torch.randn(2, 2, 64, device=device)
-    output = prefill.prefill_att(q, (k, k_scale), (v, v_scale))
+    output = run_dense(prefill, owner, q, (k, k_scale), (v, v_scale))
     torch.testing.assert_close(output, torch.ones_like(q))

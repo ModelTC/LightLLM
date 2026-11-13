@@ -1,21 +1,23 @@
-import weakref
 import json
+import weakref
 from importlib import import_module
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-import lightllm.common.basemodel.attention.base_att as base_att_module
+import lightllm.common.attention.backends.base as base_att_module
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
-from lightllm.common.basemodel.attention.base_att import BaseAttBackend
-from lightllm.common.basemodel.attention.fa3.fp import Fa3DecodeAttState, Fa3PrefillAttState
-from lightllm.common.basemodel.attention.fa3.mla import MlaFa3DecodeAttState, MlaFa3PrefillAttState
-from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
+from lightllm.common.attention.api import AttentionPhase
+from lightllm.common.attention.backends.base import BaseAttentionBackend
+from lightllm.common.attention.backends.dense.fa3.backend import Fa3AttBackend
+from lightllm.common.attention.backends.dense.triton.backend import TritonAttBackend
+from lightllm.common.attention.backends.mla.fa3.backend import MlaFa3AttBackend
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 from lightllm.utils import envs_utils
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_context, make_spec, model_stub
 
 
 @pytest.mark.parametrize(
@@ -76,19 +78,11 @@ def test_attention_backend_selects_dynamic_spec_layout(
     dynamic_spec,
     expected,
 ):
-    monkeypatch.setattr(
-        base_att_module,
-        "get_env_start_args",
-        lambda: SimpleNamespace(mtp_mode=mtp_mode, mtp_dynamic_verify=dynamic_spec),
-    )
-    backend = SimpleNamespace(
-        model=SimpleNamespace(
-            is_mtp_draft_model=is_draft_model,
-            mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
-        )
-    )
-
-    assert BaseAttBackend.uses_dynamic_spec_verify_layout(backend) is expected
+    model = model_stub(mtp_mode=mtp_mode, mtp_dynamic_verify=dynamic_spec)
+    model.is_mtp_draft_model = is_draft_model
+    model.mtp_manager.get_decode_draft_step = lambda _: draft_step
+    backend = BaseAttentionBackend(model, _spec_from_model(model))
+    assert backend.uses_dynamic_spec_verify_layout() is expected
 
 
 @pytest.mark.parametrize(
@@ -104,102 +98,59 @@ def test_attention_backend_selects_dynamic_spec_layout(
     ],
 )
 def test_attention_backend_selects_causality(monkeypatch, mtp_mode, is_draft_model, expected):
-    monkeypatch.setattr(
-        base_att_module,
-        "get_env_start_args",
-        lambda: SimpleNamespace(mtp_mode=mtp_mode),
-    )
-    backend = SimpleNamespace(model=SimpleNamespace(is_mtp_draft_model=is_draft_model))
-
-    assert BaseAttBackend.uses_causal_attention(backend) is expected
+    model = model_stub(mtp_mode=mtp_mode)
+    model.is_mtp_draft_model = is_draft_model
+    assert BaseAttentionBackend(model, _spec_from_model(model)).uses_causal_attention() is expected
 
 
-@pytest.mark.parametrize("state_class", [Fa3PrefillAttState, MlaFa3PrefillAttState])
+@pytest.mark.parametrize("state_class", [Fa3AttBackend, MlaFa3AttBackend])
 def test_fa3_prefill_state_owns_causality(monkeypatch, state_class):
-    monkeypatch.setattr(import_module(Fa3PrefillAttState.__module__), "page_table_copy", lambda **kwargs: None)
-    infer_state = InferStateInfo()
-    infer_state.b1_cu_q_seq_len = torch.tensor([0, 1, 2], dtype=torch.int32)
-    infer_state.b1_cu_kv_seq_len = torch.tensor([0, 3, 7], dtype=torch.int32)
-    infer_state.b_req_idx = torch.tensor([0, 1], dtype=torch.int32)
-    infer_state.batch_size = 2
-    infer_state.max_kv_seq_len = 4
-    infer_state.input_ids = torch.empty(2, dtype=torch.int64)
-    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(8, dtype=torch.int32).reshape(2, 4))
-    state = state_class(
-        backend=SimpleNamespace(uses_causal_attention=lambda: False, page_size=1, infer_page_size=1),
-        _infer_state_weak_ref=weakref.ref(infer_state),
-    )
-
-    state.init_state()
-
-    assert state.causal is False
+    backend = make_backend(state_class, causal=False)
+    monkeypatch.setattr(import_module(Fa3AttBackend.__module__), "page_table_copy", lambda **kwargs: None)
+    context = make_context(backend, make_batch(phase=AttentionPhase.PREFILL))
+    backend.update(context)
+    assert context.causal is False
 
 
-@pytest.mark.parametrize("state_class", [Fa3DecodeAttState, MlaFa3DecodeAttState])
+@pytest.mark.parametrize("state_class", [Fa3AttBackend, MlaFa3AttBackend])
 def test_fa3_decode_state_owns_causality(state_class):
-    infer_state = InferStateInfo()
-    infer_state.b1_cu_q_seq_len = torch.tensor([0, 1, 2], dtype=torch.int32)
-    infer_state.b1_cu_kv_seq_len = torch.tensor([0, 3, 7], dtype=torch.int32)
-    infer_state.b_req_idx = torch.tensor([0, 1], dtype=torch.int32)
-    infer_state.b_seq_len = torch.tensor([3, 4], dtype=torch.int32)
-    model = SimpleNamespace(
-        is_mtp_draft_model=False,
-        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
-    )
-    state = state_class(
-        backend=SimpleNamespace(
-            model=model,
-            uses_causal_attention=lambda: False,
-            uses_dynamic_spec_verify_layout=lambda: False,
-        ),
-        _infer_state_weak_ref=weakref.ref(infer_state),
-    )
-    state._init_page_table = lambda _: None
-
-    state.init_state()
-
-    assert state.causal is False
+    backend = make_backend(state_class, causal=False)
+    backend._decode_init_page_table = lambda *args: None
+    context = make_context(backend)
+    backend.update(context)
+    assert context.causal is False
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_triton_mtp_decode_state_builds_group_markers():
-    model = SimpleNamespace(
-        is_mtp_draft_model=False,
-        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 2),
-        req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
+    backend = make_backend(TritonAttBackend, decode_draft_step=2, hold_req_id=-1)
+    batch = make_batch(
+        (4, 4, 2, 2),
+        device="cuda",
+        b_req_idx=torch.tensor([7, 7, -1, -1], device="cuda", dtype=torch.int32),
+        hold_req_id=-1,
     )
-    infer_state = InferStateInfo()
-    infer_state.b_req_idx = torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda")
-    infer_state.max_kv_seq_len = 4
-    state = TritonDecodeAttState(
-        backend=SimpleNamespace(model=model),
-        _infer_state_weak_ref=weakref.ref(infer_state),
-    )
-
-    state.init_state()
-
-    assert state.b_mark_mtp_shared_group.cpu().tolist() == [0, 2, 1, 1]
+    context = make_context(backend, batch)
+    backend.update(context)
+    assert context.b_mark_mtp_shared_group.cpu().tolist() == [0, 2, 1, 1]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-@pytest.mark.parametrize("state_class", [Fa3DecodeAttState, MlaFa3DecodeAttState])
+@pytest.mark.parametrize("state_class", [Fa3AttBackend, MlaFa3AttBackend])
 def test_fa3_dynamic_decode_state_builds_group_markers(state_class):
-    model = SimpleNamespace(req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1))
-    infer_state = InferStateInfo()
-    infer_state.b_req_idx = torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda")
-    infer_state.b_seq_len = torch.tensor([3, 4, 2, 2], dtype=torch.int32, device="cuda")
-    infer_state.batch_size = 4
-    state = state_class(
-        backend=SimpleNamespace(model=model),
-        _infer_state_weak_ref=weakref.ref(infer_state),
+    backend = make_backend(state_class, hold_req_id=-1)
+    batch = make_batch(
+        (3, 4, 2, 2),
+        device="cuda",
+        b_req_idx=torch.tensor([7, 7, -1, -1], device="cuda", dtype=torch.int32),
+        hold_req_id=-1,
     )
-
-    b_att_req_idx = state._init_dynamic_spec_verify_state(draft_step=2)
+    context = make_context(backend, batch)
+    b_att_req_idx = backend._decode_init_dynamic_spec_verify_state(context, draft_step=2)
     torch.cuda.synchronize()
-
     assert b_att_req_idx.cpu().tolist() == [7, -1, -1, -1]
-    assert state.b_att_seq_len.cpu().tolist() == [4, 2, 2, 0]
-    assert state.cu_seqlens_q.cpu().tolist() == [0, 2, 3, 4, 4]
+    assert context.b_att_seq_len.cpu().tolist() == [4, 2, 2, 0]
+    assert context.cu_seqlens_q.cpu().tolist() == [0, 2, 3, 4, 4]
 
 
 @pytest.mark.parametrize(
@@ -411,3 +362,29 @@ def test_eagle3_added_kv_layers_come_from_draft_config(tmp_path):
     )
 
     assert envs_utils.get_added_mtp_kv_layer_num() == 2
+
+
+def _spec_from_model(model):
+    from types import SimpleNamespace
+
+    from lightllm.common.attention.api import AttentionFamily
+    from lightllm.common.basemodel.attention import describe_attention_layer
+
+    state = SimpleNamespace(
+        contains_logical_layer=lambda layer: True,
+        describe_layout=lambda: (),
+        config=SimpleNamespace(dtype=torch.bfloat16),
+    )
+    model.data_type = torch.bfloat16
+    model.att_state_manager.get_full_attention_states = lambda role: (state,)
+    layer = SimpleNamespace(
+        layer_num_=0,
+        tp_q_head_num_=4,
+        tp_k_head_num_=2,
+        head_dim_=64,
+        attention_window=lambda phase: None,
+        attention_uses_alibi=False,
+        attention_uses_sink=False,
+        attention_variant="",
+    )
+    return describe_attention_layer(model, layer, AttentionFamily.DENSE, AttentionPhase.DECODE)

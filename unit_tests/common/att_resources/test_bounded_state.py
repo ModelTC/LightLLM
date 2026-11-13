@@ -1,24 +1,20 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import (
+    ConvSSMStateConfig,
     GDNPagesPool,
     GDNState,
     KDAPagesPool,
     KDAState,
-    ConvSSMStateConfig,
 )
-from lightllm.common.attention_state.types import (
-    AxisMapping,
-    StateTransferLayout,
-    TransferRegion,
-)
+from lightllm.common.attention_state.types import AxisMapping, StateTransferLayout, TransferRegion
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import PageKind
@@ -51,7 +47,9 @@ def make_state(
     )
     manager = AttentionStateManager(request_capacity=3)
     manager.register_state("main", state)
-    state.initialize_page_pools(big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu")
+    state.initialize_page_pools(
+        big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu" and torch.cuda.is_available()
+    )
     return state
 
 

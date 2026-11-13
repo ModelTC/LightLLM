@@ -1,22 +1,21 @@
-import os
+import bisect
+import copy
+import math
+from typing import Optional
+
 import torch
 import torch.distributed as dist
-import copy
-import bisect
-import math
 import triton
-from typing import Optional
-from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.distributed import dist_group_manager
-from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
-from lightllm.utils.torch_memory_saver_utils import (
-    TorchMemorySaverWrapper,
-    MemoryTag,
-)
-from .infer_struct import InferStateInfo
 
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, Autotuner
+from lightllm.platform import get_device_runtime
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.log_utils import init_logger
+from lightllm.utils.torch_memory_saver_utils import TorchMemorySaverWrapper
+
+from .graph import GraphExecution
+from .infer_struct import InferStateInfo
 
 logger = init_logger(__name__)
 
@@ -63,10 +62,12 @@ class CudaGraph:
         max_len_in_batch=8192,
         tp_world_size: int = 1,
         capture_infer_cost: bool = False,
+        runtime=None,
     ):
         self.graph = {}
         self.tp_world_size = tp_world_size
-        self.mempool = torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None
+        self.runtime = runtime if runtime is not None else get_device_runtime()
+        self.mempool = self.runtime.graph_pool()
         self.args = get_env_start_args()
         self.max_batch_size = max_batch_size
         self.graph_max_len_in_batch = max_len_in_batch
@@ -90,7 +91,7 @@ class CudaGraph:
     def need_capture(self, batch_size):
         find_batch_size = self.find_closest_graph_batch_size(batch_size)
         if find_batch_size is not None:
-            return find_batch_size not in self.graph
+            return find_batch_size not in self.graph or self.graph[find_batch_size].graph is None
         else:
             assert False, "dead code"
 
@@ -103,37 +104,40 @@ class CudaGraph:
             return None
 
     def _capture_decode(self, decode_func, infer_state: InferStateInfo):
-        graph_obj = torch.cuda.CUDAGraph()
+        graph_obj = self.runtime.create_graph()
         input_ids = infer_state.input_ids
         batch_size = input_ids.shape[0]
         infer_state.max_kv_seq_len = self.graph_max_len_in_batch
         infer_state.total_token_num = self.graph_max_len_in_batch * batch_size
-        # warmup
-        # 因为有些推理过程的代码，会通过判断infer_state中是否存在某些属性来在一层上
-        # 做一些初始化的操作，后续层可以复用这些计算的结果，如
-        # lightllm/models/deepseek2/triton_kernel/gqa_flash_decoding.py
-        # 中做的一些操作，所以在 warmup 的时候，需要调用infer_state的copy函数做一个
-        # 浅拷贝，不然后续传入到cuda graph捕获过程中后，infer_state因为提前拥有了这些属性，
-        # 导致不会重新初始化，这样捕获过程中会不能捕获这些临时添加到 infer_state 管理对象
-        # 中的 tensor。
-
-        for _ in range(1):
-            # 记录原始存在的变量
-            pure_para_set = set(vars(infer_state).keys())
-            torch.cuda.synchronize()
-            # 在正式捕获前调优 decode attention，退出作用域后再捕获选定的配置。
+        snapshot = infer_state.att_state_manager.snapshot_capture_state(
+            infer_state.b_req_idx, infer_state.att_state_role
+        )
+        restore_state = lambda: infer_state.att_state_manager.restore_capture_state(snapshot)
+        try:
+            self.runtime.synchronize()
             with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
                 decode_func(copy.copy(infer_state))
-            torch.cuda.synchronize()
-            for param_name in set(vars(infer_state).keys()):
-                if param_name not in pure_para_set:
-                    delattr(infer_state, param_name)
+            self.runtime.synchronize()
+        finally:
+            restore_state()
 
-        with self.torch_memory_saver.cuda_graph(graph_obj, pool=self.mempool):
-            model_output = decode_func(infer_state)
-        self.graph[batch_size] = (graph_obj, infer_state, model_output)
-        graph_obj.replay()
-        self._measure_replay_cost(graph_obj=graph_obj, batch_size=batch_size)
+        try:
+            with self.runtime.capture_graph(graph_obj, pool=self.mempool, memory_saver=self.torch_memory_saver):
+                model_output = decode_func(infer_state)
+        except BaseException:
+            try:
+                GraphExecution(graph_obj, (infer_state,), runtime=self.runtime).close()
+            finally:
+                restore_state()
+            raise
+        try:
+            execution = GraphExecution(graph_obj, (infer_state,), (model_output,), runtime=self.runtime)
+        except BaseException:
+            restore_state()
+            raise
+        self.graph[batch_size] = execution
+        execution.replay()
+        self._measure_replay_cost(graph_obj=execution, batch_size=batch_size, restore_state=restore_state)
         return model_output
 
     def _capture_decode_overlap(
@@ -142,50 +146,58 @@ class CudaGraph:
         infer_state: InferStateInfo,
         infer_state1: InferStateInfo,
     ):
-        graph_obj = torch.cuda.CUDAGraph()
+        graph_obj = self.runtime.create_graph()
         input_ids = infer_state.input_ids
         batch_size = input_ids.shape[0]
         infer_state.max_kv_seq_len = self.graph_max_len_in_batch
         infer_state.total_token_num = self.graph_max_len_in_batch * batch_size
         infer_state1.max_kv_seq_len = self.graph_max_len_in_batch
         infer_state1.total_token_num = self.graph_max_len_in_batch * batch_size
-        # warmup
-        for _ in range(1):
-            # 记录原始存在的变量
-            pure_para_set = set(vars(infer_state).keys())
-            pure_para_set1 = set(vars(infer_state1).keys())
-            torch.cuda.synchronize()
+        snapshot = infer_state.att_state_manager.snapshot_capture_state(
+            torch.cat((infer_state.b_req_idx, infer_state1.b_req_idx)), infer_state.att_state_role
+        )
+        restore_state = lambda: infer_state.att_state_manager.restore_capture_state(snapshot)
+        try:
+            self.runtime.synchronize()
             with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
                 decode_func(copy.copy(infer_state), copy.copy(infer_state1))
-            torch.cuda.synchronize()
-            for para_name in set(vars(infer_state).keys()):
-                if para_name not in pure_para_set:
-                    delattr(infer_state, para_name)
-            for para_name in set(vars(infer_state1).keys()):
-                if para_name not in pure_para_set1:
-                    delattr(infer_state1, para_name)
+            self.runtime.synchronize()
+        finally:
+            restore_state()
 
-        with self.torch_memory_saver.cuda_graph(graph_obj, pool=self.mempool):
-            model_output, model_output1 = decode_func(infer_state, infer_state1)
-        self.graph[batch_size] = (
-            graph_obj,
-            infer_state,
-            infer_state1,
-            model_output,
-            model_output1,
-        )
-        graph_obj.replay()
-        self._measure_replay_cost(graph_obj=graph_obj, batch_size=batch_size)
+        try:
+            with self.runtime.capture_graph(graph_obj, pool=self.mempool, memory_saver=self.torch_memory_saver):
+                model_output, model_output1 = decode_func(infer_state, infer_state1)
+        except BaseException:
+            try:
+                GraphExecution(graph_obj, (infer_state, infer_state1), runtime=self.runtime).close()
+            finally:
+                restore_state()
+            raise
+        try:
+            execution = GraphExecution(
+                graph_obj, (infer_state, infer_state1), (model_output, model_output1), runtime=self.runtime
+            )
+        except BaseException:
+            restore_state()
+            raise
+        self.graph[batch_size] = execution
+        execution.replay()
+        self._measure_replay_cost(graph_obj=execution, batch_size=batch_size, restore_state=restore_state)
         return model_output, model_output1
 
-    def _measure_replay_cost(self, graph_obj: torch.cuda.CUDAGraph, batch_size: int) -> None:
+    def _measure_replay_cost(
+        self, graph_obj: torch.cuda.CUDAGraph, batch_size: int, restore_state=lambda: None
+    ) -> None:
         if not self.capture_infer_cost:
             return
 
         dist.barrier(group=dist.group.WORLD)
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
+        start_event = self.runtime.create_event(enable_timing=True)
+        end_event = self.runtime.create_event(enable_timing=True)
+        restore_state()
         graph_obj.replay()
+        restore_state()
         start_event.record()
         graph_obj.replay()
         end_event.record()
@@ -217,37 +229,17 @@ class CudaGraph:
             assert infer_state1 is None
             return self._capture_decode(decode_func, infer_state)
 
-    def _replay(self, infer_state: InferStateInfo):
-        batch_size = infer_state.input_ids.shape[0]
-        graph_obj, graph_infer_state, graph_output = self.graph[batch_size]
-        graph_infer_state.copy_for_cuda_graph(infer_state)
-        graph_obj.replay()
-        return graph_output
-
-    def _replay_overlap(
-        self,
-        infer_state: InferStateInfo,
-        infer_state1: InferStateInfo,
-    ):
-        batch_size = infer_state.input_ids.shape[0]
-        (
-            graph_obj,
-            graph_infer_state,
-            graph_infer_state1,
-            graph_model_output,
-            graph_model_output1,
-        ) = self.graph[batch_size]
-        graph_infer_state.copy_for_cuda_graph(infer_state)
-        graph_infer_state1.copy_for_cuda_graph(infer_state1)
-        graph_obj.replay()
-        return graph_model_output, graph_model_output1
-
     def replay(self, infer_state, infer_state1=None):
-        if self.enable_decode_microbatch_overlap:
-            return self._replay_overlap(infer_state, infer_state1)
-        else:
-            assert infer_state1 is None
-            return self._replay(infer_state)
+        batch_size = infer_state.input_ids.shape[0]
+        states = (infer_state, infer_state1) if self.enable_decode_microbatch_overlap else (infer_state,)
+        if any(state is None for state in states):
+            raise ValueError("Graph replay requires all microbatch lanes")
+        return self.graph[batch_size].replay(*states)
+
+    def close(self):
+        for execution in self.graph.values():
+            execution.close()
+        self.graph.clear()
 
     @torch.no_grad()
     def warmup(self, model):

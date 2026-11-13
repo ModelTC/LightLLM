@@ -231,6 +231,58 @@ def test_layer_shape_configures_group_planner():
     assert (large.tp_q_head_num, large.head_dim) == (16, 128)
 
 
+def test_groups_follow_each_layers_family_and_shape(monkeypatch):
+    from lightllm.common.basemodel import attention
+
+    specs = [
+        make_spec(num_q_heads=8, head_size=64),
+        make_spec(num_q_heads=8, head_size=64),
+        make_spec(num_q_heads=16, head_size=128),
+        make_spec(AttentionFamily.GDN),
+    ]
+    calls = []
+
+    def select(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(create=lambda model, spec: SimpleNamespace())
+
+    monkeypatch.setattr(selection, "select_attention_backend", select)
+    monkeypatch.setattr(
+        attention, "describe_attention_layer", lambda model, layer, family, phase: replace(layer.spec, phase=phase)
+    )
+    model = model_stub()
+    model.attention_backend_candidates = lambda family, phase: (None, None)
+    model.layers_infer = [SimpleNamespace(spec=spec, get_attention_family=lambda s=spec: s.family) for spec in specs]
+    attention.initialize_attention_groups(model)
+    assert model._attention_layer_groups == (0, 0, 1, 2)
+    assert len(calls) == 6
+    assert [group.prefill_spec.head_size for group in model.attention_groups[:2]] == [64, 128]
+    assert model.attention_groups[-1].decode_spec.family is AttentionFamily.GDN
+
+
+@pytest.mark.parametrize("invalid", ["input_ids", "group", "role"])
+def test_runner_graph_copy_rejects_before_mutating_batch(invalid):
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+
+    captured, incoming = InferStateInfo(), InferStateInfo()
+    captured.att_state_role = incoming.att_state_role = "main"
+    group = object()
+    captured.attention_groups = incoming.attention_groups = (group,)
+    captured.attention_batch = make_batch()
+    incoming.attention_batch = make_batch((9, 7), req_to_token_indexs=captured.attention_batch.req_to_token_indexs)
+    captured.input_ids = torch.zeros(2, dtype=torch.long)
+    incoming.input_ids = torch.ones(3 if invalid == "input_ids" else 2, dtype=torch.long)
+    if invalid == "group":
+        incoming.attention_groups = (object(),)
+    if invalid == "role":
+        incoming.att_state_role = "draft"
+    before = captured.attention_batch.b_seq_len.clone()
+    with pytest.raises(ValueError):
+        captured.copy_for_cuda_graph(incoming)
+    torch.testing.assert_close(captured.attention_batch.b_seq_len, before)
+    assert captured.input_ids.tolist() == [0, 0]
+
+
 def test_replay_flashqla_rejects_decode_and_fp32():
     from lightllm.common.attention.backends.gdn.replay.backend import ReplayGDNFlashQlaAttBackend
 
@@ -278,6 +330,43 @@ def test_output_rejects_incompatible_buffer(invalid):
         result, out = out, out[:1]
     with pytest.raises(ValueError, match="out"):
         layer.backend.forward(layer, context, result, out=out)
+
+
+def test_batch_builder_borrows_runtime_inputs_and_binding_checks_owner():
+    from lightllm.common.basemodel.attention_batch import AttentionBatchBuilder
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+
+    state = InferStateInfo()
+    batch = make_batch()
+    for name, value in vars(batch).items():
+        if hasattr(state, name):
+            setattr(state, name, value)
+    state.input_ids = torch.zeros(batch.token_num, dtype=torch.long)
+    state.is_prefill = False
+    state.b_image_token_end = torch.tensor([1, 2])
+    state.req_manager = SimpleNamespace(
+        req_to_token_indexs=batch.req_to_token_indexs, HOLD_REQUEST_ID=batch.hold_req_id
+    )
+    borrowed = AttentionBatchBuilder.from_infer_state(state)
+    assert borrowed.b_req_idx is state.b_req_idx
+    assert borrowed.b1_cu_q_seq_len is state.b1_cu_q_seq_len
+    assert borrowed.req_to_token_indexs is state.req_manager.req_to_token_indexs
+    assert borrowed.b_image_token_end is state.b_image_token_end
+    backend = _OutputBackend(model_stub(), make_spec())
+    context = make_context(backend, borrowed, prepare=True)
+    state.attention_contexts = {0: context}
+    layer = make_layer_attention(backend, context, params=None)
+    assert layer.context(state) is context
+    output = torch.ones(2, 32)
+    assert layer.forward(state, output) is output
+    with pytest.raises(ValueError, match="binding"):
+        replace(layer, spec=replace(layer.spec, phase=AttentionPhase.PREFILL)).forward(state, output)
+    with pytest.raises(ValueError, match="binding"):
+        replace(layer, backend=_OutputBackend(model_stub(), make_spec())).forward(state, output)
+    with pytest.raises(ValueError, match="binding"):
+        replace(layer, backend=BaseAttentionBackend(model_stub(), make_spec())).context(state)
+    with pytest.raises(AttributeError):
+        context.b_requ_idx = borrowed.b_req_idx
 
 
 @pytest.mark.parametrize("family", list(AttentionFamily))

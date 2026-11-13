@@ -65,6 +65,7 @@ class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
                 "direct": allocate_direct_smallq_workspace(q[:1]),
                 "selected": allocate_selected_prefill_workspace(q, batch_capacity=8),
             },
+            expected_type=dict,
         )
         if q.shape[0] == 1:
             return context.smallq_workspace["direct"]

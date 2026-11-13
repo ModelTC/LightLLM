@@ -28,7 +28,7 @@ import math
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.fa3.neo import flash_attn_with_kvcache_neo as flash_attn_with_kvcache
+from lightllm.common.attention.backends.dense.fa3.neo import flash_attn_with_kvcache_neo as flash_attn_with_kvcache
 
 try:
     import triton

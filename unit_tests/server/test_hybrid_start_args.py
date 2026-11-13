@@ -107,6 +107,7 @@ def test_whole_image_blocks_fit_batch_at_startup(
 @pytest.mark.parametrize("mode,step", [("native", 0), ("replay", 0), ("replay", 4)])
 def test_s3_configuration_is_prepared_before_ssm_validation(launch_args, monkeypatch, tmp_path, mode, step):
     from pathlib import Path
+
     from lightllm.utils.petrel_helper import PetrelHelper
 
     monkeypatch.chdir(tmp_path)

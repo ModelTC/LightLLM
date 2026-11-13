@@ -867,6 +867,7 @@ def test_fold_scheduling_preserves_recurrence(bucket, live, folding, width, sepa
     torch.manual_seed(72)
     initial = torch.randn(1, live + 1, 1, 32, 32, device="cuda") * 0.01
     backend = ReplaySSMExecutor(initial.clone(), 8, 4, torch.float32, kda=kda)
+    backend.tile_sync_mark = torch.zeros((bucket, backend.num_key_heads), dtype=torch.int32, device="cuda")
     reqs = torch.cat(
         (
             torch.arange(live, device="cuda", dtype=torch.int32),

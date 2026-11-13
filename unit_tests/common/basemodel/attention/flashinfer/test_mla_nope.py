@@ -25,7 +25,8 @@ pytestmark = pytest.mark.skipif(
 )
 def test_nope_sparse_mla_eager_and_graph_replay(num_tokens, num_heads, kv_dtype):
     wrapper_cls = flashinfer.mla.BatchMLAPagedAttentionWrapper
-    assert "ckv_scale_arr" in inspect.signature(wrapper_cls.run).parameters, "FlashInfer >= 0.6.18 is required"
+    if "ckv_scale_arr" not in inspect.signature(wrapper_cls.run).parameters:
+        pytest.skip("FlashInfer >= 0.6.18 is required")
 
     torch.manual_seed(17)
     dim, num_slots, width = 512, 4096, 2176
