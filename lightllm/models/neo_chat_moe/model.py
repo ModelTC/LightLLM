@@ -135,7 +135,7 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
 
     def _build_t2i_query(self, msg, thinking_content=""):
         prompt = self.tokenizer.apply_chat_template(
-            conversation=[{"role": "user", "content": msg}], tokenize=False, add_generation_prompt=True
+            conversation=[{"role": "user", "content": msg}], tokenize=False, add_generation_prompt=True, add_default_system=False,
         )
 
         return prompt + thinking_content + IMG_START_TOKEN
