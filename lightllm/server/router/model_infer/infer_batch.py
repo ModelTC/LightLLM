@@ -1059,7 +1059,7 @@ class InferReqUpdatePack:
 
         if is_master_in_dp:
             if output_top_logprobs is not None:
-                shm_req.output_top_logprobs_row(self.output_len - 1)[:] = output_top_logprobs
+                shm_req.output_topk_logprobs_row(self.output_len - 1)[:] = output_top_logprobs
             # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
             # finish_token_index finish_status candetoken_out_len 是
             # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。

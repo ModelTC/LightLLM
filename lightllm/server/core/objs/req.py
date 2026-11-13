@@ -317,45 +317,60 @@ class Req(ctypes.Structure):
 
     def create_logprobs_shm_array(self):
         name = f"shm_logprobs_{self.index_in_shm_mem}"
-        # Candidate rows follow the original logprob/rank array and cover only output positions.
-        topk = max(0, self.sample_params.output_top_logprobs)
-        num_entries = self.alloc_shm_numpy_len + self.sample_params.max_new_tokens * topk
         self.shm_logprobs = ShmArray(
             name,
-            (num_entries,),
+            (self.alloc_shm_numpy_len,),
             dtype=[("logprob", np.float32), ("rank", np.int32)],
         )
         self.shm_logprobs.create_shm()
         # rank=-1 表示该位置没有请求或没有计算 rank 元信息。
-        token_logprobs = self.shm_logprobs.arr[: self.alloc_shm_numpy_len]
-        token_logprobs["logprob"][:] = 0.0
-        token_logprobs["rank"][:] = -1
-        if topk > 0:
-            # D may replay P's first token without sampling it locally.
-            self.output_top_logprobs_row(0)[0].fill(-1)
+        self.shm_logprobs.arr["logprob"][:] = 0.0
+        self.shm_logprobs.arr["rank"][:] = -1
+        topk = int(self.sample_params.output_top_logprobs)
+        if topk >= 1:
+            self._create_output_topk_logprobs_shm_array(topk)
         return
 
     def link_logprobs_shm_array(self):
         name = f"shm_logprobs_{self.index_in_shm_mem}"
-        topk = max(0, self.sample_params.output_top_logprobs)
-        num_entries = self.alloc_shm_numpy_len + self.sample_params.max_new_tokens * topk
         self.shm_logprobs = ShmArray(
             name,
-            (num_entries,),
+            (self.alloc_shm_numpy_len,),
             dtype=[("logprob", np.float32), ("rank", np.int32)],
         )
         self.shm_logprobs.link_shm()
+        topk = int(self.sample_params.output_top_logprobs)
+        if topk >= 1:
+            self._link_output_topk_logprobs_shm_array(topk)
         return
 
-    def output_top_logprobs_row(self, output_index: int):
-        topk = self.sample_params.output_top_logprobs
-        start = self.alloc_shm_numpy_len + output_index * topk
-        # Each 8-byte slot in the tail holds two float32 values.
-        return self.shm_logprobs.arr[start : start + topk].view(np.float32).reshape(2, topk)
+    def _create_output_topk_logprobs_shm_array(self, topk: int):
+        # max_new_tokens 之外再留 128 个位置，避免模拟结束追加 EOS 等超出请求上限的写入越界。
+        self.shm_output_topk_logprobs = ShmArray(
+            f"shm_output_topk_logprobs_{self.index_in_shm_mem}",
+            (self.sample_params.max_new_tokens + 128, 2, topk),
+            np.float32,
+        )
+        self.shm_output_topk_logprobs.create_shm()
+        # PD decode 可能直接复用 prefill 已采样的第一个 token，先把 token id 标成无效。
+        self.shm_output_topk_logprobs.arr[0, 0].fill(-1)
+
+    def _link_output_topk_logprobs_shm_array(self, topk: int):
+        # 与创建侧相同，第一维是 max_new_tokens + 128。
+        self.shm_output_topk_logprobs = ShmArray(
+            f"shm_output_topk_logprobs_{self.index_in_shm_mem}",
+            (self.sample_params.max_new_tokens + 128, 2, topk),
+            np.float32,
+        )
+        self.shm_output_topk_logprobs.link_shm()
+
+    def output_topk_logprobs_row(self, output_index: int):
+        """该输出位置的候选，形状 (2, topk)。第 0 行是 token id，第 1 行是 logprob。"""
+        return self.shm_output_topk_logprobs.arr[output_index]
 
     def detach_shm_arrays(self):
         """Detach process-local request-scoped SHM handles before slot reuse."""
-        for attr_name in ("shm_prompt_ids", "shm_logprobs"):
+        for attr_name in ("shm_prompt_ids", "shm_logprobs", "shm_output_topk_logprobs"):
             shm_array = getattr(self, attr_name, None)
             if shm_array is not None:
                 shm_array.detach_shm()
