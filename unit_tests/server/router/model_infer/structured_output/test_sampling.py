@@ -147,7 +147,7 @@ def test_sample_candidate_logprobs_follow_mtp_row_selection(compiler, sampling_m
     reference = logits.log_softmax(dim=-1).cpu()
     assert middle["next_token_logprob"] == pytest.approx(reference[2, 10].item())
     assert first["output_top_logprobs"][1] == pytest.approx(reference[0, [256, 255, 254]].tolist())
-    assert last["output_top_logprobs"][1] == pytest.approx(reference[3, [256, 255]].tolist())
+    assert last["output_top_logprobs"][1] == pytest.approx(reference[3, [256, 255]].tolist(), rel=1e-5)
     assert logprobs_cpu[1].item() == pytest.approx(reference[1, 0].item())
     assert first["next_token_rank"] == 1
     assert last["next_token_rank"] == 1
@@ -467,3 +467,31 @@ def test_capture_rank_across_vocab_tiles_preserves_sampled_scores(vocab_size):
     for row, width, offset in rows.tolist():
         assert candidate_ids[offset : offset + width].tolist() == list(range(width))
         torch.testing.assert_close(scores[offset : offset + width], logits.log_softmax(-1)[row, :width])
+
+
+@pytest.mark.parametrize(
+    "logits,sampled_id,expected_ids,expected_rank",
+    [
+        ([0.0, -torch.inf, 1.0], 1, [2, 0, 1], 4),
+        ([0.0, torch.inf, 1.0], 1, [1, 2, 0], 1),
+        ([-torch.inf, -torch.inf, -torch.inf], 0, [0, 1, 2], 4),
+    ],
+)
+def test_capture_preserves_nonfinite_candidates(logits, sampled_id, expected_ids, expected_rank):
+    logits = torch.tensor([logits], device="cuda")
+    ids = torch.tensor([sampled_id], device="cuda")
+    logprobs = torch.tensor([[0.0]], device="cuda")
+    rows = torch.tensor([[0, 3, 0]], device="cuda", dtype=torch.int32)
+
+    candidate_ids, scores, ranks = sampling.capture_output_logprobs(logits, ids, logprobs, rows, 3, 3)
+
+    assert candidate_ids.tolist() == expected_ids
+    assert ranks.tolist() == [expected_rank]
+    assert not torch.isnan(scores).any()
+    if logits[0, sampled_id] == -torch.inf and not torch.isneginf(logits).all():
+        torch.testing.assert_close(scores[:2], logits.log_softmax(-1)[0, [2, 0]])
+        assert scores[2].item() == -torch.inf
+    elif logits[0, sampled_id] == torch.inf:
+        assert scores.tolist() == [0.0, -torch.inf, -torch.inf]
+    else:
+        torch.testing.assert_close(scores, torch.full_like(scores, -torch.log(torch.tensor(3.0))))

@@ -78,6 +78,9 @@ def _output_logprobs_partial(
     candidates,
     sampled_ids,
     ranks,
+    partial_maxes,
+    partial_sums,
+    partial_posinf_counts,
     stride_row: tl.constexpr,
     vocab_size: tl.constexpr,
     tiles: tl.constexpr,
@@ -94,6 +97,14 @@ def _output_logprobs_partial(
     sampled = tl.load(row_logits + tl.load(sampled_ids + row))
     rank = tl.sum(((ids < vocab_size) & (scores > sampled)).to(tl.int32), 0)
     tl.store(ranks + index * tiles + tile, rank)
+    posinf_count = tl.sum(((ids < vocab_size) & (scores == float("inf"))).to(tl.int32), 0)
+    finite_scores = tl.where((scores != float("inf")) & (scores != -float("inf")), scores, -float("inf"))
+    tile_max = tl.max(finite_scores, 0)
+    tile_sum = tl.sum(tl.exp(finite_scores - tile_max), 0)
+    tile_sum = tl.where(tile_max > -float("inf"), tile_sum, 0.0)
+    tl.store(partial_maxes + index * tiles + tile, tile_max)
+    tl.store(partial_sums + index * tiles + tile, tile_sum)
+    tl.store(partial_posinf_counts + index * tiles + tile, posinf_count)
     # tl.topk 只能比较整数。高 32 位放可排序的分数，低 32 位放反转后的 token id。
     # 取最大的键时，分数高的在前；分数相同则 id 更小的在前。词表外的位置写成最小整数。
     bits = scores.to(tl.int32, bitcast=True)
@@ -116,6 +127,9 @@ def _output_logprobs_finish(
     logprobs,
     partial_ranks,
     sampled_ranks,
+    partial_maxes,
+    partial_sums,
+    partial_posinf_counts,
     stride_row: tl.constexpr,
     vocab_size: tl.constexpr,
     tiles: tl.constexpr,
@@ -127,7 +141,6 @@ def _output_logprobs_finish(
     row = tl.load(rows + index * 3).to(tl.int64)
     row_logits = logits + row * stride_row
     sampled = tl.load(row_logits + tl.load(sampled_ids + row))
-    sampled_logprob = tl.load(sampled_logprobs + row)
     width = tl.load(rows + index * 3 + 1)
     offset = tl.load(rows + index * 3 + 2)
     columns = tl.arange(0, TOPK)
@@ -137,14 +150,25 @@ def _output_logprobs_finish(
     # 键的低 32 位是反转后的 token id，这里还原。结果仍按分数从高到低排列。
     ids = 0xFFFFFFFF - (best & 0xFFFFFFFF)
     scores = tl.load(row_logits + ids, (columns < width) & (ids < vocab_size), -float("inf"))
-    stored_ids = tl.where(tl.abs(scores) < float("inf"), ids, -1).to(tl.int64)
-    # 候选和采样 token 的 logsumexp 相同，用采样 logprob 平移即可，不必再做整词表 softmax。
-    row_logprobs = scores - sampled + sampled_logprob
+    stored_ids = tl.where(scores == scores, ids, -1).to(tl.int64)
+    rank_tiles = tl.arange(0, TILE_BLOCK)
+    tile_maxes = tl.load(partial_maxes + index * tiles + rank_tiles, rank_tiles < tiles, -float("inf"))
+    tile_sums = tl.load(partial_sums + index * tiles + rank_tiles, rank_tiles < tiles, 0.0)
+    posinf_counts = tl.load(partial_posinf_counts + index * tiles + rank_tiles, rank_tiles < tiles, 0)
+    row_max = tl.max(tile_maxes, 0)
+    row_sum = tl.sum(tl.where(tile_maxes > -float("inf"), tile_sums * tl.exp(tile_maxes - row_max), 0.0), 0)
+    posinf_count = tl.sum(posinf_counts, 0)
+    finite_logprobs = scores - (row_max + tl.log(row_sum))
+    uniform_logprob = -tl.log(float(vocab_size))
+    row_logprobs = tl.where(
+        posinf_count > 0,
+        tl.where(scores == float("inf"), -tl.log(posinf_count.to(tl.float32)), -float("inf")),
+        tl.where(row_max > -float("inf"), finite_logprobs, uniform_logprob),
+    )
     tl.store(token_ids + offset + columns, stored_ids, columns < width)
     tl.store(logprobs + offset + columns, row_logprobs, columns < width)
-    rank_tiles = tl.arange(0, TILE_BLOCK)
     rank = 1 + tl.sum(tl.load(partial_ranks + index * tiles + rank_tiles, rank_tiles < tiles, 0), 0)
-    rank = tl.where(tl.abs(sampled) < float("inf"), rank, vocab_size + 1)
+    rank = tl.where(sampled > -float("inf"), rank, vocab_size + 1)
     tl.store(sampled_ranks + index, rank)
 
 
@@ -170,12 +194,18 @@ def capture_output_logprobs(
     candidates = logits.new_empty((rows.shape[0], tiles, topk), dtype=torch.int64)
     partial_ranks = logits.new_empty((rows.shape[0], tiles), dtype=torch.int32)
     sampled_ranks = logits.new_empty((rows.shape[0],), dtype=torch.int32)
+    partial_maxes = logits.new_empty((rows.shape[0], tiles), dtype=torch.float32)
+    partial_sums = logits.new_empty((rows.shape[0], tiles), dtype=torch.float32)
+    partial_posinf_counts = logits.new_empty((rows.shape[0], tiles), dtype=torch.int32)
     _output_logprobs_partial[(rows.shape[0], tiles)](
         logits=logits,
         rows=rows,
         candidates=candidates,
         sampled_ids=sampled_ids,
         ranks=partial_ranks,
+        partial_maxes=partial_maxes,
+        partial_sums=partial_sums,
+        partial_posinf_counts=partial_posinf_counts,
         stride_row=logits.stride(0),
         vocab_size=logits.shape[1],
         tiles=tiles,
@@ -195,6 +225,9 @@ def capture_output_logprobs(
         logprobs=logprobs,
         partial_ranks=partial_ranks,
         sampled_ranks=sampled_ranks,
+        partial_maxes=partial_maxes,
+        partial_sums=partial_sums,
+        partial_posinf_counts=partial_posinf_counts,
         stride_row=logits.stride(0),
         vocab_size=logits.shape[1],
         tiles=tiles,

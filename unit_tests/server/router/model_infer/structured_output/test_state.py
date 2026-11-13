@@ -5,6 +5,7 @@ from weakref import ref
 from unittest.mock import patch
 
 import pytest
+import numpy as np
 import torch
 import xgrammar as xgr
 
@@ -308,6 +309,9 @@ def test_pd_first_token_updates_constraint_before_sampling(
     req.pd_task_success_num = 0
     req.shm_req.shm_prompt_ids.arr.append(0)
     req.shm_req.shm_logprobs = SimpleNamespace(arr=[None] * (req.shm_req.input_len + 1))
+    req.sampling_param.shm_param.output_top_logprobs = 2
+    req.shm_req.shm_output_topk_logprobs = SimpleNamespace(arr=np.full((2, 2, 2), -1, dtype=np.float64))
+    req.shm_req.output_topk_logprobs_row = lambda output_index: req.shm_req.shm_output_topk_logprobs.arr[output_index]
     req.set_next_gen_token_id = MethodType(infer_batch.InferReq.set_next_gen_token_id, req)
     req.update_finish_status = lambda **kwargs: None
     sampling_params = make_mask_buffers([req, good])
@@ -316,6 +320,8 @@ def test_pd_first_token_updates_constraint_before_sampling(
         has_error=False,
         first_gen_token_id=first_token,
         first_gen_token_logprob=0.0,
+        first_gen_token_rank=21,
+        first_gen_token_output_top_logprobs=([first_token, 7], [-0.1, -0.2]),
     )
     backend = SimpleNamespace(
         shm_pd_trans_io_buffer=SimpleNamespace(read_obj=lambda: [transfer], sub_state=lambda: None),
@@ -333,9 +339,14 @@ def test_pd_first_token_updates_constraint_before_sampling(
 
     assert req.cur_output_len == 1 and req.pd_task_success_num == 1
     assert req.shm_req.shm_prompt_ids.arr == [ord("P")] + list(history) + [first_token]
+    assert req.shm_req.shm_logprobs.arr[req.shm_req.input_len] == (0.0, 21)
     assert sampling_params.req_to_next_token_ids[req.req_idx, 0].item() == first_token
     if is_master_in_dp:
         assert req.shm_req.shm_cur_output_len == 1
+        assert req.shm_req.shm_output_topk_logprobs.arr[0].tolist() == [
+            [first_token, 7],
+            [-0.1, -0.2],
+        ]
     state = req.output_constraint
     if first_token == ord("!"):
         assert req.finish_status.status == FinishStatus.FINISHED_ERROR

@@ -349,7 +349,8 @@ class Req(ctypes.Structure):
         self.shm_output_topk_logprobs = ShmArray(
             name=f"shm_output_topk_logprobs_{self.index_in_shm_mem}",
             shape=(self.sample_params.max_new_tokens + 128, 2, topk),
-            dtype=np.float32,
+            # Token IDs must stay exact beyond float32's 2^24 integer limit.
+            dtype=np.float64,
         )
         self.shm_output_topk_logprobs.create_shm()
         # PD decode 可能直接复用 prefill 已采样的第一个 token，先把 token id 标成无效。
@@ -360,7 +361,7 @@ class Req(ctypes.Structure):
         self.shm_output_topk_logprobs = ShmArray(
             name=f"shm_output_topk_logprobs_{self.index_in_shm_mem}",
             shape=(self.sample_params.max_new_tokens + 128, 2, topk),
-            dtype=np.float32,
+            dtype=np.float64,
         )
         self.shm_output_topk_logprobs.link_shm()
 

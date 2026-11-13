@@ -446,8 +446,6 @@ class _PrefillTransModule:
                 self.transporter.release_xfer_handle(trans_task.xfer_handle)
 
             ret = trans_task.createRetObj()
-            ret.first_gen_token_id = None
-            ret.first_gen_token_logprob = None
             self.task_out_queue.put(ret)
 
             if self.args.pd_detail_log:

@@ -104,7 +104,6 @@ class PDUpKVStatus:
     pd_kv_trans_params: bytes  # pd kv 传输建立连接所使用的元数据对象
 
     def __post_init__(self):
-
         if not isinstance(self.group_request_id, int):
             error_info = "group_request_id only can be int"
             logger.error(error_info)
@@ -173,8 +172,10 @@ class PDChunckedTransTask:
     decode_num_pages: Optional[int]
     decode_page_reg_desc: Optional[bytes]
 
-    first_gen_token_id: Optional[int]
-    first_gen_token_logprob: Optional[float]
+    first_gen_token_id: Optional[int] = None
+    first_gen_token_logprob: Optional[float] = None
+    first_gen_token_rank: Optional[int] = None
+    first_gen_token_output_top_logprobs: Optional[tuple[list[int], list[float]]] = None
 
     write_stage: Optional[str] = None
 
@@ -273,6 +274,8 @@ class PDChunckedTransTask:
             error_info=self.error_info,
             first_gen_token_id=self.first_gen_token_id,
             first_gen_token_logprob=self.first_gen_token_logprob,
+            first_gen_token_rank=self.first_gen_token_rank,
+            first_gen_token_output_top_logprobs=self.first_gen_token_output_top_logprobs,
         )
         return ret
 
@@ -302,6 +305,8 @@ class PDChunckedTransTaskRet:
     error_info: str = None
     first_gen_token_id: Optional[int] = None
     first_gen_token_logprob: Optional[float] = None
+    first_gen_token_rank: Optional[int] = None
+    first_gen_token_output_top_logprobs: Optional[tuple[list[int], list[float]]] = None
 
     def get_key(self) -> str:
         return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"

@@ -122,6 +122,8 @@ def _task(peer: PDAgentMetadata, kind: str):
         decode_page_reg_desc=peer.page_reg_desc,
         first_gen_token_id=42,
         first_gen_token_logprob=-0.5,
+        first_gen_token_rank=21,
+        first_gen_token_output_top_logprobs=([42, 7], [-0.5, -0.6]),
         src_page_index=1 if kind == "kv" else 2,
         page_kind=kind,
         req_idx=1,

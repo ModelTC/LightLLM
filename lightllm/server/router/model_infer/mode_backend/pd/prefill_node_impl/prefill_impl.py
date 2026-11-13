@@ -66,7 +66,13 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         return ans_list
 
     def _prefill_chuncked_handle_func(
-        self, req_obj: InferReq, next_token_id: int, next_token_prob: float, output_len: int
+        self,
+        req_obj: InferReq,
+        next_token_id: int,
+        next_token_prob: float,
+        output_len: int,
+        next_token_rank: int,
+        output_top_logprobs=None,
     ):
         """
         在每一步chuncked prefill 后，尝试生成chuncked 传输任务，发个 kv_move_manager 进行处理。
@@ -105,6 +111,8 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                 )
             trans_task_list[-1].first_gen_token_id = next_token_id
             trans_task_list[-1].first_gen_token_logprob = next_token_prob
+            trans_task_list[-1].first_gen_token_rank = next_token_rank
+            trans_task_list[-1].first_gen_token_output_top_logprobs = output_top_logprobs
 
         if self.is_master_in_dp:
             for trans_task in trans_task_list:
@@ -155,6 +163,8 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
             decode_page_reg_desc=pd_decode_node_info.page_reg_desc,
             first_gen_token_id=None,
             first_gen_token_logprob=None,
+            first_gen_token_rank=None,
+            first_gen_token_output_top_logprobs=None,
             page_kind=page_kind,
             req_idx=req_idx,
         )

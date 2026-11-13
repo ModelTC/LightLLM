@@ -333,6 +333,10 @@ class _DecodeTransModule:
                                 local_trans_task.shared_time_out_mark.update()
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
+                                local_trans_task.first_gen_token_rank = remote_trans_task.first_gen_token_rank
+                                local_trans_task.first_gen_token_output_top_logprobs = (
+                                    remote_trans_task.first_gen_token_output_top_logprobs
+                                )
                                 self.ready_page_task_queue.put(local_trans_task)
                                 if self.args.pd_detail_log:
                                     logger.debug(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")

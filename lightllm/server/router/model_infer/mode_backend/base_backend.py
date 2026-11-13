@@ -603,9 +603,12 @@ class ModeBackend:
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
                                     next_token_id=obj.first_gen_token_id,
                                     next_token_logprob=obj.first_gen_token_logprob,
-                                    next_token_rank=-1,
+                                    next_token_rank=(
+                                        obj.first_gen_token_rank if obj.first_gen_token_rank is not None else -1
+                                    ),
                                     eos_ids=self.eos_id,
                                     is_master_in_dp=self.is_master_in_dp,
+                                    output_top_logprobs=obj.first_gen_token_output_top_logprobs,
                                 )
         return
 

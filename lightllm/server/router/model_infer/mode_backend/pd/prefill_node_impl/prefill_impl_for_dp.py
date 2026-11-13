@@ -24,10 +24,22 @@ class PDDPChunkedForPrefillNode(DPChunkedPrefillBackend):
         return PDChunkedPrefillForPrefillNode._filter_not_ready_reqs(self, req_ids)
 
     def _prefill_chuncked_handle_func(
-        self, req_obj: InferReq, next_token_id: int, next_token_prob: float, output_len: int
+        self,
+        req_obj: InferReq,
+        next_token_id: int,
+        next_token_prob: float,
+        output_len: int,
+        next_token_rank: int,
+        output_top_logprobs=None,
     ):
         return PDChunkedPrefillForPrefillNode._prefill_chuncked_handle_func(
-            self, req_obj=req_obj, next_token_id=next_token_id, next_token_prob=next_token_prob, output_len=output_len
+            self,
+            req_obj=req_obj,
+            next_token_id=next_token_id,
+            next_token_prob=next_token_prob,
+            output_len=output_len,
+            next_token_rank=next_token_rank,
+            output_top_logprobs=output_top_logprobs,
         )
 
     def _create_pd_trans_task(

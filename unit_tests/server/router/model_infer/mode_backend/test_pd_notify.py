@@ -40,6 +40,8 @@ def make_task(page_kind):
         decode_page_reg_desc=b"decode pages",
         first_gen_token_id=42,
         first_gen_token_logprob=-0.5,
+        first_gen_token_rank=21,
+        first_gen_token_output_top_logprobs=([42, 7], [-0.5, -0.6]),
         page_kind=page_kind,
         req_idx=17,
         src_page_index=3,
@@ -75,6 +77,17 @@ def test_copy_for_notify_preserves_local_task(page_kind, with_mark):
     assert task.mem_indexes == mem_indexes
     if with_mark:
         assert task.shared_time_out_mark.time_mark == time_mark
+
+
+def test_task_return_preserves_first_token_metadata():
+    task = make_task("kv")
+
+    result = task.createRetObj()
+
+    assert result.first_gen_token_id == 42
+    assert result.first_gen_token_logprob == -0.5
+    assert result.first_gen_token_rank == 21
+    assert result.first_gen_token_output_top_logprobs == ([42, 7], [-0.5, -0.6])
 
 
 _UNPICKLE_WITHOUT_DECODE = """

@@ -128,13 +128,14 @@ def test_candidate_shm_is_reused_and_resized(monkeypatch):
         assert worker.shm_output_topk_logprobs.shm.size == worker.shm_output_topk_logprobs.arr.nbytes
         assert worker.output_topk_logprobs_row(output_index=0)[0].tolist() == [-1, -1]
         worker.shm_logprobs.arr[3] = (-0.25, 1)
-        worker.output_topk_logprobs_row(output_index=0)[:] = ([9, 8], [-0.5, -1.0])
+        worker.output_topk_logprobs_row(output_index=0)[:] = ([16_777_217, 8], [-0.5, -1.0])
         worker.output_topk_logprobs_row(output_index=1)[:] = ([7, 6], [-0.25, -1.5])
         worker.detach_shm_arrays()
 
         owner.detach_shm_arrays()
         owner.link_logprobs_shm_array()
         assert owner.shm_logprobs.arr[3].tolist() == (-0.25, 1)
+        assert owner.output_topk_logprobs_row(output_index=0)[0].tolist() == [16_777_217, 8]
         assert owner.output_topk_logprobs_row(output_index=1).tolist() == [[7, 6], [-0.25, -1.5]]
 
         owner.detach_shm_arrays()
@@ -168,7 +169,12 @@ async def test_pd_first_token_uses_the_node_that_sampled_it(monkeypatch, needs_p
     d_first = (
         0,
         "first",
-        {"count_output_tokens": 1, "node_mode": "decode", "output_top_logprobs": [], "logprob_prompt_ids": prompt_ids},
+        {
+            "count_output_tokens": 1,
+            "node_mode": "decode",
+            "output_top_logprobs": [(1, -0.5)],
+            "logprob_prompt_ids": prompt_ids,
+        },
         finish,
     )
     p_first = (
@@ -208,7 +214,7 @@ async def test_pd_first_token_uses_the_node_that_sampled_it(monkeypatch, needs_p
         _, text, metadata, _ = await stream.__anext__()
         assert text == "first"
         assert metadata["logprob_prompt_ids"] == prompt_ids
-        assert metadata["output_top_logprobs"] == ([(1, -0.5)] if needs_prefill else [])
+        assert metadata["output_top_logprobs"] == [(1, -0.5)]
         _, text, _, status = await stream.__anext__()
         assert text == "second" and status.status == end_status
     finally:

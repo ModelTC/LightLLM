@@ -29,7 +29,11 @@ def test_hybrid_pd_uses_the_shared_att_state_task_without_model_flags(monkeypatc
 
     def create(**kwargs):
         task = SimpleNamespace(
-            page_kind=kwargs.get("page_kind", "kv"), first_gen_token_id=None, first_gen_token_logprob=None
+            page_kind=kwargs.get("page_kind", "kv"),
+            first_gen_token_id=None,
+            first_gen_token_logprob=None,
+            first_gen_token_rank=None,
+            first_gen_token_output_top_logprobs=None,
         )
         tasks.append(task)
         if "group" in kwargs:
@@ -38,8 +42,17 @@ def test_hybrid_pd_uses_the_shared_att_state_task_without_model_flags(monkeypatc
 
     backend._create_pd_trans_task = create
     if role == "prefill":
-        backend._prefill_chuncked_handle_func(req, next_token_id=17, next_token_prob=-0.2, output_len=1)
+        backend._prefill_chuncked_handle_func(
+            req,
+            next_token_id=17,
+            next_token_prob=-0.2,
+            output_len=1,
+            next_token_rank=21,
+            output_top_logprobs=([17, 16], [-0.2, -0.3]),
+        )
         assert tasks[-1].first_gen_token_id == 17
+        assert tasks[-1].first_gen_token_rank == 21
+        assert tasks[-1].first_gen_token_output_top_logprobs == ([17, 16], [-0.2, -0.3])
     else:
         backend.radix_cache = None
         backend.model = SimpleNamespace(

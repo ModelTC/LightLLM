@@ -1009,13 +1009,20 @@ class InferReqUpdatePack:
         eos_ids: List[int],
         is_master_in_dp: bool,
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
-        pd_prefill_chunked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
+        pd_prefill_chunked_handle_func: Optional[Callable[[InferReq, int, float, int, int, object], None]] = None,
         output_top_logprobs=None,
     ):
         # pd_prefill_chunked_handle_func 主要是为了处理 pd prefill 模式下
         # 分块 prefill 后，形成对应的pd 分块传输处理。
         if pd_prefill_chunked_handle_func is not None:
-            pd_prefill_chunked_handle_func(self.req_obj, next_token_id, next_token_logprob, self.output_len)
+            pd_prefill_chunked_handle_func(
+                self.req_obj,
+                next_token_id,
+                next_token_logprob,
+                self.output_len,
+                next_token_rank,
+                output_top_logprobs,
+            )
 
         if self.output_len <= 0:
             return
