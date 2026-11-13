@@ -22,7 +22,6 @@ from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
 from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
 from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import (
     DSV4_NSA_BACKENDS,
-    DeepseekV4FlashMlaFp8SparseAttBackend,
 )
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
 from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post
@@ -109,12 +108,13 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         )
         from .config import create_attention_config
 
-        assert args.llm_kv_type in ("None", "fp8kv_dsa"), f"unsupported V4 KV encoding: {args.llm_kv_type}"
+        assert args.llm_kv_type in ("None", "fp8kv_dsa", "nvfp4kv"), f"unsupported V4 KV encoding: {args.llm_kv_type}"
         config = create_attention_config(
             model_config=model_config,
             model_logical_layer_ids=model_logical_layer_ids,
             tp_rank=tp_rank,
             tp_world_size=tp_world_size,
+            kv_type=args.llm_kv_type,
         )
         states = []
         for ratio in (4, 128):
@@ -153,6 +153,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             model_logical_layer_ids=model_logical_layer_ids,
             tp_rank=tp_rank,
             tp_world_size=tp_world_size,
+            kv_type=args.llm_kv_type,
         )
         states = [
             create_sliding_window_state(
@@ -198,7 +199,10 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     def prepare_attention_states(self) -> None:
         super().prepare_attention_states()
         # 在统一容量规划前预留长 prefill 的 SWA 临时区，避免 KV 分配挤占计算所需空间。
-        DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(self)
+        backend_class = get_nsa_prefill_att_backend_class(
+            index=0, priority_list=["flashmla_sparse", "triton"], backend_map=DSV4_NSA_BACKENDS
+        )
+        backend_class.prepare_workspaces(self)
 
     def _init_quant(self):
         if not self.is_mtp_draft_model:
@@ -213,11 +217,14 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         args = get_env_start_args()
         if args.llm_kv_type == "None":
             args.llm_kv_type = "fp8kv_dsa"
-        # TODO: 支持其他 kv type
-        if args.llm_kv_type != "fp8kv_dsa":
-            raise RuntimeError("DeepSeek-V4 requires llm_kv_type=fp8kv_dsa for packed FlashMLA sparse attention")
-        self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0, backend_map=DSV4_NSA_BACKENDS)(model=self)
-        self.decode_att_backend = get_nsa_decode_att_backend_class(index=0, backend_map=DSV4_NSA_BACKENDS)(model=self)
+        if args.llm_kv_type not in ("fp8kv_dsa", "nvfp4kv"):
+            raise ValueError("DeepSeek-V4 supports fp8kv_dsa or nvfp4kv")
+        self.prefill_att_backend = get_nsa_prefill_att_backend_class(
+            index=0, priority_list=["flashmla_sparse", "triton"], backend_map=DSV4_NSA_BACKENDS
+        )(model=self)
+        self.decode_att_backend = get_nsa_decode_att_backend_class(
+            index=0, priority_list=["flashmla_sparse", "triton"], backend_map=DSV4_NSA_BACKENDS
+        )(model=self)
 
         tp_q_head_num = self.prefill_att_backend.tp_q_head_num
         padded_q_head_num = self.prefill_att_backend.padded_q_head_num

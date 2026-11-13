@@ -128,7 +128,7 @@ def _case(heads, ratio):
         extra_lengths=lengths.clone() if ratio else None,
     )
     # The attention backend receives all cache inputs through k, without a memory manager.
-    state_info = SimpleNamespace()
+    state_info = SimpleNamespace(microbatch_index=0)
     return backend, state_info, q, (pool, extra), decoded, extra_decoded, params
 
 

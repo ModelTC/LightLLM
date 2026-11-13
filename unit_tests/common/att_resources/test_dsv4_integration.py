@@ -7,20 +7,24 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState
+from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState, PackedSlidingWindowState
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 
 
 @pytest.fixture
-def cache(monkeypatch):
+def cache(monkeypatch, request):
+    kv_type = getattr(request, "param", "fp8kv_dsa")
     for key in ("LIGHTLLM_DP_WORLD_SIZE", "LIGHTLLM_CURRENT_RANK_IN_DP", "LIGHTLLM_CURRENT_DEVICE_ID"):
         monkeypatch.setenv(key, "1" if key.endswith("WORLD_SIZE") else "0")
     monkeypatch.setenv(
         "LIGHTLLM_START_ARGS",
         json.dumps(
             dict(
+                llm_kv_type=kv_type,
+                llm_prefill_att_backend=["triton" if kv_type == "nvfp4kv" else "flashmla_sparse"],
+                llm_decode_att_backend=["triton" if kv_type == "nvfp4kv" else "flashmla_sparse"],
                 page_size=256,
                 pd_kv_page_size=256,
                 run_mode="normal",
@@ -41,7 +45,7 @@ def cache(monkeypatch):
         sliding_window=128,
         num_attention_heads=64,
     )
-    args = SimpleNamespace(llm_kv_type="None", page_size=256, mtp_step=3)
+    args = SimpleNamespace(llm_kv_type=kv_type, page_size=256, mtp_step=3)
     manager = AttentionStateManager(request_capacity=3)
     for state in DeepseekV4TpPartModel.create_full_att_states(
         model_config=config,
@@ -59,7 +63,7 @@ def cache(monkeypatch):
     )
     for state in bounded:
         manager.register_state("main", state)
-    window = next(state for state in bounded if isinstance(state, FP8E8M0SlidingWindowState))
+    window = next(state for state in bounded if isinstance(state, PackedSlidingWindowState))
     manager.finish_state_registration()
     manager.allocate_storage(token_capacity=8192, page_size=256, big_page_tokens=2048, small_page_capacity=2)
 
@@ -68,35 +72,57 @@ def cache(monkeypatch):
 
     model = TestModel(
         config=config,
+        data_type=torch.bfloat16,
         tp_rank_=0,
         tp_world_size_=1,
         max_req_num=2,
         batch_max_tokens=2048,
         layers_infer=[SimpleNamespace(layer_num_=i) for i in range(3)],
         att_state_role="main",
-        args=SimpleNamespace(run_mode="normal", enable_prefill_microbatch_overlap=True),
+        args=SimpleNamespace(
+            run_mode="normal", enable_prefill_microbatch_overlap=True, enable_decode_microbatch_overlap=True
+        ),
     )
+    from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
+
+    model.is_mtp_draft_model = False
+    model.disable_cudagraph = True
+    model.mtp_manager = SimpleNamespace(get_decode_tokens_per_request=lambda draft: 4)
+    model._align_decode_batch_size = lambda tokens: tokens
+    model.dsv4_workspace = DeepseekV4Workspace(model)
+    model.dsv4_workspace.init_c128_compress_scratch(model)
     from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DeepseekV4FlashMlaFp8SparseAttBackend
 
-    backend = DeepseekV4FlashMlaFp8SparseAttBackend(model=model)
+    from lightllm.common.basemodel.attention.nsa.dsv4_nvfp4 import DeepseekV4Nvfp4SparseAttBackend
+
+    backend_class = DeepseekV4Nvfp4SparseAttBackend if kv_type == "nvfp4kv" else DeepseekV4FlashMlaFp8SparseAttBackend
+    backend = backend_class(model=model)
     yield manager, window, backend
     torch.cuda.synchronize()
     get_env_start_args.cache_clear()
 
 
-def make_infer(manager, window):
+def make_infer(manager, window, workspace=None):
     infer = DeepseekV4InferStateInfo()
+    infer.dsv4_workspace = workspace
     infer.att_state_manager = manager
     infer.att_state_role = "main"
     infer.first_logical_layer_id = window.config.logical_layer_ids[0]
     return infer
 
 
-def read_packed_rows(buffer, slots, page_tokens):
+def read_packed_rows(buffer, slots, page_tokens, layout=None):
     """独立参考读取 packed 数据/scale 分区，不复用 State 搬运算子。"""
+    from lightllm.common.attention_state.packed_kv_layout import PackedKVLayout
+
+    layout = layout or PackedKVLayout(512, 64)
     page_ids, rows = slots // page_tokens, slots % page_tokens
-    data = rows[:, None] * 576 + torch.arange(576, device=slots.device)
-    scale = page_tokens * 576 + rows[:, None] * 8 + torch.arange(8, device=slots.device)
+    data = rows[:, None] * layout.data_bytes + torch.arange(layout.data_bytes, device=slots.device)
+    scale = (
+        page_tokens * layout.data_bytes
+        + rows[:, None] * layout.scale_bytes
+        + torch.arange(layout.scale_bytes, device=slots.device)
+    )
     return torch.cat((buffer[page_ids[:, None], data], buffer[page_ids[:, None], scale]), dim=-1)
 
 
@@ -113,11 +139,12 @@ def test_backend_reads_owned_state_views(cache):
             assert compressed.data_ptr() == infer.get_compressed_kv_view(layer).kv.data_ptr()
 
 
+@pytest.mark.parametrize("cache", ["fp8kv_dsa", "nvfp4kv"], indirect=True)
 @pytest.mark.parametrize("ratio,layer,is_indexer", [(4, 0, False), (4, 0, True), (128, 1, False)])
 def test_real_compressor_continues_after_checkpoint_restore(cache, ratio, layer, is_indexer):
     from lightllm.models.deepseek_v4.layer_infer.compressor import fused_compress
 
-    manager, window, _ = cache
+    manager, window, backend = cache
     length, boundary = 1024, 512
     head_dim = 128 if is_indexer else 512
     scores = torch.randn((length, head_dim * (4 if ratio == 4 else 2)), device="cuda")
@@ -126,7 +153,7 @@ def test_real_compressor_continues_after_checkpoint_restore(cache, ratio, layer,
     slots = [torch.arange(offset, offset + length, dtype=torch.int32, device="cuda") for offset in (0, 2048)]
 
     def compress(req_idx, start, end, decode=False):
-        infer = make_infer(manager, window)
+        infer = make_infer(manager, window, backend.model.dsv4_workspace)
         positions = torch.arange(start, end, dtype=torch.int32, device="cuda")
         width = end - start
         infer.mem_index, infer.position_ids, infer.is_prefill = slots[req_idx][start:end], positions, not decode
@@ -171,20 +198,23 @@ def test_real_compressor_continues_after_checkpoint_restore(cache, ratio, layer,
         source = slots[0][boundary + ratio - 1 : length : ratio].long() // ratio
         target = slots[1][boundary + ratio - 1 : length : ratio].long() // ratio
         torch.testing.assert_close(
-            read_packed_rows(reference_kv, source, 256 // ratio),
-            read_packed_rows(actual, target, 256 // ratio),
+            read_packed_rows(reference_kv, source, 256 // ratio, window.config.kv_layout),
+            read_packed_rows(actual, target, 256 // ratio, window.config.kv_layout),
             rtol=0,
             atol=0,
         )
 
 
+@pytest.mark.parametrize("cache", ["fp8kv_dsa", "nvfp4kv"], indirect=True)
 def test_long_prefill_keeps_swa_prefix_and_runtime_tail(cache):
     from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
     from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
     from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
 
     manager, window, backend = cache
-    reference = torch.zeros((17, 74880), dtype=torch.uint8, device="cuda")
+    page_bytes = window.config.get_packed_kv_bytes(128)
+    layout = window.config.kv_layout
+    reference = torch.zeros((17, page_bytes), dtype=torch.uint8, device="cuda")
     kv = torch.randn((2048, 512), dtype=torch.bfloat16, device="cuda")
     weight, angles = torch.randn(512, dtype=torch.bfloat16, device="cuda"), torch.randn((2048, 32), device="cuda")
     freqs = torch.complex(angles.cos(), angles.sin())
@@ -217,16 +247,25 @@ def test_long_prefill_keeps_swa_prefix_and_runtime_tail(cache):
         )
         infer.dsv4_swa_write_slots, infer.dsv4_swa_runtime_write_slots = writes, runtime
         layer._norm_rope_and_cache_kv(kv[start:end], infer, SimpleNamespace(kv_norm_=SimpleNamespace(weight=weight)))
-        fused_kv_norm_rope_to_swa(kv[start:end], weight, 1e-6, freqs, positions, positions, reference, 128)
+        fused_kv_norm_rope_to_swa(
+            kv[start:end], weight, 1e-6, freqs, positions, positions, reference, 128, kv_format=window.config.kv_format
+        )
         visible = torch.arange(max(0, start - 127), end, device="cuda")
         offset = prefill.swa_prefill_workspace_offsets[0] + visible - max(0, start - 127) // 128 * 128
-        actual = read_packed_rows(prefill.swa_buffer[2].view(-1, 74880), offset.long(), 128)
-        torch.testing.assert_close(actual[:, :-1], read_packed_rows(reference, visible, 128)[:, :-1], rtol=0, atol=0)
+        actual = read_packed_rows(prefill.swa_buffer[2].view(-1, page_bytes), offset.long(), 128, layout)
+        torch.testing.assert_close(
+            actual[:, :-1], read_packed_rows(reference, visible, 128, layout)[:, :-1], rtol=0, atol=0
+        )
         tail = torch.arange(max(0, end - window.config.window_size), end, device="cuda")
-        actual = read_packed_rows(window.swa_buffer[2, 0].view(-1, 74880), tail % window.swa_capacity_tokens, 128)
-        torch.testing.assert_close(actual[:, :-1], read_packed_rows(reference, tail, 128)[:, :-1], rtol=0, atol=0)
+        actual = read_packed_rows(
+            window.swa_buffer[2, 0].view(-1, page_bytes), tail % window.swa_capacity_tokens, 128, layout
+        )
+        torch.testing.assert_close(
+            actual[:, :-1], read_packed_rows(reference, tail, 128, layout)[:, :-1], rtol=0, atol=0
+        )
 
 
+@pytest.mark.parametrize("cache", ["fp8kv_dsa", "nvfp4kv"], indirect=True)
 @pytest.mark.parametrize("draft_kind", ["mtp", "dspark"])
 def test_models_prepare_owned_states_in_one_manager(cache, draft_kind):
     from contextlib import nullcontext
@@ -243,16 +282,18 @@ def test_models_prepare_owned_states_in_one_manager(cache, draft_kind):
         dspark_markov_rank=4,
     )
     args = SimpleNamespace(
-        llm_kv_type="None",
+        llm_kv_type=backend.kv_type,
         page_size=256,
         mtp_step=3,
         mtp_mode="vanilla_with_att",
         run_mode="decode",
         enable_prefill_microbatch_overlap=False,
+        enable_decode_microbatch_overlap=False,
     )
     main = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
     main.config, main.args, main.max_req_num, main.tp_rank_, main.tp_world_size_ = config, args, 2, 0, 1
     main.batch_max_tokens = 2048
+    main.data_type = torch.bfloat16
     main.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(3)]
     main.torch_memory_saver = SimpleNamespace(region=lambda **kwargs: nullcontext())
     main.prepare_attention_states()
@@ -265,6 +306,7 @@ def test_models_prepare_owned_states_in_one_manager(cache, draft_kind):
         assert draft.config == cls.normalize_model_config(draft.config)
         draft.args, draft.max_req_num, draft.tp_rank_, draft.tp_world_size_ = args, 2, 0, 1
         draft.batch_max_tokens = main.batch_max_tokens
+        draft.data_type = main.data_type
         draft.torch_memory_saver = main.torch_memory_saver
         first_layer = 3 + sum(len(model.layers_infer) for model in drafts)
         draft.layers_infer = [
@@ -280,7 +322,7 @@ def test_models_prepare_owned_states_in_one_manager(cache, draft_kind):
     assert len(manager.get_bounded_attention_states()) == len(drafts) + 4
     for model in (main, *drafts):
         states = manager.get_bounded_attention_states(model.att_state_role)
-        state = next(item for item in states if isinstance(item, FP8E8M0SlidingWindowState))
+        state = next(item for item in states if isinstance(item, PackedSlidingWindowState))
         assert state.config.logical_layer_ids == tuple(layer.layer_num_ for layer in model.layers_infer)
         assert state.swa_buffer.is_cuda
         if model is not main:

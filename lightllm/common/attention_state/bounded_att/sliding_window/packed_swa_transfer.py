@@ -1,4 +1,4 @@
-"""FP8/E8M0 SWA packed ring 与时间有序快照的 GPU 搬运。"""
+"""Packed SWA ring 与时间有序快照的 GPU 搬运，保持编码字节不变。"""
 
 from __future__ import annotations
 
@@ -9,14 +9,14 @@ import triton
 import triton.language as tl
 
 if TYPE_CHECKING:
-    from .fp8_e8m0_swa_state import FP8E8M0SlidingWindowConfig
+    from .packed_swa_state import PackedSlidingWindowConfig
 
 
 def copy_swa_window(
     local: torch.Tensor,
     external: torch.Tensor,
     state_token_len: int,
-    config: FP8E8M0SlidingWindowConfig,
+    config: PackedSlidingWindowConfig,
     write: bool,
 ) -> None:
     """按绝对长度在 packed SWA ring 和 [layer, window, byte] 快照间双向复制。

@@ -100,6 +100,33 @@ automatically adjusted to four; you can explicitly select a larger value such as
 CPU cache and P/D transfer pages must also be aligned to four tokens.
 GLM native MTP uses the same NVFP4 encoding as the main model.
 
+DeepSeek-V4 NVFP4 KV
+-------------------
+
+DeepSeek-V4 supports ``--llm_kv_type nvfp4kv`` with BF16 computation, a Hopper GPU,
+and a compatible FA3 installation. See the installation guide for dependencies; the repository
+Dockerfile pins a compatible FlashMLA revision. This example uses FP8 weights; weight and KV
+quantization are configured separately:
+
+.. code-block:: bash
+
+    $ python -m lightllm.server.api_server \
+        --model_dir /path/to/DeepSeek-V4-Flash-FP8 --tp 8 --dp 8 \
+        --enable_ep_moe --expert_dtype fp8 --data_type bfloat16 \
+        --llm_kv_type nvfp4kv --chunked_prefill_size 4096
+
+The sliding window and C4/C128 compressed history encode non-RoPE features using block16
+E2M1/E4M3 and retain BF16 RoPE. Indexer FP8 keys/FP32 scales, compressor continuation state,
+and attention-sink semantics are preserved. Attention decodes selected KV into bounded scratch
+space without retaining a BF16 copy of the full history. Native MTP and DSpark KV states use
+the same encoding entry point.
+
+The default ``--page_size 1`` is automatically adjusted to 256. Explicit KV, CPU cache, and P/D
+transfer pages must be multiples of 256 tokens. Both P/D nodes must use the same KV encoding.
+V4 capacity gains depend on compression ratios, BF16 RoPE, indexer storage, and sliding windows;
+the ordinary GQA capacity ratio does not apply. Accuracy results from other models do not
+replace a V4 task-accuracy evaluation.
+
 Disaggregated P/D Deployment
 ----------------------------
 

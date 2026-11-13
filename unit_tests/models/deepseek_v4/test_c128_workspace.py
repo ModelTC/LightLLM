@@ -188,7 +188,9 @@ def compress_case(workspace, batch, region=0, boundary=True):
     values = torch.randn(batch * 4, 1024, device="cuda") * 0.4
     packed = torch.full((batch + 1, 1168), 85, dtype=torch.uint8, device="cuda")
     state = NS(config=NS(window_size=128), get_layer_view=lambda **_: runtime)
-    compressed = NS(config=NS(block_token_size=256), get_layer_view=lambda **_: NS(kv=packed))
+    compressed = NS(
+        config=NS(block_token_size=256, kv_format="fp8_group64_e8m0"), get_layer_view=lambda **_: NS(kv=packed)
+    )
     infer = NS(
         position_ids=positions,
         mem_index=request_ids * 256 + steps,
@@ -418,7 +420,9 @@ def attach_stage_case(workspace, spec, runtime, packed):
     from lightllm.models.deepseek_v4.layer_infer.compressor import fused_compress
 
     state = NS(config=NS(window_size=128), get_layer_view=lambda **_: runtime)
-    compressed = NS(config=NS(block_token_size=256), get_layer_view=lambda **_: NS(kv=packed))
+    compressed = NS(
+        config=NS(block_token_size=256, kv_format="fp8_group64_e8m0"), get_layer_view=lambda **_: NS(kv=packed)
+    )
     infer = NS(
         position_ids=spec.positions,
         mem_index=spec.mem_index,

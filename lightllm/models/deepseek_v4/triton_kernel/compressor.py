@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from triton.language.extra import libdevice
+from lightllm.common.basemodel.triton_kernel.kv_copy.packed_nvfp4 import store_packed_nvfp4
 
 
 @triton.jit
@@ -110,6 +111,7 @@ def _fused_compress_norm_rope_kernel(
     BYTES_PER_PAGE: tl.constexpr,
     BLOCK: tl.constexpr,
     IS_IN_INDEXER: tl.constexpr,
+    NVFP4: tl.constexpr = False,
 ):
     token_idx = tl.program_id(0)
     out_slot = tl.load(compressed_kv_slots + token_idx).to(tl.int64)
@@ -204,33 +206,47 @@ def _fused_compress_norm_rope_kernel(
         tl.store(out_buffer + token_idx * HEAD_DIM + offs, rotated.to(tl.bfloat16), mask=dim_mask)
         return
 
-    page = out_slot // PAGE_SIZE
-    token_in_page = out_slot % PAGE_SIZE
-    data_base = page * BYTES_PER_PAGE + token_in_page * (NOPE_DIM + ROPE_HEAD_DIM * 2)
-    scale_base = page * BYTES_PER_PAGE + PAGE_SIZE * (NOPE_DIM + ROPE_HEAD_DIM * 2) + token_in_page * SCALE_BYTES
+    if NVFP4:
+        store_packed_nvfp4(
+            normed.to(tl.bfloat16).to(tl.float32),
+            rotated,
+            out_buffer,
+            out_slot,
+            True,
+            HEAD_DIM,
+            ROPE_HEAD_DIM,
+            PAGE_SIZE,
+            BYTES_PER_PAGE,
+            BLOCK,
+        )
+    else:
+        page = out_slot // PAGE_SIZE
+        token_in_page = out_slot % PAGE_SIZE
+        data_base = page * BYTES_PER_PAGE + token_in_page * (NOPE_DIM + ROPE_HEAD_DIM * 2)
+        scale_base = page * BYTES_PER_PAGE + PAGE_SIZE * (NOPE_DIM + ROPE_HEAD_DIM * 2) + token_in_page * SCALE_BYTES
 
-    n_quant_blocks: tl.constexpr = BLOCK // QUANT_BLOCK
-    n_nope_blocks: tl.constexpr = NOPE_DIM // QUANT_BLOCK
-    # Preserve BF16 rounding before FP8 packing.
-    quant_input = normed.to(tl.bfloat16).to(tl.float32)
-    quant_2d = tl.reshape(quant_input, (n_quant_blocks, QUANT_BLOCK))
-    abs_2d = tl.abs(quant_2d)
-    block_absmax = tl.maximum(tl.max(abs_2d, axis=1), AMAX_MIN)
-    scale_exp = tl.ceil(libdevice.log2(block_absmax / FP8_MAX)).to(tl.int32)
-    scale = ((scale_exp + 127) << 23).to(tl.float32, bitcast=True)
-    kv_fp8 = tl.clamp(quant_2d / scale[:, None], -FP8_MAX, FP8_MAX).to(tl.float8e4nv)
-    kv_u8 = tl.reshape(kv_fp8.to(tl.uint8, bitcast=True), (BLOCK,))
-    tl.store(out_buffer + data_base + offs, kv_u8, mask=offs < NOPE_DIM)
+        n_quant_blocks: tl.constexpr = BLOCK // QUANT_BLOCK
+        n_nope_blocks: tl.constexpr = NOPE_DIM // QUANT_BLOCK
+        # Preserve BF16 rounding before FP8 packing.
+        quant_input = normed.to(tl.bfloat16).to(tl.float32)
+        quant_2d = tl.reshape(quant_input, (n_quant_blocks, QUANT_BLOCK))
+        abs_2d = tl.abs(quant_2d)
+        block_absmax = tl.maximum(tl.max(abs_2d, axis=1), AMAX_MIN)
+        scale_exp = tl.ceil(libdevice.log2(block_absmax / FP8_MAX)).to(tl.int32)
+        scale = ((scale_exp + 127) << 23).to(tl.float32, bitcast=True)
+        kv_fp8 = tl.clamp(quant_2d / scale[:, None], -FP8_MAX, FP8_MAX).to(tl.float8e4nv)
+        kv_u8 = tl.reshape(kv_fp8.to(tl.uint8, bitcast=True), (BLOCK,))
+        tl.store(out_buffer + data_base + offs, kv_u8, mask=offs < NOPE_DIM)
 
-    # ue8m0
-    scale_idx = tl.arange(0, SCALE_BYTES)
-    scale_bytes = tl.where(scale_idx < n_nope_blocks, scale_exp + 127, 0).to(tl.uint8)
-    tl.store(out_buffer + scale_base + scale_idx, scale_bytes)
+        # ue8m0
+        scale_idx = tl.arange(0, SCALE_BYTES)
+        scale_bytes = tl.where(scale_idx < n_nope_blocks, scale_exp + 127, 0).to(tl.uint8)
+        tl.store(out_buffer + scale_base + scale_idx, scale_bytes)
 
-    rope_local = offs - NOPE_DIM
-    rope_mask = (offs >= NOPE_DIM) & dim_mask
-    rope_ptr = (out_buffer + data_base + NOPE_DIM).to(tl.pointer_type(tl.bfloat16))
-    tl.store(rope_ptr + rope_local, rotated.to(tl.bfloat16), mask=rope_mask)
+        rope_local = offs - NOPE_DIM
+        rope_mask = (offs >= NOPE_DIM) & dim_mask
+        rope_ptr = (out_buffer + data_base + NOPE_DIM).to(tl.pointer_type(tl.bfloat16))
+        tl.store(rope_ptr + rope_local, rotated.to(tl.bfloat16), mask=rope_mask)
     return
 
 
@@ -354,6 +370,7 @@ def _compress_norm_rope_pack_kernel(
     BYTES_PER_PAGE: tl.constexpr,
     BLOCK: tl.constexpr,
     IS_IN_INDEXER: tl.constexpr,
+    NVFP4: tl.constexpr = False,
 ):
     token_idx = tl.program_id(0)
     out_slot = tl.load(compressed_kv_slots + token_idx).to(tl.int64)
@@ -392,33 +409,47 @@ def _compress_norm_rope_pack_kernel(
         tl.store(out_buffer + token_idx * HEAD_DIM + offs, rotated.to(tl.bfloat16), mask=dim_mask)
         return
 
-    page = out_slot // PAGE_SIZE
-    token_in_page = out_slot % PAGE_SIZE
-    data_base = page * BYTES_PER_PAGE + token_in_page * (NOPE_DIM + ROPE_HEAD_DIM * 2)
-    scale_base = page * BYTES_PER_PAGE + PAGE_SIZE * (NOPE_DIM + ROPE_HEAD_DIM * 2) + token_in_page * SCALE_BYTES
+    if NVFP4:
+        store_packed_nvfp4(
+            normed.to(tl.bfloat16).to(tl.float32),
+            rotated,
+            out_buffer,
+            out_slot,
+            True,
+            HEAD_DIM,
+            ROPE_HEAD_DIM,
+            PAGE_SIZE,
+            BYTES_PER_PAGE,
+            BLOCK,
+        )
+    else:
+        page = out_slot // PAGE_SIZE
+        token_in_page = out_slot % PAGE_SIZE
+        data_base = page * BYTES_PER_PAGE + token_in_page * (NOPE_DIM + ROPE_HEAD_DIM * 2)
+        scale_base = page * BYTES_PER_PAGE + PAGE_SIZE * (NOPE_DIM + ROPE_HEAD_DIM * 2) + token_in_page * SCALE_BYTES
 
-    n_quant_blocks: tl.constexpr = BLOCK // QUANT_BLOCK
-    n_nope_blocks: tl.constexpr = NOPE_DIM // QUANT_BLOCK
-    # Preserve BF16 rounding before FP8 packing.
-    quant_input = normed.to(tl.bfloat16).to(tl.float32)
-    quant_2d = tl.reshape(quant_input, (n_quant_blocks, QUANT_BLOCK))
-    abs_2d = tl.abs(quant_2d)
-    block_absmax = tl.maximum(tl.max(abs_2d, axis=1), AMAX_MIN)
-    scale_exp = tl.ceil(libdevice.log2(block_absmax / FP8_MAX)).to(tl.int32)
-    scale = ((scale_exp + 127) << 23).to(tl.float32, bitcast=True)
-    kv_fp8 = tl.clamp(quant_2d / scale[:, None], -FP8_MAX, FP8_MAX).to(tl.float8e4nv)
-    kv_u8 = tl.reshape(kv_fp8.to(tl.uint8, bitcast=True), (BLOCK,))
-    tl.store(out_buffer + data_base + offs, kv_u8, mask=offs < NOPE_DIM)
+        n_quant_blocks: tl.constexpr = BLOCK // QUANT_BLOCK
+        n_nope_blocks: tl.constexpr = NOPE_DIM // QUANT_BLOCK
+        # Preserve BF16 rounding before FP8 packing.
+        quant_input = normed.to(tl.bfloat16).to(tl.float32)
+        quant_2d = tl.reshape(quant_input, (n_quant_blocks, QUANT_BLOCK))
+        abs_2d = tl.abs(quant_2d)
+        block_absmax = tl.maximum(tl.max(abs_2d, axis=1), AMAX_MIN)
+        scale_exp = tl.ceil(libdevice.log2(block_absmax / FP8_MAX)).to(tl.int32)
+        scale = ((scale_exp + 127) << 23).to(tl.float32, bitcast=True)
+        kv_fp8 = tl.clamp(quant_2d / scale[:, None], -FP8_MAX, FP8_MAX).to(tl.float8e4nv)
+        kv_u8 = tl.reshape(kv_fp8.to(tl.uint8, bitcast=True), (BLOCK,))
+        tl.store(out_buffer + data_base + offs, kv_u8, mask=offs < NOPE_DIM)
 
-    # ue8m0
-    scale_idx = tl.arange(0, SCALE_BYTES)
-    scale_bytes = tl.where(scale_idx < n_nope_blocks, scale_exp + 127, 0).to(tl.uint8)
-    tl.store(out_buffer + scale_base + scale_idx, scale_bytes)
+        # ue8m0
+        scale_idx = tl.arange(0, SCALE_BYTES)
+        scale_bytes = tl.where(scale_idx < n_nope_blocks, scale_exp + 127, 0).to(tl.uint8)
+        tl.store(out_buffer + scale_base + scale_idx, scale_bytes)
 
-    rope_local = offs - NOPE_DIM
-    rope_mask = (offs >= NOPE_DIM) & dim_mask
-    rope_ptr = (out_buffer + data_base + NOPE_DIM).to(tl.pointer_type(tl.bfloat16))
-    tl.store(rope_ptr + rope_local, rotated.to(tl.bfloat16), mask=rope_mask)
+        rope_local = offs - NOPE_DIM
+        rope_mask = (offs >= NOPE_DIM) & dim_mask
+        rope_ptr = (out_buffer + data_base + NOPE_DIM).to(tl.pointer_type(tl.bfloat16))
+        tl.store(rope_ptr + rope_local, rotated.to(tl.bfloat16), mask=rope_mask)
     return
 
 
