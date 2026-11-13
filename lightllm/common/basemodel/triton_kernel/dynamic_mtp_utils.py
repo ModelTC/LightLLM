@@ -18,11 +18,12 @@ def _fwd_kernel_cumprod_scores(
     b_req_idx,
     max_draft_step,
     BLOCK_SIZE: tl.constexpr,
+    packed_scores=None,
+    PACKED_WIDTH: tl.constexpr = 0,
 ):
     cur_index = tl.program_id(0)
     cur_req_idx = tl.load(b_req_idx + cur_index * (max_draft_step + 1))
     base_ptr = req_to_next_token_scores + cur_req_idx * req_to_next_token_scores_stride
-    tl.store(base_ptr, 1.0)
 
     offset = tl.arange(0, BLOCK_SIZE)
     store_mask = offset < (max_draft_step + 1)
@@ -39,7 +40,20 @@ def _fwd_kernel_cumprod_scores(
     cumulative_scores = tl.cumprod(scores, axis=0)
 
     tl.store(base_ptr + offset, cumulative_scores, mask=store_mask)
+    if packed_scores is not None:
+        tl.store(packed_scores + cur_index * PACKED_WIDTH + offset, cumulative_scores, offset < PACKED_WIDTH)
     return
+
+
+@triton.jit
+def _mark_selected_rows(
+    COMPACT_IDS, SELECTED, size, PACKED_WIDTH: tl.constexpr, ROW_WIDTH: tl.constexpr, BLOCK: tl.constexpr
+):
+    lane = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = lane < size
+    index = tl.load(COMPACT_IDS + lane, valid, 0).to(tl.int32)
+    dst = index // PACKED_WIDTH * ROW_WIDTH + index % PACKED_WIDTH
+    tl.store(SELECTED + dst, 1, valid)
 
 
 def sample_dynamic_mtp_row_mask(
@@ -61,25 +75,28 @@ def sample_dynamic_mtp_row_mask(
     assert dynamic_batch_size <= valid_row_num
 
     # Convert each request's conditional scheduling scores to prefix survival scores.
+    scores = torch.empty((valid_row_num,), dtype=req_to_next_token_scores.dtype, device=b_req_idx.device)
     _fwd_kernel_cumprod_scores[(req_num,)](
         req_to_next_token_scores=req_to_next_token_scores,
         req_to_next_token_scores_stride=req_to_next_token_scores.stride(0),
         b_req_idx=b_req_idx,
         max_draft_step=max_draft_step,
         BLOCK_SIZE=triton.next_power_of_2(max_draft_step + 1),
+        packed_scores=scores,
+        PACKED_WIDTH=pre_draft_step + 1,
         num_warps=1,
         num_stages=1,
     )
 
-    request_ids = b_req_idx[:: max_draft_step + 1].long()
-    scores = req_to_next_token_scores.index_select(0, request_ids)[:, : pre_draft_step + 1].flatten()
     compact_ids = torch.topk(scores, k=dynamic_batch_size, sorted=False).indices
-    request_offsets = compact_ids // (pre_draft_step + 1)
-    step_offsets = compact_ids % (pre_draft_step + 1)
-    selected_ids = request_offsets * (max_draft_step + 1) + step_offsets
 
     selected_row_mask = torch.zeros((len(b_req_idx),), dtype=torch.int32, device=b_req_idx.device)
-    selected_row_mask.scatter_(0, selected_ids, 1)
+    if pre_draft_step == max_draft_step:
+        selected_row_mask.scatter_(0, compact_ids, 1)
+    elif dynamic_batch_size:
+        _mark_selected_rows[(triton.cdiv(dynamic_batch_size, 128),)](
+            compact_ids, selected_row_mask, dynamic_batch_size, pre_draft_step + 1, max_draft_step + 1, 128
+        )
     return selected_row_mask
 
 
