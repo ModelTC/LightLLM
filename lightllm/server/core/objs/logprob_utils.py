@@ -1,3 +1,6 @@
+from typing import Any, Dict
+
+
 def logprob_info(tokenizer, token_id: int, logprob: float, rank: int):
     decoded_token = None
     if tokenizer is not None:
@@ -17,7 +20,7 @@ _BYTE_LEVEL_BYTES.update(
 )
 
 
-def chat_token_logprob(tokenizer, token_id: int, logprob: float):
+def chat_token_logprob(tokenizer: Any, token_id: int, logprob: float) -> Dict[str, Any]:
     token = tokenizer.decode([token_id], skip_special_tokens=False)
     raw_bytes = list(token.encode("utf-8")) if "\ufffd" not in token else None
     decoder = getattr(getattr(tokenizer, "backend_tokenizer", None), "decoder", None)

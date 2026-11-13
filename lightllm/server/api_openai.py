@@ -124,7 +124,7 @@ async def _safe_stream_wrapper(stream_generator):
         return
 
 
-def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=(), logprobs=None):
+def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=(), logprobs: Optional[Any] = None):
     """Serialize a streaming chunk, explicitly including specified null fields."""
     d = chunk.model_dump(exclude_none=True)
     if choice_nulls and d.get("choices"):
@@ -141,23 +141,23 @@ def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=(), logprobs=Non
 class _ChatLogprobBuffer:
     """Keep token metadata aligned when detokenization or parsers buffer text."""
 
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer: Any):
         self.tokenizer = tokenizer
         self.pending = collections.deque()
 
-    def append(self, text, metadata, finish_status):
+    def append(self, text: str, metadata: Dict[str, Any], finish_status: FinishStatus) -> None:
         # 先把文本和对应的 token 概率存起来，等解析器确定要输出哪些文本后再取。
         token_id, score = metadata.get("id"), metadata.get("logprob")
         token = None
         # 只有结束通知、没有实际文本的消息，不当作输出 token。
         if token_id is not None and score is not None and (text or not finish_status.is_finished()):
-            token = chat_token_logprob(self.tokenizer, token_id, score)
+            token = chat_token_logprob(tokenizer=self.tokenizer, token_id=token_id, logprob=score)
         # 一个汉字可能拆成几个 token：还没凑齐时 text 为空，也要保留这些字节的概率。
         if text or (token is not None and token["bytes"] and "\ufffd" in token["token"]):
             # 每条记录保存：本次解码出的文本、token 信息、top-k 候选。
             self.pending.append((text, token, metadata.get("output_top_logprobs", ())))
 
-    def take(self, text, *, from_end=False, reasoning_start=None):
+    def take(self, text: str, *, from_end: bool = False, reasoning_start: Optional[str] = None) -> List[Dict[str, Any]]:
         if not text:
             return []
         # 思考/工具解析器可能暂存文本或去掉标记，所以按最终要输出的 text 查找对应区间。
@@ -180,7 +180,8 @@ class _ChatLogprobBuffer:
             # 收集与目标区间重叠的 token；区间内暂未解码出文字的字节 token 也要带上。
             if token is not None and (next_offset > start or (not part and offset >= start)):
                 token["top_logprobs"] = [
-                    chat_token_logprob(self.tokenizer, token_id, score) for token_id, score in candidates
+                    chat_token_logprob(tokenizer=self.tokenizer, token_id=token_id, logprob=score)
+                    for token_id, score in candidates
                 ]
                 tokens.append(token)
             if next_offset > end:
@@ -189,8 +190,15 @@ class _ChatLogprobBuffer:
             offset = next_offset
         return tokens
 
-    def content(self, text, reasoning_prefix, reasoning_logprobs, *, from_end=False):
-        tokens = reasoning_logprobs + self.take(text.removeprefix(reasoning_prefix), from_end=from_end)
+    def content(
+        self,
+        text: str,
+        reasoning_prefix: str,
+        reasoning_logprobs: List[Dict[str, Any]],
+        *,
+        from_end: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        tokens = reasoning_logprobs + self.take(text=text.removeprefix(reasoning_prefix), from_end=from_end)
         return {"content": tokens, "reasoning_content": None} if tokens else None
 
 
@@ -484,7 +492,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         prompt, sampling_params, multimodal_params, request=raw_request
     )
     logprob_buffers = (
-        collections.defaultdict(lambda: _ChatLogprobBuffer(g_objs.httpserver_manager.tokenizer))
+        collections.defaultdict(lambda: _ChatLogprobBuffer(tokenizer=g_objs.httpserver_manager.tokenizer))
         if request.logprobs
         else None
     )
@@ -508,7 +516,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             count_output_tokens_dict[sub_req_id] += 1
             final_output_dict[sub_req_id].append(request_output)
             if logprob_buffers is not None:
-                logprob_buffers[sub_req_id].append(request_output, metadata, finish_status)
+                logprob_buffers[sub_req_id].append(text=request_output, metadata=metadata, finish_status=finish_status)
             if reasoning_parser:
                 parser = reasoning_parser_dict.get(sub_req_id)
                 if parser is None:
@@ -555,7 +563,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     )
                 if logprob_buffers is not None:
                     reasoning_logprobs = logprob_buffers[sub_req_id].take(
-                        reasoning_text, reasoning_start=parser.detector.think_start_token
+                        text=reasoning_text, reasoning_start=parser.detector.think_start_token
                     )
                 if not request.separate_reasoning:
                     reasoning_prefix = reasoning_text or ""
@@ -595,7 +603,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             choice_logprobs = None
             if logprob_buffers is not None:
                 content_logprobs = logprob_buffers[sub_req_id].take(
-                    (text or "").removeprefix(reasoning_prefix), from_end=not tool_calls
+                    text=(text or "").removeprefix(reasoning_prefix), from_end=not tool_calls
                 )
                 if not request.separate_reasoning:
                     content_logprobs = reasoning_logprobs + content_logprobs
@@ -667,7 +675,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             reasoning_prefix = ""
             if logprob_buffers is not None:
                 logprob_buffer = logprob_buffers[sub_req_id]
-                logprob_buffer.append(delta, metadata, finish_status)
+                logprob_buffer.append(text=delta, metadata=metadata, finish_status=finish_status)
             current_finish_reason = finish_status.get_finish_reason()
             if current_finish_reason == "error" and completion_tokens == 1:
                 raise GenerationError("Generation failed before producing output")
@@ -697,7 +705,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 if reasoning_text:
                     if logprob_buffer is not None:
                         reasoning_logprobs = logprob_buffer.take(
-                            reasoning_text,
+                            text=reasoning_text,
                             reasoning_start=reasoning_parser_dict[choice_index].detector.think_start_token,
                         )
                     if request.separate_reasoning:
@@ -740,7 +748,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         model=request.model,
                     )
                     choice_logprobs = (
-                        logprob_buffer.content(normal_text, reasoning_prefix, reasoning_logprobs)
+                        logprob_buffer.content(
+                            text=normal_text,
+                            reasoning_prefix=reasoning_prefix,
+                            reasoning_logprobs=reasoning_logprobs,
+                        )
                         if logprob_buffer is not None
                         else None
                     )
@@ -855,7 +867,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             else:
                 if delta:
                     content_logprobs = (
-                        logprob_buffer.content(delta, reasoning_prefix, reasoning_logprobs, from_end=True)
+                        logprob_buffer.content(
+                            text=delta,
+                            reasoning_prefix=reasoning_prefix,
+                            reasoning_logprobs=reasoning_logprobs,
+                            from_end=True,
+                        )
                         if logprob_buffer is not None
                         else None
                     )
@@ -904,7 +921,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             flush_logprobs = None
                             if logprob_buffer is not None:
                                 tokens = logprob_buffer.take(
-                                    flush_reasoning, reasoning_start=parser.detector.think_start_token
+                                    text=flush_reasoning, reasoning_start=parser.detector.think_start_token
                                 )
                                 if tokens:
                                     flush_logprobs = {
@@ -945,7 +962,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 choices=[flush_choice],
                             )
                             flush_logprobs = (
-                                logprob_buffer.content(flush_text, "", [], from_end=True)
+                                logprob_buffer.content(
+                                    text=flush_text, reasoning_prefix="", reasoning_logprobs=[], from_end=True
+                                )
                                 if logprob_buffer is not None
                                 else None
                             )

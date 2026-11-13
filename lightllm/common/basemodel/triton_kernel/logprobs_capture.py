@@ -1,3 +1,5 @@
+from typing import Tuple
+
 import torch
 import triton
 import triton.language as tl
@@ -147,7 +149,7 @@ def capture_output_logprobs(
     rows: torch.Tensor,
     max_topk: int,
     output_count: int,
-):
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """返回每行的 top-k token id 和 logprob。
 
     rows 每项是 (logits 行号, K, 写入起点)。写入起点按 token 个数累加，
@@ -161,31 +163,31 @@ def capture_output_logprobs(
     topk = triton.next_power_of_2(max_topk)
     candidates = logits.new_empty((rows.shape[0], tiles, topk), dtype=torch.int64)
     _output_logprobs_partial[(rows.shape[0], tiles)](
-        logits,
-        rows,
-        candidates,
-        logits.stride(0),
-        logits.shape[1],
-        tiles,
-        topk,
-        block,
+        logits=logits,
+        rows=rows,
+        candidates=candidates,
+        stride_row=logits.stride(0),
+        vocab_size=logits.shape[1],
+        tiles=tiles,
+        TOPK=topk,
+        BLOCK=block,
         num_warps=4,
     )
     token_ids = torch.empty((output_count,), dtype=torch.int64, device=logits.device)
     logprobs = torch.empty((output_count,), dtype=torch.float32, device=logits.device)
     _output_logprobs_finish[(rows.shape[0],)](
-        logits,
-        sampled_ids,
-        sampled_logprobs,
-        rows,
-        candidates,
-        token_ids,
-        logprobs,
-        logits.stride(0),
-        logits.shape[1],
-        tiles,
-        topk,
-        triton.next_power_of_2(tiles),
+        logits=logits,
+        sampled_ids=sampled_ids,
+        sampled_logprobs=sampled_logprobs,
+        rows=rows,
+        candidates=candidates,
+        token_ids=token_ids,
+        logprobs=logprobs,
+        stride_row=logits.stride(0),
+        vocab_size=logits.shape[1],
+        tiles=tiles,
+        TOPK=topk,
+        TILE_BLOCK=triton.next_power_of_2(tiles),
         num_warps=4,
     )
     return token_ids, logprobs

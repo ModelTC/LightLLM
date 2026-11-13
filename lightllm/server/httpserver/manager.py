@@ -1099,7 +1099,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                     and not finish_status.is_error_finished()
                                     and not finish_status.is_finished_pd_decode_capacity()
                                 ):
-                                    token_ids, logprobs = req.output_topk_logprobs_row(count_output_tokens - 1)
+                                    token_ids, logprobs = req.output_topk_logprobs_row(
+                                        output_index=count_output_tokens - 1
+                                    )
                                     metadata["output_top_logprobs"] = [
                                         (int(token_id), float(score))
                                         for token_id, score in zip(token_ids, logprobs)

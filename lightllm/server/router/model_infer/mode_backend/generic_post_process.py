@@ -126,19 +126,21 @@ def sample(
             )
 
     output_topk_logprobs: TopkLogprobRows = [None] * len(reqs)
-    topk_logprobs_rows, max_topk = _collect_topk_logprobs_rows(reqs, has_output)
+    topk_logprobs_rows, max_topk = _collect_topk_logprobs_rows(reqs=reqs, has_output=has_output)
     if topk_logprobs_rows:
         next_token_logprobs, output_topk_logprobs = _capture_topk_logprobs(
-            logits,
-            next_token_ids,
-            next_token_logprobs,
-            topk_logprobs_rows,
-            max_topk,
+            logits=logits,
+            next_token_ids=next_token_ids,
+            next_token_logprobs=next_token_logprobs,
+            topk_logprobs_rows=topk_logprobs_rows,
+            max_topk=max_topk,
         )
     return next_token_ids, next_token_logprobs, output_topk_logprobs
 
 
-def _collect_topk_logprobs_rows(reqs: List[InferReq], has_output=None) -> Tuple[List[Tuple[int, int]], int]:
+def _collect_topk_logprobs_rows(
+    reqs: List[InferReq], has_output: Optional[List[bool]] = None
+) -> Tuple[List[Tuple[int, int]], int]:
     """Rows that asked for candidate topk logprobs, as (batch_index, topk), plus the maximum topk.
 
     topk == 0 only needs the sampled token logprob and is omitted. batch_index is the position
@@ -174,12 +176,12 @@ def _capture_topk_logprobs(
     rows = g_pin_mem_manager.alloc_pin_tensor("output_logprob_rows", 3 * len(capture_rows), torch.int32).view(-1, 3)
     rows.numpy()[:] = capture_rows
     token_ids, logprobs = capture_output_logprobs(
-        logits,
-        next_token_ids,
-        next_token_logprobs,
-        rows.to(device=logits.device, non_blocking=True),
-        max_topk,
-        output_count,
+        logits=logits,
+        sampled_ids=next_token_ids,
+        sampled_logprobs=next_token_logprobs,
+        rows=rows.to(device=logits.device, non_blocking=True),
+        max_topk=max_topk,
+        output_count=output_count,
     )
     token_ids_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(key="output_topk_token_ids", gpu_tensor=token_ids)
     logprobs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(key="output_topk_logprobs", gpu_tensor=logprobs)

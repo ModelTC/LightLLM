@@ -126,20 +126,20 @@ def test_candidate_shm_is_reused_and_resized(monkeypatch):
         assert worker.shm_logprobs.arr.shape == (8,)
         assert worker.shm_output_topk_logprobs.arr.shape == (3 + 128, 2, 2)
         assert worker.shm_output_topk_logprobs.shm.size == worker.shm_output_topk_logprobs.arr.nbytes
-        assert worker.output_topk_logprobs_row(0)[0].tolist() == [-1, -1]
+        assert worker.output_topk_logprobs_row(output_index=0)[0].tolist() == [-1, -1]
         worker.shm_logprobs.arr[3] = (-0.25, 1)
-        worker.output_topk_logprobs_row(0)[:] = ([9, 8], [-0.5, -1.0])
-        worker.output_topk_logprobs_row(1)[:] = ([7, 6], [-0.25, -1.5])
+        worker.output_topk_logprobs_row(output_index=0)[:] = ([9, 8], [-0.5, -1.0])
+        worker.output_topk_logprobs_row(output_index=1)[:] = ([7, 6], [-0.25, -1.5])
         worker.detach_shm_arrays()
 
         owner.detach_shm_arrays()
         owner.link_logprobs_shm_array()
         assert owner.shm_logprobs.arr[3].tolist() == (-0.25, 1)
-        assert owner.output_topk_logprobs_row(1).tolist() == [[7, 6], [-0.25, -1.5]]
+        assert owner.output_topk_logprobs_row(output_index=1).tolist() == [[7, 6], [-0.25, -1.5]]
 
         owner.detach_shm_arrays()
         owner.create_logprobs_shm_array()
-        assert owner.output_topk_logprobs_row(0)[0].tolist() == [-1, -1]
+        assert owner.output_topk_logprobs_row(output_index=0)[0].tolist() == [-1, -1]
         owner.shm_output_topk_logprobs.close_shm()
 
         owner.sample_params.output_top_logprobs = 0

@@ -328,7 +328,7 @@ class Req(ctypes.Structure):
         self.shm_logprobs.arr["rank"][:] = -1
         topk = int(self.sample_params.output_top_logprobs)
         if topk >= 1:
-            self._create_output_topk_logprobs_shm_array(topk)
+            self._create_output_topk_logprobs_shm_array(topk=topk)
         return
 
     def link_logprobs_shm_array(self):
@@ -341,30 +341,30 @@ class Req(ctypes.Structure):
         self.shm_logprobs.link_shm()
         topk = int(self.sample_params.output_top_logprobs)
         if topk >= 1:
-            self._link_output_topk_logprobs_shm_array(topk)
+            self._link_output_topk_logprobs_shm_array(topk=topk)
         return
 
-    def _create_output_topk_logprobs_shm_array(self, topk: int):
+    def _create_output_topk_logprobs_shm_array(self, topk: int) -> None:
         # max_new_tokens 之外再留 128 个位置，避免模拟结束追加 EOS 等超出请求上限的写入越界。
         self.shm_output_topk_logprobs = ShmArray(
-            f"shm_output_topk_logprobs_{self.index_in_shm_mem}",
-            (self.sample_params.max_new_tokens + 128, 2, topk),
-            np.float32,
+            name=f"shm_output_topk_logprobs_{self.index_in_shm_mem}",
+            shape=(self.sample_params.max_new_tokens + 128, 2, topk),
+            dtype=np.float32,
         )
         self.shm_output_topk_logprobs.create_shm()
         # PD decode 可能直接复用 prefill 已采样的第一个 token，先把 token id 标成无效。
         self.shm_output_topk_logprobs.arr[0, 0].fill(-1)
 
-    def _link_output_topk_logprobs_shm_array(self, topk: int):
+    def _link_output_topk_logprobs_shm_array(self, topk: int) -> None:
         # 与创建侧相同，第一维是 max_new_tokens + 128。
         self.shm_output_topk_logprobs = ShmArray(
-            f"shm_output_topk_logprobs_{self.index_in_shm_mem}",
-            (self.sample_params.max_new_tokens + 128, 2, topk),
-            np.float32,
+            name=f"shm_output_topk_logprobs_{self.index_in_shm_mem}",
+            shape=(self.sample_params.max_new_tokens + 128, 2, topk),
+            dtype=np.float32,
         )
         self.shm_output_topk_logprobs.link_shm()
 
-    def output_topk_logprobs_row(self, output_index: int):
+    def output_topk_logprobs_row(self, output_index: int) -> np.ndarray:
         """该输出位置的候选，形状 (2, topk)。第 0 行是 token id，第 1 行是 logprob。"""
         return self.shm_output_topk_logprobs.arr[output_index]
 
