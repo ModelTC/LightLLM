@@ -1,7 +1,6 @@
 import os
 import asyncio
 import pytest
-import time
 import uuid
 import numpy as np
 from unittest.mock import MagicMock
@@ -94,18 +93,6 @@ def test_alloc_req_index_no_available(shm_req_manager):
         shm_req_manager.alloc_req_index()
     index = shm_req_manager.alloc_req_index()
     assert index is None  # No indices should be available
-
-
-def test_performance_alloc_release(shm_req_manager):
-    start_time = time.time()
-
-    for _ in range(100):
-        index = shm_req_manager.alloc_req_index()
-        if index is not None:
-            shm_req_manager.release_req_index(index)
-
-    duration = time.time() - start_time
-    print(f"Time taken for 100 alloc/release cycles: {duration:.6f} seconds")
 
 
 @pytest.fixture

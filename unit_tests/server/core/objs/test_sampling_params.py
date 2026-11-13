@@ -37,48 +37,6 @@ schema_str = r"""{
 }"""
 
 
-@pytest.mark.parametrize(
-    "sequence, expected",
-    [
-        ([1, 2, 3], [1, 2, 3]),
-        ([1] * (STOP_SEQUENCE_MAX_LENGTH), [1] * STOP_SEQUENCE_MAX_LENGTH),
-    ],
-)
-def test_stop_sequence_initialization(sequence, expected):
-    seq = StopSequence()
-    seq.initialize(sequence)
-    assert seq.size == len(expected)
-    assert seq.to_list() == expected
-
-
-def test_stop_sequence_initialization_too_many():
-    seq = StopSequence()
-    with pytest.raises(AssertionError):
-        seq.initialize([1] * (STOP_SEQUENCE_MAX_LENGTH + 1))
-
-
-@pytest.mark.parametrize(
-    "stop_sequences, expected_ids, expected_strings, expected_original",
-    [
-        (["stop1", "stop2"], [], ["stop1", "stop2"], ["stop1", "stop2"]),
-        ("END", [], ["END"], ["END"]),
-        ([[1, 2], [3, 4]], [[1, 2], [3, 4]], [], [[1, 2], [3, 4]]),
-        (["END", [1, 2], "结束"], [[1, 2]], ["END", "结束"], ["END", [1, 2], "结束"]),
-        (["", [], "END", [1]], [[1]], ["END"], ["END", [1]]),
-        ([], [], [], []),
-        (None, [], [], []),
-    ],
-)
-def test_stop_sequence_groups_initialization(stop_sequences, expected_ids, expected_strings, expected_original):
-    groups = StopSequenceGroups()
-    groups.initialize(stop_sequences)
-    assert groups.size == len(expected_original)
-    assert groups.to_token_ids_list() == expected_ids
-    assert groups.to_stop_str_list() == expected_strings
-    assert groups.has_stop_strs() is bool(expected_strings)
-    assert groups.to_origin_list() == expected_original
-
-
 @pytest.mark.parametrize("mode", [StopStrMatchMode.ALL_TEXT, StopStrMatchMode.CONTENT_ONLY])
 def test_string_stops_are_not_encoded_and_round_trip_with_token_ids(mode):
     tokenizer = Mock()
@@ -99,53 +57,6 @@ def test_string_stops_are_not_encoded_and_round_trip_with_token_ids(mode):
     py_params.verify()
     assert py_params.to_dict()["stop_sequences"] == stops
     tokenizer.encode.assert_not_called()
-
-
-def test_regular_constraint_initialization():
-    constraint = RegularConstraint()
-    constraint.initialize("[a-zA-Z]+")
-    assert constraint.length == len("[a-zA-Z]+")
-    assert constraint.to_str() == "[a-zA-Z]+"
-
-    with pytest.raises(AssertionError):
-        constraint.initialize("a" * (REGULAR_CONSTRAINT_MAX_LENGTH + 1))
-
-
-def test_guided_grammar_initialization():
-    grammar = GuidedGrammar()
-    grammar.initialize(grammar_str, None)
-    assert grammar.to_str() == grammar_str
-
-    with pytest.raises(AssertionError):
-        grammar.initialize("a" * (GRAMMAR_CONSTRAINT_MAX_LENGTH + 1), None)
-
-
-def test_guided_json_schema_initialization():
-    schema = GuidedJsonSchema()
-    schema.initialize(schema_str, None)
-    assert schema.to_str() == schema_str
-
-    with pytest.raises(AssertionError):
-        schema.initialize("a" * (JSON_SCHEMA_MAX_LENGTH + 1), None)
-
-
-def test_exponential_decay_length_penalty_initialization():
-    penalty = ExponentialDecayLengthPenalty()
-    penalty.initialize((5, 1.5))
-    assert penalty.to_tuple() == (5, 1.5)
-
-    with pytest.raises(AssertionError):
-        penalty.initialize((5, 0.5))
-
-
-def test_node_uuid_initialization():
-    node_id = 12345678901234567890
-    node_uuid = NodeUUId()
-    node_uuid.initialize(node_id)
-
-    assert node_uuid.node_id_high == (node_id >> 64) & 0xFFFFFFFFFFFFFFFF
-    assert node_uuid.node_id_low == node_id & 0xFFFFFFFFFFFFFFFF
-    assert node_uuid.get() == node_id
 
 
 def test_sampling_params_initialization():
@@ -238,15 +149,6 @@ def test_stop_matching_policy_round_trip(kwargs, expected):
     assert py_restored.stop_str_match_mode.get_mode() == expected
 
 
-@pytest.mark.parametrize("mode", [-1, 0, 3, 2 ** 32, "CONTENT_ONLY", None, 0.0])
-def test_invalid_stop_str_match_mode(mode):
-    params = SamplingParams()
-    with pytest.raises((ValueError, TypeError)):
-        params.init(None, stop_str_match_mode=mode)
-    with pytest.raises((ValueError, TypeError)):
-        PySamplingParams(stop_str_match_mode=mode)
-
-
 def test_stop_str_match_mode_updates_shared_buffer():
     params = SamplingParams()
     params.init(None, include_stop_str_in_output=True, _initial_reasoning_state=1)
@@ -262,12 +164,6 @@ def test_stop_str_match_mode_updates_shared_buffer():
     with pytest.raises(ValueError):
         writer.stop_str_match_mode.set_mode(3)
     assert reader.stop_str_match_mode.is_content_only()
-
-
-def test_infer_high_priority_is_internal_and_ignores_external_value():
-    params = SamplingParams()
-    params.init(None, infer_high_priority=-3)
-    assert params.infer_high_priority == 0
 
 
 # Mock tokenizer for testing

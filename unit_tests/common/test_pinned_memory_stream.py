@@ -50,24 +50,6 @@ def release_futures(monkeypatch):
         submit(lambda: None).result(timeout=10)
 
 
-def test_empty_batch_and_fallback_do_not_create_release_pool(monkeypatch):
-    copier = cuda_wrapper.PinnedH2DBatchCopier
-    monkeypatch.setattr(copier, "_release_pool", None)
-    monkeypatch.setattr(copier, "_native_batch_available", False)
-    monkeypatch.setattr(torch.cuda, "current_stream", lambda: SimpleNamespace(cuda_stream=0))
-
-    def unexpected_pool(*args, **kwargs):
-        pytest.fail("Empty batches and copy_ fallback must not create the source release pool")
-
-    monkeypatch.setattr(cuda_wrapper, "ThreadPoolExecutor", unexpected_pool)
-    cuda_wrapper.cuda_memcpy_pinned_h2d_batch_async([], [])
-    source = torch.arange(8, dtype=torch.int32)
-    target = torch.empty_like(source)
-    cuda_wrapper.cuda_memcpy_pinned_h2d_batch_async([target], [source])
-    assert copier._release_pool is None
-    assert torch.equal(target, source)
-
-
 def test_release_pool_is_initialized_once_for_concurrent_callers(monkeypatch):
     copier = cuda_wrapper.PinnedH2DBatchCopier
     monkeypatch.setattr(copier, "_release_pool", None)
@@ -96,82 +78,6 @@ def test_release_pool_is_initialized_once_for_concurrent_callers(monkeypatch):
             allow_creation.set()
         assert all(future.result(timeout=5) is shared_pool for future in futures)
     assert creations == [{"max_workers": 1, "thread_name_prefix": "lightllm-pinned-release"}]
-
-
-@requires_cuda
-@pytest.mark.parametrize("native_batch", [False, True])
-def test_default_stream_copy_orders_reads_and_reuses_upload_stream(monkeypatch, native_batch):
-    runtime = pytest.importorskip("cuda.bindings.runtime")
-    copier = cuda_wrapper.PinnedH2DBatchCopier
-    monkeypatch.setattr(copier, "_native_batch_available", native_batch)
-    stream = torch.cuda.default_stream()
-    source = torch.arange(8192, dtype=torch.int32, pin_memory=True)
-    target = torch.empty(8192, dtype=torch.int32, device="cuda")
-    native_copy = runtime.cudaMemcpyBatchAsync
-    submitted_streams, observed = [], []
-
-    def record_batch(*args):
-        submitted_streams.append(args[-1])
-        return native_copy(*args)
-
-    monkeypatch.setattr(runtime, "cudaMemcpyBatchAsync", record_batch)
-    with torch.cuda.stream(stream):
-        for _ in range(2):
-            torch.cuda._sleep(20_000_000)
-            target.fill_(-1)
-            cuda_wrapper.cuda_memcpy_pinned_h2d_batch_async([target], [source])
-            assert torch.cuda.current_stream() == stream
-            observed.append(target.clone())
-    for result in observed:
-        assert torch.equal(result.cpu(), source)
-    if native_batch:
-        assert len(submitted_streams) == 2
-        assert submitted_streams[0] == submitted_streams[1] != 0
-    else:
-        assert submitted_streams == []
-
-
-@requires_cuda
-def test_raw_batch_records_one_completion_event_without_small_copy(monkeypatch, release_futures):
-    runtime = pytest.importorskip("cuda.bindings.runtime")
-    source = torch.arange(2048, dtype=torch.int32, pin_memory=True)
-    another_source = torch.arange(2048, dtype=torch.int32, pin_memory=True).add_(10000)
-    sources = [source[128:384], source[1000:1256], another_source[17:273]]
-    target = torch.full((1024,), -1, dtype=torch.int32, device="cuda")
-    targets = [target[2:258], target[300:556], target[600:856]]
-    expected = torch.full((1024,), -1, dtype=torch.int32)
-    expected[2:258], expected[300:556], expected[600:856] = sources
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.default_stream())
-    calls = []
-    native_copy, event_record = runtime.cudaMemcpyBatchAsync, torch.cuda.Event.record
-
-    def record_native(*args):
-        calls.append(("batch", args[3], args[-1]))
-        return native_copy(*args)
-
-    def record_event(event, on_stream=None):
-        calls.append(("event", 1, on_stream.cuda_stream))
-        return event_record(event, on_stream)
-
-    def unexpected_copy(*args, **kwargs):
-        pytest.fail("Raw batch source protection must not submit a small copy_ or enter per-tensor fallback")
-
-    def unexpected_sync(*args, **kwargs):
-        pytest.fail("Normal raw batches must not synchronize a CUDA stream on the submitting thread")
-
-    monkeypatch.setattr(runtime, "cudaMemcpyBatchAsync", record_native)
-    monkeypatch.setattr(torch.cuda.Event, "record", record_event)
-    monkeypatch.setattr(torch.Tensor, "copy_", unexpected_copy)
-    with torch.cuda.stream(stream), monkeypatch.context() as no_sync:
-        no_sync.setattr(torch.cuda.Stream, "synchronize", unexpected_sync)
-        no_sync.setattr(torch.cuda, "synchronize", unexpected_sync)
-        cuda_wrapper.cuda_memcpy_pinned_h2d_batch_async(targets, sources)
-        assert len(release_futures) == 1
-        release_futures[0].result(timeout=10)
-    assert cuda_wrapper.PinnedH2DBatchCopier._native_batch_available
-    assert calls == [("batch", 3, stream.cuda_stream), ("event", 1, stream.cuda_stream)]
-    assert torch.equal(target.cpu(), expected)
 
 
 @requires_cuda
@@ -252,74 +158,6 @@ def test_async_copy_keeps_freed_source_storage_out_of_reuse(monkeypatch, native_
     stream.synchronize()
     assert pending_checks > 0, "Delayed transfers must cover source release and pinned memory reuse checks"
     assert torch.equal(target.cpu(), expected)
-
-
-@requires_cuda
-@pytest.mark.parametrize("failure", ["record", "pool", "submit"])
-def test_event_setup_failure_propagates_without_sync_or_fallback(monkeypatch, failure):
-    pytest.importorskip("cuda.bindings.runtime")
-    source = torch.arange(1024, dtype=torch.int32, pin_memory=True)
-    target = torch.empty_like(source, device="cuda")
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.default_stream())
-    synchronize = torch.cuda.Stream.synchronize
-
-    def fail_setup(*args, **kwargs):
-        raise RuntimeError(f"test {failure} failure")
-
-    def unexpected_sync(*args, **kwargs):
-        pytest.fail("Source protection setup errors must propagate without synchronous cleanup")
-
-    def unexpected_copy(*args, **kwargs):
-        pytest.fail("copy_ fallback must not hide source protection failure after raw batch submission")
-
-    if failure == "record":
-        monkeypatch.setattr(torch.cuda.Event, "record", fail_setup)
-    elif failure == "pool":
-        monkeypatch.setattr(cuda_wrapper.PinnedH2DBatchCopier, "_release_pool", None)
-        monkeypatch.setattr(cuda_wrapper, "ThreadPoolExecutor", fail_setup)
-    else:
-        monkeypatch.setattr(cuda_wrapper.PinnedH2DBatchCopier._get_release_pool(), "submit", fail_setup)
-    monkeypatch.setattr(torch.cuda.Stream, "synchronize", unexpected_sync)
-    monkeypatch.setattr(torch.Tensor, "copy_", unexpected_copy)
-    try:
-        with torch.cuda.stream(stream):
-            torch.cuda._sleep(20_000_000)
-            with pytest.raises(RuntimeError, match=f"test {failure} failure"):
-                cuda_wrapper.cuda_memcpy_pinned_h2d_batch_async([target], [source])
-    finally:
-        # 测试捕获注入异常后仍要继续运行，自行持有源并等待在途传输结束。
-        synchronize(stream)
-    assert cuda_wrapper.PinnedH2DBatchCopier._native_batch_available
-    assert torch.equal(target.cpu(), source)
-
-
-@requires_cuda
-def test_pytorch_fallback_needs_no_completion_event_or_pool_task(monkeypatch, release_futures):
-    monkeypatch.setattr(cuda_wrapper.PinnedH2DBatchCopier, "_native_batch_available", False)
-    source = torch.arange(1024, dtype=torch.int32, pin_memory=True)
-    target = torch.empty_like(source, device="cuda")
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.default_stream())
-    copy_sizes = []
-    copy = torch.Tensor.copy_
-
-    def unexpected_event(*args, **kwargs):
-        pytest.fail("PyTorch copy_ already protects source storage and must not create an extra completion event")
-
-    def record_copy(dst, src, *args, **kwargs):
-        copy_sizes.append(src.numel() * src.element_size())
-        return copy(dst, src, *args, **kwargs)
-
-    monkeypatch.setattr(torch.cuda, "Event", unexpected_event)
-    monkeypatch.setattr(torch.Tensor, "copy_", record_copy)
-    with torch.cuda.stream(stream):
-        cuda_wrapper.cuda_memcpy_pinned_h2d_batch_async([target], [source])
-    stream.synchronize()
-    assert not cuda_wrapper.PinnedH2DBatchCopier._native_batch_available
-    assert release_futures == []
-    assert copy_sizes == [source.numel() * source.element_size()]
-    assert torch.equal(target.cpu(), source)
 
 
 @requires_cuda

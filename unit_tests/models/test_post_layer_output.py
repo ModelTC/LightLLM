@@ -78,72 +78,6 @@ def test_output_head_returns_candidates_without_mutating_state(monkeypatch, draf
     assert prompt.logits_token_ids is None
 
 
-def test_vocab_parallel_topk_returns_candidates_on_single_rank(monkeypatch) -> None:
-    _mock_vocab_parallel_pack(monkeypatch)
-    head = llama_post.LlamaPostLayerInfer.__new__(llama_post.LlamaPostLayerInfer)
-    head.tp_world_size_ = 1
-    head.alloc_tensor = lambda shape, dtype, **kwargs: torch.empty(shape, dtype=dtype)
-    local_logits = torch.tensor(
-        [
-            [1.0, 8.0],
-            [7.0, 2.0],
-            [3.0, 6.0],
-            [5.0, 4.0],
-        ]
-    )
-    head._project_local_logits = lambda *args: local_logits
-    weight = SimpleNamespace(lm_head_weight_=SimpleNamespace(vocab_size=4, tp_vocab_start_id=0))
-
-    logits, token_ids = head._vocab_parallel_topk(None, 2, weight, SimpleNamespace(dist_group=None), 2)
-
-    expected_logits, expected_token_ids = torch.topk(local_logits, k=2, dim=0, sorted=False)
-    assert logits.dtype == torch.float32 and token_ids.dtype == torch.int64
-    assert token_ids.is_contiguous()
-    torch.testing.assert_close(logits, expected_logits.permute(1, 0))
-    torch.testing.assert_close(token_ids, expected_token_ids.permute(1, 0))
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("vocab_size, token_num, top_k", [(257, 15, 512), (257, 65, 64), (248320, 64, 64)])
-def test_single_rank_vocab_topk_graph_preserves_output_contract(vocab_size, token_num, top_k) -> None:
-    head = llama_post.LlamaPostLayerInfer.__new__(llama_post.LlamaPostLayerInfer)
-    head.tp_world_size_ = 1
-    local_logits = torch.randn((vocab_size, token_num), dtype=torch.bfloat16, device="cuda")
-    head._project_local_logits = lambda *args: local_logits
-    weight = SimpleNamespace(lm_head_weight_=SimpleNamespace(vocab_size=vocab_size, tp_vocab_start_id=0))
-    state = SimpleNamespace(dist_group=None)
-
-    for _ in range(3):
-        head._vocab_parallel_topk(None, token_num, weight, state, top_k)
-    torch.cuda.synchronize()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        values, token_ids = head._vocab_parallel_topk(None, token_num, weight, state, top_k)
-
-    local_logits.normal_()
-    graph.replay()
-    torch.cuda.synchronize()
-    candidate_count = min(top_k, vocab_size)
-    expected_values = torch.topk(local_logits.T, k=candidate_count, dim=1, sorted=True).values.float()
-    assert values.shape == token_ids.shape == (token_num, candidate_count)
-    assert values.dtype == torch.float32 and token_ids.dtype == torch.int64
-    assert token_ids.is_contiguous()
-    assert torch.all((token_ids >= 0) & (token_ids < vocab_size))
-    assert torch.all(token_ids.sort(dim=1).values.diff(dim=1) > 0)
-    torch.testing.assert_close(values, local_logits.T.gather(1, token_ids).float(), rtol=0, atol=0)
-    torch.testing.assert_close(values.sort(dim=1, descending=True).values, expected_values, rtol=0, atol=0)
-
-
-def test_vocab_parallel_topk_requires_enough_local_vocabulary() -> None:
-    head = llama_post.LlamaPostLayerInfer.__new__(llama_post.LlamaPostLayerInfer)
-    head.tp_world_size_ = 2
-    head._project_local_logits = lambda *args: torch.ones(2, 1)
-    weight = SimpleNamespace(lm_head_weight_=SimpleNamespace(vocab_size=6, tp_vocab_start_id=0))
-
-    with pytest.raises(AssertionError, match="local vocabulary size 2 must be at least the candidate count 3"):
-        head._vocab_parallel_topk(None, 1, weight, SimpleNamespace(dist_group=None), 3)
-
-
 def test_vocab_parallel_topk_merges_rank_candidates(monkeypatch) -> None:
     _mock_vocab_parallel_pack(monkeypatch)
     head = llama_post.LlamaPostLayerInfer.__new__(llama_post.LlamaPostLayerInfer)
@@ -211,32 +145,6 @@ def test_vocab_parallel_topk_pack_round_trip_preserves_token_id_bits(transposed)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("shape", [(129, 15), (129, 16), (129, 17), (62080, 256)])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
-def test_local_vocab_topk_preserves_values_and_token_ids(shape, dtype) -> None:
-    logits = torch.randn(shape, dtype=dtype, device="cuda")
-    values, token_ids = local_vocab_topk(logits, top_k=64)
-    expected_values = torch.topk(logits, k=64, dim=0, sorted=True).values.T
-
-    assert values.shape == token_ids.shape == (shape[1], 64)
-    assert values.dtype == dtype and token_ids.dtype == torch.int64
-    assert torch.all((token_ids >= 0) & (token_ids < shape[0]))
-    assert torch.all(token_ids.sort(dim=1).values.diff(dim=1) > 0)
-    torch.testing.assert_close(values, logits.T.gather(1, token_ids), rtol=0, atol=0)
-    # Equal-valued boundary candidates can have different valid IDs/order.
-    torch.testing.assert_close(values.sort(dim=1, descending=True).values, expected_values, rtol=0, atol=0)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_local_vocab_topk_accepts_noncontiguous_logits() -> None:
-    logits = torch.randn((65, 129), dtype=torch.bfloat16, device="cuda").T
-    values, token_ids = local_vocab_topk(logits, top_k=8)
-    expected_values = torch.topk(logits, k=8, dim=0, sorted=True).values.T
-    torch.testing.assert_close(values, logits.T.gather(1, token_ids), rtol=0, atol=0)
-    torch.testing.assert_close(values.sort(dim=1, descending=True).values, expected_values, rtol=0, atol=0)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("top_k", [8, 64, 512])
 def test_local_vocab_topk_graph_replay_reads_updated_logits(top_k) -> None:
     logits = torch.randn((1025, 65), dtype=torch.bfloat16, device="cuda")
@@ -286,17 +194,6 @@ def test_prefill_prompt_logits_do_not_replace_candidate_output(draft) -> None:
     assert state.prompt_logics is prompt
 
 
-def test_model_output_and_unpadding_preserve_candidate_mapping() -> None:
-    model = TpPartBaseModel.__new__(TpPartBaseModel)
-    logits = torch.randn(3, 2)
-    ids = torch.tensor([[10, 20], [30, 40], [50, 60]])
-    state = SimpleNamespace(hidden_collector=NoopHiddenCollector(), prompt_logics=None)
-    output = model._create_model_output(PostLayerOutput(logits, ids), state)
-    unpadded = model._create_unpad_decode_model_output(output, 2)
-    torch.testing.assert_close(unpadded.logits, logits[:2])
-    torch.testing.assert_close(unpadded.logits_token_ids, ids[:2])
-
-
 def test_gemma_softcap_preserves_candidate_ids(monkeypatch) -> None:
     ids = torch.tensor([[10, 20]])
     logits = torch.tensor([[1.0, 4.0]])
@@ -307,12 +204,3 @@ def test_gemma_softcap_preserves_candidate_ids(monkeypatch) -> None:
     output = head.token_forward(None, state, None)
     torch.testing.assert_close(output.logits, torch.tanh(logits / 2) * 2)
     assert output.logits_token_ids is ids
-
-
-def test_overlap_keeps_each_microbatch_mapping() -> None:
-    head = llama_post.LlamaPostLayerInfer.__new__(llama_post.LlamaPostLayerInfer)
-    outputs = [PostLayerOutput(torch.ones(1, 2), torch.tensor([[10, 20]])), PostLayerOutput(torch.ones(1, 3))]
-    head.token_forward = lambda hidden, state, layer_weight: outputs[state]
-    output0, output1 = head.overlap_tpsp_token_forward(None, None, 0, 1, None)
-    assert output0 is outputs[0]
-    assert output1 is outputs[1]

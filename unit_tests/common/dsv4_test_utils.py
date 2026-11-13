@@ -245,10 +245,6 @@ class DeepseekV4MemoryManager:
     def get_cell_size(self):
         return sum(state.get_token_bytes() for state in self.full_states.values())
 
-    def get_att_input_params(self, layer: int):
-        index = self.cache_config.layer_to_compressed_kv_idx.get(layer)
-        return self.kv_buffer[index] if index is not None else None
-
     def copy_mem_to_mem(self, src_mem_index: torch.Tensor, dst_mem_index: torch.Tensor):
         for state in self.full_states.values():
             state.copy_full_att_tokens(src_mem_index, dst_mem_index)
@@ -281,12 +277,6 @@ class DeepseekV4MemoryManager:
             (count, self.manager.get_pd_operator().get_page_bytes()), dtype=torch.uint8, device="cuda"
         )
         return self.kv_move_buffer
-
-    def get_pd_kv_move_buffer_size(self):
-        return self.manager.get_pd_operator().get_page_bytes() * get_env_start_args().pd_kv_page_num
-
-    def get_paged_kv_move_buffer_shape(self, count: int, page_size: int):
-        return (count, self.manager.get_pd_operator().get_page_bytes())
 
     def write_mem_to_page_kv_move_buffer(
         self,
