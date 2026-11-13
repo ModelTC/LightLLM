@@ -3,12 +3,11 @@
 import importlib
 import importlib.abc
 import importlib.util
-from pathlib import Path
 import sys
-from types import ModuleType, SimpleNamespace
 import unittest
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
-
 
 ROOT = Path(__file__).resolve().parents[4]
 ATTENTION = "lightllm.common.basemodel.attention"
@@ -212,37 +211,15 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.assertIs(selection.get_gdn_linear_prefill_att_backend_class(), triton)
 
     def test_vit_selection_loads_only_requested_implementation(self):
-        package = "lightllm.common.basemodel.attention_vit"
-        for name in list(sys.modules):
-            if name == package or name.startswith(f"{package}."):
-                del sys.modules[name]
-        base = ModuleType(f"{package}.base_att")
-        base.BaseVitAttBackend = type("BaseVitAttBackend", (), {})
-        sys.modules[base.__name__] = base
-        sys.modules["lightllm.utils.backend_validator"]._validate = self.validate
-        imports = BackendImports(package)
-        sys.meta_path.insert(0, imports)
-        self.addCleanup(sys.meta_path.remove, imports)
-        selection = importlib.import_module(f"{package}.create_utils")
-        self.assertEqual(imports.imported, [])
+        from lightllm.common.attention import registry, selection
 
-        for name, class_name in (
-            ("fa3", "Fa3VitAttBackend"),
-            ("triton", "TritonVitAttBackend"),
-            ("sdpa", "SdpaVitAttBackend"),
-            ("xformers", "XformersVitAttBackend"),
-        ):
-            backend = imports.allow(f"{name}.fp", class_name)
-            self.args.vit_att_backend = [name]
-            self.assertEqual(selection.init_vit_att_backend(), name)
-            self.assertIs(selection.get_vit_att_backend_class(name), backend)
-        self.validate.assert_not_called()
+        loaded = []
+        sentinel = object()
 
-        self.args.vit_att_backend = ["auto"]
-        self.validate.side_effect = lambda name: name == "sdpa"
-        self.assertEqual(selection.init_vit_att_backend(), "sdpa")
-        self.assertEqual([call.args[0] for call in self.validate.call_args_list], ["fa3", "xformers", "sdpa"])
+        def import_module(name):
+            loaded.append(name)
+            return SimpleNamespace(SdpaVarlenAttentionOp=sentinel)
 
-
-if __name__ == "__main__":
-    unittest.main()
+        with patch.object(registry.importlib, "import_module", import_module):
+            assert registry.get_varlen_attention_op_class("sdpa") is sentinel
+        assert loaded == ["lightllm.common.attention.backends.dense.sdpa.varlen"]

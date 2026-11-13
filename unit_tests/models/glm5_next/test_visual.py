@@ -25,7 +25,7 @@ def test_image_canvas_and_token_expansion(tmp_path, width, height, canvas):
     image.image_w, image.image_h = width, height
     image.token_id = 1000
     image.token_num = tokenizer.get_image_token_length(image)
-    assert image.token_num == canvas[0] * canvas[1] // 28 ** 2
+    assert image.token_num == canvas[0] * canvas[1] // 28**2
     multi = MultimodalParams()
     multi.images = [image]
     ids = tokenizer.encode([1, 100, 102, 101, 2], multi)
@@ -55,8 +55,8 @@ def test_image_patch_order_temporal_repeat_and_black_padding():
 def test_vision_attention_uses_triton_rope_with_fa3_backend(monkeypatch):
     import lightllm.models.glm5_next.glm5_next_visual as glm_visual
     import lightllm.server.visualserver as visualserver
-    from lightllm.common.basemodel.attention_vit.fa3.fp import Fa3VitAttBackend
-    from lightllm.server.visualserver import set_vit_att_backend
+    from lightllm.common.attention.backends.dense.fa3.varlen import Fa3VarlenAttentionOp
+    from lightllm.server.visualserver import set_vit_attention_op
 
     rope_inputs = []
     norm_inputs = []
@@ -70,16 +70,18 @@ def test_vision_attention_uses_triton_rope_with_fa3_backend(monkeypatch):
         rope_inputs.append((x, cos, sin))
         return x
 
-    def fake_fa3(q, k, v, o, cu_seqlens, max_seqlen):
+    def fake_fa3(self, inputs, *, out):
+        q, k, v = inputs.query, inputs.key, inputs.value
+        o, cu_seqlens, max_seqlen = out, inputs.cu_seqlens, inputs.max_seqlen
         attn_inputs.append((q, k, v, cu_seqlens, max_seqlen))
         o.copy_(q)
         return o
 
     monkeypatch.setattr(glm_visual, "qk_rms_norm", fake_qk_norm)
     monkeypatch.setattr(glm_visual, "apply_rotary_pos_emb_triton", fake_rope)
-    monkeypatch.setattr(Fa3VitAttBackend, "_vit_att_fwd", staticmethod(fake_fa3))
-    monkeypatch.setattr(visualserver, "VIT_ATTN_BACKEND", visualserver.VIT_ATTN_BACKEND)
-    set_vit_att_backend("fa3")
+    monkeypatch.setattr(Fa3VarlenAttentionOp, "forward", fake_fa3)
+    monkeypatch.setattr(visualserver, "VIT_ATTENTION_OP", visualserver.VIT_ATTENTION_OP)
+    set_vit_attention_op("fa3")
 
     attention = glm_visual.Glm5NextVisionAttention(hidden_size=16, num_heads=2, eps=1e-5, bias=True)
     x = torch.randn(3, 16)
@@ -149,10 +151,10 @@ def test_triton_glm_vision_norms_match_reference():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_vision_batch_preserves_independent_image_attention():
     from lightllm.models.glm5_next.glm5_next_visual import Glm5NextVisionTransformer
-    from lightllm.server.visualserver import set_vit_att_backend
+    from lightllm.server.visualserver import set_vit_attention_op
 
     torch.manual_seed(53)
-    set_vit_att_backend("sdpa")
+    set_vit_attention_op("sdpa")
     model = (
         Glm5NextVisionTransformer(
             {"data_type": "float32"},
@@ -167,7 +169,7 @@ def test_vision_batch_preserves_independent_image_attention():
         .eval()
     )
     grid = torch.tensor([[1, 4, 6], [1, 6, 4]])
-    x = torch.randn(48, 3 * 2 * 14 ** 2, device="cuda")
+    x = torch.randn(48, 3 * 2 * 14**2, device="cuda")
     with torch.inference_mode():
         batch = model(x, grid)
         individual = torch.cat([model(x[:24], grid[:1]), model(x[24:], grid[1:])])

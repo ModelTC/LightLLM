@@ -1,36 +1,44 @@
 from lightllm.platform import get_device_runtime
-from lightllm.utils.log_utils import init_logger
 
 from .api import AttentionFamily, AttentionPhase, UnsupportedAttention
 from .registry import AUDIO_VARLEN_PRIORITY, get_varlen_attention_op_class
 from .selection import BackendSelectionError
 
-logger = init_logger(__name__)
-
 
 class AutoVarlenAttentionRunner:
-    """音频编码器的自动路径；失败的实现只在当前调用方禁用，并在本次调用中重算输出。"""
+    """One encoder owns this runner and shares stateless operators across its layers.
+
+    Unsupported inputs can try the next provider for this call. Kernel and programming
+    errors propagate: retrying on a potentially failed device is not a safe fallback.
+    Environment rejections are cached by provider/device; input rejections are not.
+    """
 
     def __init__(self, providers=AUDIO_VARLEN_PRIORITY):
         self.providers = providers
         self.ops = {}
-        self.failures = {}
+        self.unavailable = {}
 
     def forward(self, inputs, *, out):
+        failures = {}
+        caps = get_device_runtime(inputs.query.device).caps
         for name in self.providers:
-            if name in self.failures:
+            key = (name, inputs.query.device)
+            if key in self.unavailable:
+                failures[name] = self.unavailable[key]
                 continue
-            try:
-                if name not in self.ops:
+            if key not in self.ops:
+                try:
                     op_cls = get_varlen_attention_op_class(name)
-                    caps = get_device_runtime(inputs.query.device).caps
                     op_cls.check_environment(caps)
-                    op_cls.check_support(inputs, caps)
-                    self.ops[name] = op_cls()
-                return self.ops[name].forward(inputs, out=out)
+                    self.ops[key] = op_cls()
+                except (UnsupportedAttention, ImportError) as exc:
+                    self.unavailable[key] = failures[name] = str(exc)
+                    continue
+            op = self.ops[key]
+            try:
+                op.check_support(inputs, caps)
             except UnsupportedAttention as exc:
-                self.failures[name] = str(exc)
-            except Exception as exc:
-                self.failures[name] = str(exc)
-                logger.warning("Disabling %s varlen attention for this encoder: %s", name, exc)
-        raise BackendSelectionError(AttentionFamily.DENSE, AttentionPhase.PREFILL, self.failures)
+                failures[name] = str(exc)
+                continue
+            return op.forward(inputs, out=out)
+        raise BackendSelectionError(AttentionFamily.DENSE, AttentionPhase.PREFILL, failures)

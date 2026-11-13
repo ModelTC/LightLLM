@@ -536,9 +536,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--vit_att_backend",
         type=str,
-        nargs="+",
         choices=["auto", "triton", "fa3", "sdpa", "xformers"],
-        default=["auto"],
+        default="auto",
         help="""vit attention kernel used in vlm.
                 auto: automatically select best backend based on GPU and available packages
                 (priority: fa3 > xformers > sdpa > triton)""",
