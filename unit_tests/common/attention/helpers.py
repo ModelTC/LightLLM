@@ -67,6 +67,7 @@ def make_spec(family=AttentionFamily.DENSE, phase=AttentionPhase.DECODE, **kwarg
 def make_backend(cls=BaseAttentionBackend, **kwargs):
     backend = cls.__new__(cls)
     values = dict(
+        spec=make_spec(),
         page_size=1,
         causal=True,
         dynamic_verify=False,
@@ -77,6 +78,8 @@ def make_backend(cls=BaseAttentionBackend, **kwargs):
     values.update(kwargs)
     if "infer_page_size" in values:
         values["page_size"] = values.pop("infer_page_size")
+    if "softmax_scale" in values:
+        values["spec"] = replace(values["spec"], softmax_scale=values.pop("softmax_scale"))
     vars(backend).update(values)
     return backend
 

@@ -1,22 +1,22 @@
-import weakref
 import inspect
 import sys
+import weakref
 from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
 
+import lightllm.common.basemodel.attention.create_linear_utils as linear_create_utils
+import lightllm.common.basemodel.attention.linear.gdn as gdn
+import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
+import lightllm.utils.backend_validator as backend_validator
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-import lightllm.common.basemodel.attention.linear.gdn as gdn
-import lightllm.common.basemodel.attention.create_linear_utils as linear_create_utils
-import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
 from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.server.api_cli import make_argument_parser
-import lightllm.utils.backend_validator as backend_validator
 
 
 @pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float32])
@@ -251,7 +251,9 @@ def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
     flashqla = ModuleType("flash_qla")
     flashqla.chunk_gated_delta_rule = kernel
     monkeypatch.setitem(sys.modules, "flash_qla", flashqla)
-    monkeypatch.setattr(fla_ops, "chunk_gated_delta_rule", kernel)
+    from lightllm.common.attention.backends.gdn.triton.kernels import chunk
+
+    monkeypatch.setattr(chunk, "chunk_gated_delta_rule", kernel)
 
     original_randn = torch.randn
     original_rand = torch.rand

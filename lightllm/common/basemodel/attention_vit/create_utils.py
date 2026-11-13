@@ -1,9 +1,9 @@
 from importlib import import_module
 
-from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.backend_validator import _validate
 from lightllm.common.basemodel.attention_vit.base_att import BaseVitAttBackend
+from lightllm.utils.backend_validator import validate
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
@@ -34,12 +34,12 @@ def _select_vit_backend(priority_list: list = ["fa3", "xformers", "sdpa", "trito
     """Auto-select the best available backend with validation for VIT.
 
     Priority: FA3 > Xformers > Sdpa > Triton
-    Each backend is validated in a subprocess with ground truth checks.
+    This legacy entry checks provider smoke only; the Varlen numerical path is wired in PR4.
     """
 
     for backend_name in priority_list:
-        if _validate(backend_name):
-            logger.info(f"Auto-selected {backend_name} backend (validated) for VIT")
+        if validate(backend_name):
+            logger.info(f"Auto-selected {backend_name} backend (provider smoke checked) for VIT")
             return backend_name
 
     # Fallback to triton without validation (should not happen)
