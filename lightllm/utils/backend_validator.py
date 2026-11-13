@@ -435,11 +435,6 @@ def probe_varlen(backend_name: str, *, device=None, dtype=None, head_dim=80) -> 
     return _probe(backend_name, varlen=True, device=device, dtype=dtype, head_dim=head_dim)
 
 
-def validate(backend_name: str, *, device=None, dtype=None, spec=None) -> bool:
-    """Legacy selector compatibility; success does not imply family-specific numerical validation."""
-    return probe_backend(backend_name, device=device, dtype=dtype, spec=spec).ok
-
-
 def _probe(backend_name: str, *, varlen=False, device=None, dtype=None, spec=None, head_dim=80) -> ProbeResult:
     """Isolate execution and retain both its coverage and failure reason."""
     try:

@@ -23,6 +23,15 @@ from lightllm.models.glm5_next.triton_kernel.kpool import (
 )
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import set_env_start_args
+from unit_tests.common.attention.helpers import (
+    backend_context,
+    make_backend,
+    make_batch,
+    make_context,
+    run_dense,
+    run_sparse,
+    update_context,
+)
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -411,6 +420,9 @@ def test_kpool_packed_kv_above_two_gib():
 
 @pytest.mark.parametrize("tp_world_size", [1, 4])
 def test_mhc_keeps_streams_through_decode_autotuning(monkeypatch, tp_world_size):
+    deep_gemm = pytest.importorskip("deep_gemm")
+    if not hasattr(deep_gemm, "tf32_hc_prenorm_gemm"):
+        pytest.skip("installed DeepGEMM does not provide mHC projection kernels")
     from lightllm.common.triton_utils.autotuner import AutotuneKernelType, Autotuner
     from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
     from lightllm.models.glm5_next.model import Glm5NextTpPartModel
@@ -466,7 +478,7 @@ def test_mhc_keeps_streams_through_decode_autotuning(monkeypatch, tp_world_size)
 
 
 def test_shared_chunk_kernel_preserves_gdn_natural_log_decay():
-    from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import chunk_gated_delta_rule
+    from lightllm.common.attention.backends.gdn.triton.kernels.chunk import chunk_gated_delta_rule
 
     tokens, heads, dim = 67, 2, 128
     q, k, v = [torch.randn(1, tokens, heads, dim, device="cuda", dtype=torch.bfloat16) for _ in range(3)]
@@ -498,8 +510,7 @@ def test_shared_chunk_kernel_preserves_gdn_natural_log_decay():
 
 @pytest.mark.parametrize("heads", [16, 64, 128])
 def test_nope_attention_native_512_and_cuda_graph(heads):
-    from lightllm.common.basemodel.attention.base_att import AttControl
-    from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseDecodeState, Glm5NextSparsePrefillState
+    from lightllm.models.glm5_next.attention.sparse_mla import Glm5NextSparseAttBackend
 
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("FA3 NoPE requires Hopper")
@@ -521,34 +532,34 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
         return torch.stack(expected)
 
     expected = reference()
-    control = AttControl(
-        nsa_prefill_dict={"topk_mem_indices": indexes, "softmax_scale": 0.0625, "kv_lora_rank": kv.shape[-1]}
-    )
-    prefill_state = Glm5NextSparsePrefillState()
-    prefill = prefill_state._nsa_prefill_att(q, kv, control)
+    control = {"topk_mem_indices": indexes, "softmax_scale": 0.0625, "kv_lora_rank": kv.shape[-1]}
+    prefill_state = backend_context(Glm5NextSparseAttBackend, "prefill")
+    prefill_batch = SimpleNamespace()
+    prefill = run_sparse(prefill_state, prefill_batch, q, kv, control)
     torch.testing.assert_close(prefill.float(), expected, atol=0.012, rtol=0.015)
     infer_state = InferStateInfo()
     infer_state.b1_cu_q_seq_len = torch.arange(10, dtype=torch.int32, device="cuda")
     infer_state.max_q_seq_len = 1
-    decode = Glm5NextSparseDecodeState(
-        _infer_state_weak_ref=weakref.ref(infer_state),
+    decode = backend_context(
+        Glm5NextSparseAttBackend,
+        "decode",
         nsa_cache_seqlens=lengths,
         nsa_cu_seqlens_k_new=torch.nn.functional.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0)),
     )
-    control.nsa_decode_dict = control.nsa_prefill_dict
-    out = decode._nsa_decode_att((q, q[..., :0]), kv, control)
+    control = control
+    out = run_sparse(decode, infer_state, (q, q[..., :0]), kv, control)
     torch.testing.assert_close(out.float(), expected, atol=0.012, rtol=0.015)
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        prefill_state._nsa_prefill_att(q, kv, control)
-        decode._nsa_decode_att((q, q[..., :0]), kv, control)
+        run_sparse(prefill_state, prefill_batch, q, kv, control)
+        run_sparse(decode, infer_state, (q, q[..., :0]), kv, control)
     torch.cuda.current_stream().wait_stream(stream)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        graph_prefill = prefill_state._nsa_prefill_att(q, kv, control)
-        graph_decode = decode._nsa_decode_att((q, q[..., :0]), kv, control)
+        graph_prefill = run_sparse(prefill_state, prefill_batch, q, kv, control)
+        graph_decode = run_sparse(decode, infer_state, (q, q[..., :0]), kv, control)
     graph.replay()
     torch.testing.assert_close(graph_prefill.float(), expected, atol=0.012, rtol=0.015)
     torch.testing.assert_close(graph_decode.float(), expected, atol=0.012, rtol=0.015)

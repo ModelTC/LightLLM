@@ -14,11 +14,11 @@ MTP uses identical candidate packets with varying accepted widths, not sampling.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 import json
-from pathlib import Path
 import socket
 import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -35,6 +35,7 @@ from lightllm.utils.service_shm_cleanup import ServiceShmCleanup
 if TYPE_CHECKING:
     from argparse import Namespace
     from collections.abc import Sequence
+
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 
@@ -309,8 +310,10 @@ def main():
         linear_att_hash_page_size=64,
         linear_att_page_block_num=1,
         linear_att_cache_size=16,
-        llm_prefill_att_backend=["fa3", "triton"],
-        llm_decode_att_backend=["fa3", "triton"],
+        llm_prefill_att_backend="fa3",
+        llm_prefill_linear_att_backend="triton",
+        llm_decode_att_backend="fa3",
+        llm_decode_linear_att_backend="triton",
         disable_cudagraph=False,
         pd_kv_page_size=2048,
     )
@@ -332,10 +335,11 @@ def main():
         config, _ = PretrainedConfig.get_config_dict(args.model_dir)
         model, _ = get_model(config, kvargs)
         draft_models = init_mtp_draft_models(args, kvargs, model)
+        from lightllm.common.attention_state import AttentionStateManager
+        from lightllm.common.basemodel.attention import reserve_attention_resources
+        from lightllm.common.req_manager import ReqManager
         from lightllm.utils.envs_utils import set_model_init_status
         from lightllm.utils.torch_memory_saver_utils import MemoryTag
-        from lightllm.common.attention_state import AttentionStateManager
-        from lightllm.common.req_manager import ReqManager
 
         models = (model, *draft_models)
         assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"
@@ -352,6 +356,9 @@ def main():
         assert all(item.att_state_manager is manager for item in models), "models must share one resource manager"
         with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             manager.finish_state_registration()
+            for item in models:
+                item.prepare_attention_backends()
+                reserve_attention_resources(item)
             manager.load_full_att_calibration(args=model.args)
             manager.initialize_storage(
                 model.args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction

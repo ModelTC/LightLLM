@@ -7,10 +7,19 @@ import torch
 if not torch.cuda.is_available():
     pytest.skip("requires CUDA", allow_module_level=True)
 
+from lightllm.common.attention.backends.dense.triton import int8 as int8kv_module
+from lightllm.common.attention.backends.dense.triton.int8 import Int8kvTritonAttBackend
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.triton import int8kv as int8kv_module
-from lightllm.common.basemodel.attention.triton.int8kv import Int8kvTritonDecodeAttState
 from lightllm.common.basemodel.triton_kernel import diverse_utils
+from unit_tests.common.attention.helpers import (
+    backend_context,
+    make_backend,
+    make_batch,
+    make_context,
+    run_dense,
+    run_sparse,
+    update_context,
+)
 
 
 @pytest.mark.parametrize(
@@ -40,9 +49,9 @@ def test_int8kv_decode_state_rebuilds_diverse_metadata(monkeypatch):
     infer_state.max_kv_seq_len = 8192
     infer_state.b_shared_seq_len = torch.tensor([8, 8, 5, 0], dtype=torch.int32, device="cuda")
     infer_state.b_shared_radix_node_id = torch.tensor([10, 10, 20, -1], dtype=torch.int64, device="cuda")
-    state = Int8kvTritonDecodeAttState(backend=SimpleNamespace(), _infer_state_weak_ref=weakref.ref(infer_state))
+    state = backend_context(Int8kvTritonAttBackend, "decode", settings=SimpleNamespace())
 
-    state.init_state()
+    update_context(state, infer_state)
 
     assert state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
     assert state.b_shared_seq_len.cpu().tolist() == [8, 8, 0, 0]

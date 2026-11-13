@@ -117,6 +117,29 @@ class ReplayKDAState(BoundedAttentionState):
         self.raw_values = torch.empty((layers, slots, hv, capacity, v), dtype=config.conv_dtype, device=device)
         self.betas = torch.empty((layers, slots, hv, capacity), dtype=torch.float32, device=device)
 
+    @property
+    def storage_layout(self):
+        return ("kda_replay_conv_ssm", 1, self.capacity, self.verify_width, self.compute_mode, self.gate_lower_bound)
+
+    def capture_snapshot_views(self, req_indices):
+        views = [self.tile_sync_mark]
+        for req in req_indices:
+            views.extend(
+                tensor[:, req]
+                for tensor in (
+                    self.conv_state,
+                    self.ssm_state,
+                    self.keys,
+                    self.deltas,
+                    self.gates,
+                    self.raw_keys,
+                    self.raw_values,
+                    self.betas,
+                )
+            )
+            views.extend((self.cursors[req : req + 1], self.mtp_state_index[req : req + 1]))
+        return views
+
     def get_state_type(self) -> str:
         """返回算法名和 Conv/SSM 存储精度。"""
         return (

@@ -1,12 +1,10 @@
-from types import SimpleNamespace
 import weakref
+from types import SimpleNamespace
 
-import torch
 import pytest
+import torch
 
 from lightllm.common.basemodel import basemodel
-from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferDecodeAttState
-from lightllm.common.basemodel.attention.flashinfer.utils import should_init_decode_wrapper
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
 from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -100,7 +98,7 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
         expected_batch_size,
     ) in execution_configs:
         model = TpPartBaseModel.__new__(TpPartBaseModel)
-        model.args = SimpleNamespace(enable_tpsp_mix_mode=enable_tpsp_mix_mode, page_size=1)
+        model.args = SimpleNamespace(enable_tpsp_mix_mode=enable_tpsp_mix_mode, page_size=1, mtp_step=0)
         model.tp_world_size_ = tp_world_size
         model.is_mtp_draft_model = False
         model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
@@ -123,10 +121,11 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
                 b_seq_len=model_input.b_seq_len,
                 mem_index=torch.empty((model_input.batch_size,), dtype=torch.int32),
                 init_some_extra_state=lambda _: None,
+                finish_attention=lambda: None,
                 is_cuda_graph_capture=False,
                 is_cuda_graph_replay=False,
             )
-            infer_state.init_att_state = lambda: graph_flags_at_att_init.append(
+            infer_state.prepare_attention = lambda _: graph_flags_at_att_init.append(
                 (infer_state.is_cuda_graph_capture, infer_state.is_cuda_graph_replay)
             )
             return infer_state
@@ -172,7 +171,7 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
 )
 def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(lengths, graph_mode, expected_mode):
     model = TpPartBaseModel.__new__(TpPartBaseModel)
-    model.args = SimpleNamespace(enable_tpsp_mix_mode=True, page_size=1)
+    model.args = SimpleNamespace(enable_tpsp_mix_mode=True, page_size=1, mtp_step=0)
     model.tp_world_size_ = 2
     model.is_mtp_draft_model = False
     model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
@@ -183,16 +182,9 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
     def graph_flags(state):
         return state.is_cuda_graph_capture, state.is_cuda_graph_replay
 
-    class DecodeState(FlashInferDecodeAttState):
-        def init_state(self):
-            infer_state = self.infer_state
-            # Replace the external GPU wrapper allocation while preserving the
-            # production decision and InferStateInfo's initialization entry point.
-            if should_init_decode_wrapper(infer_state):
-                self.decode_wrapper = object()
-            initializations.append(
-                (infer_state.microbatch_index, graph_flags(infer_state), self.decode_wrapper is not None)
-            )
+    def prepare(state):
+        state.test_wrapper = None if state.is_cuda_graph_replay else object()
+        initializations.append((state.microbatch_index, graph_flags(state), state.test_wrapper is not None))
 
     def create_state(model_input, microbatch_index=0):
         state = InferStateInfo()
@@ -203,7 +195,8 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
         state.b_req_idx = model_input.b_req_idx
         state.b_seq_len = model_input.b_seq_len
         state.microbatch_index = microbatch_index
-        state.decode_att_state = DecodeState(_infer_state_weak_ref=weakref.ref(state))
+        state.prepare_attention = lambda _: prepare(state)
+        state.finish_attention = lambda: None
         state.init_some_extra_state = lambda _: None
         return state
 
@@ -212,8 +205,8 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
 
     def forward(state, infer_state1):
         # Eager and capture execute attention using these newly prepared states.
-        assert state.decode_att_state.decode_wrapper is not None
-        assert infer_state1.decode_att_state.decode_wrapper is not None
+        assert state.test_wrapper is not None
+        assert infer_state1.test_wrapper is not None
         executions.append(("forward", graph_flags(state), graph_flags(infer_state1)))
         return outputs(state, infer_state1)
 
@@ -223,8 +216,8 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
 
     def replay(state, infer_state1):
         # Replay uses graph-owned wrappers, so temporary states need none.
-        assert state.decode_att_state.decode_wrapper is None
-        assert infer_state1.decode_att_state.decode_wrapper is None
+        assert state.test_wrapper is None
+        assert infer_state1.test_wrapper is None
         executions.append(("replay", graph_flags(state), graph_flags(infer_state1)))
         return outputs(state, infer_state1)
 
@@ -265,7 +258,7 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
 @pytest.mark.parametrize("rows", [0, 3, 9, 24, 27])
 def test_mtp_decode_preserves_groups_and_real_rows(overlap, dynamic, graph_mode, rows):
     model = TpPartBaseModel.__new__(TpPartBaseModel)
-    model.args = SimpleNamespace(enable_tpsp_mix_mode=True)
+    model.args = SimpleNamespace(enable_tpsp_mix_mode=True, mtp_step=0)
     model.tp_world_size_ = 8
     model.is_mtp_draft_model = False
     model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1 if dynamic else 3)
@@ -283,7 +276,8 @@ def test_mtp_decode_preserves_groups_and_real_rows(overlap, dynamic, graph_mode,
             b_req_idx=model_input.b_req_idx,
             b_seq_len=model_input.b_seq_len,
             init_some_extra_state=lambda _: None,
-            init_att_state=check_layout,
+            finish_attention=lambda: None,
+            prepare_attention=lambda _: check_layout(),
         )
 
     def forward(state):

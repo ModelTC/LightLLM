@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
-from typing import TYPE_CHECKING, List
 from dataclasses import dataclass
+from functools import lru_cache
 from math import lcm, prod
+from typing import TYPE_CHECKING, List
 
 import torch
 
 from lightllm.utils.envs_utils import get_env_start_args
 
-from ...utils import deepcopy_result
 from ...types import AxisMapping, TransferRegion
+from ...utils import deepcopy_result
 from ..base_state import FullAttentionState
-from ..packed_mla.packed_transfer import transfer_packed_pages
 from ..dp_transfer import copy_packed_tokens
+from ..packed_mla.packed_transfer import transfer_packed_pages
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
@@ -102,6 +101,8 @@ class CompressedAttentionState(FullAttentionState):
     不同压缩方案各自持有存储，沿用原始 token 索引及共享分配器。
     当前实现固定为单个共享 KV head，各 TP rank 完整复制；不执行 CSA/HCA 的历史选择。
     """
+
+    storage_layout = ("compressed_fp8_e8m0_token_row", 1)
 
     # ========================================================================
     # 一、资源定义与初始化

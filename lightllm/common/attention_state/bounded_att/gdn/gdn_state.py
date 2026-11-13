@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import TYPE_CHECKING, List
 from math import prod
+from typing import TYPE_CHECKING, List
 
 import torch
 
 from lightllm.utils.log_utils import init_logger
 
-from ...utils import deepcopy_result, dtype_name
 from ...types import AxisMapping, StateTransferLayout, TensorField, TransferRegion
+from ...utils import deepcopy_result, dtype_name
 from ..base_state import BoundedAttentionState
 from ..conv_ssm_types import ConvSSMStateConfig
-from .gdn_pages_pool import GDNPagesPool
-from ..transfer_utils import bounded_att_buffer_copies
 from ..copy_kernel import copy_bounded_att_tensors
+from ..transfer_utils import bounded_att_buffer_copies
+from .gdn_pages_pool import GDNPagesPool
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import PageKind
@@ -25,6 +25,8 @@ logger = init_logger(__name__)
 
 class GDNState(BoundedAttentionState):
     """Gated DeltaNet 的 Conv 历史、SSM 和 MTP 游标，支持不同的 K/V head 数及维度。"""
+
+    storage_layout = ("gdn_conv_ssm", 1)
 
     big_pages_pool: GDNPagesPool | None
     small_pages_pool: GDNPagesPool | None
@@ -119,6 +121,15 @@ class GDNState(BoundedAttentionState):
         """按逻辑层号映射到物理层，返回 Conv/SSM Tensor 引用；MTP 游标和步数直接从 State 读取。"""
         storage_layer_index = self._logical_to_storage_layer[logical_layer_id]
         return self.conv_state[storage_layer_index], self.ssm_state[storage_layer_index]
+
+    def capture_snapshot_views(self, req_indices):
+        views = []
+        for req in req_indices:
+            start = req * (self.mtp_step + 1)
+            views.extend((self.conv_state[:, req], self.ssm_state[:, start : start + self.mtp_step + 1]))
+            if self.mtp_state_index is not None:
+                views.append(self.mtp_state_index[req : req + 1])
+        return views
 
     def reset_bounded_att_state(self, req_indices: List[int]) -> None:
         """清零指定请求的 Conv 历史、全部 SSM 候选及 MTP 游标，保留页池快照。"""

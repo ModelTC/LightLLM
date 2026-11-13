@@ -1,22 +1,21 @@
 from __future__ import annotations
 
-from functools import lru_cache
-
-from typing import TYPE_CHECKING, List
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from math import prod
+from typing import TYPE_CHECKING, List
 
 import torch
 
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
-from ...utils import deepcopy_result
 from ...types import AxisMapping, TransferRegion
+from ...utils import deepcopy_result
 from ..base_state import FullAttentionState
-from .static_fp8_transfer import transfer_static_fp8_pages
 from ..dp_transfer import copy_gqa_tokens
+from .static_fp8_transfer import transfer_static_fp8_pages
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
@@ -71,6 +70,8 @@ class StaticFP8AttentionConfig:
 
 class StaticFP8FullAttentionState(FullAttentionState):
     """使用静态标定参数的 FP8 KV 存储，固定 scale 随 State 初始化，不逐 token 搬运。"""
+
+    storage_layout = ("gqa_static_fp8_token_head_dim", 1)
 
     # ========================================================================
     # 一、资源定义与初始化

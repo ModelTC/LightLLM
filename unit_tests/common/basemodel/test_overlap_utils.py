@@ -8,6 +8,7 @@ from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA runner stream required")
 def test_base_model_prefill_accepts_two_prebuilt_inputs(monkeypatch):
     model_input0 = _make_prefill_input([10, 11], req_idx=20, is_decode_req=False)
     model_input1 = _make_prefill_input([12], req_idx=21, is_decode_req=True)
@@ -52,6 +53,7 @@ def test_base_model_prefill_accepts_two_prebuilt_inputs(monkeypatch):
     assert len(outputs) == 2
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA runner stream required")
 def test_base_model_decode_accepts_two_inputs_and_skips_empty_gather(monkeypatch):
     model_input0 = _make_decode_input()
     model_input0.input_ids = None
@@ -122,7 +124,7 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
     model_input1.to_cuda()
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
-    model.args = SimpleNamespace(enable_tpsp_mix_mode=True, page_size=1)
+    model.args = SimpleNamespace(enable_tpsp_mix_mode=True, page_size=1, mtp_step=0)
     model.tp_world_size_ = 2
     model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
     model.graph = None
@@ -136,7 +138,8 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
             b_seq_len=model_input.b_seq_len,
             mem_index=torch.empty((model_input.batch_size,), dtype=torch.int32, device="cuda"),
             init_some_extra_state=lambda _: None,
-            init_att_state=lambda: None,
+            prepare_attention=lambda _: None,
+            finish_attention=lambda: None,
         )
 
     model._create_inferstate = fake_create_inferstate

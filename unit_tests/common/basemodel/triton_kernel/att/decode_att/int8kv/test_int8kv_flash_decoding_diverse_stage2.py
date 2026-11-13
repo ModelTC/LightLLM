@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.int8kv_flash_decoding_diverse_stage2 import (
     flash_decode_stage2,
 )

@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
-
-from unit_tests.common.att_resources.model_helpers import read_kv_storage
-
-from typing import TYPE_CHECKING
+import json
 from contextlib import nullcontext
 from dataclasses import asdict
-import json
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 import torch
@@ -22,10 +18,12 @@ from lightllm.server.router.model_infer.mode_backend import base_backend
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.utils.cpu_cache_layout import build_cpu_cache_layouts
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
+from unit_tests.common.att_resources.model_helpers import full_state_test_buffers, read_kv_storage
 
 if TYPE_CHECKING:
-    from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from pathlib import Path
+
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -162,13 +160,35 @@ def test_backend_allocates_all_roles_before_warmup(
                             )
                             is state
                         )
-        model.prefill_att_backend = model.decode_att_backend = object()
-        model.prefill_att_backend1 = model.decode_att_backend1 = None
+        from lightllm.common.attention.api import AttentionFamily
+
+        model.attention_groups = (
+            SimpleNamespace(
+                prefill_spec=SimpleNamespace(family=AttentionFamily.DENSE),
+                prefill_backend=object(),
+                decode_backend=object(),
+            ),
+        )
         model.backends_bound = True
 
+    def initialize_layer_attention(model):
+        assert model.att_state_manager.full_att_allocator is not None
+        assert all(item.backends_bound for item in models)
+        model.layer_attention_initialized = True
+
+    def reserve_resources(model):
+        assert all(item.backends_bound for item in models)
+        assert model.att_state_manager.full_att_allocator is None
+        model.attention_resources_reserved = True
+
+    monkeypatch.setattr("lightllm.common.basemodel.attention.reserve_attention_resources", reserve_resources)
+    monkeypatch.setattr("lightllm.common.basemodel.attention.initialize_layer_attention", initialize_layer_attention)
+
     def warmup(model: TpPartBaseModel):
+        assert model.layer_attention_initialized
         assert model.backends_bound
         assert all(item.req_manager is mapping for item in models)
+        assert all(item.attention_resources_reserved for item in models)
         assert all(item.att_state_manager is models[0].att_state_manager for item in models)
         assert model.att_state_manager.full_att_allocator.size == 32
         assert all(item.max_total_token_num == 32 for item in models[: models.index(model) + 1])
@@ -202,8 +222,7 @@ def test_backend_allocates_all_roles_before_warmup(
         model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
         if index:
             model.main_model, model.mtp_previous_draft_models = models[0], models[1:].copy()
-        model._init_att_backend = lambda model=model: mark_backends(model)
-        model._init_att_backend1 = lambda: None
+        model.prepare_attention_backends = lambda model=model: mark_backends(model)
         model._init_hidden_collector = lambda: None
         model._autotune_warmup = lambda model=model: warmup(model)
         model._init_padded_req = lambda model=model: padded.add(id(model))
@@ -214,6 +233,7 @@ def test_backend_allocates_all_roles_before_warmup(
 
     def memory_info(device: str | torch.device | int):
         assert all(item.req_manager is mapping for item in models)
+        assert all(item.attention_resources_reserved for item in models)
         manager = models[0].att_state_manager
         states = manager.get_full_attention_states()
         assert all(read_kv_storage(state) is None for state in states)
@@ -273,6 +293,10 @@ def test_backend_allocates_all_roles_before_warmup(
                 assert all(not hasattr(other, "att_state_manager") for other in models[index + 1 :])
             main = models[0]
             main.att_state_manager.finish_state_registration()
+            for item in models:
+                item.prepare_attention_backends()
+            for item in models:
+                reserve_resources(item)
             main.att_state_manager.load_full_att_calibration(args=args)
             main.att_state_manager.initialize_storage(
                 args, token_capacity=main.max_total_token_num, mem_fraction=main.mem_fraction
@@ -280,7 +304,7 @@ def test_backend_allocates_all_roles_before_warmup(
             assert all(item.max_total_token_num is None for item in models)
             for index, item in enumerate(models):
                 item.init_runtime()
-                assert all(not getattr(other, "backends_bound", False) for other in models[index + 1 :])
+                assert all(not getattr(other, "layer_attention_initialized", False) for other in models[index + 1 :])
                 assert warmed == padded == captured == prefill_captured == {id(other) for other in models[: index + 1]}
 
     start_runtime()

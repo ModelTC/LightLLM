@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import ClassVar
 
 import torch
 
 from lightllm.utils.envs_utils import get_env_start_args
 
-from ...utils import deepcopy_result
 from ...types import AxisMapping, StateTransferLayout, TransferRegion
+from ...utils import deepcopy_result
 from ..base_state import FullAttentionState
 from ..dp_transfer import copy_packed_tokens
-from ..packed_mla.packed_transfer import transfer_packed_pages
 from ..packed_mla.packed_mla_state import PackedMLALayerView
+from ..packed_mla.packed_transfer import transfer_packed_pages
 
 
 @dataclass(frozen=True)
@@ -57,6 +56,8 @@ class FP8E8M0PackedMLAConfig:
 
 class FP8E8M0PackedMLAState(FullAttentionState):
     """独立的 group64/E8M0 MLA 实现，不继承其他具体 State 或动态选择编码。"""
+
+    storage_layout = ("mla_packed_fp8_e8m0_token_row", 1)
 
     # ========================================================================
     # 一、资源定义与初始化

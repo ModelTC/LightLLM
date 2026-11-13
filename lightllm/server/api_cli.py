@@ -494,27 +494,33 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm_prefill_att_backend",
         type=str,
-        nargs="+",
-        choices=["auto", "triton", "fa3", "flashinfer", "flashqla"],
-        default=["auto"],
-        help="""prefill attention kernel used in llm.
-                auto: automatically select best backend based on GPU and available packages
-                (priority: fa3 > flashinfer > triton)
-                for hybrid linear-attention models, the second value selects the linear-attention backend
-                (priority: flashqla > triton); when omitted, it defaults to auto""",
+        choices=["auto", "triton", "fa3", "flashinfer", "flashmla_sparse"],
+        default="auto",
+        help="""prefill attention backend. auto selects fa3 > flashinfer > triton;
+                NSA uses flashmla_sparse. Linear attention is configured separately.""",
     )
     parser.add_argument(
         "--llm_decode_att_backend",
         type=str,
-        nargs="+",
-        choices=["auto", "triton", "fa3", "flashinfer"],
-        default=["auto"],
-        help="""decode attention kernel used in llm.
-                auto: automatically select best backend based on GPU and available packages
-                (priority when mtp_step > 0: fa3 > flashinfer > triton;
-                otherwise: flashinfer > fa3 > triton)
-                for hybrid linear-attention models, the second value selects the linear-attention backend
-                (currently triton only); when omitted, it defaults to auto""",
+        choices=["auto", "triton", "fa3", "flashinfer", "flashmla_sparse"],
+        default="auto",
+        help="""decode attention backend. auto prefers fa3 with MTP, otherwise flashinfer;
+                NSA uses flashmla_sparse. Linear attention is configured separately.""",
+    )
+    parser.add_argument(
+        "--llm_prefill_linear_att_backend",
+        type=str,
+        choices=["auto", "triton", "flashqla"],
+        default="auto",
+        help="""linear attention prefill backend. GDN auto selects flashqla > triton;
+                KDA supports triton only.""",
+    )
+    parser.add_argument(
+        "--llm_decode_linear_att_backend",
+        type=str,
+        choices=["auto", "triton"],
+        default="auto",
+        help="linear attention decode backend (currently triton only).",
     )
     parser.add_argument(
         "--page_size",
@@ -1017,8 +1023,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--hardware_platform",
         type=str,
         default="cuda",
-        choices=["cuda", "musa"],
-        help="""Hardware platform: cuda | musa""",
+        choices=["cuda"],
+        help="Hardware platform: cuda",
     )
     parser.add_argument(
         "--enable_torch_fallback",

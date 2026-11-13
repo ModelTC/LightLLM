@@ -1,41 +1,43 @@
 from __future__ import annotations
 
-from unit_tests.common.att_resources.model_helpers import bind_test_fp8_calibration
-
-from unit_tests.common.att_resources.model_helpers import full_state_test_fields
-
-from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
-
-from unit_tests.common.att_resources.model_helpers import read_kv_storage
-
-from unit_tests.common.att_resources.model_helpers import rebuild_full_state
-
-from typing import TYPE_CHECKING
 from dataclasses import replace
 from functools import lru_cache, partial
 from math import prod
+from typing import TYPE_CHECKING
 
 import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention_state.utils import deepcopy_result
-from lightllm.common.attention_state.allocators import StatePageAllocator, FullAttKVAllocator
-from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState, KDAState
-from lightllm.common.attention_state.bounded_att import WindowCompressorState, WindowCompressorStateConfig
-from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.common.attention_state.allocators import FullAttKVAllocator, StatePageAllocator
+from lightllm.common.attention_state.bounded_att import (
+    ConvSSMStateConfig,
+    GDNState,
+    KDAState,
+    WindowCompressorState,
+    WindowCompressorStateConfig,
+)
 from lightllm.common.attention_state.full_att import (
     FullAttentionState,
-    GQAFullAttentionState,
     GQAAttentionConfig,
-    MLAConfig,
-    create_gqa_state,
-    create_mla_state,
+    GQAFullAttentionState,
     GroupQuantizedAttentionConfig,
     GroupQuantizedFullAttentionState,
+    MLAConfig,
     MLAFullAttentionState,
     PackedMLAFullAttentionState,
     StaticFP8FullAttentionState,
+    create_gqa_state,
+    create_mla_state,
+)
+from lightllm.common.attention_state.utils import deepcopy_result
+from lightllm.server.core.objs.start_args_type import StartArgs
+from unit_tests.common.att_resources.model_helpers import (
+    bind_test_fp8_calibration,
+    full_state_test_buffers,
+    full_state_test_fields,
+    read_kv_storage,
+    rebuild_full_state,
 )
 
 if TYPE_CHECKING:
@@ -146,12 +148,18 @@ def test_budget_matches_token_stores_including_hold_and_padding(
     reserve = manager.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
-    monkeypatch.setattr("lightllm.common.attention_state.manager.get_current_device_id", lambda: 0)
     monkeypatch.setattr(
         "lightllm.common.attention_state.manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
     )
     for budget, expected in ((actual, 20), (actual - 1, 16), (minimum, 0), (minimum - 1, None)):
         resources = AttentionStateManager(request_capacity=1)
+        from types import SimpleNamespace
+
+        resources.device_runtime = SimpleNamespace(
+            device=torch.device("cpu"),
+            empty_cache=lambda: None,
+            memory_info=lambda: (budget + reserve, budget + reserve),
+        )
         resources.register_state("main", rebuild_full_state(template, config=template.config))
         monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _: (budget + reserve, budget + reserve))
         resources.finish_state_registration()

@@ -127,7 +127,19 @@ class TpPartBaseModel:
 | def _init_some_value(self):  | 初始化推理框架会使用的一些成员变量的值                       |
 | def _init_custom(self):      | 一些模型自己的个性化初始化，比如 llama 初始化自己的Rotary值  |
 
-全部 main/draft 模型构造完成后，`ModeBackend.init_model` 先按各模型 `get_req_manager_max_seq_len()` 的最大值创建一份 `ReqManager`，通过 `bind_req_manager()` 绑定给全部模型，再调用各模型的 `prepare_attention_states()` 准备自身 State；随后管理器依次完成 `finish_state_registration()`、`load_full_att_calibration(args)` 和共享资源分配。随后按 main、各 draft 的顺序逐个调用 `init_runtime()`，每次完整执行本模型的 HOLD 页和 backend 绑定、warmup、padded-request 与 CUDA Graph 初始化；main 还在该方法末尾执行最大长度检查。全部模型完成后发布就绪标志。资源准备和运行时初始化分别通过这两个单模型公共入口完成，均不接收 draft 列表。
+全部 main/draft 模型构造完成后，`ModeBackend.init_model` 按各模型 `get_req_manager_max_seq_len()` 的最大值创建一份 `ReqManager`，通过 `bind_req_manager()` 绑定给全部模型，再调用各模型的 `prepare_attention_states()` 注册自身 State。管理器完成 `finish_state_registration()` 后，逐模型调用 `prepare_attention_backends()`：按 prefill/decode 的 `LayerSpec` 分组，检查设备、存储布局和执行模式，并运行后端数值探针。随后调用 `reserve_attention_resources(model)` 预留各执行槽位的 workspace，再加载标定并执行 `initialize_storage()`。预留必须在容量估算之前完成，使后端临时显存计入可用容量。
+
+按 main、各 draft 的顺序调用 `init_runtime()`，绑定 HOLD 页并调用 `initialize_layer_attention()` 创建各层的 `LayerAttentionBinding`，然后执行 warmup、padded-request 与 CUDA Graph 初始化；main 还在末尾执行最大长度检查。全部模型完成后才发布就绪标志。每批次的 metadata 和 provider wrapper 由 context 持有，按 `allocate_context → prepare → update → forward` 执行；KV/Conv/SSM 的存储与恢复仍由 State 管理。
+
+层内显式调用 `.forward(...)`。`LayerAttentionBinding` 保存本层的参数和共享 backend；每次 forward 通过 AttentionExecution 查找当前 Context，不缓存批次 Context。prepare/update 仍由 Runtime 管理，indexer 可用 `.context(infer_state)` 直接访问：
+
+```python
+output = self.decode_attention.forward(infer_state, DenseInputs(q))
+```
+
+视觉/音频编码器直接传入完整 Q/K/V 时，使用 `api.varlen.VarlenAttentionOp` 的 `forward(inputs, out=...)`，无需创建层 binding 或执行 context。`VarlenAttentionInputs` 描述非因果 self-attention 的变长序列；调用方提供输出缓冲区，算子不保留批次 tensor。通过 `select_varlen_attention_op()` 选择实现，只有声明 `supports_graph` 的实现可参与整段 Graph 捕获。启动参数 `--vit_att_backend` 保持不变。
+
+新增模型通过层上的 `attention_family`、`attention_window(phase)`、`attention_uses_alibi`、`attention_uses_sink` 和必要时的 `create_attention_params()` 描述计算需求与资源视图；模型的 `attention_backend_candidates()` 可指定候选实现。dense/MLA/sparse MLA 使用 `--llm_prefill_att_backend` / `--llm_decode_att_backend`，GDN/KDA 使用单独的 `--llm_prefill_linear_att_backend` / `--llm_decode_linear_att_backend`。显式指定不支持的后端会报错；`auto` 才会继续尝试候选。
 
 公共 `prepare_attention_states()` 为 main 创建空管理器，draft 引用 main 的实例。两个 State 创建接口均为 `classmethod`，显式接收模型配置、逻辑层号及 TP 信息；bounded 接收请求容量和设备；full 工厂只创建布局，不计算标定起点或读取标定文件。接口仅返回对象列表，不注册管理器，也不依赖模型实例。CPU cache 直接复用 full/bounded 工厂生成 meta 定义，无需加载标定。公共流程统一注册；无 attention 的 draft 不创建 State。
 

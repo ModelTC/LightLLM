@@ -175,13 +175,14 @@ class StartArgs:
     vit_quant_type: Optional[str] = field(default="none")
     vit_quant_cfg: Optional[str] = field(default=None)
     expert_dtype: Optional[str] = field(default=None, metadata={"choices": ["fp8", "fp4"]})
-    llm_prefill_att_backend: List[str] = field(
-        default_factory=lambda: ["auto"],
-        metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashqla"]},
+    llm_prefill_att_backend: str = field(
+        default="auto", metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashmla_sparse"]}
     )
-    llm_decode_att_backend: List[str] = field(
-        default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
+    llm_decode_att_backend: str = field(
+        default="auto", metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashmla_sparse"]}
     )
+    llm_prefill_linear_att_backend: str = field(default="auto", metadata={"choices": ["auto", "triton", "flashqla"]})
+    llm_decode_linear_att_backend: str = field(default="auto", metadata={"choices": ["auto", "triton"]})
     page_size: int = field(default=1)
     req_token_index_mode: str = field(
         default="pin_mem_cache",
@@ -244,7 +245,7 @@ class StartArgs:
     enable_rl: bool = field(default=False)
     enable_torch_memory_saver: bool = field(default=False)
     enable_weight_cpu_backup: bool = field(default=False)
-    hardware_platform: str = field(default="cuda", metadata={"choices": ["cuda", "musa"]})
+    hardware_platform: str = field(default="cuda", metadata={"choices": ["cuda"]})
     enable_torch_fallback: bool = field(default=False)
     enable_triton_fallback: bool = field(default=False)
 

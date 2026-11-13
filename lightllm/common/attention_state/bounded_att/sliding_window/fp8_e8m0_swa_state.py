@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 from dataclasses import dataclass
+from functools import lru_cache
 from math import prod
 
 import torch
 
-from ...utils import deepcopy_result
 from ...types import PageKind, StateTransferLayout, TensorField, TransferRegion
+from ...utils import deepcopy_result
 from ..base_state import BoundedAttentionState
 from ..copy_kernel import copy_bounded_att_tensors
 from ..transfer_utils import bounded_att_buffer_copies
@@ -62,6 +61,8 @@ class FP8E8M0SlidingWindowConfig:
 
 class FP8E8M0SlidingWindowState(BoundedAttentionState):
     """仅保存近期原始 KV；prefill workspace 由计算 backend 管理。"""
+
+    storage_layout = ("swa_fp8_e8m0_ring", 1)
 
     # ========================================================================
     # 一、资源定义与初始化
@@ -142,6 +143,9 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
     def get_layer_view(self, logical_layer_id: int) -> torch.Tensor:
         """返回该层的 [request, ring_token, packed_byte] 视图。"""
         return self.swa_buffer[self._logical_to_storage_layer[logical_layer_id]]
+
+    def capture_snapshot_views(self, req_indices):
+        return [self.swa_buffer[:, req] for req in req_indices]
 
     def reset_bounded_att_state(self, req_indices: list[int]) -> None:
         for req_idx in req_indices:
