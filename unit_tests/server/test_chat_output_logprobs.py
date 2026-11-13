@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
-from tokenizers import Tokenizer, decoders, models
+from tokenizers import Tokenizer, decoders, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
 from lightllm.server import api_http, api_openai, build_prompt as prompt_builder, reasoning_parser
@@ -507,6 +507,50 @@ def test_tool_parser_without_end_token_is_supported():
         tool_call_parser="llama3",
     )
     assert buffer._sequences
+
+
+def test_byte_level_candidate_preserves_raw_bytes():
+    from lightllm.server.chat_logprob_buffer import _candidate_logprob
+
+    backend = Tokenizer(models.BPE({"Ã": 0}, []))
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel()
+    backend.decoder = decoders.ByteLevel()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend)
+    assert _candidate_logprob(tokenizer, 0, -0.5)["bytes"] == [195]
+
+
+def test_harmony_commentary_attributes_are_hidden_logprobs():
+    from lightllm.server.chat_logprob_buffer import ChatLogprobBuffer
+
+    pieces = [
+        "<|start|>",
+        "assistant",
+        "<|channel|>",
+        "commentary to=functions.weather",
+        "<|message|>",
+        '{"city":"Paris"}',
+        "<|end|>",
+        "<|start|>",
+        "assistant",
+        "<|channel|>",
+        "final",
+        "<|message|>",
+        "Answer",
+        "<|return|>",
+    ]
+    unique = list(dict.fromkeys(pieces))
+    ids = {piece: index for index, piece in enumerate(unique)}
+    tokenizer = make_tokenizer(unique, decoders.Fuse())
+    buffer = ChatLogprobBuffer(tokenizer, "gpt-oss", False, True)
+    for index, piece in enumerate(pieces):
+        buffer.record(
+            piece,
+            {"id": ids[piece], "logprob": -0.1},
+            FinishStatus(FinishStatus.FINISHED_STOP if index == len(pieces) - 1 else FinishStatus.NO_FINISH),
+        )
+    content, reasoning = buffer.message_logprobs()
+    assert [token["token"] for token in content] == ["Answer"]
+    assert reasoning is None
 
 
 def test_mistral_tool_parser_is_rejected():
