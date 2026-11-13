@@ -1,5 +1,3 @@
-import torch
-
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 
 
@@ -12,11 +10,17 @@ class Glm5NextMTPPreLayerInfer(LlamaMultimodalPreLayerInfer):
 
     def _fuse_hidden(self, input_embeddings, infer_state, layer_weight):
         previous_hidden = infer_state.mtp_draft_input_hiddens
-        assert input_embeddings.shape[0] == previous_hidden.shape[0]
-        layer_weight.main_norm_weight_(input=previous_hidden, eps=self.eps_, out=previous_hidden)
-        layer_weight.enorm_weight_(input=input_embeddings, eps=self.eps_, out=input_embeddings)
-        layer_weight.hnorm_weight_(input=previous_hidden, eps=self.eps_, out=previous_hidden)
-        return layer_weight.eh_proj_weight_.mm(torch.cat((input_embeddings, previous_hidden), dim=-1))
+        from lightllm.models.glm5_next_mtp.triton_kernel.fused_eh_norm import fused_mtp_norm
+
+        normalized_embeddings = fused_mtp_norm(
+            embeddings=input_embeddings,
+            previous_hidden=previous_hidden,
+            main_weight=layer_weight.main_norm_weight_.weight,
+            embedding_weight=layer_weight.enorm_weight_.weight,
+            hidden_weight=layer_weight.hnorm_weight_.weight,
+            eps=self.eps_,
+        )
+        return layer_weight.eh_proj_weight_.mm(input_tensor=normalized_embeddings)
 
     def context_forward(self, input_ids, infer_state, layer_weight):
         input_embeddings = super().context_forward(input_ids, infer_state, layer_weight)
