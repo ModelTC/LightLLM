@@ -116,7 +116,7 @@ def _hc_pre_norm_kernel(
     UNROLL_SINKHORN: tl.constexpr = True,
 ):
     """Fuse split reduction, Sinkhorn, stream mixing and sublayer RMSNorm."""
-    token = tl.program_id(0)
+    token = tl.program_id(0).to(tl.int64)
     pre_values, post_values, matrix = _hc_mix_weights(
         gemm_partial,
         sqrsum_partial,

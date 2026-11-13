@@ -12,12 +12,58 @@ from .glm5_next import Glm5NextSparseAttBackend, Glm5NextSparsePrefillState, Glm
 class NVFP4Glm5NextSparseAttBackend(Glm5NextSparseAttBackend):
     def __init__(self, model):
         super().__init__(model)
+        self._prefill_workspaces = self.allocate_prefill_workspaces(model)
         width = ((model.config["index_topk"] + 3 + 127) // 128) * 128
         device = get_current_device_id()
         # Immutable metadata can be shared across layers, microbatches and
         # graphs. Only the per-step causal lengths and selected slots change.
         self.selected_page_table = torch.arange(512 * width, device=device, dtype=torch.int32).view(512, width)
         self.selected_cu_q = torch.arange(513, device=device, dtype=torch.int32)
+
+    @classmethod
+    def allocate_prefill_workspaces(cls, model):
+        from lightllm.models.glm5_next.triton_kernel.nvfp4_prefill import MAX_STAGED_TOKENS
+        from lightllm.models.glm5_next.triton_kernel.nvfp4_selected import _query_tile_size
+
+        regions = 1 + int(model.args.enable_prefill_microbatch_overlap)
+        rows = model.batch_max_tokens
+        width = ((model.config["index_topk"] + 3 + 127) // 128) * 128
+        tokens = min(MAX_STAGED_TOKENS, model.max_req_num * model.max_seq_length + rows)
+        if model.args.run_mode == "decode":
+            tokens = min(tokens, rows)
+        # Selected staging retains padded sparse windows even for tiny contexts.
+        tokens = max(tokens, _query_tile_size(rows) * width)
+        prefix = f"glm5_nvfp4_prefill_{model.att_state_role}"
+        staged = cls.get_gpu_workspace_buffer(prefix + "_kv", regions * tokens * 512, torch.bfloat16).view(
+            regions, tokens, 1, 512
+        )
+        indices = cls.get_gpu_workspace_buffer(prefix + "_topk", regions * rows * width, torch.int32).view(
+            regions, rows, width
+        )
+        lengths = cls.get_gpu_workspace_buffer(prefix + "_seqlens", regions * rows, torch.int32).view(regions, rows)
+        cu_q = cls.get_gpu_workspace_buffer(prefix + "_cu_q", regions * (rows + 1), torch.int32).view(regions, rows + 1)
+        cu_q.copy_(torch.arange(rows + 1, dtype=torch.int32, device=cu_q.device))
+        return [
+            dict(
+                gathered_kv=staged[index],
+                chunk_topk_indices=indices[index],
+                chunk_cache_seqlens=lengths[index],
+                cu_seqlens_q=cu_q[index],
+            )
+            for index in range(regions)
+        ]
+
+    def get_prefill_workspace(self, infer_state, topk_indices):
+        buffers = self._prefill_workspaces[infer_state.microbatch_index]
+        rows, width = topk_indices.shape
+        assert rows <= buffers["chunk_cache_seqlens"].numel()
+        assert width <= buffers["chunk_topk_indices"].shape[1]
+        return dict(
+            gathered_kv=buffers["gathered_kv"],
+            chunk_topk_indices=buffers["chunk_topk_indices"].view(-1)[: rows * width].view(rows, width),
+            chunk_cache_seqlens=buffers["chunk_cache_seqlens"][:rows],
+            cu_seqlens_q=buffers["cu_seqlens_q"][: rows + 1],
+        )
 
     def create_att_prefill_state(self, infer_state):
         return NVFP4Glm5NextSparsePrefillState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
@@ -81,6 +127,7 @@ class NVFP4Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
             params["softmax_scale"],
             params["prefill_cache_kv"],
             row_table,
+            workspace=self.backend.get_prefill_workspace(self.infer_state, params["topk_indices"]),
         )
 
 

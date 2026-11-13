@@ -183,13 +183,19 @@ class Glm5NextTpPartModel(TpPartBaseModel):
 
     def prepare_attention_states(self) -> None:
         super().prepare_attention_states()
-        if self.args.llm_kv_type == "fp8kv_dsa" and self.att_state_manager.get_full_attention_states(
+        if self.args.llm_kv_type == "fp8kv_dsa" and self.att_state_manager.has_full_attention_states(
             self.att_state_role
         ):
             from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
 
             # Reserve fixed scratch space before the shared KV capacity is profiled.
             Fp8Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
+        elif self.args.llm_kv_type == "nvfp4kv" and self.att_state_manager.has_full_attention_states(
+            self.att_state_role
+        ):
+            from lightllm.common.basemodel.attention.nsa.nvfp4_glm5_next import NVFP4Glm5NextSparseAttBackend
+
+            NVFP4Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
 
     def _init_att_backend(self):
         from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend

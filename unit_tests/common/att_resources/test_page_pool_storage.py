@@ -50,11 +50,14 @@ def test_page_pool_allocation_strategy(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dp_fetch", [False, True])
 def test_shared_registration_lives_until_last_view(
     cpu_args: EasyDict,
     monkeypatch: pytest.MonkeyPatch,
+    dp_fetch: bool,
 ) -> None:
-    cpu_args.enable_dp_prompt_cache_fetch = True
+    cpu_args.enable_dp_prompt_cache_fetch = dp_fetch
+    monkeypatch.setattr(utils, "_DIRECT_REGISTER_MIN_BYTES", 0)
     unregistered = []
     unregister = utils._unregister_page_pool_storage
 
@@ -64,6 +67,8 @@ def test_shared_registration_lives_until_last_view(
 
     monkeypatch.setattr(utils, "_unregister_page_pool_storage", record_unregister)
     tensor = utils.create_page_pool_tensor(size=(4096,), dtype=torch.float32)
+    assert tensor.is_shared() == dp_fetch
+    assert tensor.untyped_storage().nbytes() == 4096 * 4
     ptr = tensor.data_ptr()
     view = tensor[1:]
     del tensor
@@ -73,6 +78,62 @@ def test_shared_registration_lives_until_last_view(
     del view
     gc.collect()
     assert unregistered == [ptr]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_private_direct_registration_supports_async_device_copy(
+    cpu_args: EasyDict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cpu_args.enable_dp_prompt_cache_fetch = False
+    monkeypatch.setattr(utils, "_DIRECT_REGISTER_MIN_BYTES", 0)
+    tensor = utils.create_page_pool_tensor(size=(128,), dtype=torch.float32)
+    assert tensor.is_pinned() and not tensor.is_shared()
+    source = torch.arange(128, dtype=torch.float32, device="cuda")
+    tensor.copy_(source, non_blocking=True)
+    actual = tensor.to(device="cuda", non_blocking=True)
+    torch.cuda.synchronize()
+    assert torch.equal(actual, source)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("direction", ["h2d", "d2h"])
+def test_private_registration_waits_for_pending_copy_before_last_view_dies(cpu_args, monkeypatch, direction):
+    cpu_args.enable_dp_prompt_cache_fetch = False
+    monkeypatch.setattr(utils, "_DIRECT_REGISTER_MIN_BYTES", 0)
+    source = torch.arange(4096, dtype=torch.float32, device="cuda")
+    expected = source.cpu()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    done = torch.cuda.Event()
+    unregistered = []
+    unregister = utils._unregister_page_pool_storage
+
+    def record_unregister(ptr, device_id):
+        unregister(ptr=ptr, device_id=device_id)
+        assert done.query(), "Registration must outlive asynchronous device access"
+        unregistered.append(ptr)
+
+    monkeypatch.setattr(utils, "_unregister_page_pool_storage", record_unregister)
+    host = utils.create_page_pool_tensor(size=(4096,), dtype=torch.float32)
+    ptr = host.data_ptr()
+    view = host[:]
+    del host
+    if direction == "h2d":
+        view.copy_(expected)
+    with torch.cuda.stream(stream):
+        torch.cuda._sleep(100_000_000)
+        if direction == "h2d":
+            result = view.to(device="cuda", non_blocking=True)
+        else:
+            view.copy_(source, non_blocking=True)
+        done.record()
+    assert not done.query(), "The copy must still be pending when the last host view is released"
+    del view
+    gc.collect()
+    assert unregistered == [ptr]
+    if direction == "h2d":
+        assert torch.equal(result.cpu(), expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

@@ -18,6 +18,10 @@ CUDA_HOST_REGISTER_PORTABLE = 1
 # Mapped：建立设备可访问映射，供 CUDA/Triton kernel 直接访问主机存储。
 CUDA_HOST_REGISTER_MAPPED = 2
 
+# PyTorch's caching pinned allocator rounds each allocation to a power of two.
+# Register large private pools directly to retain their exact CPU allocation size.
+_DIRECT_REGISTER_MIN_BYTES = 1024 ** 3
+
 
 # ========================================================================
 # 一、页池分配：普通存储或 DP fetch 所需的共享 pinned 存储
@@ -43,16 +47,20 @@ def create_page_pool_tensor(
 
     # 阶段一：未启用 DP fetch 时沿用 torch 分配；GPU 页池也保持原设备分配方式。
     if not shared:
+        direct_register = pin_memory and nbytes >= _DIRECT_REGISTER_MIN_BYTES
         tensor = torch.empty(
             size=size,
             dtype=dtype,
             device=device,
-            pin_memory=pin_memory,
+            pin_memory=pin_memory and not direct_register,
         )
+        if direct_register:
+            _register_page_pool_storage(tensor=tensor)
         reason = "GPU device allocation" if device.type != "cpu" else "DP prompt cache fetch disabled"
         logger.info(
             f"Allocated bounded attention page pool: shape={size}, dtype={dtype}, bytes={nbytes}, "
-            f"device={device}, shared=False, pin_memory={pin_memory}, allocator=torch.empty, reason={reason}"
+            f"device={device}, shared=False, pin_memory={pin_memory}, "
+            f"allocator={'torch.empty+cudaHostRegister' if direct_register else 'torch.empty'}, reason={reason}"
         )
         return tensor
 
@@ -92,6 +100,11 @@ def register_page_pool_tensor(tensor: torch.Tensor) -> None:
     if tensor.device.type != "cpu" or tensor.numel() == 0 or tensor.is_pinned():
         return
     assert tensor.is_shared(), "page pool registration requires shared CPU storage"
+    _register_page_pool_storage(tensor=tensor)
+
+
+def _register_page_pool_storage(tensor: torch.Tensor) -> None:
+    """Register the exact storage and keep it pinned until its last view dies."""
     storage = tensor.untyped_storage()
     ptr = storage.data_ptr()
     nbytes = storage.nbytes()
@@ -108,7 +121,8 @@ def register_page_pool_tensor(tensor: torch.Tensor) -> None:
     )
     cleanup.atexit = False
     logger.info(
-        f"Registered shared bounded attention page pool: bytes={nbytes}, cuda_device={device_id}, "
+        f"Registered bounded attention page pool: shared={tensor.is_shared()}, bytes={nbytes}, "
+        f"cuda_device={device_id}, "
         "flags=Portable|Mapped; registration applies to this process's mapping"
     )
 

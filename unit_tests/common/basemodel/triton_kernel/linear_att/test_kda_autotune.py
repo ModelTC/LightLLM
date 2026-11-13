@@ -130,6 +130,53 @@ def recurrent_reference(q, k, v, g, beta, initial_state, sequences):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("packed", [False, True], ids=["single-sequence", "packed-sequences"])
+def test_kda_state_offsets_above_int32_range(packed):
+    if torch.cuda.mem_get_info()[0] < 32 * 1024 ** 3:
+        pytest.skip("Large-state regression requires 32 GiB of available GPU memory")
+    from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.chunk_delta_h import chunk_gated_delta_rule_fwd_h
+
+    triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))
+    heads, dim, chunk_size = 64, 128, 64
+    boundary_chunks = 2 ** 31 // (heads * dim * dim)
+    boundary_tokens = boundary_chunks * chunk_size
+    tokens = boundary_tokens + 128
+    boundaries = [0, boundary_tokens, tokens] if packed else [0, tokens]
+    cu_seqlens = torch.tensor(boundaries, device="cuda", dtype=torch.int32)
+    zeros = torch.zeros(1, tokens, heads, dim, device="cuda", dtype=torch.bfloat16)
+    ones = torch.ones_like(zeros)
+    initial = torch.ones(len(boundaries) - 1, heads, dim, dim, device="cuda")
+    if packed:
+        initial[1].mul_(2)
+    state, residuals, final = chunk_gated_delta_rule_fwd_h(
+        k=zeros, w=zeros, u=ones, initial_state=initial, output_final_state=True, cu_seqlens=cu_seqlens
+    )
+    chunk_rows = [0, boundary_chunks - 1, boundary_chunks, boundary_chunks + 1]
+    expected_values = torch.tensor([1, 1, 2, 2] if packed else [1, 1, 1, 1], device="cuda")
+    expected_state = expected_values[:, None, None, None].expand(4, heads, dim, dim).to(state.dtype)
+    torch.testing.assert_close(state[0, chunk_rows], expected_state, atol=0, rtol=0)
+    torch.testing.assert_close(final, initial, atol=0, rtol=0)
+    rows = [0, boundary_tokens - 1, boundary_tokens, tokens - 1]
+    torch.testing.assert_close(residuals[0, rows], ones[0, rows], atol=0, rtol=0)
+
+    output = torch.empty_like(ones)
+    gates = torch.zeros_like(zeros, dtype=torch.float32)
+    local_weights = torch.zeros(1, tokens, heads, chunk_size, device="cuda", dtype=ones.dtype)
+    kda.chunk_gla_fwd_o_gk(
+        q=ones,
+        v=residuals,
+        g=gates,
+        Aqk=local_weights,
+        h=state,
+        o=output,
+        scale=1 / dim,
+        cu_seqlens=cu_seqlens,
+    )
+    expected_output = expected_values[:, None, None].expand(4, heads, dim).to(output.dtype)
+    torch.testing.assert_close(output[0, rows], expected_output, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("config_index", [None, 0, -1], ids=["default", "first-candidate", "last-candidate"])
 @pytest.mark.parametrize(
     "seq_lens,key_dim,value_dim",

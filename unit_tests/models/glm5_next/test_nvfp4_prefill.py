@@ -47,8 +47,9 @@ def test_paired_decode_all_fp4_codes_and_positive_fp8_scales():
 @pytest.mark.parametrize("heads", [8, 16, 64])
 @pytest.mark.parametrize("workspace_tokens", [64, 1024])
 @pytest.mark.parametrize("graph", [False, True])
+@pytest.mark.parametrize("reserved", [False, True])
 def test_sparse_staging_matches_decoded_reference_with_current_override_and_empty_chunks(
-    heads, workspace_tokens, graph
+    heads, workspace_tokens, graph, reserved, monkeypatch
 ):
     torch.manual_seed(748)
     rows, tokens = 17, 769
@@ -67,16 +68,48 @@ def test_sparse_staging_matches_decoded_reference_with_current_override_and_empt
     relative[2] = tokens - 1
     relative[3, ::3] = -1
     starts = torch.zeros(rows, device="cuda", dtype=torch.int32)
+    workspace = None
+    if reserved:
+        workspace = dict(
+            gathered_kv=torch.empty((workspace_tokens, 1, 512), dtype=q.dtype, device="cuda"),
+            chunk_topk_indices=torch.empty_like(relative),
+            chunk_cache_seqlens=torch.empty((rows,), dtype=torch.int32, device="cuda"),
+            cu_seqlens_q=torch.arange(rows + 1, dtype=torch.int32, device="cuda"),
+        )
 
     def run():
         if workspace_tokens == 1024:
             physical = ragged[relative.clamp_min(0).long()].masked_fill(relative < 0, -1)
-            return nvfp4_cached_prefill(q, packed, ragged, starts, relative, physical, 0.0625, current, row_table)
+            return nvfp4_cached_prefill(
+                q, packed, ragged, starts, relative, physical, 0.0625, current, row_table, workspace=workspace
+            )
         return nvfp4_sparse_prefill(
-            q, packed, ragged, starts, relative, 0.0625, current, row_table, workspace_bytes=workspace_tokens * 1024
+            q,
+            packed,
+            ragged,
+            starts,
+            relative,
+            0.0625,
+            current,
+            row_table,
+            workspace_bytes=workspace_tokens * 1024,
+            workspace=workspace,
         )
 
-    out = run()
+    if reserved:
+        empty = torch.empty
+
+        def no_new_staging(size, *args, **kwargs):
+            assert not (
+                isinstance(size, tuple) and len(size) == 3 and size[1:] == (1, 512)
+            ), "Cached attention must reuse the preallocated staging buffer"
+            return empty(size, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(torch, "empty", no_new_staging)
+            out = run()
+    else:
+        out = run()
     if graph:
         captured = torch.cuda.CUDAGraph()
         with torch.cuda.graph(captured):
@@ -93,7 +126,8 @@ def test_sparse_staging_matches_decoded_reference_with_current_override_and_empt
 
 @pytest.mark.parametrize("rows", [17, 65, 513])
 @pytest.mark.parametrize("current", [False, True])
-def test_selected_staging_is_context_independent_and_graph_safe(rows, current):
+@pytest.mark.parametrize("reserved", [False, True])
+def test_selected_staging_is_context_independent_and_graph_safe(rows, current, reserved):
     from lightllm.models.glm5_next.triton_kernel.nvfp4_selected import nvfp4_selected_attention
 
     torch.manual_seed(741)
@@ -108,9 +142,12 @@ def test_selected_staging_is_context_independent_and_graph_safe(rows, current):
     slots = torch.tensor([3, 100, 3998, 1729, 72, 91, 2941], device="cuda", dtype=torch.int32)
     row_table[slots.long()] = torch.arange(7, device="cuda", dtype=torch.int32)
     raw_current = raw[slots.long()].clone().add_(0.125) if current else None
+    staging = torch.empty((16 * 2176, 1, 512), dtype=q.dtype, device="cuda") if reserved else None
 
     def run():
-        return nvfp4_selected_attention(q, packed, indices, 0.0625, raw_current, row_table if current else None)
+        return nvfp4_selected_attention(
+            q, packed, indices, 0.0625, raw_current, row_table if current else None, staging_buffer=staging
+        )
 
     run()
     graph = torch.cuda.CUDAGraph()

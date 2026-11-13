@@ -65,15 +65,27 @@ def _compact_topk_indices_kernel(
         tl.store(ChunkIndices + row * TOPK + lane, tl.where(valid, ragged_index - chunk_start, -1), lane < TOPK)
 
 
-def nvfp4_cached_prefill(q, packed_kv, ragged, starts, topk_indices, physical_indices, scale, current_kv, row_table):
+def nvfp4_cached_prefill(
+    q, packed_kv, ragged, starts, topk_indices, physical_indices, scale, current_kv, row_table, workspace=None
+):
     """Select the bounded cached-prefill implementation from its work size."""
     if q.dtype == torch.bfloat16 and q.shape[0] and q.shape[-1] == 512:
         # Bound history decoding by both workspace and the selected work.
         if ragged is None or prefill_uses_selected(q.shape[0], ragged.numel(), topk_indices.shape[1]):
             from .nvfp4_selected import nvfp4_selected_attention
 
-            return nvfp4_selected_attention(q, packed_kv, physical_indices, scale, current_kv, row_table)
-        return nvfp4_sparse_prefill(q, packed_kv, ragged, starts, topk_indices, scale, current_kv, row_table)
+            return nvfp4_selected_attention(
+                q,
+                packed_kv,
+                physical_indices,
+                scale,
+                current_kv,
+                row_table,
+                staging_buffer=workspace["gathered_kv"] if workspace is not None else None,
+            )
+        return nvfp4_sparse_prefill(
+            q, packed_kv, ragged, starts, topk_indices, scale, current_kv, row_table, workspace=workspace
+        )
     from lightllm.common.basemodel.triton_kernel.mla_att.nvfp4 import nvfp4_mla_attention
 
     return nvfp4_mla_attention(q, packed_kv, physical_indices, scale, current_kv=current_kv, row_table=row_table)
@@ -138,6 +150,7 @@ def nvfp4_sparse_prefill(
     current_kv,
     row_table,
     workspace_bytes=MAX_STAGED_TOKENS * 1024,
+    workspace=None,
 ):
     """Stage each visible latent once per chunk, preserving current BF16 values.
 
@@ -153,11 +166,19 @@ def nvfp4_sparse_prefill(
         return torch.zeros_like(q)
     assert topk_indices.shape[0] == rows and topk_indices.is_contiguous()
     capacity = max(4, workspace_bytes // (dim * q.element_size()) // 4 * 4)
+    if workspace is not None:
+        capacity = min(capacity, workspace["gathered_kv"].shape[0])
     chunk_size = min(capacity, ragged.numel())
-    staged = torch.empty((chunk_size, 1, dim), dtype=q.dtype, device=q.device)
-    indices = torch.empty_like(topk_indices)
-    lengths = torch.empty((rows,), dtype=torch.int32, device=q.device)
-    cu_q = torch.arange(rows + 1, dtype=torch.int32, device=q.device)
+    if workspace is None:
+        staged = torch.empty((chunk_size, 1, dim), dtype=q.dtype, device=q.device)
+        indices = torch.empty_like(topk_indices)
+        lengths = torch.empty((rows,), dtype=torch.int32, device=q.device)
+        cu_q = torch.arange(rows + 1, dtype=torch.int32, device=q.device)
+    else:
+        staged = workspace["gathered_kv"][:chunk_size]
+        indices = workspace["chunk_topk_indices"]
+        lengths = workspace["chunk_cache_seqlens"]
+        cu_q = workspace["cu_seqlens_q"]
     padded_q = q
     if ragged.numel() <= chunk_size:
         padded_heads = triton.cdiv(heads, 64) * 64

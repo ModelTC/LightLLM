@@ -299,6 +299,14 @@ class AttentionStateManager:
         self.get_cpu_cache_operator().clear_layout_cache()
         self.get_pd_operator().clear_layout_cache()
 
+    def has_full_attention_states(self, role: str) -> bool:
+        """判断当前角色是否已注册 full State；注册期可用，不查询派生布局。"""
+        assert role in MODEL_ROLES, f"unknown model role {role}"
+        return any(
+            name.startswith(role + "_") and isinstance(state, FullAttentionState)
+            for name, state in self.__dict__.items()
+        )
+
     def get_full_attention_states(self, role: str | None = None) -> tuple[FullAttentionState, ...]:
         """返回全部或指定角色的 full-attention State；只缓存对象引用。"""
         return self._get_states(FullAttentionState, role)
