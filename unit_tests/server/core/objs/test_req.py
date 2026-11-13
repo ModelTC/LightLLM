@@ -129,6 +129,23 @@ def test_final_token_metadata_read_returns_actual_prompt_tokens(req):
     ]
 
 
+def test_unwritten_prompt_logprobs_reset_on_slot_reuse(req, monkeypatch):
+    monkeypatch.setitem(get_env_start_args(), "enable_prompt_logprobs", True)
+    req.shm_logprobs.arr[: req.input_len] = (-1.25, 4)
+    req.detach_shm_arrays()
+
+    req.init(2, [1, 2, 3], {"max_new_tokens": 1, "prompt_logprobs": 0}, None)
+    try:
+        metadata = ReqFinalTokenMetadata(req).read()
+        assert metadata["prompt_logprobs"] == [
+            None,
+            {2: {"logprob": 0.0, "rank": None, "decoded_token": None}},
+            {3: {"logprob": 0.0, "rank": None, "decoded_token": None}},
+        ]
+    finally:
+        req.detach_shm_arrays()
+
+
 def test_chunked_req_get_tuple_tokens_adds_page_and_async_reserve():
     req = SimpleNamespace(
         input_len=10,

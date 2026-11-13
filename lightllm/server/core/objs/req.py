@@ -318,9 +318,11 @@ class Req(ctypes.Structure):
             dtype=[("logprob", np.float32), ("rank", np.int32)],
         )
         self.shm_logprobs.create_shm()
-        # rank=-1 表示该位置没有请求或没有计算 rank 元信息。
-        self.shm_logprobs.arr["logprob"][:] = 0.0
-        self.shm_logprobs.arr["rank"][:] = -1
+        # Output rows are written before publication. Only prompt_logprobs=0
+        # reads prompt rows that inference may have left unwritten.
+        if self.sample_params.prompt_logprobs == 0:
+            self.shm_logprobs.arr["logprob"][: self.input_len] = 0.0
+            self.shm_logprobs.arr["rank"][: self.input_len] = -1
         return
 
     def link_logprobs_shm_array(self):
