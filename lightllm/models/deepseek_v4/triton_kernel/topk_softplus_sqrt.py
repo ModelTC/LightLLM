@@ -19,6 +19,12 @@ def _sqrt_softplus(x):
 
 
 @triton.jit
+def _max_expert_and_score(rank_a, expert_a, score_a, rank_b, expert_b, score_b):
+    keep_a = (rank_a > rank_b) | ((rank_a == rank_b) & (expert_a < expert_b))
+    return tl.where(keep_a, rank_a, rank_b), tl.where(keep_a, expert_a, expert_b), tl.where(keep_a, score_a, score_b)
+
+
+@triton.jit
 def _hash_route(logits, input_ids, tid2eid, rows, valid, slots, NUM_EXPERTS: tl.constexpr, TOP_K: tl.constexpr):
     tokens = tl.load(input_ids + rows, mask=valid, other=0)
     ids = tl.load(
@@ -86,9 +92,10 @@ def _topk_softplus_sqrt_kernel(
         remaining = tl.where(dense[:, None] & (experts[None, :] < NUM_EXPERTS), selection, -float("inf"))
         selected = tl.full((BLOCK_R, BLOCK_K), 0, tl.float32)
         ids = tl.full((BLOCK_R, BLOCK_K), 0, tl.int64)
+        expert_ids = tl.broadcast_to(experts[None, :], (BLOCK_R, BLOCK_E))
         for slot in tl.static_range(TOP_K):
-            _, expert = tl.max(remaining, axis=1, return_indices=True)
-            value = tl.sum(tl.where(experts[None, :] == expert[:, None], scores, 0), axis=1)
+            # Keep the unbiased weight alongside its expert in the selection reduction.
+            _, expert, value = tl.reduce((remaining, expert_ids, scores), axis=1, combine_fn=_max_expert_and_score)
             selected = tl.where(slots[None, :] == slot, value[:, None], selected)
             ids = tl.where(slots[None, :] == slot, expert[:, None].to(tl.int64), ids)
             remaining = tl.where(experts[None, :] == expert[:, None], -float("inf"), remaining)
