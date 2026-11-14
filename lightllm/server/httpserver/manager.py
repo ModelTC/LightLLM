@@ -1094,6 +1094,20 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                         metadata["logprob"] = None
                                         metadata["logprobs"] = {}
 
+                                if (
+                                    req.sample_params.output_top_logprobs > 0
+                                    and not finish_status.is_error_finished()
+                                    and not finish_status.is_finished_pd_decode_capacity()
+                                ):
+                                    token_ids, logprobs = req.output_topk_logprobs_row(
+                                        output_index=count_output_tokens - 1
+                                    )
+                                    metadata["output_top_logprobs"] = [
+                                        (int(token_id), float(score))
+                                        for token_id, score in zip(token_ids, logprobs)
+                                        if token_id >= 0
+                                    ]
+
                                 req.out_tokens_queue.pop_no_ret()
                                 token_list.append((req_id, text, metadata, finish_status))
                             else:

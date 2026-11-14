@@ -346,6 +346,8 @@ class SamplingParams(ctypes.Structure):
         ("seed", ctypes.c_int64),  # random seed
         # -1 disables prompt logprobs; K >= 0 returns only the top-K prompt tokens.
         ("prompt_logprobs", ctypes.c_int),
+        # -1 disables chat output logprobs, 0 returns just the sampled token.
+        ("output_top_logprobs", ctypes.c_int),
     ]
 
     _do_sample: bool = False
@@ -392,12 +394,13 @@ class SamplingParams(ctypes.Structure):
         self.seed = self._normalize_and_verify_seed(kwargs.get("seed"))
         prompt_logprobs = kwargs.get("prompt_logprobs", None)
         self.prompt_logprobs = -1 if prompt_logprobs is None else int(prompt_logprobs)
+        self.output_top_logprobs = kwargs.get("output_top_logprobs", -1)
 
         self.exponential_decay_length_penalty = ExponentialDecayLengthPenalty()
         self.exponential_decay_length_penalty.initialize(kwargs.get("exponential_decay_length_penalty", (1, 1.0)))
 
+        # The trusted PD manager populates this field after request parsing.
         self.pd_kv_trans_params = PDKVTransParamObj()
-        self.pd_kv_trans_params.set(kwargs.get("pd_kv_trans_params", None))
         self.pd_master_node_id = NodeUUId()
         self.pd_master_node_id.initialize(kwargs.get("pd_master_node_id", 0))
 
@@ -488,6 +491,8 @@ class SamplingParams(ctypes.Structure):
             )
         if self.prompt_logprobs < -1 or self.prompt_logprobs > MAX_PROMPT_LOGPROBS:
             raise ValueError(f"prompt_logprobs must be in [-1, {MAX_PROMPT_LOGPROBS}], got {self.prompt_logprobs}")
+        if not -1 <= self.output_top_logprobs <= 20:
+            raise ValueError("output_top_logprobs must be in [-1, 20]")
         if self.prompt_logprobs >= 0 and not get_env_start_args().enable_prompt_logprobs:
             raise ValueError("prompt_logprobs requires --enable_prompt_logprobs")
         self._verify_grammar_constraint()
@@ -573,6 +578,7 @@ class SamplingParams(ctypes.Structure):
             "disable_prompt_cache": self.disable_prompt_cache,
             "seed": self.seed,
             "prompt_logprobs": self.prompt_logprobs,
+            "output_top_logprobs": self.output_top_logprobs,
         }
 
     def to_origin_dict(self):

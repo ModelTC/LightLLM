@@ -1,13 +1,30 @@
 import torch
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
+from lightllm.common.basemodel.triton_kernel.logprobs_capture import capture_output_logprobs
 from lightllm.common.basemodel.triton_kernel.post_process.apply_constraint_mask import apply_constraint_mask
 from lightllm.common.basemodel.triton_kernel.local_vocab_topk import local_vocab_greedy_logprob
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
+
+
+@dataclass
+class TopkLogprobRow:
+    """一行 top-k 候选。token_ids 与 logprobs 等长，按分数从高到低对齐。
+
+    batch_index 是该行在本次采样 logits 中的下标。返回列表与 logits 行对齐，未请求 logprobs 的位置是 None。
+    """
+
+    batch_index: int
+    token_ids: torch.Tensor
+    logprobs: torch.Tensor
+
+
+TopkLogprobRows = List[Optional[TopkLogprobRow]]
 
 
 def sample(
@@ -97,21 +114,86 @@ def sample(
             b_mtp_index=b_mtp_index,
         )
     if is_all_greedy:
-        return local_vocab_greedy_logprob(logits)
-
-    probs = torch.softmax(logits, dim=-1)
-
-    if skip_top_k and skip_top_p:
-        # topk 等于整个词表，topp 等于1.0，等价于不进行topk topp过滤，直接进行随机采样，可以提升采样速度
-        batch_next_token_ids = _random_sample(probs, reqs, exist_req_use_random_seed)
-        batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
-        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
-
+        next_token_ids, next_token_logprobs = local_vocab_greedy_logprob(logits)
     else:
-        batch_next_token_ids, batch_next_token_logprobs = _top_p_top_k_sample(
-            reqs, probs, b_top_ps, b_top_ks, exist_req_use_random_seed
+        probs = torch.softmax(logits, dim=-1)
+        if skip_top_k and skip_top_p:
+            next_token_ids = _random_sample(probs, reqs, exist_req_use_random_seed)
+            next_token_logprobs = probs.gather(1, next_token_ids.view(-1, 1)).log().view(-1)
+        else:
+            next_token_ids, next_token_logprobs = _top_p_top_k_sample(
+                reqs, probs, b_top_ps, b_top_ks, exist_req_use_random_seed
+            )
+
+    output_topk_logprobs: TopkLogprobRows = [None] * len(reqs)
+    topk_logprobs_rows, max_topk = _collect_topk_logprobs_rows(reqs=reqs, has_output=has_output)
+    if topk_logprobs_rows:
+        next_token_logprobs, output_topk_logprobs = _capture_topk_logprobs(
+            logits=logits,
+            next_token_ids=next_token_ids,
+            next_token_logprobs=next_token_logprobs,
+            topk_logprobs_rows=topk_logprobs_rows,
+            max_topk=max_topk,
         )
-        return batch_next_token_ids.view(-1), batch_next_token_logprobs.view(-1)
+    return next_token_ids, next_token_logprobs, output_topk_logprobs
+
+
+def _collect_topk_logprobs_rows(
+    reqs: List[InferReq], has_output: Optional[List[bool]] = None
+) -> Tuple[List[Tuple[int, int]], int]:
+    """Rows that asked for candidate topk logprobs, as (batch_index, topk), plus the maximum topk.
+
+    topk == 0 still runs the fixed top-20 cutoff on the sampled logprob and writes no candidates.
+    batch_index is the position in the original reqs and logits. max_topk is 0 when the list is empty.
+    """
+    rows = []
+    max_topk = 0
+    for batch_index, req_obj in enumerate(reqs):
+        topk = req_obj.sampling_param.shm_param.output_top_logprobs
+        # topk == 0 也要进来：没有候选列表，但仍要把落在前 20 名之外的采样 logprob 写成 -9999。
+        if topk >= 0 and (has_output is None or has_output[batch_index]):
+            rows.append((batch_index, topk))
+            max_topk = max(max_topk, topk)
+    return rows, max_topk
+
+
+def _capture_topk_logprobs(
+    logits: torch.Tensor,
+    next_token_ids: torch.Tensor,
+    next_token_logprobs: torch.Tensor,
+    topk_logprobs_rows: List[Tuple[int, int]],
+    max_topk: int,
+) -> Tuple[torch.Tensor, TopkLogprobRows]:
+    capture_rows = []
+    output_count = 0
+    for batch_index, topk in topk_logprobs_rows:
+        capture_rows.append((batch_index, topk, output_count))
+        output_count += topk
+
+    rows = g_pin_mem_manager.alloc_pin_tensor("output_logprob_rows", 3 * len(capture_rows), torch.int32).view(-1, 3)
+    rows.numpy()[:] = capture_rows
+    token_ids, logprobs = capture_output_logprobs(
+        logits=logits,
+        sampled_ids=next_token_ids,
+        sampled_logprobs=next_token_logprobs,
+        rows=rows.to(device=logits.device, non_blocking=True),
+        max_topk=max_topk,
+        output_count=output_count,
+    )
+    token_ids_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(key="output_topk_token_ids", gpu_tensor=token_ids)
+    logprobs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(key="output_topk_logprobs", gpu_tensor=logprobs)
+    topk_rows: TopkLogprobRows = [None] * logits.shape[0]
+    offset = 0
+    for batch_index, topk in topk_logprobs_rows:
+        # topk == 0 只参与上面的采样分数改写，不返回候选。
+        if topk > 0:
+            topk_rows[batch_index] = TopkLogprobRow(
+                batch_index=batch_index,
+                token_ids=token_ids_cpu[offset : offset + topk],
+                logprobs=logprobs_cpu[offset : offset + topk],
+            )
+        offset += topk
+    return next_token_logprobs, topk_rows
 
 
 def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor):

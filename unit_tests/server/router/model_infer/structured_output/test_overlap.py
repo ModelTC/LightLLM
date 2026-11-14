@@ -97,7 +97,7 @@ def test_overlap_handoff_completes_postprocessing_before_sampling(
             apply_masks(reqs, logits, mask_buffers)
         token = logits.argmax(-1)
         order.append(f"sample{chr(token.item())}")
-        return token, token, torch.zeros(1), torch.zeros(1, dtype=torch.int64)
+        return token, token, torch.zeros(1), torch.zeros(1, dtype=torch.int64), None
 
     backend._sample_and_scatter_token = sample
 

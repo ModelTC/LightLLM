@@ -696,10 +696,12 @@ class HttpServerManagerForPDMaster:
 
             new_tokens.extend(await req_status.pop_all_tokens())
 
-            for token in new_tokens:
+            for index, token in enumerate(new_tokens):
                 metadata = token[2]
                 if metadata.get("node_mode") == "prefill":
                     prompt_cache_len = metadata.get("prompt_cache_len", 0)
+                    # prefill 采样了这个首 token，放到已缓冲的 decode 输出前面再发布。
+                    new_tokens.insert(0, new_tokens.pop(index))
                     await req_status.put_tokens_to_front(new_tokens)
                     return prompt_cache_len
 
