@@ -34,6 +34,7 @@ from lightllm.utils.envs_utils import (
     get_pd_node_resource_wait_timeout_seconds,
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
+from lightllm.utils.pd_timeout_utils import get_pd_handshake_timeout_seconds
 from .pd_selector import PDSelectionExtraInfo, create_selector
 
 logger = init_logger(__name__)
@@ -524,12 +525,12 @@ class HttpServerManagerForPDMaster:
         self,
         event: asyncio.Event,
         request: Request,
-        timeout: float,
+        timeout: Optional[float],
         group_request_id: int,
         stage: str,
     ) -> None:
         """Wait for an asyncio.Event but abort early if the HTTP client disconnects."""
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout if timeout is not None else None
         disconnect_reason = f"fetch_pd_stream {stage} period check network disconnected"
 
         async def raise_if_disconnected() -> None:
@@ -541,7 +542,7 @@ class HttpServerManagerForPDMaster:
                 )
 
         while True:
-            remaining = deadline - time.time()
+            remaining = deadline - time.monotonic() if deadline is not None else 1.0
             if remaining <= 0:
                 raise ServerBusyError()
             await raise_if_disconnected()
@@ -610,7 +611,9 @@ class HttpServerManagerForPDMaster:
             await self._wait_for_event_or_disconnect(
                 up_status_event,
                 request,
-                timeout=180,
+                timeout=get_pd_handshake_timeout_seconds(
+                    resource_wait_seconds=sampling_params.pd_node_resource_wait_timeout_seconds
+                ),
                 group_request_id=group_request_id,
                 stage="decode",
             )
