@@ -42,6 +42,22 @@ def fused_experts(
     shared_expert_func: Optional[Callable[[], torch.Tensor]] = None,
 ):
     assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
+    if quant_method.method_name == "none":
+        from .bf16 import fused_experts_bf16
+
+        return fused_experts_bf16(
+            hidden_states,
+            w13.weight,
+            w2.weight,
+            topk_weights,
+            topk_idx,
+            num_experts,
+            is_prefill,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
+            shared_expert_func=shared_expert_func,
+        )
     check_ep_expert_dtype(quant_method)
     if use_sm100_mega_moe(quant_method):
         if limit is not None:

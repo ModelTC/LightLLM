@@ -34,6 +34,8 @@ class FuseMoeBaseImpl(ABC):
     专家路径中则是完成修复后的执行 ID。
     """
 
+    execution_index_dtype = None
+
     def __init__(
         self,
         n_routed_experts: int,
@@ -72,6 +74,8 @@ class FuseMoeBaseImpl(ABC):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        token_mask: Optional[torch.Tensor] = None,
+        shared_expert_func=None,
     ) -> torch.Tensor:
         assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         topk_weights, topk_ids = self._select_experts(
@@ -94,6 +98,14 @@ class FuseMoeBaseImpl(ABC):
             shared_expert_gate=shared_expert_gate,
             is_prefill=is_prefill,
         )
+        if token_mask is not None:
+            if token_mask.shape != (input_tensor.shape[0],) or token_mask.dtype != torch.bool:
+                raise ValueError("MoE token mask must contain one boolean per input row")
+            if token_mask.device != input_tensor.device:
+                raise ValueError("MoE token mask must be on the input device")
+            from lightllm.common.basemodel.triton_kernel.fused_moe.mask_topk import mask_topk
+
+            topk_weights, topk_ids = mask_topk(topk_weights, topk_ids, token_mask, self.execution_index_dtype)
         return self._fused_experts(
             input_tensor=input_tensor,
             w13=w13,
@@ -105,6 +117,7 @@ class FuseMoeBaseImpl(ABC):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            shared_expert_func=shared_expert_func,
         )
 
     @abstractmethod

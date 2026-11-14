@@ -1,5 +1,7 @@
 import torch
 import torch.distributed as dist
+import triton
+import triton.language as tl
 from torch.distributed import ProcessGroup
 
 from lightllm.utils.log_utils import init_logger
@@ -27,6 +29,16 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
 # Adopted from vLLM's multimem-vs-two_shot world-size split.
 # World sizes for which multimem (NVLS hardware reduce) beats two_shot.
 _WORLD_SIZES_MULTIMEM = {"9.0": [4, 6, 8], "10.0": [6, 8], "10.3": [6, 8]}
+
+
+@triton.jit
+def _ordered_peer_sum(Inputs, Output, SIZE: tl.constexpr, START: tl.constexpr, BLOCK: tl.constexpr):
+    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    accumulator = tl.full((BLOCK,), 0, tl.float64)
+    for rank in tl.static_range(len(Inputs)):
+        value = tl.load(Inputs[rank] + START + index, index < SIZE, other=0)
+        accumulator += value.to(tl.float64)
+    tl.store(Output + index, accumulator, index < SIZE)
 
 
 class SymmMemAllreduce:
@@ -65,6 +77,9 @@ class SymmMemAllreduce:
             logger.warning("SymmMemAllreduce: multicast pointer unavailable; disabling.")
             return
         self.disabled = False
+        self.handle = handle
+        self.peer_buffers = None
+        self.use_peer_reduce = cap_str == "9.0" and self.world_size == 8 and dtype == torch.bfloat16
         logger.info(
             "SymmMemAllreduce enabled: world_size=%d, max_size=%d, multimem=%s",
             self.world_size,
@@ -90,3 +105,48 @@ class SymmMemAllreduce:
         else:
             torch.ops.symm_mem.two_shot_all_reduce_(self.buffer[:n], "sum", self.group.group_name)
         inp.view(-1).copy_(self.buffer[:n])
+
+    def ordered_all_gather(self, inp: torch.Tensor):
+        if not self.should_use(inp) or inp.device != self.device:
+            return None
+        count = inp.numel() * self.world_size
+        if not count or count * inp.element_size() > self.max_size:
+            return None
+        if not hasattr(torch.ops.symm_mem, "multimem_all_gather_out"):
+            return None
+        if not hasattr(self, "ordered_gather_buffer"):
+            if torch.cuda.is_current_stream_capturing():
+                return None
+            self.ordered_gather_buffer = torch_symm_mem.empty(
+                self.max_size // self.dtype.itemsize, device=self.device, dtype=self.dtype
+            )
+            torch_symm_mem.rendezvous(self.ordered_gather_buffer, self.group.group_name)
+        gathered = self.ordered_gather_buffer[:count]
+        torch.ops.symm_mem.multimem_all_gather_out(inp.view(-1), self.group.group_name, gathered)
+        return gathered.view(self.world_size, *inp.shape)
+
+    def ordered_reduce_scatter(self, inp: torch.Tensor, output: torch.Tensor, rank: int) -> bool:
+        if (
+            not self.should_use(inp)
+            or not self.use_peer_reduce
+            or inp.device != self.device
+            or inp.numel() < 128 * 2560
+        ):
+            return False
+        if rank != self.handle.rank:
+            raise ValueError("Sequence-parallel scatter rank must match the process group rank")
+        if output.numel() * self.world_size != inp.numel() or output.dtype != inp.dtype:
+            raise ValueError("Ordered reduce-scatter output must hold one rank's input shard")
+        if output.device != inp.device or not output.is_contiguous():
+            raise ValueError("Ordered reduce-scatter output must be contiguous and on the input device")
+        if self.peer_buffers is None:
+            self.peer_buffers = tuple(
+                self.handle.get_buffer(rank, self.buffer.shape, self.dtype) for rank in range(self.world_size)
+            )
+        self.buffer[: inp.numel()].copy_(inp.view(-1))
+        self.handle.barrier(channel=0)
+        _ordered_peer_sum[(triton.cdiv(output.numel(), 256),)](
+            self.peer_buffers, output, output.numel(), rank * output.numel(), 256
+        )
+        self.handle.barrier(channel=1)
+        return True

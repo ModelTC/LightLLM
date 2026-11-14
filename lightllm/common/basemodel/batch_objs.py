@@ -51,9 +51,12 @@ class ModelInput:
     # mtp_draft_input_hiddens 用于模型 mtp 模式下
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+    logits_indices: Optional[torch.Tensor] = None
 
     def to_cuda(self):
         self.check_input()
+        if self.logits_indices is not None:
+            self.logits_indices = self.logits_indices.cuda(non_blocking=True)
 
         # Prefill 和 decode 都必须提供的公共张量。
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
@@ -80,6 +83,9 @@ class ModelInput:
         self.check_input()
 
     def check_input(self):
+        if self.logits_indices is not None:
+            assert not self.is_prefill
+            assert self.logits_indices.ndim == 1 and self.logits_indices.dtype == torch.int64
         if self.input_ids is not None:
             assert (
                 self.input_ids.dtype == torch.int64

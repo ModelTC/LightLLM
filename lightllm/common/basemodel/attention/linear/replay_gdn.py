@@ -76,6 +76,20 @@ class ReplayGDNFlashQlaAttBackend(BaseAttBackend):
         return ReplayGDNDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
+class ReplayGDNFlashInferAttBackend(BaseAttBackend):
+    def __init__(self, model):
+        super().__init__(model=model)
+        from .flashinfer import chunk_gated_delta_rule
+
+        _configure_gdn(self, model, chunk_gated_delta_rule)
+
+    def create_att_prefill_state(self, infer_state: "InferStateInfo"):
+        return ReplayGDNPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
+
+    def create_att_decode_state(self, infer_state: "InferStateInfo"):
+        return ReplayGDNDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
+
+
 @dataclasses.dataclass
 class ReplayGDNPrefillAttState(BasePrefillAttState):
     b_conv_buffer_idx: torch.Tensor = None
@@ -252,6 +266,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             layer_weight.linear_dt_bias.weight,
             self.b_conv_buffer_idx,
             self.b_cu_seqlens,
+            run_config=backend.replay_run_config,
         )
         return output, z
 
@@ -288,6 +303,7 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
             layer_weight.linear_dt_bias.weight,
             self.b_conv_buffer_idx,
             self.b_cu_seqlens,
+            run_config=backend.replay_run_config,
         )
         return output
 
@@ -326,6 +342,7 @@ def _configure_gdn(backend, model, prefill_kernel) -> None:
     ssm_dtypes = {"bfloat16": torch.bfloat16, "float32": torch.float32}
     backend.ssm_state_dtype = ssm_dtypes.get(get_env_start_args().linear_att_ssm_data_type, torch.bfloat16)
     backend.prefill_kernel = prefill_kernel
+    backend.replay_run_config = None
 
 
 def _split_qkvzba(backend, mixed_qkvzba):

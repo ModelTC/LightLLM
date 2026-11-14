@@ -73,17 +73,24 @@ class EagleWithAttProposer(BaseSpecProposer):
         verify_draft_input = copy.copy(target_model_input)
         verify_draft_input.input_ids = target_next_token_ids
         verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
+        selected_logits = getattr(draft_model, "supports_selected_logits", False)
+        if selected_logits:
+            verify_draft_input.logits_indices = accepted_tail_rows
         extend_output = draft_model.forward(verify_draft_input)
 
         # 只在 req_num 行 logits 上进行 argmax，避免为未接受的 verify 行执行
         # vocabulary reduction。第一列 proposal 来自每个请求的 accepted tail。
-        accepted_tail_output = ModelOutput(
-            logits=extend_output.logits.index_select(0, accepted_tail_rows),
-            logits_token_ids=(
-                extend_output.logits_token_ids.index_select(0, accepted_tail_rows)
-                if extend_output.logits_token_ids is not None
-                else None
-            ),
+        accepted_tail_output = (
+            extend_output
+            if selected_logits
+            else ModelOutput(
+                logits=extend_output.logits.index_select(0, accepted_tail_rows),
+                logits_token_ids=(
+                    extend_output.logits_token_ids.index_select(0, accepted_tail_rows)
+                    if extend_output.logits_token_ids is not None
+                    else None
+                ),
+            )
         )
         if self.enable_dynmaic_mtp:
             draft_token_ids, draft_token_probs = self._gen_argmax_token_ids_and_prob(accepted_tail_output)

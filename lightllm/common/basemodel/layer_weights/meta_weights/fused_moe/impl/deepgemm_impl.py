@@ -28,6 +28,8 @@ from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import r
 
 
 class FuseMoeDeepGEMM(FuseMoeBaseImpl):
+    execution_index_dtype = torch.int64
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         world_size = get_global_world_size()

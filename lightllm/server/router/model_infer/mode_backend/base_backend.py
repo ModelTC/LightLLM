@@ -172,6 +172,9 @@ class ModeBackend:
         with self.model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             manager.finish_state_registration()
             manager.load_full_att_calibration(args=self.model.args)
+            if self.args.enable_dp_prompt_cache_fetch:
+                torch.cuda.synchronize()
+                dist.barrier()
             manager.initialize_storage(
                 self.model.args, token_capacity=self.model.max_total_token_num, mem_fraction=self.model.mem_fraction
             )

@@ -87,10 +87,11 @@ class CudaGraph:
     def can_run(self, batch_size, max_len_in_batch):
         return batch_size <= self.max_batch_size and max_len_in_batch <= self.graph_max_len_in_batch
 
-    def need_capture(self, batch_size):
+    def need_capture(self, batch_size, logits_num=None):
         find_batch_size = self.find_closest_graph_batch_size(batch_size)
         if find_batch_size is not None:
-            return find_batch_size not in self.graph
+            key = find_batch_size if logits_num is None else (find_batch_size, logits_num)
+            return key not in self.graph
         else:
             assert False, "dead code"
 
@@ -131,9 +132,12 @@ class CudaGraph:
 
         with self.torch_memory_saver.cuda_graph(graph_obj, pool=self.mempool):
             model_output = decode_func(infer_state)
-        self.graph[batch_size] = (graph_obj, infer_state, model_output)
+        indices = getattr(infer_state, "logits_indices", None)
+        key = batch_size if indices is None else (batch_size, indices.numel())
+        self.graph[key] = (graph_obj, infer_state, model_output)
         graph_obj.replay()
-        self._measure_replay_cost(graph_obj=graph_obj, batch_size=batch_size)
+        if indices is None:
+            self._measure_replay_cost(graph_obj=graph_obj, batch_size=batch_size)
         return model_output
 
     def _capture_decode_overlap(
@@ -219,7 +223,9 @@ class CudaGraph:
 
     def _replay(self, infer_state: InferStateInfo):
         batch_size = infer_state.input_ids.shape[0]
-        graph_obj, graph_infer_state, graph_output = self.graph[batch_size]
+        indices = getattr(infer_state, "logits_indices", None)
+        key = batch_size if indices is None else (batch_size, indices.numel())
+        graph_obj, graph_infer_state, graph_output = self.graph[key]
         graph_infer_state.copy_for_cuda_graph(infer_state)
         graph_obj.replay()
         return graph_output
@@ -288,6 +294,14 @@ class CudaGraph:
             )
             model_output: ModelOutput = model.forward(model_input)
             del model_output
+            if getattr(model, "supports_selected_logits", False):
+                logits_num = 1
+                while logits_num <= triton.next_power_of_2(batch_size):
+                    model_input.logits_indices = torch.zeros(logits_num, dtype=torch.int64, device="cuda")
+                    model_output = model.forward(model_input)
+                    del model_output
+                    logits_num *= 2
+                model_input.logits_indices = None
             del input_ids
             del b_req_idx
             del b_seq_len

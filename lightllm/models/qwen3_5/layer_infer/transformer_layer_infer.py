@@ -27,8 +27,11 @@ class Qwen35TransformerLayerInfer(Qwen3NextTransformerLayerInfer):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         input = input.view(-1, self.embed_dim_)
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
+        return self._project_qkv(input, infer_state, layer_weight)
 
-        qkv_gate_out = layer_weight.qkvo_gate_proj.mm(input)
+    def _project_qkv(self, input, infer_state, layer_weight, qkv_gate_out=None):
+        if qkv_gate_out is None:
+            qkv_gate_out = layer_weight.qkvo_gate_proj.mm(input)
         qkv_out, o_gate = qkv_gate_out.split(
             [
                 self.tp_q_head_num_ * self.head_dim_ + (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_,
