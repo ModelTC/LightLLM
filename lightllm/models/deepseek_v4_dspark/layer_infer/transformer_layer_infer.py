@@ -1,3 +1,5 @@
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionFeature
 import torch
 
 from lightllm.models.deepseek_v4_dspark.infer_struct import DeepseekV4DSparkInferStateInfo
@@ -11,6 +13,10 @@ from lightllm.models.deepseek_v4_dspark.layer_weights.transformer_layer_weight i
 
 class DeepseekV4DSparkTransformerLayerInfer(DeepseekV4TransformerLayerInfer):
     """Full DSpark stage with a KV-only target-hidden commit primitive."""
+
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        return replace(description, features=description.features | {AttentionFeature.NONCAUSAL})
 
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)

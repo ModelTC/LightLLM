@@ -1,20 +1,23 @@
 from __future__ import annotations
 
-from functools import lru_cache
-from typing import TYPE_CHECKING, List
-from math import prod
 from dataclasses import dataclass
+from functools import lru_cache
+from math import prod
+from typing import TYPE_CHECKING, List
 
 import torch
 
+from lightllm.common.attention.api import UnsupportedAttention
+from lightllm.platform import Platform, get_device_runtime
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
-from ...utils import deepcopy_result, dtype_name
 from ...types import AxisMapping, TransferRegion
+from ...utils import deepcopy_result, dtype_name
 from ..base_state import FullAttentionState
-from .gqa_transfer import transfer_gqa_pages
 from ..dp_transfer import copy_gqa_tokens
+from .gqa_transfer import transfer_gqa_pages
+from .ops import get_kv_operations
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
@@ -78,6 +81,8 @@ class GQAFullAttentionState(FullAttentionState):
     query 与 KV 的分组计算由 attention backend 处理，因此三种情况共用此 State。
     """
 
+    storage_layout = ("gqa_separate_token_head_dim", 1)
+
     # 保留既有 K/V 编码的稳定传输布局标识。
 
     # ========================================================================
@@ -103,6 +108,8 @@ class GQAFullAttentionState(FullAttentionState):
         self.page_size = page_size
         self.device = torch.device(device=device)
         self.capacity = 0
+        self.zero_initialize_cache = False
+        self.ops = None
         self.k_storage: torch.Tensor | None = None
         self.v_storage: torch.Tensor | None = None
 
@@ -114,8 +121,13 @@ class GQAFullAttentionState(FullAttentionState):
         """按统一 token 容量分配本 State 的独立 KV 存储与 HOLD 页。"""
         self.capacity = token_capacity
         shape = self._storage_shape()
-        self.k_storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
-        self.v_storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
+        runtime = get_device_runtime(self.device)
+        self.ops = get_kv_operations(runtime)
+        self.k_storage = runtime.allocate(shape, self.storage_dtype)
+        self.v_storage = runtime.allocate(shape, self.storage_dtype)
+        if self.zero_initialize_cache:
+            self.k_storage.zero_()
+            self.v_storage.zero_()
 
     def get_token_bytes(self) -> int:
         """由配置累计当前 TP rank 的 K/V 单 token 开销，无需分配存储。"""
@@ -134,31 +146,30 @@ class GQAFullAttentionState(FullAttentionState):
         """按逻辑层号查询存储及配套字段的物理行；共享逻辑层返回同一下标。"""
         return self._logical_to_storage_layer[logical_layer_id]
 
+    def layer_resources(self, layer_id):
+        from lightllm.common.attention_state.types import DenseStorage
+
+        return DenseStorage(*self.get_layer_view(layer_id))
+
     def get_layer_view(self, logical_layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
         """按逻辑层号返回 K、V 视图，head 数使用当前 TP 分片配置。"""
         storage_layer_index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
         return self.k_storage[storage_layer_index], self.v_storage[storage_layer_index]
 
     def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
-        """通过 CUDA 算子将形状匹配的 K/V 数据写入指定物理 token 位置。"""
-        assert token_indices.is_cuda, "token indices must reside on CUDA"
+        """通过已绑定的设备实现将 K/V 数据写入指定物理 token 位置。"""
         storage_layer_index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
-        if not len(token_indices):
+        assert token_indices.device == kv.device == self.k_storage.device, "KV writes require same-device tensors"
+        assert token_indices.ndim == 1 and token_indices.dtype in (torch.int32, torch.int64)
+        assert kv.ndim == 3 and kv.shape[1:] == (2 * self.config.head_num, self.config.head_dim)
+        assert kv.shape[0] == token_indices.numel() and kv.dtype == self.storage_dtype
+        if not token_indices.numel():
             return
-        assert self.k_storage.is_cuda, "KV writes require CUDA storage"
-        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
-
-        # TODO：将同一层 K/V 的两次索引写入融合到一个 kernel，直接写入独立 K/V 存储。
-        destindex_copy_kv(
-            K=kv[:, : self.config.head_num], DestLoc=token_indices, Out=self.k_storage[storage_layer_index]
-        )
-        destindex_copy_kv(
-            K=kv[:, self.config.head_num :], DestLoc=token_indices, Out=self.v_storage[storage_layer_index]
-        )
+        self.ops.write(self.k_storage[storage_layer_index], self.v_storage[storage_layer_index], token_indices, kv)
 
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
         """复制完整 token 数据；索引使用 Tensor，源与目标位置由调用方保证不重叠。"""
-        assert src_indices.is_cuda and dst_indices.is_cuda, "token indices must reside on CUDA"
+        assert src_indices.device == dst_indices.device == self.k_storage.device, "token indices must match storage"
         assert (
             src_indices.ndim == dst_indices.ndim == 1 and src_indices.numel() == dst_indices.numel()
         ), "token copies require equal one-dimensional index tensors"
@@ -166,26 +177,17 @@ class GQAFullAttentionState(FullAttentionState):
             torch.int32,
             torch.int64,
         ), "token indices must be integer tensors"
-        assert self.k_storage.is_cuda, "token copies require CUDA storage"
-        if not src_indices.numel():
-            return
-        from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer
+        if src_indices.numel():
+            self.ops.copy(self.k_storage, self.v_storage, src_indices, dst_indices)
 
-        # 直接使用调用方提供的 CUDA 索引，保留原 dtype 和 stride。
-        # 按字节直接从源槽位写到目标槽位，覆盖量化 scale 和 packed padding，不创建中间 KV。
-        # 调用方保证源、目标集合不相交，且目标索引不重复，避免并行读写竞争。
-        # TODO：将 K/V 的同索引 token 复制融合为一次 kernel 发射，
-        # 保持原始字节编码及各字段 stride，仍要求源目标不重叠、目标索引不重复。
-        copy_kv_buffer_to_kv_buffer(
-            src_mem_index=src_indices,
-            dst_mem_index=dst_indices,
-            kv_buffer=self.k_storage,
-        )
-        copy_kv_buffer_to_kv_buffer(
-            src_mem_index=src_indices,
-            dst_mem_index=dst_indices,
-            kv_buffer=self.v_storage,
-        )
+    def require_zero_initialization(self):
+        self.zero_initialize_cache = True
+
+    def check_execution(self, caps, execution) -> None:
+        if caps.platform not in (Platform.CUDA, Platform.CPU):
+            raise UnsupportedAttention("GQA state operations are unavailable on this platform")
+        if caps.platform is not Platform.CUDA and execution.transfer_paths:
+            raise UnsupportedAttention("GQA CPU/DP/PD transfer operations currently require CUDA")
 
     # ========================================================================
     # 三、CPU Cache 数据交换

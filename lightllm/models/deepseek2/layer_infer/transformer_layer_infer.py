@@ -1,26 +1,33 @@
-from lightllm.common.attention_state.full_att import FullAttentionState
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionFamily
 import os
+from functools import partial
+
 import torch
 import triton
+
+from lightllm.common.attention.api.inputs import MLADecodeInputs, MLAPrefillInputs
+from lightllm.common.attention_state.full_att import FullAttentionState
+from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_sm100_mega_moe
+from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek2.triton_kernel.sample_kv import sample_kv
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
-from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
-from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
-    use_sm100_mega_moe,
-)
-from functools import partial
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
-from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 
 class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        description = replace(description, family=AttentionFamily.MLA)
+        return description
+
     def __init__(self, layer_num, network_config):
         self.tp_k_head_num_ = 1
         self.tp_v_head_num_ = 1
@@ -86,13 +93,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             layer_weight=layer_weight,
         )
 
-        o_tensor = infer_state.prefill_att_state.prefill_att(
-            q=q,
-            k=(k_nope, k_rope),
-            v=v,
-            att_control=AttControl(mla_prefill=True, mla_prefill_dict={"softmax_scale": self.softmax_scale}),
-            alloc_func=self.alloc_tensor,
-        )
+        o_tensor = self.prefill_attention.forward(infer_state.attention, MLAPrefillInputs(q, k_nope, k_rope, v))
         return o_tensor
 
     def _token_attention_kernel(
@@ -104,21 +105,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     ):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="mla",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        kv = state.get_layer_view(logical_layer_id=self.layer_num_)
 
-        out = infer_state.decode_att_state.decode_att(
-            q=(q_nope, q_rope),
-            k=kv,
-            v=None,
-            att_control=AttControl(mla_decode=True, mla_decode_dict={"softmax_scale": self.softmax_scale}),
-            alloc_func=self.alloc_tensor,
-        )
+        out = self.decode_attention.forward(infer_state.attention, MLADecodeInputs(q_nope, q_rope))
         return out
 
     def _decompress_kv(
@@ -418,7 +406,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         def _1_hook_post():
             _1_hook()
-            nonlocal _1_ffn_out
             if self.n_shared_experts is not None:
                 _1_ffn_out.add_(_1_shared_output)
             input_embdings1.add_(_1_ffn_out.view(-1, self.embed_dim_))
@@ -581,7 +568,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         def _1_hook_post():
             _1_hook()
-            nonlocal _1_ffn_out
             if self.n_shared_experts is not None:
                 _1_ffn_out.add_(_1_shared_output)
             input_embdings1.add_(_1_ffn_out.view(-1, self.embed_dim_))

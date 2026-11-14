@@ -1,17 +1,32 @@
+from contextlib import ExitStack
+from unit_tests.common.attention.helpers import prepared_session
+from lightllm.common.attention.api import AttentionFamily, AttentionPhase, CacheEncoding, CacheLayout
+from unit_tests.common.attention.helpers import make_env
 import gc
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-pytest.importorskip("flash_mla")
+from unit_tests.common.attention.helpers import make_spec
 
-from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
+flashmla = pytest.importorskip("flash_mla")
+
 from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
+from lightllm.models.deepseek_v4.attention import sparse_mla as attention
+from unit_tests.common.attention.helpers import (
+    backend_context,
+    make_backend,
+    make_batch,
+    make_context,
+    run_dense,
+    run_sparse,
+    update_context,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -35,8 +50,9 @@ class BlockVllm(importlib.abc.MetaPathFinder):
             raise ModuleNotFoundError('vllm deliberately unavailable')
 
 sys.meta_path.insert(0, BlockVllm())
-from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
-assert attention.flashmla.__name__ == 'flash_mla'
+from lightllm.models.deepseek_v4.attention import sparse_mla as attention
+import flash_mla as flashmla
+assert flashmla.__name__ == 'flash_mla'
 assert not any(name == 'vllm' or name.startswith('vllm.') for name in sys.modules)
 """
     root = Path(__file__).resolve().parents[4]
@@ -47,7 +63,8 @@ assert not any(name == 'vllm' or name.startswith('vllm.') for name in sys.module
 
 @pytest.mark.parametrize("run_mode", ["normal", "prefill", "decode"])
 def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.MonkeyPatch, run_mode: str) -> None:
-    backend_class = attention.DeepseekV4FlashMlaFp8SparseAttBackend
+    from lightllm.models.deepseek_v4.workspace import get_swa_prefill_workspace
+
     model = SimpleNamespace(
         args=SimpleNamespace(run_mode=run_mode, enable_prefill_microbatch_overlap=False),
         config=dict(
@@ -64,12 +81,7 @@ def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.Monke
         max_req_num=8,
         att_state_role="main",
     )
-    monkeypatch.setattr(
-        backend_class,
-        "get_gpu_workspace_buffer",
-        lambda key_name, workspace_size, dtype: torch.empty(workspace_size, dtype=dtype),
-    )
-    workspace, capacity = backend_class.get_swa_prefill_workspace(model=model)
+    workspace, capacity = get_swa_prefill_workspace(model=model)
     # D 节点仍执行 HOLD 请求的单 token prefill，但无需保留普通请求的长 prefill 临时区。
     assert workspace is not None
     if run_mode == "decode":
@@ -96,14 +108,28 @@ def _pool(page_size, pages):
 def _case(heads, ratio):
     torch.manual_seed(6014)
     tokens = 5
-    model = type("TestModel", (), {})()
+    from unit_tests.common.attention.helpers import model_stub
+
+    model = model_stub(page_size=256)
     model.config = {"num_attention_heads": heads, "compress_ratios": [0, 4, 128]}
     model.config.update(head_dim=512, qk_rope_head_dim=64, index_head_dim=128, sliding_window=128)
     model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(3)]
     model.tp_rank_ = 0
     model.tp_world_size_ = 1
-    backend = attention.DeepseekV4FlashMlaFp8SparseAttBackend(model=model)
-    q = torch.randn((tokens, backend.padded_q_head_num, 512), dtype=torch.bfloat16, device="cuda") * 0.1
+    from lightllm.models.deepseek_v4.config import create_attention_config
+
+    spec = make_spec(
+        AttentionFamily.SPARSE_MLA,
+        config=create_attention_config(model.config, (0, 1, 2)),
+        cache=CacheLayout(CacheEncoding.FP8_SPARSE_MLA, 256, torch.uint8, 1, 512, 512),
+        num_q_heads=heads,
+        head_size=512,
+        value_head_size=512,
+        variant="deepseek_v4",
+        softmax_scale=512 ** -0.5,
+    )
+    backend = attention.DeepseekV4SparseMLAFp8DecodeBackend(env=make_env(model), spec=spec)
+    q = torch.randn((tokens, (heads + 63) // 64 * 64, 512), dtype=torch.bfloat16, device="cuda") * 0.1
     q[:, heads:] = 0
     pool, decoded = _pool(128, 2)
     extra, extra_decoded = _pool(64 if ratio == 4 else 2, 3) if ratio else (None, None)
@@ -154,8 +180,8 @@ def _reference(q, decoded, extra_decoded, params, heads):
 @pytest.mark.parametrize("provide_out", [False, True])
 def test_prefill_matches_reference_and_preserves_out(monkeypatch, heads, ratio, provide_out):
     backend, state_info, q, pool, decoded, extra_decoded, params = _case(heads, ratio)
-    state = backend.create_att_prefill_state(state_info)
-    state.init_state()
+    state = backend_context(type(backend), "prefill", settings=backend)
+    update_context(state, state_info)
     allocations = []
 
     def alloc_output(shape, **kwargs):
@@ -163,23 +189,16 @@ def test_prefill_matches_reference_and_preserves_out(monkeypatch, heads, ratio, 
         allocations.append(buffer)
         return buffer
 
-    kernel = attention.flashmla.flash_mla_with_kvcache
+    kernel = flashmla.flash_mla_with_kvcache
 
     def flashmla_with_out(**kwargs):
         assert kwargs["out"] is not None
         return kernel(**kwargs)
 
-    monkeypatch.setattr(attention.flashmla, "flash_mla_with_kvcache", flashmla_with_out)
+    monkeypatch.setattr(flashmla, "flash_mla_with_kvcache", flashmla_with_out)
     out = torch.full_like(q, float("nan")) if provide_out else None
-    actual = state.prefill_att(
-        q,
-        pool,
-        None,
-        att_control=attention.AttControl(nsa_prefill=True, nsa_prefill_dict=params),
-        alloc_func=alloc_output,
-        out=out,
-    )
-    assert params["attn_sink"].shape == (backend.padded_q_head_num,)
+    actual = run_sparse(state, state_info, q, pool, params, alloc_func=alloc_output, out=out)
+    assert params["attn_sink"].shape == (q.shape[1],)
     assert torch.count_nonzero(params["attn_sink"][heads:]) == 0
     assert len(allocations) == (0 if provide_out else 1)
     output_buffer = out if provide_out else allocations[0]
@@ -216,24 +235,38 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
         state_info.input_ids = torch.zeros(q.shape[0], dtype=torch.int64, device=q.device)
         state_info.q = q
         state_info.packed_kv = packed_kv
-        state_info.att_control = attention.AttControl(nsa_decode=True, nsa_decode_dict=params)
-        state_info.decode_att_state = backend.create_att_decode_state(state_info)
-        state_info.decode_att_state1 = None
-        state_info.decode_att_state.init_state()
+        state_info.att_control = params
+        from lightllm.common.attention.session import AttentionSession
+
+        state_info.attention = AttentionSession()
+        state_info.attention.contexts = {0: backend_context(type(backend), "decode", settings=backend)}
+        state_info.attention.groups = ({AttentionPhase.DECODE: backend},)
+        update_context(state_info.attention.contexts[0], state_info)
+        state_info.b_req_idx = torch.arange(q.shape[0], dtype=torch.int32, device=q.device)
+        from lightllm.common.attention_state import AttentionStateManager
+
+        state_info.att_state_manager = AttentionStateManager(request_capacity=q.shape[0])
+        state_info.att_state_manager.finish_state_registration()
+        state_info.att_state_role = "main"
         cases.append((state_info, decoded, extra_decoded, params))
 
     def decode_func(*states):
         outputs = tuple(
-            state.decode_att_state.decode_att(state.q, state.packed_kv, None, att_control=state.att_control)
+            run_sparse(
+                state.attention.contexts[0], state, state.q, state.packed_kv, state.att_control, session=state.attention
+            )
             for state in states
         )
         return outputs if overlap else outputs[0]
 
     # Exercise the framework's warmup + capture directly, with no operator-specific reset.
-    outputs = runner.capture_decode(decode_func, *(case[0] for case in cases))
+    with ExitStack() as scopes:
+        for state_info, _, _, _ in cases:
+            scopes.enter_context(prepared_session(state_info.attention.contexts[0], state_info.attention))
+        outputs = runner.capture_decode(decode_func, *(case[0] for case in cases))
     outputs = outputs if overlap else (outputs,)
     for state_info, _, _, _ in cases:
-        state = state_info.decode_att_state
+        state = state_info.attention.contexts[0]
         eager_meta = state.sched_meta_by_ratio[ratio]
         capture_meta = state.capture_sched_meta_by_ratio[ratio]
         assert eager_meta.tile_scheduler_metadata.data_ptr() != capture_meta.tile_scheduler_metadata.data_ptr()
@@ -248,11 +281,11 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
             params["swa_lengths"].copy_(new_lengths)
             if ratio:
                 params["extra_lengths"].copy_(new_lengths)
-        runner.graph[5][0].replay()
+        runner.graph[5].replay()
 
         for actual, (state_info, decoded, extra_decoded, params) in zip(outputs, cases):
             assert actual.shape == (state_info.q.shape[0], heads, 512)
-            assert actual.stride(0) == backend.padded_q_head_num * 512
+            assert actual.stride(0) == state_info.q.shape[1] * 512
             torch.testing.assert_close(
                 actual, _reference(state_info.q, decoded, extra_decoded, params, heads), rtol=0.02, atol=5e-4
             )
@@ -262,13 +295,11 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
 @pytest.mark.parametrize("heads", [16, 64])
 def test_prefill_out_supports_strided_scratch_buffer(heads):
     backend, state_info, q, pool, decoded, extra_decoded, params = _case(heads, 4)
-    storage = torch.full((q.shape[0], backend.padded_q_head_num, 1024), float("nan"), dtype=q.dtype, device=q.device)
+    storage = torch.full((q.shape[0], q.shape[1], 1024), float("nan"), dtype=q.dtype, device=q.device)
     out = storage[..., :512]
-    state = backend.create_att_prefill_state(state_info)
-    state.init_state()
-    actual = state.prefill_att(
-        q, pool, None, out=out, att_control=attention.AttControl(nsa_prefill=True, nsa_prefill_dict=params)
-    )
+    state = backend_context(type(backend), "prefill", settings=backend)
+    update_context(state, state_info)
+    actual = run_sparse(state, state_info, q, pool, params, out=out)
     assert actual.data_ptr() == out.data_ptr()
     assert actual.stride() == out.stride()
     assert storage[..., 512:].isnan().all()
@@ -292,6 +323,9 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
     )
     monkeypatch.setattr(cuda_graph_module, "get_env_start_args", lambda: args)
     runner = cuda_graph_module.PrefillCudaGraph(decode_cuda_graph=None, tp_world_size=1)
+    from lightllm.common.attention_state import AttentionStateManager
+
+    manager = AttentionStateManager(request_capacity=5)
     backend, _, q, packed_kv, decoded, extra_decoded, params = _case(heads, ratio)
     indices = torch.arange(128, dtype=torch.int32, device=q.device)
     params["swa_indices"].copy_(indices)
@@ -301,17 +335,16 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         packed_kv = (packed_kv[0], extra)
         params["extra_indices"].copy_(indices)
 
-    monkeypatch.setattr(backend, "get_att_input_params", lambda infer_state, logical_layer_id: packed_kv)
-
     def new_request(length):
         infer_state = DeepseekV4InferStateInfo()
+        infer_state.att_state_manager = manager
         infer_state.input_ids = torch.zeros(q.shape[0], dtype=torch.int64, device=q.device)
         infer_state.hidden_collector = NoopHiddenCollector()
         infer_state.attn_params = dict(params, swa_lengths=torch.full_like(params["swa_lengths"], length))
         if ratio:
             infer_state.attn_params["extra_lengths"] = torch.full_like(params["extra_lengths"], length)
-        infer_state.prefill_att_state = backend.create_att_prefill_state(infer_state)
-        infer_state.prefill_att_state.init_state()
+        infer_state.attention.contexts = {0: backend_context(type(backend), "prefill", settings=backend)}
+        update_context(infer_state.attention.contexts[0], infer_state)
         return infer_state
 
     allocations = []
@@ -336,6 +369,17 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         return infer_state.attn_params
 
     layer.alloc_tensor = alloc_output
+    from dataclasses import replace
+
+    from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4Resources
+    from unit_tests.common.attention.helpers import make_layer_attention
+
+    attention_params = DeepseekV4Resources(
+        packed_kv[0], packed_kv[0], packed_kv[1], ratio, 512, params["softmax_scale"], params["attn_sink"]
+    )
+    attention_context = backend_context(type(backend), "prefill", settings=backend)
+    layer.prefill_attention = make_layer_attention(backend, attention_context, attention_params)
+    backend.alloc_tensor = alloc_output
     layer._compress_and_index = compress_and_index
     q_lora = torch.empty((q.shape[0], 4), dtype=q.dtype, device=q.device)
     x = torch.empty((q.shape[0], 8), dtype=q.dtype, device=q.device)
@@ -345,13 +389,14 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         att_out = layer._context_attention_wrapper_run(graph_q, inputs[1], inputs[2], infer_state, layer_weight)
         assert att_out.shape == (q.shape[0], heads, 512)
         assert att_out.data_ptr() == allocations[-1].data_ptr()
-        assert att_out.stride(0) == backend.padded_q_head_num * 512
+        assert att_out.stride(0) == q.shape[1] * 512
         # A graph segment after attention must read the output filled by the CPU callback.
         return [att_out + 0.125]
 
     infer_state = new_request(1)
-    layer._context_attention_wrapper_run(q, q_lora, x, infer_state, layer_weight)
-    outputs = runner.capture_prefill(prefill_func, [q, q_lora, x], infer_state)
+    with prepared_session(infer_state.attention.contexts[0], infer_state.attention):
+        layer._context_attention_wrapper_run(q, q_lora, x, infer_state, layer_weight)
+        outputs = runner.capture_prefill(prefill_func, [q, q_lora, x], infer_state)
     torch.testing.assert_close(
         outputs[0],
         _reference(q, decoded, extra_decoded, infer_state.attn_params, heads) + 0.125,
@@ -359,13 +404,14 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         atol=5e-4,
     )
     assert len(infer_state.prefill_cuda_graph_exe_list) == 3
-    previous_meta = infer_state.prefill_att_state.sched_meta_by_ratio[ratio]
+    previous_meta = infer_state.attention.contexts[0].sched_meta_by_ratio[ratio]
     for length in (128, 64, 1, 64):
         q.mul_(1.25)
         infer_state = new_request(length)
-        current_meta = infer_state.prefill_att_state.sched_meta_by_ratio[ratio]
+        current_meta = infer_state.attention.contexts[0].sched_meta_by_ratio[ratio]
         assert current_meta.tile_scheduler_metadata is None
-        actual = runner.replay([q, q_lora, x], infer_state)[0]
+        with prepared_session(infer_state.attention.contexts[0], infer_state.attention):
+            actual = runner.replay([q, q_lora, x], infer_state)[0]
         assert callback_states[-1] is infer_state
         assert current_meta.tile_scheduler_metadata.data_ptr() != previous_meta.tile_scheduler_metadata.data_ptr()
         torch.testing.assert_close(

@@ -1,22 +1,17 @@
+from __future__ import annotations
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionFamily
+
 # SPDX-License-Identifier: Apache-2.0
 
-from __future__ import annotations
-
-from lightllm.common.attention_state.full_att import FullAttentionState
 
 import torch
 
+from lightllm.common.attention.api.inputs import KDAInputs, SparseMLADecodeInputs, SparseMLAPrefillInputs
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post, hc_pre_norm
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
-    silu_and_mul_fwd,
-)
-from lightllm.common.basemodel.triton_kernel.mhc import (
-    hc_contract,
-    hc_post,
-    hc_pre_norm,
-)
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.models.glm5_next.indexer import Glm5NextNsaInfer
 from lightllm.utils.envs_utils import get_env_start_args
@@ -24,6 +19,13 @@ from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
 class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        description = replace(
+            description, family=AttentionFamily.KDA if self.is_linear_attention_layer else AttentionFamily.SPARSE_MLA
+        )
+        return description
+
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.eps_ = network_config["rms_norm_eps"]
@@ -86,7 +88,6 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
 
     def _ffn_tp(self, input, infer_state, layer_weight):
         """Dense/shared GLM FFN with the checkpoint's clamp semantics."""
-
         input = input.view(-1, self.embed_dim_)
         up_gate_out = layer_weight.gate_up_proj.mm(input)
         ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
@@ -167,30 +168,14 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=infer_state.prefill_att_state,
+            query_metadata=infer_state.sparse_queries,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="mla",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        return infer_state.prefill_att_state.prefill_att(
-            q=q,
-            k=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
-            v=None,
-            att_control=AttControl(
-                nsa_prefill=True,
-                nsa_prefill_dict={
-                    "topk_mem_indices": topk_mem_indices,
-                    "topk_indices": topk_indices,
-                    "prefill_cache_kv": kv,
-                    "softmax_scale": self.softmax_scale,
-                    "kv_lora_rank": self.kv_lora_rank,
-                },
-            ),
+
+        return self.prefill_attention.forward(
+            infer_state.attention,
+            SparseMLAPrefillInputs(q, topk_mem_indices, topk_indices, kv),
         )
 
     def _context_attention_wrapper_run(self, q, cache_kv, infer_state, layer_weight):
@@ -253,31 +238,15 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=infer_state.decode_att_state,
+            query_metadata=infer_state.sparse_queries,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
         q_rope = q_nope[..., :0]
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="mla",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        return infer_state.decode_att_state.decode_att(
-            q=(q_nope, q_rope),
-            k=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
-            v=None,
-            att_control=AttControl(
-                nsa_decode=True,
-                nsa_decode_dict={
-                    "layer_index": self.layer_num_,
-                    "topk_mem_indices": topk_mem_indices,
-                    "softmax_scale": self.softmax_scale,
-                    "kv_lora_rank": self.kv_lora_rank,
-                    "qk_rope_head_dim": 0,
-                },
-            ),
+
+        return self.decode_attention.forward(
+            infer_state.attention,
+            SparseMLADecodeInputs(q_nope, q_rope, topk_mem_indices),
         )
 
     def _get_o(self, input, infer_state, layer_weight):
@@ -339,7 +308,6 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         output at stable addresses, then register it as a CPU-side replay step
         between the surrounding CUDA-graph segments.
         """
-        backend = infer_state.prefill_att_state1.backend
         mixed_qkv = mixed_qkv.contiguous()
         raw_decay_gate = raw_decay_gate.contiguous()
         beta_logits = beta_logits.contiguous()
@@ -354,28 +322,16 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         # Construct this shape directly instead of dry-running the kernel:
         # kernel setup may synchronize with the host, which is illegal while a
         # CUDA graph capture is active.
-        output_shape = (1, mixed_qkv.shape[0], backend.tp_num_heads, backend.head_dim)
+        output_shape = (1, mixed_qkv.shape[0], self.tp_linear_num_heads, self.linear_head_dim)
         infer_state.prefill_cuda_graph_create_graph_obj()
         infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
         output = torch.empty(output_shape, dtype=mixed_qkv.dtype, device=mixed_qkv.device)
         _output = tensor_to_no_ref_tensor(output)
 
         def kda_prefill_func(new_infer_state):
-            tmp_output = new_infer_state.prefill_att_state1.prefill_att(
-                q=None,
-                k=None,
-                v=None,
-                att_control=AttControl(
-                    linear_att_prefill=True,
-                    linear_att_prefill_dict={
-                        "mixed_qkv": _mixed_qkv,
-                        "raw_gate": _raw_decay_gate,
-                        "raw_beta": _beta_logits,
-                        "layer_weight": layer_weight,
-                        "layer_num": self.layer_num_,
-                    },
-                ),
-                alloc_func=self.alloc_tensor,
+            tmp_output = self.prefill_attention.forward(
+                new_infer_state.attention,
+                KDAInputs(_mixed_qkv, _raw_decay_gate, _beta_logits),
             )
             assert tmp_output.shape == _output.shape
             _output.copy_(tmp_output)
@@ -401,21 +357,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 layer_weight,
             )
         else:
-            core_output = infer_state.prefill_att_state1.prefill_att(
-                q=None,
-                k=None,
-                v=None,
-                att_control=AttControl(
-                    linear_att_prefill=True,
-                    linear_att_prefill_dict={
-                        "mixed_qkv": qkv,
-                        "raw_gate": raw_decay_gate,
-                        "raw_beta": beta_logits,
-                        "layer_weight": layer_weight,
-                        "layer_num": self.layer_num_,
-                    },
-                ),
-                alloc_func=self.alloc_tensor,
+            core_output = self.prefill_attention.forward(
+                infer_state.attention,
+                KDAInputs(qkv, raw_decay_gate, beta_logits),
             )
         return self._kda_post(core_output, raw_output_gate, infer_state, layer_weight)
 
@@ -425,22 +369,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         qkv, raw_decay_gate, beta_logits, raw_output_gate = self._kda_projections(
             input_embeddings, infer_state, layer_weight
         )
-        core_output = infer_state.decode_att_state1.decode_att(
-            q=None,
-            k=None,
-            v=None,
-            att_control=AttControl(
-                linear_att_decode=True,
-                linear_att_decode_dict={
-                    "mixed_qkv": qkv,
-                    "raw_gate": raw_decay_gate,
-                    "raw_beta": beta_logits,
-                    "layer_weight": layer_weight,
-                    "layer_num": self.layer_num_,
-                },
-            ),
-            alloc_func=self.alloc_tensor,
-        )
+        core_output = self.decode_attention.forward(infer_state.attention, KDAInputs(qkv, raw_decay_gate, beta_logits))
         return self._kda_post(core_output, raw_output_gate, infer_state, layer_weight)
 
     def _hc_pre(self, streams, layer_weight, prefix, norm_weight):

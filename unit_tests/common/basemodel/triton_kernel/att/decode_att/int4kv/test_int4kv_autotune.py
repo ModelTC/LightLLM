@@ -1,8 +1,8 @@
-import weakref
 import collections
 import inspect
 import json
 import math
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -10,18 +10,27 @@ import torch
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.triton.int4kv import Int4kvTritonDecodeAttState
-from lightllm.common.basemodel.triton_kernel.att.decode_att.int4kv import (
+from lightllm.common.attention.backends.dense.triton.int4 import TritonDenseInt4DecodeBackend
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int4kv import (
     int4kv_flash_decoding_stage1 as stage1_module,
     ppl_int4kv_flash_decoding as decode_module,
 )
-from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.normal.int8kv_flash_decoding_stage2 import (
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.normal.int8kv_flash_decoding_stage2 import (
     flash_decode_stage2,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.triton_utils import autotuner as autotuner_module
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType, AutotuneLevel
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
+from unit_tests.common.attention.helpers import (
+    backend_context,
+    make_backend,
+    make_batch,
+    make_context,
+    run_dense,
+    run_sparse,
+    update_context,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -141,17 +150,17 @@ def test_decode_passes_saved_length_to_stage1(monkeypatch):
     infer_state.b_req_idx = inputs["B_req_idx"]
     infer_state.b_seq_len = inputs["B_Seqlen"]
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"])
-    state = Int4kvTritonDecodeAttState(
-        backend=SimpleNamespace(),
-        _infer_state_weak_ref=weakref.ref(infer_state),
-    )
-    state.init_state()
-    state.infer_state.max_kv_seq_len = 32768
+    infer_state.req_to_token_indexs = infer_state.req_manager.req_to_token_indexs
+    state = backend_context(TritonDenseInt4DecodeBackend, "decode", settings=SimpleNamespace())
+    update_context(state, infer_state)
+    infer_state.max_kv_seq_len = 32768
     calls = []
     monkeypatch.setattr(stage1_module, "int4kv_flash_decode_stage1", lambda **kwargs: calls.append(kwargs))
     stage2 = inspect.getmodule(flash_decode_stage2)
     monkeypatch.setattr(stage2, "flash_decode_stage2", lambda *args: None)
-    state.decode_att(
+    run_dense(
+        state,
+        infer_state,
         inputs["q"],
         (inputs["k"], inputs["k_scale"]),
         (inputs["v"], inputs["v_scale"]),

@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-from functools import lru_cache
-from typing import TYPE_CHECKING, List, Literal
 from dataclasses import dataclass
+from functools import lru_cache
 from math import prod
+from typing import TYPE_CHECKING, List, Literal
 
 import torch
 
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
-from ...utils import deepcopy_result, dtype_name
 from ...types import AxisMapping, TransferRegion
+from ...utils import deepcopy_result, dtype_name
 from ..base_state import FullAttentionState
-from .packed_mla_transfer import transfer_packed_mla_pages
 from ..dp_transfer import copy_packed_tokens
+from .packed_mla_transfer import transfer_packed_mla_pages
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
@@ -146,6 +146,8 @@ class PackedMLALayerView:
 class PackedMLAFullAttentionState(FullAttentionState):
     """在同一物理 token 行中存储 MLA latent、量化参数及稀疏 indexer key/scale。"""
 
+    storage_layout = ("mla_packed_token_row", 1)
+
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================
@@ -158,6 +160,7 @@ class PackedMLAFullAttentionState(FullAttentionState):
     ) -> None:
         """按 packed MLA 配置准备 KV 与 indexer 存储。"""
         self.config = layout_config
+        self.storage_dtype = torch.uint8 if layout_config.kv_encoding == "fp8_group128" else layout_config.dtype
         self.state_name: str | None = None  # 由 manager 绑定模型角色时设置。
         # 外层下标是物理层位置；组内多个逻辑层映射到同一份 KV/量化字段存储。
         self._logical_to_storage_layer = {
@@ -183,15 +186,14 @@ class PackedMLAFullAttentionState(FullAttentionState):
         """按统一 token 容量分配本 State 的独立 KV 存储与 HOLD 页。"""
         self.capacity = token_capacity
         # FP8 行混合保存多种字段，用字节 buffer 承载，字段视图再解释各自的 dtype。
-        storage_dtype = torch.uint8 if self.config.kv_encoding == "fp8_group128" else self.config.dtype
         self.storage = torch.empty(
             size=(
                 len(self.config.logical_layer_groups),
                 token_capacity + self.page_size,
                 1,
-                self.config.token_bytes // storage_dtype.itemsize,
+                self.config.token_bytes // self.storage_dtype.itemsize,
             ),
-            dtype=storage_dtype,
+            dtype=self.storage_dtype,
             device=self.device,
         )
 
@@ -210,6 +212,9 @@ class PackedMLAFullAttentionState(FullAttentionState):
     def get_storage_layer_index(self, logical_layer_id: int) -> int:
         """按逻辑层号查询存储及配套字段的物理行；共享逻辑层返回同一下标。"""
         return self._logical_to_storage_layer[logical_layer_id]
+
+    def layer_resources(self, layer_id):
+        return self.get_layer_view(layer_id).kv
 
     def get_layer_view(self, logical_layer_id: int) -> PackedMLALayerView:
         """分别返回 KV 与 packed indexer key/scale 的视图，保持原行步长。"""

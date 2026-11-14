@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import TYPE_CHECKING, List
 from math import prod
+from typing import TYPE_CHECKING, List
 
 import torch
 
 from lightllm.utils.log_utils import init_logger
 
-from ...utils import deepcopy_result, dtype_name
 from ...types import AxisMapping, StateTransferLayout, TensorField, TransferRegion
+from ...utils import deepcopy_result, dtype_name
 from ..base_state import BoundedAttentionState
 from ..conv_ssm_types import ConvSSMStateConfig
-from .kda_pages_pool import KDAPagesPool
-from ..transfer_utils import bounded_att_buffer_copies
 from ..copy_kernel import copy_bounded_att_tensors
+from ..transfer_utils import bounded_att_buffer_copies
+from .kda_pages_pool import KDAPagesPool
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import PageKind
@@ -24,7 +24,11 @@ logger = init_logger(__name__)
 
 
 class KDAState(BoundedAttentionState):
+    state_mode = "native"
+
     """KDA 的 Conv 历史、方形 SSM 和 MTP 游标，要求 Q/K/V head 数及维度相同。"""
+
+    storage_layout = ("kda_conv_ssm", 1)
 
     big_pages_pool: KDAPagesPool | None
     small_pages_pool: KDAPagesPool | None
@@ -115,10 +119,25 @@ class KDAState(BoundedAttentionState):
         """判断指定逻辑层是否属于当前 State 的层映射，共享层同样返回 True。"""
         return logical_layer_id in self._logical_to_storage_layer
 
+    def layer_resources(self, layer_id):
+        from ..conv_ssm_types import RecurrentStorage
+
+        conv, ssm = self.get_layer_view(layer_id)
+        return RecurrentStorage(conv, ssm, self.mtp_state_index)
+
     def get_layer_view(self, logical_layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
         """按逻辑层号映射到物理层，返回 Conv/SSM Tensor 引用；MTP 游标和步数直接从 State 读取。"""
         storage_layer_index = self._logical_to_storage_layer[logical_layer_id]
         return self.conv_state[storage_layer_index], self.ssm_state[storage_layer_index]
+
+    def capture_snapshot_views(self, req_indices):
+        views = []
+        for req in req_indices:
+            start = req * (self.mtp_step + 1)
+            views.extend((self.conv_state[:, req], self.ssm_state[:, start : start + self.mtp_step + 1]))
+            if self.mtp_state_index is not None:
+                views.append(self.mtp_state_index[req : req + 1])
+        return views
 
     def reset_bounded_att_state(self, req_indices: List[int]) -> None:
         """清零指定请求的 Conv 历史、全部 SSM 候选及 MTP 游标，保留页池快照。"""

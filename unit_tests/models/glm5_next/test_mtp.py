@@ -1,16 +1,16 @@
+from unit_tests.common.attention.helpers import build, run_attention
 import weakref
+
 import pytest
 import torch
 
+from lightllm.common.attention.backends._shared.linear.replayssm_fold import fold_prefix
+from lightllm.common.attention.backends.kda.triton.kernels.kda_decode import fused_recurrent_kda
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, KDAState
+from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import (
-    fused_recurrent_kda,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_fold import fold_prefix
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
-
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -145,17 +145,9 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
 def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mode, mtp_step):
     from types import SimpleNamespace
 
-    from lightllm.common.basemodel.attention.base_att import AttControl
-    from lightllm.common.basemodel.attention.linear.kda import KDADecodeAttState
-    from lightllm.common.basemodel.attention.linear.replay_kda import (
-        ReplayKDADecodeAttState,
-    )
-    from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import (
-        ReplayKDAState,
-    )
-    from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
-        causal_conv1d_update,
-    )
+    from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_update
+    from lightllm.common.attention.backends.kda.replay.backend import TritonKDAReplayDecodeBackend
+    from lightllm.common.attention.backends.kda.triton.backend import TritonKDADecodeBackend
 
     torch.manual_seed(53)
     heads, dim, width = 2, 128, mtp_step + 1
@@ -208,15 +200,6 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
             expected.append(output.reshape(1, heads, dim))
             expected_ssm[req * width + token] = state[0]
             row += 1
-    backend = SimpleNamespace(
-        mtp_step=mtp_step,
-        tp_num_heads=heads,
-        head_dim=dim,
-        tp_hidden_size=hidden,
-        lower_bound=-5.0,
-        uses_dynamic_spec_verify_layout=lambda: dynamic,
-        split_qkv=lambda x: x.split(hidden, -1),
-    )
     resources = AttentionStateManager(request_capacity=4)
     config = ConvSSMStateConfig(
         logical_layer_ids=(0,),
@@ -252,54 +235,58 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
     infer.req_manager = manager
     infer.att_state_manager = resources
     infer.att_state_role = role
-    weight = SimpleNamespace(
-        get_merged_kda_conv_weight=lambda: conv_weight,
-        linear_A_log=SimpleNamespace(weight=a),
-        linear_dt_bias=SimpleNamespace(weight=bias),
+    from lightllm.common.attention.api.inputs import KDAInputs, KDAResources
+    from unit_tests.common.attention.helpers import make_backend, make_batch, make_context, make_layer_attention
+
+    executor = make_backend(
+        TritonKDAReplayDecodeBackend if mode == "replay" else TritonKDADecodeBackend,
+        mtp_step=mtp_step,
+        draft_step=mtp_step,
+        dynamic_verify=dynamic,
+        tp_num_heads=heads,
+        head_dim=dim,
+        tp_hidden_size=hidden,
+        lower_bound=-5.0,
     )
-    decode_cls = ReplayKDADecodeAttState if mode == "replay" else KDADecodeAttState
-    state = decode_cls(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
-    state.init_state()
-    actual = state.decode_att(
-        None,
-        None,
-        None,
-        AttControl(
-            linear_att_decode=True,
-            linear_att_decode_dict=dict(
-                layer_weight=weight,
-                layer_num=0,
-                mixed_qkv=mixed,
-                raw_gate=gate,
-                raw_beta=beta,
-            ),
+    batch = make_batch(
+        (1,) * tokens, device="cuda", b_req_idx=infer.b_req_idx, b_mtp_index=infer.b_mtp_index, hold_req_id=3
+    )
+    context = make_context(executor, batch)
+    build(executor, context)
+    attention = make_layer_attention(
+        executor,
+        context,
+        KDAResources(
+            *selected.get_layer_view(0),
+            conv_weight,
+            a,
+            bias,
+            mtp_state_index=selected.mtp_state_index,
+            replay_state=selected.replay_storage() if mode == "replay" else None,
         ),
     )
-    torch.testing.assert_close(
-        actual.reshape(tokens, heads, dim)[:row],
-        torch.cat(expected),
-        atol=2e-3,
-        rtol=1e-2,
-    )
+    from lightllm.common.basemodel.attention import ModelAttention
+    from unit_tests.common.attention.helpers import prepared_session
+
+    coordinator = ModelAttention.__new__(ModelAttention)
+    coordinator.replay_states = (selected,) if mode == "replay" else ()
+    coordinator.draft_step, coordinator.dynamic_verify = mtp_step, dynamic
+    with prepared_session(context, infer.attention):
+        actual = attention.forward(infer.attention, KDAInputs(mixed, gate, beta))
+        if mode == "replay":
+            assert selected.cursors.eq(0).all()
+        coordinator.finish_decode(infer)
+    torch.testing.assert_close(actual.reshape(tokens, heads, dim)[:row], torch.cat(expected), atol=2e-3, rtol=1e-2)
     if mode == "native":
         checked_slots = len(requests) if dynamic and not mtp_step else expected_ssm.shape[0]
         torch.testing.assert_close(
-            selected.ssm_state[0, :checked_slots],
-            expected_ssm[:checked_slots],
-            atol=2e-3,
-            rtol=1e-2,
+            selected.ssm_state[0, :checked_slots], expected_ssm[:checked_slots], atol=2e-3, rtol=1e-2
         )
     else:
         for req, length in zip(requests, lengths):
-            saved = selected.ssm_state
-            clone = saved.clone()
-            selected.ssm_state = clone
-            try:
-                fold_prefix(selected, torch.tensor([req], dtype=torch.int32, device="cuda"))
-            finally:
-                selected.ssm_state = saved
+            fold_prefix(selected, torch.tensor([req], dtype=torch.int32, device="cuda"))
             torch.testing.assert_close(
-                clone[0, req],
+                selected.ssm_state[0, req],
                 expected_ssm[req * width + length - 1],
                 atol=2e-3,
                 rtol=1e-2,

@@ -1,21 +1,24 @@
-import torch
 import os
-import torch.multiprocessing as mp
 from typing import List
-from lightllm.utils.log_utils import init_logger
-from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.int8kv_flash_decoding_diverse_stage2 import (
-    flash_decode_stage2,
+
+import torch
+import torch.multiprocessing as mp
+
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.int8kv_flash_decoding_diverse_stage2 import (
     GQADiverseDecodeStage2KernelConfig,
+    flash_decode_stage2,
 )
+from lightllm.utils.log_utils import init_logger
 from lightllm.utils.watchdog_utils import Watchdog
 
 logger = init_logger(__name__)
 
 
 def set_seed():
-    import torch
     import random
+
     import numpy as np
+    import torch
 
     seed = 42
     torch.manual_seed(seed)
@@ -260,8 +263,9 @@ def tuning_configs(
 if __name__ == "__main__":
     torch.multiprocessing.set_start_method("spawn")
 
-    from lightllm.utils.tuning_utils import mp_tuning
     import collections
+
+    from lightllm.utils.tuning_utils import mp_tuning
 
     block_seq = 256
     batch_sizes = [8, 16, 32, 64]

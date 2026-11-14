@@ -1,15 +1,20 @@
+from unit_tests.common.attention.helpers import make_env
+from unit_tests.common.attention.helpers import build, run_attention
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from lightllm.common.attention.api import AttentionPhase, AttentionFamily
+from lightllm.common.attention.api.spec import GDNConfig
+from lightllm.common.attention.api.inputs import GDNInputs, GDNResources
+from lightllm.common.attention.backends.gdn.triton.backend import TritonGDNDecodeBackend, TritonGDNPrefillBackend
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.sensenova_loop.config import get_loop_layer_indices, get_loop_layer_types
 from lightllm.server.core.objs.start_args_type import StartArgs
+from unit_tests.common.attention.helpers import make_batch, make_context, make_layer_attention, make_spec, model_stub
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -40,17 +45,20 @@ def test_gdn_decode_keeps_logical_layer_state(
     indices = get_loop_layer_indices(settings, 32)
     kinds = get_loop_layer_types(settings, config)
     layers = tuple(i for i, kind in enumerate(kinds) if kind == "linear_attention")
-    args = StartArgs(mtp_step=mtp_step, linear_att_ssm_data_type="float32")
-    monkeypatch.setattr("lightllm.common.basemodel.attention.linear.gdn.get_env_start_args", lambda: args)
-    monkeypatch.setattr("lightllm.common.basemodel.attention.base_att.get_env_start_args", lambda: args)
-    backend = object.__new__(TritonLinearAttBackend)
-    backend.__init__(
-        SimpleNamespace(
-            config=config,
-            tp_world_size_=1,
-            is_mtp_draft_model=False,
-            mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: mtp_step),
-        )
+    model = model_stub(mtp_step=mtp_step, linear_att_ssm_data_type="float32")
+    model.config = config
+    model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _: mtp_step)
+    backend = TritonGDNDecodeBackend(
+        make_env(model),
+        make_spec(
+            AttentionFamily.GDN,
+            use_mtp=mtp_step > 0,
+            num_q_heads=1,
+            head_size=32,
+            value_head_size=32,
+            cache=replace(make_spec().cache, key_heads=1, state_dtype=torch.float32),
+            config=GDNConfig(2, 4, "silu"),
+        ),
     )
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
     layout = ConvSSMStateConfig(layers, 1, 2, 32, 32, 3, dtype, torch.float32)
@@ -91,57 +99,61 @@ def test_gdn_decode_keeps_logical_layer_state(
             initial_state[mtp_step + 1 : 2 * (mtp_step + 1)].add_(1)
             return v, None
 
-        monkeypatch.setattr("lightllm.common.basemodel.attention.linear.gdn.conv_pack_gdn_decode_inputs", conv_pack)
         monkeypatch.setattr(
-            "lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp.causal_conv1d_update", conv_mtp
+            "lightllm.common.attention.backends.gdn.triton.kernels.gdn_decode_pack.conv_pack_gdn_decode_inputs",
+            conv_pack,
         )
         monkeypatch.setattr(
-            "lightllm.common.basemodel.attention.linear.gdn.fused_recurrent_gated_delta_rule", recurrent
+            "lightllm.common.attention.backends._shared.linear.causal_conv1d_mtp.causal_conv1d_update", conv_mtp
         )
         monkeypatch.setattr(
-            "lightllm.common.basemodel.attention.linear.gdn.mtp_fused_recurrent_gated_delta_rule",
+            "lightllm.common.attention.backends.gdn.triton.kernels.fused_recurrent.fused_recurrent_gated_delta_rule",
+            recurrent,
+        )
+        monkeypatch.setattr(
+            "lightllm.common.attention.backends.gdn.triton.kernels.mtp_fused_recurrent."
+            "mtp_fused_recurrent_gated_delta_rule",
             recurrent,
         )
 
-    infer = InferStateInfo()
-    infer.att_state_manager, infer.att_state_role = resources, "main"
-    infer.b_req_idx = torch.tensor([1], device=device, dtype=torch.int32)
-    control = dict(layer_num=logical_layer, layer_weight=weight)
+    params = GDNResources(
+        conv_view,
+        ssm_view,
+        weight.linear_conv1d.mm_param.weight,
+        None,
+        weight.linear_A_log.weight,
+        weight.linear_dt_bias.weight,
+        mtp_state_index=resource.mtp_state_index,
+    )
     mixed_dim = backend.tp_qkvz_dim + backend.tp_ba_dim
     if device == "cuda":
-        infer.b1_cu_q_seq_len = torch.tensor([0, 5], device=device, dtype=torch.int32)
-        infer.b_ready_cache_len = torch.zeros(1, device=device, dtype=torch.int32)
-        prefill = backend.create_att_prefill_state(infer)
-        prefill.init_state()
-        prefill.prefill_att(
-            None,
-            None,
-            None,
-            AttControl(
-                linear_att_prefill=True,
-                linear_att_prefill_dict=dict(
-                    **control, mixed_qkvzba=torch.randn(5, mixed_dim, device=device, dtype=dtype)
-                ),
-            ),
+        batch = make_batch(
+            (5,),
+            device=device,
+            phase=AttentionPhase.PREFILL,
+            b_req_idx=torch.tensor([1], device=device, dtype=torch.int32),
+            token_num=5,
+            max_q_seq_len=5,
+            b_q_seq_len=torch.tensor([5], device=device),
+            b1_cu_q_seq_len=torch.tensor([0, 5], device=device, dtype=torch.int32),
         )
-
-    infer.batch_size = mtp_step + 1
-    infer.b_req_idx = infer.b_req_idx.repeat(infer.batch_size)
-    decode = backend.create_att_decode_state(infer)
+        prefill = TritonGDNPrefillBackend(make_env(model), replace(backend.spec, phase=AttentionPhase.PREFILL))
+        context = make_context(prefill, batch)
+        build(prefill, context)
+        attention = replace(make_layer_attention(prefill, context, params), logical_layer_id=logical_layer)
+        run_attention(attention, context, GDNInputs(torch.randn(5, mixed_dim, device=device, dtype=dtype)))
+    batch_size = mtp_step + 1
+    batch = make_batch(
+        (1,) * batch_size, device=device, b_req_idx=torch.ones(batch_size, device=device, dtype=torch.int32)
+    )
+    context = make_context(backend, batch)
+    attention = replace(make_layer_attention(backend, context, params), logical_layer_id=logical_layer)
     untouched = [i for i in range(len(layers)) if i != storage_layer]
     for _ in range(2):
         before_conv, before_ssm = resource.conv_state.clone(), resource.ssm_state.clone()
-        decode.init_state()
-        output, _ = decode.decode_att(
-            None,
-            None,
-            None,
-            AttControl(
-                linear_att_decode=True,
-                linear_att_decode_dict=dict(
-                    **control, mixed_qkvzba=torch.randn(infer.batch_size, mixed_dim, device=device, dtype=dtype)
-                ),
-            ),
+        build(backend, context)
+        output, _ = attention.backend.forward(
+            attention, context, GDNInputs(torch.randn(batch_size, mixed_dim, device=device, dtype=dtype))
         )
         assert torch.isfinite(output).all()
         assert not torch.equal(resource.conv_state[storage_layer], before_conv[storage_layer])

@@ -18,24 +18,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import json
+import os
+from io import BytesIO
+from typing import List
+
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-from typing import List
-from torchvision import transforms as T
-from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
-from io import BytesIO
-import torch.nn as nn
-from torch.nn import LayerNorm
-from transformers.activations import ACT2FN
 from safetensors import safe_open
-from lightllm.server.multimodal_params import ImageItem
-from lightllm.server.visualserver import get_vit_attn_backend
-from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
+from torch.nn import LayerNorm
+from torchvision import transforms as T
+from transformers.activations import ACT2FN
+
+from lightllm.common.attention.api import VarlenAttentionInputs
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
+from lightllm.models.qwen2_vl.vision_process import Qwen2VLImageProcessor, resize_image
+from lightllm.server.embed_cache.utils import get_shm_name_data, read_shm
+from lightllm.server.multimodal_params import ImageItem
+from lightllm.server.visualserver import get_vit_attention_op
 
 # adapted from
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
@@ -147,7 +150,7 @@ class VisionFlashAttention(nn.Module):
 
         attn_output = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
 
-        get_vit_attn_backend()(q, k, v, attn_output, cu_seqlens, max_seqlen)
+        get_vit_attention_op().forward(VarlenAttentionInputs(q, k, v, cu_seqlens, max_seqlen), out=attn_output)
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
@@ -239,7 +242,6 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
         return
 
     def load_model(self, weight_dir):
-
         processor_config_path = os.path.join(weight_dir, "preprocessor_config.json")
         with open(processor_config_path, "r") as f:
             processor_config_dict = json.load(f)

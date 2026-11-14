@@ -1,24 +1,27 @@
-import torch
 import time
 from typing import List, Tuple
+
+import torch
+
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.triton_kernel.mtp_utils import gen_b_req_mtp_start_loc
+from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
-from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
-from lightllm.server.router.model_infer.mode_backend.pre import (
-    prepare_prefill_inputs,
-    prepare_decode_inputs,
-    overlap_prepare_prefill_inputs,
-    overlap_prepare_decode_inputs,
-)
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
+from lightllm.server.router.model_infer.mode_backend.pre import (
+    overlap_prepare_decode_inputs,
+    overlap_prepare_prefill_inputs,
+    prepare_decode_inputs,
+    prepare_prefill_inputs,
+)
+from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
+from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_engine import DPOverlapSpecEngine
+from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
-from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_engine import DPOverlapSpecEngine
-from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
+
 from .control_state import DPControlState
 
 
@@ -495,7 +498,6 @@ class DPChunkedPrefillBackend(ModeBackend):
 
     def decode_mtp(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         """复用普通 SpecEngine 执行 DP speculative draft-and-verify。"""
-
         model_input, run_reqs = prepare_decode_inputs(req_objs=decode_reqs)
         spec_engine = self.spec_engine
         req_num = len(decode_reqs)
@@ -536,11 +538,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 )
 
                 mtp_accept_len, accepted_index = mtp_utils.verify_mtp_tokens(
-                    backend=self,
-                    next_token_ids=next_token_ids,
-                    b_req_idx=model_input.b_req_idx,
-                    b_req_mtp_start_loc=b_req_mtp_start_loc,
-                    b_mtp_index=model_input.b_mtp_index,
+                    backend=self, next_token_ids=next_token_ids, model_output=model_output, num_reqs=req_num
                 )
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="accepted_index",
@@ -818,9 +816,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                 mtp_accept_len, accepted_index = mtp_utils.verify_mtp_tokens(
                     backend=self,
                     next_token_ids=next_token_ids,
-                    b_req_idx=b_req_idx,
-                    b_req_mtp_start_loc=b_req_mtp_start_loc,
-                    b_mtp_index=b_mtp_index,
+                    model_output=(model_output0, model_output1),
+                    num_reqs=req_num,
                 )
                 mtp_accept_len0 = mtp_accept_len[:real_request_num0]
                 mtp_accept_len1 = mtp_accept_len[real_request_num0:]

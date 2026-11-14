@@ -127,7 +127,24 @@ class TpPartBaseModel:
 | def _init_some_value(self):  | 初始化推理框架会使用的一些成员变量的值                       |
 | def _init_custom(self):      | 一些模型自己的个性化初始化，比如 llama 初始化自己的Rotary值  |
 
-全部 main/draft 模型构造完成后，`ModeBackend.init_model` 先按各模型 `get_req_manager_max_seq_len()` 的最大值创建一份 `ReqManager`，通过 `bind_req_manager()` 绑定给全部模型，再调用各模型的 `prepare_attention_states()` 准备自身 State；随后管理器依次完成 `finish_state_registration()`、`load_full_att_calibration(args)` 和共享资源分配。随后按 main、各 draft 的顺序逐个调用 `init_runtime()`，每次完整执行本模型的 HOLD 页和 backend 绑定、warmup、padded-request 与 CUDA Graph 初始化；main 还在该方法末尾执行最大长度检查。全部模型完成后发布就绪标志。资源准备和运行时初始化分别通过这两个单模型公共入口完成，均不接收 draft 列表。
+全部 main/draft 模型构造完成后，`ModeBackend.init_model` 创建共享的 `ReqManager`，绑定模型并注册各自的 State。`finish_state_registration()` 后，`prepare_attention_backends()` 创建 `model.attention: ModelAttention`，统一持有分组、层路由、workspace 和存储代次。每组是 `dict[AttentionPhase, AttentionBackend]`，后端实例只实现一个阶段。`model.attention.reserve(model)` 在容量估算前预留临时区，标定和存储分配完成后由 `model.attention.bind(model)` 创建各层的 `LayerAttention`。
+
+层通过 `describe_attention(phase)` 返回 family、features、window 和 variant。family adapter 将这些需求和 State 布局组成 `LayerSpec`，并从 `State.layer_resources(layer_id)` 借用资源；FP8 scale 的选择和切片由 State 负责。`AttentionFeature` 集合统一检查能力，`CacheEncoding` 描述编码，`CacheLayout.state_mode` 区分 native/replay。模型可通过 `attention_policy()` 返回 `BackendPolicy(allow, prefer, extra)` 限制或扩展注册表。
+
+注册表枚举只加载后端定义，能力声明以类属性为准；同一后端的阶段共性放在共享 mixin。kernel 和 provider 的执行依赖在使用处导入，候选后端的环境检查才验证可选依赖。Neo 扩展缺失时，`auto` 可回退，显式选择则报错，不影响其他模型的后端枚举。
+
+后端构造只接收 frozen `BackendEnv` 和 `LayerSpec`。Env 显式提供设备 runtime、TP 信息、HOLD 请求号、decode draft step、持久状态槽宽、长度上界和 allocator。`infer_state.attention: AttentionSession` 管理批次 context、owner/phase 校验、输入复制及输出写回。后端仅提供 `allocate_context`、图外每次重放执行的 `plan_host`、图内的 `build_device_metadata` 和 `forward`。模型通过 `with model.attention.session(infer_state)` 一次完成准备及 lease 释放；decode 捕获显式传入 Graph 长度上界。Session 位于 attention 模块，只接收 batch、backend 分组和容量，不依赖模型。所有 context 共享一个捕获 batch；Graph 先校验所有 microbatch 的复制计划，再统一复制和调用 host plan。
+
+`AttentionBackend(env, spec)` 是唯一后端基类，`spec` 只存于后端。`LayerAttention` 只持有 backend、资源和路由；prefill/decode 专属构造及 helper 各归其阶段类。量化组长来自 `spec.cache`，family 参数由 adapter 翻译为不可变的 `spec.config`，allocator 直接注入后端。层的 `attention_adapter(family)` 选取一次 adapter，描述与绑定复用该实例；模型专有 adapter 放在模型目录。
+
+```python
+output = self.decode_attention.forward(infer_state.attention, DenseInputs(q))
+context = self.decode_attention.context(infer_state.attention)
+```
+
+KV/Conv/SSM 的分配、checkpoint、恢复和释放仍归 State。存储代次变化后必须重新绑定层并重新捕获 Graph。`RequestGenerationStamp.stamp()` 固定 MTP 输出对应的请求槽代次，避免释放后复用的槽接收旧结果。
+
+视觉/音频编码器使用 `VarlenAttentionOp.forward(inputs, out=...)`，直接提供 `VarlenAttentionInputs` 中的 Q/K/V 和序列边界。独立选型失败报告 `VarlenSelectionError`；只有支持 Graph 的算子才能捕获。`--vit_att_backend` 不变。dense/MLA/sparse MLA 与 GDN/KDA 使用独立的 `--llm_*_att_backend` 和 `--llm_*_linear_att_backend`。旧的 `--llm_prefill_att_backend fa3 flashqla` 等双值形式仍接受并提示弃用，第二项写入对应 linear 选项。显式选择失败时报错，只有 `auto` 尝试其他 provider。
 
 公共 `prepare_attention_states()` 为 main 创建空管理器，draft 引用 main 的实例。两个 State 创建接口均为 `classmethod`，显式接收模型配置、逻辑层号及 TP 信息；bounded 接收请求容量和设备；full 工厂只创建布局，不计算标定起点或读取标定文件。接口仅返回对象列表，不注册管理器，也不依赖模型实例。CPU cache 直接复用 full/bounded 工厂生成 meta 定义，无需加载标定。公共流程统一注册；无 attention 的 draft 不创建 State。
 

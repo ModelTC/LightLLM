@@ -1,11 +1,12 @@
-import os
 import json
-import torch
+import os
 import uuid
-from easydict import EasyDict
 from functools import lru_cache
-from lightllm.utils.log_utils import init_logger
 
+import torch
+from easydict import EasyDict
+
+from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
@@ -221,7 +222,6 @@ g_model_init_done = False
 
 
 def get_model_init_status():
-    global g_model_init_done
     return g_model_init_done
 
 
@@ -267,7 +267,7 @@ def enable_triton_mtp_kernel() -> bool:
     启用 Triton MTP 解码专用 kernel
     通过启动参数 --mtp_step > 0 和 --llm_decode_att_backend=triton 控制
     """
-    return (get_env_start_args().mtp_step > 0) and ("triton" in get_env_start_args().llm_decode_att_backend)
+    return (get_env_start_args().mtp_step > 0) and (get_env_start_args().llm_decode_att_backend == "triton")
 
 
 @lru_cache(maxsize=None)

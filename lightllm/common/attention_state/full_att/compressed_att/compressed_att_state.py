@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
-from typing import TYPE_CHECKING, List
 from dataclasses import dataclass
+from functools import lru_cache
 from math import lcm, prod
+from typing import TYPE_CHECKING, List
 
 import torch
 
 from lightllm.utils.envs_utils import get_env_start_args
 
-from ...utils import deepcopy_result
 from ...types import AxisMapping, TransferRegion
+from ...utils import deepcopy_result
 from ..base_state import FullAttentionState
-from ..packed_mla.packed_transfer import transfer_packed_pages
 from ..dp_transfer import copy_packed_tokens
+from ..packed_mla.packed_transfer import transfer_packed_pages
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
@@ -103,6 +102,8 @@ class CompressedAttentionState(FullAttentionState):
     当前实现固定为单个共享 KV head，各 TP rank 完整复制；不执行 CSA/HCA 的历史选择。
     """
 
+    storage_layout = ("compressed_fp8_e8m0_token_row", 1)
+
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================
@@ -169,6 +170,9 @@ class CompressedAttentionState(FullAttentionState):
     def get_storage_layer_index(self, logical_layer_id: int) -> int:
         """按逻辑层号查询存储及配套字段的物理行；共享逻辑层返回同一下标。"""
         return self._logical_to_storage_layer[logical_layer_id]
+
+    def layer_resources(self, layer_id):
+        return self.get_layer_view(layer_id).kv
 
     def get_layer_view(self, logical_layer_id: int) -> CompressedAttentionLayerView:
         """从同一物理压缩块取 KV 和 indexer 视图，不重排数据或创建副本。"""
