@@ -7,6 +7,7 @@ import torch
 
 from lightllm.common.attention.api import AttentionPhase, CacheLayout, ContextCapacity, UnsupportedAttention
 from lightllm.common.attention.api.inputs import DenseInputs, DenseResources
+from lightllm.common.attention.api.spec import MLAConfig
 from lightllm.common.attention.api.workspace import AttentionWorkspace
 from unit_tests.common.attention.helpers import dense_class, make_env
 from lightllm.common.attention_state import AttentionStateManager
@@ -123,31 +124,32 @@ def test_dense_provider_reference_and_decode_graph(provider, phase, head_dim, kv
         max_kv_seq_len=16,
         max_q_seq_len=batch.max_q_seq_len,
     )
-    context = AttentionSession.allocate(
-        backend, capacity, capture=capture, workspace=pool.borrow_for_capture() if capture else pool
-    )
-    plan(backend, context, batch)
-    attention = make_layer_attention(backend, context, DenseResources(key=key, value=value))
+    session = AttentionSession()
     inputs = DenseInputs(query)
     output = torch.empty_like(query)
+    with session.prepare(batch, ({phase: backend},), capacity, workspace=lambda _: pool, capture=capture):
+        context = session.contexts[0]
+        attention = make_layer_attention(backend, context, DenseResources(key=key, value=value))
 
-    def run():
-        build(backend, context)
-        return run_attention(attention, context, inputs, out=output)
+        def run():
+            session.build_device_metadata()
+            return attention.forward(session, inputs, out=output)
 
-    actual = run()
-    assert actual.data_ptr() == output.data_ptr()
-    torch.testing.assert_close(actual, _reference(query, key, value, (7, 13), q_lengths, window), rtol=0.02, atol=0.015)
-    if not capture:
-        return
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        run()
-    torch.cuda.current_stream().wait_stream(stream)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        run()
+        actual = run()
+        assert actual.data_ptr() == output.data_ptr()
+        torch.testing.assert_close(
+            actual, _reference(query, key, value, (7, 13), q_lengths, window), rtol=0.02, atol=0.015
+        )
+        if not capture:
+            return
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            run()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
     captured_pointer = context.batch.b_seq_len.data_ptr()
     manager = AttentionStateManager(request_capacity=2)
 
@@ -157,10 +159,7 @@ def test_dense_provider_reference_and_decode_graph(provider, phase, head_dim, kv
         attention_contexts={0: context},
         graph_input_copies=lambda source: state.attention.replay_input_copies(source.attention),
     )
-    state.attention = AttentionSession()
-    state.attention.groups = state.attention_groups
-    state.attention.contexts = state.attention_contexts
-    state.attention.batch = context.batch
+    state.attention = session
     execution = CapturedGraph(graph, (state,), (output,), runtime=model.device_runtime)
     try:
         # Eager execution may grow the shared pool after capture. The graph must
@@ -235,6 +234,7 @@ def test_mla_spec_scale(phase, scale, provider):
         value_head_size=512,
         cache=CacheLayout("None", 4, torch.bfloat16, 1, 192, 512),
         softmax_scale=scale,
+        config=MLAConfig(64, 128),
     )
     prefix = {"flashinfer": "FlashInfer", "fa3": "Fa3"}[provider]
     cls = load_backend_class(f"backends.mla.{provider}.backend:{prefix}MLA{phase.value.title()}Backend")
@@ -259,7 +259,7 @@ def test_mla_spec_scale(phase, scale, provider):
     capacity = ContextCapacity(
         phase=phase, batch_size=2, token_num=sum(q_lengths), max_kv_seq_len=16, max_q_seq_len=max(q_lengths)
     )
-    context = AttentionSession.allocate(backend, capacity, capture=False, workspace=workspace)
+    context = AttentionSession._allocate(backend, capacity, capture=False, workspace=workspace)
     plan(backend, context, batch)
     build(backend, context)
     if phase is AttentionPhase.PREFILL:

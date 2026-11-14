@@ -138,7 +138,7 @@ def test_storage_generation_invalidates_graph_before_copy():
     execution.close()
 
 
-@pytest.mark.parametrize("invalid", ["role", "shape"])
+@pytest.mark.parametrize("invalid", ["role", "shape", "missing_hidden", "same_pointer_shape"])
 def test_graph_validates_all_lanes_before_copy_or_plan(monkeypatch, invalid):
     from lightllm.common.attention.api import BackendEnv, ContextCapacity
     from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -148,7 +148,6 @@ def test_graph_validates_all_lanes_before_copy_or_plan(monkeypatch, invalid):
     manager = AttentionStateManager(request_capacity=2)
     env = BackendEnv(
         runtime=runtime,
-        network_config={},
         hold_req_id=7,
         draft_step=0,
         max_seq_len=16,
@@ -186,13 +185,17 @@ def test_graph_validates_all_lanes_before_copy_or_plan(monkeypatch, invalid):
     ]
     if invalid == "role":
         sources[1].att_state_role = "draft0"
+    elif invalid == "missing_hidden":
+        targets[1].mtp_draft_input_hiddens = torch.ones(2, 4)
+    elif invalid == "same_pointer_shape":
+        sources[1].input_ids = targets[1].input_ids.view(1, 2)
     else:
         sources[1].input_ids = torch.ones(3, dtype=torch.int64)
     plans.clear()
     graph = SimpleNamespace(replay=lambda: pytest.fail("submitted invalid lanes"), reset=lambda: None)
     execution = CapturedGraph(graph, targets, runtime=runtime)
     try:
-        with pytest.raises(ValueError, match="model role|shape, dtype or device"):
+        with pytest.raises(ValueError, match="model role|shape, dtype or device|changed presence"):
             execution.replay(*sources)
         assert targets[0].input_ids.tolist() == [0, 0]
         assert targets[0].attention.batch.b_seq_len.tolist() == [5, 2]

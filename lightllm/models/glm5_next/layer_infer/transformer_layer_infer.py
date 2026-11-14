@@ -168,7 +168,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=self.prefill_attention.context(infer_state.attention),
+            query_metadata=infer_state.sparse_queries,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
@@ -238,7 +238,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=self.decode_attention.context(infer_state.attention),
+            query_metadata=infer_state.sparse_queries,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params

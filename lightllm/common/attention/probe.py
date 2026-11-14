@@ -16,7 +16,6 @@ def probe_dense(backend_cls, spec, runtime):
     q_heads, kv_heads, dim = spec.num_q_heads, spec.cache.key_heads, spec.head_size
     env = BackendEnv(
         runtime=runtime,
-        network_config={},
         hold_req_id=2,
         draft_step=0,
         max_seq_len=stride,
@@ -50,19 +49,16 @@ def probe_dense(backend_cls, spec, runtime):
         phase=spec.phase, batch_size=2, token_num=sum(q_lengths), max_kv_seq_len=stride, max_q_seq_len=max(q_lengths)
     )
     workspace = AttentionWorkspace(runtime=runtime)
-    workspace.reserve(backend.resource_requirements(capacity, capture=False))
     session = AttentionSession()
-    context = session.allocate(backend, capacity, capture=False, workspace=workspace)
-    session.plan(backend, context, batch)
-    session.build(backend, context)
-    session.contexts[0] = context
     attention = LayerAttention(
         group_id=0,
         logical_layer_id=0,
         resources=DenseResources(key, value),
         backend=backend,
     )
-    actual = attention.forward(session, DenseInputs(query), out=torch.empty_like(query))
+    with session.prepare(batch, ({batch.phase: backend},), capacity, workspace=lambda _: workspace):
+        session.build_device_metadata()
+        actual = attention.forward(session, DenseInputs(query), out=torch.empty_like(query))
     expected, start = [], 0
     for request, (length, q_length) in enumerate(zip(lengths, q_lengths)):
         q = query[start : start + q_length].float()

@@ -75,7 +75,6 @@ class AttentionBackend(ABC, Generic[Context, Inputs, Output]):
     def __init__(self, env: BackendEnv, spec: LayerSpec):
         self.runtime = env.runtime
         self.spec = spec
-        self.network_config = env.network_config
         self.draft_step = env.draft_step if spec.use_mtp else 0
         self.hold_req_id = env.hold_req_id
         self.alloc_tensor = env.alloc_tensor

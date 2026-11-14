@@ -1,4 +1,4 @@
-from unit_tests.common.attention.helpers import plan, build, run_attention
+from unit_tests.common.attention.helpers import plan, build, prepared_session
 from dataclasses import replace
 
 import pytest
@@ -41,18 +41,19 @@ def test_shared_backend_selects_each_states_cursor_through_graph_replay(dynamic,
 
     def step():
         build(backend, context)
-        a, b = run_attention(layer_a, context, None), run_attention(layer_b, context, None)
-        assert run_attention(layer_a, context, None) is a
+        a, b = layer_a.forward(session, None), layer_b.forward(session, None)
+        assert layer_a.forward(session, None) is a
         return a, b
 
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        step()
-    torch.cuda.current_stream().wait_stream(stream)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        a, b = step()
+    with prepared_session(context) as session:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            step()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            a, b = step()
     graph.replay()
     tail = [1] * 4 if dynamic else []
     assert a.tolist() == [1, 3] + tail
@@ -64,7 +65,8 @@ def test_shared_backend_selects_each_states_cursor_through_graph_replay(dynamic,
     assert b.tolist() == [1, 3] + tail
     # A new eager batch must not reuse the previous batch's gathered counts.
     plan(backend, context, batch)
-    a, b = step()
+    with prepared_session(context) as session:
+        a, b = step()
     assert a.tolist() == [2, 1] + tail
     assert b.tolist() == [1, 3] + tail
     expected_requests = torch.tensor([0, 2] + ([7] * 4 if dynamic else []), device="cuda")

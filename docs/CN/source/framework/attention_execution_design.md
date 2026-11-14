@@ -17,11 +17,11 @@
 
 三个数据类型各表达一种事实：
 
-- `LayerSpec`：静态需求，包括算法、阶段、head 维度、特性及 `CacheLayout`。只由 backend 持有，层绑定不保存副本。
+- `LayerSpec`：静态需求，包括算法、阶段、head 维度、特性、`CacheLayout` 和不可变的 family 配置。只由 backend 持有，层绑定不保存副本。
 - `AttentionBatch`：本次请求索引、长度、位置等输入；Tensor 借用自 `InferStateInfo` / `ReqManager`。
 - `AttentionContext`：backend 为本次执行或某个 Graph 捕获实例准备的 metadata、容量和 workspace 引用。同一 Session 内的 context 共享一份 batch。
 
-`InferStateInfo` 单向持有 Session。Session 只接收 batch、分组、容量和 workspace 提供函数，不反向引用模型或 `InferStateInfo`。Backend 可以通过资源视图更新 KV/Conv/SSM，但不接管存储分配、checkpoint 或请求回收。
+`InferStateInfo` 单向持有 Session。Session 只接收 batch、分组、容量和 workspace 提供函数，不反向引用模型或 `InferStateInfo`。State 返回存储层定义的视图，固定字段绑定但允许修改 Tensor 内容，adapter 将其与权重组成计算资源。ReplaySSM 只暴露 Tensor 和配置，不把可执行生命周期操作的 State 对象交给 backend。Backend 可以通过资源视图更新 KV/Conv/SSM，但不接管存储分配、checkpoint 或请求回收。
 
 ## 2. 初始化：描述、选择、绑定
 
@@ -43,7 +43,7 @@
 
 只有完整的 `(prefill_spec, decode_spec)` 相同，层才能共享 backend 和批次 context；权重、逻辑层号和存储视图仍留在各自的 `LayerAttention`。同一层的两个阶段必须使用相同的物理 `CacheLayout`，避免 prefill 写入的内容无法被 decode 读取。
 
-Backend 构造统一为 `Backend(env, spec)`。`BackendEnv` 显式传入设备 runtime、allocator、TP 和 MTP 等运行信息；量化组长等布局参数读取 `spec.cache`。能力声明放在 backend 类上，注册表只枚举实现和默认优先级。选择时检查环境、计算需求和服务约束，并执行对应探针；显式指定失败时报错，`auto` 才尝试其他候选。
+Backend 构造统一为 `Backend(env, spec)`。`BackendEnv` 显式传入设备 runtime、allocator、TP 和 MTP 等运行信息，不传模型配置字典；量化组长等布局参数读取 `spec.cache`。GDN/KDA 的卷积和 gate 参数、MLA 的分解维度以及稀疏索引参数由 adapter 翻译成不可变配置，进入 `LayerSpec`，共同参与分组。能力声明放在 backend 类上，注册表只枚举实现和默认优先级。选择时检查环境、计算需求和服务约束，并执行对应探针；显式指定失败时报错，`auto` 才尝试其他候选。
 
 每层选择一次 family adapter，描述和绑定复用它。Dense 与 MLA 是独立适配；GDN 与 KDA 只共享 Conv/SSM 布局描述。DeepSeekV4 等模型专有适配放在模型目录。
 
@@ -64,31 +64,32 @@ ModelAttention.session
   → AttentionSession.prepare
       → 校验 batch，取得 workspace lease
       → backend.allocate_context
-      → backend.plan_host                  # 图外主机规划
+      → backend.plan_host                  # 提交 Graph 前的规划，可启动设备操作
   → 模型 forward
       → session.build_device_metadata      # 设备 metadata
       → 逐层 LayerAttention.forward
           → Session 检查 context 归属
           → backend.forward                # 阶段计算
           → Session 处理 out 回写
+      → model.attention.finish_decode      # 所有层成功执行后统一推进 ReplaySSM 游标
   → 退出作用域，结束 lease
 ```
 
 Backend 的执行接口只有 `allocate_context`、`plan_host`、`build_device_metadata` 和 `forward`；资源预算与捕获 hooks 按需提供。每个实例只实现 prefill 或 decode，阶段专属构造和 helper 放在对应类中，共享类只保留共同定义。
 
-Session 保证 context 属于当前 backend 和 phase，backend 返回的容量必须等于请求容量。`batch_size`、`token_num` 必须与容量契约一致，序列长度不能超过上界；padding 和 Graph bucket 选择由模型执行路径负责。
+层执行及 metadata 构建必须处于活跃的 Session 作用域，退出后拒绝继续执行；捕获 context 可以保留供 Graph 重放使用。数值探针也使用同一作用域入口。Session 保证 context 属于当前 backend 和 phase，backend 必须保留请求的容量、workspace 和 capture 模式。`batch_size`、`token_num` 必须与容量契约一致，声明的序列最大长度不能超过上界；padding 和 Graph bucket 选择由模型执行路径负责。
 
-提供 `out` 时，Session 统一校验 dtype、device 和结果范围：backend 可直接写入 `out` 或返回它的合法视图；返回独立结果时由 Session 复制，并保留辅助输出。
+提供 `out` 时，Session 统一校验 dtype、device 和结果范围：backend 可直接写入 `out`；共享存储的结果必须落在连续 `out` 内，或是 strided `out` 的同起点、同 stride 前缀切片，不能使用行间 padding；返回独立结果时由 Session 复制，并保留辅助输出。
 
-Workspace 按 `(group_id, microbatch_index)` 隔离。准备、规划或 forward 抛出异常时，`ExitStack` 仍结束已取得的 lease。结束 lease 会记录完成事件供后续复用等待，不释放池中的 Tensor，也不表示 GPU 已同步完成。
+Workspace 按 `(group_id, microbatch_index)` 隔离。同一槽位要求串行执行，lease 负责事件依赖，不是并发互斥锁。准备、规划或 forward 抛出异常时，`ExitStack` 仍结束已取得的 lease。结束 lease 会记录完成事件供后续复用等待，不释放池中的 Tensor，也不表示 GPU 已同步完成。
 
 ## 4. CUDA Graph：固定地址，先校验再写入
 
-decode 捕获时，所有组的 context 使用同一份捕获 batch。长度容量显式采用 `graph_max_len_in_batch`，当前实际长度另行传给 host planner，避免用服务最大长度扩大捕获容量。捕获的 workspace 保留原 Tensor 引用并冻结；池后续扩容不替换旧 Graph 使用的地址。
+decode 捕获时，所有组的 context 使用同一份捕获 batch。长度容量显式采用 `graph_max_len_in_batch`，当前实际长度另行传给 host planner，避免用服务最大长度扩大捕获容量。捕获的 workspace 保留原 Tensor 引用并冻结其缓冲区绑定；provider 共享对象的内部地址稳定性仍由 provider 负责；池后续扩容不替换旧 Graph 使用的地址。
 
 `CapturedGraph` 一次重放的顺序为：
 
-1. 校验存储代次，以及所有 microbatch lane 的模型角色、backend 分组、容量和输入 Tensor 形状、dtype、device；只生成复制计划。
+1. 校验存储代次，以及所有 microbatch lane 的模型角色、backend 分组、容量和输入 Tensor 的存在性、形状、dtype、device，以及同地址视图的 stride；只生成复制计划。
 2. 所有 lane 校验通过后，等待 provider 上次 metadata 使用结束，并取得 workspace lease。
 3. 将新输入复制到捕获地址，调用各组 `plan_host` 更新主机规划，再提交 Graph 和 provider 辅助任务。
 4. 将辅助任务完成事件纳入 lease 收尾，保证下一次复用的依赖完整。
@@ -98,6 +99,14 @@ decode 捕获时，所有组的 context 使用同一份捕获 batch。长度容�
 请求映射表是共享存储，重放时必须保持地址；State 存储代次改变后必须重新绑定层并重新捕获。Graph 销毁时等待相关设备工作，关闭 provider hooks，再释放捕获引用。
 
 prefill 采用另一条路径：`PrefillGraphExecution` 持有分段 Graph 的输入、输出和 collector，attention 通过段间回调使用当前批次的 Session。`build_device_metadata` 在分段执行前运行，不属于上述 decode 捕获流程；多 lane 写入前校验的保证也仅针对 `CapturedGraph` 路径。
+
+各模型的 InferState 类通过 `graph_input_names` 声明 `AttentionBatch` 之外的 RoPE、draft hidden 等重放输入。新增输入时必须扩展此清单；DeepSeek-V4 C4 索引等图内产生的中间结果不列入清单，由捕获的节点重新计算。
+
+GLM 的请求展开信息由模型推理状态生成，以 `SparseQueryMetadata` 传入 indexer；它不再读取 provider context 的内部字段。decode 捕获输入复制包含这些 Tensor，prefill 回调使用当前批次的数据。
+
+ReplaySSM 的 cursor 由模型在参与层全部成功返回后统一推进一次，普通和 overlap decode 使用同一操作，Graph 捕获包含该操作。层执行失败时不会执行这一步；此前已写入的状态不提供事务回滚。
+
+DeepSeek3.2 仍从 sparse provider context 读取 ragged-index metadata；替换该 provider 时，需要先明确这部分家族数据契约。当前 provider 没有实现辅助 capture hooks，现有假 provider 测试验证调用顺序，不能证明真实 provider 提交辅助任务后的故障恢复。
 
 ## 5. 本次精简的取舍
 

@@ -8,6 +8,13 @@ from lightllm.models.llama.model import LlamaTpPartModel
 
 
 class NeoChatInferStateInfo(LlamaInferStateInfo):
+    graph_input_names = LlamaInferStateInfo.graph_input_names + (
+        "position_cos_h",
+        "position_sin_h",
+        "position_cos_w",
+        "position_sin_w",
+    )
+
     def __init__(self):
         super().__init__()
         self.position_cos = None

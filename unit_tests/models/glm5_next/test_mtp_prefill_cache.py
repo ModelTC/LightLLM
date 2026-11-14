@@ -132,8 +132,6 @@ def test_forward_uses_common_prefill(monkeypatch, tokens, mode):
     layer._project_sparse_qkv_a = lambda hidden, *_: (hidden, None, hidden)
     layer._normalize_sparse_kv = lambda kv, _: kv
     layer.indexer = SimpleNamespace(write_k_pools=Mock())
-    context = object()
-    layer.prefill_attention = SimpleNamespace(context=Mock(return_value=context))
     writer = Mock()
     layer._post_cache_kv = writer
     model.layers_infer = [layer]
@@ -142,7 +140,13 @@ def test_forward_uses_common_prefill(monkeypatch, tokens, mode):
     monkeypatch.setattr(basemodel.dist_group_manager, "get_group", Mock())
     monkeypatch.setattr(basemodel.dist_group_manager, "clear_deepep_buffer", Mock())
     monkeypatch.setattr(ModelInput, "to_cuda", lambda self: self.check_input())
-    monkeypatch.setattr(InferStateInfo, "init_some_extra_state", Mock())
+
+    def init_metadata(state, _model):
+        state.attention = SimpleNamespace(build_device_metadata=Mock())
+        state.q_kv_seq_len = torch.ones_like(state.input_ids, dtype=torch.int32)
+        state.q_req_idx = torch.zeros_like(state.input_ids, dtype=torch.int32)
+
+    monkeypatch.setattr(model.infer_state_class, "init_some_extra_state", init_metadata)
     event = Mock()
     monkeypatch.setattr(torch.cuda, "Event", Mock(return_value=event))
     output = model.forward(model_input)
@@ -169,8 +173,9 @@ def test_forward_uses_common_prefill(monkeypatch, tokens, mode):
         post_forward.assert_not_called()
     allocator.cache_env_in.assert_called_once()
     allocator.cache_env_out.assert_called_once()
-    layer.prefill_attention.context.assert_called_once_with(infer.attention)
-    assert layer.indexer.write_k_pools.call_args.args[2] is context
+    metadata = layer.indexer.write_k_pools.call_args.args[2]
+    assert metadata.q_kv_seq_len is infer.q_kv_seq_len
+    assert metadata.q_req_idx is infer.q_req_idx
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -259,6 +264,7 @@ def test_cache_only_matches_full_prefill_cache_writes(monkeypatch, kv_type, requ
         max_q_seq_len=max(q_lengths),
         max_kv_seq_len=2048,
         attention=AttentionSession(),
+        sparse_queries=context,
         req_manager=SimpleNamespace(req_to_token_indexs=None),
     )
     # Top-k outputs are discarded here; run the normal projections and cache writers.
@@ -267,7 +273,7 @@ def test_cache_only_matches_full_prefill_cache_writes(monkeypatch, kv_type, requ
     _, kv = layer._get_qkv(layer._att_norm(hidden, infer, weights), infer, weights)
     layer._post_cache_kv(kv, infer, weights)
     layer.indexer._get_indices(
-        **infer.get_topk_indices_params, infer_state=infer, att_state=context, layer_weight=weights
+        **infer.get_topk_indices_params, infer_state=infer, query_metadata=context, layer_weight=weights
     )
     expected = [s.clone() for s in stores]
     assert not torch.equal(initial[2], expected[2])

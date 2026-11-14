@@ -1,8 +1,15 @@
 from dataclasses import dataclass, replace
 
 from lightllm.common.attention.api import AttentionFamily, AttentionPhase, CacheLayout, LayerSpec
-from lightllm.common.attention.api.inputs import GDNResources, KDAResources, MLAResources
-from lightllm.common.attention.api.spec import AttentionFeature, CacheEncoding
+from lightllm.common.attention.api.inputs import DenseResources, GDNResources, KDAResources, MLAResources
+from lightllm.common.attention.api.spec import (
+    AttentionFeature,
+    CacheEncoding,
+    GDNConfig,
+    KDAConfig,
+    MLAConfig,
+    SparseMLAConfig,
+)
 
 
 @dataclass(frozen=True)
@@ -43,6 +50,7 @@ class AttentionAdapter:
             features=frozenset(features),
             variant=description.variant,
             softmax_scale=self.scale(layer),
+            config=self.computation_config(model, layer, state),
         )
 
     def cache(self, model, state, states, heads, head_dim, value_dim):
@@ -55,6 +63,9 @@ class AttentionAdapter:
             value_dim=value_dim,
             storage_schema=tuple(state.describe_layout() for state in states),
         )
+
+    def computation_config(self, model, layer, state):
+        return None
 
     def scale(self, layer):
         return None
@@ -76,8 +87,8 @@ class DenseAdapter(AttentionAdapter):
     def bind(self, model, layer, weight):
         state = model.att_state_manager.get_state(model.att_state_role, self.state_type, layer.layer_num_)
         resources = state.layer_resources(layer.layer_num_)
-        return replace(
-            resources,
+        return DenseResources(
+            **vars(resources),
             alibi=getattr(weight, "tp_alibi", None),
             sink=weight.attn_sinks.weight
             if AttentionFeature.SINK in layer.describe_attention(AttentionPhase.PREFILL).features
@@ -87,6 +98,9 @@ class DenseAdapter(AttentionAdapter):
 
 class MLAAdapter(AttentionAdapter):
     state_type = "mla"
+
+    def computation_config(self, model, layer, state):
+        return MLAConfig(layer.qk_rope_head_dim, layer.v_head_dim)
 
     def dimensions(self, model, layer):
         return layer.tp_q_head_num_, 1, layer.qk_nope_head_dim + layer.qk_rope_head_dim, layer.kv_lora_rank
@@ -100,6 +114,9 @@ class MLAAdapter(AttentionAdapter):
 
 
 class SparseMLAAdapter(MLAAdapter):
+    def computation_config(self, model, layer, state):
+        return SparseMLAConfig(model.config.get("index_topk", 2048), model.config.get("index_kpool", 1))
+
     def dimensions(self, model, layer):
         return (
             layer.tp_q_head_num_,
@@ -135,10 +152,12 @@ class ConvSSMAdapter(AttentionAdapter):
 class GDNAdapter(ConvSSMAdapter):
     state_type = "gdn"
 
+    def computation_config(self, model, layer, state):
+        return GDNConfig(state.config.num_v_heads, state.config.conv_width + 1, layer.network_config_["hidden_act"])
+
     def dimensions(self, model, layer):
-        config = model.config
-        heads = config["linear_num_key_heads"] // model.tp_world_size_
-        return heads, heads, config["linear_key_head_dim"], config["linear_value_head_dim"]
+        config = model.att_state_manager.get_state(model.att_state_role, self.state_type, layer.layer_num_).config
+        return config.num_k_heads, config.num_k_heads, config.key_dim, config.value_dim
 
     def bind(self, model, layer, weight):
         state = model.att_state_manager.get_state(model.att_state_role, self.state_type, layer.layer_num_)
@@ -158,10 +177,14 @@ class GDNAdapter(ConvSSMAdapter):
 class KDAAdapter(ConvSSMAdapter):
     state_type = "kda"
 
+    def computation_config(self, model, layer, state):
+        return KDAConfig(
+            state.config.conv_width + 1, layer.network_config_["linear_attn_config"].get("gate_lower_bound", -5.0)
+        )
+
     def dimensions(self, model, layer):
-        config = model.config["linear_attn_config"]
-        heads = config["num_heads"] // model.tp_world_size_
-        return heads, heads, config["head_dim"], config["head_dim"]
+        config = model.att_state_manager.get_state(model.att_state_role, self.state_type, layer.layer_num_).config
+        return config.num_k_heads, config.num_k_heads, config.key_dim, config.value_dim
 
     def bind(self, model, layer, weight):
         state = model.att_state_manager.get_state(model.att_state_role, self.state_type, layer.layer_num_)

@@ -14,7 +14,13 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.server.core.objs.start_args_type import StartArgs
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state, replace_logical_layer_groups
 from unit_tests.common.att_resources.test_capacity import definition
-from unit_tests.common.attention.helpers import make_backend, make_batch, make_context, make_layer_attention
+from unit_tests.common.attention.helpers import (
+    make_backend,
+    make_batch,
+    make_context,
+    make_layer_attention,
+    prepared_session,
+)
 
 
 @pytest.mark.parametrize("backend_name", ["fa3", "flashinfer"])
@@ -98,12 +104,12 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     )
     setattr(layer, operation + "_attention", attention)
     infer = InferStateInfo()
-    infer.attention.contexts = {0: context}
     monkeypatch.setattr(manager, "get_state", lambda *args: pytest.fail("forward must not look up storage owners"))
     q = torch.ones((1, state.config.head_num, state.config.head_dim))
-    if operation == "prefill":
-        output = layer._context_attention_kernel(q=q, kv=None, infer_state=infer, layer_weight=None)
-    else:
-        output = layer._token_attention_kernel(q=q, infer_state=infer, layer_weight=None)
+    with prepared_session(context, infer.attention):
+        if operation == "prefill":
+            output = layer._context_attention_kernel(q=q, kv=None, infer_state=infer, layer_weight=None)
+        else:
+            output = layer._token_attention_kernel(q=q, infer_state=infer, layer_weight=None)
     assert torch.equal(output, q)
     assert calls == [operation]

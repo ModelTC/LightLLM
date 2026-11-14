@@ -4,6 +4,13 @@ from lightllm.models.gemma4.triton_kernel.build_b_image_token_end import build_b
 
 
 class Gemma4InferStateInfo(InferStateInfo):
+    graph_input_names = InferStateInfo.graph_input_names + (
+        "position_cos_sliding",
+        "position_sin_sliding",
+        "position_cos_full",
+        "position_sin_full",
+    )
+
     def __init__(self):
         super().__init__()
         # Gemma-4 uses two RoPE frequency tables (one per layer type):

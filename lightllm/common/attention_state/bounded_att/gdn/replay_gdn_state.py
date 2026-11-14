@@ -20,7 +20,7 @@ from lightllm.utils.log_utils import init_logger
 from ...types import AxisMapping, PageKind, StateTransferLayout, TensorField, TransferRegion
 from ...utils import deepcopy_result, dtype_name
 from ..base_state import BoundedAttentionState
-from ..conv_ssm_types import ConvSSMStateConfig
+from ..conv_ssm_types import ConvSSMStateConfig, ReplayStorage, RecurrentStorage
 from ..copy_kernel import copy_bounded_att_tensors
 from ..transfer_utils import bounded_att_buffer_copies
 from .gdn_pages_pool import GDNPagesPool
@@ -102,7 +102,7 @@ class ReplayGDNState(BoundedAttentionState):
         assert self.num_key_heads > 0 and hv % self.num_key_heads == 0
         # 最后一个 slot 是 HOLD，replay 写零并且不记 history。
         self.hold_req_id = slots - 1
-        # cursor 是已接受、尚未折回的长度。各层只读，最后一层返回后才按整窗推进。
+        # cursor 是已接受、尚未折回的长度。各层只读，模型完成本步后才按整窗推进。
         self.cursors = torch.zeros(slots, dtype=torch.int32, device=device)
         # 按 launch 行和 key head 同步。每个请求槽留 mtp_step + 6 行，盖住验证窗口和重复的 HOLD。
         self.tile_sync_mark = torch.zeros(
@@ -195,10 +195,8 @@ class ReplayGDNState(BoundedAttentionState):
         return self._logical_to_storage_layer[logical_layer_id]
 
     def layer_resources(self, layer_id):
-        from lightllm.common.attention.api.inputs import RecurrentStorage
-
         conv, ssm = self.get_layer_view(layer_id)
-        return RecurrentStorage(conv, ssm, self.mtp_state_index, self)
+        return RecurrentStorage(conv, ssm, self.mtp_state_index, self.replay_storage())
 
     def get_layer_view(self, logical_layer_id: int):
         index = self.storage_layer(logical_layer_id)
@@ -456,17 +454,18 @@ class ReplayGDNState(BoundedAttentionState):
     # 六、Replay history
     #
     # cursor 是已接受、尚未折回的长度，各层只读。
-    # 最后一层返回后按整窗全接受推进：放不下时 cursor 变成窗口长度，否则加上窗口长度。
+    # 模型完成本步后按整窗全接受推进：放不下时 cursor 变成窗口长度，否则加上窗口长度。
     # MTP 验证后再减去没接受的尾部。宽度为 1 时窗口就是这一个 token，没有尾部可剪。
     # 前缀放不下时，折回发生在 replay kernel 内。fold_accepted_prefix 把已接受前缀写回 canonical SSM。
     # ========================================================================
 
-    def finish_decode_token(self, logical_layer_id: int, reqs: torch.Tensor, cu_seqlens: torch.Tensor) -> None:
-        """最后一层按整窗全接受推进 cursor。非最后一层直接返回。"""
+    def replay_storage(self):
+        return ReplayStorage(
+            logical_layer_ids=self.config.logical_layer_ids,
+            **{name: getattr(self, name) for name in ReplayStorage.__dataclass_fields__ if name != "logical_layer_ids"},
+        )
 
-        layers = () if self.config is None else self.config.logical_layer_ids
-        if not layers or logical_layer_id != layers[-1] or reqs.numel() == 0:
-            return
+    def finish_decode(self, reqs: torch.Tensor, cu_seqlens: torch.Tensor) -> None:
         advance_cursor(self, reqs, cu_seqlens)
 
     def fold_accepted_prefix(self, reqs: torch.Tensor) -> None:

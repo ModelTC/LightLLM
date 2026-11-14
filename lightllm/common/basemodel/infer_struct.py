@@ -20,6 +20,15 @@ class InferStateInfo:
     推理时用的信息结构体
     """
 
+    graph_input_names = (
+        "input_ids",
+        "b_position_delta",
+        "b_kv_seq_len",
+        "b_q_start_loc",
+        "b_kv_start_loc",
+        "mtp_draft_input_hiddens",
+    )
+
     def __init__(self):
         self.attention = AttentionSession()
 
@@ -132,20 +141,20 @@ class InferStateInfo:
         if self.att_state_role != new_infer_state.att_state_role:
             raise ValueError("captured attention belongs to a different model role or group")
         copies = self.attention.replay_input_copies(new_infer_state.attention)
-        batch_tensor_names = {
-            name for name, value in vars(self.attention.batch).items() if isinstance(value, torch.Tensor)
-        }
-        for attr_name, attr_value in vars(new_infer_state).items():
-            if isinstance(attr_value, torch.Tensor) and attr_name not in batch_tensor_names:
-                target = getattr(self, attr_name, None)
-                if target is not None and target.data_ptr() != attr_value.data_ptr():
-                    if (target.shape, target.dtype, target.device) != (
-                        attr_value.shape,
-                        attr_value.dtype,
-                        attr_value.device,
-                    ):
-                        raise ValueError(f"captured input {attr_name} changed shape, dtype or device")
-                    copies.append((target, attr_value))
+        if self.graph_input_names != new_infer_state.graph_input_names:
+            raise ValueError("captured input inventory changed")
+        for name in self.graph_input_names:
+            target, source = getattr(self, name, None), getattr(new_infer_state, name, None)
+            if target is None and source is None:
+                continue
+            if not isinstance(target, torch.Tensor) or not isinstance(source, torch.Tensor):
+                raise ValueError(f"captured input {name} changed presence")
+            if (target.shape, target.dtype, target.device) != (source.shape, source.dtype, source.device):
+                raise ValueError(f"captured input {name} changed shape, dtype or device")
+            if target.data_ptr() == source.data_ptr() and target.stride() != source.stride():
+                raise ValueError(f"captured input {name} changed strides at the captured address")
+            if target.data_ptr() != source.data_ptr():
+                copies.append((target, source))
         return copies
 
     def call_overlap_hook(self):

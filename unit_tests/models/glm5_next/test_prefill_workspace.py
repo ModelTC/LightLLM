@@ -1,3 +1,5 @@
+from unit_tests.common.attention.helpers import make_spec
+from lightllm.common.attention.api.spec import SparseMLAConfig
 from lightllm.common.attention.session import AttentionSession
 import pytest
 import torch
@@ -12,9 +14,9 @@ from lightllm.models.glm5_next.attention.fp8_sparse_mla import (
 
 def test_fp8_prefill_context_is_owned_by_the_backend():
     backend = object.__new__(GlmSparseMLAFp8PrefillBackend)
-    backend.network_config = {"index_topk": 2048, "index_kpool": 4}
+    backend.spec = make_spec(config=SparseMLAConfig(2048, 4))
     workspace = AttentionWorkspace("cpu")
-    context = AttentionSession.allocate(
+    context = AttentionSession._allocate(
         backend,
         ContextCapacity(phase=AttentionPhase.PREFILL, batch_size=2, token_num=4, max_kv_seq_len=32, max_q_seq_len=4),
         capture=False,
@@ -39,7 +41,7 @@ def test_fp8_workspace_reserved_per_microbatch_before_execution(decode_only):
     from lightllm.platform import get_device_runtime
 
     backend = object.__new__(GlmSparseMLAFp8PrefillBackend)
-    backend.network_config = {"index_topk": 2048, "index_kpool": 4}
+    backend.spec = make_spec(config=SparseMLAConfig(2048, 4))
     backend.prefill_token_capacity = 32
     backend.prefill_graph_enabled = True
     backend.decode_only = decode_only
@@ -54,7 +56,7 @@ def test_fp8_workspace_reserved_per_microbatch_before_execution(decode_only):
     assert gathered.numel() == (32 if decode_only else 2 * 64 + 32) * 512
     assert gathered.data_ptr() != second.scratch("glm_gathered_kv", 1, torch.bfloat16).data_ptr()
     assert first.scratch("glm_chunk_indices", 1, torch.int32).numel() == 32 * 2176
-    context = AttentionSession.allocate(
+    context = AttentionSession._allocate(
         backend,
         ContextCapacity(phase=AttentionPhase.PREFILL, batch_size=2, token_num=4, max_kv_seq_len=64, max_q_seq_len=4),
         capture=True,

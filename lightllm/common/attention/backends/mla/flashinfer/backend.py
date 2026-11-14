@@ -57,10 +57,10 @@ class FlashInferMLACommon:
         set_flashinfer_envs()
         super().__init__(env=env, spec=spec)
         self.tp_q_head_num = spec.num_q_heads
-        self.qk_nope_head_dim = env.network_config["qk_nope_head_dim"]
-        self.qk_rope_head_dim = env.network_config["qk_rope_head_dim"]
-        self.kv_lora_rank = env.network_config["kv_lora_rank"]
-        self.v_head_dim = env.network_config["v_head_dim"]
+        self.qk_nope_head_dim = spec.head_size - spec.config.rope_head_dim
+        self.qk_rope_head_dim = spec.config.rope_head_dim
+        self.kv_lora_rank = spec.value_head_size
+        self.v_head_dim = spec.config.value_head_dim
         self.q_data_type = spec.dtype
         self.kv_data_type = spec.cache.dtype
         self.max_seq_length = env.max_seq_len

@@ -153,10 +153,10 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         return self._logical_to_storage_layer[logical_layer_id]
 
     def layer_resources(self, layer_id):
-        from lightllm.common.attention.api.inputs import DenseResources
+        from lightllm.common.attention_state.types import DenseStorage
 
         (key, key_scale), (value, value_scale) = self.get_layer_view(layer_id)
-        return DenseResources(key, value, key_scale=key_scale, value_scale=value_scale)
+        return DenseStorage(key, value, key_scale=key_scale, value_scale=value_scale)
 
     def get_layer_view(
         self, logical_layer_id: int

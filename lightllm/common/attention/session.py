@@ -9,13 +9,17 @@ class AttentionSession:
         self.groups = ()
         self.contexts = {}
         self.batch = None
+        self._active = False
 
     @contextmanager
     def prepare(self, batch, groups, capacity, *, workspace, capture=False, replay=False):
+        if self._active:
+            raise RuntimeError("attention session is already active")
         batch.validate()
         capacity.check(batch)
         self.groups = groups
         self.batch = batch
+        self.contexts = {}
         with ExitStack() as leases:
             if not replay:
                 if capture:
@@ -31,64 +35,52 @@ class AttentionSession:
                     if capture:
                         scratch = scratch.borrow_for_capture()
                     scratch.reserve(backend.resource_requirements(capacity, capture=capture))
-                    context = self.allocate(backend, capacity, capture=capture, workspace=scratch)
+                    context = self._allocate(backend, capacity, capture=capture, workspace=scratch)
                     context.batch = self.batch
                     context.current_max_kv_seq_len = batch.max_kv_seq_len
                     backend.plan_host(context)
                     self.contexts[group_id] = context
-            yield self
+            self._active = not replay
+            try:
+                yield self
+            finally:
+                self._active = False
 
     @staticmethod
-    def allocate(backend, capacity, *, capture, workspace):
+    def _allocate(backend, capacity, *, capture, workspace):
         if capacity.phase is not backend.phase:
             raise ValueError("backend and context phases differ")
         context = backend.allocate_context(capacity, capture=capture, workspace=workspace)
         if context.capacity != capacity:
             raise ValueError("backend changed attention context capacity")
+        if context.workspace is not workspace or context.capture != capture:
+            raise ValueError("backend changed attention context workspace or capture mode")
         context.backend_identity = backend
         return context
-
-    @staticmethod
-    def plan(backend, context, batch, *, copy_inputs=True):
-        AttentionSession._check_context(backend, context)
-        batch.validate()
-        context.capacity.check(batch)
-        context.current_max_kv_seq_len = batch.max_kv_seq_len
-        if context.capture and context.batch is not None:
-            if copy_inputs:
-                context.batch.copy_inputs(batch)
-        elif context.capture:
-            context.batch = replace(
-                batch,
-                max_kv_seq_len=context.capacity.max_kv_seq_len,
-                total_token_num=context.capacity.batch_size * context.capacity.max_kv_seq_len,
-            )
-        else:
-            context.batch = batch
-        backend.plan_host(context)
 
     @staticmethod
     def _check_context(backend, context):
         if context.backend_identity is not backend or context.capacity.phase is not backend.phase:
             raise ValueError("context belongs to a different attention backend or phase")
 
+    def _check_active(self):
+        if not self._active:
+            raise RuntimeError("attention execution requires an active session scope")
+
     def context(self, layer):
+        self._check_active()
         context = self.contexts[layer.group_id]
         self._check_context(layer.backend, context)
         if context.batch is None:
             raise RuntimeError("prepare attention inputs before execution")
         return context
 
-    @staticmethod
-    def build(backend, context):
-        AttentionSession._check_context(backend, context)
-        if context.batch is None:
-            raise RuntimeError("prepare attention inputs before update")
-        backend.build_device_metadata(context)
-
     def build_device_metadata(self):
+        self._check_active()
         for group_id, context in self.contexts.items():
-            self.build(self.groups[group_id][context.capacity.phase], context)
+            backend = self.groups[group_id][context.capacity.phase]
+            self._check_context(backend, context)
+            backend.build_device_metadata(context)
 
     def forward(self, layer, inputs, *, out=None):
         context = self.context(layer)
@@ -99,13 +91,22 @@ class AttentionSession:
         if attention.dtype != out.dtype or attention.device != out.device:
             raise ValueError("out must match the attention result dtype and device")
         if attention.untyped_storage().data_ptr() == out.untyped_storage().data_ptr():
-            begin = attention.storage_offset()
-            end = begin + sum((size - 1) * stride for size, stride in zip(attention.shape, attention.stride())) + 1
-            out_end = (
-                out.storage_offset() + sum((size - 1) * stride for size, stride in zip(out.shape, out.stride())) + 1
-            )
-            if attention.numel() and (begin < out.storage_offset() or end > out_end):
-                raise ValueError("attention result view extends beyond out")
+            if out.is_contiguous():
+                begin = attention.storage_offset()
+                end = begin + sum((size - 1) * stride for size, stride in zip(attention.shape, attention.stride())) + 1
+                valid = begin >= out.storage_offset() and end <= out.storage_offset() + out.numel()
+            else:
+                valid = (
+                    attention.ndim == out.ndim
+                    and attention.storage_offset() == out.storage_offset()
+                    and all(size <= bound for size, bound in zip(attention.shape, out.shape))
+                    and all(
+                        size <= 1 or stride == out_stride
+                        for size, stride, out_stride in zip(attention.shape, attention.stride(), out.stride())
+                    )
+                )
+            if attention.numel() and not valid:
+                raise ValueError("attention result must be contained in contiguous out or a strided out prefix")
             return result
         if attention.numel() != out.numel():
             raise ValueError("out must match the attention result element count")

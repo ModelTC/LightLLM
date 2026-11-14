@@ -6,7 +6,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.attention.api import AttentionPhase
+from lightllm.common.attention.api import AttentionPhase, AttentionFamily
+from lightllm.common.attention.api.spec import GDNConfig
 from lightllm.common.attention.api.inputs import GDNInputs, GDNResources
 from lightllm.common.attention.backends.gdn.triton.backend import TritonGDNDecodeBackend, TritonGDNPrefillBackend
 from lightllm.common.attention_state import AttentionStateManager
@@ -47,7 +48,18 @@ def test_gdn_decode_keeps_logical_layer_state(
     model = model_stub(mtp_step=mtp_step, linear_att_ssm_data_type="float32")
     model.config = config
     model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _: mtp_step)
-    backend = TritonGDNDecodeBackend(make_env(model), make_spec(use_mtp=mtp_step > 0))
+    backend = TritonGDNDecodeBackend(
+        make_env(model),
+        make_spec(
+            AttentionFamily.GDN,
+            use_mtp=mtp_step > 0,
+            num_q_heads=1,
+            head_size=32,
+            value_head_size=32,
+            cache=replace(make_spec().cache, key_heads=1, state_dtype=torch.float32),
+            config=GDNConfig(2, 4, "silu"),
+        ),
+    )
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
     layout = ConvSSMStateConfig(layers, 1, 2, 32, 32, 3, dtype, torch.float32)
     resource = GDNState(layout, request_capacity=3, mtp_step=mtp_step, device=device)
@@ -125,7 +137,7 @@ def test_gdn_decode_keeps_logical_layer_state(
             b_q_seq_len=torch.tensor([5], device=device),
             b1_cu_q_seq_len=torch.tensor([0, 5], device=device, dtype=torch.int32),
         )
-        prefill = TritonGDNPrefillBackend(make_env(model), make_spec(phase=AttentionPhase.PREFILL))
+        prefill = TritonGDNPrefillBackend(make_env(model), replace(backend.spec, phase=AttentionPhase.PREFILL))
         context = make_context(prefill, batch)
         build(prefill, context)
         attention = replace(make_layer_attention(prefill, context, params), logical_layer_id=logical_layer)

@@ -31,6 +31,23 @@ class DeepseekV4InferStateInfo(InferStateInfo):
     SWA and compressor rings are owned by the model's bounded State.
     """
 
+    graph_input_names = InferStateInfo.graph_input_names + (
+        "position_cos_sliding",
+        "position_sin_sliding",
+        "position_cos_compress",
+        "position_sin_compress",
+        "dsv4_sparse_req_idx",
+        "dsv4_swa_indices",
+        "dsv4_swa_lengths",
+        "dsv4_swa_write_slots",
+        "dsv4_swa_runtime_write_slots",
+        "dsv4_image_left",
+        "dsv4_image_right",
+        "dsv4_c128_indices",
+        "dsv4_c128_lengths",
+        "_dsv4_token_to_batch_idx",
+    )
+
     @property
     def swa_state(self) -> FP8E8M0SlidingWindowState:
         return self.att_state_manager.get_state(

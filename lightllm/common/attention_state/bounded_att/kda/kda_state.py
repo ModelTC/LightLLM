@@ -120,7 +120,7 @@ class KDAState(BoundedAttentionState):
         return logical_layer_id in self._logical_to_storage_layer
 
     def layer_resources(self, layer_id):
-        from lightllm.common.attention.api.inputs import RecurrentStorage
+        from ..conv_ssm_types import RecurrentStorage
 
         conv, ssm = self.get_layer_view(layer_id)
         return RecurrentStorage(conv, ssm, self.mtp_state_index)

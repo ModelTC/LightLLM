@@ -4,26 +4,22 @@ import torch
 
 
 class GDNMetadata:
-    def _init_linear_layer_metadata(self, network_config, tp_world_size):
-        self.num_v_heads = network_config["linear_num_value_heads"]
-        self.num_k_heads = network_config["linear_num_key_heads"]
-        self.head_k_dim = network_config["linear_key_head_dim"]
-        self.head_v_dim = network_config["linear_value_head_dim"]
-        self.key_dim = self.head_k_dim * self.num_k_heads
-        self.value_dim = self.head_v_dim * self.num_v_heads
-        self.conv_kernel_dim = network_config["linear_conv_kernel_dim"]
-        self.activation = network_config["hidden_act"]
-        self.tp_qkvz_dim = (self.key_dim * 2 + self.value_dim * 2) // tp_world_size
-        self.tp_ba_dim = self.num_v_heads * 2 // tp_world_size
-        self.tp_num_k_heads = self.num_k_heads // tp_world_size
-        self.tp_num_v_heads = self.num_v_heads // tp_world_size
-        self.tp_key_dim = self.key_dim // tp_world_size
-        self.tp_value_dim = self.value_dim // tp_world_size
-        if self.num_v_heads % self.num_k_heads:
-            raise ValueError("num_v_heads must be divisible by num_k_heads")
-        self.num_v_heads_per_k_head = self.num_v_heads // self.num_k_heads
-        self.ssm_state_dtype = self.spec.cache.state_dtype
-        return
+    def _init_linear_layer_metadata(self):
+        spec = self.spec
+        self.head_k_dim = spec.head_size
+        self.head_v_dim = spec.value_head_size
+        self.tp_num_k_heads = spec.cache.key_heads
+        self.tp_num_v_heads = spec.config.value_heads
+        self.tp_key_dim = self.head_k_dim * self.tp_num_k_heads
+        self.tp_value_dim = self.head_v_dim * self.tp_num_v_heads
+        self.tp_qkvz_dim = self.tp_key_dim * 2 + self.tp_value_dim * 2
+        self.tp_ba_dim = self.tp_num_v_heads * 2
+        self.conv_kernel_dim = spec.config.conv_kernel_size
+        self.activation = spec.config.activation
+        if self.tp_num_v_heads % self.tp_num_k_heads:
+            raise ValueError("value_heads must be divisible by key_heads")
+        self.num_v_heads_per_k_head = self.tp_num_v_heads // self.tp_num_k_heads
+        self.ssm_state_dtype = spec.cache.state_dtype
 
     def _split_qkvzba(self, mixed_qkvzba):
         qkv_dim = self.tp_key_dim * 2 + self.tp_value_dim

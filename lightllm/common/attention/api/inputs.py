@@ -5,10 +5,15 @@
 这些数据结构只固定字段绑定，不禁止 backend 原地更新所借用的状态 tensor。
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import NamedTuple, Optional, Protocol
+from typing import NamedTuple, Optional, TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from lightllm.common.attention_state.bounded_att.conv_ssm_types import ReplayStorage
 
 
 @dataclass(frozen=True)
@@ -29,41 +34,6 @@ class MLAResources:
     qk_rope_head_dim: int
 
 
-class ReplaySSMState(Protocol):
-    """Borrowed replay storage; State retains allocation, checkpoint and release ownership."""
-
-    ssm_state: torch.Tensor
-    keys: torch.Tensor
-    deltas: torch.Tensor
-    gates: torch.Tensor
-    raw_keys: torch.Tensor
-    raw_values: torch.Tensor
-    betas: torch.Tensor
-    cursors: torch.Tensor
-    tile_sync_mark: torch.Tensor
-    num_key_heads: int
-    capacity: int
-    verify_width: int
-    compute_mode: str
-    gate_lower_bound: float
-    hold_req_id: int
-    kda: bool
-
-    def storage_layer(self, logical_layer_id: int) -> int:
-        ...
-
-    def finish_decode_token(self, logical_layer_id: int, reqs: torch.Tensor, cu_seqlens: torch.Tensor) -> None:
-        ...
-
-
-@dataclass(frozen=True)
-class RecurrentStorage:
-    conv: torch.Tensor
-    ssm: torch.Tensor
-    mtp_state_index: torch.Tensor
-    replay_state: ReplaySSMState | None = None
-
-
 @dataclass(frozen=True)
 class GDNResources:
     conv: torch.Tensor
@@ -73,7 +43,7 @@ class GDNResources:
     a_log: torch.Tensor
     dt_bias: torch.Tensor
     mtp_state_index: torch.Tensor | None = None
-    replay_state: ReplaySSMState | None = None
+    replay_state: ReplayStorage | None = None
 
 
 @dataclass(frozen=True)
@@ -84,7 +54,7 @@ class KDAResources:
     a_log: torch.Tensor
     dt_bias: torch.Tensor
     mtp_state_index: torch.Tensor | None = None
-    replay_state: ReplaySSMState | None = None
+    replay_state: ReplayStorage | None = None
 
 
 @dataclass(frozen=True)

@@ -36,7 +36,7 @@ class TritonGDNReplayCommon(GDNMetadata):
 
     def __init__(self, env, spec):
         super().__init__(env=env, spec=spec)
-        self._init_linear_layer_metadata(env.network_config, env.tp_size)
+        self._init_linear_layer_metadata()
         self.state_slots = env.state_slots
 
 
@@ -203,8 +203,6 @@ class TritonGDNReplayDecodeBackend(
             core = self._mtp(layer, context, mixed_qkv, conv_states, a, b, draft_step, state)
         else:
             core, z = self._decode(layer, context, mixed_qkv, z, conv_states, a, b, state)
-        # 各层都读到了本步开始时的 cursor。最后一层返回后再按整窗全接受推进。
-        state.finish_decode_token(layer.logical_layer_id, context.b_conv_buffer_idx, context.b_cu_seqlens)
         return GDNOutput(core, z)
 
 

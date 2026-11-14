@@ -235,3 +235,12 @@ class StateTransferLayout:
     # 当前 State 参与传输的字段区域；其他 State 的区域放在它们各自的 layout 中。
     # 包含所需的 KV、动态量化参数或运行态字段，所有偏移均相对同一张完整外部页。
     regions: tuple[TransferRegion, ...]
+
+
+@dataclass(frozen=True)
+class DenseStorage:
+    key: torch.Tensor
+    value: torch.Tensor
+    query_scale: torch.Tensor | None = None
+    key_scale: torch.Tensor | float | None = None
+    value_scale: torch.Tensor | float | None = None

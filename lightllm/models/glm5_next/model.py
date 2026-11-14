@@ -13,6 +13,7 @@ from lightllm.models.glm5_next.attention.sparse_mla import GlmSparseMLAPrefillBa
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 
+from .infer_struct import Glm5NextInferStateInfo
 from .layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
 from .layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from .layer_weights.pre_and_post_layer_weight import Glm5NextPreAndPostLayerWeight
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
 
 
 class Glm5NextTpPartModel(TpPartBaseModel):
+    infer_state_class = Glm5NextInferStateInfo
     is_hybrid_att_model = True
     pre_and_post_weight_class = Glm5NextPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight

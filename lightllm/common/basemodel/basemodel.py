@@ -797,6 +797,7 @@ class TpPartBaseModel:
             input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
             hidden_collector.add(layer_index=i, hidden=input_embs)
 
+        self.attention.finish_decode(infer_state)
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         post_output: PostLayerOutput = self.post_infer.token_forward(
             last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
@@ -1064,6 +1065,8 @@ class TpPartBaseModel:
         infer_state.call_overlap_hook()
         infer_state1.call_overlap_hook()
 
+        self.attention.finish_decode(infer_state)
+        self.attention.finish_decode(infer_state1)
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         last_input_embs1 = self.post_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
 

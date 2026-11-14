@@ -30,8 +30,6 @@ class LinearDecodeContext(AttentionContext):
 
 
 def update_linear_decode(context: LinearDecodeContext, draft_step: int, dynamic: bool, *, replay: bool) -> None:
-    from .mtp_state_params import build_dynamic_mtp_layout
-
     batch = context.batch
     context.accepted_by_state.clear()
     if draft_step == 0:
@@ -42,26 +40,27 @@ def update_linear_decode(context: LinearDecodeContext, draft_step: int, dynamic:
             context.b_cu_seqlens = torch.arange(batch.batch_size + 1, dtype=torch.int32, device=batch.device)
         return
     width = draft_step + 1
-    if dynamic:
-        context.b1_mtp_cu_q_seq_len, context.b_conv_buffer_idx = build_dynamic_mtp_layout(
-            b_req_idx=batch.b_req_idx,
-            b_mtp_index=batch.b_mtp_index,
-            hold_req_id=batch.hold_req_id,
-        )
-    else:
-        if batch.batch_size % width:
-            raise ValueError("linear decode batch size must be divisible by draft_step + 1")
-        context.b1_mtp_cu_q_seq_len = torch.arange(
-            0,
-            batch.batch_size + 1,
-            width,
-            dtype=torch.int32,
-            device=batch.device,
-        )
-        context.b_conv_buffer_idx = batch.b_req_idx.view(-1, width)[:, 0].contiguous()
+    context.b_conv_buffer_idx, context.b1_mtp_cu_q_seq_len = decode_request_layout(batch, draft_step, dynamic)
     if replay:
         context.b_ssm_buffer_idx = context.b_conv_buffer_idx
         context.b_cu_seqlens = context.b1_mtp_cu_q_seq_len
     else:
         offsets = torch.arange(width, dtype=batch.b_req_idx.dtype, device=batch.device)
         context.b_ssm_buffer_idx = context.b_conv_buffer_idx[:, None] * width + offsets
+
+
+def decode_request_layout(batch, draft_step, dynamic):
+    from .mtp_state_params import build_dynamic_mtp_layout
+
+    width = draft_step + 1
+    if not draft_step:
+        return batch.b_req_idx, torch.arange(batch.batch_size + 1, dtype=torch.int32, device=batch.device)
+    if dynamic:
+        cu, reqs = build_dynamic_mtp_layout(
+            b_req_idx=batch.b_req_idx, b_mtp_index=batch.b_mtp_index, hold_req_id=batch.hold_req_id
+        )
+        return reqs, cu
+    if batch.batch_size % width:
+        raise ValueError("linear decode batch size must be divisible by draft_step + 1")
+    cu = torch.arange(0, batch.batch_size + 1, width, dtype=torch.int32, device=batch.device)
+    return batch.b_req_idx.view(-1, width)[:, 0].contiguous(), cu

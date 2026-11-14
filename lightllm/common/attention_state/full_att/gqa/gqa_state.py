@@ -147,9 +147,9 @@ class GQAFullAttentionState(FullAttentionState):
         return self._logical_to_storage_layer[logical_layer_id]
 
     def layer_resources(self, layer_id):
-        from lightllm.common.attention.api.inputs import DenseResources
+        from lightllm.common.attention_state.types import DenseStorage
 
-        return DenseResources(*self.get_layer_view(layer_id))
+        return DenseStorage(*self.get_layer_view(layer_id))
 
     def get_layer_view(self, logical_layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
         """按逻辑层号返回 K、V 视图，head 数使用当前 TP 分片配置。"""

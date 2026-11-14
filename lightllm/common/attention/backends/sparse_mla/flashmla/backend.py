@@ -16,11 +16,6 @@ class NsaFlashMlaSparsePrefillContext(AttentionContext):
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
     ragged_mem_index: torch.Tensor = None
-    # Query-row metadata is consumed by env-specific sparse indexers.  It is
-    # kept on the context so the indexer never reaches into InferStateInfo.
-    q_kv_seq_len: torch.Tensor = None
-    q_req_idx: torch.Tensor = None
-    q_kv_start_loc: torch.Tensor = None
 
 
 @dataclasses.dataclass(slots=True)
@@ -31,8 +26,6 @@ class NsaFlashMlaSparseDecodeContext(AttentionContext):
     ragged_mem_index: torch.Tensor = None
     nsa_cache_seqlens: torch.Tensor = None
     nsa_cu_seqlens_k_new: torch.Tensor = None
-    q_kv_seq_len: torch.Tensor = None
-    q_req_idx: torch.Tensor = None
 
 
 class FlashMLASparseMLACommon:
@@ -55,33 +48,6 @@ class FlashMLASparseMLAPrefillBackend(
     FlashMLASparseMLACommon, AttentionBackend[NsaFlashMlaSparsePrefillContext, SparseMLAPrefillInputs, torch.Tensor]
 ):
     phase = AttentionPhase.PREFILL
-
-    @staticmethod
-    def _update_query_metadata(context):
-        """Materialize per-query request metadata on the execution context.
-
-        Prefill positions are supplied by the env's input preparation and
-        therefore remain correct for prompt-cache and speculative layouts.
-        ``output_size`` keeps the operation graph-capturable without a host
-        read of the GPU-side query lengths.
-        """
-        batch = context.batch
-        position_ids = batch.position_ids
-        if position_ids is None:
-            # Unit-level callers may construct an AttentionBatch directly.
-            # The runtime always supplies position_ids, but contiguous query
-            # ranges are an unambiguous fallback for those callers.
-            history = batch.b_seq_len - batch.b_q_seq_len
-            starts = torch.repeat_interleave(history, batch.b_q_seq_len, output_size=batch.token_num)
-            row_starts = torch.repeat_interleave(
-                batch.b1_cu_q_seq_len[:-1], batch.b_q_seq_len, output_size=batch.token_num
-            )
-            position_ids = starts + torch.arange(batch.token_num, device=batch.device, dtype=starts.dtype) - row_starts
-        context.q_kv_seq_len = position_ids + 1
-        context.q_req_idx = torch.repeat_interleave(batch.b_req_idx, batch.b_q_seq_len, output_size=batch.token_num)
-        context.q_kv_start_loc = torch.repeat_interleave(
-            batch.b1_cu_kv_seq_len[:-1], batch.b_q_seq_len, output_size=batch.token_num
-        )
 
     def _run_prefill(self, layer, context, q: torch.Tensor, kv: torch.Tensor, inputs) -> torch.Tensor:
         from sgl_kernel.flash_mla import flash_mla_sparse_fwd
@@ -113,7 +79,6 @@ class FlashMLASparseMLAPrefillBackend(
             ragged_mem_index=context.ragged_mem_index,
             hold_req_idx=batch.hold_req_id,
         )
-        self._update_query_metadata(context)
         return
 
     def forward(
@@ -165,8 +130,6 @@ class FlashMLASparseMLADecodeBackend(
         return NsaFlashMlaSparseDecodeContext(capacity, capture, workspace)
 
     def build_device_metadata(self, context: NsaFlashMlaSparseDecodeContext):
-        context.q_kv_seq_len = context.batch.b_seq_len
-        context.q_req_idx = context.batch.b_req_idx
         context.ragged_mem_index = context.workspace.scratch(
             "sparse_ragged", max(1, context.capacity.batch_size * context.capacity.max_kv_seq_len), torch.int32
         )

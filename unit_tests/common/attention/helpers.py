@@ -1,7 +1,8 @@
 from lightllm.common.attention.api.environment import BackendEnv
-from lightllm.common.attention.api.spec import AttentionFeature
+from lightllm.common.attention.api.spec import AttentionFeature, GDNConfig, KDAConfig, MLAConfig, SparseMLAConfig
 from lightllm.common.attention.session import AttentionSession
 import importlib
+from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -64,6 +65,12 @@ def make_spec(family=AttentionFamily.DENSE, phase=AttentionPhase.DECODE, **kwarg
         head_size=8,
         value_head_size=8,
     )
+    values["config"] = {
+        AttentionFamily.GDN: GDNConfig(2, 4, "silu"),
+        AttentionFamily.KDA: KDAConfig(4, -5.0),
+        AttentionFamily.MLA: MLAConfig(0, 8),
+        AttentionFamily.SPARSE_MLA: SparseMLAConfig(2048, 4),
+    }.get(family)
     features = set(kwargs.pop("features", ()))
     for key, feature in (
         ("use_mtp", "MTP"),
@@ -132,7 +139,7 @@ def make_context(backend, batch=None, *, capture=False, max_length=None, prepare
         max_q_seq_len=batch.max_q_seq_len,
     )
     backend = phase_backend(backend, batch.phase)
-    context = AttentionSession.allocate(backend, capacity, capture=capture, workspace=AttentionWorkspace(batch.device))
+    context = AttentionSession._allocate(backend, capacity, capture=capture, workspace=AttentionWorkspace(batch.device))
     if prepare:
         plan(backend, context, batch)
     else:
@@ -232,7 +239,6 @@ def backend_context(cls, phase, settings=None, **values):
                 config["hold_req_id"] = getattr(req_manager, "HOLD_REQUEST_ID", 7)
         backend = make_backend(cls, **config)
     defaults = dict(
-        network_config={"index_topk": 2048, "index_kpool": 4},
         prefill_graph_enabled=False,
         decode_only=False,
         prefill_token_capacity=0,
@@ -263,7 +269,7 @@ def update_context(context, fixture):
     build(context.backend_identity, context)
 
 
-def run_sparse(context, fixture, query, kv, parameters, *, out=None, alloc_func=None):
+def run_sparse(context, fixture, query, kv, parameters, *, out=None, alloc_func=None, session=None):
     from lightllm.common.attention.api.inputs import MLAResources, SparseMLADecodeInputs, SparseMLAPrefillInputs
 
     q = query[0] if isinstance(query, tuple) else query
@@ -317,7 +323,9 @@ def run_sparse(context, fixture, query, kv, parameters, *, out=None, alloc_func=
         import flash_mla
 
         context.capture_flashmla_sched_meta = flash_mla.get_mla_metadata()[0]
-    return run_attention(attention, context, inputs, out=out)
+    if session is not None:
+        return attention.forward(session, inputs, out=out)
+    return backend.forward(attention, context, inputs, out=out)
 
 
 def run_dense(context, fixture, query, key, value, *, out=None, alloc_func=None, params=None):
@@ -333,7 +341,7 @@ def run_dense(context, fixture, query, key, value, *, out=None, alloc_func=None,
     attention = make_layer_attention(context.backend_identity, context, params)
     if alloc_func is not None:
         context.backend_identity.alloc_tensor = alloc_func
-    return run_attention(attention, context, DenseInputs(query), out=out)
+    return context.backend_identity.forward(attention, context, DenseInputs(query), out=out)
 
 
 class StubBackend(AttentionBackend):
@@ -352,13 +360,8 @@ class StubBackend(AttentionBackend):
 
 def make_env(model=None, **kwargs):
     model = model or model_stub()
-    config = dict(model.config)
-    for name in ("qk_nope_head_dim", "qk_rope_head_dim", "kv_lora_rank", "v_head_dim"):
-        if hasattr(model, name):
-            config[name] = getattr(model, name)
     values = dict(
         runtime=model.device_runtime,
-        network_config=config,
         hold_req_id=getattr(model.req_manager, "HOLD_REQUEST_ID", 7),
         draft_step=model.mtp_manager.get_decode_draft_step(model.is_mtp_draft_model),
         state_slots=model.args.mtp_step + 1,
@@ -390,17 +393,52 @@ def phase_backend(backend, phase):
 
 
 def plan(backend, context, batch):
-    return AttentionSession.plan(backend, context, batch)
+    AttentionSession._check_context(backend, context)
+    batch.validate()
+    context.capacity.check(batch)
+    context.current_max_kv_seq_len = batch.max_kv_seq_len
+    if context.capture:
+        context.batch = context.batch or replace(
+            batch,
+            max_kv_seq_len=context.capacity.max_kv_seq_len,
+            total_token_num=context.capacity.batch_size * context.capacity.max_kv_seq_len,
+        )
+        context.batch.copy_inputs(batch)
+    else:
+        context.batch = batch
+    backend.plan_host(context)
 
 
 def build(backend, context):
-    return AttentionSession.build(backend, context)
+    AttentionSession._check_context(backend, context)
+    backend.build_device_metadata(context)
+
+
+@contextmanager
+def prepared_session(context, session=None):
+    from unittest.mock import patch
+
+    session = session or AttentionSession()
+    backend = context.backend_identity
+
+    def allocate(capacity, *, capture, workspace):
+        context.workspace = workspace
+        return context
+
+    with patch.object(backend, "allocate_context", allocate), patch.object(backend, "plan_host", lambda ctx: None):
+        with session.prepare(
+            context.batch,
+            ({context.capacity.phase: backend},),
+            context.capacity,
+            workspace=lambda _: context.workspace,
+            capture=context.capture,
+        ):
+            yield session
 
 
 def run_attention(layer, context, inputs=None, *, out=None):
-    session = AttentionSession()
-    session.contexts[layer.group_id] = context
-    return layer.forward(session, inputs, out=out)
+    with prepared_session(context) as session:
+        return layer.forward(session, inputs, out=out)
 
 
 def dense_class(provider, phase):

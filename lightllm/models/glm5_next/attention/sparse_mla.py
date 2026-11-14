@@ -96,8 +96,8 @@ class GlmSparseMLADecodeBackend(GlmSparseMLACommon, FlashMLASparseMLADecodeBacke
 
     def build_device_metadata(self, context: Glm5NextSparseDecodeContext):
         super().build_device_metadata(context)
-        pool = self.network_config["index_kpool"]
-        topk = self.network_config["index_topk"]
+        pool = self.spec.config.index_kpool
+        topk = self.spec.config.index_topk
         context.nsa_cache_seqlens = (
             torch.minimum(context.lengths // pool * pool, torch.full_like(context.lengths, topk))
             + context.lengths % pool

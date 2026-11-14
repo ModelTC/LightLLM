@@ -1,3 +1,5 @@
+from contextlib import ExitStack
+from unit_tests.common.attention.helpers import prepared_session
 from lightllm.common.attention.api import AttentionFamily, AttentionPhase, CacheEncoding, CacheLayout
 from unit_tests.common.attention.helpers import make_env
 import gc
@@ -114,8 +116,11 @@ def _case(heads, ratio):
     model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(3)]
     model.tp_rank_ = 0
     model.tp_world_size_ = 1
+    from lightllm.models.deepseek_v4.config import create_attention_config
+
     spec = make_spec(
         AttentionFamily.SPARSE_MLA,
+        config=create_attention_config(model.config, (0, 1, 2)),
         cache=CacheLayout(CacheEncoding.FP8_SPARSE_MLA, 256, torch.uint8, 1, 512, 512),
         num_q_heads=heads,
         head_size=512,
@@ -247,13 +252,18 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
 
     def decode_func(*states):
         outputs = tuple(
-            run_sparse(state.attention.contexts[0], state, state.q, state.packed_kv, state.att_control)
+            run_sparse(
+                state.attention.contexts[0], state, state.q, state.packed_kv, state.att_control, session=state.attention
+            )
             for state in states
         )
         return outputs if overlap else outputs[0]
 
     # Exercise the framework's warmup + capture directly, with no operator-specific reset.
-    outputs = runner.capture_decode(decode_func, *(case[0] for case in cases))
+    with ExitStack() as scopes:
+        for state_info, _, _, _ in cases:
+            scopes.enter_context(prepared_session(state_info.attention.contexts[0], state_info.attention))
+        outputs = runner.capture_decode(decode_func, *(case[0] for case in cases))
     outputs = outputs if overlap else (outputs,)
     for state_info, _, _, _ in cases:
         state = state_info.attention.contexts[0]
@@ -384,8 +394,9 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         return [att_out + 0.125]
 
     infer_state = new_request(1)
-    layer._context_attention_wrapper_run(q, q_lora, x, infer_state, layer_weight)
-    outputs = runner.capture_prefill(prefill_func, [q, q_lora, x], infer_state)
+    with prepared_session(infer_state.attention.contexts[0], infer_state.attention):
+        layer._context_attention_wrapper_run(q, q_lora, x, infer_state, layer_weight)
+        outputs = runner.capture_prefill(prefill_func, [q, q_lora, x], infer_state)
     torch.testing.assert_close(
         outputs[0],
         _reference(q, decoded, extra_decoded, infer_state.attn_params, heads) + 0.125,
@@ -399,7 +410,8 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         infer_state = new_request(length)
         current_meta = infer_state.attention.contexts[0].sched_meta_by_ratio[ratio]
         assert current_meta.tile_scheduler_metadata is None
-        actual = runner.replay([q, q_lora, x], infer_state)[0]
+        with prepared_session(infer_state.attention.contexts[0], infer_state.attention):
+            actual = runner.replay([q, q_lora, x], infer_state)[0]
         assert callback_states[-1] is infer_state
         assert current_meta.tile_scheduler_metadata.data_ptr() != previous_meta.tile_scheduler_metadata.data_ptr()
         torch.testing.assert_close(

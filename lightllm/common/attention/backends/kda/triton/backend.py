@@ -35,14 +35,11 @@ class TritonKDACommon:
 
     def __init__(self, env, spec):
         super().__init__(env=env, spec=spec)
-        config = env.network_config["linear_attn_config"]
-        self.num_heads = config["num_heads"]
-        self.head_dim = config["head_dim"]
-        assert self.num_heads % env.tp_size == 0
-        self.tp_num_heads = self.num_heads // env.tp_size
+        self.head_dim = spec.head_size
+        self.tp_num_heads = spec.num_q_heads
         self.tp_hidden_size = self.tp_num_heads * self.head_dim
-        self.conv_kernel_size = config["short_conv_kernel_size"]
-        self.lower_bound = config.get("gate_lower_bound", -5.0)
+        self.conv_kernel_size = spec.config.conv_kernel_size
+        self.lower_bound = spec.config.gate_lower_bound
         self.state_slots = env.state_slots
 
 

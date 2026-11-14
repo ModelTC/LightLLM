@@ -288,8 +288,14 @@ def _test_backend(requests, token_capacity=8192):
     model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _: 0)
     model.swa_prefill_workspace = get_swa_prefill_workspace(model)
     requests._test_model = model
+    from lightllm.models.deepseek_v4.config import create_attention_config
+
     return DeepseekV4SparseMLAFp8DecodeBackend(
-        make_env(model), make_spec(cache=replace(make_spec().cache, page_size=256))
+        make_env(model),
+        make_spec(
+            cache=replace(make_spec().cache, page_size=256),
+            config=create_attention_config(model.config, tuple(layer.layer_num_ for layer in model.layers_infer)),
+        ),
     )
 
 

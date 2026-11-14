@@ -5,6 +5,13 @@ from lightllm.common.basemodel.attention_adapters import AttentionAdapter
 class DeepseekV4Adapter(AttentionAdapter):
     state_type = "swa_"
 
+    def computation_config(self, model, layer, state):
+        from lightllm.models.deepseek_v4.config import create_attention_config
+
+        return create_attention_config(
+            model.config, tuple(item.layer_num_ for item in model.layers_infer), model.tp_rank_, model.tp_world_size_
+        )
+
     def dimensions(self, model, layer):
         return layer.tp_q_head_num_, 1, layer.head_dim_, layer.v_head_dim
 

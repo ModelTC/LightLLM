@@ -75,6 +75,31 @@ class CacheLayout:
 
 
 @dataclass(frozen=True)
+class GDNConfig:
+    value_heads: int
+    conv_kernel_size: int
+    activation: str
+
+
+@dataclass(frozen=True)
+class KDAConfig:
+    conv_kernel_size: int
+    gate_lower_bound: float
+
+
+@dataclass(frozen=True)
+class MLAConfig:
+    rope_head_dim: int
+    value_head_dim: int
+
+
+@dataclass(frozen=True)
+class SparseMLAConfig:
+    index_topk: int = 2048
+    index_kpool: int = 1
+
+
+@dataclass(frozen=True)
 class LayerSpec:
     """一个层在一个 phase 下的静态计算需求，用于能力检查和分组。
 
@@ -93,8 +118,10 @@ class LayerSpec:
     features: frozenset[AttentionFeature] = frozenset()
     variant: str = ""
     softmax_scale: float | None = None
+    config: object = None
 
     def __post_init__(self):
+        hash(self.config)
         features = set(self.features)
         if self.sliding_window is not None:
             features.add(AttentionFeature.SLIDING_WINDOW)

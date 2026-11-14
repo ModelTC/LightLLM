@@ -19,9 +19,6 @@ class NsaFlashMlaFp8SparsePrefillContext(AttentionContext):
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
     ragged_mem_index: torch.Tensor = None
-    q_kv_seq_len: torch.Tensor = None
-    q_req_idx: torch.Tensor = None
-    q_kv_start_loc: torch.Tensor = None
 
 
 @dataclasses.dataclass(slots=True)
@@ -32,8 +29,6 @@ class NsaFlashMlaFp8SparseDecodeContext(AttentionContext):
     ragged_mem_index: torch.Tensor = None
     flashmla_sched_meta: object = None
     capture_flashmla_sched_meta: object = None
-    q_kv_seq_len: torch.Tensor = None
-    q_req_idx: torch.Tensor = None
 
 
 class FlashMLASparseMLAFp8Common:
@@ -134,8 +129,6 @@ class FlashMLASparseMLAFp8DecodeBackend(FlashMLASparseMLAFp8Common, FlashMLASpar
         return NsaFlashMlaFp8SparseDecodeContext(capacity, capture, workspace)
 
     def build_device_metadata(self, context: NsaFlashMlaFp8SparseDecodeContext):
-        context.q_kv_seq_len = context.batch.b_seq_len
-        context.q_req_idx = context.batch.b_req_idx
         context.ragged_mem_index = context.workspace.scratch(
             "sparse_ragged", max(1, context.capacity.batch_size * context.capacity.max_kv_seq_len), torch.int32
         )

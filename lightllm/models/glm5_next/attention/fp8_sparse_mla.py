@@ -157,7 +157,7 @@ class GlmSparseMLAFp8PrefillBackend(GlmSparseMLAFp8Common, FlashMLASparseMLAFp8P
         tokens = max(1, self.prefill_token_capacity, capacity.token_num)
         kv_tokens = tokens if self.decode_only else capacity.batch_size * capacity.max_kv_seq_len + tokens
         gather_tokens = min(KV_GATHER_CHUNK_SIZE, kv_tokens)
-        topk = (self.network_config["index_topk"] + 3 + 127) // 128 * 128
+        topk = (self.spec.config.index_topk + 3 + 127) // 128 * 128
         return WorkspaceBudget(
             workspace=(
                 WorkspaceRequirement("glm_gathered_kv", gather_tokens * 512, torch.bfloat16),
@@ -232,6 +232,6 @@ class GlmSparseMLAFp8DecodeBackend(GlmSparseMLAFp8Common, FlashMLASparseMLAFp8De
             capture,
             workspace,
             decode_topk_bound=2051
-            if self.network_config["index_topk"] == 2048 and self.network_config["index_kpool"] == 4
+            if self.spec.config.index_topk == 2048 and self.spec.config.index_kpool == 4
             else None,
         )

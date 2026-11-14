@@ -91,14 +91,7 @@ class DeepseekV4SparseMLAFp8Common:
 
     def __init__(self, env, spec):
         super().__init__(env=env, spec=spec)
-        from lightllm.models.deepseek_v4.config import create_attention_config
-
-        config = create_attention_config(
-            model_config=env.network_config,
-            model_logical_layer_ids=env.layer_ids,
-            tp_rank=env.tp_rank,
-            tp_world_size=env.tp_size,
-        )
+        config = spec.config
         self.compress_ratios = tuple(dict.fromkeys(config.compress_ratios))
         self.swa_config = config.create_swa_config()
         self.compressed_configs = {

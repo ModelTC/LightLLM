@@ -7,6 +7,41 @@ from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import Deep
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 
 
+@pytest.mark.parametrize("draft", [False, True])
+def test_backend_initialization_uses_spec_heads(monkeypatch, draft):
+    from lightllm.common.attention.api import AttentionFamily, AttentionPhase
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
+    from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4SparseMLAFp8PrefillBackend
+    from lightllm.models.deepseek_v4.config import create_attention_config
+    from unit_tests.common.attention.helpers import make_env, make_spec
+
+    config = dict(
+        compress_ratios=[0, 4, 128], head_dim=512, qk_rope_head_dim=64, index_head_dim=128, sliding_window=128
+    )
+    spec = make_spec(
+        AttentionFamily.SPARSE_MLA,
+        AttentionPhase.PREFILL,
+        num_q_heads=16,
+        config=create_attention_config(config, (0, 1, 2)),
+    )
+    backend = DeepseekV4SparseMLAFp8PrefillBackend(make_env(), spec)
+    model = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
+    model.args = SimpleNamespace(llm_kv_type="fp8kv_dsa")
+    model.config, model.data_type = config, torch.bfloat16
+    model.is_mtp_draft_model = draft
+    model.layers_infer = [SimpleNamespace() for _ in range(3)]
+    model.attention = SimpleNamespace(groups=({AttentionPhase.PREFILL: backend},))
+    reservations = []
+    model.dsv4_workspace = SimpleNamespace(init_flashmla_prefill_q=lambda **kw: reservations.append(kw))
+    monkeypatch.setattr(TpPartBaseModel, "prepare_attention_backends", lambda self: None)
+    monkeypatch.setattr("lightllm.models.deepseek_v4.model.get_env_start_args", lambda: model.args)
+    model.prepare_attention_backends()
+    assert [layer.flashmla_q_head_num_ for layer in model.layers_infer] == [64, 64, 64]
+    assert len(reservations) == (0 if draft else 1)
+    if not draft:
+        assert reservations[0] == dict(tp_q_head_num=16, padded_q_head_num=64, head_dim=512, dtype=torch.bfloat16)
+
+
 @pytest.mark.parametrize("capture", [False, True], ids=["eager", "capture"])
 @pytest.mark.parametrize("draft", [False, True], ids=["main", "dspark"])
 def test_pre_layer_decode_uses_current_graph_flag(monkeypatch: pytest.MonkeyPatch, capture: bool, draft: bool) -> None:

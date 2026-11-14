@@ -72,7 +72,7 @@ def test_layer_attention_rejects_wrong_phase():
     context = make_context(backend, prepare=True)
     attention = make_layer_attention(backend, context, params=None)
     context.capacity = replace(context.capacity, phase=AttentionPhase.PREFILL)
-    with pytest.raises(ValueError, match="different attention backend"):
+    with pytest.raises(ValueError, match="capacity"):
         run_attention(attention, context, inputs=None)
 
 
@@ -228,7 +228,8 @@ def test_fp8_scale_layouts_are_not_interchangeable(format, provider):
     assert not any(cls.provider == provider and CacheEncoding(format) in cls.cache_encodings for cls in backends)
 
 
-def test_layer_shape_configures_group_planner():
+def test_layer_shape_configures_group_planner(monkeypatch):
+    monkeypatch.setattr("lightllm.common.attention.backends.dense.flashinfer.backend.set_flashinfer_envs", lambda: None)
     from lightllm.common.attention.backends.dense.flashinfer.backend import FlashInferDenseDecodeBackend
 
     model = model_stub(page_size=16)
@@ -368,15 +369,20 @@ def test_batch_builder_borrows_runtime_inputs_and_binding_checks_owner():
     assert borrowed.b_image_token_end is state.b_image_token_end
     backend = _OutputBackend(make_env(), make_spec())
     context = make_context(backend, borrowed, prepare=True)
-    state.attention.contexts = {0: context}
+    from lightllm.common.attention.api import AttentionWorkspace
+
     layer = make_layer_attention(backend, context, params=None)
-    assert layer.context(state.attention) is context
-    output = torch.ones(2, 32)
-    assert layer.forward(state.attention, output) is output
-    with pytest.raises(ValueError, match="different attention backend|specifications differ"):
-        replace(layer, backend=_OutputBackend(make_env(), make_spec())).forward(state.attention, output)
-    with pytest.raises(ValueError, match="different attention backend|specifications differ"):
-        replace(layer, backend=StubBackend(make_env(), make_spec())).context(state.attention)
+    with state.attention.prepare(
+        borrowed, ({borrowed.phase: backend},), context.capacity, workspace=lambda _: AttentionWorkspace("cpu")
+    ):
+        context = state.attention.contexts[0]
+        assert layer.context(state.attention) is context
+        output = torch.ones(2, 32)
+        assert layer.forward(state.attention, output) is output
+        with pytest.raises(ValueError, match="different attention backend"):
+            replace(layer, backend=_OutputBackend(make_env(), make_spec())).forward(state.attention, output)
+        with pytest.raises(ValueError, match="different attention backend"):
+            replace(layer, backend=StubBackend(make_env(), make_spec())).context(state.attention)
     with pytest.raises(AttributeError):
         context.b_requ_idx = borrowed.b_req_idx
 
@@ -487,7 +493,7 @@ def test_gdn_output_contract(monkeypatch, replay, phase):
     else:
         monkeypatch.setattr(backend, "_decode" if replay else "_run_decode", lambda *a: (core, gate))
     context = make_context(backend, make_batch(phase=phase))
-    state = SimpleNamespace(finish_decode_token=lambda *a: None)
+    state = SimpleNamespace()
     layer = make_layer_attention(backend, context, SimpleNamespace(conv=None, ssm=None, replay_state=state))
     out = torch.empty_like(core)
     result = run_attention(layer, context, GDNInputs(core), out=out)
@@ -498,12 +504,9 @@ def test_gdn_output_contract(monkeypatch, replay, phase):
 
 
 def test_binding_resolves_context_on_each_forward(monkeypatch):
-    from lightllm.common.attention.session import AttentionSession
-
     backend = _OutputBackend(make_env(), make_spec())
     first, second = make_context(backend), make_context(backend)
     layer = make_layer_attention(backend, first, params=None)
-    session = AttentionSession()
     forwarded = []
 
     def forward(layer, context, inputs, *, out=None):
@@ -513,8 +516,7 @@ def test_binding_resolves_context_on_each_forward(monkeypatch):
     monkeypatch.setattr(backend, "forward", forward)
     result, out = torch.ones(2, 32), torch.empty(2, 32)
     for context in (first, second):
-        session.contexts[0] = context
-        assert layer.forward(session, result, out=out) is out
+        assert run_attention(layer, context, result, out=out) is out
     assert all(a is b for a, b in zip(forwarded, (first, second)))
     torch.testing.assert_close(out, result)
 
@@ -538,6 +540,11 @@ def test_session_enforces_direct_backend_contract():
         def allocate_context(self, capacity, *, capture, workspace):
             return AttentionContext(capacity, capture, workspace)
 
+        def resource_requirements(self, capacity, *, capture):
+            from lightllm.common.attention.api import WorkspaceBudget
+
+            return WorkspaceBudget()
+
         def plan_host(self, context):
             pass
 
@@ -547,19 +554,20 @@ def test_session_enforces_direct_backend_contract():
     backend, session = Backend(), AttentionSession()
     batch = make_batch()
     capacity = ContextCapacity(phase=batch.phase, batch_size=2, token_num=2, max_kv_seq_len=16, max_q_seq_len=1)
-    context = session.allocate(backend, capacity, capture=True, workspace=AttentionWorkspace("cpu"))
-    session.plan(backend, context, batch)
-    session.contexts[0] = context
-    layer = make_layer_attention(StubBackend(make_env(), make_spec()), context, None)
-    layer = replace(layer, backend=backend)
-    out = torch.zeros(2, 4)
-    assert layer.forward(session, torch.ones(2, 4), out=out) is out
-    assert out.eq(1).all()
-    with pytest.raises(ValueError, match="different attention backend"):
-        replace(layer, backend=Backend()).forward(session, out)
-    context.capacity = replace(context.capacity, phase=AttentionPhase.PREFILL)
-    with pytest.raises(ValueError, match="different attention backend"):
-        layer.forward(session, out)
+    with session.prepare(
+        batch, ({batch.phase: backend},), capacity, workspace=lambda _: AttentionWorkspace("cpu"), capture=True
+    ):
+        context = session.contexts[0]
+        layer = make_layer_attention(StubBackend(make_env(), make_spec()), context, None)
+        layer = replace(layer, backend=backend)
+        out = torch.zeros(2, 4)
+        assert layer.forward(session, torch.ones(2, 4), out=out) is out
+        assert out.eq(1).all()
+        with pytest.raises(ValueError, match="different attention backend"):
+            replace(layer, backend=Backend()).forward(session, out)
+        context.capacity = replace(context.capacity, phase=AttentionPhase.PREFILL)
+        with pytest.raises(ValueError, match="different attention backend"):
+            layer.forward(session, out)
 
 
 def test_replay_copies_shared_batch_once(monkeypatch):
@@ -679,3 +687,114 @@ def test_model_capture_session_uses_graph_bound_and_one_batch():
             raise RuntimeError("forward failed")
 
     assert events == [("begin", 0), ("begin", 1), ("finish", 1), ("finish", 0)]
+
+
+@pytest.mark.parametrize("invalid", ["missing_hidden", "new_hidden", "same_pointer_shape", "same_pointer_stride"])
+def test_graph_inputs_validate_presence_and_alias_metadata(invalid):
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+
+    captured, incoming = InferStateInfo(), InferStateInfo()
+    captured.attention.batch = make_batch()
+    incoming.attention.batch = make_batch((9, 7), req_to_token_indexs=captured.attention.batch.req_to_token_indexs)
+    captured.input_ids = torch.zeros(2, dtype=torch.int64)
+    incoming.input_ids = torch.ones_like(captured.input_ids)
+    if invalid == "same_pointer_shape":
+        incoming.input_ids = captured.input_ids.view(1, 2)
+    elif invalid == "same_pointer_stride":
+        storage = torch.zeros(4, dtype=torch.int64)
+        captured.input_ids, incoming.input_ids = storage[::2], storage[:2]
+    elif invalid == "missing_hidden":
+        captured.mtp_draft_input_hiddens = torch.ones(2, 4)
+    else:
+        incoming.mtp_draft_input_hiddens = torch.ones(2, 4)
+    before = captured.attention.batch.b_seq_len.clone()
+    with pytest.raises(ValueError, match="captured input"):
+        captured.graph_input_copies(incoming)
+    torch.testing.assert_close(captured.attention.batch.b_seq_len, before)
+
+
+@pytest.mark.parametrize("capture", [False, True])
+def test_session_execution_ends_with_scope(capture):
+    from lightllm.common.attention.api import AttentionWorkspace, ContextCapacity, LayerAttention
+    from lightllm.common.attention.session import AttentionSession
+
+    session = AttentionSession()
+    backend = _OutputBackend(make_env(), make_spec())
+    batch = make_batch()
+    capacity = ContextCapacity(phase=batch.phase, batch_size=2, token_num=2, max_kv_seq_len=16, max_q_seq_len=1)
+    layer = LayerAttention(0, 0, None, backend)
+    value = torch.ones(2)
+    with session.prepare(
+        batch, ({batch.phase: backend},), capacity, workspace=lambda _: AttentionWorkspace("cpu"), capture=capture
+    ):
+        assert layer.forward(session, value) is value
+        with pytest.raises(RuntimeError, match="already active"):
+            with session.prepare(batch, (), capacity, workspace=lambda _: None):
+                pass
+    assert session.contexts[0].batch is not None
+    for operation in (lambda: layer.forward(session, value), session.build_device_metadata):
+        with pytest.raises(RuntimeError, match="active session"):
+            operation()
+
+
+@pytest.mark.parametrize("changed", ["capacity", "workspace", "capture"])
+def test_session_rejects_context_substitution(changed):
+    from lightllm.common.attention.api import AttentionContext, AttentionWorkspace, ContextCapacity
+    from lightllm.common.attention.session import AttentionSession
+
+    class Backend(StubBackend):
+        def allocate_context(self, capacity, *, capture, workspace):
+            if changed == "capacity":
+                capacity = replace(capacity, max_kv_seq_len=32)
+            elif changed == "workspace":
+                workspace = AttentionWorkspace("cpu")
+            else:
+                capture = not capture
+            return AttentionContext(capacity, capture, workspace)
+
+    batch = make_batch()
+    backend = Backend(make_env(), make_spec())
+    capacity = ContextCapacity(phase=batch.phase, batch_size=2, token_num=2, max_kv_seq_len=16, max_q_seq_len=1)
+    with pytest.raises(ValueError, match="backend changed"):
+        with AttentionSession().prepare(
+            batch, ({batch.phase: backend},), capacity, workspace=lambda _: AttentionWorkspace("cpu")
+        ):
+            pytest.fail("invalid context entered execution")
+
+
+def test_output_rejects_strided_padding_hole():
+    backend = _OutputBackend(make_env(), make_spec())
+    context = make_context(backend, prepare=True)
+    layer = make_layer_attention(backend, context, None)
+    base = torch.arange(16).view(2, 8)
+    with pytest.raises(ValueError, match="out"):
+        run_attention(layer, context, base[:1, 4:8], out=base[:, :4])
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_recurrent_constructor_uses_spec(replay):
+    from lightllm.common.attention.api.spec import GDNConfig, KDAConfig
+    from lightllm.common.attention.registry import load_backend_class
+
+    for family, config in ((AttentionFamily.GDN, GDNConfig(6, 5, "silu")), (AttentionFamily.KDA, KDAConfig(5, -3.0))):
+        mode = "replay" if replay else "triton"
+        name = f"Triton{family.value.upper()}{'Replay' if replay else ''}DecodeBackend"
+        cls = load_backend_class(f"backends.{family.value}.{mode}.backend:{name}")
+        spec = make_spec(family, num_q_heads=3, head_size=16, value_head_size=16, config=config)
+        spec = replace(spec, cache=replace(spec.cache, key_heads=3, state_dtype=torch.float32))
+        backend = cls(make_env(tp_size=8), spec)
+        if family is AttentionFamily.GDN:
+            assert (backend.tp_num_k_heads, backend.tp_num_v_heads, backend.tp_key_dim, backend.tp_value_dim) == (
+                3,
+                6,
+                48,
+                96,
+            )
+            assert backend.conv_kernel_dim == 5
+        else:
+            assert (backend.tp_num_heads, backend.tp_hidden_size, backend.conv_kernel_size, backend.lower_bound) == (
+                3,
+                48,
+                5,
+                -3.0,
+            )

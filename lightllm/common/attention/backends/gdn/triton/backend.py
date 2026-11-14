@@ -32,7 +32,7 @@ class TritonGDNCommon(GDNMetadata):
 
     def __init__(self, env, spec):
         super().__init__(env=env, spec=spec)
-        self._init_linear_layer_metadata(network_config=env.network_config, tp_world_size=env.tp_size)
+        self._init_linear_layer_metadata()
         self.state_slots = env.state_slots
 
 

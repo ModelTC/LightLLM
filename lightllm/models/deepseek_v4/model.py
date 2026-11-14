@@ -218,8 +218,8 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         self.args.llm_kv_type = args.llm_kv_type
         super().prepare_attention_backends()
         backend = self.attention.groups[0][AttentionPhase.PREFILL]
-        tp_q_head_num = backend.tp_q_head_num
-        padded_q_head_num = backend.padded_q_head_num
+        tp_q_head_num = backend.spec.num_q_heads
+        padded_q_head_num = (tp_q_head_num + 63) // 64 * 64
         if not self.is_mtp_draft_model:
             # Drafts share this buffer after the main model has captured its CUDA graphs.
             self.dsv4_workspace.init_flashmla_prefill_q(

@@ -133,9 +133,9 @@ class TpPartBaseModel:
 
 注册表枚举只加载后端定义，能力声明以类属性为准；同一后端的阶段共性放在共享 mixin。kernel 和 provider 的执行依赖在使用处导入，候选后端的环境检查才验证可选依赖。Neo 扩展缺失时，`auto` 可回退，显式选择则报错，不影响其他模型的后端枚举。
 
-后端构造只接收 frozen `BackendEnv` 和 `LayerSpec`。Env 显式提供设备 runtime、网络配置、TP 信息、HOLD 请求号、decode draft step、持久状态槽宽、长度上界和 allocator。`infer_state.attention: AttentionSession` 管理批次 context、owner/phase 校验、输入复制及输出写回。后端仅提供 `allocate_context`、图外每次重放执行的 `plan_host`、图内的 `build_device_metadata` 和 `forward`。模型通过 `with model.attention.session(infer_state)` 一次完成准备及 lease 释放；decode 捕获显式传入 Graph 长度上界。Session 位于 attention 模块，只接收 batch、backend 分组和容量，不依赖模型。所有 context 共享一个捕获 batch；Graph 先校验所有 microbatch 的复制计划，再统一复制和调用 host plan。
+后端构造只接收 frozen `BackendEnv` 和 `LayerSpec`。Env 显式提供设备 runtime、TP 信息、HOLD 请求号、decode draft step、持久状态槽宽、长度上界和 allocator。`infer_state.attention: AttentionSession` 管理批次 context、owner/phase 校验、输入复制及输出写回。后端仅提供 `allocate_context`、图外每次重放执行的 `plan_host`、图内的 `build_device_metadata` 和 `forward`。模型通过 `with model.attention.session(infer_state)` 一次完成准备及 lease 释放；decode 捕获显式传入 Graph 长度上界。Session 位于 attention 模块，只接收 batch、backend 分组和容量，不依赖模型。所有 context 共享一个捕获 batch；Graph 先校验所有 microbatch 的复制计划，再统一复制和调用 host plan。
 
-`AttentionBackend(env, spec)` 是唯一后端基类，`spec` 只存于后端。`LayerAttention` 只持有 backend、资源和路由；prefill/decode 专属构造及 helper 各归其阶段类。量化组长来自 `spec.cache`，allocator 直接注入后端。层的 `attention_adapter(family)` 选取一次 adapter，描述与绑定复用该实例；模型专有 adapter 放在模型目录。
+`AttentionBackend(env, spec)` 是唯一后端基类，`spec` 只存于后端。`LayerAttention` 只持有 backend、资源和路由；prefill/decode 专属构造及 helper 各归其阶段类。量化组长来自 `spec.cache`，family 参数由 adapter 翻译为不可变的 `spec.config`，allocator 直接注入后端。层的 `attention_adapter(family)` 选取一次 adapter，描述与绑定复用该实例；模型专有 adapter 放在模型目录。
 
 ```python
 output = self.decode_attention.forward(infer_state.attention, DenseInputs(q))

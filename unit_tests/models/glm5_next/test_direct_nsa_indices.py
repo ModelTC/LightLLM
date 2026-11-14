@@ -63,17 +63,7 @@ def test_topk_request_lookup_preserves_strided_tables(dense):
     torch.testing.assert_close(actual_relative, expected_relative, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize(
-    "reference",
-    [
-        "backends.sparse_mla.flashmla.fp8:FlashMLASparseMLAFp8PrefillBackend",
-        "lightllm.models.glm5_next.attention.sparse_mla:GlmSparseMLAPrefillBackend",
-        "lightllm.models.glm5_next.attention.fp8_sparse_mla:GlmSparseMLAFp8PrefillBackend",
-    ],
-)
-def test_sparse_context_owns_query_metadata(reference):
-    from lightllm.common.attention.registry import load_backend_class
-
+def test_model_owns_query_metadata():
     lengths = torch.tensor([5, 4], device="cuda", dtype=torch.int32)
     q_lengths = torch.tensor([2, 1], device="cuda", dtype=torch.int32)
     batch = AttentionBatch(
@@ -94,15 +84,16 @@ def test_sparse_context_owns_query_metadata(reference):
         b_ready_cache_len=tensor([3, 3]),
         position_ids=tensor([3, 4, 3]),
     )
-    backend = object.__new__(load_backend_class(reference))
-    context = AttentionSession.allocate(
-        backend,
-        ContextCapacity(phase=AttentionPhase.PREFILL, batch_size=2, token_num=3, max_kv_seq_len=5, max_q_seq_len=2),
-        capture=False,
-        workspace=AttentionWorkspace("cuda"),
-    )
-    plan(backend, context, batch)
-    build(backend, context)
-    torch.testing.assert_close(context.q_kv_seq_len, tensor([4, 5, 4]))
-    torch.testing.assert_close(context.q_req_idx, tensor([0, 0, 1]))
-    torch.testing.assert_close(context.q_kv_start_loc, tensor([0, 0, 5]))
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+    from lightllm.models.glm5_next.infer_struct import Glm5NextInferStateInfo
+    from unittest.mock import patch
+
+    state = Glm5NextInferStateInfo()
+    for name, value in vars(batch).items():
+        setattr(state, name, value)
+    state.is_prefill = True
+    state.input_ids = torch.empty(3, device="cuda", dtype=torch.int64)
+    with patch.object(InferStateInfo, "init_some_extra_state", lambda *args: None):
+        state.init_some_extra_state(None)
+    torch.testing.assert_close(state.sparse_queries.q_kv_seq_len, tensor([4, 5, 4]))
+    torch.testing.assert_close(state.sparse_queries.q_req_idx, tensor([0, 0, 1]))

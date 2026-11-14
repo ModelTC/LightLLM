@@ -21,7 +21,11 @@ if TYPE_CHECKING:
     from lightllm.server.core.objs.start_args_type import StartArgs
 
 
+from lightllm.models.glm5_next.infer_struct import Glm5NextInferStateInfo
+
+
 class Glm5NextMTPModel(TpPartBaseModel):
+    infer_state_class = Glm5NextInferStateInfo
     is_mtp_draft_model = True
     pre_and_post_weight_class = Glm5NextMTPPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight

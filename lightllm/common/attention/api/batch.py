@@ -89,6 +89,8 @@ class AttentionBatch:
                     raise ValueError(f"captured input {item.name} changed presence")
                 if (dst.shape, dst.dtype, dst.device) != (src.shape, src.dtype, src.device):
                     raise ValueError(f"captured input {item.name} changed shape, dtype or device")
+                if dst.data_ptr() == src.data_ptr() and dst.stride() != src.stride():
+                    raise ValueError(f"captured input {item.name} changed strides at the captured address")
                 if item.metadata.get("shared_storage") and dst.data_ptr() != src.data_ptr():
                     raise ValueError("request table storage changed; recapture attention")
                 if dst.data_ptr() != src.data_ptr():

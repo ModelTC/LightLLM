@@ -37,7 +37,6 @@ def _alloc_tensor(shape, dtype, device="cuda"):
 def backend_env(model):
     return BackendEnv(
         runtime=model.device_runtime,
-        network_config=model.config,
         hold_req_id=model.req_manager.HOLD_REQUEST_ID,
         draft_step=model.mtp_manager.get_decode_draft_step(model.is_mtp_draft_model),
         max_seq_len=model.max_seq_length,
@@ -86,6 +85,7 @@ class ModelAttention:
         self.routes = ()
         self.adapters = ()
         self.workspaces = {}
+        self.replay_states = ()
         self.generation = None
         self.runtime = model.device_runtime
         self.constraints = describe_serving_constraints(model)
@@ -100,6 +100,13 @@ class ModelAttention:
             state.check_execution(caps, self.constraints)
         groups, keys, routes, adapters = [], {}, [], []
         env = backend_env(model)
+        self.draft_step = env.draft_step
+        self.dynamic_verify = model.args.mtp_dynamic_verify and not model.is_mtp_draft_model
+        self.replay_states = tuple(
+            state
+            for state in model.att_state_manager.get_bounded_attention_states(model.att_state_role)
+            if getattr(state, "state_mode", None) == "replay"
+        )
         for layer in model.layers_infer:
             specs = []
             adapter = layer.attention_adapter(layer.describe_attention(AttentionPhase.PREFILL).family)
@@ -169,6 +176,14 @@ class ModelAttention:
                     ),
                 )
         self.generation = model.att_state_manager.storage_generation
+
+    def finish_decode(self, infer_state):
+        if self.replay_states:
+            from lightllm.common.attention.backends._shared.linear.layout import decode_request_layout
+
+            reqs, cu = decode_request_layout(infer_state.attention.batch, self.draft_step, self.dynamic_verify)
+            for state in self.replay_states:
+                state.finish_decode(reqs, cu)
 
     def workspace(self, group_id, slot):
         key = group_id, slot

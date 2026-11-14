@@ -228,7 +228,7 @@ class StaticFP8FullAttentionState(FullAttentionState):
         return self.scales[storage_layer_index, head_num:].view(1, head_num).expand(batch_size, head_num)
 
     def layer_resources(self, layer_id):
-        from lightllm.common.attention.api.inputs import DenseResources
+        from lightllm.common.attention_state.types import DenseStorage
 
         key, value = self.get_layer_view(layer_id)
         index = self.get_storage_layer_index(layer_id)
@@ -239,7 +239,7 @@ class StaticFP8FullAttentionState(FullAttentionState):
         else:
             key_scale, value_scale = map(float, self.cpu_scales[index])
             query_scale = None
-        return DenseResources(key, value, query_scale=query_scale, key_scale=key_scale, value_scale=value_scale)
+        return DenseStorage(key, value, query_scale=query_scale, key_scale=key_scale, value_scale=value_scale)
 
     def get_layer_view(self, logical_layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
         """按逻辑层号返回 K、V 视图，head 数使用当前 TP 分片配置。"""

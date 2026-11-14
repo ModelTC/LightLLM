@@ -1,3 +1,5 @@
+from dataclasses import replace
+from lightllm.common.attention.api.spec import SparseMLAConfig
 import weakref
 from types import SimpleNamespace
 
@@ -784,12 +786,12 @@ def test_fp8_decode_infer_state_graph_qpad_and_mutation(num_heads):
 
 
 def test_fp8_sparse_direct_decode_factory_bound_guard():
-    backend = object.__new__(GlmSparseMLAFp8DecodeBackend)
-    backend.network_config = {"index_topk": 2048, "index_kpool": 4}
+    backend = make_backend(GlmSparseMLAFp8DecodeBackend)
+    backend.spec = replace(backend.spec, config=SparseMLAConfig(2048, 4))
     assert backend_context(type(backend), "decode", settings=backend).decode_topk_bound == 2051
-    backend.network_config = {"index_topk": 2048, "index_kpool": 8}
+    backend.spec = replace(backend.spec, config=SparseMLAConfig(2048, 8))
     assert backend_context(type(backend), "decode", settings=backend).decode_topk_bound is None
-    backend.network_config = {"index_topk": 2047, "index_kpool": 4}
+    backend.spec = replace(backend.spec, config=SparseMLAConfig(2047, 4))
     assert backend_context(type(backend), "decode", settings=backend).decode_topk_bound is None
 
 
@@ -906,8 +908,8 @@ def test_fp8_sparse_direct_decode_general_graph_factory_entry(monkeypatch, num_h
         indices[3, 64:128] = indices[3, :64]  # duplicates
     assert torch.equal(indices[:, 2051:], torch.full_like(indices[:, 2051:], -1))
     control = {"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
-    backend = object.__new__(GlmSparseMLAFp8DecodeBackend)
-    backend.network_config = {"index_topk": 2048, "index_kpool": 4}
+    backend = make_backend(GlmSparseMLAFp8DecodeBackend)
+    backend.spec = replace(backend.spec, config=SparseMLAConfig(2048, 4))
     infer_state = _make_infer_state(is_cuda_graph_capture=False)
     state = backend_context(type(backend), "decode", settings=backend)
     state.flashmla_sched_meta = flash_mla.get_mla_metadata()[0]

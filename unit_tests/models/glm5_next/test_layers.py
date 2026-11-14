@@ -1,3 +1,4 @@
+from unit_tests.common.attention.helpers import prepared_session
 from lightllm.common.attention.api import AttentionPhase
 import dataclasses
 import json
@@ -173,6 +174,7 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     layer.indexer = SimpleNamespace(_get_indices=lambda **kwargs: (indices, indices))
     state = InferStateInfo()
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
+    state.sparse_queries = None
     state.att_state_role = "main"
     state.att_state_manager = SimpleNamespace(
         get_state=lambda **kwargs: SimpleNamespace(get_layer_view=lambda logical_layer_id: SimpleNamespace(kv=kv))
@@ -194,8 +196,10 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
         scores = projected[row].float() @ keys.T * config["qk_nope_head_dim"] ** -0.5
         expected.append(scores.softmax(-1) @ keys)
     expected = torch.stack(expected)
-    prefill = layer._context_attention_kernel(q, None, state, weight)
+    with prepared_session(context, state.attention):
+        prefill = layer._context_attention_kernel(q, None, state, weight)
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
+    state.sparse_queries = None
     context = make_context(backend, make_batch((2, 3, 5), phase=AttentionPhase.DECODE, device="cuda"))
     context.nsa_cache_seqlens = lengths
     context.nsa_cu_seqlens_k_new = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
@@ -203,7 +207,8 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     layer.decode_attention = make_layer_attention(
         backend, context, MLAResources(kv, layer.kv_lora_rank, 0), softmax_scale=layer.softmax_scale
     )
-    decode = layer._token_attention_kernel(q, state, weight)
+    with prepared_session(context, state.attention):
+        decode = layer._token_attention_kernel(q, state, weight)
     for output in (prefill, decode):
         torch.testing.assert_close(output.float(), expected, atol=1e-3, rtol=0.015)
 
@@ -457,6 +462,7 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
         state.input_ids = torch.zeros(3, device="cuda", dtype=torch.int64)
         state.b_ready_cache_len = torch.tensor([2], device="cuda", dtype=torch.int32)
         state.b_seq_len = torch.tensor([5], device="cuda", dtype=torch.int32)
+        state.b_req_idx = torch.tensor([0], device="cuda", dtype=torch.int32)
         state.init_some_extra_state(model)
         torch.testing.assert_close(
             state.position_ids, torch.arange(2, 5, device="cuda", dtype=state.position_ids.dtype)

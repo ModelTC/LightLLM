@@ -146,14 +146,16 @@ from lightllm.common.attention.backends.gdn.triton.backend import TritonGDNDecod
 from lightllm.common.attention.backends.gdn.replay.backend import TritonGDNReplayDecodeBackend
 from lightllm.platform import DeviceRuntime
 
-env = BackendEnv(runtime=DeviceRuntime("cpu"), network_config={
-    "linear_num_value_heads": 4, "linear_num_key_heads": 2, "linear_key_head_dim": 8,
-    "linear_value_head_dim": 16, "linear_conv_kernel_dim": 4, "hidden_act": "silu",
-}, hold_req_id=7, draft_step=0, max_seq_len=64, tp_size=1, alloc_tensor=torch.empty)
+from lightllm.common.attention.api.spec import GDNConfig
+
+env = BackendEnv(
+    runtime=DeviceRuntime("cpu"), hold_req_id=7, draft_step=0, max_seq_len=64, tp_size=1, alloc_tensor=torch.empty
+)
 for cls in (TritonGDNDecodeBackend, TritonGDNReplayDecodeBackend):
     cache = CacheLayout("plain", 1, torch.bfloat16, 2, 8, 16,
         state_mode=cls.state_mode, state_dtype=torch.float32)
-    spec = LayerSpec(AttentionFamily.GDN, AttentionPhase.DECODE, torch.bfloat16, cache, 2, 8, 16)
+    spec = LayerSpec(AttentionFamily.GDN, AttentionPhase.DECODE, torch.bfloat16, cache, 2, 8, 16,
+        config=GDNConfig(4, 4, "silu"))
     backend = cls(env, spec)
     assert backend.spec is spec
 assert not torch.cuda.is_initialized()
@@ -185,7 +187,6 @@ def test_quantized_prefill_uses_layout_group(monkeypatch, bits):
     monkeypatch.setattr(prefill, "context_attention_fwd_contiguous_kv", lambda **kwargs: kwargs["o"].zero_())
     env = BackendEnv(
         runtime=DeviceRuntime("cpu"),
-        network_config={},
         hold_req_id=7,
         draft_step=0,
         max_seq_len=64,

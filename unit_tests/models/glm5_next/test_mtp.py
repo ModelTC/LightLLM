@@ -262,10 +262,20 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
             a,
             bias,
             mtp_state_index=selected.mtp_state_index,
-            replay_state=selected if mode == "replay" else None,
+            replay_state=selected.replay_storage() if mode == "replay" else None,
         ),
     )
-    actual = run_attention(attention, context, KDAInputs(mixed, gate, beta))
+    from lightllm.common.basemodel.attention import ModelAttention
+    from unit_tests.common.attention.helpers import prepared_session
+
+    coordinator = ModelAttention.__new__(ModelAttention)
+    coordinator.replay_states = (selected,) if mode == "replay" else ()
+    coordinator.draft_step, coordinator.dynamic_verify = mtp_step, dynamic
+    with prepared_session(context, infer.attention):
+        actual = attention.forward(infer.attention, KDAInputs(mixed, gate, beta))
+        if mode == "replay":
+            assert selected.cursors.eq(0).all()
+        coordinator.finish_decode(infer)
     torch.testing.assert_close(actual.reshape(tokens, heads, dim)[:row], torch.cat(expected), atol=2e-3, rtol=1e-2)
     if mode == "native":
         checked_slots = len(requests) if dynamic and not mtp_step else expected_ssm.shape[0]
