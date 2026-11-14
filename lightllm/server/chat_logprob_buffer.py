@@ -12,7 +12,8 @@ class ChatLogprobBuffer:
     """按 token 序列识别分隔符，把可见文本的 logprob 放进正文或思维链。
 
     分隔符可以是一个或多个 token。凑齐才切换通道，分隔符本身不输出。
-    空增量的分数先累加，加到后面第一个非空文本上。生成结束时还没拼上的空增量丢掉。
+    每个采样位置单独一条 logprob。未完成的 UTF-8 字节文本为空，字符文本落在补齐的那个
+    token 上，分数不相加。特殊 token 的空文本不输出。
     """
 
     def __init__(
@@ -28,7 +29,6 @@ class ChatLogprobBuffer:
         self._separate_reasoning = separate_reasoning
         self._channel = "content"  # 当前输出通道：content、reasoning，或 commentary 的 drop。
         self._in_tool = False  # 是否处在工具调用开始和结束分隔符之间。
-        self._pending_logprob = 0.0  # 尚未拼成字符的空增量分数，等下一个非空文本一起输出。
         self._reasoning: list[dict[str, Any]] = []  # 分开思考时的思维链 logprob。
         self._content: list[dict[str, Any]] = []  # 正文 logprob；不分开思考时思维链也放这里。
         self._sequences: list[tuple[tuple[int, ...], str]] = []  # 分隔符 token id 序列和切换动作。
@@ -47,7 +47,6 @@ class ChatLogprobBuffer:
             self._resolve_held(closing=False)
         if finish_status.is_finished():
             self._resolve_held(closing=True)
-            self._pending_logprob = 0.0
 
     def reasoning_logprobs(self) -> dict[str, Any] | None:
         tokens = self._drain(items=self._reasoning)
@@ -193,16 +192,11 @@ class ChatLogprobBuffer:
                 self._save(text=text, score=score, metadata=metadata, token_id=token_id)
 
     def _save(self, text: str, score: float, metadata: dict[str, Any], token_id: int) -> None:
-        if not text:
-            # 未完成的 UTF-8 字节并进后面的字符。特殊 token 的空文本直接丢掉。
-            if not self._is_special(metadata=metadata, token_id=token_id):
-                self._pending_logprob += score
+        if not text and self._is_special(metadata=metadata, token_id=token_id):
             return
-        logprob = self._pending_logprob + score
-        self._pending_logprob = 0.0
         token = {
             "token": text,
-            "logprob": logprob,
+            "logprob": score,
             "bytes": None if "\ufffd" in text else list(text.encode("utf-8")),
             "top_logprobs": [
                 _candidate_logprob(tokenizer=self.tokenizer, token_id=candidate, logprob=value)
