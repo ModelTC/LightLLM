@@ -107,8 +107,11 @@ async def test_chat_logprobs_response(monkeypatch, fields, topk, stream, separat
     assert [entry["token"] for entry in reasoning] == (["think"] if separate_reasoning else [])
     expected_content = "你 yes" if separate_reasoning else "think你 yes"
     assert bytes(byte for entry in content for byte in entry["bytes"]).decode() == expected_content
-    assert [entry["token"] for entry in content] == (["你", " yes"] if separate_reasoning else ["think", "你", " yes"])
-    assert [entry["logprob"] for entry in content] == ([-0.75, -0.25] if separate_reasoning else [-0.25, -0.75, -0.25])
+    assert [entry["token"] for entry in content] == (
+        ["", "", "你", " yes"] if separate_reasoning else ["think", "", "", "你", " yes"]
+    )
+    expected_logprobs = [-0.25, -0.25, -0.25, -0.25] if separate_reasoning else [-0.25] * 5
+    assert [entry["logprob"] for entry in content] == expected_logprobs
     assert [entry["logprob"] for entry in reasoning] == ([-0.25] if separate_reasoning else [])
     expected = [{"token": " yes", "logprob": -0.125, "bytes": [32, 121, 101, 115]}] if topk > 0 else []
     assert all(entry["top_logprobs"] == expected for entry in content + reasoning)
@@ -287,13 +290,13 @@ async def test_chat_keeps_the_sampled_logprob(chat_response, stream, topk, rank)
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("stream", [False, True])
-async def test_empty_increments_fuse_into_the_following_text(chat_response, stream):
+async def test_empty_increments_keep_their_own_logprob(chat_response, stream):
     tokenizer = make_tokenizer(["<0xE4>", "<0xBD>", "<0xA0>"])
     text, _, content, _ = await chat_response(tokenizer, [(0, ""), (1, ""), (2, "你")], stream=stream)
     assert text == "你"
-    assert [entry["token"] for entry in content] == ["你"]
-    assert content[0]["logprob"] == pytest.approx(-2.401099 * 3)
-    assert content[0]["bytes"] == list("你".encode())
+    assert [entry["token"] for entry in content] == ["", "", "你"]
+    assert [entry["logprob"] for entry in content] == pytest.approx([-2.401099, -2.401099, -2.401099])
+    assert [entry["bytes"] for entry in content] == [[], [], list("你".encode())]
 
 
 @pytest.mark.anyio
@@ -424,7 +427,7 @@ async def test_tool_delimiter_fused_into_another_token_is_rejected(chat_response
         await chat_response(tokenizer, list(enumerate(pieces)), stream=False, tools=tools)
 
 
-def test_empty_increments_fuse_and_trailing_ones_are_dropped():
+def test_empty_increments_keep_each_position_including_a_trailing_one():
     from lightllm.server.chat_logprob_buffer import ChatLogprobBuffer
 
     tokenizer = SimpleNamespace(decode=lambda ids, **kwargs: "")
@@ -432,12 +435,14 @@ def test_empty_increments_fuse_and_trailing_ones_are_dropped():
     for token_id, text in enumerate(["", "", "你"]):
         buffer.record(text, {"id": token_id, "logprob": -0.25}, FinishStatus())
     content, _ = buffer.message_logprobs()
-    assert [token["token"] for token in content] == ["你"]
-    assert content[0]["logprob"] == -0.75
-    assert content[0]["bytes"] == list("你".encode())
+    assert [token["token"] for token in content] == ["", "", "你"]
+    assert [token["logprob"] for token in content] == [-0.25, -0.25, -0.25]
+    assert content[2]["bytes"] == list("你".encode())
 
     buffer.record("", {"id": 3, "logprob": -0.5}, FinishStatus(FinishStatus.FINISHED_STOP))
-    assert buffer.message_logprobs() == (None, None)
+    content, reasoning = buffer.message_logprobs()
+    assert [(token["token"], token["logprob"]) for token in content] == [("", -0.5)]
+    assert reasoning is None
 
 
 def test_reasoning_delimiter_must_be_one_token():

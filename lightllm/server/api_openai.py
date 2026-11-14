@@ -885,7 +885,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     model=request.model,
                     choices=[final_choice],
                 )
-                yield f"data: {_serialize_sse_chunk(final_chunk, _final_choice_nulls)}\n\n"
+                final_logprobs = None
+                if logprob_buffer is not None:
+                    content_tokens, reasoning_tokens = logprob_buffer.message_logprobs()
+                    if content_tokens or reasoning_tokens:
+                        final_logprobs = {"content": content_tokens, "reasoning_content": reasoning_tokens}
+                yield f"data: {_serialize_sse_chunk(final_chunk, _final_choice_nulls, logprobs=final_logprobs)}\n\n"
 
         reasoning_parser = get_env_start_args().reasoning_parser
         completion_tokens_details = None
