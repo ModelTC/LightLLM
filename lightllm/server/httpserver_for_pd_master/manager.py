@@ -27,11 +27,13 @@ from lightllm.server.httpserver.stop_seq_match import wrap_stop_match_stream
 from lightllm.server.httpserver.grammar import create_output_grammar_compiler
 from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.utils.envs_utils import (
+    get_pd_allowed_node_addresses,
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
     get_pd_node_busy_retry_timeout_seconds,
     get_pd_node_continuation_resource_wait_timeout_seconds,
     get_pd_node_resource_wait_timeout_seconds,
+    validate_pd_node_address,
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
 from .pd_selector import PDSelectionExtraInfo, create_selector
@@ -1036,6 +1038,14 @@ class PDManager:
 
     def register_pd(self, pd_info_json, websocket):
         pd_client = PD_Client_Obj(**pd_info_json)
+        validate_pd_node_address(pd_client.client_ip_port)
+        if pd_client.client_ip_port not in get_pd_allowed_node_addresses():
+            raise ValueError("PD node address is not enrolled")
+        for current in self.url_to_pd_nodes.values():
+            if current.client_ip_port == pd_client.client_ip_port and (
+                current.node_id != pd_client.node_id or current.mode != pd_client.mode
+            ):
+                raise ValueError("PD node address already belongs to another node or mode")
         client_max_req_total_len = pd_client.start_args["max_req_total_len"]
         if client_max_req_total_len != self.args.max_req_total_len:
             logger.error(

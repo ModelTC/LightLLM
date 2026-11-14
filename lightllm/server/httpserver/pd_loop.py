@@ -16,7 +16,7 @@ from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.server.httpserver.async_queue import AsyncQueue
 from lightllm.utils.net_utils import get_hostname_ip, format_host_port
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
+from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size, get_pd_register_token
 from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Client_Obj, PD_Master_Obj
 from lightllm.server.core.objs import StartArgs
@@ -90,6 +90,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             uri = f"ws://{pd_master_obj.host_ip_port}/pd_register"
             async with websockets.connect(
                 uri,
+                additional_headers={"Authorization": f"Bearer {get_pd_register_token()}"},
                 max_size=get_lightllm_websocket_max_message_size(),
                 max_queue=(2048 * 1024, 2048 * 1023),  # 关键修改
                 # 下方应用层心跳已负责存活检测，禁用协议层 keepalive，避免繁忙连接被误断。

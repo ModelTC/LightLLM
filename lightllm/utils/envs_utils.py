@@ -1,13 +1,64 @@
 import os
 import json
+import ipaddress
+import re
 import torch
 import uuid
 from easydict import EasyDict
 from functools import lru_cache
 from lightllm.utils.log_utils import init_logger
 
-
 logger = init_logger(__name__)
+
+
+def get_pd_register_token() -> str:
+    token = os.getenv("LIGHTLLM_PD_REGISTER_TOKEN")
+    # uvicorn encodes WebSocket headers as ASCII, so any other token fails the handshake.
+    if not token or not token.isascii() or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in token):
+        raise ValueError("LIGHTLLM_PD_REGISTER_TOKEN must be a nonempty ASCII bearer token")
+    return token
+
+
+def validate_pd_node_address(address: str) -> None:
+    """Require a canonical host:port authority before constructing node URLs."""
+    if not isinstance(address, str) or not address.isascii() or any(char.isspace() for char in address):
+        raise ValueError("invalid PD node address")
+    if address.startswith("["):
+        match = re.fullmatch(r"\[([0-9a-f:]+)\]:([0-9]+)", address)
+        if match is None or str(ipaddress.IPv6Address(match[1])) != match[1]:
+            raise ValueError("invalid PD node IPv6 address")
+    else:
+        match = re.fullmatch(r"([a-z0-9.-]+):([0-9]+)", address)
+        if match is None:
+            raise ValueError("invalid PD node address")
+        host = match[1]
+        # Numeric hosts must be canonical IPv4, never abbreviated, octal or hex forms.
+        if re.fullmatch(r"[0-9.]+", host):
+            if str(ipaddress.IPv4Address(host)) != host:
+                raise ValueError("invalid PD node IPv4 address")
+        elif (
+            len(host) > 253
+            or any(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None for label in host.split("."))
+            or re.fullmatch(r"(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+))*", host)
+        ):
+            raise ValueError("invalid PD node hostname")
+    port = match[2]
+    if len(port) > 5 or not 1 <= int(port) <= 65535 or str(int(port)) != port:
+        raise ValueError("invalid PD node port")
+
+
+def get_pd_allowed_node_addresses() -> set[str]:
+    try:
+        addresses = json.loads(os.environ["LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES"])
+        if not isinstance(addresses, list) or not addresses:
+            raise ValueError("empty address list")
+        for address in addresses:
+            validate_pd_node_address(address)
+    except (KeyError, TypeError, ValueError):
+        raise ValueError(
+            "LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES must be a nonempty JSON array of node authorities"
+        ) from None
+    return set(addresses)
 
 
 def set_unique_server_name(args):
