@@ -16,7 +16,7 @@ from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
 from .cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
 
@@ -30,13 +30,11 @@ class MultiLevelKVCacheManager:
     ):
         self.args: StartArgs = args
         ports = get_shm_port_args()
-        context = zmq.Context(2)
-        self.zmq_recv_socket = context.socket(zmq.PULL)
+        self.context = zmq.Context(2)
+        self.zmq_recv_socket = self.context.socket(zmq.PULL)
         self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{ports.multi_level_kv_cache_port}")
 
-        self.send_to_router = context.socket(zmq.PUSH)
-        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{ports.router_port}")
-        logger.info(f"send_to_router sendhwm {self.send_to_router.getsockopt(zmq.SNDHWM)}")
+        self.router_addr = f"{args.zmq_mode}127.0.0.1:{ports.router_port}"
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=True)
         self.shm_req_manager = ShmReqManager()
         self.only_cpu_cache_enable = args.enable_cpu_cache and not args.enable_disk_cache
@@ -45,6 +43,11 @@ class MultiLevelKVCacheManager:
         # 控制进行 cpu cache 页面匹配的时间，超过时间则不再匹配，直接转发。
         self.cpu_cache_time_out = 0.5
         self.recv_queue = Queue(maxsize=1024)
+        self.send_to_router_queue = Queue(maxsize=args.running_max_req_size)
+        self.send_to_router_init = concurrent.futures.Future()
+        self.send_to_router_thread = threading.Thread(target=self.send_loop, daemon=True)
+        self.send_to_router_thread.start()
+        self.send_to_router_init.result()
         self.cpu_cache_thread = threading.Thread(target=self.cpu_cache_hanle_loop, daemon=True)
         self.cpu_cache_thread.start()
 
@@ -144,7 +147,7 @@ class MultiLevelKVCacheManager:
         # 超时时，放弃进行 cache page 的匹配。
         current_time = time.time()
         if current_time - start_time >= self.cpu_cache_time_out:
-            self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+            self.send_to_router_queue.put(group_req_indexes)
             logger.warning(
                 f"cache matching time out {current_time - start_time}s, "
                 f"group_req_id: {group_req_indexes.group_req_id}"
@@ -211,8 +214,22 @@ class MultiLevelKVCacheManager:
         for req in reqs:
             self.shm_req_manager.put_back_req_obj(req)
 
-        self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+        self.send_to_router_queue.put(group_req_indexes)
         return
+
+    def send_loop(self):
+        try:
+            with self.context.socket(zmq.PUSH) as send_to_router:
+                send_to_router.connect(self.router_addr)
+                logger.debug(f"send_to_router sendhwm {send_to_router.getsockopt(zmq.SNDHWM)}")
+                self.send_to_router_init.set_result(None)
+                while True:
+                    group_req_indexes = self.send_to_router_queue.get()
+                    send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception as e:
+            if self.send_to_router_init.done():
+                raise
+            self.send_to_router_init.set_exception(e)
 
     def recv_loop(self):
         try:
@@ -228,7 +245,7 @@ class MultiLevelKVCacheManager:
                         recv_objs.append(recv_obj)
 
                         start_time = recv_obj.time_mark
-                        logger.info(
+                        logger.debug(
                             f"multi_level_kv_cache recive group req id {recv_obj.group_req_id} "
                             f"cost time {time.time() - start_time} s"
                         )
@@ -254,6 +271,7 @@ def start_multi_level_kv_cache_manager(args, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::multi_level_kv_cache")
+    install_fatal_thread_excepthook()
     start_parent_check_thread()
 
     try:
