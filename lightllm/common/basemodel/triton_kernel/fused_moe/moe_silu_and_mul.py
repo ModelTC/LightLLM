@@ -16,10 +16,12 @@ def _silu_and_mul_quant_fp8(
     groups,
     scale_stride_n,
     limit,
+    alpha,
     fp8_max: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     GROUPS_PER_CTA: tl.constexpr,
     USE_LIMIT: tl.constexpr,
+    USE_ALPHA: tl.constexpr,
     USE_GELU: tl.constexpr,
 ):
     ids = tl.program_id(0) * GROUPS_PER_CTA + tl.arange(0, GROUPS_PER_CTA)
@@ -33,7 +35,9 @@ def _silu_and_mul_quant_fp8(
     if USE_LIMIT:
         gate = tl.minimum(gate, limit)
         up = tl.minimum(tl.maximum(up, -limit), limit)
-    if USE_GELU:
+    if USE_ALPHA:
+        gate = 1 / (1 + tl.exp(-gate * alpha)) * gate
+    elif USE_GELU:
         cubed = gate * gate * gate
         arg = 0.7978845608028654 * (gate + 0.044715 * cubed)
         gate = 0.5 * gate * (1.0 + (2.0 / (1.0 + tl.exp(-2.0 * arg)) - 1.0))
@@ -54,19 +58,21 @@ def _silu_and_mul_quant_fp8(
     configs_gen_func=lambda: [
         {"GROUPS_PER_CTA": g, "num_warps": w} for g, w in [(1, 1), (4, 1), (4, 4), (8, 4), (16, 4)]
     ],
-    static_key_func=lambda input, group_size, dtype, limit: {
+    static_key_func=lambda input, group_size, dtype, limit, alpha: {
         "N": input.shape[1] // 2,
         "input_dtype": str(input.dtype),
         "output_dtype": str(dtype),
         "group_size": group_size,
         "clamp": limit is not None,
         "gelu": ffn_use_tanh_approximate_gelu() and limit is None,
+        **({"alpha": alpha} if alpha is not None else {}),
     },
     run_key_func=lambda input: input.shape[0],
 )
-def silu_and_mul_quant_fp8(input, group_size, dtype, limit=None, alloc_func=torch.empty, run_config=None):
+def silu_and_mul_quant_fp8(input, group_size, dtype, limit=None, alloc_func=torch.empty, run_config=None, alpha=None):
     """Fuse blocked activation with FP8 quantization and TMA-aligned UE8M0 scales."""
     assert input.ndim == 2 and input.stride(1) == 1
+    assert alpha is None or limit is not None
     assert input.shape[1] % (2 * group_size) == 0 and group_size == triton.next_power_of_2(group_size)
     m, n = input.shape[0], input.shape[1] // 2
     quant = alloc_func((m, n), device=input.device, dtype=dtype)
@@ -84,9 +90,11 @@ def silu_and_mul_quant_fp8(input, group_size, dtype, limit=None, alloc_func=torc
         groups,
         scale.stride(1),
         limit,
+        alpha,
         torch.finfo(dtype).max,
         group_size,
         USE_LIMIT=limit is not None,
+        USE_ALPHA=alpha is not None,
         USE_GELU=ffn_use_tanh_approximate_gelu() and limit is None,
         **run_config,
     )
