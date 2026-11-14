@@ -2,7 +2,7 @@ import pickle
 import subprocess
 import sys
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -120,6 +120,7 @@ def test_notification_payload(backend, page_kind, method, stage, destination):
     transporter = backend.__new__(backend)
     transporter.node_id, transporter.tp_idx = 10, 0
     transporter.num_pages = 12
+    transporter.page_payload_bytes = {"kv": 128, "att_state": 128}
     transporter.remote_agents = {"prefill": object(), "decode": object()}
     if backend is NcclKVTransporter:
         transporter.host_ip = "127.0.0.1"
@@ -194,12 +195,16 @@ def test_receiver_rejects_payload_with_decode_local_mark():
 def test_nixl_rejects_different_peer_page_capacity_before_registering_handles():
     transporter = NixlKVTransporter.__new__(NixlKVTransporter)
     transporter.page_bytes = 128
+    transporter.page_payload_bytes = {"kv": 128, "att_state": 64}
     transporter.nixl_agent = SimpleNamespace(get_xfer_descs=Mock(), prep_xfer_dlist=Mock())
     with pytest.raises(AssertionError, match="same page byte capacity"):
         transporter._create_paged_xfer_handles([(4096, 512, 0, None)], 2, "peer")
     transporter.nixl_agent.get_xfer_descs.assert_not_called()
     transporter._create_paged_xfer_handles([(4096, 256, 0, None)], 2, "peer")
-    transporter.nixl_agent.get_xfer_descs.assert_called_once_with([(4096, 128, 0), (4224, 128, 0)], "VRAM")
+    assert transporter.nixl_agent.get_xfer_descs.call_args_list == [
+        call([(4096, 128, 0), (4224, 128, 0)], "VRAM"),
+        call([(4096, 64, 0), (4224, 64, 0)], "VRAM"),
+    ]
 
 
 def test_nccl_checks_peer_page_bytes_before_accepting_agent():
@@ -209,7 +214,12 @@ def test_nccl_checks_peer_page_bytes_before_accepting_agent():
     transporter.remote_agents = {}
     transporter.kv_move_buffer = SimpleNamespace(shape=(2, 128))
     transporter.num_pages = 2
-    assert pickle.loads(transporter.local_page_mem_desc) == {"num_pages": 2, "page_bytes": 128}
+    transporter.page_payload_bytes = {"kv": 128, "att_state": 64}
+    assert pickle.loads(transporter.local_page_mem_desc) == {
+        "num_pages": 2,
+        "page_bytes": 128,
+        "payload_bytes": transporter.page_payload_bytes,
+    }
     peer = SimpleNamespace(
         agent_name="peer",
         agent_metadata=pickle.dumps(NcclAgentMetadata("peer", "127.0.0.1", 1234, 0)),

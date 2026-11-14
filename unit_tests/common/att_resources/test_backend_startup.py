@@ -258,37 +258,16 @@ def test_backend_allocates_all_roles_before_warmup(
                     )
                 )
         else:
-            assert all(
-                getattr(item, "att_state_manager", None) is None for item in models
-            ), "resources already initialized"
-            req_manager = create_req_manager(
-                max_request_num=models[0].max_req_num,
-                max_sequence_length=max(item.get_req_manager_max_seq_len() for item in models),
-            )
-            for item in models:
-                item.bind_req_manager(req_manager=req_manager)
-            for index, item in enumerate(models):
-                item.prepare_attention_states()
-                assert all(other.att_state_manager is models[0].att_state_manager for other in models[: index + 1])
-                assert all(not hasattr(other, "att_state_manager") for other in models[index + 1 :])
-            main = models[0]
-            main.att_state_manager.finish_state_registration()
-            main.att_state_manager.load_full_att_calibration(args=args)
-            main.att_state_manager.initialize_storage(
-                args, token_capacity=main.max_total_token_num, mem_fraction=main.mem_fraction
-            )
-            assert all(item.max_total_token_num is None for item in models)
-            for index, item in enumerate(models):
-                item.init_runtime()
-                assert all(not getattr(other, "backends_bound", False) for other in models[index + 1 :])
-                assert warmed == padded == captured == prefill_captured == {id(other) for other in models[: index + 1]}
+            from lightllm.common.basemodel.model_group import initialize_model_group
+
+            initialize_model_group(models[0], models[1:])
 
     start_runtime()
     assert request_allocations == [(2, 32)]
     assert manager_creations == [models[0].max_req_num + 1]
     assert captured == {id(model) for model in models}
     assert checked == [models[0]]
-    assert ready == ([True] if via_backend else [])
+    assert ready == [True]
     manager = models[0].att_state_manager
     assert len(manager.get_bounded_attention_states()) == draft_count + int(main_linear)
     assert all(not hasattr(model, "mtp_state_cursors") for model in models)

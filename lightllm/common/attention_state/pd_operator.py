@@ -66,12 +66,20 @@ class PDOperator:
         return layouts
 
     @lru_cache(maxsize=None)
+    def get_payload_bytes(self, kind: Literal["kv", "att_state"]) -> int:
+        if kind == "kv":
+            layouts = self.get_pd_full_att_page_layouts()
+        elif kind == "att_state":
+            layouts = self.get_pd_bounded_att_page_layouts()
+        else:
+            raise ValueError(f"unknown PD page kind {kind}")
+        return max((layout.byte_end for layout in layouts.values()), default=0)
+
+    @lru_cache(maxsize=None)
     def get_page_bytes(self) -> int:
-        token_layouts = self.get_pd_full_att_page_layouts()
-        runtime_layouts = self.get_pd_bounded_att_page_layouts()
-        full_bytes = max((layout.byte_end for layout in token_layouts.values()), default=0)
-        runtime_bytes = max((layout.byte_end for layout in runtime_layouts.values()), default=0)
-        if token_layouts and full_bytes < runtime_bytes:
+        full_bytes = self.get_payload_bytes("kv")
+        runtime_bytes = self.get_payload_bytes("att_state")
+        if full_bytes and full_bytes < runtime_bytes:
             logger.warning(
                 f"PD KV page size ({full_bytes} bytes) is smaller than the complete attention runtime "
                 f"({runtime_bytes} bytes); using {runtime_bytes} bytes per transfer page"
@@ -81,6 +89,7 @@ class PDOperator:
     def clear_layout_cache(self) -> None:
         self.get_pd_full_att_page_layouts.cache_clear()
         self.get_pd_bounded_att_page_layouts.cache_clear()
+        self.get_payload_bytes.cache_clear()
         self.get_page_bytes.cache_clear()
 
     def create_ipc_copy(self) -> AttentionStateManager:

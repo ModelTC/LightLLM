@@ -23,7 +23,9 @@ except ImportError:
 
 
 class NixlKVTransporter:
-    def __init__(self, node_id: int, tp_idx: int, kv_move_buffer: Tensor):
+    def __init__(
+        self, node_id: int, tp_idx: int, kv_move_buffer: Tensor, page_payload_bytes: dict[str, int] | None = None
+    ):
         self.node_id = node_id
         self.tp_idx = tp_idx
         self.capture_telemetry = os.getenv("LIGHTLLM_NIXL_CAPTURE_TELEMETRY", "0").lower() in (
@@ -38,6 +40,12 @@ class NixlKVTransporter:
             conf.capture_telemetry = True
             logger.info("NIXL telemetry enabled")
         self.nixl_agent = NixlWrapper(self.agent_name, conf)
+        page_bytes = kv_move_buffer[0].numel() * kv_move_buffer.element_size()
+        self.page_payload_bytes = (
+            dict(page_payload_bytes) if page_payload_bytes is not None else {"kv": page_bytes, "att_state": page_bytes}
+        )
+        assert set(self.page_payload_bytes) == {"kv", "att_state"}
+        assert all(0 <= size <= page_bytes for size in self.page_payload_bytes.values())
         self._register_kv_move_buffer(kv_move_buffer=kv_move_buffer)
         self.remote_agents: Dict[str, PDAgentMetadata] = {}
         # Serialize complete peer add/remove operations, including native NIXL
@@ -55,7 +63,12 @@ class NixlKVTransporter:
 
     @property
     def local_page_mem_desc(self):
-        return self.nixl_agent.get_serialized_descs(self.page_reg_desc)
+        return pickle.dumps(
+            {
+                "memory": self.nixl_agent.get_serialized_descs(self.page_reg_desc),
+                "payload_bytes": self.page_payload_bytes,
+            }
+        )
 
     def get_new_notifs(self) -> Dict[str, list[bytes]]:
         return self.nixl_agent.get_new_notifs()
@@ -70,11 +83,15 @@ class NixlKVTransporter:
         base_addr, registered_bytes, device_id, _ = reg_desc[0]
         # NIXL 原生描述记录整块注册内存的字节数，按对端页数检查单页容量是否一致。
         assert registered_bytes == page_num * self.page_bytes, "PD peers must use the same page byte capacity"
-        pages_data = []
-        for page_id in range(page_num):
-            pages_data.append((base_addr + page_id * self.page_bytes, self.page_bytes, device_id))
-        descs = self.nixl_agent.get_xfer_descs(pages_data, "VRAM")
-        return self.nixl_agent.prep_xfer_dlist(agent_name, descs, "VRAM")
+        handles = {}
+        for kind, payload_bytes in self.page_payload_bytes.items():
+            if payload_bytes:
+                pages_data = [
+                    (base_addr + page_id * self.page_bytes, payload_bytes, device_id) for page_id in range(page_num)
+                ]
+                descs = self.nixl_agent.get_xfer_descs(pages_data, "VRAM")
+                handles[kind] = self.nixl_agent.prep_xfer_dlist(agent_name, descs, "VRAM")
+        return handles
 
     def connect_add_remote_agent(self, remote_agent: PDAgentMetadata):
         with self._remote_agents_lock:
@@ -82,6 +99,8 @@ class NixlKVTransporter:
                 return
 
             start_time = time.time()
+            page = pickle.loads(remote_agent.page_reg_desc)
+            assert page["payload_bytes"] == self.page_payload_bytes, "PD peers must use the same payload byte lengths"
 
             peer_name = self.nixl_agent.add_remote_agent(remote_agent.agent_metadata)
             if isinstance(peer_name, bytes):
@@ -91,7 +110,7 @@ class NixlKVTransporter:
                 peer_name == remote_agent.agent_name
             ), f"Peer name {peer_name} does not match remote name {remote_agent.agent_name}"
 
-            page_mem_desc = self.nixl_agent.deserialize_descs(remote_agent.page_reg_desc)
+            page_mem_desc = self.nixl_agent.deserialize_descs(page["memory"])
             kv_page_xfer_handles = self._create_paged_xfer_handles(
                 page_mem_desc, remote_agent.num_pages, agent_name=peer_name
             )
@@ -113,7 +132,8 @@ class NixlKVTransporter:
                     assert remote_agent.agent_name == peer_name
                     self.nixl_agent.remove_remote_agent(remote_agent.agent_name)
                     if remote_agent.page_xfer_handles is not None:
-                        self.nixl_agent.release_dlist_handle(remote_agent.page_xfer_handles)
+                        for handle in remote_agent.page_xfer_handles.values():
+                            self.nixl_agent.release_dlist_handle(handle)
                     logger.info(f"Removed remote agent {peer_name}, cost time: {time.monotonic() - start_time:.6f} s")
                 except BaseException as e:
                     logger.error(
@@ -250,8 +270,8 @@ class NixlKVTransporter:
 
         assert trans_task.src_page_index is not None and trans_task.dst_page_index is not None
         remote_agent: PDAgentMetadata = self.remote_agents[decode_agent_name]
-        src_handle = self.page_local_xfer_handles
-        dst_handle = remote_agent.page_xfer_handles
+        src_handle = self.page_local_xfer_handles[trans_task.page_kind]
+        dst_handle = remote_agent.page_xfer_handles[trans_task.page_kind]
         handle = self.nixl_agent.make_prepped_xfer(
             "WRITE",
             src_handle,
@@ -281,7 +301,8 @@ class NixlKVTransporter:
 
     def shutdown(self):
         self.nixl_agent.deregister_memory(self.page_reg_desc)
-        self.nixl_agent.release_dlist_handle(self.page_local_xfer_handles)
+        for handle in self.page_local_xfer_handles.values():
+            self.nixl_agent.release_dlist_handle(handle)
         agent_names = list(self.remote_agents.keys())
         for agent_name in agent_names:
             self.remove_remote_agent(agent_name)
