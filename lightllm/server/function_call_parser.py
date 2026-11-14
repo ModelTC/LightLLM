@@ -60,6 +60,57 @@ class StreamingParseResult:
         self.calls = calls or []
 
 
+def _safe_json_string_delta(text: str) -> bool:
+    # Quotes and backslashes change JSON structure or escapes, so they must be reparsed.
+    return bool(text) and all(ch != '"' and ch != "\\" and ord(ch) >= 32 for ch in text)
+
+
+def _open_value_string_tail(text: str):
+    """Last raw character of an open value string, or None when the tail is an escape."""
+    in_string = False
+    escape = False
+    value_string = False
+    prev = ""
+    last_raw = ""
+    for ch in text:
+        if escape:
+            escape = False
+            last_raw = ""
+            continue
+        if in_string:
+            if ch == "\\":
+                escape = True
+                last_raw = ""
+            elif ch == '"':
+                in_string = False
+                last_raw = ""
+            else:
+                last_raw = ch
+            continue
+        if ch == '"':
+            in_string = True
+            value_string = prev == ":"
+            last_raw = ""
+            continue
+        if ch not in " \t\r\n":
+            prev = ch
+    if in_string and not escape and value_string:
+        return last_raw
+    return None
+
+
+def _open_argument_string(arguments):
+    if not isinstance(arguments, dict) or not arguments:
+        return None
+    key = next(reversed(arguments))
+    value = arguments[key]
+    if isinstance(value, str):
+        return arguments, key, value
+    if isinstance(value, dict):
+        return _open_argument_string(value)
+    return None
+
+
 def _find_common_prefix(s1: str, s2: str) -> str:
     # Binary search on slice comparisons, which run in C, instead of building
     # the prefix one character at a time. Invariant: s1[:low] == s2[:low].
@@ -131,6 +182,9 @@ class BaseFormatDetector(ABC):
         # Critical for serving layer to calculate remaining content when streaming ends.
         # Each index corresponds to a tool_id. Example: ['{"location": "San Francisco"', '{"temp": 72']
         self.streamed_args_for_tool: List[str] = []
+        # Set while the buffer ends inside an argument string. Plain deltas extend it
+        # without parsing the whole tool call again. None disables the fast path.
+        self._fast_arg = None
 
         # Token configuration (override in subclasses)
         self.bot_token = ""
@@ -215,6 +269,11 @@ class BaseFormatDetector(ABC):
 
         For incompatible formats, detectors should override this method with custom logic.
         """
+        if self._fast_arg is not None and _safe_json_string_delta(new_text):
+            self._buffer += new_text
+            return self._extend_fast_arg(new_text)
+        self._fast_arg = None
+
         # Append new text to buffer
         self._buffer += new_text
         current_text = self._buffer
@@ -372,11 +431,61 @@ class BaseFormatDetector(ABC):
                     self.prev_tool_call_arr.append({})
                 self.prev_tool_call_arr[self.current_tool_id] = current_tool_call
 
+            if not is_current_complete and isinstance(current_tool_call, dict):
+                self._fast_arg = self._argument_string_fast_state(
+                    current_tool_call.get("arguments"),
+                    current_text[start_idx : start_idx + end_idx],
+                )
             return res
 
         except Exception as e:
             logger.error(f"Error in parse_streaming_increment: {e}")
             return StreamingParseResult()
+
+    def _extend_fast_arg(self, new_text: str) -> StreamingParseResult:
+        slot = self._fast_arg
+        unsent = slot["unsent"]
+        container = slot["container"]
+        container[slot["key"]] = container[slot["key"]] + new_text
+        slot["unsent"] = new_text
+        if not unsent:
+            return StreamingParseResult()
+        self.streamed_args_for_tool[self.current_tool_id] += unsent
+        return StreamingParseResult(calls=[ToolCallItem(tool_index=self.current_tool_id, parameters=unsent)])
+
+    def _argument_string_fast_state(self, arguments, json_text: str):
+        if not self.current_tool_name_sent or self.current_tool_id < 0:
+            return None
+        if self.current_tool_id >= len(self.streamed_args_for_tool):
+            return None
+        tail = _open_value_string_tail(json_text)
+        if tail is None:
+            return None
+        found = _open_argument_string(arguments)
+        if found is None:
+            return None
+        container, key, value = found
+        # The decoded tail must be that raw character. Unicode escapes and
+        # backslash sequences stay on the full parser.
+        if bool(value) != bool(tail) or (tail and value[-1] != tail):
+            return None
+        sent = self.streamed_args_for_tool[self.current_tool_id]
+        dumped = json.dumps(arguments, ensure_ascii=False)
+        if not dumped.startswith(sent):
+            return None
+        gap = dumped[len(sent) :]
+        quote = gap.find('"')
+        if quote < 0:
+            return None
+        unsent = gap[:quote]
+        closing = gap[quote:]
+        if not closing.startswith('"') or any(ch not in '"}]' for ch in closing):
+            return None
+        if unsent and not value.endswith(unsent):
+            return None
+        if sent + unsent + closing != dumped:
+            return None
+        return {"container": container, "key": key, "unsent": unsent}
 
 
 class Qwen25Detector(BaseFormatDetector):
