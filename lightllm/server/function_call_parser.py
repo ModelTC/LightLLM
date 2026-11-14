@@ -1524,8 +1524,15 @@ class DeepSeekV32Detector(BaseFormatDetector):
             # Try to find complete invoke blocks first. An invoke is only complete once
             # its end tag is in the buffer, so skip the regex scan until then.
             complete_invoke_match = None
-            if self.invoke_end_token in current_text:
+            while self.invoke_end_token in current_text:
                 complete_invoke_match = self.invoke_regex.search(current_text)
+                if complete_invoke_match is None or complete_invoke_match.group(1) in self._tool_indices:
+                    break
+                logger.warning(f"Model attempted to call undefined function: {complete_invoke_match.group(1)}")
+                self._buffer = current_text[complete_invoke_match.end() :]
+                current_text = self._buffer
+                complete_invoke_match = None
+
             if complete_invoke_match:
                 func_name = complete_invoke_match.group(1)
                 invoke_body = complete_invoke_match.group(2)
@@ -1598,6 +1605,8 @@ class DeepSeekV32Detector(BaseFormatDetector):
             if partial_match:
                 func_name = partial_match.group(1)
                 partial_body = partial_match.group(2)
+                if func_name not in self._tool_indices:
+                    return StreamingParseResult()
 
                 if self.current_tool_id == -1:
                     self.current_tool_id = 0
@@ -1611,19 +1620,18 @@ class DeepSeekV32Detector(BaseFormatDetector):
                     self.streamed_args_for_tool.append("")
 
                 if not self.current_tool_name_sent:
-                    if func_name in self._tool_indices:
-                        calls.append(
-                            ToolCallItem(
-                                tool_index=self.current_tool_id,
-                                name=func_name,
-                                parameters="",
-                            )
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            name=func_name,
+                            parameters="",
                         )
-                        self.current_tool_name_sent = True
-                        self.prev_tool_call_arr[self.current_tool_id] = {
-                            "name": func_name,
-                            "arguments": {},
-                        }
+                    )
+                    self.current_tool_name_sent = True
+                    self.prev_tool_call_arr[self.current_tool_id] = {
+                        "name": func_name,
+                        "arguments": {},
+                    }
                 elif partial_body.count(self.param_end_token) > len(self._accumulated_params):
                     # Stream arguments as complete parameters are parsed. Each parameter
                     # ends with its end tag, so only re-parse once a new one has arrived.

@@ -82,6 +82,60 @@ def test_dsml_emits_buffered_invoke_on_next_delta():
     assert json.loads(arguments[1]) == {"location": "Paris"}
 
 
+@pytest.mark.parametrize("tool_call_parser,block", [("deepseekv32", "function_calls"), ("deepseekv4", "tool_calls")])
+@pytest.mark.parametrize("chunk_size", [1, 5, 16, None])
+@pytest.mark.parametrize(
+    "tool_names",
+    [
+        ["undefined_tool"],
+        ["undefined_tool", "get_weather"],
+        ["write_file", "undefined_tool", "get_weather"],
+        ["write_file", "get_weather", "undefined_tool"],
+    ],
+)
+def test_dsml_stream_skips_undefined_tools(tool_call_parser, block, chunk_size, tool_names):
+    invokes = [_dsml_invoke(name, "location" if name == "get_weather" else "content", "Paris") for name in tool_names]
+    deltas = [f"<{DSML}{block}>"] + invokes + [f"</{DSML}{block}>"]
+    text = "".join(deltas)
+    if chunk_size is not None:
+        deltas = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+    elif len(invokes) == 1:
+        deltas = [text]
+
+    _, expected = FunctionCallParser(TOOLS, tool_call_parser).parse_non_stream(text)
+    parser = FunctionCallParser(TOOLS, tool_call_parser)
+    names, arguments = _stream(parser, deltas)
+
+    assert names == [call.name for call in expected]
+    assert list(arguments) == list(range(len(expected)))
+    assert [json.loads(value) for value in arguments.values()] == [json.loads(call.parameters) for call in expected]
+    assert parser.detector.prev_tool_call_arr == [
+        {"name": call.name, "arguments": json.loads(call.parameters)} for call in expected
+    ]
+
+
+@pytest.mark.parametrize("tool_call_parser,block", [("deepseekv32", "function_calls"), ("deepseekv4", "tool_calls")])
+@pytest.mark.parametrize("split_valid_invoke", [False, True])
+def test_dsml_skips_undefined_invokes_before_a_buffered_valid_call(tool_call_parser, block, split_valid_invoke):
+    unknown = _dsml_invoke("undefined_tool", "content", "ignored")
+    valid = _dsml_invoke("get_weather", "location", "Paris")
+    prefix = f"<{DSML}{block}>" + unknown * 3
+    suffix = f"</{DSML}{block}>"
+    if split_valid_invoke:
+        split = valid.index(f"<{DSML}parameter")
+        deltas = [prefix + valid[:split], valid[split:] + suffix]
+    else:
+        deltas = [prefix + valid + suffix]
+
+    parser = FunctionCallParser(TOOLS, tool_call_parser)
+    names, arguments = _stream(parser, deltas)
+
+    assert names == ["get_weather"]
+    assert list(arguments) == [0]
+    assert json.loads(arguments[0]) == {"location": "Paris"}
+    assert parser.detector.prev_tool_call_arr == [{"name": "get_weather", "arguments": {"location": "Paris"}}]
+
+
 def _v3_call(name, payload):
     return "<｜tool▁call▁begin｜>function<｜tool▁sep｜>" + name + "\n```json\n" + payload + "\n```<｜tool▁call▁end｜>"
 
