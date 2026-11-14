@@ -50,6 +50,7 @@ from lightllm.server.multi_level_kv_cache import (
 from .prefill_queue_strategy import create_prefill_queue_strategy
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
+from .ep_runtime import install_ep_runtime
 
 
 class ModeBackend:
@@ -169,11 +170,17 @@ class ModeBackend:
             item.prepare_attention_states()
         manager: AttentionStateManager = self.model.att_state_manager
         assert all(item.att_state_manager is manager for item in models), "models must share one resource manager"
+        from lightllm.common.eplb_utils import get_eplb_memory_reservations
+
+        memory_reservations = get_eplb_memory_reservations(self.model)
         with self.model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             manager.finish_state_registration()
             manager.load_full_att_calibration(args=self.model.args)
             manager.initialize_storage(
-                self.model.args, token_capacity=self.model.max_total_token_num, mem_fraction=self.model.mem_fraction
+                self.model.args,
+                token_capacity=self.model.max_total_token_num,
+                mem_fraction=self.model.mem_fraction,
+                memory_reservations=memory_reservations,
             )
         for item in models:
             item.init_runtime()
@@ -294,13 +301,17 @@ class ModeBackend:
         # 策略可能读取模型、缓存管理器和 rank 等全局调度状态，因此在 backend 完成初始化后再创建。
         self.prefill_queue_strategy = create_prefill_queue_strategy(self)
 
+        install_ep_runtime(self)
+        self.start_infer_loops()
+        return
+
+    def start_infer_loops(self):
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
         self.infer_loop_thread = threading.Thread(target=self.infer_loop, daemon=True)
         self.infer_loop_thread.start()
         self.infer_loop_thread1 = threading.Thread(target=self.infer_loop, daemon=True)
         self.infer_loop_thread1.start()
-        return
 
     def init_custom(self):
         pass
@@ -388,7 +399,8 @@ class ModeBackend:
                 model_cfg=draft_model_cfg,
                 spec_mode=spec_mode,
             )
-            self.draft_models.append(draft_model_class(draft_model_kvargs))
+            draft_model = draft_model_class(draft_model_kvargs)
+            self.draft_models.append(draft_model)
 
             self.logger.info(f"loaded speculative draft model class {self.draft_models[i].__class__}")
         return

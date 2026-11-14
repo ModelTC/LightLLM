@@ -186,6 +186,7 @@ class AttentionStateManager:
         token_capacity: int | None,
         mem_fraction: float,
         device: str | torch.device | int = "cuda",
+        memory_reservations: dict[str, int] | None = None,
     ) -> None:
         """全部模型完成资源准备后，规划共享容量并初始化缓存存储。
 
@@ -194,6 +195,10 @@ class AttentionStateManager:
         依次执行各模型的运行时初始化，由模型读取 allocator 中的最终容量。
         """
         assert self._state_registration_finished, "State registration must finish before resource initialization"
+        self.memory_reservations = dict(memory_reservations or {})
+        if any(value < 0 for value in self.memory_reservations.values()):
+            raise ValueError(f"memory reservations must be non-negative: {self.memory_reservations}")
+        reserved_memory_bytes = sum(self.memory_reservations.values())
 
         # 阶段一：规划共享 token 容量，并向下对齐到完整 KV 页。
         # 未指定容量时，根据剩余显存评估；固定运行态的显存已经在前面占用。
@@ -207,7 +212,7 @@ class AttentionStateManager:
             torch.cuda.empty_cache()
             gpu_device = torch.device("cuda", get_current_device_id())
             free_bytes, total_bytes = torch.cuda.mem_get_info(gpu_device)
-            budget = int(free_bytes - total_bytes * (1 - mem_fraction)) - pd_reserved_bytes
+            budget = int(free_bytes - total_bytes * (1 - mem_fraction)) - pd_reserved_bytes - reserved_memory_bytes
 
             # 按每页开销直接计算容量，预留一个 HOLD 页；静态量化参数占比较小，不单独扣减。
             assert args.page_size > 0, "capacity planning requires a positive page size"
@@ -224,6 +229,7 @@ class AttentionStateManager:
             logger.info(
                 f"Attention storage budget: {budget / 1024**3:.3f} GiB, "
                 f"transfer reserve: {pd_reserved_bytes / 1024**2:.3f} MiB, "
+                f"post-profile reserves: {self.memory_reservations}, "
                 f"profiled token capacity: {token_capacity} (mem_fraction={mem_fraction})"
             )
         token_capacity = token_capacity // args.page_size * args.page_size

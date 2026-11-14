@@ -4,32 +4,36 @@ from lightllm.common.quantization.quantize_method import QuantizationMethod
 from .triton_impl import FuseMoeTriton
 from .marlin_impl import FuseMoeMarlin
 from .deepgemm_impl import FuseMoeDeepGEMM
+from ..expert_parallel_state import ExpertParallelState
 
 
 def create_fuse_moe_impl(
+    *,
     n_routed_experts: int,
     num_fused_shared_experts: int,
     routed_scaling_factor: float,
     quant_method: QuantizationMethod,
-    enable_ep_moe: bool = False,
-    layer_index: Optional[int] = None,
+    expert_parallel_state: ExpertParallelState | None = None,
 ):
-    """创建持有自身路由运行态的 MoE 执行实现。
+    if expert_parallel_state is not None:
+        return FuseMoeDeepGEMM(
+            n_routed_experts=n_routed_experts,
+            num_fused_shared_experts=num_fused_shared_experts,
+            routed_scaling_factor=routed_scaling_factor,
+            quant_method=quant_method,
+            expert_parallel_state=expert_parallel_state,
+        )
 
-    直接返回完成初始化的对象，而不是仅返回实现类，使冗余专家计数器等后端专属
-    状态与使用它们的 kernel 保持在同一个实现对象中。
-    """
-    if enable_ep_moe:
-        impl_cls = FuseMoeDeepGEMM
-    elif quant_method.method_name == "awq_marlin":
-        impl_cls = FuseMoeMarlin
-    else:
-        impl_cls = FuseMoeTriton
-
-    return impl_cls(
+    if quant_method.method_name == "awq_marlin":
+        return FuseMoeMarlin(
+            n_routed_experts=n_routed_experts,
+            num_fused_shared_experts=num_fused_shared_experts,
+            routed_scaling_factor=routed_scaling_factor,
+            quant_method=quant_method,
+        )
+    return FuseMoeTriton(
         n_routed_experts=n_routed_experts,
         num_fused_shared_experts=num_fused_shared_experts,
         routed_scaling_factor=routed_scaling_factor,
         quant_method=quant_method,
-        layer_index=layer_index,
     )

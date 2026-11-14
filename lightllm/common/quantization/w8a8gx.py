@@ -32,7 +32,12 @@ class _BaseQuantizationMethod(QuantizationMethod):
         return "w8a8gx-base"
 
     def _create_weight(
-        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: Union[int, List[int]],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: Optional[int] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         raise NotImplementedError("Not implemented")
 
@@ -119,10 +124,15 @@ class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
         return f"fp8w8a8g{self.act_quant_group_size}-triton"
 
     def _create_weight(
-        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: Union[int, List[int]],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: Optional[int] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
-        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        expert_prefix = () if num_experts is None else (num_experts,)
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
         weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)

@@ -9,9 +9,12 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer im
     SliceMixinTpl,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import create_fuse_moe_impl
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
+    create_expert_parallel_state,
+)
 from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.common.quantization.quantize_method import QuantizationMethod
-from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
 from lightllm.utils.log_utils import init_logger
 
@@ -56,20 +59,15 @@ class FusedMoeWeight(BaseWeightTpl):
         self.n_routed_experts = n_routed_experts
         self.num_fused_shared_experts = num_fused_shared_experts
         self._init_config(network_config)
-        self._init_redundancy_expert_params()
+        self._init_expert_parallel_state(network_config)
+        self._init_weight_partition()
         self.fuse_moe_impl = create_fuse_moe_impl(
             n_routed_experts=self.n_routed_experts,
             num_fused_shared_experts=self.num_fused_shared_experts,
             routed_scaling_factor=self.routed_scaling_factor,
             quant_method=self.quant_method,
-            enable_ep_moe=self.enable_ep_moe,
-            layer_index=self.layer_num_,
+            expert_parallel_state=self.expert_parallel_state,
         )
-        # 冗余专家的 CUDA 状态由 DeepGEMM 实现持有。自动更新仍通过权重对象读写同一份 tensor。
-        if self.enable_ep_moe:
-            self.redundancy_expert_ids_tensor = self.fuse_moe_impl.redundancy_expert_ids_tensor
-            self.routed_expert_counter_tensor = self.fuse_moe_impl.routed_expert_counter_tensor
-        self._init_weight_partition()
         self.lock = threading.Lock()
         self._create_weight()
 
@@ -82,12 +80,19 @@ class FusedMoeWeight(BaseWeightTpl):
         self.routed_scaling_factor = network_config.get("routed_scaling_factor", 1.0)
         self.scoring_func = network_config.get("scoring_func", "softmax")
 
-    def _init_redundancy_expert_params(self):
-        self.redundancy_expert_num = get_redundancy_expert_num()
-        self.redundancy_expert_ids = get_redundancy_expert_ids(self.layer_num_)
-        self.auto_update_redundancy_expert: bool = get_env_start_args().auto_update_redundancy_expert
-        # TODO: find out the reason of failure of deepep when redundancy_expert_num is 1.
-        assert self.redundancy_expert_num != 1, "redundancy_expert_num can not be 1 for some unknown hang of deepep."
+    def _init_expert_parallel_state(self, network_config: Dict[str, Any]):
+        self.expert_parallel_state = (
+            create_expert_parallel_state(
+                self.n_routed_experts,
+                self.global_world_size,
+                self.global_rank_,
+                tp_rank=self.tp_rank_,
+                tp_world_size=self.tp_world_size_,
+                is_mtp_draft_model=network_config.get("is_mtp_draft_model", False),
+            )
+            if self.enable_ep_moe
+            else None
+        )
 
     def _init_weight_partition(self):
         if self.enable_ep_moe:
@@ -103,16 +108,31 @@ class FusedMoeWeight(BaseWeightTpl):
         self.split_inter_size = self.moe_intermediate_size // self.tp_world_size_
         if self.enable_ep_moe:
             assert self.num_fused_shared_experts == 0, "num_fused_shared_experts must be 0 when enable_ep_moe"
-            self.local_logic_expert_ids_list = self.fuse_moe_impl.local_logics_expert_ids_list
-            logger.debug(
-                f"global_rank {self.global_rank_} layerindex {self.layer_num_} "
-                f"local_logic_expert_ids_list: {self.local_logic_expert_ids_list}"
-            )
-            self.local_n_routed_experts = len(self.local_logic_expert_ids_list)
-        else:
-            self.local_logic_expert_ids_list = list(range(self.n_routed_experts + self.num_fused_shared_experts))
+            eplb = self.expert_parallel_state.eplb
+            num_redundant_experts_per_rank = 0 if eplb is None else eplb.num_redundant_experts_per_rank
+            num_primary_experts_per_rank = self.expert_parallel_state.num_primary_experts_per_rank
+            self.local_n_routed_experts = num_primary_experts_per_rank + num_redundant_experts_per_rank
+            if eplb is None:
+                start_expert_id = self.global_rank_ * num_primary_experts_per_rank
+                self.expert_idx_to_local_idx = {
+                    expert_idx: expert_idx - start_expert_id
+                    for expert_idx in range(start_expert_id, start_expert_id + num_primary_experts_per_rank)
+                }
+            else:
+                # Weights, scales and zero points share one absolute local-row map.
+                self.expert_idx_to_local_idx = {
+                    expert: slot for slot, expert in enumerate(eplb.physical_to_logical[self.global_rank_].tolist())
+                }
 
-    # ==================== Prefill / Decode 公共接口 ====================
+        else:
+            self.local_expert_ids = list(range(self.n_routed_experts + self.num_fused_shared_experts))
+            self.expert_idx_to_local_idx = {expert_idx: i for (i, expert_idx) in enumerate(self.local_expert_ids)}
+
+        self.local_logic_expert_ids_list = (
+            self.expert_parallel_state.eplb.physical_to_logical[self.global_rank_].tolist()
+            if self.enable_ep_moe and self.expert_parallel_state.eplb is not None
+            else list(self.expert_idx_to_local_idx)
+        )
 
     def experts(
         self,
@@ -152,6 +172,7 @@ class FusedMoeWeight(BaseWeightTpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            dist_group=None if infer_state is None else infer_state.dist_group,
         )
 
     def experts_with_topk(
@@ -194,12 +215,14 @@ class FusedMoeWeight(BaseWeightTpl):
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
             shared_expert_func=shared_expert_func,
+            dist_group=None if infer_state is None else infer_state.dist_group,
         )
 
     def select_experts_and_quant_input(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        poll_migration: bool = True,
     ):
         assert self.enable_ep_moe, "select_experts_and_quant_input is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.select_experts_and_quant_input(
@@ -213,6 +236,7 @@ class FusedMoeWeight(BaseWeightTpl):
             topk_group=self.topk_group,
             n_group=self.n_group,
             scoring_func=self.scoring_func,
+            poll_migration=poll_migration,
         )
 
     def quantize_dispatch_input(self, hidden_states: torch.Tensor):
@@ -341,12 +365,14 @@ class FusedMoeWeight(BaseWeightTpl):
         gemm_out_b: torch.Tensor,
         handle: Any,
         overlap_event: Optional[Any] = None,
+        dist_group=None,
     ):
         assert self.enable_ep_moe, "prefill_combine is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.prefill_combine(
             gemm_out_b=gemm_out_b,
             handle=handle,
             overlap_event=overlap_event,
+            dist_group=dist_group,
         )
 
     def load_hf_weights(self, weights):
