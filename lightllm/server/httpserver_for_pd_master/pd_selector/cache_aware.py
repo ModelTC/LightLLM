@@ -168,11 +168,13 @@ class CacheAwarePolicy:
         if idle_worker is not None:
             selected_worker = idle_worker
         else:
+            # 长前缀只把缓存节点这次的新增量算成未命中后缀；普通请求两边都是整段 prompt。
+            cache_new_chars = request_load if not long_prefix_match else max(1, request_load - matched_chars)
             selected_worker = self._select_worker_by_cache_and_load(
                 workers=workers,
                 cache_worker=cache_worker,
                 request_load=request_load,
-                cached_chars=matched_chars if long_prefix_match else 0,
+                cache_new_chars=cache_new_chars,
             )
 
         selection_extra_info = PDSelectionExtraInfo()
@@ -233,15 +235,15 @@ class CacheAwarePolicy:
         workers: List[PD_Client_Obj],
         cache_worker: Optional[PD_Client_Obj],
         request_load: int,
-        cached_chars: int = 0,
+        cache_new_chars: int,
     ) -> PD_Client_Obj:
-        """比较在途 prompt 负载与新增工作量；长前缀可抵扣缓存节点的新增成本。"""
+        """比较在途字符数与本次新增字符数。缓存节点的新增量由调用方传入。"""
         least_loaded_worker = min(workers, key=lambda worker: worker.dispatched_prompt_chars)
         least_projected_load = least_loaded_worker.dispatched_prompt_chars + request_load
         cache_projected_load = None
         cache_worker_is_overloaded = False
         if cache_worker is not None:
-            cache_projected_load = cache_worker.dispatched_prompt_chars + max(1, request_load - cached_chars)
+            cache_projected_load = cache_worker.dispatched_prompt_chars + cache_new_chars
             cache_worker_is_overloaded = cache_projected_load > least_projected_load * self.config.balance_rel_threshold
 
         if cache_worker is None or cache_worker_is_overloaded:
