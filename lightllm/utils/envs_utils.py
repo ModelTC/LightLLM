@@ -387,5 +387,11 @@ def get_pd_cache_high_priority_min_prompt_tokens() -> int:
 
 
 @lru_cache(maxsize=None)
+def get_pd_long_prefix_affinity_max_age_seconds() -> int:
+    """长前缀可以越过空闲节点时，前缀记录允许的最大年龄，单位为秒。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_LONG_PREFIX_AFFINITY_MAX_AGE_SECONDS", 180)))
+
+
+@lru_cache(maxsize=None)
 def get_lightllm_url_pool_maxsize() -> int:
     return int(os.getenv("LIGHTLLM_URL_POOL_MAXSIZE", 512))

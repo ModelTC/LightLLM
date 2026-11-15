@@ -20,10 +20,12 @@ PD Master 的 cache-aware prefill 选点策略。
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 from lightllm.server.pd_io_struct import PD_Client_Obj
+from lightllm.utils.envs_utils import get_pd_long_prefix_affinity_max_age_seconds
 from lightllm.utils.log_utils import init_logger
 
 from .pd_selector import PDSelectionExtraInfo
@@ -54,9 +56,10 @@ class CacheAwareConfig:
     evict_node_batch: int = 10_000
     # 每隔 sample_stride 个字符抽 1 个作为前缀树 key，降低匹配开销与内存。
     sample_stride: int = 512
-    # 达到两个门槛的历史前缀可以优先于空闲节点，但仍受 balance_rel_threshold 限制。
+    # 达到长度、命中率和记录新鲜度门槛的历史前缀可以优先于空闲节点，但仍受 balance_rel_threshold 限制。
     long_prefix_min_chars: int = 65536
     long_prefix_min_hit_rate: float = 0.8
+    long_prefix_max_age_seconds: int = field(default_factory=get_pd_long_prefix_affinity_max_age_seconds)
 
 
 class BalanceRelThresholdController:
@@ -144,10 +147,15 @@ class CacheAwarePolicy:
         cache_worker, cache_match = await self._get_cache_worker(workers, request_text)
         request_load = len(request_text)
         matched_chars = min(request_load, max(0, cache_match.matched_char_count))
+        cache_age_seconds = None
+        if cache_match.last_insert_time is not None:
+            cache_age_seconds = max(0.0, time.monotonic() - cache_match.last_insert_time)
         long_prefix_match = (
             cache_worker is not None
             and matched_chars >= self.config.long_prefix_min_chars
             and matched_chars / request_load >= self.config.long_prefix_min_hit_rate
+            and cache_age_seconds is not None
+            and cache_age_seconds <= self.config.long_prefix_max_age_seconds
         )
 
         # 长前缀允许与空闲节点比较预计负载；历史位置仅是缓存提示，不保证 KV 仍驻留。

@@ -401,3 +401,26 @@ def test_long_prefix_affinity_requires_an_eligible_online_cache_worker(available
 
     assert selected is idle
     assert info == PDSelectionExtraInfo()
+
+
+@pytest.mark.parametrize("cache_age_seconds,expect_cache", [(60, True), (61, False)])
+def test_long_prefix_affinity_requires_a_recent_cache_record(
+    cache_age_seconds: int, expect_cache: bool, monkeypatch
+) -> None:
+    policy = _local_policy(
+        config=CacheAwareConfig(sample_stride=1, long_prefix_min_chars=16, long_prefix_max_age_seconds=60)
+    )
+    cached = _worker(address="cached", dispatched_prompt_chars=1, dispatched_req_num=1)
+    idle = _worker(address="idle")
+    prefix = "a" * 16
+    prompt = prefix + "b" * 4
+    _insert_prompt(policy=policy, prompt=prefix, worker=cached)
+    match = _prefix_match(policy=policy, prompt=prompt)
+    monkeypatch.setattr(
+        "lightllm.server.httpserver_for_pd_master.pd_selector.cache_aware.time.monotonic",
+        lambda: match.last_insert_time + cache_age_seconds,
+    )
+
+    selected, _ = asyncio.run(main=policy.select_worker(workers=[idle, cached], request_text=prompt))
+
+    assert selected is (cached if expect_cache else idle)

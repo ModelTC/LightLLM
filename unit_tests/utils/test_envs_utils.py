@@ -8,6 +8,7 @@ from lightllm.utils.envs_utils import (
     is_stop_matching_in_reasoning_enabled,
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
+    get_pd_long_prefix_affinity_max_age_seconds,
     get_pd_node_busy_retry_timeout_seconds,
     get_pd_node_continuation_resource_wait_timeout_seconds,
     get_pd_node_resource_wait_timeout_seconds,
@@ -63,6 +64,24 @@ def test_pd_cache_high_priority_min_prompt_tokens_reads_environment_variable(mon
     assert get_pd_cache_high_priority_min_prompt_tokens() == 2048
 
     get_pd_cache_high_priority_min_prompt_tokens.cache_clear()
+
+
+def test_pd_long_prefix_affinity_max_age_defaults_to_180_seconds(monkeypatch):
+    monkeypatch.delenv("LIGHTLLM_PD_LONG_PREFIX_AFFINITY_MAX_AGE_SECONDS", raising=False)
+    get_pd_long_prefix_affinity_max_age_seconds.cache_clear()
+
+    assert get_pd_long_prefix_affinity_max_age_seconds() == 180
+
+    get_pd_long_prefix_affinity_max_age_seconds.cache_clear()
+
+
+def test_pd_long_prefix_affinity_max_age_reads_environment_variable(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_PD_LONG_PREFIX_AFFINITY_MAX_AGE_SECONDS", "30")
+    get_pd_long_prefix_affinity_max_age_seconds.cache_clear()
+
+    assert get_pd_long_prefix_affinity_max_age_seconds() == 30
+
+    get_pd_long_prefix_affinity_max_age_seconds.cache_clear()
 
 
 def test_pd_node_resource_wait_timeout_defaults_to_20_seconds(monkeypatch):
