@@ -1,9 +1,57 @@
 import json
+from pathlib import Path
 
 import pytest
 
 from lightllm.server.api_start import _launch_subprocesses
 from lightllm.server.core.objs.start_args_type import StartArgs
+
+
+@pytest.mark.parametrize("config_owned", [False, True])
+@pytest.mark.parametrize("rank", [0, 1])
+def test_startup_checks_only_locally_owned_rendezvous_ports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, config_owned: bool, rank: int
+) -> None:
+    from lightllm.server import api_start
+
+    for name in (
+        "_set_envs_and_config",
+        "auto_set_max_req_total_len",
+        "auto_set_fused_shared_experts",
+        "set_unique_server_name",
+        "auto_set_page_size",
+        "auto_set_response_parsers",
+        "auto_configure_allreduce_flags_from_args",
+    ):
+        monkeypatch.setattr(target=api_start, name=name, value=lambda args: None)
+    (tmp_path / "config.json").write_text(data=json.dumps(obj={"model_type": "llama"}))
+    args = StartArgs(
+        run_mode="prefill",
+        model_dir=str(tmp_path),
+        tp=2,
+        dp=2,
+        nnodes=2,
+        node_rank=rank,
+        use_config_server_to_init_nccl=config_owned,
+        config_server_host="127.0.0.1",
+        nccl_host="127.0.0.1",
+        port=8019,
+        nccl_port=29501,
+        max_req_total_len=8192,
+        eos_id=[2],
+        data_type="bfloat16",
+        disable_vision=True,
+        disable_audio=True,
+        disable_shm_warning=True,
+    )
+
+    def checked(ports: list[int]) -> None:
+        assert ports == ([8019, 29501] if rank == 0 and not config_owned else [8019])
+        raise RuntimeError("port validation reached")
+
+    monkeypatch.setattr(target=api_start, name="validate_ports", value=checked)
+    with pytest.raises(expected_exception=RuntimeError, match="port validation reached"):
+        api_start._launch_subprocesses(args=args)
 
 
 @pytest.fixture
