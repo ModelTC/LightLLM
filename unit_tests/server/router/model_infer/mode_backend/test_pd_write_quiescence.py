@@ -627,6 +627,45 @@ def test_failed_fences_remain_quarantined_and_retries_are_bounded():
     module.transporter.check_task_status.assert_not_called()
 
 
+@pytest.mark.parametrize("last_fence_status", ["DONE", "ERR"])
+def test_prefill_exits_only_when_all_pages_exhaust_write_recovery(monkeypatch, last_fence_status):
+    monkeypatch.setattr(prefill_trans_process.time, "monotonic", lambda: 100.0)
+    module = _module(_PrefillTransModule)
+    for page in range(module.args.pd_kv_page_num):
+        task = _task(request_id=123 + page, src_page_index=page, write_submitted=True, xfer_handle=7 + page)
+        module.waiting_dict[task.get_key()] = task
+    module.transporter.check_task_status.return_value = "ERR"
+    module._update_task_status_once()
+    first = module.write_peer_kv_queue.get_nowait()
+    last = module.write_peer_kv_queue.get_nowait()
+    for recovery in (first, last):
+        recovery.attempts = 3
+        recovery.fence.write_submitting = False
+    last.post_confirmed = True
+    last.deadline = 110.0
+    last.fence.xfer_handle = 9
+
+    module.transporter.check_task_status.return_value = "PROC"
+    module._update_task_status_once()
+    assert first.fence.write_uncertain
+    assert not last.fence.write_uncertain
+    assert module.page_index_queue.empty()
+
+    last.next_check_time = 0
+    module.transporter.check_task_status.return_value = last_fence_status
+    if last_fence_status == "DONE":
+        module._update_task_status_once()
+        assert module.page_index_queue.get_nowait() == 1
+        assert module.quarantined_tasks == {first.original.get_key(): first.original}
+    else:
+        with pytest.raises(RuntimeError, match="WRITE recovery exhausted for all 2 transfer pages"):
+            module._update_task_status_once()
+        assert last.fence.write_uncertain
+        assert module.page_index_queue.empty()
+        assert len(module.quarantined_tasks) == 2
+        module.transporter.release_xfer_handle.assert_not_called()
+
+
 def test_recovery_does_not_accept_done_after_unconfirmed_post_and_retries_with_fresh_handle():
     module = _module(_PrefillTransModule)
     task = _uncertain_source(module)

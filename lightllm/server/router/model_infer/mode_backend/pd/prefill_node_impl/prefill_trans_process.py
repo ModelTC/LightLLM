@@ -656,6 +656,20 @@ class _PrefillTransModule:
                         failed_task.error_info = "time out in update_task_status_loop"
                         self.failed_queue.put(failed_task)
 
+            # A recovery fence becomes uncertain when it exhausts its retries.
+            if (
+                self.use_write_quiescence
+                and len(self.quarantined_tasks) == self.args.pd_kv_page_num
+                and all(
+                    key in self.write_recoveries and self.write_recoveries[key].fence.write_uncertain
+                    for key in self.quarantined_tasks
+                )
+            ):
+                raise RuntimeError(
+                    f"Prefill device {self.device_id}: WRITE recovery exhausted for all "
+                    f"{self.args.pd_kv_page_num} transfer pages"
+                )
+
     def _release_source_page(self, task: PDChunckedTransTask):
         if task.xfer_handle is not None:
             self.transporter.release_xfer_handle(task.xfer_handle)
