@@ -422,15 +422,23 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await pd_upload_websocket.send(
                     pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, array("q", prompt_ids)))
                 )
-                # Prefill 上报 prompt ids 后就在等 Decode 节点信息，早于 Master 把请求发给 Decode。
-                # Decode 会先等共享请求槽，再在 Router 里独立等进入推理，两段各用一份资源预算；
-                # 15 秒留给 5 秒一次的超时检查和错误回传。Prefill 再多 15 秒，让 Master 先超时并把中止通知过来。
-                # 预算为负表示资源等待不限时，握手也不设截止时间。预算较小时仍保持原来的 180 秒下限。
+                # 截止时间要盖住 Decode 拿到请求后的两段资源等待。两段各用一份预算，并且前后分开计时：
+                # _alloc_shm_req_indexes 先等共享请求槽，上限是 resource_wait_seconds；
+                # 槽到位、请求进入 Router 后，router_arrival_time 重新起算，
+                # has_timed_out_waiting_for_inference 再给一整份 resource_wait_seconds。
+                # Router 这段不是到点立刻失败。_wait_to_token_package 每 5 秒才查一次，
+                # 最坏会在期限之后将近 5 秒才抛出 ServerBusyError，这个错误还要回到这次握手。
+                # 所以在两份预算之外再留 15 秒，这是检查迟到和错误传回的余量，不是第三段资源等待。
+                # 预算为负表示没有下发资源等待上限（自限流关闭时字段保持 -1，或环境变量显式为负）。
+                # 这时没有两段预算可包住，Master 保持原来的 180 秒，避免 Decode 一直不上报时等待没有截止时间。
+                # 预算较小时 max 仍保持原来的 180 秒下限。
                 resource_wait_seconds = sampling_params.pd_node_resource_wait_timeout_seconds
                 if resource_wait_seconds < 0:
-                    handshake_timeout = None
+                    handshake_timeout = 180
                 else:
-                    handshake_timeout = max(180, 2 * resource_wait_seconds + 15) + 15
+                    handshake_timeout = max(180, 2 * resource_wait_seconds + 15)
+                # 最初比 Master 多留 15 秒。Prefill 只是略早开始等，5 秒足够让 Master 先超时并发送 ABORT。
+                handshake_timeout += 5
                 try:
                     await asyncio.wait_for(pd_event.wait(), timeout=handshake_timeout)
                 except asyncio.TimeoutError:

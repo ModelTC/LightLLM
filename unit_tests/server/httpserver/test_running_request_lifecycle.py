@@ -271,8 +271,8 @@ def test_prefill_full_cache_hit_never_enters_running_request_count():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("resource_wait,expected", [(0, 195), (60, 195), (200, 430), (450, 930), (-1, None)])
-def test_prefill_assignment_wait_encloses_master_budget(resource_wait: int, expected: int | None) -> None:
+@pytest.mark.parametrize("resource_wait,expected", [(0, 185), (60, 185), (200, 420), (450, 920), (-1, 185)])
+def test_prefill_assignment_wait_encloses_master_budget(resource_wait: int, expected: int) -> None:
     async def run() -> None:
         manager = _make_manager(mode=NodeRole.P)
         params = _sampling_params()

@@ -524,12 +524,12 @@ class HttpServerManagerForPDMaster:
         self,
         event: asyncio.Event,
         request: Request,
-        timeout: Optional[float],
+        timeout: float,
         group_request_id: int,
         stage: str,
     ) -> None:
         """Wait for an asyncio.Event but abort early if the HTTP client disconnects."""
-        deadline = time.monotonic() + timeout if timeout is not None else None
+        deadline = time.monotonic() + timeout
         disconnect_reason = f"fetch_pd_stream {stage} period check network disconnected"
 
         async def raise_if_disconnected() -> None:
@@ -541,7 +541,7 @@ class HttpServerManagerForPDMaster:
                 )
 
         while True:
-            remaining = deadline - time.monotonic() if deadline is not None else 1.0
+            remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ServerBusyError()
             await raise_if_disconnected()
@@ -606,12 +606,20 @@ class HttpServerManagerForPDMaster:
             pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
         )
 
-        # Master 在等 Decode 上报。Decode 会先等共享请求槽，再在 Router 里独立等进入推理，
-        # 两段各用一份资源预算；再留 15 秒给 5 秒一次的超时检查和错误回传。
-        # 预算为负表示资源等待不限时，握手也不设截止时间。预算较小时仍保持原来的 180 秒下限。
+        # Master 在等 Decode 上报。截止时间要盖住 Decode 拿到请求后的两段资源等待。
+        # 两段各用一份预算，并且前后分开计时：_alloc_shm_req_indexes 先等共享请求槽，
+        # 上限是 resource_wait_seconds；槽到位、请求进入 Router 后，router_arrival_time 重新起算，
+        # has_timed_out_waiting_for_inference 再给一整份 resource_wait_seconds。
+        # Router 这段不是到点立刻失败。_wait_to_token_package 每 5 秒才查一次，
+        # 最坏会在期限之后将近 5 秒才抛出 ServerBusyError，这个错误还要回到这次握手。
+        # 所以在两份预算之外再留 15 秒，这是检查迟到和错误传回的余量，不是第三段资源等待。
+        # 预算为负表示没有下发资源等待上限（自限流关闭时字段保持 -1，或环境变量显式为负）。
+        # 这时没有两段预算可包住，握手保持原来的 180 秒，避免 Decode 一直不上报时这次等待没有截止时间。
+        # 预算较小时 max 仍保持原来的 180 秒下限。
+        # Prefill 在此基础上再加 5 秒，因为它更早开始等，需要让 Master 先超时并发送 ABORT。
         resource_wait_seconds = sampling_params.pd_node_resource_wait_timeout_seconds
         if resource_wait_seconds < 0:
-            decode_handshake_timeout = None
+            decode_handshake_timeout = 180
         else:
             decode_handshake_timeout = max(180, 2 * resource_wait_seconds + 15)
         try:
