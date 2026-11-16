@@ -252,7 +252,7 @@ class MultiLevelKVCacheManager:
                     time.sleep(0.005)
             except Exception as e:
                 logger.exception(f"detoken process has exception {str(e)}")
-                return
+                raise e
 
 
 def start_multi_level_kv_cache_manager(args, pipe_writer):
