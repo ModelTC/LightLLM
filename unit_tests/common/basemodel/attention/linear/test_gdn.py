@@ -11,7 +11,7 @@ from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNS
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention.linear.gdn as gdn
 import lightllm.common.basemodel.attention.create_linear_utils as linear_create_utils
-import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
+import lightllm.common.attention.kernels.gdn.third_party_fla.ops as fla_ops
 from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig

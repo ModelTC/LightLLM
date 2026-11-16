@@ -2,8 +2,8 @@
 
 import torch
 
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
-from lightllm.common.basemodel.triton_kernel.linear_att.kda_state_io import gather_kda_state, scatter_kda_state
+from lightllm.common.attention.kernels.gdn.third_party_fla.ops.kda import chunk_kda_with_fused_gate
+from lightllm.common.attention.kernels.kda.kda_state_io import gather_kda_state, scatter_kda_state
 from lightllm.utils.log_utils import init_logger
 
 

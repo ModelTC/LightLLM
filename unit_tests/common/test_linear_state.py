@@ -268,7 +268,7 @@ def test_pd_block_roundtrip_preserves_replicated_heads_and_accepted_mtp_state(mo
 @pytest.mark.parametrize("step", [0, 2])
 @pytest.mark.parametrize("restore_kind", ["checkpoint", "pd", "dp"])
 def test_replay_restored_slot_decodes_like_clean_slot(runtime_start_args, cls, step, restore_kind):
-    from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import replay_layer
+    from unit_tests.common.attention.kernels.gdn.replayssm.replay_history import replay_layer
 
     torch.manual_seed(1690)
     state, _, layout = make_state(cls=cls, mode="replay", step=step)

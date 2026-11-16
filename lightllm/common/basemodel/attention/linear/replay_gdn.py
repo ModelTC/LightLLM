@@ -21,19 +21,19 @@ from lightllm.common.basemodel.attention.base_att import (
     BaseDecodeAttState,
     BasePrefillAttState,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
+from lightllm.common.attention.kernels.gdn.causal_conv1d import (
     causal_conv1d_fn,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
+from lightllm.common.attention.kernels.gdn.causal_conv1d_mtp import (
     causal_conv1d_update as causal_conv1d_update_mtp,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import (
+from lightllm.common.attention.kernels.gdn.fused_gdn_gating import (
     fused_gdn_gating,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import (
+from lightllm.common.attention.kernels.gdn.gdn_decode_pack import (
     conv_pack_gdn_decode_inputs,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
+from lightllm.common.attention.kernels.gdn.mtp_state_params import (
     build_dynamic_mtp_linear_att_state_params,
 )
 from lightllm.utils.envs_utils import get_env_start_args
@@ -49,7 +49,7 @@ class ReplayGDNTritonAttBackend(BaseAttBackend):
 
     def __init__(self, model):
         super().__init__(model=model)
-        from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import chunk_gated_delta_rule
+        from lightllm.common.attention.kernels.gdn.third_party_fla.ops.chunk import chunk_gated_delta_rule
 
         _configure_gdn(self, model, chunk_gated_delta_rule)
 

@@ -10,7 +10,7 @@ import ast
 import torch
 import triton
 
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_decode import (
+from lightllm.common.attention.kernels.gdn.replayssm.replayssm_decode import (
     _decode_replay,
     check_replay_sync_mark,
 )

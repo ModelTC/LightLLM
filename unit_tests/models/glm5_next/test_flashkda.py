@@ -9,8 +9,8 @@ from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.attention.linear import flashkda
 from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.linear.replay_kda import ReplayKDALinearAttBackend
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
-from lightllm.common.basemodel.triton_kernel.linear_att.kda_state_io import gather_kda_state, scatter_kda_state
+from lightllm.common.attention.kernels.gdn.third_party_fla.ops.kda import chunk_kda_with_fused_gate
+from lightllm.common.attention.kernels.kda.kda_state_io import gather_kda_state, scatter_kda_state
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
 
