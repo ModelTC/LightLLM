@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import weakref
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
 
@@ -20,7 +20,8 @@ from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
+from lightllm.common.basemodel.attention.linear.kda_prefill import get_flash_kda_fwd, kda_prefill, select_kda_prefill
+from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_qkv import causal_conv1d_qkv
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
     causal_conv1d_update as causal_conv1d_update_mtp,
@@ -47,6 +48,7 @@ class KDALinearAttBackend(BaseAttBackend):
         self.conv_kernel_size = config["short_conv_kernel_size"]
         self.lower_bound = config.get("gate_lower_bound", -5.0)
         self.mtp_step = model.args.mtp_step
+        self.flash_kda_fwd = get_flash_kda_fwd(model)
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo"):
         return KDALinearAttPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
@@ -62,10 +64,16 @@ class KDALinearAttBackend(BaseAttBackend):
 class KDALinearAttPrefillAttState(BasePrefillAttState):
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
+    cu_seqlens: torch.Tensor = None
+    flash_kda_fwd: Callable = None
 
     def init_state(self):
         linear_state_manager = self.infer_state.req_manager.linear_state_manager
         self.b_conv_buffer_idx, self.b_ssm_buffer_idx = linear_state_manager.prepare_prefill(self.infer_state.b_req_idx)
+        self.flash_kda_fwd = select_kda_prefill(self.backend, self.infer_state.max_q_seq_len)
+        self.cu_seqlens = self.infer_state.b1_cu_q_seq_len
+        if self.flash_kda_fwd is not None:
+            self.cu_seqlens = self.cu_seqlens.to(torch.int64).contiguous()
 
     def prefill_att(
         self,
@@ -86,42 +94,50 @@ class KDALinearAttPrefillAttState(BasePrefillAttState):
 
         conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
         conv_states = conv_states[..., : backend.conv_kernel_size - 1]
-        mixed_qkv = causal_conv1d_fn(
-            mixed_qkv.transpose(0, 1),
-            layer_weight.get_merged_kda_conv_weight(),
-            bias=None,
-            query_start_loc=self.infer_state.b1_cu_q_seq_len,
-            cache_indices=self.b_conv_buffer_idx,
-            has_initial_state=self.infer_state.b_ready_cache_len > 0,
-            conv_states=conv_states,
-            activation="silu",
-        ).transpose(0, 1)
-
-        q, k, v = backend.split_qkv(mixed_qkv)
-        q = q.view(1, -1, backend.tp_num_heads, backend.head_dim)
-        k = k.view(1, -1, backend.tp_num_heads, backend.head_dim)
-        v = v.view(1, -1, backend.tp_num_heads, backend.head_dim)
+        if self.flash_kda_fwd is not None and backend.conv_kernel_size == 4:
+            q, k, v = causal_conv1d_qkv(
+                mixed_qkv,
+                layer_weight.get_merged_kda_conv_weight(),
+                conv_states,
+                self.infer_state.b1_cu_q_seq_len,
+                self.b_conv_buffer_idx,
+                self.infer_state.b_ready_cache_len,
+                self.infer_state.max_q_seq_len,
+                use_qk_l2norm=False,
+            )
+        else:
+            mixed_qkv = causal_conv1d_fn(
+                mixed_qkv.transpose(0, 1),
+                layer_weight.get_merged_kda_conv_weight(),
+                bias=None,
+                query_start_loc=self.infer_state.b1_cu_q_seq_len,
+                cache_indices=self.b_conv_buffer_idx,
+                has_initial_state=self.infer_state.b_ready_cache_len > 0,
+                conv_states=conv_states,
+                activation="silu",
+            ).transpose(0, 1)
+            q, k, v = backend.split_qkv(mixed_qkv)
+            q = q.view(1, -1, backend.tp_num_heads, backend.head_dim)
+            k = k.view(1, -1, backend.tp_num_heads, backend.head_dim)
+            v = v.view(1, -1, backend.tp_num_heads, backend.head_dim)
         raw_gate = raw_gate.view(1, -1, backend.tp_hidden_size)
         raw_beta = raw_beta.view(1, -1, backend.tp_num_heads)
 
-        initial_state = ssm_states[self.b_ssm_buffer_idx].contiguous()
-        output, final_state = chunk_kda_with_fused_gate(
+        return kda_prefill(
             q=q,
             k=k,
             v=v,
             raw_g=raw_gate.view(1, -1, backend.tp_num_heads, backend.head_dim),
-            beta=raw_beta.float().sigmoid(),
+            raw_beta=raw_beta,
             A_log=layer_weight.linear_A_log.weight,
             g_bias=layer_weight.linear_dt_bias.weight,
-            initial_state=initial_state,
-            output_final_state=True,
-            use_qk_l2norm_in_kernel=True,
-            cu_seqlens=self.infer_state.b1_cu_q_seq_len,
-            safe_gate=True,
+            ssm_states=ssm_states,
+            state_indices=self.b_ssm_buffer_idx,
+            qk_normalized=False,
+            cu_seqlens=self.cu_seqlens,
             lower_bound=backend.lower_bound,
+            flash_kda_fwd=self.flash_kda_fwd,
         )
-        ssm_states[self.b_ssm_buffer_idx] = final_state.to(ssm_states.dtype, copy=False)
-        return output
 
 
 @dataclasses.dataclass

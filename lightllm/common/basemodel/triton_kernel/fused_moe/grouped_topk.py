@@ -16,7 +16,7 @@ def _eplb_replica_index(token_index, logical_id, replica_count):
 @triton.jit
 def _compare_and_swap(x, x_1, ids, flip, i: tl.core.constexpr, n_dims: tl.core.constexpr):
     n_outer: tl.core.constexpr = x.numel >> n_dims
-    shape: tl.core.constexpr = [n_outer * 2**i, 2, 2 ** (n_dims - i - 1)]
+    shape: tl.core.constexpr = [n_outer * 2 ** i, 2, 2 ** (n_dims - i - 1)]
     y = tl.core.reshape(x, shape)
     y_1 = tl.core.reshape(x_1, shape)
     # slice left/right with 'stride' 2**(n_dims - i - 1)
@@ -74,7 +74,7 @@ def _bitonic_merge(x, x_1, ids, stage: tl.core.constexpr, order: tl.core.constex
     # if flip = 00110011... then all the elements will be re-arranged alternatingly (with
     # a stride of 2) at this stage
     if order == 2:
-        shape: tl.core.constexpr = [n_outer * 2 ** (n_dims - 1 - stage), 2, 2**stage]
+        shape: tl.core.constexpr = [n_outer * 2 ** (n_dims - 1 - stage), 2, 2 ** stage]
         flip = tl.core.reshape(tl.core.broadcast_to(tl.core.arange(0, 2)[None, :, None], shape), x.shape)
     else:
         flip = order

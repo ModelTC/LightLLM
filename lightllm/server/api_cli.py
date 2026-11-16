@@ -473,13 +473,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--llm_prefill_att_backend",
         type=str,
         nargs="+",
-        choices=["auto", "triton", "fa3", "flashinfer", "flashqla"],
+        choices=["auto", "triton", "fa3", "flashinfer", "flashqla", "flashkda"],
         default=["auto"],
         help="""prefill attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
                 (priority: fa3 > flashinfer > triton)
                 for hybrid linear-attention models, the second value selects the linear-attention backend
-                (priority: flashqla > triton); when omitted, it defaults to auto""",
+                (GDN priority: flashqla > triton; KDA auto: shape-dependent FlashKDA on Hopper with
+                BF16 state, otherwise Triton; explicit flashkda requires a compatible installation);
+                when omitted, it defaults to auto""",
     )
     parser.add_argument(
         "--llm_decode_att_backend",

@@ -1,0 +1,26 @@
+ARG BASE_IMAGE=registry.cn-sh-02.sensecore.cn/ccr-ams-public/crafted/lightllm@sha256:1c48fccdecef901df2a322227b53aae3ee6b17fff8102298ff6831b95a36da00
+FROM ${BASE_IMAGE} AS builder
+ENV CUDA_HOME=/usr/local/cuda \
+    FLASH_KDA_CUDA_ARCHS=90a \
+    FLASH_KDA_VERSION_SUFFIX=+d7e3b3a9 \
+    TVM_FFI_CUDA_ARCH_LIST=9.0a \
+    MAX_JOBS=4 \
+    NVCC_THREADS=4
+COPY flash-kda /build/flash-kda
+RUN /opt/conda/bin/python -m pip wheel --no-deps --no-build-isolation \
+    /build/flash-kda -w /build/wheels
+COPY DeepGEMM /build/DeepGEMM
+COPY build_glm53_kernels.py /build/build_glm53_kernels.py
+RUN /opt/conda/bin/python /build/build_glm53_kernels.py
+
+FROM ${BASE_IMAGE}
+COPY --from=builder /build/wheels /opt/lightllm-build/wheels
+RUN /opt/conda/bin/python -m pip install --no-deps /opt/lightllm-build/wheels/flash_kda-*.whl
+COPY --from=builder /build/sgl_deep_gemm /opt/conda/lib/python3.10/site-packages/sgl_deep_gemm
+COPY --from=builder /build/kernel_build.json /opt/lightllm-build/kernel_build.json
+COPY licenses /opt/lightllm-build/licenses
+COPY --from=builder /build/flash-kda/LICENSE /opt/lightllm-build/licenses/flash-kda-LICENSE
+COPY --from=builder /build/flash-kda/cutlass/LICENSE.txt /opt/lightllm-build/licenses/flash-cutlass-LICENSE.txt
+COPY kernel_inputs.json /opt/lightllm-build/kernel_inputs.json
+RUN /opt/conda/bin/python -c \
+    "import deep_gemm, flash_kda, sgl_deep_gemm; assert callable(deep_gemm.fp8_gemm_nt); assert callable(flash_kda.fwd); assert callable(sgl_deep_gemm.fp8_mega_moe)"

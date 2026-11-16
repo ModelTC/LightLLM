@@ -1,0 +1,17 @@
+ARG KERNEL_IMAGE=lightllm:glm53-kernels
+FROM ${KERNEL_IMAGE}
+WORKDIR /lightllm
+RUN rm -rf /lightllm
+COPY . /lightllm
+ARG VCS_REF
+LABEL org.opencontainers.image.source="https://github.com/ModelTC/LightLLM" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.description="glm53_optim with FlashKDA and single-node SM90 FP8 MegaMoE"
+RUN test -n "${VCS_REF}" \
+    && test "$(git rev-parse HEAD)" = "${VCS_REF}" \
+    && test -z "$(git status --porcelain)" \
+    && /opt/conda/bin/python -m pip install --no-cache-dir --no-deps --no-build-isolation -e /lightllm \
+    && ln -s /lightllm/test/start_scripts/glm53/glm53_pd_kernels.sh /usr/local/bin/glm53-pd-kernels \
+    && printf '%s\n' "${VCS_REF}" > /opt/lightllm-build/source_revision \
+    && /opt/conda/bin/python /lightllm/docker/validate_glm53_kernels.py
+CMD ["/bin/bash"]

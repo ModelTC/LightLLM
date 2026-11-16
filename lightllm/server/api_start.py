@@ -298,7 +298,7 @@ def _launch_subprocesses(args: StartArgs):
         ), "--eplb_num_redundant_experts_per_rank must be greater than 0"
 
     if args.enable_ep_moe:
-        allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}
+        allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla", "flashkda"}
         for backend in args.llm_prefill_att_backend:
             assert backend in allowed_ep_prefill_att_backends, (
                 "When --enable_ep_moe is enabled, --llm_prefill_att_backend must be one of "
