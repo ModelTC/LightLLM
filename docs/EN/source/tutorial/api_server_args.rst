@@ -590,10 +590,9 @@ Performance Optimization Parameters
       can override them for other workloads.
     * ``triton``: Always use Triton, without importing FlashKDA.
     * ``flashkda``: Use the optional FlashKDA prefill kernel, in both native and replay SSM modes.
-      Requires SM90, SM100, SM103 or SM120, BF16 computation, BF16 or FP32 recurrent state,
-      head dimension 128, and a gate lower bound in [-5, 0]. An explicit request fails at startup
-      for an unsupported configuration or a package that cannot be loaded. Decode and MTP verification continue
-      to use the selected SSM mode's existing kernels.
+      The FlashKDA installation must support the current GPU and model inputs. Explicit selection
+      bypasses the automatic length policy; decode and MTP verification continue to use the selected
+      SSM mode's existing kernels.
 
     Install FlashKDA with CUDA 12.9 or newer:
 

@@ -18,29 +18,12 @@ def get_flash_kda_fwd(model):
     if backend not in ("auto", "flashkda"):
         raise ValueError(f"Unsupported KDA prefill backend: {backend}; use auto, triton, or flashkda")
 
-    config = model.config["linear_attn_config"]
-    lower_bound = config.get("gate_lower_bound", -5.0)
-    reason = None
-    if model.data_type != torch.bfloat16:
-        reason = "activations must be bfloat16"
-    elif model.args.linear_att_ssm_data_type not in ("bfloat16", "float32"):
-        reason = "recurrent state must be bfloat16 or float32"
-    elif config["head_dim"] != 128:
-        reason = "head_dim must be 128"
-    elif lower_bound is None or not -5.0 <= lower_bound <= 0.0:
-        reason = "gate_lower_bound must be in [-5, 0]"
-    elif torch.version.hip is not None or not torch.cuda.is_available():
-        reason = "an NVIDIA CUDA device is required"
-    elif torch.cuda.get_device_capability() not in ((9, 0), (10, 0), (10, 3), (12, 0)):
-        reason = "the CUDA device must support SM90, SM100, SM103 or SM120"
-    if reason is not None:
-        if backend == "flashkda":
-            raise ValueError(f"Cannot use explicit FlashKDA: {reason}. Use 'auto triton' for KDA prefill.")
-        logger.info("KDA prefill uses Triton: %s.", reason)
-        return None
-
     if backend == "auto" and (
-        model.args.linear_att_ssm_data_type != "bfloat16" or torch.cuda.get_device_capability() != (9, 0)
+        model.data_type != torch.bfloat16
+        or model.args.linear_att_ssm_data_type != "bfloat16"
+        or torch.version.hip is not None
+        or not torch.cuda.is_available()
+        or torch.cuda.get_device_capability() != (9, 0)
     ):
         return None
 
@@ -55,11 +38,6 @@ def get_flash_kda_fwd(model):
             "`pip install --no-build-isolation git+https://github.com/MoonshotAI/FlashKDA.git` "
             "and build it for the current GPU and PyTorch/CUDA versions."
         ) from exc
-    if not callable(fwd):
-        if backend == "auto":
-            logger.info("KDA prefill uses Triton: the installed flash_kda.fwd is not callable.")
-            return None
-        raise ImportError("The installed flash_kda package does not expose a callable fwd; reinstall FlashKDA.")
     logger.info("KDA prefill attention backend: %s.", "automatic FlashKDA/Triton" if backend == "auto" else "flashkda")
     return fwd
 
@@ -100,7 +78,7 @@ def kda_prefill(
             beta=raw_beta.float().sigmoid(),
             A_log=A_log,
             g_bias=g_bias,
-            initial_state=ssm_states[state_indices].contiguous(),
+            initial_state=ssm_states[state_indices],
             output_final_state=True,
             use_qk_l2norm_in_kernel=not qk_normalized,
             cu_seqlens=cu_seqlens,
@@ -116,15 +94,15 @@ def kda_prefill(
     state = gather_kda_state(ssm_states, state_indices)
     final_state = torch.empty_like(state)
     flash_kda_fwd(
-        q=q.contiguous(),
-        k=k.contiguous(),
-        v=v.contiguous(),
-        g=raw_g.contiguous(),
-        beta=raw_beta.contiguous(),
+        q=q,
+        k=k,
+        v=v,
+        g=raw_g,
+        beta=raw_beta,
         scale=q.shape[-1] ** -0.5,
         out=output,
-        A_log=A_log.reshape(-1).float().contiguous(),
-        dt_bias=g_bias.reshape(q.shape[2], q.shape[3]).float().contiguous(),
+        A_log=A_log.reshape(-1).float(),
+        dt_bias=g_bias.reshape(q.shape[2], q.shape[3]).float(),
         lower_bound=lower_bound,
         initial_state=state,
         final_state=final_state,

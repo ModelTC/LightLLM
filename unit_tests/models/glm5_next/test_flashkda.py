@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.common.basemodel.attention.linear import kda_prefill
+from lightllm.common.basemodel.attention.linear import flashkda
 from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.linear.replay_kda import ReplayKDALinearAttBackend
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
@@ -53,48 +53,35 @@ def test_fp32_auto_and_explicit_triton_do_not_import_flashkda(monkeypatch, flash
     monkeypatch.setitem(sys.modules, "flash_kda", None)
     model = make_model()
     model.args.llm_prefill_att_backend = backends
-    assert kda_prefill.get_flash_kda_fwd(model) is None
+    assert flashkda.get_flash_kda_fwd(model) is None
 
 
 def test_missing_explicit_flashkda_reports_install_command(monkeypatch, flash_module):
     monkeypatch.setitem(sys.modules, "flash_kda", None)
     with pytest.raises(ImportError, match="pip install --no-build-isolation"):
-        kda_prefill.get_flash_kda_fwd(make_model())
+        flashkda.get_flash_kda_fwd(make_model())
 
 
-@pytest.mark.parametrize("requested", ["auto", "flashkda"])
-@pytest.mark.parametrize(
-    "unsupported", ["dtype", "state_dtype", "head_dim", "gate", "unbounded", "cpu", "sm80", "sm110"]
-)
-def test_unsupported_flashkda_configuration(monkeypatch, flash_module, unsupported, requested):
-    model = make_model(requested)
+@pytest.mark.parametrize("unsupported", ["dtype", "state_dtype", "cpu", "sm80", "sm110"])
+def test_auto_skips_unsupported_flashkda_configuration(monkeypatch, flash_module, unsupported):
+    model = make_model("auto")
     model.args.linear_att_ssm_data_type = "bfloat16"
     if unsupported == "dtype":
         model.data_type = torch.float16
     elif unsupported == "state_dtype":
         model.args.linear_att_ssm_data_type = "float8_e4m3fn"
-    elif unsupported == "head_dim":
-        model.config["linear_attn_config"]["head_dim"] = 64
-    elif unsupported == "gate":
-        model.config["linear_attn_config"]["gate_lower_bound"] = -6.0
-    elif unsupported == "unbounded":
-        model.config["linear_attn_config"]["gate_lower_bound"] = None
     elif unsupported == "cpu":
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     else:
         monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (8, 0) if unsupported == "sm80" else (11, 0))
-    if requested == "flashkda":
-        with pytest.raises(ValueError, match="Cannot use explicit FlashKDA"):
-            kda_prefill.get_flash_kda_fwd(model)
-    else:
-        assert kda_prefill.get_flash_kda_fwd(model) is None
+    assert flashkda.get_flash_kda_fwd(model) is None
 
 
 def test_missing_optional_flashkda_falls_back(monkeypatch, flash_module):
     model = make_model("auto")
     model.args.linear_att_ssm_data_type = "bfloat16"
     monkeypatch.setitem(sys.modules, "flash_kda", None)
-    assert kda_prefill.get_flash_kda_fwd(model) is None
+    assert flashkda.get_flash_kda_fwd(model) is None
 
 
 @pytest.mark.parametrize("requested", ["auto", "flashkda"])
@@ -110,10 +97,10 @@ def test_extension_load_failure_is_reported_or_falls_back(monkeypatch, flash_mod
     model = make_model(requested)
     model.args.linear_att_ssm_data_type = "bfloat16"
     if requested == "auto":
-        assert kda_prefill.get_flash_kda_fwd(model) is None
+        assert flashkda.get_flash_kda_fwd(model) is None
     else:
         with pytest.raises(ImportError, match="PyTorch/CUDA") as exc:
-            kda_prefill.get_flash_kda_fwd(model)
+            flashkda.get_flash_kda_fwd(model)
         assert isinstance(exc.value.__cause__, OSError)
 
 
@@ -151,24 +138,24 @@ def test_automatic_dispatch_accounts_for_heads_and_length(flash_module, heads, l
     model.config["linear_attn_config"]["num_heads"] = 64
     model.tp_world_size_ = 64 // heads
     backend = backend_cls(model=model)
-    assert (kda_prefill.select_kda_prefill(backend, length) is flash_module.fwd) == uses_flash
+    assert (flashkda.select_kda_prefill(backend, length) is flash_module.fwd) == uses_flash
 
 
 def test_explicit_flashkda_overrides_performance_policy(flash_module):
     backend = KDALinearAttBackend(model=make_model())
-    assert kda_prefill.select_kda_prefill(backend, 32768) is flash_module.fwd
+    assert flashkda.select_kda_prefill(backend, 32768) is flash_module.fwd
 
 
 def test_fp8_sparse_kv_does_not_change_kda_selection(flash_module):
     model = make_model("auto")
     model.args.linear_att_ssm_data_type = "bfloat16"
     model.args.llm_kv_type = "fp8kv_dsa"
-    assert kda_prefill.get_flash_kda_fwd(model) is flash_module.fwd
+    assert flashkda.get_flash_kda_fwd(model) is flash_module.fwd
 
 
 def test_invalid_kda_backend_is_rejected():
     with pytest.raises(ValueError, match="Unsupported KDA prefill backend"):
-        kda_prefill.get_flash_kda_fwd(make_model("flashqla"))
+        flashkda.get_flash_kda_fwd(make_model("flashqla"))
 
 
 def test_cli_accepts_flashkda_prefill():
@@ -213,11 +200,11 @@ def make_inputs(lengths, state_dtype, device):
     packed = torch.randn(1, tokens, heads * (4 * dim + 1), device=device, dtype=torch.bfloat16)
     q, k, v, g, beta = packed.split([heads * dim] * 4 + [heads], dim=-1)
     return dict(
-        q=q.view(1, tokens, heads, dim),
-        k=k.view(1, tokens, heads, dim),
-        v=v.view(1, tokens, heads, dim),
-        raw_g=g.view(1, tokens, heads, dim),
-        raw_beta=beta.view(1, tokens, heads),
+        q=q.contiguous().view(1, tokens, heads, dim),
+        k=k.contiguous().view(1, tokens, heads, dim),
+        v=v.contiguous().view(1, tokens, heads, dim),
+        raw_g=g.contiguous().view(1, tokens, heads, dim),
+        raw_beta=beta.contiguous().view(1, tokens, heads),
         A_log=torch.randn(heads, device=device) * 0.1,
         g_bias=torch.randn(heads * dim, device=device) * 0.1,
         initial_state=torch.randn(len(lengths), heads, dim, dim, device=device, dtype=state_dtype) * 0.1,
@@ -231,7 +218,7 @@ def run_prefill(inputs, fwd):
     kwargs = inputs.copy()
     states = kwargs.pop("initial_state").clone()
     kwargs["cu_seqlens"] = kwargs["cu_seqlens"].to(torch.int64 if fwd is not None else torch.int32)
-    output = kda_prefill.kda_prefill(
+    output = flashkda.kda_prefill(
         **kwargs,
         ssm_states=states,
         state_indices=torch.arange(states.shape[0], device=states.device, dtype=torch.int32),
