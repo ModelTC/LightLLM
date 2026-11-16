@@ -9,7 +9,7 @@ from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
 from lightllm.utils.sgl_utils import flash_attn_varlen_func
-from .fp import Fa3AttBackend
+from ..dense.fa3 import Fa3AttBackend
 
 
 class MlaFa3AttBackend(Fa3AttBackend):

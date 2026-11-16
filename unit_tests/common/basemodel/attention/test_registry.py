@@ -4,25 +4,25 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 import lightllm.common.basemodel.attention.registry as registry
-from lightllm.common.basemodel.attention.fa3 import neo
-from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
-from lightllm.common.basemodel.attention.fa3.fp8 import Fp8Fa3AttBackend
-from lightllm.common.basemodel.attention.fa3.mla import MlaFa3AttBackend
-from lightllm.common.basemodel.attention.fa3.neo import NeoFa3AttBackend
-from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferAttBackend
-from lightllm.common.basemodel.attention.flashinfer.fp8 import Fp8FlashInferAttBackend
-from lightllm.common.basemodel.attention.flashinfer.mla import MlaFlashInferAttBackend
-from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
+from lightllm.common.basemodel.attention.neo import fa3 as neo
+from lightllm.common.basemodel.attention.dense.fa3 import Fa3AttBackend
+from lightllm.common.basemodel.attention.dense.fa3_fp8 import Fp8Fa3AttBackend
+from lightllm.common.basemodel.attention.mla.fa3 import MlaFa3AttBackend
+from lightllm.common.basemodel.attention.neo.fa3 import NeoFa3AttBackend
+from lightllm.common.basemodel.attention.dense.flashinfer import FlashInferAttBackend
+from lightllm.common.basemodel.attention.dense.flashinfer_fp8 import Fp8FlashInferAttBackend
+from lightllm.common.basemodel.attention.mla.flashinfer import MlaFlashInferAttBackend
+from lightllm.common.basemodel.attention.linear.gdn_flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.replay_gdn import ReplayGDNFlashQlaAttBackend, ReplayGDNTritonAttBackend
-from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
-from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DeepseekV4FlashMlaFp8SparseAttBackend
+from lightllm.common.basemodel.attention.linear.gdn_triton import TritonLinearAttBackend
+from lightllm.common.basemodel.attention.nsa.dsv4_flashmla_sparse_fp8 import DeepseekV4FlashMlaFp8SparseAttBackend
 from lightllm.common.basemodel.attention.nsa.flashmla_sparse import NsaFlashMlaSparseAttBackend
-from lightllm.common.basemodel.attention.nsa.fp8_flashmla_sparse import NsaFlashMlaFp8SparseAttBackend
-from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
-from lightllm.common.basemodel.attention.triton.int4kv import Int4kvTritonAttBackend
-from lightllm.common.basemodel.attention.triton.int8kv import Int8kvTritonAttBackend
-from lightllm.common.basemodel.attention.triton.mla import MlaTritonAttBackend
-from lightllm.common.basemodel.attention.triton.neo import NeoTritonAttBackend
+from lightllm.common.basemodel.attention.nsa.flashmla_sparse_fp8 import NsaFlashMlaFp8SparseAttBackend
+from lightllm.common.basemodel.attention.dense.triton import TritonAttBackend
+from lightllm.common.basemodel.attention.dense.triton_int4kv import Int4kvTritonAttBackend
+from lightllm.common.basemodel.attention.dense.triton_int8kv import Int8kvTritonAttBackend
+from lightllm.common.basemodel.attention.mla.triton import MlaTritonAttBackend
+from lightllm.common.basemodel.attention.neo.triton import NeoTritonAttBackend
 from lightllm.common.basemodel.attention.registry import (
     ANY_KV_TYPE,
     DECODE,

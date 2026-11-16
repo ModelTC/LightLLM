@@ -8,8 +8,8 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.basemodel.attention.fa3 import fp8 as fa3_fp8
-from lightllm.common.basemodel.attention.flashinfer import fp8 as flashinfer_fp8
+from lightllm.common.basemodel.attention.dense import fa3_fp8
+from lightllm.common.basemodel.attention.dense import flashinfer_fp8
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state

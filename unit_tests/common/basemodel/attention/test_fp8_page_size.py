@@ -3,14 +3,14 @@ from unittest.mock import patch
 
 import pytest
 
-from lightllm.common.basemodel.attention.fa3 import fp8 as fa3_fp8
-from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
-from lightllm.common.basemodel.attention.fa3.fp8 import Fp8Fa3AttBackend
-from lightllm.common.basemodel.attention.fa3.mla import MlaFa3AttBackend
-from lightllm.common.basemodel.attention.flashinfer import fp8 as flashinfer_fp8
-from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferAttBackend
-from lightllm.common.basemodel.attention.flashinfer.fp8 import Fp8FlashInferAttBackend
-from lightllm.common.basemodel.attention.flashinfer.mla import MlaFlashInferAttBackend
+from lightllm.common.basemodel.attention.dense import fa3_fp8
+from lightllm.common.basemodel.attention.dense.fa3 import Fa3AttBackend
+from lightllm.common.basemodel.attention.dense.fa3_fp8 import Fp8Fa3AttBackend
+from lightllm.common.basemodel.attention.mla.fa3 import MlaFa3AttBackend
+from lightllm.common.basemodel.attention.dense import flashinfer_fp8
+from lightllm.common.basemodel.attention.dense.flashinfer import FlashInferAttBackend
+from lightllm.common.basemodel.attention.dense.flashinfer_fp8 import Fp8FlashInferAttBackend
+from lightllm.common.basemodel.attention.mla.flashinfer import MlaFlashInferAttBackend
 
 
 @pytest.mark.parametrize(

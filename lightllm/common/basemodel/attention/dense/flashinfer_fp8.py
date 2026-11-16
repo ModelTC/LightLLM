@@ -2,8 +2,8 @@ import dataclasses
 import weakref
 import torch
 from ..base_att import AttControl
-from .fp import FlashInferAttBackend, FlashInferPrefillAttState, FlashInferDecodeAttState
-from .env_utils import set_flashinfer_envs
+from .flashinfer import FlashInferAttBackend, FlashInferPrefillAttState, FlashInferDecodeAttState
+from ..flashinfer_utils import set_flashinfer_envs
 from lightllm.utils.log_utils import init_logger
 
 

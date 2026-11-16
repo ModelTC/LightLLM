@@ -6,8 +6,7 @@ from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, 
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 from ...triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from ...triton_kernel.repack_kv_index import repack_kv_index
-from .env_utils import set_flashinfer_envs
-from .utils import should_init_decode_wrapper
+from ..flashinfer_utils import set_flashinfer_envs, should_init_decode_wrapper
 
 
 class FlashInferAttBackend(BaseAttBackend):

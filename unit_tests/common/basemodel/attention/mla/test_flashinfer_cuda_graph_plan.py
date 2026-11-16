@@ -6,7 +6,7 @@ import torch
 
 flashinfer = pytest.importorskip("flashinfer")
 
-from lightllm.common.basemodel.attention.flashinfer.mla import (  # noqa: E402
+from lightllm.common.basemodel.attention.mla.flashinfer import (  # noqa: E402
     MlaFlashInferDecodeAttState,
 )
 from lightllm.common.basemodel.infer_struct import InferStateInfo  # noqa: E402

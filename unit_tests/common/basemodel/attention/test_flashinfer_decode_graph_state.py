@@ -4,8 +4,8 @@ from types import ModuleType, SimpleNamespace
 
 import torch
 
-from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferDecodeAttState
-from lightllm.common.basemodel.attention.flashinfer import mla
+from lightllm.common.basemodel.attention.dense.flashinfer import FlashInferDecodeAttState
+from lightllm.common.basemodel.attention.mla import flashinfer as mla
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 

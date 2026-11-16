@@ -33,7 +33,7 @@ class BackendImports(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         suffix = fullname.removeprefix(f"{self.package}.")
         if not fullname.startswith(f"{self.package}.") or "." not in suffix:
             return None
-        if suffix.split(".")[0] not in {"triton", "fa3", "flashinfer", "nsa", "linear", "sdpa", "xformers"}:
+        if suffix.split(".")[0] not in {"dense", "mla", "neo", "nsa", "linear", "triton", "fa3", "sdpa", "xformers"}:
             return None
         self.imported.append(fullname)
         if fullname not in self.allowed:
@@ -95,24 +95,24 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.assertEqual(self.imports.imported, [])
 
     def test_explicit_regular_selection_skips_neo(self):
-        backend = self.imports.allow("fa3.fp", "Fa3AttBackend")
+        backend = self.imports.allow("dense.fa3", "Fa3AttBackend")
         self.args.llm_prefill_att_backend = ["fa3"]
 
         self.assertIs(self.attention.resolve_att_backend_class("dense", "prefill"), backend)
-        self.assertEqual(self.imports.imported, [f"{ATTENTION}.fa3.fp"])
+        self.assertEqual(self.imports.imported, [f"{ATTENTION}.dense.fa3"])
         self.validate.assert_not_called()
 
     def test_auto_selection_does_not_import_failed_candidates(self):
-        backend = self.imports.allow("flashinfer.fp", "FlashInferAttBackend")
+        backend = self.imports.allow("dense.flashinfer", "FlashInferAttBackend")
         self.args.llm_prefill_att_backend = ["auto"]
         self.validate.side_effect = lambda name: name == "flashinfer"
 
         self.assertIs(self.attention.resolve_att_backend_class("dense", "prefill"), backend)
         self.assertEqual([call.args[0] for call in self.validate.call_args_list], ["fa3", "flashinfer"])
-        self.assertEqual(self.imports.imported, [f"{ATTENTION}.flashinfer.fp"])
+        self.assertEqual(self.imports.imported, [f"{ATTENTION}.dense.flashinfer"])
 
     def test_mtp_decode_preserves_fa3_priority(self):
-        backend = self.imports.allow("fa3.fp", "Fa3AttBackend")
+        backend = self.imports.allow("dense.fa3", "Fa3AttBackend")
         self.args.llm_decode_att_backend = ["auto"]
         self.args.mtp_step = 2
 
@@ -120,7 +120,7 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.validate.assert_called_once_with("fa3")
 
     def test_expert_parallelism_still_excludes_flashinfer(self):
-        backend = self.imports.allow("triton.fp", "TritonAttBackend")
+        backend = self.imports.allow("dense.triton", "TritonAttBackend")
         self.args.llm_decode_att_backend = ["auto"]
         self.args.enable_ep_moe = True
         self.validate.side_effect = lambda name: name == "triton"
@@ -129,20 +129,20 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.assertEqual([call.args[0] for call in self.validate.call_args_list], ["fa3", "triton"])
 
     def test_auto_selection_falls_back_to_triton(self):
-        backend = self.imports.allow("triton.mla", "MlaTritonAttBackend")
+        backend = self.imports.allow("mla.triton", "MlaTritonAttBackend")
         self.args.llm_prefill_att_backend = ["auto"]
         self.validate.return_value = False
 
         self.assertIs(self.attention.resolve_att_backend_class("mla", "prefill"), backend)
-        self.assertEqual(self.imports.imported, [f"{ATTENTION}.triton.mla"])
+        self.assertEqual(self.imports.imported, [f"{ATTENTION}.mla.triton"])
 
     def test_nsa_selection_does_not_import_other_kv_types(self):
-        backend = self.imports.allow("nsa.fp8_flashmla_sparse", "NsaFlashMlaFp8SparseAttBackend")
+        backend = self.imports.allow("nsa.flashmla_sparse_fp8", "NsaFlashMlaFp8SparseAttBackend")
         self.args.llm_kv_type = "fp8kv_dsa"
         self.args.llm_decode_att_backend = ["flashmla_sparse"]
 
         self.assertIs(self.attention.resolve_att_backend_class("nsa", "decode"), backend)
-        self.assertEqual(self.imports.imported, [f"{ATTENTION}.nsa.fp8_flashmla_sparse"])
+        self.assertEqual(self.imports.imported, [f"{ATTENTION}.nsa.flashmla_sparse_fp8"])
 
     def test_registered_import_path_is_loaded_on_selection(self):
         backend = self.imports.allow("nsa.custom", "CustomBackend")
@@ -156,16 +156,16 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.assertEqual(self.imports.imported, [f"{ATTENTION}.nsa.custom"])
 
     def test_neo_triton_selection_does_not_probe_fa3(self):
-        backend = self.imports.allow("triton.neo", "NeoTritonAttBackend")
+        backend = self.imports.allow("neo.triton", "NeoTritonAttBackend")
 
         self.assertIs(self.attention.resolve_att_backend_class("neo", "prefill"), backend)
         self.args.llm_prefill_att_backend = ["auto"]
         self.assertIs(self.attention.resolve_att_backend_class("neo", "prefill", allowed=("triton",)), backend)
-        self.assertEqual(self.imports.imported, [f"{ATTENTION}.triton.neo"])
+        self.assertEqual(self.imports.imported, [f"{ATTENTION}.neo.triton"])
 
     def test_neo_auto_selection_still_falls_back_without_image_token_interface(self):
-        self.imports.allow("fa3.neo", "NeoFa3AttBackend", HAS_FLASH_ATTN_INTERFACE=False)
-        backend = self.imports.allow("triton.neo", "NeoTritonAttBackend")
+        self.imports.allow("neo.fa3", "NeoFa3AttBackend", HAS_FLASH_ATTN_INTERFACE=False)
+        backend = self.imports.allow("neo.triton", "NeoTritonAttBackend")
         self.args.llm_prefill_att_backend = ["auto"]
 
         self.assertIs(self.attention.resolve_att_backend_class("neo", "prefill"), backend)
@@ -175,16 +175,16 @@ class TestLazyAttentionImports(unittest.TestCase):
             self.attention.resolve_att_backend_class("neo", "prefill")
 
     def test_neo_auto_selection_uses_supported_fa3(self):
-        backend = self.imports.allow("fa3.neo", "NeoFa3AttBackend", HAS_FLASH_ATTN_INTERFACE=True)
+        backend = self.imports.allow("neo.fa3", "NeoFa3AttBackend", HAS_FLASH_ATTN_INTERFACE=True)
         self.args.llm_prefill_att_backend = ["auto"]
 
         self.assertIs(self.attention.resolve_att_backend_class("neo", "prefill"), backend)
-        self.assertEqual(self.imports.imported, [f"{ATTENTION}.fa3.neo"])
+        self.assertEqual(self.imports.imported, [f"{ATTENTION}.neo.fa3"])
         self.validate.assert_called_once_with("fa3")
 
     def _allow_linear_backend_classes(self):
-        flashqla = self.imports.allow("linear.flashqla", "FlashQlaLinearAttBackend")
-        triton = self.imports.allow("linear.triton", "TritonLinearAttBackend")
+        flashqla = self.imports.allow("linear.gdn_flashqla", "FlashQlaLinearAttBackend")
+        triton = self.imports.allow("linear.gdn_triton", "TritonLinearAttBackend")
         self.imports.allow("linear.replay_gdn", "ReplayGDNTritonAttBackend")
         replay_gdn = self.imports.allowed[f"{ATTENTION}.linear.replay_gdn"]
         replay_gdn.ReplayGDNFlashQlaAttBackend = type("ReplayGDNFlashQlaAttBackend", (), {})

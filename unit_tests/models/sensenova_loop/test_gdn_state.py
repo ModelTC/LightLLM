@@ -6,7 +6,7 @@ import torch
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
 from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
+from lightllm.common.basemodel.attention.linear.gdn_triton import TritonLinearAttBackend
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.sensenova_loop.config import get_loop_layer_indices, get_loop_layer_types
 from lightllm.server.core.objs.start_args_type import StartArgs

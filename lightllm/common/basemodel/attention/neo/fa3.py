@@ -5,7 +5,7 @@ import warnings
 
 import torch
 
-from .fp import Fa3AttBackend, Fa3PrefillAttState
+from ..dense.fa3 import Fa3AttBackend, Fa3PrefillAttState
 from ..base_att import AttControl
 
 

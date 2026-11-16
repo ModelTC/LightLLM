@@ -5,8 +5,8 @@ import torch
 import pytest
 
 from lightllm.common.basemodel import basemodel
-from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferDecodeAttState
-from lightllm.common.basemodel.attention.flashinfer.utils import should_init_decode_wrapper
+from lightllm.common.basemodel.attention.dense.flashinfer import FlashInferDecodeAttState
+from lightllm.common.basemodel.attention.flashinfer_utils import should_init_decode_wrapper
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
 from lightllm.common.basemodel.infer_struct import InferStateInfo

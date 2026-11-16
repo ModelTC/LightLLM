@@ -60,7 +60,7 @@ def test_gqa_layouts_coexist_and_match_across_tp_and_registration_order(kv_type,
 
 @pytest.mark.parametrize("prefill", [False, True])
 def test_fa3_reads_descale_for_each_head_layout(prefill, monkeypatch):
-    from lightllm.common.basemodel.attention.fa3 import fp8 as fa3_fp8
+    from lightllm.common.basemodel.attention.dense import fa3_fp8
 
     manager = AttentionStateManager(request_capacity=2)
     for layer, heads in enumerate((2, 4)):

@@ -245,7 +245,7 @@ def _write_packed_rows(buffer, layer_index, slots, packed):
 
 
 def _test_backend(requests, token_capacity=8192):
-    from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DeepseekV4FlashMlaFp8SparseAttBackend
+    from lightllm.common.basemodel.attention.nsa.dsv4_flashmla_sparse_fp8 import DeepseekV4FlashMlaFp8SparseAttBackend
 
     model = type("TestModel", (), {})()
     model.req_manager = requests
@@ -942,7 +942,7 @@ def test_swa_index_cuda_graph_reads_updated_private_pages(cache):
     indirect=["cache"],
 )
 def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, dspark):
-    from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
+    from lightllm.common.basemodel.attention.nsa import dsv4_flashmla_sparse_fp8 as attention
     from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
     from lightllm.models.deepseek_v4.triton_kernel.build_dspark_swa_indices import build_dspark_swa_indices
 
@@ -1418,7 +1418,7 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
     import lightllm.models.deepseek_v4_dspark.infer_struct as dspark_state
     from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
     from lightllm.models.deepseek_v4_dspark.infer_struct import DeepseekV4DSparkInferStateInfo
-    from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DeepseekV4FlashMlaFp8SparseAttBackend
+    from lightllm.common.basemodel.attention.nsa.dsv4_flashmla_sparse_fp8 import DeepseekV4FlashMlaFp8SparseAttBackend
 
     manager, requests = cache
     req_idx, slots = _reserve(manager, requests, 512)

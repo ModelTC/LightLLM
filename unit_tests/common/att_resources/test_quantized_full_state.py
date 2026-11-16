@@ -335,7 +335,7 @@ def test_deferred_storage_preserves_real_fp8_calibration(kind: str):
 def test_int4_prefill_with_separate_storage(device, monkeypatch):
     import weakref
     from types import SimpleNamespace
-    from lightllm.common.basemodel.attention.triton.int4kv import Int4kvTritonPrefillAttState
+    from lightllm.common.basemodel.attention.dense.triton_int4kv import Int4kvTritonPrefillAttState
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.common.basemodel.triton_kernel.kv_copy import ppl_int4kv_copy_kv
     from lightllm.common.basemodel.triton_kernel.att.prefill_att import context_flashattention_nopad

@@ -8,8 +8,7 @@ from ...triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from ...triton_kernel.repack_kv_index import repack_kv_index
 from ...triton_kernel.flashinfer_mla_plan import fill_mla_decode_plan_for_cuda_graph
 from typing import Tuple
-from .env_utils import set_flashinfer_envs
-from .utils import should_init_decode_wrapper
+from ..flashinfer_utils import set_flashinfer_envs, should_init_decode_wrapper
 
 
 class MlaFlashInferAttBackend(BaseAttBackend):

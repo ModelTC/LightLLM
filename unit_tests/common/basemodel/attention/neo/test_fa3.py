@@ -6,7 +6,8 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.fa3 import fp, neo
+from lightllm.common.basemodel.attention.dense import fa3 as fp
+from lightllm.common.basemodel.attention.neo import fa3 as neo
 
 
 def _load_neo(monkeypatch, attention_func):
@@ -15,7 +16,7 @@ def _load_neo(monkeypatch, attention_func):
         interface = ModuleType("flash_attn_interface")
         interface.flash_attn_with_kvcache = attention_func
     monkeypatch.setitem(sys.modules, "flash_attn_interface", interface)
-    name = "lightllm.common.basemodel.attention.fa3._neo_import_test"
+    name = "lightllm.common.basemodel.attention.neo._fa3_import_test"
     spec = importlib.util.spec_from_file_location(name, neo.__file__)
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, name, module)

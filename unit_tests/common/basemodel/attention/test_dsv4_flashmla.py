@@ -10,7 +10,7 @@ import torch
 
 pytest.importorskip("flash_mla")
 
-from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
+from lightllm.common.basemodel.attention.nsa import dsv4_flashmla_sparse_fp8 as attention
 from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
 
 
@@ -35,7 +35,7 @@ class BlockVllm(importlib.abc.MetaPathFinder):
             raise ModuleNotFoundError('vllm deliberately unavailable')
 
 sys.meta_path.insert(0, BlockVllm())
-from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
+from lightllm.common.basemodel.attention.nsa import dsv4_flashmla_sparse_fp8 as attention
 assert attention.flashmla.__name__ == 'flash_mla'
 assert not any(name == 'vllm' or name.startswith('vllm.') for name in sys.modules)
 """

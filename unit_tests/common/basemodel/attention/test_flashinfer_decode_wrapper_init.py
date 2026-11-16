@@ -6,8 +6,12 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.flashinfer import fp, fp8, mla
-from lightllm.common.basemodel.attention.flashinfer.utils import should_init_decode_wrapper
+from lightllm.common.basemodel.attention.dense import flashinfer as fp
+
+from lightllm.common.basemodel.attention.dense import flashinfer_fp8 as fp8
+
+from lightllm.common.basemodel.attention.mla import flashinfer as mla
+from lightllm.common.basemodel.attention.flashinfer_utils import should_init_decode_wrapper
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 

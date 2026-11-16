@@ -4,7 +4,7 @@ import torch
 from typing import Tuple
 
 from ..base_att import AttControl
-from .fp import TritonAttBackend, TritonPrefillAttState, TritonDecodeAttState
+from ..dense.triton import TritonAttBackend, TritonPrefillAttState, TritonDecodeAttState
 
 
 class NeoTritonAttBackend(TritonAttBackend):

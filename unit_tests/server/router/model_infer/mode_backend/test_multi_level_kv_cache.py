@@ -495,10 +495,10 @@ def test_async_load_notifies_every_rank_before_deref(monkeypatch):
 
 def test_fa3_cpu_cache_sync_defaults_off():
     from lightllm.common.basemodel.attention.base_att import BaseAttBackend
-    from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
-    from lightllm.common.basemodel.attention.fa3.fp8 import Fp8Fa3AttBackend
-    from lightllm.common.basemodel.attention.fa3.mla import MlaFa3AttBackend
-    from lightllm.common.basemodel.attention.fa3.neo import NeoFa3AttBackend
+    from lightllm.common.basemodel.attention.dense.fa3 import Fa3AttBackend
+    from lightllm.common.basemodel.attention.dense.fa3_fp8 import Fp8Fa3AttBackend
+    from lightllm.common.basemodel.attention.mla.fa3 import MlaFa3AttBackend
+    from lightllm.common.basemodel.attention.neo.fa3 import NeoFa3AttBackend
 
     assert BaseAttBackend.requires_cpu_cache_sync is False
     assert all(

@@ -11,7 +11,7 @@ from frozendict import frozendict
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
+from lightllm.common.basemodel.attention.dense.triton import TritonDecodeAttState
 from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.flash_decoding import (
     gqa_flash_decoding as decode_module,
     gqa_flash_decoding_stage1 as stage1_module,

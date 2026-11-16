@@ -9,7 +9,7 @@ import torch
 from frozendict import frozendict
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.fa3 import fp as fa3_module
+from lightllm.common.basemodel.attention.dense import fa3 as fa3_module
 from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils import sgl_utils

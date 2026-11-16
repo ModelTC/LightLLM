@@ -18,8 +18,8 @@ import torch
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.allocators import FullAttKVAllocator
 from lightllm.common.basemodel.attention.base_att import AttControl, BaseAttBackend
-from lightllm.common.basemodel.attention.fa3 import fp8 as fa3
-from lightllm.common.basemodel.attention.flashinfer import fp8 as flashinfer
+from lightllm.common.basemodel.attention.dense import fa3_fp8 as fa3
+from lightllm.common.basemodel.attention.dense import flashinfer_fp8 as flashinfer
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from unit_tests.common.att_resources.test_capacity import definition
 

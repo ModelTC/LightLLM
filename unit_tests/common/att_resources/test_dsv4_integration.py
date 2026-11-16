@@ -76,7 +76,7 @@ def cache(monkeypatch):
         att_state_role="main",
         args=SimpleNamespace(run_mode="normal", enable_prefill_microbatch_overlap=True),
     )
-    from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DeepseekV4FlashMlaFp8SparseAttBackend
+    from lightllm.common.basemodel.attention.nsa.dsv4_flashmla_sparse_fp8 import DeepseekV4FlashMlaFp8SparseAttBackend
 
     backend = DeepseekV4FlashMlaFp8SparseAttBackend(model=model)
     yield manager, window, backend

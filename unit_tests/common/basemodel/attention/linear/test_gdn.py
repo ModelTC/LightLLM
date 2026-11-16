@@ -13,8 +13,8 @@ import lightllm.common.basemodel.attention.linear.gdn as gdn
 import lightllm.common.basemodel.attention.registry as att_registry
 from lightllm.common.basemodel.attention import PREFILL, DECODE, resolve_att_backend_class
 import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
-from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
-from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
+from lightllm.common.basemodel.attention.linear.gdn_flashqla import FlashQlaLinearAttBackend
+from lightllm.common.basemodel.attention.linear.gdn_triton import TritonLinearAttBackend
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.server.api_cli import make_argument_parser
 import lightllm.utils.backend_validator as backend_validator

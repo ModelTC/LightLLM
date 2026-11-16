@@ -9,13 +9,13 @@ from lightllm.common.basemodel.attention.nsa.glm5_next import (
     Glm5NextSparseAttBackend,
     Glm5NextSparseDecodeState,
 )
-from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import (
+from lightllm.common.basemodel.attention.nsa.glm5_next_fp8 import (
     Fp8Glm5NextSparseAttBackend,
     Fp8Glm5NextSparseDecodeState,
 )
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
-from lightllm.common.basemodel.attention.nsa import fp8_glm5_next
+from lightllm.common.basemodel.attention.nsa import glm5_next_fp8 as fp8_glm5_next
 from lightllm.models.glm5_next.triton_kernel.kpool import expand_topk, prefill_nsa_params
 
 

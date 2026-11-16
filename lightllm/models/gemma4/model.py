@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING
 import os
 import json
 import torch
-from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
+from lightllm.common.basemodel.attention.dense.triton import TritonAttBackend
 from lightllm.common.build_utils import repair_config
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.gemma4.infer_struct import Gemma4InferStateInfo

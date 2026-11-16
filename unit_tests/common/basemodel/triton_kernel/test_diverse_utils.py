@@ -8,8 +8,8 @@ if not torch.cuda.is_available():
     pytest.skip("requires CUDA", allow_module_level=True)
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.triton import int8kv as int8kv_module
-from lightllm.common.basemodel.attention.triton.int8kv import Int8kvTritonDecodeAttState
+from lightllm.common.basemodel.attention.dense import triton_int8kv as int8kv_module
+from lightllm.common.basemodel.attention.dense.triton_int8kv import Int8kvTritonDecodeAttState
 from lightllm.common.basemodel.triton_kernel import diverse_utils
 
 

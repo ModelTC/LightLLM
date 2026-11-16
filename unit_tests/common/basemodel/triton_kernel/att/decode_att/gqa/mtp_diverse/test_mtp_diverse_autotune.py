@@ -12,7 +12,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel import cuda_graph as graph_module
-from lightllm.common.basemodel.attention.triton import fp as state_module
+from lightllm.common.basemodel.attention.dense import triton as state_module
 from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.mtp_diverse import (
     mtp_diverse_attn as decode_module,
     stage1_single_token as stage1_module,

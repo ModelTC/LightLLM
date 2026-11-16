@@ -1,8 +1,8 @@
 from lightllm.common.basemodel.attention import base_att
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend
-from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferAttBackend
-from lightllm.common.basemodel.attention.flashinfer.fp8 import Fp8FlashInferAttBackend
-from lightllm.common.basemodel.attention.flashinfer.mla import MlaFlashInferAttBackend
+from lightllm.common.basemodel.attention.dense.flashinfer import FlashInferAttBackend
+from lightllm.common.basemodel.attention.dense.flashinfer_fp8 import Fp8FlashInferAttBackend
+from lightllm.common.basemodel.attention.mla.flashinfer import MlaFlashInferAttBackend
 
 
 def test_workspace_is_shared_by_backend_family_and_device(monkeypatch):

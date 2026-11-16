@@ -10,9 +10,9 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention.base_att as base_att_module
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend
-from lightllm.common.basemodel.attention.fa3.fp import Fa3DecodeAttState, Fa3PrefillAttState
-from lightllm.common.basemodel.attention.fa3.mla import MlaFa3DecodeAttState, MlaFa3PrefillAttState
-from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
+from lightllm.common.basemodel.attention.dense.fa3 import Fa3DecodeAttState, Fa3PrefillAttState
+from lightllm.common.basemodel.attention.mla.fa3 import MlaFa3DecodeAttState, MlaFa3PrefillAttState
+from lightllm.common.basemodel.attention.dense.triton import TritonDecodeAttState
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 from lightllm.utils import envs_utils

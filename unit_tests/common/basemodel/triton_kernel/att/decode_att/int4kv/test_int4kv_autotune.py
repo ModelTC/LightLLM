@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.triton.int4kv import Int4kvTritonDecodeAttState
+from lightllm.common.basemodel.attention.dense.triton_int4kv import Int4kvTritonDecodeAttState
 from lightllm.common.basemodel.triton_kernel.att.decode_att.int4kv import (
     int4kv_flash_decoding_stage1 as stage1_module,
     ppl_int4kv_flash_decoding as decode_module,

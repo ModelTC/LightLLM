@@ -8,7 +8,7 @@ from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant i
     q_per_head_static_fp8_quant,
 )
 from lightllm.utils.log_utils import init_logger
-from .fp import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
+from .fa3 import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
 
 
 logger = init_logger(__name__)

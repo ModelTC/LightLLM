@@ -202,50 +202,50 @@ def _get_auto_priority(family: str, phase: str, candidates: Dict[str, _BackendEn
 
 
 def _register_builtin_backends() -> None:
-    register_att_backend("dense", "triton", "triton.fp:TritonAttBackend")
-    register_att_backend("dense", "fa3", "fa3.fp:Fa3AttBackend")
-    register_att_backend("dense", "flashinfer", "flashinfer.fp:FlashInferAttBackend")
-    register_att_backend("dense", "triton", "triton.int4kv:Int4kvTritonAttBackend", kv_types=("int4kv",))
-    register_att_backend("dense", "triton", "triton.int8kv:Int8kvTritonAttBackend", kv_types=("int8kv",))
-    register_att_backend("dense", "fa3", "fa3.fp8:Fp8Fa3AttBackend", kv_types=("fp8kv_sph",))
-    register_att_backend("dense", "flashinfer", "flashinfer.fp8:Fp8FlashInferAttBackend", kv_types=("fp8kv_spt",))
+    register_att_backend("dense", "triton", "dense.triton:TritonAttBackend")
+    register_att_backend("dense", "fa3", "dense.fa3:Fa3AttBackend")
+    register_att_backend("dense", "flashinfer", "dense.flashinfer:FlashInferAttBackend")
+    register_att_backend("dense", "triton", "dense.triton_int4kv:Int4kvTritonAttBackend", kv_types=("int4kv",))
+    register_att_backend("dense", "triton", "dense.triton_int8kv:Int8kvTritonAttBackend", kv_types=("int8kv",))
+    register_att_backend("dense", "fa3", "dense.fa3_fp8:Fp8Fa3AttBackend", kv_types=("fp8kv_sph",))
+    register_att_backend("dense", "flashinfer", "dense.flashinfer_fp8:Fp8FlashInferAttBackend", kv_types=("fp8kv_spt",))
 
-    register_att_backend("mla", "triton", "triton.mla:MlaTritonAttBackend")
-    register_att_backend("mla", "fa3", "fa3.mla:MlaFa3AttBackend")
-    register_att_backend("mla", "flashinfer", "flashinfer.mla:MlaFlashInferAttBackend")
+    register_att_backend("mla", "triton", "mla.triton:MlaTritonAttBackend")
+    register_att_backend("mla", "fa3", "mla.fa3:MlaFa3AttBackend")
+    register_att_backend("mla", "flashinfer", "mla.flashinfer:MlaFlashInferAttBackend")
 
     register_att_backend("nsa", "flashmla_sparse", "nsa.flashmla_sparse:NsaFlashMlaSparseAttBackend")
     register_att_backend(
         "nsa",
         "flashmla_sparse",
-        "nsa.fp8_flashmla_sparse:NsaFlashMlaFp8SparseAttBackend",
+        "nsa.flashmla_sparse_fp8:NsaFlashMlaFp8SparseAttBackend",
         kv_types=("fp8kv_dsa",),
     )
     register_att_backend(
         "dsv4_nsa",
         "flashmla_sparse",
-        "nsa.dsv4_fp8_flashmla_sparse:DeepseekV4FlashMlaFp8SparseAttBackend",
+        "nsa.dsv4_flashmla_sparse_fp8:DeepseekV4FlashMlaFp8SparseAttBackend",
         kv_types=("fp8kv_dsa",),
     )
 
-    register_att_backend("neo", "triton", "triton.neo:NeoTritonAttBackend", phases=(PREFILL,))
+    register_att_backend("neo", "triton", "neo.triton:NeoTritonAttBackend", phases=(PREFILL,))
     register_att_backend(
         "neo",
         "fa3",
-        "fa3.neo:NeoFa3AttBackend",
+        "neo.fa3:NeoFa3AttBackend",
         phases=(PREFILL,),
         # Only Neo FA3 needs the optional image-token attention interface.
-        available_flag="fa3.neo:HAS_FLASH_ATTN_INTERFACE",
+        available_flag="neo.fa3:HAS_FLASH_ATTN_INTERFACE",
         unavailable_hint="Neo FA3 needs the flash_attn_interface build with image_token_end support; "
         "use --llm_prefill_att_backend triton to select Triton instead.",
     )
 
     # Linear attention does not read the full-attention KV cache format.
     register_att_backend(
-        "gdn", "flashqla", "linear.flashqla:FlashQlaLinearAttBackend", kv_types=(ANY_KV_TYPE,), phases=(PREFILL,)
+        "gdn", "flashqla", "linear.gdn_flashqla:FlashQlaLinearAttBackend", kv_types=(ANY_KV_TYPE,), phases=(PREFILL,)
     )
     register_att_backend(
-        "gdn", "triton", "linear.triton:TritonLinearAttBackend", kv_types=(ANY_KV_TYPE,), needs_validation=False
+        "gdn", "triton", "linear.gdn_triton:TritonLinearAttBackend", kv_types=(ANY_KV_TYPE,), needs_validation=False
     )
     register_att_backend(
         "gdn_replay",

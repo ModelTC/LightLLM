@@ -8,11 +8,11 @@ import torch
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend, BaseDecodeAttState
 
 _BACKEND_MODULES = (
-    "triton.fp",
-    "triton.int4kv",
-    "triton.int8kv",
-    "triton.mla",
-    "triton.neo",
+    "dense.triton",
+    "dense.triton_int4kv",
+    "dense.triton_int8kv",
+    "mla.triton",
+    "neo.triton",
     "nsa.glm5_next",
     "linear.gdn",
     "linear.kda",
