@@ -36,6 +36,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--httpserver_workers", type=int, default=1)
     parser.add_argument(
+        "--stream_interval",
+        type=int,
+        default=1,
+        help=(
+            "Number of completion tokens to buffer before sending one SSE event. Must be >= 1. "
+            "1 sends every token. The first token of each choice and a finished token are sent immediately."
+        ),
+    )
+    parser.add_argument(
         "--disable_delay_response_start",
         action="store_true",
         help=(

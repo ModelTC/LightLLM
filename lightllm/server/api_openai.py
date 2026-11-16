@@ -1053,58 +1053,57 @@ async def _process_prompts_completion(
     return _build_completion_response(results_by_prompt, request, created_time, len(prompts) > 1)
 
 
-class _ReadyCompletionBatch:
-    """Hold completion text that has already arrived.
+def _server_stream_interval() -> int:
+    """Read --stream_interval. Missing startup args keep the one-token default."""
+    raw = os.environ.get("LIGHTLLM_START_ARGS")
+    if not raw:
+        return 1
+    return int(json.loads(raw).get("stream_interval", 1))
 
-    The first event for a choice goes out immediately. Later text stays together
-    until the ready batch ends, the choice finishes, or the buffer reaches 32
-    tokens or 64KiB. A missing batch-end flag sends every token.
+
+class _StreamIntervalBatch:
+    """Buffer completion text and send one SSE event every `interval` tokens.
+
+    The first token of a choice and a finished token are sent immediately.
+    An interval of 1 therefore sends every token.
     """
 
-    _TOKEN_LIMIT = 32
-    _CHAR_LIMIT = 64 * 1024
-
-    def __init__(self, logprobs):
-        self._logprobs = logprobs
+    def __init__(self, interval, request, created_time):
+        self._interval = interval
+        self._request = request
+        self._created_time = created_time
+        self.request_id = None
         self._choices = {}
-        self._tokens = 0
-        self._chars = 0
-        self._started = set()
 
     def append(self, choice_index, text, finish_reason):
         choice = self._choices.get(choice_index)
         if choice is None:
-            self._choices[choice_index] = {
-                "text": text,
+            choice = {
+                "text": "",
                 "index": int(choice_index),
-                "logprobs": None if self._logprobs is None else {},
-                "finish_reason": finish_reason,
+                "logprobs": None if self._request.logprobs is None else {},
+                "finish_reason": None,
+                "tokens": 0,
+                "seen": False,
             }
-        else:
-            choice["text"] += text
-            choice["finish_reason"] = finish_reason
-        self._tokens += 1
-        self._chars += len(text)
-        is_first = choice_index not in self._started
-        self._started.add(choice_index)
-        return is_first
-
-    def should_send(self, is_first, batch_end, finish_reason):
-        return (
-            is_first
-            or batch_end
-            or finish_reason is not None
-            or self._tokens >= self._TOKEN_LIMIT
-            or self._chars >= self._CHAR_LIMIT
-        )
-
-    def pop_event(self, request_id, created, model):
-        if not self._choices:
+            self._choices[choice_index] = choice
+        choice["text"] += text
+        choice["tokens"] += 1
+        choice["finish_reason"] = finish_reason
+        due = (not choice["seen"]) or finish_reason is not None or choice["tokens"] >= self._interval
+        if not due:
             return None
+        return self._pop(choice_index)
+
+    def drain(self):
+        return [self._pop(choice_index) for choice_index, choice in self._choices.items() if choice["tokens"]]
+
+    def _pop(self, choice_index):
+        choice = self._choices[choice_index]
         response = CompletionStreamResponse(
-            id=request_id,
-            created=created,
-            model=model,
+            id=self.request_id,
+            created=self._created_time,
+            model=self._request.model,
             choices=[
                 CompletionStreamChoice(
                     text=choice["text"],
@@ -1112,12 +1111,12 @@ class _ReadyCompletionBatch:
                     logprobs=choice["logprobs"],
                     finish_reason=choice["finish_reason"],
                 )
-                for choice in self._choices.values()
             ],
         )
-        self._choices.clear()
-        self._tokens = 0
-        self._chars = 0
+        choice["text"] = ""
+        choice["tokens"] = 0
+        choice["finish_reason"] = None
+        choice["seen"] = True
         return f"data: {json.dumps(response.model_dump(), ensure_ascii=False)}\n\n"
 
 
@@ -1141,10 +1140,7 @@ async def _handle_streaming_completion(
         prompt_tokens = 0
         completion_tokens = 0
         cached_tokens = 0
-        batch = _ReadyCompletionBatch(request.logprobs)
-
-        def flush_batch():
-            return batch.pop_event(group_request_id, created_time, request.model)
+        batch = _StreamIntervalBatch(_server_stream_interval(), request, created_time)
 
         try:
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
@@ -1163,19 +1159,17 @@ async def _handle_streaming_completion(
                         prompt_str = g_objs.httpserver_manager.tokenizer.decode(prompt, skip_special_tokens=False)
                     output_text = prompt_str + output_text
 
-                is_first = batch.append(choice_index, output_text, finish_reason)
-                batch_end = metadata.pop("_pd_stream_batch_end", True)
-                if batch.should_send(is_first, batch_end, finish_reason):
-                    yield flush_batch()
+                batch.request_id = group_request_id
+                event = batch.append(choice_index, output_text, finish_reason)
+                if event is not None:
+                    yield event
         except Exception:
-            pending = flush_batch()
-            if pending is not None:
-                yield pending
+            for event in batch.drain():
+                yield event
             raise
 
-        pending = flush_batch()
-        if pending is not None:
-            yield pending
+        for event in batch.drain():
+            yield event
 
         usage = UsageInfo(
             prompt_tokens=prompt_tokens,

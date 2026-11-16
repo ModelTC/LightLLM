@@ -663,7 +663,6 @@ class HttpServerManagerForPDMaster:
                 )
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
-                output_tokens = []
                 for sub_req_id, request_output, metadata, finish_status in token_list:
                     output_index = metadata.get("count_output_tokens")
                     # 因为 pd 的 prefill 和 decode 节点都有可能上报首token，所以需要做一下过滤。
@@ -679,16 +678,12 @@ class HttpServerManagerForPDMaster:
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                             metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
                             metadata["needs_prefill_first_token"] = needs_prefill_first_token
-                            output_tokens.append((sub_req_id, request_output, metadata, finish_status))
+                            yield sub_req_id, request_output, metadata, finish_status
                         else:
                             continue
                     else:
                         metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
-                        output_tokens.append((sub_req_id, request_output, metadata, finish_status))
-                # 只标记这一轮已经到达的 token。被过滤的重复首 token 不占批次结束位置。
-                for index, token_info in enumerate(output_tokens):
-                    token_info[2]["_pd_stream_batch_end"] = index == len(output_tokens) - 1
-                    yield token_info
+                        yield sub_req_id, request_output, metadata, finish_status
 
         return
 
