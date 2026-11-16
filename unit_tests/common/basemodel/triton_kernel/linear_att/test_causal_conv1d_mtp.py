@@ -5,6 +5,8 @@ import torch
 
 from lightllm.common.attention.backends._shared.linear.causal_conv1d_mtp import causal_conv1d_update
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+
 
 def causal_conv1d_ref(
     x: torch.Tensor,

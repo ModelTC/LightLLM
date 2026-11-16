@@ -4,7 +4,7 @@
 import triton
 import triton.language as tl
 
-from lightllm.common.attention.backends._shared.linear.replayssm_delta import _apply_accepted_prefix
+from .replayssm_delta import _apply_accepted_prefix
 
 
 @triton.jit

@@ -55,7 +55,9 @@ def rebuild_inputs(state, linear_layer_idx, q, k, v, a, b, a_log, bias, reqs, cu
     # 一行一个 token 时请求数就是 token 数。打包窗口再用 verify_width 折成请求数。
     batch = run_count if tokens == run_count else min(run_count, triton.cdiv(tokens, state.verify_width))
     _, _, hv, kd, vd = state.ssm_state.shape
-    scratch = type(state)(
+    from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
+
+    scratch = ReplayGDNState(
         ConvSSMStateConfig(
             logical_layer_ids=(0,),
             global_k_heads=state.num_key_heads,
@@ -86,7 +88,7 @@ def rebuild_inputs(state, linear_layer_idx, q, k, v, a, b, a_log, bias, reqs, cu
     cu = torch.arange(run_count + 1, dtype=torch.int32, device=q.device)
     cu = (cu * state.verify_width).clamp_max(tokens)
     return (), dict(
-        state=scratch,
+        state=scratch.replay_storage(),
         linear_layer_idx=0,
         q=copied[0],
         k=copied[1],
