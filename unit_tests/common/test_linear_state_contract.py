@@ -4,7 +4,7 @@ import torch
 from lightllm.common.attention_state.bounded_att import KDAState
 from unit_tests.common.test_linear_state import make_state
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
+from lightllm.common.attention.kernels.linear.replay.replayssm_cursor import advance_cursor
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig

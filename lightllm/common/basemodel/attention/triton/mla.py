@@ -45,7 +45,9 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
         att_control: AttControl,
         alloc_func=torch.empty,
     ):
-        from ...triton_kernel.mla_att.prefill_att import context_attention_fwd_with_v
+        from lightllm.common.attention.kernels.mla.prefill.context_flashattention_nopad_with_v import (
+            context_attention_fwd_with_v,
+        )
 
         qk_rope_head_dim = 64
         q_nope, q_rope = q[:, :, :-qk_rope_head_dim], q[:, :, -qk_rope_head_dim:]
@@ -77,7 +79,9 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
         att_control: AttControl,
         alloc_func=torch.empty,
     ):
-        from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
+        from lightllm.common.attention.kernels.dense.prefill.context_flashattention_nopad import (
+            context_attention_fwd_contiguous_kv,
+        )
 
         k_nope, k_rope = k
         q_head_num = q.shape[1]
@@ -142,7 +146,9 @@ class MlaTritonDecodeAttState(BaseDecodeAttState):
         assert att_control.mla_decode
         softmax_scale = att_control.mla_decode_dict["softmax_scale"]
 
-        from ...triton_kernel.mla_att.decode_att import gqa_token_decode_attention_flash_decoding
+        from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding import (
+            gqa_token_decode_attention_flash_decoding,
+        )
 
         qk_rope_head_dim = 64
         q_nope, q_rope = q

@@ -1,5 +1,5 @@
 from lightllm.common.basemodel.attention.linear.gdn import LinearAttBackend
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import chunk_gated_delta_rule
+from lightllm.common.attention.kernels.linear.fla.ops.chunk import chunk_gated_delta_rule
 
 
 class TritonLinearAttBackend(LinearAttBackend):

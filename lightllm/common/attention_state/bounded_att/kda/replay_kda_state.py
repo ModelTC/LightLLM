@@ -11,9 +11,9 @@ from math import prod
 
 import torch
 
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_fold import fold_prefix
-from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
+from lightllm.common.attention.kernels.linear.replay.replayssm_cursor import advance_cursor
+from lightllm.common.attention.kernels.linear.replay.replayssm_fold import fold_prefix
+from lightllm.common.attention.kernels.linear.replay.ssm_acceptance import commit_ssm_prefix
 from lightllm.utils.log_utils import init_logger
 
 from ...types import AxisMapping, PageKind, StateTransferLayout, TensorField, TransferRegion

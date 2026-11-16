@@ -96,7 +96,7 @@ def _validate_flashqla():
     """Validate FlashQLA against LightLLM's vendored FLA kernel."""
     from flash_qla import chunk_gated_delta_rule as flashqla_chunk_gated_delta_rule
 
-    from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
+    from lightllm.common.attention.kernels.linear.fla.ops.chunk import (
         chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
     )
     from lightllm.models.qwen3next.config import Qwen3NextResourceConfig

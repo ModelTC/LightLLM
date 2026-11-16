@@ -6,16 +6,16 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
-from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import fused_gdn_gating
-from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import conv_pack_gdn_decode_inputs
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
+from lightllm.common.attention.kernels.linear.causal_conv1d import causal_conv1d_fn
+from lightllm.common.attention.kernels.linear.gdn.fused_gdn_gating import fused_gdn_gating
+from lightllm.common.attention.kernels.linear.gdn.gdn_decode_pack import conv_pack_gdn_decode_inputs
+from lightllm.common.attention.kernels.linear.gdn.mtp_fused_recurrent import (
     mtp_fused_recurrent_gated_delta_rule,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
+from lightllm.common.attention.kernels.linear.mtp_state_params import (
     build_dynamic_mtp_linear_att_state_params,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
+from lightllm.common.attention.kernels.linear.fla.ops.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 
@@ -389,7 +389,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
     ):
-        from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
+        from lightllm.common.attention.kernels.linear.causal_conv1d_mtp import (
             causal_conv1d_update as causal_conv1d_update_mtp,
         )
 
