@@ -1,16 +1,32 @@
 from __future__ import annotations
 
+"""Exercise shared-manager startup with independently prepared hybrid drafts."""
+
+
+import json
+from contextlib import nullcontext
+from dataclasses import asdict
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
-
-
 import torch
 
-
+from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
+from lightllm.common.basemodel import runtime as runtime_module
+from lightllm.platform import DeviceRuntime
 from lightllm.server.core.objs.start_args_type import StartArgs
-
-
+from lightllm.server.router.model_infer.mode_backend import base_backend
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+from lightllm.utils.cpu_cache_layout import build_cpu_cache_layouts
+from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
+from unit_tests.common.att_resources.model_helpers import full_state_test_buffers, read_kv_storage
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -22,3 +38,348 @@ def test_backend_rejects_more_than_36_drafts_before_loading():
     with pytest.raises(AssertionError, match="at most 36"):
         backend.init_mtp_draft_model({})
     assert backend.draft_models == []
+
+
+@pytest.mark.parametrize("main_linear", [False, True])
+@pytest.mark.parametrize("draft_full", [False, True])
+@pytest.mark.parametrize("draft_count", [1, 2])
+@pytest.mark.parametrize("encoding", ["None", "fp8kv_sph", "fp8kv_spt"])
+@pytest.mark.parametrize("via_backend", [False, True])
+def test_backend_allocates_all_roles_before_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    main_linear: bool,
+    draft_full: bool,
+    draft_count: int,
+    encoding: str,
+    via_backend: bool,
+):
+    args = StartArgs(
+        model_dir=str(tmp_path),
+        data_type="bfloat16",
+        llm_kv_type=encoding,
+        page_size=4,
+        linear_att_hash_page_size=4,
+        linear_att_page_block_num=2,
+        linear_att_cache_size=2,
+        cpu_cache_token_page_size=8,
+        mtp_mode="vanilla_with_att",
+        mtp_step=draft_count,
+    )
+    for key in ("CURRENT_RANK_IN_DP", "CURRENT_RANK_IN_NODE", "CURRENT_DEVICE_ID"):
+        monkeypatch.setenv("LIGHTLLM_" + key, "0")
+    monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", "1")
+    config = dict(
+        model_type="qwen3_5_text",
+        architectures=["Qwen3NextForCausalLM"],
+        num_hidden_layers=4,
+        n_layer=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        hidden_size=64,
+        head_dim=16,
+        full_attention_interval=2,
+        linear_num_key_heads=2,
+        linear_num_value_heads=4,
+        linear_key_head_dim=8,
+        linear_value_head_dim=8,
+        linear_conv_kernel_dim=3,
+    )
+    draft_config = dict(
+        config,
+        num_hidden_layers=2 if draft_full else 1,
+        n_layer=2 if draft_full else 1,
+        num_key_value_heads=1,
+        head_dim=8,
+    )
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    draft_dir = tmp_path / "draft"
+    draft_dir.mkdir()
+    (draft_dir / "config.json").write_text(json.dumps(draft_config))
+    args.mtp_draft_model_dir = [str(draft_dir)] * draft_count
+    main_full_layers = 2 if main_linear else 4
+    if encoding != "None":
+        calibration_layers = main_full_layers + int(draft_full) * draft_count
+        scales = torch.arange(1, calibration_layers + 1, dtype=torch.float32) * 0.125
+        calibration = {
+            "architectures": "Qwen3NextForCausalLM",
+            "num_head": 1,
+            "num_layers": calibration_layers,
+            "scales_shape": [calibration_layers, 2],
+            "scales": scales[:, None].expand(-1, 2).tolist(),
+            "q_calibration": {
+                "num_head": 1,
+                "scales_shape": [calibration_layers, 1],
+                "scales": (scales[:, None] * 2).tolist(),
+            },
+            "quant_type": "per_head" if encoding == "fp8kv_sph" else "per_tensor",
+        }
+        calibration_path = tmp_path / "calibration.json"
+        calibration_path.write_text(json.dumps(calibration))
+        args.kv_quant_calibration_config_path = str(calibration_path)
+    monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(asdict(args)))
+    get_env_start_args.cache_clear()
+    get_added_mtp_kv_layer_num.cache_clear()
+    main_cls = Qwen3NextTpPartModel if main_linear else LlamaTpPartModel
+    monkeypatch.setattr("lightllm.utils.llm_utils.get_llm_model_class", lambda: main_cls)
+    monkeypatch.setattr("lightllm.models.get_draft_model_class", lambda *_: Qwen3NextTpPartModel)
+    models, warmed, padded, captured, prefill_captured, ready = [], set(), set(), set(), set(), []
+    capture_order, profiled_generations, unbound = [], [], []
+    mapping = SimpleNamespace(bind_hold_page=lambda indices: None, req_list=SimpleNamespace(is_all_free=lambda: True))
+    request_allocations = []
+    manager_creations = []
+    from lightllm.common.attention_state import AttentionStateManager
+
+    def create_empty_manager(request_capacity: int):
+        manager = AttentionStateManager(request_capacity=request_capacity)
+        assert not manager._state_registration_finished
+        assert not any(name.endswith("_state") for name in manager.__dict__)
+        manager_creations.append(request_capacity)
+        return manager
+
+    monkeypatch.setattr("lightllm.common.basemodel.basemodel.AttentionStateManager", create_empty_manager)
+
+    def create_req_manager(max_request_num: int, max_sequence_length: int):
+        assert len(models) == 1 + draft_count
+        assert all(not hasattr(item, "req_manager") for item in models)
+        request_allocations.append((max_request_num, max_sequence_length))
+        return mapping
+
+    monkeypatch.setattr("lightllm.common.req_manager.ReqManager", create_req_manager)
+    monkeypatch.setattr(runtime_module, "ReqManager", create_req_manager)
+
+    def mark_backends(model: TpPartBaseModel):
+        # 第一个模型初始化 backend 前，全部 State 已创建完成，可通过缓存查询取得资源。
+        for item in models:
+            for state in item.att_state_manager.get_full_attention_states(item.att_state_role):
+                logical_layer_ids = {layer_id for group in state.config.logical_layer_groups for layer_id in group}
+                for layer in item.layers_infer:
+                    if layer.layer_num_ in logical_layer_ids:
+                        assert (
+                            item.att_state_manager.get_state(
+                                model_role=item.att_state_role,
+                                state_type_filter="",
+                                logical_layer_id=layer.layer_num_,
+                                state_class=type(state),
+                            )
+                            is state
+                        )
+        from lightllm.common.attention.api import AttentionFamily, AttentionPhase
+
+        backend = SimpleNamespace(spec=SimpleNamespace(family=AttentionFamily.DENSE))
+        model.attention = SimpleNamespace(
+            groups=({phase: backend for phase in AttentionPhase},),
+            reserve=reserve_resources,
+            bind=initialize_layer_attention,
+            unbind=lambda model: unbound.append(id(model)),
+            capacity_memory_bytes=lambda model, tokens: 0,
+        )
+        model.backends_bound = True
+
+    def initialize_layer_attention(model):
+        assert model.att_state_manager.full_att_allocator is not None
+        assert all(item.backends_bound for item in models)
+        model.layer_attention_initialized = True
+
+    def reserve_resources(model):
+        assert model.backends_bound
+        assert model.att_state_manager.full_att_allocator is None
+        model.attention_resources_reserved = True
+
+    def warmup(model: TpPartBaseModel):
+        assert model.layer_attention_initialized
+        assert model.backends_bound
+        assert all(item.req_manager is mapping for item in models)
+        assert all(item.attention_resources_reserved for item in models)
+        assert all(item.att_state_manager is models[0].att_state_manager for item in models)
+        assert model.att_state_manager.full_att_allocator.size == 32
+        assert all(item.max_total_token_num == 32 for item in models[: models.index(model) + 1])
+        assert all(item.max_total_token_num is None for item in models[models.index(model) + 1 :])
+        assert captured == prefill_captured == {id(item) for item in models[: models.index(model)]}
+        assert not ready
+        warmed.add(id(model))
+
+    def capture(model: TpPartBaseModel):
+        assert id(model) in warmed and id(model) in padded
+        assert model is models[len(capture_order) % len(models)]
+        assert not ready
+        capture_order.append(id(model))
+        captured.add(id(model))
+
+    offset = 0
+    for index in range(1 + draft_count):
+        cls = Qwen3NextTpPartModel if index else main_cls
+        model = cls.__new__(cls)
+        model.is_mtp_draft_model = bool(index)
+        model.args, model.config = args, draft_config.copy() if index else config.copy()
+        model.max_req_num, model.max_total_token_num, model.mem_fraction = 2, None, 0.9
+        model.max_seq_length, model.batch_max_tokens = (32 if index else 24), 16
+        model.graph = model.prefill_graph = None
+        model.mtp_manager = SimpleNamespace(
+            get_decode_tokens_per_request=lambda is_draft: 1 if is_draft else draft_count + 1
+        )
+        model.tp_world_size_, model.tp_rank_ = 1, 0
+        model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(offset, offset + model.config["n_layer"])]
+        offset += len(model.layers_infer)
+        model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
+        if index:
+            model.main_model, model.mtp_previous_draft_models = models[0], models[1:].copy()
+        model.prepare_attention_backends = lambda model=model: mark_backends(model)
+        model._init_hidden_collector = lambda: None
+        model._autotune_warmup = lambda model=model: warmup(model)
+        model._init_padded_req = lambda model=model: padded.add(id(model))
+        model._init_cudagraph = lambda model=model: capture(model)
+        model._init_prefill_cuda_graph = lambda model=model: prefill_captured.add(id(model))
+        models.append(model)
+
+    def memory_info(device: str | torch.device | int):
+        assert all(item.req_manager is mapping for item in models)
+        assert all(item.attention_resources_reserved for item in models)
+        manager = models[0].att_state_manager
+        states = manager.get_full_attention_states()
+        assert manager.draft0_gdn_conv_bf16_ssm_fp32_state.conv_state.is_cuda
+        if manager.full_att_allocator is None:
+            assert all(read_kv_storage(state) is None for state in states)
+            assert manager.draft0_gdn_conv_bf16_ssm_fp32_state.big_pages_pool is None
+            if profiled_generations:
+                assert unbound == [id(model) for model in models]
+        return manager.get_full_att_token_bytes() * (32 + args.page_size), 0
+
+    def profile_runtime(incoming_models):
+        assert tuple(incoming_models) == tuple(models)
+        assert not ready
+        assert warmed == padded == captured == prefill_captured == {id(model) for model in models}
+        assert len(capture_order) == (len(profiled_generations) + 1) * len(models)
+        profiled_generations.append(models[0].att_state_manager.storage_generation)
+
+    monkeypatch.setattr(runtime_module, "_profile_runtime", profile_runtime)
+    monkeypatch.setattr(DeviceRuntime, "memory_info", lambda runtime: memory_info(runtime.device))
+    monkeypatch.setattr(DeviceRuntime, "memory_reserved", lambda runtime, peak=False: 0)
+    monkeypatch.setattr(DeviceRuntime, "reset_peak_memory", lambda runtime: None)
+    monkeypatch.setattr("lightllm.utils.envs_utils.set_model_init_status", ready.append)
+    assert all(not hasattr(item, "att_state_manager") for item in models)
+
+    class RuntimeReady(Exception):
+        """Stop after model readiness, before unrelated queue and thread setup."""
+
+    if via_backend:
+        backend = ModeBackend.__new__(ModeBackend)
+        backend.init_rank_infos = lambda: None
+        backend.init_mtp_draft_model = lambda _: backend.draft_models.extend(models[1:])
+        monkeypatch.setattr(base_backend, "init_distributed_env", lambda _: None)
+        monkeypatch.setattr(base_backend.dist_group_manager, "create_groups", lambda **_: None)
+        monkeypatch.setattr(base_backend, "TokenLoad", lambda *_: None)
+        monkeypatch.setattr(base_backend, "get_model", lambda *_: (models[0], False))
+
+        def mark_ready(value: bool):
+            ready.append(value)
+            raise RuntimeReady
+
+        monkeypatch.setattr("lightllm.utils.envs_utils.set_model_init_status", mark_ready)
+
+    def start_runtime():
+        if via_backend:
+            with pytest.raises(RuntimeReady):
+                backend.init_model(
+                    dict(
+                        args=args,
+                        world_size=1,
+                        load_way="HF",
+                        weight_dir=str(tmp_path),
+                        max_total_token_num=None,
+                    )
+                )
+        else:
+            runtime_module.initialize_model_runtime(models)
+
+    start_runtime()
+    assert request_allocations == [(2, 32)]
+    assert manager_creations == [models[0].max_req_num + 1]
+    assert captured == {id(model) for model in models}
+    assert len(profiled_generations) == 2 and profiled_generations[0] < profiled_generations[1]
+    assert capture_order == [id(model) for model in models] * 2
+    assert models[0].runtime_memory.attempted_capacities == (32,)
+    assert ready == ([True] if via_backend else [])
+    manager = models[0].att_state_manager
+    assert len(manager.get_bounded_attention_states()) == draft_count + int(main_linear)
+    assert all(not hasattr(model, "mtp_state_cursors") for model in models)
+    assert all(not hasattr(model, "full_att_state") for model in models)
+    draft_states = [manager.get_bounded_attention_states(f"draft{i}")[0] for i in range(draft_count)]
+    assert len({state.conv_state.data_ptr() for state in draft_states}) == draft_count
+    manager.commit_bounded_att_state(
+        torch.tensor([0], dtype=torch.int32, device="cuda"),
+        torch.tensor([draft_count + 1], dtype=torch.int32, device="cuda"),
+        torch.tensor([draft_count + 1], dtype=torch.int32, device="cuda"),
+        role="main",
+    )
+    assert all(not state.mtp_state_index.any() for state in draft_states)
+    if main_linear:
+        assert manager.main_gdn_conv_bf16_ssm_fp32_state.mtp_state_index[0] == draft_count
+    for i, state in enumerate(draft_states):
+        assert len(state.config.logical_layer_ids) == 1
+        manager.commit_bounded_att_state(
+            torch.tensor([0], dtype=torch.int32, device="cuda"),
+            torch.tensor([i + 2], dtype=torch.int32, device="cuda"),
+            torch.tensor([i + 2], dtype=torch.int32, device="cuda"),
+            role=f"draft{i}",
+        )
+        assert state.mtp_state_index[0] == i + 1
+        assert all(not other.mtp_state_index.any() for other in draft_states[i + 1 :])
+        if draft_full:
+            main_state = manager.get_full_attention_states("main")[0]
+            draft_state = manager.get_full_attention_states(f"draft{i}")[0]
+            assert main_state.config.head_dim == 16
+            assert draft_state.config.head_dim == 8
+            assert {buffer.data_ptr() for buffer in full_state_test_buffers(main_state).values()}.isdisjoint(
+                buffer.data_ptr() for buffer in full_state_test_buffers(draft_state).values()
+            )
+            assert len(draft_state.config.logical_layer_groups) == 1
+        else:
+            assert not manager.get_full_attention_states(f"draft{i}")
+
+    if encoding != "None":
+        ranges = [("main", 0, main_full_layers)] + [
+            (f"draft{i}", main_full_layers + i, main_full_layers + i + 1) for i in range(draft_count)
+        ]
+        for role, start, end in ranges:
+            for state in manager.get_full_attention_states(role):
+                assert torch.equal(state.scales[:, 0].cpu(), scales[start:end])
+                if encoding == "fp8kv_sph":
+                    assert torch.equal(state.q_scales[:, 0].cpu(), scales[start:end] * 2)
+
+    layouts = build_cpu_cache_layouts()
+    assert (
+        max(layout.byte_end for layout in layouts.values()) + 15
+    ) // 16 * 16 == manager.get_cpu_cache_operator().get_page_bytes()
+    assert layouts.keys() == manager.get_cpu_cache_operator().get_page_layouts().keys()
+    for state_name, layout in layouts.items():
+        runtime_layout = manager.get_cpu_cache_operator().get_page_layouts()[state_name]
+        assert [(r.field, r.byte_start, r.byte_end, r.dtype, r.axes, r.shape) for r in layout.regions] == [
+            (r.field, r.byte_start, r.byte_end, r.dtype, r.axes, r.shape) for r in runtime_layout.regions
+        ]
+    slot = manager.bounded_att_big_page_allocator.alloc(1)[0]
+    for i, state in enumerate(manager.get_bounded_attention_states()):
+        state.conv_state.fill_(i + 3)
+        state.ssm_state.fill_(i + 7)
+    manager.save_bounded_att_runtime_to_pages(
+        req_indices=[0],
+        state_token_lens=[4],
+        page_kind="big",
+        page_slot_ids=[slot],
+    )
+    manager.reset_bounded_att_state([0])
+    assert all(not state.conv_state[:, 0].any() for state in manager.get_bounded_attention_states())
+    manager.restore_bounded_att_runtime_from_pages(
+        req_indices=[0],
+        state_token_lens=[4],
+        page_kind="big",
+        page_slot_ids=[slot],
+    )
+    for i, state in enumerate(manager.get_bounded_attention_states()):
+        assert (state.conv_state[:, 0, :, : state.config.conv_width] == i + 3).all()
+        assert (state.ssm_state[:, 0] == i + 7).all()
+    with pytest.raises(AssertionError, match="resources already initialized"):
+        start_runtime()
+    assert all(item.att_state_manager is manager for item in models)
+    get_env_start_args.cache_clear()
+    get_added_mtp_kv_layer_num.cache_clear()
