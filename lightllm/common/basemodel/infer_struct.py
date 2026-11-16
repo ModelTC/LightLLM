@@ -1,3 +1,4 @@
+from lightllm.common.attention.session import AttentionSession
 import torch
 import triton
 import collections
@@ -20,6 +21,7 @@ class InferStateInfo:
     """
 
     def __init__(self):
+        self.attention = AttentionSession()
         # prefill 和 decode 使用的 att 状态对象
         self.prefill_att_state: BasePrefillAttState = None
         self.decode_att_state: BaseDecodeAttState = None
