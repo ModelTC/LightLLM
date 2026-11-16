@@ -1,4 +1,3 @@
-from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
 import dataclasses
 from types import SimpleNamespace
 
@@ -6,17 +5,16 @@ import pytest
 import torch
 
 from lightllm.common.attention_state.allocators import FullAttKVAllocator
-
 from lightllm.common.attention_state.full_att import (
-    PackedMLAFullAttentionState,
     PackedMLAAttentionConfig,
+    PackedMLAFullAttentionState,
     PackedMLALogicalConfig,
 )
 from lightllm.common.req_manager import ReqManager
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args, set_unique_server_name
-
+from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
 
 pytestmark = [
     pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),

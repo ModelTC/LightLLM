@@ -1,13 +1,12 @@
-import torch
 from contextlib import contextmanager
 from enum import Enum
+
+import torch
+
 from lightllm.utils.log_utils import init_logger
 
 try:
-    from torch_memory_saver import (
-        torch_memory_saver,
-        configure_subprocess as tms_configure_subprocess,
-    )
+    from torch_memory_saver import configure_subprocess as tms_configure_subprocess, torch_memory_saver
 
     HAS_TORCH_MEMORY_SAVER = True
 
@@ -52,6 +51,8 @@ class TorchMemorySaverWrapper:
 
 
 class _TorchMemorySaver:
+    enabled = True
+
     @contextmanager
     def configure_subprocess(self):
         # 子进程启动需要放在该上下文里，让 torch_memory_saver 在 worker
@@ -80,6 +81,8 @@ class _TorchMemorySaver:
 
 
 class _TorchMemorySaverFake:
+    enabled = False
+
     # 未开启 torch_memory_saver 时保持相同接口，保证调用方逻辑完全一致。
     @contextmanager
     def configure_subprocess(self):

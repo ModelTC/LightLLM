@@ -3,8 +3,43 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
+from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+
+
+@pytest.mark.parametrize("draft", [False, True])
+def test_backend_initialization_uses_spec_heads(monkeypatch, draft):
+    from lightllm.common.attention.api import AttentionFamily, AttentionPhase
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
+    from lightllm.models.deepseek_v4.attention.sparse_mla import DeepseekV4SparseMLAFp8PrefillBackend
+    from lightllm.models.deepseek_v4.config import create_attention_config
+    from unit_tests.common.attention.helpers import make_env, make_spec
+
+    config = dict(
+        compress_ratios=[0, 4, 128], head_dim=512, qk_rope_head_dim=64, index_head_dim=128, sliding_window=128
+    )
+    spec = make_spec(
+        AttentionFamily.SPARSE_MLA,
+        AttentionPhase.PREFILL,
+        num_q_heads=16,
+        config=create_attention_config(config, (0, 1, 2)),
+    )
+    backend = DeepseekV4SparseMLAFp8PrefillBackend(make_env(), spec)
+    model = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
+    model.args = SimpleNamespace(llm_kv_type="fp8kv_dsa")
+    model.config, model.data_type = config, torch.bfloat16
+    model.is_mtp_draft_model = draft
+    model.layers_infer = [SimpleNamespace() for _ in range(3)]
+    model.attention = SimpleNamespace(groups=({AttentionPhase.PREFILL: backend},))
+    reservations = []
+    model.dsv4_workspace = SimpleNamespace(init_flashmla_prefill_q=lambda **kw: reservations.append(kw))
+    monkeypatch.setattr(TpPartBaseModel, "prepare_attention_backends", lambda self: None)
+    monkeypatch.setattr("lightllm.models.deepseek_v4.model.get_env_start_args", lambda: model.args)
+    model.prepare_attention_backends()
+    assert [layer.flashmla_q_head_num_ for layer in model.layers_infer] == [64, 64, 64]
+    assert len(reservations) == (0 if draft else 1)
+    if not draft:
+        assert reservations[0] == dict(tp_q_head_num=16, padded_q_head_num=64, head_dim=512, dtype=torch.bfloat16)
 
 
 @pytest.mark.parametrize("capture", [False, True], ids=["eager", "capture"])
@@ -264,6 +299,7 @@ def test_output_projection_matches_bf16_reference(monkeypatch, tp_size, rank):
     layer = DeepseekV4TransformerLayerWeight.__new__(DeepseekV4TransformerLayerWeight)
     BaseLayerWeight.__init__(layer)
     layer.prefix, layer.data_type_ = "layers.0", torch.bfloat16
+    layer.num_fused_shared_experts = 0
     layer.hidden, layer.n_heads, layer.head_dim = 128, 8, 64
     layer.q_lora_rank, layer.o_lora_rank, layer.o_groups = 128, 128, 2
     layer.get_quant_method = lambda name: None

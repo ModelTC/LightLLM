@@ -1,11 +1,11 @@
 import pytest
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention_state.full_att import FullAttentionState
 from lightllm.common.attention_state.bounded_att import BoundedAttentionState
+from lightllm.common.attention_state.full_att import FullAttentionState
+from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
-from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 
 

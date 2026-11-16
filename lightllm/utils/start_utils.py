@@ -1,15 +1,17 @@
-import os
 import ctypes
+import multiprocessing as mp
+import os
 import resource
 import signal
 import subprocess
 import sys
 import time
-import multiprocessing as mp
+
 import psutil
+
+from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.process_check import is_process_active
-from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.service_shm_cleanup import start_launcher_shm_cleanup_process
 
 logger = init_logger(__name__)

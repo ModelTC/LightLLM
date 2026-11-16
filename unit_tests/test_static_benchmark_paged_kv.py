@@ -3,8 +3,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATIC_BENCHMARK_DIR = REPO_ROOT / "test" / "benchmark" / "static_inference"
@@ -153,3 +153,50 @@ def test_profile_capacity_uses_page_aligned_per_request_cost():
     args.mtp_mode = "eagle_with_att"
     args.mtp_step = 3
     assert decode_profile_batch_divisor(args, decode_case) == 24
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_benchmark_shared_memory_cleanup(monkeypatch, fail):
+    from multiprocessing import shared_memory
+
+    from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
+
+    monkeypatch.delenv("LIGHTLLM_UNIQUE_SERVICE_NAME_ID", raising=False)
+    monkeypatch.setenv("LIGHTLLM_START_ARGS", "{}")
+    static_benchmark.get_unique_server_name.cache_clear()
+    names = []
+
+    def run(args, cases):
+        counter = SharedInt("benchmark_counter")
+        names.append(counter.shm.name)
+        counter.set_value(17)
+        assert counter.get_value() == 17
+        counter.shm.close()
+        if fail:
+            raise RuntimeError("worker failed")
+
+    monkeypatch.setattr(static_benchmark, "run_benchmark", run)
+    argv = [
+        "--benchmark",
+        "decode",
+        "--batch_size",
+        "1",
+        "--input_len",
+        "4",
+        "--output_len",
+        "1",
+        "--data_type",
+        "bfloat16",
+        "--enable_fused_shared_experts",
+    ]
+    try:
+        if fail:
+            with pytest.raises(RuntimeError, match="worker failed"):
+                static_benchmark.main(argv)
+        else:
+            static_benchmark.main(argv)
+        assert len(names) == 1
+        with pytest.raises(FileNotFoundError):
+            shared_memory.SharedMemory(name=names[0])
+    finally:
+        static_benchmark.get_unique_server_name.cache_clear()

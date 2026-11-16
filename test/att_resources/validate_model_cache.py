@@ -14,11 +14,12 @@ MTP uses identical candidate packets with varying accepted widths, not sampling.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import dataclasses
 import json
-from pathlib import Path
 import socket
 import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -35,6 +36,7 @@ from lightllm.utils.service_shm_cleanup import ServiceShmCleanup
 if TYPE_CHECKING:
     from argparse import Namespace
     from collections.abc import Sequence
+
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 
@@ -290,6 +292,7 @@ def main():
     parser = make_argument_parser()
     add_static_benchmark_args(parser)
     parser.add_argument("--report", required=True)
+    parser.add_argument("--auto_kv_capacity", action="store_true")
     parser.set_defaults(
         tp=1,
         dp=1,
@@ -309,8 +312,10 @@ def main():
         linear_att_hash_page_size=64,
         linear_att_page_block_num=1,
         linear_att_cache_size=16,
-        llm_prefill_att_backend=["fa3", "triton"],
-        llm_decode_att_backend=["fa3", "triton"],
+        llm_prefill_att_backend="fa3",
+        llm_prefill_linear_att_backend="triton",
+        llm_decode_att_backend="fa3",
+        llm_decode_linear_att_backend="triton",
         disable_cudagraph=False,
         pd_kv_page_size=2048,
     )
@@ -321,6 +326,8 @@ def main():
         port.bind(("127.0.0.1", 0))
         parsed.nccl_port = port.getsockname()[1]
     args = normalize_args(parsed, build_cases(parsed))
+    if parsed.auto_kv_capacity:
+        args.max_total_token_num = None
     set_unique_server_name(args)
     set_env_start_args(args)
     torch.set_num_threads(4)
@@ -332,35 +339,14 @@ def main():
         config, _ = PretrainedConfig.get_config_dict(args.model_dir)
         model, _ = get_model(config, kvargs)
         draft_models = init_mtp_draft_models(args, kvargs, model)
+        from lightllm.common.basemodel.runtime import initialize_model_runtime
         from lightllm.utils.envs_utils import set_model_init_status
-        from lightllm.utils.torch_memory_saver_utils import MemoryTag
-        from lightllm.common.attention_state import AttentionStateManager
-        from lightllm.common.req_manager import ReqManager
 
         models = (model, *draft_models)
-        assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"
-        assert all(item.max_req_num == model.max_req_num for item in models), "models must share the request domain"
-        # main/draft 共用请求映射；按所有模型的最大需求分配，再逐模型绑定。
-        max_seq_len = max(item.get_req_manager_max_seq_len() for item in models)
-        with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            req_manager = ReqManager(max_request_num=model.max_req_num, max_sequence_length=max_seq_len)
-        for item in models:
-            item.bind_req_manager(req_manager=req_manager)
-        for item in models:
-            item.prepare_attention_states()
-        manager: AttentionStateManager = model.att_state_manager
-        assert all(item.att_state_manager is manager for item in models), "models must share one resource manager"
-        with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            manager.finish_state_registration()
-            manager.load_full_att_calibration(args=model.args)
-            manager.initialize_storage(
-                model.args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
-            )
-        for item in models:
-            item.init_runtime()
-        torch.cuda.empty_cache()
+        initialize_model_runtime(models)
         set_model_init_status(True)
         report = validate(model, args, draft_models)
+        report["runtime_memory"] = dataclasses.asdict(model.runtime_memory)
         Path(args.report).write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report, indent=2), flush=True)
     finally:

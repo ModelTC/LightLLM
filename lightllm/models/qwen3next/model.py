@@ -1,23 +1,22 @@
+from typing import TYPE_CHECKING, Optional
+
 import torch
-from typing import Optional, TYPE_CHECKING
 import triton
+
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
-from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
-    Qwen3NextTransformerLayerWeight,
-)
-from lightllm.models.qwen3next.layer_weights.pre_and_post_layer_weight import Qwen3NextPreAndPostLayerWeight
-from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
-    Qwen3NextTransformerLayerInfer,
-)
-from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
-from lightllm.utils.log_utils import init_logger
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
+from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
+from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerInfer
+from lightllm.models.qwen3next.layer_weights.pre_and_post_layer_weight import Qwen3NextPreAndPostLayerWeight
+from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import Qwen3NextTransformerLayerWeight
+from lightllm.utils.log_utils import init_logger
 
 if TYPE_CHECKING:
     from easydict import EasyDict
-    from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.attention_state.full_att import FullAttentionState
+
     from lightllm.common.attention_state.bounded_att import BoundedAttentionState
+    from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.server.core.objs.start_args_type import StartArgs
 
 logger = init_logger(__name__)
 
@@ -51,7 +50,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         device: str = "meta",
     ) -> list["BoundedAttentionState"]:
         """创建当前模型的 bounded 运行态；CPU 布局查询传入 meta 设备。"""
-        from lightllm.common.attention_state.bounded_att import create_gdn_state, ConvSSMStateConfig
+        from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, create_gdn_state
 
         config = cls.normalize_model_config(model_config)
         assert config["num_attention_heads"] % tp_world_size == 0
@@ -136,20 +135,3 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     def _init_config(self):
         super()._init_config()
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
-
-    def _init_att_backend1(self):
-        role = self.att_state_role
-        if not self.att_state_manager.get_bounded_attention_states(role):
-            self.prefill_att_backend1 = None
-            self.decode_att_backend1 = None
-            return
-        from lightllm.common.basemodel.attention.create_linear_utils import (
-            get_gdn_linear_prefill_att_backend_class,
-            get_gdn_linear_decode_att_backend_class,
-        )
-
-        linear_prefill_att_backend_class = get_gdn_linear_prefill_att_backend_class(index=1)
-        linear_decode_att_backend_class = get_gdn_linear_decode_att_backend_class(index=1)
-        self.prefill_att_backend1 = linear_prefill_att_backend_class(model=self)
-        self.decode_att_backend1 = linear_decode_att_backend_class(model=self)
-        return

@@ -1,31 +1,87 @@
-import os
-import torch
-import copy
 import bisect
+from threading import Lock
+from typing import List, Optional, Tuple
+
+import torch
 import triton
-from typing import List, Tuple
-from typing import Optional
-from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
-from lightllm.distributed import dist_group_manager
+
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from .infer_struct import InferStateInfo
+from lightllm.platform import get_device_runtime
+from lightllm.common.attention.api.graph import TensorCopyPlan, tensor_input_copy
+from lightllm.common.execution import ExecutionScope
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.log_utils import init_logger
+from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+
 from .cuda_graph import CudaGraph
+from .infer_struct import InferStateInfo
 
 logger = init_logger(__name__)
+
+
+class PrefillGraphExecution:
+    """分段图拥有输入/输出和 collector；attention 仍通过段间回调使用本批次 Plan。"""
+
+    def __init__(self, infer_state, inputs, outputs, collector, runtime, execution):
+        self.state, self.inputs, self.outputs, self.collector = infer_state, inputs, outputs, collector
+        self.runtime = runtime
+        self.execution = execution
+        self.binding = infer_state.attention.binding
+        self.generation = infer_state.att_state_manager.storage_generation
+        self.invalid = False
+        self.lock = Lock()
+        self.copy_plan = TensorCopyPlan(
+            [target for target, _ in infer_state.prefill_input_copies(infer_state)] + list(inputs)
+        )
+        self.manifest = infer_state.capture_manifest(segmented=True)
+        self.manifest.add("segment.inputs", "copy", inputs)
+        self.manifest.add("segment.outputs", "generated", outputs)
+        self.manifest.add("collector", "generated", collector)
+        infer_state.att_state_manager.register_graph(self)
+
+    def record_output_use(self, event):
+        if not self.lock.acquire(blocking=False):
+            raise RuntimeError("cannot register an output reader during prefill Graph submission")
+        try:
+            if self.state is None or self.invalid:
+                raise RuntimeError("prefill Graph execution is closed or invalid")
+            self.execution.record_reader(event)
+        finally:
+            self.lock.release()
+
+    def close(self):
+        if not self.lock.acquire(blocking=False):
+            raise RuntimeError("cannot close prefill Graph during an active submission")
+        try:
+            if self.state is None:
+                return
+            with self.execution.join():
+                self.state.close_prefill_graphs()
+                self.state = self.collector = self.copy_plan = self.manifest = self.binding = None
+                self.inputs = self.outputs = ()
+        finally:
+            self.lock.release()
 
 
 class PrefillCudaGraph:
     # CudaGraph forward pass for the decoding stage.
 
-    def __init__(self, decode_cuda_graph: CudaGraph, tp_world_size: int):
+    def __init__(self, decode_cuda_graph: CudaGraph, tp_world_size: int, runtime=None, execution=None):
         self.graph = {}
+        self.sealed = False
+        self.runtime = runtime or (decode_cuda_graph.runtime if decode_cuda_graph is not None else get_device_runtime())
         self.tp_world_size = tp_world_size
         if decode_cuda_graph is not None:
             self.mempool = decode_cuda_graph.mempool  # prefill 和 decode 共享一个 mempool
         else:
-            self.mempool = torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None
+            self.mempool = self.runtime.graph_pool()
+        self.execution = (
+            decode_cuda_graph.execution
+            if decode_cuda_graph is not None
+            else execution
+            if execution is not None
+            else ExecutionScope(self.runtime)
+        )
 
         self.args = get_env_start_args()
         self.enable_prefill_microbatch_overlap = self.args.enable_prefill_microbatch_overlap
@@ -57,12 +113,20 @@ class PrefillCudaGraph:
         logger.info(f"prefill cuda graph graph_handle_token_nums: {self.graph_handle_token_nums}")
 
     def can_run(self, handle_token_num: int):
-        return handle_token_num <= self.max_handle_token_num
+        if handle_token_num > self.max_handle_token_num:
+            return False
+        if self.sealed:
+            execution = self.graph.get(self.find_closest_graph_handle_token_num(handle_token_num))
+            return execution is not None and execution.state is not None and not execution.invalid
+        return True
+
+    def seal(self):
+        self.sealed = True
 
     def need_capture(self, handle_token_num: int):
         finded_handle_token_num = self.find_closest_graph_handle_token_num(handle_token_num=handle_token_num)
         if finded_handle_token_num is not None:
-            return finded_handle_token_num not in self.graph
+            return finded_handle_token_num not in self.graph or self.graph[finded_handle_token_num].state is None
         else:
             assert False, "dead code"
 
@@ -77,37 +141,56 @@ class PrefillCudaGraph:
     def _capture_prefill(
         self, prefill_func, input_tensors: List[torch.Tensor], infer_state: InferStateInfo
     ) -> List[torch.Tensor]:
+        with self.execution.join(retain=(infer_state, input_tensors)):
+            return self._capture_prefill_body(prefill_func, input_tensors, infer_state)
+
+    def _capture_prefill_body(self, prefill_func, input_tensors, infer_state):
         handle_token_num = infer_state.input_ids.shape[0]
         infer_state.mem_pool = self.mempool
-        infer_state.prefill_cuda_graph_create_graph_obj()
-        infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-        graph_input_tensors: List[torch.Tensor] = [torch.empty_like(e) for e in input_tensors]
-        graph_out_tensors: List[torch.Tensor] = prefill_func(graph_input_tensors, infer_state)
-        graph_out_tensors = [e.contiguous() for e in graph_out_tensors]
-        infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
+        infer_state.device_runtime = self.runtime
+        manager = infer_state.att_state_manager
+        snapshot = manager.snapshot_capture_state(infer_state.b_req_idx, infer_state.att_state_role)
+        restore_pending = True
+        try:
+            infer_state.prefill_cuda_graph_create_graph_obj()
+            infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
+            graph_input_tensors: List[torch.Tensor] = [torch.empty_like(e) for e in input_tensors]
+            graph_out_tensors: List[torch.Tensor] = prefill_func(graph_input_tensors, infer_state)
+            graph_out_tensors = [e.contiguous() for e in graph_out_tensors]
+            infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
+            manager.restore_capture_state(snapshot)
+            restore_pending = False
 
-        graph_input_tensors = [tensor_to_no_ref_tensor(e) for e in graph_input_tensors]
-        graph_out_tensors = [tensor_to_no_ref_tensor(e) for e in graph_out_tensors]
+            graph_input_tensors = [tensor_to_no_ref_tensor(e) for e in graph_input_tensors]
+            graph_out_tensors = [tensor_to_no_ref_tensor(e) for e in graph_out_tensors]
 
-        graph_hidden_collector = infer_state.hidden_collector
-        hidden_tensor_count, hidden_tensor_nbytes = graph_hidden_collector.release_graph_tensor_ownership()
-        logger.info(
-            f"Prefill CUDA Graph hidden collector 已完成 capture 状态托管："
-            f"handle_token_num={handle_token_num}, "
-            f"collector={graph_hidden_collector.__class__.__name__}, "
-            f"no_ref_tensor_count={hidden_tensor_count}, "
-            f"no_ref_tensor_nbytes={hidden_tensor_nbytes}。"
-            f"这些 tensor 的固定地址由 graph memory pool 管理，collector 仅保留无所有权引用供 replay 使用。"
-        )
-        self.graph[handle_token_num] = (
-            infer_state,
-            graph_input_tensors,
-            graph_out_tensors,
-            graph_hidden_collector,
-        )
-        self.replay(input_tensors, infer_state)
+            graph_hidden_collector = infer_state.hidden_collector
+            hidden_tensor_count, hidden_tensor_nbytes = graph_hidden_collector.release_graph_tensor_ownership()
+            logger.info(
+                f"Prefill CUDA Graph hidden collector 已完成 capture 状态托管："
+                f"handle_token_num={handle_token_num}, "
+                f"collector={graph_hidden_collector.__class__.__name__}, "
+                f"no_ref_tensor_count={hidden_tensor_count}, "
+                f"no_ref_tensor_nbytes={hidden_tensor_nbytes}。"
+                f"这些 tensor 的固定地址由 graph memory pool 管理，collector 仅保留无所有权引用供 replay 使用。"
+            )
+            self.graph[handle_token_num] = PrefillGraphExecution(
+                infer_state,
+                graph_input_tensors,
+                graph_out_tensors,
+                graph_hidden_collector,
+                self.runtime,
+                self.execution,
+            )
+            self.replay(input_tensors, infer_state)
 
-        return graph_out_tensors
+            return graph_out_tensors
+        except BaseException:
+            self.graph.pop(handle_token_num, None)
+            infer_state.close_prefill_graphs()
+            if restore_pending:
+                manager.restore_capture_state(snapshot)
+            raise
 
     def _capture_prefill_overlap(
         self,
@@ -132,6 +215,8 @@ class PrefillCudaGraph:
         Capture the cuda graph for the prefill stage.
         input_tensor1 and infer_state1 is used for the overlap.
         """
+        if self.sealed:
+            raise RuntimeError("prefill Graph admission is sealed; capture requires runtime initialization")
         if self.enable_prefill_microbatch_overlap:
             return self._capture_prefill_overlap(
                 prefill_func=prefill_func,
@@ -148,22 +233,60 @@ class PrefillCudaGraph:
 
     def _replay(self, input_tensors: List[torch.Tensor], infer_state: InferStateInfo) -> List[torch.Tensor]:
         handle_token_num = infer_state.input_ids.shape[0]
-        graph_infer_state, graph_input_tensors, graph_output_tensors, graph_hidden_collector = self.graph[
-            handle_token_num
-        ]
-        graph_infer_state: InferStateInfo = graph_infer_state
-        for graph_in_tensor, in_tensor in zip(graph_input_tensors, input_tensors):
-            graph_in_tensor.copy_(in_tensor)
+        execution = self.graph[handle_token_num]
+        if not execution.lock.acquire(blocking=False):
+            raise RuntimeError("prefill Graph already has an active submission")
+        try:
+            with self.execution.join(retain=(infer_state, input_tensors)):
+                return self._replay_execution(execution, input_tensors, infer_state)
+        finally:
+            execution.lock.release()
 
-        graph_infer_state.copy_for_prefill_cuda_graph(new_infer_state=infer_state)
-        # 首次 capture 后 replay 时，infer_state 与 graph_infer_state 是同一对象，
-        # 需要先创建运行时实例，避免 finish_output 清空 graph 中保存的 capture collector。
-        if infer_state.hidden_collector is graph_hidden_collector:
-            infer_state.hidden_collector = graph_hidden_collector.new_instance()
-        infer_state.hidden_collector.restore_graph_state(graph_hidden_collector)
-        graph_infer_state.prefill_replay(infer_state)
+    def _replay_execution(self, execution, input_tensors, infer_state):
+        graph_infer_state = execution.state
+        if graph_infer_state is None:
+            raise RuntimeError("prefill Graph execution is closed")
+        if execution.invalid:
+            raise RuntimeError("prefill Graph execution is invalid after a failed submission")
+        graph_infer_state.att_state_manager.check_execution_health()
+        if graph_infer_state.att_state_manager is not infer_state.att_state_manager:
+            raise ValueError("prefill Graph input belongs to a different attention state manager")
+        if graph_infer_state.att_state_manager.storage_generation != execution.generation:
+            raise RuntimeError("attention storage changed; recapture prefill Graph")
+        if execution.binding is not None:
+            execution.binding.check()
+        if execution.binding is not infer_state.attention.binding:
+            raise ValueError("prefill Graph model binding changed")
+        execution.manifest.check()
+        graph_input_tensors, graph_output_tensors, graph_hidden_collector = (
+            execution.inputs,
+            execution.outputs,
+            execution.collector,
+        )
+        if len(graph_input_tensors) != len(input_tensors):
+            raise ValueError("prefill Graph input count changed")
+        copies = graph_infer_state.prefill_input_copies(infer_state)
+        for index, (target, source) in enumerate(zip(graph_input_tensors, input_tensors)):
+            copies.extend(tensor_input_copy(f"prefill input {index}", target, source))
+        copies = execution.copy_plan.validate(copies)
+        infer_state.attention.retain(input_tensors)
+        try:
+            for target, source in copies:
+                target.copy_(source, non_blocking=True)
+            if infer_state.hidden_collector is graph_hidden_collector:
+                infer_state.hidden_collector = graph_hidden_collector.new_instance()
+            infer_state.hidden_collector.restore_graph_state(graph_hidden_collector)
+            graph_infer_state.prefill_replay(infer_state)
+        except BaseException:
+            execution.invalid = True
+            raise
 
         return graph_output_tensors
+
+    def close(self):
+        for execution in self.graph.values():
+            execution.close()
+        self.graph.clear()
 
     def _replay_overlap(
         self,

@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-from unit_tests.common.att_resources.model_helpers import read_kv_storage
-
-from unit_tests.common.att_resources.model_helpers import main_linear_state, prepare_model_states
-from lightllm.common.attention_state.full_att import FullAttentionState
-from unit_tests.common.att_resources.model_helpers import owned_states
 import dataclasses
 
 import pytest
 import torch
 
+from lightllm.common.attention_state.full_att import FullAttentionState
 from lightllm.common.req_manager import ReqManager
 from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
-from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
 from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
+from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
+from lightllm.platform import DeviceRuntime
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
@@ -23,7 +20,12 @@ from lightllm.utils.envs_utils import (
     set_env_start_args,
     set_unique_server_name,
 )
-
+from unit_tests.common.att_resources.model_helpers import (
+    main_linear_state,
+    owned_states,
+    prepare_model_states,
+    read_kv_storage,
+)
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -112,7 +114,7 @@ def test_real_model_resource_hooks_and_shared_draft(
             reserve = resources.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
         return resources.get_full_att_token_bytes() * (32 + args.page_size) + reserve, 0
 
-    monkeypatch.setattr(torch.cuda, "mem_get_info", check_runtime_before_profile)
+    monkeypatch.setattr(DeviceRuntime, "memory_info", lambda runtime: check_runtime_before_profile(runtime.device))
     prepare_model_states(model)
     drafts = []
     if mtp:

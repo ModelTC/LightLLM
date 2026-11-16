@@ -5,6 +5,8 @@ from lightllm.common.basemodel import InferStateInfo
 
 
 class QwenInferStateInfo(LlamaInferStateInfo):
+    graph_input_names = LlamaInferStateInfo.graph_input_names + ("logn_values",)
+
     def __init__(self):
         super().__init__()
         self.position_cos = None

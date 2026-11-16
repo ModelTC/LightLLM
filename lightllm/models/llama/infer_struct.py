@@ -5,6 +5,11 @@ from lightllm.common.req_manager import ReqManager
 
 
 class LlamaInferStateInfo(InferStateInfo):
+    graph_input_names = InferStateInfo.graph_input_names + (
+        "position_cos",
+        "position_sin",
+    )
+
     def __init__(self):
         super().__init__()
         self.position_cos = None

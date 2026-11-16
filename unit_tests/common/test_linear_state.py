@@ -310,7 +310,7 @@ def test_replay_restored_slot_decodes_like_clean_slot(runtime_start_args, cls, s
                     run_config={"BV": 32, "num_warps": 1, "num_stages": 3},
                 )
             )
-            state.finish_decode_token(logical_layer_id=layer, reqs=reqs, cu_seqlens=cu)
+        state.finish_decode(reqs=reqs, cu_seqlens=cu)
         return outputs
 
     decode()

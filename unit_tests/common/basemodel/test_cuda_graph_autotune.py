@@ -5,9 +5,29 @@ import pytest
 import torch
 
 from lightllm.common.basemodel import cuda_graph as cuda_graph_module
+from lightllm.common.attention.session import AttentionSession
+from lightllm.common.attention.api.graph import CaptureManifest
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner, autotune
+
+
+def make_capture_states(manager, overlap):
+    states = []
+    for _ in range(2 if overlap else 1):
+        runtime = AttentionSession()
+        states.append(
+            SimpleNamespace(
+                input_ids=torch.ones(2, dtype=torch.int64),
+                b_req_idx=torch.tensor([0, 1]),
+                att_state_role="main",
+                att_state_manager=manager,
+                attention=runtime,
+                graph_input_copies=lambda source: [],
+                capture_manifest=CaptureManifest,
+            )
+        )
+    return states
 
 
 @pytest.fixture
@@ -22,16 +42,20 @@ def capture_env(monkeypatch):
     monkeypatch.setattr(Autotuner, "_autotune_warmup_kernel_type", None)
     monkeypatch.setattr(autotuner_module.dist, "is_initialized", lambda: False)
     monkeypatch.setattr(autotuner_module.KernelConfigs, "get_config_file_name", lambda params: "configs.json")
-    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *args: None)
     monkeypatch.setattr(torch.cuda, "graph_pool_handle", lambda: None)
 
     class FakeGraph:
         def __init__(self):
             self.replays = 0
+            self.resets = 0
             env.graphs.append(self)
 
         def replay(self):
             self.replays += 1
+
+        def reset(self):
+            self.resets += 1
 
     @contextmanager
     def capture(graph, **kwargs):
@@ -45,7 +69,48 @@ def capture_env(monkeypatch):
 
     monkeypatch.setattr(torch.cuda, "CUDAGraph", FakeGraph)
     monkeypatch.setattr(torch.cuda, "graph", capture)
+    from lightllm.platform import DeviceCaps, Platform
+    from lightllm.platform.cuda import CudaRuntime
+
+    runtime = CudaRuntime("cuda:0")
+    runtime.caps = DeviceCaps(Platform.CUDA, torch.device("cuda:0"), supports_graph=True)
+    monkeypatch.setattr(runtime, "current_stream", lambda: None)
+    monkeypatch.setattr(cuda_graph_module, "get_device_runtime", lambda: runtime)
     return env
+
+
+def test_sealed_graphs_decline_missing_and_retired_buckets_before_capture(capture_env, monkeypatch):
+    from lightllm.common.basemodel import prefill_cuda_graph
+
+    decode = CudaGraph(1, 2, 1, max_batch_size=4)
+    decode.graph[2] = SimpleNamespace(graph=object(), _invalid=False)
+    decode.seal()
+    assert decode.can_run(2, 16)
+    assert not decode.can_run(3, 16)
+    decode.graph[2].graph = None
+    assert not decode.can_run(2, 16)
+    with pytest.raises(RuntimeError, match="admission is sealed"):
+        decode.capture_decode(lambda _: pytest.fail("capture started"), None)
+
+    monkeypatch.setattr(
+        prefill_cuda_graph,
+        "get_env_start_args",
+        lambda: SimpleNamespace(
+            enable_prefill_microbatch_overlap=False,
+            prefill_cudagraph_max_handle_token=8,
+            batch_max_tokens=8,
+            enable_tpsp_mix_mode=False,
+        ),
+    )
+    prefill = prefill_cuda_graph.PrefillCudaGraph(decode, 1)
+    prefill.graph[4] = SimpleNamespace(state=object(), invalid=False)
+    prefill.seal()
+    assert prefill.can_run(3)
+    assert not prefill.can_run(8)
+    prefill.graph[4].state = None
+    assert not prefill.can_run(3)
+    with pytest.raises(RuntimeError, match="admission is sealed"):
+        prefill.capture_prefill(lambda *args: pytest.fail("capture started"), [], None)
 
 
 @pytest.mark.parametrize("overlap", [False, True])
@@ -82,7 +147,14 @@ def test_decode_attention_tunes_before_capture_only(capture_env, tmp_path, monke
 
     general, general_cache = make_kernel(AutotuneKernelType.GENERAL)
     attention, attention_cache = make_kernel(AutotuneKernelType.DECODE_ATTENTION)
-    states = [SimpleNamespace(input_ids=torch.ones(2, dtype=torch.int64)) for _ in range(2 if overlap else 1)]
+    manager = SimpleNamespace(
+        storage_generation=0,
+        check_execution_health=lambda: None,
+        register_graph=lambda graph: None,
+        snapshot_capture_state=lambda *args: (),
+        restore_capture_state=lambda snapshot: None,
+    )
+    states = make_capture_states(manager, overlap)
     outputs = [object() for _ in states]
     forward_calls = []
 
@@ -115,7 +187,14 @@ def test_decode_attention_tunes_before_capture_only(capture_env, tmp_path, monke
 def test_warmup_failure_restores_phase_without_capturing(capture_env, overlap):
     capture_env.args.enable_decode_microbatch_overlap = overlap
     graph = CudaGraph(1, 2, 1, max_batch_size=2)
-    states = [SimpleNamespace(input_ids=torch.ones(2, dtype=torch.int64)) for _ in range(2 if overlap else 1)]
+    manager = SimpleNamespace(
+        storage_generation=0,
+        check_execution_health=lambda: None,
+        register_graph=lambda graph: None,
+        snapshot_capture_state=lambda *args: (),
+        restore_capture_state=lambda snapshot: None,
+    )
+    states = make_capture_states(manager, overlap)
 
     def decode_func(*infer_states):
         assert Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION)
@@ -128,3 +207,35 @@ def test_warmup_failure_restores_phase_without_capturing(capture_env, overlap):
     assert not Autotuner.is_autotune_warmup()
     assert capture_env.capture_count == 0
     assert graph.graph == {}
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("fail_manifest", [False, True])
+def test_capture_failure_restores_state_and_releases_native_graph(capture_env, overlap, fail_manifest):
+    capture_env.args.enable_decode_microbatch_overlap = overlap
+    graph = CudaGraph(1, 2, 1, max_batch_size=2)
+    persistent = torch.zeros(1)
+    manager = SimpleNamespace(
+        storage_generation=0,
+        check_execution_health=lambda: None,
+        register_graph=lambda graph: None,
+        snapshot_capture_state=lambda *args: persistent.clone(),
+        restore_capture_state=lambda snapshot: persistent.copy_(snapshot),
+    )
+
+    states = make_capture_states(manager, overlap)
+    if fail_manifest:
+        target = torch.zeros(1).expand(2)
+        states[-1].graph_input_copies = lambda source: [(target, target)]
+
+    def decode_func(*infer_states):
+        persistent.add_(1)
+        if capture_env.capturing and not fail_manifest:
+            raise ValueError("failed capture")
+        return (None, None) if overlap else None
+
+    with pytest.raises(ValueError, match="overlapping elements" if fail_manifest else "failed capture"):
+        graph.capture_decode(decode_func, *states)
+    assert persistent.item() == 0
+    assert not capture_env.capturing and not graph.graph
+    assert capture_env.graphs[0].resets == 1

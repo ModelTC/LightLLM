@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -6,8 +7,11 @@ import torch
 from lightllm.common.basemodel import basemodel
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.platform import get_device_runtime
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA runner stream required")
 def test_base_model_prefill_accepts_two_prebuilt_inputs(monkeypatch):
     model_input0 = _make_prefill_input([10, 11], req_idx=20, is_decode_req=False)
     model_input1 = _make_prefill_input([12], req_idx=21, is_decode_req=True)
@@ -27,7 +31,9 @@ def test_base_model_prefill_accepts_two_prebuilt_inputs(monkeypatch):
     monkeypatch.setattr(basemodel, "gather_token_prefill_decode_mixed", fake_gather)
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
-    model.args = SimpleNamespace(enable_prefill_decode_mixed=True, page_size=1)
+    model.device_runtime = get_device_runtime("cuda")
+    model.att_state_manager = AttentionStateManager(request_capacity=2)
+    model.args = SimpleNamespace(enable_prefill_decode_mixed=True, page_size=1, mtp_step=0)
     model.req_manager = SimpleNamespace(
         req_sampling_params_manager=SimpleNamespace(req_to_next_token_ids=object()),
     )
@@ -52,6 +58,7 @@ def test_base_model_prefill_accepts_two_prebuilt_inputs(monkeypatch):
     assert len(outputs) == 2
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA runner stream required")
 def test_base_model_decode_accepts_two_inputs_and_skips_empty_gather(monkeypatch):
     model_input0 = _make_decode_input()
     model_input0.input_ids = None
@@ -78,6 +85,8 @@ def test_base_model_decode_accepts_two_inputs_and_skips_empty_gather(monkeypatch
     monkeypatch.setattr(basemodel, "gather_token", fake_gather)
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.device_runtime = get_device_runtime("cuda")
+    model.att_state_manager = AttentionStateManager(request_capacity=2)
     model.args = SimpleNamespace(page_size=1)
     model.req_manager = SimpleNamespace(
         req_sampling_params_manager=SimpleNamespace(req_to_next_token_ids=object()),
@@ -122,10 +131,11 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
     model_input1.to_cuda()
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
-    model.args = SimpleNamespace(enable_tpsp_mix_mode=True, page_size=1)
+    model.args = SimpleNamespace(enable_tpsp_mix_mode=True, page_size=1, mtp_step=0)
     model.tp_world_size_ = 2
     model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
     model.graph = None
+    model.attention = SimpleNamespace(session=lambda *args, **kwargs: nullcontext())
     model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88, req_to_token_indexs=object())
     infer_batch_sizes = []
 
@@ -136,7 +146,6 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
             b_seq_len=model_input.b_seq_len,
             mem_index=torch.empty((model_input.batch_size,), dtype=torch.int32, device="cuda"),
             init_some_extra_state=lambda _: None,
-            init_att_state=lambda: None,
         )
 
     model._create_inferstate = fake_create_inferstate

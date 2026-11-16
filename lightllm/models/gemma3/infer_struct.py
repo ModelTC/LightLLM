@@ -5,6 +5,15 @@ from lightllm.common.req_manager import ReqManager
 
 
 class Gemma3InferStateInfo(InferStateInfo):
+    graph_input_names = InferStateInfo.graph_input_names + (
+        "position_cos",
+        "position_sin",
+        "position_cos_local",
+        "position_sin_local",
+        "position_cos_global",
+        "position_sin_global",
+    )
+
     def __init__(self):
         super().__init__()
         self.position_cos_global = None

@@ -83,7 +83,7 @@ def test_decode_batch_alignment(monkeypatch, spec_mode, dynamic_verify, is_draft
         ("dflash2", True, 7),
     ],
 )
-def test_decode_draft_step(monkeypatch, spec_mode, is_draft_model, expected):
+def test_draft_step(monkeypatch, spec_mode, is_draft_model, expected):
     args = SimpleNamespace(mtp_mode=spec_mode, mtp_step=7, mtp_dynamic_verify=False)
     monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
 

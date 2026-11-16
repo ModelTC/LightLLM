@@ -22,7 +22,6 @@ import torch
 import torch.multiprocessing as mp
 from transformers import PretrainedConfig
 
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
@@ -34,8 +33,8 @@ from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.config_utils import auto_set_fused_shared_experts, get_dtype, get_vocab_size
 from lightllm.utils.dist_utils import init_distributed_env
-from lightllm.utils.envs_utils import set_env_start_args
-
+from lightllm.utils.envs_utils import get_unique_server_name, set_env_start_args, set_unique_server_name
+from lightllm.utils.service_shm_cleanup import ServiceShmCleanup
 
 DEFAULT_BATCH_SIZES = [2, 8, 16, 32, 64, 128]
 MTP_MODES = {"vanilla_with_att", "eagle_with_att", "vanilla_no_att", "eagle_no_att"}
@@ -596,7 +595,6 @@ class StaticBenchmarkExecutor:
 
     def _split_prefill_input(self, model_input: ModelInput):
         """在 benchmark 调用侧按请求构造两个 prefill microbatch。"""
-
         split_batch = model_input.batch_size // 2
         q_lens = model_input.b_seq_len - model_input.b_ready_cache_len
         split_tokens = int(q_lens[:split_batch].sum().item())
@@ -1171,6 +1169,8 @@ def build_model_kvargs(args: SimpleNamespace, rank_id: int) -> Dict:
         "disable_cudagraph": args.disable_cudagraph,
         "llm_prefill_att_backend": args.llm_prefill_att_backend,
         "llm_decode_att_backend": args.llm_decode_att_backend,
+        "llm_prefill_linear_att_backend": args.llm_prefill_linear_att_backend,
+        "llm_decode_linear_att_backend": args.llm_decode_linear_att_backend,
         "vit_att_backend": args.vit_att_backend,
         "llm_kv_type": args.llm_kv_type,
         "llm_kv_quant_group_size": args.llm_kv_quant_group_size,
@@ -1210,53 +1210,17 @@ def init_mtp_draft_models(args: SimpleNamespace, main_kvargs: Dict, main_model) 
     return draft_models
 
 
-def init_deferred_cudagraph(args: SimpleNamespace, cases: Sequence[BenchmarkCase], model_kvargs: Dict, model) -> None:
-    """Capture profile-mode graphs after the real decode batch is known."""
-    profile_batch_size = max_decode_batch_size(cases)
-    graph_batch_size = profile_batch_size
-    if args.mtp_mode in MTP_MODES:
-        graph_batch_size = min(graph_batch_size, args.graph_max_batch_size)
-    args.graph_max_batch_size = graph_batch_size
-    model_kvargs["graph_max_batch_size"] = graph_batch_size
-    model_kvargs["disable_cudagraph"] = False
-
-    if args.enable_decode_microbatch_overlap:
-        graph_batch_size //= 2
-    model.graph_max_batch_size = graph_batch_size * (int(args.mtp_step) + 1)
-    if torch.distributed.get_rank() == 0:
-        print(
-            f"Profile decode batch size: {profile_batch_size}; "
-            f"CUDA Graph request batch size: {args.graph_max_batch_size}; "
-            f"expanded graph batch size: {model.graph_max_batch_size}",
-            flush=True,
-        )
-    model.disable_cudagraph = False
-    # Attention backends may size persistent graph buffers during construction.
-    # Rebuild them after replacing the temporary profile-time batch limit.
-    model._init_att_backend()
-    model._init_att_backend1()
-    torch.cuda.empty_cache()
-    model._init_cudagraph()
-
-
 def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue):
     try:
         args = SimpleNamespace(**args_dict)
         cases = [BenchmarkCase(**case) for case in case_dicts]
         set_env_start_args(args)
 
-        from lightllm.distributed import dist_group_manager
         import torch.distributed as dist
 
+        from lightllm.distributed import dist_group_manager
+
         model_kvargs = build_model_kvargs(args, rank_id)
-        defer_cudagraph = (
-            not args.disable_cudagraph
-            and args.decode_batch_size_mode == "profile"
-            and any(case.stage == "decode" for case in cases)
-        )
-        if defer_cudagraph:
-            model_kvargs["disable_cudagraph"] = True
-            model_kvargs["graph_max_batch_size"] = 2 if args.enable_decode_microbatch_overlap else 1
         group_size = 2 if (args.enable_decode_microbatch_overlap or args.enable_prefill_microbatch_overlap) else 1
         if group_size == 2:
             for case in cases:
@@ -1270,48 +1234,14 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         torch.cuda.empty_cache()
         model, _ = get_model(model_cfg, model_kvargs)
         draft_models = init_mtp_draft_models(args, model_kvargs, model)
+        from lightllm.common.basemodel.runtime import initialize_model_runtime
         from lightllm.utils.envs_utils import set_model_init_status
-        from lightllm.utils.torch_memory_saver_utils import MemoryTag
-        from lightllm.common.attention_state import AttentionStateManager
-        from lightllm.common.req_manager import ReqManager
 
         models = (model, *draft_models)
-        assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"
-        assert all(item.max_req_num == model.max_req_num for item in models), "models must share the request domain"
-        # main/draft 共用请求映射；按所有模型的最大需求分配，再逐模型绑定。
-        max_seq_len = max(item.get_req_manager_max_seq_len() for item in models)
-        with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            req_manager = ReqManager(max_request_num=model.max_req_num, max_sequence_length=max_seq_len)
-        for item in models:
-            item.bind_req_manager(req_manager=req_manager)
-        for item in models:
-            item.prepare_attention_states()
-        manager: AttentionStateManager = model.att_state_manager
-        assert all(item.att_state_manager is manager for item in models), "models must share one resource manager"
-        with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            manager.finish_state_registration()
-            manager.load_full_att_calibration(args=model.args)
-            manager.initialize_storage(
-                model.args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
-            )
-        for item in models:
-            item.init_runtime()
-        torch.cuda.empty_cache()
-        set_model_init_status(True)
+        initialize_model_runtime(models)
         cases = resolve_batch_max_prefill_cases(args, cases, model.att_state_manager.full_att_allocator.size)
         cases = resolve_profile_decode_cases(args, cases, model.att_state_manager.full_att_allocator.size)
-        if defer_cudagraph:
-            init_deferred_cudagraph(args, cases, model_kvargs, model)
-            for draft in draft_models:
-                batch_size = args.graph_max_batch_size
-                if args.enable_decode_microbatch_overlap:
-                    batch_size //= 2
-                batch_size *= draft.mtp_manager.get_decode_tokens_per_request(True)
-                draft.graph_max_batch_size = draft._align_decode_batch_size(batch_size)
-                draft.disable_cudagraph = False
-                draft._init_att_backend()
-                draft._init_att_backend1()
-                draft._init_cudagraph()
+        set_model_init_status(True)
         token_source = TokenSource(args)
         executor = StaticBenchmarkExecutor(args, model, draft_models, token_source)
 
@@ -1642,9 +1572,13 @@ def main(argv: Optional[Sequence[str]] = None):
     if not cases:
         raise ValueError("no benchmark cases were generated")
     args = normalize_args(args, cases)
+    set_unique_server_name(args)
     set_env_start_args(args)
 
-    run_benchmark(args, cases)
+    try:
+        run_benchmark(args, cases)
+    finally:
+        ServiceShmCleanup(get_unique_server_name()).cleanup_service_resources()
 
 
 if __name__ == "__main__":

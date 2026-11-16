@@ -1,6 +1,5 @@
 from dataclasses import replace
 from lightllm.common.attention.api.spec import AttentionFeature
-
 import torch
 
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_forward
@@ -11,6 +10,10 @@ from lightllm.models.qwen3_dflash.layer_weights.transformer_layer_weight import 
 
 
 class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        return replace(description, features=description.features | {AttentionFeature.NONCAUSAL})
+
     """DFlash layer inference.
 
     The model path is built from two explicit layer primitives:
@@ -70,7 +73,3 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
             partial_rotary_factor=self.partial_rotary_factor,
         )
         return q, cache_kv
-
-    def describe_attention(self, phase):
-        description = super().describe_attention(phase)
-        return replace(description, features=description.features | {AttentionFeature.NONCAUSAL})

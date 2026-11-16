@@ -1,23 +1,39 @@
-from types import SimpleNamespace
 from collections import deque
+from types import SimpleNamespace
 
 import pytest
 import torch
 
-from lightllm.server.multi_level_kv_cache import (
-    AdaptiveCachePlacementController,
-    CacheCapacityConfig,
-    CacheTier,
-)
-from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import MultiLevelKvCacheModule
-from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as multi_level_kv_cache_impl
+from lightllm.server.multi_level_kv_cache import AdaptiveCachePlacementController, CacheCapacityConfig, CacheTier
 from lightllm.server.router.model_infer.infer_batch import InferenceContext
+from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as multi_level_kv_cache_impl
+from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import MultiLevelKvCacheModule
+
+
+@pytest.mark.parametrize("sync", [False, True])
+def test_attention_cpu_cache_sync(sync):
+    from lightllm.common.attention.api import AttentionPhase
+
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.backend = SimpleNamespace(
+        model=SimpleNamespace(
+            attention=SimpleNamespace(
+                groups=(
+                    {
+                        AttentionPhase.PREFILL: SimpleNamespace(requires_cpu_cache_sync=False),
+                        AttentionPhase.DECODE: SimpleNamespace(requires_cpu_cache_sync=sync),
+                    },
+                )
+            )
+        )
+    )
+    assert module.need_sync_compute_stream() is sync
 
 
 def test_running_cpu_cache_tasks_are_not_ready(monkeypatch):
     from lightllm.server.router.model_infer.infer_batch import InferReq
-    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
     from lightllm.server.router.model_infer.mode_backend import base_backend as base_backend_impl
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 
     status = InferReq._CpuCacheTaskStatus
 
@@ -494,14 +510,14 @@ def test_async_load_notifies_every_rank_before_deref(monkeypatch):
 
 
 def test_fa3_cpu_cache_sync_defaults_off():
-    from lightllm.common.basemodel.attention.base_att import BaseAttBackend
-    from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
-    from lightllm.common.basemodel.attention.fa3.fp8 import Fp8Fa3AttBackend
-    from lightllm.common.basemodel.attention.fa3.mla import MlaFa3AttBackend
-    from lightllm.common.basemodel.attention.fa3.neo import NeoFa3AttBackend
+    from lightllm.common.attention.api.backend import AttentionBackend
+    from lightllm.common.attention.backends.dense.fa3.backend import Fa3DenseDecodeBackend
+    from lightllm.common.attention.backends.dense.fa3.fp8 import Fa3DenseFp8DecodeBackend
+    from lightllm.common.attention.backends.dense.fa3.neo import Fa3DenseNeoDecodeBackend
+    from lightllm.common.attention.backends.mla.fa3.backend import Fa3MLADecodeBackend
 
-    assert BaseAttBackend.requires_cpu_cache_sync is False
+    assert AttentionBackend.requires_cpu_cache_sync is False
     assert all(
         backend.requires_cpu_cache_sync is False
-        for backend in (Fa3AttBackend, Fp8Fa3AttBackend, MlaFa3AttBackend, NeoFa3AttBackend)
+        for backend in (Fa3DenseDecodeBackend, Fa3DenseFp8DecodeBackend, Fa3MLADecodeBackend, Fa3DenseNeoDecodeBackend)
     )
