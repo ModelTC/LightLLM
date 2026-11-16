@@ -177,7 +177,7 @@ class StartArgs:
     expert_dtype: Optional[str] = field(default=None, metadata={"choices": ["fp8", "fp4"]})
     llm_prefill_att_backend: List[str] = field(
         default_factory=lambda: ["auto"],
-        metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashqla"]},
+        metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashqla", "flashkda"]},
     )
     llm_decode_att_backend: List[str] = field(
         default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}

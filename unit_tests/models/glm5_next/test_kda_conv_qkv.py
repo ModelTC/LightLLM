@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def reference(x, weight, states, starts, slots, warm, heads):
+def reference(x, weight, states, starts, slots, warm, heads, use_qk_l2norm=True):
     mixed = causal_conv1d_fn(
         x.clone().T,
         weight,
@@ -30,13 +30,16 @@ def reference(x, weight, states, starts, slots, warm, heads):
         conv_states=states,
     ).T
     q, k, v = [part.view(1, x.shape[0], heads, 128) for part in mixed.chunk(3, dim=-1)]
+    if not use_qk_l2norm:
+        return q.contiguous(), k.contiguous(), v.contiguous()
     return l2norm_fwd(q.contiguous()), l2norm_fwd(k.contiguous()), v.contiguous()
 
 
 @pytest.mark.parametrize("heads", [1, 2, 8, 64])
 @pytest.mark.parametrize("state_width", [3, 4, 7])
 @pytest.mark.parametrize("lengths", [(2049, 2, 1024), (257, 1, 1), (1, 2, 3), (0, 1, 0, 2), (1,)])
-def test_conv_norm_preserves_outputs_and_history(heads, state_width, lengths):
+@pytest.mark.parametrize("use_qk_l2norm", [False, True])
+def test_conv_norm_preserves_outputs_and_history(heads, state_width, lengths, use_qk_l2norm):
     torch.manual_seed(42)
     channels = heads * 128 * 3
     opts = dict(device="cuda", dtype=torch.bfloat16)
@@ -49,8 +52,8 @@ def test_conv_norm_preserves_outputs_and_history(heads, state_width, lengths):
     starts = torch.tensor([0, *lengths], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
     slots = torch.tensor([1, 2, -1, 3][: len(lengths)], device="cuda", dtype=torch.int32)
     cache_seqlens = torch.tensor([0, 7, 0, 1][: len(lengths)], device="cuda", dtype=torch.int32)
-    expected = reference(x, weight, expected_states[..., :3], starts, slots, cache_seqlens > 0, heads)
-    actual = causal_conv1d_qkv(x, weight, states[..., :3], starts, slots, cache_seqlens, max(lengths))
+    expected = reference(x, weight, expected_states[..., :3], starts, slots, cache_seqlens > 0, heads, use_qk_l2norm)
+    actual = causal_conv1d_qkv(x, weight, states[..., :3], starts, slots, cache_seqlens, max(lengths), use_qk_l2norm)
     for a, b in zip(actual, expected):
         assert a.is_contiguous()
         assert torch.equal(a.view(torch.uint8), b.view(torch.uint8))
@@ -134,10 +137,12 @@ def test_backend_fused_conv_output_and_state(lengths):
         tp_hidden_size=heads * 128,
         conv_kernel_size=4,
         lower_bound=-5.0,
+        flash_kda_fwd=None,
     )
     att = backend_module.KDAPrefillAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer_state))
     att.b_conv_buffer_idx = torch.arange(1, len(lengths) + 1, device="cuda", dtype=torch.int32)
     att.b_ssm_buffer_idx = att.b_conv_buffer_idx
+    att.cu_seqlens = infer_state.b1_cu_q_seq_len
     layer_weight = SimpleNamespace(
         get_merged_kda_conv_weight=lambda: weight,
         linear_A_log=SimpleNamespace(weight=torch.zeros(heads, device="cuda")),
