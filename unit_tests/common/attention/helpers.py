@@ -196,8 +196,6 @@ def make_layer_attention(backend, context, params, **spec_kwargs):
 
 def model_stub(**args):
     args.setdefault("disable_cudagraph", not torch.cuda.is_available())
-    args.setdefault("llm_prefill_att_backend", "auto")
-    args.setdefault("llm_decode_att_backend", "auto")
     model = SimpleNamespace(
         args=StartArgs(**args),
         device_runtime=get_device_runtime("cuda" if torch.cuda.is_available() else "cpu"),

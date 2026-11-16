@@ -6,7 +6,9 @@ from lightllm.server.api_start import _launch_subprocesses
 from lightllm.server.core.objs.start_args_type import StartArgs
 
 
-def test_decode_node_batch_max_tokens_covers_mtp_rows(monkeypatch, tmp_path):
+@pytest.mark.parametrize("backend", ["auto", "fa3", "triton", "flashinfer"])
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_decode_node_batch_max_tokens_covers_mtp_rows(monkeypatch, tmp_path, backend, phase):
     for name in (
         "_set_envs_and_config",
         "auto_set_max_req_total_len",
@@ -38,6 +40,14 @@ def test_decode_node_batch_max_tokens_covers_mtp_rows(monkeypatch, tmp_path):
         disable_shm_warning=True,
         router_token_ratio=0.0,
     )
+
+    setattr(args, f"llm_{phase}_att_backend", backend)
+    args.llm_prefill_linear_att_backend = "flashqla"
+    args.llm_decode_linear_att_backend = "triton"
+    if backend == "flashinfer":
+        with pytest.raises(AssertionError, match=f"--llm_{phase}_att_backend"):
+            _launch_subprocesses(args)
+        return
 
     with pytest.raises(RuntimeError, match="startup validation passed"):
         _launch_subprocesses(args)

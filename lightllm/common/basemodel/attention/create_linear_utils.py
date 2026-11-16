@@ -7,7 +7,7 @@ from lightllm.common.basemodel.attention.linear.replay_gdn import (
 from lightllm.common.basemodel.attention.linear.replay_kda import ReplayKDALinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
 from lightllm.utils.backend_validator import validate
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args as _legacy_start_args
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -77,3 +77,15 @@ def _select_backend(classes, backend_args, index, priority_list, stage):
 def _get_backend_str(backend_args, index):
     assert index == 1, "linear attention backend index must be 1"
     return backend_args[index] if len(backend_args) > index else "auto"
+
+
+def get_env_start_args():
+    from copy import copy
+
+    args = copy(_legacy_start_args())
+    for phase in ("prefill", "decode"):
+        name = f"llm_{phase}_att_backend"
+        backend = getattr(args, name)
+        if isinstance(backend, str):
+            setattr(args, name, [backend, getattr(args, f"llm_{phase}_linear_att_backend")])
+    return args

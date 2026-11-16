@@ -1,6 +1,6 @@
 """Attention backend selection utilities."""
 
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args as _legacy_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.backend_validator import validate
 from .base_att import BaseAttBackend
@@ -164,3 +164,15 @@ def get_neo_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "tr
     if backend_str != "auto":
         return load_backend_class(backend_map[llm_dtype][backend_str])
     return _auto_select_backend(llm_dtype, kv_type_to_backend=backend_map, priority_list=priority_list)
+
+
+def get_env_start_args():
+    from copy import copy
+
+    args = copy(_legacy_start_args())
+    for phase in ("prefill", "decode"):
+        name = f"llm_{phase}_att_backend"
+        backend = getattr(args, name)
+        if isinstance(backend, str):
+            setattr(args, name, [backend, getattr(args, f"llm_{phase}_linear_att_backend")])
+    return args

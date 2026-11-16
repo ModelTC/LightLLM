@@ -1,40 +1,42 @@
+import math
 import multiprocessing as mp
 import os
-import uuid
 import subprocess
-import math
-from lightllm.utils.start_utils import configure_decode_open_file_limit, process_manager
-from .metrics.manager import start_metric_manager
-from .httpserver.req_id_generator_server import start_req_id_generator_server
-from .embed_cache.manager import start_cache_manager
-from lightllm.utils.log_utils import init_logger
+import uuid
+
+from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.utils.config_utils import (
+    auto_set_cpu_cache_token_page_size,
+    auto_set_fused_shared_experts,
+    auto_set_max_req_total_len,
+    auto_set_page_size,
+    auto_set_response_parsers,
+    get_default_disable_chunked_mm_input,
+    get_running_max_req_size_per_dp,
+    has_audio_module,
+    has_vision_module,
+    is_hybrid_att_model,
+)
+from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 from lightllm.utils.envs_utils import (
     get_env_start_args,
     get_unique_server_name,
     set_env_start_args,
     set_unique_server_name,
 )
-from lightllm.utils.shm_port_args import get_shm_port_args
-from lightllm.utils.net_utils import validate_ports
-from .detokenization.manager import start_detokenization_process
-from .router.manager import start_router_process
+from lightllm.utils.log_utils import init_logger
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
+from lightllm.utils.net_utils import validate_ports
 from lightllm.utils.redis_utils import start_redis_service
+from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.shm_size_check import check_recommended_shm_size
-from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.utils.config_utils import (
-    has_audio_module,
-    has_vision_module,
-    is_hybrid_att_model,
-    auto_set_max_req_total_len,
-    auto_set_page_size,
-    auto_set_cpu_cache_token_page_size,
-    auto_set_fused_shared_experts,
-    auto_set_response_parsers,
-    get_running_max_req_size_per_dp,
-    get_default_disable_chunked_mm_input,
-)
-from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
+from lightllm.utils.start_utils import configure_decode_open_file_limit, process_manager
+
+from .detokenization.manager import start_detokenization_process
+from .embed_cache.manager import start_cache_manager
+from .httpserver.req_id_generator_server import start_req_id_generator_server
+from .metrics.manager import start_metric_manager
+from .router.manager import start_router_process
 
 logger = init_logger(__name__)
 
@@ -184,17 +186,11 @@ def _launch_subprocesses(args: StartArgs):
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
     if args.enable_ep_moe:
-        allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}
-        for backend in args.llm_prefill_att_backend:
-            assert backend in allowed_ep_prefill_att_backends, (
-                "When --enable_ep_moe is enabled, --llm_prefill_att_backend must be one of "
-                f"{sorted(allowed_ep_prefill_att_backends)}; flashinfer is not supported."
-            )
-        allowed_ep_decode_att_backends = {"auto", "fa3", "triton"}
-        for backend in args.llm_decode_att_backend:
-            assert backend in allowed_ep_decode_att_backends, (
-                "When --enable_ep_moe is enabled, --llm_decode_att_backend must be one of "
-                f"{sorted(allowed_ep_decode_att_backends)}; flashinfer is not supported."
+        allowed_ep_att_backends = {"auto", "fa3", "triton"}
+        for option in ("llm_prefill_att_backend", "llm_decode_att_backend"):
+            assert getattr(args, option) in allowed_ep_att_backends, (
+                f"When --enable_ep_moe is enabled, --{option} must be one of "
+                f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
             )
 
     if args.page_size < 1:

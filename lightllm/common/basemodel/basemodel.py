@@ -1,3 +1,7 @@
+from functools import cached_property
+from lightllm.platform import get_device_runtime
+from lightllm.common.execution import ExecutionScope
+from lightllm.common.attention.selection import BackendPolicy
 import os
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -1278,3 +1282,19 @@ class TpPartBaseModel:
             special_model_input["mtp_draft_input_hiddens"] = None
 
         return special_model_input
+
+    @cached_property
+    def device_runtime(self):
+        return get_device_runtime(platform=self.args.hardware_platform)
+
+    @cached_property
+    def execution(self):
+        return ExecutionScope(self.device_runtime)
+
+    def prepare_attention_backends(self):
+        from lightllm.common.basemodel.attention import ModelAttention
+
+        self.attention = ModelAttention(self)
+
+    def attention_policy(self, family, phase):
+        return BackendPolicy()
