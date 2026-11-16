@@ -580,6 +580,37 @@ Performance Optimization Parameters
 
     Example: ``--llm_prefill_att_backend fa3 flashqla``.
 
+    Linear-attention options for GLM-5.3-Flash:
+
+    * ``auto`` (default): On Hopper with BF16 computation and BF16 recurrent state, use FlashKDA
+      when installed and compatible. Select it for query chunks up to 8192 tokens with at least
+      16 local KDA heads, or up to 2048 tokens with fewer heads. The longest query chunk in the
+      batch determines selection, before Q/K normalization. Other cases use Triton.
+      These conservative limits reflect measured H100/H200 performance; explicit selection
+      can override them for other workloads.
+    * ``triton``: Always use Triton, without importing FlashKDA.
+    * ``flashkda``: Use the optional FlashKDA prefill kernel, in both native and replay SSM modes.
+      Requires SM90, SM100, SM103 or SM120, BF16 computation, BF16 or FP32 recurrent state,
+      head dimension 128, and a gate lower bound in [-5, 0]. An explicit request fails at startup
+      for an unsupported configuration or a package that cannot be loaded. Decode and MTP verification continue
+      to use the selected SSM mode's existing kernels.
+
+    Install FlashKDA with CUDA 12.9 or newer:
+
+    .. code-block:: bash
+
+        pip install --no-build-isolation git+https://github.com/MoonshotAI/FlashKDA.git
+
+    Select it with ``--llm_prefill_att_backend auto flashkda``. A missing or unloadable optional
+    package falls back to Triton in ``auto`` mode, and reports an installation error in explicit mode.
+    FlashKDA uses BF16 internal recurrent updates even with FP32 state storage.
+    Automatic selection therefore keeps FP32 state configurations on Triton.
+    Use explicit ``triton`` when FP32 recurrent computation is required.
+
+    ``--llm_kv_type fp8kv_dsa`` independently controls the sparse-attention layers and can be used
+    with FlashKDA. It does not quantize KDA inputs or recurrent state to FP8. KDA's persistent
+    state layout is unchanged for decode, MTP, prefix-cache restore and PD transfer.
+
 .. option:: --llm_decode_att_backend
 
     Set the attention backend for the decode phase. For hybrid linear-attention models such as Qwen3.5,

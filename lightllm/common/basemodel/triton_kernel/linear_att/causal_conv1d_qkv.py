@@ -26,6 +26,7 @@ def _conv_qkv_kernel(
     stride_conv_state_seq: tl.constexpr,
     stride_conv_state_dim: tl.constexpr,
     stride_conv_state_tok: tl.constexpr,
+    USE_QK_L2NORM: tl.constexpr,
     BLOCK_T: tl.constexpr,
 ):
     if PACKED:
@@ -86,7 +87,7 @@ def _conv_qkv_kernel(
                 acc = tl.fma(x_val, w_val[None, :], acc)
             # Preserve the BF16 rounding between convolution and Q/K norm.
             y = (acc / (1 + tl.exp(-acc))).to(q.dtype.element_ty)
-        if qkv_id < 2:
+        if USE_QK_L2NORM and qkv_id < 2:
             qk = y.to(tl.float32)
             norm = tl.rsqrt(tl.sum(qk * qk, 1)[:, None] + 1e-6)
             y = (qk * norm).to(q.dtype.element_ty)
@@ -125,8 +126,10 @@ def _conv_qkv_kernel(
         tl.store(state_ptr, tl.where(input_token[:, None] >= 0, tail, history), state_mask)
 
 
-def causal_conv1d_qkv(x, weight, conv_states, query_start_loc, cache_indices, cache_seqlens, max_q_seq_len):
-    """Convolve projected QKV and return contiguous Q/K/V with Q/K L2 norm.
+def causal_conv1d_qkv(
+    x, weight, conv_states, query_start_loc, cache_indices, cache_seqlens, max_q_seq_len, use_qk_l2norm=True
+):
+    """Convolve projected QKV and return contiguous Q/K/V with optional Q/K L2 norm.
 
     x is BF16 [tokens, 3 * head_num * 128] with unit channel stride;
     weight is contiguous [3 * head_num * 128, 4]. conv_states and request
@@ -164,6 +167,7 @@ def causal_conv1d_qkv(x, weight, conv_states, query_start_loc, cache_indices, ca
         stride_conv_state_seq,
         stride_conv_state_dim,
         stride_conv_state_tok,
+        USE_QK_L2NORM=use_qk_l2norm,
         BLOCK_T=block_t,
         num_warps=num_warps,
     )
