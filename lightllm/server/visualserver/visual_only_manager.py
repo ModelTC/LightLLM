@@ -1,35 +1,38 @@
 import asyncio
-import uvloop
-import rpyc
 import inspect
-import setproctitle
-import threading
-import uuid
+import os
 import pickle
-import websockets
+import signal
 import socket
 import sys
-import os
-import signal
+import threading
 import time
-from lightllm.utils.net_utils import get_hostname_ip
-from .objs import VIT_Obj
+import uuid
 from typing import List
+
+import rpyc
+import setproctitle
+import uvloop
+import websockets
+
 from lightllm.server.core.objs import StartArgs
+from lightllm.utils.net_utils import get_hostname_ip
+
+from .objs import VIT_Obj
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from lightllm.server.multimodal_params import MultimodalParams, ImageItem
-from .model_infer import start_model_process, VisualModelRpcClient
-from lightllm.common.basemodel.attention_vit.create_utils import init_vit_att_backend
-from lightllm.utils.log_utils import init_logger
-from lightllm.utils.graceful_utils import graceful_registry
-from lightllm.utils.process_check import start_parent_check_thread
-from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.shm_port_args import get_shm_port_args
 from rpyc.utils.classic import obtain
-from lightllm.server.embed_cache.utils import create_shm, get_shm_name_data, free_shm
-from .manager import VisualManager
 
+from lightllm.server.embed_cache.utils import create_shm, free_shm, get_shm_name_data
+from lightllm.server.multimodal_params import ImageItem, MultimodalParams
+from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.graceful_utils import graceful_registry
+from lightllm.utils.log_utils import init_logger
+from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.shm_port_args import get_shm_port_args
+
+from .manager import VisualManager
+from .model_infer import VisualModelRpcClient, start_model_process
 
 logger = init_logger(__name__)
 
@@ -74,7 +77,6 @@ class VisualOnlyManager(rpyc.Service):
             try:
                 uri = f"ws://{args.config_server_host}:{ports.config_server_port}/visual_register"
                 async with websockets.connect(uri, max_queue=(2048 * 1024, 2048 * 1023)) as websocket:
-
                     sock = websocket.transport.get_extra_info("socket")
                     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
@@ -94,12 +96,10 @@ class VisualOnlyManager(rpyc.Service):
                 logger.info("reconnection to config_server")
 
     async def wait_to_model_ready(self):
-
         self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
-        self.vit_attn_backend = init_vit_att_backend(index=0)
+        self.vit_attn_backend = self.args.vit_att_backend
         for dp_rank_id in range(self.vit_dp):
             for tp_rank_id in range(self.vit_tp):
-
                 rpc_model = await start_model_process()
                 self.model_rpcs[dp_rank_id].append(rpc_model)
 

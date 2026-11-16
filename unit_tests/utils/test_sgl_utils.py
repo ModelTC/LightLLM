@@ -1,19 +1,28 @@
-import weakref
 import collections
 import inspect
 import math
+import weakref
 from types import SimpleNamespace
 
 import pytest
 import torch
 from frozendict import frozendict
 
+from lightllm.common.attention.backends.dense.fa3 import backend as fa3_module
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.fa3 import fp as fa3_module
 from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils import sgl_utils
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
+from unit_tests.common.attention.helpers import (
+    backend_context,
+    make_backend,
+    make_batch,
+    make_context,
+    run_dense,
+    run_sparse,
+    update_context,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -114,33 +123,36 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, pa
     infer_state.b_seq_len = torch.tensor([4096, actual_kv_len], dtype=torch.int32)
     infer_state.b1_cu_q_seq_len = torch.tensor([0, 1, 2], dtype=torch.int32)
     infer_state.b1_cu_kv_seq_len = torch.tensor([0, 4096, 4096 + actual_kv_len], dtype=torch.int32)
-    state = fa3_module.Fa3DecodeAttState(
-        backend=SimpleNamespace(
+    state = backend_context(
+        fa3_module.Fa3DenseDecodeBackend,
+        "decode",
+        settings=SimpleNamespace(
             model=model,
-            infer_page_size=page_size,
+            kernel_page_size=page_size,
             uses_causal_attention=lambda: True,
-            uses_dynamic_spec_verify_layout=lambda: False,
+            uses_dynamic_verify_layout=lambda: False,
             get_page_table_view=lambda att_batch_size, max_kv_len, microbatch_index: torch.zeros(
                 att_batch_size, math.ceil(max_kv_len / page_size), dtype=torch.int32
             ),
         ),
-        _infer_state_weak_ref=weakref.ref(infer_state),
     )
     copy_calls = []
-    monkeypatch.setattr(fa3_module, "page_table_copy", lambda **kwargs: copy_calls.append(kwargs))
-    state.init_state()
+    monkeypatch.setattr(
+        "lightllm.common.basemodel.triton_kernel.fa3_utils.page_table_copy", lambda **kwargs: copy_calls.append(kwargs)
+    )
+    update_context(state, infer_state)
     # 模拟 CudaGraph._capture_decode 对 infer_state 的修改。
-    state.infer_state.max_kv_seq_len = graph.graph_max_len_in_batch
+    infer_state.max_kv_seq_len = graph.graph_max_len_in_batch
     calls = []
 
     def attention(**kwargs):
         calls.append(kwargs)
         return kwargs["q"]
 
-    monkeypatch.setattr(fa3_module, "flash_attn_with_kvcache_autotune", attention)
-    state.decode_att(torch.empty(2, 4, 8), torch.empty(page_size, 2, 8), torch.empty(page_size, 2, 8))
+    monkeypatch.setattr("lightllm.utils.sgl_utils.flash_attn_with_kvcache_autotune", attention)
+    run_dense(state, infer_state, torch.empty(2, 4, 8), torch.empty(page_size, 2, 8), torch.empty(page_size, 2, 8))
     assert calls[0]["max_seqlen_k"] == actual_kv_len
-    assert calls[0]["page_table"].shape == (2, 32768 // page_size)
+    assert calls[0]["page_table"].shape == (2, math.ceil(actual_kv_len / page_size))
 
     assert copy_calls[0]["page_table"].shape == (2, math.ceil(actual_kv_len / page_size))
     assert copy_calls[0]["page_size"] == page_size

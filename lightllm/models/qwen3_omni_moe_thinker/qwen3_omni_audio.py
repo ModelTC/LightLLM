@@ -1,19 +1,21 @@
-import os
 import json
 import math
-import torch
+import os
+from typing import Callable, List, Optional, Union
+
 import numpy as np
-from torch import Tensor, nn
+import torch
 from safetensors import safe_open
+from torch import Tensor, nn
 from torch.nn import functional as F
-from typing import Callable, Optional, Union, List
 from transformers.activations import ACT2FN
 
+from lightllm.common.attention.api import VarlenAttentionInputs
+from lightllm.common.attention.varlen import AutoVarlenAttentionRunner
+from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+from lightllm.models.qwen3_omni_moe_thinker.audio_process import WhisperFeatureExtractor
 from lightllm.server.multimodal_params import AudioItem
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
-from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
-from lightllm.models.qwen3_omni_moe_thinker.audio_process import WhisperFeatureExtractor
 
 QWEN3_OMNI_CONV_CHUNKSIZE = int(os.getenv("LIGHTLLM_QWEN3_OMNI_CONV_CHUNKSIZE", 200))
 
@@ -24,7 +26,6 @@ def _get_feat_extract_output_lengths(input_lengths):
     """
     Computes the output length of the convolutional layers and the output length of the audio encoder
     """
-
     input_lengths_leave = input_lengths % 100
     feat_lengths = (input_lengths_leave - 1) // 2 + 1
     output_lengths = ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
@@ -41,10 +42,13 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         activation_function,
         activation_dropout,
         encoder_ffn_dim,
+        attention_op=None,
     ):
         super().__init__()
         self.embed_dim = d_model
-        self.self_attn = Qwen3OmniMoeAudioAttention(d_model, encoder_attention_heads, attention_dropout)
+        self.self_attn = Qwen3OmniMoeAudioAttention(
+            d_model, encoder_attention_heads, attention_dropout, attention_op=attention_op
+        )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.dropout = dropout
         self.activation_fn = ACT2FN[activation_function]
@@ -86,7 +90,7 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
 
 
 class Qwen3OmniMoeAudioAttention(nn.Module):
-    def __init__(self, d_model, encoder_attention_heads, attention_dropout):
+    def __init__(self, d_model, encoder_attention_heads, attention_dropout, *, attention_op=None):
         super().__init__()
         self.embed_dim = d_model
         self.num_heads = encoder_attention_heads
@@ -103,6 +107,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         self.attention_dropout = 0.0
         self.is_decoder = False
         self.is_causal = False
+        self.attention_op = attention_op if attention_op is not None else AutoVarlenAttentionRunner()
         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
@@ -116,7 +121,6 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
-
         seq_length, _ = hidden_states.size()
 
         q = self.q_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
@@ -125,7 +129,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
 
         attn_output = g_cache_manager.alloc_tensor(q.shape, q.dtype, device=q.device)
 
-        flash_attention_fwd(q, k, v, attn_output, cu_seqlens, max_seqlen)
+        self.attention_op.forward(VarlenAttentionInputs(q, k, v, cu_seqlens, max_seqlen), out=attn_output)
 
         attn_output = attn_output.reshape(seq_length, -1).contiguous()
         attn_output = self.out_proj(attn_output)
@@ -176,6 +180,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         self.embed_scale = math.sqrt(self.embed_dim) if scale_embedding else 1.0
         self.n_window = n_window
         self.positional_embedding = SinusoidsPositionEmbedding(self.max_source_positions, self.embed_dim)
+        attention_op = AutoVarlenAttentionRunner()
         self.layers = nn.ModuleList(
             [
                 Qwen3OmniMoeAudioEncoderLayer(
@@ -186,6 +191,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
                     activation_function,
                     activation_dropout,
                     encoder_ffn_dim,
+                    attention_op=attention_op,
                 )
                 for _ in range(encoder_layers)
             ]

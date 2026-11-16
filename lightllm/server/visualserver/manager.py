@@ -1,29 +1,31 @@
+import asyncio
+import collections
+import inspect
+import pickle
+import socket
+import threading
+from typing import List
+
+import rpyc
+import setproctitle
+import uvloop
 import zmq
 import zmq.asyncio
-import asyncio
-import uvloop
-import rpyc
-import socket
-import pickle
-import inspect
-import setproctitle
-import threading
-import collections
-from typing import List
-from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
+
 from lightllm.server.core.objs import ShmReqManager, StartArgs
+from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from lightllm.server.multimodal_params import MultimodalParams, ImageItem
-from .model_infer import start_model_process, VisualModelRpcClient
-from lightllm.common.basemodel.attention_vit.create_utils import init_vit_att_backend
-from lightllm.utils.log_utils import init_logger
-from lightllm.utils.graceful_utils import graceful_registry
-from lightllm.utils.process_check import start_parent_check_thread
-from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.shm_port_args import get_shm_port_args
 from rpyc.utils.classic import obtain
 
+from lightllm.server.multimodal_params import ImageItem, MultimodalParams
+from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.graceful_utils import graceful_registry
+from lightllm.utils.log_utils import init_logger
+from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.shm_port_args import get_shm_port_args
+
+from .model_infer import VisualModelRpcClient, start_model_process
 
 logger = init_logger(__name__)
 
@@ -62,12 +64,10 @@ class VisualManager:
         self.lock = asyncio.Lock()
 
     async def wait_to_model_ready(self):
-
         self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
-        self.vit_attn_backend = init_vit_att_backend(index=0)
+        self.vit_attn_backend = self.args.vit_att_backend
         for dp_rank_id in range(self.vit_dp):
             for tp_rank_id in range(self.vit_tp):
-
                 rpc_model = await start_model_process()
                 self.model_rpcs[dp_rank_id].append(rpc_model)
 

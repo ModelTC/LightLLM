@@ -187,9 +187,7 @@ class StartArgs:
         default="pin_mem_cache",
         metadata={"choices": ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"]},
     )
-    vit_att_backend: List[str] = field(
-        default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
-    )
+    vit_att_backend: str = field(default="auto", metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]})
     llm_kv_type: str = field(
         default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt", "fp8kv_dsa"]}
     )

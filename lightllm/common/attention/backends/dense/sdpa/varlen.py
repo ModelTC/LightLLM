@@ -1,0 +1,54 @@
+import torch
+import torch.nn.functional as F
+
+from lightllm.common.attention.api.varlen import validate_varlen_output
+from lightllm.common.attention.backends.dense.varlen import BaseVarlenAttentionOp
+from lightllm.platform import Platform
+
+
+class SdpaVarlenAttentionOp(BaseVarlenAttentionOp):
+    """Fallback with a device-to-host boundary sync and a Python loop per sequence.
+
+    This path cannot be captured in a CUDA Graph.
+    """
+
+    provider = "sdpa"
+    supported_platforms = frozenset({Platform.CPU, Platform.CUDA})
+
+    def forward(self, inputs, *, out):
+        validate_varlen_output(inputs, out)
+        inputs.validate()
+        q, k, v, cu_seqlens, max_seqlen = inputs
+        output_buffer = out
+        assert q.ndim == k.ndim == v.ndim == output_buffer.ndim == 3
+        assert cu_seqlens is not None and cu_seqlens.ndim == 1
+        cu_seqlens = cu_seqlens.detach().to("cpu")
+        B = cu_seqlens.numel() - 1
+
+        with torch.no_grad():
+            for b in range(B):
+                s = int(cu_seqlens[b])
+                e = int(cu_seqlens[b + 1])
+                L = e - s
+                if L <= 0:
+                    continue
+                if max_seqlen:
+                    assert L <= max_seqlen
+
+                # [L, H, D] -> [1, H, L, D]
+                q_ = q[s:e].permute(1, 0, 2).unsqueeze(0)
+                k_ = k[s:e].permute(1, 0, 2).unsqueeze(0)
+                v_ = v[s:e].permute(1, 0, 2).unsqueeze(0)
+
+                sequence_output = F.scaled_dot_product_attention(
+                    q_,
+                    k_,
+                    v_,
+                    attn_mask=None,
+                    dropout_p=0.0,
+                    is_causal=False,
+                )
+                # [1, H, L, D] -> [L, H, D]
+                output_buffer[s:e].copy_(sequence_output.squeeze(0).permute(1, 0, 2))
+
+        return output_buffer
