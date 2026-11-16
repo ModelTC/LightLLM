@@ -53,20 +53,33 @@ def _silu_and_mul_quant_fp8(
     tl.store(scale_ptr + rows + group_cols * scale_stride_n, scale, ids < groups)
 
 
-@autotune(
-    kernel_name="silu_and_mul_quant_fp8:v1",
-    configs_gen_func=lambda: [
-        {"GROUPS_PER_CTA": g, "num_warps": w} for g, w in [(1, 1), (4, 1), (4, 4), (8, 4), (16, 4)]
-    ],
-    static_key_func=lambda input, group_size, dtype, limit, alpha: {
+def _get_silu_and_mul_quant_fp8_static_key(
+    input: torch.Tensor,
+    group_size: int,
+    dtype: torch.dtype,
+    limit: float | None,
+    alpha: float | None,
+) -> dict:
+    key = {
         "N": input.shape[1] // 2,
         "input_dtype": str(input.dtype),
         "output_dtype": str(dtype),
         "group_size": group_size,
         "clamp": limit is not None,
         "gelu": ffn_use_tanh_approximate_gelu() and limit is None,
-        **({"alpha": alpha} if alpha is not None else {}),
-    },
+    }
+    # Leave alpha out of the default key so existing autotune caches still match.
+    if alpha is not None:
+        key["alpha"] = alpha
+    return key
+
+
+@autotune(
+    kernel_name="silu_and_mul_quant_fp8:v1",
+    configs_gen_func=lambda: [
+        {"GROUPS_PER_CTA": g, "num_warps": w} for g, w in [(1, 1), (4, 1), (4, 4), (8, 4), (16, 4)]
+    ],
+    static_key_func=_get_silu_and_mul_quant_fp8_static_key,
     run_key_func=lambda input: input.shape[0],
 )
 def silu_and_mul_quant_fp8(input, group_size, dtype, limit=None, alloc_func=torch.empty, run_config=None, alpha=None):

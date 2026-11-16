@@ -282,9 +282,11 @@ def chunked_expanded_moe_forward(
                     alpha=alpha,
                     run_config={"GROUPS_PER_CTA": 4, "num_warps": 1},
                 )
+                del gemm_out_a
             else:
                 silu_out = torch.empty((chunk_rows, intermediate_size), dtype=hidden_dtype, device=recv_x[0].device)
                 silu_and_mul_fwd(gemm_out_a, silu_out, alpha=alpha, limit=limit, clamp_up_add_one=clamp_up_add_one)
+                del gemm_out_a
                 qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
                     silu_out,
                     block_size_k,
@@ -294,7 +296,6 @@ def chunked_expanded_moe_forward(
                     use_ue8m0_scales=get_env_use_ue8m0_scales(),
                 )
                 del silu_out
-            del gemm_out_a
 
             gemm_out_b = torch.empty(
                 (chunk_rows, hidden_size),
