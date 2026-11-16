@@ -3,6 +3,7 @@ from copy import deepcopy
 import torch
 
 from lightllm.common.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.attention import AttBackendSlot, MAIN_SLOT
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.common.basemodel.attention.nsa.glm5_next_fp8 import Fp8Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
@@ -175,12 +176,11 @@ class Glm5NextMTPModel(TpPartBaseModel):
             # Reserve fixed scratch space before the shared KV capacity is profiled.
             Fp8Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
 
-    def _init_att_backend(self):
+    def _init_att_backends(self):
         backend_class = (
             Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
         )
-        self.prefill_att_backend = backend_class(model=self)
-        self.decode_att_backend = self.prefill_att_backend
+        return {MAIN_SLOT: AttBackendSlot.build(self, backend_class, backend_class)}
 
     def autotune_layers(self):
         return 1

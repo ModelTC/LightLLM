@@ -15,6 +15,7 @@ Backend modules are imported lazily by the registry, so they must not be importe
 """
 
 from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from .base_att import AttBackendSlot, MAIN_SLOT, LINEAR_SLOT
 from .registry import (
     PREFILL,
     DECODE,

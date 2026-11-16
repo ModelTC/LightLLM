@@ -72,8 +72,18 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.validate = Mock(return_value=True)
         dependencies = {
             f"{ATTENTION}.base_att": {
-                name: type(name, (), {})
-                for name in ("BaseAttBackend", "BasePrefillAttState", "BaseDecodeAttState", "AttControl")
+                **{
+                    name: type(name, (), {})
+                    for name in (
+                        "BaseAttBackend",
+                        "BasePrefillAttState",
+                        "BaseDecodeAttState",
+                        "AttControl",
+                        "AttBackendSlot",
+                    )
+                },
+                "MAIN_SLOT": "main",
+                "LINEAR_SLOT": "linear",
             },
             "lightllm.utils.envs_utils": {"get_env_start_args": lambda: self.args},
             "lightllm.utils.backend_validator": {"validate": self.validate},

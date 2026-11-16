@@ -46,8 +46,9 @@ def test_ffn_only_draft_has_no_state_or_attention_backend(monkeypatch: pytest.Mo
     draft, resources = draft_model(mode)
     draft.prepare_attention_states()
     resources.finish_state_registration()
-    draft._init_att_backend()
-    draft._init_att_backend1()
+    draft.init_att_backends()
+    assert draft.att_backends == {}
+    assert draft.prefill_att_backend is None and draft.decode_att_backend is None
     assert draft.att_state_manager is resources
     assert not hasattr(draft, "full_att_state")
     assert not resources.get_full_attention_states("draft0")

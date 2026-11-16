@@ -117,7 +117,7 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         backend: LinearAttBackend = self.backend
         mtp_step = backend.mtp_step
         # 每次 _prefill 都会在 runtime infer_state 上调用 init_state。
-        # prefill cuda graph 回调必须走 new_infer_state.prefill_att_state1，
+        # prefill cuda graph 回调必须走 new_infer_state.prefill_att_states[LINEAR_SLOT]，
         # 才能读到这里按当前 batch（含 token padding 后的 dummy request）更新的索引。
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
         self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (mtp_step + 1)

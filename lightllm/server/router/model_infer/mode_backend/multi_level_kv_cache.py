@@ -47,14 +47,9 @@ class MultiLevelKvCacheModule(object):
         """不支持异步 CPU cache 的 backend（目前是 FA3）仍要等计算流，否则搬运可能崩溃。"""
 
         model = self.backend.model
-        att_backends = [
-            model.prefill_att_backend,
-            model.decode_att_backend,
-            model.prefill_att_backend1,
-            model.decode_att_backend1,
-        ]
+        att_backends = [att_backend for slot in model.att_backends.values() for att_backend in slot.backends()]
         for att_backend in att_backends:
-            if att_backend is not None and att_backend.requires_cpu_cache_sync:
+            if att_backend.requires_cpu_cache_sync:
                 logger.info(
                     "MultiLevelKvCacheModule: %s requires synchronous CPU cache IO.", type(att_backend).__name__
                 )

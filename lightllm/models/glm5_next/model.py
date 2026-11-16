@@ -6,6 +6,7 @@ import torch
 import triton
 
 from lightllm.common.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.attention import AttBackendSlot, MAIN_SLOT, LINEAR_SLOT
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.distributed.communication_op import dist_group_manager
@@ -193,24 +194,20 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.v_head_dim = self.config.get("v_head_dim", self.qk_nope_head_dim)
         self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
 
-    def _init_att_backend(self):
+    def _init_att_backends(self):
         from lightllm.common.basemodel.attention.nsa.glm5_next_fp8 import (
             Fp8Glm5NextSparseAttBackend,
         )
 
-        backend_class = (
-            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
-        )
-        self.prefill_att_backend = backend_class(model=self)
-        self.decode_att_backend = self.prefill_att_backend
-
-    def _init_att_backend1(self):
+        sparse_class = Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
         if self.args.ssm_state_mode == "replay":
-            from lightllm.common.basemodel.attention.linear.replay_kda import ReplayKDALinearAttBackend as backend_cls
+            from lightllm.common.basemodel.attention.linear.replay_kda import ReplayKDALinearAttBackend as kda_class
         else:
-            from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend as backend_cls
-        self.prefill_att_backend1 = backend_cls(model=self)
-        self.decode_att_backend1 = self.prefill_att_backend1
+            from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend as kda_class
+        return {
+            MAIN_SLOT: AttBackendSlot.build(self, sparse_class, sparse_class),
+            LINEAR_SLOT: AttBackendSlot.build(self, kda_class, kda_class),
+        }
 
     def _init_custom(self):
         triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))

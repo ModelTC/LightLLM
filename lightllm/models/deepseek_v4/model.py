@@ -20,6 +20,7 @@ from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
     DeepseekV4TransformerLayerInfer,
 )
 from lightllm.common.basemodel.attention import PREFILL, DECODE, resolve_att_backend_class
+from lightllm.common.basemodel.attention import AttBackendSlot, MAIN_SLOT
 from lightllm.common.basemodel.attention.nsa.dsv4_flashmla_sparse_fp8 import DeepseekV4FlashMlaFp8SparseAttBackend
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
 from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post
@@ -206,18 +207,21 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         config = dict(self.config, n_layer=len(self.config["compress_ratios"]))
         self.quant_cfg = Quantcfg(config, self.quant_type, self.quant_cfg_path, self.expert_dtype)
 
-    def _init_att_backend(self):
+    def _init_att_backends(self):
         args = get_env_start_args()
         if args.llm_kv_type == "None":
             args.llm_kv_type = "fp8kv_dsa"
         # TODO: 支持其他 kv type
         if args.llm_kv_type != "fp8kv_dsa":
             raise RuntimeError("DeepSeek-V4 requires llm_kv_type=fp8kv_dsa for packed FlashMLA sparse attention")
-        self.prefill_att_backend = resolve_att_backend_class("dsv4_nsa", PREFILL)(model=self)
-        self.decode_att_backend = resolve_att_backend_class("dsv4_nsa", DECODE)(model=self)
+        slot = AttBackendSlot.build(
+            self,
+            prefill_class=resolve_att_backend_class("dsv4_nsa", PREFILL),
+            decode_class=resolve_att_backend_class("dsv4_nsa", DECODE),
+        )
 
-        tp_q_head_num = self.prefill_att_backend.tp_q_head_num
-        padded_q_head_num = self.prefill_att_backend.padded_q_head_num
+        tp_q_head_num = slot.prefill.tp_q_head_num
+        padded_q_head_num = slot.prefill.padded_q_head_num
         if not self.is_mtp_draft_model:
             # Drafts share this buffer after the main model has captured its CUDA graphs.
             self.dsv4_workspace.init_flashmla_prefill_q(
@@ -228,7 +232,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             )
         for layer_infer in self.layers_infer:
             layer_infer.flashmla_q_head_num_ = padded_q_head_num
-        return
+        return {MAIN_SLOT: slot}
 
     def _init_custom(self):
         self._init_to_get_rotary()

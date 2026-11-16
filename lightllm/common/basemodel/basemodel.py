@@ -8,7 +8,7 @@ import json
 import torch
 import torch.nn.functional as F
 import triton
-from typing import final, List, TYPE_CHECKING
+from typing import final, Dict, List, Optional, TYPE_CHECKING
 from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
@@ -44,7 +44,7 @@ from lightllm.utils.torch_memory_saver_utils import (
     MemoryTag,
 )
 from .attention import PREFILL, DECODE, resolve_att_backend_class
-from .attention import BaseAttBackend
+from .attention import BaseAttBackend, AttBackendSlot, MAIN_SLOT
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -182,19 +182,8 @@ class TpPartBaseModel:
         """Initialize this model's backends, warmup and graphs after shared allocation."""
         self.req_manager.bind_hold_page(self.att_state_manager.full_att_allocator.hold_token_indices)
         self._check_mem_size()
-        self._init_att_backend()
-        self._init_att_backend1()
+        self.init_att_backends()
         self._init_hidden_collector()
-        role = self.att_state_role
-        logger.info(
-            f"{role} prefill/decode attention: {type(self.prefill_att_backend).__name__} / "
-            f"{type(self.decode_att_backend).__name__}"
-        )
-        if self.prefill_att_backend1 is not None:
-            logger.info(
-                f"{role} prefill/decode attention1: {type(self.prefill_att_backend1).__name__} / "
-                f"{type(self.decode_att_backend1).__name__}"
-            )
 
         self._autotune_warmup()
         self._init_padded_req()
@@ -336,21 +325,57 @@ class TpPartBaseModel:
         self.vocab_size = self.config["vocab_size"]
         return
 
-    def _init_att_backend(self):
+    def init_att_backends(self):
+        """
+        创建（或重建）所有 attention backend。Backend 可能在构造时按当前的 CUDA graph 上限
+        分配常驻 buffer，因此这些上限变化后需要重新调用。
+        """
+        self.att_backends: Dict[str, AttBackendSlot] = self._init_att_backends()
         role = self.att_state_role
-        if not self.att_state_manager.get_full_attention_states(role):
-            # FFN-only and linear-only models do not need a full-attention backend.
-            self.prefill_att_backend = self.decode_att_backend = None
-            return
-        self.prefill_att_backend: BaseAttBackend = resolve_att_backend_class("dense", PREFILL)(model=self)
-        self.decode_att_backend: BaseAttBackend = resolve_att_backend_class("dense", DECODE)(model=self)
+        for slot_name, slot in self.att_backends.items():
+            prefill_name = type(slot.prefill).__name__ if slot.prefill is not None else None
+            decode_name = type(slot.decode).__name__ if slot.decode is not None else None
+            logger.info(f"{role} attention slot '{slot_name}': prefill={prefill_name}, decode={decode_name}")
         return
 
-    def _init_att_backend1(self):
-        # self.prefill_att_backend1 是给后续有模型支持不同层用不同的att模块时，保留的扩展。
-        self.prefill_att_backend1: BaseAttBackend = None
-        self.decode_att_backend1: BaseAttBackend = None
-        return
+    def _init_att_backends(self) -> Dict[str, AttBackendSlot]:
+        """
+        返回 slot 名称到 backend 的映射。不同层使用不同 attention 的模型在这里增加 slot，
+        层内通过 infer_state.prefill_att_states[name] / decode_att_states[name] 取用。
+        """
+        if not self.att_state_manager.get_full_attention_states(self.att_state_role):
+            # FFN-only and linear-only models do not need a full-attention backend.
+            return {}
+        return {
+            MAIN_SLOT: AttBackendSlot.build(
+                self,
+                prefill_class=resolve_att_backend_class("dense", PREFILL),
+                decode_class=resolve_att_backend_class("dense", DECODE),
+            )
+        }
+
+    def _create_att_states(self, infer_state: InferStateInfo):
+        """为每个 slot 创建当前阶段（prefill 或 decode）的 att 状态。"""
+        for slot_name, slot in self.att_backends.items():
+            if infer_state.is_prefill:
+                if slot.prefill is not None:
+                    infer_state.prefill_att_states[slot_name] = slot.prefill.create_att_prefill_state(
+                        infer_state=infer_state
+                    )
+            elif slot.decode is not None:
+                infer_state.decode_att_states[slot_name] = slot.decode.create_att_decode_state(infer_state=infer_state)
+
+    @property
+    def prefill_att_backend(self) -> Optional[BaseAttBackend]:
+        """MAIN_SLOT 的 prefill backend; 模型没有该 slot 时为 None。"""
+        slot = self.att_backends.get(MAIN_SLOT)
+        return slot.prefill if slot is not None else None
+
+    @property
+    def decode_att_backend(self) -> Optional[BaseAttBackend]:
+        """MAIN_SLOT 的 decode backend; 模型没有该 slot 时为 None。"""
+        slot = self.att_backends.get(MAIN_SLOT)
+        return slot.decode if slot is not None else None
 
     def _align_decode_batch_size(self, batch_size: int) -> int:
         alignment = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
@@ -467,26 +492,7 @@ class TpPartBaseModel:
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
 
-        if infer_state.is_prefill:
-            infer_state.prefill_att_state = (
-                self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
-                if self.prefill_att_backend is not None
-                else None
-            )
-            if self.prefill_att_backend1 is not None:
-                infer_state.prefill_att_state1 = self.prefill_att_backend1.create_att_prefill_state(
-                    infer_state=infer_state
-                )
-        else:
-            infer_state.decode_att_state = (
-                self.decode_att_backend.create_att_decode_state(infer_state=infer_state)
-                if self.decode_att_backend is not None
-                else None
-            )
-            if self.decode_att_backend1 is not None:
-                infer_state.decode_att_state1 = self.decode_att_backend1.create_att_decode_state(
-                    infer_state=infer_state
-                )
+        self._create_att_states(infer_state)
 
         return infer_state
 

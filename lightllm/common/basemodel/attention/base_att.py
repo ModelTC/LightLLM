@@ -4,7 +4,7 @@ import weakref
 import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING, Tuple, Dict
+from typing import Optional, TYPE_CHECKING, Tuple, Dict, Type
 
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
@@ -17,7 +17,9 @@ if TYPE_CHECKING:
 class BaseAttBackend(ABC):
     """
     用于创建支持各种不同的AttBackend, 如 fa3, flashinfer, triton 实现等。
-    每个 model 复用一个 backend 实例。
+
+    Backend 实例由 model 通过 AttBackendSlot 持有。Main 和 speculative draft model 可能使用
+    不同的 CUDA graph 上限和缓存布局，因此每个 model 各自创建自己的实例。
 
     A backend is long-lived and owns no per-forward data. Each forward gets its own state from
     create_att_prefill_state / create_att_decode_state.
@@ -25,21 +27,8 @@ class BaseAttBackend(ABC):
 
     requires_cpu_cache_sync = False
 
-    _instances = {}
     _workspace_buffers = {}
     _workspace_buffer_lock = threading.Lock()
-
-    def __new__(cls, *args, **kwargs):
-        """
-        Main 和 speculative draft model 可能使用不同的 CUDA graph 上限
-        和缓存布局，不能只按 backend class 共享实例。
-        """
-        model = kwargs.get("model", args[0] if args else None)
-        instance_key = (cls, model)
-        if instance_key not in cls._instances:
-            instance = super().__new__(cls)
-            cls._instances[instance_key] = instance
-        return cls._instances[instance_key]
 
     def __init__(self, model: "TpPartBaseModel"):
         self.model = model
@@ -81,6 +70,52 @@ class BaseAttBackend(ABC):
         args = get_env_start_args()
         is_parallel_block_draft = self.model.is_mtp_draft_model and args.mtp_mode in ("dspark", "dflash", "dflash2")
         return not is_parallel_block_draft
+
+
+# 每个 model 默认使用的 slot 名称。
+MAIN_SLOT = "main"
+# 混合模型中 linear attention 层使用的 slot 名称。
+LINEAR_SLOT = "linear"
+
+
+@dataclass(frozen=True)
+class AttBackendSlot:
+    """
+    一个 slot 是一组使用同一种 attention 的层所共用的 prefill / decode backend。
+    大多数模型只有 MAIN_SLOT；不同层使用不同 attention 的模型按名字增加 slot。
+    某个阶段不经过 backend 时，对应项为 None。
+    """
+
+    prefill: Optional[BaseAttBackend] = None
+    decode: Optional[BaseAttBackend] = None
+
+    @classmethod
+    def build(
+        cls,
+        model: "TpPartBaseModel",
+        prefill_class: Optional[Type[BaseAttBackend]],
+        decode_class: Optional[Type[BaseAttBackend]],
+    ) -> "AttBackendSlot":
+        """
+        prefill 和 decode 选中同一个 backend class 时共用一个实例，
+        避免 page table 等常驻 buffer 被创建两份。
+        """
+        prefill = prefill_class(model=model) if prefill_class is not None else None
+        if decode_class is None:
+            decode = None
+        elif decode_class is prefill_class:
+            decode = prefill
+        else:
+            decode = decode_class(model=model)
+        return cls(prefill=prefill, decode=decode)
+
+    def backends(self) -> Tuple[BaseAttBackend, ...]:
+        """该 slot 中不重复的 backend 实例。"""
+        if self.prefill is None:
+            return () if self.decode is None else (self.decode,)
+        if self.decode is None or self.decode is self.prefill:
+            return (self.prefill,)
+        return (self.prefill, self.decode)
 
 
 @dataclass

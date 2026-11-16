@@ -1,5 +1,6 @@
 import torch
 
+from lightllm.common.basemodel.attention import MAIN_SLOT
 from lightllm.common.basemodel.attention.dense.fa3 import Fa3AttBackend
 from lightllm.common.basemodel.attention.dense.fa3_fp8 import Fp8Fa3AttBackend
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -46,12 +47,13 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         self.block_size = int(self.config["block_size"])
         self.mask_token_id = int(self.config["mask_token_id"])
 
-    def _init_att_backend(self):
-        super()._init_att_backend()
+    def _init_att_backends(self):
+        slots = super()._init_att_backends()
         # FA3 is currently the only backend that supports non-causal block decode.
         # TODO: Remove this restriction after Triton and FlashInfer support non-causal block decode.
-        if not isinstance(self.decode_att_backend, (Fa3AttBackend, Fp8Fa3AttBackend)):
+        if not isinstance(slots[MAIN_SLOT].decode, (Fa3AttBackend, Fp8Fa3AttBackend)):
             raise NotImplementedError("Qwen3 DFlash decode requires FA3")
+        return slots
 
     def _init_infer_layer(self, start_layer_index=None):
         self.draft_layer_start = len(self.main_model.layers_infer)

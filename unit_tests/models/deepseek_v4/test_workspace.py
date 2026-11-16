@@ -36,7 +36,7 @@ def test_draft_initialization_preserves_captured_prefill_buffer(monkeypatch, dra
         "_sin_cached_compress",
     ):
         setattr(main, name, torch.ones((1, 32), device="cuda"))
-    main._init_att_backend()
+    main._init_att_backends()
     buffer = main.dsv4_workspace.flashmla_prefill_q
     buffer[:, :2].fill_(2)
     graph = torch.cuda.CUDAGraph()
@@ -48,7 +48,7 @@ def test_draft_initialization_preserves_captured_prefill_buffer(monkeypatch, dra
     draft.layers_infer = [SimpleNamespace(compress_ratio=0)]
     draft.context_wkv_weight = object()
     draft._init_custom()
-    draft._init_att_backend()
+    draft._init_att_backends()
 
     assert draft.dsv4_workspace is main.dsv4_workspace
     assert main.dsv4_workspace.flashmla_prefill_q is buffer

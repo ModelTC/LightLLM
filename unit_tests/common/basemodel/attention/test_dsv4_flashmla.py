@@ -218,7 +218,6 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
         state_info.packed_kv = packed_kv
         state_info.att_control = attention.AttControl(nsa_decode=True, nsa_decode_dict=params)
         state_info.decode_att_state = backend.create_att_decode_state(state_info)
-        state_info.decode_att_state1 = None
         state_info.decode_att_state.init_state()
         cases.append((state_info, decoded, extra_decoded, params))
 

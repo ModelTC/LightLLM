@@ -137,16 +137,19 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         super()._init_config()
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
 
-    def _init_att_backend1(self):
-        role = self.att_state_role
-        if not self.att_state_manager.get_bounded_attention_states(role):
-            self.prefill_att_backend1 = None
-            self.decode_att_backend1 = None
-            return
+    def _init_att_backends(self):
         from lightllm.common.basemodel.attention import PREFILL, DECODE, resolve_att_backend_class
+        from lightllm.common.basemodel.attention import AttBackendSlot, LINEAR_SLOT
 
+        slots = super()._init_att_backends()
+        if not self.att_state_manager.get_bounded_attention_states(self.att_state_role):
+            # Models without linear-attention layers (such as full-attention drafts) need no linear backend.
+            return slots
         # The linear-attention backend is the second value of --llm_{prefill,decode}_att_backend.
         family = "gdn_replay" if self.args.ssm_state_mode == "replay" else "gdn"
-        self.prefill_att_backend1 = resolve_att_backend_class(family, PREFILL, slot_index=1)(model=self)
-        self.decode_att_backend1 = resolve_att_backend_class(family, DECODE, slot_index=1)(model=self)
-        return
+        slots[LINEAR_SLOT] = AttBackendSlot.build(
+            self,
+            prefill_class=resolve_att_backend_class(family, PREFILL, slot_index=1),
+            decode_class=resolve_att_backend_class(family, DECODE, slot_index=1),
+        )
+        return slots

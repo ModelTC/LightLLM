@@ -4,7 +4,7 @@ import weakref
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.base_att import BaseDecodeAttState, BasePrefillAttState
+from lightllm.common.basemodel.attention.base_att import BaseDecodeAttState, BasePrefillAttState, MAIN_SLOT
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
@@ -38,15 +38,22 @@ def no_cycle_gc():
             gc.enable()
 
 
+SECONDARY_SLOT = "secondary"
+
+
+def _att_states(owner, is_prefill):
+    return owner.prefill_att_states if is_prefill else owner.decode_att_states
+
+
 def _create_state(is_prefill, secondary=False):
     owner = InferStateInfo()
     owner.is_prefill = is_prefill
     owner.position_ids = torch.arange(4)
     state_cls = _PrefillState if is_prefill else _DecodeState
-    slot = "prefill_att_state" if is_prefill else "decode_att_state"
-    setattr(owner, slot, state_cls(_infer_state_weak_ref=weakref.ref(owner)))
+    att_states = _att_states(owner, is_prefill)
+    att_states[MAIN_SLOT] = state_cls(_infer_state_weak_ref=weakref.ref(owner))
     if secondary:
-        setattr(owner, slot + "1", state_cls(_infer_state_weak_ref=weakref.ref(owner)))
+        att_states[SECONDARY_SLOT] = state_cls(_infer_state_weak_ref=weakref.ref(owner))
     owner.init_att_state()
     return owner
 
@@ -55,7 +62,8 @@ def _create_state(is_prefill, secondary=False):
 @pytest.mark.parametrize("secondary", [False, True])
 def test_forward_states_release_without_cycle_gc(no_cycle_gc, is_prefill, secondary):
     owner = _create_state(is_prefill, secondary)
-    states = [state for state in vars(owner).values() if isinstance(state, (BasePrefillAttState, BaseDecodeAttState))]
+    states = list(_att_states(owner, is_prefill).values())
+    assert len(states) == (2 if secondary else 1)
     owner_ref = weakref.ref(owner)
     tensor_ref = weakref.ref(owner.position_ids)
     state_refs = [weakref.ref(state) for state in states]
@@ -86,11 +94,10 @@ def test_attention_getter_uses_a_weak_reference_and_is_read_only(state_cls):
 
 
 @pytest.mark.parametrize("is_prefill", [False, True])
-@pytest.mark.parametrize("slot_suffix", ["", "1"])
-def test_check_rejects_infer_state_under_any_attribute_name(is_prefill, slot_suffix):
+@pytest.mark.parametrize("slot_name", [MAIN_SLOT, SECONDARY_SLOT])
+def test_check_rejects_infer_state_under_any_attribute_name(is_prefill, slot_name):
     owner = _create_state(is_prefill, secondary=True)
-    slot = ("prefill_att_state" if is_prefill else "decode_att_state") + slot_suffix
-    attention = getattr(owner, slot)
+    attention = _att_states(owner, is_prefill)[slot_name]
 
     class _OtherInferState(InferStateInfo):
         pass
@@ -102,22 +109,22 @@ def test_check_rejects_infer_state_under_any_attribute_name(is_prefill, slot_suf
 
 
 @pytest.mark.parametrize("is_prefill", [False, True])
-@pytest.mark.parametrize("slot_suffix", ["", "1"])
-def test_init_checks_for_accidental_back_reference(is_prefill, slot_suffix):
+@pytest.mark.parametrize("slot_name", [MAIN_SLOT, SECONDARY_SLOT])
+def test_init_checks_for_accidental_back_reference(is_prefill, slot_name):
     owner = _create_state(is_prefill, secondary=True)
-    slot = ("prefill_att_state" if is_prefill else "decode_att_state") + slot_suffix
+    att_states = _att_states(owner, is_prefill)
     base = _PrefillState if is_prefill else _DecodeState
 
     class _RetainingState(base):
         def init_state(self):
             self.saved_context = self.infer_state
 
-    setattr(owner, slot, _RetainingState(_infer_state_weak_ref=weakref.ref(owner)))
+    att_states[slot_name] = _RetainingState(_infer_state_weak_ref=weakref.ref(owner))
     try:
         with pytest.raises(RuntimeError, match="saved_context"):
             owner.init_att_state()
     finally:
-        del getattr(owner, slot).saved_context
+        del att_states[slot_name].saved_context
 
 
 def test_decode_graph_replay_preserves_capture_buffers_and_owner_lifetime(no_cycle_gc):
@@ -145,7 +152,7 @@ def test_decode_graph_replay_preserves_capture_buffers_and_owner_lifetime(no_cyc
     assert replay_calls == [True]
     assert captured_ref().position_ids.data_ptr() == capture_positions_ptr
     assert captured_ref().decode_att_state.infer_state is captured_ref()
-    assert captured_ref().decode_att_state1.infer_state is captured_ref()
+    assert captured_ref().decode_att_states[SECONDARY_SLOT].infer_state is captured_ref()
     torch.testing.assert_close(captured_ref().position_ids, runtime.position_ids)
 
     del runtime
@@ -159,16 +166,16 @@ def test_secondary_state_without_primary(is_prefill):
     owner = InferStateInfo()
     owner.is_prefill = is_prefill
     owner.position_ids = torch.arange(4)
-    slot = "prefill_att_state1" if is_prefill else "decode_att_state1"
     state_cls = _PrefillState if is_prefill else _DecodeState
     secondary = state_cls(_infer_state_weak_ref=weakref.ref(owner))
-    setattr(owner, slot, secondary)
+    _att_states(owner, is_prefill)[SECONDARY_SLOT] = secondary
+    assert owner.prefill_att_state is None and owner.decode_att_state is None
     owner.init_att_state()
     torch.testing.assert_close(secondary.positions, owner.position_ids)
     if not is_prefill:
         runtime = InferStateInfo()
         runtime.position_ids = owner.position_ids + 7
-        runtime.decode_att_state1 = _DecodeState(_infer_state_weak_ref=weakref.ref(runtime))
-        runtime.decode_att_state1.init_state()
+        runtime.decode_att_states[SECONDARY_SLOT] = _DecodeState(_infer_state_weak_ref=weakref.ref(runtime))
+        runtime.decode_att_states[SECONDARY_SLOT].init_state()
         owner.copy_for_cuda_graph(runtime)
         torch.testing.assert_close(secondary.positions, runtime.position_ids)

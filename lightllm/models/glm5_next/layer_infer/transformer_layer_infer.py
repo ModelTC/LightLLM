@@ -7,7 +7,7 @@ from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.base_att import AttControl, LINEAR_SLOT
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
     silu_and_mul_fwd,
@@ -339,7 +339,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         output at stable addresses, then register it as a CPU-side replay step
         between the surrounding CUDA-graph segments.
         """
-        backend = infer_state.prefill_att_state1.backend
+        backend = infer_state.prefill_att_states[LINEAR_SLOT].backend
         mixed_qkv = mixed_qkv.contiguous()
         raw_decay_gate = raw_decay_gate.contiguous()
         beta_logits = beta_logits.contiguous()
@@ -361,7 +361,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         _output = tensor_to_no_ref_tensor(output)
 
         def kda_prefill_func(new_infer_state):
-            tmp_output = new_infer_state.prefill_att_state1.prefill_att(
+            tmp_output = new_infer_state.prefill_att_states[LINEAR_SLOT].prefill_att(
                 q=None,
                 k=None,
                 v=None,
@@ -401,7 +401,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 layer_weight,
             )
         else:
-            core_output = infer_state.prefill_att_state1.prefill_att(
+            core_output = infer_state.prefill_att_states[LINEAR_SLOT].prefill_att(
                 q=None,
                 k=None,
                 v=None,
@@ -425,7 +425,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         qkv, raw_decay_gate, beta_logits, raw_output_gate = self._kda_projections(
             input_embeddings, infer_state, layer_weight
         )
-        core_output = infer_state.decode_att_state1.decode_att(
+        core_output = infer_state.decode_att_states[LINEAR_SLOT].decode_att(
             q=None,
             k=None,
             v=None,

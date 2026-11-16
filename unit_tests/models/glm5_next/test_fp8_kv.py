@@ -163,6 +163,8 @@ class _PrefillCase:
 @pytest.mark.parametrize("kv_type", ["None", "fp8kv_dsa"])
 def test_main_and_native_mtp_backend_selection(monkeypatch, draft, kv_type):
     from lightllm.models.glm5_next.model import Glm5NextTpPartModel
+    from lightllm.common.basemodel.attention import LINEAR_SLOT, MAIN_SLOT
+    from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
     from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
@@ -174,7 +176,10 @@ def test_main_and_native_mtp_backend_selection(monkeypatch, draft, kv_type):
     model.max_req_num = 2
     model.batch_max_tokens = 4
     model.mtp_previous_draft_models = []
-    model._init_att_backend()
+    monkeypatch.setattr(KDALinearAttBackend, "__init__", lambda self, model: None)
+    model.args.ssm_state_mode = "native"
+    model.init_att_backends()
+    assert set(model.att_backends) == ({MAIN_SLOT} if draft else {MAIN_SLOT, LINEAR_SLOT})
     infer_state = InferStateInfo()
     prefill = model.prefill_att_backend.create_att_prefill_state(infer_state)
     decode = model.decode_att_backend.create_att_decode_state(infer_state)

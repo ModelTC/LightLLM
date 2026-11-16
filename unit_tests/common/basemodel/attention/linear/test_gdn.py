@@ -364,14 +364,16 @@ def test_gdn_prefill_backend_falls_back_when_flashqla_validation_fails(monkeypat
 def test_glm5_next_selects_native_or_replay_kda_backend(monkeypatch, ssm_state_mode, expected):
     from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
     from lightllm.common.basemodel.attention.linear.replay_kda import ReplayKDALinearAttBackend
+    from lightllm.common.basemodel.attention import LINEAR_SLOT
+    from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
     from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 
-    for backend_class in (KDALinearAttBackend, ReplayKDALinearAttBackend):
+    for backend_class in (KDALinearAttBackend, ReplayKDALinearAttBackend, Glm5NextSparseAttBackend):
         monkeypatch.setattr(backend_class, "__init__", lambda self, model: None)
     model = type("_Model", (), {})()
-    model.args = SimpleNamespace(ssm_state_mode=ssm_state_mode)
+    model.args = SimpleNamespace(ssm_state_mode=ssm_state_mode, llm_kv_type="None")
 
-    Glm5NextTpPartModel._init_att_backend1(model)
+    slot = Glm5NextTpPartModel._init_att_backends(model)[LINEAR_SLOT]
 
-    assert type(model.prefill_att_backend1).__name__ == expected
-    assert model.decode_att_backend1 is model.prefill_att_backend1
+    assert type(slot.prefill).__name__ == expected
+    assert slot.decode is slot.prefill

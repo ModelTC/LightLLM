@@ -8,7 +8,7 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.base_att import AttControl, LINEAR_SLOT
 from typing import Tuple
 from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
 from lightllm.distributed import all_reduce
@@ -184,7 +184,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        backend = infer_state.prefill_att_state1.backend
+        backend = infer_state.prefill_att_states[LINEAR_SLOT].backend
 
         mixed_qkvzba = mixed_qkvzba.contiguous()
         _mixed_qkvzba = tensor_to_no_ref_tensor(mixed_qkvzba)
@@ -209,10 +209,10 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         _z = tensor_to_no_ref_tensor(z)
 
         def gdn_prefill_func(new_infer_state: "Qwen3NextInferStateInfo"):
-            # 与 Llama/FA3 一致：通过 new_infer_state.prefill_att_state1 进入，
+            # 与 Llama/FA3 一致：通过 new_infer_state.prefill_att_states[LINEAR_SLOT] 进入，
             # 使用 runtime 上 init_att_state() 更新过的 buffer idx，而不是
-            # capture 时闭包住的 graph prefill_att_state1。
-            tmp_o, tmp_z = new_infer_state.prefill_att_state1.prefill_att(
+            # capture 时闭包住的 graph prefill att state。
+            tmp_o, tmp_z = new_infer_state.prefill_att_states[LINEAR_SLOT].prefill_att(
                 q=None,
                 k=None,
                 v=None,
@@ -249,7 +249,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         if torch.cuda.is_current_stream_capturing():
             core_attn_out, z = self._linear_prefill_cuda_graph_wrapper(mixed_qkvzba, infer_state, layer_weight)
         else:
-            core_attn_out, z = infer_state.prefill_att_state1.prefill_att(
+            core_attn_out, z = infer_state.prefill_att_states[LINEAR_SLOT].prefill_att(
                 q=None,
                 k=None,
                 v=None,
@@ -280,7 +280,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             return super().token_attention_forward(input_embdings, infer_state, layer_weight)
 
         mixed_qkvzba = self._linear_in_proj(input_embdings, layer_weight)
-        core_attn_out, z = infer_state.decode_att_state1.decode_att(
+        core_attn_out, z = infer_state.decode_att_states[LINEAR_SLOT].decode_att(
             q=None,
             k=None,
             v=None,

@@ -4,6 +4,7 @@ from lightllm.models.deepseek2.model import Deepseek2TpPartModel
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
 from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
 from lightllm.common.basemodel.attention import PREFILL, DECODE, resolve_att_backend_class
+from lightllm.common.basemodel.attention import AttBackendSlot, MAIN_SLOT
 
 
 if TYPE_CHECKING:
@@ -52,7 +53,11 @@ class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
         )
         return [state]
 
-    def _init_att_backend(self):
-        self.prefill_att_backend = resolve_att_backend_class("nsa", PREFILL)(model=self)
-        self.decode_att_backend = resolve_att_backend_class("nsa", DECODE)(model=self)
-        return
+    def _init_att_backends(self):
+        return {
+            MAIN_SLOT: AttBackendSlot.build(
+                self,
+                prefill_class=resolve_att_backend_class("nsa", PREFILL),
+                decode_class=resolve_att_backend_class("nsa", DECODE),
+            )
+        }

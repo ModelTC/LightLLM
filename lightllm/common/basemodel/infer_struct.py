@@ -4,14 +4,14 @@ import collections
 from lightllm.common.attention_state.manager import AttentionStateManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
-from typing import Tuple, Any, Optional, List
+from typing import Dict, Tuple, Any, Optional, List
 from .triton_kernel.gen_prefill_params import gen_prefill_params
 from .triton_kernel.gen_decode_params import gen_decode_params
 from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
-from .attention import BasePrefillAttState, BaseDecodeAttState
+from .attention import BasePrefillAttState, BaseDecodeAttState, MAIN_SLOT
 
 
 class InferStateInfo:
@@ -20,13 +20,10 @@ class InferStateInfo:
     """
 
     def __init__(self):
-        # prefill 和 decode 使用的 att 状态对象
-        self.prefill_att_state: BasePrefillAttState = None
-        self.decode_att_state: BaseDecodeAttState = None
-
-        # 保留的扩展, 支持线性att与标准att混合使用时使用
-        self.prefill_att_state1: BasePrefillAttState = None
-        self.decode_att_state1: BaseDecodeAttState = None
+        # prefill 和 decode 使用的 att 状态对象, 按 model.att_backends 的 slot 名称索引。
+        # 一次 forward 只会填充当前阶段对应的那一个 dict; 没有 backend 的 slot 不出现在 dict 中。
+        self.prefill_att_states: Dict[str, BasePrefillAttState] = {}
+        self.decode_att_states: Dict[str, BaseDecodeAttState] = {}
 
         self.input_ids: torch.Tensor = None
         self.batch_size: int = None
@@ -133,23 +130,41 @@ class InferStateInfo:
             ) = gen_decode_params(self.b_seq_len)
             self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
-    def init_att_state(self):
-        if self.is_prefill:
-            if self.prefill_att_state is not None:
-                self.prefill_att_state.init_state()
-            if self.prefill_att_state1 is not None:
-                self.prefill_att_state1.init_state()
+    @property
+    def prefill_att_state(self) -> Optional[BasePrefillAttState]:
+        """MAIN_SLOT 的 prefill att 状态; 该 slot 没有 prefill backend 时为 None。"""
+        return self.prefill_att_states.get(MAIN_SLOT)
+
+    @prefill_att_state.setter
+    def prefill_att_state(self, att_state: Optional[BasePrefillAttState]):
+        self._set_att_state(self.prefill_att_states, att_state)
+
+    @property
+    def decode_att_state(self) -> Optional[BaseDecodeAttState]:
+        """MAIN_SLOT 的 decode att 状态; 该 slot 没有 decode backend 时为 None。"""
+        return self.decode_att_states.get(MAIN_SLOT)
+
+    @decode_att_state.setter
+    def decode_att_state(self, att_state: Optional[BaseDecodeAttState]):
+        self._set_att_state(self.decode_att_states, att_state)
+
+    @staticmethod
+    def _set_att_state(att_states: dict, att_state) -> None:
+        if att_state is None:
+            att_states.pop(MAIN_SLOT, None)
         else:
-            if self.decode_att_state is not None:
-                self.decode_att_state.init_state()
-            if self.decode_att_state1 is not None:
-                self.decode_att_state1.init_state()
+            att_states[MAIN_SLOT] = att_state
+
+    def init_att_state(self):
+        att_states = self.prefill_att_states if self.is_prefill else self.decode_att_states
+        for att_state in att_states.values():
+            att_state.init_state()
         self.check_att_states()
 
     def check_att_states(self) -> None:
         """检查 attention state，防止其强引用 InferStateInfo 而形成循环引用。
 
-        InferStateInfo 已经通过下列四个属性强引用主、辅 attention state。
+        InferStateInfo 已经通过 prefill_att_states / decode_att_states 强引用各 slot 的 attention state。
         如果 attention state 再把 infer_state 存到普通属性中，就会形成
         infer_state -> attention state -> infer_state 的强引用闭环。
         即使一次推理结束、外部引用全部释放，引用计数也无法立即回收这两个对象，
@@ -170,9 +185,8 @@ class InferStateInfo:
         注意：检查仅扫描非空 attention state 的第一层实例属性，不递归检查容器或
         回调闭包；实现后端时也应避免通过这些位置间接保存 infer_state 的强引用。
         """
-        for state in (self.prefill_att_state, self.prefill_att_state1, self.decode_att_state, self.decode_att_state1):
-            if state is not None:
-                state.check_no_infer_state()
+        for state in (*self.prefill_att_states.values(), *self.decode_att_states.values()):
+            state.check_no_infer_state()
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
         for attr_name, attr_value in vars(new_infer_state).items():
@@ -181,10 +195,8 @@ class InferStateInfo:
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
                     attr_.copy_(attr_value, non_blocking=True)
 
-        if self.decode_att_state is not None:
-            self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
-        if self.decode_att_state1 is not None:
-            self.decode_att_state1.copy_for_decode_cuda_graph(new_infer_state.decode_att_state1)
+        for slot_name, att_state in self.decode_att_states.items():
+            att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_states[slot_name])
         return
 
     def call_overlap_hook(self):

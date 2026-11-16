@@ -15,6 +15,10 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 
 
+# Attention backend slot used by the full-attention layers; sliding layers use MAIN_SLOT.
+FULL_ATT_SLOT = "full"
+
+
 class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     """
     Gemma-4 decoder block. Per-layer heterogeneity (sliding vs full attention)
@@ -240,8 +244,8 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
             return o_tensor.view(q.shape)
 
         # Full-attn layers: head_dim=512, no SWA, no image bidi — standard
-        # triton via backend1.
-        o_tensor = infer_state.prefill_att_state1.prefill_att(
+        # triton via the full-attention slot.
+        o_tensor = infer_state.prefill_att_states[FULL_ATT_SLOT].prefill_att(
             q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor
         )
         return o_tensor.view(q.shape)
@@ -255,7 +259,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> torch.Tensor:
         _k, _v = self._get_layer_kv(infer_state)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        att_state = infer_state.decode_att_state if self.is_sliding else infer_state.decode_att_state1
+        att_state = infer_state.decode_att_state if self.is_sliding else infer_state.decode_att_states[FULL_ATT_SLOT]
         o_tensor = att_state.decode_att(q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor)
         return o_tensor.view(q.shape)
 

@@ -6,6 +6,7 @@ from lightllm.models.bloom.layer_weights.pre_and_post_layer_weight import BloomP
 from lightllm.models.bloom.layer_weights.transformer_layer_weight import BloomTransformerLayerWeight
 from lightllm.common.basemodel import InferStateInfo, TpPartBaseModel
 from lightllm.common.basemodel.attention.dense.triton import TritonAttBackend
+from lightllm.common.basemodel.attention import AttBackendSlot, MAIN_SLOT
 
 
 if TYPE_CHECKING:
@@ -75,7 +76,5 @@ class BloomTpPartModel(TpPartBaseModel):
         self.config["num_key_value_heads"] = self.config["num_attention_heads"]
         return
 
-    def _init_att_backend(self):
-        self.prefill_att_backend = TritonAttBackend(self)
-        self.decode_att_backend = TritonAttBackend(self)
-        return
+    def _init_att_backends(self):
+        return {MAIN_SLOT: AttBackendSlot.build(self, TritonAttBackend, TritonAttBackend)}

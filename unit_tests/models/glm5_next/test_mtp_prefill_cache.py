@@ -89,7 +89,7 @@ def test_forward_uses_common_prefill(monkeypatch, tokens, mode):
     model.att_state_manager = object()
     model.hidden_collector_prototype = FinalHiddenCollector()
     model.return_all_prompt_logics = False
-    model.prefill_att_backend = model.prefill_att_backend1 = None
+    model.att_backends = {}
     model._select_mem_indexes = lambda model_input: torch.zeros_like(model_input.input_ids)
     batch = int(tokens > 0)
     model_input = ModelInput(
