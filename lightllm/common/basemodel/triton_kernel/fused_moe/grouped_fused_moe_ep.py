@@ -11,7 +11,6 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quan
     silu_and_mul_masked_post_quant_fwd,
 )
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
-    lightllm_per_token_group_quant_fp8,
     per_token_group_quant_fp8,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_kernels import (
@@ -29,6 +28,10 @@ from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 from lightllm.utils.device_utils import is_sm100_gpu
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
 from lightllm.utils.tensor_buffer_manager import TensorBufferManager
+from lightllm.common.basemodel.triton_kernel.fused_moe.sm90_fp8_mega_moe import (
+    prepare_sm90_mega_moe_weights,
+    sm90_mega_moe_forward,
+)
 
 logger = init_logger(__name__)
 SUPPORTED_EP_EXPERT_DTYPES = ("fp8w8a8-b128-deepgemm", "fp4fp8-b32-deepgemm")
@@ -114,25 +117,15 @@ def masked_group_gemm(
 
 
 def _get_mega_moe_weights(w13: Any, w2: Any, mma_type: str):
+    if mma_type == "fp8xfp8":
+        return prepare_sm90_mega_moe_weights(w13, w2)
     weights = getattr(w13, "_mega_moe_weights", None)
     if weights is not None:
         return weights
-    transform_kwargs = {"mma_type": mma_type} if mma_type == "fp8xfp8" else {}
     weights = deep_gemm.transform_weights_for_mega_moe(
         (w13.weight, w13.weight_scale),
         (w2.weight, w2.weight_scale),
-        **transform_kwargs,
     )
-    if mma_type == "fp8xfp8":
-        # Keep the transformed layout in the preallocated weight storage so we do not retain a second
-        # full copy of the expert weights. Skip copy_ when DeepGEMM already returned an alias.
-        for target, transformed in zip(
-            (w13.weight, w13.weight_scale, w2.weight, w2.weight_scale),
-            (*weights[0], *weights[1]),
-        ):
-            if target.data_ptr() != transformed.data_ptr():
-                target.copy_(transformed)
-        weights = ((w13.weight, w13.weight_scale), (w2.weight, w2.weight_scale))
     w13._mega_moe_weights = weights
     return weights
 
@@ -169,10 +162,6 @@ def mega_moe_impl(
     clamp_limit: Optional[float] = None,
     alloc_tensor_func: Callable = torch.empty,
 ):
-    kernel_name = "fp8_fp8_mega_moe" if mma_type == "fp8xfp8" else "fp8_fp4_mega_moe"
-    if not (HAS_DEEPGEMM and hasattr(deep_gemm, kernel_name)):
-        raise RuntimeError(f"deep_gemm does not provide {kernel_name} Mega MoE kernel")
-
     buffer = getattr(dist_group_manager, "ep_mega_moe_buffer", None)
     if buffer is None:
         raise RuntimeError("Mega MoE requires dist_group_manager.ep_mega_moe_buffer to be initialized")
@@ -184,19 +173,17 @@ def mega_moe_impl(
         )
 
     if mma_type == "fp8xfp8":
-        lightllm_per_token_group_quant_fp8(
-            x=hidden_states,
-            group_size=quant_method.block_size,
-            x_q=buffer.x[:num_tokens],
-            x_s=buffer.x_sf[:num_tokens],
-            eps=1e-4,
-            dtype=buffer.x.dtype,
-            topk_ids=topk_ids,
-            topk_weights=topk_weights,
-            topk_ids_out=buffer.topk_idx[:num_tokens],
-            topk_weights_out=buffer.topk_weights[:num_tokens],
+        state = getattr(w13, "_mega_moe_state", None)
+        if state is None:
+            state = {}
+            w13._mega_moe_state = state
+        stats = _get_mega_moe_cumulative_stats(w13.weight.shape[0], hidden_states.device, state)
+        return sm90_mega_moe_forward(
+            hidden_states, w13, w2, topk_weights, topk_ids, buffer, stats, clamp_limit, alloc_tensor_func
         )
     else:
+        if not (HAS_DEEPGEMM and hasattr(deep_gemm, "fp8_fp4_mega_moe")):
+            raise RuntimeError("deep_gemm does not provide fp8_fp4_mega_moe Mega MoE kernel")
         from deep_gemm.utils import per_token_cast_to_fp8
 
         qinput_tensor = per_token_cast_to_fp8(
@@ -217,8 +204,7 @@ def mega_moe_impl(
         w13._mega_moe_state = state
     stats = _get_mega_moe_cumulative_stats(w13.weight.shape[0], hidden_states.device, state)
     output = alloc_tensor_func(hidden_states.shape, device=hidden_states.device, dtype=hidden_states.dtype)
-    kernel = getattr(deep_gemm, kernel_name)
-    kernel(
+    deep_gemm.fp8_fp4_mega_moe(
         output,
         l1_weights,
         l2_weights,

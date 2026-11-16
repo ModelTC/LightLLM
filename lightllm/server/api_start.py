@@ -101,6 +101,24 @@ def _validate_and_normalize_ssm_config(args: StartArgs):
         assert capacity >= args.mtp_step + 1, "ReplaySSM capacity must cover the verify width"
 
 
+def _validate_ep_moe_backend(args: StartArgs):
+    if args.ep_moe_backend not in ("triton", "megamoe"):
+        return
+    backend = args.ep_moe_backend
+    assert args.enable_ep_moe, f"--ep_moe_backend {backend} requires --enable_ep_moe"
+    assert args.nnodes == 1, f"--ep_moe_backend {backend} only supports a single node"
+    assert not args.enable_prefill_eplb, f"--ep_moe_backend {backend} does not support --enable_prefill_eplb"
+    assert is_sm90_gpu(), f"--ep_moe_backend {backend} only supports SM90 GPUs"
+    if backend == "triton":
+        assert args.run_mode == "prefill", "--ep_moe_backend triton only supports --run_mode prefill"
+    else:
+        assert args.data_type in (None, "bf16", "bfloat16"), "--ep_moe_backend megamoe requires BF16 hidden states"
+        assert not args.enable_rl, "--ep_moe_backend megamoe does not support --enable_rl"
+        assert not (
+            args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap
+        ), "--ep_moe_backend megamoe does not support microbatch overlap"
+
+
 def _launch_subprocesses(args: StartArgs):
     _validate_pd_features(args)
     _set_envs_and_config(args)
@@ -268,12 +286,7 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
-    if args.ep_moe_backend == "triton":
-        assert args.enable_ep_moe, "--ep_moe_backend triton requires --enable_ep_moe"
-        assert args.run_mode == "prefill", "--ep_moe_backend triton only supports --run_mode prefill"
-        assert args.nnodes == 1, "--ep_moe_backend triton only supports a single node"
-        assert not args.enable_prefill_eplb, "--ep_moe_backend triton does not support --enable_prefill_eplb"
-        assert is_sm90_gpu(), "--ep_moe_backend triton only supports SM90 GPUs"
+    _validate_ep_moe_backend(args)
 
     if args.enable_prefill_eplb:
         assert args.enable_ep_moe, "--enable_prefill_eplb requires --enable_ep_moe"

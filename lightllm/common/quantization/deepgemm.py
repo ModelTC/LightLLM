@@ -36,6 +36,9 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
         )
 
         prepare_ep_moe_weights(moe_weight.w13, moe_weight.w2, self)
+        if self.mega_moe_mma_type is not None:
+            # Backend construction precedes buffer selection and weight loading.
+            moe_weight.fuse_moe_impl.supports_decode_shared_expert_overlap = False
 
     def apply(
         self,

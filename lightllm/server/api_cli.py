@@ -788,12 +788,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--ep_moe_backend",
         type=str,
-        choices=["auto", "triton"],
+        choices=["auto", "triton", "megamoe"],
         default="auto",
         help=(
             "EP MoE execution backend. 'auto' keeps the existing backend selection; "
             "'triton' selects the single-node SM90 FP8 Triton peer backend on Prefill nodes "
-            "for experts resolved by --expert_dtype fp8."
+            "for experts resolved by --expert_dtype fp8. "
+            "'megamoe' selects single-node SM90 FP8 DeepGEMM MegaMoE for Prefill and Decode."
         ),
     )
     parser.add_argument(

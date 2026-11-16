@@ -262,6 +262,12 @@ class DistributeGroupManager:
             self.ep_num_sms = None
             return
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"
+        if args.ep_moe_backend == "megamoe":
+            if expert_quant_method_names != {FP8_MOE_QUANT_METHOD}:
+                raise ValueError("--ep_moe_backend megamoe requires FP8 DeepGEMM experts; use --expert_dtype fp8")
+            from lightllm.common.basemodel.triton_kernel.fused_moe.sm90_fp8_mega_moe import get_sm90_mega_moe_module
+
+            get_sm90_mega_moe_module()
 
         global_world_size = get_global_world_size()
         deepep_group = dist.new_group(list(range(global_world_size)))
@@ -314,12 +320,14 @@ class DistributeGroupManager:
             self.ep_mega_moe_mma_type = "fp8xfp4"
             self.ep_mega_moe_quant_method = FP4_MOE_QUANT_METHOD
         elif self.ep_triton_moe_quant_method is None and (
-            enable_env_vars("LIGHTLLM_ENABLE_SM90_FP8_MEGA_MOE")
+            (args.ep_moe_backend == "megamoe" or enable_env_vars("LIGHTLLM_ENABLE_SM90_FP8_MEGA_MOE"))
             and is_sm90_gpu()
             and FP8_MOE_QUANT_METHOD in expert_quant_method_names
             and total_redundant_experts == 0
             and args.nnodes == 1
             and not args.enable_rl
+            and not args.enable_prefill_microbatch_overlap
+            and not args.enable_decode_microbatch_overlap
         ):
             self.ep_mega_moe_mma_type = "fp8xfp8"
             self.ep_mega_moe_quant_method = FP8_MOE_QUANT_METHOD
@@ -406,24 +414,28 @@ class DistributeGroupManager:
             if moe_intermediate_size is None:
                 raise ValueError("Mega MoE requires moe_intermediate_size or intermediate_size in model config")
 
-            import deep_gemm
-
             num_max_tokens_per_rank = (
                 self.ll_decode_num_tokens
                 if self.ep_mega_moe_mma_type == "fp8xfp8" and args.run_mode == "decode"
                 else self.ll_num_tokens
             )
-            mega_buffer_kwargs = (
-                {"mma_type": self.ep_mega_moe_mma_type} if self.ep_mega_moe_mma_type == "fp8xfp8" else {}
-            )
-            self.ep_mega_moe_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
+            if self.ep_mega_moe_mma_type == "fp8xfp8":
+                from lightllm.common.basemodel.triton_kernel.fused_moe.sm90_fp8_mega_moe import get_sm90_mega_moe_module
+
+                if args.run_mode == "normal":
+                    num_max_tokens_per_rank = max(num_max_tokens_per_rank, self.ll_decode_num_tokens)
+                new_mega_buffer = get_sm90_mega_moe_module().get_symm_buffer_for_sm90_mega_moe
+            else:
+                import deep_gemm
+
+                new_mega_buffer = deep_gemm.get_symm_buffer_for_mega_moe
+            self.ep_mega_moe_buffer = new_mega_buffer(
                 deepep_group,
                 self.ll_decode_num_experts,
                 num_max_tokens_per_rank,
                 num_experts_per_tok,
                 self.ll_hidden,
                 moe_intermediate_size,
-                **mega_buffer_kwargs,
             )
         logger.info(
             "Initialize DeepEP MoE buffers: low_latency=%s, prefill_workspace_bytes=%s, "
@@ -461,6 +473,9 @@ class DistributeGroupManager:
                 deep_gemm_sms = device_sms
             if self.ep_mega_moe_mma_type == "fp8xfp8":
                 deep_gemm_sms -= deep_gemm_sms % 2
+                from lightllm.common.basemodel.triton_kernel.fused_moe.sm90_fp8_mega_moe import get_sm90_mega_moe_module
+
+                get_sm90_mega_moe_module().set_num_sms(deep_gemm_sms)
             set_num_sms(deep_gemm_sms)
         except BaseException as e:
             if self.ep_mega_moe_mma_type is not None:
