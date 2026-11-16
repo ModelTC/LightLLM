@@ -107,6 +107,7 @@ class PDOperator:
         req_idx: int | None = None,
         state_token_len: int | None = None,
     ) -> None:
+        self.owner.check_execution_health()
         match kind:
             case "kv":
                 assert token_indices is not None, "KV PD pages require token indices"

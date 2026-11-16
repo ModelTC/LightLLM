@@ -8,8 +8,9 @@ from typing import Any, List
 
 import torch
 
-from ..utils import deepcopy_result
 from lightllm.common.attention_state.types import PageKind, StateTransferLayout, TransferRegion
+
+from ..utils import deepcopy_result
 
 
 class CoreInterface(ABC):

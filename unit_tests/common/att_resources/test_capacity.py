@@ -1,41 +1,43 @@
 from __future__ import annotations
 
-from unit_tests.common.att_resources.model_helpers import bind_test_fp8_calibration
-
-from unit_tests.common.att_resources.model_helpers import full_state_test_fields
-
-from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
-
-from unit_tests.common.att_resources.model_helpers import read_kv_storage
-
-from unit_tests.common.att_resources.model_helpers import rebuild_full_state
-
-from typing import TYPE_CHECKING
 from dataclasses import replace
 from functools import lru_cache, partial
 from math import prod
+from typing import TYPE_CHECKING
 
 import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention_state.utils import deepcopy_result
-from lightllm.common.attention_state.allocators import StatePageAllocator, FullAttKVAllocator
-from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState, KDAState
-from lightllm.common.attention_state.bounded_att import WindowCompressorState, WindowCompressorStateConfig
-from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.common.attention_state.allocators import FullAttKVAllocator, StatePageAllocator
+from lightllm.common.attention_state.bounded_att import (
+    ConvSSMStateConfig,
+    GDNState,
+    KDAState,
+    WindowCompressorState,
+    WindowCompressorStateConfig,
+)
 from lightllm.common.attention_state.full_att import (
     FullAttentionState,
-    GQAFullAttentionState,
     GQAAttentionConfig,
-    MLAConfig,
-    create_gqa_state,
-    create_mla_state,
+    GQAFullAttentionState,
     GroupQuantizedAttentionConfig,
     GroupQuantizedFullAttentionState,
+    MLAConfig,
     MLAFullAttentionState,
     PackedMLAFullAttentionState,
     StaticFP8FullAttentionState,
+    create_gqa_state,
+    create_mla_state,
+)
+from lightllm.common.attention_state.utils import deepcopy_result
+from lightllm.server.core.objs.start_args_type import StartArgs
+from unit_tests.common.att_resources.model_helpers import (
+    bind_test_fp8_calibration,
+    full_state_test_buffers,
+    full_state_test_fields,
+    read_kv_storage,
+    rebuild_full_state,
 )
 
 if TYPE_CHECKING:
@@ -146,12 +148,18 @@ def test_budget_matches_token_stores_including_hold_and_padding(
     reserve = manager.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
-    monkeypatch.setattr("lightllm.common.attention_state.manager.get_current_device_id", lambda: 0)
     monkeypatch.setattr(
         "lightllm.common.attention_state.manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
     )
     for budget, expected in ((actual, 20), (actual - 1, 16), (minimum, 0), (minimum - 1, None)):
         resources = AttentionStateManager(request_capacity=1)
+        from types import SimpleNamespace
+
+        resources.device_runtime = SimpleNamespace(
+            device=torch.device("cpu"),
+            empty_cache=lambda: None,
+            memory_info=lambda: (budget + reserve, budget + reserve),
+        )
         resources.register_state("main", rebuild_full_state(template, config=template.config))
         monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _: (budget + reserve, budget + reserve))
         resources.finish_state_registration()
@@ -202,6 +210,60 @@ def test_shared_allocator_accounts_for_distinct_state_stores():
         for state in (main, draft)
     )
     assert manager.get_full_att_token_bytes() * (12 + 4) == expected
+
+
+@pytest.mark.parametrize(
+    "kind", ["gqa", "int4", "int8", "static_head", "static_tensor", "mla", "packed", "packed_fp8", "packed_glm"]
+)
+def test_startup_storage_can_be_retired_without_losing_calibration(kind):
+    state = rebuild_full_state(definition(kind), config=definition(kind).config, token_capacity=12, device="cpu")
+    calibration = getattr(state, "scales", None)
+    assert state.storage_tensors()
+    state.release_storage()
+    assert state.storage_tensors() == ()
+    assert state.capacity == 0
+    assert getattr(state, "scales", None) is calibration
+    state.allocate_storage(20)
+    assert (
+        sum(tensor.numel() * tensor.element_size() for tensor in state.storage_tensors())
+        == (20 + state.page_size) * state.get_token_bytes()
+    )
+
+
+def test_insufficient_rank_joins_consensus_before_rejecting_capacity(monkeypatch):
+    from types import SimpleNamespace
+
+    manager = AttentionStateManager(request_capacity=1)
+    manager.register_state("main", definition("mla"))
+    manager.finish_state_registration()
+    manager.device_runtime = SimpleNamespace(
+        device=torch.device("cpu"), empty_cache=lambda: None, memory_info=lambda: (0, 0)
+    )
+    joined = []
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda value, op: joined.append(value.item()))
+    with pytest.raises(MemoryError, match="every rank"):
+        manager.initialize_storage(StartArgs(page_size=4), 16, 1.0, device="cpu")
+    assert joined == [-1]
+
+
+def test_explicit_capacity_cannot_bypass_runtime_or_transfer_reservation():
+    from types import SimpleNamespace
+
+    manager = AttentionStateManager(request_capacity=1)
+    manager.register_state("main", definition("mla"))
+    manager.finish_state_registration()
+    bytes_per_token = manager.get_full_att_token_bytes()
+    manager.device_runtime = SimpleNamespace(
+        device=torch.device("cpu"),
+        empty_cache=lambda: None,
+        memory_info=lambda: (20 * bytes_per_token, 20 * bytes_per_token),
+    )
+    with pytest.raises(MemoryError, match="requested attention capacity"):
+        manager.initialize_storage(
+            StartArgs(page_size=4), 16, 1.0, device="cpu", runtime_reserved_bytes=4 * bytes_per_token
+        )
 
 
 @pytest.mark.parametrize("state_cls", [KDAState, GDNState])

@@ -72,6 +72,7 @@ class CpuCacheOperator:
         small_page_slot_ids: List[int] | None = None,
     ) -> None:
         """写出单个请求的 full-attention token 和 bounded 页快照。"""
+        self.owner.check_execution_health()
         if cpu_page_ready_flags is not None:
             assert len(cpu_page_ready_flags) == len(cpu_page_indices), "CPU page and ready counts differ"
             if all(cpu_page_ready_flags):

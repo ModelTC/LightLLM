@@ -17,6 +17,7 @@ import pytest
 import torch
 
 from lightllm.common.attention_state.full_att import MLAFullAttentionState, PackedMLAFullAttentionState
+from lightllm.platform import DeviceRuntime
 from lightllm.utils.envs_utils import get_env_start_args
 from unit_tests.common.att_resources.test_capacity import allocated_bytes
 from unit_tests.server.router.model_infer.test_cpu_resource_layout import CASES, make_runtime, runtime
@@ -98,7 +99,7 @@ def test_auto_profile_fits_actual_gpu_storage_and_pd_pages(
     transfer_bytes = reference.get_pd_operator().get_page_bytes() * 3 if mode == "prefill" else 0
     storage_bytes = allocated_bytes(state)
     budget = storage_bytes + transfer_bytes
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (budget, 1 << 30))
+    monkeypatch.setattr(DeviceRuntime, "memory_info", lambda device_runtime: (budget, 1 << 30))
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
     model = model_cls.__new__(model_cls)
     model.args, model.config = args, json.loads((tmp_path / "config.json").read_text())

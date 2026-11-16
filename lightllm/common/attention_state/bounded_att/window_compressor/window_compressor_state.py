@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 from dataclasses import dataclass
+from functools import lru_cache
 from math import prod
 from typing import Literal
 
@@ -12,8 +11,8 @@ import torch
 
 from lightllm.utils.envs_utils import get_env_start_args
 
-from ...utils import deepcopy_result
 from ...types import PageKind, StateTransferLayout, TensorField, TransferRegion
+from ...utils import deepcopy_result
 from ..base_state import BoundedAttentionState
 from ..copy_kernel import copy_bounded_att_tensors
 from ..transfer_utils import bounded_att_buffer_copies
@@ -78,6 +77,8 @@ class WindowCompressorState(BoundedAttentionState):
     大小页在产出步长的边界保存重叠历史，PD 则保存完整窗口以支持任意前缀长度。
     无重叠的窗口在组边界不需要快照，因此不创建大小页池，也不占 CPU 联合页字节。
     """
+
+    storage_layout = ("window_compressor_ring", 1)
 
     # ========================================================================
     # 一、资源定义与初始化
@@ -161,6 +162,9 @@ class WindowCompressorState(BoundedAttentionState):
     def get_layer_view(self, logical_layer_id: int) -> torch.Tensor:
         """返回该层 [request, window+MTP, candidate|gate] 的计算视图。"""
         return self.buffer[self._logical_to_storage_layer[logical_layer_id]]
+
+    def capture_snapshot_views(self, req_indices):
+        return [self.buffer[:, req] for req in req_indices]
 
     def reset_bounded_att_state(self, req_indices: list[int]) -> None:
         for req_idx in req_indices:

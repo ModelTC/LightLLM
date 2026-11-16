@@ -51,6 +51,8 @@ class DPSharedOperator:
         dst_req_idx: int,
     ) -> None:
         """复制其他 DP 的 token、大小页和 prefill 基准运行态。"""
+        self.owner.check_execution_health()
+        remote_att_manager.check_execution_health()
         assert type(remote_att_manager) is type(self.owner), "DP replicas must use the same model resource manager"
         assert src_token_indices.numel() == dst_token_indices.numel(), "source and destination token counts differ"
         assert len(src_big_page_ids) == len(dst_big_page_ids), "source and destination page counts differ"

@@ -7,6 +7,9 @@ import torch
 from lightllm.common.attention.api.workspace import AttentionWorkspace
 
 
+from lightllm.common.attention_state.full_att.gqa.gqa_state import GQAAttentionConfig, GQAFullAttentionState
+
+
 from lightllm.platform import get_device_runtime
 
 
@@ -35,6 +38,16 @@ def test_explicit_current_device_is_not_overridden_by_worker_default(monkeypatch
     assert get_device_runtime().device == torch.device("cuda:0")
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="two CUDA devices required")
+def test_gqa_storage_allocation_uses_explicit_device_context(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
+    config = GQAAttentionConfig(logical_layer_groups=((0,),), global_head_num=2, head_dim=8, dtype=torch.float32)
+    with torch.cuda.device(1):
+        state = GQAFullAttentionState(config, device="cuda", page_size=4)
+        state.allocate_storage(8)
+    assert state.k_storage.device == state.v_storage.device == torch.device("cuda:1")
+
+
 def test_captured_workspace_keeps_address_when_pool_grows():
     pool = AttentionWorkspace("cpu")
     first, second = pool.borrow_for_capture(), pool.borrow_for_capture()
@@ -48,6 +61,22 @@ def test_captured_workspace_keeps_address_when_pool_grows():
     with pytest.raises(RuntimeError, match="cannot grow"):
         first.scratch("scratch", 64, torch.int32)
     assert AttentionWorkspace("cpu").scratch("scratch", 8, torch.int32).data_ptr() != old.data_ptr()
+
+
+def test_state_layout_and_native_write_preserve_physical_rows():
+    config = GQAAttentionConfig(logical_layer_groups=((0, 3), (7,)), global_head_num=2, head_dim=8, dtype=torch.float32)
+    state = GQAFullAttentionState(config, device="cpu", page_size=4)
+    state.require_zero_initialization()
+    state.allocate_storage(12)
+    assert not state.k_storage.count_nonzero()
+    values = torch.arange(2 * 4 * 8, dtype=torch.float32).view(2, 4, 8)
+    state.write_full_att_kv(3, torch.tensor([2, 5], dtype=torch.int32), values)
+    torch.testing.assert_close(state.get_layer_view(0)[0][[2, 5]], values[:, :2])
+    state.copy_full_att_tokens(torch.tensor([2, 5]), torch.tensor([7, 9]))
+    torch.testing.assert_close(state.get_layer_view(3)[1][[7, 9]], values[:, 2:])
+    assert not state.get_layer_view(7)[0].count_nonzero()
+    relocated = type("ExternalState", (GQAFullAttentionState,), {"__module__": "external.provider"})
+    assert relocated(config, device="cpu").describe_layout() == state.describe_layout()
 
 
 def test_runtime_registration_keeps_platform_validation_in_adapter(monkeypatch):

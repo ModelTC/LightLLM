@@ -51,3 +51,35 @@ class ConvSSMStateConfig:
             assert heads > 0 and (
                 heads % self.tp_world_size == 0 or self.tp_world_size % heads == 0
             ), "Conv/SSM heads require complete TP shards or replicas"
+
+
+@dataclass(frozen=True)
+class ReplayStorage:
+    logical_layer_ids: tuple[int, ...]
+    ssm_state: torch.Tensor
+    keys: torch.Tensor
+    deltas: torch.Tensor
+    gates: torch.Tensor
+    raw_keys: torch.Tensor
+    raw_values: torch.Tensor
+    betas: torch.Tensor
+    cursors: torch.Tensor
+    tile_sync_mark: torch.Tensor
+    num_key_heads: int
+    capacity: int
+    verify_width: int
+    compute_mode: str
+    gate_lower_bound: float
+    hold_req_id: int
+    kda: bool
+
+    def storage_layer(self, logical_layer_id):
+        return self.logical_layer_ids.index(logical_layer_id)
+
+
+@dataclass(frozen=True)
+class RecurrentStorage:
+    conv: torch.Tensor
+    ssm: torch.Tensor
+    mtp_state_index: torch.Tensor
+    replay_state: ReplayStorage | None = None

@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import ClassVar
 
 import torch
 
 from lightllm.utils.envs_utils import get_env_start_args
 
-from ...utils import deepcopy_result
 from ...types import AxisMapping, StateTransferLayout, TransferRegion
+from ...utils import deepcopy_result
 from ..base_state import FullAttentionState
 from ..dp_transfer import copy_packed_tokens
-from ..packed_mla.packed_transfer import transfer_packed_pages
 from ..packed_mla.packed_mla_state import PackedMLALayerView
+from ..packed_mla.packed_transfer import transfer_packed_pages
 
 
 @dataclass(frozen=True)
@@ -58,6 +57,8 @@ class FP8E8M0PackedMLAConfig:
 class FP8E8M0PackedMLAState(FullAttentionState):
     """独立的 group64/E8M0 MLA 实现，不继承其他具体 State 或动态选择编码。"""
 
+    storage_layout = ("mla_packed_fp8_e8m0_token_row", 1)
+
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================
@@ -70,6 +71,7 @@ class FP8E8M0PackedMLAState(FullAttentionState):
     ) -> None:
         """只准备布局和逻辑层映射，实际存储由管理器确定 token 容量后统一分配。"""
         self.config = layout_config
+        self.storage_dtype = torch.uint8
         self.state_name: str | None = None
         self.page_size = page_size
         self.device = torch.device(device=device)
@@ -90,7 +92,7 @@ class FP8E8M0PackedMLAState(FullAttentionState):
         self.capacity = token_capacity
         self.storage = torch.empty(
             size=(len(self.config.logical_layer_groups), token_capacity + self.page_size, 1, self.config.token_bytes),
-            dtype=torch.uint8,
+            dtype=self.storage_dtype,
             device=self.device,
         )
 
@@ -109,6 +111,9 @@ class FP8E8M0PackedMLAState(FullAttentionState):
     def get_storage_layer_index(self, logical_layer_id: int) -> int:
         """将逻辑层映射为物理存储行；同组逻辑层返回相同下标。"""
         return self._logical_to_storage_layer[logical_layer_id]
+
+    def layer_resources(self, layer_id):
+        return self.get_layer_view(layer_id).kv
 
     def get_layer_view(self, logical_layer_id: int) -> PackedMLALayerView:
         """返回固定 584 字节 KV 和 indexer key/scale 视图，保留物理行 stride。"""
