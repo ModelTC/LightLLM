@@ -9,7 +9,7 @@ import time
 import threading
 import concurrent.futures
 import setproctitle
-from queue import Queue
+from queue import Empty, Queue
 from typing import List
 from lightllm.server.core.objs import ShmReqManager, Req, StartArgs
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
@@ -45,6 +45,7 @@ class MultiLevelKVCacheManager:
         # 控制进行 cpu cache 页面匹配的时间，超过时间则不再匹配，直接转发。
         self.cpu_cache_time_out = 0.5
         self.recv_queue = Queue(maxsize=1024)
+        self.send_to_router_queue = Queue(maxsize=args.running_max_req_size)
         self.cpu_cache_thread = threading.Thread(target=self.cpu_cache_hanle_loop, daemon=True)
         self.cpu_cache_thread.start()
 
@@ -144,7 +145,7 @@ class MultiLevelKVCacheManager:
         # 超时时，放弃进行 cache page 的匹配。
         current_time = time.time()
         if current_time - start_time >= self.cpu_cache_time_out:
-            self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+            self.send_to_router_queue.put(group_req_indexes)
             logger.warning(
                 f"cache matching time out {current_time - start_time}s, "
                 f"group_req_id: {group_req_indexes.group_req_id}"
@@ -211,43 +212,47 @@ class MultiLevelKVCacheManager:
         for req in reqs:
             self.shm_req_manager.put_back_req_obj(req)
 
-        self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+        self.send_to_router_queue.put(group_req_indexes)
         return
 
-    def recv_loop(self):
+    def _send_finished_groups(self):
+        while True:
+            try:
+                group_req_indexes = self.send_to_router_queue.get_nowait()
+            except Empty:
+                return
+            self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def _recv_groups(self):
+        recv_objs = []
         try:
-            recv_max_count = 128
+            # 一次最多取 256 个请求，避免 zmq 里积压过多时堵住主循环。
+            for _ in range(256):
+                recv_obj: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+                assert isinstance(recv_obj, GroupReqIndexes)
+                recv_objs.append(recv_obj)
 
-            while True:
-                recv_objs = []
-                try:
-                    # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
-                    for _ in range(recv_max_count):
-                        recv_obj: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                        assert isinstance(recv_obj, GroupReqIndexes)
-                        recv_objs.append(recv_obj)
+                start_time = recv_obj.time_mark
+                logger.debug(
+                    f"multi_level_kv_cache recive group req id {recv_obj.group_req_id} "
+                    f"cost time {time.time() - start_time} s"
+                )
+        except zmq.ZMQError:
+            pass
+        return recv_objs
 
-                        start_time = recv_obj.time_mark
-                        logger.info(
-                            f"multi_level_kv_cache recive group req id {recv_obj.group_req_id} "
-                            f"cost time {time.time() - start_time} s"
-                        )
-
-                    # 当队列中存在较多的请求时，将一次接受的数量上调
-                    recv_max_count = min(int(recv_max_count * 1.3), 256)
-                except zmq.ZMQError:
-                    # 当队列已经开始清空的时候，将一次接受的数量下调
-                    recv_max_count = 128
-
+    def task_loop(self):
+        while True:
+            try:
+                self._send_finished_groups()
+                recv_objs = self._recv_groups()
                 for recv_obj in recv_objs:
                     self.recv_queue.put(recv_obj)
-
                 if len(recv_objs) == 0:
-                    time.sleep(0.01)
-
-        except Exception as e:
-            logger.exception(f"detoken process has exception {str(e)}")
-        return
+                    time.sleep(0.005)
+            except Exception as e:
+                logger.exception(f"detoken process has exception {str(e)}")
+                raise e
 
 
 def start_multi_level_kv_cache_manager(args, pipe_writer):
@@ -266,5 +271,5 @@ def start_multi_level_kv_cache_manager(args, pipe_writer):
         raise
 
     pipe_writer.send("init ok")
-    manager.recv_loop()
+    manager.task_loop()
     return
