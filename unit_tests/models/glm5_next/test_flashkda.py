@@ -177,6 +177,37 @@ def test_cli_accepts_flashkda_prefill():
     assert "flashkda" in StartArgs.__dataclass_fields__["llm_prefill_att_backend"].metadata["choices"]
 
 
+def test_ep_startup_accepts_flashkda(monkeypatch):
+    from lightllm.server import api_start
+
+    args = StartArgs(
+        enable_ep_moe=True,
+        llm_prefill_att_backend=["auto", "flashkda"],
+        disable_vision=True,
+        disable_audio=True,
+        disable_shm_warning=True,
+        page_size=0,
+    )
+    for name in (
+        "configure_decode_open_file_limit",
+        "_set_envs_and_config",
+        "auto_set_max_req_total_len",
+        "auto_set_fused_shared_experts",
+        "set_unique_server_name",
+        "_auto_set_prefill_queue_strategy",
+        "auto_set_page_size",
+    ):
+        monkeypatch.setattr(api_start, name, lambda args: None)
+    monkeypatch.setattr(api_start, "is_hybrid_att_model", lambda model_dir: True)
+    monkeypatch.setattr(
+        api_start.process_manager,
+        "start_submodule_processes",
+        lambda *args, **kwargs: pytest.fail("subprocess startup must not be reached"),
+    )
+    with pytest.raises(ValueError, match="--page_size"):
+        api_start._launch_subprocesses(args)
+
+
 def make_inputs(lengths, state_dtype, device):
     heads, dim, tokens = 2, 128, sum(lengths)
     packed = torch.randn(1, tokens, heads * (4 * dim + 1), device=device, dtype=torch.bfloat16)
