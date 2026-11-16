@@ -114,10 +114,10 @@ class NixlKVTransporter:
             ), f"Peer name {peer_name} does not match remote name {remote_agent.agent_name}"
 
             page_mem_desc = self.nixl_agent.deserialize_descs(page_reg_desc["memory"])
-            kv_page_xfer_handles = self._create_paged_xfer_handles(
+            page_kind_xfer_handles = self._create_paged_xfer_handles(
                 page_mem_desc, remote_agent.num_pages, agent_name=peer_name
             )
-            remote_agent.page_xfer_handles = kv_page_xfer_handles
+            remote_agent.page_xfer_handles = page_kind_xfer_handles
 
             logger.info(
                 f"Added remote agent {peer_name} with mem desc {page_mem_desc} cost time: {time.time() - start_time} s"

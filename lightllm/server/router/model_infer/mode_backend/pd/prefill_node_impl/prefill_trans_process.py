@@ -112,9 +112,9 @@ class _PrefillTransModule:
         pd_operator = self.resource_managers[device_id].get_pd_operator()
         pd_page_kind_payload_bytes = {}
         for kind in ("kv", "att_state"):
-            size = pd_operator.get_pd_page_kind_payload_bytes(kind)
-            if size > 0:
-                pd_page_kind_payload_bytes[kind] = size
+            payload_bytes = pd_operator.get_pd_page_kind_payload_bytes(kind)
+            if payload_bytes > 0:
+                pd_page_kind_payload_bytes[kind] = payload_bytes
         self.transporter = create_kv_transporter(
             args=self.args,
             node_id=self.args.pd_node_id,

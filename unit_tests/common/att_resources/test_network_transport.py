@@ -170,9 +170,9 @@ def _worker(connection: Connection, backend: str, sender: bool):
         copy_stream = torch.cuda.Stream()
         pd_page_kind_payload_bytes = {}
         for kind in ("kv", "att_state"):
-            size = resources.get_pd_operator().get_pd_page_kind_payload_bytes(kind)
-            if size > 0:
-                pd_page_kind_payload_bytes[kind] = size
+            payload_bytes = resources.get_pd_operator().get_pd_page_kind_payload_bytes(kind)
+            if payload_bytes > 0:
+                pd_page_kind_payload_bytes[kind] = payload_bytes
         if backend == "nccl":
             from lightllm.server.router.model_infer.mode_backend.pd.nccl_kv_transporter import NcclKVTransporter
 
