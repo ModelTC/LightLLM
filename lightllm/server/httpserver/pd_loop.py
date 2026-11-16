@@ -194,35 +194,22 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.exception(str(e))
         finally:
             # 这条连接只属于一个 pd master。断开后终止它下发、仍留在本节点上的请求。
-            request_ids = list(generation_tasks)
-            if request_ids:
-                logger.warning(
-                    "pd master %s disconnected, abort %s in-flight request(s)",
-                    pd_master_obj.host_ip_port,
-                    len(request_ids),
-                )
-            pending_request_ids = await _abort_requests_from_disconnected_master(manager, request_ids)
+            await _abort_requests_from_disconnected_master(manager, list(generation_tasks))
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
             child_tasks.extend(generation_tasks.values())
             for task in child_tasks:
                 task.cancel()
             if child_tasks:
                 await asyncio.gather(*child_tasks, return_exceptions=True)
-            # 登记发生在断开之后的请求，等生成任务退出后再 abort 一次。
-            await _abort_requests_from_disconnected_master(manager, pending_request_ids)
 
         await asyncio.sleep(10)
         await forwarding_queue.get_all_data()
         logger.info("reconnection to pd_master")
 
 
-async def _abort_requests_from_disconnected_master(manager: HttpServerManager, request_ids: List[int]) -> List[int]:
-    """Abort requests this PD master dispatched. Returns ids that were not registered yet."""
-    pending_request_ids = []
+async def _abort_requests_from_disconnected_master(manager: HttpServerManager, request_ids: List[int]) -> None:
     for group_req_id in request_ids:
-        if not await manager.abort(group_req_id):
-            pending_request_ids.append(group_req_id)
-    return pending_request_ids
+        await manager.abort(group_req_id)
 
 
 async def _get_pd_master_objs(args: StartArgs) -> Optional[Dict[int, PD_Master_Obj]]:
