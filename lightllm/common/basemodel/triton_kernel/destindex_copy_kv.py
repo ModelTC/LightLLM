@@ -27,8 +27,8 @@ def _fwd_kernel_destindex_copy_kv_split(
 ):
     token = tl.program_id(0)
     heads = tl.arange(0, BLOCK_HEAD)[:, None]
-    dims = tl.arange(0, BLOCK_DMODEL)[None, :]
-    mask = (heads < HEAD_NUM) & (dims < HEAD_DIM)
+    dims = (tl.arange(0, BLOCK_DMODEL) % HEAD_DIM)[None, :]
+    mask = heads < HEAD_NUM
     dest = tl.load(DestLoc + token * stride_index).to(tl.int64)
     source = KV + token * stride_kv_bs + heads * stride_kv_h + dims * stride_kv_d
     k = tl.load(source, mask=mask, other=0)
