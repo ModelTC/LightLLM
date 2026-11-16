@@ -8,8 +8,12 @@ def token_decode_attention_flash_decoding(q, infer_state, cache_k, cache_v, out=
     q_head_num, head_dim = q.shape[1], q.shape[2]
     calcu_shape1 = (batch_size, q_head_num, head_dim)
 
-    from .flash_decoding_stage1 import flash_decode_stage1
-    from .flash_decoding_stage2 import flash_decode_stage2
+    from lightllm.common.attention.backends.dense.triton.kernels.decode.mha.flash.flash_decoding_stage1 import (
+        flash_decode_stage1,
+    )
+    from lightllm.common.attention.backends.dense.triton.kernels.decode.mha.flash.flash_decoding_stage2 import (
+        flash_decode_stage2,
+    )
 
     o_tensor = alloc_tensor_func(q.shape, q.dtype, q.device) if out is None else out
 

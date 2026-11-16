@@ -7,10 +7,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.mtp_diverse import (
+    stage2_single_token as stage2_module,
+)
 from lightllm.common.basemodel import cuda_graph as graph_module
-from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.mtp_diverse import stage2_single_token as stage2_module
 from lightllm.common.triton_utils import autotuner as autotuner_module
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType, AutotuneLevel
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
 
 

@@ -1,9 +1,12 @@
 import dataclasses
 import weakref
-import torch
-from lightllm.utils.envs_utils import get_env_start_args
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, Tuple
+
+import torch
+
+from lightllm.utils.envs_utils import get_env_start_args
+
+from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
 
 
 class Int4kvTritonAttBackend(BaseAttBackend):
@@ -20,7 +23,6 @@ class Int4kvTritonAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class Int4kvTritonPrefillAttState(BasePrefillAttState):
-
     # 用于反量化的时候使用，可以减少反量化占用的显存数量。按需使用。
     b_kv_start_loc: torch.Tensor = None
 
@@ -95,7 +97,9 @@ class Int4kvTritonPrefillAttState(BasePrefillAttState):
             quant_group_size=self.backend.quant_group_size,
         )
 
-        from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
+        from lightllm.common.attention.backends._shared.prefill.context_flashattention_nopad import (
+            context_attention_fwd_contiguous_kv,
+        )
 
         context_attention_fwd_contiguous_kv(
             q=q,

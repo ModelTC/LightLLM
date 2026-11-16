@@ -1,14 +1,13 @@
 import pytest
 import torch
 
-from lightllm.common.attention_state.bounded_att import KDAState
-from unit_tests.common.test_linear_state import make_state
-from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
+from lightllm.common.attention.backends._shared.linear.replayssm_cursor import advance_cursor
+from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState, KDAState
 from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
+from unit_tests.common.test_linear_state import make_state
 
 
 @pytest.fixture

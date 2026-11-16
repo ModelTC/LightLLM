@@ -10,22 +10,20 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_update
+from lightllm.common.attention.backends._shared.linear.causal_conv1d_mtp import (
+    causal_conv1d_update as causal_conv1d_update_mtp,
+)
+from lightllm.common.attention.backends._shared.linear.causal_conv1d_qkv import causal_conv1d_qkv
+from lightllm.common.attention.backends._shared.linear.mtp_state_params import build_dynamic_mtp_linear_att_state_params
+from lightllm.common.attention.backends.kda.triton.kernels.kda import chunk_kda_with_fused_gate
+from lightllm.common.attention.backends.kda.triton.kernels.kda_decode import fused_recurrent_kda
 from lightllm.common.attention_state.bounded_att import KDAState
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
     BaseAttBackend,
     BaseDecodeAttState,
     BasePrefillAttState,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_update
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_qkv import causal_conv1d_qkv
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
-    causal_conv1d_update as causal_conv1d_update_mtp,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
-    build_dynamic_mtp_linear_att_state_params,
 )
 
 if TYPE_CHECKING:

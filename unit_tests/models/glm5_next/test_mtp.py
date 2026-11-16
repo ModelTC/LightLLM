@@ -1,16 +1,14 @@
 import weakref
+
 import pytest
 import torch
 
+from lightllm.common.attention.backends._shared.linear.replayssm_fold import fold_prefix
+from lightllm.common.attention.backends.kda.triton.kernels.kda_decode import fused_recurrent_kda
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, KDAState
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import (
-    fused_recurrent_kda,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_fold import fold_prefix
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
-
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -145,17 +143,11 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
 def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mode, mtp_step):
     from types import SimpleNamespace
 
+    from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_update
+    from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
     from lightllm.common.basemodel.attention.base_att import AttControl
     from lightllm.common.basemodel.attention.linear.kda import KDADecodeAttState
-    from lightllm.common.basemodel.attention.linear.replay_kda import (
-        ReplayKDADecodeAttState,
-    )
-    from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import (
-        ReplayKDAState,
-    )
-    from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
-        causal_conv1d_update,
-    )
+    from lightllm.common.basemodel.attention.linear.replay_kda import ReplayKDADecodeAttState
 
     torch.manual_seed(53)
     heads, dim, width = 2, 128, mtp_step + 1

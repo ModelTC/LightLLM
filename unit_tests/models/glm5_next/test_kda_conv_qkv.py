@@ -4,15 +4,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_fn
+from lightllm.common.attention.backends._shared.linear.causal_conv1d_qkv import causal_conv1d_qkv
+from lightllm.common.attention.backends._shared.linear.l2norm import USE_DEFAULT_FLA_NORM, l2norm_fwd
+from lightllm.common.attention.backends.kda.triton.kernels.kda import chunk_kda_with_fused_gate
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.attention.linear import kda as backend_module
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_qkv import (
-    causal_conv1d_qkv,
-)
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.l2norm import l2norm_fwd, USE_DEFAULT_FLA_NORM
-
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0) or USE_DEFAULT_FLA_NORM,

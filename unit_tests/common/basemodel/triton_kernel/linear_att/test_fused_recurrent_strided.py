@@ -1,9 +1,7 @@
 import pytest
 import torch
 
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.fused_recurrent import (
-    fused_recurrent_gated_delta_rule,
-)
+from lightllm.common.attention.backends.gdn.triton.kernels.fused_recurrent import fused_recurrent_gated_delta_rule
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA required", allow_module_level=True)

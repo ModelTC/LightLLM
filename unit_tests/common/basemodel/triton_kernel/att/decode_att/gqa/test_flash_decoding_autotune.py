@@ -1,7 +1,7 @@
-import weakref
 import collections
 import inspect
 import math
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -10,17 +10,19 @@ import torch.nn.functional as F
 from frozendict import frozendict
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
-from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.flash_decoding import (
-    gqa_flash_decoding as decode_module,
+from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.flash import (
     gqa_flash_decoding_stage1 as stage1_module,
 )
-from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding_stage2 import (
+from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.flash.gqa_flash_decoding_stage2 import (
     flash_decode_stage2,
 )
+from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
+from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.flash_decoding import (
+    gqa_flash_decoding as decode_module,
+)
 from lightllm.common.triton_utils import autotuner as autotuner_module
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType, AutotuneLevel
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
 
 

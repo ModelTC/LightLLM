@@ -1,9 +1,16 @@
 # 为 diverse mode 定制设计的 int8kv flash decoding attention 实现，可以实现更高效的多样性采样
 import torch
+
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.int8kv_flash_decoding_diverse_stage1 import (
+    flash_decode_stage1,
+)
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.int8kv_flash_decoding_diverse_stage2 import (
+    flash_decode_stage2,
+)
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.int8kv_flash_decoding_diverse_stage3 import (
+    flash_diverse_decode_stage3,
+)
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from .int8kv_flash_decoding_diverse_stage1 import flash_decode_stage1
-from .int8kv_flash_decoding_diverse_stage2 import flash_decode_stage2
-from .int8kv_flash_decoding_diverse_stage3 import flash_diverse_decode_stage3
 from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
 
 
