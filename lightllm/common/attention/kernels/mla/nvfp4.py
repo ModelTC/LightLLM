@@ -8,7 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ..kv_copy.nvfp4 import decode_e2m1
+from lightllm.common.basemodel.triton_kernel.kv_copy.nvfp4 import decode_e2m1
 
 
 @triton.jit
@@ -141,7 +141,7 @@ def _attention(
 
 @triton.jit(do_not_specialize=["SPLITS"])
 def _reduce(Partial, Lse, Out, HEADS: tl.constexpr, DIM: tl.constexpr, SPLITS, BS: tl.constexpr, BD: tl.constexpr):
-    row, head, block = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    row, head, block = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
     s, d = tl.arange(0, BS), block * BD + tl.arange(0, BD)
     lse = tl.load(Lse + (row * SPLITS + s) * HEADS + head, s < SPLITS, -float("inf"))
     maximum = tl.max(lse, 0)

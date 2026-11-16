@@ -30,7 +30,7 @@ def _dequantize(
         return
     token = tile * BT + tl.arange(0, BT)
     dim = tl.arange(0, DIM)
-    request = tl.load(REQ + batch)
+    request = tl.load(REQ + batch).to(tl.int64)
     slot = tl.load(TABLE + request * TS[0] + token * TS[1], token < length, other=0).to(tl.int64)
     km = slot[:, None] * KS[0] + head * KS[1]
     vm = slot[:, None] * VS[0] + head * VS[1]

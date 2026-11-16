@@ -3,7 +3,11 @@
 import torch
 
 from .dsv4 import DeepseekV4SparseAttBackend
-from ...triton_kernel.mla_att.packed_sparse import STAGED_KV_BYTES, QUERY_TILE_SIZE, packed_sparse_attention
+from lightllm.common.attention.kernels.mla.packed_sparse import (
+    STAGED_KV_BYTES,
+    QUERY_TILE_SIZE,
+    packed_sparse_attention,
+)
 
 
 class DeepseekV4Nvfp4SparseAttBackend(DeepseekV4SparseAttBackend):

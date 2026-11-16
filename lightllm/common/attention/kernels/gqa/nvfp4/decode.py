@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ...kv_copy.nvfp4 import decode_e2m1
+from lightllm.common.basemodel.triton_kernel.kv_copy.nvfp4 import decode_e2m1
 from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
 
 
@@ -24,8 +24,6 @@ def _decode(
     KS: tl.constexpr,
     VS: tl.constexpr,
     TS: tl.constexpr,
-    MS: tl.constexpr,
-    LS: tl.constexpr,
     META_STRIDES: tl.constexpr,
     KV_HEADS: tl.constexpr,
     GROUP: tl.constexpr,
@@ -38,7 +36,7 @@ def _decode(
     BN: tl.constexpr,
     SPLIT: tl.constexpr,
 ):
-    batch, kv_head, split = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    batch, kv_head, split = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
     size = tl.load(MARKERS + batch * META_STRIDES[3]) if SHARED else 1
     if size == 0:
         return
@@ -54,7 +52,7 @@ def _decode(
     visible = tl.load(VISIBLE + batches * META_STRIDES[1])
     positions = tl.load(POSITIONS + batches * META_STRIDES[2]) - 1
     maximum_length = tl.max(tl.where(batch_lanes < size, visible, 0), 0)
-    req = tl.load(REQ + batch * META_STRIDES[0])
+    req = tl.load(REQ + batch * META_STRIDES[0]).to(tl.int64)
     sm_scale = 1.4426950408889634 / tl.sqrt(float(DIM))
     maximum = tl.full((ROWS,), -float("inf"), tl.float32)
     denominator = tl.zeros((ROWS,), tl.float32)
@@ -103,34 +101,33 @@ def _decode(
             maximum = new_max
     result = acc * (1.0 / tl.where(denominator > 0, denominator, 1.0)[:, None])
     lse = tl.where(denominator > 0, maximum * 0.6931471805599453 + tl.log(denominator), -float("inf"))
-    offsets = batches[:, None] * MS[0] + heads[:, None] * MS[1] + split * MS[2] + d[None, :] * MS[3]
+    # Scratch is contiguous [batch, head, split, dim]; split count is runtime metadata.
+    scratch_rows = (batches * (KV_HEADS * GROUP) + heads) * tl.num_programs(2) + split
+    offsets = scratch_rows[:, None] * DIM + d[None, :]
     tl.store(MID + offsets, result, valid[:, None])
-    tl.store(LSE + batches * LS[0] + heads * LS[1] + split * LS[2], lse, valid)
+    tl.store(LSE + scratch_rows, lse, valid)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["SPLITS"])
 def _reduce_splits(
     MID,
     LSE,
     OUT,
-    MS: tl.constexpr,
-    LS: tl.constexpr,
     OS: tl.constexpr,
     DIM: tl.constexpr,
-    SPLITS: tl.constexpr,
+    SPLITS,
     BLOCK: tl.constexpr,
 ):
-    batch, head = tl.program_id(0), tl.program_id(1)
+    batch, head = tl.program_id(0).to(tl.int64), tl.program_id(1)
     split = tl.arange(0, BLOCK)
     d = tl.arange(0, DIM)
     valid = split < SPLITS
-    lse = tl.load(LSE + batch * LS[0] + head * LS[1] + split * LS[2], valid, other=-float("inf"))
+    scratch_rows = (batch * tl.num_programs(1) + head) * SPLITS + split
+    lse = tl.load(LSE + scratch_rows, valid, other=-float("inf"))
     maximum = tl.max(lse, 0)
     safe_max = tl.where(maximum == -float("inf"), 0.0, maximum)
     weights = tl.exp(lse - safe_max)
-    values = tl.load(
-        MID + batch * MS[0] + head * MS[1] + split[:, None] * MS[2] + d[None, :] * MS[3], valid[:, None], other=0
-    ).to(tl.float32)
+    values = tl.load(MID + scratch_rows[:, None] * DIM + d[None, :], valid[:, None], other=0).to(tl.float32)
     denominator = tl.sum(weights, 0)
     result = tl.sum(values * weights[:, None], 0) / tl.where(denominator > 0, denominator, 1.0)
     tl.store(OUT + batch * OS[0] + head * OS[1] + d * OS[2], result)
@@ -180,8 +177,6 @@ def decode_attention_nvfp4(
         k.stride(),
         v.stride(),
         table.stride(),
-        mid.stride(),
-        lse.stride(),
         (req.stride(0), visible.stride(0), original_lengths.stride(0), markers.stride(0) if markers is not None else 1),
         k.shape[1],
         group,
@@ -200,8 +195,6 @@ def decode_attention_nvfp4(
         mid,
         lse,
         out,
-        mid.stride(),
-        lse.stride(),
         out.stride(),
         dim,
         blocks,

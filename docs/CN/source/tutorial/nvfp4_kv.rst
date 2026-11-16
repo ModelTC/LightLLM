@@ -27,7 +27,7 @@ FA3 prefill 和 FlashInfer decode；原生 FlashInfer 路径支持 head_dim 128/
 以及 Qwen 混合模型的 full-attention 层。支持 CUDA Graph、前缀缓存、滑动窗口
 和 MTP block decode；这些通用 GQA 路径不支持 ALiBi 和 attention sink。
 普通 DeepSeek/GLM MLA、GLM-5.3 Flash 稀疏 MLA 和 DeepSeek-V4 也支持 NVFP4，
-具体启动方式和硬件要求见 :doc:`fp8_kv_quantization`。
+具体启动方式和硬件要求见 :doc:`kv_cache_quantization`。
 DeepSeek-V4 保留 BF16 RoPE、FP8 indexer 和 attention sink；由于其压缩历史、
 滑窗及 indexer 的布局不同，上述 3.56 倍容量比例不适用于 V4 整体 KV 存储。
 DeepSeek-V3.2 的稀疏 MLA 尚未接入 NVFP4。

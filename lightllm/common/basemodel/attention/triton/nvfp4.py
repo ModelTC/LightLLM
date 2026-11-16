@@ -38,7 +38,7 @@ class NVFP4PrefillAttState(BasePrefillAttState):
 
     def prefill_att(self, q, k, v, att_control=AttControl(), alloc_func=torch.empty):
         assert not att_control.use_alibi and not att_control.use_att_sink, "NVFP4 ALiBi/attention sinks are unsupported"
-        from ...triton_kernel.att.prefill_att.nvfp4 import context_attention_nvfp4
+        from lightllm.common.attention.kernels.gqa.nvfp4.prefill import context_attention_nvfp4
 
         out = alloc_func(q.shape, dtype=q.dtype, device=q.device)
         context_attention_nvfp4(
@@ -83,7 +83,7 @@ class NVFP4DecodeAttState(BaseDecodeAttState):
 
     def decode_att(self, q, k, v, att_control=AttControl(), alloc_func=torch.empty):
         assert not att_control.use_alibi and not att_control.use_att_sink, "NVFP4 ALiBi/attention sinks are unsupported"
-        from ...triton_kernel.att.decode_att.nvfp4 import decode_attention_nvfp4
+        from lightllm.common.attention.kernels.gqa.nvfp4.decode import decode_attention_nvfp4
 
         return decode_attention_nvfp4(
             q,

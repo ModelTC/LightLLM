@@ -6,7 +6,7 @@ import weakref
 import torch
 
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from ...triton_kernel.mla_att.nvfp4 import nvfp4_mla_attention, prepare_prefill_queries
+from lightllm.common.attention.kernels.mla.nvfp4 import nvfp4_mla_attention, prepare_prefill_queries
 
 
 class NVFP4MlaTritonAttBackend(BaseAttBackend):

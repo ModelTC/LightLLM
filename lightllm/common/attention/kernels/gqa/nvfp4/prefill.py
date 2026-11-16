@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ...kv_copy.nvfp4 import decode_e2m1
+from lightllm.common.basemodel.triton_kernel.kv_copy.nvfp4 import decode_e2m1
 
 
 @triton.jit
@@ -41,8 +41,8 @@ def _prefill(
     q_length = length - ready
     if tile * BM >= q_length:
         return
-    start = tl.load(START + batch)
-    req = tl.load(REQ + batch)
+    start = tl.load(START + batch).to(tl.int64)
+    req = tl.load(REQ + batch).to(tl.int64)
     m = tile * BM + tl.arange(0, BM)
     d = tl.arange(0, DIM)
     n = tl.arange(0, BN)

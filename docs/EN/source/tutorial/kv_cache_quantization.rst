@@ -1,4 +1,4 @@
-.. _tutorial/fp8_kv_quantization_en:
+.. _tutorial/kv_cache_quantization_en:
 
 KV Cache Quantization Guide
 ===========================
@@ -101,7 +101,7 @@ CPU cache and P/D transfer pages must also be aligned to four tokens.
 GLM native MTP uses the same NVFP4 encoding as the main model.
 
 DeepSeek-V4 NVFP4 KV
--------------------
+---------------------
 
 DeepSeek-V4 supports ``--llm_kv_type nvfp4kv`` with BF16 computation, a Hopper GPU,
 and a compatible FA3 installation. See the installation guide for dependencies; the repository

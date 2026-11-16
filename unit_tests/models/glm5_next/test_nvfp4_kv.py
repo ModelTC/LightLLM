@@ -48,7 +48,18 @@ def test_fresh_and_cached_prefill_use_physical_indices_and_current_bf16(cached, 
         ]
     )
     state.mem_index = mem[raw_rows]
-    model = type("Model", (), {"config": {"index_topk": 2048}})()
+    model = type(
+        "Model",
+        (),
+        dict(
+            config={"index_topk": 2048},
+            args=SimpleNamespace(enable_prefill_microbatch_overlap=False, run_mode="normal"),
+            batch_max_tokens=rows,
+            max_req_num=2,
+            max_seq_length=64,
+            att_state_role=f"nvfp4_current_{cached}_{rows}",
+        ),
+    )()
     backend = NVFP4Glm5NextSparseAttBackend(model)
     backend_state = backend.create_att_prefill_state(state)
     backend_state.init_state()

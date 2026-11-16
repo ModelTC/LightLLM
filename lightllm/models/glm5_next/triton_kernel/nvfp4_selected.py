@@ -119,7 +119,7 @@ def nvfp4_selected_attention(
         physical_indices = physical_indices[:, 0]
     rows, heads, dim = q.shape
     if dim != 512 or q.dtype != torch.bfloat16:
-        from lightllm.common.basemodel.triton_kernel.mla_att.nvfp4 import nvfp4_mla_attention
+        from lightllm.common.attention.kernels.mla.nvfp4 import nvfp4_mla_attention
 
         return nvfp4_mla_attention(
             q, packed_kv, physical_indices, softmax_scale, current_kv=current_kv, row_table=row_table

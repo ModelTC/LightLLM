@@ -135,7 +135,7 @@ def recurrent_reference(q, k, v, g, beta, initial_state, sequences):
 def test_kda_state_offsets_above_int32_range(packed):
     if torch.cuda.mem_get_info()[0] < 32 * 1024 ** 3:
         pytest.skip("Large-state regression requires 32 GiB of available GPU memory")
-    from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.chunk_delta_h import chunk_gated_delta_rule_fwd_h
+    from lightllm.common.attention.kernels.gdn.third_party_fla.ops.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 
     triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))
     heads, dim, chunk_size = 64, 128, 64

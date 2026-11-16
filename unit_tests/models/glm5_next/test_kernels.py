@@ -567,7 +567,8 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
 
 
 @pytest.mark.parametrize("max_kv_seq_len", [2065, 1 << 20])
-def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
+@pytest.mark.parametrize("indexer_token_stride", [1, 4])
+def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len, indexer_token_stride):
     from lightllm.models.glm5_next.indexer import Glm5NextNsaInfer
 
     tokens, heads, dim = 2065, 32, 128
@@ -582,12 +583,15 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
         wq_b_proj_=SimpleNamespace(mm=lambda x: x @ q_weight),
         weights_proj_=SimpleNamespace(mm=lambda x: torch.ones(x.shape[0], heads, device=x.device)),
     )
-    storage = torch.zeros(tokens + 9, 1, 584, device="cuda", dtype=torch.bfloat16)
+    storage = torch.zeros(triton.cdiv(tokens + 9, indexer_token_stride), 1, 584, device="cuda", dtype=torch.bfloat16)
     tail = torch.zeros(2, 4, 256, device="cuda", dtype=torch.bfloat16)
     ragged = torch.randperm(tokens + 9, device="cuda", dtype=torch.int32)[:tokens]
+    if indexer_token_stride == 4:
+        pages = torch.randperm(storage.shape[0], device="cuda", dtype=torch.int32)
+        ragged = (pages[:, None] * 4 + torch.arange(4, device="cuda", dtype=torch.int32)).flatten()[:tokens]
     full_att_state = SimpleNamespace(
         get_layer_view=lambda logical_layer_id: SimpleNamespace(
-            indexer_k=storage.view(torch.uint8)[:, :, -132:], indexer_token_stride=1
+            indexer_k=storage.view(torch.uint8)[:, :, -132:], indexer_token_stride=indexer_token_stride
         ),
     )
     infer = SimpleNamespace(
@@ -630,7 +634,7 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
     # next pool boundary. Stale window data is irrelevant at a complete group boundary.
     prefix = 2060
     storage = storage.clone()
-    storage[ragged[prefix:].long()] = 0
+    storage[ragged[prefix:].long() // indexer_token_stride] = 0
     tail.fill_(19)
     infer.is_prefill = False
     infer.b1_cu_q_seq_len[1] = 1

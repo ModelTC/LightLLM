@@ -73,10 +73,11 @@ class Glm5NextNsaInfer:
             b_mtp_index=None if infer_state.is_prefill else infer_state.b_mtp_index,
             indexer_token_stride=view.indexer_token_stride,
         )
-        return indexer_k
+        return view
 
     def _get_indices(self, hidden_states, q_lora, infer_state, att_state, layer_weight):
-        indexer_k = self.write_k_pools(hidden_states, infer_state, att_state, layer_weight)
+        view = self.write_k_pools(hidden_states, infer_state, att_state, layer_weight)
+        indexer_k = view.indexer_k
 
         if infer_state.max_kv_seq_len <= self.index_topk:
             return expand_topk(

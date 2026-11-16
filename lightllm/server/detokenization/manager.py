@@ -79,10 +79,7 @@ class DeTokenizationManager:
                     logger.info(f"detokenize batch cost time {cost_time} ms")
 
                 if not exist_need_detoken:
-                    # Pending requests can produce a token at any moment.
-                    # A 2 ms polling interval otherwise quantizes packet tails,
-                    # amplifying small differences in model step time.
-                    time.sleep(0.0002 if self.req_id_to_out else 0.002)
+                    time.sleep(0.002)
 
         except Exception as e:
             logger.exception(f"detoken process has exception {str(e)}")

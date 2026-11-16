@@ -1,4 +1,4 @@
-.. _tutorial/fp8_kv_quantization_cn:
+.. _tutorial/kv_cache_quantization_cn:
 
 KV Cache 量化使用指南
 =====================
@@ -94,7 +94,7 @@ GLM 的 KV 页须为 4 的倍数；默认 ``--page_size 1`` 启动时自动调�
 GLM 的原生 MTP 与主模型使用相同的 NVFP4 编码。
 
 DeepSeek-V4 NVFP4 KV
--------------------
+---------------------
 
 DeepSeek-V4 可以使用 ``--llm_kv_type nvfp4kv``，需要 BF16 计算、Hopper GPU
 及兼容的 FA3。依赖安装方式见安装指南；仓库 Dockerfile 固定了兼容的 FlashMLA 版本。

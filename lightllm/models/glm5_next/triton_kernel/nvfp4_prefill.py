@@ -86,7 +86,7 @@ def nvfp4_cached_prefill(
         return nvfp4_sparse_prefill(
             q, packed_kv, ragged, starts, topk_indices, scale, current_kv, row_table, workspace=workspace
         )
-    from lightllm.common.basemodel.triton_kernel.mla_att.nvfp4 import nvfp4_mla_attention
+    from lightllm.common.attention.kernels.mla.nvfp4 import nvfp4_mla_attention
 
     return nvfp4_mla_attention(q, packed_kv, physical_indices, scale, current_kv=current_kv, row_table=row_table)
 

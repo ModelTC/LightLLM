@@ -10,8 +10,8 @@ from dataclasses import replace
 
 from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
 from lightllm.common.basemodel.triton_kernel.kv_copy.nvfp4 import quantize_nvfp4_kv
-from lightllm.common.basemodel.triton_kernel.att.prefill_att.nvfp4 import context_attention_nvfp4
-from lightllm.common.basemodel.triton_kernel.att.decode_att.nvfp4 import decode_attention_nvfp4
+from lightllm.common.attention.kernels.gqa.nvfp4.prefill import context_attention_nvfp4
+from lightllm.common.attention.kernels.gqa.nvfp4.decode import decode_attention_nvfp4
 
 
 def decode_reference(packed):
@@ -684,3 +684,40 @@ def test_backend_cuda_graph_replays_updated_lengths_and_marker_layout(monkeypatc
     graph.replay()
     expected = reference_attention(q, kd, vd, table, updated.b_req_idx, update.visible_lengths, updated.b_seq_len - 1)
     torch.testing.assert_close(output.float(), expected, atol=0.014, rtol=0.014)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_decode_runtime_split_counts_reuse_warmed_kernels(monkeypatch):
+    import triton
+
+    torch.manual_seed(19)
+    raw = torch.randn(2048, 2, 16, device="cuda", dtype=torch.bfloat16)
+    k = torch.empty((2048, 1, 9), device="cuda", dtype=torch.uint8)
+    v = torch.empty_like(k)
+    ids = torch.arange(2048, device="cuda", dtype=torch.int32)
+    quantize_nvfp4_kv(raw, ids, k, v)
+    q = torch.randn(1, 2, 16, device="cuda", dtype=raw.dtype)
+    request = torch.zeros(1, device="cuda", dtype=torch.int32)
+    length = torch.ones_like(request)
+
+    def run(count):
+        length.fill_(count)
+        return decode_attention_nvfp4(q, k, v, ids[None], request, length, length, count)
+
+    # Cover each reduction tile size once; subsequent split counts are new.
+    for count in (1, 257, 769, 1793):
+        run(count)
+    misses, compilations = [], []
+
+    def on_miss(**kwargs):
+        misses.append(kwargs["fn"])
+        return False
+
+    monkeypatch.setattr(triton.knobs.runtime, "jit_cache_hook", on_miss)
+    monkeypatch.setattr(triton.knobs.compilation, "listener", lambda **kwargs: compilations.append(kwargs["cache_hit"]))
+    kd, vd = [dequantize(value, 16, q.dtype) for value in (k, v)]
+    for count in (513, 1025, 1281, 1537, 17, 1025, 513):
+        actual = run(count)
+        expected = reference_attention(q, kd, vd, ids[None], request, length, length - 1)
+        torch.testing.assert_close(actual.float(), expected, atol=0.02, rtol=0.02)
+    assert not misses and not compilations

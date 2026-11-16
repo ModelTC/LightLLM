@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ..kv_copy.nvfp4 import decode_e2m1
+from lightllm.common.basemodel.triton_kernel.kv_copy.nvfp4 import decode_e2m1
 
 STAGED_KV_BYTES = 64 * 1024 * 1024
 QUERY_TILE_SIZE = 32

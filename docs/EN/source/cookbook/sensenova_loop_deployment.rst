@@ -52,7 +52,7 @@ CUDA Graph for one GPU and one active request, with vision, audio and MTP disabl
 
 The example's calibration file was generated with the SenseNova Loop BF16 model
 and WorkBuddy data for two Loop passes. Use a matching ``KV_CALIB`` for other
-models. See :doc:`../tutorial/fp8_kv_quantization` for FP8 KV options.
+models. See :doc:`../tutorial/kv_cache_quantization` for FP8 KV options.
 
 Enable MTP
 ----------

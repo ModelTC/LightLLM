@@ -49,7 +49,7 @@ AWQ 部署
 脚本启用 FP8 KV 和解码 CUDA Graph，使用单卡、单个运行请求，禁用视觉、音频和 MTP。
 
 示例中的校准文件使用 SenseNova Loop BF16 模型和 WorkBuddy 数据生成，适用于 Loop 两轮。
-其他模型请替换 ``KV_CALIB``；FP8 KV 参数说明见 :doc:`../tutorial/fp8_kv_quantization`。
+其他模型请替换 ``KV_CALIB``；FP8 KV 参数说明见 :doc:`../tutorial/kv_cache_quantization`。
 
 启用 MTP
 --------

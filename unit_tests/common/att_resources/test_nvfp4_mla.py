@@ -18,7 +18,7 @@ from lightllm.common.attention_state.full_att import (
 )
 from lightllm.common.attention_state.types import StateTransferLayout
 from lightllm.common.basemodel.triton_kernel.kv_copy.nvfp4_mla import quantize_nvfp4_mla
-from lightllm.common.basemodel.triton_kernel.mla_att.nvfp4 import nvfp4_mla_attention
+from lightllm.common.attention.kernels.mla.nvfp4 import nvfp4_mla_attention
 from unit_tests.common.att_resources.test_nvfp4 import encode_reference, decode_reference
 
 
@@ -314,7 +314,7 @@ def test_state_rejects_mismatched_rope_dtype_and_skips_ready_cpu_page(pd_args):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_dense_mla_paged_causal_metadata_and_graph(dtype):
-    from lightllm.common.basemodel.triton_kernel.mla_att.nvfp4 import prepare_prefill_queries
+    from lightllm.common.attention.kernels.mla.nvfp4 import prepare_prefill_queries
 
     torch.manual_seed(71)
     rows, heads, dim, rope = 7, 8, 512, 64
