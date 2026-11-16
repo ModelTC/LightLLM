@@ -100,9 +100,9 @@ class NixlKVTransporter:
                 return
 
             start_time = time.time()
-            page = pickle.loads(remote_agent.page_reg_desc)
+            page_reg_desc = pickle.loads(remote_agent.page_reg_desc)
             assert (
-                page["payload_bytes"] == self.pd_page_kind_payload_bytes
+                page_reg_desc["payload_bytes"] == self.pd_page_kind_payload_bytes
             ), "PD peers must use the same payload byte lengths"
 
             peer_name = self.nixl_agent.add_remote_agent(remote_agent.agent_metadata)
@@ -113,7 +113,7 @@ class NixlKVTransporter:
                 peer_name == remote_agent.agent_name
             ), f"Peer name {peer_name} does not match remote name {remote_agent.agent_name}"
 
-            page_mem_desc = self.nixl_agent.deserialize_descs(page["memory"])
+            page_mem_desc = self.nixl_agent.deserialize_descs(page_reg_desc["memory"])
             kv_page_xfer_handles = self._create_paged_xfer_handles(
                 page_mem_desc, remote_agent.num_pages, agent_name=peer_name
             )

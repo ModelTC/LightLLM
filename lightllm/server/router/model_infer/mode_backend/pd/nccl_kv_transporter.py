@@ -117,10 +117,13 @@ class NcclKVTransporter:
             metadata.agent_name == remote_agent.agent_name
         ), f"Peer name {metadata.agent_name} does not match remote name {remote_agent.agent_name}"
 
-        page = pickle.loads(remote_agent.page_reg_desc)
-        assert page["page_bytes"] == self.kv_move_buffer.shape[1], "PD peers must use the same page byte capacity"
-        assert page.get("payload_bytes", dict.fromkeys(("kv", "att_state"), page["page_bytes"])) == (
-            self.pd_page_kind_payload_bytes
+        # 对方必须显式带上各类别的有效长度，且与本端一致。不再把缺省补成两个类别都传整页。
+        page_reg_desc = pickle.loads(remote_agent.page_reg_desc)
+        assert (
+            page_reg_desc["page_bytes"] == self.kv_move_buffer.shape[1]
+        ), "PD peers must use the same page byte capacity"
+        assert (
+            page_reg_desc["payload_bytes"] == self.pd_page_kind_payload_bytes
         ), "PD peers must use the same payload byte lengths"
         self.remote_agents[remote_agent.agent_name] = remote_agent
         logger.info(f"Added NCCL remote agent {remote_agent.agent_name} at {metadata.host_ip}:{metadata.control_port}")

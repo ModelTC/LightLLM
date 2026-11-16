@@ -228,6 +228,10 @@ def test_nccl_checks_peer_page_bytes_before_accepting_agent():
     with pytest.raises(AssertionError, match="same page byte capacity"):
         transporter.connect_add_remote_agent(peer)
     assert not transporter.remote_agents
+    # 页容量相同但没有 payload_bytes 时拒绝连接。
+    peer.page_reg_desc = pickle.dumps({"page_bytes": 128})
+    with pytest.raises(KeyError, match="payload_bytes"):
+        transporter.connect_add_remote_agent(peer)
     peer.page_reg_desc = transporter.local_page_mem_desc
     transporter.connect_add_remote_agent(peer)
     assert transporter.remote_agents["peer"] is peer
