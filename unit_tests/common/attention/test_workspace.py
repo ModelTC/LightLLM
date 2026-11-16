@@ -1,8 +1,5 @@
 import pytest
-
-
 import torch
-
 
 from lightllm.common.attention.api.workspace import AttentionWorkspace
 
@@ -123,3 +120,28 @@ def test_failed_completion_quarantines_pool_and_preserves_original_error(monkeyp
             pass
     with pytest.raises(RuntimeError, match="quarantined"):
         workspace.execution.synchronize()
+
+
+def test_output_reader_fences_other_graphs_sharing_the_pool():
+    from types import SimpleNamespace
+    from lightllm.common.basemodel.graph import CapturedGraph
+    from lightllm.platform import DeviceRuntime
+
+    calls = []
+    runtime = DeviceRuntime("cpu")
+    event = object()
+    stream = SimpleNamespace(wait_event=lambda incoming: calls.append(incoming))
+    runtime.current_stream = lambda: stream
+    runtime.create_event = lambda: SimpleNamespace(record=lambda _: None, query=lambda: True)
+    pool = AttentionWorkspace(runtime=runtime)
+    first = CapturedGraph(SimpleNamespace(reset=lambda: None), runtime=runtime, execution=pool.execution)
+    second = CapturedGraph(
+        SimpleNamespace(replay=lambda: calls.append("submit"), reset=lambda: None),
+        runtime=runtime,
+        execution=pool.execution,
+    )
+    first.record_output_use(event)
+    second.replay()
+    assert calls == [event, "submit"]
+    first.close()
+    second.close()

@@ -1,16 +1,37 @@
+from types import SimpleNamespace
+
+
 import pytest
 
 
 import torch
 
 
+from lightllm.common.attention.api import AttentionPhase
+
+
+from lightllm.common.attention.api.graph import CaptureManifest
+
+
 from lightllm.common.attention.api.workspace import AttentionWorkspace
+
+
+from lightllm.common.attention_state import AttentionStateManager
 
 
 from lightllm.common.attention_state.full_att.gqa.gqa_state import GQAAttentionConfig, GQAFullAttentionState
 
 
-from lightllm.platform import get_device_runtime
+from lightllm.common.attention.session import AttentionSession
+
+
+from lightllm.common.basemodel.graph import CapturedGraph
+
+
+from lightllm.common.execution import ExecutionScope
+
+
+from lightllm.platform import DeviceRuntime, get_device_runtime
 
 
 def test_runtime_resolves_host_platform_without_querying_cuda(monkeypatch):
@@ -61,6 +82,159 @@ def test_captured_workspace_keeps_address_when_pool_grows():
     with pytest.raises(RuntimeError, match="cannot grow"):
         first.scratch("scratch", 64, torch.int32)
     assert AttentionWorkspace("cpu").scratch("scratch", 8, torch.int32).data_ptr() != old.data_ptr()
+
+
+def test_graph_orders_input_copy_plan_submission_and_destruction():
+    events = []
+
+    class Runtime(DeviceRuntime):
+        def synchronize(self):
+            events.append("synchronize")
+
+    def submit():
+        events.append("submit")
+
+    runtime = Runtime("cpu")
+    manager = AttentionStateManager(request_capacity=2)
+    copied = torch.zeros(1)
+
+    def plan(context):
+        assert copied.item() == 1
+        events.extend(("copy", "plan"))
+
+    backend = SimpleNamespace(plan_host=plan)
+    state = SimpleNamespace(
+        input_ids=torch.zeros(1),
+        att_state_manager=manager,
+        attention_groups=({AttentionPhase.DECODE: backend},),
+        attention_contexts={
+            0: SimpleNamespace(
+                capacity=SimpleNamespace(phase=AttentionPhase.DECODE), workspace=AttentionWorkspace(runtime=runtime)
+            )
+        },
+        graph_input_copies=lambda source: [(copied, torch.ones(1))],
+        capture_manifest=CaptureManifest,
+    )
+    graph = SimpleNamespace(replay=submit, reset=lambda: events.append("graph_reset"))
+    state.attention = AttentionSession()
+    state.attention.groups = state.attention_groups
+    state.attention.contexts = state.attention_contexts
+    state.attention.batch = SimpleNamespace(max_kv_seq_len=16)
+    execution = CapturedGraph(graph, (state,), ("result",), runtime=runtime)
+    assert execution.replay(state) == "result"
+    assert events == ["copy", "plan", "submit"]
+    manager.close_graphs()
+    execution.close()
+    assert events[-2:] == ["synchronize", "graph_reset"]
+    assert execution.infer_states == ()
+    with pytest.raises(RuntimeError, match="closed"):
+        execution.replay(state)
+
+
+def test_storage_generation_invalidates_graph_before_copy():
+    manager = AttentionStateManager(request_capacity=2)
+    state = SimpleNamespace(
+        input_ids=torch.zeros(1),
+        att_state_manager=manager,
+        attention_contexts={},
+        attention_groups=(),
+        graph_input_copies=lambda source: [],
+        capture_manifest=CaptureManifest,
+    )
+    graph = SimpleNamespace(replay=lambda: pytest.fail("replayed a stale graph"), reset=lambda: None)
+    state.attention = AttentionSession()
+    state.attention.groups = state.attention_groups
+    state.attention.contexts = state.attention_contexts
+    execution = CapturedGraph(graph, (state,), runtime=DeviceRuntime("cpu"))
+    execution.infer_states[0].graph_input_copies = lambda source: pytest.fail("copied into a stale graph")
+    manager.storage_generation += 1
+    with pytest.raises(RuntimeError, match="storage changed"):
+        execution.replay(state)
+    execution.close()
+
+
+@pytest.mark.parametrize("invalid", ["role", "shape", "missing_hidden", "same_pointer_shape"])
+def test_graph_validates_all_lanes_before_copy_or_plan(monkeypatch, invalid):
+    from lightllm.common.attention.api import BackendEnv, ContextCapacity
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+    from unit_tests.common.attention.helpers import StubBackend, make_batch, make_spec
+
+    runtime = DeviceRuntime("cpu")
+    submission = ExecutionScope(runtime)
+    manager = AttentionStateManager(request_capacity=2)
+    env = BackendEnv(
+        runtime=runtime,
+        hold_req_id=7,
+        draft_step=0,
+        max_seq_len=16,
+        tp_size=1,
+        alloc_tensor=torch.empty,
+    )
+    backend = StubBackend(env, make_spec())
+    groups = ({AttentionPhase.DECODE: backend},)
+    plans = []
+    monkeypatch.setattr(backend, "plan_host", lambda context: plans.append(context))
+    capacity = ContextCapacity(
+        phase=AttentionPhase.DECODE, batch_size=2, token_num=2, max_kv_seq_len=16, max_q_seq_len=1
+    )
+
+    def make_state(batch, capture):
+        state = InferStateInfo()
+        state.att_state_role = "main"
+        state.att_state_manager = manager
+        state.input_ids = torch.zeros(2, dtype=torch.int64) if capture else torch.ones(2, dtype=torch.int64)
+        with state.attention.prepare(
+            batch,
+            groups,
+            capacity,
+            workspace=lambda group_id: AttentionWorkspace(runtime=runtime, execution=submission),
+            capture=capture,
+            replay=not capture,
+        ):
+            pass
+        return state
+
+    targets = [make_state(make_batch(), True) for _ in range(2)]
+    sources = [
+        make_state(make_batch((9, 7), req_to_token_indexs=target.attention.batch.req_to_token_indexs), False)
+        for target in targets
+    ]
+    if invalid == "role":
+        sources[1].att_state_role = "draft0"
+    elif invalid == "missing_hidden":
+        targets[1].mtp_draft_input_hiddens = torch.ones(2, 4)
+    elif invalid == "same_pointer_shape":
+        sources[1].input_ids = targets[1].input_ids.view(1, 2)
+    else:
+        sources[1].input_ids = torch.ones(3, dtype=torch.int64)
+    plans.clear()
+    graph = SimpleNamespace(replay=lambda: pytest.fail("submitted invalid lanes"), reset=lambda: None)
+    execution = CapturedGraph(graph, targets, runtime=runtime)
+    try:
+        with pytest.raises(ValueError, match="model role|shape, dtype or device|changed presence"):
+            execution.replay(*sources)
+        assert targets[0].input_ids.tolist() == [0, 0]
+        assert targets[0].attention.batch.b_seq_len.tolist() == [5, 2]
+        assert plans == []
+    finally:
+        execution.close()
+
+
+def test_invalid_capture_manifest_releases_native_graph():
+    events = []
+
+    manager = AttentionStateManager(request_capacity=2)
+    target = torch.zeros(1).expand(4)
+    state = SimpleNamespace(
+        att_state_manager=manager,
+        attention=AttentionSession(),
+        graph_input_copies=lambda source: [(target, target)],
+    )
+    graph = SimpleNamespace(reset=lambda: events.append("graph_reset"))
+    with pytest.raises(ValueError, match="overlapping elements"):
+        CapturedGraph(graph, (state,), runtime=DeviceRuntime("cpu"))
+    manager.close_graphs()
+    assert events == ["graph_reset"]
 
 
 def test_state_layout_and_native_write_preserve_physical_rows():

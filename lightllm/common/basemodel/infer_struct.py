@@ -1,3 +1,5 @@
+from lightllm.common.attention.api.graph import CaptureManifest, tensor_input_copy
+from dataclasses import fields
 from lightllm.common.attention.session import AttentionSession
 import torch
 import triton
@@ -16,6 +18,19 @@ from .attention import BasePrefillAttState, BaseDecodeAttState
 
 
 class InferStateInfo:
+    graph_shared_names = ()
+
+    graph_generated_names = ("prompt_logics",)
+
+    graph_input_names = (
+        "input_ids",
+        "b_position_delta",
+        "b_kv_seq_len",
+        "b_q_start_loc",
+        "b_kv_start_loc",
+        "mtp_draft_input_hiddens",
+    )
+
     """
     推理时用的信息结构体
     """
@@ -432,3 +447,93 @@ class InferStateInfo:
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr() and attr_.shape == attr_value.shape:
                     attr_.copy_(attr_value, non_blocking=True)
         return
+
+    def graph_input_copies(self, new_infer_state: "InferStateInfo"):
+        if self.att_state_role != new_infer_state.att_state_role:
+            raise ValueError("captured attention belongs to a different model role or group")
+        if (self.microbatch_index, self.is_prefill, self.is_draft_model) != (
+            new_infer_state.microbatch_index,
+            new_infer_state.is_prefill,
+            new_infer_state.is_draft_model,
+        ):
+            raise ValueError("captured model execution lane or phase changed")
+        copies = self.attention.replay_input_copies(new_infer_state.attention)
+        if self.graph_input_names != new_infer_state.graph_input_names:
+            raise ValueError("captured input inventory changed")
+        for name in self.graph_input_names:
+            target, source = getattr(self, name, None), getattr(new_infer_state, name, None)
+            copies.extend(tensor_input_copy(name, target, source))
+        return copies
+
+    def capture_manifest(self, *, segmented=False):
+        manifest = CaptureManifest()
+        for name in ("att_state_role", "is_prefill", "is_draft_model", "microbatch_index", "graph_input_names"):
+            manifest.add(name, "constant", getattr(self, name), read=lambda name=name: getattr(self, name))
+        binding = self.attention.binding
+        if binding is not None:
+            manifest.entries.extend(binding.capture_entries)
+        if segmented:
+            copied = self.prefill_graph_input_names()
+            for name in copied:
+                manifest.add(name, "copy", getattr(self, name, None))
+            manifest.add("attention", "prepare", self.attention.groups)
+        else:
+            batch = self.attention.batch
+            copied = self.graph_input_names
+            declared = set(copied) | set(self.graph_generated_names) | set(self.graph_shared_names)
+            declared.update(item.name for item in fields(batch))
+            missing = [
+                name for name, value in vars(self).items() if isinstance(value, torch.Tensor) and name not in declared
+            ]
+            if missing:
+                raise ValueError(f"model tensors need a capture update policy: {', '.join(missing)}")
+            for item in fields(batch):
+                value = getattr(batch, item.name)
+                policy = "shared" if item.metadata.get("shared_storage") else "copy"
+                if not isinstance(value, torch.Tensor):
+                    policy = "constant"
+                manifest.add(f"batch.{item.name}", policy, value)
+            for name in copied:
+                manifest.add(name, "copy", getattr(self, name, None))
+            for group_id, context in self.attention.contexts.items():
+                backend = self.attention.groups[group_id][context.capacity.phase]
+                prefix = f"context.{group_id}"
+                manifest.add(f"{prefix}.spec", "constant", backend.spec, read=lambda backend=backend: backend.spec)
+                manifest.add(
+                    f"{prefix}.capacity",
+                    "constant",
+                    context.capacity,
+                    read=lambda context=context: context.capacity,
+                )
+                for item in fields(context):
+                    if item.name in ("batch", "workspace", "backend_identity", "capacity", "capture"):
+                        continue
+                    value = getattr(context, item.name)
+                    policy = backend.capture_field_policies.get(
+                        item.name, "generated" if isinstance(value, (torch.Tensor, dict, list)) else "constant"
+                    )
+                    if item.name == "current_max_kv_seq_len":
+                        policy = "prepare"
+                    manifest.add(
+                        f"{prefix}.{item.name}",
+                        policy,
+                        value,
+                        read=lambda context=context, name=item.name: getattr(context, name),
+                    )
+                manifest.add(
+                    f"{prefix}.scratch",
+                    "shared",
+                    context.workspace._buffers,
+                    read=lambda context=context: context.workspace._buffers,
+                )
+                manifest.add(
+                    f"{prefix}.provider_objects",
+                    "shared",
+                    context.workspace._objects,
+                    read=lambda context=context: context.workspace._objects,
+                )
+        for name in self.graph_generated_names:
+            manifest.add(name, "generated", getattr(self, name, None), read=lambda name=name: getattr(self, name, None))
+        for name in self.graph_shared_names:
+            manifest.add(name, "shared", getattr(self, name, None), read=lambda name=name: getattr(self, name, None))
+        return manifest
