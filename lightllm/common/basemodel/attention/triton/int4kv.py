@@ -119,9 +119,6 @@ class Int4kvTritonDecodeAttState(BaseDecodeAttState):
         # Graph 捕获会改写 infer_state 的长度上限，提前保存真实长度用于配置查找。
         self.decode_max_kv_seq_len = self.infer_state.max_kv_seq_len
 
-    def copy_for_decode_cuda_graph(self, new_state: "Int4kvTritonDecodeAttState"):
-        super().copy_for_decode_cuda_graph(new_state)
-
     def decode_att(
         self,
         q: torch.Tensor,

@@ -93,9 +93,6 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
     def init_state(self):
         super().init_state()
 
-    def copy_for_decode_cuda_graph(self, new_state):
-        return super().copy_for_decode_cuda_graph(new_state)
-
     def decode_att(
         self,
         q: torch.Tensor,

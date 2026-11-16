@@ -108,9 +108,6 @@ class TritonDecodeAttState(BaseDecodeAttState):
                 hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
             )
 
-    def copy_for_decode_cuda_graph(self, new_state: "TritonDecodeAttState"):
-        super().copy_for_decode_cuda_graph(new_state)
-
     def decode_att(
         self,
         q: torch.Tensor,

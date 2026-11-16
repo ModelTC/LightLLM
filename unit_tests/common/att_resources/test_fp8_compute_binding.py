@@ -27,6 +27,14 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
+class _StubAttBackend(BaseAttBackend):
+    def create_att_prefill_state(self, infer_state):
+        return None
+
+    def create_att_decode_state(self, infer_state):
+        return None
+
+
 @pytest.mark.parametrize("kind", ["static_head", "static_tensor"])
 @pytest.mark.parametrize("role", ["main", "draft0"])
 @pytest.mark.parametrize("prefill", [False, True])
@@ -83,7 +91,7 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
     infer.att_state_role = role
     infer.batch_size, infer.max_q_seq_len = 2, 1
     infer.b_seq_len = torch.ones(2, dtype=torch.int32, device="cpu")
-    backend = object.__new__(BaseAttBackend)
+    backend = object.__new__(_StubAttBackend)
     observed = {}
 
     if kind == "static_head":

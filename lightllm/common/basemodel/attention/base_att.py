@@ -14,10 +14,13 @@ if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
-class BaseAttBackend:
+class BaseAttBackend(ABC):
     """
     用于创建支持各种不同的AttBackend, 如 fa3, flashinfer, triton 实现等。
     每个 model 复用一个 backend 实例。
+
+    A backend is long-lived and owns no per-forward data. Each forward gets its own state from
+    create_att_prefill_state / create_att_decode_state.
     """
 
     requires_cpu_cache_sync = False
@@ -58,11 +61,13 @@ class BaseAttBackend:
                 BaseAttBackend._workspace_buffers[buffer_key] = workspace_buffer
             return workspace_buffer
 
+    @abstractmethod
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "BasePrefillAttState":
-        raise NotImplementedError("not impl")
+        pass
 
+    @abstractmethod
     def create_att_decode_state(self, infer_state: "InferStateInfo") -> "BaseDecodeAttState":
-        raise NotImplementedError("not impl")
+        pass
 
     def uses_dynamic_spec_verify_layout(self) -> bool:
         args = get_env_start_args()

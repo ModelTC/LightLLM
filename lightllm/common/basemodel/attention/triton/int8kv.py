@@ -130,9 +130,6 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
                 self.infer_state.b_shared_seq_len,
             )
 
-    def copy_for_decode_cuda_graph(self, new_state: "Int8kvTritonDecodeAttState"):
-        super().copy_for_decode_cuda_graph(new_state)
-
     def decode_att(
         self,
         q: torch.Tensor,
