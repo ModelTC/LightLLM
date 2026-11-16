@@ -142,7 +142,7 @@ class _DecodeTransModule:
             tp_idx=device_id,
             kv_move_buffer=kv_move_buffer,
             page_payload_bytes={
-                kind: self.resource_managers[device_id].get_pd_operator().get_payload_bytes(kind)
+                kind: self.resource_managers[device_id].get_pd_operator().get_pd_page_kind_payload_bytes(kind)
                 for kind in ("kv", "att_state")
             },
         )
