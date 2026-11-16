@@ -1,12 +1,9 @@
 import torch
 
-from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.mtp_diverse.stage1_single_token import (
-    mtp_diverse_stage1_single_token,
-)
-from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.mtp_diverse.stage2_single_token import (
-    mtp_diverse_stage2_single_token,
-)
 from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
+
+from .stage1_single_token import mtp_diverse_stage1_single_token
+from .stage2_single_token import mtp_diverse_stage2_single_token
 
 
 @torch.no_grad()

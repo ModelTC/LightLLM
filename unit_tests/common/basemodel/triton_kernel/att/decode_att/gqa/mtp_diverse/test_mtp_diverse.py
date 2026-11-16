@@ -13,6 +13,8 @@ Single Token Mode:
 import pytest
 import torch
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+
 
 def gqa_attention_reference(
     q: torch.Tensor,
@@ -142,7 +144,7 @@ def mtp_diverse_attention(
     """
     MTP Diverse Attention 调用入口
     """
-    from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.mtp_diverse import (
+    from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.mtp_diverse import (
         token_decode_attention_mtp_diverse_single_token,
     )
 
