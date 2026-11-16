@@ -14,7 +14,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .index import prepare_chunk_indices
+from lightllm.common.attention.kernels.linear.index import prepare_chunk_indices
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})

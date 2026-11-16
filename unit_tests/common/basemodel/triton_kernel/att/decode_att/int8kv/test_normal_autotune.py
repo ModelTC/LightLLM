@@ -13,11 +13,11 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.attention.triton import int8kv as state_module
 from lightllm.common.basemodel.attention.triton.int8kv import Int8kvTritonDecodeAttState
-from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.normal import (
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.normal import (
     int8kv_flash_decoding_stage1 as stage1_module,
-    int8kv_flash_decoding as decode_module,
 )
-from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.normal.int8kv_flash_decoding_stage2 import (
+from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.normal import int8kv_flash_decoding as decode_module
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.normal.int8kv_flash_decoding_stage2 import (
     flash_decode_stage2,
 )
 from lightllm.common.triton_utils import autotuner as autotuner_module

@@ -6,11 +6,11 @@ from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import 
     attach_replay_history as ReplaySSMExecutor,
     replay_layer,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
+from lightllm.common.attention.kernels.linear.mtp_state_params import (
     build_dynamic_mtp_linear_att_state_params,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
-from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
+from lightllm.common.attention.kernels.linear.replay.replayssm_cursor import advance_cursor
+from lightllm.common.attention.kernels.linear.replay.ssm_acceptance import commit_ssm_prefix
 from types import SimpleNamespace
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -18,8 +18,8 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 
 @pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
 def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
-    from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import _advance_cursor
-    from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_decode import _decode_replay
+    from lightllm.common.attention.kernels.linear.replay.replayssm_cursor import _advance_cursor
+    from lightllm.common.attention.kernels.linear.replay.replayssm_decode import _decode_replay
 
     kernels = {"_decode_replay": _decode_replay, "_advance_cursor": _advance_cursor}
     hashes = {name: set() for name in kernels}

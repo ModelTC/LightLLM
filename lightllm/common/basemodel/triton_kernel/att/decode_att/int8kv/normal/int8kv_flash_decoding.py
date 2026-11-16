@@ -1,8 +1,12 @@
 import torch
 from typing import Optional
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from .int8kv_flash_decoding_stage1 import flash_decode_stage1
-from .int8kv_flash_decoding_stage2 import flash_decode_stage2
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.normal.int8kv_flash_decoding_stage1 import (
+    flash_decode_stage1,
+)
+from lightllm.common.attention.backends.dense.triton.kernels.decode.int8kv.normal.int8kv_flash_decoding_stage2 import (
+    flash_decode_stage2,
+)
 
 
 @torch.no_grad()

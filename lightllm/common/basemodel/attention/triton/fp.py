@@ -69,7 +69,9 @@ class TritonPrefillAttState(BasePrefillAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd
+        from lightllm.common.attention.kernels.prefill.context_flashattention_nopad import (
+            context_attention_fwd,
+        )
 
         if att_control.use_sliding_window:
             sliding_window = att_control.sliding_window
@@ -257,7 +259,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ):
         # TODO USE , 在特定场景下比 _normal_decode_gqa_flash_decoding_att 省显存
-        from ...triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding_vsm import (
+        from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.flash.gqa_flash_decoding_vsm import (
             gqa_token_decode_attention_flash_decoding_vsm,
         )
 
@@ -282,7 +284,9 @@ class TritonDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ):
         # TODO USE , 在特定场景下比 _normal_decode_gqa_flash_decoding_att 省显存
-        from ...triton_kernel.att.decode_att.gqa.gqa_decode_flashattention_nopad import gqa_decode_attention_fwd
+        from lightllm.common.attention.backends.dense.triton.kernels.decode.gqa.gqa_decode_flashattention_nopad import (
+            gqa_decode_attention_fwd,
+        )
 
         out = alloc_func(q.shape, q.dtype)
 
@@ -312,9 +316,11 @@ class TritonDecodeAttState(BaseDecodeAttState):
         calcu_shape1 = (batch_size, q_head_num, head_dim)
         att_m_tensor = alloc_func((q_head_num, total_token_num), torch.float32)
 
-        from ...triton_kernel.att.decode_att.mha.stage3_decode_att.token_attention_nopad_att1 import token_att_fwd
+        from lightllm.common.attention.backends.dense.triton.kernels.decode.mha.stage3_decode_att import (
+            token_attention_nopad_att1,
+        )
 
-        token_att_fwd(
+        token_attention_nopad_att1.token_att_fwd(
             q.view(calcu_shape1),
             k,
             att_m_tensor,
@@ -326,11 +332,11 @@ class TritonDecodeAttState(BaseDecodeAttState):
         )
 
         o_tensor = alloc_func(q.shape, q.dtype)
-        from ...triton_kernel.att.decode_att.mha.stage3_decode_att.token_attention_softmax_and_reducev import (
-            token_softmax_reducev_fwd,
+        from lightllm.common.attention.backends.dense.triton.kernels.decode.mha.stage3_decode_att import (
+            token_attention_softmax_and_reducev,
         )
 
-        token_softmax_reducev_fwd(
+        token_attention_softmax_and_reducev.token_softmax_reducev_fwd(
             att_m_tensor,
             v,
             o_tensor.view(calcu_shape1),

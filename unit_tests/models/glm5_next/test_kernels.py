@@ -10,11 +10,11 @@ import triton
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import set_env_start_args
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import (
+from lightllm.common.attention.backends.kda.triton.kernels.kda import (
     chunk_kda_with_fused_gate,
     fused_kda_gate_chunk_cumsum,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
+from lightllm.common.attention.backends.kda.triton.kernels.kda_decode import fused_recurrent_kda
 from lightllm.models.glm5_next.triton_kernel.kpool import (
     compress_pools,
     gather_pools,

@@ -15,9 +15,9 @@ import torch
 import triton
 import triton.language as tl
 
-from .index import prepare_chunk_indices
-from .op import exp, safe_exp
-from .utils import FLA_GDN_FIX_BT, check_shared_mem, is_nvidia_hopper
+from lightllm.common.attention.kernels.linear.index import prepare_chunk_indices
+from lightllm.common.attention.kernels.linear.op import exp, safe_exp
+from lightllm.common.attention.kernels.linear.utils import FLA_GDN_FIX_BT, check_shared_mem, is_nvidia_hopper
 from lightllm.common.triton_utils.autotuner import autotune
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]

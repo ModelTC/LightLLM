@@ -338,7 +338,7 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
     from lightllm.common.basemodel.attention.triton.int4kv import Int4kvTritonPrefillAttState
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.common.basemodel.triton_kernel.kv_copy import ppl_int4kv_copy_kv
-    from lightllm.common.basemodel.triton_kernel.att.prefill_att import context_flashattention_nopad
+    from lightllm.common.attention.kernels.prefill import context_flashattention_nopad
 
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")

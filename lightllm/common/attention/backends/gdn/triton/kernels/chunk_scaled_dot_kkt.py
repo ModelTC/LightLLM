@@ -13,8 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
-from .index import prepare_chunk_indices
-from .op import safe_exp
+from lightllm.common.attention.kernels.linear.index import prepare_chunk_indices
+from lightllm.common.attention.kernels.linear.op import safe_exp
 from lightllm.common.triton_utils.autotuner import autotune
 
 

@@ -77,7 +77,9 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
         att_control: AttControl,
         alloc_func=torch.empty,
     ):
-        from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
+        from lightllm.common.attention.kernels.prefill.context_flashattention_nopad import (
+            context_attention_fwd_contiguous_kv,
+        )
 
         k_nope, k_rope = k
         q_head_num = q.shape[1]
