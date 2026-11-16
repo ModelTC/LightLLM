@@ -5,7 +5,7 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.params import GdnAttParams
 from lightllm.common.basemodel.attention.linear.gdn_triton import TritonLinearAttBackend
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.sensenova_loop.config import get_loop_layer_indices, get_loop_layer_types
@@ -117,12 +117,7 @@ def test_gdn_decode_keeps_logical_layer_state(
             None,
             None,
             None,
-            AttControl(
-                linear_att_prefill=True,
-                linear_att_prefill_dict=dict(
-                    **control, mixed_qkvzba=torch.randn(5, mixed_dim, device=device, dtype=dtype)
-                ),
-            ),
+            GdnAttParams(**control, mixed_qkvzba=torch.randn(5, mixed_dim, device=device, dtype=dtype)),
         )
 
     infer.batch_size = mtp_step + 1
@@ -136,12 +131,7 @@ def test_gdn_decode_keeps_logical_layer_state(
             None,
             None,
             None,
-            AttControl(
-                linear_att_decode=True,
-                linear_att_decode_dict=dict(
-                    **control, mixed_qkvzba=torch.randn(infer.batch_size, mixed_dim, device=device, dtype=dtype)
-                ),
-            ),
+            GdnAttParams(**control, mixed_qkvzba=torch.randn(infer.batch_size, mixed_dim, device=device, dtype=dtype)),
         )
         assert torch.isfinite(output).all()
         assert not torch.equal(resource.conv_state[storage_layer], before_conv[storage_layer])

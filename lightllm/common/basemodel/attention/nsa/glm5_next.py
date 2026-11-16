@@ -3,7 +3,8 @@ import weakref
 
 import torch
 
-from ..base_att import AttControl, BaseAttBackend, BasePrefillAttState, BaseDecodeAttState
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState
+from ..params import NsaDecodeAttParams, NsaPrefillAttParams
 
 
 class Glm5NextSparseAttBackend(BaseAttBackend):
@@ -16,6 +17,7 @@ class Glm5NextSparseAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class Glm5NextSparsePrefillState(BasePrefillAttState):
+    params_type = NsaPrefillAttParams
     q_kv_seq_len: torch.Tensor = None
     q_req_idx: torch.Tensor = None
     q_kv_start_loc: torch.Tensor = None
@@ -28,11 +30,11 @@ class Glm5NextSparsePrefillState(BasePrefillAttState):
             infer_state.position_ids, infer_state.b_req_idx, infer_state.b1_cu_q_seq_len, infer_state.b1_cu_kv_seq_len
         )
 
-    def prefill_att(self, q, k, v, att_control=AttControl(), alloc_func=torch.empty):
-        assert att_control.nsa_prefill and att_control.nsa_prefill_dict is not None
-        return self._nsa_prefill_att(q, k, att_control)
+    def prefill_att(self, q, k, v, params=None, alloc_func=torch.empty):
+        params = self._check_params(params)
+        return self._nsa_prefill_att(q, k, params)
 
-    def _nsa_prefill_att(self, q, kv, att_control):
+    def _nsa_prefill_att(self, q, kv, params):
         from sgl_kernel.flash_mla import flash_mla_sparse_fwd
 
         q_token_num, q_head_num, head_dim = q.shape
@@ -42,19 +44,19 @@ class Glm5NextSparsePrefillState(BasePrefillAttState):
         if padded_q_head_num != q_head_num:
             padded_q = q.new_zeros((q_token_num, padded_q_head_num, head_dim))
             padded_q[:, :q_head_num] = q
-        nsa_prefill_dict = att_control.nsa_prefill_dict
         output, _, _ = flash_mla_sparse_fwd(
             q=padded_q,
             kv=kv,
-            indices=nsa_prefill_dict["topk_mem_indices"].unsqueeze(1),
-            sm_scale=nsa_prefill_dict["softmax_scale"],
-            d_v=nsa_prefill_dict["kv_lora_rank"],
+            indices=params.topk_mem_indices.unsqueeze(1),
+            sm_scale=params.softmax_scale,
+            d_v=params.kv_lora_rank,
         )
         return output[:, :q_head_num]
 
 
 @dataclasses.dataclass
 class Glm5NextSparseDecodeState(BaseDecodeAttState):
+    params_type = NsaDecodeAttParams
     q_kv_seq_len: torch.Tensor = None
     q_req_idx: torch.Tensor = None
     nsa_cache_seqlens: torch.Tensor = None
@@ -73,28 +75,27 @@ class Glm5NextSparseDecodeState(BaseDecodeAttState):
         )
         self.nsa_cu_seqlens_k_new = torch.nn.functional.pad(self.nsa_cache_seqlens.cumsum(0, dtype=torch.int32), (1, 0))
 
-    def decode_att(self, q, k, v, att_control=AttControl(), alloc_func=torch.empty):
-        assert att_control.nsa_decode and att_control.nsa_decode_dict is not None
-        return self._nsa_decode_att(q, k, att_control)
+    def decode_att(self, q, k, v, params=None, alloc_func=torch.empty):
+        params = self._check_params(params)
+        return self._nsa_decode_att(q, k, params)
 
-    def _nsa_decode_att(self, q, kv, att_control):
+    def _nsa_decode_att(self, q, kv, params):
         from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
-        nsa_decode_dict = att_control.nsa_decode_dict
         q_nope, _ = q
-        kv_nope = kv.view(-1, 1, 1, nsa_decode_dict["kv_lora_rank"])
+        kv_nope = kv.view(-1, 1, 1, params.kv_lora_rank)
         # NoPE has no RoPE Q/K tensors; only_qv uses q_nope and kv_nope directly.
         return flash_attn_with_kvcache(
             q=None,
             qv=q_nope,
             k_cache=None,
             v_cache=kv_nope,
-            page_table=nsa_decode_dict["topk_mem_indices"],
+            page_table=params.topk_mem_indices,
             cache_seqlens=self.nsa_cache_seqlens,
             cu_seqlens_q=self.infer_state.b1_cu_q_seq_len,
             cu_seqlens_k_new=self.nsa_cu_seqlens_k_new,
             max_seqlen_q=self.infer_state.max_q_seq_len,
-            softmax_scale=nsa_decode_dict["softmax_scale"],
+            softmax_scale=params.softmax_scale,
             causal=False,
             only_qv=True,
         )

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.params import NsaPrefillAttParams
 from lightllm.common.basemodel.attention.nsa.glm5_next import (
     Glm5NextSparseAttBackend,
     Glm5NextSparseDecodeState,
@@ -213,15 +213,12 @@ def test_fp8_prefill_reads_request_table_without_ragged_buffer(monkeypatch, quer
     state = backend.create_att_prefill_state(infer)
     state.init_state()
     assert not hasattr(state, "ragged_mem_index") and not hasattr(backend, "ragged_mem_buffers")
-    control = AttControl(
-        nsa_prefill=True,
-        nsa_prefill_dict={
-            "topk_indices": topk,
-            "topk_mem_indices": topk_mem,
-            "prefill_cache_kv": prefill_kv,
-            "softmax_scale": 512 ** -0.5,
-            "kv_lora_rank": 512,
-        },
+    control = NsaPrefillAttParams(
+        topk_indices=topk,
+        topk_mem_indices=topk_mem,
+        prefill_cache_kv=prefill_kv,
+        softmax_scale=512 ** -0.5,
+        kv_lora_rank=512,
     )
 
     def run():

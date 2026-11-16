@@ -1,7 +1,7 @@
 import dataclasses
 import weakref
 import torch
-from ..base_att import AttControl
+from ..params import DenseAttParams
 from .flashinfer import FlashInferAttBackend, FlashInferPrefillAttState, FlashInferDecodeAttState
 from ..flashinfer_utils import set_flashinfer_envs
 from lightllm.utils.log_utils import init_logger
@@ -45,20 +45,16 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: DenseAttParams = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
+        params = self._check_params(params)
         return self._fp8_prefill_att(
             q=q,
             k=k,
             v=v,
             alloc_func=alloc_func,
-            logical_layer_id=att_control.logical_layer_id,
+            logical_layer_id=params.logical_layer_id,
         )
 
     def _fp8_prefill_att(
@@ -98,20 +94,16 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: DenseAttParams = None,
         alloc_func=torch.empty,
     ):
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
+        params = self._check_params(params)
         return self._fp8_decode_att(
             q=q,
             k=k,
             v=v,
             alloc_func=alloc_func,
-            logical_layer_id=att_control.logical_layer_id,
+            logical_layer_id=params.logical_layer_id,
         )
 
     def _fp8_decode_att(

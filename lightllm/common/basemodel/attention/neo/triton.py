@@ -3,7 +3,7 @@ import weakref
 import torch
 from typing import Tuple
 
-from ..base_att import AttControl
+from ..params import DenseAttParams
 from ..dense.triton import TritonAttBackend, TritonPrefillAttState, TritonDecodeAttState
 
 
@@ -14,6 +14,9 @@ class NeoTritonAttBackend(TritonAttBackend):
 
 @dataclasses.dataclass
 class NeoTritonPrefillAttState(TritonPrefillAttState):
+    # The kernels used here take none of the optional dense features.
+    supported_features = frozenset()
+
     def init_state(self):
         pass
 
@@ -22,9 +25,10 @@ class NeoTritonPrefillAttState(TritonPrefillAttState):
         q: torch.Tensor,
         k: Tuple[torch.Tensor, torch.Tensor],
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: DenseAttParams = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
+        params = self._check_params(params)
         from ...triton_kernel.att.prefill_att.context_attention_fwd_neo import context_attention_fwd_neo
         from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
 

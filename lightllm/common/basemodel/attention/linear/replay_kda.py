@@ -15,11 +15,11 @@ from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import (
     ReplayKDAState,
 )
 from lightllm.common.basemodel.attention.base_att import (
-    AttControl,
     BaseAttBackend,
     BaseDecodeAttState,
     BasePrefillAttState,
 )
+from ..params import KdaAttParams
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
@@ -67,6 +67,7 @@ class ReplayKDALinearAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class ReplayKDAPrefillAttState(BasePrefillAttState):
+    params_type = KdaAttParams
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
@@ -80,19 +81,18 @@ class ReplayKDAPrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: KdaAttParams = None,
         alloc_func=torch.empty,
     ):
-        assert att_control.linear_att_prefill
-        params = att_control.linear_att_prefill_dict
-        layer_num = params["layer_num"]
-        layer_weight = params["layer_weight"]
+        params = self._check_params(params)
+        layer_num = params.layer_num
+        layer_weight = params.layer_weight
         backend: ReplayKDALinearAttBackend = self.backend
         state = _replay_state(self, layer_num)
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         conv_states = conv_states[..., : backend.conv_kernel_size - 1]
         mixed_qkv = causal_conv1d_fn(
-            params["mixed_qkv"].transpose(0, 1),
+            params.mixed_qkv.transpose(0, 1),
             layer_weight.get_merged_kda_conv_weight(),
             bias=None,
             query_start_loc=self.infer_state.b1_cu_q_seq_len,
@@ -105,8 +105,8 @@ class ReplayKDAPrefillAttState(BasePrefillAttState):
         q = q.view(1, -1, backend.tp_num_heads, backend.head_dim)
         k = k.view(1, -1, backend.tp_num_heads, backend.head_dim)
         v = v.view(1, -1, backend.tp_num_heads, backend.head_dim)
-        raw_gate = params["raw_gate"].view(1, -1, backend.tp_hidden_size)
-        raw_beta = params["raw_beta"].view(1, -1, backend.tp_num_heads)
+        raw_gate = params.raw_gate.view(1, -1, backend.tp_hidden_size)
+        raw_beta = params.raw_beta.view(1, -1, backend.tp_num_heads)
         output, final_state = chunk_kda_with_fused_gate(
             q=q,
             k=k,
@@ -128,6 +128,7 @@ class ReplayKDAPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class ReplayKDADecodeAttState(BaseDecodeAttState):
+    params_type = KdaAttParams
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
@@ -151,13 +152,12 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: KdaAttParams = None,
         alloc_func=torch.empty,
     ):
-        assert att_control.linear_att_decode
-        params = att_control.linear_att_decode_dict
-        layer_num = params["layer_num"]
-        layer_weight = params["layer_weight"]
+        params = self._check_params(params)
+        layer_num = params.layer_num
+        layer_weight = params.layer_weight
         backend: ReplayKDALinearAttBackend = self.backend
         state = _replay_state(self, layer_num)
         conv_states, _ = state.get_layer_view(logical_layer_id=layer_num)
@@ -171,7 +171,7 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
                 query_start_loc=self.b1_mtp_cu_q_seq_len,
             )
         mixed_qkv = conv_update(
-            params["mixed_qkv"],
+            params.mixed_qkv,
             conv_states,
             layer_weight.get_merged_kda_conv_weight(),
             **conv_kwargs,
@@ -180,8 +180,8 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
         q = q.view(-1, backend.tp_num_heads, backend.head_dim)
         k = k.view(-1, backend.tp_num_heads, backend.head_dim)
         v = v.view(-1, backend.tp_num_heads, backend.head_dim)
-        raw_gate = params["raw_gate"].reshape(-1, backend.tp_hidden_size)
-        raw_beta = params["raw_beta"].reshape(-1, backend.tp_num_heads)
+        raw_gate = params.raw_gate.reshape(-1, backend.tp_hidden_size)
+        raw_beta = params.raw_beta.reshape(-1, backend.tp_num_heads)
         layer = state.storage_layer(layer_num)
         output = replay(
             state_ssm=state.ssm_state[layer],

@@ -7,7 +7,8 @@ from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.common.basemodel.attention.base_att import AttControl, LINEAR_SLOT
+from lightllm.common.basemodel.attention.base_att import LINEAR_SLOT
+from lightllm.common.basemodel.attention.params import KdaAttParams, NsaDecodeAttParams, NsaPrefillAttParams
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
     silu_and_mul_fwd,
@@ -181,15 +182,12 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             q=q,
             k=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
             v=None,
-            att_control=AttControl(
-                nsa_prefill=True,
-                nsa_prefill_dict={
-                    "topk_mem_indices": topk_mem_indices,
-                    "topk_indices": topk_indices,
-                    "prefill_cache_kv": kv,
-                    "softmax_scale": self.softmax_scale,
-                    "kv_lora_rank": self.kv_lora_rank,
-                },
+            params=NsaPrefillAttParams(
+                topk_mem_indices=topk_mem_indices,
+                topk_indices=topk_indices,
+                prefill_cache_kv=kv,
+                softmax_scale=self.softmax_scale,
+                kv_lora_rank=self.kv_lora_rank,
             ),
         )
 
@@ -268,15 +266,11 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             q=(q_nope, q_rope),
             k=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
             v=None,
-            att_control=AttControl(
-                nsa_decode=True,
-                nsa_decode_dict={
-                    "layer_index": self.layer_num_,
-                    "topk_mem_indices": topk_mem_indices,
-                    "softmax_scale": self.softmax_scale,
-                    "kv_lora_rank": self.kv_lora_rank,
-                    "qk_rope_head_dim": 0,
-                },
+            params=NsaDecodeAttParams(
+                topk_mem_indices=topk_mem_indices,
+                softmax_scale=self.softmax_scale,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=0,
             ),
         )
 
@@ -365,15 +359,12 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 q=None,
                 k=None,
                 v=None,
-                att_control=AttControl(
-                    linear_att_prefill=True,
-                    linear_att_prefill_dict={
-                        "mixed_qkv": _mixed_qkv,
-                        "raw_gate": _raw_decay_gate,
-                        "raw_beta": _beta_logits,
-                        "layer_weight": layer_weight,
-                        "layer_num": self.layer_num_,
-                    },
+                params=KdaAttParams(
+                    mixed_qkv=_mixed_qkv,
+                    raw_gate=_raw_decay_gate,
+                    raw_beta=_beta_logits,
+                    layer_weight=layer_weight,
+                    layer_num=self.layer_num_,
                 ),
                 alloc_func=self.alloc_tensor,
             )
@@ -405,15 +396,12 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 q=None,
                 k=None,
                 v=None,
-                att_control=AttControl(
-                    linear_att_prefill=True,
-                    linear_att_prefill_dict={
-                        "mixed_qkv": qkv,
-                        "raw_gate": raw_decay_gate,
-                        "raw_beta": beta_logits,
-                        "layer_weight": layer_weight,
-                        "layer_num": self.layer_num_,
-                    },
+                params=KdaAttParams(
+                    mixed_qkv=qkv,
+                    raw_gate=raw_decay_gate,
+                    raw_beta=beta_logits,
+                    layer_weight=layer_weight,
+                    layer_num=self.layer_num_,
                 ),
                 alloc_func=self.alloc_tensor,
             )
@@ -429,15 +417,12 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             q=None,
             k=None,
             v=None,
-            att_control=AttControl(
-                linear_att_decode=True,
-                linear_att_decode_dict={
-                    "mixed_qkv": qkv,
-                    "raw_gate": raw_decay_gate,
-                    "raw_beta": beta_logits,
-                    "layer_weight": layer_weight,
-                    "layer_num": self.layer_num_,
-                },
+            params=KdaAttParams(
+                mixed_qkv=qkv,
+                raw_gate=raw_decay_gate,
+                raw_beta=beta_logits,
+                layer_weight=layer_weight,
+                layer_num=self.layer_num_,
             ),
             alloc_func=self.alloc_tensor,
         )

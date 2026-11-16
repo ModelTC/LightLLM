@@ -16,11 +16,11 @@ from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import (
     ReplayGDNState,
 )
 from lightllm.common.basemodel.attention.base_att import (
-    AttControl,
     BaseAttBackend,
     BaseDecodeAttState,
     BasePrefillAttState,
 )
+from ..params import GdnAttParams
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
     causal_conv1d_fn,
 )
@@ -78,6 +78,7 @@ class ReplayGDNFlashQlaAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class ReplayGDNPrefillAttState(BasePrefillAttState):
+    params_type = GdnAttParams
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
@@ -91,19 +92,18 @@ class ReplayGDNPrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: GdnAttParams = None,
         alloc_func=torch.empty,
     ):
-        assert att_control.linear_att_prefill and att_control.linear_att_prefill_dict is not None
-        params = att_control.linear_att_prefill_dict
-        layer_num = params["layer_num"]
-        layer_weight = params["layer_weight"]
+        params = self._check_params(params)
+        layer_num = params.layer_num
+        layer_weight = params.layer_weight
         backend = self.backend
         state = _replay_state(self, layer_num)
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         if backend.mtp_step > 0:
             conv_states = conv_states[:, :, : -backend.mtp_step]
-        mixed_qkv, z, b, a = _split_qkvzba(backend, params["mixed_qkvzba"])
+        mixed_qkv, z, b, a = _split_qkvzba(backend, params.mixed_qkvzba)
         core_attn_out = self._prefill(mixed_qkv, conv_states, ssm_states, a, b, layer_weight)
         return core_attn_out, z
 
@@ -138,6 +138,7 @@ class ReplayGDNPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class ReplayGDNDecodeAttState(BaseDecodeAttState):
+    params_type = GdnAttParams
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
@@ -162,15 +163,14 @@ class ReplayGDNDecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: GdnAttParams = None,
         alloc_func=torch.empty,
     ):
-        assert att_control.linear_att_decode and att_control.linear_att_decode_dict is not None
-        params = att_control.linear_att_decode_dict
-        layer_num = params["layer_num"]
-        layer_weight = params["layer_weight"]
+        params = self._check_params(params)
+        layer_num = params.layer_num
+        layer_weight = params.layer_weight
         backend = self.backend
-        mixed_qkv, z, b, a = _split_qkvzba(backend, params["mixed_qkvzba"])
+        mixed_qkv, z, b, a = _split_qkvzba(backend, params.mixed_qkvzba)
         state = _replay_state(self, layer_num)
         conv_states, _ = state.get_layer_view(logical_layer_id=layer_num)
         draft_step = backend.model.mtp_manager.get_decode_draft_step(backend.model.is_mtp_draft_model)

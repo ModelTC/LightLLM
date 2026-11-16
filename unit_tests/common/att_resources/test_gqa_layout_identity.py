@@ -6,7 +6,7 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.params import DenseAttParams
 
 
 @pytest.mark.parametrize("kv_type", ["None", "int4kv", "int8kv", "fp8kv_spt", "fp8kv_sph"])
@@ -104,7 +104,7 @@ def test_fa3_reads_descale_for_each_head_layout(prefill, monkeypatch):
         q = k = v = torch.zeros((2, heads, state.config.head_dim))
         observed.clear()
         run = att.prefill_att if prefill else att.decode_att
-        run(q=q, k=k, v=v, att_control=AttControl(logical_layer_id=layer))
+        run(q=q, k=k, v=v, params=DenseAttParams(logical_layer_id=layer))
         row = state.scales[0]
         k_descale = observed["k_descale"]
         v_descale = observed["v_descale"]

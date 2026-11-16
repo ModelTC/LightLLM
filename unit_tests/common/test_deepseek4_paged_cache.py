@@ -1017,13 +1017,13 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
         swa_lengths=lengths,
         attn_sink=torch.zeros(64, device="cuda"),
     )
-    control = attention.AttControl(nsa_decode=True, nsa_decode_dict=params)
+    control = attention.Dsv4NsaAttParams(**params)
     q = torch.randn((token_num, 64, 512), dtype=torch.bfloat16, device="cuda") * 0.1
     packed_kv = requests.get_att_input_params(2)
 
     def forward():
         build()
-        return state.decode_att(q, packed_kv, None, att_control=control)
+        return state.decode_att(q, packed_kv, None, params=control)
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -1081,7 +1081,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
         reference_indices = reference_indices.to(torch.int32)
         reference_params = dict(params, swa_indices=reference_indices.unsqueeze(1), swa_lengths=reference_lengths)
         expected = reference_state.decode_att(
-            q, reference_kv, None, att_control=attention.AttControl(nsa_decode=True, nsa_decode_dict=reference_params)
+            q, reference_kv, None, params=attention.Dsv4NsaAttParams(**reference_params)
         )
         torch.testing.assert_close(actual, expected, rtol=0, atol=0, msg=f"SWA mismatch at position {start}")
         torch.testing.assert_close(write_slots, _swa_slots(requests, destination, logical_positions).to(torch.int32))

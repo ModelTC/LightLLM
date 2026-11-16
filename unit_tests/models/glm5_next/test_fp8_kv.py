@@ -5,7 +5,7 @@ import pytest
 import torch
 import triton
 
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.params import NsaDecodeAttParams, NsaPrefillAttParams
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.attention.nsa.glm5_next import (
     Glm5NextSparsePrefillState,
@@ -106,15 +106,12 @@ class _PrefillCase:
         )
         self.backend = backend or _make_workspace_backend(queries)
         _, self.att_state = self.new_state()
-        self.control = AttControl(
-            nsa_prefill=True,
-            nsa_prefill_dict={
-                "topk_indices": self.topk_indices,
-                "topk_mem_indices": self.topk_mem_indices,
-                "prefill_cache_kv": self.prefill_cache_kv,
-                "softmax_scale": softmax_scale,
-                "kv_lora_rank": 512,
-            },
+        self.control = NsaPrefillAttParams(
+            topk_indices=self.topk_indices,
+            topk_mem_indices=self.topk_mem_indices,
+            prefill_cache_kv=self.prefill_cache_kv,
+            softmax_scale=softmax_scale,
+            kv_lora_rank=512,
         )
 
     def new_state(self, **overrides):
@@ -305,9 +302,7 @@ def test_fp8_nope_decode_and_cuda_graph(num_heads):
     indices = torch.randint(0, 4096, (9, 2176), device="cuda", dtype=torch.int32)
     lanes = torch.arange(2176, device="cuda")
     indices.masked_fill_(lanes[None, :] >= lengths[:, None], -1)
-    control = AttControl(
-        nsa_decode=True, nsa_decode_dict={"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
-    )
+    control = NsaDecodeAttParams(topk_mem_indices=indices, softmax_scale=0.0625, kv_lora_rank=512, qk_rope_head_dim=0)
     infer_state = _make_infer_state()
     state = Fp8Glm5NextSparseDecodeState(
         _infer_state_weak_ref=weakref.ref(infer_state), flashmla_sched_meta=flash_mla.get_mla_metadata()[0]
@@ -507,13 +502,8 @@ def test_fp8_one_query_prefill_and_decode_read_their_own_kv_sources():
     decode_infer.is_cuda_graph_capture = True
     decode_state = case.backend.create_att_decode_state(decode_infer)
     decode_state.init_state()
-    control = AttControl(
-        nsa_decode=True,
-        nsa_decode_dict={
-            "topk_mem_indices": case.topk_mem_indices,
-            "softmax_scale": 0.0625,
-            "kv_lora_rank": 512,
-        },
+    control = NsaDecodeAttParams(
+        topk_mem_indices=case.topk_mem_indices, softmax_scale=0.0625, kv_lora_rank=512, qk_rope_head_dim=0
     )
 
     def run():
@@ -547,9 +537,7 @@ def test_fp8_h64_b1_decode_uses_native_eager_and_direct_graph():
     q = torch.randn(64, 1, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
     indices = torch.full((1, 2176), -1, device="cuda", dtype=torch.int32)
     indices[:, :2049] = torch.randint(0, capacity, (1, 2049), device="cuda", dtype=torch.int32)
-    control = AttControl(
-        nsa_decode=True, nsa_decode_dict={"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
-    )
+    control = NsaDecodeAttParams(topk_mem_indices=indices, softmax_scale=0.0625, kv_lora_rank=512, qk_rope_head_dim=0)
     infer = _make_infer_state(is_cuda_graph_capture=False)
     state = Fp8Glm5NextSparseDecodeState(
         _infer_state_weak_ref=weakref.ref(infer),
@@ -615,10 +603,7 @@ def test_fp8_decode_infer_state_graph_qpad_and_mutation(num_heads):
     q = torch.randn(num_heads, batch, 1024, device="cuda", dtype=torch.bfloat16)[..., ::2].transpose(0, 1)
     indices = torch.full((batch, 2176), -1, device="cuda", dtype=torch.int32)
     indices[:, :2049] = torch.randint(0, capacity, (batch, 2049), device="cuda", dtype=torch.int32)
-    control = AttControl(
-        nsa_decode=True,
-        nsa_decode_dict={"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512},
-    )
+    control = NsaDecodeAttParams(topk_mem_indices=indices, softmax_scale=0.0625, kv_lora_rank=512, qk_rope_head_dim=0)
     infer_state = _make_infer_state(is_cuda_graph_capture=False)
     state = Fp8Glm5NextSparseDecodeState(
         _infer_state_weak_ref=weakref.ref(infer_state), flashmla_sched_meta=flash_mla.get_mla_metadata()[0]
@@ -680,9 +665,7 @@ def test_fp8_sparse_direct_decode_actual_entry_edges_and_graph(monkeypatch, batc
         indices[5, :64] = -1  # holes
         indices[6, 64:128] = indices[6, :64]  # duplicates
     assert torch.equal(indices[:, 2051:], torch.full_like(indices[:, 2051:], -1))
-    control = AttControl(
-        nsa_decode=True, nsa_decode_dict={"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
-    )
+    control = NsaDecodeAttParams(topk_mem_indices=indices, softmax_scale=0.0625, kv_lora_rank=512, qk_rope_head_dim=0)
     state_owner = _make_infer_state(is_cuda_graph_capture=False)
     state = Fp8Glm5NextSparseDecodeState(
         _infer_state_weak_ref=weakref.ref(state_owner),
@@ -770,10 +753,7 @@ def test_fp8_sparse_direct_decode_general_graph_factory_entry(monkeypatch, num_h
     if batch >= 4:
         indices[3, 64:128] = indices[3, :64]  # duplicates
     assert torch.equal(indices[:, 2051:], torch.full_like(indices[:, 2051:], -1))
-    control = AttControl(
-        nsa_decode=True,
-        nsa_decode_dict={"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512},
-    )
+    control = NsaDecodeAttParams(topk_mem_indices=indices, softmax_scale=0.0625, kv_lora_rank=512, qk_rope_head_dim=0)
     backend = object.__new__(Fp8Glm5NextSparseAttBackend)
     backend.model = SimpleNamespace(config={"index_topk": 2048, "index_kpool": 4})
     infer_state = _make_infer_state(is_cuda_graph_capture=False)
@@ -843,9 +823,7 @@ def test_fp8_sparse_direct_decode_unknown_bound_fallback_and_strided_q(monkeypat
     q = torch.randn(1, 8, 512, device="cuda", dtype=torch.bfloat16)
     late = torch.full((1, 2176), -1, device="cuda", dtype=torch.int32)
     late[:, 2175] = 17
-    control = AttControl(
-        nsa_decode=True, nsa_decode_dict={"topk_mem_indices": late, "softmax_scale": 0.0625, "kv_lora_rank": 512}
-    )
+    control = NsaDecodeAttParams(topk_mem_indices=late, softmax_scale=0.0625, kv_lora_rank=512, qk_rope_head_dim=0)
     calls = []
     original = flash_mla.flash_mla_with_kvcache
 
@@ -909,9 +887,8 @@ def test_fp8_sparse_direct_decode_strided_inputs_and_packed_row_padding(monkeypa
                 (q, q[..., :0]),
                 packed,
                 None,
-                AttControl(
-                    nsa_decode=True,
-                    nsa_decode_dict={"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512},
+                NsaDecodeAttParams(
+                    topk_mem_indices=indices, softmax_scale=0.0625, kv_lora_rank=512, qk_rope_head_dim=0
                 ),
             ).float(),
             expected(),
@@ -997,9 +974,7 @@ def test_fp8_sparse_direct_decode_large_workload_retains_native_graph(monkeypatc
         decode_topk_bound=2051,
         flashmla_sched_meta=flash_mla.get_mla_metadata()[0],
     )
-    control = AttControl(
-        nsa_decode=True, nsa_decode_dict={"topk_mem_indices": topk, "softmax_scale": 0.0625, "kv_lora_rank": 512}
-    )
+    control = NsaDecodeAttParams(topk_mem_indices=topk, softmax_scale=0.0625, kv_lora_rank=512, qk_rope_head_dim=0)
     run = lambda: state.decode_att((q, q[..., :0]), packed[..., :584], None, control)
     expected = _torch_sparse_attention(q, _dequantize_kv_cache(packed), topk[:, 0])
     torch.testing.assert_close(run().float(), expected, atol=0.02, rtol=0.02)

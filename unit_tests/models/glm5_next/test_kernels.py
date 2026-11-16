@@ -499,7 +499,7 @@ def test_shared_chunk_kernel_preserves_gdn_natural_log_decay():
 
 @pytest.mark.parametrize("heads", [16, 64, 128])
 def test_nope_attention_native_512_and_cuda_graph(heads):
-    from lightllm.common.basemodel.attention.base_att import AttControl
+    from lightllm.common.basemodel.attention.params import NsaPrefillAttParams
     from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparsePrefillState, Glm5NextSparseDecodeState
 
     if torch.cuda.get_device_capability()[0] != 9:
@@ -522,9 +522,7 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
         return torch.stack(expected)
 
     expected = reference()
-    control = AttControl(
-        nsa_prefill_dict={"topk_mem_indices": indexes, "softmax_scale": 0.0625, "kv_lora_rank": kv.shape[-1]}
-    )
+    control = NsaPrefillAttParams(topk_mem_indices=indexes, softmax_scale=0.0625, kv_lora_rank=kv.shape[-1])
     prefill_state = Glm5NextSparsePrefillState()
     prefill = prefill_state._nsa_prefill_att(q, kv, control)
     torch.testing.assert_close(prefill.float(), expected, atol=0.012, rtol=0.015)

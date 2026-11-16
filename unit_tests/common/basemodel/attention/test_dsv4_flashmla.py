@@ -175,7 +175,7 @@ def test_prefill_matches_reference_and_preserves_out(monkeypatch, heads, ratio, 
         q,
         pool,
         None,
-        att_control=attention.AttControl(nsa_prefill=True, nsa_prefill_dict=params),
+        params=attention.Dsv4NsaAttParams(**params),
         alloc_func=alloc_output,
         out=out,
     )
@@ -216,14 +216,14 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
         state_info.input_ids = torch.zeros(q.shape[0], dtype=torch.int64, device=q.device)
         state_info.q = q
         state_info.packed_kv = packed_kv
-        state_info.att_control = attention.AttControl(nsa_decode=True, nsa_decode_dict=params)
+        state_info.att_control = attention.Dsv4NsaAttParams(**params)
         state_info.decode_att_state = backend.create_att_decode_state(state_info)
         state_info.decode_att_state.init_state()
         cases.append((state_info, decoded, extra_decoded, params))
 
     def decode_func(*states):
         outputs = tuple(
-            state.decode_att_state.decode_att(state.q, state.packed_kv, None, att_control=state.att_control)
+            state.decode_att_state.decode_att(state.q, state.packed_kv, None, params=state.att_control)
             for state in states
         )
         return outputs if overlap else outputs[0]
@@ -265,9 +265,7 @@ def test_prefill_out_supports_strided_scratch_buffer(heads):
     out = storage[..., :512]
     state = backend.create_att_prefill_state(state_info)
     state.init_state()
-    actual = state.prefill_att(
-        q, pool, None, out=out, att_control=attention.AttControl(nsa_prefill=True, nsa_prefill_dict=params)
-    )
+    actual = state.prefill_att(q, pool, None, out=out, params=attention.Dsv4NsaAttParams(**params))
     assert actual.data_ptr() == out.data_ptr()
     assert actual.stride() == out.stride()
     assert storage[..., 512:].isnan().all()

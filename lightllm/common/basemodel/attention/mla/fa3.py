@@ -2,7 +2,8 @@ import dataclasses
 import weakref
 import torch
 import triton
-from ..base_att import BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BasePrefillAttState, BaseDecodeAttState
+from ..params import MlaAttParams
 from typing import Optional, TYPE_CHECKING, Tuple
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params, page_table_copy
@@ -22,6 +23,7 @@ class MlaFa3AttBackend(Fa3AttBackend):
 
 @dataclasses.dataclass
 class MlaFa3PrefillAttState(BasePrefillAttState):
+    params_type = MlaAttParams
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
     causal: bool = None
@@ -36,24 +38,20 @@ class MlaFa3PrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: Tuple[torch.Tensor, torch.Tensor],
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: MlaAttParams = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
+        params = self._check_params(params)
         return self._mla_prefill_att(
             q=q,
             k=k,
             v=v,
-            att_control=att_control,
+            params=params,
             alloc_func=alloc_func,
         )
 
     def _mla_prefill_att(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, att_control: AttControl, alloc_func=torch.empty
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, params: MlaAttParams, alloc_func=torch.empty
     ) -> torch.Tensor:
         self.backend: MlaFa3AttBackend = self.backend  # for typing
         k_nope, k_rope = k
@@ -62,8 +60,7 @@ class MlaFa3PrefillAttState(BasePrefillAttState):
 
         assert q.ndim == 3 and k.ndim == 3 and v.ndim == 3
 
-        assert att_control.mla_prefill
-        softmax_scale = att_control.mla_prefill_dict["softmax_scale"]
+        softmax_scale = params.softmax_scale
 
         o_tensor = flash_attn_varlen_func(
             q=q,
@@ -82,6 +79,7 @@ class MlaFa3PrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class MlaFa3DecodeAttState(BaseDecodeAttState):
+    params_type = MlaAttParams
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
     page_table: torch.Tensor = None
@@ -184,21 +182,17 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
         q: Tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: MlaAttParams = None,
         alloc_func=torch.empty,
     ):
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
+        params = self._check_params(params)
         assert v is None
 
         return self._mla_decode_att(
             q=q,
             k=k,
             v=v,
-            att_control=att_control,
+            params=params,
             alloc_func=alloc_func,
         )
 
@@ -207,7 +201,7 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
         q: Tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: MlaAttParams = None,
         alloc_func=torch.empty,
     ):
         q_nope, q_rope = q
@@ -217,8 +211,7 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
         k_rope = kv[:, :, -qk_rope_head_dim:].view(-1, self.backend.infer_page_size, 1, qk_rope_head_dim)
         kv_nope = kv[:, :, :-qk_rope_head_dim].view(-1, self.backend.infer_page_size, 1, kv_lora_rank)
         k_descale, v_descale = None, None
-        assert att_control.mla_decode
-        softmax_scale = att_control.mla_decode_dict["softmax_scale"]
+        softmax_scale = params.softmax_scale
 
         o_tensor = flash_attn_with_kvcache(
             q=q_rope,

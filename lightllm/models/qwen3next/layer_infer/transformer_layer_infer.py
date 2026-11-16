@@ -8,7 +8,8 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
-from lightllm.common.basemodel.attention.base_att import AttControl, LINEAR_SLOT
+from lightllm.common.basemodel.attention.base_att import LINEAR_SLOT
+from lightllm.common.basemodel.attention.params import GdnAttParams
 from typing import Tuple
 from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
 from lightllm.distributed import all_reduce
@@ -216,13 +217,10 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
                 q=None,
                 k=None,
                 v=None,
-                att_control=AttControl(
-                    linear_att_prefill=True,
-                    linear_att_prefill_dict={
-                        "mixed_qkvzba": _mixed_qkvzba,
-                        "layer_weight": layer_weight,
-                        "layer_num": self.layer_num_,
-                    },
+                params=GdnAttParams(
+                    mixed_qkvzba=_mixed_qkvzba,
+                    layer_weight=layer_weight,
+                    layer_num=self.layer_num_,
                 ),
                 alloc_func=self.alloc_tensor,
             )
@@ -253,13 +251,10 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
                 q=None,
                 k=None,
                 v=None,
-                att_control=AttControl(
-                    linear_att_prefill=True,
-                    linear_att_prefill_dict={
-                        "mixed_qkvzba": mixed_qkvzba,
-                        "layer_weight": layer_weight,
-                        "layer_num": self.layer_num_,
-                    },
+                params=GdnAttParams(
+                    mixed_qkvzba=mixed_qkvzba,
+                    layer_weight=layer_weight,
+                    layer_num=self.layer_num_,
                 ),
                 alloc_func=self.alloc_tensor,
             )
@@ -284,13 +279,10 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             q=None,
             k=None,
             v=None,
-            att_control=AttControl(
-                linear_att_decode=True,
-                linear_att_decode_dict={
-                    "mixed_qkvzba": mixed_qkvzba,
-                    "layer_weight": layer_weight,
-                    "layer_num": self.layer_num_,
-                },
+            params=GdnAttParams(
+                mixed_qkvzba=mixed_qkvzba,
+                layer_weight=layer_weight,
+                layer_num=self.layer_num_,
             ),
             alloc_func=self.alloc_tensor,
         )

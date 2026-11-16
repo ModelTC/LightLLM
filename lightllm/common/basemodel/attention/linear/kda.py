@@ -12,11 +12,11 @@ import torch
 
 from lightllm.common.attention_state.bounded_att import KDAState
 from lightllm.common.basemodel.attention.base_att import (
-    AttControl,
     BaseAttBackend,
     BaseDecodeAttState,
     BasePrefillAttState,
 )
+from ..params import KdaAttParams
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_update
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_qkv import causal_conv1d_qkv
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
@@ -58,6 +58,7 @@ class KDALinearAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class KDAPrefillAttState(BasePrefillAttState):
+    params_type = KdaAttParams
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
@@ -70,16 +71,15 @@ class KDAPrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: KdaAttParams = None,
         alloc_func=torch.empty,
     ):
-        assert att_control.linear_att_prefill
-        params = att_control.linear_att_prefill_dict
-        layer_weight = params["layer_weight"]
-        layer_num = params["layer_num"]
-        mixed_qkv = params["mixed_qkv"]
-        raw_gate = params["raw_gate"]
-        raw_beta = params["raw_beta"]
+        params = self._check_params(params)
+        layer_weight = params.layer_weight
+        layer_num = params.layer_num
+        mixed_qkv = params.mixed_qkv
+        raw_gate = params.raw_gate
+        raw_beta = params.raw_beta
         backend: KDALinearAttBackend = self.backend
 
         state = self.infer_state.att_state_manager.get_state(
@@ -123,6 +123,7 @@ class KDAPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class KDADecodeAttState(BaseDecodeAttState):
+    params_type = KdaAttParams
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
@@ -201,16 +202,15 @@ class KDADecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: KdaAttParams = None,
         alloc_func=torch.empty,
     ):
-        assert att_control.linear_att_decode
-        params = att_control.linear_att_decode_dict
-        layer_weight = params["layer_weight"]
-        layer_num = params["layer_num"]
-        mixed_qkv = params["mixed_qkv"]
-        raw_gate = params["raw_gate"]
-        raw_beta = params["raw_beta"]
+        params = self._check_params(params)
+        layer_weight = params.layer_weight
+        layer_num = params.layer_num
+        mixed_qkv = params.mixed_qkv
+        raw_gate = params.raw_gate
+        raw_beta = params.raw_beta
         backend: KDALinearAttBackend = self.backend
 
         state = self.infer_state.att_state_manager.get_state(

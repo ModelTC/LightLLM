@@ -4,10 +4,11 @@ import weakref
 import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING, Tuple, Dict, Type
+from typing import ClassVar, FrozenSet, Optional, TYPE_CHECKING, Tuple, Type
 
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
+from .params import DenseAttParams
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -118,39 +119,38 @@ class AttBackendSlot:
         return (self.prefill, self.decode)
 
 
-@dataclass
-class AttControl:
+class _AttParamsCheck:
     """
-    prefill_att 和 decode_att 的入参，用于控制att backend 内部的行为, 选择正确的att 实现。
+    prefill_att / decode_att 入参的统一校验。子类通过两个类属性声明自己接受什么：
+
+    params_type: 接受的参数类型, 见 params.py。
+    supported_features: params_type 为 DenseAttParams 时, 该实现支持的可选特性名称。
     """
 
-    use_alibi: bool = False
-    tp_alibi: torch.Tensor = None
-    use_sliding_window: bool = False
-    sliding_window: Tuple[int, int] = (-1, -1)
-    use_att_sink: bool = False
-    sink_weight: torch.Tensor = None
-    # mla 专用传参项
-    mla_prefill: bool = False
-    mla_prefill_dict: Dict = None
-    mla_decode: bool = False
-    mla_decode_dict: Dict = None
-    # nsa (native sparse attention) 专用传参项
-    nsa_prefill: bool = False
-    nsa_prefill_dict: Dict = None
-    nsa_decode: bool = False
-    nsa_decode_dict: Dict = None
-    # linear attention 专用传参项
-    linear_att_prefill: bool = False
-    linear_att_prefill_dict: Dict = None
-    linear_att_decode: bool = False
-    linear_att_decode_dict: Dict = None
-    # 静态 FP8 标定按此逻辑层号查询 State 的物理行；其他后端可不使用。
-    logical_layer_id: Optional[int] = None
+    params_type: ClassVar[type] = DenseAttParams
+    supported_features: ClassVar[FrozenSet[str]] = frozenset()
+
+    def _check_params(self, params):
+        if params is None and self.params_type is DenseAttParams:
+            # 标准 attention 没有必填参数, 不传表示不启用任何可选特性。
+            return DenseAttParams()
+        if not isinstance(params, self.params_type):
+            raise TypeError(
+                f"{type(self).__name__} expects params of type {self.params_type.__name__}, "
+                f"got {type(params).__name__}"
+            )
+        if isinstance(params, DenseAttParams):
+            unsupported = [name for name in params.enabled_features() if name not in self.supported_features]
+            if unsupported:
+                raise NotImplementedError(
+                    f"{type(self).__name__} does not support {unsupported}; "
+                    f"supported features: {sorted(self.supported_features)}"
+                )
+        return params
 
 
 @dataclass
-class BaseAttState(ABC):
+class BaseAttState(_AttParamsCheck, ABC):
     """Attention metadata with a weak reference to its owning InferStateInfo."""
 
     backend: BaseAttBackend = None
@@ -192,12 +192,16 @@ class BasePrefillAttState(BaseAttState):
     @abstractmethod
     def prefill_att(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        q: torch.Tensor = None,
+        k: torch.Tensor = None,
+        v: torch.Tensor = None,
+        params=None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
+        """
+        q / k / v 的具体形式由 attention family 决定; linear attention 不使用它们,
+        输入全部通过 params 传入。实现需要先调用 self._check_params(params)。
+        """
         raise NotImplementedError("not impl")
 
 
@@ -214,10 +218,11 @@ class BaseDecodeAttState(BaseAttState):
     @abstractmethod
     def decode_att(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        q: torch.Tensor = None,
+        k: torch.Tensor = None,
+        v: torch.Tensor = None,
+        params=None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
+        """入参约定同 BasePrefillAttState.prefill_att。"""
         pass

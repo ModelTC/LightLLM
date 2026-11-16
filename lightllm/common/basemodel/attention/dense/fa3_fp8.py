@@ -1,13 +1,13 @@
 import dataclasses
 import weakref
 import torch
-from ..base_att import AttControl
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import (
     q_per_head_fp8_quant,
     q_per_head_static_fp8_quant,
 )
 from lightllm.utils.log_utils import init_logger
+from ..params import DenseAttParams
 from .fa3 import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
 
 
@@ -36,6 +36,9 @@ class Fp8Fa3AttBackend(Fa3AttBackend):
 
 @dataclasses.dataclass
 class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
+    # The kernels used here take none of the optional dense features.
+    supported_features = frozenset()
+
     def init_state(self):
         super().init_state()
 
@@ -44,20 +47,16 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: DenseAttParams = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
+        params = self._check_params(params)
         return self._fp8_prefill_att(
             q=q,
             k=k,
             v=v,
             alloc_func=alloc_func,
-            logical_layer_id=att_control.logical_layer_id,
+            logical_layer_id=params.logical_layer_id,
         )
 
     def _fp8_prefill_att(
@@ -119,6 +118,9 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
 
 @dataclasses.dataclass
 class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
+    # The kernels used here take none of the optional dense features.
+    supported_features = frozenset()
+
     def init_state(self):
         self.backend: Fp8Fa3AttBackend = self.backend
 
@@ -129,20 +131,16 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: DenseAttParams = None,
         alloc_func=torch.empty,
     ):
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
+        params = self._check_params(params)
         return self._fp8_decode_att(
             q=q,
             k=k,
             v=v,
             alloc_func=alloc_func,
-            logical_layer_id=att_control.logical_layer_id,
+            logical_layer_id=params.logical_layer_id,
         )
 
     def _fp8_decode_att(

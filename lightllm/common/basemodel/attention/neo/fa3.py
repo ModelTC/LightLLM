@@ -5,8 +5,8 @@ import warnings
 
 import torch
 
+from ..params import DenseAttParams
 from ..dense.fa3 import Fa3AttBackend, Fa3PrefillAttState
-from ..base_att import AttControl
 
 
 _NEO_FA3_INSTALL_HINT = (
@@ -46,16 +46,20 @@ class NeoFa3AttBackend(Fa3AttBackend):
 
 @dataclasses.dataclass
 class NeoFa3PrefillAttState(Fa3PrefillAttState):
+    # The kernels used here take none of the optional dense features.
+    supported_features = frozenset()
+
     def prefill_att(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: DenseAttParams = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
         # neo_chat*: image-token bidirectional attention requires flash_attn_interface
         # (sgl_kernel's flash_attn_with_kvcache does not support image_token_end).
+        params = self._check_params(params)
         if not HAS_FLASH_ATTN_INTERFACE:
             raise ImportError("Neo prefill requires FA3 with image_token_end support.\n" + _NEO_FA3_INSTALL_HINT)
         if self.infer_state.b_image_token_end is None:

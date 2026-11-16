@@ -10,7 +10,6 @@ from lightllm.models.neo_chat_moe.layer_weights.transformer_layer_weight import 
 from lightllm.distributed import all_reduce
 import torch.distributed as dist
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)

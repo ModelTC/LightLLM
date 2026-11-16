@@ -6,7 +6,8 @@ import triton
 import flash_mla as flashmla
 
 
-from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
+from ..base_att import BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
+from ..params import Dsv4NsaAttParams
 
 if TYPE_CHECKING:
     from flash_mla.flash_mla_interface import FlashMLASchedMeta
@@ -90,7 +91,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         self,
         q: torch.Tensor,
         packed_kv: Tuple[torch.Tensor, Optional[torch.Tensor]],
-        nsa_dict: dict,
+        params: Dsv4NsaAttParams,
         sched_meta: "FlashMLASchedMeta",
         out: torch.Tensor,
     ) -> torch.Tensor:
@@ -99,7 +100,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         # 原子配置提供计算视图；backend 不再计算编码字节数或解释压缩块布局。
         compressed_cache = None
         if compressed_packed is not None:
-            config = self.compressed_configs[nsa_dict["compress_ratio"]]
+            config = self.compressed_configs[params.compress_ratio]
             compressed_cache = config.get_attention_view(packed_kv=compressed_packed)
         swa_cache = self.swa_config.get_attention_view(packed_kv=swa_packed)
 
@@ -108,18 +109,18 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
             k_cache=swa_cache,
             block_table=None,
             cache_seqlens=None,
-            head_dim_v=nsa_dict["head_dim_v"],
+            head_dim_v=params.head_dim_v,
             tile_scheduler_metadata=sched_meta,
             num_splits=None,
-            softmax_scale=nsa_dict["softmax_scale"],
+            softmax_scale=params.softmax_scale,
             causal=False,
             is_fp8_kvcache=True,
-            indices=nsa_dict["swa_indices"],
-            attn_sink=nsa_dict["attn_sink"],
-            topk_length=nsa_dict["swa_lengths"],
+            indices=params.swa_indices,
+            attn_sink=params.attn_sink,
+            topk_length=params.swa_lengths,
             extra_k_cache=compressed_cache,
-            extra_indices_in_kvcache=nsa_dict.get("extra_indices"),
-            extra_topk_length=nsa_dict.get("extra_lengths"),
+            extra_indices_in_kvcache=params.extra_indices,
+            extra_topk_length=params.extra_lengths,
             out=out.unsqueeze(1),
         )
         return padded_out[:, 0]
@@ -133,6 +134,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class _PrefillAttState(BasePrefillAttState):
+    params_type = Dsv4NsaAttParams
     sched_meta_by_ratio: dict[int, "FlashMLASchedMeta"] | None = None
 
     def prepare_swa_workspace(self, infer_state):
@@ -164,20 +166,20 @@ class _PrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: Tuple[torch.Tensor, Optional[torch.Tensor]],
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: Dsv4NsaAttParams = None,
         alloc_func=torch.empty,
         *,
         out: torch.Tensor = None,
     ) -> torch.Tensor:
-        nsa_dict = att_control.nsa_prefill_dict
+        params = self._check_params(params)
         if out is None:
-            out = alloc_func((q.shape[0], q.shape[1], nsa_dict["head_dim_v"]), dtype=q.dtype, device=q.device)
+            out = alloc_func((q.shape[0], q.shape[1], params.head_dim_v), dtype=q.dtype, device=q.device)
 
         padded_out = self.backend._flashmla_att(
             q,
             k,
-            nsa_dict,
-            self.sched_meta_by_ratio[nsa_dict["compress_ratio"]],
+            params,
+            self.sched_meta_by_ratio[params.compress_ratio],
             out=out,
         )
         return padded_out[:, : self.backend.tp_q_head_num]
@@ -185,6 +187,7 @@ class _PrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class _DecodeAttState(BaseDecodeAttState):
+    params_type = Dsv4NsaAttParams
     sched_meta_by_ratio: dict[int, "FlashMLASchedMeta"] | None = None
     capture_sched_meta_by_ratio: dict[int, "FlashMLASchedMeta"] | None = None
 
@@ -200,19 +203,19 @@ class _DecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: Tuple[torch.Tensor, Optional[torch.Tensor]],
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: Dsv4NsaAttParams = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        nsa_dict = att_control.nsa_decode_dict
+        params = self._check_params(params)
         sched_meta_by_ratio = (
             self.capture_sched_meta_by_ratio if torch.cuda.is_current_stream_capturing() else self.sched_meta_by_ratio
         )
-        out = alloc_func((q.shape[0], q.shape[1], nsa_dict["head_dim_v"]), dtype=q.dtype, device=q.device)
+        out = alloc_func((q.shape[0], q.shape[1], params.head_dim_v), dtype=q.dtype, device=q.device)
         padded_out = self.backend._flashmla_att(
             q,
             k,
-            nsa_dict,
-            sched_meta_by_ratio[nsa_dict["compress_ratio"]],
+            params,
+            sched_meta_by_ratio[params.compress_ratio],
             out=out,
         )
         return padded_out[:, : self.backend.tp_q_head_num]

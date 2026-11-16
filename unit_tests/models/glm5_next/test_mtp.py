@@ -145,7 +145,7 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
 def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mode, mtp_step):
     from types import SimpleNamespace
 
-    from lightllm.common.basemodel.attention.base_att import AttControl
+    from lightllm.common.basemodel.attention.params import KdaAttParams
     from lightllm.common.basemodel.attention.linear.kda import KDADecodeAttState
     from lightllm.common.basemodel.attention.linear.replay_kda import (
         ReplayKDADecodeAttState,
@@ -264,16 +264,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
         None,
         None,
         None,
-        AttControl(
-            linear_att_decode=True,
-            linear_att_decode_dict=dict(
-                layer_weight=weight,
-                layer_num=0,
-                mixed_qkv=mixed,
-                raw_gate=gate,
-                raw_beta=beta,
-            ),
-        ),
+        KdaAttParams(layer_weight=weight, layer_num=0, mixed_qkv=mixed, raw_gate=gate, raw_beta=beta),
     )
     torch.testing.assert_close(
         actual.reshape(tokens, heads, dim)[:row],

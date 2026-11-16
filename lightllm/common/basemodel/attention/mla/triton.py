@@ -1,7 +1,8 @@
 import dataclasses
 import weakref
 import torch
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState
+from ..params import MlaAttParams
 from typing import Tuple
 
 
@@ -15,6 +16,8 @@ class MlaTritonAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class MlaTritonPrefillAttState(BasePrefillAttState):
+    params_type = MlaAttParams
+
     def init_state(self):
         pass
 
@@ -23,26 +26,22 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: Tuple[torch.Tensor, torch.Tensor],
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: MlaAttParams = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
+        params = self._check_params(params)
         if q.shape[2] == 256:
             # glm model
-            return self._contiguous_kv_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
+            return self._contiguous_kv_prefill_att(q=q, k=k, v=v, params=params, alloc_func=alloc_func)
         else:
-            return self._mla_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
+            return self._mla_prefill_att(q=q, k=k, v=v, params=params, alloc_func=alloc_func)
 
     def _mla_prefill_att(
         self,
         q: torch.Tensor,
         k: Tuple[torch.Tensor, torch.Tensor],
         v: torch.Tensor,
-        att_control: AttControl,
+        params: MlaAttParams,
         alloc_func=torch.empty,
     ):
         from ...triton_kernel.mla_att.prefill_att import context_attention_fwd_with_v
@@ -51,8 +50,7 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
         q_nope, q_rope = q[:, :, :-qk_rope_head_dim], q[:, :, -qk_rope_head_dim:]
         o_tensor = alloc_func((q_nope.shape[0], q_nope.shape[1], v.shape[-1]), dtype=q_nope.dtype, device=q.device)
         k_nope, k_rope = k
-        assert att_control.mla_prefill
-        softmax_scale = att_control.mla_prefill_dict["softmax_scale"]
+        softmax_scale = params.softmax_scale
         context_attention_fwd_with_v(
             q_nope,
             q_rope,
@@ -74,7 +72,7 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: Tuple[torch.Tensor, torch.Tensor],
         v: torch.Tensor,
-        att_control: AttControl,
+        params: MlaAttParams,
         alloc_func=torch.empty,
     ):
         from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
@@ -102,6 +100,8 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class MlaTritonDecodeAttState(BaseDecodeAttState):
+    params_type = MlaAttParams
+
     def init_state(self):
         pass
 
@@ -110,21 +110,17 @@ class MlaTritonDecodeAttState(BaseDecodeAttState):
         q: Tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: MlaAttParams = None,
         alloc_func=torch.empty,
     ):
-        assert (
-            att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-            and att_control.use_alibi is False
-        )
+        params = self._check_params(params)
         assert v is None
 
         return self._mla_decode_att(
             q=q,
             k=k,
             v=v,
-            att_control=att_control,
+            params=params,
             alloc_func=alloc_func,
         )
 
@@ -133,11 +129,10 @@ class MlaTritonDecodeAttState(BaseDecodeAttState):
         q: Tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl,
+        params: MlaAttParams,
         alloc_func=torch.empty,
     ):
-        assert att_control.mla_decode
-        softmax_scale = att_control.mla_decode_dict["softmax_scale"]
+        softmax_scale = params.softmax_scale
 
         from ...triton_kernel.mla_att.decode_att import gqa_token_decode_attention_flash_decoding
 

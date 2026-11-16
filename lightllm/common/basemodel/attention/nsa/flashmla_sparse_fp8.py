@@ -3,7 +3,8 @@ import weakref
 import torch
 from typing import TYPE_CHECKING, Tuple
 
-from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
+from ..base_att import BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
+from ..params import NsaDecodeAttParams, NsaPrefillAttParams
 from lightllm.utils.dist_utils import get_current_device_id
 
 if TYPE_CHECKING:
@@ -28,6 +29,7 @@ class NsaFlashMlaFp8SparseAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
+    params_type = NsaPrefillAttParams
     ks: torch.Tensor = None
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
@@ -58,27 +60,25 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: NsaPrefillAttParams = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.nsa_prefill, "nsa_prefill must be True for NSA prefill attention"
-        assert att_control.nsa_prefill_dict is not None, "nsa_prefill_dict is required"
-        return self._nsa_prefill_att(q=q, packed_kv=k, att_control=att_control)
+        params = self._check_params(params)
+        return self._nsa_prefill_att(q=q, packed_kv=k, params=params)
 
     def _nsa_prefill_att(
         self,
         q: torch.Tensor,
         packed_kv: torch.Tensor,
-        att_control: AttControl,
+        params: NsaPrefillAttParams,
     ) -> torch.Tensor:
         import flash_mla
 
-        nsa_dict = att_control.nsa_prefill_dict
-        topk_indices = nsa_dict["topk_indices"]
-        softmax_scale = nsa_dict["softmax_scale"]
-        kv_lora_rank = nsa_dict["kv_lora_rank"]
-        topk_mem_indices = nsa_dict["topk_mem_indices"]
-        prefill_cache_kv = nsa_dict["prefill_cache_kv"]
+        topk_indices = params.topk_indices
+        softmax_scale = params.softmax_scale
+        kv_lora_rank = params.kv_lora_rank
+        topk_mem_indices = params.topk_mem_indices
+        prefill_cache_kv = params.prefill_cache_kv
 
         if self.infer_state.max_cache_len > 0:
             # 当前推理生成的token kv部分从 prefill_cache_kv 中获取，历史
@@ -113,6 +113,7 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
+    params_type = NsaDecodeAttParams
     ks: torch.Tensor = None
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
@@ -157,25 +158,23 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
         q: Tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: NsaDecodeAttParams = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.nsa_decode, "nsa_decode must be True for NSA decode attention"
-        assert att_control.nsa_decode_dict is not None, "nsa_decode_dict is required"
-        return self._nsa_decode_att(q=q, packed_kv=k, att_control=att_control)
+        params = self._check_params(params)
+        return self._nsa_decode_att(q=q, packed_kv=k, params=params)
 
     def _nsa_decode_att(
         self,
         q: Tuple[torch.Tensor, torch.Tensor],
         packed_kv: torch.Tensor,
-        att_control: AttControl,
+        params: NsaDecodeAttParams,
     ) -> torch.Tensor:
         import flash_mla
 
-        nsa_dict = att_control.nsa_decode_dict
-        topk_mem_indices = nsa_dict["topk_mem_indices"]
-        softmax_scale = nsa_dict["softmax_scale"]
-        kv_lora_rank = nsa_dict["kv_lora_rank"]
+        topk_mem_indices = params.topk_mem_indices
+        softmax_scale = params.softmax_scale
+        kv_lora_rank = params.kv_lora_rank
 
         if topk_mem_indices.ndim == 2:
             topk_mem_indices = topk_mem_indices.unsqueeze(1)

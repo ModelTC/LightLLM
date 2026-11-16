@@ -2,7 +2,7 @@ from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 from lightllm.models.gpt_oss.layer_weights.transformer_layer_weight import GptOssTransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer, LlamaInferStateInfo
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.params import DenseAttParams
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -69,10 +69,8 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
     ):
         if self.network_config_["layer_types"][self.layer_num_] == "sliding_attention":
             window_size = (self.sliding_window - 1, 0)
-            use_sliding_window = True
         else:
-            window_size = (-1, -1)
-            use_sliding_window = False
+            window_size = None
 
         state = infer_state.att_state_manager.get_state(
             model_role=infer_state.att_state_role,
@@ -86,12 +84,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
             q=_q,
             k=_k,
             v=_v,
-            att_control=AttControl(
-                use_sliding_window=use_sliding_window,
-                sliding_window=window_size,
-                use_att_sink=True,
-                sink_weight=layer_weight.attn_sinks.weight,
-            ),
+            params=DenseAttParams(sliding_window=window_size, sink_weight=layer_weight.attn_sinks.weight),
             alloc_func=self.alloc_tensor,
         )
         o_tensor = o_tensor.view(q.shape)
@@ -102,10 +95,8 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
     ):
         if self.network_config_["layer_types"][self.layer_num_] == "sliding_attention":
             window_size = (self.sliding_window - 1, 0)
-            use_sliding_window = True
         else:
-            window_size = (-1, -1)
-            use_sliding_window = False
+            window_size = None
 
         state = infer_state.att_state_manager.get_state(
             model_role=infer_state.att_state_role,
@@ -119,12 +110,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
             q=_q,
             k=_k,
             v=_v,
-            att_control=AttControl(
-                use_sliding_window=use_sliding_window,
-                sliding_window=window_size,
-                use_att_sink=True,
-                sink_weight=layer_weight.attn_sinks.weight,
-            ),
+            params=DenseAttParams(sliding_window=window_size, sink_weight=layer_weight.attn_sinks.weight),
             alloc_func=self.alloc_tensor,
         )
         o_tensor = o_tensor.view(q.shape)

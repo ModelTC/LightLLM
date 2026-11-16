@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn as nn
 
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.params import DenseAttParams
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
@@ -180,11 +180,11 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     # ----- Attention kernels (sliding window + per-layer KV reshape) ---
 
-    def _att_control(self):
+    def _att_params(self) -> DenseAttParams:
         if self.is_sliding and self.sliding_window_ > 0:
             w = self.sliding_window_ - 1
-            return AttControl(use_sliding_window=True, sliding_window=(w, 0), logical_layer_id=self.layer_num_)
-        return AttControl(use_sliding_window=False, sliding_window=(-1, -1), logical_layer_id=self.layer_num_)
+            return DenseAttParams(sliding_window=(w, 0), logical_layer_id=self.layer_num_)
+        return DenseAttParams(logical_layer_id=self.layer_num_)
 
     def _get_layer_kv(self, infer_state: InferStateInfo):
         # 直接用当前逻辑层号访问；共享层由 State 的 logical_layer_groups 映射到生产层的物理 KV。
@@ -246,7 +246,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         # Full-attn layers: head_dim=512, no SWA, no image bidi — standard
         # triton via the full-attention slot.
         o_tensor = infer_state.prefill_att_states[FULL_ATT_SLOT].prefill_att(
-            q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor
+            q=_q, k=_k, v=_v, params=self._att_params(), alloc_func=self.alloc_tensor
         )
         return o_tensor.view(q.shape)
 
@@ -260,7 +260,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         _k, _v = self._get_layer_kv(infer_state)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         att_state = infer_state.decode_att_state if self.is_sliding else infer_state.decode_att_states[FULL_ATT_SLOT]
-        o_tensor = att_state.decode_att(q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor)
+        o_tensor = att_state.decode_att(q=_q, k=_k, v=_v, params=self._att_params(), alloc_func=self.alloc_tensor)
         return o_tensor.view(q.shape)
 
     # ----- FFN (Gemma gelu-tanh, fused gate_up + down) -----------------

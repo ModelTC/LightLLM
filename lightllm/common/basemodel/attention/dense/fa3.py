@@ -2,7 +2,8 @@ import dataclasses
 import weakref
 import torch
 import triton
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState
+from ..params import DenseAttParams
 from typing import Optional, TYPE_CHECKING
 from lightllm.utils.envs_utils import enable_env_vars
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache, flash_attn_with_kvcache_autotune
@@ -88,6 +89,7 @@ class Fa3AttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class Fa3PrefillAttState(BasePrefillAttState):
+    supported_features = frozenset({"sliding_window", "sink_weight"})
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
     page_table: torch.Tensor = None
@@ -117,32 +119,26 @@ class Fa3PrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: DenseAttParams = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.use_alibi is False
+        params = self._check_params(params)
         return self._nomarl_prefill_att(
             q=q,
             k=k,
             v=v,
-            att_control=att_control,
+            params=params,
             alloc_func=alloc_func,
         )
 
     def _nomarl_prefill_att(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, att_control: AttControl, alloc_func=torch.empty
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, params: DenseAttParams, alloc_func=torch.empty
     ) -> torch.Tensor:
         self.backend: Fa3AttBackend = self.backend  # for typing
 
-        if att_control.use_sliding_window:
-            window_size = att_control.sliding_window
-        else:
-            window_size = (-1, -1)
+        window_size = params.sliding_window if params.sliding_window is not None else (-1, -1)
 
-        if att_control.use_att_sink:
-            sink_weight: torch.Tensor = att_control.sink_weight
-        else:
-            sink_weight = None
+        sink_weight: Optional[torch.Tensor] = params.sink_weight
 
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
@@ -170,6 +166,7 @@ class Fa3PrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class Fa3DecodeAttState(BaseDecodeAttState):
+    supported_features = frozenset({"sliding_window", "sink_weight"})
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
     page_table: torch.Tensor = None
@@ -275,15 +272,15 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: DenseAttParams = None,
         alloc_func=torch.empty,
     ):
-        assert att_control.use_alibi is False
+        params = self._check_params(params)
         return self._normal_decode_att(
             q=q,
             k=k,
             v=v,
-            att_control=att_control,
+            params=params,
             alloc_func=alloc_func,
         )
 
@@ -292,18 +289,12 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl,
+        params: DenseAttParams,
         alloc_func=torch.empty,
     ):
-        if att_control.use_sliding_window:
-            window_size = att_control.sliding_window
-        else:
-            window_size = (-1, -1)
+        window_size = params.sliding_window if params.sliding_window is not None else (-1, -1)
 
-        if att_control.use_att_sink:
-            sink_weight: torch.Tensor = att_control.sink_weight
-        else:
-            sink_weight = None
+        sink_weight: Optional[torch.Tensor] = params.sink_weight
 
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]

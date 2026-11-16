@@ -2,7 +2,8 @@ import dataclasses
 import weakref
 import torch
 import triton
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState
+from ..params import MlaAttParams
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 from ...triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from ...triton_kernel.repack_kv_index import repack_kv_index
@@ -66,6 +67,7 @@ class MlaFlashInferAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class MlaFlashInferPrefillAttState(BasePrefillAttState):
+    params_type = MlaAttParams
     prefill_wrapper: object = None
 
     def init_state(self):
@@ -101,14 +103,10 @@ class MlaFlashInferPrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: Tuple[torch.Tensor, torch.Tensor],
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: MlaAttParams = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
+        params = self._check_params(params)
         return self._mla_prefill_att(
             q=q,
             k=k,
@@ -130,6 +128,7 @@ class MlaFlashInferPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class MlaFlashInferDecodeAttState(BaseDecodeAttState):
+    params_type = MlaAttParams
     kv_indices: torch.Tensor = None
     kv_starts: torch.Tensor = None
     q_indptr_host: torch.Tensor = None
@@ -228,22 +227,18 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         q: Tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: MlaAttParams = None,
         alloc_func=torch.empty,
     ):
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
 
+        params = self._check_params(params)
         assert v is None
 
         return self._mla_decode_att(
             q=q,
             k=k,
             v=v,
-            att_control=att_control,
+            params=params,
             alloc_func=alloc_func,
         )
 
@@ -252,13 +247,12 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         q: Tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl,
+        params: MlaAttParams,
         alloc_func=torch.empty,
     ):
         qk_rope_head_dim = 64
         q_nope, q_rope = q
         o_tensor = alloc_func(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
-        assert att_control.mla_decode
 
         self.decode_wrapper.run(
             q_nope,

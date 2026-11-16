@@ -4,7 +4,8 @@ import weakref
 import torch
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState
+from ..params import GdnAttParams
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
 from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import fused_gdn_gating
@@ -109,6 +110,7 @@ class LinearAttBackend(BaseAttBackend, ABC):
 
 @dataclasses.dataclass
 class LinearAttPrefillAttState(BasePrefillAttState):
+    params_type = GdnAttParams
 
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
@@ -128,16 +130,14 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: GdnAttParams = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.linear_att_prefill, "linear_att_prefill must be True for Linear prefill attention"
-        assert att_control.linear_att_prefill_dict is not None, "linear_att_prefill_dict is required"
 
-        linear_att_dict = att_control.linear_att_prefill_dict
-        mixed_qkvzba: torch.Tensor = linear_att_dict["mixed_qkvzba"]
-        layer_weight = linear_att_dict["layer_weight"]
-        layer_num = linear_att_dict["layer_num"]
+        params = self._check_params(params)
+        mixed_qkvzba: torch.Tensor = params.mixed_qkvzba
+        layer_weight = params.layer_weight
+        layer_num = params.layer_num
         backend: LinearAttBackend = self.backend
 
         state = self.infer_state.att_state_manager.get_state(
@@ -207,6 +207,7 @@ class LinearAttPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class LinearAttDecodeAttState(BaseDecodeAttState):
+    params_type = GdnAttParams
 
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
@@ -286,16 +287,14 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        params: GdnAttParams = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.linear_att_decode, "linear_att_decode must be True for Linear decode attention"
-        assert att_control.linear_att_decode_dict is not None, "linear_att_decode_dict is required"
 
-        linear_att_dict = att_control.linear_att_decode_dict
-        mixed_qkvzba = linear_att_dict["mixed_qkvzba"]
-        layer_weight = linear_att_dict["layer_weight"]
-        layer_num = linear_att_dict["layer_num"]
+        params = self._check_params(params)
+        mixed_qkvzba = params.mixed_qkvzba
+        layer_weight = params.layer_weight
+        layer_num = params.layer_num
         backend: LinearAttBackend = self.backend
 
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)

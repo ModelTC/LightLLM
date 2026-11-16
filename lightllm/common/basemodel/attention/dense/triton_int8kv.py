@@ -2,7 +2,8 @@ import dataclasses
 import weakref
 import torch
 from lightllm.utils.envs_utils import get_env_start_args
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState
+from ..params import DenseAttParams
 from typing import Optional, Tuple
 from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
 from lightllm.common.basemodel.triton_kernel.diverse_utils import build_diverse_shared_group_markers
@@ -37,15 +38,11 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
         q: torch.Tensor,
         k: Tuple[torch.Tensor, torch.Tensor],
         v: Tuple[torch.Tensor, torch.Tensor],
-        att_control: AttControl = AttControl(),
+        params: DenseAttParams = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
 
+        params = self._check_params(params)
         self.backend: Int8kvTritonAttBackend = self.backend  # for typing
 
         k, k_scale = k
@@ -135,14 +132,10 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: Tuple[torch.Tensor, torch.Tensor],
         v: Tuple[torch.Tensor, torch.Tensor],
-        att_control: AttControl = AttControl(),
+        params: DenseAttParams = None,
         alloc_func=torch.empty,
     ):
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
+        params = self._check_params(params)
         k, k_scale = k
         v, v_scale = v
         if enable_diverse_mode_gqa_decode_fast_kernel():

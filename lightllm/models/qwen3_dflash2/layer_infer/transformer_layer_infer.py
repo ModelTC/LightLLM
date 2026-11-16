@@ -1,5 +1,5 @@
 from lightllm.common.attention_state.full_att import FullAttentionState
-from lightllm.common.basemodel.attention import AttControl
+from lightllm.common.basemodel.attention import DenseAttParams
 from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
 from lightllm.models.qwen3_dflash2.triton_kernel import grouped_dynamic_conv
 
@@ -32,10 +32,9 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
             q=q,
             k=k,
             v=v,
-            att_control=AttControl(
+            params=DenseAttParams(
                 logical_layer_id=self.layer_num_,
-                use_sliding_window=use_sliding_window,
-                sliding_window=(window, window) if use_sliding_window else (-1, -1),
+                sliding_window=(window, window) if use_sliding_window else None,
             ),
             alloc_func=self.alloc_tensor,
         )

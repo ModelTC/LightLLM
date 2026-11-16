@@ -17,7 +17,8 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.allocators import FullAttKVAllocator
-from lightllm.common.basemodel.attention.base_att import AttControl, BaseAttBackend
+from lightllm.common.basemodel.attention.base_att import BaseAttBackend
+from lightllm.common.basemodel.attention.params import DenseAttParams
 from lightllm.common.basemodel.attention.dense import fa3_fp8 as fa3
 from lightllm.common.basemodel.attention.dense import flashinfer_fp8 as flashinfer
 from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -128,7 +129,7 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
             q=q,
             k=k,
             v=v,
-            att_control=AttControl(logical_layer_id=8),
+            params=DenseAttParams(logical_layer_id=8),
             alloc_func=allocate,
         )
     else:
@@ -136,7 +137,7 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
             q=q,
             k=k,
             v=v,
-            att_control=AttControl(logical_layer_id=8),
+            params=DenseAttParams(logical_layer_id=8),
             alloc_func=allocate,
         )
     if kind == "static_head":

@@ -14,7 +14,16 @@ Layout: one directory per attention family (the registry key), one module per ke
 Backend modules are imported lazily by the registry, so they must not be imported here.
 """
 
-from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState
+from .params import (
+    DenseAttParams,
+    MlaAttParams,
+    NsaPrefillAttParams,
+    NsaDecodeAttParams,
+    Dsv4NsaAttParams,
+    GdnAttParams,
+    KdaAttParams,
+)
 from .base_att import AttBackendSlot, MAIN_SLOT, LINEAR_SLOT
 from .registry import (
     PREFILL,

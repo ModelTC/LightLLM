@@ -60,7 +60,7 @@ def test_default_decode_cuda_graph_copy_refreshes_tensor_fields_in_place():
         def init_state(self):
             pass
 
-        def decode_att(self, q, k, v, att_control=None, alloc_func=torch.empty):
+        def decode_att(self, q, k, v, params=None, alloc_func=torch.empty):
             return q
 
     shared = torch.tensor([7, 7])

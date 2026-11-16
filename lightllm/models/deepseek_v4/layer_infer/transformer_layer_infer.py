@@ -1,7 +1,7 @@
 import torch
 import triton
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.params import Dsv4NsaAttParams
 from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_post_pre_norm, hc_pre_norm
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_sm100_mega_moe
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
@@ -499,21 +499,18 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         out=None,
     ):
         meta = self._compress_and_index(q_lora, x, infer_state, layer_weight)
-        att_control = AttControl(
-            nsa_prefill=True,
-            nsa_prefill_dict={
-                "compress_ratio": self.compress_ratio,
-                "head_dim_v": self.v_head_dim,
-                "softmax_scale": self.softmax_scale,
-                "attn_sink": layer_weight.attn_sink_.weight,
-                **meta,
-            },
+        params = Dsv4NsaAttParams(
+            compress_ratio=self.compress_ratio,
+            head_dim_v=self.v_head_dim,
+            softmax_scale=self.softmax_scale,
+            attn_sink=layer_weight.attn_sink_.weight,
+            **meta,
         )
         return infer_state.prefill_att_state.prefill_att(
             q=q,
             k=infer_state.prefill_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
             v=None,
-            att_control=att_control,
+            params=params,
             alloc_func=self.alloc_tensor,
             out=out,
         )
@@ -530,21 +527,18 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         self, q, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
         meta = self._compress_and_index(q_lora, x, infer_state, layer_weight)
-        att_control = AttControl(
-            nsa_decode=True,
-            nsa_decode_dict={
-                "compress_ratio": self.compress_ratio,
-                "head_dim_v": self.v_head_dim,
-                "softmax_scale": self.softmax_scale,
-                "attn_sink": layer_weight.attn_sink_.weight,
-                **meta,
-            },
+        params = Dsv4NsaAttParams(
+            compress_ratio=self.compress_ratio,
+            head_dim_v=self.v_head_dim,
+            softmax_scale=self.softmax_scale,
+            attn_sink=layer_weight.attn_sink_.weight,
+            **meta,
         )
         return infer_state.decode_att_state.decode_att(
             q=q,
             k=infer_state.decode_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
             v=None,
-            att_control=att_control,
+            params=params,
         )
 
     # ------------------------------------------------------------------ moe

@@ -78,7 +78,6 @@ class TestLazyAttentionImports(unittest.TestCase):
                         "BaseAttBackend",
                         "BasePrefillAttState",
                         "BaseDecodeAttState",
-                        "AttControl",
                         "AttBackendSlot",
                     )
                 },

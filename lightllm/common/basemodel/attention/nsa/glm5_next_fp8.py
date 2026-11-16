@@ -77,7 +77,7 @@ class Fp8Glm5NextSparseAttBackend(BaseAttBackend):
 @dataclasses.dataclass
 class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
     @torch.no_grad()
-    def _nsa_prefill_att(self, q, packed_kv, att_control):
+    def _nsa_prefill_att(self, q, packed_kv, params):
         from sgl_kernel.flash_attn import flash_attn_with_kvcache
         from lightllm.models.glm5_next.triton_kernel.fp8_prefill import (
             _gather_prefill_kv_kernel,
@@ -85,12 +85,11 @@ class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
             _merge_att_output_kernel,
         )
 
-        nsa_prefill_dict = att_control.nsa_prefill_dict
         infer_state = self.infer_state
         q_token_num, q_head_num, _ = q.shape
-        prefill_cache_kv = nsa_prefill_dict["prefill_cache_kv"]
-        topk_indices = nsa_prefill_dict["topk_indices"]
-        softmax_scale = nsa_prefill_dict["softmax_scale"]
+        prefill_cache_kv = params.prefill_cache_kv
+        topk_indices = params.topk_indices
+        softmax_scale = params.softmax_scale
         req_to_token_indexs = infer_state.req_manager.req_to_token_indexs
         b_req_idx = infer_state.b_req_idx
         b1_cu_kv_seq_len = infer_state.b1_cu_kv_seq_len
@@ -192,14 +191,13 @@ class Fp8Glm5NextSparseDecodeState(Glm5NextSparseDecodeState):
         self.q_req_idx = self.infer_state.b_req_idx
         self.flashmla_sched_meta, _ = flash_mla.get_mla_metadata()
 
-    def _nsa_decode_att(self, q, packed_kv, att_control):
+    def _nsa_decode_att(self, q, packed_kv, params):
         import flash_mla
 
         from lightllm.models.glm5_next.triton_kernel import fp8_sparse_decode
         from lightllm.models.glm5_next.triton_kernel.pad_query_heads import pad_query_heads
 
-        nsa_decode_dict = att_control.nsa_decode_dict
-        topk_mem_indices = nsa_decode_dict["topk_mem_indices"]
+        topk_mem_indices = params.topk_mem_indices
         if topk_mem_indices.ndim == 2:
             topk_mem_indices = topk_mem_indices.unsqueeze(1)
         assert topk_mem_indices.shape[1] == 1, "FlashMLA sparse decode path currently expects seq_len_q == 1"
@@ -210,13 +208,11 @@ class Fp8Glm5NextSparseDecodeState(Glm5NextSparseDecodeState):
             q_nope,
             packed_kv,
             topk_mem_indices,
-            nsa_decode_dict["kv_lora_rank"],
+            params.kv_lora_rank,
             self.decode_topk_bound,
             is_cuda_graph_capture=self.infer_state.is_cuda_graph_capture,
         ):
-            return fp8_sparse_decode.fp8_sparse_direct_decode(
-                q_nope, packed_kv, topk_mem_indices, nsa_decode_dict["softmax_scale"]
-            )
+            return fp8_sparse_decode.fp8_sparse_direct_decode(q_nope, packed_kv, topk_mem_indices, params.softmax_scale)
         padded_q = pad_query_heads(q_nope, is_cuda_graph_capture=self.infer_state.is_cuda_graph_capture)
         kv_cache = torch.as_strided(
             packed_kv,
@@ -228,9 +224,9 @@ class Fp8Glm5NextSparseDecodeState(Glm5NextSparseDecodeState):
             k_cache=kv_cache,
             block_table=None,
             cache_seqlens=None,
-            head_dim_v=nsa_decode_dict["kv_lora_rank"],
+            head_dim_v=params.kv_lora_rank,
             tile_scheduler_metadata=self.flashmla_sched_meta,
-            softmax_scale=nsa_decode_dict["softmax_scale"],
+            softmax_scale=params.softmax_scale,
             causal=False,
             is_fp8_kvcache=True,
             indices=topk_mem_indices,

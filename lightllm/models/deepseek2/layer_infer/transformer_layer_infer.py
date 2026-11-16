@@ -3,7 +3,7 @@ import os
 import torch
 import triton
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.params import MlaAttParams
 from lightllm.models.deepseek2.triton_kernel.sample_kv import sample_kv
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -90,7 +90,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             q=q,
             k=(k_nope, k_rope),
             v=v,
-            att_control=AttControl(mla_prefill=True, mla_prefill_dict={"softmax_scale": self.softmax_scale}),
+            params=MlaAttParams(softmax_scale=self.softmax_scale),
             alloc_func=self.alloc_tensor,
         )
         return o_tensor
@@ -116,7 +116,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             q=(q_nope, q_rope),
             k=kv,
             v=None,
-            att_control=AttControl(mla_decode=True, mla_decode_dict={"softmax_scale": self.softmax_scale}),
+            params=MlaAttParams(softmax_scale=self.softmax_scale),
             alloc_func=self.alloc_tensor,
         )
         return out
