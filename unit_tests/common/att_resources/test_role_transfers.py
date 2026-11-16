@@ -88,8 +88,8 @@ def test_main_and_draft_transfers_copy_pd_and_dp_windows(
             dst_token_indices=dst_indices,
             src_big_page_ids=[],
             dst_big_page_ids=[],
-            src_req_idx=0,
-            dst_req_idx=2,
+            src_req_indices=[0],
+            dst_req_indices=[2],
         )
     for index, role in enumerate(("main", "draft0")):
         state = target.get_full_attention_states(role)[0]

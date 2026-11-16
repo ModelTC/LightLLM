@@ -182,8 +182,8 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
                 dst_token_indices=indices,
                 src_big_page_ids=[],
                 dst_big_page_ids=[],
-                src_req_idx=int(source_req[0]),
-                dst_req_idx=int(request[0]),
+                src_req_indices=[int(source_req[0])],
+                dst_req_indices=[int(request[0])],
             )
         else:
             resources.get_pd_operator().read_page(

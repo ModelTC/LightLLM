@@ -155,7 +155,7 @@ class DPKVSharedMoudle:
                 )
                 dst_token_indices = torch.cat([task.dst_token_indices for task in tasks])
             dst_token_indices = dst_token_indices.to(device="cuda", dtype=torch.long, non_blocking=True)
-            target.get_dp_shared_operator().copy_batch_from_dp(
+            target.get_dp_shared_operator().copy_from_dp(
                 remote_att_manager=self.backend.dp_att_state_managers[src_dp_rank],
                 src_token_indices=src_token_indices,
                 dst_token_indices=dst_token_indices,

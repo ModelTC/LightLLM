@@ -52,8 +52,8 @@ def test_gqa_layouts_coexist_and_match_across_tp_and_registration_order(kv_type,
         dst_token_indices=torch.tensor([1]),
         src_big_page_ids=[],
         dst_big_page_ids=[],
-        src_req_idx=0,
-        dst_req_idx=1,
+        src_req_indices=[0],
+        dst_req_indices=[1],
     )
     assert copied == [getattr(target, state.state_name) for state in states]
 
