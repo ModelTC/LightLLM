@@ -4,6 +4,9 @@ import pytest
 import torch
 
 
+from lightllm.common.attention.api.workspace import AttentionWorkspace
+
+
 from lightllm.platform import get_device_runtime
 
 
@@ -30,6 +33,21 @@ def test_explicit_current_device_is_not_overridden_by_worker_default(monkeypatch
     assert get_device_runtime("cuda").device == torch.device("cuda:1")
     assert get_device_runtime("cuda:2").device == torch.device("cuda:2")
     assert get_device_runtime().device == torch.device("cuda:0")
+
+
+def test_captured_workspace_keeps_address_when_pool_grows():
+    pool = AttentionWorkspace("cpu")
+    first, second = pool.borrow_for_capture(), pool.borrow_for_capture()
+    old = first.scratch("scratch", 8, torch.int32)
+    assert second.scratch("scratch", 8, torch.int32).data_ptr() == old.data_ptr()
+    first.freeze()
+    grown = pool.scratch("scratch", 64, torch.int32)
+    old.fill_(17)
+    grown.fill_(29)
+    assert first.scratch("scratch", 8, torch.int32).tolist() == [17] * 8
+    with pytest.raises(RuntimeError, match="cannot grow"):
+        first.scratch("scratch", 64, torch.int32)
+    assert AttentionWorkspace("cpu").scratch("scratch", 8, torch.int32).data_ptr() != old.data_ptr()
 
 
 def test_runtime_registration_keeps_platform_validation_in_adapter(monkeypatch):
