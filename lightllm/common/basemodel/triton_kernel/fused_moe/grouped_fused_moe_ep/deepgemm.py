@@ -244,6 +244,9 @@ def chunked_expanded_moe_forward(
         dtype=hidden_dtype,
         device=recv_x[0].device,
     )
+    # GLM expanded-MoE prefill 的加速：Hopper 上把 SwiGLU 和 UE8M0 量化合成一次。
+    # 只匹配 GLM expert（hidden 4096、intermediate 2048、block 128）和它的 clamp SwiGLU
+    # （alpha=1、limit=10、不做 up+1）。warmup 以及其他模型继续走原来的两步。
     fuse_activation = (
         not is_autotune_warmup
         and get_env_use_ue8m0_scales()
@@ -273,6 +276,7 @@ def chunked_expanded_moe_forward(
                 gemm_out_a,
                 m_indices[chunk_start:chunk_end],
             )
+            # GLM 这条融合路径只在 896～32768 行更快；更短的尾 chunk 仍先激活再量化。
             if fuse_activation and 896 <= chunk_rows <= 32768:
                 qsilu_out, qsilu_out_scale = silu_and_mul_quant_fp8(
                     input=gemm_out_a,
