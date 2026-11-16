@@ -1,16 +1,31 @@
+from lightllm.common.basemodel.attention_adapters import AttentionDescription
+from typing import Iterable, Union
+
 import torch
 import torch.distributed as dist
-from typing import Dict, Iterable, Literal, Tuple, Union, List
+
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.layer_weights.base_layer_weight import BaseLayerWeight
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
-from .cache_tensor_manager import g_cache_manager
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor, all_reduce
 from lightllm.common.basemodel.triton_kernel.sp_pad_copy import sp_pad_copy
+from lightllm.distributed.communication_op import all_gather_into_tensor, all_reduce, reduce_scatter_tensor
+from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
+from lightllm.utils.envs_utils import get_env_start_args
+
+from .cache_tensor_manager import g_cache_manager
 
 
 class BaseLayerInfer:
+    def describe_attention(self, phase):
+        return AttentionDescription()
+
+    def attention_adapter(self, family):
+        from lightllm.common.basemodel.attention_adapters import ADAPTERS
+
+        return ADAPTERS[family]
+
+    def bind_attention_resources(self, model, weight, adapter):
+        return adapter.bind(model, self, weight)
+
     def __init__(self) -> None:
         self.tp_rank_ = get_current_rank_in_dp()
         self.tp_world_size_ = get_dp_world_size()

@@ -1,3 +1,6 @@
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionFeature
+
 from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 from typing import Tuple
@@ -107,3 +110,8 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         gelu_out = None
         ffn2_out = self._tpsp_reduce(ffn2_out, infer_state)
         return ffn2_out
+
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        description = replace(description, features=description.features | {AttentionFeature.ALIBI})
+        return description

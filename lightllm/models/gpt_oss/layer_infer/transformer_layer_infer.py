@@ -1,3 +1,6 @@
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionFeature
+
 from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 from lightllm.models.gpt_oss.layer_weights.transformer_layer_weight import GptOssTransformerLayerWeight
@@ -129,3 +132,10 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         o_tensor = o_tensor.view(q.shape)
         return o_tensor
+
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        description = replace(description, features=description.features | {AttentionFeature.SINK})
+        if self.network_config_["layer_types"][self.layer_num_] == "sliding_attention":
+            return replace(description, window=(self.sliding_window - 1, 0))
+        return replace(description, window=None)

@@ -1,3 +1,6 @@
+from lightllm.common.attention.selection import BackendPolicy
+from lightllm.common.attention.api import AttentionPhase
+
 import os
 import json
 from lightllm.common.build_utils import repair_config
@@ -199,3 +202,6 @@ class NeoTpMOEPartModel(NeoModelBase, Qwen3MOEModel):
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
+
+    def attention_policy(self, family, phase):
+        return BackendPolicy(prefer=("fa3", "triton")) if phase is AttentionPhase.PREFILL else BackendPolicy()

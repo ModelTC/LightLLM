@@ -1,3 +1,5 @@
+from lightllm.common.attention.selection import BackendPolicy
+
 from typing import TYPE_CHECKING
 from copy import deepcopy
 import torch
@@ -184,3 +186,16 @@ class Glm5NextMTPModel(TpPartBaseModel):
 
     def autotune_layers(self):
         return 1
+
+    def attention_policy(self, family, phase):
+        if family.is_recurrent:
+            return BackendPolicy(prefer=("triton",))
+        return BackendPolicy(
+            prefer=("flashmla_sparse",),
+            extra=(
+                "lightllm.models.glm5_next.attention.sparse_mla:GlmSparseMLAPrefillBackend",
+                "lightllm.models.glm5_next.attention.sparse_mla:GlmSparseMLADecodeBackend",
+                "lightllm.models.glm5_next.attention.fp8_sparse_mla:GlmSparseMLAFp8PrefillBackend",
+                "lightllm.models.glm5_next.attention.fp8_sparse_mla:GlmSparseMLAFp8DecodeBackend",
+            ),
+        )

@@ -1,3 +1,6 @@
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionPhase
+
 import os
 import torch
 from functools import partial
@@ -77,3 +80,8 @@ class NeoChatTransformerLayerInfer(Qwen3TransformerLayerInfer):
         k = torch.cat([k_t, k_h, k_w], dim=-1)
         cache_kv = torch.cat([k, v], dim=1)
         return q, cache_kv
+
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        description = replace(description, variant="neo" if phase is AttentionPhase.PREFILL else "")
+        return description

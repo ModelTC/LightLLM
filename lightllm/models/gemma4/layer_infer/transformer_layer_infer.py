@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from lightllm.common.attention_state.full_att import FullAttentionState
 import math
 import torch
@@ -375,3 +377,17 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings = self._ffn(input_embdings, infer_state, layer_weight)
 
         return self._block_epilogue(input_embdings, infer_state, layer_weight)
+
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        return replace(
+            description, window=(self.sliding_window_ - 1, 0) if self.is_sliding and self.sliding_window_ > 0 else None
+        )
+
+    def bind_attention_resources(self, model, weight, adapter):
+        resources = super().bind_attention_resources(model, weight, adapter)
+        k, v = resources.key, resources.value
+        width = self.tp_k_head_num_ * self.head_dim_
+        k = k.flatten(1)[:, :width].view(-1, self.tp_k_head_num_, self.head_dim_)
+        v = v.flatten(1)[:, :width].view(-1, self.tp_k_head_num_, self.head_dim_)
+        return replace(resources, key=k, value=v)

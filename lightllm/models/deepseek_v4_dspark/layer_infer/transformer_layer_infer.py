@@ -1,3 +1,6 @@
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionFeature
+
 import torch
 
 from lightllm.models.deepseek_v4_dspark.infer_struct import DeepseekV4DSparkInferStateInfo
@@ -29,3 +32,7 @@ class DeepseekV4DSparkTransformerLayerInfer(DeepseekV4TransformerLayerInfer):
             infer_state.context_kv = all_kv.split(self.head_dim_, dim=-1)
         self._norm_rope_and_cache_kv(infer_state.context_kv[self.stage_id], infer_state, layer_weight)
         return input_embdings
+
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        return replace(description, features=description.features | {AttentionFeature.NONCAUSAL})

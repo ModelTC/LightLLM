@@ -1,3 +1,6 @@
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionFamily
+
 import torch
 
 import torch.distributed as dist
@@ -321,3 +324,10 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         core_attn_out = norm_out.view(num_tokens, -1)
         output = layer_weight.linear_out_proj.mm(core_attn_out)
         return output
+
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        description = replace(
+            description, family=AttentionFamily.GDN if self.is_linear_attention_layer else AttentionFamily.DENSE
+        )
+        return description

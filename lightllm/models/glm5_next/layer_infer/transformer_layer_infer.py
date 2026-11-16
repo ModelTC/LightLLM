@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionFamily
+
 
 from lightllm.common.attention_state.full_att import FullAttentionState
 
@@ -488,3 +491,10 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         if not self.use_mhc:
             return super().token_forward(input_embeddings, infer_state, layer_weight)
         return self._forward_mhc(input_embeddings, infer_state, layer_weight, prefill=False)
+
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        description = replace(
+            description, family=AttentionFamily.KDA if self.is_linear_attention_layer else AttentionFamily.SPARSE_MLA
+        )
+        return description

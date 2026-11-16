@@ -1,3 +1,5 @@
+from lightllm.common.attention.selection import BackendPolicy
+
 from lightllm.models.gpt_oss.layer_infer.transformer_layer_infer import GptOssTransformerLayerInfer
 from lightllm.models.gpt_oss.layer_weights.transformer_layer_weight import GptOssTransformerLayerWeight
 from lightllm.models.llama.model import LlamaTpPartModel
@@ -26,3 +28,6 @@ class GptOssTpPartModel(LlamaTpPartModel):
         self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0, priority_list=["fa3"])(
             model=self
         )
+
+    def attention_policy(self, family, phase):
+        return BackendPolicy(allow=frozenset({"fa3"}), prefer=("fa3",))

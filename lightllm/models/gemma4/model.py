@@ -1,3 +1,5 @@
+from lightllm.common.attention.selection import BackendPolicy
+
 from typing import TYPE_CHECKING
 import os
 import json
@@ -274,3 +276,6 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         self._cos_cached_full = torch.cos(freqs_f).to(self.data_type).cuda()
         self._sin_cached_full = torch.sin(freqs_f).to(self.data_type).cuda()
         return
+
+    def attention_policy(self, family, phase):
+        return BackendPolicy(allow=frozenset({"triton"}), prefer=("triton",))

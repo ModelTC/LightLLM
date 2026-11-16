@@ -1,3 +1,5 @@
+from lightllm.common.attention.selection import BackendPolicy
+
 import json
 import os
 from typing import TYPE_CHECKING
@@ -223,3 +225,16 @@ class Glm5NextTpPartModel(TpPartBaseModel):
                 num_experts_per_tok=self.config["num_experts_per_tok"],
                 moe_intermediate_size=self.config["moe_intermediate_size"],
             )
+
+    def attention_policy(self, family, phase):
+        if family.is_recurrent:
+            return BackendPolicy(prefer=("triton",))
+        return BackendPolicy(
+            prefer=("flashmla_sparse",),
+            extra=(
+                "lightllm.models.glm5_next.attention.sparse_mla:GlmSparseMLAPrefillBackend",
+                "lightllm.models.glm5_next.attention.sparse_mla:GlmSparseMLADecodeBackend",
+                "lightllm.models.glm5_next.attention.fp8_sparse_mla:GlmSparseMLAFp8PrefillBackend",
+                "lightllm.models.glm5_next.attention.fp8_sparse_mla:GlmSparseMLAFp8DecodeBackend",
+            ),
+        )

@@ -1,3 +1,6 @@
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionFamily
+
 from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 from typing import Any
@@ -161,6 +164,11 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             att_control=att_control,
         )
         return o_tensor
+
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        description = replace(description, family=AttentionFamily.SPARSE_MLA)
+        return description
 
 
 class NsaInfer:

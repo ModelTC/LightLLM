@@ -1,3 +1,6 @@
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionFamily
+
 from lightllm.common.attention_state.full_att import FullAttentionState
 import os
 import torch
@@ -590,3 +593,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state1.hook = _1_hook_post
 
         return input_embdings, input_embdings1
+
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        description = replace(description, family=AttentionFamily.MLA)
+        return description

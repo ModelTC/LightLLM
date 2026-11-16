@@ -1,3 +1,5 @@
+from lightllm.common.attention.selection import BackendPolicy
+
 from typing import TYPE_CHECKING
 from lightllm.models.bloom.layer_infer.pre_layer_infer import BloomPreLayerInfer
 from lightllm.models.bloom.layer_infer.post_layer_infer import BloomPostLayerInfer
@@ -79,3 +81,6 @@ class BloomTpPartModel(TpPartBaseModel):
         self.prefill_att_backend = TritonAttBackend(self)
         self.decode_att_backend = TritonAttBackend(self)
         return
+
+    def attention_policy(self, family, phase):
+        return BackendPolicy(allow=frozenset({"triton"}), prefer=("triton",))

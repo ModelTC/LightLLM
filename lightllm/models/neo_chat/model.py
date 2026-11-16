@@ -1,3 +1,6 @@
+from lightllm.common.attention.selection import BackendPolicy
+from lightllm.common.attention.api import AttentionPhase
+
 import os
 import json
 import torch
@@ -156,3 +159,6 @@ class NeoTpPartModel(NeoModelBase, Qwen3TpPartModel):
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
+
+    def attention_policy(self, family, phase):
+        return BackendPolicy(prefer=("fa3", "triton")) if phase is AttentionPhase.PREFILL else BackendPolicy()

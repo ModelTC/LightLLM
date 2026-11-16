@@ -1,3 +1,6 @@
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionFamily, AttentionFeature
+
 import torch
 import triton
 from lightllm.common.basemodel import TransformerLayerInferTpl
@@ -703,3 +706,14 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             image_token_start=image_token_start,
         )
         return topk_weights, topk_indices
+
+    def attention_adapter(self, family):
+        from lightllm.models.deepseek_v4.attention.adapter import DeepseekV4Adapter
+
+        return DeepseekV4Adapter()
+
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        description = replace(description, family=AttentionFamily.SPARSE_MLA, variant="deepseek_v4")
+        description = replace(description, features=description.features | {AttentionFeature.SINK})
+        return description

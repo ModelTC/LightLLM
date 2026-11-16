@@ -1,3 +1,6 @@
+from dataclasses import replace
+from lightllm.common.attention.api.spec import AttentionPhase
+
 from lightllm.common.attention_state.full_att import FullAttentionState
 from lightllm.common.basemodel.attention import AttControl
 from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
@@ -98,3 +101,18 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         )
         input_embdings.add_(mlp_output.view(-1, self.embed_dim_))
         return input_embdings
+
+    def describe_attention(self, phase):
+        description = super().describe_attention(phase)
+        if phase is AttentionPhase.DECODE and self.sliding_window_ > 0:
+            return replace(description, window=(self.sliding_window_ - 1, self.sliding_window_ - 1))
+        return replace(description, window=None)
+
+    def bind_attention_resources(self, model, weight, adapter):
+        resources = super().bind_attention_resources(model, weight, adapter)
+        k, v = resources.key, resources.value
+        return replace(
+            resources,
+            key=k.view(-1, self.tp_k_head_num_, self.head_dim_),
+            value=v.view(-1, self.tp_k_head_num_, self.head_dim_),
+        )

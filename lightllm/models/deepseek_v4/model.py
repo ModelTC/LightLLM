@@ -1,4 +1,6 @@
 from __future__ import annotations
+from lightllm.common.attention.selection import BackendPolicy
+
 
 from typing import TYPE_CHECKING
 
@@ -332,6 +334,15 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             # the indexer-Q fused kernel (compress rope) needs the complex compress freqs table.
             layer.index_infer.freqs_cis = self._freqs_cis_compress
         return
+
+    def attention_policy(self, family, phase):
+        return BackendPolicy(
+            prefer=("flashmla_sparse",),
+            extra=(
+                "lightllm.models.deepseek_v4.attention.sparse_mla:DeepseekV4SparseMLAFp8PrefillBackend",
+                "lightllm.models.deepseek_v4.attention.sparse_mla:DeepseekV4SparseMLAFp8DecodeBackend",
+            ),
+        )
 
 
 class DeepseekV4VisionTpPartModel(DeepseekV4TpPartModel):
