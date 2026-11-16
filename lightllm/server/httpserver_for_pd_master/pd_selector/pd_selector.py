@@ -51,6 +51,9 @@ class PDSelector:
         """记录成功进入推理的 prompt；非 cache-aware 策略无需处理。"""
         return
 
+    async def run_metadata_sync(self) -> None:
+        return
+
 
 class RandomSelector(PDSelector):
     """随机选择器"""
@@ -112,13 +115,28 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
             prompt_cache_tree=create_prompt_cache_tree_client(config=config),
             config=config,
         )
+        self.shared_cache = None
+        if pd_manager is not None and pd_manager.args.config_server_host and pd_manager.args.config_server_port:
+            from .shared_cache import SharedCacheState
+
+            self.shared_cache = SharedCacheState(self, pd_manager.args)
 
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         assert isinstance(prompt, str), "prompt must be a string for cache-aware selection"
-        await self.pd_node_stats.update_dispatched_info(p_nodes=self.prefill_nodes)
-        p_node, selection_extra_info = await self.policy.select_worker(self.prefill_nodes, request_text=prompt)
+        if self.shared_cache is None:
+            await self.pd_node_stats.update_dispatched_info(p_nodes=self.prefill_nodes)
+            p_node, selection_extra_info = await self.policy.select_worker(self.prefill_nodes, request_text=prompt)
+        elif len(self.prefill_nodes) == 1 and not self.shared_cache.enabled():
+            return self.prefill_nodes[0], self._importance_sampling(self.decode_nodes), PDSelectionExtraInfo()
+        else:
+            loads = self.shared_cache.cluster_loads(self.prefill_nodes)
+            if loads is None:
+                p_node = self._importance_sampling(self.prefill_nodes) if self.prefill_nodes else None
+                selection_extra_info = PDSelectionExtraInfo()
+            else:
+                p_node, selection_extra_info = await self.policy.select_worker(self.prefill_nodes, prompt, loads)
         # 前缀查询期间 P 节点可能已经重连；即使 connection_key 相同，旧对象持有的 WebSocket 也已失效。
         # 必须按对象身份确认选中节点仍是当前连接，让上层通过 ServerBusyError 重新选点。
         if not any(node is p_node for node in self.prefill_nodes):
@@ -137,7 +155,15 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
         self.policy.record_prompt_cache_hit_rate(cache_hit_rate)
 
     async def insert_prompt_cache(self, prompt: str, p_node: PD_Client_Obj) -> None:
+        if self.shared_cache is not None:
+            # Apply our own hints through the same ordered stream as every other master.
+            self.shared_cache.publish_hint(prompt, p_node)
+            return
         sample_stride = self.policy.config.sample_stride
         await self.policy.prompt_cache_tree.insert_sampled(
             prompt[::sample_stride], p_node.connection_key, sample_stride
         )
+
+    async def run_metadata_sync(self) -> None:
+        if self.shared_cache is not None:
+            await self.shared_cache.run()

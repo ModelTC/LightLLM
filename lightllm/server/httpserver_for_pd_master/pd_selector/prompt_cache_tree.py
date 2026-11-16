@@ -21,6 +21,7 @@ class PromptCacheMatchResult:
     input_char_count: int
     # 命中节点最近一次由 prompt 插入更新的单调时钟时间戳；未命中时为 None。
     last_insert_time: Optional[float]
+    prefill_node_epoch: Optional[int] = None
 
 
 @dataclass(slots=True)
@@ -32,6 +33,7 @@ class _PromptCacheNode:
     edge_char: Optional[str] = None
     last_prefill_node: Optional[str] = None
     last_insert_time: Optional[float] = None
+    prefill_node_epoch: Optional[int] = None
     last_time_mark: int = 0
 
 
@@ -70,7 +72,21 @@ class PromptCacheTree:
         self._lock = RLock()
         self._time_mark_lock = Lock()
 
-    def insert_sampled(self, key: str, prefill_node: str, sample_stride: int) -> None:
+    def clear(self) -> None:
+        with self._lock:
+            self.root = _PromptCacheNode()
+            self._node_count = 0
+            self._leaf_lru.clear()
+
+    def insert_sampled(
+        self,
+        key: str,
+        prefill_node: str,
+        sample_stride: int,
+        *,
+        last_insert_time: Optional[float] = None,
+        prefill_node_epoch: Optional[int] = None,
+    ) -> None:
         """将抽稀后的 prompt key 写入树，并关联到 prefill_node。
 
         路径上的节点会更新 last_prefill_node 与 LRU 时间戳；写入后若超
@@ -80,6 +96,8 @@ class PromptCacheTree:
             key: 已按 sample_stride 抽稀的 prompt key。
             prefill_node: 处理该 prompt 的 prefill 连接标识（connection_key），不可为 None。
             sample_stride: 调用方生成 key 时使用的抽样步长，必须与树配置一致。
+            last_insert_time: 共享提示的原始观测时间，已转换为本地单调时钟。
+            prefill_node_epoch: 共享提示对应的 P 实例 ID。若未提供，则为本地插入。
 
         Raises:
             ValueError: prefill_node 为 None 时抛出。
@@ -89,6 +107,8 @@ class PromptCacheTree:
         ), f"sample_stride mismatch: tree={self.sample_stride}, input={sample_stride}"
         if prefill_node is None:
             raise ValueError("prefill_node must not be None")
+        if prefill_node_epoch is None:
+            last_insert_time = time.monotonic()
         with self._lock:
             # 使用循环沿 key 向下构建路径，避免 key 很长时递归层数超过 Python
             # 调用栈上限。path 按访问顺序保存根节点和每个命中的子节点，后面
@@ -101,7 +121,6 @@ class PromptCacheTree:
                     child = _PromptCacheNode(
                         parent=node,
                         edge_char=ch,
-                        last_insert_time=time.monotonic(),
                     )
                     child.last_time_mark = self._gen_time_mark()
                     node.children[ch] = child
@@ -115,7 +134,8 @@ class PromptCacheTree:
             for node in reversed(path):
                 if node is not self.root:
                     node.last_prefill_node = prefill_node
-                    node.last_insert_time = time.monotonic()
+                    node.last_insert_time = last_insert_time
+                    node.prefill_node_epoch = prefill_node_epoch
                 if node.last_time_mark in self._leaf_lru:
                     self._leaf_lru.pop(node.last_time_mark, None)
                 node.last_time_mark = self._gen_time_mark()
@@ -172,6 +192,7 @@ class PromptCacheTree:
                 matched_char_count=matched_char_count,
                 input_char_count=input_char_count,
                 last_insert_time=node.last_insert_time if node is not self.root else None,
+                prefill_node_epoch=node.prefill_node_epoch,
             )
 
     def evict_lru_nodes(self) -> int:

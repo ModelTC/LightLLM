@@ -31,6 +31,8 @@ def _make_manager(monkeypatch):
         enable_rl=False,
         enable_return_routed_experts=False,
         select_p_d_node_strategy="cache_aware",
+        config_server_host=None,
+        config_server_port=None,
         pd_master_mode="elastic",
     )
     mgr.enable_pd_node_self_request_limit = True

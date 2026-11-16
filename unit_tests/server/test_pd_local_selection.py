@@ -98,7 +98,9 @@ def _set_nodes(manager, prefill_nodes, decode_nodes):
 
 def _manager(strategy="cache_aware", *, prefill_nodes=None, decode_nodes=None, mock_prefix=True):
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-    manager.args = SimpleNamespace(select_p_d_node_strategy=strategy, pd_master_mode="elastic")
+    manager.args = SimpleNamespace(
+        select_p_d_node_strategy=strategy, pd_master_mode="elastic", config_server_host=None, config_server_port=None
+    )
     manager.pd_manager = PDManager(manager.args)
     _set_nodes(
         manager,
