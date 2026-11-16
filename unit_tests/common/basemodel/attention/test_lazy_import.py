@@ -98,7 +98,7 @@ class TestLazyAttentionImports(unittest.TestCase):
         backend = self.imports.allow("fa3.fp", "Fa3AttBackend")
         self.args.llm_prefill_att_backend = ["fa3"]
 
-        self.assertIs(self.attention.get_prefill_att_backend_class(), backend)
+        self.assertIs(self.attention.resolve_att_backend_class("dense", "prefill"), backend)
         self.assertEqual(self.imports.imported, [f"{ATTENTION}.fa3.fp"])
         self.validate.assert_not_called()
 
@@ -107,7 +107,7 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.args.llm_prefill_att_backend = ["auto"]
         self.validate.side_effect = lambda name: name == "flashinfer"
 
-        self.assertIs(self.attention.get_prefill_att_backend_class(), backend)
+        self.assertIs(self.attention.resolve_att_backend_class("dense", "prefill"), backend)
         self.assertEqual([call.args[0] for call in self.validate.call_args_list], ["fa3", "flashinfer"])
         self.assertEqual(self.imports.imported, [f"{ATTENTION}.flashinfer.fp"])
 
@@ -116,7 +116,7 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.args.llm_decode_att_backend = ["auto"]
         self.args.mtp_step = 2
 
-        self.assertIs(self.attention.get_decode_att_backend_class(), backend)
+        self.assertIs(self.attention.resolve_att_backend_class("dense", "decode"), backend)
         self.validate.assert_called_once_with("fa3")
 
     def test_expert_parallelism_still_excludes_flashinfer(self):
@@ -125,7 +125,7 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.args.enable_ep_moe = True
         self.validate.side_effect = lambda name: name == "triton"
 
-        self.assertIs(self.attention.get_decode_att_backend_class(), backend)
+        self.assertIs(self.attention.resolve_att_backend_class("dense", "decode"), backend)
         self.assertEqual([call.args[0] for call in self.validate.call_args_list], ["fa3", "triton"])
 
     def test_auto_selection_falls_back_to_triton(self):
@@ -133,7 +133,7 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.args.llm_prefill_att_backend = ["auto"]
         self.validate.return_value = False
 
-        self.assertIs(self.attention.get_mla_prefill_att_backend_class(), backend)
+        self.assertIs(self.attention.resolve_att_backend_class("mla", "prefill"), backend)
         self.assertEqual(self.imports.imported, [f"{ATTENTION}.triton.mla"])
 
     def test_nsa_selection_does_not_import_other_kv_types(self):
@@ -141,28 +141,26 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.args.llm_kv_type = "fp8kv_dsa"
         self.args.llm_decode_att_backend = ["flashmla_sparse"]
 
-        self.assertIs(self.attention.get_nsa_decode_att_backend_class(), backend)
+        self.assertIs(self.attention.resolve_att_backend_class("nsa", "decode"), backend)
         self.assertEqual(self.imports.imported, [f"{ATTENTION}.nsa.fp8_flashmla_sparse"])
 
-    def test_custom_backend_map_uses_import_paths(self):
+    def test_registered_import_path_is_loaded_on_selection(self):
         backend = self.imports.allow("nsa.custom", "CustomBackend")
-        backend_map = {"None": {"custom": "nsa.custom:CustomBackend"}}
+        self.attention.register_att_backend("custom_nsa", "custom", "nsa.custom:CustomBackend")
+        self.assertEqual(self.imports.imported, [])
         self.args.llm_prefill_att_backend = ["custom"]
         self.args.llm_decode_att_backend = ["auto"]
 
-        self.assertIs(self.attention.get_nsa_prefill_att_backend_class(backend_map=backend_map), backend)
-        self.assertIs(
-            self.attention.get_nsa_decode_att_backend_class(priority_list=["custom"], backend_map=backend_map),
-            backend,
-        )
+        self.assertIs(self.attention.resolve_att_backend_class("custom_nsa", "prefill"), backend)
+        self.assertIs(self.attention.resolve_att_backend_class("custom_nsa", "decode"), backend)
         self.assertEqual(self.imports.imported, [f"{ATTENTION}.nsa.custom"])
 
     def test_neo_triton_selection_does_not_probe_fa3(self):
         backend = self.imports.allow("triton.neo", "NeoTritonAttBackend")
 
-        self.assertIs(self.attention.get_neo_prefill_att_backend_class(), backend)
+        self.assertIs(self.attention.resolve_att_backend_class("neo", "prefill"), backend)
         self.args.llm_prefill_att_backend = ["auto"]
-        self.assertIs(self.attention.get_neo_prefill_att_backend_class(priority_list=["triton"]), backend)
+        self.assertIs(self.attention.resolve_att_backend_class("neo", "prefill", allowed=("triton",)), backend)
         self.assertEqual(self.imports.imported, [f"{ATTENTION}.triton.neo"])
 
     def test_neo_auto_selection_still_falls_back_without_image_token_interface(self):
@@ -170,17 +168,17 @@ class TestLazyAttentionImports(unittest.TestCase):
         backend = self.imports.allow("triton.neo", "NeoTritonAttBackend")
         self.args.llm_prefill_att_backend = ["auto"]
 
-        self.assertIs(self.attention.get_neo_prefill_att_backend_class(), backend)
+        self.assertIs(self.attention.resolve_att_backend_class("neo", "prefill"), backend)
         self.validate.assert_called_once_with("triton")
         self.args.llm_prefill_att_backend = ["fa3"]
-        with self.assertRaises(KeyError):
-            self.attention.get_neo_prefill_att_backend_class()
+        with self.assertRaisesRegex(ValueError, "dependency is missing"):
+            self.attention.resolve_att_backend_class("neo", "prefill")
 
     def test_neo_auto_selection_uses_supported_fa3(self):
         backend = self.imports.allow("fa3.neo", "NeoFa3AttBackend", HAS_FLASH_ATTN_INTERFACE=True)
         self.args.llm_prefill_att_backend = ["auto"]
 
-        self.assertIs(self.attention.get_neo_prefill_att_backend_class(), backend)
+        self.assertIs(self.attention.resolve_att_backend_class("neo", "prefill"), backend)
         self.assertEqual(self.imports.imported, [f"{ATTENTION}.fa3.neo"])
         self.validate.assert_called_once_with("fa3")
 
@@ -196,20 +194,17 @@ class TestLazyAttentionImports(unittest.TestCase):
 
     def test_linear_prefill_auto_selects_validated_flashqla(self):
         flashqla, _triton = self._allow_linear_backend_classes()
-        selection = importlib.import_module(f"{ATTENTION}.create_linear_utils")
-
-        self.assertIs(selection.get_gdn_linear_prefill_att_backend_class(), flashqla)
+        self.assertIs(self.attention.resolve_att_backend_class("gdn", "prefill", slot_index=1), flashqla)
         self.validate.assert_called_once_with("flashqla")
 
     def test_linear_selection_falls_back_to_triton(self):
         _flashqla, triton = self._allow_linear_backend_classes()
-        selection = importlib.import_module(f"{ATTENTION}.create_linear_utils")
         self.validate.return_value = False
 
-        self.assertIs(selection.get_gdn_linear_prefill_att_backend_class(), triton)
-        self.assertIs(selection.get_gdn_linear_decode_att_backend_class(), triton)
+        self.assertIs(self.attention.resolve_att_backend_class("gdn", "prefill", slot_index=1), triton)
+        self.assertIs(self.attention.resolve_att_backend_class("gdn", "decode", slot_index=1), triton)
         self.args.llm_prefill_att_backend.append("triton")
-        self.assertIs(selection.get_gdn_linear_prefill_att_backend_class(), triton)
+        self.assertIs(self.attention.resolve_att_backend_class("gdn", "prefill", slot_index=1), triton)
 
     def test_vit_selection_loads_only_requested_implementation(self):
         package = "lightllm.common.basemodel.attention_vit"

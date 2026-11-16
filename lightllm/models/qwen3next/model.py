@@ -143,13 +143,10 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             self.prefill_att_backend1 = None
             self.decode_att_backend1 = None
             return
-        from lightllm.common.basemodel.attention.create_linear_utils import (
-            get_gdn_linear_prefill_att_backend_class,
-            get_gdn_linear_decode_att_backend_class,
-        )
+        from lightllm.common.basemodel.attention import PREFILL, DECODE, resolve_att_backend_class
 
-        linear_prefill_att_backend_class = get_gdn_linear_prefill_att_backend_class(index=1)
-        linear_decode_att_backend_class = get_gdn_linear_decode_att_backend_class(index=1)
-        self.prefill_att_backend1 = linear_prefill_att_backend_class(model=self)
-        self.decode_att_backend1 = linear_decode_att_backend_class(model=self)
+        # The linear-attention backend is the second value of --llm_{prefill,decode}_att_backend.
+        family = "gdn_replay" if self.args.ssm_state_mode == "replay" else "gdn"
+        self.prefill_att_backend1 = resolve_att_backend_class(family, PREFILL, slot_index=1)(model=self)
+        self.decode_att_backend1 = resolve_att_backend_class(family, DECODE, slot_index=1)(model=self)
         return

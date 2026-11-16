@@ -43,7 +43,7 @@ from lightllm.utils.torch_memory_saver_utils import (
     TorchMemorySaverWrapper,
     MemoryTag,
 )
-from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
+from .attention import PREFILL, DECODE, resolve_att_backend_class
 from .attention import BaseAttBackend
 
 if TYPE_CHECKING:
@@ -342,8 +342,8 @@ class TpPartBaseModel:
             # FFN-only and linear-only models do not need a full-attention backend.
             self.prefill_att_backend = self.decode_att_backend = None
             return
-        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(index=0)(model=self)
-        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0)(model=self)
+        self.prefill_att_backend: BaseAttBackend = resolve_att_backend_class("dense", PREFILL)(model=self)
+        self.decode_att_backend: BaseAttBackend = resolve_att_backend_class("dense", DECODE)(model=self)
         return
 
     def _init_att_backend1(self):

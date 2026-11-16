@@ -8,7 +8,7 @@ from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.distributed.communication_op import dist_group_manager
-from lightllm.common.basemodel.attention import get_mla_decode_att_backend_class, get_mla_prefill_att_backend_class
+from lightllm.common.basemodel.attention import PREFILL, DECODE, resolve_att_backend_class
 
 logger = init_logger(__name__)
 
@@ -34,8 +34,8 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         return
 
     def _init_att_backend(self):
-        self.prefill_att_backend = get_mla_prefill_att_backend_class(index=0)(model=self)
-        self.decode_att_backend = get_mla_decode_att_backend_class(index=0)(model=self)
+        self.prefill_att_backend = resolve_att_backend_class("mla", PREFILL)(model=self)
+        self.decode_att_backend = resolve_att_backend_class("mla", DECODE)(model=self)
         return
 
     def _init_some_value(self):

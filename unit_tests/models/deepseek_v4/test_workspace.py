@@ -17,11 +17,11 @@ def test_draft_initialization_preserves_captured_prefill_buffer(monkeypatch, dra
     args = SimpleNamespace(llm_kv_type="fp8kv_dsa")
     monkeypatch.setattr("lightllm.models.deepseek_v4.model.get_env_start_args", lambda: args)
 
-    def backend_class(**kwargs):
+    def backend_class(family, phase):
+        assert family == "dsv4_nsa"
         return lambda model: SimpleNamespace(tp_q_head_num=2, padded_q_head_num=4)
 
-    monkeypatch.setattr("lightllm.models.deepseek_v4.model.get_nsa_prefill_att_backend_class", backend_class)
-    monkeypatch.setattr("lightllm.models.deepseek_v4.model.get_nsa_decode_att_backend_class", backend_class)
+    monkeypatch.setattr("lightllm.models.deepseek_v4.model.resolve_att_backend_class", backend_class)
     main = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
     main.batch_max_tokens, main.tp_world_size_, main.data_type = 8, 1, torch.bfloat16
     main.config = {"head_dim": 512, "block_size": 3, "dspark_noise_token_id": 1}

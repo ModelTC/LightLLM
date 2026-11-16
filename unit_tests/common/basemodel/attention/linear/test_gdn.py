@@ -10,7 +10,8 @@ from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention.linear.gdn as gdn
-import lightllm.common.basemodel.attention.create_linear_utils as linear_create_utils
+import lightllm.common.basemodel.attention.registry as att_registry
+from lightllm.common.basemodel.attention import PREFILL, DECODE, resolve_att_backend_class
 import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
 from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
@@ -146,85 +147,6 @@ def test_linear_backend_is_abstract_and_triton_supplies_chunk_kernel():
     assert backend.get_prefill_kernel() is fla_ops.chunk_gated_delta_rule
 
 
-@pytest.fixture
-def auto_linear_backend_args(monkeypatch):
-    monkeypatch.setattr(
-        linear_create_utils,
-        "get_env_start_args",
-        lambda: SimpleNamespace(
-            llm_prefill_att_backend=["fa3"],
-            llm_decode_att_backend=["flashinfer"],
-            ssm_state_mode="native",
-        ),
-    )
-
-
-def test_missing_linear_backend_arg_uses_auto_selection(monkeypatch, auto_linear_backend_args):
-    validate_calls = []
-    flashqla = ModuleType("flash_qla")
-    flashqla.chunk_gated_delta_rule = lambda **kwargs: ("flashqla", kwargs)
-    monkeypatch.setitem(sys.modules, "flash_qla", flashqla)
-    monkeypatch.setattr(
-        linear_create_utils,
-        "validate",
-        lambda name: validate_calls.append(name) or True,
-    )
-
-    backend_class = linear_create_utils.get_gdn_linear_prefill_att_backend_class(index=1)
-
-    assert backend_class is FlashQlaLinearAttBackend
-    backend = object.__new__(backend_class)
-    assert backend.get_prefill_kernel()(q="q")[0] == "flashqla"
-    assert validate_calls == ["flashqla"]
-
-
-def test_replay_mode_selects_standalone_gdn_backends(monkeypatch):
-    monkeypatch.setattr(
-        linear_create_utils,
-        "get_env_start_args",
-        lambda: SimpleNamespace(
-            llm_prefill_att_backend=["fa3", "flashqla"],
-            llm_decode_att_backend=["flashinfer", "triton"],
-            ssm_state_mode="replay",
-        ),
-    )
-    from lightllm.common.basemodel.attention.base_att import BaseAttBackend
-    from lightllm.common.basemodel.attention.linear.gdn import LinearAttBackend
-    from lightllm.common.basemodel.attention.linear.replay_gdn import (
-        ReplayGDNFlashQlaAttBackend,
-        ReplayGDNTritonAttBackend,
-    )
-
-    prefill_backend = linear_create_utils.get_gdn_linear_prefill_att_backend_class(index=1)
-    decode_backend = linear_create_utils.get_gdn_linear_decode_att_backend_class(index=1)
-
-    assert prefill_backend is ReplayGDNFlashQlaAttBackend
-    assert decode_backend is ReplayGDNTritonAttBackend
-    assert prefill_backend.__bases__ == (BaseAttBackend,)
-    assert decode_backend.__bases__ == (BaseAttBackend,)
-    assert not issubclass(prefill_backend, LinearAttBackend)
-    assert not issubclass(decode_backend, LinearAttBackend)
-
-
-def test_kda_entry_selects_native_or_replay(monkeypatch):
-    from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
-    from lightllm.common.basemodel.attention.linear.replay_kda import ReplayKDALinearAttBackend
-
-    monkeypatch.setattr(
-        linear_create_utils,
-        "get_env_start_args",
-        lambda: SimpleNamespace(ssm_state_mode="native"),
-    )
-    assert linear_create_utils.get_kda_linear_att_backend_class() is KDALinearAttBackend
-
-    monkeypatch.setattr(
-        linear_create_utils,
-        "get_env_start_args",
-        lambda: SimpleNamespace(ssm_state_mode="replay"),
-    )
-    assert linear_create_utils.get_kda_linear_att_backend_class() is ReplayKDALinearAttBackend
-
-
 def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
     linear_config = SimpleNamespace(
         tp_world_size=2,
@@ -287,29 +209,6 @@ def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
     assert kernel_calls[0]["initial_state"].dtype == torch.float32
 
 
-def test_explicit_linear_backend_arg_skips_auto_selection(monkeypatch):
-    monkeypatch.setattr(
-        linear_create_utils,
-        "get_env_start_args",
-        lambda: SimpleNamespace(
-            llm_prefill_att_backend=["fa3", "triton"],
-            llm_decode_att_backend=["flashinfer", "triton"],
-            ssm_state_mode="native",
-        ),
-    )
-    monkeypatch.setattr(
-        linear_create_utils,
-        "validate",
-        lambda *args: pytest.fail("an explicit linear backend must not be auto-validated"),
-    )
-
-    prefill_backend_class = linear_create_utils.get_gdn_linear_prefill_att_backend_class(index=1)
-    decode_backend_class = linear_create_utils.get_gdn_linear_decode_att_backend_class(index=1)
-
-    assert prefill_backend_class is TritonLinearAttBackend
-    assert decode_backend_class is TritonLinearAttBackend
-
-
 def test_cli_accepts_linear_backend_at_index_one():
     args = make_argument_parser().parse_args(
         [
@@ -324,74 +223,6 @@ def test_cli_accepts_linear_backend_at_index_one():
 
     assert args.llm_prefill_att_backend == ["fa3", "flashqla"]
     assert args.llm_decode_att_backend == ["flashinfer", "triton"]
-
-
-@pytest.mark.parametrize(
-    "get_backend_class",
-    [
-        linear_create_utils.get_gdn_linear_prefill_att_backend_class,
-        linear_create_utils.get_gdn_linear_decode_att_backend_class,
-    ],
-)
-def test_linear_backend_rejects_non_linear_index(auto_linear_backend_args, get_backend_class):
-    with pytest.raises(AssertionError, match="index must be 1"):
-        get_backend_class(index=0)
-
-
-def test_missing_linear_decode_backend_arg_defaults_to_triton(auto_linear_backend_args):
-    backend_class = linear_create_utils.get_gdn_linear_decode_att_backend_class(index=1)
-
-    assert backend_class is TritonLinearAttBackend
-
-
-def test_gdn_decode_backend_uses_priority_list(monkeypatch, auto_linear_backend_args):
-    validate_calls = []
-    monkeypatch.setattr(
-        linear_create_utils,
-        "gdn_decode_backends",
-        {"optimized": FlashQlaLinearAttBackend, "triton": TritonLinearAttBackend},
-    )
-    monkeypatch.setattr(
-        linear_create_utils,
-        "validate",
-        lambda name: validate_calls.append(name) or True,
-    )
-
-    backend_class = linear_create_utils.get_gdn_linear_decode_att_backend_class(
-        index=1, priority_list=("optimized", "triton")
-    )
-
-    assert backend_class is FlashQlaLinearAttBackend
-    assert validate_calls == ["optimized"]
-
-
-def test_gdn_prefill_backend_falls_back_when_flashqla_validation_fails(monkeypatch, auto_linear_backend_args):
-    monkeypatch.setattr(linear_create_utils, "validate", lambda *args: False)
-
-    backend_class = linear_create_utils.get_gdn_linear_prefill_att_backend_class(index=1)
-
-    assert backend_class is TritonLinearAttBackend
-
-
-def test_gdn_prefill_backend_tries_candidates_in_order(monkeypatch, auto_linear_backend_args):
-    validate_calls = []
-    monkeypatch.setattr(
-        linear_create_utils,
-        "gdn_prefill_backends",
-        {"flashqla2": TritonLinearAttBackend, "flashqla3": FlashQlaLinearAttBackend},
-    )
-    monkeypatch.setattr(
-        linear_create_utils,
-        "validate",
-        lambda name, *args: validate_calls.append(name) or name == "flashqla3",
-    )
-
-    backend_class = linear_create_utils.get_gdn_linear_prefill_att_backend_class(
-        index=1, priority_list=("flashqla2", "flashqla3")
-    )
-
-    assert backend_class is FlashQlaLinearAttBackend
-    assert validate_calls == ["flashqla2", "flashqla3"]
 
 
 def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_state_index=None, role="main"):
@@ -436,3 +267,111 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
         _infer_state_weak_ref=weakref.ref(infer_state),
     )
     return state, infer_state
+
+
+def _linear_args(prefill=("fa3",), decode=("flashinfer",)):
+    return SimpleNamespace(
+        llm_kv_type="None",
+        llm_prefill_att_backend=list(prefill),
+        llm_decode_att_backend=list(decode),
+        mtp_step=0,
+        enable_ep_moe=False,
+    )
+
+
+@pytest.fixture
+def auto_linear_backend_args(monkeypatch):
+    monkeypatch.setattr(att_registry, "get_env_start_args", lambda: _linear_args())
+
+
+def test_missing_linear_backend_arg_uses_auto_selection(monkeypatch, auto_linear_backend_args):
+    validate_calls = []
+    flashqla = ModuleType("flash_qla")
+    flashqla.chunk_gated_delta_rule = lambda **kwargs: ("flashqla", kwargs)
+    monkeypatch.setitem(sys.modules, "flash_qla", flashqla)
+    monkeypatch.setattr(att_registry, "validate", lambda name: validate_calls.append(name) or True)
+
+    backend_class = resolve_att_backend_class("gdn", PREFILL, slot_index=1)
+
+    assert backend_class is FlashQlaLinearAttBackend
+    backend = object.__new__(backend_class)
+    assert backend.get_prefill_kernel()(q="q")[0] == "flashqla"
+    assert validate_calls == ["flashqla"]
+
+
+def test_replay_mode_selects_standalone_gdn_backends(monkeypatch):
+    monkeypatch.setattr(
+        att_registry,
+        "get_env_start_args",
+        lambda: _linear_args(prefill=("fa3", "flashqla"), decode=("flashinfer", "triton")),
+    )
+    from lightllm.common.basemodel.attention.base_att import BaseAttBackend
+    from lightllm.common.basemodel.attention.linear.gdn import LinearAttBackend
+    from lightllm.common.basemodel.attention.linear.replay_gdn import (
+        ReplayGDNFlashQlaAttBackend,
+        ReplayGDNTritonAttBackend,
+    )
+
+    prefill_backend = resolve_att_backend_class("gdn_replay", PREFILL, slot_index=1)
+    decode_backend = resolve_att_backend_class("gdn_replay", DECODE, slot_index=1)
+
+    assert prefill_backend is ReplayGDNFlashQlaAttBackend
+    assert decode_backend is ReplayGDNTritonAttBackend
+    assert prefill_backend.__bases__ == (BaseAttBackend,)
+    assert decode_backend.__bases__ == (BaseAttBackend,)
+    assert not issubclass(prefill_backend, LinearAttBackend)
+    assert not issubclass(decode_backend, LinearAttBackend)
+
+
+def test_explicit_linear_backend_arg_skips_auto_selection(monkeypatch):
+    monkeypatch.setattr(
+        att_registry,
+        "get_env_start_args",
+        lambda: _linear_args(prefill=("fa3", "triton"), decode=("flashinfer", "triton")),
+    )
+    monkeypatch.setattr(
+        att_registry,
+        "validate",
+        lambda *args: pytest.fail("an explicit linear backend must not be auto-validated"),
+    )
+
+    assert resolve_att_backend_class("gdn", PREFILL, slot_index=1) is TritonLinearAttBackend
+    assert resolve_att_backend_class("gdn", DECODE, slot_index=1) is TritonLinearAttBackend
+
+
+@pytest.mark.parametrize("phase", [PREFILL, DECODE])
+def test_linear_backend_rejects_full_attention_backend_name(auto_linear_backend_args, phase):
+    # Position 0 holds the full-attention backend, which is not a linear-attention backend.
+    with pytest.raises(ValueError, match="valid choices"):
+        resolve_att_backend_class("gdn", phase, slot_index=0)
+
+
+def test_missing_linear_decode_backend_arg_defaults_to_triton(monkeypatch, auto_linear_backend_args):
+    monkeypatch.setattr(att_registry, "validate", lambda *args: pytest.fail("triton linear decode is not validated"))
+
+    assert resolve_att_backend_class("gdn", DECODE, slot_index=1) is TritonLinearAttBackend
+
+
+def test_gdn_prefill_backend_falls_back_when_flashqla_validation_fails(monkeypatch, auto_linear_backend_args):
+    monkeypatch.setattr(att_registry, "validate", lambda *args: False)
+
+    assert resolve_att_backend_class("gdn", PREFILL, slot_index=1) is TritonLinearAttBackend
+
+
+@pytest.mark.parametrize(
+    "ssm_state_mode, expected", [("native", "KDALinearAttBackend"), ("replay", "ReplayKDALinearAttBackend")]
+)
+def test_glm5_next_selects_native_or_replay_kda_backend(monkeypatch, ssm_state_mode, expected):
+    from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
+    from lightllm.common.basemodel.attention.linear.replay_kda import ReplayKDALinearAttBackend
+    from lightllm.models.glm5_next.model import Glm5NextTpPartModel
+
+    for backend_class in (KDALinearAttBackend, ReplayKDALinearAttBackend):
+        monkeypatch.setattr(backend_class, "__init__", lambda self, model: None)
+    model = type("_Model", (), {})()
+    model.args = SimpleNamespace(ssm_state_mode=ssm_state_mode)
+
+    Glm5NextTpPartModel._init_att_backend1(model)
+
+    assert type(model.prefill_att_backend1).__name__ == expected
+    assert model.decode_att_backend1 is model.prefill_att_backend1

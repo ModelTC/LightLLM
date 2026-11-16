@@ -205,11 +205,10 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.decode_att_backend = self.prefill_att_backend
 
     def _init_att_backend1(self):
-        from lightllm.common.basemodel.attention.create_linear_utils import (
-            get_kda_linear_att_backend_class,
-        )
-
-        backend_cls = get_kda_linear_att_backend_class()
+        if self.args.ssm_state_mode == "replay":
+            from lightllm.common.basemodel.attention.linear.replay_kda import ReplayKDALinearAttBackend as backend_cls
+        else:
+            from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend as backend_cls
         self.prefill_att_backend1 = backend_cls(model=self)
         self.decode_att_backend1 = self.prefill_att_backend1
 

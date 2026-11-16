@@ -216,10 +216,3 @@ class _DecodeAttState(BaseDecodeAttState):
             out=out,
         )
         return padded_out[:, : self.backend.tp_q_head_num]
-
-
-DSV4_NSA_BACKENDS = {
-    "fp8kv_dsa": {
-        "flashmla_sparse": "nsa.dsv4_fp8_flashmla_sparse:DeepseekV4FlashMlaFp8SparseAttBackend",
-    }
-}

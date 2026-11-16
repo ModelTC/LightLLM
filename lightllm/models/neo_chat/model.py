@@ -20,11 +20,7 @@ from lightllm.models.neo_chat.layer_weights.transformer_layer_weight import NeoC
 from lightllm.models.neo_chat.layer_weights.pre_and_post_layer_weight import NeoChatPreAndPostLayerWeight
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
-from lightllm.common.basemodel.attention import (
-    get_neo_prefill_att_backend_class,
-    get_decode_att_backend_class,
-    BaseAttBackend,
-)
+from lightllm.common.basemodel.attention import PREFILL, DECODE, resolve_att_backend_class, BaseAttBackend
 from lightllm.utils.log_utils import init_logger
 
 
@@ -140,10 +136,8 @@ class NeoTpPartModel(NeoModelBase, Qwen3TpPartModel):
         pass
 
     def _init_att_backend(self):
-        self.prefill_att_backend: BaseAttBackend = get_neo_prefill_att_backend_class(
-            index=0, priority_list=["fa3", "triton"]
-        )(model=self)
-        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0)(model=self)
+        self.prefill_att_backend: BaseAttBackend = resolve_att_backend_class("neo", PREFILL)(model=self)
+        self.decode_att_backend: BaseAttBackend = resolve_att_backend_class("dense", DECODE)(model=self)
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
