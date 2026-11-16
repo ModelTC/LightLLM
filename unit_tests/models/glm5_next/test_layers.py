@@ -1,22 +1,25 @@
-import weakref
+from unit_tests.common.attention.helpers import prepared_session
+from lightllm.common.attention.api import AttentionPhase
 import dataclasses
 import json
+import weakref
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn.functional as F
 
+from lightllm.common.attention.api.inputs import MLAResources
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparsePrefillState, Glm5NextSparseDecodeState
 from lightllm.common.quantization import Quantcfg
+from lightllm.models.glm5_next.attention.sparse_mla import GlmSparseMLADecodeBackend
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import get_env_start_args
-
+from unit_tests.common.attention.helpers import make_backend, make_batch, make_context, make_layer_attention
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -171,18 +174,21 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     layer.indexer = SimpleNamespace(_get_indices=lambda **kwargs: (indices, indices))
     state = InferStateInfo()
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
+    state.sparse_queries = None
     state.att_state_role = "main"
     state.att_state_manager = SimpleNamespace(
         get_state=lambda **kwargs: SimpleNamespace(get_layer_view=lambda logical_layer_id: SimpleNamespace(kv=kv))
     )
-    state.prefill_att_state = Glm5NextSparsePrefillState()
-    state.b1_cu_q_seq_len = torch.arange(4, device="cuda", dtype=torch.int32)
+    backend = make_backend(GlmSparseMLADecodeBackend)
+    phase = AttentionPhase.PREFILL
+    context = make_context(backend, make_batch((2, 3, 5), phase=phase, device="cuda"))
+    state.b1_cu_q_seq_len = context.batch.b1_cu_q_seq_len
     state.max_q_seq_len = 1
-    state.decode_att_state = Glm5NextSparseDecodeState(
-        _infer_state_weak_ref=weakref.ref(state),
-        nsa_cache_seqlens=lengths,
-        nsa_cu_seqlens_k_new=F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0)),
+    state.attention.contexts = {0: context}
+    attention = make_layer_attention(
+        backend, context, MLAResources(kv, layer.kv_lora_rank, 0), softmax_scale=layer.softmax_scale
     )
+    layer.prefill_attention = layer.decode_attention = attention
     projected = torch.bmm(q.transpose(0, 1), kv_b.view(4, 256, 512)[:, :128]).transpose(0, 1)
     expected = []
     for row, length in enumerate(lengths.tolist()):
@@ -190,9 +196,19 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
         scores = projected[row].float() @ keys.T * config["qk_nope_head_dim"] ** -0.5
         expected.append(scores.softmax(-1) @ keys)
     expected = torch.stack(expected)
-    prefill = layer._context_attention_kernel(q, None, state, weight)
+    with prepared_session(context, state.attention):
+        prefill = layer._context_attention_kernel(q, None, state, weight)
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
-    decode = layer._token_attention_kernel(q, state, weight)
+    state.sparse_queries = None
+    context = make_context(backend, make_batch((2, 3, 5), phase=AttentionPhase.DECODE, device="cuda"))
+    context.nsa_cache_seqlens = lengths
+    context.nsa_cu_seqlens_k_new = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
+    state.attention.contexts = {0: context}
+    layer.decode_attention = make_layer_attention(
+        backend, context, MLAResources(kv, layer.kv_lora_rank, 0), softmax_scale=layer.softmax_scale
+    )
+    with prepared_session(context, state.attention):
+        decode = layer._token_attention_kernel(q, state, weight)
     for output in (prefill, decode):
         torch.testing.assert_close(output.float(), expected, atol=1e-3, rtol=0.015)
 
@@ -324,7 +340,7 @@ def test_mtp_pre_layer_applies_main_norm_before_hidden_fusion(config, monkeypatc
         main_norm_weight_=norms[0],
         enorm_weight_=norms[1],
         hnorm_weight_=norms[2],
-        eh_proj_weight_=SimpleNamespace(mm=lambda x: x @ projection),
+        eh_proj_weight_=SimpleNamespace(mm=lambda input_tensor: input_tensor @ projection),
     )
     state = SimpleNamespace(mtp_draft_input_hiddens=hidden.clone())
     monkeypatch.setattr(LlamaMultimodalPreLayerInfer, method, lambda self, ids, state, weight: embeddings.clone())
@@ -428,14 +444,15 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
     for step, draft in enumerate(drafts):
         draft.prepare_attention_states()
         assert draft.att_state_manager is main.att_state_manager
-        draft._init_att_backend1()
         state = getattr(draft.att_state_manager, f"draft{step}_mla_packed_bf16_state")
         assert state is not main.att_state_manager.main_mla_packed_bf16_state
         assert not hasattr(draft, "full_att_state")
         assert state.storage is None
         assert state.config.logical_layer_groups == ((4 + step,),)
         assert state.state_name == f"draft{step}_mla_packed_bf16_state"
-        assert draft.prefill_att_backend1 is None and draft.decode_att_backend1 is None
+        from lightllm.common.attention.api import AttentionFamily
+
+        assert draft.layers_infer[0].describe_attention(AttentionPhase.DECODE).family is AttentionFamily.SPARSE_MLA
         assert getattr(draft.att_state_manager, f"draft{step}_compressor_indexer_w4_s4_bf16_state").buffer.is_cuda
 
     # NoPE state initialization must not require a model-owned RoPE cache.
@@ -445,7 +462,50 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
         state.input_ids = torch.zeros(3, device="cuda", dtype=torch.int64)
         state.b_ready_cache_len = torch.tensor([2], device="cuda", dtype=torch.int32)
         state.b_seq_len = torch.tensor([5], device="cuda", dtype=torch.int32)
+        state.b_req_idx = torch.tensor([0], device="cuda", dtype=torch.int32)
         state.init_some_extra_state(model)
         torch.testing.assert_close(
             state.position_ids, torch.arange(2, 5, device="cuda", dtype=state.position_ids.dtype)
         )
+
+
+@pytest.mark.parametrize("family", ["gdn", "kda"])
+def test_prefill_graph_output_shape_uses_model_dimensions(monkeypatch, family):
+    from lightllm.models.glm5_next.layer_infer import transformer_layer_infer as glm
+    from lightllm.models.qwen3next.layer_infer import transformer_layer_infer as qwen
+
+    callbacks = []
+    graph_context = SimpleNamespace(__enter__=lambda: None, __exit__=lambda *args: None)
+    state = SimpleNamespace(
+        attention=object(),
+        prefill_cuda_graph_get_current_capture_graph=lambda: graph_context,
+        prefill_cuda_graph_create_graph_obj=lambda: None,
+        prefill_cuda_graph_add_cpu_runnning_func=lambda func, after_graph: callbacks.append(func),
+    )
+    # No attention_groups/backend dimensions: only the binding's public execution methods.
+    binding = SimpleNamespace(context=lambda state: None)
+    layer = SimpleNamespace(prefill_attention=binding, tp_world_size_=2, tp_linear_num_heads=3, linear_head_dim=16)
+    inputs = torch.zeros(5, 48, dtype=torch.bfloat16, device="cuda")
+    if family == "gdn":
+        monkeypatch.setattr(qwen, "tensor_to_no_ref_tensor", lambda tensor: tensor)
+        binding.forward = lambda *a: (
+            torch.ones(1, 5, 3, 16, device="cuda"),
+            torch.full((5, 3, 16), 2.0, device="cuda"),
+        )
+        weights = SimpleNamespace(linear_num_v_heads=6, linear_v_head_dim=16)
+        output, gate = qwen.Qwen3NextTransformerLayerInfer._linear_prefill_cuda_graph_wrapper(
+            layer, inputs, state, weights
+        )
+        assert output.shape == gate.shape == (5, 3, 16)
+    else:
+        monkeypatch.setattr(glm, "tensor_to_no_ref_tensor", lambda tensor: tensor)
+        binding.forward = lambda *a: torch.ones(1, 5, 3, 16, device="cuda")
+        output = glm.Glm5NextTransformerLayerInfer._kda_prefill_cuda_graph_wrapper(
+            layer, inputs, inputs, inputs, state, None
+        )
+        assert output.shape == (1, 5, 3, 16)
+    assert len(callbacks) == 1
+    callbacks[0](state)
+    assert torch.all(output == 1)
+    if family == "gdn":
+        assert torch.all(gate == 2)
