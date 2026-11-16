@@ -309,12 +309,11 @@ def mtp_scatter_next_token_ids(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["batch_size"])
 def _fwd_kernel_gen_b_req_mtp_start_loc(
     b_mtp_index,
     b_req_mtp_start_loc,
-    num_reqs: tl.constexpr,
-    batch_size: tl.constexpr,
+    batch_size,
     BLOCK_SIZE: tl.constexpr,
 ):
     offset = tl.arange(0, BLOCK_SIZE)
@@ -333,7 +332,6 @@ def gen_b_req_mtp_start_loc(b_mtp_index: torch.Tensor, num_reqs: int):
     _fwd_kernel_gen_b_req_mtp_start_loc[grid](
         b_mtp_index=b_mtp_index,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
-        num_reqs=num_reqs,
         batch_size=batch_size,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=8,

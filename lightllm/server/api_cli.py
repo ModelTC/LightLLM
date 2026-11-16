@@ -501,7 +501,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                 auto: automatically select best backend based on GPU and available packages
                 (priority: fa3 > flashinfer > triton)
                 for hybrid linear-attention models, the second value selects the linear-attention backend
-                (priority: flashqla > triton); when omitted, it defaults to auto""",
+                (priority: flashqla > triton); explicit flashinfer requires FlashInfer >= 0.7.2.
+                When omitted, it defaults to auto""",
     )
     parser.add_argument(
         "--llm_decode_att_backend",
@@ -556,7 +557,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                 fp8kv_dsa: use dynamic per-token/group FlashMLA FP8 sparse KV cache
                 for DeepSeek-V3.2 or GLM-5.3 Flash.
                 fp8kv_sph and fp8kv_spt requires --kv_quant_calibration_config_path
-                to load pre-computed FP8 scales.
+                to load pre-computed FP8 scales, except Qwen4Exp fp8kv_spt,
+                which uses unit scales and does not accept calibration files.
                 Note: fp8kv_spt requires flashinfer-python>=0.6.5 (default is 0.6.3,
                 may cause runtime issues). Install with: pip install flashinfer-python==0.6.5""",
     )
@@ -946,6 +948,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""enable torch memory saver, which is used for release_memory and resume_memory during RL training.""",
     )
     parser.add_argument("--enable_weight_cpu_backup", action="store_true", help="""enable weight cpu backup.""")
+    parser.add_argument(
+        "--offload_ngram_embedding",
+        action="store_true",
+        help="Keep supported n-gram embedding tables in pinned CPU memory; gather requested rows onto CUDA.",
+    )
     parser.add_argument(
         "--disk_cache_dir",
         type=str,

@@ -5,6 +5,33 @@ import torch
 
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import causal_conv1d_update
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("activation", [None, "silu"])
+def test_low_precision_products_accumulate_in_fp32(dtype, activation):
+    torch.manual_seed(2907)
+    x = torch.randn(6, 512, device="cuda", dtype=dtype) * 0.3
+    weight = torch.randn(512, 4, device="cuda", dtype=dtype) * 0.2
+    prefix = torch.randn(2, 512, 3, device="cuda", dtype=dtype) * 0.3
+    full = torch.cat([prefix, x.view(2, 3, 512).transpose(1, 2)], -1).float()
+    expected = torch.nn.functional.conv1d(full, weight.float()[:, None], groups=512)
+    if activation == "silu":
+        expected = torch.nn.functional.silu(expected)
+    expected = expected.transpose(1, 2).reshape(6, 512).to(dtype)
+    actual = causal_conv1d_update(
+        x.clone(),
+        torch.nn.functional.pad(prefix, (0, 2)),
+        weight,
+        mtp_step=2,
+        conv_state_indices=torch.tensor([0, 1], device="cuda", dtype=torch.int32),
+        num_accepted_tokens=torch.ones(2, device="cuda", dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 3, 6], device="cuda", dtype=torch.int32),
+        activation=activation,
+    )
+    torch.testing.assert_close(actual, expected, atol=1e-7, rtol=1e-6)
+
 
 def causal_conv1d_ref(
     x: torch.Tensor,

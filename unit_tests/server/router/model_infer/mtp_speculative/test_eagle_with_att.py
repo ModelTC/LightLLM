@@ -125,7 +125,8 @@ def test_eagle_with_att_prefill_builds_draft_kv_without_mutating_target():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
+@pytest.mark.parametrize("selected_logits", [False, True])
+def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch, selected_logits):
     device = "cuda"
     original_input_ids = torch.tensor([10, 11, 12, 20, 21, 22], dtype=torch.int64, device=device)
     target_hidden = torch.arange(12, dtype=torch.float32, device=device).reshape(6, 2)
@@ -148,8 +149,11 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
             }
         )
         if len(draft_calls) == 1:
+            logits = torch.arange(30, 36, dtype=torch.float32, device=device).unsqueeze(1)
+            if selected_logits:
+                logits = logits.index_select(0, model_input.logits_indices)
             return ModelOutput(
-                logits=torch.arange(30, 36, dtype=torch.float32, device=device).unsqueeze(1),
+                logits=logits,
                 mtp_collector=ModelMtpOutputCollector(spec_hidden=extend_hidden),
             )
         return ModelOutput(
@@ -158,7 +162,7 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
         )
 
     backend = SimpleNamespace(
-        draft_models=[SimpleNamespace(forward=forward)],
+        draft_models=[SimpleNamespace(forward=forward, supports_selected_logits=selected_logits)],
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].long(),
         _gen_argmax_token_ids_and_prob=lambda output: (
             output.logits[:, 0].long(),

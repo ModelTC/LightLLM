@@ -28,7 +28,7 @@ from lightllm.server.router.model_infer.mode_backend.rl_backend_ops import RlBac
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
-from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name, get_model_infer_recursion_limit
 from lightllm.utils.torch_memory_saver_utils import MemoryTag
 from lightllm.server.io_struct import RlOpReq, RlOpRsp
@@ -167,6 +167,7 @@ def _init_env(
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    install_fatal_thread_excepthook()
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::model_infer:RANK{rank}")
     start_parent_check_thread()
 

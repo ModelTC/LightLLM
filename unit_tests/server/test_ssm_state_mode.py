@@ -21,6 +21,8 @@ from lightllm.server.core.objs.start_args_type import StartArgs
         ("replay", "bfloat16", 2, "qwen3_5", 16, None),
         ("replay", "bfloat16", 2, "qwen3_5", 4, None),
         ("replay", "bfloat16", 0, "qwen3_5", 16, None),
+        ("replay", "float32", 3, "qwen4_exp", 16, None),
+        ("replay", "bfloat16", 3, "qwen4_exp_text", 8, None),
         ("replay", "float32", 4, "qwen3_5", 4, "capacity"),
         ("replay", "float32", 2, "llama", 16, "require a GDN"),
     ],
@@ -46,7 +48,7 @@ def test_ssm_mode_validation(monkeypatch, mode, dtype, step, model, capacity, er
         _validate_and_normalize_ssm_config(args)
 
 
-@pytest.mark.parametrize("model", ["qwen3_5", "glm5_next"])
+@pytest.mark.parametrize("model", ["qwen3_5", "glm5_next", "qwen4_exp", "qwen4_exp_text"])
 @pytest.mark.parametrize("mode", ["native", "replay"])
 @pytest.mark.parametrize("step", [15, 16])
 def test_gdn_kda_mtp_width_limit(monkeypatch, model, mode, step):
@@ -59,7 +61,7 @@ def test_gdn_kda_mtp_width_limit(monkeypatch, model, mode, step):
             _validate_and_normalize_ssm_config(args)
 
 
-@pytest.mark.parametrize("model", ["qwen3_5", "glm5_next"])
+@pytest.mark.parametrize("model", ["qwen3_5", "glm5_next", "qwen4_exp", "qwen4_exp_text"])
 @pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
 @pytest.mark.parametrize("cache_len", [32, 64])
 def test_replay_large_cache_does_not_bypass_mtp_width_limit(monkeypatch, model, compute_mode, cache_len):

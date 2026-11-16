@@ -30,7 +30,6 @@ async def lightllm_get_score(request: Request, httpserver_manager: HttpServerMan
 
 
 async def lightllm_generate(request: Request, httpserver_manager: HttpServerManager) -> Response:
-
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]
@@ -115,11 +114,10 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
 
 
 async def lightllm_generate_stream(request: Request, httpserver_manager: HttpServerManager) -> Response:
-
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]
-    _ = sample_params_dict.pop("return_details", False)
+    return_details = sample_params_dict.pop("return_details", False)
     _ = sample_params_dict.pop("return_routed_experts", None)
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
@@ -155,6 +153,15 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
                 "input_usage": input_usage,
             }
             ret["token"]["logprobs"] = metadata["logprobs"]
+            if return_details:
+                for name in (
+                    "prompt_cache_len",
+                    "mtp_accepted_token_num",
+                    "mtp_verify_token_num",
+                    "mtp_verify_step_num",
+                ):
+                    if name in metadata:
+                        ret["token"][name] = metadata[name]
             if "prompt_logprobs" in metadata:
                 ret["prompt_logprobs"] = metadata["prompt_logprobs"]
                 ret["prompt_token_ids"] = metadata.get("prompt_token_ids")

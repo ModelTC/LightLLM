@@ -90,10 +90,11 @@ class ChunkedPrefillBackend(ModeBackend):
                     )
                     continue
                 elif run_way.is_pass():
+                    sleep_time = 0.001 if self.is_pd_decode_mode and g_infer_context.infer_req_ids else 0.02
                     event_pack.notify_post_handle_and_wait_pre_post_handle()
                     event_pack.notify_forward_and_wait_post_handle()
                     event_pack.notify_pre_post_handle()
-                    time.sleep(0.02)
+                    time.sleep(sleep_time)
                     continue
 
         except BaseException as e:
