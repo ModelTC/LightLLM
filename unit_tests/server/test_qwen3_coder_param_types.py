@@ -19,17 +19,35 @@ from lightllm.server.function_call_parser import FunctionCallParser
         ({"type": "string"}, "true", "true"),
         ({"type": "string"}, "42", "42"),
         ({"type": "string"}, "None", "None"),
+        ({"type": "string"}, " none ", " none "),
+        ({"type": "str"}, "null", "null"),
+        ({"type": "text"}, "NULL", "NULL"),
         ({"type": "integer"}, "42", 42),
         ({"type": "boolean"}, "true", True),
         ({"type": "object"}, '{"x":1}', {"x": 1}),
         ({"type": "array"}, "[1,2]", [1, 2]),
         ({"type": "integer"}, "null", None),
+        ({"type": "integer"}, "None", None),
+        ({"type": "integer"}, " none ", None),
         ({"type": "boolean"}, "NULL", None),
         ({"type": "object"}, "null", None),
         ({"type": "array"}, "null", None),
         ({"type": ["string", "null"]}, "null", None),
+        ({"type": ["string", "null"]}, "None", None),
         ({"type": ["object", "null"]}, "null", None),
         ({"type": ["integer", "null"]}, "null", None),
+        ({"type": "string", "nullable": True}, "null", None),
+        ({"type": "string", "nullable": True}, "hello", "hello"),
+        ({"enum": ["red", "green"]}, "null", "null"),
+        ({"enum": ["null", "auto"]}, "null", "null"),
+        ({"enum": [None, "auto"]}, "null", None),
+        ({"enum": [None, "auto"]}, "NONE", None),
+        ({"anyOf": [{"type": "string"}, {"type": "null"}]}, "null", None),
+        ({"anyOf": [{"type": "string"}]}, "null", "null"),
+        ({"allOf": [{"type": "string"}]}, "null", "null"),
+        ({"oneOf": [{"type": "integer"}, {"type": "string"}]}, "None", None),
+        ({"const": "ok"}, "null", "null"),
+        ({"const": None}, "null", None),
         ({}, "null", None),
         (None, "null", None),
     ],
@@ -64,5 +82,33 @@ def test_qwen3_coder_parameter_schema_values(schema, value, expected, chunk_size
         arguments = "".join(argument_parts)
 
     result = json.loads(arguments)["value"]
+    assert type(result) is type(expected)
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("property_schema", "definition", "value", "expected"),
+    [
+        ({"$ref": "#/$defs/Value"}, {"type": "string"}, "null", "null"),
+        ({"$ref": "#/$defs/Value"}, {"type": "integer"}, "None", None),
+        ({"$ref": "#/$defs/Value", "nullable": True}, {"type": "string"}, "NONE", None),
+    ],
+)
+def test_qwen3_coder_ref_schema_null_text(property_schema, definition, value, expected):
+    tool = Tool(
+        type="function",
+        function=Function(
+            name="echo",
+            parameters={
+                "type": "object",
+                "$defs": {"Value": definition},
+                "properties": {"value": property_schema},
+            },
+        ),
+    )
+    parser = FunctionCallParser([tool], "qwen3_coder")
+    text = f"<tool_call>\n<function=echo>\n<parameter=value>{value}</parameter>\n</function>\n</tool_call>"
+    _, calls = parser.parse_non_stream(text)
+    result = json.loads(calls[0].parameters)["value"]
     assert type(result) is type(expected)
     assert result == expected

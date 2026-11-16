@@ -1715,17 +1715,26 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     return params
         return {}
 
-    def _convert_param_value(self, value: str, param_name: str, param_config: Dict, func_name: str) -> Any:
+    def _get_parameter_schema_root(self, func_name: str, tools: List[Tool]) -> Any:
+        for tool in tools:
+            if tool.function.name == func_name and isinstance(tool.function.parameters, dict):
+                return tool.function.parameters
+        return None
+
+    def _convert_param_value(
+        self, value: str, param_name: str, param_config: Dict, func_name: str, schema_root: Any
+    ) -> Any:
         """Convert parameter value based on schema type. Safe alternative to eval()."""
         prop = param_config.get(param_name, {})
-        param_type = str(prop.get("type", "string")).strip().lower() if isinstance(prop, dict) else "string"
-        if value.lower() == "null" and not (
-            isinstance(prop, dict) and "type" in prop and param_type in ("string", "str", "enum")
+        if _qwen3_is_null_literal(value=value) and not _qwen3_schema_is_verbatim_string(
+            schema=prop, schema_root=schema_root
         ):
             return None
 
         if param_name not in param_config:
             return value
+
+        param_type = str(prop.get("type", "string")).strip().lower() if isinstance(prop, dict) else "string"
 
         if param_type in ("string", "str", "enum"):
             return value
@@ -1767,6 +1776,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         parameters_text = function_str[end_index + 1 :]
         param_config = self._get_param_config(func_name, tools)
+        schema_root = self._get_parameter_schema_root(func_name=func_name, tools=tools)
         param_dict = {}
 
         for match in self.parameter_regex.findall(parameters_text):
@@ -1782,7 +1792,9 @@ class Qwen3CoderDetector(BaseFormatDetector):
             if param_value.endswith("\n"):
                 param_value = param_value[:-1]
 
-            param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, func_name)
+            param_dict[param_name] = self._convert_param_value(
+                param_value, param_name, param_config, func_name, schema_root=schema_root
+            )
 
         return ToolCallItem(
             tool_index=tool_indices.get(func_name, -1),
@@ -1813,6 +1825,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             return None
 
         param_config = self._get_param_config(func_name, tools)
+        schema_root = self._get_parameter_schema_root(func_name=func_name, tools=tools)
         param_dict = {}
         has_visible_value = False
 
@@ -1841,7 +1854,9 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 # Parameter tag is present but its value has not started streaming yet.
                 continue
 
-            param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, func_name)
+            param_dict[param_name] = self._convert_param_value(
+                param_value, param_name, param_config, func_name, schema_root=schema_root
+            )
 
         if not param_dict and not has_visible_value:
             return None
@@ -2057,3 +2072,186 @@ class FunctionCallParser:
             final_normal_text = sp_result.normal_text
 
         return final_normal_text, final_calls
+
+
+# --- Qwen3-Coder 参数里 null 文本是否保留 ---
+_QWEN3_SCHEMA_TYPE_NAMES = {
+    "string": "string",
+    "str": "string",
+    "text": "string",
+    "varchar": "string",
+    "char": "string",
+    "enum": "string",
+    "integer": "integer",
+    "int": "integer",
+    "number": "number",
+    "float": "number",
+    "double": "number",
+    "boolean": "boolean",
+    "bool": "boolean",
+    "binary": "boolean",
+    "object": "object",
+    "dict": "object",
+    "map": "object",
+    "array": "array",
+    "arr": "array",
+    "list": "array",
+    "sequence": "array",
+    "null": "null",
+}
+_QWEN3_SCHEMA_DEPTH_LIMIT = 32
+
+
+def _qwen3_is_null_literal(value: str) -> bool:
+    text = value.strip().lower()
+    return text == "null" or text == "none"
+
+
+def _qwen3_schema_is_verbatim_string(schema: Any, schema_root: Any) -> bool:
+    schema_types = _qwen3_parameter_schema_types(schema=schema, schema_root=schema_root)
+    return schema_types == {"string"}
+
+
+def _qwen3_parameter_schema_types(schema: Any, schema_root: Any) -> Optional[set[str]]:
+    schema_types = _qwen3_schema_option_types(schema=schema, depth=0, schema_root=schema_root, expanded_ids=set())
+    if schema_types is None:
+        return None
+    if isinstance(schema, dict) and schema.get("nullable") is True and "null" not in schema_types:
+        return set(schema_types) | {"null"}
+    return schema_types
+
+
+def _qwen3_schema_option_types(schema: Any, depth: int, schema_root: Any, expanded_ids: set[int]) -> Optional[set[str]]:
+    if depth > _QWEN3_SCHEMA_DEPTH_LIMIT:
+        return None
+    if schema is False:
+        return set()
+    if not isinstance(schema, dict):
+        return None
+    reference = schema.get("$ref")
+    if isinstance(reference, str):
+        target = _qwen3_resolve_schema_ref(schema_root=schema_root, reference=reference)
+        if target is None:
+            return None
+        target_id = id(target)
+        if target_id in expanded_ids:
+            return set()
+        expanded_ids.add(target_id)
+        return _qwen3_schema_option_types(
+            schema=target, depth=depth + 1, schema_root=schema_root, expanded_ids=expanded_ids
+        )
+    if "const" in schema:
+        return {_qwen3_json_type_of_value(value=schema["const"])}
+    enum_values = schema.get("enum")
+    if isinstance(enum_values, list):
+        return {_qwen3_json_type_of_value(value=item) for item in enum_values}
+    union_schemas = schema.get("anyOf")
+    if not isinstance(union_schemas, list):
+        union_schemas = schema.get("oneOf")
+    if isinstance(union_schemas, list):
+        return _qwen3_union_schema_types(
+            schemas=union_schemas, depth=depth, schema_root=schema_root, expanded_ids=expanded_ids
+        )
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        if len(all_of) == 1:
+            return _qwen3_schema_option_types(
+                schema=all_of[0], depth=depth + 1, schema_root=schema_root, expanded_ids=expanded_ids
+            )
+        return None
+    if "type" in schema:
+        return _qwen3_declared_schema_types(type_value=schema["type"])
+    if "properties" in schema or "additionalProperties" in schema:
+        return {"object"}
+    if "items" in schema:
+        return {"array"}
+    return None
+
+
+def _qwen3_union_schema_types(
+    schemas: List[Any], depth: int, schema_root: Any, expanded_ids: set[int]
+) -> Optional[set[str]]:
+    union_types: set[str] = set()
+    for item in schemas:
+        item_types = _qwen3_schema_option_types(
+            schema=item, depth=depth + 1, schema_root=schema_root, expanded_ids=expanded_ids
+        )
+        if item_types is None:
+            return None
+        union_types.update(item_types)
+    return union_types
+
+
+def _qwen3_resolve_schema_ref(schema_root: Any, reference: str) -> Any:
+    if schema_root is None or not reference.startswith("#"):
+        return None
+    pointer = reference[1:]
+    if pointer == "":
+        return schema_root
+    if not pointer.startswith("/"):
+        return None
+    node = schema_root
+    for raw_token in pointer[1:].split("/"):
+        token = raw_token.replace("~1", "/").replace("~0", "~")
+        if isinstance(node, dict):
+            if token not in node:
+                return None
+            node = node[token]
+            continue
+        if isinstance(node, list) and token.isdecimal():
+            index = int(token)
+            if index >= len(node):
+                return None
+            node = node[index]
+            continue
+        return None
+    return node
+
+
+def _qwen3_declared_schema_types(type_value: Any) -> Optional[set[str]]:
+    if isinstance(type_value, str):
+        parsed = _qwen3_json_type_name(type_name=type_value)
+        return set() if parsed is None else {parsed}
+    if isinstance(type_value, list):
+        parsed_types = set()
+        for item in type_value:
+            if not isinstance(item, str):
+                continue
+            parsed = _qwen3_json_type_name(type_name=item)
+            if parsed is not None:
+                parsed_types.add(parsed)
+        return parsed_types
+    return None
+
+
+def _qwen3_json_type_name(type_name: str) -> Optional[str]:
+    name = type_name.strip().lower()
+    if name in _QWEN3_SCHEMA_TYPE_NAMES:
+        return _QWEN3_SCHEMA_TYPE_NAMES[name]
+    if name.startswith(("int", "uint", "long", "short", "unsigned")):
+        return "integer"
+    if name.startswith(("num", "float")):
+        return "number"
+    if name.startswith("dict"):
+        return "object"
+    if name.startswith("list"):
+        return "array"
+    return None
+
+
+def _qwen3_json_type_of_value(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "string"
