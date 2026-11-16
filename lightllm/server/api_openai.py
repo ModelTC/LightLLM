@@ -1053,6 +1053,74 @@ async def _process_prompts_completion(
     return _build_completion_response(results_by_prompt, request, created_time, len(prompts) > 1)
 
 
+class _ReadyCompletionBatch:
+    """Hold completion text that has already arrived.
+
+    The first event for a choice goes out immediately. Later text stays together
+    until the ready batch ends, the choice finishes, or the buffer reaches 32
+    tokens or 64KiB. A missing batch-end flag sends every token.
+    """
+
+    _TOKEN_LIMIT = 32
+    _CHAR_LIMIT = 64 * 1024
+
+    def __init__(self, logprobs):
+        self._logprobs = logprobs
+        self._choices = {}
+        self._tokens = 0
+        self._chars = 0
+        self._started = set()
+
+    def append(self, choice_index, text, finish_reason):
+        choice = self._choices.get(choice_index)
+        if choice is None:
+            self._choices[choice_index] = {
+                "text": text,
+                "index": int(choice_index),
+                "logprobs": None if self._logprobs is None else {},
+                "finish_reason": finish_reason,
+            }
+        else:
+            choice["text"] += text
+            choice["finish_reason"] = finish_reason
+        self._tokens += 1
+        self._chars += len(text)
+        is_first = choice_index not in self._started
+        self._started.add(choice_index)
+        return is_first
+
+    def should_send(self, is_first, batch_end, finish_reason):
+        return (
+            is_first
+            or batch_end
+            or finish_reason is not None
+            or self._tokens >= self._TOKEN_LIMIT
+            or self._chars >= self._CHAR_LIMIT
+        )
+
+    def pop_event(self, request_id, created, model):
+        if not self._choices:
+            return None
+        response = CompletionStreamResponse(
+            id=request_id,
+            created=created,
+            model=model,
+            choices=[
+                CompletionStreamChoice(
+                    text=choice["text"],
+                    index=choice["index"],
+                    logprobs=choice["logprobs"],
+                    finish_reason=choice["finish_reason"],
+                )
+                for choice in self._choices.values()
+            ],
+        )
+        self._choices.clear()
+        self._tokens = 0
+        self._chars = 0
+        return f"data: {json.dumps(response.model_dump(), ensure_ascii=False)}\n\n"
+
+
 async def _handle_streaming_completion(
     prompt: Union[str, List[int]],
     sampling_params: SamplingParams,
@@ -1073,34 +1141,10 @@ async def _handle_streaming_completion(
         prompt_tokens = 0
         completion_tokens = 0
         cached_tokens = 0
-        pending_choices = {}
-        pending_tokens = 0
-        pending_chars = 0
-        emitted_choices = set()
-        max_pending_tokens = 32
-        max_pending_chars = 64 * 1024
+        batch = _ReadyCompletionBatch(request.logprobs)
 
-        def pop_pending_chunk():
-            """Serialize text already buffered for this ready batch, then clear it."""
-            nonlocal pending_tokens, pending_chars
-            stream_resp = CompletionStreamResponse(
-                id=group_request_id,
-                created=created_time,
-                model=request.model,
-                choices=[
-                    CompletionStreamChoice(
-                        text=choice["text"],
-                        index=choice["index"],
-                        logprobs=choice["logprobs"],
-                        finish_reason=choice["finish_reason"],
-                    )
-                    for choice in pending_choices.values()
-                ],
-            )
-            pending_choices.clear()
-            pending_tokens = 0
-            pending_chars = 0
-            return f"data: {json.dumps(stream_resp.model_dump(), ensure_ascii=False)}\n\n"
+        def flush_batch():
+            return batch.pop_event(group_request_id, created_time, request.model)
 
         try:
             async for sub_req_id, request_output, metadata, finish_status in results_generator:
@@ -1110,9 +1154,7 @@ async def _handle_streaming_completion(
                 prompt_tokens = metadata["prompt_tokens"]
                 cached_tokens = metadata.get("prompt_cache_len", 0)
                 completion_tokens += 1
-                current_finish_reason = None
-                if finish_status.is_finished():
-                    current_finish_reason = finish_status.get_finish_reason()
+                finish_reason = finish_status.get_finish_reason() if finish_status.is_finished() else None
 
                 output_text = request_output
                 if request.echo and metadata.get("is_first_token", False):
@@ -1121,39 +1163,19 @@ async def _handle_streaming_completion(
                         prompt_str = g_objs.httpserver_manager.tokenizer.decode(prompt, skip_special_tokens=False)
                     output_text = prompt_str + output_text
 
-                if choice_index not in pending_choices:
-                    pending_choices[choice_index] = {
-                        "text": output_text,
-                        "index": int(choice_index),
-                        "logprobs": None if request.logprobs is None else {},
-                        "finish_reason": current_finish_reason,
-                    }
-                else:
-                    choice = pending_choices[choice_index]
-                    choice["text"] += output_text
-                    choice["finish_reason"] = current_finish_reason
-                pending_tokens += 1
-                pending_chars += len(output_text)
-                is_first_chunk = choice_index not in emitted_choices
-                emitted_choices.add(choice_index)
-                # PD sets this false until the last token already waiting in this read.
-                # Missing metadata means flush now, so a normal server still emits one token per event.
+                is_first = batch.append(choice_index, output_text, finish_reason)
                 batch_end = metadata.pop("_pd_stream_batch_end", True)
-                if (
-                    is_first_chunk
-                    or batch_end
-                    or current_finish_reason is not None
-                    or pending_tokens >= max_pending_tokens
-                    or pending_chars >= max_pending_chars
-                ):
-                    yield pop_pending_chunk()
+                if batch.should_send(is_first, batch_end, finish_reason):
+                    yield flush_batch()
         except Exception:
-            if pending_choices:
-                yield pop_pending_chunk()
+            pending = flush_batch()
+            if pending is not None:
+                yield pending
             raise
 
-        if pending_choices:
-            yield pop_pending_chunk()
+        pending = flush_batch()
+        if pending is not None:
+            yield pending
 
         usage = UsageInfo(
             prompt_tokens=prompt_tokens,
