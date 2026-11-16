@@ -68,7 +68,7 @@ class NixlKVTransporter:
         return pickle.dumps(
             {
                 "memory": self.nixl_agent.get_serialized_descs(self.page_reg_desc),
-                "payload_bytes": self.pd_page_kind_payload_bytes,
+                "pd_page_kind_payload_bytes": self.pd_page_kind_payload_bytes,
             }
         )
 
@@ -102,7 +102,7 @@ class NixlKVTransporter:
             start_time = time.time()
             page_reg_desc = pickle.loads(remote_agent.page_reg_desc)
             assert (
-                page_reg_desc["payload_bytes"] == self.pd_page_kind_payload_bytes
+                page_reg_desc["pd_page_kind_payload_bytes"] == self.pd_page_kind_payload_bytes
             ), "PD peers must use the same payload byte lengths"
 
             peer_name = self.nixl_agent.add_remote_agent(remote_agent.agent_metadata)

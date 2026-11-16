@@ -98,7 +98,7 @@ class NcclKVTransporter:
                 "num_pages": self.num_pages,
                 # PD buffer 固定为二维 uint8，页长度就是单页字节数。
                 "page_bytes": self.kv_move_buffer.shape[1],
-                "payload_bytes": self.pd_page_kind_payload_bytes,
+                "pd_page_kind_payload_bytes": self.pd_page_kind_payload_bytes,
             }
         )
 
@@ -123,7 +123,7 @@ class NcclKVTransporter:
             page_reg_desc["page_bytes"] == self.kv_move_buffer.shape[1]
         ), "PD peers must use the same page byte capacity"
         assert (
-            page_reg_desc["payload_bytes"] == self.pd_page_kind_payload_bytes
+            page_reg_desc["pd_page_kind_payload_bytes"] == self.pd_page_kind_payload_bytes
         ), "PD peers must use the same payload byte lengths"
         self.remote_agents[remote_agent.agent_name] = remote_agent
         logger.info(f"Added NCCL remote agent {remote_agent.agent_name} at {metadata.host_ip}:{metadata.control_port}")
