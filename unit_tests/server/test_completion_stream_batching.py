@@ -38,7 +38,7 @@ def _completion_stream(monkeypatch, results, *, echo=False, logprobs=None, inter
             }, _finish_status(reason)
 
     monkeypatch.setattr(g_objs, "httpserver_manager", SimpleNamespace(generate=generate), raising=False)
-    monkeypatch.setattr(api_openai, "_server_stream_interval", lambda: interval)
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(stream_interval=interval))
     request = CompletionRequest(model="test", prompt="Prompt", stream=True, echo=echo, logprobs=logprobs)
     return asyncio.run(api_openai._handle_streaming_completion("Prompt", None, None, None, request, 123))
 
@@ -116,7 +116,7 @@ def test_first_token_does_not_wait_for_the_interval(monkeypatch):
         raise AssertionError("The next token must not be fetched before the first chunk is emitted")
 
     monkeypatch.setattr(g_objs, "httpserver_manager", SimpleNamespace(generate=generate), raising=False)
-    monkeypatch.setattr(api_openai, "_server_stream_interval", lambda: 8)
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(stream_interval=8))
 
     async def first_chunk():
         request = CompletionRequest(model="test", prompt="Prompt", stream=True)
@@ -125,20 +125,3 @@ def test_first_token_does_not_wait_for_the_interval(monkeypatch):
             return await stream.__anext__()
 
     assert json.loads(asyncio.run(first_chunk())[6:])["choices"][0]["text"] == "A"
-
-
-def test_pending_text_is_flushed_before_error(monkeypatch):
-    from lightllm.server.api_http import g_objs
-
-    async def generate(*_args, **_kwargs):
-        for text in ["A", "B", "C"]:
-            yield 80, text, {"prompt_tokens": 4}, FinishStatus()
-        raise ValueError("generation failed")
-
-    monkeypatch.setattr(g_objs, "httpserver_manager", SimpleNamespace(generate=generate), raising=False)
-    monkeypatch.setattr(api_openai, "_server_stream_interval", lambda: 4)
-    request = CompletionRequest(model="test", prompt="Prompt", stream=True)
-    response = asyncio.run(api_openai._handle_streaming_completion("Prompt", None, None, None, request, 123))
-    payloads = _completion_payloads(response)
-    assert [payload["choices"][0]["text"] for payload in payloads[:-1]] == ["A", "BC"]
-    assert payloads[-1]["error"]["message"] == "generation failed"

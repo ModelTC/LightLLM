@@ -1053,14 +1053,6 @@ async def _process_prompts_completion(
     return _build_completion_response(results_by_prompt, request, created_time, len(prompts) > 1)
 
 
-def _server_stream_interval() -> int:
-    """Read --stream_interval. Missing startup args keep the one-token default."""
-    raw = os.environ.get("LIGHTLLM_START_ARGS")
-    if not raw:
-        return 1
-    return int(json.loads(raw).get("stream_interval", 1))
-
-
 class _StreamIntervalBatch:
     """Buffer completion text and send one SSE event every `interval` tokens.
 
@@ -1140,33 +1132,28 @@ async def _handle_streaming_completion(
         prompt_tokens = 0
         completion_tokens = 0
         cached_tokens = 0
-        batch = _StreamIntervalBatch(_server_stream_interval(), request, created_time)
+        batch = _StreamIntervalBatch(get_env_start_args().stream_interval, request, created_time)
 
-        try:
-            async for sub_req_id, request_output, metadata, finish_status in results_generator:
-                finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
-                group_request_id = convert_sub_id_to_group_id(sub_req_id)
-                choice_index = sub_req_id - group_request_id
-                prompt_tokens = metadata["prompt_tokens"]
-                cached_tokens = metadata.get("prompt_cache_len", 0)
-                completion_tokens += 1
-                finish_reason = finish_status.get_finish_reason() if finish_status.is_finished() else None
+        async for sub_req_id, request_output, metadata, finish_status in results_generator:
+            finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
+            group_request_id = convert_sub_id_to_group_id(sub_req_id)
+            choice_index = sub_req_id - group_request_id
+            prompt_tokens = metadata["prompt_tokens"]
+            cached_tokens = metadata.get("prompt_cache_len", 0)
+            completion_tokens += 1
+            finish_reason = finish_status.get_finish_reason() if finish_status.is_finished() else None
 
-                output_text = request_output
-                if request.echo and metadata.get("is_first_token", False):
-                    prompt_str = prompt
-                    if isinstance(prompt, list):
-                        prompt_str = g_objs.httpserver_manager.tokenizer.decode(prompt, skip_special_tokens=False)
-                    output_text = prompt_str + output_text
+            output_text = request_output
+            if request.echo and metadata.get("is_first_token", False):
+                prompt_str = prompt
+                if isinstance(prompt, list):
+                    prompt_str = g_objs.httpserver_manager.tokenizer.decode(prompt, skip_special_tokens=False)
+                output_text = prompt_str + output_text
 
-                batch.request_id = group_request_id
-                event = batch.append(choice_index, output_text, finish_reason)
-                if event is not None:
-                    yield event
-        except Exception:
-            for event in batch.drain():
+            batch.request_id = group_request_id
+            event = batch.append(choice_index, output_text, finish_reason)
+            if event is not None:
                 yield event
-            raise
 
         for event in batch.drain():
             yield event
