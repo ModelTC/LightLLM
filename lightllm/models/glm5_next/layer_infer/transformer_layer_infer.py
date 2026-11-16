@@ -13,7 +13,6 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
     silu_and_mul_fwd,
     silu_and_mul_quant_fp8,
 )
-from lightllm.common.quantization.deepgemm import DeepGEMMFP8w8a8B128QuantizationMethod
 from lightllm.common.basemodel.triton_kernel.mhc import (
     hc_contract,
     hc_post,
@@ -93,9 +92,8 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         up_gate_out = layer_weight.gate_up_proj.mm(input)
         quant_method = layer_weight.down_proj.quant_method
         if (
-            isinstance(quant_method, DeepGEMMFP8w8a8B128QuantizationMethod)
-            and quant_method.use_ue8m0_scales
-            and not quant_method.use_packed_ue8m0
+            getattr(quant_method, "use_ue8m0_scales", False)
+            and not getattr(quant_method, "use_packed_ue8m0", False)
             and up_gate_out.dtype == torch.bfloat16
         ):
             activated, scale = silu_and_mul_quant_fp8(
