@@ -155,30 +155,6 @@ def test_completion_stream_flushes_pending_text_before_error(monkeypatch):
     assert payloads[-1]["error"]["message"] == "generation failed"
 
 
-def test_pd_single_choice_closes_source_on_client_stop():
-    from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
-
-    closed = []
-    consumer_tasks = []
-
-    async def generate():
-        try:
-            assert asyncio.current_task() is consumer_tasks[0]
-            yield "first"
-            yield "second"
-        finally:
-            closed.append(True)
-
-    async def consume_first():
-        consumer_tasks.append(asyncio.current_task())
-        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-        async with aclosing(manager._merge_choice_generators([generate()])) as stream:
-            assert await stream.__anext__() == "first"
-
-    asyncio.run(consume_first())
-    assert closed == [True]
-
-
 def test_completion_batch_end_flushes_before_waiting_for_next_batch(monkeypatch):
     from lightllm.server.api_http import g_objs
 

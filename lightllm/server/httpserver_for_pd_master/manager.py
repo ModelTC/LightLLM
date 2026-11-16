@@ -490,13 +490,6 @@ class HttpServerManagerForPDMaster:
 
     async def _merge_choice_generators(self, generators):
         """Merge independent n=1 PD generators into one multi-choice stream."""
-        # One choice has nothing to merge. Consume it here so cancellation closes the source.
-        if len(generators) == 1:
-            async with aclosing(generators[0]) as generator:
-                async for result in generator:
-                    yield result
-            return
-
         result_queue = asyncio.Queue()
         generator_done = object()
 
