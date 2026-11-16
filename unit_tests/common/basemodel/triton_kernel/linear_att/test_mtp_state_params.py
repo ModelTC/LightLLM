@@ -3,7 +3,7 @@ import torch
 
 from lightllm.common.attention_state.bounded_att import GDNState, ConvSSMStateConfig
 
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
+from lightllm.common.attention.backends._shared.linear.mtp_state_params import (
     build_dynamic_mtp_linear_att_state_params,
 )
 

@@ -62,7 +62,7 @@ def flash_decode_stage2(
     mid_out_logexpsum,
     B_Seqlen,
     Out,
-    **run_config
+    **run_config,
 ):
     if run_config:
         num_warps = run_config["stage2_num_warps"]

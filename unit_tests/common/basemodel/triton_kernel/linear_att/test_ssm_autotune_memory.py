@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.linear import replay_gdn_decode as tuning
+from lightllm.common.attention.backends.gdn.replay import decode as tuning
 from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
     attach_replay_history as ReplaySSMExecutor,
 )

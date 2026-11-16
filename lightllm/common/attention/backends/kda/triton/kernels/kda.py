@@ -27,12 +27,12 @@ import triton.language as tl
 
 from lightllm.common.triton_utils.autotuner import autotune
 
-from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
-from .cumsum import chunk_local_cumsum
-from .index import prepare_chunk_indices
-from .l2norm import l2norm_fwd
+from lightllm.common.attention.backends._shared.linear.chunk_delta_h import chunk_gated_delta_rule_fwd_h
+from lightllm.common.attention.backends._shared.linear.cumsum import chunk_local_cumsum
+from lightllm.common.attention.backends._shared.linear.index import prepare_chunk_indices
+from lightllm.common.attention.backends._shared.linear.l2norm import l2norm_fwd
 from triton.language import exp2, log
-from .solve_tril import solve_tril
+from lightllm.common.attention.backends._shared.linear.solve_tril import solve_tril
 
 
 FLA_CHUNK_SIZE = 64

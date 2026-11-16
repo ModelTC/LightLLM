@@ -95,7 +95,9 @@ class Int4kvTritonPrefillAttState(BasePrefillAttState):
             quant_group_size=self.backend.quant_group_size,
         )
 
-        from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
+        from lightllm.common.attention.backends._shared.prefill.context_flashattention_nopad import (
+            context_attention_fwd_contiguous_kv,
+        )
 
         context_attention_fwd_contiguous_kv(
             q=q,

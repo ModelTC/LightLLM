@@ -1,10 +1,12 @@
 """Linear-attention / GDN triton kernels shared across hybrid models."""
 
-from .causal_conv1d import causal_conv1d_fn
-from .causal_conv1d_mtp import causal_conv1d_update
-from .fused_gdn_gating import fused_gdn_gating
-from .gdn_decode_pack import conv_pack_gdn_decode_inputs
-from .mtp_fused_recurrent import mtp_fused_recurrent_gated_delta_rule
+from lightllm.common.attention.backends._shared.linear.causal_conv1d import causal_conv1d_fn
+from lightllm.common.attention.backends._shared.linear.causal_conv1d_mtp import causal_conv1d_update
+from lightllm.common.attention.backends.gdn.triton.kernels.fused_gdn_gating import fused_gdn_gating
+from lightllm.common.attention.backends.gdn.triton.kernels.gdn_decode_pack import conv_pack_gdn_decode_inputs
+from lightllm.common.attention.backends.gdn.triton.kernels.mtp_fused_recurrent import (
+    mtp_fused_recurrent_gated_delta_rule,
+)
 from .fla.ops import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 
 __all__ = [

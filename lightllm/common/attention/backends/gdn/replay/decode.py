@@ -11,7 +11,7 @@ import torch
 import triton
 
 from lightllm.common.attention_state.bounded_att.conv_ssm_types import ConvSSMStateConfig
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_decode import (
+from lightllm.common.attention.backends._shared.linear.replayssm_decode import (
     _decode_replay,
     check_replay_sync_mark,
 )

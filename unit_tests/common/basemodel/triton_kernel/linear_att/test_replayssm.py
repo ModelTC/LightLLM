@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.linear.replay_gdn_decode import get_configs
+from lightllm.common.attention.backends.gdn.replay.decode import get_configs
 from unit_tests.common.basemodel.triton_kernel.linear_att.replay_history import (
     accept_replay_window,
     attach_replay_history as ReplaySSMExecutor,
@@ -22,9 +22,9 @@ def ssm_snapshot(backend, req):
     return clone[:, req]
 
 
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_fold import fold_prefix
-from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
+from lightllm.common.attention.backends._shared.linear.replayssm_cursor import advance_cursor
+from lightllm.common.attention.backends._shared.linear.replayssm_fold import fold_prefix
+from lightllm.common.attention.backends._shared.linear.ssm_acceptance import commit_ssm_prefix
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 

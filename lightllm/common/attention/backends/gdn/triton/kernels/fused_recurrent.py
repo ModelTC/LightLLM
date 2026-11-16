@@ -13,7 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .op import exp
+from lightllm.common.attention.backends._shared.linear.op import exp
 
 
 @triton.heuristics(

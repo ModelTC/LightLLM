@@ -261,7 +261,7 @@ def gqa_token_decode_attention_flash_decoding_vsm_stage1(
     q_head_num,
     kv_head_num,
     batch_size,
-    **run_config
+    **run_config,
 ):
     grid = (num_vsm,)
 

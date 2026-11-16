@@ -5,10 +5,10 @@ import torch
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, KDAState
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import (
+from lightllm.common.attention.backends.kda.triton.kernels.kda_decode import (
     fused_recurrent_kda,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_fold import fold_prefix
+from lightllm.common.attention.backends._shared.linear.replayssm_fold import fold_prefix
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
 
 
@@ -153,7 +153,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
     from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import (
         ReplayKDAState,
     )
-    from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
+    from lightllm.common.attention.backends._shared.linear.causal_conv1d import (
         causal_conv1d_update,
     )
 
