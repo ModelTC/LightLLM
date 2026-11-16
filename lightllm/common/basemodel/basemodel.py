@@ -119,6 +119,8 @@ class TpPartBaseModel:
         with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
             self._init_weights()
         self._init_infer_layer()
+        for layer in self.layers_infer:
+            layer._legacy_attention_execution = True
         self._init_some_value()
         self._init_custom()
         self.load_weights(self.weight_dict)

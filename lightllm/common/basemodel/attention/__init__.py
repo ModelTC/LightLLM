@@ -246,6 +246,7 @@ class ModelAttention:
                     continue
                 group = self.groups[group_id]
                 resources = layer.bind_attention_resources(model, weight, adapter)
+                layer._legacy_attention_execution = False
                 owners[f"layer.{layer.layer_num_}"] = resources
                 for phase, backend in group.items():
                     setattr(

@@ -1,3 +1,5 @@
+from lightllm.common.attention.api.inputs import DenseInputs
+
 from dataclasses import replace
 from lightllm.common.attention.api.spec import AttentionPhase
 
@@ -17,6 +19,33 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         self.sliding_window_ = int(network_config.get("sliding_window", 0) or 0)
 
     def _token_attention_kernel(self, q, infer_state, layer_weight):
+        if getattr(self, "_legacy_attention_execution", False):
+            state = infer_state.att_state_manager.get_state(
+                model_role=infer_state.att_state_role,
+                state_type_filter="gqa",
+                logical_layer_id=self.layer_num_,
+                state_class=FullAttentionState,
+            )
+            k, v = state.get_layer_view(logical_layer_id=self.layer_num_)
+            k = k.view(k.shape[0], self.tp_k_head_num_, self.head_dim_)
+            v = v.view(v.shape[0], self.tp_k_head_num_, self.head_dim_)
+            q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
+            use_sliding_window = self.sliding_window_ > 0
+            # DFlash2 attention is non-causal, so its local window must retain both
+            # the visible prefix on the left and the complete draft block on the right.
+            window = self.sliding_window_ - 1
+            output = infer_state.decode_att_state.decode_att(
+                q=q,
+                k=k,
+                v=v,
+                att_control=AttControl(
+                    logical_layer_id=self.layer_num_,
+                    use_sliding_window=use_sliding_window,
+                    sliding_window=(window, window) if use_sliding_window else (-1, -1),
+                ),
+                alloc_func=self.alloc_tensor,
+            )
+            return output.view(-1, self.tp_q_head_num_ * self.head_dim_)
         state = infer_state.att_state_manager.get_state(
             model_role=infer_state.att_state_role,
             state_type_filter="gqa",
@@ -27,21 +56,11 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         k = k.view(k.shape[0], self.tp_k_head_num_, self.head_dim_)
         v = v.view(v.shape[0], self.tp_k_head_num_, self.head_dim_)
         q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        use_sliding_window = self.sliding_window_ > 0
+
         # DFlash2 attention is non-causal, so its local window must retain both
         # the visible prefix on the left and the complete draft block on the right.
-        window = self.sliding_window_ - 1
-        output = infer_state.decode_att_state.decode_att(
-            q=q,
-            k=k,
-            v=v,
-            att_control=AttControl(
-                logical_layer_id=self.layer_num_,
-                use_sliding_window=use_sliding_window,
-                sliding_window=(window, window) if use_sliding_window else (-1, -1),
-            ),
-            alloc_func=self.alloc_tensor,
-        )
+
+        output = self.decode_attention.forward(infer_state.attention, DenseInputs(q))
         return output.view(-1, self.tp_q_head_num_ * self.head_dim_)
 
     def _post_cache_kv(self, cache_kv, infer_state, layer_weight):
