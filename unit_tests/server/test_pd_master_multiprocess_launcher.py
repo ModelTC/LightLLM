@@ -93,6 +93,8 @@ def test_backend_launch_tracks_processes_and_passes_worker_index(monkeypatch, ex
 
 
 def test_worker_bootstrap_uses_its_assigned_port(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_LOG_HTTP_LEVEL", "error")
+    monkeypatch.setenv("LIGHTLLM_LOG_HTTP_ACCESS", "1")
     import hypercorn.__main__
 
     args = _args(port=8000, httpserver_workers=2)
@@ -108,6 +110,8 @@ def test_worker_bootstrap_uses_its_assigned_port(monkeypatch):
         assert argv[argv.index("--workers") + 1] == "0"
         assert argv[argv.index("--bind") + 1] == "10.0.0.1:8101"
         assert argv[-1] == "lightllm.server.api_http:app"
+        assert argv[argv.index("--log-level") + 1] == "error"
+        assert "--access-logfile" not in argv
 
     monkeypatch.setattr(hypercorn.__main__, "main", start_hypercorn)
     multiprocess._start_pd_master_worker()

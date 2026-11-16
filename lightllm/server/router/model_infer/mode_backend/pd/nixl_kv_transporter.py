@@ -29,6 +29,8 @@ class NixlKVTransporter:
         kv_move_buffer: Tensor,
         pd_page_kind_payload_bytes: dict[str, int],
     ):
+        if NixlWrapper is None:
+            raise ImportError("pd_trans_mode=nixl requires NIXL; install NIXL or select pd_trans_mode=nccl")
         self.node_id = node_id
         self.tp_idx = tp_idx
         self.capture_telemetry = os.getenv("LIGHTLLM_NIXL_CAPTURE_TELEMETRY", "0").lower() in (
@@ -75,6 +77,7 @@ class NixlKVTransporter:
         return self.nixl_agent.get_new_notifs()
 
     def _register_kv_move_buffer(self, kv_move_buffer: Tensor):
+        self.kv_move_buffer = kv_move_buffer
         self.num_pages = kv_move_buffer.shape[0]
         self.page_bytes = kv_move_buffer[0].numel() * kv_move_buffer.element_size()
         self.page_reg_desc = self.nixl_agent.register_memory(kv_move_buffer)

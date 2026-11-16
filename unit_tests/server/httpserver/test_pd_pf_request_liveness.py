@@ -40,7 +40,7 @@ class _Session:
         self.hold_prefill_ready = False
         self.failed_sends = set()
         self.messages = {"p": [], "d": []}
-        self.request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
+        self.request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
         self.p_ws = SimpleNamespace(send_bytes=AsyncMock(side_effect=self._send_prefill))
         self.d_ws = SimpleNamespace(send_bytes=AsyncMock(side_effect=self._send_decode))
         self.p_node = PD_Client_Obj(1, "prefill:8000", "prefill", {}, sub_connections={"p": self.p_ws})

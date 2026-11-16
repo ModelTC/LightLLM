@@ -9,6 +9,7 @@ import numpy as np
 
 from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, SamplingParams
 from lightllm.server.router.model_infer.infer_batch import InferReq
+from lightllm.server.httpserver_for_pd_master import manager as pd_master_module
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
 from lightllm.server.pd_io_struct import PD_Client_Obj
@@ -108,7 +109,9 @@ def _collect(
 ):
     segment_iter = iter(segments)
 
-    async def fake_wait(p_node, d_node, start_time, prompt_ids, sp, multimodal_params, request, origin_request_id):
+    async def fake_wait(
+        p_node, d_node, start_time, prompt_ids, sp, multimodal_params, request, origin_request_id, **_kwargs
+    ):
         assert origin_request_id in mgr.active_req_ids
         mgr.segment_inputs.append(
             pickle.loads(pickle.dumps((prompt_ids, sp.constraint_out_params.pd_previous_output_len)))
@@ -174,7 +177,7 @@ def test_pd_token_id_stop_matches_across_capacity_segments(monkeypatch, mode, hi
         params.init(None, stop_sequences=[stop_ids], stop_str_match_mode=mode, max_new_tokens=6)
         segments = []
 
-        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal, request, origin_request_id):
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal, request, **_kwargs):
             index = len(segments)
             segments.append(sp.group_request_id)
             req = InferReq.__new__(InferReq)
@@ -300,7 +303,7 @@ def test_budget_counts_initial_prompt_once_across_choices_and_busy_retries(monke
     params.init(None, n=choice_count, best_of=choice_count, thinking_token_budget=3, guided_reasoning_end=[5])
     attempts = {}
 
-    async def attempt(prompt, sampling_params, multimodal, request, start_time, req_id, input_token_num):
+    async def attempt(prompt, sampling_params, multimodal, request, start_time, req_id, input_token_num, summary_state):
         assert prompt == "prompt"
         assert input_token_num == 2
         assert sampling_params.constraint_out_params.thinking_token_budget == 3
@@ -454,7 +457,7 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch):
         _initial_reasoning_state=1,
     )
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, origin_request_id):
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
         assert sp.stop_str_match_mode.get_mode() == (StopStrMatchMode.ALL_TEXT)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
         yield sp.group_request_id, "reasonENDextra", metadata, FinishStatus(FinishStatus.FINISHED_LENGTH)
@@ -496,7 +499,7 @@ def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
     )
     segment_modes = []
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, origin_request_id):
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
         segment_modes.append(sp._initial_reasoning_state)
         assert sp.stop_str_match_mode.get_mode() == StopStrMatchMode.CONTENT_ONLY
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
@@ -605,7 +608,7 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
     )
     segments = []
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, origin_request_id):
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
         segments.append(prompt)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segments) == 1:
@@ -695,7 +698,7 @@ def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch
 
         manager.stop_request = stop_and_notify
 
-        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request, origin_request_id):
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
             segments.append(prompt)
             metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
             try:
@@ -728,9 +731,10 @@ def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch
 
 @pytest.mark.parametrize(
     "exit_mode, token_count",
-    [("finish", 2), ("capacity", 2), ("close", 1), ("error", 1), ("empty", 0), ("empty_prompt", 2)],
+    [("finish", 2), ("capacity", 2), ("close", 1), ("error", 1), ("empty", 0), ("stopped", 0), ("empty_prompt", 2)],
 )
-def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, exit_mode, token_count):
+@pytest.mark.parametrize("prefill_first", [False, True])
+def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, exit_mode, token_count, prefill_first):
     import math
     import time
     from unittest.mock import MagicMock
@@ -745,8 +749,8 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, exit_mode, token_co
     summary = MagicMock()
     monkeypatch.setattr(pd_master_module, "log_request_summary", summary)
 
-    async def raw_stream(p_node, d_node, prompt, sampling_params, multimodal_params, request, origin_request_id):
-        if exit_mode == "empty":
+    async def raw_stream(**kwargs):
+        if exit_mode in ("empty", "stopped"):
             return
         metadata = {
             "prompt_tokens": 0 if exit_mode == "empty_prompt" else 10,
@@ -759,10 +763,13 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, exit_mode, token_co
             FinishStatus.FINISHED_PD_DECODE_CAPACITY if exit_mode == "capacity" else FinishStatus.FINISHED_LENGTH
         )
 
-    manager.fetch_pd_stream = raw_stream
+    manager.args.pd_prefill_first = prefill_first
+    setattr(manager, "fetch_prefill_first_stream" if prefill_first else "fetch_pd_stream", raw_stream)
 
     async def run():
-        generator = manager._wait_to_token_package(None, None, time.time(), "prompt", params, None, request, 80)
+        generator = manager._wait_to_token_package(
+            None, None, time.time(), "prompt", params, None, request, 80, {"stop": exit_mode == "stopped"}
+        )
         if exit_mode == "close":
             await generator.__anext__()
             await generator.aclose()
@@ -775,6 +782,16 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, exit_mode, token_co
 
     asyncio.run(run())
     summaries = summary.call_args_list
+    if exit_mode == "stopped":
+        summary.assert_called_once_with(
+            80,
+            status="completed",
+            finish_reason="stop",
+            x_request_id="summary-test",
+            output_tokens=0,
+            timing_scope="end_to_end",
+        )
+        return
     if token_count:
         assert len(summaries) == 1
         assert summaries[0].kwargs["x_request_id"] == "summary-test"
@@ -872,7 +889,7 @@ def test_application_pd_stop_leaves_sibling_choice_running(monkeypatch):
 
         manager.remove_req = remove_req
 
-        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request, origin_request_id):
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
             index = len(segments)
             segments.append(sp.group_request_id)
             metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
@@ -927,7 +944,8 @@ def test_pd_failure_emits_one_summary_with_output_counts(monkeypatch, bad_metada
     params.init(SimpleNamespace(encode=lambda *_args, **_kwargs: []), max_new_tokens=4)
     request = SimpleNamespace(headers={}, is_disconnected=lambda: asyncio.sleep(0, False))
 
-    async def raw_stream(_p, _d, _prompt, sp, *_args):
+    async def raw_stream(sampling_params, **kwargs):
+        sp = sampling_params
         metadata = {"id": 1, "prompt_tokens": 10, "prompt_cache_len": 3}
         yield sp.group_request_id, "first", dict(metadata), FinishStatus()
         if bad_metadata == "busy":
@@ -977,7 +995,8 @@ def test_busy_before_first_token_logs_only_terminal_outcome(monkeypatch, mode):
     request = SimpleNamespace(headers={}, is_disconnected=lambda: asyncio.sleep(0, False))
     attempts = []
 
-    async def raw_stream(_p, _d, _prompt, sp, *_args):
+    async def raw_stream(sampling_params, **kwargs):
+        sp = sampling_params
         attempts.append(sp.group_request_id)
         if len(attempts) == 1:
             raise ServerBusyError("decode busy")
@@ -1028,7 +1047,8 @@ def test_pd_continuation_busy_before_first_token_emits_terminal_summary(monkeypa
     request = SimpleNamespace(headers={}, is_disconnected=lambda: asyncio.sleep(0, False))
     attempts = 0
 
-    async def raw_stream(_p, _d, _prompt, sp, *_args):
+    async def raw_stream(sampling_params, **kwargs):
+        sp = sampling_params
         nonlocal attempts
         attempts += 1
         metadata = {"id": 1, "prompt_tokens": 10, "prompt_cache_len": 3}
@@ -1068,7 +1088,8 @@ def test_pd_continuation_busy_before_first_token_emits_terminal_summary(monkeypa
 
 
 @pytest.mark.parametrize("headers, expected", [({"X-Request-Id": "header-id"}, "header-id"), ({}, "context-id")])
-def test_fetch_pd_stream_sends_request_context_to_both_nodes(headers, expected):
+@pytest.mark.parametrize("prefill_first", [False, True])
+def test_fetch_pd_stream_sends_request_context_to_both_nodes(headers, expected, prefill_first):
     from lightllm.server.pd_io_struct import ObjType
     from lightllm.utils.log_utils import set_http_request_id, reset_http_request_id
 
@@ -1084,25 +1105,39 @@ def test_fetch_pd_stream_sends_request_context_to_both_nodes(headers, expected):
         params.max_new_tokens = 8
         p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
         d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+        p_node.pick_websocket = lambda: p_node.websocket
+        d_node.pick_websocket = lambda: d_node.websocket
+        manager.pd_manager = SimpleNamespace(selector=SimpleNamespace(selection_lock=asyncio.Lock()))
+        manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, None))
+        manager._wait_prefill_first_token = AsyncMock(return_value=(123, "hello", {}, FinishStatus()))
 
         async def wait(event, *args, stage, **kwargs):
             if stage == "prefill":
                 event.prompt_ids = [1, 2, 3]
+            elif stage == "pf-prefill-kv-ready":
+                event.ready = SimpleNamespace(prompt_ids=[1, 2, 3])
             else:
                 raise StopAfterDispatch()
 
         manager._wait_for_event_or_disconnect = wait
         token = set_http_request_id("context-id")
         try:
-            stream = manager.fetch_pd_stream(p_node, d_node, "prompt", params, None, SimpleNamespace(headers=headers))
+            request = SimpleNamespace(headers=headers)
+            if prefill_first:
+                stream = manager.fetch_prefill_first_stream(p_node, "prompt", params, None, request, 123)
+                await anext(stream)
+            else:
+                stream = manager.fetch_pd_stream(p_node, d_node, "prompt", params, None, request, 123)
             with pytest.raises(StopAfterDispatch):
                 await anext(stream)
         finally:
             reset_http_request_id(token)
         for node, prompt, max_tokens in ((p_node, "prompt", 1), (d_node, [1, 2, 3], 8)):
-            node.websocket.send_bytes.assert_awaited_once()
-            kind, (sent_prompt, sent_params, _), metadata = pickle.loads(node.websocket.send_bytes.call_args.args[0])
-            assert kind == ObjType.REQ
+            messages = [pickle.loads(call.args[0]) for call in node.websocket.send_bytes.await_args_list]
+            [(kind, (sent_prompt, sent_params, _), metadata)] = [
+                message for message in messages if message[0] in (ObjType.REQ, ObjType.PD_PF_PREFILL_REQ)
+            ]
+            assert kind == (ObjType.PD_PF_PREFILL_REQ if prefill_first and node is p_node else ObjType.REQ)
             assert sent_prompt == prompt
             assert sent_params.max_new_tokens == max_tokens
             assert metadata == {"http_request_id": expected}

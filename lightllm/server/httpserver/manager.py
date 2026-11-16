@@ -926,6 +926,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 yield sub_req_id, out_str, metadata, finish_status
                 # 如果有子请求完成，就更新计数
                 if finish_status.is_finished():
+                    finish_reasons.add(
+                        "pd_capacity"
+                        if finish_status.is_finished_pd_decode_capacity()
+                        else finish_status.get_finish_reason()
+                    )
                     unfinished_count -= 1
 
                 if unfinished_count == 0:
@@ -933,10 +938,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
                     self.per_token_costs.add(mean_per_token_cost_time_ms)
                     x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
-                    x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
-                    gpu_prompt_cache_ratio = gpu_prompt_cache_len / prompt_tokens
-                    cpu_prompt_cache_ratio = cpu_prompt_cache_len / prompt_tokens
-                    disk_prompt_cache_ratio = disk_prompt_cache_len / prompt_tokens
                     prompt_cache_len = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
                     prompt_cache_ratio = prompt_cache_len / prompt_tokens
                     generation_throughput = out_token_counter / max(total_cost_time_ms / 1000.0, 1e-6)
@@ -947,32 +948,26 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     if mtp_total_verify_steps <= 0:
                         mtp_total_verify_steps = out_token_counter - mtp_accepted_token_num
                     mtp_avg_token_per_step = out_token_counter / max(mtp_total_verify_steps, 1)
-                    mtp_avg_verify_tokens_per_step = mtp_verify_token_num / max(mtp_total_verify_steps, 1)
-                    mtp_avg_accepted_tokens_per_step = mtp_accepted_token_num / max(mtp_total_verify_steps, 1)
-                    format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-                    logger.debug(
-                        f"X-Request-Id:{x_request_id} "
-                        f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
-                        f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
-                        f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
-                        f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
-                        f"prompt_token_num:{prompt_tokens} "
-                        f"gpu cache hit: {gpu_prompt_cache_ratio > 0} "
-                        f"gpu_prompt_cache_len:{gpu_prompt_cache_len} "
-                        f"gpu_prompt_cache_ratio:{gpu_prompt_cache_ratio} "
-                        f"cpu cache hit: {cpu_prompt_cache_len > 0} "
-                        f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
-                        f"cpu_prompt_cache_ratio:{cpu_prompt_cache_ratio} "
-                        f"disk cache hit: {disk_prompt_cache_len > 0} "
-                        f"disk_prompt_cache_len:{disk_prompt_cache_len} "
-                        f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
-                        f"mtp_accepted_token_num:{mtp_accepted_token_num} "
-                        f"mtp_total_verify_steps:{mtp_total_verify_steps} "
-                        f"mtp_total_verify_tokens:{mtp_verify_token_num} "
-                        f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
-                        f"mtp_avg_accepted_tokens_per_step:{mtp_avg_accepted_tokens_per_step} "
-                        f"mtp_avg_verify_tokens_per_step:{mtp_avg_verify_tokens_per_step} "
-                    )
+                    if not self.is_multinode_tp_slave:
+                        log_request_summary(
+                            group_request_id,
+                            **request_finish_fields(finish_reasons),
+                            x_request_id=x_request_id,
+                            prompt_tokens=prompt_tokens,
+                            output_tokens=out_token_counter,
+                            timing_scope=(
+                                self.args.run_mode if self.args.run_mode in ("prefill", "decode") else "end_to_end"
+                            ),
+                            ttft_ms=round(first_token_cost_ms, 3),
+                            duration_ms=round(total_cost_time_ms, 3),
+                            gpu_cache_tokens=gpu_prompt_cache_len,
+                            cpu_cache_tokens=cpu_prompt_cache_len,
+                            disk_cache_tokens=disk_prompt_cache_len,
+                            mtp_enabled=bool(self.args.mtp_step),
+                            mtp_accepted_tokens=mtp_accepted_token_num,
+                            mtp_verify_steps=mtp_total_verify_steps,
+                            mtp_verify_tokens=mtp_verify_token_num,
+                        )
 
                     self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
                     self.metric_client.histogram_observe("lightllm_cache_ratio", prompt_cache_ratio)

@@ -306,10 +306,16 @@ class Autotuner:
             self.cached_configs[static_key] = {}
             if get_triton_autotune_level() == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
                 if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
-                    logger.warning(
-                        f"No kernel config for {self.kernel_name} in {KernelConfigs.get_config_file_name(static_key)},"
-                        f"the performance may be suboptimal!"
-                        f"You can use LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 to enable autotune.",
+                    if not Autotuner._defaults_warning_emitted:
+                        logger.warning(
+                            "event=kernel.defaults_used reason=tuned_configs_missing action=use_default_configs "
+                            "performance=may_be_suboptimal hint=LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 details=DEBUG"
+                        )
+                        Autotuner._defaults_warning_emitted = True
+                    logger.debug(
+                        "event=kernel.config_missing kernel=%s config=%s",
+                        self.kernel_name,
+                        KernelConfigs.get_config_file_name(static_key),
                     )
         return True
 

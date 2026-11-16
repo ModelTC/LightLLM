@@ -188,6 +188,24 @@ JSON retains the ``engine.stats`` / ``engine.idle`` events and exact numeric fie
 monotonic elapsed time; the default interval remains 10 seconds. In-flight
 requests contribute tokens before they finish.
 
+With MTP enabled, windows containing draft verification add a second text line:
+
+.. code-block:: text
+
+   15:54:23.459 INFO [D/router] MTP stats | Draft acceptance: 66.7% | Mean length: 2.33 | Draft tokens: accepted 4, verified 6 | Throughput: accepted 2.0 tok/s, verified draft 3.0 tok/s
+
+Draft acceptance divides accepted draft tokens by the actual number of verified
+draft tokens, including dynamic verification's selected widths. Both exclude the
+mandatory target token. Mean length is ``1 + accepted draft tokens / request rounds``,
+including that target token; rounds without draft verification are excluded.
+These are verification results before stop/length clipping, whereas output throughput
+counts committed outputs. Already synchronized CPU results feed the counters; logging
+adds no GPU synchronization. JSON includes ``mtp_accepted_tokens``,
+``mtp_verified_draft_tokens``, ``mtp_rounds``, ``mtp_acceptance_pct``,
+``mtp_mean_acceptance_length``, ``mtp_accepted_tok_s`` and ``mtp_verified_draft_tok_s``
+in the same engine event. Empty MTP windows use null acceptance/mean values and omit
+the extra text line. Disabled MTP omits all these fields.
+
 One progress-publishing TP leader writes each CPU shared counter row; the router
 sums local DP rows. Pure multi-node TP still logs only on the primary router.
 Prefill counts computed input tokens, excluding GPU/CPU/disk cache restoration

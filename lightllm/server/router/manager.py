@@ -71,7 +71,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         self.shm_req_manager = ShmReqManager()
         self.service_ready = SharedInt("service_ready")
         self.service_ready.set_value(0)
-        self.engine_counters = EngineCounters(self.dp_size_in_node, owner=True)
+        self.engine_counters = EngineCounters(self.dp_size_in_node, owner=True, mtp_enabled=args.mtp_mode is not None)
         # 用共享内存进行共享，router 模块读取进行精确的调度估计
         self.kv_capacity_reader = KVCapacityReader()
         # 初始化 radix_cache_client 用于读取 prompt cache 的管理信息
@@ -242,19 +242,63 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
     async def loop_for_fwd(
         self,
     ):
+        counter_count = 0
+        self.engine_throughput = EngineThroughput(self.engine_counters)
+        stats_logger = PeriodicStatsLogger(init_logger("lightllm.stats"))
+        last_poll = time.monotonic()
+        resumed = False
+        seen_ready = False
         while True:
             await self._step()
+            counter_count += 1
+            # One node-local snapshot, never one copy per TP worker. Multi-node TP
+            # slave routers mirror requests and must not duplicate the master summary.
+            running = len(self.running_batch.reqs) if self.running_batch is not None else 0
+            waiting = self.req_queue.get_wait_req_num()
+            if self.schedule_new_batch is not None:
+                waiting += len(self.schedule_new_batch.reqs)
+            now = time.monotonic()
+            active = bool(running or waiting) or self.engine_throughput.has_activity()
+            if self.service_ready.get_value() and not seen_ready:
+                if not resumed:
+                    self.engine_throughput.resume(last_poll)
+                    stats_logger.last_time = last_poll
+                seen_ready = True
+            if stats_logger.active is not True and active and not resumed:
+                self.engine_throughput.resume(last_poll)
+                stats_logger.last_time = last_poll
+                resumed = True
+            last_poll = now
+            if (self.dp_size > 1 or self.node_rank == 0) and seen_ready and stats_logger.should_log(active):
+                resumed = False
+                stats_logger.log(
+                    scope="node",
+                    **self.engine_throughput.snapshot(),
+                    running=running,
+                    waiting=waiting,
+                    paused=self._get_paused_req_num(),
+                    kv_active_pct_by_local_dp=[
+                        round(float(100 * self.get_used_tokens(i) / max(self.max_total_token_num, 1)), 1)
+                        for i in range(self.dp_size_in_node)
+                    ],
+                    kv_cached_pct_by_local_dp=[
+                        round(
+                            float(
+                                100
+                                * self.radix_cache_client.get_unrefed_tokens_num(i)
+                                / max(self.max_total_token_num, 1)
+                            ),
+                            1,
+                        )
+                        if self.radix_cache_client is not None
+                        else 0.0
+                        for i in range(self.dp_size_in_node)
+                    ],
+                    kv_capacity_tokens_per_dp=self.max_total_token_num,
+                )
             if self.running_batch is not None:
-                # 有运行请求时，5 秒打一次 batch 状态，并写 pause 指标。
-                if log_time_ready("router_running_batch_status", 5):
-                    for dp_index in range(self.dp_size_in_node):
-                        token_ratio1 = self.get_used_tokens(dp_index) / self.max_total_token_num
-                        token_ratio2 = (
-                            self.max_total_token_num - self.kv_capacity_reader.get_available_tokens(dp_index)
-                        ) / self.max_total_token_num
-                        d_i = dp_index
-                        estimated_peak_token_count = self.shared_token_load.get_estimated_peak_token_count(d_i)
-                        paused_req_num = self._get_paused_req_num_in_dp_index(dp_index=d_i)
+                if counter_count % 100 == 0:
+                    if log_time_ready("router_debug_snapshot", 10) and logger.isEnabledFor(logging.DEBUG):
                         logger.debug(
                             "event=router.policy running=%s waiting=%s paused=%s estimated_output_tokens=%s",
                             running,

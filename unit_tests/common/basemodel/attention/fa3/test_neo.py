@@ -134,12 +134,12 @@ def test_prefill_missing_extension_reports_install_instructions(monkeypatch):
 @pytest.mark.parametrize("rank", [0, 1])
 def test_neo_selection_only_explains_missing_extension_when_requested(monkeypatch, selection, rank):
     from lightllm.common.basemodel.attention import create_utils
+    from lightllm.common.basemodel.attention.triton.neo import NeoTritonAttBackend
     from lightllm.utils import log_utils
 
     monkeypatch.setattr(log_utils, "_context", {"tp_rank": rank})
     monkeypatch.setattr(log_utils, "_context_pid", log_utils.os.getpid())
     monkeypatch.setattr(neo, "HAS_FLASH_ATTN_INTERFACE", False)
-    monkeypatch.setattr(create_utils, "HAS_FLASH_ATTN_INTERFACE", False)
     monkeypatch.setattr(
         create_utils,
         "get_env_start_args",
@@ -152,10 +152,10 @@ def test_neo_selection_only_explains_missing_extension_when_requested(monkeypatc
         create_utils,
         "neo_data_type_to_backend",
         {
-            "None": {"triton": create_utils.NeoTritonAttBackend},
+            "None": {"triton": "triton.neo:NeoTritonAttBackend"},
         },
     )
-    automatic = Mock(return_value=create_utils.NeoTritonAttBackend)
+    automatic = Mock(return_value=NeoTritonAttBackend)
     logger = Mock()
     monkeypatch.setattr(create_utils, "_auto_select_backend", automatic)
     monkeypatch.setattr(create_utils, "logger", logger)
@@ -164,7 +164,7 @@ def test_neo_selection_only_explains_missing_extension_when_requested(monkeypatc
             create_utils.get_neo_prefill_att_backend_class()
         assert not logger.mock_calls
     else:
-        assert create_utils.get_neo_prefill_att_backend_class() is create_utils.NeoTritonAttBackend
+        assert create_utils.get_neo_prefill_att_backend_class() is NeoTritonAttBackend
         if selection == "auto":
             automatic.assert_called_once()
             assert logger.info.call_count == int(rank == 0)

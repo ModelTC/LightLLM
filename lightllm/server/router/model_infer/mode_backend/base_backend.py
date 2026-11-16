@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 import torch
 import time
@@ -212,7 +214,7 @@ class ModeBackend:
                     page_size=self.args.page_size,
                 )
 
-        self.logger.info(f"loaded model class {self.model.__class__}")
+        self.logger.info("event=model.initialized model_class=%s", self.model.__class__.__name__)
 
         cache_placement_controller = create_cache_placement_controller(
             args=self.args,
@@ -267,7 +269,7 @@ class ModeBackend:
                     kind="dp",
                     reader_count=self.dp_size_in_node - 1,
                 )
-            dist.barrier(group=self.node_nccl_group)
+            dist.barrier(group=self.node_nccl_group, device_ids=[torch.cuda.current_device()])
 
         # 同一 DP 组内只需主 rank 初始化真实的 capture buffer 并执行后续相关操作；
         # 非主 rank 不需要分配 buffer，避免重复占用内存。
@@ -810,7 +812,7 @@ class ModeBackend:
                         else:
                             # 非 overlap 模式没有在途的异步计算，可以在本轮直接清理。
                             finished_reqs.append(req_obj)
-                        self.logger.info(
+                        self.logger.warning(
                             f"force early finish for PD decode req_id={req_obj.req_id} "
                             f"because token capacity is insufficient"
                         )
@@ -950,6 +952,8 @@ class ModeBackend:
         next_token_logprobs = next_token_logprobs.tolist()
         next_token_ranks = next_token_ranks.tolist()
 
+        counters = getattr(self, "engine_counters", None)
+        prefill_tokens = output_tokens = 0
         for req_obj, next_token_id, next_token_logprob, next_token_rank, topk_row, pack in zip(
             run_reqs,
             next_token_ids,
@@ -960,6 +964,7 @@ class ModeBackend:
         ):
             req_obj: InferReq = req_obj
             pack: InferReqUpdatePack = pack
+            old_output = req_obj.shm_req.shm_cur_output_len if counters is not None else 0
             output_top_logprobs = None
             if topk_row is not None:
                 output_top_logprobs = (topk_row.token_ids.tolist(), topk_row.logprobs.tolist())

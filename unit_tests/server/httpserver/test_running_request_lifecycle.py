@@ -319,7 +319,7 @@ def test_prefill_assignment_wait_encloses_master_budget(resource_wait: int, expe
 def test_prefill_upload_preserves_int64_multimodal_prompt_ids():
     async def run():
         manager = _make_manager(NodeRole.P)
-        multimodal_token_id = 2 ** 32
+        multimodal_token_id = 2**32
         manager._encode.return_value = [10, multimodal_token_id, 12]
         websocket = AsyncMock()
         pd_event = asyncio.Event()
@@ -648,6 +648,49 @@ def test_wait_to_token_package_releases_lock_while_consumer_is_suspended():
         await asyncio.wait_for(produce(), timeout=1)
         rest = [item async for item in output_generator]
         assert [first[1]] + [item[1] for item in rest] == ["a", "b", "c"]
+
+
+@pytest.mark.parametrize(
+    "kind,status",
+    [
+        ("busy", "busy"),
+        ("invalid", "rejected"),
+        ("timeout", "timeout"),
+        ("error", "error"),
+        ("cancel", "cancelled"),
+        ("exit", "cancelled"),
+        ("disconnect", "cancelled"),
+    ],
+)
+@pytest.mark.parametrize("slave", [False, True])
+def test_generate_failure_summary_preserves_reason(monkeypatch, kind, status, slave):
+    from lightllm.utils.error_utils import ServerBusyError, InvalidRequestError, ClientDisconnected
+
+    summary = MagicMock()
+    monkeypatch.setattr("lightllm.server.httpserver.manager.log_request_summary", summary)
+    error_type = {
+        "busy": ServerBusyError,
+        "invalid": InvalidRequestError,
+        "timeout": asyncio.TimeoutError,
+        "error": RuntimeError,
+        "cancel": asyncio.CancelledError,
+        "exit": GeneratorExit,
+        "disconnect": ClientDisconnected,
+    }[kind]
+
+    async def run():
+        manager = _make_manager(NodeRole.NORMAL)
+        manager.is_multinode_tp_slave = slave
+        manager._encode.side_effect = (
+            ClientDisconnected(8, "request rejected reason")
+            if kind == "disconnect"
+            else error_type("request rejected reason")
+        )
+        with pytest.raises(error_type):
+            await _drain_generate(manager, _sampling_params(), _multimodal_params())
+        summary.assert_called_once()
+        assert summary.call_args.kwargs["status"] == status
+        assert summary.call_args.kwargs["reason"] == str(manager._encode.side_effect)
 
     asyncio.run(run())
 

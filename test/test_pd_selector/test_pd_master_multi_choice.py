@@ -103,7 +103,7 @@ def test_pd_master_expands_n_into_concurrent_single_choice_requests():
             choice_sampling_params,
             child_multimodal_params,
             child_request,
-            origin_request_id,
+            **_kwargs,
         ):
             captured_params.append(choice_sampling_params)
             started.add(choice_sampling_params.group_request_id)
@@ -371,7 +371,7 @@ def test_pd_master_stopped_choice_does_not_forward_late_output(late_status):
         sampling_params.max_new_tokens = 4
 
         async def wait_to_token_package(
-            p_node, d_node, start_time, prompt, params, multimodal_params, request, origin_request_id
+            p_node, d_node, start_time, prompt, params, multimodal_params, request, **_kwargs
         ):
             metadata = {"id": 10, "prompt_tokens": 2}
             yield params.group_request_id, "first", dict(metadata), FinishStatus()

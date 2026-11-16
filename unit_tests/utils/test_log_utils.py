@@ -606,6 +606,35 @@ def test_stats_text_does_not_mutate_json_record():
     assert result["output_tok_s"] == 12.345
 
 
+@pytest.mark.parametrize("rounds", [0, 3])
+def test_mtp_stats_text_and_json(rounds):
+    code = f"""
+        import logging
+        from lightllm.utils.log_utils import PeriodicStatsLogger
+        stats = PeriodicStatsLogger(logging.getLogger("lightllm.stats"))
+        stats.active = True
+        stats.log(output_tok_s=3.5, mtp_rounds={rounds},
+                  mtp_accepted_tokens=4, mtp_verified_draft_tokens=6,
+                  mtp_acceptance_pct=66.67 if {rounds} else None,
+                  mtp_mean_acceptance_length=2.33 if {rounds} else None,
+                  mtp_accepted_tok_s=2, mtp_verified_draft_tok_s=3)
+    """
+    text = _run_logging(code, LIGHTLLM_LOG_NODE_ROLE="D")
+    if rounds:
+        lines = text.splitlines()
+        assert len(lines) == 2
+        assert "[D/main] MTP stats | Draft acceptance: 66.7% | Mean length: 2.33" in lines[1]
+        assert "Draft tokens: accepted 4, verified 6" in lines[1]
+        assert "Throughput: accepted 2.0 tok/s, verified draft 3.0 tok/s" in lines[1]
+    else:
+        assert "MTP stats" not in text
+    record = json.loads(_run_logging(code, LIGHTLLM_LOG_FORMAT="json"))
+    assert record["mtp_rounds"] == rounds
+    assert record["mtp_accepted_tokens"] == 4 and record["mtp_verified_draft_tokens"] == 6
+    assert record["mtp_acceptance_pct"] == (66.67 if rounds else None)
+    assert record["mtp_mean_acceptance_length"] == (2.33 if rounds else None)
+
+
 def test_python_warnings_survive_error_service_level_and_reconfiguration():
     output = _run_logging(
         """

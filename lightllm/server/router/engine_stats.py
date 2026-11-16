@@ -13,14 +13,15 @@ class EngineCounters:
     sampling cumulative totals keeps short requests and overlapping windows exact.
     """
 
-    def __init__(self, dp_size, dp_rank=None, *, owner=False):
-        self.storage = ShmArray("engine_token_counters", (dp_size, 2), np.int64)
+    def __init__(self, dp_size, dp_rank=None, *, owner=False, mtp_enabled=False):
+        self.storage = ShmArray("engine_token_counters", (dp_size, 5), np.int64)
         if owner:
             self.storage.create_shm()
             self.storage.arr.fill(0)
         else:
             self.storage.link_shm()
         self.dp_rank = dp_rank
+        self.mtp_enabled = mtp_enabled
 
     def add(self, prefill_tokens=0, output_tokens=0):
         row = self.storage.arr[self.dp_rank]
@@ -28,7 +29,13 @@ class EngineCounters:
         row[1] += output_tokens
 
     def totals(self):
-        return tuple(int(value) for value in self.storage.arr.sum(axis=0))
+        return tuple(int(value) for value in self.storage.arr[:, :2].sum(axis=0))
+
+    def add_speculation(self, accepted, verified, rounds):
+        self.storage.arr[self.dp_rank, 2:] += (accepted, verified, rounds)
+
+    def speculation_totals(self):
+        return tuple(int(value) for value in self.storage.arr[:, 2:].sum(axis=0))
 
 
 class EngineThroughput:
@@ -38,6 +45,7 @@ class EngineThroughput:
         self.counters = counters
         self.completed = 0
         self.last_prefill, self.last_output = counters.totals()
+        self.last_speculation = counters.speculation_totals()
         self.last_completed = 0
         self.last_time = time.monotonic()
 
@@ -49,7 +57,11 @@ class EngineThroughput:
 
     def has_activity(self):
         prefill, output = self.counters.totals()
-        return (prefill, output, self.completed) != (self.last_prefill, self.last_output, self.last_completed)
+        return (prefill, output, self.completed) != (
+            self.last_prefill,
+            self.last_output,
+            self.last_completed,
+        ) or self.counters.speculation_totals() != self.last_speculation
 
     def resume(self, since=None):
         """Start a new busy window without losing tokens from a short burst."""
@@ -67,6 +79,19 @@ class EngineThroughput:
             output_tok_s=round(counts[1] / elapsed, 2) if elapsed > 0 else 0.0,
             completed_req_s=round(counts[2] / elapsed, 2) if elapsed > 0 else 0.0,
         )
+        speculation = self.counters.speculation_totals()
+        if self.counters.mtp_enabled:
+            accepted, verified, rounds = (cur - prev for cur, prev in zip(speculation, self.last_speculation))
+            result.update(
+                mtp_accepted_tokens=accepted,
+                mtp_verified_draft_tokens=verified,
+                mtp_rounds=rounds,
+                mtp_acceptance_pct=round(100 * accepted / verified, 2) if verified else None,
+                mtp_mean_acceptance_length=round(1 + accepted / rounds, 2) if rounds else None,
+                mtp_accepted_tok_s=round(accepted / elapsed, 2) if elapsed > 0 else 0.0,
+                mtp_verified_draft_tok_s=round(verified / elapsed, 2) if elapsed > 0 else 0.0,
+            )
+        self.last_speculation = speculation
         self.last_prefill, self.last_output, self.last_completed = prefill, output, self.completed
         self.last_time = now
         return result

@@ -39,7 +39,41 @@ def test_shared_dp_rows_are_aggregated_without_tp_multiplier(counters):
     first.add(512, 4)
     second.add(256, 2)
     assert counters.totals() == (768, 6)
-    assert counters.storage.arr.tolist() == [[512, 4], [256, 2]]
+    assert counters.storage.arr.tolist() == [[512, 4, 0, 0, 0], [256, 2, 0, 0, 0]]
+
+
+def test_speculation_aggregates_dp_window_deltas_and_excludes_idle(monkeypatch, counters):
+    now = [0.0]
+    monkeypatch.setattr(engine_stats.time, "monotonic", lambda: now[0])
+    counters.mtp_enabled = True
+    throughput = engine_stats.EngineThroughput(counters)
+    engine_stats.EngineCounters(2, 0).add_speculation(3, 4, 2)
+    engine_stats.EngineCounters(2, 1).add_speculation(1, 2, 1)
+    assert throughput.has_activity()
+    now[0] = 2
+    result = throughput.snapshot()
+    assert result["mtp_accepted_tokens"] == 4
+    assert result["mtp_verified_draft_tokens"] == 6
+    assert result["mtp_rounds"] == 3
+    assert result["mtp_acceptance_pct"] == 66.67
+    assert result["mtp_mean_acceptance_length"] == 2.33
+    assert result["mtp_accepted_tok_s"] == 2
+    assert result["mtp_verified_draft_tok_s"] == 3
+    assert result["output_tokens"] == 0
+    assert not throughput.has_activity()
+    now[0] = 4
+    idle = throughput.snapshot()
+    assert idle["mtp_accepted_tokens"] == idle["mtp_verified_draft_tokens"] == idle["mtp_rounds"] == 0
+    assert idle["mtp_acceptance_pct"] is idle["mtp_mean_acceptance_length"] is None
+    engine_stats.EngineCounters(2, 0).add_speculation(0, 2, 1)
+    rejected = throughput.snapshot()
+    assert rejected["mtp_acceptance_pct"] == 0
+    assert rejected["mtp_mean_acceptance_length"] == 1
+    assert rejected["mtp_accepted_tok_s"] == rejected["mtp_verified_draft_tok_s"] == 0
+
+
+def test_disabled_speculation_has_no_periodic_fields(counters):
+    assert not any(key.startswith("mtp_") for key in engine_stats.EngineThroughput(counters).snapshot())
 
 
 def test_running_request_rates_and_completed_count_use_window_deltas(monkeypatch, counters):
@@ -141,7 +175,12 @@ def backend(monkeypatch, counters, leader=True):
 def post(result, reqs, packs):
     count = len(reqs)
     result._post_handle(
-        reqs, torch.zeros(count, dtype=torch.int64), torch.zeros(count), torch.zeros(count, dtype=torch.int64), packs
+        reqs,
+        torch.zeros(count, dtype=torch.int64),
+        torch.zeros(count),
+        torch.zeros(count, dtype=torch.int64),
+        [None] * count,
+        packs,
     )
 
 
@@ -163,6 +202,25 @@ def test_chunked_prefill_counts_computed_input_only_after_postprocessing(monkeyp
     second = prefill(result, [req])
     post(result, [req], second)
     assert counters.totals() == (800, 1)
+
+
+@pytest.mark.parametrize("leader", [True, False])
+def test_top_logprobs_and_throughput(monkeypatch, counters, leader):
+    result = backend(monkeypatch, counters, leader=leader)
+    req = request(2)
+    row = np.full((2, 2), -1.0)
+    req.shm_req.output_topk_logprobs_row = lambda output_index: row
+    topk = SimpleNamespace(token_ids=torch.tensor([9, 8]), logprobs=torch.tensor([-0.5, -1.0]))
+    result._post_handle(
+        [req],
+        torch.tensor([9]),
+        torch.tensor([-0.5]),
+        torch.tensor([1]),
+        [topk],
+        prefill(result, [req]),
+    )
+    assert counters.totals() == ((2, 1) if leader else (0, 0))
+    assert row.tolist() == ([[9, 8], [-0.5, -1.0]] if leader else [[-1, -1], [-1, -1]])
 
 
 def test_pd_received_kv_and_prefill_first_token_are_not_recounted(monkeypatch, counters):
@@ -299,7 +357,7 @@ def test_reward_prefill_counts_uncached_tokens_only_on_leader(monkeypatch, count
     monkeypatch.setattr(reward, "prepare_prefill_inputs", lambda *a, **kw: ("input", [req]))
     events = Mock()
     worker.reward_prefill(events, [req])
-    assert counters.storage.arr.tolist() == [[0, 0], [100 - cached, 1] if leader else [0, 0]]
+    assert counters.storage.arr[:, :2].tolist() == [[0, 0], [100 - cached, 1] if leader else [0, 0]]
     assert req.cur_output_len == 1
     if leader:
         assert req.shm_req.reward_score == 0.75
@@ -350,7 +408,7 @@ def test_init_model_attaches_only_the_dp_leaders_counter_row(monkeypatch, counte
     assert worker.dp_rank_in_node == 1
     if tp_rank == 0:
         worker.engine_counters.add(7, 3)
-        assert counters.storage.arr.tolist() == [[0, 0], [7, 3]]
+        assert counters.storage.arr[:, :2].tolist() == [[0, 0], [7, 3]]
     else:
         assert worker.engine_counters is None
         assert counters.totals() == (0, 0)
@@ -428,10 +486,12 @@ def test_real_shared_counter_owner_and_worker_rows(monkeypatch):
             worker = engine_stats.EngineCounters(2, rank)
             workers.append(worker)
             assert isinstance(worker.storage, ShmArray)
-            assert worker.storage.shape == (2, 2)
+            assert worker.storage.shape == (2, 5)
             worker.add(10 + rank, 2 + rank)
-        assert owner.storage.arr.tolist() == [[10, 2], [11, 3]]
+            worker.add_speculation(rank, rank + 1, 1)
+        assert owner.storage.arr.tolist() == [[10, 2, 0, 1, 1], [11, 3, 1, 2, 1]]
         assert owner.totals() == (21, 5)
+        assert owner.speculation_totals() == (1, 3, 2)
     finally:
         for worker in workers:
             worker.storage.detach_shm()

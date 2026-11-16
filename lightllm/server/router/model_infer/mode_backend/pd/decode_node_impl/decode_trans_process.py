@@ -8,7 +8,7 @@ import torch.multiprocessing as mp
 import queue
 import pickle
 from typing import List, Dict, Union, Optional
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, set_log_context, DebugStatsLogger
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.server.router.model_infer.shared_att_resources_utils import load_att_resources
 from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer, copy_page
@@ -107,10 +107,9 @@ def _init_env(
         while True:
             time.sleep(100)
 
-    except Exception as e:
+    except Exception:
         task_out_queue.put("init_failed")
-        logger.exception(str(e))
-        logger.error(f"Fatal error happened in kv trans process: {e}")
+        logger.exception("KV transfer worker initialization failed")
         pass
 
 

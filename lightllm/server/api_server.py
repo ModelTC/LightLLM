@@ -12,7 +12,14 @@ def launch_server(args: StartArgs):
     _configure_httpserver_workers(args=args)
     if args.use_dp_split_mode_connect_pd_master and args.run_mode != "prefill":
         raise ValueError("--use_dp_split_mode_connect_pd_master only supports prefill")
-    set_log_node_role(args.run_mode)
+    configure_logging_from_args(args)
+    os.environ["LIGHTLLM_SERVICE_START_TIME"] = str(time.monotonic())
+    logger.info(
+        "event=service.starting role=%s model=%s",
+        args.run_mode,
+        args.model_name,
+        extra={"event": "service.starting", "run_mode": args.run_mode, "model": args.model_name},
+    )
     from .api_start import (
         pd_master_start,
         pd_master_multi_worker_start,

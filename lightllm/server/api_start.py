@@ -7,7 +7,7 @@ from lightllm.utils.start_utils import configure_decode_open_file_limit, process
 from .metrics.manager import start_metric_manager
 from .httpserver.req_id_generator_server import start_req_id_generator_server
 from .embed_cache.manager import start_cache_manager
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_startup_config, get_http_logging_args
 from lightllm.utils.envs_utils import (
     get_env_start_args,
     get_unique_server_name,
@@ -631,6 +631,7 @@ def pd_master_multi_worker_start(args: StartArgs):
     ports = get_shm_port_args(create=True)
     worker_ports = ports.pd_master_multi_ports
     validate_ports([args.port, ports.metric_port, *worker_ports])
+    log_startup_config(logger, args)
     logger.info("PD master worker ports: %s", worker_ports)
     process_manager.start_submodule_processes(
         start_funcs=[start_metric_manager],

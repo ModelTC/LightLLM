@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -462,7 +463,7 @@ def test_records_request_mtp_metrics_in_one_pass():
         def update_mtp_verify_step_num(self, verify_step_num: int):
             self.verify_steps += verify_step_num
 
-    backend = SimpleNamespace(is_master_in_dp=True)
+    backend = SimpleNamespace(is_master_in_dp=True, engine_counters=Mock())
     req0 = MetricReq(req_idx=10, mtp_step=3)
     req1 = MetricReq(req_idx=11, mtp_step=3)
 
@@ -475,6 +476,7 @@ def test_records_request_mtp_metrics_in_one_pass():
 
     assert (req0.accepted, req0.verified, req0.verify_steps) == (1, 2, 1)
     assert (req1.accepted, req1.verified, req1.verify_steps) == (0, 1, 1)
+    backend.engine_counters.add_speculation.assert_called_once_with(1, 1, 1)
 
     fixed_req = MetricReq(req_idx=12, mtp_step=3)
     mtp_utils.record_request_mtp_metrics(
@@ -483,6 +485,17 @@ def test_records_request_mtp_metrics_in_one_pass():
         accept_lengths_cpu=torch.tensor([3], dtype=torch.int32),
         verify_run_reqs=[fixed_req] * 4,
     )
+    assert (fixed_req.accepted, fixed_req.verified, fixed_req.verify_steps) == (2, 4, 1)
+    backend.engine_counters.add_speculation.assert_called_with(2, 3, 1)
+    backend.is_master_in_dp = False
+    backend.engine_counters.reset_mock()
+    mtp_utils.record_request_mtp_metrics(
+        backend=backend,
+        decode_reqs=[fixed_req],
+        accept_lengths_cpu=torch.tensor([3], dtype=torch.int32),
+        verify_run_reqs=[fixed_req] * 4,
+    )
+    backend.engine_counters.add_speculation.assert_not_called()
     assert (fixed_req.accepted, fixed_req.verified, fixed_req.verify_steps) == (2, 4, 1)
 
 

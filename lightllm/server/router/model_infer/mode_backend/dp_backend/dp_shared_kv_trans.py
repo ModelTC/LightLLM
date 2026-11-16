@@ -4,6 +4,7 @@ import dataclasses
 from collections import defaultdict
 import torch
 from typing import List
+from lightllm.utils.log_utils import DebugStatsLogger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_dp_rank_in_node
 from lightllm.server.core.objs.shm_array import ShmArray
@@ -144,6 +145,8 @@ class DPKVSharedMoudle:
         return trans_tasks
 
     def kv_trans(self, trans_tasks: List["TransTask"]) -> None:
+        if self.backend.is_master_in_dp:
+            self._debug_transfers.flush()
         target = self.backend.model.att_state_manager
         tasks_by_dp = defaultdict(list)
         for task in trans_tasks:
@@ -165,6 +168,10 @@ class DPKVSharedMoudle:
                 dst_big_page_ids=[page for task in tasks for page in task.dst_big_page_ids],
                 src_req_indices=[task.src_req_idx for task in tasks],
                 dst_req_indices=[task.dst_req.req_idx for task in tasks],
+            )
+        if trans_tasks and self.backend.is_master_in_dp:
+            self._debug_transfers.add(
+                tokens_total=sum(len(task.src_token_indices) for task in trans_tasks), tasks_total=len(trans_tasks)
             )
         # Source requests may be released on other ranks immediately afterwards.
         # All ranks participate, including those without a local transfer task.

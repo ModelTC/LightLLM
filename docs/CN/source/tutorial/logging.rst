@@ -202,6 +202,22 @@ JSON 保留 ``engine.stats`` / ``engine.idle`` 事件及 ``prefill_tok_s``、``o
 ``prefill_tokens``、``output_tokens``、``completed_reqs``，便于核对。使用单调时钟的实际窗口长度计算速率，
 默认仍按 10 秒输出；长请求未完成时也会报告已处理的 token。
 
+启用 MTP 后，窗口内实际发生 draft 验证时增加一行：
+
+.. code-block:: text
+
+   15:54:23.459 INFO [D/router] MTP stats | Draft acceptance: 66.7% | Mean length: 2.33 | Draft tokens: accepted 4, verified 6 | Throughput: accepted 2.0 tok/s, verified draft 3.0 tok/s
+
+接受率为接受的 draft token 数除以实际验证的 draft token 数，动态验证按实际选中的宽度统计；
+分子、分母均不包含必然提交的一个 target token。平均接受长度为
+``1 + accepted draft tokens / request rounds``，包含该 target token，
+未验证 draft 的轮次不计入。这些数值统计 stop/length 裁剪前的验证结果；
+output 吞吐仍只统计提交的输出。复用已同步的 CPU 数据，不增加 GPU 同步。
+JSON 在同一引擎事件保留 ``mtp_accepted_tokens``、``mtp_verified_draft_tokens``、
+``mtp_rounds``、``mtp_acceptance_pct``、``mtp_mean_acceptance_length``、
+``mtp_accepted_tok_s`` 和 ``mtp_verified_draft_tok_s``。空窗口的接受率和平均长度为 null，
+不增加文本行；未启用 MTP 时不输出这些字段。
+
 每个 TP 组由负责发布进度的 leader 累加 CPU 共享计数，router 汇总本节点 DP 行。
 纯跨节点 TP 仍仅主 router 输出。prefill 统计实际计算的输入 token，排除 GPU/CPU/磁盘
 缓存恢复和 P/D 传入 KV；暂停后实际重算的输入会再次计入。生成统计只包含提交的输出

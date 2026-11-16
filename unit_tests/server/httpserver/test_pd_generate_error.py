@@ -349,7 +349,7 @@ def test_pd_master_first_token_dedup_preserves_terminal_status(terminal_status, 
             "prompt",
             sampling_params,
             MultimodalParams(),
-            SimpleNamespace(is_disconnected=AsyncMock(return_value=False)),
+            SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False)),
             origin_request_id=80,
         )
         try:

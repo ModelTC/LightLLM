@@ -26,7 +26,7 @@ from typing import List, Optional
 
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.utils.envs_utils import get_pd_long_prefix_affinity_max_age_seconds
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_debug_event
 
 from .pd_selector import PDSelectionExtraInfo
 from .prompt_cache_tree import PromptCacheMatchResult
@@ -216,10 +216,13 @@ class CacheAwarePolicy:
             return None
 
         selected_worker = random.choice(idle_workers)
-        logger.debug(
-            f"CacheAwarePolicy: select idle worker, idle_worker_num={len(idle_workers)}, "
-            f"balance_rel_threshold={self.config.balance_rel_threshold:.4f}, "
-            f"selected_worker={selected_worker.client_ip_port}"
+        log_debug_event(
+            logger,
+            "pd.prefill_selected",
+            reason="idle_random",
+            candidates=len(idle_workers),
+            selected=selected_worker.client_ip_port,
+            load=selected_worker.dispatched_prompt_chars,
         )
         return selected_worker
 
@@ -251,7 +254,7 @@ class CacheAwarePolicy:
             selected=selected_worker.client_ip_port,
             load=selected_worker.dispatched_prompt_chars,
             least_load=least_loaded_worker.dispatched_prompt_chars,
-            projected_load=selected_worker.dispatched_prompt_chars + request_load,
+            projected_load=cache_projected_load if selected_worker is cache_worker else least_projected_load,
             balance_threshold=self.config.balance_rel_threshold,
         )
         return selected_worker

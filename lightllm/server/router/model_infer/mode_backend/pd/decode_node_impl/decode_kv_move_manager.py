@@ -39,6 +39,7 @@ def _init_env(args, info_queue: mp.Queue, event: mp.Event):
 
         # 注册graceful 退出的处理
         graceful_registry(inspect.currentframe().f_code.co_name)
+        set_log_context(component="kv_move")
         setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::decode_kv_move_manager")
 
         from .decode_trans_process import start_decode_trans_process

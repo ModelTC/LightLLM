@@ -439,6 +439,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     sampling_params.constraint_out_params.pd_previous_output_len = max(
                         0, block_token_num - input_token_num
                     )
+                self._summary_states[origin_request_id] = summary_state
                 results_generator = self._wait_to_token_package(
                     p_node,
                     d_node,
@@ -447,7 +448,8 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     sampling_params,
                     multimodal_params,
                     request,
-                    origin_request_id,
+                    origin_request_id=origin_request_id,
+                    summary_state=summary_state,
                 )
                 raw_finish_status = FinishStatus()
                 async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
@@ -623,6 +625,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
         multimodal_params: MultimodalParams,
         request: Request,
         origin_request_id: int,
+        summary_state: Optional[dict] = None,
     ):
         if sampling_params.disable_prompt_cache:
             assert False, "pd mode dont support set disable_prompt_cache to True"
@@ -700,6 +703,17 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
             raise
         finally:
             # 分段可能因 stop、容量切换或取消而提前关闭，已有输出也需要记录总结。
+            if summary_state.get("stop"):
+                finish_reasons = {"stop"}
+                if not out_token_counter:
+                    log_request_summary(
+                        origin_request_id,
+                        **request_finish_fields(finish_reasons),
+                        x_request_id=request.headers.get("X-Request-Id") or get_http_request_id(),
+                        output_tokens=0,
+                        timing_scope="end_to_end",
+                    )
+                    summary_state["logged"] = True
             if out_token_counter:
                 total_cost_time_ms = (time.time() - start_time) * 1000
                 mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
@@ -753,7 +767,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
     async def abort(
         self, group_request_id, p_node: Optional[PD_Client_Obj] = None, d_node: Optional[PD_Client_Obj] = None
     ):
-        logger.warning(f"aborted group_request_id {group_request_id}")
+        logger.debug(f"aborted group_request_id {group_request_id}")
         payload = pickle.dumps((ObjType.ABORT, group_request_id))
         try:
             req_status = self.req_id_to_out_inf.pop(group_request_id)

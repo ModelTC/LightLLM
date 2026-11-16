@@ -131,7 +131,17 @@ def _format_engine_stats(record):
             kv.append(f"{label} {usage}")
     if kv:
         groups.append("KV: " + ", ".join(kv))
-    return " | ".join(groups)
+    text = " | ".join(groups)
+    if fields.get("mtp_rounds", 0):
+        text += (
+            f"\nMTP stats | Draft acceptance: {fields['mtp_acceptance_pct']:.1f}%"
+            f" | Mean length: {fields['mtp_mean_acceptance_length']:.2f}"
+            f" | Draft tokens: accepted {fields['mtp_accepted_tokens']}"
+            f", verified {fields['mtp_verified_draft_tokens']}"
+            f" | Throughput: accepted {fields['mtp_accepted_tok_s']:.1f} tok/s"
+            f", verified draft {fields['mtp_verified_draft_tok_s']:.1f} tok/s"
+        )
+    return text
 
 
 class NewLineFormatter(logging.Formatter):
@@ -330,7 +340,7 @@ def should_log_request(request_id):
     if _request_sample_rate == 1:
         return True
     digest = hashlib.blake2b(str(request_id).encode(), digest_size=8).digest()
-    return int.from_bytes(digest, "big") / 2 ** 64 < _request_sample_rate
+    return int.from_bytes(digest, "big") / 2**64 < _request_sample_rate
 
 
 def http_access_enabled():

@@ -25,7 +25,7 @@ from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_info_on_leader, progress_enabled
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 from lightllm.utils.envs_utils import (
     get_env_start_args,
@@ -185,17 +185,22 @@ class TpPartBaseModel:
         self._check_mem_size()
         self._init_att_backend()
         self._init_att_backend1()
-        self._init_hidden_collector()
-        role = self.att_state_role
-        logger.info(
-            f"{role} prefill/decode attention: {type(self.prefill_att_backend).__name__} / "
-            f"{type(self.decode_att_backend).__name__}"
+
+        backends = {
+            "role": self.att_state_role,
+            "prefill": self.prefill_att_backend.__class__.__name__,
+            "decode": self.decode_att_backend.__class__.__name__,
+            "linear_prefill": self.prefill_att_backend1.__class__.__name__ if self.prefill_att_backend1 else None,
+            "linear_decode": self.decode_att_backend1.__class__.__name__ if self.decode_att_backend1 else None,
+        }
+        log_info_on_leader(
+            logger,
+            "event=backend.selected %s",
+            " ".join(f"{k}={v}" for k, v in backends.items() if v is not None),
+            extra={"event": "backend.selected", **backends},
         )
-        if self.prefill_att_backend1 is not None:
-            logger.info(
-                f"{role} prefill/decode attention1: {type(self.prefill_att_backend1).__name__} / "
-                f"{type(self.decode_att_backend1).__name__}"
-            )
+
+        self._init_hidden_collector()
 
         self._autotune_warmup()
         self._init_padded_req()
@@ -1118,7 +1123,7 @@ class TpPartBaseModel:
             prob_out = None
             self.req_manager.free_all()
             self.att_state_manager.full_att_allocator.free_all()
-            logger.info(f"check max_len {self.batch_max_tokens} infer ok")
+            logger.debug("Batch token capacity check passed: batch_max_tokens=%s", self.batch_max_tokens)
         except (RuntimeError, torch.OutOfMemoryError) as e:
             logger.exception(str(e))
             exception_str = (

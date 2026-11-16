@@ -17,7 +17,7 @@ def test_nixl_success_logging_keeps_processing_completed_pages(monkeypatch, side
     transporter._create_paged_xfer_handles = Mock()
     buffer = torch.empty((2, 3, 4, 5, 6), dtype=torch.float16)
     transporter._register_kv_move_buffer(buffer)
-    assert transporter.page_len == buffer[0].numel() * buffer.element_size()
+    assert transporter.page_bytes == buffer[0].numel() * buffer.element_size()
     transporter.release_xfer_handle = Mock()
     module = prefill_trans_process if side == "prefill" else decode_trans_process
     cls = module._PrefillTransModule if side == "prefill" else module._DecodeTransModule
@@ -60,7 +60,7 @@ def test_nixl_success_logging_keeps_processing_completed_pages(monkeypatch, side
     assert transporter.release_xfer_handle.call_count == 2
     assert stats.add.call_count == (2 if tokens else 0)
     if tokens:
-        assert stats.add.call_args.kwargs["bytes_total"] == transporter.page_len
+        assert stats.add.call_args.kwargs["bytes_total"] == transporter.page_bytes
     stats.flush.assert_called_once()
 
 

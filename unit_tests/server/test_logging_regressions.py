@@ -153,8 +153,11 @@ def test_dp_shared_kv_transfer_stats(monkeypatch, caplog, master, level):
     copy = Mock()
     worker.backend = SimpleNamespace(
         is_master_in_dp=master,
-        model=SimpleNamespace(mem_manager=SimpleNamespace(operator=SimpleNamespace(copy_kv_from_other_dp_ranks=copy))),
-        mem_managers=[],
+        model=SimpleNamespace(
+            att_state_manager=SimpleNamespace(get_dp_shared_operator=lambda: SimpleNamespace(copy_from_dp=copy))
+        ),
+        dp_att_state_managers=[object(), object()],
+        node_nccl_group=object(),
         dp_size_in_node=2,
         rank_in_dp=0,
     )
@@ -165,12 +168,16 @@ def test_dp_shared_kv_transfer_stats(monkeypatch, caplog, master, level):
     original_to, original_tensor = torch.Tensor.to, torch.tensor
     monkeypatch.setattr(torch.Tensor, "to", lambda tensor, **kw: original_to(tensor, **dict(kw, device="cpu")))
     monkeypatch.setattr(module.torch, "tensor", lambda *a, **kw: original_tensor(*a, **dict(kw, device="cpu")))
-    req = SimpleNamespace(cur_kv_len=0, hold_kv_len=6, shm_req=SimpleNamespace())
+    monkeypatch.setattr(module.dist, "barrier", Mock())
+    req = SimpleNamespace(req_idx=0, cur_kv_len=0, hold_kv_len=6, shm_req=SimpleNamespace())
     task = SimpleNamespace(
-        max_kv_len_mem_indexes=original_tensor([1, 2]),
-        max_kv_len_dp_rank=1,
-        mem_indexes=original_tensor([3, 4]),
-        req=req,
+        src_token_indices=original_tensor([1, 2]),
+        src_dp_rank=1,
+        dst_token_indices=original_tensor([3, 4]),
+        src_big_page_ids=[],
+        dst_big_page_ids=[],
+        src_req_idx=1,
+        dst_req=req,
     )
     with caplog.at_level(level, logger=logger.name):
         worker.kv_trans([task])
@@ -204,7 +211,7 @@ def test_router_opens_launcher_readiness_key(monkeypatch, dp, nnodes, local_dp):
     monkeypatch.setattr(module, "ShmReqManager", Mock())
     counters = Mock()
     monkeypatch.setattr(module, "EngineCounters", counters)
-    monkeypatch.setattr(module, "ReadOnlyStaticsMemoryManager", Mock(side_effect=StopInit))
+    monkeypatch.setattr(module, "KVCapacityReader", Mock(side_effect=StopInit))
     args = StartArgs()
     args.tp = 8
     args.dp, args.nnodes = dp, nnodes
@@ -402,27 +409,6 @@ def test_cuda_graph_replay_cost_barrier_uses_current_device(monkeypatch, overlap
     end.synchronize.assert_called_once()
 
 
-@pytest.mark.parametrize("rank", [0, 1])
-def test_memory_manager_selection_logs_only_on_leader(monkeypatch, caplog, rank):
-    from lightllm.common.kv_cache_mem_manager import mem_utils as module
-
-    logger = logging.getLogger("memory-selection-regression")
-    monkeypatch.setattr(module, "logger", logger)
-    monkeypatch.setattr(module, "get_llm_model_class", lambda: object)
-    monkeypatch.setattr(module, "get_env_start_args", lambda: SimpleNamespace(llm_kv_type="None"))
-    monkeypatch.setattr(log_utils, "_context", {"tp_rank": rank})
-    monkeypatch.setattr(log_utils, "_context_pid", log_utils.os.getpid())
-    module.select_mem_manager_class.cache_clear()
-    try:
-        with caplog.at_level(logging.DEBUG, logger=logger.name):
-            assert module.select_mem_manager_class() is module.MemoryManager
-        records = [r for r in caplog.records if r.name == logger.name]
-        assert len(records) == 2
-        assert all(r.levelno == (logging.INFO if rank == 0 else logging.DEBUG) for r in records)
-    finally:
-        module.select_mem_manager_class.cache_clear()
-
-
 def test_idle_prefill_selection_records_decision_metadata(monkeypatch):
     from lightllm.server.httpserver_for_pd_master.pd_selector import cache_aware as module
 
@@ -535,10 +521,17 @@ def test_router_ready_event_uses_agreed_model_capacity(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "cache_load,reason,selected_load",
-    [(120, "cache", 120), (300, "cache_overloaded", 100), (None, "least_load", 100)],
+    "cache_load,cache_new_chars,reason,selected_load",
+    [
+        (120, 20, "cache", 120),
+        (150, 1, "cache", 150),
+        (300, 20, "cache_overloaded", 100),
+        (None, 20, "least_load", 100),
+    ],
 )
-def test_busy_prefill_selection_records_decision_metadata(monkeypatch, cache_load, reason, selected_load):
+def test_busy_prefill_selection_records_decision_metadata(
+    monkeypatch, cache_load, cache_new_chars, reason, selected_load
+):
     from lightllm.server.httpserver_for_pd_master.pd_selector import cache_aware as module
 
     policy = module.CacheAwarePolicy.__new__(module.CacheAwarePolicy)
@@ -549,7 +542,9 @@ def test_busy_prefill_selection_records_decision_metadata(monkeypatch, cache_loa
     )
     event = Mock()
     monkeypatch.setattr(module, "log_debug_event", event)
-    selected = policy._select_worker_by_cache_and_load([cache, least], cache if cache_load is not None else None, 20)
+    selected = policy._select_worker_by_cache_and_load(
+        [cache, least], cache if cache_load is not None else None, 20, cache_new_chars
+    )
     assert selected is (cache if reason == "cache" else least)
     event.assert_called_once_with(
         module.logger,
@@ -558,6 +553,6 @@ def test_busy_prefill_selection_records_decision_metadata(monkeypatch, cache_loa
         selected=selected.client_ip_port,
         load=selected_load,
         least_load=100,
-        projected_load=selected_load + 20,
+        projected_load=selected_load + (cache_new_chars if selected is cache else 20),
         balance_threshold=1.5,
     )

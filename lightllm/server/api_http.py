@@ -45,7 +45,14 @@ from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import (
+    init_logger,
+    set_log_context,
+    log_http_access,
+    new_http_request_id,
+    set_http_request_id,
+    reset_http_request_id,
+)
 from lightllm.utils.error_utils import (
     ClientDisconnected,
     GenerationError,

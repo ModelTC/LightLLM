@@ -15,7 +15,7 @@ from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import (
     HybridAttPagedRadixCache,
     HybridAttPagedTreeNode,
 )
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_debug_event
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.envs_utils import get_env_start_args, enable_thinking_budget
 from lightllm.utils.multimodal_chunk_utils import adjust_mm_chunk_end, get_mm_input_spans
@@ -337,12 +337,13 @@ class InferenceContext:
         self.infer_req_ids = [_id for _id in self.infer_req_ids if _id not in finished_req_ids_set]
 
         if self.radix_cache is not None and len(self.infer_req_ids) == 0:
-            logger.debug(
-                f"free a batch state:\n"
-                f"radix refed token num {self.radix_cache.get_refed_tokens_num()}\n"
-                f"radix hold token num {self.radix_cache.get_tree_total_tokens_num()}\n"
-                f"KV allocator available tokens {self.att_state_manager.full_att_allocator.can_use_mem_size}\n"
-                f"KV allocator total tokens {self.att_state_manager.full_att_allocator.size}\n"
+            log_debug_event(
+                logger,
+                "cache.idle",
+                referenced_tokens=self.radix_cache.get_refed_tokens_num(),
+                cached_tokens=self.radix_cache.get_tree_total_tokens_num(),
+                free_tokens=self.att_state_manager.full_att_allocator.can_use_mem_size,
+                leader_only=True,
             )
 
     def filter_reqs(self, finished_reqs: List["InferReq"]):

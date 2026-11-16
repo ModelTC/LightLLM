@@ -15,7 +15,13 @@ from websockets import ClientConnection
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.server.httpserver.async_queue import AsyncQueue
 from lightllm.utils.net_utils import get_hostname_ip, format_host_port
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import (
+    init_logger,
+    set_http_request_id,
+    reset_http_request_id,
+    log_debug_event,
+    log_repeated_exception,
+)
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 from lightllm.utils.websocket_utils import PD_WEBSOCKET_WRITE_LIMIT, websocket_message_exceeds_limit
 from lightllm.server.httpserver.manager import HttpServerManager
@@ -162,6 +168,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                                 forwarding_queue=forwarding_queue,
                                 pd_upload_websocket=websocket,
                                 decode_kv_ready_event=decode_kv_ready_event,
+                                http_request_id=obj[2].get("http_request_id") if len(obj) > 2 else None,
                             )
                         )
                         generation_tasks[group_req_id] = generation_task

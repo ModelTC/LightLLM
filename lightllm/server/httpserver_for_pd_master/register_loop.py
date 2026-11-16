@@ -30,7 +30,6 @@ async def register_loop(manager: HttpServerManagerForPDMaster):
                 write_limit=PD_WEBSOCKET_WRITE_LIMIT,
                 max_queue=(2048 * 1024, 2048 * 1023),
             ) as websocket:
-
                 sock = websocket.transport.get_extra_info("socket")
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 

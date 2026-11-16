@@ -7,8 +7,8 @@ import setproctitle
 import torch.multiprocessing as mp
 import queue
 import pickle
-from typing import List, Dict, Union
-from lightllm.utils.log_utils import init_logger
+from typing import List, Dict, Optional, Union
+from lightllm.utils.log_utils import init_logger, set_log_context, DebugStatsLogger
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.server.router.model_infer.shared_att_resources_utils import load_att_resources
 from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer, copy_page
@@ -82,10 +82,9 @@ def _init_env(
         while True:
             time.sleep(100)
 
-    except Exception as e:
+    except Exception:
         task_out_queue.put("init_failed")
-        logger.exception(str(e))
-        logger.error(f"Fatal error happened in kv trans process: {e}")
+        logger.exception("KV transfer worker initialization failed")
         pass
 
 
@@ -403,13 +402,6 @@ class _PrefillTransModule:
                         self.failed_queue.put(completed_task)
                         continue
 
-                    if self.args.pd_detail_log:
-                        logger.debug(
-                            f"send WRITE done PD notify "
-                            f"request_id={completed_task.request_id} "
-                            f"kv=[{completed_task.start_kv_index},{completed_task.end_kv_index}) "
-                            f"src_page={completed_task.src_page_index} dst_page={completed_task.dst_page_index}"
-                        )
                     self.success_queue.put(completed_task)
                 elif ret == "ERR":
                     failed_task = self.waiting_dict.pop(trans_task.get_key(), None)
