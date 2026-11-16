@@ -168,6 +168,11 @@ def _worker(connection: Connection, backend: str, sender: bool):
         buffer = allocate_transfer_buffer(resources, 3, device=f"cuda:{device}")
         buffer.fill_(93 if sender else 11)
         copy_stream = torch.cuda.Stream()
+        pd_page_kind_payload_bytes = {}
+        for kind in ("kv", "att_state"):
+            size = resources.get_pd_operator().get_pd_page_kind_payload_bytes(kind)
+            if size > 0:
+                pd_page_kind_payload_bytes[kind] = size
         if backend == "nccl":
             from lightllm.server.router.model_infer.mode_backend.pd.nccl_kv_transporter import NcclKVTransporter
 
@@ -176,10 +181,7 @@ def _worker(connection: Connection, backend: str, sender: bool):
                 tp_idx=device,
                 kv_move_buffer=buffer,
                 host_ip="127.0.0.1",
-                page_payload_bytes={
-                    kind: resources.get_pd_operator().get_pd_page_kind_payload_bytes(kind)
-                    for kind in ("kv", "att_state")
-                },
+                pd_page_kind_payload_bytes=pd_page_kind_payload_bytes,
             )
         else:
             from lightllm.server.router.model_infer.mode_backend.pd.nixl_kv_transporter import NixlKVTransporter
@@ -188,10 +190,7 @@ def _worker(connection: Connection, backend: str, sender: bool):
                 os.getpid(),
                 device,
                 buffer,
-                page_payload_bytes={
-                    kind: resources.get_pd_operator().get_pd_page_kind_payload_bytes(kind)
-                    for kind in ("kv", "att_state")
-                },
+                pd_page_kind_payload_bytes=pd_page_kind_payload_bytes,
             )
         connection.send(
             (

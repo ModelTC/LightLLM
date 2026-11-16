@@ -24,7 +24,11 @@ except ImportError:
 
 class NixlKVTransporter:
     def __init__(
-        self, node_id: int, tp_idx: int, kv_move_buffer: Tensor, page_payload_bytes: dict[str, int] | None = None
+        self,
+        node_id: int,
+        tp_idx: int,
+        kv_move_buffer: Tensor,
+        pd_page_kind_payload_bytes: dict[str, int],
     ):
         self.node_id = node_id
         self.tp_idx = tp_idx
@@ -41,11 +45,9 @@ class NixlKVTransporter:
             logger.info("NIXL telemetry enabled")
         self.nixl_agent = NixlWrapper(self.agent_name, conf)
         page_bytes = kv_move_buffer[0].numel() * kv_move_buffer.element_size()
-        self.page_payload_bytes = (
-            dict(page_payload_bytes) if page_payload_bytes is not None else {"kv": page_bytes, "att_state": page_bytes}
-        )
-        assert set(self.page_payload_bytes) == {"kv", "att_state"}
-        assert all(0 <= size <= page_bytes for size in self.page_payload_bytes.values())
+        self.pd_page_kind_payload_bytes = dict(pd_page_kind_payload_bytes)
+        assert set(self.pd_page_kind_payload_bytes) <= {"kv", "att_state"} and self.pd_page_kind_payload_bytes
+        assert all(0 < size <= page_bytes for size in self.pd_page_kind_payload_bytes.values())
         self._register_kv_move_buffer(kv_move_buffer=kv_move_buffer)
         self.remote_agents: Dict[str, PDAgentMetadata] = {}
         # Serialize complete peer add/remove operations, including native NIXL
@@ -66,7 +68,7 @@ class NixlKVTransporter:
         return pickle.dumps(
             {
                 "memory": self.nixl_agent.get_serialized_descs(self.page_reg_desc),
-                "payload_bytes": self.page_payload_bytes,
+                "payload_bytes": self.pd_page_kind_payload_bytes,
             }
         )
 
@@ -84,13 +86,12 @@ class NixlKVTransporter:
         # NIXL 原生描述记录整块注册内存的字节数，按对端页数检查单页容量是否一致。
         assert registered_bytes == page_num * self.page_bytes, "PD peers must use the same page byte capacity"
         handles = {}
-        for kind, payload_bytes in self.page_payload_bytes.items():
-            if payload_bytes:
-                pages_data = [
-                    (base_addr + page_id * self.page_bytes, payload_bytes, device_id) for page_id in range(page_num)
-                ]
-                descs = self.nixl_agent.get_xfer_descs(pages_data, "VRAM")
-                handles[kind] = self.nixl_agent.prep_xfer_dlist(agent_name, descs, "VRAM")
+        for kind, payload_bytes in self.pd_page_kind_payload_bytes.items():
+            pages_data = [
+                (base_addr + page_id * self.page_bytes, payload_bytes, device_id) for page_id in range(page_num)
+            ]
+            descs = self.nixl_agent.get_xfer_descs(pages_data, "VRAM")
+            handles[kind] = self.nixl_agent.prep_xfer_dlist(agent_name, descs, "VRAM")
         return handles
 
     def connect_add_remote_agent(self, remote_agent: PDAgentMetadata):
@@ -100,7 +101,9 @@ class NixlKVTransporter:
 
             start_time = time.time()
             page = pickle.loads(remote_agent.page_reg_desc)
-            assert page["payload_bytes"] == self.page_payload_bytes, "PD peers must use the same payload byte lengths"
+            assert (
+                page["payload_bytes"] == self.pd_page_kind_payload_bytes
+            ), "PD peers must use the same payload byte lengths"
 
             peer_name = self.nixl_agent.add_remote_agent(remote_agent.agent_metadata)
             if isinstance(peer_name, bytes):

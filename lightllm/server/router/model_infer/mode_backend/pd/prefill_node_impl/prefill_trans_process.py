@@ -109,15 +109,18 @@ class _PrefillTransModule:
         )
         self.kv_move_buffer = kv_move_buffer
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
+        pd_operator = self.resource_managers[device_id].get_pd_operator()
+        pd_page_kind_payload_bytes = {}
+        for kind in ("kv", "att_state"):
+            size = pd_operator.get_pd_page_kind_payload_bytes(kind)
+            if size > 0:
+                pd_page_kind_payload_bytes[kind] = size
         self.transporter = create_kv_transporter(
             args=self.args,
             node_id=self.args.pd_node_id,
             tp_idx=device_id,
             kv_move_buffer=kv_move_buffer,
-            page_payload_bytes={
-                kind: self.resource_managers[device_id].get_pd_operator().get_pd_page_kind_payload_bytes(kind)
-                for kind in ("kv", "att_state")
-            },
+            pd_page_kind_payload_bytes=pd_page_kind_payload_bytes,
         )
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, PDChunckedTransTask] = {}
