@@ -1637,7 +1637,7 @@ async def _images_to_image_generation_response(
     )
 
 
-async def image_generation_impl(request: ImageGenerationRequest | ImageEditRequest, raw_request: Request) -> Response:
+async def image_generation_impl(request: ImageGenerationRequest | ImageEditRequest, raw_request: Request, response: Response) -> Response:
     from .api_http import g_objs
     from lightllm.server.x2i_server.manager import get_chat_template_kwargs
     from lightllm.server.x2i_server.manager import get_enable_self_correction
@@ -1675,7 +1675,7 @@ async def image_generation_impl(request: ImageGenerationRequest | ImageEditReque
                 images.extend([(revision_feedback,), revised_image])
             else:
                 images = [revised_image]
-
+    response.headers["X-Lightllm-Request-Id"] = str(x2i_params.request_id)
     return await _images_to_image_generation_response(images, request, x2i_params, output_image_tokens)
 
 

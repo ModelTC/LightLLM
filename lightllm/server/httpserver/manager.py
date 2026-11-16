@@ -690,23 +690,28 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
             wait_cancel = asyncio.create_task(wait_for_cancel())
 
-            await req_status.event.wait()
+            await asyncio.wait_for(req_status.event.wait(), timeout=300)
+
             assert req_status.response is not None
 
             if not wait_cancel.done():
                 wait_cancel.cancel()
             await asyncio.gather(wait_cancel, return_exceptions=True)
 
-            self.req_id_to_x2i_reqs.pop(x2i_req_id, None)
             generation_params.first_image = False
 
             return req_status.response.images
+
+        except asyncio.TimeoutError:
+            logger.error(f"Request timeout after waiting generation for 5 minutes: {x2i_req_id}")
+            self.x2i_http_request_state.set_cancel(x2i_req_id, 1)
 
         except Exception as e:
             logger.error(str(e), exc_info=e)
             return []
 
         finally:
+            self.req_id_to_x2i_reqs.pop(x2i_req_id, None)
             for req_id in generate_req_ids:
                 self.past_kv_cache_client.free_pages_by_req_id(req_id)
 
@@ -1183,21 +1188,24 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 events = dict(await poller.poll(timeout=50))
 
                 if self.recv_from_x2i in events:
-                    recv_obj = await self.recv_from_x2i.recv_pyobj()
+                    recv_obj : Union[X2ICacheRelease, X2IResponse] = await self.recv_from_x2i.recv_pyobj()
                 else:
                     continue
 
-                if isinstance(recv_obj, X2ICacheRelease):
-                    status = self.req_id_to_x2i_reqs[recv_obj.request_id]
-                    for req_id in status.req_ids:
-                        self.past_kv_cache_client.free_pages_by_req_id(req_id)
+                logger.info(f"{type(recv_obj)} received: request_id={recv_obj.request_id}")
+                status = self.req_id_to_x2i_reqs[recv_obj.request_id]
+                if status is None:
+                    logger.warning(
+                        f"Unknown request_id: {recv_obj.request_id}"
+                    )
+                    continue
 
-                elif isinstance(recv_obj, X2IResponse):
-                    status = self.req_id_to_x2i_reqs[recv_obj.request_id]
-                    if recv_obj.images is None:
-                        for req_id in status.req_ids:
-                            self.past_kv_cache_client.free_pages_by_req_id(req_id)
+                # early free
+                for req_id in status.req_ids:
+                    self.past_kv_cache_client.free_pages_by_req_id(req_id)
 
+                if isinstance(recv_obj, X2IResponse):
+                    status = self.req_id_to_x2i_reqs[recv_obj.request_id]
                     status.response = recv_obj
                     status.event.set()
 

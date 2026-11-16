@@ -152,19 +152,37 @@ class _AccessLogMiddleware:
             await self.app(scope, receive, send)
             return
 
+        def _get_header(container, name):
+            headers = dict(container.get("headers", []))
+            value = headers.get(name.lower().encode())
+            return value.decode("utf-8", errors="replace") if value else ""
+
+        start_time = time.perf_counter()
         status_holder = {"status": 0}
+        request_id = _get_header(scope, "X-Request-Id")
 
         async def send_wrapper(message):
             if message["type"] == "http.response.start":
                 status_holder["status"] = message["status"]
+                lightllm_req_id = _get_header(message, "X-Lightllm-Request-Id")
+                if lightllm_req_id:
+                    status_holder["lightllm_req_id"] = lightllm_req_id
             await send(message)
 
         try:
             await self.app(scope, receive, send_wrapper)
         finally:
             if scope["type"] == "http":
+                elapsed = time.perf_counter() - start_time
                 status = status_holder["status"]
-                msg = f"{scope['method']} {scope['path']} {status}"
+                msg = f"{scope['method']} {scope['path']} {status} cost={elapsed:.3f}s"
+
+                if status_holder.get("lightllm_req_id"):
+                    msg = f"lightllm_req_id={status_holder['lightllm_req_id']} {msg}"
+
+                if request_id:
+                    msg = f"request_id={request_id} {msg}"
+
                 color = _ACCESS_LOG_STATUS_COLORS.get(status // 100, "")
                 if color:
                     msg = color + msg + _ACCESS_LOG_RESET
@@ -399,14 +417,14 @@ async def generate_image(request: Request) -> Response:
 
 @app.post("/v1/images/generations", response_model=ImageGenerationResponse)
 @http_endpoint_guard
-async def image_generation(request: ImageGenerationRequest, raw_request: Request) -> Response:
-    return await image_generation_impl(request, raw_request)
+async def image_generation(request: ImageGenerationRequest, raw_request: Request, response: Response) -> Response:
+    return await image_generation_impl(request, raw_request, response)
 
 
 @app.post("/v1/images/edits", response_model=ImageEditResponse)
 @http_endpoint_guard
-async def image_edit(request: ImageEditRequest, raw_request: Request) -> Response:
-    return await image_generation_impl(request, raw_request)
+async def image_edit(request: ImageEditRequest, raw_request: Request, response: Response) -> Response:
+    return await image_generation_impl(request, raw_request, response)
 
 
 @app.post("/v1/messages")

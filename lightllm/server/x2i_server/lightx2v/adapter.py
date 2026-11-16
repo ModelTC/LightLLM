@@ -161,11 +161,12 @@ class LightX2VServer:
                 start = time.time()
                 images = await self._process(param)
                 logger.info(
-                    f"[{self.rank}/{self.world_size}/{self.nccl_port}] generate images cost {time.time() - start} seconds"
+                    f"[{self.rank}/{self.world_size}/{self.nccl_port}] req:{param.request_id}/{param.session_id} generate images cost {time.time() - start} seconds"
                 )
 
                 if self.rank == 0:
                     await self.result_socket.send_pyobj(X2IResponse(request_id=param.request_id, images=images))
+                    logger.info(f"req:{param.request_id}/{param.session_id} response send finished.")
 
             except Exception as e:
                 logger.error(f"Error processing request {param.request_id}: {str(e)}", exc_info=e)
