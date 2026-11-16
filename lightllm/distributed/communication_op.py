@@ -36,7 +36,7 @@ from lightllm.utils.dist_utils import (
     create_new_group_for_current_dp,
     create_dp_special_inter_group,
 )
-from lightllm.utils.device_utils import get_device_sm_count, is_sm100_gpu
+from lightllm.utils.device_utils import get_device_sm_count, is_sm100_gpu, is_sm90_gpu
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
 logger = init_logger(__name__)
@@ -108,6 +108,7 @@ class DistributeGroupManager:
         self.groups = []
         self.ep_buffer = None
         self.ep_mega_moe_buffer = None
+        self.ep_mega_moe_mma_type = None
         self.ep_num_sms = None
         self.ep_non_overlap_num_sms = None
 
@@ -168,10 +169,11 @@ class DistributeGroupManager:
         DeepEP Elastic 路径。这里只为实际存在的执行路径分配 buffer，
         避免为未使用的路径长期占用显存。
         """
-        enable_ep_moe = get_env_start_args().enable_ep_moe
-        if not enable_ep_moe:
+        args = get_env_start_args()
+        if not args.enable_ep_moe:
             self.ep_buffer = None
             self.ep_mega_moe_buffer = None
+            self.ep_mega_moe_mma_type = None
             self.ep_num_sms = None
             self.ep_non_overlap_num_sms = None
             return
@@ -199,6 +201,33 @@ class DistributeGroupManager:
         self.ll_num_tokens = num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
         self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
+        if args.ep_moe_backend == "megamoe":
+            if expert_quant_method_names != {"fp8w8a8-b128-deepgemm"}:
+                raise ValueError("--ep_moe_backend megamoe requires FP8 DeepGEMM experts; use --expert_dtype fp8")
+            if not is_sm90_gpu() or args.nnodes != 1 or get_redundancy_expert_num():
+                raise ValueError("SM90 MegaMoE requires a single SM90 node without redundant experts")
+            if moe_intermediate_size is None:
+                raise ValueError("MegaMoE requires moe_intermediate_size or intermediate_size in model config")
+            from lightllm.common.basemodel.triton_kernel.fused_moe.sm90_fp8_mega_moe import get_sm90_mega_moe_module
+
+            self.ep_buffer = None
+            self.ep_mega_moe_mma_type = "fp8xfp8"
+            self.ep_mega_moe_buffer = get_sm90_mega_moe_module().get_symm_buffer_for_sm90_mega_moe(
+                deepep_group,
+                self.ll_num_experts,
+                self.ll_num_tokens,
+                num_experts_per_tok,
+                self.ll_hidden,
+                moe_intermediate_size,
+            )
+            self._set_num_sms_for_deep_gemm(0)
+            logger.info(
+                "Initialize SM90 FP8 MegaMoE: capacity=%s, experts=%s",
+                self.ll_num_tokens,
+                self.ll_num_experts,
+            )
+            return
+        self.ep_mega_moe_mma_type = None
         self.ep_buffer = deep_ep.ElasticBuffer(
             deepep_group,
             num_max_tokens_per_rank=self.ll_num_tokens,
@@ -270,8 +299,16 @@ class DistributeGroupManager:
             device_sms = get_device_sm_count()
             deepep_sms = max(0, min(deepep_sms, max(device_sms - 2, 0)))
             self.ep_num_sms = deepep_sms
-            set_num_sms(max(device_sms - deepep_sms, 2))
+            gemm_sms = max(device_sms - deepep_sms, 2)
+            if self.ep_mega_moe_mma_type == "fp8xfp8":
+                from lightllm.common.basemodel.triton_kernel.fused_moe.sm90_fp8_mega_moe import get_sm90_mega_moe_module
+
+                gemm_sms -= gemm_sms % 2
+                get_sm90_mega_moe_module().set_num_sms(gemm_sms)
+            set_num_sms(gemm_sms)
         except BaseException as e:
+            if self.ep_mega_moe_mma_type == "fp8xfp8":
+                raise
             logger.warning(f"set num sms for deep_gemm failed: {e}")
 
     def clear_deepep_buffer(self) -> None:

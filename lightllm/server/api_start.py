@@ -39,12 +39,30 @@ from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_
 logger = init_logger(__name__)
 
 
+def _validate_ep_moe_backend(args: StartArgs):
+    if args.ep_moe_backend != "megamoe":
+        return
+    from lightllm.utils.device_utils import is_sm90_gpu
+
+    assert args.enable_ep_moe, "--ep_moe_backend megamoe requires --enable_ep_moe"
+    assert args.nnodes == 1, "--ep_moe_backend megamoe only supports a single node"
+    assert is_sm90_gpu(), "--ep_moe_backend megamoe only supports SM90 GPUs"
+    assert args.data_type in (None, "bf16", "bfloat16"), "--ep_moe_backend megamoe requires BF16 hidden states"
+    assert args.ep_redundancy_expert_config_path is None, "--ep_moe_backend megamoe does not support redundant experts"
+    assert not args.auto_update_redundancy_expert, "--ep_moe_backend megamoe does not support redundant expert updates"
+    assert not args.enable_rl, "--ep_moe_backend megamoe does not support --enable_rl"
+    assert not (
+        args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap
+    ), "--ep_moe_backend megamoe does not support microbatch overlap"
+
+
 def _set_envs_and_config(args: StartArgs):
     mp.set_start_method("spawn", force=True)
 
 
 def _launch_subprocesses(args: StartArgs):
     _validate_pd_features(args)
+    _validate_ep_moe_backend(args)
     configure_decode_open_file_limit(args)
     _set_envs_and_config(args)
 

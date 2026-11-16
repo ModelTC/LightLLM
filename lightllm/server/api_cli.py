@@ -815,6 +815,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Whether to enable ep moe for deepseekv3 model.""",
     )
     parser.add_argument(
+        "--ep_moe_backend",
+        type=str,
+        choices=["auto", "megamoe"],
+        default="auto",
+        help="EP MoE backend. 'auto' keeps the existing selection; 'megamoe' selects single-node SM90 FP8 MegaMoE.",
+    )
+    parser.add_argument(
         "--ep_redundancy_expert_config_path",
         type=str,
         default=None,
