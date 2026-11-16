@@ -13,13 +13,37 @@ import pytest
 import torch
 
 
-from lightllm.common.attention.api import AttentionPhase
+from lightllm.common.attention import selection
+
+
+from lightllm.common.attention.api import AttentionFamily, AttentionPhase, UnsupportedAttention
 
 
 from unit_tests.common.attention.helpers import StubBackend, make_env, build
 
 
-from unit_tests.common.attention.helpers import make_batch, make_context, make_layer_attention, make_spec
+from lightllm.utils.backend_validator import ProbeResult, ProbeScope
+
+
+from unit_tests.common.attention.helpers import make_batch, make_context, make_layer_attention, make_spec, model_stub
+
+
+def _select(*, model, specs=None, **kwargs):
+    family, phase = kwargs.pop("family"), kwargs.pop("phase")
+    candidates = kwargs.pop("candidates", None)
+    priority = kwargs.pop("priority", ())
+    if candidates is not None:
+        kwargs["policy"] = selection.BackendPolicy(
+            allow=frozenset(priority),
+            prefer=tuple(priority),
+            extra=tuple(backend for formats in candidates.values() for backend in formats.values()),
+        )
+    return selection.select_attention_backend(
+        specs=specs or (make_spec(family, phase),),
+        caps=model.device_runtime.caps,
+        execution=model.attention_requirements,
+        **kwargs,
+    )
 
 
 @pytest.mark.parametrize("capture", [False, True])
@@ -45,6 +69,136 @@ def test_layer_attention_rejects_wrong_phase():
     context.capacity = replace(context.capacity, phase=AttentionPhase.PREFILL)
     with pytest.raises(ValueError, match="capacity"):
         run_attention(attention, context, inputs=None)
+
+
+@pytest.mark.parametrize("requested", ["auto", "triton"])
+def test_selection_never_falls_back_to_a_rejected_backend(monkeypatch, requested):
+    spec = make_spec(cache=replace(make_spec().cache, encoding="fp8kv_sph"))
+    monkeypatch.setattr(
+        StubBackend,
+        "check_environment",
+        classmethod(lambda cls, caps: None),
+    )
+    with pytest.raises(selection.BackendSelectionError, match="encoding fp8kv_sph"):
+        _select(
+            family=spec.family,
+            phase=spec.phase,
+            model=model_stub(),
+            specs=(spec,),
+            requested=requested,
+            candidates={"None": {"triton": StubBackend}},
+            priority=["triton"],
+        )
+
+
+@pytest.mark.parametrize("requested", ["auto", "triton"])
+def test_environment_checks_apply_to_explicit_and_auto(monkeypatch, requested):
+    def reject(cls, caps):
+        raise UnsupportedAttention("missing extension")
+
+    monkeypatch.setattr(StubBackend, "check_environment", classmethod(reject))
+    with pytest.raises(selection.BackendSelectionError, match="missing extension"):
+        _select(
+            family=AttentionFamily.DENSE,
+            phase=AttentionPhase.DECODE,
+            model=model_stub(),
+            requested=requested,
+            candidates={"None": {"triton": StubBackend}},
+            priority=["triton"],
+        )
+
+
+def _backend_check_exception_candidates(monkeypatch, error_type=RuntimeError):
+    class BrokenBackend(StubBackend):
+        provider = "broken"
+
+        @classmethod
+        def check_environment(cls, caps):
+            raise error_type("provider ABI mismatch")
+
+    class WorkingBackend(StubBackend):
+        provider = "working"
+
+        @classmethod
+        def check_environment(cls, caps):
+            return None
+
+    monkeypatch.setattr(
+        "lightllm.utils.backend_validator.probe_backend",
+        lambda *args, **kwargs: ProbeResult(True, ProbeScope.BACKEND_NUMERICS),
+    )
+    return {"None": {"broken": BrokenBackend, "working": WorkingBackend}}
+
+
+@pytest.mark.parametrize("error_type", [UnsupportedAttention, ValueError, RuntimeError])
+def test_backend_check_exception_is_reported_for_explicit_selection(monkeypatch, error_type):
+    candidates = _backend_check_exception_candidates(monkeypatch, error_type)
+    with pytest.raises(selection.BackendSelectionError) as error:
+        _select(
+            family=AttentionFamily.DENSE,
+            phase=AttentionPhase.DECODE,
+            model=model_stub(),
+            requested="broken",
+            candidates=candidates,
+            priority=["broken", "working"],
+        )
+
+    reason = "provider ABI mismatch"
+    if error_type is not UnsupportedAttention:
+        reason = f"provider check failed: {error_type.__name__}: {reason}"
+    assert error.value.failures == {"broken": reason}
+
+
+@pytest.mark.parametrize("requested", ["auto", "triton"])
+def test_rejection_reaches_rank_consensus(monkeypatch, requested):
+    spec = make_spec(dtype=torch.float64)
+    ranks = []
+    monkeypatch.setattr(StubBackend, "check_environment", classmethod(lambda cls, caps: None))
+    monkeypatch.setattr(
+        selection.backend_validator, "probe_backend", lambda *args, **kwargs: pytest.fail("probed rejected inputs")
+    )
+    monkeypatch.setattr(selection, "_check_rank_selection", lambda *args: ranks.append(args))
+    with pytest.raises(selection.BackendSelectionError, match="activation dtype"):
+        _select(
+            family=spec.family,
+            phase=spec.phase,
+            model=model_stub(),
+            specs=(spec,),
+            requested=requested,
+            candidates={"None": {"triton": StubBackend}},
+            priority=["triton"],
+        )
+    assert len(ranks) == 1
+    assert ranks[0][:3] == (spec.family, spec.phase, None)
+    assert "activation dtype" in ranks[0][3]
+
+
+def test_rank_selection_checks_all_ranks_after_local_selection(monkeypatch):
+    import torch.distributed as dist
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+
+    def gather(output, value):
+        output[:] = [value, {"backend": "triton", "failure": None}]
+
+    monkeypatch.setattr(dist, "all_gather_object", gather)
+    with pytest.raises(selection.BackendSelectionError, match="backend selection"):
+        selection._check_rank_selection(AttentionFamily.DENSE, AttentionPhase.DECODE, "fa3", None)
+
+
+def test_rank_selection_propagates_remote_failure(monkeypatch):
+    import torch.distributed as dist
+
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(
+        dist,
+        "all_gather_object",
+        lambda output, value: output.__setitem__(slice(None), [value, {"backend": None, "failure": "probe failed"}]),
+    )
+    with pytest.raises(selection.BackendSelectionError, match="rank 1: probe failed"):
+        selection._check_rank_selection(AttentionFamily.DENSE, AttentionPhase.DECODE, "fa3", None)
 
 
 class _OutputBackend(StubBackend):
@@ -127,6 +281,48 @@ def test_batch_builder_borrows_runtime_inputs_and_binding_checks_owner():
             replace(layer, backend=StubBackend(make_env(), make_spec())).context(state.attention)
     with pytest.raises(AttributeError):
         context.b_requ_idx = borrowed.b_req_idx
+
+
+@pytest.mark.parametrize("family", list(AttentionFamily))
+def test_probe_reports_actual_coverage(monkeypatch, family):
+    from lightllm.common.attention import probe, registry
+    from lightllm.utils import backend_validator as validator
+
+    spec = make_spec(family)
+    calls = []
+    monkeypatch.setattr(registry, "load_backend_class", lambda name: SimpleNamespace(provider="triton"))
+    monkeypatch.setattr(probe, "probe_dense", lambda *args: calls.append("backend") or (True, None))
+    monkeypatch.setattr(validator, "_smoke_provider", lambda *a, **k: calls.append("smoke") or (True, None))
+    result = validator._probe_in_process("selected", device="cpu", spec=spec)
+    assert result.ok
+    numerical = family is AttentionFamily.DENSE
+    assert result.scope is (validator.ProbeScope.BACKEND_NUMERICS if numerical else validator.ProbeScope.PROVIDER_SMOKE)
+    assert calls == (["backend"] if numerical else ["smoke"])
+
+
+def test_special_dense_probe_is_explicitly_smoke_only(monkeypatch):
+    from dataclasses import replace
+
+    from lightllm.common.attention import probe, registry
+    from lightllm.utils import backend_validator as validator
+
+    monkeypatch.setattr(registry, "load_backend_class", lambda name: SimpleNamespace(provider="triton"))
+    monkeypatch.setattr(probe, "probe_dense", lambda *args: pytest.fail("unsupported numerical probe"))
+    monkeypatch.setattr(validator, "_smoke_provider", lambda *a, **k: (False, "provider failed"))
+    result = validator._probe_in_process("selected", device="cpu", spec=make_spec(use_mtp=True))
+    assert not result.ok
+    assert result.scope is validator.ProbeScope.PROVIDER_SMOKE
+    assert result.reason == "provider failed"
+
+
+@pytest.mark.parametrize("field,value", [("phase", AttentionPhase.PREFILL), ("family", AttentionFamily.MLA)])
+def test_selection_rejects_mixed_specs(field, value):
+    with pytest.raises(ValueError, match="share family, phase and cache layout"):
+        selection.select_attention_backend(
+            specs=(make_spec(), replace(make_spec(), **{field: value})),
+            caps=model_stub().device_runtime.caps,
+            execution=model_stub().attention_requirements,
+        )
 
 
 def test_binding_resolves_context_on_each_forward(monkeypatch):
