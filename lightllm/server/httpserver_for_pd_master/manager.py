@@ -490,6 +490,13 @@ class HttpServerManagerForPDMaster:
 
     async def _merge_choice_generators(self, generators):
         """Merge independent n=1 PD generators into one multi-choice stream."""
+        # One choice has nothing to merge. Consume it here so cancellation closes the source.
+        if len(generators) == 1:
+            async with aclosing(generators[0]) as generator:
+                async for result in generator:
+                    yield result
+            return
+
         result_queue = asyncio.Queue()
         generator_done = object()
 
@@ -663,6 +670,7 @@ class HttpServerManagerForPDMaster:
                 )
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
+                output_tokens = []
                 for sub_req_id, request_output, metadata, finish_status in token_list:
                     output_index = metadata.get("count_output_tokens")
                     # 因为 pd 的 prefill 和 decode 节点都有可能上报首token，所以需要做一下过滤。
@@ -678,12 +686,16 @@ class HttpServerManagerForPDMaster:
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                             metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
                             metadata["needs_prefill_first_token"] = needs_prefill_first_token
-                            yield sub_req_id, request_output, metadata, finish_status
+                            output_tokens.append((sub_req_id, request_output, metadata, finish_status))
                         else:
                             continue
                     else:
                         metadata["prompt_cache_len"] = prompt_cache_len_from_prefill
-                        yield sub_req_id, request_output, metadata, finish_status
+                        output_tokens.append((sub_req_id, request_output, metadata, finish_status))
+                # 只标记这一轮已经到达的 token。被过滤的重复首 token 不占批次结束位置。
+                for index, token_info in enumerate(output_tokens):
+                    token_info[2]["_pd_stream_batch_end"] = index == len(output_tokens) - 1
+                    yield token_info
 
         return
 
