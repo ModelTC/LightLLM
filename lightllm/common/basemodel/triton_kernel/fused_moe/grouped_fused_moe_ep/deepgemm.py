@@ -3,7 +3,10 @@ import triton
 from typing import List, Optional, Tuple
 
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
+    silu_and_mul_fwd,
+    silu_and_mul_quant_fp8,
+)
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
     silu_and_mul_psum_post_quant_fwd,
 )
@@ -17,6 +20,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_ke
     ep_zero_padding,
 )
 from lightllm.utils.envs_utils import get_env_use_ue8m0_scales
+from lightllm.utils.device_utils import is_hopper
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 
 logger = init_logger(__name__)
@@ -240,6 +244,20 @@ def chunked_expanded_moe_forward(
         dtype=hidden_dtype,
         device=recv_x[0].device,
     )
+    # GLM expanded-MoE prefill 的加速：Hopper 上把 SwiGLU 和 UE8M0 量化合成一次。
+    # 只匹配 GLM expert（hidden 4096、intermediate 2048、block 128）和它的 clamp SwiGLU
+    # （alpha=1、limit=10、不做 up+1）。warmup 以及其他模型继续走原来的两步。
+    fuse_activation = (
+        not is_autotune_warmup
+        and get_env_use_ue8m0_scales()
+        and hidden_dtype == torch.bfloat16
+        and w2.dtype == torch.float8_e4m3fn
+        and (hidden_size, intermediate_size, block_size_k) == (4096, 2048, 128)
+        and alpha == 1.0
+        and limit == 10.0
+        and not clamp_up_add_one
+        and is_hopper()
+    )
     try:
         for chunk_index, chunk_start in enumerate(range(0, all_tokens, max_chunk_rows)):
             if is_autotune_warmup and chunk_index == 1:
@@ -247,11 +265,6 @@ def chunked_expanded_moe_forward(
 
             chunk_end = min(chunk_start + max_chunk_rows, all_tokens)
             chunk_rows = chunk_end - chunk_start
-            silu_out = torch.empty(
-                (chunk_rows, intermediate_size),
-                dtype=hidden_dtype,
-                device=recv_x[0].device,
-            )
             gemm_out_a = torch.empty(
                 (chunk_rows, intermediate_twice),
                 dtype=hidden_dtype,
@@ -263,18 +276,30 @@ def chunked_expanded_moe_forward(
                 gemm_out_a,
                 m_indices[chunk_start:chunk_end],
             )
-            silu_and_mul_fwd(gemm_out_a, silu_out, alpha=alpha, limit=limit, clamp_up_add_one=clamp_up_add_one)
-            del gemm_out_a
-
-            qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
-                silu_out,
-                block_size_k,
-                dtype=w2.dtype,
-                column_major_scales=True,
-                scale_tma_aligned=True,
-                use_ue8m0_scales=get_env_use_ue8m0_scales(),
-            )
-            del silu_out
+            # GLM 这条融合路径只在 896～32768 行更快；更短的尾 chunk 仍先激活再量化。
+            if fuse_activation and 896 <= chunk_rows <= 32768:
+                qsilu_out, qsilu_out_scale = silu_and_mul_quant_fp8(
+                    input=gemm_out_a,
+                    group_size=block_size_k,
+                    dtype=w2.dtype,
+                    limit=limit,
+                    alpha=alpha,
+                    run_config={"GROUPS_PER_CTA": 4, "num_warps": 1},
+                )
+                del gemm_out_a
+            else:
+                silu_out = torch.empty((chunk_rows, intermediate_size), dtype=hidden_dtype, device=recv_x[0].device)
+                silu_and_mul_fwd(gemm_out_a, silu_out, alpha=alpha, limit=limit, clamp_up_add_one=clamp_up_add_one)
+                del gemm_out_a
+                qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
+                    silu_out,
+                    block_size_k,
+                    dtype=w2.dtype,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    use_ue8m0_scales=get_env_use_ue8m0_scales(),
+                )
+                del silu_out
 
             gemm_out_b = torch.empty(
                 (chunk_rows, hidden_size),
