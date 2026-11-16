@@ -2116,12 +2116,22 @@ def _qwen3_parameter_schema_types(schema: Any, schema_root: Any) -> Optional[set
     schema_types = _qwen3_schema_option_types(schema=schema, depth=0, schema_root=schema_root, expanded_ids=set())
     if schema_types is None:
         return None
-    if isinstance(schema, dict) and schema.get("nullable") is True and "null" not in schema_types:
-        return set(schema_types) | {"null"}
     return schema_types
 
 
 def _qwen3_schema_option_types(schema: Any, depth: int, schema_root: Any, expanded_ids: set[int]) -> Optional[set[str]]:
+    """Collect the JSON types accepted by a schema, including nested nullable flags."""
+    schema_types = _qwen3_schema_option_types_impl(
+        schema=schema, depth=depth, schema_root=schema_root, expanded_ids=expanded_ids
+    )
+    if schema_types is not None and isinstance(schema, dict) and schema.get("nullable") is True:
+        return set(schema_types) | {"null"}
+    return schema_types
+
+
+def _qwen3_schema_option_types_impl(
+    schema: Any, depth: int, schema_root: Any, expanded_ids: set[int]
+) -> Optional[set[str]]:
     if depth > _QWEN3_SCHEMA_DEPTH_LIMIT:
         return None
     if schema is False:

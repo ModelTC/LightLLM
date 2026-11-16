@@ -186,6 +186,24 @@ def test_non_null_text_follows_the_same_schema_split(schema, value, expected):
             None,
         ),
         (
+            {"$ref": "#/$defs/NullableName"},
+            {"$defs": {"NullableName": {"type": "string", "nullable": True}}},
+            "null",
+            None,
+        ),
+        (
+            {"anyOf": [{"type": "string", "nullable": True}]},
+            {},
+            "NONE",
+            None,
+        ),
+        (
+            {"allOf": [{"type": "string", "nullable": True}]},
+            {},
+            "null",
+            None,
+        ),
+        (
             {"anyOf": [{"$ref": "#/$defs/Name"}, {"type": "null"}]},
             {"$defs": {"Name": {"type": "string"}}},
             "NONE",
