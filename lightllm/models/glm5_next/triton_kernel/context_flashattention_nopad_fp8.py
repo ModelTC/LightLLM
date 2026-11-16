@@ -263,7 +263,24 @@ def _build_prefill_row_table_kernel(PrefillMemIndex, RowTable, num_tokens, BLOCK
     tl.store(RowTable + mem_index, row, row < num_tokens)
 
 
-@triton.jit(do_not_specialize=["num_tokens"])
+@triton.jit(do_not_specialize=["ragged_n"])
+def _index_selected_prefill_kernel(
+    TopkIndices,
+    KVStarts,
+    SelectedOwners,
+    ragged_n,
+    TOPK: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    lane = tl.arange(0, BLOCK)
+    index = tl.load(TopkIndices + row * TOPK + lane, lane < TOPK, -1).to(tl.int64)
+    position = tl.load(KVStarts + row).to(tl.int64) + index
+    valid = (lane < TOPK) & (index >= 0) & (position >= 0) & (position < ragged_n)
+    tl.atomic_min(SelectedOwners + position, row * TOPK + lane, valid, sem="relaxed")
+
+
+@triton.jit(do_not_specialize=["num_tokens", "ragged_n"])
 def _gather_prefill_kv_kernel(
     PackedKV,
     MemIndex,
@@ -275,13 +292,29 @@ def _gather_prefill_kv_kernel(
     prefill_stride_s: tl.constexpr,
     prefill_stride_d: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
+    TopkIndices=None,
+    KVStarts=None,
+    SelectedOwners=None,
+    ChunkIndices=None,
+    ragged_n=0,
+    TOPK: tl.constexpr = 0,
 ):
     row = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
     dim = tl.arange(0, 512)
-    mem_index = tl.load(MemIndex + row, row < num_tokens, 0).to(tl.int64)
-    prefill_row = tl.load(PrefillRowTable + mem_index, row < num_tokens, -1)
-    cached = (row < num_tokens) & (prefill_row < 0)
-    current = (row < num_tokens) & (prefill_row >= 0)
+    live = row < num_tokens
+    if TOPK:
+        index = tl.load(TopkIndices + row, live, -1).to(tl.int64)
+        position = tl.load(KVStarts + row // TOPK, live, 0).to(tl.int64) + index
+        valid = live & (index >= 0) & (position >= 0) & (position < ragged_n)
+        owner = tl.load(SelectedOwners + position, valid, -1)
+        tl.store(ChunkIndices + row, owner, live)
+        live = valid & (owner == row)
+        mem_index = tl.load(MemIndex + position, live, 0).to(tl.int64)
+    else:
+        mem_index = tl.load(MemIndex + row, live, 0).to(tl.int64)
+    prefill_row = tl.load(PrefillRowTable + mem_index, live, -1)
+    cached = live & (prefill_row < 0)
+    current = live & (prefill_row >= 0)
     packed_row = PackedKV + mem_index[:, None] * packed_stride_s
 
     quantized = tl.load(
@@ -309,7 +342,7 @@ def _gather_prefill_kv_kernel(
     tl.store(
         Output + row[:, None] * 512 + dim[None, :],
         tl.where(current[:, None], current_values, values),
-        row[:, None] < num_tokens,
+        live[:, None],
     )
 
 
@@ -328,7 +361,7 @@ def _compact_topk_indices_kernel(
     row = tl.program_id(0)
     lane = tl.arange(0, BLOCK)
     index = tl.load(TopkIndices + row * TOPK + lane, lane < TOPK, -1)
-    ragged_index = index + tl.load(KVStarts + row)
+    ragged_index = index if KVStarts is None else index + tl.load(KVStarts + row)
     valid = (lane < TOPK) & (index >= 0) & (ragged_index >= chunk_start) & (ragged_index < chunk_end)
     if COMPACT:
         compact_index = tl.cumsum(valid.to(tl.int32)) - 1
@@ -647,6 +680,29 @@ def context_attention_fwd_fp8(
 
     num_q_tokens, num_heads, _ = q.shape
     gather_chunk_size = min(KV_GATHER_CHUNK_SIZE, ragged_mem_index.numel())
+    use_native_sparse = num_q_tokens > 8 and num_heads == 64
+    min_selected_context = 131072 if num_heads == 64 else 262144
+    gather_selected = (
+        num_q_tokens > 8
+        and ragged_mem_index.numel() >= min_selected_context
+        and topk_indices.numel() * 3 <= ragged_mem_index.numel()
+    )
+    if use_native_sparse or gather_selected:
+        compatible = (
+            ragged_mem_index.numel() > num_q_tokens
+            and ragged_mem_index.numel() <= KV_GATHER_CHUNK_SIZE
+            and q.dtype == torch.bfloat16
+            and q.is_contiguous()
+            and q.stride(-1) == 1
+            and packed_kv.dtype == torch.uint8
+            and packed_kv.shape[1:] == (1, 584)
+            and topk_indices.dtype == torch.int32
+            and topk_indices.shape[1] == 2176
+            and topk_indices.is_contiguous()
+        )
+        use_native_sparse = use_native_sparse and compatible
+        gather_selected = gather_selected and compatible
+    gather_rows = topk_indices.numel() if gather_selected else gather_chunk_size
     if generic_workspace is None:
         # Build the row table before gathering KV and allocating compaction metadata.
         prefill_row_table = torch.full((packed_kv.shape[0],), -1, dtype=torch.int32, device=q.device)
@@ -654,7 +710,7 @@ def context_attention_fwd_fp8(
             prefill_mem_index, prefill_row_table, prefill_mem_index.numel(), BLOCK=256
         )
         # Keep this potentially 2 GiB buffer local to a DSA layer.
-        gathered_kv = q.new_empty((gather_chunk_size, 1, 512))
+        gathered_kv = q.new_empty((gather_rows, 1, 512))
         chunk_indices = torch.empty_like(topk_indices)
         chunk_lengths = torch.empty(num_q_tokens, dtype=torch.int32, device=q.device)
         cu_seqlens_q = torch.arange(num_q_tokens + 1, dtype=torch.int32, device=q.device)
@@ -672,50 +728,68 @@ def context_attention_fwd_fp8(
             )
             generic_workspace["row_table_built"] = True
         # Keep this potentially 2 GiB buffer local to a DSA layer.
-        gathered_kv = q.new_empty((gather_chunk_size, 1, 512))
-    output = lse = None
-    for chunk_start in range(0, ragged_mem_index.numel(), gather_chunk_size):
-        num_chunk_tokens = min(gather_chunk_size, ragged_mem_index.numel() - chunk_start)
-        _gather_prefill_kv_kernel[(triton.cdiv(num_chunk_tokens, 4),)](
+        gathered_kv = q.new_empty((gather_rows, 1, 512))
+    if gather_selected:
+        owners = torch.full((ragged_mem_index.numel(),), 2**31 - 1, dtype=torch.int32, device=q.device)
+        _index_selected_prefill_kernel[(num_q_tokens,)](
+            topk_indices,
+            kv_starts,
+            owners,
+            ragged_mem_index.numel(),
+            TOPK=topk_indices.shape[1],
+            BLOCK=triton.next_power_of_2(topk_indices.shape[1]),
+        )
+        _gather_prefill_kv_kernel[(triton.cdiv(gather_rows, 4),)](
             packed_kv,
-            ragged_mem_index[chunk_start : chunk_start + num_chunk_tokens],
+            ragged_mem_index,
             prefill_row_table,
             prefill_kv,
             gathered_kv,
-            num_chunk_tokens,
+            gather_rows,
             packed_kv.stride(0),
             prefill_kv.stride(0),
             prefill_kv.stride(2),
             BLOCK_ROWS=4,
+            TopkIndices=topk_indices,
+            KVStarts=kv_starts,
+            SelectedOwners=owners,
+            ChunkIndices=chunk_indices,
+            ragged_n=ragged_mem_index.numel(),
+            TOPK=topk_indices.shape[1],
         )
+    output = lse = None
+    total_gather_rows = gather_rows if gather_selected else ragged_mem_index.numel()
+    for chunk_start in range(0, total_gather_rows, gather_chunk_size):
+        num_chunk_tokens = min(gather_chunk_size, total_gather_rows - chunk_start)
+        if not gather_selected:
+            _gather_prefill_kv_kernel[(triton.cdiv(num_chunk_tokens, 4),)](
+                packed_kv,
+                ragged_mem_index[chunk_start : chunk_start + num_chunk_tokens],
+                prefill_row_table,
+                prefill_kv,
+                gathered_kv,
+                num_chunk_tokens,
+                packed_kv.stride(0),
+                prefill_kv.stride(0),
+                prefill_kv.stride(2),
+                BLOCK_ROWS=4,
+            )
         chunk_kv = gathered_kv[:num_chunk_tokens].view(-1, 1, 1, 512)
-        if (
-            num_q_tokens > 8
-            and num_heads == 64
-            and ragged_mem_index.numel() > num_q_tokens
-            and ragged_mem_index.numel() <= KV_GATHER_CHUNK_SIZE
-            and q.dtype == torch.bfloat16
-            and q.is_contiguous()
-            and q.stride(-1) == 1
-            and packed_kv.dtype == torch.uint8
-            and packed_kv.shape[1:] == (1, 584)
-            and topk_indices.dtype == torch.int32
-            and topk_indices.shape[1] == 2176
-            and topk_indices.is_contiguous()
-        ):
+        if use_native_sparse:
             from sgl_kernel.flash_mla import flash_mla_sparse_fwd
 
-            _compact_topk_indices_kernel[(num_q_tokens,)](
-                topk_indices,
-                kv_starts,
-                chunk_indices,
-                chunk_lengths,
-                chunk_start,
-                chunk_start + num_chunk_tokens,
-                TOPK=topk_indices.shape[1],
-                BLOCK=triton.next_power_of_2(topk_indices.shape[1]),
-                COMPACT=False,
-            )
+            if not gather_selected:
+                _compact_topk_indices_kernel[(num_q_tokens,)](
+                    topk_indices,
+                    kv_starts,
+                    chunk_indices,
+                    chunk_lengths,
+                    chunk_start,
+                    chunk_start + num_chunk_tokens,
+                    TOPK=topk_indices.shape[1],
+                    BLOCK=triton.next_power_of_2(topk_indices.shape[1]),
+                    COMPACT=False,
+                )
             return flash_mla_sparse_fwd(
                 q=q,
                 kv=gathered_kv[:num_chunk_tokens],
@@ -724,8 +798,8 @@ def context_attention_fwd_fp8(
                 d_v=512,
             )[0]
         _compact_topk_indices_kernel[(num_q_tokens,)](
-            topk_indices,
-            kv_starts,
+            chunk_indices if gather_selected else topk_indices,
+            None if gather_selected else kv_starts,
             chunk_indices,
             chunk_lengths,
             chunk_start,

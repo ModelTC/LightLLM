@@ -239,7 +239,7 @@ def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chun
         nsa_prefill_dict={
             "topk_indices": topk_indices,
             "prefill_cache_kv": prefill_kv,
-            "softmax_scale": 512 ** -0.5,
+            "softmax_scale": 512**-0.5,
             "kv_lora_rank": 512,
         },
     )
@@ -276,7 +276,7 @@ def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chun
 
 
 @pytest.mark.parametrize("num_heads", [8, 16, 64, 128])
-@pytest.mark.parametrize("softmax_scale", [0.0625, 512 ** -0.5])
+@pytest.mark.parametrize("softmax_scale", [0.0625, 512**-0.5])
 def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softmax_scale):
     monkeypatch.setattr(fp8_prefill, "KV_GATHER_CHUNK_SIZE", 129)
     torch.manual_seed(53)
@@ -336,13 +336,14 @@ def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softm
     check(output)
 
 
-def _sampled_h64_sparse_reference(q, packed, ragged, prefill_mem, prefill_kv, starts, topk, samples):
-    """Reference only a few H64 rows so the large-Q regression stays bounded."""
+def _sampled_sparse_prefill_reference(q, packed, ragged, prefill_mem, prefill_kv, starts, topk, samples):
+    """Reference a few rows and heads to keep the long-context regressions bounded."""
     expected = []
     for row, heads in samples:
         local = topk[row]
-        local = local[local >= 0].long()
-        physical = ragged[(starts[row].long() + local)].long()
+        positions = starts[row].long() + local.long()
+        valid = (local >= 0) & (positions >= 0) & (positions < ragged.numel())
+        physical = ragged[positions[valid]].long()
         values = _dequantize_kv_cache(packed[physical])[:, 0].float()
         current = physical[:, None] == prefill_mem[None, :].long()
         has_current = current.any(dim=1)
@@ -353,15 +354,15 @@ def _sampled_h64_sparse_reference(q, packed, ragged, prefill_mem, prefill_kv, st
 
 
 @pytest.mark.parametrize("num_q", [16, 33])
-def test_fp8_h64_largeq_native_prefill_permuted_ragged_graph(monkeypatch, num_q):
+@pytest.mark.parametrize("ragged_n", [65536, 262144])
+def test_fp8_h64_largeq_native_prefill_permuted_ragged_graph(monkeypatch, num_q, ragged_n):
     """The native sparse prefill path maps top-k ragged positions, never physical IDs."""
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("Validated FlashMLA sparse prefill target is Hopper")
     from sgl_kernel.flash_mla import flash_mla_sparse_fwd
 
     torch.manual_seed(53100 + num_q)
-    capacity = 131072
-    ragged_n = 65536
+    capacity = 2 * ragged_n
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
     destindex_copy_kv_flashmla_fp8(source, torch.arange(capacity, device="cuda", dtype=torch.int32), packed)
@@ -375,13 +376,15 @@ def test_fp8_h64_largeq_native_prefill_permuted_ragged_graph(monkeypatch, num_q)
     current_local = (torch.arange(num_q, device="cuda", dtype=torch.int32) * 37) % 2048 + 64
     current_positions = starts + current_local
     prefill_mem = ragged[current_positions.long()].clone()
-    prefill_kv = torch.randn(num_q, 1, 512, device="cuda", dtype=torch.bfloat16)
+    prefill_kv = torch.randn(num_q, 1, 1024, device="cuda", dtype=torch.bfloat16)[..., ::2]
     prefill_kv.add_(torch.arange(num_q, device="cuda", dtype=torch.bfloat16)[:, None, None])
     topk = torch.randint(0, 2176, (num_q, 2176), device="cuda", dtype=torch.int32)
     topk[:, ::19] = -1  # Holes must survive the native position-preserving map.
     topk[:, 0] = current_local
     topk[:, 1] = current_local  # Duplicates are valid selected keys.
     topk[:, 2] = topk[:, 3]
+    topk[:, 4] = ragged_n
+    topk[:, 5] = 2**31 - 1
     assert q.is_contiguous() and topk.is_contiguous()
 
     observed = []
@@ -400,13 +403,14 @@ def test_fp8_h64_largeq_native_prefill_permuted_ragged_graph(monkeypatch, num_q)
     samples = [(0, torch.tensor([0, 9, 63], device="cuda")), (num_q - 1, torch.tensor([3, 31, 62], device="cuda"))]
 
     def check(actual):
-        expected = _sampled_h64_sparse_reference(q, packed, ragged, prefill_mem, prefill_kv, starts, topk, samples)
+        expected = _sampled_sparse_prefill_reference(q, packed, ragged, prefill_mem, prefill_kv, starts, topk, samples)
         for (row, heads), value in zip(samples, expected):
             torch.testing.assert_close(actual[row, heads].float(), value, atol=0.012, rtol=0.015)
 
     eager = run()
     check(eager)
-    assert observed == [((num_q, 64, 512), (ragged_n, 1, 512), (num_q, 1, 2176))]
+    gather_rows = num_q * 2176 if ragged_n == 262144 else ragged_n
+    assert observed == [((num_q, 64, 512), (gather_rows, 1, 512), (num_q, 1, 2176))]
     graph, output = _capture_cuda_graph(run)
     q.normal_()
     prefill_kv.normal_()
@@ -414,26 +418,33 @@ def test_fp8_h64_largeq_native_prefill_permuted_ragged_graph(monkeypatch, num_q)
     prefill_mem.copy_(ragged[current_positions.long()])
     topk.copy_(topk.roll(1, dims=1))
     topk[:, 1] = current_local
+    source.normal_()
+    destindex_copy_kv_flashmla_fp8(source, torch.arange(capacity, device="cuda", dtype=torch.int32), packed)
     graph.replay()
     check(output)
     topk.fill_(-1)
     graph.replay()
     assert torch.count_nonzero(output) == 0
+    topk.random_(0, 2176)
+    topk[:, 0] = current_local
+    graph.replay()
+    check(output)
     assert len(observed) == 3  # eager, graph warmup, and capture; replay stays inside the CUDA graph.
 
 
-def test_fp8_h8_largeq_prefill_keeps_flashattention_path(monkeypatch):
-    """H8 large-Q prefill must not enter the H64 native sparse fast path."""
+@pytest.mark.parametrize("capacity", [65536, 131072, 262144])
+@pytest.mark.parametrize("num_heads", [8, 16, 128])
+def test_fp8_largeq_prefill_keeps_flashattention_path(monkeypatch, capacity, num_heads):
+    """Full and selected gathering retain FA3 for non-H64 query shapes."""
     import sgl_kernel.flash_attn as flash_attn
     import sgl_kernel.flash_mla as flash_mla
 
     torch.manual_seed(53180)
-    capacity = 65536
     num_q = 16
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
     destindex_copy_kv_flashmla_fp8(source, torch.arange(capacity, device="cuda", dtype=torch.int32), packed)
-    q = torch.randn(num_q, 8, 512, device="cuda", dtype=torch.bfloat16)
+    q = torch.randn(num_q, num_heads, 512, device="cuda", dtype=torch.bfloat16)
     ragged = torch.randperm(capacity, device="cuda", dtype=torch.int32)
     starts = torch.full((num_q,), 1024, device="cuda", dtype=torch.int32)
     current_local = torch.arange(num_q, device="cuda", dtype=torch.int32) + 64
@@ -442,23 +453,53 @@ def test_fp8_h8_largeq_prefill_keeps_flashattention_path(monkeypatch):
     topk = torch.full((num_q, 2176), -1, device="cuda", dtype=torch.int32)
     topk[:, :64] = torch.arange(64, device="cuda", dtype=torch.int32)
     topk[:, 0] = current_local
+    topk[:, 1] = current_local
+    topk[:, 8] = -1
+    topk[:, 9] = capacity
     seen_flashattention = []
     original_flashattention = flash_attn.flash_attn_with_kvcache
 
     def observed_flashattention(*args, **kwargs):
-        seen_flashattention.append(True)
+        seen_flashattention.append(kwargs["v_cache"].shape[0])
         return original_flashattention(*args, **kwargs)
 
     def unexpected_native(*args, **kwargs):
-        raise AssertionError("H8 large-Q prefill entered the native H64 sparse path")
+        raise AssertionError("non-H64 prefill entered the native H64 sparse path")
 
     monkeypatch.setattr(flash_attn, "flash_attn_with_kvcache", observed_flashattention)
     monkeypatch.setattr(flash_mla, "flash_mla_sparse_fwd", unexpected_native)
-    output = fp8_prefill.context_attention_fwd_fp8(
-        q, packed[..., :584], ragged, prefill_mem, prefill_kv, starts, topk, 0.0625
-    )
-    assert seen_flashattention
+
+    def run():
+        return fp8_prefill.context_attention_fwd_fp8(
+            q, packed[..., :584], ragged, prefill_mem, prefill_kv, starts, topk, 0.0625
+        )
+
+    samples = [(row, torch.tensor([0, num_heads // 2, num_heads - 1], device="cuda")) for row in [0, num_q - 1]]
+
+    def check(actual):
+        expected = _sampled_sparse_prefill_reference(q, packed, ragged, prefill_mem, prefill_kv, starts, topk, samples)
+        for (row, heads), value in zip(samples, expected):
+            torch.testing.assert_close(actual[row, heads].float(), value, atol=0.012, rtol=0.015)
+
+    output = run()
+    check(output)
+    assert seen_flashattention == [num_q * 2176 if capacity == 262144 else capacity]
     assert output.shape == q.shape
+    graph, output = _capture_cuda_graph(run)
+    q.normal_()
+    prefill_kv.normal_()
+    ragged.copy_(ragged.roll(1))
+    prefill_mem.copy_(ragged[(starts + current_local).long()])
+    topk.copy_(topk.roll(1, dims=1))
+    graph.replay()
+    check(output)
+    topk.fill_(-1)
+    graph.replay()
+    assert torch.count_nonzero(output) == 0
+    topk[:, :64] = torch.arange(64, device="cuda", dtype=torch.int32)
+    topk[:, 0] = current_local
+    graph.replay()
+    check(output)
 
 
 @pytest.mark.parametrize(
@@ -1088,7 +1129,7 @@ def test_fp8_sparse_direct_decode_offsets_beyond_int32(strided_input):
     storage_size = (batch - 1) * stride + shape[-1]
     required_bytes = storage_size * torch.empty((), dtype=dtype).element_size()
     torch.cuda.empty_cache()
-    if torch.cuda.mem_get_info()[0] < required_bytes + 512 * 1024 ** 2:
+    if torch.cuda.mem_get_info()[0] < required_bytes + 512 * 1024**2:
         pytest.skip("Large-stride regression requires sufficient free GPU memory")
     # Allocate address space without initializing the gaps between logical rows.
     storage = torch.empty(storage_size, device="cuda", dtype=dtype)
@@ -1145,10 +1186,12 @@ def test_fp8_sparse_direct_decode_large_workload_retains_native_graph(monkeypatc
     torch.testing.assert_close(output.float(), expected, atol=0.02, rtol=0.02)
 
 
-def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallback():
+@pytest.mark.parametrize("gather_chunk_size", [4096, 2097152])
+def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallback(monkeypatch, gather_chunk_size):
     """Generic H64 backend buffers are reused, batch metadata resets, and graph falls back."""
+    monkeypatch.setattr(fp8_prefill, "KV_GATHER_CHUNK_SIZE", gather_chunk_size)
     torch.manual_seed(53450)
-    capacity, num_q = 65536, 13
+    capacity, num_q = 131072, 13
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
     mem = torch.arange(capacity, device="cuda", dtype=torch.int32)
