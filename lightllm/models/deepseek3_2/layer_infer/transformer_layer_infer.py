@@ -1,3 +1,5 @@
+from lightllm.common.attention.api.inputs import SparseIndexMetadata, SparseMLADecodeInputs, SparseMLAPrefillInputs
+
 from dataclasses import replace
 from lightllm.common.attention.api.spec import AttentionFamily
 
@@ -76,44 +78,67 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         out=None,
     ) -> torch.Tensor:
         # Model-specific q projection (uses layer weights)
+        if getattr(self, "_legacy_attention_execution", False):
+            q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
+            q_all = torch.cat([q_nope, q_rope], dim=-1)
+
+            # 计算 topk indices
+            att_state = infer_state.prefill_att_state
+            topk_mem_indices, topk_indices = self.indexer._get_legacy_indices(
+                hidden_states=infer_state.get_topk_indices_params["hidden_states"],
+                q_lora=infer_state.get_topk_indices_params["q_lora"],
+                infer_state=infer_state,
+                att_state=att_state,
+                layer_weight=layer_weight,
+            )
+            del infer_state.get_topk_indices_params
+
+            # Use NSA backend for attention computation
+            att_control = AttControl(
+                nsa_prefill=True,
+                nsa_prefill_dict={
+                    "topk_mem_indices": topk_mem_indices,
+                    "topk_indices": topk_indices,
+                    "prefill_cache_kv": kv,
+                    "softmax_scale": self.softmax_scale,
+                    "kv_lora_rank": self.kv_lora_rank,
+                },
+            )
+
+            state = infer_state.att_state_manager.get_state(
+                model_role=infer_state.att_state_role,
+                state_type_filter="mla",
+                logical_layer_id=self.layer_num_,
+                state_class=FullAttentionState,
+            )
+            mla_out = infer_state.prefill_att_state.prefill_att(
+                q=q_all,
+                k=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
+                v=None,
+                att_control=att_control,
+            )
+            return mla_out
         q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
         q_all = torch.cat([q_nope, q_rope], dim=-1)
 
         # 计算 topk indices
-        att_state = infer_state.prefill_att_state
+        index_metadata = self.prefill_attention.sparse_index_metadata(infer_state.attention)
         topk_mem_indices, topk_indices = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=att_state,
+            index_metadata=index_metadata,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
 
         # Use NSA backend for attention computation
-        att_control = AttControl(
-            nsa_prefill=True,
-            nsa_prefill_dict={
-                "topk_mem_indices": topk_mem_indices,
-                "topk_indices": topk_indices,
-                "prefill_cache_kv": kv,
-                "softmax_scale": self.softmax_scale,
-                "kv_lora_rank": self.kv_lora_rank,
-            },
-        )
 
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="mla",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        mla_out = infer_state.prefill_att_state.prefill_att(
-            q=q_all,
-            k=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
-            v=None,
-            att_control=att_control,
+        mla_out = self.prefill_attention.forward(
+            infer_state.attention,
+            SparseMLAPrefillInputs(q_all, topk_mem_indices, topk_indices, kv),
         )
         return mla_out
 
@@ -125,43 +150,65 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         out=None,
     ):
         # Model-specific q projection (uses layer weights)
+        if getattr(self, "_legacy_attention_execution", False):
+            q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
+            q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
+
+            # 计算 topk mem indices
+            att_state = infer_state.decode_att_state
+            topk_mem_indices, _ = self.indexer._get_legacy_indices(
+                hidden_states=infer_state.get_topk_indices_params["hidden_states"],
+                q_lora=infer_state.get_topk_indices_params["q_lora"],
+                infer_state=infer_state,
+                att_state=att_state,
+                layer_weight=layer_weight,
+            )
+            del infer_state.get_topk_indices_params
+
+            # Use NSA backend for attention computation
+            att_control = AttControl(
+                nsa_decode=True,
+                nsa_decode_dict={
+                    "layer_index": self.layer_num_,
+                    "topk_mem_indices": topk_mem_indices,
+                    "softmax_scale": self.softmax_scale,
+                    "kv_lora_rank": self.kv_lora_rank,
+                    "qk_rope_head_dim": self.qk_rope_head_dim,
+                },
+            )
+
+            state = infer_state.att_state_manager.get_state(
+                model_role=infer_state.att_state_role,
+                state_type_filter="mla",
+                logical_layer_id=self.layer_num_,
+                state_class=FullAttentionState,
+            )
+            o_tensor = infer_state.decode_att_state.decode_att(
+                q=(q_nope, q_rope),
+                k=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
+                v=None,
+                att_control=att_control,
+            )
+            return o_tensor
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
 
         # 计算 topk mem indices
-        att_state = infer_state.decode_att_state
+        index_metadata = self.decode_attention.sparse_index_metadata(infer_state.attention)
         topk_mem_indices, _ = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=att_state,
+            index_metadata=index_metadata,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
 
         # Use NSA backend for attention computation
-        att_control = AttControl(
-            nsa_decode=True,
-            nsa_decode_dict={
-                "layer_index": self.layer_num_,
-                "topk_mem_indices": topk_mem_indices,
-                "softmax_scale": self.softmax_scale,
-                "kv_lora_rank": self.kv_lora_rank,
-                "qk_rope_head_dim": self.qk_rope_head_dim,
-            },
-        )
 
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="mla",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        o_tensor = infer_state.decode_att_state.decode_att(
-            q=(q_nope, q_rope),
-            k=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
-            v=None,
-            att_control=att_control,
+        o_tensor = self.decode_attention.forward(
+            infer_state.attention,
+            SparseMLADecodeInputs(q_nope, q_rope, topk_mem_indices),
         )
         return o_tensor
 
@@ -190,6 +237,98 @@ class NsaInfer:
         self.tp_index_n_heads = self.index_n_heads // self.tp_world_size_
 
     def _get_indices(
+        self,
+        hidden_states: torch.Tensor,
+        q_lora: torch.Tensor,
+        infer_state: Deepseek2InferStateInfo,
+        index_metadata: SparseIndexMetadata,
+        layer_weight: Deepseek3_2TransformerLayerWeight,
+    ):
+        q, k = self._get_q_k_bf16(hidden_states, q_lora, infer_state, layer_weight)
+
+        if self.tp_world_size_ > 1:
+            q_merge = torch.empty(
+                size=(self.tp_world_size_ * q.numel()),
+                dtype=q.dtype,
+                device=q.device,
+            )
+            all_gather_into_tensor(output_=q_merge, input_=q.view(-1), group=infer_state.dist_group, async_op=False)
+            q = (
+                q_merge.view(self.tp_world_size_, q.shape[0], self.tp_index_n_heads, q.shape[2])
+                .transpose(0, 1)
+                .contiguous()
+                .view(q.shape[0], self.index_n_heads, q.shape[2])
+            )
+
+        q_fp8, q_scale = act_quant(q, self.block_size, self.scale_fmt)
+        k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
+
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="mla",
+            logical_layer_id=self.layer_idx_,
+            state_class=FullAttentionState,
+        )
+        destindex_copy_indexer_ks(
+            K_fp8=k_fp8,
+            K_scale=k_scale,
+            DestLoc=infer_state.mem_index,
+            O_buffer=state.get_layer_view(logical_layer_id=self.layer_idx_).indexer_k,
+        )
+
+        weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
+        weights = weights.unsqueeze(-1) * q_scale
+
+        ks = index_metadata.ks
+        ke = index_metadata.ke
+        lengths = index_metadata.lengths
+
+        if infer_state.is_prefill:
+            mtp_step = 0
+        else:
+            mtp_step = get_env_start_args().mtp_step
+        # Use efficient Triton kernel to extract FP8 keys and scales from buffer
+        k_fp8_, k_scale_ = extract_indexer_ks(
+            I_buffer=state.get_layer_view(logical_layer_id=self.layer_idx_).indexer_k,
+            b_seq_len=infer_state.b_seq_len,
+            b_req_idx=infer_state.b_req_idx,
+            req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
+            out_token_num=infer_state.b_seq_len.shape[0] * infer_state.max_kv_seq_len,
+            max_kv_seq_len=infer_state.max_kv_seq_len,
+            mtp_step=mtp_step,
+        )
+
+        import deep_gemm
+
+        logits = deep_gemm.fp8_mqa_logits(
+            q_fp8,
+            (k_fp8_, k_scale_),
+            weights.squeeze(-1),
+            ks,
+            ke,
+            clean_logits=False,
+            max_seqlen_k=infer_state.max_kv_seq_len,
+        )
+
+        from sgl_kernel import fast_topk_v2
+
+        b_topk_index = fast_topk_v2(
+            score=logits,
+            lengths=lengths,
+            topk=self.index_topk,
+        )
+        b_topk_index = torch.where(b_topk_index != -1, b_topk_index + ks.view(-1, 1), -1)
+        # 将 topk index 转化为 mem index
+        from ..triton_kernel.topk_index_to_mem_index import trans_topk_index_to_mem_index
+
+        b_topk_mem_index = trans_topk_index_to_mem_index(
+            topk_index=b_topk_index,
+            ragged_mem_index=index_metadata.ragged_mem_index,
+        )
+
+        return b_topk_mem_index, b_topk_index
+
+    def _get_legacy_indices(
         self,
         hidden_states: torch.Tensor,
         q_lora: torch.Tensor,
