@@ -80,6 +80,7 @@ Documentation List
    :caption: Architecture Introduction
 
    Architecture Overview <framework/framework>
+   Attention Execution Design <framework/attention_execution_design>
    Token Attention <framework/token_attention>
    Efficient Router <framework/router>
    
