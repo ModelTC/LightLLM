@@ -7,6 +7,7 @@ indices and attention metadata. This module only holds computation scratch.
 import math
 
 import torch
+import triton
 
 
 class DeepseekV4C4PrefillWorkspace:
@@ -109,3 +110,36 @@ class DeepseekV4Workspace:
                 f"DeepSeek-V4 Q workspace capacity {self.token_capacity} is smaller than {token_num} tokens"
             )
         return self.flashmla_prefill_q[:token_num]
+
+
+def get_swa_prefill_workspace(model):
+    """由 backend 复用计算临时区；模型在 KV 容量评估前调用，以计入实际显存占用。"""
+    if hasattr(model, "swa_prefill_workspace"):
+        return model.swa_prefill_workspace
+    from lightllm.models.deepseek_v4.config import create_attention_config
+
+    config = create_attention_config(
+        model_config=model.config,
+        model_logical_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),
+        tp_rank=model.tp_rank_,
+        tp_world_size=model.tp_world_size_,
+    ).create_swa_config()
+    page_token_num = config.page_token_size
+    max_forward_tokens = max(model.batch_max_tokens, model.max_req_num) + 2 * model.tp_world_size_
+    capacity = (
+        triton.cdiv(max_forward_tokens + model.max_req_num * (config.window_size + 2 * page_token_num), page_token_num)
+        * page_token_num
+    )
+    if model.args.run_mode == "decode":
+        # D 节点初始化仍会对 HOLD 请求执行一次 prefill；只保留末尾的 HOLD 页，
+        # 不为普通请求预留长 prefill 临时区，实际请求的前缀由 P 节点传入。
+        capacity = 0
+    regions = 1 + int(model.args.enable_prefill_microbatch_overlap)
+    # 每个 microbatch 使用独立临时区；最后一页留给 HOLD 请求。
+    token_num = regions * capacity + page_token_num
+    # 物理行宽由 SWA 原子配置给出，backend 仅决定 workspace 的 token 容量。
+    slot_bytes = config.get_packed_kv_bytes(page_token_num) // page_token_num
+    layer_count = len(config.logical_layer_ids)
+    buffer = torch.empty(layer_count * token_num * slot_bytes, dtype=torch.uint8, device="cuda")
+    model.swa_prefill_workspace = buffer.view(layer_count, token_num, slot_bytes), capacity
+    return model.swa_prefill_workspace
