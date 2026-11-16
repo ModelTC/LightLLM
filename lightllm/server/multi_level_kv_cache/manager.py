@@ -9,14 +9,14 @@ import time
 import threading
 import concurrent.futures
 import setproctitle
-from queue import Queue
+from queue import Empty, Queue
 from typing import List
 from lightllm.server.core.objs import ShmReqManager, Req, StartArgs
 from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
 from .cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
+from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
 
@@ -30,11 +30,13 @@ class MultiLevelKVCacheManager:
     ):
         self.args: StartArgs = args
         ports = get_shm_port_args()
-        self.context = zmq.Context(2)
-        self.zmq_recv_socket = self.context.socket(zmq.PULL)
+        context = zmq.Context(2)
+        self.zmq_recv_socket = context.socket(zmq.PULL)
         self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{ports.multi_level_kv_cache_port}")
 
-        self.router_addr = f"{args.zmq_mode}127.0.0.1:{ports.router_port}"
+        self.send_to_router = context.socket(zmq.PUSH)
+        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{ports.router_port}")
+        logger.info(f"send_to_router sendhwm {self.send_to_router.getsockopt(zmq.SNDHWM)}")
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=True)
         self.shm_req_manager = ShmReqManager()
         self.only_cpu_cache_enable = args.enable_cpu_cache and not args.enable_disk_cache
@@ -44,10 +46,6 @@ class MultiLevelKVCacheManager:
         self.cpu_cache_time_out = 0.5
         self.recv_queue = Queue(maxsize=1024)
         self.send_to_router_queue = Queue(maxsize=args.running_max_req_size)
-        self.send_to_router_init = concurrent.futures.Future()
-        self.send_to_router_thread = threading.Thread(target=self.send_loop, daemon=True)
-        self.send_to_router_thread.start()
-        self.send_to_router_init.result()
         self.cpu_cache_thread = threading.Thread(target=self.cpu_cache_hanle_loop, daemon=True)
         self.cpu_cache_thread.start()
 
@@ -217,61 +215,50 @@ class MultiLevelKVCacheManager:
         self.send_to_router_queue.put(group_req_indexes)
         return
 
-    def send_loop(self):
+    def _send_finished_groups(self):
+        while True:
+            try:
+                group_req_indexes = self.send_to_router_queue.get_nowait()
+            except Empty:
+                return
+            self.send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def _recv_groups(self):
+        recv_objs = []
         try:
-            with self.context.socket(zmq.PUSH) as send_to_router:
-                send_to_router.connect(self.router_addr)
-                logger.debug(f"send_to_router sendhwm {send_to_router.getsockopt(zmq.SNDHWM)}")
-                self.send_to_router_init.set_result(None)
-                while True:
-                    group_req_indexes = self.send_to_router_queue.get()
-                    send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-        except Exception as e:
-            if self.send_to_router_init.done():
-                raise
-            self.send_to_router_init.set_exception(e)
+            # 一次最多取 256 个请求，避免 zmq 里积压过多时堵住主循环。
+            for _ in range(256):
+                recv_obj: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+                assert isinstance(recv_obj, GroupReqIndexes)
+                recv_objs.append(recv_obj)
 
-    def recv_loop(self):
-        try:
-            recv_max_count = 128
+                start_time = recv_obj.time_mark
+                logger.debug(
+                    f"multi_level_kv_cache recive group req id {recv_obj.group_req_id} "
+                    f"cost time {time.time() - start_time} s"
+                )
+        except zmq.ZMQError:
+            pass
+        return recv_objs
 
-            while True:
-                recv_objs = []
-                try:
-                    # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
-                    for _ in range(recv_max_count):
-                        recv_obj: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                        assert isinstance(recv_obj, GroupReqIndexes)
-                        recv_objs.append(recv_obj)
-
-                        start_time = recv_obj.time_mark
-                        logger.debug(
-                            f"multi_level_kv_cache recive group req id {recv_obj.group_req_id} "
-                            f"cost time {time.time() - start_time} s"
-                        )
-
-                    # 当队列中存在较多的请求时，将一次接受的数量上调
-                    recv_max_count = min(int(recv_max_count * 1.3), 256)
-                except zmq.ZMQError:
-                    # 当队列已经开始清空的时候，将一次接受的数量下调
-                    recv_max_count = 128
-
+    def task_loop(self):
+        while True:
+            try:
+                self._send_finished_groups()
+                recv_objs = self._recv_groups()
                 for recv_obj in recv_objs:
                     self.recv_queue.put(recv_obj)
-
                 if len(recv_objs) == 0:
-                    time.sleep(0.01)
-
-        except Exception as e:
-            logger.exception(f"detoken process has exception {str(e)}")
-        return
+                    time.sleep(0.005)
+            except Exception as e:
+                logger.exception(f"detoken process has exception {str(e)}")
+                return
 
 
 def start_multi_level_kv_cache_manager(args, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::multi_level_kv_cache")
-    install_fatal_thread_excepthook()
     start_parent_check_thread()
 
     try:
@@ -284,5 +271,5 @@ def start_multi_level_kv_cache_manager(args, pipe_writer):
         raise
 
     pipe_writer.send("init ok")
-    manager.recv_loop()
+    manager.task_loop()
     return

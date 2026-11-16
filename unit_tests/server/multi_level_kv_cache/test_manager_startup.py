@@ -2,7 +2,6 @@ import errno
 import multiprocessing as mp
 import subprocess
 import sys
-import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
@@ -17,7 +16,6 @@ from lightllm.utils.start_utils import SubmoduleManager
 def _start_cache(stage, commands, pipe_writer):
     context = Mock()
     send_socket = MagicMock()
-    send_socket.__enter__.return_value = send_socket
     if stage == "connect":
         send_socket.connect.side_effect = zmq.ZMQError(errno.EMFILE)
     send_socket.send_pyobj.side_effect = zmq.ZMQError(errno.EIO)
@@ -29,21 +27,15 @@ def _start_cache(stage, commands, pipe_writer):
             return send_socket
         return Mock()
 
-    def recv_loop(self):
+    def task_loop(self):
         command = commands.recv()
         if command == "send":
             self.send_to_router_queue.put(None)
+            self._send_finished_groups()
             commands.recv()
 
     context.socket.side_effect = socket
     context_factory = manager_impl.zmq.Context if stage == "ready" else lambda _: context
-    thread_start = threading.Thread.start
-
-    def start_thread(thread):
-        wait_for_fault = stage in ("socket", "connect") and thread._target.__name__ == "send_loop"
-        thread_start(thread)
-        if wait_for_fault:
-            thread.join(timeout=5)
 
     with patch.multiple(
         manager_impl,
@@ -55,11 +47,9 @@ def _start_cache(stage, commands, pipe_writer):
     ), patch.multiple(
         manager_impl.MultiLevelKVCacheManager,
         cpu_cache_hanle_loop=lambda self: None,
-        recv_loop=recv_loop,
+        task_loop=task_loop,
     ), patch.object(
         manager_impl.zmq, "Context", context_factory
-    ), patch.object(
-        threading.Thread, "start", start_thread
     ):
         manager_impl.start_multi_level_kv_cache_manager(
             SimpleNamespace(
@@ -108,7 +98,7 @@ def test_sender_startup(stage):
         assert result.returncode == 0, output
         assert "init func _start_cache : init ok" in output, output
         if stage == "send":
-            assert "fatal background thread failure" in output, output
+            assert "Input/output error" in output, output
 
 
 if __name__ == "__main__":
