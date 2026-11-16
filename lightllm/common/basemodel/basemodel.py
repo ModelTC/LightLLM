@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from functools import cached_property
 from lightllm.platform import get_device_runtime
 from lightllm.common.execution import ExecutionScope
@@ -728,55 +729,57 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
+        with (
+            self.attention.layer_pass(infer_state) if getattr(self, "attention", None) is not None else nullcontext()
+        ):
+            input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
+            if self.args.enable_dp_prefill_balance:
+                assert not self.args.enable_prefill_cudagraph, "not support now"
+                infer_state.prepare_prefill_dp_balance()
+                input_embs = infer_state._all_to_all_balance_get(data=input_embs)
 
-        input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
-        if self.args.enable_dp_prefill_balance:
-            assert not self.args.enable_prefill_cudagraph, "not support now"
-            infer_state.prepare_prefill_dp_balance()
-            input_embs = infer_state._all_to_all_balance_get(data=input_embs)
+            input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
+            input_tensors = [input_embs]
+            if Autotuner.is_autotune_warmup():
+                infer_state.hidden_collector = NoopHiddenCollector()
 
-        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
-        input_tensors = [input_embs]
-        if Autotuner.is_autotune_warmup():
-            infer_state.hidden_collector = NoopHiddenCollector()
+            def prefill_func(input_tensors, _infer_state):
+                hidden_collector = _infer_state.hidden_collector
+                _input_embs = input_tensors[0]
+                for i in range(self.layers_num):
+                    layer = self.layers_infer[i]
+                    _input_embs = layer.context_forward(_input_embs, _infer_state, self.trans_layers_weight[i])
+                    hidden_collector.add(
+                        layer_index=i,
+                        hidden=_input_embs,
+                    )
 
-        def prefill_func(input_tensors, _infer_state):
-            hidden_collector = _infer_state.hidden_collector
-            _input_embs = input_tensors[0]
-            for i in range(self.layers_num):
-                layer = self.layers_infer[i]
-                _input_embs = layer.context_forward(_input_embs, _infer_state, self.trans_layers_weight[i])
-                hidden_collector.add(
-                    layer_index=i,
-                    hidden=_input_embs,
+                return [_input_embs]
+
+            handle_token_num = infer_state.input_ids.shape[0]
+
+            if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=handle_token_num):
+                finded_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
+                    handle_token_num=handle_token_num
                 )
+                assert finded_handle_token_num == handle_token_num
+                if self.prefill_graph.need_capture(handle_token_num=finded_handle_token_num):
+                    output_tensors: List[torch.Tensor] = self.prefill_graph.capture_prefill(
+                        prefill_func=prefill_func,
+                        input_tensors=input_tensors,
+                        infer_state=infer_state,
+                    )
+                else:
+                    output_tensors: List[torch.Tensor] = self.prefill_graph.replay(
+                        input_tensors=input_tensors, infer_state=infer_state
+                    )
 
-            return [_input_embs]
-
-        handle_token_num = infer_state.input_ids.shape[0]
-
-        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=handle_token_num):
-            finded_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
-                handle_token_num=handle_token_num
-            )
-            assert finded_handle_token_num == handle_token_num
-            if self.prefill_graph.need_capture(handle_token_num=finded_handle_token_num):
-                output_tensors: List[torch.Tensor] = self.prefill_graph.capture_prefill(
-                    prefill_func=prefill_func,
-                    input_tensors=input_tensors,
-                    infer_state=infer_state,
-                )
             else:
-                output_tensors: List[torch.Tensor] = self.prefill_graph.replay(
-                    input_tensors=input_tensors, infer_state=infer_state
-                )
+                g_cache_manager.cache_env_in()
+                output_tensors: List[torch.Tensor] = prefill_func(input_tensors, infer_state)
+                g_cache_manager.cache_env_out()
 
-        else:
-            g_cache_manager.cache_env_in()
-            output_tensors: List[torch.Tensor] = prefill_func(input_tensors, infer_state)
-            g_cache_manager.cache_env_out()
-
-        input_embs = output_tensors[0]
+            input_embs = output_tensors[0]
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         if infer_state.need_dp_prefill_balance:
@@ -794,16 +797,19 @@ class TpPartBaseModel:
         return model_output
 
     def _token_forward(self, infer_state: InferStateInfo):
-        hidden_collector = infer_state.hidden_collector
-        input_ids = infer_state.input_ids
-        cuda_input_ids = input_ids
-        input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
-        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
+        with (
+            self.attention.layer_pass(infer_state) if getattr(self, "attention", None) is not None else nullcontext()
+        ):
+            hidden_collector = infer_state.hidden_collector
+            input_ids = infer_state.input_ids
+            cuda_input_ids = input_ids
+            input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
+            input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
 
-        for i in range(self.layers_num):
-            layer = self.layers_infer[i]
-            input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
-            hidden_collector.add(layer_index=i, hidden=input_embs)
+            for i in range(self.layers_num):
+                layer = self.layers_infer[i]
+                input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
+                hidden_collector.add(layer_index=i, hidden=input_embs)
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         post_output: PostLayerOutput = self.post_infer.token_forward(
@@ -968,41 +974,46 @@ class TpPartBaseModel:
 
     @final
     def _overlap_tpsp_context_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
-        g_cache_manager.cache_env_in()
-        hidden_collector0 = infer_state.hidden_collector
-        hidden_collector1 = infer_state1.hidden_collector
+        with (
+            self.attention.layer_pass(infer_state, infer_state1)
+            if getattr(self, "attention", None) is not None
+            else nullcontext()
+        ):
+            g_cache_manager.cache_env_in()
+            hidden_collector0 = infer_state.hidden_collector
+            hidden_collector1 = infer_state1.hidden_collector
 
-        input_embs, input_embs1 = self.pre_infer.overlap_tpsp_context_forward(
-            infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
-        )
-
-        # 决定是否进行 dp balance 优化，可以提升dp > 1 时的 prefill 效率。
-        if get_env_start_args().enable_dp_prefill_balance:
-            assert not self.args.enable_prefill_cudagraph, "not support now"
-            infer_state.prepare_prefill_dp_balance()
-            infer_state1.prepare_prefill_dp_balance()
-            input_embs = infer_state._all_to_all_balance_get(data=input_embs)
-            input_embs1 = infer_state1._all_to_all_balance_get(data=input_embs1)
-
-        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
-        input_embs1 = self.pre_infer._tpsp_sp_split(input=input_embs1, infer_state=infer_state1)
-
-        for i in range(self.layers_num):
-            input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_context_forward(
-                input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
-            )
-            hidden_collector0.add(
-                layer_index=i,
-                hidden=input_embs,
-            )
-            hidden_collector1.add(
-                layer_index=i,
-                hidden=input_embs1,
+            input_embs, input_embs1 = self.pre_infer.overlap_tpsp_context_forward(
+                infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
             )
 
-        # 折叠模式调用完infer_state 和 infer_state1 上的hook函数后，input_embs 和 input_embs1 才具备正确的运算数据。
-        infer_state.call_overlap_hook()
-        infer_state1.call_overlap_hook()
+            # 决定是否进行 dp balance 优化，可以提升dp > 1 时的 prefill 效率。
+            if get_env_start_args().enable_dp_prefill_balance:
+                assert not self.args.enable_prefill_cudagraph, "not support now"
+                infer_state.prepare_prefill_dp_balance()
+                infer_state1.prepare_prefill_dp_balance()
+                input_embs = infer_state._all_to_all_balance_get(data=input_embs)
+                input_embs1 = infer_state1._all_to_all_balance_get(data=input_embs1)
+
+            input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
+            input_embs1 = self.pre_infer._tpsp_sp_split(input=input_embs1, infer_state=infer_state1)
+
+            for i in range(self.layers_num):
+                input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_context_forward(
+                    input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
+                )
+                hidden_collector0.add(
+                    layer_index=i,
+                    hidden=input_embs,
+                )
+                hidden_collector1.add(
+                    layer_index=i,
+                    hidden=input_embs1,
+                )
+
+            # 折叠模式调用完infer_state 和 infer_state1 上的hook函数后，input_embs 和 input_embs1 才具备正确的运算数据。
+            infer_state.call_overlap_hook()
+            infer_state1.call_overlap_hook()
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         last_input_embs1 = self.post_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
@@ -1025,30 +1036,35 @@ class TpPartBaseModel:
 
     @final
     def _overlap_tpsp_token_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
-        hidden_collector0 = infer_state.hidden_collector
-        hidden_collector1 = infer_state1.hidden_collector
-        input_embs, input_embs1 = self.pre_infer.overlap_tpsp_token_forward(
-            infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
-        )
-        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
-        input_embs1 = self.pre_infer._tpsp_sp_split(input=input_embs1, infer_state=infer_state1)
+        with (
+            self.attention.layer_pass(infer_state, infer_state1)
+            if getattr(self, "attention", None) is not None
+            else nullcontext()
+        ):
+            hidden_collector0 = infer_state.hidden_collector
+            hidden_collector1 = infer_state1.hidden_collector
+            input_embs, input_embs1 = self.pre_infer.overlap_tpsp_token_forward(
+                infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
+            )
+            input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
+            input_embs1 = self.pre_infer._tpsp_sp_split(input=input_embs1, infer_state=infer_state1)
 
-        for i in range(self.layers_num):
-            input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_token_forward(
-                input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
-            )
-            hidden_collector0.add(
-                layer_index=i,
-                hidden=input_embs,
-            )
-            hidden_collector1.add(
-                layer_index=i,
-                hidden=input_embs1,
-            )
+            for i in range(self.layers_num):
+                input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_token_forward(
+                    input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
+                )
+                hidden_collector0.add(
+                    layer_index=i,
+                    hidden=input_embs,
+                )
+                hidden_collector1.add(
+                    layer_index=i,
+                    hidden=input_embs1,
+                )
 
-        # 折叠模式调用完infer_state 上的hook函数后，input_embs 和 input_embs 才具备正确的运算数据。
-        infer_state.call_overlap_hook()
-        infer_state1.call_overlap_hook()
+            # 折叠模式调用完infer_state 上的hook函数后，input_embs 和 input_embs 才具备正确的运算数据。
+            infer_state.call_overlap_hook()
+            infer_state1.call_overlap_hook()
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         last_input_embs1 = self.post_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)

@@ -1,30 +1,14 @@
 from unit_tests.common.attention.helpers import plan, run_attention
-
-
 from dataclasses import replace
-
-
 from types import SimpleNamespace
 
-
 import pytest
-
-
 import torch
 
-
-from lightllm.common.attention import selection
-
-
+from lightllm.common.attention import registry, selection
 from lightllm.common.attention.api import AttentionFamily, AttentionPhase, UnsupportedAttention
-
-
-from unit_tests.common.attention.helpers import StubBackend, make_env, build
-
-
+from unit_tests.common.attention.helpers import StubBackend, make_env, phase_class, build
 from lightllm.utils.backend_validator import ProbeResult, ProbeScope
-
-
 from unit_tests.common.attention.helpers import make_batch, make_context, make_layer_attention, make_spec, model_stub
 
 
@@ -44,6 +28,27 @@ def _select(*, model, specs=None, **kwargs):
         execution=model.attention_requirements,
         **kwargs,
     )
+
+
+def test_graph_copy_validates_all_inputs_before_writing():
+    captured = make_batch()
+    incoming = make_batch((9, 7))
+    incoming = replace(incoming, req_to_token_indexs=captured.req_to_token_indexs, b_seq_len=incoming.b_seq_len.long())
+    before = captured.b_req_idx.clone()
+    with pytest.raises(ValueError, match="b_seq_len"):
+        captured.copy_inputs(incoming)
+    torch.testing.assert_close(captured.b_req_idx, before)
+
+
+def test_graph_copy_keeps_tensor_addresses_and_uses_new_lengths():
+    captured = make_batch()
+    incoming = make_batch((9, 7), req_to_token_indexs=captured.req_to_token_indexs)
+    pointer = captured.b_seq_len.data_ptr()
+    captured.copy_inputs(incoming)
+    assert captured.b_seq_len.data_ptr() == pointer
+    assert captured.b_seq_len.tolist() == [9, 7]
+    with pytest.raises(ValueError, match="request table"):
+        captured.copy_inputs(make_batch((9, 7)))
 
 
 @pytest.mark.parametrize("capture", [False, True])
@@ -131,6 +136,20 @@ def _backend_check_exception_candidates(monkeypatch, error_type=RuntimeError):
 
 
 @pytest.mark.parametrize("error_type", [UnsupportedAttention, ValueError, RuntimeError])
+def test_backend_check_exception_allows_auto_fallback(monkeypatch, error_type):
+    candidates = _backend_check_exception_candidates(monkeypatch, error_type)
+    selected = _select(
+        family=AttentionFamily.DENSE,
+        phase=AttentionPhase.DECODE,
+        model=model_stub(),
+        requested="auto",
+        candidates=candidates,
+        priority=["broken", "working"],
+    )
+    assert selected.provider == "working"
+
+
+@pytest.mark.parametrize("error_type", [UnsupportedAttention, ValueError, RuntimeError])
 def test_backend_check_exception_is_reported_for_explicit_selection(monkeypatch, error_type):
     candidates = _backend_check_exception_candidates(monkeypatch, error_type)
     with pytest.raises(selection.BackendSelectionError) as error:
@@ -199,6 +218,95 @@ def test_rank_selection_propagates_remote_failure(monkeypatch):
     )
     with pytest.raises(selection.BackendSelectionError, match="rank 1: probe failed"):
         selection._check_rank_selection(AttentionFamily.DENSE, AttentionPhase.DECODE, "fa3", None)
+
+
+@pytest.mark.parametrize("format,provider", [("fp8kv_sph", "flashinfer"), ("fp8kv_spt", "fa3")])
+def test_fp8_scale_layouts_are_not_interchangeable(format, provider):
+    from lightllm.common.attention.api.spec import CacheEncoding
+
+    backends = (registry.load_backend_class(ref) for ref in registry.BACKENDS)
+    assert not any(cls.provider == provider and CacheEncoding(format) in cls.cache_encodings for cls in backends)
+
+
+def test_layer_shape_configures_group_planner(monkeypatch):
+    monkeypatch.setattr("lightllm.common.attention.backends.dense.flashinfer.backend.set_flashinfer_envs", lambda: None)
+    from lightllm.common.attention.backends.dense.flashinfer.backend import FlashInferDenseDecodeBackend
+
+    model = model_stub(page_size=16)
+    model.config = {"num_attention_heads": 16, "num_key_value_heads": 4, "hidden_size": 2048}
+    model.max_seq_length = 128
+    model.data_type = torch.bfloat16
+    small = FlashInferDenseDecodeBackend(make_env(model), make_spec(num_q_heads=8, head_size=64))
+    large = FlashInferDenseDecodeBackend(make_env(model), make_spec(num_q_heads=16, head_size=128))
+    assert (small.tp_q_head_num, small.head_dim) == (8, 64)
+    assert (large.tp_q_head_num, large.head_dim) == (16, 128)
+
+
+def test_groups_follow_each_layers_family_and_shape(monkeypatch):
+    from lightllm.common.basemodel.attention import ModelAttention
+    from lightllm.common.basemodel.attention_adapters import ADAPTERS, AttentionDescription
+
+    specs = [make_spec(head_size=64), make_spec(head_size=64), make_spec(head_size=128), make_spec(AttentionFamily.GDN)]
+    calls = []
+
+    def select(**kwargs):
+        calls.append(kwargs)
+        return lambda env, spec: SimpleNamespace(spec=spec, family=spec.family)
+
+    monkeypatch.setattr(selection, "select_attention_backend", select)
+    for adapter in ADAPTERS.values():
+        monkeypatch.setattr(adapter, "describe", lambda model, layer, phase, desc: replace(layer.spec, phase=phase))
+    model = model_stub()
+    model.attention_policy = lambda family, phase: selection.BackendPolicy()
+    model.layers_infer = [
+        SimpleNamespace(
+            layer_num_=i,
+            spec=spec,
+            describe_attention=lambda phase, s=spec: AttentionDescription(s.family),
+            attention_adapter=lambda family: ADAPTERS[family],
+        )
+        for i, spec in enumerate(specs)
+    ]
+    attention = ModelAttention(model)
+    assert attention.routes == (0, 0, 1, 2)
+    assert len(calls) == 6
+    assert [group[AttentionPhase.PREFILL].spec.head_size for group in attention.groups[:2]] == [64, 128]
+    assert attention.groups[-1][AttentionPhase.DECODE].family is AttentionFamily.GDN
+
+
+@pytest.mark.parametrize("invalid", ["input_ids", "group", "role"])
+def test_runner_graph_copy_rejects_before_mutating_batch(invalid):
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+
+    captured, incoming = InferStateInfo(), InferStateInfo()
+    captured.att_state_role = incoming.att_state_role = "main"
+    group = object()
+    captured.attention.groups = incoming.attention.groups = (group,)
+    captured.attention.batch = make_batch()
+    incoming.attention.batch = make_batch((9, 7), req_to_token_indexs=captured.attention.batch.req_to_token_indexs)
+    captured.input_ids = torch.zeros(2, dtype=torch.long)
+    incoming.input_ids = torch.ones(3 if invalid == "input_ids" else 2, dtype=torch.long)
+    if invalid == "group":
+        incoming.attention.groups = (object(),)
+    if invalid == "role":
+        incoming.att_state_role = "draft"
+    before = captured.attention.batch.b_seq_len.clone()
+    captured.attention = captured.attention.capture()
+    with pytest.raises(ValueError):
+        captured.graph_input_copies(incoming)
+    torch.testing.assert_close(captured.attention.batch.b_seq_len, before)
+    assert captured.input_ids.tolist() == [0, 0]
+
+
+def test_replay_flashqla_rejects_decode_and_fp32():
+    from lightllm.common.attention.backends.gdn.replay.backend import FlashQlaGDNReplayPrefillBackend
+
+    spec = make_spec(family=AttentionFamily.GDN)
+    spec = replace(spec, cache=replace(spec.cache, state_mode="replay"))
+    with pytest.raises(UnsupportedAttention, match="decode"):
+        FlashQlaGDNReplayPrefillBackend.check_support(spec)
+    with pytest.raises(UnsupportedAttention, match="dtype"):
+        FlashQlaGDNReplayPrefillBackend.check_support(replace(spec, phase=AttentionPhase.PREFILL, dtype=torch.float32))
 
 
 class _OutputBackend(StubBackend):
@@ -315,6 +423,52 @@ def test_special_dense_probe_is_explicitly_smoke_only(monkeypatch):
     assert result.reason == "provider failed"
 
 
+def test_replay_flashqla_uses_inherited_initialization(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    from lightllm.common.attention.backends.gdn.replay.backend import (
+        FlashQlaGDNReplayPrefillBackend,
+        TritonGDNReplayDecodeBackend,
+    )
+
+    calls = []
+    original = phase_class(TritonGDNReplayDecodeBackend, AttentionPhase.PREFILL).__init__
+
+    def initialize(self, model, spec):
+        calls.append("parent")
+        original(self, model, spec)
+
+    monkeypatch.setattr(phase_class(TritonGDNReplayDecodeBackend, AttentionPhase.PREFILL), "__init__", initialize)
+    monkeypatch.setattr(
+        phase_class(TritonGDNReplayDecodeBackend, AttentionPhase.PREFILL),
+        "_init_linear_layer_metadata",
+        lambda *a: calls.append("metadata"),
+    )
+    module = ModuleType("flash_qla")
+    module.chunk_gated_delta_rule = object()
+    monkeypatch.setitem(sys.modules, "flash_qla", module)
+    model = model_stub()
+    backend = FlashQlaGDNReplayPrefillBackend(make_env(model), make_spec(AttentionFamily.GDN))
+    assert calls == ["parent", "metadata"]
+    assert backend.runtime is model.device_runtime
+    assert backend.prefill_kernel is module.chunk_gated_delta_rule
+
+
+def test_spec_configures_backend_before_planning():
+    from lightllm.common.attention.api import AttentionContext, AttentionWorkspace
+
+    model = model_stub(page_size=1, mtp_dynamic_verify=False)
+    spec = make_spec(cache=replace(make_spec().cache, page_size=16), causal=False, dynamic_verify=True)
+    backend = StubBackend(make_env(model), spec)
+    assert backend.spec is spec
+    assert (backend.spec.cache.page_size, backend.spec.causal, backend.spec.dynamic_verify) == (16, False, True)
+    context = make_context(backend)
+    assert isinstance(context, AttentionContext)
+    assert isinstance(context.workspace, AttentionWorkspace)
+    assert context.backend_identity is backend
+
+
 @pytest.mark.parametrize("field,value", [("phase", AttentionPhase.PREFILL), ("family", AttentionFamily.MLA)])
 def test_selection_rejects_mixed_specs(field, value):
     with pytest.raises(ValueError, match="share family, phase and cache layout"):
@@ -323,6 +477,35 @@ def test_selection_rejects_mixed_specs(field, value):
             caps=model_stub().device_runtime.caps,
             execution=model_stub().attention_requirements,
         )
+
+
+@pytest.mark.parametrize("replay", [False, True])
+@pytest.mark.parametrize("phase", list(AttentionPhase))
+def test_gdn_output_contract(monkeypatch, replay, phase):
+    from lightllm.common.attention.api import GDNInputs, GDNOutput
+    from lightllm.common.attention.backends.gdn.replay.backend import TritonGDNReplayDecodeBackend
+    from lightllm.common.attention.backends.gdn.triton.backend import TritonGDNDecodeBackend
+    from unit_tests.common.attention.helpers import make_backend
+
+    backend = make_backend(
+        phase_class(TritonGDNReplayDecodeBackend if replay else TritonGDNDecodeBackend, phase), mtp_step=0
+    )
+    shape = (2, backend.spec.config.value_heads, backend.spec.value_head_size)
+    core, gate = torch.randn(shape), torch.randn(shape)
+    monkeypatch.setattr(backend, "_split_qkvzba", lambda x: (x, gate, None, None))
+    if phase is AttentionPhase.PREFILL:
+        monkeypatch.setattr(backend, "_prefill" if replay else "_run_prefill", lambda *a: core)
+    else:
+        monkeypatch.setattr(backend, "_decode" if replay else "_run_decode", lambda *a: (core, gate))
+    context = make_context(backend, make_batch(phase=phase))
+    state = SimpleNamespace()
+    layer = make_layer_attention(backend, context, SimpleNamespace(conv=None, ssm=None, replay_state=state))
+    out = torch.empty_like(core)
+    result = run_attention(layer, context, GDNInputs(core), out=out)
+    assert isinstance(result, GDNOutput)
+    assert result.hidden_states is out
+    assert result.gate is gate
+    torch.testing.assert_close(result.hidden_states, core)
 
 
 def test_binding_resolves_context_on_each_forward(monkeypatch):
@@ -394,6 +577,36 @@ def test_session_enforces_direct_backend_contract():
         context.capacity = replace(context.capacity, phase=AttentionPhase.PREFILL)
         with pytest.raises(ValueError, match="different attention backend"):
             layer.forward(session, out)
+
+
+def test_replay_copies_shared_batch_once(monkeypatch):
+    from lightllm.common.attention.api import AttentionBatch
+    from lightllm.common.attention.session import AttentionSession
+
+    first, second = (_OutputBackend(make_env(), make_spec()) for _ in range(2))
+    captured, source = AttentionSession(), AttentionSession()
+    captured.groups = source.groups = ({AttentionPhase.DECODE: first}, {AttentionPhase.DECODE: second})
+    captured.batch = make_batch()
+    source.batch = make_batch((9, 7), req_to_token_indexs=captured.batch.req_to_token_indexs)
+    for i, backend in enumerate((first, second)):
+        captured.contexts[i] = make_context(backend, captured.batch, capture=True, max_length=16, prepare=True)
+    copies = []
+    original = AttentionBatch.input_copies
+
+    def copy(batch, incoming):
+        copies.append(batch)
+        return original(batch, incoming)
+
+    monkeypatch.setattr(AttentionBatch, "input_copies", copy)
+    captured = captured.capture()
+    for target, incoming in captured.replay_input_copies(source):
+        target.copy_(incoming)
+    captured.plan_replay(source)
+    assert len(copies) == 1
+    for context in captured.contexts.values():
+        assert context.batch.b_seq_len.tolist() == [9, 7]
+        assert context.current_max_kv_seq_len == 9
+        assert context.batch.max_kv_seq_len == 16
 
 
 @pytest.mark.parametrize("failure", ["allocate", "plan", "forward"])
@@ -488,6 +701,31 @@ def test_model_capture_session_uses_graph_bound_and_one_batch():
     assert events == ["begin", "finish"]
 
 
+@pytest.mark.parametrize("invalid", ["missing_hidden", "new_hidden", "same_pointer_shape", "same_pointer_stride"])
+def test_graph_inputs_validate_presence_and_alias_metadata(invalid):
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+
+    captured, incoming = InferStateInfo(), InferStateInfo()
+    captured.attention.batch = make_batch()
+    incoming.attention.batch = make_batch((9, 7), req_to_token_indexs=captured.attention.batch.req_to_token_indexs)
+    captured.input_ids = torch.zeros(2, dtype=torch.int64)
+    incoming.input_ids = torch.ones_like(captured.input_ids)
+    if invalid == "same_pointer_shape":
+        incoming.input_ids = captured.input_ids.view(1, 2)
+    elif invalid == "same_pointer_stride":
+        storage = torch.zeros(4, dtype=torch.int64)
+        captured.input_ids, incoming.input_ids = storage[::2], storage[:2]
+    elif invalid == "missing_hidden":
+        captured.mtp_draft_input_hiddens = torch.ones(2, 4)
+    else:
+        incoming.mtp_draft_input_hiddens = torch.ones(2, 4)
+    before = captured.attention.batch.b_seq_len.clone()
+    captured.attention = captured.attention.capture()
+    with pytest.raises(ValueError, match="captured input"):
+        captured.graph_input_copies(incoming)
+    torch.testing.assert_close(captured.attention.batch.b_seq_len, before)
+
+
 @pytest.mark.parametrize("capture", [False, True])
 def test_session_execution_ends_with_scope(capture):
     from lightllm.common.attention.api import AttentionWorkspace, ContextCapacity, LayerAttention
@@ -547,3 +785,32 @@ def test_output_rejects_strided_padding_hole():
     base = torch.arange(16).view(2, 8)
     with pytest.raises(ValueError, match="out"):
         run_attention(layer, context, base[:1, 4:8], out=base[:, :4])
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_recurrent_constructor_uses_spec(replay):
+    from lightllm.common.attention.api.spec import GDNConfig, KDAConfig
+    from lightllm.common.attention.registry import load_backend_class
+
+    for family, config in ((AttentionFamily.GDN, GDNConfig(6, 5, "silu")), (AttentionFamily.KDA, KDAConfig(5, -3.0))):
+        mode = "replay" if replay else "triton"
+        name = f"Triton{family.value.upper()}{'Replay' if replay else ''}DecodeBackend"
+        cls = load_backend_class(f"backends.{family.value}.{mode}.backend:{name}")
+        spec = make_spec(family, num_q_heads=3, head_size=16, value_head_size=16, config=config)
+        spec = replace(spec, cache=replace(spec.cache, key_heads=3, state_dtype=torch.float32))
+        backend = cls(make_env(tp_size=8), spec)
+        if family is AttentionFamily.GDN:
+            assert (backend.tp_num_k_heads, backend.tp_num_v_heads, backend.tp_key_dim, backend.tp_value_dim) == (
+                3,
+                6,
+                48,
+                96,
+            )
+            assert backend.conv_kernel_dim == 5
+        else:
+            assert (backend.tp_num_heads, backend.tp_hidden_size, backend.conv_kernel_size, backend.lower_bound) == (
+                3,
+                48,
+                5,
+                -3.0,
+            )

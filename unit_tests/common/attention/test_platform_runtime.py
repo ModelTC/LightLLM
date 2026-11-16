@@ -1,36 +1,16 @@
 from types import SimpleNamespace
 
-
 import pytest
-
-
 import torch
 
-
 from lightllm.common.attention.api import AttentionPhase
-
-
 from lightllm.common.attention.api.graph import CaptureManifest
-
-
 from lightllm.common.attention.api.workspace import AttentionWorkspace
-
-
 from lightllm.common.attention_state import AttentionStateManager
-
-
 from lightllm.common.attention_state.full_att.gqa.gqa_state import GQAAttentionConfig, GQAFullAttentionState
-
-
 from lightllm.common.attention.session import AttentionSession
-
-
 from lightllm.common.basemodel.graph import CapturedGraph
-
-
 from lightllm.common.execution import ExecutionScope
-
-
 from lightllm.platform import DeviceRuntime, get_device_runtime
 
 
