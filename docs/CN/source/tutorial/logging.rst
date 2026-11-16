@@ -187,8 +187,18 @@ TP 公共缓存状态和暂停/恢复事件只由组 leader 输出；各 rank �
 引擎窗口吞吐
 ------------
 
-``engine.stats`` / ``engine.idle`` 展示 ``prefill_tok_s``、``output_tok_s``、
-``completed_req_s``；JSON 另外保留 ``window_s`` 以及窗口原始计数
+文本摘要按吞吐、请求状态和 KV 占用分组：
+
+.. code-block:: text
+
+   15:54:23.459 INFO [D/router] Engine stats | Throughput: prefill 0.0 tok/s, output 31.6 tok/s | Requests: running 1, waiting 0, paused 0, done 0.50/s | KV: active 5.2%, cached 0.0%
+
+空闲转换使用 ``Engine idle``。单 DP 的 KV 占用直接显示百分比；多个本地 DP
+按顺序显示为列表，例如 ``active [3.0%, 12.5%]``，避免平均值掩盖分布不均。
+``cached`` 表示可复用 KV 的占用率，不是前缀缓存命中率；``done`` 为每秒完成的内部请求数。
+
+JSON 保留 ``engine.stats`` / ``engine.idle`` 事件及 ``prefill_tok_s``、``output_tok_s``、
+``completed_req_s`` 等原始数值，以及 ``kv_capacity_tokens_per_dp``、``window_s`` 和窗口原始计数
 ``prefill_tokens``、``output_tokens``、``completed_reqs``，便于核对。使用单调时钟的实际窗口长度计算速率，
 默认仍按 10 秒输出；长请求未完成时也会报告已处理的 token。
 

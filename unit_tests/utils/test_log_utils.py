@@ -566,20 +566,44 @@ def test_terminal_error_is_not_hidden_by_successful_sibling():
     assert log_utils.request_finish_fields(["length"])["finish_reason"] == "length"
 
 
-def test_compact_stats_text_retains_exact_json_window():
-    code = """
+@pytest.mark.parametrize("active", [True, False])
+@pytest.mark.parametrize("usage", [[3.0], [3.0, 12.5]])
+def test_compact_stats_text_retains_exact_json_window(active, usage):
+    code = f"""
         import logging
         from lightllm.utils.log_utils import PeriodicStatsLogger
         stats = PeriodicStatsLogger(logging.getLogger("lightllm.stats"))
-        stats.active = True
+        stats.active = {active}
         stats.log(prefill_tokens=20, output_tokens=40, completed_reqs=1, window_s=2,
-                  output_tok_s=20, running=1, kv_active_pct_by_local_dp=[3.0])
+                  prefill_tok_s=10.125, output_tok_s=20, completed_req_s=0.5,
+                  running=1, waiting=2, paused=0, kv_active_pct_by_local_dp={usage},
+                  kv_cached_pct_by_local_dp={[0.0] * len(usage)}, kv_capacity_tokens_per_dp=1024)
     """
-    text = _run_logging(code)
-    assert "output_tok_s=20" in text and "running=1" in text
+    text = _run_logging(code, LIGHTLLM_LOG_NODE_ROLE="D")
+    assert "[D/main] Engine " + ("stats" if active else "idle") in text
+    assert "Throughput: prefill 10.1 tok/s, output 20.0 tok/s" in text
+    assert "Requests: running 1, waiting 2, paused 0, done 0.50/s" in text
+    if len(usage) == 1:
+        assert "KV: active 3.0%, cached 0.0%" in text
+    else:
+        assert "KV: active [3.0%, 12.5%], cached [0.0%, 0.0%]" in text
     assert "output_tokens=" not in text and "window_s=" not in text
     record = json.loads(_run_logging(code, LIGHTLLM_LOG_FORMAT="json"))
+    assert record["event"] == ("engine.stats" if active else "engine.idle")
     assert record["output_tokens"] == 40 and record["window_s"] == 2
+    assert record["prefill_tok_s"] == 10.125 and record["completed_req_s"] == 0.5
+    assert record["kv_active_pct_by_local_dp"] == usage
+    assert record["kv_capacity_tokens_per_dp"] == 1024
+
+
+def test_stats_text_does_not_mutate_json_record():
+    record = logging.LogRecord("lightllm.stats", logging.INFO, __file__, 1, "event=%s", ("engine.stats",), None)
+    record.event, record.output_tok_s = "engine.stats", 12.345
+    text = log_utils.NewLineFormatter("%(message)s").format(record)
+    assert text == "Engine stats | Throughput: output 12.3 tok/s"
+    result = json.loads(log_utils.JsonFormatter().format(record))
+    assert result["message"] == "event=engine.stats"
+    assert result["output_tok_s"] == 12.345
 
 
 def test_python_warnings_survive_error_service_level_and_reconfiguration():

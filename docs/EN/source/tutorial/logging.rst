@@ -170,8 +170,20 @@ Request and transfer errors do not use this connection-failure deduplication pol
 Engine throughput windows
 -------------------------
 
-``engine.stats`` / ``engine.idle`` display ``prefill_tok_s``, ``output_tok_s`` and
-``completed_req_s``. JSON also retains ``window_s`` and raw window counts
+Text groups engine snapshots into throughput, request state and KV occupancy:
+
+.. code-block:: text
+
+   15:54:23.459 INFO [D/router] Engine stats | Throughput: prefill 0.0 tok/s, output 31.6 tok/s | Requests: running 1, waiting 0, paused 0, done 0.50/s | KV: active 5.2%, cached 0.0%
+
+Idle transitions use ``Engine idle``. Single-DP KV occupancy is a percentage;
+multiple local DPs use ordered lists, such as ``active [3.0%, 12.5%]``, without
+averaging away imbalances. ``cached`` means reusable KV occupancy, not a prefix
+cache hit rate. ``done`` counts completed internal requests per second.
+
+JSON retains the ``engine.stats`` / ``engine.idle`` events and exact numeric fields
+``prefill_tok_s``, ``output_tok_s`` and ``completed_req_s``, along with
+``kv_capacity_tokens_per_dp``, ``window_s`` and raw window counts
 ``prefill_tokens``, ``output_tokens`` and ``completed_reqs``. Rates use actual
 monotonic elapsed time; the default interval remains 10 seconds. In-flight
 requests contribute tokens before they finish.

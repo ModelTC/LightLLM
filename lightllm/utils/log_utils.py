@@ -108,6 +108,32 @@ def _compact_context(record):
     return " ".join(fields)
 
 
+def _format_engine_stats(record):
+    fields = record.__dict__
+    groups = ["Engine idle" if record.event == "engine.idle" else "Engine stats"]
+    rates = [
+        f"{label} {fields[key]:.1f} tok/s"
+        for key, label in (("prefill_tok_s", "prefill"), ("output_tok_s", "output"))
+        if key in fields
+    ]
+    if rates:
+        groups.append("Throughput: " + ", ".join(rates))
+    requests = [f"{key} {fields[key]}" for key in ("running", "waiting", "paused") if key in fields]
+    if "completed_req_s" in fields:
+        requests.append(f"done {fields['completed_req_s']:.2f}/s")
+    if requests:
+        groups.append("Requests: " + ", ".join(requests))
+    kv = []
+    for key, label in (("kv_active_pct_by_local_dp", "active"), ("kv_cached_pct_by_local_dp", "cached")):
+        values = [f"{value:.1f}%" for value in fields.get(key, ())]
+        if values:
+            usage = values[0] if len(values) == 1 else "[" + ", ".join(values) + "]"
+            kv.append(f"{label} {usage}")
+    if kv:
+        groups.append("KV: " + ", ".join(kv))
+    return " | ".join(groups)
+
+
 class NewLineFormatter(logging.Formatter):
     """Prefix every physical line, including traceback lines, with process context."""
 
@@ -117,6 +143,8 @@ class NewLineFormatter(logging.Formatter):
     def format(self, record):
         _add_context(record)
         record = logging.makeLogRecord(record.__dict__.copy())
+        if getattr(record, "event", None) in {"engine.stats", "engine.idle"}:
+            record.msg, record.args = _format_engine_stats(record), ()
         record.compact_context = _compact_context(record)
         record.source = (
             f"{record.filename}:{record.lineno} "
