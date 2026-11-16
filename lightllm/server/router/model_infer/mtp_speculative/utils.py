@@ -5,7 +5,10 @@ from typing import TYPE_CHECKING, List, Tuple
 
 import torch
 
+from lightllm.common.attention_state.commit import RequestGenerationStamp
+from lightllm.common.attention.api.execution import ExecutionFailure
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
+    gen_b_req_mtp_start_loc,
     mtp_scatter_next_token_ids,
     mtp_verify,
 )
@@ -16,29 +19,40 @@ if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mtp_speculative.proposers.base import SpecProposal
 
 
-def verify_mtp_tokens(
-    backend: ModeBackend,
-    next_token_ids: torch.Tensor,
-    b_req_idx: torch.Tensor,
-    b_req_mtp_start_loc: torch.Tensor,
-    b_mtp_index: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Verify target tokens and update recurrent MTP state when required."""
-    # 保留原调用接口中的步序参数；当前状态提交直接使用验证返回的接受长度。
+def verify_mtp_tokens(backend: ModeBackend, next_token_ids: torch.Tensor, model_output, num_reqs: int):
+    outputs = model_output if isinstance(model_output, tuple) else (model_output,)
+    commits = tuple(output.attention_commit for output in outputs)
+    if any(commit is None for commit in commits):
+        raise ValueError("MTP verification requires an output-bound attention commit")
+    commit = commits[0] if len(commits) == 1 else RequestGenerationStamp.concatenate(commits)
+    if next_token_ids.shape != commit.request_indices.shape or not 0 <= num_reqs <= next_token_ids.numel():
+        raise ValueError("MTP verification token and request counts do not match the output")
+    manager = backend.model.att_state_manager
+    manager.check_execution_health()
+    consumed = False
 
-    accept_lengths, accepted_index = mtp_verify(
-        req_to_next_token_ids=backend.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-        b_req_mtp_start_loc=b_req_mtp_start_loc,
-        new_next_token_ids=next_token_ids,
-        b_req_idx=b_req_idx,
-    )
-    # 最后一层已经按这个窗口全接受推进了 cursor。这里剪掉没通过验证的尾部。
-    backend.model.att_state_manager.commit_bounded_att_state(
-        b_req_idx[b_req_mtp_start_loc],
-        accept_lengths,
-        role="main",
-        req_verify_width=_req_verify_width(b_req_mtp_start_loc, b_req_idx.shape[0]),
-    )
+    def failed(error, submission):
+        if consumed:
+            failure = ExecutionFailure(commit.role, (commit.request_indices,), "MTP verification")
+            manager.invalidate_execution(failure)
+            error.attention_failure = failure
+
+    with backend.model.execution.submit(retain=(next_token_ids, *outputs), on_failure=failed):
+        commit.consume(backend.model.req_manager)
+        consumed = True
+        starts = gen_b_req_mtp_start_loc(b_mtp_index=commit.mtp_indices, num_reqs=num_reqs)
+        accept_lengths, accepted_index = mtp_verify(
+            req_to_next_token_ids=backend.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+            b_req_mtp_start_loc=starts,
+            new_next_token_ids=next_token_ids,
+            b_req_idx=commit.request_indices,
+        )
+        manager.commit_bounded_att_state(
+            commit.request_indices[starts.long()],
+            accept_lengths,
+            role=commit.role,
+            req_verify_width=_req_verify_width(starts, commit.request_indices.shape[0]),
+        )
     return accept_lengths, accepted_index
 
 
@@ -67,7 +81,6 @@ def scatter_mtp_next_tokens(
     mtp_accept_len: torch.Tensor,  # [req_num]
 ) -> None:
     """Persist the next MTP proposal and optional scheduling scores by request."""
-
     schedule_scores = getattr(proposal, "schedule_scores", None)
     if schedule_scores is not None and 0 in schedule_scores.shape:
         schedule_scores = None
@@ -100,7 +113,6 @@ def record_request_mtp_metrics(
     verify_run_reqs: List[InferReq],
 ) -> None:
     """Accumulate user-visible MTP metrics on each request."""
-
     if not backend.is_master_in_dp:
         return
 

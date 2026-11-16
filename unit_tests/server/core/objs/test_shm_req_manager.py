@@ -1,16 +1,17 @@
-import os
 import asyncio
-import pytest
+import os
 import time
 import uuid
-import numpy as np
-from unittest.mock import MagicMock
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import numpy as np
+import pytest
 from easydict import EasyDict
-from lightllm.utils.envs_utils import set_env_start_args, get_env_start_args
-from lightllm.utils import shm_utils
+
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
+from lightllm.utils import shm_utils
+from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -23,8 +24,8 @@ def setup_env():
             running_max_req_size=10,
             disable_chunked_prefill=True,
             mtp_step=0,
-            llm_prefill_att_backend=["None"],
-            llm_decode_att_backend=["None"],
+            llm_prefill_att_backend="None",
+            llm_decode_att_backend="None",
             cpu_cache_token_page_size=256,
             enable_cpu_cache=False,
         )

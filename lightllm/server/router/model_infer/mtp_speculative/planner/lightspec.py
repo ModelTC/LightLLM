@@ -50,7 +50,7 @@ class LightSpecPlanner(BaseMtpPlanner):
         self.backend = backend
         self.max_draft_step = int(backend.max_draft_step)
         self.block_size = int(backend.draft_models[0].block_size) if self.spec_mode in ("dflash", "dflash2") else None
-        self.draft_steps = self._get_draft_steps()
+        self.draft_steps = self._get_decode_draft_steps()
 
         self.target_infer_costs = _InferCostMsTable()
         self.draft_infer_costs = _InferCostMsTable()
@@ -189,7 +189,7 @@ class LightSpecPlanner(BaseMtpPlanner):
             verified_draft_step=plan.pre_draft_step,
         )
 
-    def _get_draft_steps(self) -> Tuple[int, ...]:
+    def _get_decode_draft_steps(self) -> Tuple[int, ...]:
         """Return the draft configurations supported by the current MTP mode."""
 
         if self.spec_mode in ("vanilla_no_att", "eagle_no_att"):

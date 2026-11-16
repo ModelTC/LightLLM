@@ -396,6 +396,7 @@ class StaticBenchmarkExecutor:
             torch.cuda.synchronize()
             start = time.perf_counter()
             output = self.model.forward(model_input)
+            output.attention_commit.consume(self.model.req_manager)
             candidate_rows = self._run_mtp_draft_decode(
                 model_input=model_input,
                 model_output=output,
@@ -590,8 +591,14 @@ class StaticBenchmarkExecutor:
         if allow_overlap and self.args.enable_decode_microbatch_overlap:
             model_input0, model_input1 = self._split_decode_input(model_input)
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
+            for output in (model_output0, model_output1):
+                if output.attention_commit is not None:
+                    output.attention_commit.consume(self.model.req_manager)
             return self._merge_overlap_model_outputs(model_output0, model_output1)
-        return self.model.forward(model_input)
+        output = self.model.forward(model_input)
+        if output.attention_commit is not None:
+            output.attention_commit.consume(self.model.req_manager)
+        return output
 
     def _split_prefill_input(self, model_input: ModelInput):
         """在 benchmark 调用侧按请求构造两个 prefill microbatch。"""

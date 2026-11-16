@@ -1,6 +1,6 @@
-"""Verification commits State-owned recurrent data without model cursor aliases."""
-
 from __future__ import annotations
+
+"""Verification commits State-owned recurrent data without model cursor aliases."""
 
 
 from types import SimpleNamespace
@@ -9,10 +9,13 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention_state.bounded_att import GDNState
 from lightllm.common.attention_state.allocators import StatePageAllocator
+from lightllm.common.attention_state.bounded_att import GDNState
 from lightllm.server.router.model_infer.mtp_speculative.utils import verify_mtp_tokens
 from unit_tests.common.att_resources.test_bounded_state import make_state
+from unit_tests.common.attention.helpers import make_verification_manager
+from lightllm.common.execution import ExecutionScope
+from lightllm.platform import get_device_runtime
 
 
 def make_manager(device: str | torch.device | int):
@@ -82,16 +85,18 @@ def test_commit_without_recurrent_state_and_invalid_role():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("widths", [(3, 3, 3), (3, 1, 2)])
-def test_verify_commits_main_states_for_fixed_and_dynamic_widths(widths: tuple[int, ...]):
+@pytest.mark.parametrize("overlap", [False, True])
+def test_verify_commits_main_states_for_fixed_and_dynamic_widths(widths: tuple[int, ...], overlap):
     manager = make_manager("cuda")
+    req_manager = make_verification_manager(count=3, device="cuda")
+    req_manager.req_sampling_params_manager = SimpleNamespace(
+        req_to_next_token_ids=torch.tensor([[-1, 10, 11]] * 3, device="cuda")
+    )
     backend = SimpleNamespace(
         model=SimpleNamespace(
             att_state_manager=manager,
-            req_manager=SimpleNamespace(
-                req_sampling_params_manager=SimpleNamespace(
-                    req_to_next_token_ids=torch.tensor([[-1, 10, 11]] * 3, device="cuda")
-                )
-            ),
+            req_manager=req_manager,
+            execution=ExecutionScope(get_device_runtime("cuda")),
         )
     )
     reqs, starts, tokens, expected_mask = [], [], [], []
@@ -100,12 +105,31 @@ def test_verify_commits_main_states_for_fixed_and_dynamic_widths(widths: tuple[i
         reqs.extend([req] * width)
         tokens.extend(99 if offset == accepted - 1 else 10 + offset for offset in range(width))
         expected_mask.extend(int(offset < accepted) for offset in range(width))
+    from lightllm.common.attention_state.commit import RequestGenerationStamp
+
+    request_indices = torch.tensor(reqs, dtype=torch.int32, device="cuda")
+    mtp_indices = torch.tensor([step for width in widths for step in range(width)], dtype=torch.int32, device="cuda")
+
+    def output(start, end):
+        return SimpleNamespace(
+            attention_commit=RequestGenerationStamp.stamp(
+                "main",
+                request_indices[start:end],
+                mtp_indices[start:end],
+                backend.model.req_manager.request_generations,
+                req_manager.begin_verification(request_indices[start:end]),
+            )
+        )
+
+    model_output = (output(0, starts[1]), output(starts[1], len(reqs))) if overlap else output(0, len(reqs))
+
+    request_indices.zero_()
+    mtp_indices.zero_()
     accept_lengths, accepted_index = verify_mtp_tokens(
         backend=backend,
         next_token_ids=torch.tensor(tokens, device="cuda"),
-        b_req_idx=torch.tensor(reqs, dtype=torch.int32, device="cuda"),
-        b_req_mtp_start_loc=torch.tensor(starts, dtype=torch.int32, device="cuda"),
-        b_mtp_index=torch.tensor([step for width in widths for step in range(width)], dtype=torch.int32, device="cuda"),
+        model_output=model_output,
+        num_reqs=len(widths),
     )
     assert accept_lengths.tolist() == [3, 1, 2]
     assert accepted_index.tolist() == expected_mask

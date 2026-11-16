@@ -229,6 +229,8 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
                 max_kv_seq_len=int(lengths[-1]),
             )
             output = model.forward(batch)
+            if output.attention_commit is not None:
+                output.attention_commit.consume(model.req_manager)
             logits = [output.logits.clone()]
             for draft in draft_models:
                 batch.input_ids = output.logits.argmax(dim=-1)

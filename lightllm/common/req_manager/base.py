@@ -5,7 +5,6 @@ import torch
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
-
 logger = init_logger("lightllm.common.req_manager")
 
 
@@ -53,6 +52,27 @@ class ReqManager:
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
+        self.request_generations = torch.zeros(max_request_num + 1, dtype=torch.int64, device="cuda")
+        self.request_verify_steps = torch.zeros_like(self.request_generations)
+        self.request_verified_steps = torch.zeros_like(self.request_generations)
+        self._verification_serial = 0
+
+    def check_verified(self, request_indices):
+        indexes = request_indices.long()
+        torch._assert_async(
+            torch.all(
+                (indexes == self.HOLD_REQUEST_ID)
+                | (self.request_verify_steps[indexes] == self.request_verified_steps[indexes])
+            ),
+            "a request still has an unconsumed MTP output",
+        )
+
+    def begin_verification(self, request_indices):
+        self.check_verified(request_indices)
+        indexes = request_indices.long()
+        self._verification_serial += 1
+        self.request_verify_steps.index_fill_(0, indexes, self._verification_serial)
+        return torch.full_like(indexes, self._verification_serial)
 
     def bind_hold_page(self, token_indices):
         """Map padding requests to the resource owner's reserved physical page."""
@@ -67,11 +87,17 @@ class ReqManager:
         hold_row.view(-1, self.page_size).copy_(hold_page)
 
     def alloc(self):
-        return self.req_list.alloc()
+        index = self.req_list.alloc()
+        if index is not None:
+            self.request_generations[index].add_(1)
+        return index
 
     def free(self, free_req_indexes: List[int]):
         for req_index in free_req_indexes:
             self.req_list.free(req_index)
+            self.request_generations[req_index].add_(1)
+            self.request_verify_steps[req_index].zero_()
+            self.request_verified_steps[req_index].zero_()
         if self.req_list.is_all_free():
             logger.debug(f"freed all request size {self.req_list.can_alloc_size}")
 
@@ -80,4 +106,7 @@ class ReqManager:
 
     def free_all(self):
         self.req_list = _ReqIndexPool(self.max_request_num)
+        self.request_generations.add_(1)
+        self.request_verify_steps.zero_()
+        self.request_verified_steps.zero_()
         return

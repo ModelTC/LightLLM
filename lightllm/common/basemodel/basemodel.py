@@ -17,6 +17,7 @@ from tqdm import tqdm
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention.api.execution import ExecutionFailure
 from lightllm.common.execution import ExecutionScope
+from lightllm.common.attention_state.commit import RequestGenerationStamp
 from lightllm.common.attention_state.utils import MAX_DRAFT_MODELS
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput, PostLayerOutput
 from lightllm.common.basemodel.cuda_graph import CudaGraph
@@ -608,6 +609,26 @@ class TpPartBaseModel:
         )
         return output
 
+    def _begin_attention_commit(self, model_input):
+        if not self.args.mtp_step or self.is_mtp_draft_model:
+            return None
+        steps = self.req_manager.begin_verification(model_input.b_req_idx)
+        return RequestGenerationStamp.stamp(
+            self.att_state_role,
+            model_input.b_req_idx,
+            model_input.b_mtp_index,
+            self.req_manager.request_generations,
+            steps,
+        )
+
+    @staticmethod
+    def _attach_attention_commit(output, commit):
+        if commit is None:
+            return output
+        output = copy.copy(output)
+        output.attention_commit = commit
+        return output
+
     def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
         padded_batch_size = model_output.logits.shape[0]
         if padded_batch_size == origin_batch_size:
@@ -644,6 +665,8 @@ class TpPartBaseModel:
         self,
         model_input: ModelInput,
     ):
+        if self.args.mtp_step and not self.is_mtp_draft_model:
+            self.req_manager.check_verified(model_input.b_req_idx)
         if self.args.enable_prefill_decode_mixed and model_input.input_ids.shape[0] > 0:
             gather_token_prefill_decode_mixed(
                 input_ids=model_input.input_ids,
@@ -691,6 +714,7 @@ class TpPartBaseModel:
         self,
         model_input: ModelInput,
     ) -> ModelOutput:
+        commit = self._begin_attention_commit(model_input)
         if model_input.input_ids is None:
             if model_input.batch_size > 0:
                 model_input.input_ids = gather_token(
@@ -738,6 +762,7 @@ class TpPartBaseModel:
                 model_output = self._token_forward(infer_state)
 
             output = self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
+            output = self._attach_attention_commit(output, commit)
 
             return output
 
@@ -842,6 +867,8 @@ class TpPartBaseModel:
         """执行由调用方提前构建好的两个 prefill microbatch。"""
         for model_input in (model_input0, model_input1):
             model_input.to_cuda()
+            if self.args.mtp_step and not self.is_mtp_draft_model:
+                self.req_manager.check_verified(model_input.b_req_idx)
             if self.args.enable_prefill_decode_mixed and model_input.input_ids.shape[0] > 0:
                 gather_token_prefill_decode_mixed(
                     input_ids=model_input.input_ids,
@@ -927,6 +954,8 @@ class TpPartBaseModel:
 
     def _microbatch_overlap_decode_cuda(self, model_input0: ModelInput, model_input1: ModelInput):
         assert self.args.enable_tpsp_mix_mode
+        commit0 = self._begin_attention_commit(model_input0)
+        commit1 = self._begin_attention_commit(model_input1)
 
         origin_batch_size0 = model_input0.batch_size
         origin_batch_size1 = model_input1.batch_size
@@ -988,6 +1017,8 @@ class TpPartBaseModel:
                     model_output1, origin_batch_size=origin_batch_size1
                 )
 
+            model_output0 = self._attach_attention_commit(model_output0, commit0)
+            model_output1 = self._attach_attention_commit(model_output1, commit1)
             return model_output0, model_output1
 
     @final
