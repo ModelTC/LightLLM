@@ -7,6 +7,9 @@ import pytest
 import torch
 
 
+from lightllm.common.attention.api.graph import TensorCopyPlan, tensor_input_copy, validate_copy_plan
+
+
 from lightllm.common.execution import ExecutionScope
 
 
@@ -71,3 +74,51 @@ def test_backpressure_failure_quarantines_without_releasing_inputs(monkeypatch):
     with pytest.raises(RuntimeError, match="quarantined"):
         with scope.submit():
             pass
+
+
+@pytest.mark.parametrize("invalid", ["conflicting", "partial", "source", "unchanged", "expanded"])
+def test_replay_manifest_rejects_aliases_before_any_write(invalid):
+    target = torch.zeros(8)
+    source = torch.ones(8)
+    copies = tensor_input_copy("first", target, source)
+    if invalid == "conflicting":
+        copies += tensor_input_copy("second", target, source.clone())
+    elif invalid == "partial":
+        copies += tensor_input_copy("second", target[1:], source[:-1])
+    elif invalid == "source":
+        copies += tensor_input_copy("second", torch.empty(8), target)
+    elif invalid == "unchanged":
+        copies += tensor_input_copy("second", target[:4], target[:4])
+    else:
+        copies = tensor_input_copy("expanded", target[:1].expand(8), source)
+    with pytest.raises(ValueError, match="conflicting|overlap|overwrite"):
+        validate_copy_plan(copies)
+    assert target.eq(0).all()
+
+
+def test_replay_manifest_coalesces_cumulative_offsets_and_prefix_views():
+    target, source = torch.zeros(8), torch.arange(8, dtype=torch.float32)
+    copies = tensor_input_copy("cumulative", target, source)
+    copies += tensor_input_copy("start", target[:-1], source[:-1])
+    copies += tensor_input_copy("duplicate", target, source)
+    plan = validate_copy_plan(copies)
+    assert len(plan) == 1
+    for destination, incoming in plan:
+        destination.copy_(incoming)
+    torch.testing.assert_close(target, source)
+
+
+@pytest.mark.parametrize("change", ["stride", "storage", "conflict"])
+def test_compiled_manifest_revalidates_sources_and_destination_identity(change):
+    target, source = torch.zeros(4, 4), torch.ones(4, 4)
+    copies = [(target, source), (target, source)]
+    plan = TensorCopyPlan([tensor for tensor, _ in copies])
+    assert len(plan.validate(copies)) == 1
+    if change == "stride":
+        target.transpose_(0, 1)
+    elif change == "storage":
+        target.set_(torch.empty_like(target))
+    else:
+        copies[-1] = (target, source.clone())
+    with pytest.raises(ValueError, match="destination"):
+        plan.validate(copies)
