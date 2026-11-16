@@ -8,18 +8,9 @@ from lightllm.server.core.objs import SamplingParams
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, ReqStatus
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
-from lightllm.utils.pd_timeout_utils import get_pd_handshake_timeout_seconds
 
 
-@pytest.mark.parametrize(
-    "resource_wait,master,prefill", [(-1, None, None), (0, 180, 195), (60, 180, 195), (200, 415, 430), (450, 915, 930)]
-)
-def test_handshake_encloses_both_resource_waits(resource_wait: int, master: int | None, prefill: int | None) -> None:
-    assert get_pd_handshake_timeout_seconds(resource_wait_seconds=resource_wait) == master
-    assert get_pd_handshake_timeout_seconds(resource_wait_seconds=resource_wait, prefill=True) == prefill
-
-
-@pytest.mark.parametrize("resource_wait,expected", [(60, 180), (200, 415), (-1, None)])
+@pytest.mark.parametrize("resource_wait,expected", [(0, 180), (60, 180), (200, 415), (450, 915), (-1, None)])
 def test_master_uses_the_current_segments_resource_budget(resource_wait: int, expected: int | None) -> None:
     async def run() -> None:
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)

@@ -33,7 +33,6 @@ from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.pd_timeout_utils import get_pd_handshake_timeout_seconds
 from lightllm.server.metrics.manager import MetricClient
 from .rl_controller import HttpRlController
 from .manager_ext import HttpRlManagerHelper
@@ -423,9 +422,15 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await pd_upload_websocket.send(
                     pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, array("q", prompt_ids)))
                 )
-                handshake_timeout = get_pd_handshake_timeout_seconds(
-                    resource_wait_seconds=sampling_params.pd_node_resource_wait_timeout_seconds, prefill=True
-                )
+                # Prefill 上报 prompt ids 后就在等 Decode 节点信息，早于 Master 把请求发给 Decode。
+                # Decode 会先等共享请求槽，再在 Router 里独立等进入推理，两段各用一份资源预算；
+                # 15 秒留给 5 秒一次的超时检查和错误回传。Prefill 再多 15 秒，让 Master 先超时并把中止通知过来。
+                # 预算为负表示资源等待不限时，握手也不设截止时间。预算较小时仍保持原来的 180 秒下限。
+                resource_wait_seconds = sampling_params.pd_node_resource_wait_timeout_seconds
+                if resource_wait_seconds < 0:
+                    handshake_timeout = None
+                else:
+                    handshake_timeout = max(180, 2 * resource_wait_seconds + 15) + 15
                 try:
                     await asyncio.wait_for(pd_event.wait(), timeout=handshake_timeout)
                 except asyncio.TimeoutError:

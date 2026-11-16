@@ -34,7 +34,6 @@ from lightllm.utils.envs_utils import (
     get_pd_node_resource_wait_timeout_seconds,
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
-from lightllm.utils.pd_timeout_utils import get_pd_handshake_timeout_seconds
 from .pd_selector import PDSelectionExtraInfo, create_selector
 
 logger = init_logger(__name__)
@@ -607,13 +606,19 @@ class HttpServerManagerForPDMaster:
             pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
         )
 
+        # Master 在等 Decode 上报。Decode 会先等共享请求槽，再在 Router 里独立等进入推理，
+        # 两段各用一份资源预算；再留 15 秒给 5 秒一次的超时检查和错误回传。
+        # 预算为负表示资源等待不限时，握手也不设截止时间。预算较小时仍保持原来的 180 秒下限。
+        resource_wait_seconds = sampling_params.pd_node_resource_wait_timeout_seconds
+        if resource_wait_seconds < 0:
+            decode_handshake_timeout = None
+        else:
+            decode_handshake_timeout = max(180, 2 * resource_wait_seconds + 15)
         try:
             await self._wait_for_event_or_disconnect(
                 up_status_event,
                 request,
-                timeout=get_pd_handshake_timeout_seconds(
-                    resource_wait_seconds=sampling_params.pd_node_resource_wait_timeout_seconds
-                ),
+                timeout=decode_handshake_timeout,
                 group_request_id=group_request_id,
                 stage="decode",
             )
