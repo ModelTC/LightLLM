@@ -465,14 +465,6 @@ class ReplayGDNState(BoundedAttentionState):
             **{name: getattr(self, name) for name in ReplayStorage.__dataclass_fields__ if name != "logical_layer_ids"},
         )
 
-    def finish_decode_token(self, logical_layer_id: int, reqs: torch.Tensor, cu_seqlens: torch.Tensor) -> None:
-        """最后一层按整窗全接受推进 cursor。非最后一层直接返回。"""
-
-        layers = () if self.config is None else self.config.logical_layer_ids
-        if not layers or logical_layer_id != layers[-1] or reqs.numel() == 0:
-            return
-        advance_cursor(self, reqs, cu_seqlens)
-
     def finish_decode(self, reqs: torch.Tensor, cu_seqlens: torch.Tensor) -> None:
         advance_cursor(self, reqs, cu_seqlens)
 

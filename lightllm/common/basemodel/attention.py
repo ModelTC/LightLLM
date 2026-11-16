@@ -1,15 +1,3 @@
-from .base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from .create_utils import (
-    get_prefill_att_backend_class,
-    get_decode_att_backend_class,
-    get_mla_prefill_att_backend_class,
-    get_mla_decode_att_backend_class,
-    get_nsa_prefill_att_backend_class,
-    get_nsa_decode_att_backend_class,
-    get_neo_prefill_att_backend_class,
-)
-
-
 from contextlib import ExitStack, contextmanager
 from types import MappingProxyType
 
@@ -246,7 +234,6 @@ class ModelAttention:
                     continue
                 group = self.groups[group_id]
                 resources = layer.bind_attention_resources(model, weight, adapter)
-                layer._legacy_attention_execution = False
                 owners[f"layer.{layer.layer_num_}"] = resources
                 for phase, backend in group.items():
                     setattr(
