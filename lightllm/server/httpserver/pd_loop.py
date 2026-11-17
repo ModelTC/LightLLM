@@ -394,6 +394,12 @@ class PDMasterForwarder:
     async def run(self) -> None:
         from lightllm.server.pd_httpserver_ipc import PDHttpserverIpc
 
+        async def send_status(websocket, upkv_status):
+            try:
+                await websocket.send(pickle.dumps((ObjType.PD_UPLOAD_KV_STATUS, upkv_status)))
+            except BaseException as e:
+                logger.exception(f"upload pd kv status failed, request_id={upkv_status.group_request_id}: {str(e)}")
+
         pull = PDHttpserverIpc.Pull()
         try:
             # 同一个地址只能绑一次。别的 httpserver 进程再 bind 会失败并记日志。
@@ -401,14 +407,12 @@ class PDMasterForwarder:
             logger.info("pd httpserver ipc receiver started in this httpserver worker")
             while True:
                 upkv_status = await pull.recv()
-                try:
-                    websocket = self._node_id_to_websocket.get(upkv_status.pd_master_node_id)
-                    if websocket is None:
-                        logger.warning(f"no connection to pd master, drop up kv status {upkv_status}")
-                        continue
-                    await websocket.send(pickle.dumps((ObjType.PD_UPLOAD_KV_STATUS, upkv_status)))
-                except Exception as e:
-                    logger.exception(f"upload pd kv status failed, request_id={upkv_status.group_request_id}: {str(e)}")
+                websocket = self._node_id_to_websocket.get(upkv_status.pd_master_node_id)
+                if websocket is None:
+                    logger.warning(f"no connection to pd master, drop up kv status {upkv_status}")
+                    continue
+                # 单条连接的写入背压不能阻塞本机 IPC 和其他 Master 的握手。
+                asyncio.create_task(send_status(websocket, upkv_status))
         except asyncio.CancelledError:
             raise
         except BaseException as e:

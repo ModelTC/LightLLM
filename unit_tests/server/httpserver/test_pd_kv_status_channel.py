@@ -108,6 +108,53 @@ def test_httpserver_drops_the_handshake_without_master_connection(monkeypatch):
     _run_one_ipc_message(monkeypatch, forwarder, status)
 
 
+def test_blocked_master_does_not_block_other_handshakes(monkeypatch):
+    async def run():
+        messages = asyncio.Queue()
+        blocked = asyncio.Event()
+        release = asyncio.Event()
+        completed = asyncio.Event()
+        delivered = asyncio.Event()
+
+        class Pull:
+            def bind(self):
+                pass
+
+            async def recv(self):
+                return await messages.get()
+
+            def close(self):
+                pass
+
+        async def slow_send(payload):
+            blocked.set()
+            await release.wait()
+            completed.set()
+
+        async def healthy_send(payload):
+            assert pickle.loads(payload) == (ObjType.PD_UPLOAD_KV_STATUS, PDUpKVStatus(16, 200, b"metadata"))
+            delivered.set()
+
+        monkeypatch.setattr("lightllm.server.pd_httpserver_ipc.PDHttpserverIpc.Pull", Pull)
+        forwarder = PDMasterForwarder()
+        forwarder.register(100, SimpleNamespace(send=slow_send))
+        forwarder.register(200, SimpleNamespace(send=healthy_send))
+        task = asyncio.create_task(forwarder.run())
+        try:
+            await messages.put(PDUpKVStatus(8, 100, b"metadata"))
+            await asyncio.wait_for(blocked.wait(), timeout=1)
+            await messages.put(PDUpKVStatus(16, 200, b"metadata"))
+            await asyncio.wait_for(delivered.wait(), timeout=1)
+            assert not completed.is_set()
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=1)
+            await asyncio.wait_for(completed.wait(), timeout=1)
+
+    asyncio.run(run())
+
+
 def test_stale_connection_does_not_unregister_its_replacement():
     old, _ = _recording_websocket()
     new, _ = _recording_websocket()
