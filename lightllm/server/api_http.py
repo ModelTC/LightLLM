@@ -187,6 +187,11 @@ async def invalid_request_exception_handler(request: Request, exc: InvalidReques
 
 @app.exception_handler(GenerationError)
 async def generation_exception_handler(request: Request, exc: GenerationError) -> JSONResponse:
+    if request.url.path == "/v1/messages":
+        from .api_anthropic import _anthropic_error_response
+
+        g_objs.metric_client.counter_inc("lightllm_request_failure")
+        return _anthropic_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
     return create_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
 
 
@@ -458,9 +463,11 @@ async def anthropic_count_tokens(raw_request: Request) -> Response:
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
+    except (ValueError, InvalidRequestError) as e:
+        return _anthropic_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except Exception as e:
         logger.error("An error occurred: %s", str(e), exc_info=True)
-        return _anthropic_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")
+        return _anthropic_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, "Failed to count input tokens")
 
 
 @app.post("/v1/responses")

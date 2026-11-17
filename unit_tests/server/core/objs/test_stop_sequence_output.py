@@ -1203,6 +1203,7 @@ def test_application_stop_keeps_hit_metadata_and_discards_backend_finish():
         "id": 11,
         "logprob": -0.2,
         "count_output_tokens": 2,
+        "stop_sequence": "END",
     }
     manager.stop_request.assert_awaited_once_with(80)
 

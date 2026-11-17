@@ -144,6 +144,8 @@ def _serialize_chat_sse_chunk(
     choice_nulls=(),
     response_nulls=(),
     finish_reason=None,
+    stop_reason=None,
+    usage=None,
 ):
     """Serialize a chat streaming chunk without constructing Pydantic models."""
     choice = {"index": int(choice_index), "delta": delta}
@@ -151,6 +153,8 @@ def _serialize_chat_sse_chunk(
         choice["finish_reason"] = finish_reason
     for field in choice_nulls:
         choice[field] = None
+    if stop_reason is not None:
+        choice["stop_reason"] = stop_reason
 
     chunk = {
         "id": request_id,
@@ -161,6 +165,8 @@ def _serialize_chat_sse_chunk(
     }
     for field in response_nulls:
         chunk[field] = None
+    if usage is not None:
+        chunk["usage"] = usage
     return json.dumps(chunk, ensure_ascii=False)
 
 
@@ -271,7 +277,7 @@ def _process_reasoning_stream(
     return parser.parse_stream_chunk(delta)
 
 
-def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: ChatCompletionRequest):
+def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: ChatCompletionRequest, *, ordered=False):
     from .api_http import g_objs
 
     if index not in parser_dict:
@@ -283,9 +289,10 @@ def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: Ch
         )
     parser = parser_dict[index]
 
-    # parse_increment => returns (normal_text, calls)
-    normal_text, calls = parser.parse_stream_chunk(delta)
-    return normal_text, calls
+    if ordered:
+        result = parser.parse_stream_result(delta)
+        return result.events if result.events is not None else [result.normal_text, *result.calls]
+    return parser.parse_stream_chunk(delta)
 
 
 def _split_tool_argument_delta(arguments: Optional[str]) -> List[str]:
@@ -377,7 +384,11 @@ def _select_chat_template_tools(request: ChatCompletionRequest) -> Optional[List
 
 
 async def chat_completions_impl(
-    request: ChatCompletionRequest, raw_request: Request, *, preserve_abort: bool = False
+    request: ChatCompletionRequest,
+    raw_request: Request,
+    *,
+    preserve_abort: bool = False,
+    include_initial_usage: bool = False,
 ) -> Response:
     from .api_http import g_objs
 
@@ -467,6 +478,7 @@ async def chat_completions_impl(
         final_output_dict = collections.defaultdict(list)
         count_output_tokens_dict = collections.defaultdict(lambda: 0)
         finish_reason_dict = {}
+        stop_reason_dict = {}
         prompt_tokens_dict = {}
         prompt_cache_len_dict = {}
         completion_tokens = 0
@@ -492,8 +504,12 @@ async def chat_completions_impl(
                     parser.update_reasoning_token_count(int(token_id), request_output)
             if finish_status.is_finished():
                 finish_reason_dict[sub_req_id] = finish_status.get_finish_reason()
+                if (stop_sequence := metadata.get("stop_sequence")) is not None:
+                    stop_reason_dict[sub_req_id] = stop_sequence
                 prompt_tokens_dict[sub_req_id] = metadata["prompt_tokens"]
                 prompt_cache_len_dict[sub_req_id] = metadata.get("prompt_cache_len", 0)
+        if len(finish_reason_dict) < request.n:
+            raise GenerationError("Generation ended without a finish status")
         choices = []
         sub_ids = list(final_output_dict.keys())[: request.n]
         prompt_tokens = prompt_tokens_dict[sub_ids[0]]
@@ -563,6 +579,7 @@ async def chat_completions_impl(
                 index=i,
                 message=chat_message,
                 finish_reason=finish_reason,
+                stop_reason=stop_reason_dict.get(sub_req_id),
             )
             choices.append(choice)
         completion_tokens_details = None
@@ -593,7 +610,9 @@ async def chat_completions_impl(
     _final_choice_nulls = ("logprobs", "token_ids", "stop_reason")
     _first_resp_nulls = ("prompt_token_ids",)
 
-    def make_chat_sse_chunk(choice_index, delta, choice_nulls=(), response_nulls=(), finish_reason=None):
+    def make_chat_sse_chunk(
+        choice_index, delta, choice_nulls=(), response_nulls=(), finish_reason=None, stop_reason=None, usage=None
+    ):
         payload = _serialize_chat_sse_chunk(
             chat_completion_id,
             created_time,
@@ -603,6 +622,8 @@ async def chat_completions_impl(
             choice_nulls,
             response_nulls,
             finish_reason,
+            stop_reason,
+            usage,
         )
         return f"data: {payload}\n\n"
 
@@ -662,12 +683,20 @@ async def chat_completions_impl(
             # OpenAI SSE spec: role appears only in the first delta with content="".
             if not has_emitted_first_chunk[choice_index]:
                 has_emitted_first_chunk[choice_index] = True
+                initial_usage = None
+                if include_initial_usage:
+                    initial_usage = {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": 0,
+                        "prompt_tokens_details": {"cached_tokens": cached_tokens},
+                    }
                 append_sse_chunk(
                     make_chat_sse_chunk(
                         choice_index,
                         {"role": "assistant", "content": ""},
                         _first_choice_nulls,
                         _first_resp_nulls,
+                        usage=initial_usage,
                     )
                 )
 
@@ -691,25 +720,24 @@ async def chat_completions_impl(
                         delta = reasoning_text + (delta or "")
 
             if request.tool_choice != "none" and request.tools:
-                # parse_increment => returns (normal_text, calls)
-                normal_text, calls = _process_tools_stream(
-                    index=choice_index, delta=delta, parser_dict=parser_dict, request=request
+                events = _process_tools_stream(
+                    index=choice_index, delta=delta, parser_dict=parser_dict, request=request, ordered=True
                 )
-
-                # 1) if there's normal_text, output it as normal content
-                if normal_text and (normal_text.strip() or not has_emitted_tool_calls[sub_req_id]):
-                    append_sse_chunk(make_chat_sse_chunk(choice_index, {"content": normal_text}, _choice_nulls))
-
-                # 2) if we found calls, we output them as separate chunk(s)
-                if calls:
-                    fc_parser = parser_dict[choice_index]
-                for call_item in calls:
+                for call_item in events:
+                    if isinstance(call_item, str):
+                        if call_item and (call_item.strip() or not has_emitted_tool_calls[sub_req_id]):
+                            append_sse_chunk(make_chat_sse_chunk(choice_index, {"content": call_item}, _choice_nulls))
+                        continue
                     has_emitted_tool_calls[sub_req_id] = True
                     # transform call_item -> FunctionResponse + ToolCall
                     # DSML detectors already emit complete argument deltas, including
                     # when the tool head and arguments arrive in the final chunk.
-                    if current_finish_reason == "stop" and tool_parser not in ("deepseekv32", "deepseekv4"):
-                        det = fc_parser.detector
+                    if current_finish_reason == "stop" and tool_parser not in (
+                        "deepseekv32",
+                        "deepseekv4",
+                        "deepseekv41",
+                    ):
+                        det = parser_dict[choice_index].detector
                         ti = call_item.tool_index
                         if ti >= 0 and ti < len(det.prev_tool_call_arr) and ti < len(det.streamed_args_for_tool):
                             latest_delta_len = 0
@@ -819,6 +847,7 @@ async def chat_completions_impl(
                                 {"content": delta},
                                 _final_choice_nulls,
                                 finish_reason=current_finish_reason,
+                                stop_reason=metadata.get("stop_sequence"),
                             )
                         )
                         if pd_stream_batch_end:
@@ -843,6 +872,7 @@ async def chat_completions_impl(
                         {},
                         _final_choice_nulls,
                         finish_reason=current_finish_reason,
+                        stop_reason=metadata.get("stop_sequence"),
                     )
                 )
 

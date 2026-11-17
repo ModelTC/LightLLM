@@ -11,6 +11,11 @@ No server required — calls the pure translation helper directly.
 
 import asyncio
 import base64
+from contextlib import aclosing
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import httpx
 import pytest
 import ujson as json
 
@@ -269,7 +274,9 @@ def test_non_dict_extra_body_is_ignored():
 
 
 def test_pdf_document_block_becomes_text_not_pdf_image_url(monkeypatch):
-    _enable_pdf_parsing(monkeypatch)
+    monkeypatch.delenv("LIGHTLLM_ANTHROPIC_ENABLE_PDF_PARSING", raising=False)
+    monkeypatch.setattr(api_anthropic, "_ensure_pdf_tools_installed", lambda: None)
+    monkeypatch.setattr(api_anthropic, "_pdf_page_count", lambda _, deadline=None: 1)
     monkeypatch.setattr(api_anthropic, "_is_vision_enabled", lambda: False)
     monkeypatch.setattr(api_anthropic, "_extract_pdf_text", lambda _, deadline=None: "PDF_SENTINEL_DIRECT")
     body = _user_pdf_body()
@@ -280,6 +287,12 @@ def test_pdf_document_block_becomes_text_not_pdf_image_url(monkeypatch):
     assert content[0]["type"] == "text"
     assert "PDF_SENTINEL_DIRECT" in content[0]["text"]
     assert "data:application/pdf" not in json.dumps(chat_dict)
+
+
+def test_pdf_document_block_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_ANTHROPIC_ENABLE_PDF_PARSING", "0")
+    with pytest.raises(RuntimeError, match="PDF document parsing is disabled"):
+        _anthropic_to_chat_request(_user_pdf_body())
 
 
 def test_pdf_document_block_becomes_images_when_vision_enabled(monkeypatch):
@@ -680,7 +693,7 @@ def test_anthropic_messages_impl_runs_translation_in_thread(monkeypatch):
     def fake_translate(_body):
         return {"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}, {}
 
-    async def fake_chat_completions_impl(_request, _raw_request):
+    async def fake_chat_completions_impl(_request, _raw_request, **_kwargs):
         from fastapi.responses import Response
 
         return Response("ok")
@@ -807,7 +820,7 @@ def test_interleaved_tool_calls_do_not_emit_against_closed_block():
         yield _chunk(
             {
                 "tool_calls": [
-                    {"index": 1, "id": "call_b", "function": {"name": "fn_b", "arguments": '{"y":2'}},
+                    {"index": 1, "id": "call_b", "function": {"name": "fn_b", "arguments": '{"y":2}'}},
                 ]
             }
         )
@@ -827,7 +840,7 @@ def test_interleaved_tool_calls_do_not_emit_against_closed_block():
         return out
 
     events = asyncio.run(run())
-    index_of_delta = []
+    inputs = {}
     currently_open = None
     for raw in events:
         lines = raw.strip().split("\n")
@@ -835,14 +848,227 @@ def test_interleaved_tool_calls_do_not_emit_against_closed_block():
         data = json.loads(lines[1].split(": ", 1)[1])
         if etype == "content_block_start":
             currently_open = data["index"]
+            assert currently_open not in inputs
+            inputs[currently_open] = ""
         elif etype == "content_block_stop":
             currently_open = None
         elif etype == "content_block_delta":
             assert (
                 currently_open == data["index"]
             ), f"delta for index {data['index']} but open block is {currently_open}"
-            index_of_delta.append(data["index"])
-    assert index_of_delta, "no deltas observed"
+            inputs[currently_open] += data["delta"]["partial_json"]
+        assert etype != "error"
+    assert [json.loads(args) for args in inputs.values()] == [{"x": 1}, {"y": 2}]
+
+
+@pytest.fixture
+def messages_endpoint(monkeypatch):
+    from lightllm.server import api_http, api_openai, api_stream_obj, build_prompt
+    from lightllm.server.core.objs import FinishStatus
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.server.httpserver.stop_seq_match import wrap_stop_match_stream
+
+    args = StartArgs(run_mode="normal", reasoning_parser=None, tool_call_parser="deepseekv41")
+    tokens = []
+    manager = SimpleNamespace(
+        args=args,
+        tokenizer=SimpleNamespace(encode=lambda *args, **kwargs: []),
+        output_grammar_compiler=None,
+        stop_request=AsyncMock(),
+        tokens=lambda prompt, *_args: len(prompt),
+    )
+
+    def generate(prompt, sampling_params, *_args, **_kwargs):
+        async def raw_stream():
+            for index, (text, status) in enumerate(tokens):
+                if isinstance(status, Exception):
+                    raise status
+                yield 0, text, {"id": index, "prompt_tokens": 100, "prompt_cache_len": 80}, FinishStatus(status)
+
+        return wrap_stop_match_stream(manager, raw_stream(), sampling_params, prompt)
+
+    monkeypatch.setattr(api_http, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: args)
+    manager.generate = generate
+    metrics = SimpleNamespace(counter_inc=lambda *args: None)
+    monkeypatch.setattr(
+        api_http, "g_objs", SimpleNamespace(args=args, httpserver_manager=manager, metric_client=metrics)
+    )
+    monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value="prompt"))
+    monkeypatch.setattr(build_prompt, "build_prompt", api_openai.build_prompt)
+
+    def post(body=None, *, path="/v1/messages", **kwargs):
+        async def run():
+            transport = httpx.ASGITransport(app=api_http.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                if body is not None:
+                    kwargs["json"] = body
+                return await client.post(path, **kwargs)
+
+        return asyncio.run(run())
+
+    return post, tokens, FinishStatus
+
+
+def _events(response):
+    return [json.loads(line[6:]) for line in response.text.split("\n") if line.startswith("data: ")]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_messages_matches_stop_sequence_and_reports_cache_usage(messages_endpoint, stream):
+    post, tokens, status = messages_endpoint
+    tokens[:] = [("hello#", status.NO_FINISH), ("END ignored", status.NO_FINISH), ("late", status.FINISHED_LENGTH)]
+    response = post({**_base_body(), "stop_sequences": ["#END"], "stream": stream})
+    assert response.status_code == 200
+    if stream:
+        events = _events(response)
+        start, end = events[0]["message"], events[-2]
+        assert start["usage"]["input_tokens"] == 20
+        assert start["usage"]["cache_read_input_tokens"] == 80
+        assert start["usage"]["output_tokens"] == 0
+        text = "".join(event["delta"]["text"] for event in events if event["type"] == "content_block_delta")
+        stop, usage = end["delta"], end["usage"]
+    else:
+        message = response.json()
+        stop, usage = message, message["usage"]
+        text = message["content"][0]["text"]
+    assert text == "hello"
+    assert (stop["stop_reason"], stop["stop_sequence"]) == ("stop_sequence", "#END")
+    assert (usage["input_tokens"], usage["cache_read_input_tokens"], usage["output_tokens"]) == (20, 80, 2)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "failure", ["first_error", "late_error", "abort", "early_eof", "pd_disconnect", "first_pd_error"]
+)
+def test_messages_surfaces_failed_generation(messages_endpoint, stream, failure):
+    post, tokens, status = messages_endpoint
+    first = failure in ("first_error", "first_pd_error")
+    if not first:
+        tokens.append(("partial text", status.NO_FINISH))
+    if failure in ("pd_disconnect", "first_pd_error"):
+        tokens.append(("", RuntimeError("PD node disconnected")))
+    elif failure != "early_eof":
+        tokens.append(("", status.FINISHED_ABORTED if failure == "abort" else status.FINISHED_ERROR))
+    response = post({**_base_body(), "stream": stream})
+    if stream and not first:
+        events = _events(response)
+        assert response.status_code == 200
+        assert [event["type"] for event in events[-3:]] == ["content_block_stop", "error", "message_stop"]
+        assert events[-2]["error"]["type"] == "api_error"
+        assert all(event["type"] != "message_delta" for event in events)
+    else:
+        assert response.status_code == 500
+        assert response.json()["type"] == "error"
+        assert response.json()["error"]["type"] == "api_error"
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_messages_restores_long_tool_name_and_preserves_order_in_anthropic_sdk(messages_endpoint, split):
+    anthropic = pytest.importorskip("anthropic")
+    post, tokens, status = messages_endpoint
+    name = "mcp__" + "server_" * 10 + "write"
+    body = {**_base_body(), "tools": [{"name": name, "input_schema": {"type": "object"}}], "stream": True}
+    chat, _ = _anthropic_to_chat_request(body)
+    short_name = chat["tools"][0]["function"]["name"]
+    assert short_name != name
+    start = (
+        f'Before. <｜DSML｜ calls><｜DSML｜ invoke name="{short_name}">'
+        '<｜DSML｜ parameter name="content" string="true">abc'
+    )
+    tail = "</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls> Done."
+    if split:
+        tokens.append((start, status.NO_FINISH))
+    tokens.append((tail if split else start + tail, status.FINISHED_STOP))
+    response = post(body)
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, headers=response.headers, content=response.content))
+    with anthropic.Anthropic(api_key="test", http_client=httpx.Client(transport=transport)) as client:
+        with client.messages.stream(model=body["model"], max_tokens=body["max_tokens"], messages=body["messages"]) as s:
+            message = s.get_final_message()
+    assert [block.type for block in message.content] == ["text", "tool_use", "text"]
+    assert message.content[0].text == "Before. "
+    assert message.content[1].name == name
+    assert message.content[1].input == {"content": "abc"}
+    assert message.content[2].text == " Done."
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_messages_enforces_disabled_parallel_tool_use(messages_endpoint, stream):
+    post, tokens, status = messages_endpoint
+    body = {
+        **_base_body(),
+        "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
+        "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+        "stream": stream,
+    }
+    chat, _ = _anthropic_to_chat_request(body)
+    assert chat["parallel_tool_calls"] is False
+    invoke = '<｜DSML｜ invoke name="Read"></｜DSML｜ invoke>'
+    tokens[:] = [(f"<｜DSML｜ calls>{invoke}{invoke}</｜DSML｜ calls>", status.FINISHED_STOP)]
+    response = post(body)
+    assert response.status_code == 200
+    if stream:
+        events = _events(response)
+        content = [event["content_block"] for event in events if event["type"] == "content_block_start"]
+        stop = events[-2]["delta"]
+    else:
+        stop = response.json()
+        content = stop["content"]
+    assert [(block["type"], block["name"]) for block in content] == [("tool_use", "Read")]
+    assert stop["stop_reason"] == "tool_use"
+
+
+def test_messages_ignores_variable_billing_header():
+    stable = {"type": "text", "text": "Keep this instruction.", "cache_control": {"type": "ephemeral"}}
+    expected, _ = _anthropic_to_chat_request({**_base_body(), "system": [stable]})
+    for nonce in ("aaa", "bbb"):
+        header = f"x-anthropic-billing-header: cc_version=2.1.{nonce}; cch={nonce};"
+        system = [{"type": "text", "text": header}, stable]
+        request, _ = _anthropic_to_chat_request({**_base_body(), "system": system})
+        assert request["messages"] == expected["messages"]
+        request, _ = _anthropic_to_chat_request({**_base_body(), "system": header + "\n" + stable["text"]})
+        assert request["messages"][0]["content"] == stable["text"]
+
+
+@pytest.mark.parametrize("payload", [{"content": "{"}, {"json": []}, {"json": {"model": "test"}}])
+def test_messages_count_tokens_returns_invalid_request(messages_endpoint, payload):
+    post, _, _ = messages_endpoint
+    response = post(path="/v1/messages/count_tokens", **payload)
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_messages_count_tokens_accepts_request_without_max_tokens(messages_endpoint):
+    post, _, _ = messages_endpoint
+    response = post({"model": "test", "messages": _base_body()["messages"]}, path="/v1/messages/count_tokens")
+    assert response.status_code == 200
+    assert response.json() == {"input_tokens": 6, "context_management": {"original_input_tokens": 6}}
+
+
+def test_closing_anthropic_response_closes_underlying_stream(monkeypatch):
+    from lightllm.server import api_openai
+    from lightllm.server.api_stream_obj import CustomStreamingResponse
+
+    closed = []
+
+    async def chunks():
+        try:
+            yield _chunk({"content": "partial"})
+        finally:
+            closed.append(True)
+
+    inner = CustomStreamingResponse(chunks())
+    monkeypatch.setattr(api_openai, "chat_completions_impl", AsyncMock(return_value=inner))
+
+    async def run():
+        request = SimpleNamespace(json=AsyncMock(return_value={**_base_body(), "stream": True}))
+        response = await api_anthropic.anthropic_messages_impl(request)
+        async with aclosing(response.body_iterator) as iterator:
+            await anext(iterator)
+        assert closed == [True]
+
+    asyncio.run(run())
 
 
 def test_streaming_reasoning_uses_anthropic_thinking_events():

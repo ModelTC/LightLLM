@@ -325,6 +325,7 @@ class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
     finish_reason: Optional[Literal["stop", "length", "tool_calls", "error", "abort"]] = None
+    stop_reason: Optional[str] = Field(default=None, exclude=True)
 
 
 class ChatCompletionResponse(BaseModel):

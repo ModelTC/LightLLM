@@ -262,6 +262,7 @@ class StopStrMatchBuffer:
             )
         self._pending_tokens = deque()
         self._pending_text = ""
+        self._matched_stop_sequence = None
         # 已确定可输出的 (sub_req_id, request_output, metadata, finish_status)，调用方按顺序 popleft()。
         self.ready_token_list: deque[tuple[int, str, dict, FinishStatus]] = deque()
 
@@ -331,9 +332,10 @@ class StopStrMatchBuffer:
 
     async def _handle_wait_last_pack(self, sub_req_id, request_output, metadata, finish_status):
         """命中 stop 后原样放行后续包，直到后端结束并携带最终 metadata。"""
-        self.ready_token_list.append((sub_req_id, request_output, metadata, finish_status))
         if finish_status.is_finished():
             self.state = self.State.STOPPED
+            metadata["stop_sequence"] = self._matched_stop_sequence
+        self.ready_token_list.append((sub_req_id, request_output, metadata, finish_status))
 
     def _match_and_release_token(self, sub_req_id, request_output, metadata, finish_status):
         """匹配并释放 token，返回是否命中 stop；状态跳转由调用方处理。"""
@@ -357,6 +359,7 @@ class StopStrMatchBuffer:
             self._release_safe_tokens(matched.start())
             return False
         # 完整命中：按 include_stop 决定是否保留 stop 文本，截断释放并返回命中结果。
+        self._matched_stop_sequence = metadata["stop_sequence"] = matched.group()
         visible_length = matched.end() if self._include_stop else matched.start()
         self._release_pending_tokens(visible_length)
         return True

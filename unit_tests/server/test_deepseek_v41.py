@@ -140,3 +140,53 @@ def test_non_stream_chat_returns_v41_tool_calls(monkeypatch):
     call = choice.message.tool_calls[0]
     assert call.function.name == "lookup"
     assert json.loads(call.function.arguments) == {"city": "北京"}
+
+
+def test_anthropic_stream_sends_write_content_before_dsml_closes(monkeypatch):
+    from lightllm.server import api_http, api_openai
+    from lightllm.server.api_anthropic import _openai_sse_to_anthropic_events
+    from lightllm.server.core.objs import FinishStatus
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    lines = [f'# line {i:03d}\nprint("北京", r"C:\\tmp")\n<code>\n' for i in range(1024)]
+    deltas, events = [], []
+
+    async def generate(*args, **kwargs):
+        start = (
+            '<｜DSML｜ calls><｜DSML｜ invoke name="Write">'
+            '<｜DSML｜ parameter name="file_path" string="true">street.py</｜DSML｜ parameter>'
+            '<｜DSML｜ parameter name="content" string="true">'
+        )
+        yield 0, start, {"prompt_tokens": 1}, FinishStatus(FinishStatus.NO_FINISH)
+        for i, line in enumerate(lines):
+            yield 0, line, {"prompt_tokens": 1}, FinishStatus(FinishStatus.NO_FINISH)
+            assert deltas and f"# line {i:03d}" in deltas[-1], f"Write content stalled at line {i}"
+        yield 0, "</｜DSML｜ para", {"prompt_tokens": 1}, FinishStatus(FinishStatus.NO_FINISH)
+        yield 0, "meter></｜DSML｜ invoke></｜DSML｜ calls>", {"prompt_tokens": 1}, FinishStatus(FinishStatus.FINISHED_STOP)
+
+    args = StartArgs(reasoning_parser=None, tool_call_parser="deepseekv41")
+    manager = SimpleNamespace(tokenizer=None, output_grammar_compiler=None, generate=generate)
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value="prompt"))
+    monkeypatch.setattr(api_http, "g_objs", SimpleNamespace(args=args, httpserver_manager=manager))
+    request = ChatCompletionRequest(
+        model="v41",
+        messages=[],
+        tools=[Tool.model_validate({"type": "function", "function": {"name": "Write", "parameters": {}}})],
+        tool_choice="auto",
+        stream=True,
+    )
+
+    async def run():
+        response = await api_openai.chat_completions_impl(request, None)
+        async for raw in _openai_sse_to_anthropic_events(response.body_iterator, "v41", "msg_test"):
+            event = json.loads(raw.decode().splitlines()[1].removeprefix("data: "))
+            events.append(event)
+            if event.get("delta", {}).get("type") == "input_json_delta":
+                deltas.append(event["delta"]["partial_json"])
+
+    asyncio.run(run())
+    assert json.loads("".join(deltas)) == {"file_path": "street.py", "content": "".join(lines)}
+    assert [event["content_block"]["name"] for event in events if event["type"] == "content_block_start"] == ["Write"]
+    assert sum(event["type"] == "content_block_stop" for event in events) == 1
+    assert [event["delta"]["stop_reason"] for event in events if event["type"] == "message_delta"] == ["tool_use"]

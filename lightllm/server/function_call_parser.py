@@ -57,9 +57,15 @@ class ToolCallItem(BaseModel):
 class StreamingParseResult:
     """Result of streaming incremental parsing."""
 
-    def __init__(self, normal_text: str = "", calls: Optional[List[ToolCallItem]] = None):
+    def __init__(
+        self,
+        normal_text: str = "",
+        calls: Optional[List[ToolCallItem]] = None,
+        events: Optional[list[str | ToolCallItem]] = None,
+    ):
         self.normal_text = normal_text
         self.calls = calls or []
+        self.events = events
 
 
 def _find_common_prefix(s1: str, s2: str) -> str:
@@ -1420,22 +1426,19 @@ class DeepSeekV32Detector(BaseFormatDetector):
         self.invoke_end_token = f"</{self.dsml_token}invoke>"
         self.param_end_token = f"</{self.dsml_token}parameter>"
 
-        # Regex for complete invoke extraction
         _de = re.escape(self.dsml_token)
+        self._invoke_header_pattern = rf'<{_de}invoke\s+name="([^"]+)"\s*>'
+        self._param_header_pattern = rf'<{_de}parameter\s+name="([^"]+)"(?:\s+string="(true|false)")?\s*>'
         self.invoke_regex = re.compile(
-            rf'<{_de}invoke\s+name="([^"]+)"\s*>(.*?)</{_de}invoke>',
+            rf"{self._invoke_header_pattern}(.*?)</{_de}invoke>",
             re.DOTALL,
         )
-        # Regex for parameter extraction
         self.param_regex = re.compile(
-            rf'<{_de}parameter\s+name="([^"]+)"(?:\s+string="(true|false)")?\s*>(.*?)</{_de}parameter>',
+            rf"{self._param_header_pattern}(.*?)</{_de}parameter>",
             re.DOTALL,
         )
         # Regex for partial invoke (name known, body still streaming)
-        self.partial_invoke_regex = re.compile(
-            rf'<{_de}invoke\s+name="([^"]+)"\s*>(.*)',
-            re.DOTALL,
-        )
+        self.partial_invoke_regex = re.compile(rf"{self._invoke_header_pattern}(.*)", re.DOTALL)
 
         self._last_arguments = ""
         self._accumulated_params: List[tuple] = []
@@ -2013,45 +2016,109 @@ class DeepSeekV41Detector(DeepSeekV32Detector):
     DSML_TOKEN = "｜DSML｜ "
 
     def __init__(self):
-        super().__init__()
-        self.bot_token = f"<{self.dsml_token}calls>"
-        self.eot_token = f"</{self.dsml_token}calls>"
+        super().__init__(block_name="calls")
+        self._invoke_or_block_end = re.compile(rf"{self._invoke_header_pattern}|{re.escape(self.eot_token)}")
+        self._param_or_invoke_end = re.compile(rf"{self._param_header_pattern}|{re.escape(self.invoke_end_token)}")
+        self._in_invoke = False
+        self._parameter_name: Optional[str] = None
+        self._parameter_is_string = False
+        self._parameter_names: set[str] = set()
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
-        # Buffer a calls block so parameter additions never invalidate already emitted JSON.
         self._buffer += new_text
-        normal_text, calls = "", []
+        events: list[str | ToolCallItem] = []
+        tool_name, arguments = None, []
         while self._buffer:
-            start = self._buffer.find(self.bot_token)
-            if start == -1:
-                partial = self._ends_with_partial_token(self._buffer, self.bot_token)
-                normal_text += self._buffer[:-partial] if partial else self._buffer
-                self._buffer = self._buffer[-partial:] if partial else ""
-                break
-            normal_text += self._buffer[:start]
-            self._buffer = self._buffer[start:]
-            end = self._buffer.find(self.eot_token)
-            if end == -1:
-                match = self.partial_invoke_regex.search(self._buffer)
-                if match and not self.current_tool_name_sent and match.group(1) in self._get_tool_indices(tools):
-                    if self.current_tool_id == -1:
-                        self.current_tool_id = 0
-                    calls.append(ToolCallItem(tool_index=self.current_tool_id, name=match.group(1), parameters=""))
-                    self.current_tool_name_sent = True
-                break
-            end += len(self.eot_token)
-            parsed = self.detect_and_parse(self._buffer[:end], tools)
-            if self.current_tool_id == -1:
-                self.current_tool_id = 0
-            for index, item in enumerate(parsed.calls):
-                item.tool_index = self.current_tool_id
-                if index == 0 and self.current_tool_name_sent:
-                    item.name = None
-                calls.append(item)
+            if not self._in_function_calls:
+                start = self._buffer.find(self.bot_token)
+                if start == -1:
+                    partial = self._ends_with_partial_token(self._buffer, self.bot_token)
+                    events.append(self._buffer[:-partial] if partial else self._buffer)
+                    self._buffer = self._buffer[-partial:] if partial else ""
+                    break
+                if start:
+                    events.append(self._buffer[:start])
+                self._buffer = self._buffer[start + len(self.bot_token) :]
+                self._in_function_calls = True
+                continue
+
+            if not self._in_invoke:
+                match = self._invoke_or_block_end.search(self._buffer)
+                if not match:
+                    break
+                self._buffer = self._buffer[match.end() :]
+                name = match[1]
+                if name is None:
+                    self._in_function_calls = False
+                    continue
+                self._in_invoke = True
+                if ENABLE_TOOL_NAME_CHECK and name not in self._get_tool_indices(tools):
+                    logger.warning(f"Model attempted to call undefined function: {name}")
+                    continue
                 self.current_tool_id += 1
-            self.current_tool_name_sent = False
-            self._buffer = self._buffer[end:]
-        return StreamingParseResult(normal_text=normal_text, calls=calls)
+                self.current_tool_name_sent = True
+                tool_name = name
+                arguments.append("{")
+                continue
+
+            if self._parameter_name is None:
+                match = self._param_or_invoke_end.search(self._buffer)
+                if not match:
+                    break
+                self._buffer = self._buffer[match.end() :]
+                name, is_string = match.groups()
+                if name is None:
+                    if self.current_tool_name_sent:
+                        arguments.append("}")
+                        events.append(
+                            ToolCallItem(tool_index=self.current_tool_id, name=tool_name, parameters="".join(arguments))
+                        )
+                        tool_name, arguments = None, []
+                    self._in_invoke = self.current_tool_name_sent = False
+                    self._parameter_names.clear()
+                    continue
+                if name in self._parameter_names:
+                    raise GenerationError(f"Duplicate DSML tool parameter: {name}")
+                self._parameter_name = name
+                self._parameter_is_string = is_string == "true"
+                if self.current_tool_name_sent:
+                    if self._parameter_names:
+                        arguments.append(", ")
+                    if self._parameter_is_string:
+                        arguments.append(json.dumps(name, ensure_ascii=False) + ': "')
+                self._parameter_names.add(name)
+                continue
+
+            end = self._buffer.find(self.param_end_token)
+            if self._parameter_is_string:
+                # Retain only a possible closing tag across chunks. Each other
+                # piece can be escaped independently inside the same JSON string.
+                value_end = end
+                if end < 0:
+                    value_end = len(self._buffer) - self._ends_with_partial_token(self._buffer, self.param_end_token)
+                if self.current_tool_name_sent and value_end:
+                    arguments.append(json.dumps(self._buffer[:value_end], ensure_ascii=False)[1:-1])
+                if end < 0:
+                    self._buffer = self._buffer[value_end:]
+                    break
+                if self.current_tool_name_sent:
+                    arguments.append('"')
+            elif end < 0:
+                # A non-string value can fall back to a string if it is invalid JSON.
+                break
+            elif self.current_tool_name_sent:
+                parameter = (self._parameter_name, None, self._buffer[:end])
+                arguments.append(self._dsml_params_to_json([parameter])[1:-1])
+            self._buffer = self._buffer[end + len(self.param_end_token) :]
+            self._parameter_name = None
+
+        if arguments:
+            events.append(ToolCallItem(tool_index=self.current_tool_id, name=tool_name, parameters="".join(arguments)))
+        return StreamingParseResult(
+            normal_text="".join(event for event in events if isinstance(event, str)),
+            calls=[event for event in events if isinstance(event, ToolCallItem)],
+            events=events,
+        )
 
 
 class FunctionCallParser:
@@ -2137,16 +2204,10 @@ class FunctionCallParser:
             - The normal text that should be displayed to the user
             - A list of tool calls parsed from the chunk
         """
+        result = self.parse_stream_result(chunk_text)
+        return result.normal_text, result.calls
+
+    def parse_stream_result(self, chunk_text: str) -> StreamingParseResult:
         if not self.tools:
-            return chunk_text, []
-        final_normal_text = ""
-        final_calls = []
-
-        sp_result = self.detector.parse_streaming_increment(chunk_text, self.tools)
-        if sp_result.normal_text:
-            final_normal_text = sp_result.normal_text
-        if sp_result.calls:
-            final_calls.extend(sp_result.calls)
-            final_normal_text = sp_result.normal_text
-
-        return final_normal_text, final_calls
+            return StreamingParseResult(normal_text=chunk_text)
+        return self.detector.parse_streaming_increment(chunk_text, self.tools)
