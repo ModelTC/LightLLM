@@ -4,6 +4,7 @@ from array import array
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 
 from lightllm.server.core.objs import FinishStatus, SamplingParams, StartArgs
@@ -15,132 +16,6 @@ from lightllm.server.pd_io_struct import ObjType, PD_Client_Obj
 def _node(mode="prefill", send_bytes=None):
     websocket = SimpleNamespace(send_bytes=send_bytes if send_bytes is not None else AsyncMock())
     return PD_Client_Obj(1, f"{mode}:8000", mode, {}, websocket=websocket)
-
-
-def test_cancelled_caller_leaves_its_send_owned_by_the_connection():
-    async def run():
-        started, release = asyncio.Event(), asyncio.Event()
-        written = []
-
-        async def send(payload):
-            if payload == b"request":
-                started.set()
-                await release.wait()
-            written.append(payload)
-
-        node = _node(send_bytes=send)
-        caller = asyncio.create_task(node.send_control_message(b"request"))
-        await asyncio.wait_for(started.wait(), 1)
-        owned_send = node._send_task
-        assert owned_send is not caller
-        caller.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await caller
-        assert not owned_send.cancelled()
-
-        abort = asyncio.create_task(node.send_control_message(b"abort"))
-        await asyncio.sleep(0)
-        assert written == []
-        release.set()
-        await asyncio.wait_for(abort, 1)
-        assert written == [b"request", b"abort"]
-        assert node._send_task is None
-        assert not node._send_lock.locked()
-
-    asyncio.run(run())
-
-
-def test_cancelled_queued_send_is_skipped_without_blocking_later_messages():
-    async def run():
-        started, release = asyncio.Event(), asyncio.Event()
-        written = []
-
-        async def send(payload):
-            if payload == b"first":
-                started.set()
-                await release.wait()
-            written.append(payload)
-
-        node = _node(send_bytes=send)
-        first = asyncio.create_task(node.send_control_message(b"first"))
-        await asyncio.wait_for(started.wait(), 1)
-        cancelled = asyncio.create_task(node.send_control_message(b"cancelled"))
-        await asyncio.sleep(0)
-        cancelled.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await cancelled
-        last = asyncio.create_task(node.send_control_message(b"last"))
-        release.set()
-        await asyncio.wait_for(asyncio.gather(first, last), 1)
-        assert written == [b"first", b"last"]
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("cancel_caller", [False, True])
-def test_failed_send_invalidates_connection_and_releases_waiters(cancel_caller):
-    async def run():
-        started, fail = asyncio.Event(), asyncio.Event()
-        attempted = []
-
-        async def send(payload):
-            attempted.append(payload)
-            started.set()
-            await fail.wait()
-            raise ConnectionError("peer disconnected")
-
-        node = _node(send_bytes=send)
-        first = asyncio.create_task(node.send_control_message(b"first"))
-        await asyncio.wait_for(started.wait(), 1)
-        owned_send = node._send_task
-        if cancel_caller:
-            first.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await first
-        queued = asyncio.create_task(node.send_control_message(b"queued"))
-        await asyncio.sleep(0)
-        fail.set()
-        if not cancel_caller:
-            with pytest.raises(ConnectionError, match="peer disconnected"):
-                await asyncio.wait_for(first, 1)
-        with pytest.raises(ConnectionError, match="unavailable"):
-            await asyncio.wait_for(queued, 1)
-        with pytest.raises(ConnectionError, match="peer disconnected"):
-            await owned_send
-        assert attempted == [b"first"]
-        assert node.websocket is None
-        assert node._send_task is None
-        assert not node._send_lock.locked()
-
-    asyncio.run(run())
-
-
-def test_disconnect_rejects_new_and_queued_sends_while_an_old_send_is_pending():
-    async def run():
-        started, release = asyncio.Event(), asyncio.Event()
-        attempted = []
-
-        async def send(payload):
-            attempted.append(payload)
-            started.set()
-            await release.wait()
-
-        node = _node(send_bytes=send)
-        first = asyncio.create_task(node.send_control_message(b"first"))
-        await asyncio.wait_for(started.wait(), 1)
-        queued = asyncio.create_task(node.send_control_message(b"queued"))
-        await asyncio.sleep(0)
-        node.websocket = None
-        with pytest.raises(ConnectionError, match="unavailable"):
-            await asyncio.wait_for(node.send_control_message(b"new"), 0.1)
-        release.set()
-        await asyncio.wait_for(first, 1)
-        with pytest.raises(ConnectionError, match="unavailable"):
-            await asyncio.wait_for(queued, 1)
-        assert attempted == [b"first"]
-        assert not node._send_lock.locked()
-
-    asyncio.run(run())
 
 
 @pytest.mark.usefixtures("single_http_worker_start_args")
@@ -170,9 +45,7 @@ def test_old_connection_cleanup_wakes_only_its_requests_and_keeps_replacement(co
             old_status.raise_if_error()
         assert new_status.error_info is None
         assert not new_status.event.is_set()
-        with pytest.raises(ConnectionError, match="unavailable"):
-            await old.send_control_message(b"stale")
-        await replacement.send_control_message(b"new")
+        await replacement.websocket.send_bytes(b"new")
         replacement.websocket.send_bytes.assert_awaited_once_with(b"new")
 
     asyncio.run(run())
@@ -203,14 +76,36 @@ def test_abort_notifies_the_other_peer_while_one_send_is_blocked():
     asyncio.run(run())
 
 
-def test_requests_handshake_and_abort_share_control_sender_and_preserve_int64_ids():
+def test_abort_notifications_survive_cancelled_http_scope():
+    async def run():
+        notified = asyncio.Event()
+        messages = []
+
+        async def send(payload):
+            await asyncio.sleep(0)
+            messages.append(pickle.loads(payload))
+            if len(messages) == 2:
+                notified.set()
+
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.req_id_to_out_inf = {123: ReqStatus(123, _node(send_bytes=send), _node("decode", send))}
+        with anyio.CancelScope() as scope:
+            scope.cancel()
+            await manager.abort(123)
+
+        await asyncio.wait_for(notified.wait(), 1)
+        assert messages == [(ObjType.ABORT, 123), (ObjType.ABORT, 123)]
+        assert 123 not in manager.req_id_to_out_inf
+
+    asyncio.run(run())
+
+
+def test_direct_requests_handshake_and_abort_preserve_int64_ids():
     async def run():
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
         manager.args = SimpleNamespace(pd_node_id=1)
         manager.req_id_to_out_inf = {}
         p_node, d_node = _node(), _node("decode")
-        for node in (p_node, d_node):
-            node.send_control_message = AsyncMock(wraps=node.send_control_message)
         params = SamplingParams()
         params.group_request_id, params.max_new_tokens = 123, 4
         ids = array("q", [1, 2 ** 40, 2 ** 63 - 1])
@@ -248,7 +143,7 @@ def test_requests_handshake_and_abort_share_control_sender_and_preserve_int64_id
         assert [message[0] for message in d_messages] == [ObjType.REQ, ObjType.ABORT]
         assert d_messages[0][1][0].typecode == "q"
         assert d_messages[0][1][0] == ids
-        assert p_node.send_control_message.await_count == 3
-        assert d_node.send_control_message.await_count == 2
+        assert p_node.websocket.send_bytes.await_count == 3
+        assert d_node.websocket.send_bytes.await_count == 2
 
     asyncio.run(run())

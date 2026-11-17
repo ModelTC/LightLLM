@@ -82,7 +82,7 @@ def test_kv_status_is_forwarded_without_registration_or_reply(monkeypatch):
     websocket.send_bytes.assert_not_awaited()
 
 
-def test_master_registers_with_config_server_without_compression(monkeypatch):
+def test_config_registration_uses_pd_write_buffer_limits(monkeypatch):
     from lightllm.server.httpserver_for_pd_master import register_loop
     from lightllm.server.pd_io_struct import PD_Master_Obj
 
@@ -91,6 +91,7 @@ def test_master_registers_with_config_server_without_compression(monkeypatch):
     @asynccontextmanager
     async def connect(uri, **kwargs):
         assert uri == "ws://config:9000/pd_master_register"
+        assert kwargs["write_limit"] == (64 * 1024 * 1024, 48 * 1024 * 1024)
         assert kwargs["compression"] is None
         yield websocket
 

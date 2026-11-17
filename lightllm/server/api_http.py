@@ -109,6 +109,9 @@ class G_Objs:
             self.model_created = int(time.time())
 
         if args.run_mode == "pd_master":
+            from lightllm.utils.websocket_utils import configure_pd_master_write_buffer
+
+            configure_pd_master_write_buffer()
             self.httpserver_manager = HttpServerManagerForPDMaster(args=args)
             self.metric_client = self.httpserver_manager.metric_client
         else:

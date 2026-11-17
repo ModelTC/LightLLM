@@ -585,7 +585,7 @@ class HttpServerManagerForPDMaster:
 
         old_max_new_tokens = sampling_params.max_new_tokens
         sampling_params.max_new_tokens = 1
-        await p_node.send_control_message(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         try:
             await self._wait_for_event_or_disconnect(
@@ -604,7 +604,7 @@ class HttpServerManagerForPDMaster:
         logger.debug(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
         sampling_params.max_new_tokens = old_max_new_tokens
-        await d_node.send_control_message(
+        await d_node.websocket.send_bytes(
             pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
         )
 
@@ -641,7 +641,7 @@ class HttpServerManagerForPDMaster:
         upkv_status: PDUpKVStatus = up_status_event.upkv_status
         pd_kv_trans_params: bytes = upkv_status.pd_kv_trans_params
         decode_node_info: PDDecodeNodeInfo = pickle.loads(pd_kv_trans_params)
-        await p_node.send_control_message(
+        await p_node.websocket.send_bytes(
             pickle.dumps((ObjType.PD_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
         )
 
@@ -823,9 +823,16 @@ class HttpServerManagerForPDMaster:
             d_node = req_status.d_node
 
         payload = pickle.dumps((ObjType.ABORT, group_request_id))
-        await asyncio.gather(
-            *(node.send_control_message(payload) for node in (p_node, d_node) if node is not None),
-            return_exceptions=True,
+        # HTTP cancellation must not cancel the peer cleanup notifications.
+        await asyncio.shield(
+            asyncio.gather(
+                *(
+                    node.websocket.send_bytes(payload)
+                    for node in (p_node, d_node)
+                    if node is not None and node.websocket is not None
+                ),
+                return_exceptions=True,
+            )
         )
         return
 
