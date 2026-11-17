@@ -136,11 +136,18 @@ class _DecodeTransModule:
         )
         self.kv_move_buffer = kv_move_buffer
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
+        pd_operator = self.resource_managers[device_id].get_pd_operator()
+        pd_page_kind_payload_bytes = {}
+        for kind in ("kv", "att_state"):
+            payload_bytes = pd_operator.get_pd_page_kind_payload_bytes(kind)
+            if payload_bytes > 0:
+                pd_page_kind_payload_bytes[kind] = payload_bytes
         self.transporter = create_kv_transporter(
             args=self.args,
             node_id=self.args.pd_node_id,
             tp_idx=device_id,
             kv_move_buffer=kv_move_buffer,
+            pd_page_kind_payload_bytes=pd_page_kind_payload_bytes,
         )
         self.recv_task_group_queue = queue.Queue()
         self.waiting_dict_lock = threading.Lock()

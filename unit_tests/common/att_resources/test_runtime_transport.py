@@ -143,8 +143,8 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
                 dst_token_indices=dp_indices,
                 src_big_page_ids=[],
                 dst_big_page_ids=[],
-                src_req_idx=0,
-                dst_req_idx=0,
+                src_req_indices=[0],
+                dst_req_indices=[0],
             )
         return
     managers[1].get_dp_shared_operator().copy_from_dp(
@@ -153,8 +153,8 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
         dst_token_indices=dp_indices,
         src_big_page_ids=[],
         dst_big_page_ids=[],
-        src_req_idx=0,
-        dst_req_idx=0,
+        src_req_indices=[0],
+        dst_req_indices=[0],
     )
     assert_token_fields_equal(
         source=src,
