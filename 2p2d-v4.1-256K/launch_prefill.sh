@@ -23,7 +23,7 @@ exec /opt/conda/bin/python -u -m "${LIGHTLLM_SERVER_MODULE:-lightllm.server.api_
     --nccl_host "$PREFILL_NCCL_HOST" \
     --nccl_port 28741 \
     --enable_ep_moe \
-    --ep_moe_backend deepep_v2 \
+    --ep_moe_backend deepep_v2_humming \
     --data_type bfloat16 \
     --host 0.0.0.0 \
     --port 8019 \
