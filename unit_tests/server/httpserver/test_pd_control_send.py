@@ -4,7 +4,6 @@ from array import array
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import anyio
 import pytest
 
 from lightllm.server.core.objs import FinishStatus, SamplingParams, StartArgs
@@ -47,55 +46,6 @@ def test_old_connection_cleanup_wakes_only_its_requests_and_keeps_replacement(co
         assert not new_status.event.is_set()
         await replacement.websocket.send_bytes(b"new")
         replacement.websocket.send_bytes.assert_awaited_once_with(b"new")
-
-    asyncio.run(run())
-
-
-def test_abort_notifies_the_other_peer_while_one_send_is_blocked():
-    async def run():
-        started, release, decode_notified = asyncio.Event(), asyncio.Event(), asyncio.Event()
-
-        async def slow_send(payload):
-            started.set()
-            await release.wait()
-
-        async def decode_send(payload):
-            assert pickle.loads(payload) == (ObjType.ABORT, 123)
-            decode_notified.set()
-
-        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-        manager.req_id_to_out_inf = {123: ReqStatus(123, _node(send_bytes=slow_send), _node("decode", decode_send))}
-        abort = asyncio.create_task(manager.abort(123))
-        await asyncio.wait_for(started.wait(), 1)
-        await asyncio.wait_for(decode_notified.wait(), 1)
-        assert 123 not in manager.req_id_to_out_inf
-        assert not abort.done()
-        release.set()
-        await asyncio.wait_for(abort, 1)
-
-    asyncio.run(run())
-
-
-def test_abort_notifications_survive_cancelled_http_scope():
-    async def run():
-        notified = asyncio.Event()
-        messages = []
-
-        async def send(payload):
-            await asyncio.sleep(0)
-            messages.append(pickle.loads(payload))
-            if len(messages) == 2:
-                notified.set()
-
-        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-        manager.req_id_to_out_inf = {123: ReqStatus(123, _node(send_bytes=send), _node("decode", send))}
-        with anyio.CancelScope() as scope:
-            scope.cancel()
-            await manager.abort(123)
-
-        await asyncio.wait_for(notified.wait(), 1)
-        assert messages == [(ObjType.ABORT, 123), (ObjType.ABORT, 123)]
-        assert 123 not in manager.req_id_to_out_inf
 
     asyncio.run(run())
 

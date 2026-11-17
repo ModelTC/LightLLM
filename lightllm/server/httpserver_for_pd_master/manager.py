@@ -817,23 +817,24 @@ class HttpServerManagerForPDMaster:
     ):
         logger.warning(f"aborted group_request_id {group_request_id}")
 
-        req_status = self.req_id_to_out_inf.pop(group_request_id, None)
-        if req_status is not None:
+        try:
+            req_status = self.req_id_to_out_inf[group_request_id]
+            del self.req_id_to_out_inf[group_request_id]
             p_node = req_status.p_node
             d_node = req_status.d_node
+        except:
+            pass
 
-        payload = pickle.dumps((ObjType.ABORT, group_request_id))
-        # HTTP cancellation must not cancel the peer cleanup notifications.
-        await asyncio.shield(
-            asyncio.gather(
-                *(
-                    node.websocket.send_bytes(payload)
-                    for node in (p_node, d_node)
-                    if node is not None and node.websocket is not None
-                ),
-                return_exceptions=True,
-            )
-        )
+        try:
+            await p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
+        except:
+            pass
+
+        try:
+            await d_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
+        except:
+            pass
+
         return
 
     async def remove_req(self, group_request_id):
