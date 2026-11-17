@@ -91,9 +91,9 @@ class TritonPrefillAttState(BasePrefillAttState):
             max_q_seq_len=infer_state.max_q_seq_len,
         )
         return self.backend.prefill_backend.forward(
-            batch,
-            DenseInputs(q, k, v, sliding_window),
-            out=alloc_func(q.shape, q.dtype),
+            batch=batch,
+            inputs=DenseInputs(q=q, k_cache=k, v_cache=v, sliding_window=sliding_window),
+            out=alloc_func(q.shape, dtype=q.dtype, device=q.device),
             alloc_func=alloc_func,
         )
 
@@ -186,13 +186,13 @@ class TritonDecodeAttState(BaseDecodeAttState):
             req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
             b_req_idx=infer_state.b_req_idx,
             b_seq_len=infer_state.b_seq_len,
-            max_kv_seq_len=infer_state.max_kv_seq_len,
-            max_len_in_batch=self.decode_max_kv_seq_len,
+            kv_seq_len_upper_bound=infer_state.max_kv_seq_len,
+            tuning_kv_seq_len=self.decode_max_kv_seq_len,
         )
         return self.backend.decode_backend.forward(
-            batch,
-            DenseInputs(q, k, v, sliding_window),
-            out=alloc_func(q.shape, q.dtype),
+            batch=batch,
+            inputs=DenseInputs(q=q, k_cache=k, v_cache=v, sliding_window=sliding_window),
+            out=alloc_func(q.shape, dtype=q.dtype, device=q.device),
             alloc_func=alloc_func,
         )
 

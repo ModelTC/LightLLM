@@ -1,9 +1,11 @@
 import weakref
 from types import SimpleNamespace
+from typing import Iterator
 
 import pytest
 import torch
 
+from lightllm.common.attention.backend import TensorAllocator
 from lightllm.common.attention.backends.dense import DenseInputs, DensePrefillBatch, DenseDecodeBatch
 from lightllm.common.attention.backends.dense.triton import TritonDensePrefillBackend, TritonDenseDecodeBackend
 from lightllm.common.basemodel.attention.base_att import AttControl
@@ -12,6 +14,22 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+
+
+@pytest.fixture(params=["torch", "serving"])
+def allocator(request: pytest.FixtureRequest) -> Iterator[TensorAllocator]:
+    if request.param == "torch":
+        yield torch.empty
+        return
+
+    from lightllm.common.basemodel.layer_infer.base_layer_infer import BaseLayerInfer
+    from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+
+    g_cache_manager.cache_env_in()
+    try:
+        yield BaseLayerInfer.__new__(BaseLayerInfer).alloc_tensor
+    finally:
+        g_cache_manager.cache_env_out()
 
 
 def reference(q, k, v, token_map, req_ids, lengths, ready, window):
@@ -47,38 +65,54 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
     before = kv.clone()
     k, v = kv[:, :kv_heads], kv[:, kv_heads:]
     query_lengths = lengths - torch.tensor(ready, device="cuda", dtype=torch.int32)
-    q = torch.randn(int(query_lengths.sum()), q_heads, 64, device="cuda", dtype=dtype)
+    q = torch.randn(int(query_lengths.sum()), q_heads + 1, 64, device="cuda", dtype=dtype)[:, :q_heads]
+    q_before = q.clone()
     batch = DensePrefillBatch(
-        token_map,
-        req_ids,
-        lengths,
-        query_lengths.cumsum(0, dtype=torch.int32) - query_lengths,
-        torch.tensor(ready, device="cuda", dtype=torch.int32),
-        int(query_lengths.max()),
+        req_to_token_indexs=token_map,
+        b_req_idx=req_ids,
+        b_seq_len=lengths,
+        b_q_start_loc=query_lengths.cumsum(0, dtype=torch.int32) - query_lengths,
+        b_ready_cache_len=torch.tensor(ready, device="cuda", dtype=torch.int32),
+        max_q_seq_len=int(query_lengths.max()),
     )
-    out = torch.empty_like(q)
-    assert TritonDensePrefillBackend().forward(batch, DenseInputs(q, k, v, window), out=out) is out
+    out = torch.empty(q.shape[0], q_heads + 1, 64, device=q.device, dtype=q.dtype)[:, :q_heads]
+    inputs = DenseInputs(q=q, k_cache=k, v_cache=v, sliding_window=window)
+    assert TritonDensePrefillBackend().forward(batch=batch, inputs=inputs, out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k, v, token_map, req_ids, lengths, ready, window), atol=0.02, rtol=0.02
     )
+    torch.testing.assert_close(q, q_before, atol=0, rtol=0)
+
+    def allocate(shape: tuple[int, ...] | list[int], *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        assert device == q.device
+        return torch.empty(shape, dtype=dtype, device=device)
 
     for _ in range(3):
         lengths += 1
-        q = torch.randn(3, q_heads, 64, device="cuda", dtype=dtype)
-        batch = DenseDecodeBatch(token_map, req_ids, lengths, int(lengths.max()), int(lengths.max()))
-        out = torch.empty_like(q)
-        assert TritonDenseDecodeBackend().forward(batch, DenseInputs(q, k, v, window), out=out) is out
+        q = torch.randn(3, q_heads + 1, 64, device="cuda", dtype=dtype)[:, :q_heads]
+        q_before = q.clone()
+        batch = DenseDecodeBatch(
+            req_to_token_indexs=token_map,
+            b_req_idx=req_ids,
+            b_seq_len=lengths,
+            kv_seq_len_upper_bound=int(lengths.max()),
+            tuning_kv_seq_len=int(lengths.max()),
+        )
+        out = torch.empty(3, q_heads + 1, 64, device=q.device, dtype=q.dtype)[:, :q_heads]
+        inputs = DenseInputs(q=q, k_cache=k, v_cache=v, sliding_window=window)
+        assert TritonDenseDecodeBackend().forward(batch=batch, inputs=inputs, out=out, alloc_func=allocate) is out
         torch.testing.assert_close(
             out.float(),
             reference(q, k, v, token_map, req_ids, lengths, (lengths - 1).tolist(), window),
             atol=0.02,
             rtol=0.02,
         )
+        torch.testing.assert_close(q, q_before, atol=0, rtol=0)
     torch.testing.assert_close(kv, before, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("q_heads,kv_heads", [(4, 4), (8, 2)])
-def test_adapter_graph(q_heads, kv_heads):
+def test_adapter_graph(q_heads, kv_heads, allocator):
     torch.manual_seed(43)
     owner = InferStateInfo()
     owner.batch_size = 2
@@ -100,11 +134,8 @@ def test_adapter_graph(q_heads, kv_heads):
     kv = torch.randn(1024, 2 * kv_heads, 64, device="cuda", dtype=q.dtype)
     k, v = kv[:, :kv_heads], kv[:, kv_heads:]
 
-    def allocate(shape, dtype, device="cuda"):
-        return torch.empty(shape, dtype=dtype, device=device)
-
-    def forward():
-        return state.decode_att(q, k, v, AttControl(), allocate)
+    def forward() -> torch.Tensor:
+        return state.decode_att(q=q, k=k, v=v, att_control=AttControl(), alloc_func=allocator)
 
     forward()
     torch.cuda.synchronize()
@@ -117,6 +148,7 @@ def test_adapter_graph(q_heads, kv_heads):
         graph.replay()
         expected = reference(q, k, v, token_map, owner.b_req_idx, owner.b_seq_len, [x - 1 for x in lengths], (-1, -1))
         torch.testing.assert_close(actual.float(), expected, atol=0.02, rtol=0.02)
+    assert state.decode_max_kv_seq_len == 33
     owner_ref = weakref.ref(owner)
     del owner
     assert owner_ref() is None

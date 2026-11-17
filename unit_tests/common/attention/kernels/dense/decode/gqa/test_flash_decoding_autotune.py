@@ -20,6 +20,7 @@ from lightllm.common.attention.kernels.dense.decode.gqa import (
 from lightllm.common.attention.kernels.dense.decode.gqa.gqa_flash_decoding_stage2 import (
     flash_decode_stage2,
 )
+from lightllm.common.attention.kernels.dense.decode.mha import flash_decoding as mha_decode_module
 from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType, AutotuneLevel
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
@@ -125,7 +126,8 @@ def test_rebuild_preserves_layout_and_bounds_indices(monkeypatch, num_tokens):
         torch.testing.assert_close(inputs[name], value)
 
 
-def test_state_retains_actual_length_before_graph_capture(monkeypatch):
+@pytest.mark.parametrize("q_heads", [2, 8])
+def test_state_retains_actual_length_before_graph_capture(monkeypatch, q_heads):
     infer_state = InferStateInfo()
     infer_state.max_kv_seq_len = 8193
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.empty(2, 32768, dtype=torch.int32))
@@ -143,16 +145,24 @@ def test_state_retains_actual_length_before_graph_capture(monkeypatch):
     state.init_state()
     state.infer_state.max_kv_seq_len = 32768
     calls = []
-    monkeypatch.setattr(
-        decode_module, "gqa_token_decode_attention_flash_decoding", lambda **kwargs: calls.append(kwargs)
-    )
+    if q_heads == 2:
+        monkeypatch.setattr(
+            mha_decode_module, "token_decode_attention_flash_decoding", lambda **kwargs: calls.append(kwargs)
+        )
+    else:
+        monkeypatch.setattr(
+            decode_module, "gqa_token_decode_attention_flash_decoding", lambda **kwargs: calls.append(kwargs)
+        )
     state.decode_att(
-        q=torch.empty(2, 8, 64),
+        q=torch.empty(2, q_heads, 64),
         k=torch.empty(16, 2, 64),
         v=torch.empty(16, 2, 64),
-        alloc_func=lambda shape, dtype: torch.empty(shape, dtype=dtype),
+        alloc_func=torch.empty,
     )
-    assert calls[0]["max_len_in_batch"] == 8193
+    if q_heads == 2:
+        assert calls[0]["max_kv_seq_len"] == 32768
+    else:
+        assert calls[0]["max_len_in_batch"] == 8193
 
 
 def reference_attention(inputs):

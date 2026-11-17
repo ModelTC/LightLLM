@@ -20,7 +20,7 @@ def gqa_token_decode_attention_flash_decoding(
     from .gqa_flash_decoding_stage1 import flash_decode_stage1
     from .gqa_flash_decoding_stage2 import flash_decode_stage2
 
-    o_tensor = alloc_tensor_func(q.shape, q.dtype, q.device) if out is None else out
+    o_tensor = alloc_tensor_func(q.shape, dtype=q.dtype, device=q.device) if out is None else out
 
     # Because we need to allocate some intermediate tensors, considering parallelism and
     # intermediate memory consumption, when batch_size is small, block_num is larger,
@@ -34,8 +34,8 @@ def gqa_token_decode_attention_flash_decoding(
     else:
         block_num = 32
 
-    mid_o = alloc_tensor_func([batch_size, q_head_num, block_num, head_dim], dtype=q.dtype, device="cuda")
-    mid_o_logexpsum = alloc_tensor_func([batch_size, q_head_num, block_num], dtype=torch.float32, device="cuda")
+    mid_o = alloc_tensor_func([batch_size, q_head_num, block_num, head_dim], dtype=q.dtype, device=q.device)
+    mid_o_logexpsum = alloc_tensor_func([batch_size, q_head_num, block_num], dtype=torch.float32, device=q.device)
 
     flash_decode_stage1(
         q=q.view(calcu_shape1),
