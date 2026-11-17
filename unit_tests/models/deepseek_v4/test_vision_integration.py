@@ -276,6 +276,8 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
     module.args = SimpleNamespace(page_size=256)
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
+        is_deepseek_v4=False,
+        dp_world_size=1,
         _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
             req_manager=SimpleNamespace(req_to_token_indexs=table),

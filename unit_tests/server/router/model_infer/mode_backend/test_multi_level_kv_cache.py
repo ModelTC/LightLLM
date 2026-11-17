@@ -187,6 +187,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     backend = SimpleNamespace(
         is_master_in_dp=False,
         is_deepseek_v4=False,
+        dp_world_size=2,
         radix_cache=None,
         model=SimpleNamespace(
             mem_manager=SimpleNamespace(operator=operator),

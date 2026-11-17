@@ -154,6 +154,7 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
         is_deepseek_v4=False,
+        dp_world_size=1,
         _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(mem_manager=mem, req_manager=requests),
     )

@@ -306,6 +306,7 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
         is_deepseek_v4=False,
+        dp_world_size=1,
         _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
             req_manager=SimpleNamespace(req_to_token_indexs=table),

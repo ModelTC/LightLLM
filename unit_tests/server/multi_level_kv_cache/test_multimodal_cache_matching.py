@@ -125,6 +125,8 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
     module.need_sync_compute_stream = lambda: False
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
+        is_deepseek_v4=False,
+        dp_world_size=1,
         _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
             req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(1024).view(1, -1)),

@@ -139,7 +139,12 @@ def test_store_allocations_do_not_overwrite_another_loading_owner():
 
 @pytest.mark.parametrize(
     "is_dsv4, tp_size, expected_calls",
-    [(False, 1, ["load", "sync", "barrier"]), (True, 1, ["load"]), (True, 2, ["load", "barrier"])],
+    [
+        (False, 1, ["load", "sync"]),
+        (False, 2, ["load", "sync", "barrier"]),
+        (True, 1, ["load"]),
+        (True, 2, ["load", "barrier"]),
+    ],
 )
 def test_loader_uses_events_for_dsv4_and_keeps_other_models_synchronous(monkeypatch, is_dsv4, tp_size, expected_calls):
     obj = module()
