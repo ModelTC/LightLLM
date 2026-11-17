@@ -3,15 +3,17 @@ import torch
 
 def gqa_token_decode_attention_flash_decoding(
     q: torch.Tensor,
-    infer_state,
     cache_k: torch.Tensor,
     cache_v: torch.Tensor,
+    req_to_token_indexs: torch.Tensor,
+    b_req_idx: torch.Tensor,
+    b_seq_len: torch.Tensor,
     max_len_in_batch: int,
     out=None,
     alloc_tensor_func=torch.empty,
     sliding_window=(-1, -1),
 ):
-    batch_size = infer_state.batch_size
+    batch_size = b_req_idx.shape[0]
     q_head_num, head_dim = q.shape[1], q.shape[2]
     calcu_shape1 = (batch_size, q_head_num, head_dim)
 
@@ -39,9 +41,9 @@ def gqa_token_decode_attention_flash_decoding(
         q=q.view(calcu_shape1),
         k=cache_k,
         v=cache_v,
-        Req_to_tokens=infer_state.req_manager.req_to_token_indexs,
-        B_req_idx=infer_state.b_req_idx,
-        B_Seqlen=infer_state.b_seq_len,
+        Req_to_tokens=req_to_token_indexs,
+        B_req_idx=b_req_idx,
+        B_Seqlen=b_seq_len,
         max_len_in_batch=max_len_in_batch,
         mid_out=mid_o,
         mid_out_logsumexp=mid_o_logexpsum,
@@ -51,7 +53,7 @@ def gqa_token_decode_attention_flash_decoding(
     flash_decode_stage2(
         mid_out=mid_o,
         mid_out_logexpsum=mid_o_logexpsum,
-        B_Seqlen=infer_state.b_seq_len,
+        B_Seqlen=b_seq_len,
         out=o_tensor.view(calcu_shape1),
         block_seq=BLOCK_SEQ,
         sliding_window=sliding_window,

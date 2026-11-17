@@ -1,10 +1,19 @@
 import torch
 
 
-def token_decode_attention_flash_decoding(q, infer_state, cache_k, cache_v, out=None, alloc_tensor_func=torch.empty):
+def token_decode_attention_flash_decoding(
+    q,
+    cache_k,
+    cache_v,
+    req_to_token_indexs,
+    b_req_idx,
+    b_seq_len,
+    max_kv_seq_len,
+    out=None,
+    alloc_tensor_func=torch.empty,
+):
     BLOCK_SEQ = 256
-    batch_size = infer_state.batch_size
-    max_kv_seq_len = infer_state.max_kv_seq_len
+    batch_size = b_req_idx.shape[0]
     q_head_num, head_dim = q.shape[1], q.shape[2]
     calcu_shape1 = (batch_size, q_head_num, head_dim)
 
@@ -24,13 +33,13 @@ def token_decode_attention_flash_decoding(q, infer_state, cache_k, cache_v, out=
         q.view(calcu_shape1),
         cache_k,
         cache_v,
-        infer_state.req_manager.req_to_token_indexs,
-        infer_state.b_req_idx,
-        infer_state.b_seq_len,
-        infer_state.max_kv_seq_len,
+        req_to_token_indexs,
+        b_req_idx,
+        b_seq_len,
+        max_kv_seq_len,
         mid_o,
         mid_o_logexpsum,
         BLOCK_SEQ,
     )
-    flash_decode_stage2(mid_o, mid_o_logexpsum, infer_state.b_seq_len, o_tensor.view(calcu_shape1), BLOCK_SEQ)
+    flash_decode_stage2(mid_o, mid_o_logexpsum, b_seq_len, o_tensor.view(calcu_shape1), BLOCK_SEQ)
     return o_tensor

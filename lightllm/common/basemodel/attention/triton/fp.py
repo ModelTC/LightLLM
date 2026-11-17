@@ -4,9 +4,16 @@ import torch
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional
 from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
+from lightllm.common.attention.backends.dense import DenseInputs, DensePrefillBatch, DenseDecodeBatch
+from lightllm.common.attention.backends.dense.triton import TritonDensePrefillBackend, TritonDenseDecodeBackend
 
 
 class TritonAttBackend(BaseAttBackend):
+    def __init__(self, model):
+        super().__init__(model)
+        self.prefill_backend = TritonDensePrefillBackend()
+        self.decode_backend = TritonDenseDecodeBackend()
+
     def create_att_prefill_state(self, infer_state) -> "TritonPrefillAttState":
         return TritonPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
@@ -69,28 +76,26 @@ class TritonPrefillAttState(BasePrefillAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        from lightllm.common.attention.kernels.dense.prefill.context_flashattention_nopad import context_attention_fwd
-
         if att_control.use_sliding_window:
             sliding_window = att_control.sliding_window
         else:
             sliding_window = (-1, -1)
 
-        out = alloc_func(q.shape, q.dtype)
-        context_attention_fwd(
-            q,
-            k,
-            v,
-            out,
-            self.infer_state.b_req_idx,
-            self.infer_state.b_q_start_loc,
-            self.infer_state.b_seq_len,
-            self.infer_state.b_ready_cache_len,
-            self.infer_state.max_q_seq_len,
-            self.infer_state.req_manager.req_to_token_indexs,
-            sliding_window=sliding_window,
+        infer_state = self.infer_state
+        batch = DensePrefillBatch(
+            req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
+            b_req_idx=infer_state.b_req_idx,
+            b_seq_len=infer_state.b_seq_len,
+            b_q_start_loc=infer_state.b_q_start_loc,
+            b_ready_cache_len=infer_state.b_ready_cache_len,
+            max_q_seq_len=infer_state.max_q_seq_len,
         )
-        return out
+        return self.backend.prefill_backend.forward(
+            batch,
+            DenseInputs(q, k, v, sliding_window),
+            out=alloc_func(q.shape, q.dtype),
+            alloc_func=alloc_func,
+        )
 
 
 @dataclasses.dataclass
@@ -126,21 +131,15 @@ class TritonDecodeAttState(BaseDecodeAttState):
         else:
             draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
 
-            q_head_num = q.shape[1]
-            k_head_num = k.shape[1]
-
             if draft_step > 0:
-                assert q_head_num >= k_head_num, "speculative decode requires q_head_num >= k_head_num"
+                assert q.shape[1] >= k.shape[1], "speculative decode requires q_head_num >= k_head_num"
                 return self._spec_decode_gqa_att(q=q, k=k, v=v, alloc_func=alloc_func)
-            elif q_head_num == k_head_num:
-                assert att_control.use_sliding_window is False, "sliding_window not supported in non-gqa attention yet"
-                return self._normal_decode_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
-            elif q_head_num > k_head_num:
-                return self._normal_decode_gqa_flash_decoding_att(
-                    q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func
-                )
             else:
-                raise NotImplementedError("error")
+                if q.shape[1] == k.shape[1]:
+                    assert (
+                        att_control.use_sliding_window is False
+                    ), "sliding_window not supported in non-gqa attention yet"
+                return self._normal_decode_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
 
     def _alibi_decode_att(
         self,
@@ -169,30 +168,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         )
         return out
 
-    def _normal_decode_flash_decoding_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        alloc_func=torch.empty,
-    ):
-        from lightllm.common.attention.kernels.dense.decode.mha.flash_decoding import (
-            token_decode_attention_flash_decoding,
-        )
-
-        out = alloc_func(q.shape, q.dtype)
-
-        token_decode_attention_flash_decoding(
-            q=q,
-            infer_state=self.infer_state,
-            cache_k=k,
-            cache_v=v,
-            out=out,
-            alloc_tensor_func=alloc_func,
-        )
-        return out
-
-    def _normal_decode_gqa_flash_decoding_att(
+    def _normal_decode_att(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -200,29 +176,25 @@ class TritonDecodeAttState(BaseDecodeAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        from lightllm.common.attention.kernels.dense.decode.gqa.gqa_flash_decoding import (
-            gqa_token_decode_attention_flash_decoding,
-        )
-
         if att_control.use_sliding_window:
             sliding_window = att_control.sliding_window
         else:
             sliding_window = (-1, -1)
 
-        out = alloc_func(q.shape, q.dtype)
-
-        gqa_token_decode_attention_flash_decoding(
-            q=q,
-            infer_state=self.infer_state,
-            cache_k=k,
-            cache_v=v,
+        infer_state = self.infer_state
+        batch = DenseDecodeBatch(
+            req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
+            b_req_idx=infer_state.b_req_idx,
+            b_seq_len=infer_state.b_seq_len,
+            max_kv_seq_len=infer_state.max_kv_seq_len,
             max_len_in_batch=self.decode_max_kv_seq_len,
-            out=out,
-            alloc_tensor_func=alloc_func,
-            sliding_window=sliding_window,
         )
-
-        return out
+        return self.backend.decode_backend.forward(
+            batch,
+            DenseInputs(q, k, v, sliding_window),
+            out=alloc_func(q.shape, q.dtype),
+            alloc_func=alloc_func,
+        )
 
     def _spec_decode_gqa_att(
         self,

@@ -12,6 +12,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
+from lightllm.common.attention.backends.dense.triton import TritonDenseDecodeBackend
 from lightllm.common.attention.kernels.dense.decode.gqa import (
     gqa_flash_decoding as decode_module,
     gqa_flash_decoding_stage1 as stage1_module,
@@ -127,11 +128,15 @@ def test_rebuild_preserves_layout_and_bounds_indices(monkeypatch, num_tokens):
 def test_state_retains_actual_length_before_graph_capture(monkeypatch):
     infer_state = InferStateInfo()
     infer_state.max_kv_seq_len = 8193
+    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.empty(2, 32768, dtype=torch.int32))
+    infer_state.b_req_idx = torch.arange(2, dtype=torch.int32)
+    infer_state.b_seq_len = torch.full((2,), 8193, dtype=torch.int32)
     state = TritonDecodeAttState(
         backend=SimpleNamespace(
             model=SimpleNamespace(
                 is_mtp_draft_model=False, mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0)
-            )
+            ),
+            decode_backend=TritonDenseDecodeBackend(),
         ),
         _infer_state_weak_ref=weakref.ref(infer_state),
     )
