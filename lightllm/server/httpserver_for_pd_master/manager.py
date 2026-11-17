@@ -98,11 +98,13 @@ class HttpServerManagerForPDMaster:
         return False
 
     async def register_pd(self, pd_info_json, websocket):
-        self.pd_manager.register_pd(pd_info_json, websocket)
-        return
+        return self.pd_manager.register_pd(pd_info_json, websocket)
 
-    async def remove_pd(self, pd_info_json):
-        self.pd_manager.remove_pd(pd_info_json)
+    async def remove_pd(self, pd_client: PD_Client_Obj):
+        self.pd_manager.remove_pd(pd_client)
+        for req_status in tuple(self.req_id_to_out_inf.values()):
+            if req_status.p_node is pd_client or req_status.d_node is pd_client:
+                await req_status.set_error(f"PD {pd_client.mode} node {pd_client.client_ip_port} disconnected")
         return
 
     async def update_req_status(self, upkv_status: PDUpKVStatus):
@@ -583,7 +585,7 @@ class HttpServerManagerForPDMaster:
 
         old_max_new_tokens = sampling_params.max_new_tokens
         sampling_params.max_new_tokens = 1
-        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+        await p_node.send_control_message(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         try:
             await self._wait_for_event_or_disconnect(
@@ -602,7 +604,7 @@ class HttpServerManagerForPDMaster:
         logger.debug(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
         sampling_params.max_new_tokens = old_max_new_tokens
-        await d_node.websocket.send_bytes(
+        await d_node.send_control_message(
             pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
         )
 
@@ -639,7 +641,7 @@ class HttpServerManagerForPDMaster:
         upkv_status: PDUpKVStatus = up_status_event.upkv_status
         pd_kv_trans_params: bytes = upkv_status.pd_kv_trans_params
         decode_node_info: PDDecodeNodeInfo = pickle.loads(pd_kv_trans_params)
-        await p_node.websocket.send_bytes(
+        await p_node.send_control_message(
             pickle.dumps((ObjType.PD_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
         )
 
@@ -815,24 +817,16 @@ class HttpServerManagerForPDMaster:
     ):
         logger.warning(f"aborted group_request_id {group_request_id}")
 
-        try:
-            req_status = self.req_id_to_out_inf[group_request_id]
-            del self.req_id_to_out_inf[group_request_id]
+        req_status = self.req_id_to_out_inf.pop(group_request_id, None)
+        if req_status is not None:
             p_node = req_status.p_node
             d_node = req_status.d_node
-        except:
-            pass
 
-        try:
-            await p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
-        except:
-            pass
-
-        try:
-            await d_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
-        except:
-            pass
-
+        payload = pickle.dumps((ObjType.ABORT, group_request_id))
+        await asyncio.gather(
+            *(node.send_control_message(payload) for node in (p_node, d_node) if node is not None),
+            return_exceptions=True,
+        )
         return
 
     async def remove_req(self, group_request_id):
@@ -1088,13 +1082,12 @@ class PDManager:
         self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
 
         logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} registed")
-        return
+        return pd_client
 
-    def remove_pd(self, pd_info_json):
-        pd_client = PD_Client_Obj(**pd_info_json)
-        current = self.url_to_pd_nodes.get(pd_client.connection_key)
-        # 同一 key 可能已重新注册；旧连接退出时不能删除新连接。
-        if current is None or current.connection_id != pd_client.connection_id:
+    def remove_pd(self, pd_client: PD_Client_Obj):
+        # Invalidate this connection even if a replacement has already registered.
+        pd_client.websocket = None
+        if self.url_to_pd_nodes.get(pd_client.connection_key) is not pd_client:
             return
 
         self.url_to_pd_nodes.pop(pd_client.connection_key, None)

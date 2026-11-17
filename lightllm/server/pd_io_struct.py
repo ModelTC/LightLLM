@@ -1,3 +1,4 @@
+import asyncio
 import enum
 import time
 import copy
@@ -65,6 +66,8 @@ class PD_Client_Obj:
 
     dp_index: Optional[int] = None
     connection_id: Optional[str] = None
+    _send_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False, compare=False)
+    _send_task: Optional[asyncio.Task] = field(default=None, init=False, repr=False, compare=False)
 
     @staticmethod
     def make_connection_key(client_ip_port: str, dp_index: Optional[int]) -> str:
@@ -83,6 +86,35 @@ class PD_Client_Obj:
 
     def to_llm_url(self):
         return f"http://{self.client_ip_port}/pd_generate_stream"
+
+    async def send_control_message(self, payload: bytes) -> None:
+        """Serialize complete sends; the connection owns a send after its caller is cancelled."""
+        if self.websocket is None:
+            raise ConnectionError(f"PD control connection unavailable: {self.client_ip_port}")
+
+        await self._send_lock.acquire()
+        try:
+            if self.websocket is None:
+                raise ConnectionError(f"PD control connection unavailable: {self.client_ip_port}")
+            send_task = asyncio.create_task(self.websocket.send_bytes(payload))
+            self._send_task = send_task
+            send_task.add_done_callback(self._finish_control_send)
+        except BaseException:
+            self._send_lock.release()
+            raise
+
+        # The completion callback releases the lock, including when this caller is cancelled.
+        await asyncio.shield(send_task)
+
+    def _finish_control_send(self, task: asyncio.Task) -> None:
+        self._send_task = None
+        try:
+            task.result()
+        except BaseException:
+            self.websocket = None
+            logger.exception("PD control send failed: peer=%s", self.client_ip_port)
+        finally:
+            self._send_lock.release()
 
 
 @dataclass

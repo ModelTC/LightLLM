@@ -50,14 +50,14 @@ def test_split_connections_register_select_update_and_reconnect_independently():
     assert [node.run_status.total_token_usage_rate for node in manager.prefill_nodes] == [0, 0.1, 0.2, 0.3]
     replacement_socket = object()
     replacement_info = dict(_registration(args, 3), connection_id="replacement")
-    manager.register_pd(replacement_info, replacement_socket)
-    replacement = manager.url_to_pd_nodes["p:8000/dp3"]
+    replacement = manager.register_pd(replacement_info, replacement_socket)
     assert replacement.connection_key == cached_node.connection_key
-    manager.remove_pd(_registration(args, 3))
+    manager.remove_pd(cached_node)
+    assert cached_node.websocket is None
     assert manager.url_to_pd_nodes["p:8000/dp3"] is replacement
     assert replacement in manager.prefill_nodes
     assert replacement in manager.selector.prefill_nodes
-    manager.remove_pd(replacement_info)
+    manager.remove_pd(replacement)
     assert len(manager.prefill_nodes) == 3
     assert "p:8000/dp3" not in manager.url_to_pd_nodes
 
@@ -69,14 +69,14 @@ def test_unsplit_reconnection_ignores_old_connection_id_cleanup(mode):
     info = dict(_registration(args, mode=mode), connection_id="old")
     new_info = dict(info, connection_id="new")
     old_socket, new_socket = object(), object()
-    manager.register_pd(info, old_socket)
-    manager.register_pd(new_info, new_socket)
+    old = manager.register_pd(info, old_socket)
+    replacement = manager.register_pd(new_info, new_socket)
     key = f"{info['client_ip_port']}/dpNone"
-    replacement = manager.url_to_pd_nodes[key]
-    manager.remove_pd(info)
+    manager.remove_pd(old)
+    assert old.websocket is None
     assert manager.url_to_pd_nodes[key] is replacement
     assert replacement.websocket is new_socket
-    manager.remove_pd(new_info)
+    manager.remove_pd(replacement)
     assert key not in manager.url_to_pd_nodes
 
 
@@ -262,6 +262,7 @@ def test_reported_load_key_matches_registered_connection_without_rewriting(monke
     async def handle(obj):
         assert obj[2] == load_info
         manager.update_node_load_info(obj[2])
+        assert manager.url_to_pd_nodes[obj[2]["connection_key"]].websocket is websocket
         updated_nodes.append(manager.url_to_pd_nodes[obj[2]["connection_key"]])
 
     websocket = SimpleNamespace(
@@ -284,7 +285,7 @@ def test_reported_load_key_matches_registered_connection_without_rewriting(monke
     asyncio.run(api_http_pd.register_and_keep_alive(websocket))
     assert len(updated_nodes) == 1
     assert updated_nodes[0].dp_index == dp_index
-    assert updated_nodes[0].websocket is websocket
+    assert updated_nodes[0].websocket is None  # The handler invalidates its own connection on disconnect.
     assert updated_nodes[0].run_status.total_token_usage_rate == 0.7
 
 
