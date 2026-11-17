@@ -207,7 +207,7 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
 
         def connect(uri, **kwargs):
             assert uri == "ws://master:8000/pd_register"
-            assert kwargs["write_limit"] == (64 * 1024 * 1024, 48 * 1024 * 1024)
+            assert kwargs["write_limit"] == (8 * 1024 * 1024, 8 * 1024 * 1024 - 32 * 1024)
             assert kwargs["compression"] is None
             return Connection()
 

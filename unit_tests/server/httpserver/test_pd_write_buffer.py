@@ -48,7 +48,7 @@ def test_pd_write_limits_and_cancelled_frame_preserve_following_messages(monkeyp
                 await websocket.accept()
                 assert await websocket.receive_bytes() == b"start"
                 writer = connections[-1].writer
-                assert writer.transport.get_write_buffer_limits() == (48 * 1024 * 1024, 64 * 1024 * 1024)
+                assert writer.transport.get_write_buffer_limits() == (8 * 1024 * 1024 - 32 * 1024, 8 * 1024 * 1024)
                 writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
 
                 # A burst below the high watermark returns even while the peer
@@ -56,7 +56,7 @@ def test_pd_write_limits_and_cancelled_frame_preserve_following_messages(monkeyp
                 await websocket.send_bytes(payload)
                 assert writer.transport.get_write_buffer_size() > 0
 
-                # Force the backpressure case without allocating a 64+ MiB frame.
+                # Force the backpressure case without allocating an 8+ MiB frame.
                 writer.transport.set_write_buffer_limits(high=4096, low=1024)
                 sending = asyncio.create_task(websocket.send_bytes(payload))
 
@@ -107,7 +107,7 @@ def test_pd_write_limits_and_cancelled_frame_preserve_following_messages(monkeyp
                 ping_interval=None,
                 proxy=None,
             ) as peer:
-                assert peer.transport.get_write_buffer_limits() == (48 * 1024 * 1024, 64 * 1024 * 1024)
+                assert peer.transport.get_write_buffer_limits() == (8 * 1024 * 1024 - 32 * 1024, 8 * 1024 * 1024)
                 peer.transport.pause_reading()
                 try:
                     await peer.send(b"start")

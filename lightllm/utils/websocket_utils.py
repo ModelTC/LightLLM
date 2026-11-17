@@ -1,6 +1,6 @@
 """Write-buffer limits shared by PD WebSocket clients and masters."""
 
-PD_WEBSOCKET_WRITE_LIMIT = (64 * 1024 * 1024, 48 * 1024 * 1024)
+PD_WEBSOCKET_WRITE_LIMIT = (8 * 1024 * 1024, 8 * 1024 * 1024 - 32 * 1024)
 
 
 def configure_pd_master_write_buffer():

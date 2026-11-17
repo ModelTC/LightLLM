@@ -43,7 +43,7 @@ def test_status_is_sent_directly_without_control_frames_or_reply(monkeypatch):
         @asynccontextmanager
         async def connect(uri, **kwargs):
             assert uri == "ws://master:8100/kv_move_status"
-            assert kwargs["write_limit"] == (64 * 1024 * 1024, 48 * 1024 * 1024)
+            assert kwargs["write_limit"] == (8 * 1024 * 1024, 8 * 1024 * 1024 - 32 * 1024)
             assert kwargs["compression"] is None
             yield websocket
 
