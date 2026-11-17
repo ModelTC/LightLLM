@@ -139,6 +139,16 @@ def test_native_thinking_parameter_is_forwarded():
     assert "thinking" not in chat_dict
 
 
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_native_output_config_effort_is_forwarded(effort):
+    body = _base_body()
+    body["output_config"] = {"effort": effort}
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+
+    assert ChatCompletionRequest(**chat_dict).reasoning_effort == effort
+
+
 def test_replayed_thinking_is_preserved_through_request_validation():
     body = _tool_result_body("file contents")
     body["messages"][1]["content"].insert(

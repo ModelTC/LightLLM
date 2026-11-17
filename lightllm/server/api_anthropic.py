@@ -160,6 +160,12 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
         for k, v in extra_body.items():
             openai_dict.setdefault(k, v)
 
+    output_config = anthropic_body.get("output_config")
+    if isinstance(output_config, dict):
+        effort = output_config.get("effort")
+        if effort in ("low", "medium", "high", "xhigh", "max"):
+            openai_dict.setdefault("reasoning_effort", effort)
+
     _UNKNOWN_FIELDS = {"extra_body", "metadata", "anthropic_version", "cache_control"}
     dropped = [k for k in anthropic_body if k in _UNKNOWN_FIELDS]
     if dropped:

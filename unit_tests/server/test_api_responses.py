@@ -1173,7 +1173,9 @@ def test_native_chat_flushes_terminal_reasoning_buffer_before_finish(
         content = "".join(choice["delta"].get("content") or "" for choice in choices)
         reasoning = "".join(choice["delta"].get("reasoning") or "" for choice in choices)
         assert content == (tail if separate else "plan" + tail)
+        reasoning_content = "".join(choice["delta"].get("reasoning_content") or "" for choice in choices)
         assert reasoning == ("plan" if separate else "")
+        assert reasoning_content == reasoning
         assert [choice["finish_reason"] for choice in choices if choice.get("finish_reason")] == [finish]
         assert choices[-1]["delta"].get("content", "").endswith(tail)
 
