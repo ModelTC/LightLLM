@@ -4,6 +4,7 @@ from typing import Optional, Tuple, Any, Callable
 from .base_impl import FuseMoeBaseImpl
 from ..expert_parallel_state import ExpertParallelState
 from lightllm.distributed import dist_group_manager
+from lightllm.common.quantization.humming import HUMMING_QUANT_METHODS
 from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
@@ -19,6 +20,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     check_ep_expert_dtype,
     deepep_v2_decode_dispatch,
     deepep_v2_decode_combine,
+    GROUP32_EP_METHODS,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
@@ -76,7 +78,11 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         topk_idx = topk_idx.to(torch.long)
         if dist_group_manager.ep_decode_use_v2:
             recv_x, masked_m, handle = deepep_v2_decode_dispatch(
-                hidden_states, topk_idx, topk_weights, self.n_routed_experts
+                hidden_states,
+                topk_idx,
+                topk_weights,
+                self.n_routed_experts,
+                32 if self.quant_method.method_name in GROUP32_EP_METHODS else 128,
             )
             return recv_x, masked_m, topk_idx, topk_weights, handle, lambda: None
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
@@ -195,6 +201,10 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             expected_m=expected_m,
             clamp_limit=clamp_limit,
             alloc_tensor_func=alloc_tensor_func,
+            block_size_k=32 if self.quant_method.method_name in GROUP32_EP_METHODS else 128,
+            humming_gemms=(
+                (w13.humming_gemm, w2.humming_gemm) if self.quant_method.method_name in HUMMING_QUANT_METHODS else None
+            ),
         )
 
     def prefilled_group_gemm(
@@ -230,6 +240,11 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
                 hidden_dtype=hidden_dtype,
                 clamp_limit=clamp_limit,
+                humming_gemms=(
+                    (w13.humming_gemm, w2.humming_gemm)
+                    if self.quant_method.method_name in HUMMING_QUANT_METHODS
+                    else None
+                ),
             )
         else:
             gather_out = torch.empty(

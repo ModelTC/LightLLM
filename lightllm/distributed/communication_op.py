@@ -57,6 +57,7 @@ def get_deep_ep_prefill_moe_workspace_size(
     num_experts: int,
     world_size: int,
     hidden_dtype: torch.dtype,
+    activation_group_size: int = 128,
 ) -> int:
     """Size one Prefill microbatch workspace for the bounded grouped-MoE path.
 
@@ -85,7 +86,7 @@ def get_deep_ep_prefill_moe_workspace_size(
     silu_out = align_up(target_chunk_rows * intermediate_size * hidden_bytes, tensor_alignment)
     gemm_out_a = align_up(target_chunk_rows * 2 * intermediate_size * hidden_bytes, tensor_alignment)
     quant_out = align_up(target_chunk_rows * intermediate_size, tensor_alignment)
-    quant_scale = align_up(target_chunk_rows * (intermediate_size // expert_alignment) * 4, tensor_alignment)
+    quant_scale = align_up(target_chunk_rows * (intermediate_size // activation_group_size) * 4, tensor_alignment)
     gemm_out_b = align_up(target_chunk_rows * hidden_size * hidden_bytes, tensor_alignment)
 
     # TensorBufferManager uses first-fit allocation. W1 keeps silu_out and gemm_out_a
@@ -247,7 +248,8 @@ class DistributeGroupManager:
         args = get_env_start_args()
         self.ep_mega_moe_draft_buffer = None
         enable_ep_moe = args.enable_ep_moe
-        self.ep_decode_use_v2 = args.ep_moe_backend == "deepep_v2"
+        use_humming = args.ep_moe_backend == "deepep_v2_humming"
+        self.ep_decode_use_v2 = args.ep_moe_backend == "deepep_v2" or use_humming
         prefill_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
         decode_num_max_dispatch_tokens_per_rank = (
             None if args.run_mode == "prefill" else get_deepep_num_max_dispatch_tokens_per_rank_decode()
@@ -264,8 +266,12 @@ class DistributeGroupManager:
             self.ep_num_sms = None
             return
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"
-        if self.ep_decode_use_v2 and expert_quant_method_names != {FP8_MOE_QUANT_METHOD}:
-            raise ValueError("--ep_moe_backend deepep_v2 requires FP8 DeepGEMM experts")
+        from lightllm.common.quantization.humming import HUMMING_QUANT_METHODS
+        from lightllm.common.quantization.w8a8 import FP8_MOE_B32_QUANT_METHOD
+
+        v2_methods = HUMMING_QUANT_METHODS if use_humming else {FP8_MOE_QUANT_METHOD, FP8_MOE_B32_QUANT_METHOD}
+        if self.ep_decode_use_v2 and (not expert_quant_method_names or expert_quant_method_names - v2_methods):
+            raise ValueError(f"--ep_moe_backend {args.ep_moe_backend} requires one of {sorted(v2_methods)}")
 
         global_world_size = get_global_world_size()
         deepep_group = dist.new_group(list(range(global_world_size)))
@@ -386,6 +392,9 @@ class DistributeGroupManager:
                 num_experts=self.ll_prefill_num_experts,
                 world_size=global_world_size,
                 hidden_dtype=get_torch_dtype(args.data_type),
+                activation_group_size=(
+                    32 if use_humming or FP8_MOE_B32_QUANT_METHOD in expert_quant_method_names else 128
+                ),
             )
             self.ep_prefill_moe_workspace = torch.empty(
                 workspace_size * len(self.groups),

@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import triton
 
 from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_fused_moe_ep as moe
 from lightllm.distributed import communication_op
@@ -28,7 +29,7 @@ def test_v2_dispatch_keeps_collective_capacity_and_compute_stream_ownership(monk
 
     monkeypatch.setattr(moe.dist_group_manager, "ep_buffer", SimpleNamespace(dispatch=dispatch, num_ranks=16))
     monkeypatch.setattr(moe, "get_deepep_num_max_dispatch_tokens_per_rank_decode", lambda: 384)
-    monkeypatch.setattr(moe, "per_token_group_quant_fp8", lambda x, block: quantized)
+    monkeypatch.setattr(moe, "per_token_group_quant_fp8", lambda x, block, **kwargs: quantized)
     monkeypatch.setattr(
         moe, "deep_gemm", SimpleNamespace(get_mk_alignment_for_contiguous_layout=lambda: 128), raising=False
     )
@@ -155,3 +156,53 @@ def test_v2_initialization_does_not_allocate_legacy_rdma_buffer(monkeypatch):
     assert manager.ep_decode_use_v2
     assert manager.ep_low_latency_buffer is None
     assert manager.ep_prefill_moe_workspace.numel() == 4096
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_v2_fp8_1x32_uses_fresh_expert_ends_on_graph_replay(monkeypatch):
+    torch.manual_seed(123)
+    device = "cuda"
+    experts, rows, hidden, intermediate = 3, 192, 256, 128
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+
+    def weight(n, k):
+        w = torch.randn((experts, n, k), device=device).to(torch.float8_e4m3fn)
+        scale = torch.randint(117, 122, (experts, n, k // 32), dtype=torch.uint8, device=device)
+        return w, scale
+
+    def dequant(x, scales):
+        return x.float() * scales.repeat_interleave(32, dim=-1)
+
+    w13, s13 = weight(2 * intermediate, hidden)
+    w2, s2 = weight(hidden, intermediate)
+    w13_ref = dequant(w13, torch.exp2(s13.float() - 127))
+    w2_ref = dequant(w2, torch.exp2(s2.float() - 127))
+    hidden_states = torch.randn((rows, hidden), device=device, dtype=torch.bfloat16)
+    x, scales = moe.per_token_group_quant_fp8(hidden_states, 32, use_ue8m0_scales=True, column_major_scales=True)
+    ends = torch.tensor([3, 32, 69], device=device, dtype=torch.int32)
+
+    def run():
+        return moe.masked_group_gemm(
+            (x, scales), ends, torch.bfloat16, w13, s13, w2, s2, expected_m=16, limit=7.0, block_size_k=32
+        )
+
+    run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = run()
+
+    for expert_ends in ([3, 32, 69], [0, 39, 64], [0, 0, 0], [41, 75, 121]):
+        ends.copy_(torch.tensor(expert_ends, device=device, dtype=torch.int32))
+        graph.replay()
+        start = 0
+        for expert, end in enumerate(expert_ends):
+            if start < end:
+                a = dequant(x[start:end], scales[start:end])
+                gate, up = (a @ w13_ref[expert].T).to(torch.bfloat16).chunk(2, dim=-1)
+                gate = torch.nn.functional.silu(gate.float().clamp(max=7.0)).to(torch.bfloat16)
+                act = gate.float() * up.float().clamp(min=-7.0, max=7.0)
+                q, s = moe.per_token_group_quant_fp8(act, 32, use_ue8m0_scales=True)
+                expected = (dequant(q, s) @ w2_ref[expert].T).to(torch.bfloat16)
+                relative_error = (out[start:end].float() - expected.float()).norm() / expected.float().norm()
+                assert relative_error.item() < 0.015
+            start = triton.cdiv(end, 32) * 32

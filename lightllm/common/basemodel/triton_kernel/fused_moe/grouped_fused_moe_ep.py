@@ -5,6 +5,9 @@ import triton
 import triton.language as tl
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from lightllm.distributed import dist_group_manager
+from lightllm.common.quantization.humming import HUMMING_QUANT_METHODS
+from lightllm.common.quantization.w8a8 import FP8_MOE_B32_QUANT_METHOD
+from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_gemm_kernel import expanded_grouped_fp8_gemm
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
@@ -17,6 +20,7 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel im
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_kernels import (
     ep_reduce_decode_output,
+    ep_aligned_expert_offsets,
     ep_build_m_indices,
     ep_compact_metadata,
     ep_gather_chunk,
@@ -33,7 +37,8 @@ from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
 from lightllm.utils.tensor_buffer_manager import TensorBufferManager
 
 logger = init_logger(__name__)
-SUPPORTED_EP_EXPERT_DTYPES = ("fp8w8a8-b128-deepgemm", "fp4fp8-b32-deepgemm")
+GROUP32_EP_METHODS = HUMMING_QUANT_METHODS | {FP8_MOE_B32_QUANT_METHOD}
+SUPPORTED_EP_EXPERT_DTYPES = GROUP32_EP_METHODS | {"fp8w8a8-b128-deepgemm", "fp4fp8-b32-deepgemm"}
 
 
 try:
@@ -50,12 +55,13 @@ def get_ep_num_sms() -> int:
     return getattr(dist_group_manager, "ep_num_sms", None) or 0
 
 
-def deepep_v2_decode_dispatch(hidden_states, topk_idx, topk_weights, num_experts):
+def deepep_v2_decode_dispatch(hidden_states, topk_idx, topk_weights, num_experts, block_size_k=128):
     buffer = dist_group_manager.ep_buffer
     # DP ranks may have different local batch sizes. This collective capacity
     # must be identical on every rank, including CUDA graph replays.
     capacity = get_deepep_num_max_dispatch_tokens_per_rank_decode()
-    qinput = per_token_group_quant_fp8(hidden_states, 128, use_ue8m0_scales=is_sm100_gpu())
+    group32 = block_size_k == 32
+    qinput = per_token_group_quant_fp8(hidden_states, block_size_k, use_ue8m0_scales=group32 or is_sm100_gpu())
     # Compute-stream ownership lets CUDA Graph reuse receive storage across layers.
     recv_x, _, recv_weights, handle, _ = buffer.dispatch(
         qinput,
@@ -63,7 +69,7 @@ def deepep_v2_decode_dispatch(hidden_states, topk_idx, topk_weights, num_experts
         topk_weights=topk_weights,
         num_experts=num_experts,
         num_max_tokens_per_rank=capacity,
-        expert_alignment=deep_gemm.get_mk_alignment_for_contiguous_layout(),
+        expert_alignment=32 if group32 else deep_gemm.get_mk_alignment_for_contiguous_layout(),
         do_expand=True,
         do_zero_padding=True,
         use_tma_aligned_col_major_sf=True,
@@ -129,6 +135,8 @@ def masked_group_gemm(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
+    block_size_k: int = 128,
+    humming_gemms=None,
 ):
     assert clamp_limit is None or limit is None
     if clamp_limit is not None:
@@ -137,24 +145,34 @@ def masked_group_gemm(
     # a padded 3D tensor and per-expert counts.
     row_shape = recv_x[0].shape[:-1]
     use_psum_layout = len(row_shape) == 1
-    expert_alignment = deep_gemm.get_mk_alignment_for_contiguous_layout() if use_psum_layout else None
+    group32 = block_size_k == 32
+    if group32:
+        assert use_psum_layout, "1x32 expert GEMM requires DeepEP V2 expanded rows"
+        expert_alignment = 32
+    else:
+        expert_alignment = deep_gemm.get_mk_alignment_for_contiguous_layout() if use_psum_layout else None
     padded_m = row_shape[-1]
     intermediate_twice = w1.shape[1]
-    block_size = 128
     gemm_out_a = alloc_tensor_func((*row_shape, intermediate_twice), device=recv_x[0].device, dtype=dtype)
     expected_m = min(expected_m, padded_m)
     # The expanded path needs a TMA-aligned column-major FP8 scale view.
     scale_rows = triton.cdiv(padded_m, 4) * 4 if use_psum_layout else padded_m
     qsilu_out_scale = alloc_tensor_func(
-        (*row_shape[:-1], intermediate_twice // 2 // block_size, scale_rows),
+        (*row_shape[:-1], intermediate_twice // 2 // block_size_k, scale_rows),
         device=recv_x[0].device,
         dtype=torch.float32,
     )
     if scale_rows != padded_m:
         qsilu_out_scale = qsilu_out_scale[:, :padded_m]
     qsilu_out_scale = qsilu_out_scale.transpose(-1, -2)
-    qsilu_out = alloc_tensor_func((*row_shape, intermediate_twice // 2), dtype=w1.dtype, device=recv_x[0].device)
-    if use_psum_layout:
+    qsilu_out = alloc_tensor_func((*row_shape, intermediate_twice // 2), dtype=recv_x[0].dtype, device=recv_x[0].device)
+    if humming_gemms is not None:
+        offsets = ep_aligned_expert_offsets(masked_m, expert_alignment, padded_m)
+        valid_rows = expected_m * w1.shape[0]
+        humming_gemms[0](*recv_x, gemm_out_a, offsets, valid_rows, expert_alignment=expert_alignment)
+    elif group32:
+        expanded_grouped_fp8_gemm(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expert_alignment, expected_m=expected_m)
+    elif use_psum_layout:
         deepgemm_grouped_fp8_nt_contiguous(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
     else:
         _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
@@ -163,17 +181,23 @@ def masked_group_gemm(
         gemm_out_a,
         qsilu_out,
         qsilu_out_scale,
-        block_size,
+        block_size_k,
         masked_m,
         alpha=alpha,
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
         expert_alignment=expert_alignment,
-        use_ue8m0_scales=is_sm100_gpu(),
+        use_ue8m0_scales=group32 or is_sm100_gpu(),
     )
     del gemm_out_a
     gemm_out_b = alloc_tensor_func(recv_x[0].shape, device=recv_x[0].device, dtype=dtype)
-    if use_psum_layout:
+    if humming_gemms is not None:
+        humming_gemms[1](qsilu_out, qsilu_out_scale, gemm_out_b, offsets, valid_rows, expert_alignment=expert_alignment)
+    elif group32:
+        expanded_grouped_fp8_gemm(
+            (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expert_alignment, expected_m=expected_m
+        )
+    elif use_psum_layout:
         deepgemm_grouped_fp8_nt_contiguous(
             (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m
         )
@@ -295,9 +319,13 @@ def quantize_fused_experts_input(
 ):
     check_ep_expert_dtype(quant_method)
     block_size_k = quant_method.block_size
-    assert block_size_k == 128, "block_size_k must be 128"
+    group32 = quant_method.method_name in GROUP32_EP_METHODS
+    assert group32 or block_size_k == 128, "block_size_k must be 128 for the DeepGEMM dispatch"
     return per_token_group_quant_fp8(
-        hidden_states, block_size_k, dtype=w13.weight.dtype, use_ue8m0_scales=is_sm100_gpu()
+        hidden_states,
+        block_size_k,
+        dtype=torch.float8_e4m3fn if group32 else w13.weight.dtype,
+        use_ue8m0_scales=group32 or is_sm100_gpu(),
     )
 
 
@@ -339,6 +367,7 @@ def fused_experts(
             alloc_tensor_func=alloc_tensor_func,
         )
 
+    assert quant_method.method_name in GROUP32_EP_METHODS or quant_method.block_size == 128
     buffer = dist_group_manager.ep_buffer if is_prefill else dist_group_manager.ep_low_latency_buffer
     return fused_experts_impl(
         hidden_states=hidden_states,
@@ -348,6 +377,9 @@ def fused_experts(
         topk_idx=topk_idx,
         num_experts=num_experts,
         block_size_k=quant_method.block_size,
+        humming_gemms=(
+            (w13.humming_gemm, w2.humming_gemm) if quant_method.method_name in HUMMING_QUANT_METHODS else None
+        ),
         buffer=buffer,
         is_prefill=is_prefill,
         use_fp8_w8a8=True,
@@ -386,12 +418,14 @@ def fused_experts_impl(
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
     block_size_k: int = 128,
+    humming_gemms=None,
 ):
     assert clamp_limit is None or limit is None
     if clamp_limit is not None:
         limit = clamp_limit
     # Check constraints.
-    assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
+    weight_k = w1.shape[2] if humming_gemms is None else humming_gemms[0].config.shape_k
+    assert hidden_states.shape[1] == weight_k, "Hidden size mismatch"
     assert topk_weights.shape == topk_idx.shape, "topk shape mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
@@ -401,12 +435,14 @@ def fused_experts_impl(
     # qaunt hidden_states
     assert use_fp8_w8a8 and use_fp8_all2all, "use_fp8_w8a8 and use_fp8_all2all must be True"
 
-    assert block_size_k == 128, "block_size_k must be 128"
-
     combined_x = None
     if is_prefill:
         qinput_tensor, input_scale = per_token_group_quant_fp8(
-            hidden_states, block_size_k, dtype=w1.dtype, alloc_func=alloc_tensor_func, use_ue8m0_scales=is_sm100_gpu()
+            hidden_states,
+            block_size_k,
+            dtype=w1.dtype if humming_gemms is None else torch.float8_e4m3fn,
+            alloc_func=alloc_tensor_func,
+            use_ue8m0_scales=block_size_k == 32 or is_sm100_gpu(),
         )
         allocate_on_comm_stream = previous_event is not None
         # Expanded dispatch directly produces expert-contiguous, alignment-padded inputs:
@@ -464,6 +500,8 @@ def fused_experts_impl(
                 alpha=alpha,
                 limit=limit,
                 clamp_up_add_one=clamp_up_add_one,
+                expert_ends=handle.psum_num_recv_tokens_per_expert if block_size_k == 32 else None,
+                humming_gemms=humming_gemms,
             )
         else:
             gather_out = torch.empty(
@@ -501,7 +539,9 @@ def fused_experts_impl(
         # low latency dispatch
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         if dist_group_manager.ep_decode_use_v2:
-            recv_x, masked_m, handle = deepep_v2_decode_dispatch(hidden_states, topk_idx, topk_weights, num_experts)
+            recv_x, masked_m, handle = deepep_v2_decode_dispatch(
+                hidden_states, topk_idx, topk_weights, num_experts, block_size_k
+            )
             world_size = dist_group_manager.ep_buffer.num_ranks
         else:
             world_size = buffer.group_size
@@ -529,6 +569,8 @@ def fused_experts_impl(
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            block_size_k=block_size_k,
+            humming_gemms=humming_gemms,
         )
         # low latency combine
         if dist_group_manager.ep_decode_use_v2:
@@ -665,6 +707,8 @@ def chunked_expanded_moe_forward(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
+    expert_ends: Optional[torch.Tensor] = None,
+    humming_gemms=None,
 ):
     """Run bounded expanded MoE and rewrite metadata for dense DeepEP combine."""
     assert clamp_limit is None or limit is None
@@ -677,18 +721,19 @@ def chunked_expanded_moe_forward(
     assert all_tokens > 0, "chunked_expanded_moe_forward requires non-empty input"
     assert workspace.dtype == torch.uint8 and workspace.ndim == 1 and workspace.is_contiguous()
 
-    m_indices = torch.empty(all_tokens, device=recv_x[0].device, dtype=torch.int32)
-    # 与 m_indices 一一对应：0 表示真实 token，1 表示 expert 对齐产生的 padding 行。
-    # padding 行必须在 grouped GEMM 前清零，避免无效数据参与计算。
-    padding_mask = torch.empty_like(m_indices)
-    ep_build_m_indices(num_unaligned_recv_tokens_per_expert, m_indices, padding_mask, alignment)
-    ep_zero_padding(
-        recv_x[0],
-        recv_x[1],
-        recv_topk_weights,
-        padding_mask,
-    )
-    del padding_mask
+    group32 = block_size_k == 32
+    if group32:
+        if expert_ends is None:
+            counts = num_unaligned_recv_tokens_per_expert
+            padded_counts = (counts + alignment - 1) // alignment * alignment
+            expert_ends = padded_counts.cumsum(0, dtype=torch.int32) - padded_counts + counts
+    else:
+        m_indices = torch.empty(all_tokens, device=recv_x[0].device, dtype=torch.int32)
+        # DeepGEMM computes every aligned row, so zero the incoming padding first.
+        padding_mask = torch.empty_like(m_indices)
+        ep_build_m_indices(num_unaligned_recv_tokens_per_expert, m_indices, padding_mask, alignment)
+        ep_zero_padding(recv_x[0], recv_x[1], recv_topk_weights, padding_mask)
+        del padding_mask
 
     gather_rows = recv_src_metadata.shape[0]
     scale_cols = intermediate_size // block_size_k
@@ -700,7 +745,7 @@ def chunked_expanded_moe_forward(
         intermediate_twice=intermediate_twice,
         scale_cols=scale_cols,
         hidden_dtype=hidden_dtype,
-        quant_dtype=w2.dtype,
+        quant_dtype=recv_x[0].dtype,
         expert_alignment=alignment,
     )
 
@@ -730,15 +775,19 @@ def chunked_expanded_moe_forward(
             silu_out = workspace_manager.alloc((chunk_rows, intermediate_size), hidden_dtype)
             gemm_out_a = workspace_manager.alloc((chunk_rows, intermediate_twice), hidden_dtype)
             input_scale = recv_x[1][chunk_start:chunk_end]
-            # Blackwell's FP32-to-UE8M0 packer requires the chunk's own column pitch.
-            if is_sm100_gpu() and input_scale.stride(1) != chunk_rows:
+            # Humming and Blackwell's FP32-to-UE8M0 packer use the chunk's own column pitch.
+            if input_scale.stride(1) != chunk_rows and (humming_gemms is not None or (not group32 and is_sm100_gpu())):
                 input_scale = tma_align_input_scale(input_scale)
-            deepgemm_grouped_fp8_nt_contiguous(
-                (recv_x[0][chunk_start:chunk_end], input_scale),
-                (w1, w1_scale),
-                gemm_out_a,
-                m_indices[chunk_start:chunk_end],
-            )
+            chunk_input = (recv_x[0][chunk_start:chunk_end], input_scale)
+            if humming_gemms is not None:
+                offsets = ep_aligned_expert_offsets(expert_ends, alignment, chunk_rows, chunk_start)
+                humming_gemms[0](*chunk_input, gemm_out_a, offsets, chunk_rows)
+            elif group32:
+                expanded_grouped_fp8_gemm(chunk_input, (w1, w1_scale), gemm_out_a, expert_ends, alignment, chunk_start)
+            else:
+                deepgemm_grouped_fp8_nt_contiguous(
+                    chunk_input, (w1, w1_scale), gemm_out_a, m_indices[chunk_start:chunk_end]
+                )
             silu_and_mul_fwd(gemm_out_a, silu_out, alpha=alpha, limit=limit, clamp_up_add_one=clamp_up_add_one)
             workspace_manager.free(gemm_out_a)
             del gemm_out_a
@@ -755,22 +804,26 @@ def chunked_expanded_moe_forward(
             qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
                 silu_out,
                 block_size_k,
-                dtype=w2.dtype,
+                dtype=recv_x[0].dtype,
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 alloc_func=workspace_quant_alloc,
-                use_ue8m0_scales=is_sm100_gpu(),
+                use_ue8m0_scales=group32 or is_sm100_gpu(),
             )
             workspace_manager.free(silu_out)
             del silu_out
 
             gemm_out_b = workspace_manager.alloc((chunk_rows, hidden_size), hidden_dtype)
-            deepgemm_grouped_fp8_nt_contiguous(
-                (qsilu_out, qsilu_out_scale),
-                (w2, w2_scale),
-                gemm_out_b,
-                m_indices[chunk_start:chunk_end],
-            )
+            if humming_gemms is not None:
+                humming_gemms[1](qsilu_out, qsilu_out_scale, gemm_out_b, offsets, chunk_rows)
+            elif group32:
+                expanded_grouped_fp8_gemm(
+                    (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, expert_ends, alignment, chunk_start
+                )
+            else:
+                deepgemm_grouped_fp8_nt_contiguous(
+                    (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices[chunk_start:chunk_end]
+                )
             del qsilu_out, qsilu_out_scale
             for quant_buffer in quant_buffers:
                 workspace_manager.free(quant_buffer)

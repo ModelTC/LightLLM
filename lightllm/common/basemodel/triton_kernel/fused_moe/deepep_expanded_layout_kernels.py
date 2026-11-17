@@ -4,6 +4,33 @@ import triton.language as tl
 
 
 @triton.jit
+def _ep_aligned_expert_offsets_kernel(
+    ENDS,
+    OFFSETS,
+    EXPERTS: tl.constexpr,
+    ALIGNMENT: tl.constexpr,
+    CHUNK_START: tl.constexpr,
+    ROWS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    i = tl.arange(0, BLOCK)
+    end = tl.load(ENDS + i - 1, (i > 0) & (i <= EXPERTS), 0)
+    start = tl.cdiv(end, ALIGNMENT) * ALIGNMENT
+    offset = tl.minimum(tl.maximum(start - CHUNK_START, 0), ROWS)
+    tl.store(OFFSETS + i, offset, i <= EXPERTS)
+
+
+def ep_aligned_expert_offsets(expert_ends, alignment, rows, chunk_start=0):
+    """Convert DeepEP's unpadded ends to Humming's padded CSR offsets."""
+    experts = expert_ends.numel()
+    offsets = torch.empty(experts + 1, device=expert_ends.device, dtype=torch.int32)
+    _ep_aligned_expert_offsets_kernel[(1,)](
+        expert_ends, offsets, experts, alignment, chunk_start, rows, triton.next_power_of_2(experts + 1)
+    )
+    return offsets
+
+
+@triton.jit
 def _ep_expanded_to_masked_kernel(
     X,
     S,

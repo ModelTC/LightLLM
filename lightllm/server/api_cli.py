@@ -819,11 +819,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--ep_moe_backend",
         type=str,
-        choices=["auto", "triton", "deepep_v2"],
+        choices=["auto", "triton", "deepep_v2", "deepep_v2_humming"],
         default="auto",
         help=(
             "EP MoE execution backend. 'auto' keeps the existing backend selection; "
             "'deepep_v2' uses ElasticBuffer for FP8 Decode as well as Prefill; "
+            "'deepep_v2_humming' uses ElasticBuffer and Humming for SM90 V4.1 1x32 FP8 or MXFP4 experts; "
             "'triton' selects the single-node SM90 FP8 Triton peer backend on Prefill nodes "
             "for experts resolved by --expert_dtype fp8."
         ),

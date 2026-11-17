@@ -558,3 +558,43 @@ class FP8w8a8B32TritonQuantizationMethod(FP8w8a8B128TritonQuantizationMethod):
     @property
     def method_name(self):
         return "fp8w8a8-b32-triton"
+
+
+FP8_MOE_B32_QUANT_METHOD = "fp8w8a8-moe-1x32-triton"
+
+
+@QUANTMETHODS.register(FP8_MOE_B32_QUANT_METHOD, platform="cuda")
+class FP8w8a8MoEB32TritonQuantizationMethod(BaseQuantizationMethod):
+    """Serialized E4M3 expert weights with one UE8M0 byte per 32 input values."""
+
+    weight_dtype = torch.float8_e4m3fn
+    weight_pack_factor = 1
+
+    def __init__(self):
+        super().__init__()
+        self.block_size = 32
+        self.has_weight_scale = True
+        self.weight_scale_suffix = "scale"
+
+    @property
+    def method_name(self):
+        return FP8_MOE_B32_QUANT_METHOD
+
+    def _create_weight(self, out_dims, in_dim, dtype, device_id, num_experts=1):
+        device = torch.device("cuda", device_id)
+        shape = (num_experts, sum(out_dims))
+        weight_pack = WeightPack(
+            weight=torch.empty((*shape, in_dim // self.weight_pack_factor), device=device, dtype=self.weight_dtype),
+            weight_scale=torch.empty((*shape, in_dim // self.block_size), device=device, dtype=torch.uint8),
+        )
+        return weight_pack, self._split_weight_pack(weight_pack, out_dims, -2, out_dims, -2)
+
+    def load_weight(self, weight, weight_pack):
+        if weight.dtype != torch.float8_e4m3fn:
+            raise ValueError("1x32 FP8 routed experts require serialized E4M3 weights")
+        super().load_weight(weight, weight_pack)
+
+    def load_weight_scale(self, weight_scale, weight_pack):
+        if weight_scale.dtype != torch.float8_e8m0fnu or weight_scale.shape != weight_pack.weight_scale.shape:
+            raise ValueError("1x32 FP8 routed experts require one UE8M0 scale per row and 32 input values")
+        super().load_weight_scale(weight_scale.view(torch.uint8), weight_pack)

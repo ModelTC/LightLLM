@@ -195,6 +195,11 @@ def _launch_subprocesses(args: StartArgs):
         assert not args.enable_prefill_eplb, "--ep_moe_backend triton does not support --enable_prefill_eplb"
         assert is_sm90_gpu(), "--ep_moe_backend triton only supports SM90 GPUs"
 
+    if args.ep_moe_backend == "deepep_v2_humming":
+        assert args.enable_ep_moe, "--ep_moe_backend deepep_v2_humming requires --enable_ep_moe"
+        assert is_sm90_gpu(), "--ep_moe_backend deepep_v2_humming requires SM90"
+        assert not (args.enable_prefill_eplb or args.enable_rl), "Humming expert repacking requires immutable weights"
+
     if args.enable_prefill_eplb:
         assert args.enable_ep_moe, "--enable_prefill_eplb requires --enable_ep_moe"
         assert not args.enable_prefill_cudagraph, "--enable_prefill_eplb does not support --enable_prefill_cudagraph"

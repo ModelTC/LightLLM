@@ -225,7 +225,12 @@ class TpPartBaseModel:
 
     def _init_quant(self):
         self.quant_cfg = Quantcfg(
-            self.config, self.quant_type, self.quant_cfg_path, self.expert_dtype, enable_ep_moe=self.args.enable_ep_moe
+            self.config,
+            self.quant_type,
+            self.quant_cfg_path,
+            self.expert_dtype,
+            enable_ep_moe=self.args.enable_ep_moe,
+            ep_moe_backend=self.args.ep_moe_backend,
         )
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
 

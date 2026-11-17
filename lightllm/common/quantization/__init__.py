@@ -3,6 +3,7 @@ import collections
 from .registry import QUANTMETHODS
 from .w8a8 import *
 from .w8a8gx import *
+from .humming import HUMMING_FP4_QUANT_METHOD, HUMMING_FP8_QUANT_METHOD
 from .deepgemm import *
 from .awq import *
 from .no_quant import *
@@ -21,16 +22,27 @@ SUPPORTED_EXPERT_DTYPES = tuple(EXPERT_DTYPE_TO_QUANT_TYPE)
 
 class Quantcfg:
     def __init__(
-        self, network_config, quant_type="none", custom_cfg_path=None, expert_dtype=None, *, enable_ep_moe=False
+        self,
+        network_config,
+        quant_type="none",
+        custom_cfg_path=None,
+        expert_dtype=None,
+        *,
+        enable_ep_moe=False,
+        ep_moe_backend="auto",
     ):
         self.layer_num = network_config["n_layer"]
         self.quant_type = quant_type
         self.start_args_expert_dtype = expert_dtype
         self.config_expert_dtype = network_config.get("expert_dtype", None)
         self.model_type = network_config.get("model_type", None)
+        self.use_humming = ep_moe_backend == "deepep_v2_humming"
+        if self.use_humming and (not enable_ep_moe or self.model_type != "deepseek_v41"):
+            raise ValueError("Humming EP MoE requires DeepSeek-V4.1 with --enable_ep_moe")
         if (
             self.model_type == "deepseek_v41"
             and "fp4" in (self.config_expert_dtype, self.start_args_expert_dtype)
+            and not self.use_humming
             and not (enable_ep_moe and is_sm100_gpu())
         ):
             if self.config_expert_dtype == "fp4":
@@ -43,6 +55,16 @@ class Quantcfg:
         self._parse_network_config(network_config)
 
     def _get_expert_quant_type(self, expert_dtype):
+        quant_config = self.hf_quantization_config or {}
+        expert_block_size = quant_config.get("expert_weight_block_size")
+        if expert_block_size == [1, 32]:
+            if expert_dtype != "fp8" or quant_config.get("scale_fmt") != "ue8m0":
+                raise ValueError("expert_weight_block_size [1, 32] requires FP8 experts with UE8M0 scales")
+            return HUMMING_FP8_QUANT_METHOD if self.use_humming else FP8_MOE_B32_QUANT_METHOD
+        if self.use_humming:
+            if expert_dtype in ("fp4", "mxfp4") and quant_config.get("scale_fmt") == "ue8m0":
+                return HUMMING_FP4_QUANT_METHOD
+            raise ValueError("Humming EP MoE requires a 1x32 FP8 or MXFP4 checkpoint with UE8M0 scales")
         quant_type = EXPERT_DTYPE_TO_QUANT_TYPE.get(expert_dtype)
         if quant_type is None:
             raise ValueError(

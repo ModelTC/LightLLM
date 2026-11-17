@@ -1,4 +1,6 @@
 from lightllm.common.quantization.quantize_method import QuantizationMethod
+from lightllm.common.quantization.w8a8 import FP8_MOE_B32_QUANT_METHOD
+from lightllm.common.quantization.humming import HUMMING_QUANT_METHODS
 from .triton_impl import FuseMoeTriton
 from .triton_ep_impl import FuseMoeTritonEP
 from .marlin_impl import FuseMoeMarlin
@@ -16,6 +18,14 @@ def create_fuse_moe_impl(
     expert_parallel_state: ExpertParallelState | None = None,
     ep_moe_backend: str = "auto",
 ):
+    if quant_method.method_name == FP8_MOE_B32_QUANT_METHOD and (
+        expert_parallel_state is None or ep_moe_backend != "deepep_v2"
+    ):
+        raise ValueError("1x32 FP8 routed experts require --enable_ep_moe --ep_moe_backend deepep_v2")
+    if quant_method.method_name in HUMMING_QUANT_METHODS and (
+        expert_parallel_state is None or ep_moe_backend != "deepep_v2_humming"
+    ):
+        raise ValueError("Humming experts require --enable_ep_moe --ep_moe_backend deepep_v2_humming")
     if quant_method.method_name == "mxfp4w4a16-b32-marlin":
         if expert_parallel_state is not None:
             raise RuntimeError("mxfp4w4a16-b32-marlin does not support enable_ep_moe yet")
