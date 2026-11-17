@@ -251,7 +251,7 @@ class _DecodeTransModule:
             pd_master_node_id=task.pd_master_node_id,
             pd_kv_trans_params=pickle.dumps(decode_node_info),
         )
-        # 送给本机 httpserver，由它按请求找到 PD Master 连接再转发。
+        # 送给本机 httpserver，由它按 pd_master_node_id 找到 PD Master 连接再转发。
         self.pd_httpserver_push.send(message=up_status)
 
     @log_exception

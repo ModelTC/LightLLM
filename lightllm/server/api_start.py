@@ -746,6 +746,8 @@ def _validate_pd_features(args: StartArgs):
         # control frames between the separated nodes, so PD deployments use
         # the built-in Hypercorn defaults consistently.
         raise ValueError("--hypercorn_config is not supported in PD mode")
+    if args.run_mode in ("prefill", "decode"):
+        assert args.httpserver_workers == 1, "--httpserver_workers must be 1 for prefill/decode nodes"
     if args.run_mode in ("pd_master", "prefill", "decode") and (
         args.enable_rl or args.enable_return_routed_experts or args.enable_prompt_logprobs
     ):

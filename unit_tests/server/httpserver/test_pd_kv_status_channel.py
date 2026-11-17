@@ -70,33 +70,56 @@ def _run_one_ipc_message(monkeypatch, forwarder, status):
             if delivered:
                 break
             await asyncio.sleep(0.01)
+        await asyncio.sleep(0.01)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(go())
 
 
-def test_httpserver_forwards_the_packed_handshake(monkeypatch):
-    status = PDUpKVStatus(9, 100, b"metadata")
+def _recording_websocket():
     sent = []
 
     async def send(payload):
         sent.append(pickle.loads(payload))
 
+    return SimpleNamespace(send=send), sent
+
+
+def test_httpserver_forwards_the_handshake_by_pd_master_node(monkeypatch):
+    # 请求可能是从别的 httpserver worker 进来的，这里只靠 pd_master_node_id 选连接。
+    status = PDUpKVStatus(9, 100, b"metadata")
+    master_100, sent_100 = _recording_websocket()
+    master_200, sent_200 = _recording_websocket()
+
     forwarder = PDMasterForwarder()
-    event = asyncio.Event()
-    forwarder.bind(group_req_id=8, event=event, websocket=SimpleNamespace(send=send))
+    forwarder.register(node_id=100, websocket=master_100)
+    forwarder.register(node_id=200, websocket=master_200)
 
     _run_one_ipc_message(monkeypatch, forwarder, status)
-    assert event.websocket is not None
-    assert sent == [(ObjType.PD_UPLOAD_KV_STATUS, status)]
+    assert sent_100 == [(ObjType.PD_UPLOAD_KV_STATUS, status)]
+    assert sent_200 == []
 
 
-def test_httpserver_drops_the_handshake_when_the_request_is_gone(monkeypatch):
+def test_httpserver_drops_the_handshake_without_master_connection(monkeypatch):
     forwarder = PDMasterForwarder()
     status = PDUpKVStatus(8, 100, b"metadata")
 
     _run_one_ipc_message(monkeypatch, forwarder, status)
+
+
+def test_stale_connection_does_not_unregister_its_replacement():
+    old, _ = _recording_websocket()
+    new, _ = _recording_websocket()
+    forwarder = PDMasterForwarder()
+    forwarder.register(node_id=100, websocket=old)
+    forwarder.register(node_id=100, websocket=new)
+
+    forwarder.unregister(node_id=100, websocket=old)
+    assert forwarder._node_id_to_websocket == {100: new}
+
+    forwarder.unregister(node_id=100, websocket=new)
+    assert forwarder._node_id_to_websocket == {}
 
 
 def test_master_reports_kv_status_from_the_register_channel(monkeypatch):

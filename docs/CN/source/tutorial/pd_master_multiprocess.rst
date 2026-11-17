@@ -36,10 +36,10 @@ tokenizer、P/D 编排、token 消息处理和 SSE 序列化分散到多个 CPU 
    Prefill / Decode
      1. 访问公共端口的 /get_server_info，读取 pd_master_multi_ports
      2. 使用 worker 端口作为本机多进程模式的 pd_node_id
-     3. 直接连接每个 worker 的 /pd_register 和 /kv_move_status
+     3. 直接连接每个 worker 的 /pd_register（Decode 的 KV 握手也走这条连接）
 
-HAProxy 不代理 P/D WebSocket。公共端口上的 ``/pd_register`` 和
-``/kv_move_status`` 返回 HTTP 426，P/D 必须能够直接访问
+HAProxy 不代理 P/D WebSocket。公共端口上的 ``/pd_register``
+返回 HTTP 426，P/D 必须能够直接访问
 ``pd_master_multi_ports`` 中的内部端口。请求的整个生命周期固定归属于接收它的
 worker，逐 token 数据也不会经过共享 RPyC 服务。
 
