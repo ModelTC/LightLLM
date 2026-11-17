@@ -330,10 +330,22 @@ class HttpServerManagerForPDMaster:
                     logger.error(f"{origin_request_id}: No p_node or d_node found")
                     raise Exception(f"{origin_request_id}: No p_node or d_node found")
 
-                pending_prefill_load_chars = len(prompt)
+                estimated_prefill_chars = selection_extra_info.estimated_prefill_chars
+                pending_prefill_load_chars = (
+                    len(prompt) if estimated_prefill_chars is None else max(1, min(len(prompt), estimated_prefill_chars))
+                )
                 await self.pd_node_stats.add_dispatched_info(p_node=p_node, chars=pending_prefill_load_chars, req_num=1)
 
             cache_age_seconds = None
+            if selection_extra_info.estimated_prefill_chars is not None:
+                logger.info(
+                    f"pd_cache_selection origin_req_id:{origin_request_id} p_node:{p_node.connection_key} "
+                    f"candidate:{selection_extra_info.cache_candidate} "
+                    f"reason:{selection_extra_info.selection_reason} "
+                    f"estimated_hit_rate:{selection_extra_info.estimated_cache_hit_rate:.6f} "
+                    f"reserved_prefill_chars:{pending_prefill_load_chars} "
+                    f"pending_before_chars:{selection_extra_info.selected_pending_chars}"
+                )
             if selection_extra_info.cache_last_insert_time is not None:
                 cache_age_seconds = max(0.0, time.monotonic() - selection_extra_info.cache_last_insert_time)
             # TODO: 后续应收集系统实际请求的 cache 命中信息及其随时间变化的规律，自动估算并动态调整
@@ -860,6 +872,7 @@ class HttpServerManagerForPDMaster:
             from lightllm.server.httpserver_for_pd_master.register_loop import register_loop
 
             asyncio.create_task(register_loop(self))
+            asyncio.create_task(self.pd_manager.selector.run_metadata_sync())
 
         while True:
             objs = await self.infos_queues.wait_to_get_all_data()

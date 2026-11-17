@@ -779,6 +779,62 @@ def test_error_before_first_token_clears_segment_counters(backend):
     manager.pd_node_stats.sub_dispatched_info.assert_awaited_once_with(p_node=prefill, chars=len("prompt"), req_num=1)
 
 
+@pytest.mark.parametrize("exit_mode", ["first_token", "error", "cancel"])
+def test_shared_uncached_work_reservation_is_released_exactly_once(backend, exit_mode):
+    async def run():
+        manager, state = _generator_manager(backend, "cache_aware")
+        prefill = manager.pd_manager.prefill_nodes[0]
+        decode = manager.pd_manager.decode_nodes[0]
+        prompt = "x" * 100_000 + "y" * 1_000
+        expected_work = 1_000
+        manager.pd_manager.selector.select_p_d_node = AsyncMock(
+            return_value=(prefill, decode, PDSelectionExtraInfo(estimated_prefill_chars=expected_work))
+        )
+        started = asyncio.Event()
+
+        async def generate_segment(p_node, _d_node, _start_time, _prompt, params, *_args):
+            assert p_node is prefill
+            assert _pending(state, prefill) == (expected_work, 1)
+            started.set()
+            if exit_mode == "error":
+                raise RuntimeError("before first token")
+            if exit_mode == "cancel":
+                await asyncio.Event().wait()
+            yield (
+                params.group_request_id,
+                "x",
+                {"prompt_tokens": 50_000, "prompt_cache_len": 49_000},
+                FinishStatus(FinishStatus.FINISHED_STOP),
+            )
+            assert _pending(state, prefill) == (0, 0)
+
+        manager._wait_to_token_package = generate_segment
+
+        async def consume():
+            return [item async for item in manager._generate_one_attempt(prompt, _params(), None, None, 0, 80, 50_000)]
+
+        task = asyncio.create_task(consume())
+        if exit_mode == "cancel":
+            await asyncio.wait_for(started.wait(), timeout=2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif exit_mode == "error":
+            with pytest.raises(RuntimeError, match="before first token"):
+                await task
+        else:
+            await task
+        assert _pending(state, prefill) == (0, 0)
+        manager.pd_node_stats.add_dispatched_info.assert_awaited_once_with(
+            p_node=prefill, chars=expected_work, req_num=1
+        )
+        manager.pd_node_stats.sub_dispatched_info.assert_awaited_once_with(
+            p_node=prefill, chars=expected_work, req_num=1
+        )
+
+    asyncio.run(run())
+
+
 def test_sampling_params_copy_failure_clears_initial_reservation(monkeypatch, backend):
     manager, state = _generator_manager(backend)
     prefill = manager.pd_manager.prefill_nodes[0]
