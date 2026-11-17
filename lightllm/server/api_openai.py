@@ -558,7 +558,6 @@ async def chat_completions_impl(
                 content=text if text else "",
                 tool_calls=tool_calls,
                 reasoning=reasoning_text if reasoning_text else "",
-                reasoning_content=reasoning_text or None,
             )
             choice = ChatCompletionResponseChoice(
                 index=i,
@@ -686,11 +685,7 @@ async def chat_completions_impl(
                 if reasoning_text:
                     if request.separate_reasoning:
                         append_sse_chunk(
-                            make_chat_sse_chunk(
-                                choice_index,
-                                {"reasoning": reasoning_text, "reasoning_content": reasoning_text},
-                                _choice_nulls,
-                            )
+                            make_chat_sse_chunk(choice_index, {"reasoning": reasoning_text}, _choice_nulls)
                         )
                     else:
                         delta = reasoning_text + (delta or "")
