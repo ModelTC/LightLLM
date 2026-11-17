@@ -137,6 +137,13 @@ class ImageItem:
         self._preload_data = None
         self.extra_params = {}
 
+    def __getstate__(self):
+        """Transmit preloaded image bytes once, retaining the source request for retries."""
+        state = self.__dict__.copy()
+        if self._type == "base64" and self._preload_data is not None:
+            state["_data"] = None
+        return state
+
     async def preload(self, request: Request):
         if self._preload_data is not None:
             return
@@ -227,10 +234,11 @@ class ImageItem:
         """
         将内容转换为原始请求的形式，主要用于请求转发
         """
-        ret = {}
-        ret["type"] = self._type
-        ret["data"] = self._data
-        return ret
+        data = self._data
+        if self._type == "base64" and data is None and self._preload_data is not None:
+            # Internal transfers omit Base64; forwarding reuses the verified (possibly resized) image.
+            data = base64.b64encode(self._preload_data).decode("ascii")
+        return {"type": self._type, "data": data}
 
 
 class MultimodalParams:
