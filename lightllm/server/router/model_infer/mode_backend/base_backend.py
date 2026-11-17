@@ -851,13 +851,15 @@ class ModeBackend:
                 )
                 chunk_end = None
                 if token_num > remaining:
-                    if not (no_decode and not self.disable_chunked_prefill and remaining >= self.args.page_size):
-                        continue
-                    if req_obj.cur_kv_len == 0 and (
-                        partial_first_chunk_scheduled or req_obj.shm_req.input_len <= self.args.chunked_prefill_size
+                    if not (
+                        no_decode
+                        and not self.disable_chunked_prefill
+                        and remaining >= self.args.page_size
+                        and req_obj.cur_kv_len == 0
+                        and not partial_first_chunk_scheduled
+                        and req_obj.shm_req.input_len > self.args.chunked_prefill_size
                     ):
                         continue
-                    # Fit a partial chunk in queue order before considering lower-ranked requests.
                     fitted = req_obj.fit_prefill_chunk(remaining, can_alloc_token_num)
                     if fitted is None:
                         continue
@@ -866,7 +868,7 @@ class ModeBackend:
                     self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
                     if chunk_end is not None:
                         req_obj.prefill_chunk_end = chunk_end
-                        partial_first_chunk_scheduled |= req_obj.cur_kv_len == 0
+                        partial_first_chunk_scheduled = True
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num

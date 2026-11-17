@@ -284,14 +284,13 @@ def _make_pd_prefill_batch(monkeypatch, inputs):
 
 
 @pytest.mark.parametrize(
-    "image_spans, later_len, long_end, selected",
+    "image_spans, later_len",
     [
-        ([], 6144, 14336, [0, 1]),
-        ([(11264, 15360)], 2048, 11264, [0, 1, 2]),
-        ([(8192, 15360)], 2048, 8192, [0, 2]),
+        ([], 6144),
+        ([(11264, 15360)], 2048),
     ],
 )
-def test_pd_prefill_fits_started_chunk_in_queue_order(monkeypatch, image_spans, later_len, long_end, selected):
+def test_pd_prefill_defers_started_chunk_that_does_not_fit(monkeypatch, image_spans, later_len):
     _, backend, reqs = _make_pd_prefill_batch(
         monkeypatch, [(2048, 0, []), (24576, 8192, image_spans), (later_len, 0, [])]
     )
@@ -305,18 +304,14 @@ def test_pd_prefill_fits_started_chunk_in_queue_order(monkeypatch, image_spans, 
     reqs[2].prefill_need_token_num = later_prefill_need_token_num
     prefill_reqs, decode_reqs, token_num = backend._get_classed_reqs(req_ids=[0, 1, 2], no_decode=True)
 
-    assert [req.req_idx for req in prefill_reqs] == selected and not decode_reqs
-    assert later_budget_checks == ([True] if 2 in selected else [])
-    assert token_num == 2048 + long_end - 8192 + (later_len if 2 in selected else 0)
-    assert reqs[1].hold_kv_len == long_end
+    assert prefill_reqs == [reqs[0], reqs[2]] and not decode_reqs
+    assert later_budget_checks == [True]
+    assert token_num == 2048 + later_len
     model_input, run_reqs = generic_pre_process.prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=True)
     assert model_input.input_ids.numel() == token_num
-    if long_end > 8192:
-        assert model_input.b_seq_len[1] == long_end
-    updates = backend._pre_post_handle(run_reqs, is_chuncked_mode=True)
-    assert reqs[1].cur_kv_len == long_end
-    if long_end > 8192:
-        assert updates[1].output_len == 0
+    backend._pre_post_handle(run_reqs, is_chuncked_mode=True)
+    assert reqs[1].cur_kv_len == reqs[1].hold_kv_len == 8192
+    assert not reqs[1].wait_pause
     assert reqs[1].get_chuncked_input_token_len() == 16384
 
 
