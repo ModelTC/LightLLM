@@ -225,7 +225,9 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
         assert "dp_index" in payloads[0]
         assert connections.call_count == 2
         for call in connections.call_args_list:
+            assert call.args == ("ws://master:8000/pd_register",)
             assert call.kwargs["additional_headers"] == {"Authorization": "Bearer test-pd-secret"}
+            assert call.kwargs["compression"] is None
         assert "test-pd-secret" not in json.dumps(payloads[0])
         assert "Sent registration JSON" in caplog.text
         assert "test-pd-secret" not in caplog.text

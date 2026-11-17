@@ -489,7 +489,6 @@ def test_ep_moe_rounds_scales_and_preserves_logical_block_size(monkeypatch, is_p
     torch.testing.assert_close(sf, expected_scales)
     seen = []
     monkeypatch.setattr(ep.dist_group_manager, "ep_buffer", object(), raising=False)
-    monkeypatch.setattr(ep.dist_group_manager, "ep_low_latency_buffer", object(), raising=False)
 
     def check_dispatch(**kwargs):
         seen.append(kwargs["block_size_k"])
@@ -500,7 +499,7 @@ def test_ep_moe_rounds_scales_and_preserves_logical_block_size(monkeypatch, is_p
         )
         return x
 
-    monkeypatch.setattr(ep, "fused_experts_impl", check_dispatch)
+    monkeypatch.setattr(ep.prefill_decode_sync, "fused_experts_impl", check_dispatch)
     ep.fused_experts(
         x,
         w13,

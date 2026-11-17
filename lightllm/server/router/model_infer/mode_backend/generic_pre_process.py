@@ -10,6 +10,7 @@ INT64_MAX = torch.iinfo(torch.int64).max
 def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> Tuple[ModelInput, List[InferReq]]:
     run_reqs = []
     total_token_num = 0
+    total_input_token_num = 0
     input_ids = []
     b_req_idx = []
     b_seq_len = []
@@ -40,6 +41,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_seq_len.append(seq_len)
         b_q_seq_len.append(input_token_len)
         input_ids.append(input_id)
+        total_input_token_num += input_token_len
         total_token_num += seq_len
         b_ready_cache_len.append(req.cur_kv_len)
         b_mtp_index.append(0)
@@ -55,14 +57,15 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     max_cache_len = max(b_ready_cache_len, default=0)
     max_q_seq_len = max(b_q_seq_len, default=0)
 
-    input_ids = np.concatenate(input_ids, dtype=np.int64) if input_ids else np.empty((0,), dtype=np.int64)
-    input_ids = torch.tensor(input_ids, dtype=torch.int64, device="cpu")
-    b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
-    b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
+    token_ids = torch.empty(total_input_token_num, dtype=torch.int64, device="cpu", pin_memory=True)
+    if input_ids:
+        np.concatenate(input_ids, out=token_ids.numpy())
+    input_ids = token_ids
+
+    b_req_idx, b_seq_len, b_mtp_index, b_ready_cache_len, b_q_seq_len = torch.from_numpy(
+        np.asarray((b_req_idx, b_seq_len, b_mtp_index, b_ready_cache_len, b_q_seq_len), dtype=np.int32)
+    ).unbind()
     b_is_decode_req = torch.tensor(b_is_decode_req, dtype=torch.bool, device="cpu")
-    b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
-    b_ready_cache_len = torch.tensor(b_ready_cache_len, dtype=torch.int32, device="cpu")
-    b_q_seq_len = torch.tensor(b_q_seq_len, dtype=torch.int32, device="cpu")
     b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
 
     model_input = ModelInput(
@@ -120,14 +123,12 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     max_kv_seq_len = max(b_seq_len, default=0)
     max_q_seq_len = max(b_q_seq_len, default=1)
 
-    b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
-    b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
-    b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
+    b_shared_seq_len = [req.get_radix_cache_shared_len() for req in run_reqs]
+    b_req_idx, b_seq_len, b_mtp_index, b_shared_seq_len = torch.from_numpy(
+        np.asarray((b_req_idx, b_seq_len, b_mtp_index, b_shared_seq_len), dtype=np.int32)
+    ).unbind()
     b_position_delta = build_b_position_delta(multimodal_params)
 
-    b_shared_seq_len = torch.tensor(
-        [req.get_radix_cache_shared_len() for req in run_reqs], dtype=torch.int32, device="cpu"
-    )
     b_shared_radix_node_id = torch.tensor(
         [-1 if req.shared_kv_node is None else req.shared_kv_node.time_id % INT64_MAX for req in run_reqs],
         dtype=torch.int64,

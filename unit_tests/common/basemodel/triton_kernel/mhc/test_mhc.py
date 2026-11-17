@@ -201,3 +201,75 @@ def test_shared_mhc_cuda_graph_replay(tokens):
         layer_output.normal_()
         graph.replay()
         torch.testing.assert_close(actual, reference(), atol=0.06, rtol=0.04)
+
+
+def test_mhc_reduction_reuses_compilation_within_split_buckets():
+    hashes = {}
+    for tokens, splits in [
+        (1, 1),
+        (16, 1),
+        (2, 3),
+        (16, 3),
+        (16, 8),
+        (3, 3),
+        (17, 7),
+        (31, 14),
+        (129, 26),
+        (257, 33),
+        (513, 64),
+    ]:
+        partial = torch.randn((splits, tokens, 24), device="cuda") * 0.05
+        squares = torch.rand((splits, tokens), device="cuda") * (16384 / splits) + 1
+        scale = torch.randn(3, device="cuda")
+        base = torch.randn(24, device="cuda")
+        x = torch.randn((tokens, 16384), device="cuda", dtype=torch.bfloat16)
+        norm = torch.randn(4096, device="cuda", dtype=torch.bfloat16)
+
+        def run(gemm, sqrsum):
+            post = torch.empty((tokens, 4), device="cuda")
+            mix = torch.empty((tokens, 4, 4), device="cuda")
+            output = torch.empty((tokens, 4096), device="cuda", dtype=torch.bfloat16)
+            block_splits = triton.next_power_of_2(gemm.shape[0])
+            compiled = pre_norm._hc_pre_norm_kernel[(tokens,)](
+                x,
+                gemm,
+                sqrsum,
+                scale,
+                base,
+                post,
+                mix,
+                norm,
+                output,
+                hidden=4096,
+                x_stride_m=x.stride(0),
+                gemm_stride_s=gemm.stride(0),
+                gemm_stride_m=gemm.stride(1),
+                sqrsum_stride_s=sqrsum.stride(0),
+                sqrsum_stride_m=sqrsum.stride(1),
+                out_stride_m=output.stride(0),
+                RMS_EPS=1e-5,
+                NORM_EPS=1e-5,
+                STREAMS=4,
+                HC_EPS=1e-6,
+                POST_MULTIPLIER=2.0,
+                SINKHORN_ITERS=20,
+                N_SPLITS=gemm.shape[0],
+                BLOCK_SPLITS=block_splits,
+                BLOCK_H=4096,
+                num_warps=4,
+            )
+            hashes.setdefault(block_splits, set()).add(compiled.hash)
+            return output, mix, post
+
+        # The fused kernel reduces splits in parallel, so compare to sequential
+        # FP32 accumulation with tolerance for the different reduction order.
+        total = torch.zeros_like(partial[:1])
+        total_squares = torch.zeros_like(squares[:1])
+        for index in range(splits):
+            total.add_(partial[index : index + 1])
+            total_squares.add_(squares[index : index + 1])
+        actual, expected = run(partial, squares), run(total, total_squares)
+        torch.testing.assert_close(actual[0], expected[0], atol=0.04, rtol=0.03)
+        for output, reference in zip(actual[1:], expected[1:]):
+            torch.testing.assert_close(output, reference, atol=1e-6, rtol=1e-5)
+    assert all(len(bucket_hashes) == 1 for bucket_hashes in hashes.values())

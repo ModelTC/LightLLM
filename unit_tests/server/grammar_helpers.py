@@ -55,6 +55,7 @@ def make_req(guided_reasoning_end=(), **constraints):
             temperature=1.0,
             top_p=1.0,
             top_k=1,
+            output_top_logprobs=-1,
         ),
     )
     params.update(constraints)

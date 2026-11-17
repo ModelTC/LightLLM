@@ -31,12 +31,12 @@ TOOLS = [
 ]
 
 
-def collect_stream(text, chunk_size):
-    parser = FunctionCallParser(TOOLS, "glm47")
+def collect_chunks(chunks, tools=TOOLS):
+    parser = FunctionCallParser(tools, "glm47")
     content = ""
     calls = {}
-    for start in range(0, len(text), chunk_size):
-        normal, deltas = parser.parse_stream_chunk(text[start : start + chunk_size])
+    for chunk in chunks:
+        normal, deltas = parser.parse_stream_chunk(chunk)
         content += normal
         for delta in deltas:
             if delta.name is not None:
@@ -44,6 +44,10 @@ def collect_stream(text, chunk_size):
                 calls[delta.tool_index] = {"name": delta.name, "arguments": ""}
             calls[delta.tool_index]["arguments"] += delta.parameters
     return content, calls
+
+
+def collect_stream(text, chunk_size):
+    return collect_chunks(text[start : start + chunk_size] for start in range(0, len(text), chunk_size))
 
 
 @pytest.mark.parametrize("separator", ["", "\n"])
@@ -125,3 +129,54 @@ def test_undefined_buffered_tool_does_not_consume_a_call_index():
     assert len(calls) == 1
     assert calls[0].name == "Read"
     assert calls[0].tool_index == 0
+
+
+@pytest.mark.parametrize("end_split", range(1, len("</tool_call>")))
+def test_long_arguments_and_split_end_tag_preserve_following_call(end_split):
+    value = '中文\n{"literal": true}</tool_calX>' * 1024
+    closing = "</tool_call>"
+    following = " between <tool_call>Read<arg_key>file_path</arg_key><arg_value>/tmp/a</arg_value>"
+    chunks = ["before <tool_call>Write<arg_key>content</arg_key><arg_value>"]
+    chunks.extend(value[start : start + 16] for start in range(0, len(value), 16))
+    chunks.extend(["</arg_value>", closing[:end_split], closing[end_split:] + following, closing + " after"])
+
+    content, calls = collect_chunks(chunks)
+
+    assert content == "before  between  after"
+    assert list(calls) == [0, 1]
+    assert [call["name"] for call in calls.values()] == ["Write", "Read"]
+    assert json.loads(calls[0]["arguments"]) == {"content": value}
+    assert json.loads(calls[1]["arguments"]) == {"file_path": "/tmp/a"}
+
+
+@pytest.mark.parametrize("separator", ["\n", "<arg_key>content</arg_key><arg_value>x</arg_value>"])
+def test_long_tool_name_split_into_single_characters(separator):
+    name = "write_" + "x" * 1024
+    tool = Tool.model_validate({"type": "function", "function": {"name": name, "parameters": {}}})
+    text = f"<tool_call>  {name}  {separator}</tool_call>"
+
+    content, calls = collect_chunks(iter(text), tools=[tool])
+
+    assert content == ""
+    assert list(calls) == [0]
+    assert calls[0]["name"] == name
+    _, nonstream = FunctionCallParser([tool], "glm47").parse_non_stream(text)
+    assert calls[0]["arguments"] == nonstream[0].parameters
+
+
+def test_empty_chunks_preserve_buffered_keepalive_and_call_index():
+    parser = FunctionCallParser(TOOLS, "glm47")
+    _, calls = parser.parse_stream_chunk("<tool_call>Read\n")
+    assert calls[0].name == "Read"
+
+    for _ in range(3):
+        normal, calls = parser.parse_stream_chunk("")
+        assert normal == ""
+        assert len(calls) == 1
+        assert calls[0].tool_index == 0
+        assert calls[0].name is None
+        assert calls[0].parameters == ""
+
+    _, calls = parser.parse_stream_chunk("</tool_call><tool_call>Read\n")
+    assert [(call.tool_index, call.name) for call in calls] == [(0, None), (1, "Read")]
+    assert json.loads(calls[0].parameters) == {}

@@ -147,6 +147,28 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             weights[self._q_weight_name] = _q_proj
             weights[self._o_gate_weight_name] = _gate_proj
 
+        if self.is_linear_attention_layer:
+            return
+        quant_method = self.qkvo_gate_proj.quant_method
+        if quant_method.method_name not in ("awq", "awq_marlin"):
+            return
+
+        # AWQ GEMM stores output channels on the last axis, packed for qweight and qzeros.
+        for suffix, factor in (
+            ("qweight", quant_method.pack_factor),
+            ("qzeros", quant_method.pack_factor),
+            ("scales", 1),
+        ):
+            q_name = self._q_weight_name.removesuffix(".weight") + f".{suffix}"
+            weight = weights.get(q_name)
+            head_width = self.head_dim // factor
+            if weight is None or weight.shape[-1] != 2 * self.q_head_num_ * head_width:
+                continue
+            q, gate = weight.reshape(weight.shape[0], self.q_head_num_, 2, head_width).unbind(dim=2)
+            gate_name = self._o_gate_weight_name.removesuffix(".weight") + f".{suffix}"
+            weights[q_name] = q.flatten(1)
+            weights[gate_name] = gate.flatten(1)
+
     def _rename_shared_expert_to_moe_expert(self, weights):
         if self.num_fused_shared_experts != 1:
             return

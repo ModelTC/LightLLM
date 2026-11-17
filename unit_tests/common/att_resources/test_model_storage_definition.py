@@ -272,5 +272,5 @@ def test_cpu_layout_uses_all_model_factory_states(
     prepare_model_states(model)
     model.att_state_manager.finish_state_registration()
     runtime_layouts = model.att_state_manager.get_cpu_cache_operator().get_page_layouts()
-    assert set(cpu_layouts) == set(runtime_layouts) == {"main_gqa_bf16_state", "main_gqa_fp16_state"}
+    assert set(cpu_layouts) == set(runtime_layouts) == {"main_gqa_bf16_h8_d16_state", "main_gqa_fp16_h8_d16_state"}
     assert cpu_layouts == runtime_layouts

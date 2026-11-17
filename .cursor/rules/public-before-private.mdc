@@ -1,0 +1,26 @@
+---
+description: 文件和类里公开声明放前面，私有实现放后面
+alwaysApply: true
+---
+
+# 公开在前，私有在后
+
+一个文件里，对外的函数、类、常量放在前面，只给本文件用的函数和常量放在后面。类里面也一样：公开方法在前，私有方法在后。
+
+强内聚的一块可以放在一起，用块注释和其他代码分开。块里面仍是公开的在前、私有的在后。
+
+```python
+def capture_output_logprobs(...):
+    ...
+
+
+# --- 采样 logprob 的分段 kernel ---
+def _output_logprobs_partial(...):
+    ...
+
+
+def _output_logprobs_finish(...):
+    ...
+```
+
+新写的代码按这个顺序排。改旧代码时，不为了调整顺序去搬动这次没碰到的声明。

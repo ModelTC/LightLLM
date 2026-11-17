@@ -59,13 +59,18 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
         token_source=TokenSource(args),
     )
     resources = model.att_state_manager
-    (full_state,) = resources.get_full_attention_states("main")
+    full_states = resources.get_full_attention_states("main")
+    assert full_states
+    for state in full_states:
+        assert state.capacity == resources.full_att_allocator.size
     for draft in draft_models:
         assert draft.att_state_manager is resources
         assert not hasattr(draft, "full_att_state")
-        (draft_state,) = resources.get_full_attention_states("draft0")
-        assert draft_state is not full_state
-        assert draft_state.capacity == full_state.capacity == resources.full_att_allocator.size
+        draft_states = resources.get_full_attention_states(draft.att_state_role)
+        assert draft_states
+        for state in draft_states:
+            assert all(state is not main_state for main_state in full_states)
+            assert state.capacity == resources.full_att_allocator.size
         assert draft.req_manager is model.req_manager
     prefix_len, page_tokens = args.input_len, args.cpu_cache_token_page_size
     if prefix_len % page_tokens:
@@ -177,8 +182,8 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
                 dst_token_indices=indices,
                 src_big_page_ids=[],
                 dst_big_page_ids=[],
-                src_req_idx=int(source_req[0]),
-                dst_req_idx=int(request[0]),
+                src_req_indices=[int(source_req[0])],
+                dst_req_indices=[int(request[0])],
             )
         else:
             resources.get_pd_operator().read_page(
@@ -231,10 +236,12 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
             if draft_models and hybrid:
                 cuda_req_indices = request.cuda(non_blocking=True)
                 accepted_steps = torch.full_like(cuda_req_indices, accepted_width, dtype=torch.int32)
+                req_verify_width = torch.full_like(cuda_req_indices, step_width, dtype=torch.int32)
                 for item in (model, *draft_models):
                     resources.commit_bounded_att_state(
                         req_indices=cuda_req_indices,
                         accepted_steps=accepted_steps,
+                        req_verify_width=req_verify_width,
                         role=item.att_state_role,
                     )
             return logits

@@ -168,6 +168,11 @@ def _worker(connection: Connection, backend: str, sender: bool):
         buffer = allocate_transfer_buffer(resources, 3, device=f"cuda:{device}")
         buffer.fill_(93 if sender else 11)
         copy_stream = torch.cuda.Stream()
+        pd_page_kind_payload_bytes = {}
+        for kind in ("kv", "att_state"):
+            payload_bytes = resources.get_pd_operator().get_pd_page_kind_payload_bytes(kind)
+            if payload_bytes > 0:
+                pd_page_kind_payload_bytes[kind] = payload_bytes
         if backend == "nccl":
             from lightllm.server.router.model_infer.mode_backend.pd.nccl_kv_transporter import NcclKVTransporter
 
@@ -176,11 +181,17 @@ def _worker(connection: Connection, backend: str, sender: bool):
                 tp_idx=device,
                 kv_move_buffer=buffer,
                 host_ip="127.0.0.1",
+                pd_page_kind_payload_bytes=pd_page_kind_payload_bytes,
             )
         else:
             from lightllm.server.router.model_infer.mode_backend.pd.nixl_kv_transporter import NixlKVTransporter
 
-            transporter = NixlKVTransporter(os.getpid(), device, buffer)
+            transporter = NixlKVTransporter(
+                os.getpid(),
+                device,
+                buffer,
+                pd_page_kind_payload_bytes=pd_page_kind_payload_bytes,
+            )
         connection.send(
             (
                 "metadata",
@@ -269,6 +280,8 @@ def _worker(connection: Connection, backend: str, sender: bool):
                         assert time.monotonic() < deadline, "PD receive timed out"
                         time.sleep(0.002)
                     assert transporter.check_task_status(request) == "DONE"
+                payload_bytes = resources.get_pd_operator().get_pd_page_kind_payload_bytes(kind)
+                assert (buffer[request.dst_page_index, payload_bytes:] == 11).all()
                 # Match production: unpack on a separate stream after the done notification.
                 with torch.cuda.stream(copy_stream):
                     copy_page(

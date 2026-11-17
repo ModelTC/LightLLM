@@ -30,13 +30,17 @@ class VanillaWithAttProposer(BaseSpecProposer):
         draft_input = copy.copy(target_model_input)
         draft_hidden = target_model_output.mtp_collector.spec_hidden
         draft_token_ids = target_next_token_ids
-        for draft_model in self.backend.draft_models:
+        for draft_index, draft_model in enumerate(self.backend.draft_models):
             draft_input = self._prepare_mtp_prefill_inputs(
                 model_input=draft_input,
                 b_next_token_ids=draft_token_ids,
                 mtp_draft_input_hiddens=draft_hidden,
             )
             draft_output = draft_model.forward(draft_input)
+            # The final chained draft only needs its KV cache. Its output is
+            # consumed by no subsequent draft model.
+            if draft_index + 1 == len(self.backend.draft_models):
+                break
             draft_hidden = draft_output.mtp_collector.spec_hidden
             draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)
 

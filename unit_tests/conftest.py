@@ -2,11 +2,37 @@
 
 from __future__ import annotations
 
-
+import os
 from contextlib import suppress
 from uuid import uuid4
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def single_rank_environment(monkeypatch: pytest.MonkeyPatch):
+    """Default standalone tests to one rank without overriding explicit settings."""
+    for key, value in {
+        "LIGHTLLM_CURRENT_DEVICE_ID": "0",
+        "LIGHTLLM_CURRENT_RANK_IN_DP": "0",
+        "LIGHTLLM_CURRENT_RANK_IN_NODE": "0",
+        "LIGHTLLM_DP_WORLD_SIZE": "1",
+    }.items():
+        if key not in os.environ:
+            monkeypatch.setenv(key, value)
+
+
+@pytest.fixture
+def runtime_start_args(monkeypatch: pytest.MonkeyPatch):
+    import json
+    from dataclasses import asdict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.utils.envs_utils import get_env_start_args
+
+    monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(asdict(StartArgs())))
+    get_env_start_args.cache_clear()
+    yield
+    get_env_start_args.cache_clear()
 
 
 @pytest.fixture

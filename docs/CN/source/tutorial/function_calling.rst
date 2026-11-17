@@ -53,6 +53,8 @@ Mistral
 
 **格式**: ``[TOOL_CALLS] [{"name": "func", "arguments": {...}}, ...]``
 
+启用 chat logprobs 时暂不支持 ``mistral`` 工具调用解析器。
+
 DeepSeek-V3
 ~~~~~~~~~~~
 

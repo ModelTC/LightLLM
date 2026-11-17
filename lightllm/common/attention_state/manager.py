@@ -396,13 +396,19 @@ class AttentionStateManager:
         self,
         req_indices: torch.Tensor,
         accepted_steps: torch.Tensor,
+        req_verify_width: torch.Tensor,
         role: str,
     ) -> None:
-        """传入 CUDA 请求索引和 int32 接受步数，包含基准输入步；无参与 State 时为空操作。"""
-        assert req_indices.is_cuda and accepted_steps.is_cuda, "commit inputs must be CUDA tensors"
+        """传入 CUDA 请求索引、int32 接受步数和每个请求的验证宽度；无参与 State 时为空操作。
+
+        req_verify_width 与请求逐行对齐，是每个请求这次送去验证的 token 数。Replay 用它剪掉未接受尾部。
+        """
+        assert (
+            req_indices.is_cuda and accepted_steps.is_cuda and req_verify_width.is_cuda
+        ), "commit inputs must be CUDA tensors"
         assert role in MODEL_ROLES, f"unknown model role {role}"
         for state in self.get_bounded_attention_states(role):
-            state.commit_bounded_att_state(req_indices, accepted_steps)
+            state.commit_bounded_att_state(req_indices, accepted_steps, req_verify_width)
 
     # ========================================================================
     # 四、CPU/DP/PD 操作均由对应 Operator 提供。

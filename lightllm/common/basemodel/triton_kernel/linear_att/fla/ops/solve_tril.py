@@ -201,6 +201,33 @@ def merge_16x16_to_32x32_inverse_kernel(
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.jit(do_not_specialize=["T"])
+def _invert_64_diagonal_tiles(A, Diag, cu_seqlens, chunk_indices, T, H: tl.constexpr, IS_VARLEN: tl.constexpr):
+    """Invert the four independent 16x16 blocks before the full inverse merge."""
+    i_t, i_bh, d = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_b, h = i_bh // H, i_bh % H
+    if IS_VARLEN:
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+        chunk = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+    else:
+        bos, eos = i_b * T, (i_b + 1) * T
+        chunk = i_t
+    row = chunk * 64 + d * 16
+    i = tl.arange(0, 16)
+    base = A + ((bos + row).to(tl.int64) * H + h) * 64 + d * 16
+    tile = tl.load(base + i[:, None] * H * 64 + i[None, :], mask=(bos + row + i[:, None]) < eos, other=0).to(tl.float32)
+    inv = -tl.where(i[:, None] > i[None, :], tile, 0)
+    for j in range(2, min(16, eos - bos - row)):
+        a = -tl.load(base + j * H * 64 + i)
+        a += tl.sum(a[:, None] * inv, 0)
+        inv = tl.where((i == j)[:, None], a, inv)
+    inv += i[:, None] == i[None, :]
+    tl.store(Diag + ((i_t.to(tl.int64) * tl.num_programs(1) + i_bh) * 4 + d) * 256 + i[:, None] * 16 + i[None, :], inv)
+
+
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.jit(do_not_specialize=["T"])
 def merge_16x16_to_64x64_inverse_kernel(
     A,
     Ai,
@@ -212,6 +239,8 @@ def merge_16x16_to_64x64_inverse_kernel(
     USE_TMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     DOT_PRECISION: tl.constexpr,
+    Diag=None,
+    PREINVERTED: tl.constexpr = False,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -234,49 +263,59 @@ def merge_16x16_to_64x64_inverse_kernel(
     A += (bos * H + i_h) * BT
     Ai += (bos * H + i_h) * BT
 
-    if not USE_TMA:
-        p_A_11 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
-        p_A_22 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
-        p_A_33 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 32, 32), (16, 16), (1, 0))
-        p_A_44 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 48, 48), (16, 16), (1, 0))
-        b_Ai_11 = tl.load(p_A_11, boundary_check=(0, 1)).to(tl.float32)
-        b_Ai_22 = tl.load(p_A_22, boundary_check=(0, 1)).to(tl.float32)
-        b_Ai_33 = tl.load(p_A_33, boundary_check=(0, 1)).to(tl.float32)
-        b_Ai_44 = tl.load(p_A_44, boundary_check=(0, 1)).to(tl.float32)
-    else:
+    if USE_TMA:
         desc = make_tensor_descriptor(A, [T, BT], [H * BT, 1], [16, 16])
         desc_o = make_tensor_descriptor(Ai, [T, BT], [H * BT, 1], [16, 16])
-        b_Ai_11 = desc.load([i_t * BT + 0, 0]).to(tl.float32)
-        b_Ai_22 = desc.load([i_t * BT + 16, 16]).to(tl.float32)
-        b_Ai_33 = desc.load([i_t * BT + 32, 32]).to(tl.float32)
-        b_Ai_44 = desc.load([i_t * BT + 48, 48]).to(tl.float32)
+    if PREINVERTED:
+        base = (
+            Diag + (tl.program_id(0).to(tl.int64) * tl.num_programs(1) + i_bh) * 1024 + o_i[:, None] * 16 + o_i[None, :]
+        )
+        b_Ai_11 = tl.load(base)
+        b_Ai_22 = tl.load(base + 256)
+        b_Ai_33 = tl.load(base + 512)
+        b_Ai_44 = tl.load(base + 768)
+    else:
+        if not USE_TMA:
+            p_A_11 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
+            p_A_22 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
+            p_A_33 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 32, 32), (16, 16), (1, 0))
+            p_A_44 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 48, 48), (16, 16), (1, 0))
+            b_Ai_11 = tl.load(p_A_11, boundary_check=(0, 1)).to(tl.float32)
+            b_Ai_22 = tl.load(p_A_22, boundary_check=(0, 1)).to(tl.float32)
+            b_Ai_33 = tl.load(p_A_33, boundary_check=(0, 1)).to(tl.float32)
+            b_Ai_44 = tl.load(p_A_44, boundary_check=(0, 1)).to(tl.float32)
+        else:
+            b_Ai_11 = desc.load([i_t * BT + 0, 0]).to(tl.float32)
+            b_Ai_22 = desc.load([i_t * BT + 16, 16]).to(tl.float32)
+            b_Ai_33 = desc.load([i_t * BT + 32, 32]).to(tl.float32)
+            b_Ai_44 = desc.load([i_t * BT + 48, 48]).to(tl.float32)
 
-    # [16, 16]
-    b_Ai_11 = -tl.where(m_A, b_Ai_11, 0)
-    b_Ai_22 = -tl.where(m_A, b_Ai_22, 0)
-    b_Ai_33 = -tl.where(m_A, b_Ai_33, 0)
-    b_Ai_44 = -tl.where(m_A, b_Ai_44, 0)
+        # [16, 16]
+        b_Ai_11 = -tl.where(m_A, b_Ai_11, 0)
+        b_Ai_22 = -tl.where(m_A, b_Ai_22, 0)
+        b_Ai_33 = -tl.where(m_A, b_Ai_33, 0)
+        b_Ai_44 = -tl.where(m_A, b_Ai_44, 0)
 
-    for i in range(2, min(16, T - i_t * BT)):
-        b_a_11 = -tl.load(A + (i_t * BT + i) * H * BT + o_i)
-        b_a_11 += tl.sum(b_a_11[:, None] * b_Ai_11, 0)
-        b_Ai_11 = tl.where((o_i == i)[:, None], b_a_11, b_Ai_11)
-    for i in range(16 + 2, min(32, T - i_t * BT)):
-        b_a_22 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 16)
-        b_a_22 += tl.sum(b_a_22[:, None] * b_Ai_22, 0)
-        b_Ai_22 = tl.where((o_i == i - 16)[:, None], b_a_22, b_Ai_22)
-    for i in range(32 + 2, min(48, T - i_t * BT)):
-        b_a_33 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 32)
-        b_a_33 += tl.sum(b_a_33[:, None] * b_Ai_33, 0)
-        b_Ai_33 = tl.where((o_i == i - 32)[:, None], b_a_33, b_Ai_33)
-    for i in range(48 + 2, min(64, T - i_t * BT)):
-        b_a_44 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 48)
-        b_a_44 += tl.sum(b_a_44[:, None] * b_Ai_44, 0)
-        b_Ai_44 = tl.where((o_i == i - 48)[:, None], b_a_44, b_Ai_44)
-    b_Ai_11 += m_I
-    b_Ai_22 += m_I
-    b_Ai_33 += m_I
-    b_Ai_44 += m_I
+        for i in range(2, min(16, T - i_t * BT)):
+            b_a_11 = -tl.load(A + (i_t * BT + i) * H * BT + o_i)
+            b_a_11 += tl.sum(b_a_11[:, None] * b_Ai_11, 0)
+            b_Ai_11 = tl.where((o_i == i)[:, None], b_a_11, b_Ai_11)
+        for i in range(16 + 2, min(32, T - i_t * BT)):
+            b_a_22 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 16)
+            b_a_22 += tl.sum(b_a_22[:, None] * b_Ai_22, 0)
+            b_Ai_22 = tl.where((o_i == i - 16)[:, None], b_a_22, b_Ai_22)
+        for i in range(32 + 2, min(48, T - i_t * BT)):
+            b_a_33 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 32)
+            b_a_33 += tl.sum(b_a_33[:, None] * b_Ai_33, 0)
+            b_Ai_33 = tl.where((o_i == i - 32)[:, None], b_a_33, b_Ai_33)
+        for i in range(48 + 2, min(64, T - i_t * BT)):
+            b_a_44 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 48)
+            b_a_44 += tl.sum(b_a_44[:, None] * b_Ai_44, 0)
+            b_Ai_44 = tl.where((o_i == i - 48)[:, None], b_a_44, b_Ai_44)
+        b_Ai_11 += m_I
+        b_Ai_22 += m_I
+        b_Ai_33 += m_I
+        b_Ai_44 += m_I
 
     if not USE_TMA:
         p_A_21 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
@@ -412,6 +451,8 @@ def solve_tril(
     A: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float,
+    *,
+    split_diagonal: bool = False,
 ) -> torch.Tensor:
     """
     Compute the inverse of the matrix I + A
@@ -425,6 +466,9 @@ def solve_tril(
         output_dtype (torch.dtype):
             The dtype of the output tensor. Default: `torch.float`.
             If `None`, the output dtype will be the same as the input dtype.
+        split_diagonal (bool):
+            Split the four diagonal solves for 64-token chunks. Small inputs
+            and batches with excessive FP32 workspace use the original solver.
 
     Returns:
         (I + A)^-1 with the same shape as A
@@ -437,16 +481,24 @@ def solve_tril(
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
 
     Ai = torch.zeros_like(A, dtype=output_dtype)
+    # Ensure Triton allocator is set for TMA kernels that require scratch memory
+    if is_tma_supported:
+        _ensure_triton_allocator()
+
+    split_args = {}
     if BT == 16:
         merge_fn = solve_tril_16x16_kernel
     elif BT == 32:
         merge_fn = merge_16x16_to_32x32_inverse_kernel
     elif BT == 64:
         merge_fn = merge_16x16_to_64x64_inverse_kernel
-
-    # Ensure Triton allocator is set for TMA kernels that require scratch memory
-    if is_tma_supported:
-        _ensure_triton_allocator()
+        # Bound the FP32 workspace by the FP32 input size and skip sub-chunk inputs.
+        diag_numel = NT * B * H * 4 * 16 * 16
+        if split_diagonal and T >= BT and diag_numel <= A.numel():
+            # Keep diagonal inverses in FP32 until the final output conversion.
+            diag = torch.empty((NT, B * H, 4, 16, 16), dtype=torch.float32, device=A.device)
+            _invert_64_diagonal_tiles[NT, B * H, 4](A, diag, cu_seqlens, chunk_indices, T, H=H, num_warps=4)
+            split_args = {"Diag": diag, "PREINVERTED": True}
 
     merge_fn[NT, B * H](
         A=A,
@@ -458,5 +510,6 @@ def solve_tril(
         BT=BT,
         USE_TMA=is_tma_supported,
         DOT_PRECISION=FLA_TRIL_PRECISION,
+        **split_args,
     )
     return Ai

@@ -79,6 +79,6 @@ def test_attention_draft_prepares_its_own_state_before_shared_allocation(mode: s
     resources.finish_state_registration()
     (state,) = resources.get_full_attention_states("draft0")
     assert not hasattr(draft, "full_att_state")
-    assert state.state_name == "draft0_gqa_bf16_state"
+    assert state.state_name == f"draft0_{state.get_state_type()}_state"
     assert state.config.logical_layer_groups == ((2,),)
     assert read_kv_storage(state) is None

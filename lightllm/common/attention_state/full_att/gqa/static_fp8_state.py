@@ -175,8 +175,8 @@ class StaticFP8FullAttentionState(FullAttentionState):
         self.q_scales = q_scales
 
     def get_state_type(self) -> str:
-        """返回包含 per-tensor 或 per-head 标定方式的 FP8 方案标记。"""
-        return "gqa_fp8_static_" + self.config.scale_mode
+        """返回包含标定方式及全局 head 布局的 FP8 方案标记。"""
+        return f"gqa_fp8_static_{self.config.scale_mode}_h{self.config.global_head_num}_d{self.config.head_dim}"
 
     def allocate_storage(self, token_capacity: int) -> None:
         """绑定 KV 与真实标定参数，并预备 FlashInfer 使用的 CPU scale。"""
@@ -209,6 +209,22 @@ class StaticFP8FullAttentionState(FullAttentionState):
     def get_storage_layer_index(self, logical_layer_id: int) -> int:
         """按逻辑层号查询 KV 和标定参数共用的物理行；共享逻辑层返回同一下标。"""
         return self._logical_to_storage_layer[logical_layer_id]
+
+    def get_k_descale(self, storage_layer_index: int, batch_size: int) -> torch.Tensor:
+        """返回 per-head FP8 的 K descale，shape [batch_size, head_num]，供 FA3 kernel 使用。
+
+        数据已由 bind_calibration 按当前 TP rank 切分，此处仅做 view + broadcast，
+        不分配新内存；batch_size 由调用方按本次请求的实际 batch 给出。
+        """
+        assert self.config.scale_mode == "per_head", "K descale requires per-head calibration"
+        head_num = self.config.head_num
+        return self.scales[storage_layer_index, :head_num].view(1, head_num).expand(batch_size, head_num)
+
+    def get_v_descale(self, storage_layer_index: int, batch_size: int) -> torch.Tensor:
+        """返回 per-head FP8 的 V descale，shape [batch_size, head_num]，供 FA3 kernel 使用。"""
+        assert self.config.scale_mode == "per_head", "V descale requires per-head calibration"
+        head_num = self.config.head_num
+        return self.scales[storage_layer_index, head_num:].view(1, head_num).expand(batch_size, head_num)
 
     def get_layer_view(self, logical_layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
         """按逻辑层号返回 K、V 视图，head 数使用当前 TP 分片配置。"""

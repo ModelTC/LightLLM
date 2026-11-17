@@ -47,6 +47,13 @@ class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
         ]
         self.trans_layers_weight = [self.physical_layer_weights[i] for i in self.loop_layer_indices]
 
+    def _init_infer_layer(self, start_layer_index=0):
+        super()._init_infer_layer(start_layer_index)
+        # Bind split projections once for each visit to a shared physical layer.
+        for layer, weight in zip(self.layers_infer, self.trans_layers_weight):
+            if getattr(weight, "linear_gate_proj", None) is not None:
+                layer._linear_in_proj = layer._linear_in_proj_with_gates
+
     def load_weights(self, weight_dict):
         execution_weights = self.trans_layers_weight
         self.trans_layers_weight = self.physical_layer_weights

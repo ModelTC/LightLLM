@@ -32,7 +32,7 @@ def test_router_reads_each_local_dp_groups_allocator(
     for rank in range(tp // nnodes):
         monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", str(rank))
         allocator = FullAttKVAllocator(16 + 4 * rank, 4, pin_memory=False)
-        assert allocator.shared_can_use_token_num.get_value() == allocator.size
+        assert allocator._shared_can_use_token_num.get_value() == allocator.size
         allocator.alloc(4)
         allocators.append(allocator)
     reader = reader or full_att_kv_allocator.KVCapacityReader()
@@ -51,7 +51,7 @@ def test_router_reads_each_local_dp_groups_allocator(
 
 def test_failed_page_operations_leave_shared_capacity_unchanged():
     allocator = FullAttKVAllocator(16, 4, pin_memory=False)
-    counter = allocator.shared_can_use_token_num
+    counter = allocator._shared_can_use_token_num
     tokens = allocator.alloc(16)
     with pytest.raises(AssertionError):
         allocator.alloc(4)

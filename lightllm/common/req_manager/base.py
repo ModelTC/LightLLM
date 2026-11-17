@@ -9,45 +9,31 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger("lightllm.common.req_manager")
 
 
-class _ReqNode:
-    def __init__(self, index):
-        self.index = index
-        self.next: "_ReqNode" = None
-
-
-class _ReqLinkedList:
+class _ReqIndexPool:
     def __init__(self, max_request_num):
-        self.nodes = [_ReqNode(i) for i in range(max_request_num)]
-        self.marks = [0 for _ in range(max_request_num)]
-        self.root_node = _ReqNode(-1)
-        for i in range(0, max_request_num - 1):
-            self.nodes[i].next = self.nodes[i + 1]
-        self.root_node.next = self.nodes[0]
-        self.can_alloc_size = max_request_num
-        return
+        self.free_indexes = list(range(max_request_num - 1, -1, -1))
+        self.marks = [0] * max_request_num
+
+    @property
+    def can_alloc_size(self):
+        return len(self.free_indexes)
 
     def alloc(self):
-        if self.root_node.next is None:
+        if not self.free_indexes:
             logger.warning("alloc req index fail")
             return None
-        get_node = self.root_node.next
-        self.root_node.next = self.root_node.next.next
-        assert self.marks[get_node.index] == 0
-        self.marks[get_node.index] = 1
-        self.can_alloc_size -= 1
-        return get_node.index
+        index = self.free_indexes.pop()
+        assert self.marks[index] == 0
+        self.marks[index] = 1
+        return index
 
     def free(self, index):
         assert self.marks[index] == 1
-        node = self.nodes[index]
-        node.next = self.root_node.next
-        self.root_node.next = node
         self.marks[index] = 0
-        self.can_alloc_size += 1
-        return
+        self.free_indexes.append(index)
 
     def is_all_free(self):
-        return self.can_alloc_size == len(self.marks)
+        return len(self.free_indexes) == len(self.marks)
 
 
 class ReqManager:
@@ -58,7 +44,7 @@ class ReqManager:
         # 的这个请求管理 id， 主要是为了兼容 DP 运行模式下，让各个 DP 能 padding 到 DP 中最大
         # 的那个batch size 进行运行，所有 padding 的请求都会使用预留的这个请求管理 id 进行处理
         # 这样让 DP 的实现更为简化一些。
-        self.req_list = _ReqLinkedList(max_request_num)
+        self.req_list = _ReqIndexPool(max_request_num)
         self.page_size = page_size = get_env_start_args().page_size
         max_sequence_length = (max_sequence_length + page_size - 1) // page_size * page_size
         self.req_to_token_indexs = torch.zeros(
@@ -73,12 +59,9 @@ class ReqManager:
         assert (
             self.req_list.is_all_free()
         ), "hold request indexes can only be initialized when all requests are released"
+
         hold_row = self.req_to_token_indexs[self.HOLD_REQUEST_ID]
-        hold_page = torch.as_tensor(
-            token_indices,
-            dtype=hold_row.dtype,
-            device=hold_row.device,
-        )
+        hold_page = torch.as_tensor(token_indices, dtype=hold_row.dtype, device=hold_row.device)
         if hold_page.ndim != 1 or hold_page.numel() != self.page_size:
             raise ValueError("HOLD indices must describe exactly one physical page")
         hold_row.view(-1, self.page_size).copy_(hold_page)
@@ -89,16 +72,12 @@ class ReqManager:
     def free(self, free_req_indexes: List[int]):
         for req_index in free_req_indexes:
             self.req_list.free(req_index)
-
         if self.req_list.is_all_free():
             logger.debug(f"freed all request size {self.req_list.can_alloc_size}")
 
     def free_req(self, free_req_index: int):
-        self.req_list.free(free_req_index)
-        if self.req_list.is_all_free():
-            logger.debug(f"freed all request size {self.req_list.can_alloc_size}")
-        return
+        self.free([free_req_index])
 
     def free_all(self):
-        self.req_list = _ReqLinkedList(self.max_request_num)
+        self.req_list = _ReqIndexPool(self.max_request_num)
         return

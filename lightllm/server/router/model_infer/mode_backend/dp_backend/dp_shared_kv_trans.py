@@ -1,6 +1,7 @@
 # 该文件用于提供在数据dp并行的推理模式下，共享kv cache trans相关的功能函数模块
 import numpy as np
 import dataclasses
+from collections import defaultdict
 import torch
 from typing import List
 from lightllm.utils.envs_utils import get_env_start_args
@@ -48,6 +49,11 @@ class DPKVSharedMoudle:
 
     def fill_reqs_info(self, reqs: List[InferReq]) -> None:
         """发布每个请求的 KV 长度、请求槽位及完整有序大页列表。"""
+        # 请求索引统一在默认流维护，原生 batch 的默认流适配由拷贝封装处理。
+        # DP 发布复用统一入口，不另建索引流或逐请求事件。
+        self.backend._copy_req_token_indexes_to_gpu(reqs)
+        # 同步 NCCL barrier 会等待默认流上排入的上传依赖完成；所有 TP rank
+        # 到达此屏障后，其他 DP rank 才能读取已发布的 GPU 索引和共享请求元数据。
         dist.barrier(group=self.backend.node_nccl_group)
         if self.backend.is_master_in_dp:
             for req_index, req in enumerate(reqs):
@@ -92,7 +98,7 @@ class DPKVSharedMoudle:
             # 计算需要传输的 kv 长度， 不能超过 req.get_cur_total_len() - 1
             trans_size = min(max_available_kv_len, req.get_cur_total_len() - 1) - req.cur_kv_len
             target_kv_len = req.cur_kv_len + trans_size
-            alloc_token_num = req._kv_cache_alloc_need(target_kv_len) if trans_size > 0 else 0
+            alloc_token_num = req.kv_cache_alloc_need(target_kv_len) if trans_size > 0 else 0
 
             if is_local_dp_request and trans_size > 0 and alloc_token_num <= g_infer_context.get_can_alloc_token_num():
                 assert req.hold_kv_len == req.cur_kv_len
@@ -111,7 +117,7 @@ class DPKVSharedMoudle:
                         assert all(
                             page_id >= 0 for page_id in src_big_page_ids
                         ), "DP source is missing prefix big pages"
-                dst_token_indices = self.backend._alloc_req_kv_mem(req, alloc_token_num)
+                dst_token_indices = req.alloc_kv_mem(alloc_token_num)
                 assert dst_token_indices is not None
                 if src_big_page_ids:
                     allocator = self.backend.model.att_state_manager.bounded_att_big_page_allocator
@@ -138,18 +144,26 @@ class DPKVSharedMoudle:
 
     def kv_trans(self, trans_tasks: List["TransTask"]) -> None:
         target = self.backend.model.att_state_manager
+        tasks_by_dp = defaultdict(list)
         for task in trans_tasks:
-            source = self.backend.dp_att_state_managers[task.src_dp_rank]
-            # 源索引来自远端 CUDA 请求表；allocator 返回 CPU 索引，在此一次性准备目标 CUDA int64 索引。
-            dst_token_indices = task.dst_token_indices.to(device="cuda", dtype=torch.long, non_blocking=True)
+            tasks_by_dp[task.src_dp_rank].append(task)
+        for src_dp_rank, tasks in tasks_by_dp.items():
+            # 单个 tensor 的 cat 仍会拷贝。源索引已在 CUDA；目标索引保持 allocator 的 int32，kernel 读取时再扩成 int64。
+            if len(tasks) == 1:
+                src_token_indices = tasks[0].src_token_indices
+                dst_token_indices = tasks[0].dst_token_indices
+            else:
+                src_token_indices = torch.cat([task.src_token_indices for task in tasks])
+                dst_token_indices = torch.cat([task.dst_token_indices for task in tasks])
+            dst_token_indices = dst_token_indices.to(device="cuda", non_blocking=True)
             target.get_dp_shared_operator().copy_from_dp(
-                remote_att_manager=source,
-                src_token_indices=task.src_token_indices,
+                remote_att_manager=self.backend.dp_att_state_managers[src_dp_rank],
+                src_token_indices=src_token_indices,
                 dst_token_indices=dst_token_indices,
-                src_big_page_ids=task.src_big_page_ids,
-                dst_big_page_ids=task.dst_big_page_ids,
-                src_req_idx=task.src_req_idx,
-                dst_req_idx=task.dst_req.req_idx,
+                src_big_page_ids=[page for task in tasks for page in task.src_big_page_ids],
+                dst_big_page_ids=[page for task in tasks for page in task.dst_big_page_ids],
+                src_req_indices=[task.src_req_idx for task in tasks],
+                dst_req_indices=[task.dst_req.req_idx for task in tasks],
             )
         # Source requests may be released on other ranks immediately afterwards.
         # All ranks participate, including those without a local transfer task.
@@ -175,6 +189,6 @@ class TransTask:
     src_dp_rank: int  # 来源 DP 在当前节点内的编号。
     src_req_idx: int  # 远端请求槽位，用于复制 prefill 基准运行态。
     src_token_indices: torch.Tensor  # 来源 CUDA 请求表中的有效 KV 索引。
-    dst_token_indices: torch.Tensor  # allocator 返回的目标 CPU 索引，提交时统一转为 CUDA int64。
+    dst_token_indices: torch.Tensor  # allocator 返回的目标 CPU int32 索引，提交时转到 CUDA。
     src_big_page_ids: List[int]  # 按前缀长度递增排列的源大页槽位。
     dst_big_page_ids: List[int]  # 与源列表一一配对的新分配目标大页槽位。

@@ -1,3 +1,5 @@
+from typing import Tuple
+
 import torch
 import triton
 import triton.language as tl
@@ -67,3 +69,136 @@ def scatter_prompt_logprobs_to_cpu(
         MAX_TOPK=max_topk,
         BLOCK=block,
     )
+
+
+@triton.jit
+def _output_logprobs_partial(
+    logits,
+    rows,
+    candidates,
+    sampled_ids,
+    higher_counts,
+    stride_row: tl.constexpr,
+    vocab_size: tl.constexpr,
+    tiles: tl.constexpr,
+    TOPK: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    # 词表按 1024 一段切开。每个程序处理一行中的一段，只保留这段里分数最高的 TOPK 个键。
+    index = tl.program_id(0)
+    tile = tl.program_id(1)
+    row = tl.load(rows + index * 3).to(tl.int64)
+    row_logits = logits + row * stride_row
+    ids = tile * BLOCK + tl.arange(0, BLOCK)
+    scores = tl.load(row_logits + ids, ids < vocab_size, -float("inf")).to(tl.float32)
+    sampled = tl.load(row_logits + tl.load(sampled_ids + row)).to(tl.float32)
+    # 只数严格更高的 logit。同分不占名次，采样 token 仍算在前 20 里。
+    higher = tl.sum(((ids < vocab_size) & (scores > sampled)).to(tl.int32), 0)
+    tl.store(higher_counts + index * tiles + tile, higher)
+    # tl.topk 只能比较整数。高 32 位放可排序的分数，低 32 位放反转后的 token id。
+    # 取最大的键时，分数高的在前；分数相同则 id 更小的在前。词表外的位置写成最小整数。
+    bits = scores.to(tl.int32, bitcast=True)
+    ordered = bits ^ tl.where(bits < 0, 0x7FFFFFFF, 0)
+    ordered = tl.where(scores != scores, 0x7FFFFFFF, ordered)
+    keys = (ordered.to(tl.int64) << 32) | (0xFFFFFFFF - ids.to(tl.int64))
+    keys = tl.where(ids < vocab_size, keys, -0x8000000000000000)
+    keys = tl.topk(keys, TOPK)
+    tl.store(candidates + (index * tiles + tile) * TOPK + tl.arange(0, TOPK), keys)
+
+
+@triton.jit
+def _output_logprobs_finish(
+    logits,
+    sampled_ids,
+    sampled_logprobs,
+    rows,
+    candidates,
+    token_ids,
+    logprobs,
+    higher_counts,
+    stride_row: tl.constexpr,
+    vocab_size: tl.constexpr,
+    tiles: tl.constexpr,
+    TOPK: tl.constexpr,
+    TILE_BLOCK: tl.constexpr,
+):
+    # 每个程序处理一行：合并各段的局部 top-k，按该行请求的 K 写出结果。
+    index = tl.program_id(0)
+    row = tl.load(rows + index * 3).to(tl.int64)
+    row_logits = logits + row * stride_row
+    sampled = tl.load(row_logits + tl.load(sampled_ids + row))
+    sampled_logprob = tl.load(sampled_logprobs + row)
+    width = tl.load(rows + index * 3 + 1)
+    offset = tl.load(rows + index * 3 + 2)
+    columns = tl.arange(0, TOPK)
+    positions = tl.arange(0, TILE_BLOCK * TOPK)
+    keys = tl.load(candidates + index * tiles * TOPK + positions, positions < tiles * TOPK, -0x8000000000000000)
+    best = tl.topk(keys, TOPK)
+    # 键的低 32 位是反转后的 token id，这里还原。结果仍按分数从高到低排列。
+    ids = 0xFFFFFFFF - (best & 0xFFFFFFFF)
+    scores = tl.load(row_logits + ids, (columns < width) & (ids < vocab_size), -float("inf"))
+    stored_ids = tl.where(tl.abs(scores) < float("inf"), ids, -1).to(tl.int64)
+    # 候选和采样 token 的 logsumexp 相同，用采样 logprob 平移即可，不必再做整词表 softmax。
+    row_logprobs = scores - sampled + sampled_logprob
+    tl.store(token_ids + offset + columns, stored_ids, columns < width)
+    tl.store(logprobs + offset + columns, row_logprobs, columns < width)
+    # 候选平移用的是原始采样 logprob。至少 20 个 token 严格更高时，再把采样分数写成 -9999。
+    higher_tiles = tl.arange(0, TILE_BLOCK)
+    higher = tl.sum(tl.load(higher_counts + index * tiles + higher_tiles, higher_tiles < tiles, 0), 0)
+    outside = (higher >= 20) | ~(tl.abs(sampled) < float("inf"))
+    tl.store(sampled_logprobs + row, -9999.0, mask=outside)
+
+
+def capture_output_logprobs(
+    logits: torch.Tensor,
+    sampled_ids: torch.Tensor,
+    sampled_logprobs: torch.Tensor,
+    rows: torch.Tensor,
+    max_topk: int,
+    output_count: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """返回每行的 top-k token id 和 logprob。
+
+    rows 每项是 (logits 行号, K, 写入起点)。写入起点按 token 个数累加，
+    第 r 行的候选是两个数组的 [起点, 起点 + K)。至少 20 个 token 的 logit
+    严格高于采样 token 时，把 sampled_logprobs 里对应位置写成 -9999。K=0 也判断。
+    """
+    block = 1024
+    # 先按词表分段留下局部 top-k，再逐行合并成最终候选。
+    tiles = triton.cdiv(logits.shape[1], block)
+    # Triton 的 topk 块长必须是 2 的幂。请求的 K 最大 20，这里向上取整；真正写入仍按每行的 K 截断。
+    topk = triton.next_power_of_2(max(2, max_topk))
+    candidates = logits.new_empty((rows.shape[0], tiles, topk), dtype=torch.int64)
+    higher_counts = logits.new_empty((rows.shape[0], tiles), dtype=torch.int32)
+    _output_logprobs_partial[(rows.shape[0], tiles)](
+        logits=logits,
+        rows=rows,
+        candidates=candidates,
+        sampled_ids=sampled_ids,
+        higher_counts=higher_counts,
+        stride_row=logits.stride(0),
+        vocab_size=logits.shape[1],
+        tiles=tiles,
+        TOPK=topk,
+        BLOCK=block,
+        num_warps=4,
+    )
+    token_ids = torch.empty((output_count,), dtype=torch.int64, device=logits.device)
+    logprobs = torch.empty((output_count,), dtype=torch.float32, device=logits.device)
+    _output_logprobs_finish[(rows.shape[0],)](
+        logits=logits,
+        sampled_ids=sampled_ids,
+        sampled_logprobs=sampled_logprobs,
+        rows=rows,
+        candidates=candidates,
+        token_ids=token_ids,
+        logprobs=logprobs,
+        higher_counts=higher_counts,
+        stride_row=logits.stride(0),
+        vocab_size=logits.shape[1],
+        tiles=tiles,
+        TOPK=topk,
+        TILE_BLOCK=triton.next_power_of_2(tiles),
+        num_warps=4,
+    )
+    return token_ids, logprobs

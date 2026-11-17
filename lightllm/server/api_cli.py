@@ -1,4 +1,5 @@
 import argparse
+import json
 
 
 def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -494,13 +495,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--llm_prefill_att_backend",
         type=str,
         nargs="+",
-        choices=["auto", "triton", "fa3", "flashinfer", "flashqla"],
+        choices=["auto", "triton", "fa3", "flashinfer", "flashqla", "flashkda"],
         default=["auto"],
         help="""prefill attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
                 (priority: fa3 > flashinfer > triton)
                 for hybrid linear-attention models, the second value selects the linear-attention backend
-                (priority: flashqla > triton); when omitted, it defaults to auto""",
+                (GDN priority: flashqla > triton; KDA auto: shape-dependent FlashKDA on Hopper with
+                BF16 state, otherwise Triton; explicit flashkda requires a compatible installation);
+                when omitted, it defaults to auto""",
     )
     parser.add_argument(
         "--llm_decode_att_backend",
@@ -521,6 +524,16 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=1,
         help="""KV cache page size in tokens. Values greater than 1 make each request reserve
         page-aligned contiguous KV slots and make paged attention/cache reuse operate on full pages.""",
+    )
+    parser.add_argument(
+        "--req_token_index_mode",
+        type=str,
+        choices=["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"],
+        default="pin_mem_cache",
+        help="""How each request stores its token indexes. pin_mem_cache keeps a CPU copy and uploads
+        pending indexes from a fresh pinned slice. pin_mem_page_cache stores one pinned CPU index per KV
+        page and expands it for reads and uploads. pure_gpu writes the GPU request table directly; CPU
+        reads copy back from that table.""",
     )
     parser.add_argument(
         "--vit_att_backend",
@@ -973,6 +986,21 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""The size of linear attn cache.
         If radix cache hit rate is low under high load due to limited small-page capacity and LRU
         eviction, increasing linear_att_cache_size can improve hit rate at the cost of more memory.""",
+    )
+    parser.add_argument(
+        "--ssm_state_mode",
+        choices=["native", "replay"],
+        default="native",
+        help="SSM state storage: native snapshots or deferred GDN/KDA ReplaySSM (FP32/BF16).",
+    )
+    parser.add_argument(
+        "--ssm_replay_config",
+        type=json.loads,
+        default={},
+        help='Replay-only JSON object: {"cache_len":16,"compute_mode":"precompute"}. '
+        "cache_len: 4/8/16/32/64, at least the verify width; compute_mode: inline/precompute. "
+        "mtp_step=0 decode uses the same replay history: explicit precompute projects that one token, "
+        "and the default is inline. MTP defaults to precompute.",
     )
     parser.add_argument(
         "--linear_att_ssm_data_type",

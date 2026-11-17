@@ -122,7 +122,7 @@ def test_paged_decode_matches_nonpaged_with_graph_and_mtp(indexer, monkeypatch, 
         max_q_seq_len=1,
         req_manager=SimpleNamespace(req_to_token_indexs=table),
     )
-    att_state = SimpleNamespace(lengths=lengths)
+    att_state = SimpleNamespace(q_kv_seq_len=lengths)
     logits_outputs = []
     select_topk = indexer.select_topk_indices
 

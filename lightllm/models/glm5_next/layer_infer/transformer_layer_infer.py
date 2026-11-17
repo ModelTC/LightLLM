@@ -11,7 +11,9 @@ from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
     silu_and_mul_fwd,
+    silu_and_mul_quant_fp8,
 )
+from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
 from lightllm.common.basemodel.triton_kernel.mhc import (
     hc_contract,
     hc_post,
@@ -76,10 +78,11 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
     def _ffn(self, input, infer_state, layer_weight):
         input = self._tpsp_allgather(input=input.view(-1, self.embed_dim_), infer_state=infer_state)
         if self.is_moe:
-            output = self._moe_ffn(input, infer_state, layer_weight)
+            topk_weights, topk_ids = self._select_experts(input, layer_weight)
             if self.enable_ep_moe:
                 # DeepEP combine already includes all routed experts.
-                return output
+                return self._moe_ffn_ep(input, infer_state, layer_weight, topk_weights, topk_ids)
+            output = self._moe_ffn_tp(input, infer_state, layer_weight, topk_weights, topk_ids)
         else:
             output = self._ffn_tp(input, infer_state, layer_weight)
         return self._tpsp_reduce(input=output, infer_state=infer_state)
@@ -89,6 +92,24 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
 
         input = input.view(-1, self.embed_dim_)
         up_gate_out = layer_weight.gate_up_proj.mm(input)
+        quant_method = layer_weight.down_proj.quant_method
+        if (
+            getattr(quant_method, "use_ue8m0_scales", False)
+            and not getattr(quant_method, "use_packed_ue8m0", False)
+            and up_gate_out.dtype == torch.bfloat16
+        ):
+            activated, scale = silu_and_mul_quant_fp8(
+                input=up_gate_out,
+                group_size=quant_method.block_size,
+                dtype=layer_weight.down_proj.mm_param.weight.dtype,
+                limit=self.swiglu_limit,
+                alpha=1.0,
+                alloc_func=self.alloc_tensor,
+            )
+            activated.scale = scale
+            del up_gate_out
+            out = self.alloc_tensor(shape=(input.size(0), self.embed_dim_), dtype=input.dtype)
+            return layer_weight.down_proj.mm(input_tensor=activated, out=out)
         ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
         silu_and_mul_fwd(
             up_gate_out,
@@ -99,37 +120,60 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         )
         return layer_weight.down_proj.mm(ffn1_out)
 
-    def _moe_ffn(self, input, infer_state, layer_weight) -> torch.Tensor:
-        hidden_states = input.view(-1, self.embed_dim_)
-        num_tokens, hidden_dim = hidden_states.shape
-
-        # if fused_shared_experts is not enabled, compute shared_output
-        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
-            shared_output = self._ffn_tp(hidden_states, infer_state, layer_weight)
-
-        moe_gate_dtype = layer_weight.moe_gate.data_type_
-        router_logits = layer_weight.moe_gate.mm(hidden_states.to(moe_gate_dtype))
-        output = layer_weight.experts.experts(
-            hidden_states,
+    def _select_experts(self, input, layer_weight):
+        experts = layer_weight.experts
+        router_logits = layer_weight.moe_gate.mm(input.to(layer_weight.moe_gate.data_type_))
+        topk_weights, topk_ids = select_experts(
+            hidden_states=input,
             router_logits=router_logits,
+            correction_bias=experts.e_score_correction_bias,
             top_k=self.num_experts_per_tok,
             renormalize=self.norm_topk_prob,
             use_grouped_topk=self.n_group,
             topk_group=self.topk_group,
             num_expert_group=self.n_group,
+            scoring_func=experts.scoring_func,
+        )
+        if experts.routed_scaling_factor != 1.0:
+            topk_weights.mul_(experts.routed_scaling_factor)
+        return topk_weights, topk_ids
+
+    def _moe_ffn_tp(self, input, infer_state, layer_weight, topk_weights, topk_ids):
+        shared_output = None
+        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
+            # TP routed kernels overwrite input, so run the shared expert first.
+            shared_output = self._ffn_tp(input, infer_state, layer_weight)
+        output = layer_weight.experts.experts_with_topk(
+            input_tensor=input,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
             is_prefill=infer_state.is_prefill,
             infer_state=infer_state,
             alpha=1.0,
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
         )
-
-        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
+        if shared_output is not None:
             output.add_(shared_output)
+        return output
 
-        return output.view(num_tokens, hidden_dim)
+    def _moe_ffn_ep(self, input, infer_state, layer_weight, topk_weights, topk_ids):
+        shared_expert_func = None
+        if self.n_shared_experts is not None:
+            shared_expert_func = lambda: self._ffn_tp(input, infer_state, layer_weight)
+        return layer_weight.experts.experts_with_topk(
+            input_tensor=input,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            is_prefill=infer_state.is_prefill,
+            infer_state=infer_state,
+            alpha=1.0,
+            limit=self.swiglu_limit,
+            clamp_up_add_one=False,
+            shared_expert_func=shared_expert_func,
+        )
 
-    def _get_qkv(self, input, infer_state, layer_weight):
+    def _project_sparse_qkv_a(self, input, infer_state, layer_weight):
         if self.is_linear_attention_layer:
             raise AssertionError("KDA projections use _kda_projections")
 
@@ -139,9 +183,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             input = infer_state._all_to_all_unbalance_get(data=input)
 
         q, cache_kv = layer_weight.qkv_a_proj_with_mqa_.mm(input).split([self.q_lora_rank, self.kv_lora_rank], dim=-1)
-        q = rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_.weight, eps=self.eps_)
-        infer_state.get_topk_indices_params = {"hidden_states": input, "q_lora": q}
-        q = layer_weight.q_b_proj_.mm(q).view(-1, self.tp_q_head_num_, self.qk_nope_head_dim)
+        return input, q, cache_kv
+
+    def _normalize_sparse_kv(self, cache_kv, layer_weight):
         cache_kv = cache_kv.view(-1, 1, self.kv_lora_rank)
         rmsnorm_forward(
             cache_kv[:, :, : self.kv_lora_rank],
@@ -149,10 +193,20 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             eps=self.eps_,
             out=cache_kv[:, :, : self.kv_lora_rank],
         )
-        return q, cache_kv
+        return cache_kv
+
+    def _get_qkv(self, input, infer_state, layer_weight):
+        input, q, cache_kv = self._project_sparse_qkv_a(input, infer_state, layer_weight)
+        q = rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_.weight, eps=self.eps_)
+        infer_state.get_topk_indices_params = {"hidden_states": input, "q_lora": q}
+        q = layer_weight.q_b_proj_.mm(q).view(-1, self.tp_q_head_num_, self.qk_nope_head_dim)
+        return q, self._normalize_sparse_kv(cache_kv, layer_weight)
 
     def _context_attention_kernel(self, q, kv, infer_state, layer_weight, out=None):
-        q = layer_weight.k_b_proj_.bmm(q.transpose(0, 1)).transpose(0, 1).contiguous()
+        q_nope = self.alloc_tensor((q.shape[0], self.tp_q_head_num_, self.kv_lora_rank), dtype=q.dtype, device=q.device)
+        # Write [tokens, heads, latent] directly for sparse prefill attention.
+        layer_weight.k_b_proj_.bmm(q.transpose(0, 1), out=q_nope.transpose(0, 1))
+        q = q_nope
         topk_mem_indices, topk_indices = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
@@ -273,9 +327,12 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
     def _get_o(self, input, infer_state, layer_weight):
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_balance_get(data=input)
-        # Both sparse prefill and decode return attention in MLA latent space.
-        input = layer_weight.v_b_proj_.bmm(input.transpose(0, 1)).transpose(0, 1)
-        output = layer_weight.o_weight_.mm(input.reshape(-1, self.tp_q_head_num_ * self.v_head_dim))
+        values = self.alloc_tensor(
+            (input.shape[0], self.tp_q_head_num_, self.v_head_dim), dtype=input.dtype, device=input.device
+        )
+        # Token-major output lets prefill and decode flatten the heads without copying.
+        layer_weight.v_b_proj_.bmm(input.transpose(0, 1), out=values.transpose(0, 1))
+        output = layer_weight.o_weight_.mm(values.view(-1, self.tp_q_head_num_ * self.v_head_dim))
         return self._tpsp_reduce(input=output, infer_state=infer_state)
 
     def _kda_projections(self, hidden_states, infer_state, layer_weight):

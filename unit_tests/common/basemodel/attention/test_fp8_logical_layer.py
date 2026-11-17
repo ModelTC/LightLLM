@@ -78,8 +78,6 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
 
     attention = state_class(backend=SimpleNamespace(), _infer_state_weak_ref=weakref.ref(infer))
     if backend_name == "fa3":
-        attention.k_descale = state.scales[:, :2].unsqueeze(1)
-        attention.v_descale = state.scales[:, 2:].unsqueeze(1)
         attention.page_table = attention.cu_seqlens_q = attention.cu_seqlens_k = None
         attention.b_att_seq_len = infer.b_seq_len
         attention.decode_max_q_seq_len = 1

@@ -47,7 +47,7 @@ def _fwd_kernel_apply_penalty_cache(
     return
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["batch_size"])
 def _eos_penalty(
     Logits,
     stride_logit_b,
@@ -75,7 +75,11 @@ def _eos_penalty(
         eos_id = tl.load(eos_ids + eos_index)
         cur_eos_logit_ptr = Logits + offs * stride_logit_b + eos_id
         cur_eos_logit = tl.load(cur_eos_logit_ptr, mask=mask, other=0.0)
-        cur_eos_logit = cur_eos_logit + tl.abs(cur_eos_logit) * penalty_scale
+        # Preserve masked EOS and zero logits; neutral/overflowed scales must not create NaNs.
+        apply_length_penalty = (penalty_scale != 0.0) & (cur_eos_logit != 0.0) & (cur_eos_logit != -float("inf"))
+        cur_eos_logit = tl.where(
+            apply_length_penalty, cur_eos_logit + tl.abs(cur_eos_logit) * penalty_scale, cur_eos_logit
+        )
         cur_eos_logit = tl.where(mask_eos != 0, -10000000.0, cur_eos_logit)
         tl.store(cur_eos_logit_ptr, cur_eos_logit, mask=mask)
     return

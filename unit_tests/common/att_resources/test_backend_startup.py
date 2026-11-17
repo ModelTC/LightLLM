@@ -298,6 +298,7 @@ def test_backend_allocates_all_roles_before_warmup(
     manager.commit_bounded_att_state(
         torch.tensor([0], dtype=torch.int32, device="cuda"),
         torch.tensor([draft_count + 1], dtype=torch.int32, device="cuda"),
+        torch.tensor([draft_count + 1], dtype=torch.int32, device="cuda"),
         role="main",
     )
     assert all(not state.mtp_state_index.any() for state in draft_states)
@@ -307,6 +308,7 @@ def test_backend_allocates_all_roles_before_warmup(
         assert len(state.config.logical_layer_ids) == 1
         manager.commit_bounded_att_state(
             torch.tensor([0], dtype=torch.int32, device="cuda"),
+            torch.tensor([i + 2], dtype=torch.int32, device="cuda"),
             torch.tensor([i + 2], dtype=torch.int32, device="cuda"),
             role=f"draft{i}",
         )

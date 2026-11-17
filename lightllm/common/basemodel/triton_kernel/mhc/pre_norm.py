@@ -86,7 +86,7 @@ def _hc_mix_weights(
     return pre_values, post_values, matrix
 
 
-@triton.jit(do_not_specialize=["N_SPLITS"])
+@triton.jit(do_not_specialize=["N_SPLITS", "gemm_stride_s", "sqrsum_stride_s"])
 def _hc_pre_norm_kernel(
     x,  # 输入 [T, S * H]，bf16；逻辑形状 [T, S, H]。
     gemm_partial,

@@ -97,7 +97,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     ) -> torch.Tensor:
         qweight = weight_pack.weight
         weight_scale = weight_pack.weight_scale
-        input_scale = None
+        input_scale = getattr(input_tensor, "scale", None)
         alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
         m, k = input_tensor.shape
         n = qweight.shape[0]
@@ -112,6 +112,9 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
                 use_ue8m0_scales=self.use_ue8m0_scales,
                 use_packed_ue8m0=self.use_packed_ue8m0,
             )
+        else:
+            assert out is not None, "prequantized input requires an explicit floating-point output"
+            qinput_tensor = input_tensor
 
         if out is None:
             out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)

@@ -5,6 +5,97 @@ import triton
 import triton.language as tl
 
 
+@triton.jit(do_not_specialize=["logits_stride_b", "logits_stride_v", "bias_stride_b", "bias_stride_v"])
+def _vocab_bias_max_partial(
+    logits,
+    bias,
+    values,
+    indexes,
+    logits_stride_b,
+    logits_stride_v,
+    bias_stride_b,
+    bias_stride_v,
+    batch,
+    vocab: tl.constexpr,
+    chunks: tl.constexpr,
+    BLOCK_V: tl.constexpr,
+    BLOCK_B: tl.constexpr,
+):
+    v = tl.program_id(0) * BLOCK_V + tl.arange(0, BLOCK_V)
+    b = tl.program_id(1) * BLOCK_B + tl.arange(0, BLOCK_B)
+    mask = (v[:, None] < vocab) & (b[None, :] < batch)
+    # 词表下标本身放得进 int32，但下标乘 stride 会超过 int32。地址统一用 int64。
+    v_offsets = v.to(tl.int64)
+    b_offsets = b.to(tl.int64)
+    logits_stride_b = logits_stride_b.to(tl.int64)
+    logits_stride_v = logits_stride_v.to(tl.int64)
+    bias_stride_b = bias_stride_b.to(tl.int64)
+    bias_stride_v = bias_stride_v.to(tl.int64)
+    base = tl.load(logits + v_offsets[:, None] * logits_stride_v + b_offsets[None, :] * logits_stride_b, mask, 0).to(
+        tl.float32
+    )
+    extra = tl.load(bias + v_offsets[:, None] * bias_stride_v + b_offsets[None, :] * bias_stride_b, mask, 0).to(
+        tl.float32
+    )
+    scores = tl.where(mask, base + extra, -float("inf"))
+    maximum = tl.max(scores, axis=0)
+    winner = tl.min(tl.where((scores == maximum[None, :]) & mask, v[:, None], 2147483647), axis=0)
+    offset = b * chunks + tl.program_id(0)
+    tl.store(values + offset, maximum, b < batch)
+    tl.store(indexes + offset, winner, b < batch)
+
+
+@triton.jit
+def _vocab_bias_max_finish(values, indexes, out_values, out_indexes, chunks: tl.constexpr, BLOCK: tl.constexpr):
+    b = tl.program_id(0)
+    c = tl.arange(0, BLOCK)
+    val = tl.load(values + b * chunks + c, c < chunks, -float("inf"))
+    idx = tl.load(indexes + b * chunks + c, c < chunks, 2147483647)
+    maximum = tl.max(val, axis=0)
+    winner = tl.min(tl.where(val == maximum, idx, 2147483647), axis=0)
+    tl.store(out_values + b, maximum)
+    tl.store(out_indexes + b, winner.to(tl.int64))
+
+
+def local_vocab_bias_max(base_logits: torch.Tensor, bias: torch.Tensor, alloc_func=torch.empty, run_config=None):
+    """FP32 add and max over each local vocabulary row, choosing the first ID on ties.
+
+    Read strided [B,V] views directly; only partial maxima are materialized.
+    Markov steps remain sequential in the caller.
+    """
+    assert base_logits.shape == bias.shape and base_logits.ndim == 2
+    batch, vocab = base_logits.shape
+    if run_config is None:
+        run_config = {"BLOCK_V": 256, "BLOCK_B": 8, "num_warps": 4}
+    chunks = triton.cdiv(vocab, run_config["BLOCK_V"])
+    partial_values = alloc_func((batch, chunks), dtype=torch.float32, device=base_logits.device)
+    partial_indexes = alloc_func((batch, chunks), dtype=torch.int32, device=base_logits.device)
+    values = alloc_func((batch,), dtype=torch.float32, device=base_logits.device)
+    indexes = alloc_func((batch,), dtype=torch.int64, device=base_logits.device)
+    _vocab_bias_max_partial[(chunks, triton.cdiv(batch, run_config["BLOCK_B"]))](
+        base_logits,
+        bias,
+        partial_values,
+        partial_indexes,
+        *base_logits.stride(),
+        *bias.stride(),
+        batch,
+        vocab,
+        chunks,
+        **run_config,
+    )
+    _vocab_bias_max_finish[(batch,)](
+        partial_values,
+        partial_indexes,
+        values,
+        indexes,
+        chunks,
+        triton.next_power_of_2(chunks),
+        num_warps=4,
+    )
+    return values, indexes
+
+
 @triton.jit
 def _transpose_vocab_logits_kernel(
     logits,
@@ -108,3 +199,91 @@ def local_vocab_topk(
     )
     # 词表现在位于连续的最后一维；只需要候选集合，不额外要求候选按分数排序。
     return torch.topk(transposed_logits, k=top_k, dim=1, sorted=False)
+
+
+@triton.jit
+def _maximum_propagating_nan(a, b):
+    return tl.maximum(a, b, propagate_nan=tl.PropagateNan.ALL)
+
+
+@triton.jit
+def _greedy_vocab_partial(
+    logits,
+    maxima,
+    sums,
+    indexes,
+    vocab: tl.constexpr,
+    stride_b: tl.constexpr,
+    chunks: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    b = tl.program_id(0)
+    v = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    scores = tl.load(logits + b * stride_b + v, v < vocab, -float("inf"))
+    maximum = tl.reduce(scores, axis=0, combine_fn=_maximum_propagating_nan)
+    # Fully masked chunks contribute zero instead of exp(-inf - -inf) = NaN.
+    total = tl.sum(tl.exp(scores - maximum), axis=0)
+    total = tl.where(maximum == -float("inf"), 0.0, total)
+    # Match torch.argmax: NaNs take precedence, then choose the first valid index.
+    valid = v < vocab
+    is_nan = scores != scores
+    is_maximum = scores == maximum
+    is_candidate = valid & (is_nan | is_maximum)
+    winner = tl.min(tl.where(is_candidate, v, 2147483647), axis=0)
+    offset = b * chunks + tl.program_id(1)
+    tl.store(maxima + offset, maximum)
+    tl.store(sums + offset, total)
+    tl.store(indexes + offset, winner)
+
+
+@triton.jit
+def _greedy_vocab_finish(maxima, sums, indexes, token_ids, logprobs, chunks: tl.constexpr, BLOCK: tl.constexpr):
+    b = tl.program_id(0)
+    c = tl.arange(0, BLOCK)
+    maximums = tl.load(maxima + b * chunks + c, c < chunks, -float("inf"))
+    partial_sums = tl.load(sums + b * chunks + c, c < chunks, 0)
+    ids = tl.load(indexes + b * chunks + c, c < chunks, 2147483647)
+    maximum = tl.reduce(maximums, axis=0, combine_fn=_maximum_propagating_nan)
+    total = tl.sum(partial_sums * tl.exp(maximums - maximum), axis=0)
+    valid = c < chunks
+    is_nan = maximums != maximums
+    is_maximum = maximums == maximum
+    is_candidate = valid & (is_nan | is_maximum)
+    winner = tl.min(tl.where(is_candidate, ids, 2147483647), axis=0)
+    tl.store(token_ids + b, winner.to(tl.int64))
+    tl.store(logprobs + b, -tl.log(total))
+
+
+def local_vocab_greedy_logprob(logits: torch.Tensor, alloc_func=torch.empty, run_config=None):
+    """Return greedy IDs and their normalized logprobs without a full probability matrix."""
+    assert logits.ndim == 2 and logits.dtype == torch.float32 and logits.stride(1) == 1
+    batch, vocab = logits.shape
+    if run_config is None:
+        run_config = {"BLOCK": 2048, "num_warps": 4}
+    chunks = triton.cdiv(vocab, run_config["BLOCK"])
+    maxima = alloc_func((batch, chunks), dtype=torch.float32, device=logits.device)
+    sums = alloc_func((batch, chunks), dtype=torch.float32, device=logits.device)
+    indexes = alloc_func((batch, chunks), dtype=torch.int32, device=logits.device)
+    token_ids = alloc_func((batch,), dtype=torch.int64, device=logits.device)
+    logprobs = alloc_func((batch,), dtype=torch.float32, device=logits.device)
+    _greedy_vocab_partial[(batch, chunks)](
+        logits,
+        maxima,
+        sums,
+        indexes,
+        vocab,
+        logits.stride(0),
+        chunks,
+        **run_config,
+    )
+    _greedy_vocab_finish[(batch,)](
+        maxima,
+        sums,
+        indexes,
+        token_ids,
+        logprobs,
+        chunks,
+        triton.next_power_of_2(chunks),
+        num_warps=4,
+    )
+    return token_ids, logprobs

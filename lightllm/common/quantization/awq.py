@@ -18,7 +18,7 @@ try:
             check_marlin_supported,
             marlin_permute_scales,
             awq_to_marlin_zero_points,
-            should_use_atomic_add_reduce,
+            apply_awq_marlin_linear,
             marlin_make_empty_g_idx,
             marlin_make_workspace_new,
         )
@@ -168,42 +168,20 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qweight = weight_pack.weight
-        weight_scale = weight_pack.weight_scale
-        qzeros = weight_pack.weight_zero_point
-        reshaped_x = input_tensor.reshape(-1, input_tensor.shape[-1])
-
-        use_atomic_add = should_use_atomic_add_reduce(
-            m=reshaped_x.size(0),
-            n=self.n,
-            k=self.k,
-            device=input_tensor.device,
-            dtype=input_tensor.dtype,
-        )
-
-        out = vllm_ops.gptq_marlin_gemm(
-            reshaped_x,
-            None,
-            qweight,
-            bias,
-            weight_scale,
-            None,
-            qzeros,
-            self.g_idx,
-            self.g_idx_sort_indices,
-            self.workspace,
-            self.vllm_quant_type,
-            size_m=reshaped_x.shape[0],
-            size_n=self.n,
-            size_k=self.k,
-            use_atomic_add=use_atomic_add,
+        return apply_awq_marlin_linear(
+            input=input_tensor.reshape(-1, input_tensor.shape[-1]),
+            weight=weight_pack.weight,
+            weight_scale=weight_pack.weight_scale,
+            weight_zp=weight_pack.weight_zero_point,
+            g_idx=self.g_idx,
+            g_idx_sort_indices=self.g_idx_sort_indices,
+            workspace=self.workspace,
+            quant_type=self.vllm_quant_type,
+            output_size_per_partition=self.n,
+            input_size_per_partition=self.k,
+            bias=bias,
             use_fp32_reduce=True,
-            is_zp_float=False,
         )
-
-        if bias is not None:
-            out.add_(bias)
-        return out
 
     def _create_weight(
         self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1

@@ -177,12 +177,16 @@ class StartArgs:
     expert_dtype: Optional[str] = field(default=None, metadata={"choices": ["fp8", "fp4"]})
     llm_prefill_att_backend: List[str] = field(
         default_factory=lambda: ["auto"],
-        metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashqla"]},
+        metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashqla", "flashkda"]},
     )
     llm_decode_att_backend: List[str] = field(
         default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
     )
     page_size: int = field(default=1)
+    req_token_index_mode: str = field(
+        default="pin_mem_cache",
+        metadata={"choices": ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"]},
+    )
     vit_att_backend: List[str] = field(
         default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
     )
@@ -251,6 +255,8 @@ class StartArgs:
     weight_version: str = "default"
 
     # hybrid attention model (Qwen3Next)
+    ssm_state_mode: str = "native"
+    ssm_replay_config: dict[str, object] = field(default_factory=dict)
     linear_att_hash_page_size: int = field(default=512)
     linear_att_page_block_num: int = field(default=10000000)
     disable_linear_att_small_page_cpu_cache: bool = field(default=False)

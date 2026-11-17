@@ -41,8 +41,9 @@ def test_status_is_sent_directly_without_control_frames_or_reply(monkeypatch):
         websocket = _websocket(send)
 
         @asynccontextmanager
-        async def connect(uri):
+        async def connect(uri, **kwargs):
             assert uri == "ws://master:8100/kv_move_status"
+            assert kwargs["compression"] is None
             yield websocket
 
         monkeypatch.setattr(up_status.websockets, "connect", connect)

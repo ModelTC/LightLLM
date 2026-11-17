@@ -53,6 +53,8 @@ Mistral
 
 **Format**: ``[TOOL_CALLS] [{"name": "func", "arguments": {...}}, ...]``
 
+The ``mistral`` tool-call parser is not supported when chat logprobs are enabled.
+
 DeepSeek-V3
 ~~~~~~~~~~~
 

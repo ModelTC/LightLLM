@@ -3,7 +3,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["batch_size"])
 def _gen_sampling_params_kernel(
     req_to_presence_penalty,
     b_presence_penalty,
@@ -19,7 +19,6 @@ def _gen_sampling_params_kernel(
     batch_size,
     BLOCK: tl.constexpr,  # num_warps
 ):
-
     block_start_index = tl.program_id(0) * BLOCK
     offs = block_start_index + tl.arange(0, BLOCK)
     mask = offs < batch_size
@@ -79,7 +78,7 @@ def gen_sampling_params(b_req_idx: torch.Tensor, req_sampling_params_manager):
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["input_size"])
 def _token_id_counter_kernel(
     prompt_ids_ptr,
     token_id_to_counter_ptr,
@@ -87,7 +86,6 @@ def _token_id_counter_kernel(
     vocab_size,
     BLOCK: tl.constexpr,
 ):
-
     block_start_index = tl.program_id(0) * BLOCK
     offs = block_start_index + tl.arange(0, BLOCK)
     mask = offs < input_size
@@ -114,7 +112,7 @@ def token_id_counter(prompt_ids: torch.Tensor, out_token_id_counter: torch.Tenso
     return
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["batch_size"])
 def _token_id_counter_update_kernel(
     b_req_idx_ptr,
     req_to_out_token_id_counter_ptr,
@@ -127,7 +125,6 @@ def _token_id_counter_update_kernel(
     BLOCK: tl.constexpr,
     OLD_VERSION_TRITON: tl.constexpr,
 ):
-
     block_start_index = tl.program_id(0) * BLOCK
     offs = block_start_index + tl.arange(0, BLOCK)
     loc_mask = offs < batch_size

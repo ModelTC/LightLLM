@@ -113,7 +113,8 @@ def test_kda_projections_need_no_sparse_attention_config(config):
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-def test_mla_loading_preserves_replicated_qkv_and_sharded_bmm(config, monkeypatch, rank):
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_mla_loading_preserves_replicated_qkv_and_sharded_bmm(config, monkeypatch, rank, is_prefill):
     monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", "2")
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", str(rank))
     layer = Glm5NextTransformerLayerInfer(3, config)
@@ -133,7 +134,7 @@ def test_mla_loading_preserves_replicated_qkv_and_sharded_bmm(config, monkeypatc
         {f"model.language_model.layers.3.self_attn.{name}": value for name, value in tensors.items()}
     )
     hidden = random_weight(3, 128)
-    state = SimpleNamespace(need_dp_prefill_balance=False)
+    state = SimpleNamespace(is_prefill=is_prefill, need_dp_prefill_balance=False)
     q, kv = layer._get_qkv(hidden, state, weight)
     q_lora = rmsnorm(F.linear(hidden, q_a), config["rms_norm_eps"])
     expected_q = F.linear(q_lora, q_b).view(3, 4, 128)[:, rank * 2 : (rank + 1) * 2]
@@ -197,7 +198,9 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
 
 
 @pytest.mark.parametrize("mode", ["dense", "moe", "fused_moe"])
-def test_ffn_dispatch_preserves_clamp_and_shared_expert(config, monkeypatch, mode):
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_ffn_dispatch_preserves_clamp_and_shared_expert(config, monkeypatch, mode, is_prefill):
+    config["routed_scaling_factor"] = 2.5
     args = StartArgs(enable_fused_shared_experts=mode == "fused_moe")
     monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(dataclasses.asdict(args)))
     get_env_start_args.cache_clear()
@@ -207,6 +210,7 @@ def test_ffn_dispatch_preserves_clamp_and_shared_expert(config, monkeypatch, mod
     prefix = f"model.language_model.layers.{index}.mlp"
     eye = torch.eye(128, device="cuda", dtype=torch.bfloat16)
     tensors = {}
+    correction_bias = torch.tensor([0.25, -0.25, 0.5, -0.5], device="cuda")
 
     def mlp_weights(name, gate_scale, up_scale):
         tensors[f"{name}.gate_proj.weight"] = eye * gate_scale
@@ -222,7 +226,7 @@ def test_ffn_dispatch_preserves_clamp_and_shared_expert(config, monkeypatch, mod
         router = torch.zeros(4, 128, device="cuda", dtype=torch.float32)
         router[:, :4] = torch.eye(4, device="cuda") * 0.2
         tensors[f"{prefix}.gate.weight"] = router
-        tensors[f"{prefix}.gate.e_score_correction_bias"] = torch.zeros(4, device="cuda")
+        tensors[f"{prefix}.gate.e_score_correction_bias"] = correction_bias
     weight.load_hf_weights(tensors)
     x = torch.linspace(-25, 25, 3 * 128, device="cuda", dtype=torch.bfloat16).view(3, 128)
 
@@ -234,19 +238,35 @@ def test_ffn_dispatch_preserves_clamp_and_shared_expert(config, monkeypatch, mod
     expected = reference_mlp(1.5, 0.75)
     if mode != "dense":
         scores = F.linear(x.float(), router).sigmoid()
-        probabilities, ids = scores.topk(2, dim=-1)
+        ids = (scores + correction_bias).topk(2, dim=-1).indices
+        probabilities = scores.gather(1, ids)
         probabilities /= probabilities.sum(-1, keepdim=True)
+        probabilities *= config["routed_scaling_factor"]
         routed = torch.zeros_like(x)
         for expert in range(4):
             coefficient = (probabilities * (ids == expert)).sum(-1, keepdim=True)
             routed += (reference_mlp(1 + expert / 4, 2 + expert / 8).float() * coefficient).bfloat16()
         expected += routed
-    actual = layer._ffn(x.clone(), SimpleNamespace(is_prefill=True), weight)
+    captured = []
+    monkeypatch.setattr(
+        "lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight.get_moe_capture_callback",
+        lambda *args: lambda ids: captured.append(ids.clone()),
+    )
+    actual = layer._ffn(x.clone(), SimpleNamespace(is_prefill=is_prefill), weight)
     torch.testing.assert_close(actual, expected, atol=0.25, rtol=0.015)
+    if mode == "dense":
+        assert not captured
+    else:
+        assert len(captured) == 1
+        assert torch.equal(captured[0].sort(dim=-1).values, ids.sort(dim=-1).values)
 
 
 @pytest.mark.parametrize("is_prefill", [False, True])
-def test_ep_ffn_uses_combined_output_and_replicated_shared_expert(config, monkeypatch, is_prefill):
+@pytest.mark.parametrize("routed_scaling_factor", [1.0, 2.5])
+def test_ep_ffn_uses_combined_output_and_replicated_shared_expert(
+    config, monkeypatch, is_prefill, routed_scaling_factor
+):
+    config["routed_scaling_factor"] = routed_scaling_factor
     args = StartArgs(tp=2, enable_ep_moe=True, enable_fused_shared_experts=True)
     monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(dataclasses.asdict(args)))
     monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", "2")
@@ -260,22 +280,36 @@ def test_ep_ffn_uses_combined_output_and_replicated_shared_expert(config, monkey
     prefix = "model.language_model.layers.3.mlp.shared_experts"
     eye = torch.eye(128, device="cuda", dtype=torch.bfloat16)
     weight.load_hf_weights({f"{prefix}.{name}.weight": eye for name in ("gate_proj", "up_proj", "down_proj")})
+    weight.experts.e_score_correction_bias.copy_(torch.arange(4, device="cuda", dtype=torch.bfloat16))
     x = torch.linspace(-25, 25, 3 * 128, device="cuda", dtype=torch.bfloat16).view(3, 128)
     original = x.clone()
     monkeypatch.setattr(weight.moe_gate, "mm", lambda x: torch.zeros(3, 4, device="cuda"))
     monkeypatch.setattr(layer, "_tpsp_reduce", lambda **kwargs: pytest.fail("EP output must not be TP-reduced again"))
 
-    def combined_output(hidden_states, **kwargs):
+    events = []
+    shared_ffn = layer._ffn_tp
+
+    def run_shared(*args):
+        events.append("shared")
+        return shared_ffn(*args)
+
+    def combined_output(input_tensor, **kwargs):
+        events.append("combine")
+        assert events == ["combine"]
         assert kwargs["is_prefill"] is is_prefill
         assert kwargs["alpha"] == 1.0 and kwargs["limit"] == 10.0
         assert kwargs["clamp_up_add_one"] is False
-        return torch.full_like(hidden_states, 17)
+        torch.testing.assert_close(kwargs["topk_weights"], torch.full((3, 2), routed_scaling_factor / 2, device="cuda"))
+        assert torch.equal(kwargs["topk_ids"].sort(dim=-1).values, torch.tensor([[2, 3]] * 3, device="cuda"))
+        return torch.full_like(input_tensor, 17) + kwargs["shared_expert_func"]()
 
-    monkeypatch.setattr(weight.experts, "experts", combined_output)
+    monkeypatch.setattr(layer, "_ffn_tp", run_shared)
+    monkeypatch.setattr(weight.experts.fuse_moe_impl, "_fused_experts", combined_output)
     actual = layer._ffn(x, SimpleNamespace(is_prefill=is_prefill), weight)
     shared = (F.silu(x.float().clamp(max=10)).bfloat16().float() * x.float().clamp(-10, 10)).bfloat16()
     torch.testing.assert_close(actual, shared + 17, atol=0.25, rtol=0.01)
     torch.testing.assert_close(x, original, atol=0, rtol=0)
+    assert events == ["combine", "shared"]
 
 
 def test_fp8_shared_expert_scales_and_bf16_kv_b_load_together(config, monkeypatch):

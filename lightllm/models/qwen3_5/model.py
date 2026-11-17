@@ -60,6 +60,9 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
     def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
         """展开文本配置并补齐 Qwen3.5 的 rotary 与 MoE 默认值。"""
         config = super().normalize_model_config(model_config)
+        quantization = model_config.get("quantization_config") or {}
+        if quantization.get("quant_method") == "awq":
+            config.setdefault("quantization_config", quantization)
         rope_parameters = config.get("rope_parameters")
         if isinstance(rope_parameters, dict):
             if "rope_theta" in rope_parameters and "rope_theta" not in config:

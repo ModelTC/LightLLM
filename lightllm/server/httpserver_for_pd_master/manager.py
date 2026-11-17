@@ -531,7 +531,7 @@ class HttpServerManagerForPDMaster:
         stage: str,
     ) -> None:
         """Wait for an asyncio.Event but abort early if the HTTP client disconnects."""
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         disconnect_reason = f"fetch_pd_stream {stage} period check network disconnected"
 
         async def raise_if_disconnected() -> None:
@@ -543,7 +543,7 @@ class HttpServerManagerForPDMaster:
                 )
 
         while True:
-            remaining = deadline - time.time()
+            remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ServerBusyError()
             await raise_if_disconnected()
@@ -608,11 +608,27 @@ class HttpServerManagerForPDMaster:
             pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
         )
 
+        # Master 在等 Decode 上报。截止时间要盖住 Decode 拿到请求后的两段资源等待。
+        # 两段各用一份预算，并且前后分开计时：_alloc_shm_req_indexes 先等共享请求槽，
+        # 上限是 resource_wait_seconds；槽到位、请求进入 Router 后，router_arrival_time 重新起算，
+        # has_timed_out_waiting_for_inference 再给一整份 resource_wait_seconds。
+        # Router 这段不是到点立刻失败。_wait_to_token_package 每 5 秒才查一次，
+        # 最坏会在期限之后将近 5 秒才抛出 ServerBusyError，这个错误还要回到这次握手。
+        # 所以在两份预算之外再留 15 秒，这是检查迟到和错误传回的余量，不是第三段资源等待。
+        # 预算为负表示没有下发资源等待上限（自限流关闭时字段保持 -1，或环境变量显式为负）。
+        # 这时没有两段预算可包住，握手保持原来的 180 秒，避免 Decode 一直不上报时这次等待没有截止时间。
+        # 预算较小时 max 仍保持原来的 180 秒下限。
+        # Prefill 在此基础上再加 5 秒，因为它更早开始等，需要让 Master 先超时并发送 ABORT。
+        resource_wait_seconds = sampling_params.pd_node_resource_wait_timeout_seconds
+        if resource_wait_seconds < 0:
+            decode_handshake_timeout = 180
+        else:
+            decode_handshake_timeout = max(180, 2 * resource_wait_seconds + 15)
         try:
             await self._wait_for_event_or_disconnect(
                 up_status_event,
                 request,
-                timeout=180,
+                timeout=decode_handshake_timeout,
                 group_request_id=group_request_id,
                 stage="decode",
             )
@@ -698,10 +714,12 @@ class HttpServerManagerForPDMaster:
 
             new_tokens.extend(await req_status.pop_all_tokens())
 
-            for token in new_tokens:
+            for index, token in enumerate(new_tokens):
                 metadata = token[2]
                 if metadata.get("node_mode") == "prefill":
                     prompt_cache_len = metadata.get("prompt_cache_len", 0)
+                    # prefill 采样了这个首 token，放到已缓冲的 decode 输出前面再发布。
+                    new_tokens.insert(0, new_tokens.pop(index))
                     await req_status.put_tokens_to_front(new_tokens)
                     return prompt_cache_len
 

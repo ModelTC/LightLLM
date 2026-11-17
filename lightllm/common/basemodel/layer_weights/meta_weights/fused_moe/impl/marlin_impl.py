@@ -11,6 +11,10 @@ from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
 
 
 class FuseMoeMarlin(FuseMoeTriton):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.workspace = self.create_workspace()
+
     def create_workspace(self):
         from lightllm.utils.vllm_utils import HAS_VLLM
 
@@ -28,12 +32,14 @@ class FuseMoeMarlin(FuseMoeTriton):
         w2: WeightPack,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        is_prefill: bool,
         router_logits: Optional[torch.Tensor] = None,
-        is_prefill: Optional[bool] = None,
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        shared_expert_func=None,
     ):
+        assert shared_expert_func is None, "FuseMoeMarlin does not support shared expert overlap"
         if alpha is not None or limit is not None:
             raise NotImplementedError("FuseMoeMarlin does not support clamped SwiGLU")
 

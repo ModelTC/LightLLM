@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
-from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
+from lightllm.models.deepseek_v4.workspace import DeepseekV4C4PrefillWorkspace, DeepseekV4Workspace
 from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
 from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
 
@@ -64,7 +64,9 @@ def test_workspace_covers_tp_padding_and_checks_q_capacity(batch_max_tokens, tp,
     from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_q_norm_rope
 
     model = SimpleNamespace(
-        batch_max_tokens=batch_max_tokens, tp_world_size_=tp, config={"index_n_heads": 2, "index_head_dim": 128}
+        batch_max_tokens=batch_max_tokens,
+        tp_world_size_=tp,
+        config={"index_n_heads": 2, "index_head_dim": 128},
     )
     workspace = DeepseekV4Workspace(model)
     assert workspace.token_capacity == capacity
@@ -80,3 +82,16 @@ def test_workspace_covers_tp_padding_and_checks_q_capacity(batch_max_tokens, tp,
     assert workspace.c4_prefill_aux.indexer_q_outputs(capacity)[0].shape[0] == capacity
     with pytest.raises(ValueError, match="capacity"):
         workspace.get_flashmla_prefill_q(capacity + 1)
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+def test_c4_aux_is_one_workspace(overlap):
+    model = SimpleNamespace(
+        batch_max_tokens=4,
+        tp_world_size_=1,
+        config={"index_n_heads": 2, "index_head_dim": 8},
+        args=SimpleNamespace(enable_prefill_microbatch_overlap=overlap),
+    )
+    workspace = DeepseekV4Workspace(model)
+    workspace.init_c4_prefill_aux(model)
+    assert isinstance(workspace.c4_prefill_aux, DeepseekV4C4PrefillWorkspace)

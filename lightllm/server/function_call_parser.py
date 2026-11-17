@@ -926,11 +926,14 @@ class DeepSeekV31Detector(BaseFormatDetector):
 
         calls: list[ToolCallItem] = []
         try:
-            partial_match = re.search(
-                pattern=r"<｜tool▁call▁begin｜>(.*)<｜tool▁sep｜>(.*)<｜tool▁call▁end｜>",
-                string=current_text,
-                flags=re.DOTALL,
-            )
+            # The pattern needs the tool call end token, so skip the regex scan until it arrives.
+            partial_match = None
+            if "<｜tool▁call▁end｜>" in current_text:
+                partial_match = re.search(
+                    pattern=r"<｜tool▁call▁begin｜>(.*)<｜tool▁sep｜>(.*)<｜tool▁call▁end｜>",
+                    string=current_text,
+                    flags=re.DOTALL,
+                )
             if partial_match:
                 func_name = partial_match.group(1).strip()
                 func_args_raw = partial_match.group(2).strip()
@@ -1104,11 +1107,16 @@ class DeepSeekV3Detector(BaseFormatDetector):
 
         calls: list[ToolCallItem] = []
         try:
-            partial_match = re.search(
-                pattern=r"<｜tool▁call▁begin｜>(.*)<｜tool▁sep｜>(.*)\n```json\n(.*)\n```.*",
-                string=current_text,
-                flags=re.DOTALL,
-            )
+            # The pattern needs a closing ``` fence after ```json, so skip the scan until then.
+            partial_match = None
+            json_header = "\n```json\n"
+            header_at = current_text.find(json_header)
+            if header_at != -1 and current_text.find("\n```", header_at + len(json_header)) != -1:
+                partial_match = re.search(
+                    pattern=r"<｜tool▁call▁begin｜>(.*)<｜tool▁sep｜>(.*)\n```json\n(.*)\n```.*",
+                    string=current_text,
+                    flags=re.DOTALL,
+                )
             if partial_match:
                 func_name = partial_match.group(2).strip()
                 func_args_raw = partial_match.group(3).strip()
@@ -1239,6 +1247,9 @@ class Glm47Detector(BaseFormatDetector):
         )
         self.func_name_regex = re.compile(r"<tool_call>([^<\n]+?)(?:\n|(?=<arg_key>)|(?=</tool_call>))")
         self._streaming_tool_name: Optional[str] = None
+        self._streaming_tool_chunks: Optional[List[str]] = None
+        self._streaming_tool_tail = ""
+        self._streaming_tool_name_checked = False
         # Extract arg_key/arg_value pairs
         self.func_arg_regex = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL)
 
@@ -1332,40 +1343,52 @@ class Glm47Detector(BaseFormatDetector):
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
         """Buffer XML arguments while emitting tool deltas to keep the stream alive."""
-        self._buffer += new_text
-        normal_text = ""
+        new_text = self._buffer + new_text
+        self._buffer = ""
+        normal_parts: List[str] = []
         calls: List[ToolCallItem] = []
-        while self._buffer:
-            start = self._buffer.find(self.bot_token)
-            if start == -1:
-                keep = self._ends_with_partial_token(self._buffer, self.bot_token)
-                end = len(self._buffer) - keep
-                normal_text += self._buffer[:end]
-                self._buffer = self._buffer[end:]
-                break
+        while new_text or self._streaming_tool_chunks is not None:
+            if self._streaming_tool_chunks is None:
+                start = new_text.find(self.bot_token)
+                if start == -1:
+                    keep = self._ends_with_partial_token(new_text, self.bot_token)
+                    end = len(new_text) - keep
+                    normal_parts.append(new_text[:end])
+                    self._buffer = new_text[end:]
+                    break
 
-            normal_text += self._buffer[:start]
-            self._buffer = self._buffer[start:]
-            end = self._buffer.find(self.eot_token)
+                normal_parts.append(new_text[:start])
+                new_text = new_text[start:]
+                self._streaming_tool_chunks = []
+
+            # Previously scanned arguments stay in chunks. Only the new text and
+            # a delimiter-sized overlap need searching, even for long tool calls.
+            search_text = self._streaming_tool_tail + new_text
+            end = search_text.find(self.eot_token)
             if end == -1:
+                if new_text:
+                    self._streaming_tool_chunks.append(new_text)
                 # Match the buffered Qwen3-Coder flow: announce the name once,
                 # then send empty argument deltas until the XML call is complete.
                 # Long Write/Bash arguments must not leave the HTTP stream idle.
                 name = None
-                if self._streaming_tool_name is None:
-                    match = self.func_name_regex.match(self._buffer)
+                if not self._streaming_tool_name_checked and ("\n" in search_text or "<arg_key>" in search_text):
+                    self._streaming_tool_name_checked = True
+                    match = self.func_name_regex.match("".join(self._streaming_tool_chunks))
                     if match and match.group(1).strip() in self._get_tool_indices(tools):
                         name = match.group(1).strip()
                         self._streaming_tool_name = name
                         self.current_tool_id += 1
+                self._streaming_tool_tail = search_text[-(len(self.eot_token) - 1) :]
                 if self._streaming_tool_name is not None:
                     calls.append(ToolCallItem(tool_index=self.current_tool_id, name=name, parameters=""))
                 break
 
-            end += len(self.eot_token)
+            end += len(self.eot_token) - len(self._streaming_tool_tail)
+            self._streaming_tool_chunks.append(new_text[:end])
             # Waiting for the closing tag avoids re-emitting partial JSON or
             # rewriting already sent arguments when another XML key arrives.
-            result = self.detect_and_parse(self._buffer[:end], tools)
+            result = self.detect_and_parse("".join(self._streaming_tool_chunks), tools)
             for call in result.calls:
                 if self._streaming_tool_name is None:
                     self.current_tool_id += 1
@@ -1374,9 +1397,12 @@ class Glm47Detector(BaseFormatDetector):
                 call.tool_index = self.current_tool_id
                 calls.append(call)
             self._streaming_tool_name = None
-            self._buffer = self._buffer[end:]
+            self._streaming_tool_chunks = None
+            self._streaming_tool_tail = ""
+            self._streaming_tool_name_checked = False
+            new_text = new_text[end:]
 
-        return StreamingParseResult(normal_text=normal_text, calls=calls)
+        return StreamingParseResult(normal_text="".join(normal_parts), calls=calls)
 
 
 class DeepSeekV32Detector(BaseFormatDetector):
@@ -1513,8 +1539,11 @@ class DeepSeekV32Detector(BaseFormatDetector):
         calls: List[ToolCallItem] = []
 
         try:
-            # Try to find complete invoke blocks first
-            complete_invoke_match = self.invoke_regex.search(current_text)
+            # Try to find complete invoke blocks first. An invoke is only complete once
+            # its end tag is in the buffer, so skip the regex scan until then.
+            complete_invoke_match = None
+            if self.invoke_end_token in current_text:
+                complete_invoke_match = self.invoke_regex.search(current_text)
             if complete_invoke_match:
                 func_name = complete_invoke_match.group(1)
                 invoke_body = complete_invoke_match.group(2)
@@ -1613,15 +1642,19 @@ class DeepSeekV32Detector(BaseFormatDetector):
                             "name": func_name,
                             "arguments": {},
                         }
-                else:
-                    # Stream arguments as complete parameters are parsed
+                elif partial_body.count(self.param_end_token) > len(self._accumulated_params):
+                    # Stream arguments as complete parameters are parsed. Each parameter
+                    # ends with its end tag, so only re-parse once a new one has arrived.
                     param_matches = self.param_regex.findall(partial_body)
                     if param_matches and len(param_matches) > len(self._accumulated_params):
                         self._accumulated_params = param_matches
                         current_args_json = self._dsml_params_to_json(param_matches)
 
+                        # Hold back the closing brace while the invoke is open: the next
+                        # parameter is appended after it, and the complete-invoke branch
+                        # sends the brace once the invoke ends.
                         sent = len(self.streamed_args_for_tool[self.current_tool_id])
-                        argument_diff = current_args_json[sent:]
+                        argument_diff = current_args_json[:-1][sent:]
 
                         if argument_diff:
                             calls.append(
@@ -1700,15 +1733,25 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     return params
         return {}
 
-    def _convert_param_value(self, value: str, param_name: str, param_config: Dict, func_name: str) -> Any:
+    def _get_parameter_schema_root(self, func_name: str, tools: List[Tool]) -> Any:
+        for tool in tools:
+            if tool.function.name == func_name and isinstance(tool.function.parameters, dict):
+                return tool.function.parameters
+        return None
+
+    def _convert_param_value(
+        self, value: str, param_name: str, param_config: Dict, func_name: str, schema_root: Any
+    ) -> Any:
         """Convert parameter value based on schema type. Safe alternative to eval()."""
-        if value.lower() == "null":
+        prop = param_config.get(param_name, {})
+        if _qwen3_is_null_literal(value=value) and not _qwen3_schema_is_verbatim_string(
+            schema=prop, schema_root=schema_root
+        ):
             return None
 
         if param_name not in param_config:
             return value
 
-        prop = param_config.get(param_name, {})
         param_type = str(prop.get("type", "string")).strip().lower() if isinstance(prop, dict) else "string"
 
         if param_type in ("string", "str", "enum"):
@@ -1751,6 +1794,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         parameters_text = function_str[end_index + 1 :]
         param_config = self._get_param_config(func_name, tools)
+        schema_root = self._get_parameter_schema_root(func_name=func_name, tools=tools)
         param_dict = {}
 
         for match in self.parameter_regex.findall(parameters_text):
@@ -1766,7 +1810,9 @@ class Qwen3CoderDetector(BaseFormatDetector):
             if param_value.endswith("\n"):
                 param_value = param_value[:-1]
 
-            param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, func_name)
+            param_dict[param_name] = self._convert_param_value(
+                param_value, param_name, param_config, func_name, schema_root=schema_root
+            )
 
         return ToolCallItem(
             tool_index=tool_indices.get(func_name, -1),
@@ -1797,6 +1843,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             return None
 
         param_config = self._get_param_config(func_name, tools)
+        schema_root = self._get_parameter_schema_root(func_name=func_name, tools=tools)
         param_dict = {}
         has_visible_value = False
 
@@ -1825,7 +1872,9 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 # Parameter tag is present but its value has not started streaming yet.
                 continue
 
-            param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, func_name)
+            param_dict[param_name] = self._convert_param_value(
+                param_value, param_name, param_config, func_name, schema_root=schema_root
+            )
 
         if not param_dict and not has_visible_value:
             return None
@@ -2041,3 +2090,196 @@ class FunctionCallParser:
             final_normal_text = sp_result.normal_text
 
         return final_normal_text, final_calls
+
+
+# --- Qwen3-Coder 参数里 null 文本是否保留 ---
+_QWEN3_SCHEMA_TYPE_NAMES = {
+    "string": "string",
+    "str": "string",
+    "text": "string",
+    "varchar": "string",
+    "char": "string",
+    "enum": "string",
+    "integer": "integer",
+    "int": "integer",
+    "number": "number",
+    "float": "number",
+    "double": "number",
+    "boolean": "boolean",
+    "bool": "boolean",
+    "binary": "boolean",
+    "object": "object",
+    "dict": "object",
+    "map": "object",
+    "array": "array",
+    "arr": "array",
+    "list": "array",
+    "sequence": "array",
+    "null": "null",
+}
+_QWEN3_SCHEMA_DEPTH_LIMIT = 32
+
+
+def _qwen3_is_null_literal(value: str) -> bool:
+    text = value.strip().lower()
+    return text == "null" or text == "none"
+
+
+def _qwen3_schema_is_verbatim_string(schema: Any, schema_root: Any) -> bool:
+    schema_types = _qwen3_parameter_schema_types(schema=schema, schema_root=schema_root)
+    return schema_types == {"string"}
+
+
+def _qwen3_parameter_schema_types(schema: Any, schema_root: Any) -> Optional[set[str]]:
+    schema_types = _qwen3_schema_option_types(schema=schema, depth=0, schema_root=schema_root, expanded_ids=set())
+    if schema_types is None:
+        return None
+    return schema_types
+
+
+def _qwen3_schema_option_types(schema: Any, depth: int, schema_root: Any, expanded_ids: set[int]) -> Optional[set[str]]:
+    """Collect the JSON types accepted by a schema, including nested nullable flags."""
+    schema_types = _qwen3_schema_option_types_impl(
+        schema=schema, depth=depth, schema_root=schema_root, expanded_ids=expanded_ids
+    )
+    if schema_types is not None and isinstance(schema, dict) and schema.get("nullable") is True:
+        return set(schema_types) | {"null"}
+    return schema_types
+
+
+def _qwen3_schema_option_types_impl(
+    schema: Any, depth: int, schema_root: Any, expanded_ids: set[int]
+) -> Optional[set[str]]:
+    if depth > _QWEN3_SCHEMA_DEPTH_LIMIT:
+        return None
+    if schema is False:
+        return set()
+    if not isinstance(schema, dict):
+        return None
+    reference = schema.get("$ref")
+    if isinstance(reference, str):
+        target = _qwen3_resolve_schema_ref(schema_root=schema_root, reference=reference)
+        if target is None:
+            return None
+        target_id = id(target)
+        if target_id in expanded_ids:
+            return set()
+        expanded_ids.add(target_id)
+        return _qwen3_schema_option_types(
+            schema=target, depth=depth + 1, schema_root=schema_root, expanded_ids=expanded_ids
+        )
+    if "const" in schema:
+        return {_qwen3_json_type_of_value(value=schema["const"])}
+    enum_values = schema.get("enum")
+    if isinstance(enum_values, list):
+        return {_qwen3_json_type_of_value(value=item) for item in enum_values}
+    union_schemas = schema.get("anyOf")
+    if not isinstance(union_schemas, list):
+        union_schemas = schema.get("oneOf")
+    if isinstance(union_schemas, list):
+        return _qwen3_union_schema_types(
+            schemas=union_schemas, depth=depth, schema_root=schema_root, expanded_ids=expanded_ids
+        )
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        if len(all_of) == 1:
+            return _qwen3_schema_option_types(
+                schema=all_of[0], depth=depth + 1, schema_root=schema_root, expanded_ids=expanded_ids
+            )
+        return None
+    if "type" in schema:
+        return _qwen3_declared_schema_types(type_value=schema["type"])
+    if "properties" in schema or "additionalProperties" in schema:
+        return {"object"}
+    if "items" in schema:
+        return {"array"}
+    return None
+
+
+def _qwen3_union_schema_types(
+    schemas: List[Any], depth: int, schema_root: Any, expanded_ids: set[int]
+) -> Optional[set[str]]:
+    union_types: set[str] = set()
+    for item in schemas:
+        item_types = _qwen3_schema_option_types(
+            schema=item, depth=depth + 1, schema_root=schema_root, expanded_ids=expanded_ids
+        )
+        if item_types is None:
+            return None
+        union_types.update(item_types)
+    return union_types
+
+
+def _qwen3_resolve_schema_ref(schema_root: Any, reference: str) -> Any:
+    if schema_root is None or not reference.startswith("#"):
+        return None
+    pointer = reference[1:]
+    if pointer == "":
+        return schema_root
+    if not pointer.startswith("/"):
+        return None
+    node = schema_root
+    for raw_token in pointer[1:].split("/"):
+        token = raw_token.replace("~1", "/").replace("~0", "~")
+        if isinstance(node, dict):
+            if token not in node:
+                return None
+            node = node[token]
+            continue
+        if isinstance(node, list) and token.isdecimal():
+            index = int(token)
+            if index >= len(node):
+                return None
+            node = node[index]
+            continue
+        return None
+    return node
+
+
+def _qwen3_declared_schema_types(type_value: Any) -> Optional[set[str]]:
+    if isinstance(type_value, str):
+        parsed = _qwen3_json_type_name(type_name=type_value)
+        return set() if parsed is None else {parsed}
+    if isinstance(type_value, list):
+        parsed_types = set()
+        for item in type_value:
+            if not isinstance(item, str):
+                continue
+            parsed = _qwen3_json_type_name(type_name=item)
+            if parsed is not None:
+                parsed_types.add(parsed)
+        return parsed_types
+    return None
+
+
+def _qwen3_json_type_name(type_name: str) -> Optional[str]:
+    name = type_name.strip().lower()
+    if name in _QWEN3_SCHEMA_TYPE_NAMES:
+        return _QWEN3_SCHEMA_TYPE_NAMES[name]
+    if name.startswith(("int", "uint", "long", "short", "unsigned")):
+        return "integer"
+    if name.startswith(("num", "float")):
+        return "number"
+    if name.startswith("dict"):
+        return "object"
+    if name.startswith("list"):
+        return "array"
+    return None
+
+
+def _qwen3_json_type_of_value(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "string"

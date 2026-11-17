@@ -15,6 +15,7 @@ if not is_fp8_native_supported():
 
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
     silu_and_mul_masked_post_quant_fwd,
+    silu_and_mul_psum_post_quant_fwd,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
@@ -149,6 +150,46 @@ def test_clamped_swiglu_quantization_matches_reference(monkeypatch, dtype, use_u
         torch.testing.assert_close(actual[expert, :count], expected[expert, :count], atol=0.05, rtol=0.02)
         assert torch.all(out[expert, count:].float() == 1)
         assert torch.all(scales[expert, count:] == 7)
+
+
+def test_silu_and_mul_psum_skips_alignment_padding():
+    hidden = 128
+    alignment = 8
+    # expert0 使用 3 行，expert1 从对齐后的第 8 行开始再使用 2 行。
+    expert_token_psum = torch.tensor([3, 10], device="cuda", dtype=torch.int32)
+    rows = 16
+    gate = torch.randn((rows, hidden), device="cuda", dtype=torch.bfloat16)
+    up = torch.randn((rows, hidden), device="cuda", dtype=torch.bfloat16)
+    packed = torch.cat([gate, up], dim=1).contiguous()
+    output = torch.zeros((rows, hidden), device="cuda", dtype=torch.float8_e4m3fn)
+    scales = torch.zeros((rows, hidden // 128), device="cuda", dtype=torch.float32)
+
+    silu_and_mul_psum_post_quant_fwd(
+        input=packed,
+        output=output,
+        output_scale=scales,
+        expert_token_psum=expert_token_psum,
+        expert_alignment=alignment,
+        quant_group_size=128,
+    )
+
+    def reference(row):
+        # Match the kernel: SiLU in fp32, then round the gate back to bf16 before multiplying.
+        activated_gate = torch.nn.functional.silu(gate[row].float()).to(torch.bfloat16)
+        activated = activated_gate.float() * up[row].float()
+        scale = activated.abs().amax().clamp(min=1e-10) / torch.finfo(torch.float8_e4m3fn).max
+        quantized = (activated / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
+        return quantized, scale
+
+    for row in (0, 1, 2, 8, 9):
+        expected_q, expected_scale = reference(row)
+        torch.testing.assert_close(scales[row], expected_scale.view(1), atol=1e-4, rtol=1e-3)
+        actual = output[row].float() * scales[row]
+        expected = expected_q.float() * expected_scale
+        # FP8 E4M3 bins are coarse, so compare the dequantized activation within one bin.
+        torch.testing.assert_close(actual, expected, atol=0.25, rtol=0.15)
+    # expert0 与 expert1 之间的对齐 padding 不应被写成有效值。
+    assert torch.count_nonzero(output[3:8].float()) == 0
 
 
 if __name__ == "__main__":

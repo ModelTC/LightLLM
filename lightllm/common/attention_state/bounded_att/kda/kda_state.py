@@ -46,6 +46,7 @@ class KDAState(BoundedAttentionState):
         self.state_name: str | None = None  # 由 AttentionStateManager.register_state() 绑定时设置。
         self.request_capacity = request_capacity  # 包含预留的 HOLD 请求槽位。
         self.mtp_step = mtp_step
+        self.mtp_enabled = mtp_step > 0
         self._logical_to_storage_layer = {
             logical_layer_id: storage_layer_index
             for storage_layer_index, logical_layer_id in enumerate(config.logical_layer_ids)
@@ -67,7 +68,7 @@ class KDAState(BoundedAttentionState):
             dtype=config.ssm_dtype,
             device=device,
         )
-        self.mtp_state_index = torch.zeros(request_capacity, dtype=torch.int32, device=device) if mtp_step else None
+        self.mtp_state_index = torch.zeros(request_capacity, dtype=torch.int32, device=device)
         self.big_pages_pool = None
         self.small_pages_pool = None
 
@@ -126,7 +127,7 @@ class KDAState(BoundedAttentionState):
             self.conv_state[:, req_idx].zero_()
             start = req_idx * (self.mtp_step + 1)
             self.ssm_state[:, start : start + self.mtp_step + 1].zero_()
-            if self.mtp_state_index is not None:
+            if self.mtp_enabled:
                 self.mtp_state_index[req_idx].fill_(0)
 
     def save_bounded_att_runtime_to_pages(
@@ -170,7 +171,7 @@ class KDAState(BoundedAttentionState):
             ssm_copies.append((pool.ssm_state[slot_id], self.ssm_state[:, req_idx * (self.mtp_step + 1)]))
         copy_bounded_att_tensors(copies=conv_copies)
         copy_bounded_att_tensors(copies=ssm_copies)
-        if self.mtp_state_index is not None:
+        if self.mtp_enabled:
             for req_idx in req_indices:
                 self.mtp_state_index[req_idx].fill_(0)
 
@@ -178,10 +179,11 @@ class KDAState(BoundedAttentionState):
         self,
         req_indices: torch.Tensor,
         accepted_steps: torch.Tensor,
+        req_verify_width: torch.Tensor,
     ) -> None:
         """用 CUDA 请求索引和 int32 接受步数选择 SSM 候选位置；步数包含基准输入步。"""
         assert req_indices.is_cuda and accepted_steps.is_cuda, "commit inputs must be CUDA tensors"
-        if self.mtp_state_index is not None:
+        if self.mtp_enabled:
             self.mtp_state_index[req_indices] = accepted_steps - 1
 
     # ========================================================================
@@ -320,7 +322,7 @@ class KDAState(BoundedAttentionState):
             )
         copy_bounded_att_tensors(copies=conv_copies)
         copy_bounded_att_tensors(copies=ssm_copies)
-        if self.mtp_state_index is not None:
+        if self.mtp_enabled:
             for dst_req in dst_req_indices:
                 self.mtp_state_index[dst_req].fill_(0)
 
@@ -375,7 +377,7 @@ class KDAState(BoundedAttentionState):
             write=False,
         ):
             copy_bounded_att_tensors(copies=copies)
-        if self.mtp_state_index is not None:
+        if self.mtp_enabled:
             self.mtp_state_index[req_idx].fill_(0)
 
     # ========================================================================

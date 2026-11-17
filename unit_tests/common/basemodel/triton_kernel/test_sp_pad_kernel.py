@@ -17,14 +17,19 @@ logger = init_logger(__name__)
     ],
 )
 def test_sp_pad_copy(token_num, hidden_dim, sp_world_size):
-
     in_tensor = torch.randn((token_num, hidden_dim), dtype=torch.float16, device="cuda")
+    if token_num % sp_world_size:
+        # TPSP pads the model input before splitting it between ranks.
+        with pytest.raises(AssertionError, match="in_token_num % sp_world_size != 0"):
+            sp_pad_copy(in_tensor=in_tensor, sp_rank_id=0, sp_world_size=sp_world_size)
+        padding = in_tensor[: sp_world_size - token_num % sp_world_size]
+        in_tensor = torch.cat([in_tensor, padding])
     out_tensors = [
         sp_pad_copy(in_tensor=in_tensor, sp_rank_id=rank_id, sp_world_size=sp_world_size)
         for rank_id in range(sp_world_size)
     ]
     out_tensor = torch.cat(out_tensors, dim=0)
-    assert torch.equal(in_tensor, out_tensor[0:token_num, :])
+    assert torch.equal(in_tensor, out_tensor)
 
 
 if __name__ == "__main__":

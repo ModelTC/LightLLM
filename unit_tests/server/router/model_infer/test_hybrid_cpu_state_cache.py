@@ -1,6 +1,8 @@
 from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
+from unit_tests.common.req_token_index_test_utils import attach_req_token_index
 import dataclasses
 import json
+from collections import deque
 from types import SimpleNamespace
 
 import pytest
@@ -93,6 +95,7 @@ def linear_cache(monkeypatch, tmp_path, request):
         SimpleNamespace(
             get_big_page_ids_by_node=lambda node: [],
             free_one_small_page_buffer=lambda: None,
+            free_radix_cache_to_get_enough_token=lambda need: None,
         ),
     )
     yield full, resources, requests, config
@@ -101,11 +104,13 @@ def linear_cache(monkeypatch, tmp_path, request):
 
 
 @pytest.mark.parametrize("token_num", [320, 384])
+@pytest.mark.parametrize("token_index_mode", ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"])
 def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     monkeypatch,
     linear_cache,
     cpu_cache_factory,
     token_num,
+    token_index_mode,
 ):
     from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
     from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as common
@@ -146,7 +151,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     req = SimpleNamespace(
         req_idx=0,
         cache_tiers=(CacheTier.CPU,),
-        cpu_cache_task_status=InferReq._CpuCacheTaskStatus.NOT_STARTED,
+        cpu_cache_offload_task_status=InferReq._CpuCacheTaskStatus.NOT_STARTED,
         cur_kv_len=token_num,
         hold_kv_len=token_num,
         hybrid_cache_len=token_num,
@@ -165,8 +170,9 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     )
 
     # 通过接收 InferReq 的生产入口完成页来源查询、CPU 分配与快照写出。
-    requests.req_to_token_indexs[0, :token_num] = indexes
+    attach_req_token_index(req, requests, indexes.cpu(), mode=token_index_mode)
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.load_tasks = deque()
     module.args = get_env_start_args()
     module.cpu_cache_client = client
     module.gloo_group = None
@@ -177,7 +183,8 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
         model=SimpleNamespace(req_manager=requests, att_state_manager=resources),
     )
     monkeypatch.setattr(common.dist, "broadcast_object_list", lambda *args, **kwargs: None)
-    task = module.write_req_to_cpu(req, torch.cuda.Stream())
+    module.get_cpu_offload_stream().wait_stream(torch.cuda.current_stream())
+    task = module.write_req_to_cpu(req)
     assert task is not None
     task.sync_event.synchronize()
     pages = task.page_indexes.tolist()
@@ -188,21 +195,16 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     req.hybrid_len_to_big_page_id = {}
     req.tail_small_page_buffer_id = None
     req.cur_kv_len = req.hold_kv_len = 0
+    req.token_index.reset()
     full.k_storage.zero_()
     full.v_storage.zero_()
     big.conv_state.zero_()
     big.ssm_state.zero_()
 
-    def allocate(req, count):
-        allocated = resources.full_att_allocator.alloc(count)
-        requests.req_to_token_indexs[req.req_idx, :count] = allocated.cuda()
-        req.hold_kv_len = count
-        return allocated
-
     module.args = get_env_start_args()
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
-        _alloc_req_kv_mem=allocate,
+        dp_world_size=1,
         model=SimpleNamespace(req_manager=requests, att_state_manager=resources),
         is_hybrid_att_model=True,
     )
@@ -211,6 +213,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 384)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
     module.load_cpu_cache_to_reqs([req])
+    torch.cuda.synchronize()
 
     assert req.cur_kv_len == req.hold_kv_len == token_num
     restored_indices = requests.req_to_token_indexs[req.req_idx, :token_num]
@@ -281,12 +284,15 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
         hybrid_len_to_big_page_id=big_slots,
         tail_small_page_buffer_id=None,
         cur_kv_len=256,
+        hold_kv_len=256,
         cache_tiers=(CacheTier.CPU,),
         shm_req=SimpleNamespace(
+            input_len=257,
             token_hash_list=SimpleNamespace(get_all=lambda: [11, 22]),
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: [128, 256]),
         ),
     )
+    attach_req_token_index(req, requests, torch.arange(256, dtype=torch.int32))
     requested_hashes = []
     writes = []
 
@@ -321,10 +327,10 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
     monkeypatch.setattr(resources.get_cpu_cache_operator(), "write_req", write_to_cpu)
     broadcasts = []
     monkeypatch.setattr(common.dist, "broadcast_object_list", lambda data, **kwargs: broadcasts.append(data))
-    task = module.write_req_to_cpu(req, torch.cuda.Stream())
+    task = module.write_req_to_cpu(req)
     if allocated_pages == 0:
         assert task is None
-        assert req.cpu_cache_task_status == InferReq._CpuCacheTaskStatus.FINISHED
+        assert req.cpu_cache_offload_task_status == InferReq._CpuCacheTaskStatus.FINISHED
         assert requested_hashes == [[11, 22]]
         assert broadcasts == [[0]]
         assert writes == []
@@ -350,7 +356,7 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
     else:
         del req.hybrid_len_to_big_page_id[missing_length]
     with pytest.raises(KeyError) as error:
-        module.write_req_to_cpu(req, torch.cuda.Stream())
+        module.write_req_to_cpu(req)
     assert error.value.args == (missing_length,)
     assert requested_hashes == [[11, 22], [11, 22]]
     assert len(writes) == 1

@@ -3,7 +3,7 @@ import os
 import uuid
 import subprocess
 import math
-from lightllm.utils.start_utils import process_manager
+from lightllm.utils.start_utils import configure_decode_open_file_limit, process_manager
 from .metrics.manager import start_metric_manager
 from .httpserver.req_id_generator_server import start_req_id_generator_server
 from .embed_cache.manager import start_cache_manager
@@ -45,6 +45,7 @@ def _set_envs_and_config(args: StartArgs):
 
 def _launch_subprocesses(args: StartArgs):
     _validate_pd_features(args)
+    configure_decode_open_file_limit(args)
     _set_envs_and_config(args)
 
     if args.target_vocab_topk_sampling is not None:
@@ -169,6 +170,12 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap:
         args.enable_tpsp_mix_mode = True
+        if args.enable_ep_moe and "PYTORCH_ALLOC_CONF" not in os.environ:
+            # 在启动模型子进程前设置，使 CUDA allocator 第一次初始化时即可
+            # 使用 CUDA Graph 拓扑分析 record_stream 张量的真实依赖关系。在确认
+            # 前一张量已经完成所有跨流访问后，Graph 私有内存池可以更早复用它的
+            # 显存，避免 overlap 路径的临时张量在多层捕获过程中重复保留。
+            os.environ["PYTORCH_ALLOC_CONF"] = "graph_capture_record_stream_reuse:True"
 
     if args.enable_prefill_decode_mixed:
         assert args.run_mode == "normal", "--enable_prefill_decode_mixed only supports run_mode normal"
@@ -177,7 +184,7 @@ def _launch_subprocesses(args: StartArgs):
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
     if args.enable_ep_moe:
-        allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}
+        allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla", "flashkda"}
         for backend in args.llm_prefill_att_backend:
             assert backend in allowed_ep_prefill_att_backends, (
                 "When --enable_ep_moe is enabled, --llm_prefill_att_backend must be one of "
@@ -297,6 +304,22 @@ def _launch_subprocesses(args: StartArgs):
             f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
         )
 
+    if args.run_mode == "decode":
+        # Decode 节点的启动 warmup 仍会构造 batch_max_tokens 个 token 做一次
+        # prefill-style model forward。Decode 节点没有必要沿用较大的 prefill
+        # batch 上限，但需要覆盖每个请求的一个 target token 和 mtp_step 个
+        # draft token。
+        decode_batch_max_tokens = int(args.running_max_req_size) * (1 + int(args.mtp_step))
+        logger.info(
+            "Decode node overrides batch_max_tokens: configured=%s, running_max_req_size=%s, "
+            "mtp_step=%s, decode_batch_max_tokens=%s",
+            args.batch_max_tokens,
+            args.running_max_req_size,
+            args.mtp_step,
+            decode_batch_max_tokens,
+        )
+        args.batch_max_tokens = decode_batch_max_tokens
+
     args.disable_chunked_mm_input = args.disable_chunked_mm_input or get_default_disable_chunked_mm_input(
         args.model_dir
     )
@@ -332,6 +355,8 @@ def _launch_subprocesses(args: StartArgs):
         from lightllm.utils.petrel_helper import s3_model_prepare
 
         s3_model_prepare(args.model_dir)
+
+    _validate_and_normalize_ssm_config(args)
 
     # 如果args.eos_id 是 None, 从 config.json 中读取 eos_token_id 相关的信息，赋值给 args
     if args.eos_id is None:
@@ -385,7 +410,8 @@ def _launch_subprocesses(args: StartArgs):
     ports_to_check = [args.port]
     if args.dp == 1 and args.nnodes > 1:
         ports_to_check.extend([args.multinode_httpmanager_port, args.multinode_router_gloo_port])
-    if args.node_rank == 0 and args.nccl_port is not None:
+    # ConfigServer owns and replaces its TCPStore; a surviving store must not block rank-0 restart.
+    if args.node_rank == 0 and args.nccl_port is not None and not args.use_config_server_to_init_nccl:
         ports_to_check.append(args.nccl_port)
     validate_ports(ports_to_check)
 
@@ -722,3 +748,54 @@ def _auto_set_prefill_queue_strategy(args: StartArgs) -> None:
     if args.prefill_queue_strategy == "auto":
         args.prefill_queue_strategy = "hrrn" if args.run_mode == "prefill" else "default"
         logger.info(f"run_mode={args.run_mode}, auto set prefill_queue_strategy to {args.prefill_queue_strategy}")
+
+
+def _validate_and_normalize_ssm_config(args: StartArgs):
+    assert args.ssm_state_mode in ("native", "replay"), "Invalid ssm_state_mode"
+    config = args.ssm_replay_config
+    assert isinstance(config, dict), "ssm_replay_config must be a JSON object"
+    assert args.ssm_state_mode == "replay" or not config, "ssm_replay_config requires ssm_state_mode=replay"
+    if args.ssm_state_mode == "replay":
+        defaults = {"cache_len": 16, "compute_mode": "precompute" if args.mtp_step > 0 else "inline"}
+        unknown = config.keys() - defaults.keys()
+        assert not unknown, f"Unknown ssm_replay_config fields: {unknown}"
+        config = {**defaults, **config}
+        assert type(config["cache_len"]) is int and config["cache_len"] in (
+            4,
+            8,
+            16,
+            32,
+            64,
+        ), "ReplaySSM capacity must be a power of two and at least 4, up to 64"
+        assert config["compute_mode"] in ("inline", "precompute"), "Invalid replay compute_mode"
+        args.ssm_replay_config = config
+        logger.info(f"SSM mode: replay, config: {config}")
+    else:
+        logger.info(f"SSM mode: {args.ssm_state_mode}")
+    from lightllm.utils.config_utils import get_model_type
+
+    model_type = get_model_type(args.model_dir)
+    is_gdn_or_kda = model_type in (
+        "glm5_next",
+        "glm5_next_text",
+        "qwen3_next",
+        "qwen3_5",
+        "qwen3_5_moe",
+        "qwen3_5_text",
+        "qwen3_5_moe_text",
+        "sensenova_loop",
+    )
+    if is_gdn_or_kda:
+        assert args.mtp_step <= 15, (
+            "GDN/KDA requires mtp_step <= 15: " "linear attention MTP state acceptance supports verify width <= 16"
+        )
+    if args.ssm_state_mode == "native":
+        return
+    assert args.linear_att_ssm_data_type in (
+        "float32",
+        "bfloat16",
+    ), "Non-native SSM state modes require FP32 or BF16 state"
+    assert is_gdn_or_kda, "Non-native SSM state modes currently require a GDN or KDA model"
+    assert args.mtp_step >= 0, "ssm_state_mode=replay requires mtp_step >= 0"
+    capacity = config["cache_len"]
+    assert capacity >= args.mtp_step + 1, "ReplaySSM capacity must cover the verify width"

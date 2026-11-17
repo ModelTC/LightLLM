@@ -46,7 +46,7 @@ def make_mems(monkeypatch, request):
     get_env_start_args.cache_clear()
     set_env_start_args(dataclasses.asdict(args))
 
-    def create(tp, target_mtp_step=None):
+    def create(tp, target_mtp_step=None, mode="native"):
         local_mtp_step = mtp_step if target_mtp_step is None else target_mtp_step
         config = Glm5NextResourceConfig(
             tp_world_size=tp,
@@ -87,6 +87,7 @@ def make_mems(monkeypatch, request):
                 config=config,
                 request_capacity=4,
                 mtp_step=local_mtp_step,
+                ssm_state_mode=mode,
                 tp_rank=rank,
                 full_state=main,
                 full_allocator=FullAttKVAllocator(full.capacity, full.page_size),
@@ -112,16 +113,21 @@ def make_mems(monkeypatch, request):
 @pytest.mark.parametrize("prefill_tp,decode_tp", [(1, 1), (4, 4), (1, 4), (4, 1)])
 @pytest.mark.parametrize("remainder", range(4))
 @pytest.mark.parametrize("decode_mtp_step", [0, 1, 5])
+@pytest.mark.parametrize("source_mode", ["native", "replay"])
+@pytest.mark.parametrize("dest_mode", ["native", "replay"])
 def test_pd_kv_and_runtime_state_roundtrip(
     make_mems,
     prefill_tp,
     decode_tp,
     remainder,
     decode_mtp_step,
+    source_mode,
+    dest_mode,
 ):
-    source, dest = make_mems(prefill_tp), make_mems(decode_tp, target_mtp_step=decode_mtp_step)
+    source = make_mems(prefill_tp, mode=source_mode)
+    dest = make_mems(decode_tp, target_mtp_step=decode_mtp_step, mode=dest_mode)
+    dst_ssm_stride = 1 if dest_mode == "replay" else dest[0].linear.mtp_step + 1
     mtp_size = get_env_start_args().mtp_step + 1
-    dst_mtp_size = decode_mtp_step + 1
     layers = sum(len(state.config.logical_layer_groups) for state in source[0].full_states)
     src_req, dst_req = 0, 2
     length = 8 + remainder
@@ -159,7 +165,15 @@ def test_pd_kv_and_runtime_state_roundtrip(
             state.storage.view(torch.uint8)[:, src_indexes] = packed[offset:end]
             offset = end
         mem.linear.conv_state[:, src_req, ..., :3].copy_(conv[:, :, heads].reshape(6, -1, 3))
-        mem.linear.ssm_state[:, src_req * mtp_size].copy_(ssm[:, heads])
+        src_slot = src_req if source_mode == "replay" else src_req * (mem.linear.mtp_step + 1)
+        mem.linear.ssm_state[:, src_slot].copy_(ssm[:, heads])
+        if source_mode == "replay":
+            backend = mem.linear
+            backend.raw_keys.zero_()
+            backend.raw_values.zero_()
+            backend.gates.fill_(-0.5)
+            backend.betas.zero_()
+            backend.cursors[src_req] = 1
         offset = 0
         for state in mem.tails:
             end = offset + len(state.config.logical_layer_ids)
@@ -173,6 +187,10 @@ def test_pd_kv_and_runtime_state_roundtrip(
             state.storage.zero_()
         mem.linear.conv_state.normal_()
         mem.linear.ssm_state.normal_()
+        if dest_mode == "replay":
+            mem.linear.cursors[dst_req] = 3
+        if mem.linear.mtp_enabled:
+            mem.linear.mtp_state_index[dst_req] = decode_mtp_step
         for state in mem.tails:
             state.buffer.normal_()
         original_tails.append(torch.cat([state.buffer[:, dst_req] for state in mem.tails]).clone())
@@ -181,7 +199,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
                 x[:, torch.tensor([0, 1, 3], device="cuda") * stride].clone()
                 for x, stride in (
                     (mem.linear.conv_state, 1),
-                    (mem.linear.ssm_state, dst_mtp_size),
+                    (mem.linear.ssm_state, dst_ssm_stride),
                     *((state.buffer, 1) for state in mem.tails),
                 )
             ]
@@ -235,18 +253,20 @@ def test_pd_kv_and_runtime_state_roundtrip(
                     source_field.tensor[:, src_indexes].contiguous().view(torch.uint8),
                 )
         assert torch.equal(mem.linear.conv_state[:, dst_req, ..., :3], conv[:, :, heads].reshape(6, -1, 3))
-        assert torch.equal(mem.linear.ssm_state[:, dst_req * dst_mtp_size], ssm[:, heads])
+        assert torch.equal(mem.linear.ssm_state[:, dst_req * dst_ssm_stride], ssm[:, heads])
         restored_tail = torch.cat([state.buffer[:, dst_req] for state in mem.tails])
         expected_tail = original_tails[rank].clone()
         for position in range(length - 4, length):
             expected_tail[:, position % (4 + decode_mtp_step)] = tail[:, position % tail.shape[1]]
         assert torch.equal(restored_tail, expected_tail)
-        if mem.linear.mtp_state_index is not None:
+        if dest_mode == "replay":
+            assert mem.linear.cursors[dst_req] == 0
+        if mem.linear.mtp_enabled:
             assert mem.linear.mtp_state_index[dst_req] == 0
         for (state, stride), expected in zip(
             (
                 (mem.linear.conv_state, 1),
-                (mem.linear.ssm_state, dst_mtp_size),
+                (mem.linear.ssm_state, dst_ssm_stride),
                 *((state.buffer, 1) for state in mem.tails),
             ),
             untouched[rank],
@@ -267,19 +287,17 @@ def test_pd_kv_and_runtime_state_roundtrip(
     outputs = []
     for mem, req_idx, indexes in ((source[0], src_req, src_indexes), (dest[0], dst_req, dst_indexes)):
         new_indexes = [i for i in range(32) if i not in indexes][:count]
-        all_indexes = indexes + new_indexes
         compress_pools(
-            raw=raw,
-            tail=mem.tail.buffer[0],
-            packed_buffer=mem.full.get_layer_view(3).indexer_k,
-            ape=ape,
-            lengths=tensor(range(length + 1, length + count + 1)),
-            starts=tensor([0] * count),
-            ragged=tensor(all_indexes),
-            req_idx=tensor([req_idx]),
-            cu_q_lens=tensor([0, count]),
-            seq_lens=tensor([length + count]),
-            max_q_len=count,
+            k_and_gate=raw,
+            indexer_tail=mem.tail.buffer[0],
+            indexer_k=mem.full.get_layer_view(3).indexer_k,
+            index_kpool_compress_ape=ape,
+            q_kv_seq_len=tensor(range(length + 1, length + count + 1)),
+            mem_index=tensor(new_indexes),
+            b_req_idx=tensor([req_idx]),
+            b1_cu_q_seq_len=tensor([0, count]),
+            b_seq_len=tensor([length + count]),
+            max_q_seq_len=count,
         )
         outputs.append(mem.full.get_layer_view(3).indexer_k[new_indexes[-1]].clone())
     assert torch.equal(*outputs)
@@ -347,22 +365,21 @@ def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step,
     def prefill(values, destination, tail):
         count = len(values)
         compress_pools(
-            raw=values,
-            tail=tail,
-            packed_buffer=destination,
-            ape=ape,
-            lengths=torch.arange(
+            k_and_gate=values,
+            indexer_tail=tail,
+            indexer_k=destination,
+            index_kpool_compress_ape=ape,
+            q_kv_seq_len=torch.arange(
                 start=1,
                 end=count + 1,
                 device="cuda",
                 dtype=torch.int32,
             ),
-            starts=torch.zeros(count, device="cuda", dtype=torch.int32),
-            ragged=ragged,
-            req_idx=torch.zeros(1, device="cuda", dtype=torch.int32),
-            cu_q_lens=torch.tensor([0, count], device="cuda", dtype=torch.int32),
-            seq_lens=torch.tensor([count], device="cuda", dtype=torch.int32),
-            max_q_len=count,
+            mem_index=ragged[:count],
+            b_req_idx=torch.zeros(1, device="cuda", dtype=torch.int32),
+            b1_cu_q_seq_len=torch.tensor([0, count], device="cuda", dtype=torch.int32),
+            b_seq_len=torch.tensor([count], device="cuda", dtype=torch.int32),
+            max_q_seq_len=count,
         )
 
     prefill(raw[:prefix], packed, source.get_layer_view(0))
@@ -407,18 +424,17 @@ def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step,
             dtype=torch.int32,
         )
         compress_pools(
-            raw=raw[start : start + count],
-            tail=target.get_layer_view(0),
-            packed_buffer=packed,
-            ape=ape,
-            lengths=lengths,
-            starts=torch.zeros(count, device="cuda", dtype=torch.int32),
-            ragged=ragged,
-            req_idx=torch.zeros(count, device="cuda", dtype=torch.int32),
-            cu_q_lens=torch.arange(count + 1, device="cuda", dtype=torch.int32),
-            seq_lens=lengths,
-            max_q_len=1,
-            mtp_index=torch.arange(count, device="cuda", dtype=torch.int32),
+            k_and_gate=raw[start : start + count],
+            indexer_tail=target.get_layer_view(0),
+            indexer_k=packed,
+            index_kpool_compress_ape=ape,
+            q_kv_seq_len=lengths,
+            mem_index=ragged[start : start + count],
+            b_req_idx=torch.zeros(count, device="cuda", dtype=torch.int32),
+            b1_cu_q_seq_len=torch.arange(count + 1, device="cuda", dtype=torch.int32),
+            b_seq_len=lengths,
+            max_q_seq_len=1,
+            b_mtp_index=torch.arange(count, device="cuda", dtype=torch.int32),
         )
         expected = torch.zeros_like(packed)
         prefill(raw[: start + count], expected, torch.zeros_like(source.get_layer_view(0)))

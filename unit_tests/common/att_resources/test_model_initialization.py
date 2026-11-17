@@ -162,7 +162,9 @@ def test_real_model_resource_hooks_and_shared_draft(
     assert resources.bounded_att_big_page_allocator.size == 6
     assert resources.bounded_att_small_page_allocator.size == 2
     assert not hasattr(model, "mtp_state_cursors")
-    assert (main_linear_state(resources).mtp_state_index is not None) == bool(mtp)
+    linear_state = main_linear_state(resources)
+    assert linear_state.mtp_state_index is not None
+    assert linear_state.mtp_enabled == bool(mtp)
     if mode == "prefill":
         assert resources.get_pd_operator().get_pd_full_att_page_layouts()
         assert resources.get_pd_operator().get_pd_bounded_att_page_layouts()

@@ -91,6 +91,8 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             async with websockets.connect(
                 uri,
                 additional_headers={"Authorization": f"Bearer {get_pd_register_token()}"},
+                # Compression runs on the event loop and stalls heartbeats for large prompts.
+                compression=None,
                 max_size=get_lightllm_websocket_max_message_size(),
                 max_queue=(2048 * 1024, 2048 * 1023),  # 关键修改
                 # 下方应用层心跳已负责存活检测，禁用协议层 keepalive，避免繁忙连接被误断。

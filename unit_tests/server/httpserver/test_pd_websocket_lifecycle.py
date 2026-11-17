@@ -3,8 +3,9 @@
 import asyncio
 import json
 import pickle
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -117,3 +118,25 @@ def test_kv_status_is_forwarded_without_registration_or_reply(monkeypatch):
     asyncio.run(api_http_pd.kv_move_status(websocket))
     manager.update_req_status.assert_awaited_once_with(status)
     websocket.send_bytes.assert_not_awaited()
+
+
+def test_master_registers_with_config_server_without_compression(monkeypatch):
+    from lightllm.server.httpserver_for_pd_master import register_loop
+    from lightllm.server.pd_io_struct import PD_Master_Obj
+
+    websocket = SimpleNamespace(send=AsyncMock(), transport=SimpleNamespace(get_extra_info=lambda _key: MagicMock()))
+
+    @asynccontextmanager
+    async def connect(uri, **kwargs):
+        assert uri == "ws://config:9000/pd_master_register"
+        assert kwargs["compression"] is None
+        yield websocket
+
+    monkeypatch.setattr(register_loop.websockets, "connect", connect)
+    monkeypatch.setattr(register_loop, "get_shm_port_args", lambda: SimpleNamespace(config_server_port=9000, port=8000))
+    monkeypatch.setattr(register_loop.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError))
+    manager = SimpleNamespace(args=SimpleNamespace(host="master", config_server_host="config", pd_node_id=100))
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(register_loop.register_loop(manager))
+    assert pickle.loads(websocket.send.await_args_list[0].args[0]) == PD_Master_Obj(100, "master:8000")
+    assert websocket.send.await_args_list[1].args[0] == "heartbeat"

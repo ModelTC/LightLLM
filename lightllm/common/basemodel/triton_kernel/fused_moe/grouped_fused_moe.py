@@ -212,7 +212,7 @@ def moe_align1(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["token_num_mul_topk"])
 def moe_align_fused_small_token_kernel(
     topk_ids_ptr,  # [token_num, topk]
     topk_weights_ptr,  # [token_num, topk]
@@ -324,7 +324,7 @@ def _moe_align_fused_small_token(
     return expert_to_token_index, expert_to_weight, expert_token_num
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["token_num_mul_topk"])
 def moe_align_fused_atomic_kernel(
     topk_ids_ptr,  # [token_num, topk]
     topk_weights_ptr,  # [token_num, topk]
@@ -395,7 +395,7 @@ def moe_align_fused(expert_to_token_index, expert_to_weight, expert_token_num, t
     return expert_to_token_index, expert_to_weight, expert_token_num
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["max_num_m_blocks"])
 def moe_align2_kernel(
     experts_token_num_ptr,  # [expert_num,]
     mblocks_to_tuple_info,  # [max_num_m_blocks, 3], tuple for (expert_id, m_index, token_start_index)
@@ -475,7 +475,7 @@ def moe_align2(token_num_mul_topk_num: int, exports_token_num: torch.Tensor, blo
     return mblocks_to_tuple_info
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["expert_to_weights_stride0", "expert_to_token_index_stride_0", "m_block_num"])
 def grouped_matmul_kernel(
     mblocks_to_tuple_info,  # [max_m_block_size, 3] tuple for (expert_id, m_index, token_start_index)
     mblocks_to_tuple_info_stride_0,  # int

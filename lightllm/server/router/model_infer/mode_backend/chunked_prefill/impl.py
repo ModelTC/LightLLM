@@ -115,7 +115,13 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
+            (
+                _,
+                next_token_ids_cpu,
+                next_token_logprobs_cpu,
+                next_token_ranks_cpu,
+                output_topk_logprobs,
+            ) = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
@@ -139,6 +145,7 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_ids=next_token_ids_cpu,
             next_token_logprobs=next_token_logprobs_cpu,
             next_token_ranks=next_token_ranks_cpu,
+            output_topk_logprobs=output_topk_logprobs,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
             pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
@@ -160,7 +167,13 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
+            (
+                _,
+                next_token_ids_cpu,
+                next_token_logprobs_cpu,
+                next_token_ranks_cpu,
+                output_topk_logprobs,
+            ) = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
@@ -180,6 +193,7 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_ids=next_token_ids_cpu,
             next_token_logprobs=next_token_logprobs_cpu,
             next_token_ranks=next_token_ranks_cpu,
+            output_topk_logprobs=output_topk_logprobs,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
@@ -207,6 +221,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 next_token_ids_cpu,
                 next_token_logprobs_cpu,
                 next_token_ranks_cpu,
+                output_topk_logprobs,
             ) = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
@@ -240,6 +255,7 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_ids=next_token_ids_cpu,
             next_token_logprobs=next_token_logprobs_cpu,
             next_token_ranks=next_token_ranks_cpu,
+            output_topk_logprobs=output_topk_logprobs,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
             pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
@@ -281,7 +297,7 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            next_token_ids, next_token_logprobs = sample(
+            next_token_ids, next_token_logprobs, output_topk_logprobs = sample(
                 model_output.logits,
                 run_reqs,
                 self.eos_id,
@@ -376,11 +392,13 @@ class ChunkedPrefillBackend(ModeBackend):
         )
 
         select_mask = accepted_index_cpu.to(dtype=torch.bool)
+        output_topk_logprobs = [row for row, keep in zip(output_topk_logprobs, select_mask.tolist()) if keep]
         self._post_handle(
             run_reqs=verify_ok_reqs,
             next_token_ids=next_token_ids_cpu[select_mask],
             next_token_logprobs=next_token_logprobs_cpu[select_mask],
             next_token_ranks=next_token_ranks_cpu[select_mask],
+            output_topk_logprobs=output_topk_logprobs,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )

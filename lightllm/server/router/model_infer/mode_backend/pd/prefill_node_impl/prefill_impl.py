@@ -1,6 +1,5 @@
 import torch.multiprocessing as mp
-import random
-from typing import List, Tuple
+from typing import List
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.log_utils import init_logger
@@ -44,6 +43,12 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
             ):
                 self.info_queue.put(PDAbortReq(request_id=req_obj.req_id, device_id=req_obj.pd_trans_device_id))
                 req_obj.pd_abort_req_send_count = pd_abort_req_send_count + 1
+
+            # CPU cache 还在搬运时，cur_kv_len 已经记成命中长度，但 KV 还不能读。
+            if self.args.enable_cpu_cache and (
+                req_obj.cpu_cache_load_task_status.is_running() or req_obj.cpu_cache_offload_task_status.is_running()
+            ):
+                continue
 
             prefill_finished = req_obj.shm_req.input_len <= req_obj.cur_kv_len
             if prefill_finished:
@@ -122,12 +127,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
 
         pd_decode_node_info = req_obj.sampling_param.pd_decode_node
         if page_kind == "kv":
-            mem_indexes = (
-                self.model.req_manager.req_to_token_indexs[req_obj.req_idx, kv_start_index:kv_end_index]
-                .detach()
-                .cpu()
-                .tolist()
-            )
+            mem_indexes = req_obj.token_index.get_cpu_token_indexes(kv_start_index, kv_end_index).tolist()
             req_idx = None
         elif page_kind == "att_state":
             mem_indexes = []

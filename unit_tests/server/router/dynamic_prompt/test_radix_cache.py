@@ -276,7 +276,7 @@ def test_hybrid_flush_releases_shared_kv_and_state_slots(monkeypatch):
         "lightllm.common.attention_state.bounded_att.utils.get_env_start_args",
         lambda: SimpleNamespace(enable_dp_prompt_cache_fetch=False),
     )
-    resources = composition(device="cuda", with_tail=False)
+    resources = composition(device="cuda")
     allocator = resources.full_att_allocator
     big = resources.bounded_att_big_page_allocator.alloc(1)[0]
     small = resources.bounded_att_small_page_allocator.alloc(1)[0]
@@ -672,14 +672,21 @@ def test_hybrid_request_release_frees_or_transfers_image_page_slots(
 
     tree, freed = hybrid_tree
     context = InferenceContext()
+    context.is_hybrid_att_model = True
     context.args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
     monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: context.args)
     context.radix_cache = tree
     context.att_state_manager = tree.att_state_manager
-    context.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(100, 132).view(1, -1))
+    table = torch.arange(100, 132).view(1, -1)
+    context.req_manager = SimpleNamespace()
     req = InferReq.__new__(InferReq)
     req.req_idx = req.cur_output_len = 0
+    req.token_index = SimpleNamespace(
+        get_cpu_token_indexes=lambda start, end: table[0, start:end].clone(),
+        get_free_token_indexes=lambda start, end: table[0, start:end].clone(),
+        reset=lambda: None,
+    )
     req.cur_kv_len, req.hold_kv_len, req.hybrid_cache_len = computed, max(24, computed), cache_len
     req.shared_kv_node = None
     req.hybrid_len_to_big_page_id = SortedDict({end: end // 8 + 4 for end in range(8, min(computed, cache_len) + 1, 8)})
@@ -694,7 +701,9 @@ def test_hybrid_request_release_frees_or_transfers_image_page_slots(
     )
     released = []
     context._hybrid_att_free_req(released, req)
-    assert torch.cat(released).tolist() == list(range(100 + retained, 100 + max(24, computed)))
+    assert [index for block in released for index in block.tolist()] == list(
+        range(100 + retained, 100 + max(24, computed))
+    )
     assert not req.hybrid_len_to_big_page_id
     assert req.tail_small_page_buffer_id is None
     assert tree.get_tree_total_tokens_num() == retained

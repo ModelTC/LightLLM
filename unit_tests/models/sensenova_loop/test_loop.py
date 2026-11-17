@@ -192,6 +192,94 @@ def test_plain_loop_registry_does_not_enable_mhc():
     assert registration.is_multimodal
 
 
+def test_awq_config_applies_to_main_model_and_excludes_float_mtp():
+    from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
+    from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
+
+    config = _config()
+    quantization = {"quant_method": "awq", "bits": 4, "group_size": 128, "modules_to_not_convert": ["mtp"]}
+    config["quantization_config"] = quantization
+    original = deepcopy(config)
+    assert SenseNovaLoopTpPartModel.normalize_model_config(config)["quantization_config"] == quantization
+    assert "quantization_config" not in Qwen3_5MTPModel.normalize_model_config(config)
+    assert config == original
+
+    config["text_config"]["quantization_config"] = None
+    assert SenseNovaLoopTpPartModel.normalize_model_config(config)["quantization_config"] is None
+
+
+@pytest.mark.parametrize("suffix,factor", [("qweight", 8), ("qzeros", 8), ("scales", 1)])
+def test_awq_fused_projections_split_on_output_axis(suffix, factor):
+    from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import Qwen35TransformerLayerWeight
+
+    method = SimpleNamespace(method_name="awq_marlin", pack_factor=8)
+    layer = object.__new__(Qwen35TransformerLayerWeight)
+    layer.layer_num_ = 0
+    layer.linear_num_k_heads = 2
+    layer.linear_num_v_heads = 4
+    layer.linear_k_head_dim = layer.linear_v_head_dim = 16
+    layer.linear_in_proj = SimpleNamespace(quant_method=method)
+    prefix = "model.layers.0.linear_attn.in_proj_"
+    qkv = torch.arange(256 // factor).reshape(2, 128 // factor)
+    fused_name = f"{prefix}qkv.{suffix}"
+    weights = {fused_name: qkv}
+    layer._split_linear_in_proj_qkv(weights)
+    q_end, k_end = 32 // factor, 64 // factor
+    assert fused_name not in weights
+    assert torch.equal(weights[f"{prefix}q.{suffix}"], qkv[:, :q_end])
+    assert torch.equal(weights[f"{prefix}k.{suffix}"], qkv[:, q_end:k_end])
+    assert torch.equal(weights[f"{prefix}v.{suffix}"], qkv[:, k_end:])
+
+    layer.is_linear_attention_layer = False
+    layer.q_head_num_, layer.head_dim = 2, 16
+    layer.qkvo_gate_proj = SimpleNamespace(quant_method=method)
+    layer._q_weight_name = "model.layers.0.self_attn.q_proj.weight"
+    layer._o_gate_weight_name = "model.layers.0.self_attn.o_gate_proj.weight"
+    q_name = f"model.layers.0.self_attn.q_proj.{suffix}"
+    gate_name = f"model.layers.0.self_attn.o_gate_proj.{suffix}"
+    head_width = layer.head_dim // factor
+    q_gate = torch.arange(8 * head_width).reshape(2, 4 * head_width)
+    q1, gate1, q2, gate2 = q_gate.split(head_width, dim=1)
+    weights = {q_name: q_gate}
+    layer._split_q_with_gate(weights)
+    assert torch.equal(weights[q_name], torch.cat((q1, q2), dim=1))
+    assert torch.equal(weights[gate_name], torch.cat((gate1, gate2), dim=1))
+    layer._split_q_with_gate(weights)
+    assert torch.equal(weights[q_name], torch.cat((q1, q2), dim=1))
+    assert torch.equal(weights[gate_name], torch.cat((gate1, gate2), dim=1))
+
+
+def test_loop_binds_split_gdn_projection_only_for_weights_with_separate_gates(monkeypatch):
+    from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
+    from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35TransformerLayerInfer
+    from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerInfer
+    from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
+    from lightllm.models.sensenova_loop.layer_infer.transformer_layer_infer import SenseNovaLoopTransformerLayerInfer
+
+    qkvz = torch.arange(8).reshape(2, 4)
+    gates = torch.arange(8, 12).reshape(2, 2)
+    fused = torch.cat((qkvz, gates), dim=-1)
+    fused_weight = SimpleNamespace(linear_in_proj=SimpleNamespace(mm=lambda _: fused))
+    split_weight = SimpleNamespace(
+        linear_in_proj=SimpleNamespace(mm=lambda _: qkvz),
+        linear_gate_proj=SimpleNamespace(mm=lambda _: gates),
+    )
+    model = object.__new__(SenseNovaLoopTpPartModel)
+    model.trans_layers_weight = [fused_weight, split_weight, split_weight]
+    layers = [object.__new__(SenseNovaLoopTransformerLayerInfer) for _ in model.trans_layers_weight]
+    for layer in layers:
+        layer.embed_dim_ = 4
+    monkeypatch.setattr(Qwen3_5TpPartModel, "_init_infer_layer", lambda self, _: setattr(self, "layers_infer", layers))
+
+    model._init_infer_layer()
+    assert Qwen35TransformerLayerInfer._linear_in_proj is Qwen3NextTransformerLayerInfer._linear_in_proj
+    assert layers[0]._linear_in_proj.__func__ is Qwen3NextTransformerLayerInfer._linear_in_proj
+    for layer in layers[1:]:
+        assert layer._linear_in_proj.__func__ is SenseNovaLoopTransformerLayerInfer._linear_in_proj_with_gates
+    for layer, weight in zip(layers, model.trans_layers_weight):
+        assert torch.equal(layer._linear_in_proj(torch.zeros(1, 2, 4), weight), fused)
+
+
 def test_weight_load_failure_restores_execution_weights(monkeypatch):
     from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
     from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel

@@ -387,7 +387,7 @@ def test_production_offload_preserves_ready_pages_without_host_sync(
             tail_small_page_buffer_id=None,
             hybrid_len_to_big_page_id=dict(zip([8, 16], slots)) if hybrid else {},
             shared_kv_node=None,
-            cpu_cache_task_status=InferReq._CpuCacheTaskStatus.NOT_STARTED,
+            cpu_cache_offload_task_status=InferReq._CpuCacheTaskStatus.NOT_STARTED,
             shm_req=SimpleNamespace(
                 token_hash_list=SimpleNamespace(get_all=lambda: [11, 22]),
                 token_hash_page_len_list=SimpleNamespace(get_all=lambda: [8, 16]),
@@ -397,13 +397,15 @@ def test_production_offload_preserves_ready_pages_without_host_sync(
         module.args = get_env_start_args()
         module.cpu_cache_client = client
         module.gloo_group = None
+        token_indexes = torch.arange(16, device="cuda")
+        req.token_index = SimpleNamespace(get_gpu_token_indexes=lambda start, end: token_indexes[start:end])
         module.backend = SimpleNamespace(
             is_master_in_dp=True,
             is_hybrid_att_model=hybrid,
             dp_world_size=1,
             model=SimpleNamespace(
                 att_state_manager=resources,
-                req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(16, device="cuda").view(1, -1)),
+                req_manager=SimpleNamespace(req_to_token_indexs=token_indexes.view(1, -1)),
             ),
         )
         monkeypatch.setattr(common.dist, "broadcast_object_list", lambda *args, **kwargs: None)
@@ -425,11 +427,12 @@ def test_production_offload_preserves_ready_pages_without_host_sync(
         with monkeypatch.context() as patch:
             patch.setattr(torch.cuda.Stream, "synchronize", reject_host_sync)
             patch.setattr(torch.cuda.Stream, "wait_stream", record_wait)
-            task = module.write_req_to_cpu(req, copy_stream)
+            module.get_cpu_offload_stream = lambda: copy_stream
+            task = module.write_req_to_cpu(req)
         assert waited_streams == []
     task.sync_event.synchronize()
     assert write_batches == [(pages, [True, False])]
-    assert req.cpu_cache_task_status.is_running()
+    assert req.cpu_cache_offload_task_status.is_running()
     assert (client.cpu_kv_cache_tensor[pages[0]] == 123).all()
     for storage_buffer in full_state_test_buffers(full).values():
         storage_buffer[:, :8].zero_()

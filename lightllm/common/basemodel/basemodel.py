@@ -208,7 +208,7 @@ class TpPartBaseModel:
         """返回当前模型的有效配置，供模型初始化和 CPU cache 共用。
 
         不依赖模型实例、权重或 CUDA；不修改输入配置，重复调用应保持结果不变。
-        子类负责模型专有的配置覆盖，通用工具仅展开 text_config 并同步字段别名。
+        子类负责模型专有的配置覆盖，通用工具展开 thinker_config、llm_config、text_config 并同步字段别名。
         """
         from lightllm.common.basemodel.basemodel_utils import normalize_model_config
 

@@ -107,8 +107,8 @@ class GQAFullAttentionState(FullAttentionState):
         self.v_storage: torch.Tensor | None = None
 
     def get_state_type(self) -> str:
-        """返回 GQA KV 精度对应的存储方案标记。"""
-        return "gqa_" + dtype_name(dtype=self.config.dtype)
+        """返回 GQA KV 精度及全局 head 布局对应的存储方案标记。"""
+        return f"gqa_{dtype_name(dtype=self.config.dtype)}_h{self.config.global_head_num}_d{self.config.head_dim}"
 
     def allocate_storage(self, token_capacity: int) -> None:
         """按统一 token 容量分配本 State 的独立 KV 存储与 HOLD 页。"""
@@ -146,14 +146,13 @@ class GQAFullAttentionState(FullAttentionState):
         if not len(token_indices):
             return
         assert self.k_storage.is_cuda, "KV writes require CUDA storage"
-        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
+        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv_split
 
-        # TODO：将同一层 K/V 的两次索引写入融合到一个 kernel，直接写入独立 K/V 存储。
-        destindex_copy_kv(
-            K=kv[:, : self.config.head_num], DestLoc=token_indices, Out=self.k_storage[storage_layer_index]
-        )
-        destindex_copy_kv(
-            K=kv[:, self.config.head_num :], DestLoc=token_indices, Out=self.v_storage[storage_layer_index]
+        destindex_copy_kv_split(
+            KV=kv,
+            DestLoc=token_indices,
+            OutK=self.k_storage[storage_layer_index],
+            OutV=self.v_storage[storage_layer_index],
         )
 
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:

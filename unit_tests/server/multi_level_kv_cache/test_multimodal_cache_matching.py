@@ -64,21 +64,38 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
         ),
     )
 
-    def allocate(req, count):
-        req.hold_kv_len = count
-        return torch.arange(count, dtype=torch.int32)
+    def allocate(alloc_token_num):
+        if alloc_token_num == 0:
+            return None
+        start = req.cur_kv_len
+        req.hold_kv_len += alloc_token_num
+        return torch.arange(start, start + alloc_token_num, dtype=torch.int32)
+
+    req.args = SimpleNamespace(page_size=1)
+    req.token_index = SimpleNamespace(
+        get_gpu_token_indexes=lambda start, end: torch.empty(end - start, dtype=torch.int32)
+    )
+    req.kv_cache_alloc_need = lambda target: max(0, target - req.hold_kv_len)
+    req.alloc_kv_mem = allocate
+
+    from collections import deque
 
     module = common.MultiLevelKvCacheModule.__new__(common.MultiLevelKvCacheModule)
+    module.load_tasks = deque()
     module.args = SimpleNamespace(page_size=1, cpu_cache_token_page_size=256)
     module.cpu_cache_client = client
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
+        dp_world_size=1,
         is_hybrid_att_model=False,
-        _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
-            req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(1024).view(1, -1)),
+            req_manager=SimpleNamespace(
+                req_to_token_indexs=torch.arange(1024).view(1, -1),
+                alloc_token_indexes=allocate,
+                wait_token_indexes=lambda: None,
+            ),
             att_state_manager=SimpleNamespace(
                 get_cpu_cache_operator=lambda: SimpleNamespace(
                     get_page_layouts=lambda: {},
@@ -86,14 +103,17 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
                         cpu_page_indices
                     ),
                 ),
+                full_att_allocator=None,
             ),
         ),
     )
     monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 1024)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
-    monkeypatch.setattr(torch.cuda, "current_stream", lambda: SimpleNamespace(synchronize=lambda: None))
     module.load_cpu_cache_to_reqs([req])
+    for task in module.load_tasks:
+        task.event.synchronize()
+    module.update_cpu_cache_load_task_states()
     assert copied_pages == loaded[:2]
     assert req.cur_kv_len == req.hold_kv_len == req.shm_req.disk_prompt_cache_len == 512
     assert req.shm_req.cpu_prompt_cache_len == 0
