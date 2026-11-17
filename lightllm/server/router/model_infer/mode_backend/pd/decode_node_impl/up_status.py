@@ -80,7 +80,7 @@ class UpStatusManager:
         while True:
             try:
                 uri = f"ws://{pd_master_obj.host_ip_port}/kv_move_status"
-                async with websockets.connect(uri) as websocket:
+                async with websockets.connect(uri, compression=None) as websocket:
                     import socket
 
                     sock = websocket.transport.get_extra_info("socket")
