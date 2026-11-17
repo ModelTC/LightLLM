@@ -13,6 +13,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
     silu_and_mul_fwd,
     silu_and_mul_quant_fp8,
 )
+from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
 from lightllm.common.basemodel.triton_kernel.mhc import (
     hc_contract,
     hc_post,
@@ -77,10 +78,11 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
     def _ffn(self, input, infer_state, layer_weight):
         input = self._tpsp_allgather(input=input.view(-1, self.embed_dim_), infer_state=infer_state)
         if self.is_moe:
-            output = self._moe_ffn(input, infer_state, layer_weight)
+            topk_weights, topk_ids = self._select_experts(input, layer_weight)
             if self.enable_ep_moe:
                 # DeepEP combine already includes all routed experts.
-                return output
+                return self._moe_ffn_ep(input, infer_state, layer_weight, topk_weights, topk_ids)
+            output = self._moe_ffn_tp(input, infer_state, layer_weight, topk_weights, topk_ids)
         else:
             output = self._ffn_tp(input, infer_state, layer_weight)
         return self._tpsp_reduce(input=output, infer_state=infer_state)
@@ -118,35 +120,58 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         )
         return layer_weight.down_proj.mm(ffn1_out)
 
-    def _moe_ffn(self, input, infer_state, layer_weight) -> torch.Tensor:
-        hidden_states = input.view(-1, self.embed_dim_)
-        num_tokens, hidden_dim = hidden_states.shape
-
-        # if fused_shared_experts is not enabled, compute shared_output
-        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
-            shared_output = self._ffn_tp(hidden_states, infer_state, layer_weight)
-
-        moe_gate_dtype = layer_weight.moe_gate.data_type_
-        router_logits = layer_weight.moe_gate.mm(hidden_states.to(moe_gate_dtype))
-        output = layer_weight.experts.experts(
-            hidden_states,
+    def _select_experts(self, input, layer_weight):
+        experts = layer_weight.experts
+        router_logits = layer_weight.moe_gate.mm(input.to(layer_weight.moe_gate.data_type_))
+        topk_weights, topk_ids = select_experts(
+            hidden_states=input,
             router_logits=router_logits,
+            correction_bias=experts.e_score_correction_bias,
             top_k=self.num_experts_per_tok,
             renormalize=self.norm_topk_prob,
             use_grouped_topk=self.n_group,
             topk_group=self.topk_group,
             num_expert_group=self.n_group,
+            scoring_func=experts.scoring_func,
+        )
+        if experts.routed_scaling_factor != 1.0:
+            topk_weights.mul_(experts.routed_scaling_factor)
+        return topk_weights, topk_ids
+
+    def _moe_ffn_tp(self, input, infer_state, layer_weight, topk_weights, topk_ids):
+        shared_output = None
+        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
+            # TP routed kernels overwrite input, so run the shared expert first.
+            shared_output = self._ffn_tp(input, infer_state, layer_weight)
+        output = layer_weight.experts.experts_with_topk(
+            input_tensor=input,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
             is_prefill=infer_state.is_prefill,
             infer_state=infer_state,
             alpha=1.0,
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
         )
-
-        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
+        if shared_output is not None:
             output.add_(shared_output)
+        return output
 
-        return output.view(num_tokens, hidden_dim)
+    def _moe_ffn_ep(self, input, infer_state, layer_weight, topk_weights, topk_ids):
+        shared_expert_func = None
+        if self.n_shared_experts is not None:
+            shared_expert_func = lambda: self._ffn_tp(input, infer_state, layer_weight)
+        return layer_weight.experts.experts_with_topk(
+            input_tensor=input,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            is_prefill=infer_state.is_prefill,
+            infer_state=infer_state,
+            alpha=1.0,
+            limit=self.swiglu_limit,
+            clamp_up_add_one=False,
+            shared_expert_func=shared_expert_func,
+        )
 
     def _project_sparse_qkv_a(self, input, infer_state, layer_weight):
         if self.is_linear_attention_layer:
