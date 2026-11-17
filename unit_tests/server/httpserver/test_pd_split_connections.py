@@ -118,7 +118,7 @@ def test_prefill_opens_local_dp_connections(monkeypatch, split, dp, nnodes, expe
 @pytest.mark.parametrize("dp_index", [None, 0, 3])
 def test_pd_handle_loop_passes_its_fixed_rank_to_each_master(monkeypatch, dp_index):
     async def run():
-        manager = SimpleNamespace(args=StartArgs(host="p", run_mode="prefill"))
+        manager = SimpleNamespace(args=StartArgs(host="p", run_mode="prefill"), pd_mode=pd_loop.NodeRole.P)
         started = []
         tasks = []
         masters = {rank: PD_Master_Obj(rank, f"master{rank}:8000") for rank in (1, 2)}
@@ -155,7 +155,11 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
 
     async def run():
         args = StartArgs(run_mode="prefill", dp=8, nnodes=2)
-        manager = SimpleNamespace(args=args, host_ip="p", pd_mode=SimpleNamespace(value="prefill"))
+        manager = SimpleNamespace(
+            args=args,
+            host_ip="p",
+            pd_mode=pd_loop.NodeRole.P,
+        )
         monkeypatch.setattr(
             api_http,
             "g_objs",

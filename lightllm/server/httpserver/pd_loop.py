@@ -19,6 +19,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 from lightllm.utils.websocket_utils import PD_WEBSOCKET_WRITE_LIMIT, websocket_message_exceeds_limit
 from lightllm.server.httpserver.manager import HttpServerManager
+from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from ..pd_io_struct import PD_Client_Obj, PD_Master_Obj
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs import SamplingParams
@@ -47,6 +48,11 @@ async def pd_handle_loop(manager: HttpServerManager, dp_index: Optional[int] = N
         manager.host_ip = get_hostname_ip()
     else:
         manager.host_ip = manager.args.host
+
+    if manager.pd_mode.is_D():
+        # Decode 才接收本机 KV 握手。转发任务先启动，由它 bind PULL。
+        manager.pd_master_forwarder = PDMasterForwarder()
+        asyncio.create_task(manager.pd_master_forwarder.run())
 
     id_to_handle_task: Dict[int, asyncio.Task] = {}
 
@@ -143,6 +149,11 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         group_req_id = sampling_params.group_request_id
                         pd_event = asyncio.Event()
                         group_req_id_to_event[group_req_id] = pd_event
+                        if manager.pd_mode.is_D():
+                            # 请求还在处理，把这条 PD Master 连接挂到 pd_event 上，供稍后的握手查找。
+                            manager.pd_master_forwarder.bind(
+                                group_req_id=group_req_id, event=pd_event, websocket=websocket
+                            )
                         generation_task = asyncio.create_task(
                             _pd_process_generate(
                                 manager=manager,
@@ -360,3 +371,44 @@ def _get_load_info(dp_index: Optional[int] = None) -> dict:
         ),
     }
     return load_info
+
+
+class PDMasterForwarder:
+    """Decode 上按请求记住 PD Master 连接，并把本机 IPC 消息转发出去。
+
+    请求任务持有 pd_event，连接挂在 event.websocket 上。表里只留弱引用，请求结束后条目消失。
+    """
+
+    def __init__(self) -> None:
+        self._events = weakref.WeakValueDictionary()
+
+    def bind(self, group_req_id: int, event: asyncio.Event, websocket: ClientConnection) -> None:
+        event.websocket = websocket
+        self._events[group_req_id] = event
+
+    async def run(self) -> None:
+        from lightllm.server.pd_httpserver_ipc import PDHttpserverIpc
+
+        pull = PDHttpserverIpc.Pull()
+        try:
+            # 同一个地址只能绑一次。别的 httpserver 进程再 bind 会失败并记日志。
+            pull.bind()
+            while True:
+                upkv_status = await pull.recv()
+                try:
+                    # 传输进程带来的是子请求 id，登记时用的是 group id。
+                    event = self._events.get(convert_sub_id_to_group_id(upkv_status.group_request_id))
+                    if event is None:
+                        # 请求已经结束，弱引用消失，这条握手不再补发。
+                        logger.warning(
+                            f"request {upkv_status.group_request_id} has no pd master socket, drop up kv status"
+                        )
+                        continue
+                    # 沿这条请求自己的 /pd_register 连接上报给 PD Master。
+                    await event.websocket.send(pickle.dumps((ObjType.PD_UPLOAD_KV_STATUS, upkv_status)))
+                except BaseException as e:
+                    logger.exception(f"upload pd kv status failed, request_id={upkv_status.group_request_id}: {str(e)}")
+        except BaseException as e:
+            logger.exception(f"pd httpserver ipc loop failed: {str(e)}")
+        finally:
+            pull.close()

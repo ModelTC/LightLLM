@@ -1,8 +1,7 @@
 """PD separation control-plane WebSocket APIs.
 
 供 prefill / decode 节点与 pd_master 通信：
-  - ``/pd_register``：P/D 节点注册与请求转发
-  - ``/kv_move_status``：decode 节点上报 KV 传输状态
+  - ``/pd_register``：P/D 节点注册、请求转发，以及 Decode 上报 KV 握手状态
 
 路由在模块级 ``router`` 上注册，由 ``api_http`` ``include_router`` 挂载。
 ``g_objs`` 在 handler 内懒导入，避免与 api_http 循环依赖。
@@ -60,24 +59,4 @@ async def register_and_keep_alive(websocket: WebSocket):
     finally:
         logger.error(f"client {regist_json} removed")
         await g_objs.httpserver_manager.remove_pd(pd_client)
-    return
-
-
-@router.websocket("/kv_move_status")
-async def kv_move_status(websocket: WebSocket):
-    from .api_http import g_objs
-
-    await websocket.accept()
-    set_pd_websocket_write_buffer(websocket=websocket)
-    client_ip, client_port = websocket.client
-    logger.info(f"kv_move_status Client connected from IP: {client_ip}, Port: {client_port}")
-    try:
-        while True:
-            data = await websocket.receive_bytes()
-            upkv_status = pickle.loads(data)
-            logger.debug(f"received upkv_status {upkv_status} from {(client_ip, client_port)}")
-            await g_objs.httpserver_manager.update_req_status(upkv_status)
-    except (WebSocketDisconnect, Exception, RuntimeError) as e:
-        logger.error(f"kv_move_status client {(client_ip, client_port)} has error {str(e)}")
-        logger.exception(str(e))
     return

@@ -60,7 +60,6 @@ def test_pd_uploads_cpu_indices_on_copy_stream_and_skips_runtime_pages(
             task_in_queue=None,
             task_out_queue=None,
             resource_managers=[resource, resource],
-            up_status_in_queue=None,
         )
 
     # 构造时两个 DP 的预热均上传单个零索引。

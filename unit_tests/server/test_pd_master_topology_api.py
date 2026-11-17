@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from lightllm.server import api_http
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
-from lightllm.server.pd_io_struct import PDUpKVStatus
+from lightllm.server.pd_io_struct import ObjType, PDUpKVStatus
 
 
 def _install(monkeypatch, *, ready=False, healthy=False):
@@ -88,9 +88,14 @@ def test_fixed_topology_health_failure_has_consistent_payload(monkeypatch):
     manager.pd_manager.check_pd_nodes_health.assert_awaited_once()
 
 
-def test_kv_status_keeps_existing_wire_protocol(monkeypatch):
+def test_kv_status_is_accepted_on_the_register_connection(monkeypatch):
     _, manager = _install(monkeypatch)
+    manager.register_pd = AsyncMock()
+    manager.put_to_handle_queue = AsyncMock()
+    status = PDUpKVStatus(8, 100, b"metadata")
     with TestClient(api_http.app) as client:
-        with client.websocket_connect("/kv_move_status") as websocket:
-            websocket.send_bytes(pickle.dumps(PDUpKVStatus(8, 100, b"metadata")))
-            client.portal.call(_wait_until, lambda: manager.update_req_status.await_count == 1)
+        with client.websocket_connect("/pd_register") as websocket:
+            websocket.send_text(json.dumps({"node_id": 1, "mode": "decode"}))
+            websocket.send_bytes(pickle.dumps((ObjType.PD_UPLOAD_KV_STATUS, status)))
+            client.portal.call(_wait_until, lambda: manager.put_to_handle_queue.await_count == 1)
+    manager.put_to_handle_queue.assert_awaited_once_with((ObjType.PD_UPLOAD_KV_STATUS, status))

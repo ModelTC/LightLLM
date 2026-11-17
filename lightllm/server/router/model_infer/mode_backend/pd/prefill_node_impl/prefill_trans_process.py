@@ -6,7 +6,7 @@ import setproctitle
 import torch.multiprocessing as mp
 import queue
 import pickle
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.server.router.model_infer.shared_att_resources_utils import load_att_resources
@@ -28,7 +28,6 @@ def start_prefill_trans_process(
     device_id,
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
-    up_status_in_queue: Optional[mp.SimpleQueue] = None,
 ):
     proc = mp.Process(target=_init_env, args=(args, device_id, task_in_queue, task_out_queue))
     proc.start()

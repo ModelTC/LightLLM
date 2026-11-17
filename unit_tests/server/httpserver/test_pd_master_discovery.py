@@ -295,7 +295,7 @@ def test_discovery_cancellation_closes_http_client_without_retry(monkeypatch):
 
 def test_registry_changes_connect_all_owners_and_retire_removed_ids(monkeypatch):
     async def run():
-        manager = SimpleNamespace(args=SimpleNamespace(host="prefill"))
+        manager = SimpleNamespace(args=SimpleNamespace(host="prefill"), pd_mode=pd_loop.NodeRole.P)
         responses = asyncio.Queue()
         discoveries = asyncio.Queue()
         started = asyncio.Queue()

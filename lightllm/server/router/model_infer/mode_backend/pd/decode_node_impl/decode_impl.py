@@ -160,8 +160,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
             assert req_obj.cur_kv_len == input_len - 1
 
         if not group.task_list:
-            # 需要上报一个包含 0 长度的trans task，触发 kv move manager 给 pd master 上报
-            # upkv_status 状态，使推理流程完整。
+            # 没有实际传输页时仍要放一个空任务，让传输进程上报握手信息。
             self._create_pd_trans_task(
                 req_obj=req_obj,
                 mem_indexes=[],
