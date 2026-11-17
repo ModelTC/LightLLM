@@ -155,9 +155,11 @@ def _rope_reference(x, freqs, positions):
     return rotated
 
 
-def _indexer_fp8_reference(x):
+def _indexer_fp8_reference(x, round_scale_to_power_of_two=False):
     values = x.float()
     scale = values.abs().amax(-1, keepdim=True).clamp_min(1e-4) / 448
+    if round_scale_to_power_of_two:
+        scale = scale.log2().ceil().exp2()
     return (values / scale).to(torch.float8_e4m3fn).float() * scale
 
 
@@ -173,17 +175,20 @@ def _assert_native_fp8_gemm_accuracy(actual, expected):
 @pytest.mark.parametrize("tokens", [1, 17])
 @pytest.mark.parametrize("heads", [1, 32])
 @pytest.mark.parametrize("position_dtype", [torch.int32, torch.int64])
-def test_indexer_fp8_rope_matches_reference(tokens, heads, position_dtype):
+@pytest.mark.parametrize("round_scale_to_power_of_two", [False, True])
+def test_indexer_fp8_rope_matches_reference(tokens, heads, position_dtype, round_scale_to_power_of_two):
     x = torch.randn((tokens, heads, 128), device="cuda", dtype=torch.bfloat16)
     x[0].zero_()
     angles = torch.randn((32, 32), device="cuda")
     freqs = torch.polar(torch.ones_like(angles), angles)
     positions = torch.randint(0, 32, (tokens,), dtype=position_dtype, device="cuda")
     weights = torch.ones(tokens, heads, device="cuda")
-    q, scale = fused_q_indexer_rope_quant(x, weights, 1.0, freqs, positions, apply_hadamard=False)
+    q, scale = fused_q_indexer_rope_quant(
+        x, weights, 1.0, freqs, positions, apply_hadamard=False, round_scale_to_power_of_two=round_scale_to_power_of_two
+    )
     assert q.dtype == torch.float8_e4m3fn
     assert q.shape == x.shape
-    expected = _indexer_fp8_reference(_rope_reference(x, freqs, positions))
+    expected = _indexer_fp8_reference(_rope_reference(x, freqs, positions), round_scale_to_power_of_two)
     torch.testing.assert_close(q.float() * scale, expected, atol=0, rtol=1e-6)
 
 
@@ -610,7 +615,8 @@ def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monke
 
 
 @pytest.mark.parametrize("ratio", [1, 2])
-def test_dense_prefill_gather_and_request_relative_logits(ratio):
+@pytest.mark.parametrize("round_scale_to_power_of_two", [False, True])
+def test_dense_prefill_gather_and_request_relative_logits(ratio, round_scale_to_power_of_two):
     import deep_gemm
     from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_indexer_k_buffer, gather_indexer_k
 
@@ -640,13 +646,14 @@ def test_dense_prefill_gather_and_request_relative_logits(ratio):
         256 // ratio,
         ratio,
         freqs_cis=torch.ones(7 * ratio, 32, dtype=torch.complex64, device="cuda"),
+        round_scale_to_power_of_two=round_scale_to_power_of_two,
     )
     lengths = torch.tensor([5, 7], dtype=torch.int32, device="cuda")
     starts = torch.tensor([0, 5], dtype=torch.int32, device="cuda")
     keys = gather_indexer_k(
         manager, 0, torch.arange(2, dtype=torch.int32, device="cuda"), lengths, starts, table, 12, 64
     )
-    expected_keys = _indexer_fp8_reference(raw[ratio - 1 :: ratio])
+    expected_keys = _indexer_fp8_reference(raw[ratio - 1 :: ratio], round_scale_to_power_of_two)
     torch.testing.assert_close(keys[0].float() * keys[1][:, None], expected_keys, atol=0, rtol=0)
     query = torch.randn(4, 32, 128, device="cuda").to(torch.float8_e4m3fn)
     weights = torch.randn(4, 32, device="cuda")

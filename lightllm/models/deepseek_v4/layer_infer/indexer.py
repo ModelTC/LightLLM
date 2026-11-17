@@ -64,6 +64,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                 infer_state.req_manager.cache_config.compressed_kv_token_alignment // self.compress_ratio,
                 compress_ratio=self.compress_ratio,
                 freqs_cis=self.freqs_cis,
+                round_scale_to_power_of_two=True,
             )
             return
         if self.compress_ratio != 4:
@@ -176,6 +177,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             q_fp8=idx_q_fp8_out,
             weights_out=weights_out,
             apply_hadamard=not self.is_v41,
+            round_scale_to_power_of_two=self.is_v41,
         )  # fp8 [T,H,d]; weights [T,H,1] with q-scale + weight_scale folded
         return idx_q_fp8, weights.squeeze(-1)
 

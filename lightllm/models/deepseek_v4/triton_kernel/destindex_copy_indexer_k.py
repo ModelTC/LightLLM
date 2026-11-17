@@ -16,6 +16,7 @@ def _destindex_copy_indexer_k_kernel(
     indexer_k_stride1,
     freqs_cis,
     APPLY_ROPE: tl.constexpr,
+    ROUND_SCALE_TO_POWER_OF_TWO: tl.constexpr,
     FP8_MIN: tl.constexpr,
     FP8_MAX: tl.constexpr,
     AMAX_MIN: tl.constexpr,
@@ -52,6 +53,8 @@ def _destindex_copy_indexer_k_kernel(
     amax = tl.maximum(tl.max(tl.abs(vals), axis=0), AMAX_MIN)
     # Each indexer key carries one FP32 quantization scale in the page tail.
     scale = amax / FP8_MAX
+    if ROUND_SCALE_TO_POWER_OF_TWO:
+        scale = tl.exp2(tl.ceil(tl.log2(scale)))
     k_fp8 = tl.clamp(vals / scale, min=FP8_MIN, max=FP8_MAX).to(tl.float8e4nv)
 
     slab = token_in_page // SLAB_SIZE
@@ -73,6 +76,7 @@ def destindex_copy_indexer_k(
     page_size: int,
     compress_ratio: int = 4,
     freqs_cis: torch.Tensor = None,
+    round_scale_to_power_of_two: bool = False,
 ):
     """Write closed compression groups to packed FP8 indexer K pages.
 
@@ -97,6 +101,7 @@ def destindex_copy_indexer_k(
         indexer_k.stride(1),
         None if freqs_cis is None else torch.view_as_real(freqs_cis).flatten(-2),
         APPLY_ROPE=freqs_cis is not None,
+        ROUND_SCALE_TO_POWER_OF_TWO=round_scale_to_power_of_two,
         FP8_MIN=torch.finfo(torch.float8_e4m3fn).min,
         FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
         AMAX_MIN=1e-4,

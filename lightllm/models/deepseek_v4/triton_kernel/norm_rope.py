@@ -181,6 +181,7 @@ def _indexer_rope_hadamard_quant_kernel(
     NUM_HEADS: tl.constexpr,
     WEIGHT_SCALE: tl.constexpr,
     APPLY_HADAMARD: tl.constexpr,
+    ROUND_SCALE_TO_POWER_OF_TWO: tl.constexpr,
     BLOCK_R: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
@@ -206,6 +207,8 @@ def _indexer_rope_hadamard_quant_kernel(
     else:
         x = x.to(tl.bfloat16).to(tl.float32)
     scale = tl.maximum(tl.max(tl.abs(x), axis=1), 1e-4) / 448
+    if ROUND_SCALE_TO_POWER_OF_TWO:
+        scale = tl.exp2(tl.ceil(tl.log2(scale)))
     tl.store(
         q_fp8 + row[:, None] * 128 + dim[None, :], tl.clamp(x / scale[:, None], -448, 448), mask=row[:, None] < num_rows
     )
@@ -308,6 +311,7 @@ def fused_q_indexer_rope_quant(
     q_fp8=None,
     weights_out=None,
     apply_hadamard=True,
+    round_scale_to_power_of_two=False,
 ):
     """RoPE/Hadamard-128 and FP8 quantization for contiguous BF16 indexer Q.
 
@@ -332,6 +336,7 @@ def fused_q_indexer_rope_quant(
             NUM_HEADS=q_input.shape[1],
             WEIGHT_SCALE=float(weight_scale),
             APPLY_HADAMARD=apply_hadamard,
+            ROUND_SCALE_TO_POWER_OF_TWO=round_scale_to_power_of_two,
             BLOCK_R=block_r,
             num_warps=1,
             num_stages=1,
