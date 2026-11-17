@@ -15,7 +15,6 @@ from lightllm.server.core.objs import ShmReqManager, StartArgs
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
-from .model_infer import start_model_process, VisualModelRpcClient
 from lightllm.common.basemodel.attention_vit.create_utils import init_vit_att_backend
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
@@ -62,6 +61,14 @@ class VisualManager:
         self.lock = asyncio.Lock()
 
     async def wait_to_model_ready(self):
+
+        if self.args.visual_infer_in_llm:
+            # Keep this process CPU-only. The LLM worker fills the shared embedding
+            # cache synchronously before prefill, using the same CUDA context/pool.
+            self.model_rpcs = []
+            return
+
+        from .model_infer import start_model_process, VisualModelRpcClient
 
         self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
         self.vit_attn_backend = init_vit_att_backend(index=0)
@@ -137,6 +144,8 @@ class VisualManager:
             return
 
     async def handle_images(self, images_need_infer: List[ImageItem]):
+        if self.args.visual_infer_in_llm:
+            return
         if not hasattr(self, "cur_dp_index"):
             self.cur_dp_index = 0
 

@@ -33,6 +33,7 @@ from lightllm.utils.config_utils import (
     auto_set_response_parsers,
     get_running_max_req_size_per_dp,
     get_default_disable_chunked_mm_input,
+    get_model_type,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -256,6 +257,10 @@ def _launch_subprocesses(args: StartArgs):
             f"visual_infer_batch_size ({args.visual_infer_batch_size}) must be "
             f"a positive integer multiple of visual_dp ({args.visual_dp})"
         )
+
+    from lightllm.models.sensenova_loop.config import validate_inline_vision
+
+    validate_inline_vision(args, get_model_type(args.model_dir))
 
     if not args.disable_audio:
         if args.audio_tp != 1:

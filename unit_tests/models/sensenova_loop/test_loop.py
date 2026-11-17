@@ -265,6 +265,7 @@ def test_loop_binds_split_gdn_projection_only_for_weights_with_separate_gates(mo
         linear_gate_proj=SimpleNamespace(mm=lambda _: gates),
     )
     model = object.__new__(SenseNovaLoopTpPartModel)
+    model.args = StartArgs()
     model.trans_layers_weight = [fused_weight, split_weight, split_weight]
     layers = [object.__new__(SenseNovaLoopTransformerLayerInfer) for _ in model.trans_layers_weight]
     for layer in layers:
