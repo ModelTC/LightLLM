@@ -44,6 +44,8 @@ class FuseMoeBaseImpl(ABC):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        # Decode-only callback run while the routed-expert combine is in flight.
+        shared_expert_func: Optional[Callable[[], torch.Tensor]] = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids, origin_topk_ids = self._select_experts(
             input_tensor=input_tensor,
@@ -62,6 +64,8 @@ class FuseMoeBaseImpl(ABC):
         )
         if moe_capture_callback is not None:
             moe_capture_callback(origin_topk_ids)
+        # Only backends that implement the overlap accept this argument.
+        kwargs = {} if shared_expert_func is None else {"shared_expert_func": shared_expert_func}
         return self._fused_experts(
             input_tensor=input_tensor,
             w13=w13,
@@ -73,6 +77,7 @@ class FuseMoeBaseImpl(ABC):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            **kwargs,
         )
 
     @abstractmethod

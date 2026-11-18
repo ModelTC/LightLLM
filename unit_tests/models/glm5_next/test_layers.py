@@ -263,11 +263,19 @@ def test_ep_ffn_uses_combined_output_and_replicated_shared_expert(config, monkey
     monkeypatch.setattr(weight.moe_gate, "mm", lambda x: torch.zeros(3, 4, device="cuda"))
     monkeypatch.setattr(layer, "_tpsp_reduce", lambda **kwargs: pytest.fail("EP output must not be TP-reduced again"))
 
+    overlap = not is_prefill and weight.experts.fuse_moe_impl.supports_decode_shared_expert_overlap
+
     def combined_output(hidden_states, **kwargs):
         assert kwargs["is_prefill"] is is_prefill
         assert kwargs["alpha"] == 1.0 and kwargs["limit"] == 10.0
         assert kwargs["clamp_up_add_one"] is False
-        return torch.full_like(hidden_states, 17)
+        shared_expert_func = kwargs["shared_expert_func"]
+        routed = torch.full_like(hidden_states, 17)
+        if not overlap:
+            assert shared_expert_func is None
+            return routed
+        # The overlapping backend adds the shared expert after the combine send.
+        return routed + shared_expert_func()
 
     monkeypatch.setattr(weight.experts, "experts", combined_output)
     actual = layer._ffn(x, SimpleNamespace(is_prefill=is_prefill), weight)

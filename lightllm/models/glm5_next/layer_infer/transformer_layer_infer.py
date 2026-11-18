@@ -98,8 +98,19 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
 
-        # if fused_shared_experts is not enabled, compute shared_output
-        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
+        has_shared_expert = self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0
+        # EP decode keeps hidden_states intact through low-latency dispatch, so
+        # the shared expert can run while the routed combine is in flight.
+        overlap_shared_expert = (
+            has_shared_expert
+            and self.enable_ep_moe
+            and infer_state.is_prefill is False
+            and getattr(layer_weight.experts.fuse_moe_impl, "supports_decode_shared_expert_overlap", False)
+        )
+        shared_expert_func = None
+        if overlap_shared_expert:
+            shared_expert_func = lambda: self._ffn_tp(hidden_states, infer_state, layer_weight)
+        elif has_shared_expert:
             shared_output = self._ffn_tp(hidden_states, infer_state, layer_weight)
 
         moe_gate_dtype = layer_weight.moe_gate.data_type_
@@ -117,9 +128,10 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             alpha=1.0,
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
+            shared_expert_func=shared_expert_func,
         )
 
-        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
+        if has_shared_expert and not overlap_shared_expert:
             output.add_(shared_output)
 
         return output.view(num_tokens, hidden_dim)

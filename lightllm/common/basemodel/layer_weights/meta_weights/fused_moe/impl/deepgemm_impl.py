@@ -170,6 +170,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         expected_m: int,
         clamp_limit: Optional[float] = None,
         alloc_tensor_func=torch.empty,
+        alpha: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ):
         w13, w2 = self._primary_weight_pack(w13), self._primary_weight_pack(w2)
         w13_weight, w13_scale = w13.weight, w13.weight_scale
@@ -185,6 +187,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             expected_m=expected_m,
             clamp_limit=clamp_limit,
             alloc_tensor_func=alloc_tensor_func,
+            alpha=alpha,
+            clamp_up_add_one=clamp_up_add_one,
         )
 
     def prefilled_group_gemm(
@@ -374,6 +378,9 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 expected_m,
                 clamp_limit=limit,
                 alloc_tensor_func=alloc_tensor_func,
+                # Keep the activation identical to the non-overlapped decode path.
+                alpha=alpha,
+                clamp_up_add_one=clamp_up_add_one,
             )
             routed, combine_hook = self.low_latency_combine(gemm_out, topk_ids, topk_weights, handle)
             # This backend preserves input_tensor; shared compute can run while
