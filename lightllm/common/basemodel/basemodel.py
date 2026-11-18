@@ -214,6 +214,13 @@ class TpPartBaseModel:
             logger.info("Skip padded Prefill request on pure low-latency Decode worker")
         else:
             self._init_padded_req()
+        if self.args.run_mode == "decode" and dist_group_manager.decode_low_latency_only:
+            # The first low-latency dispatch must start from a clean DeepEP
+            # staging area.  Prefill workers normally reach this cleanup after
+            # their padded request, while a pure Decode worker skips that
+            # request because it has no ElasticBuffer.
+            dist_group_manager.clear_deepep_buffer()
+            logger.info("Cleaned low-latency DeepEP buffer before Decode graph warmup")
         self._init_cudagraph()
         self._init_prefill_cuda_graph()
         if not self.is_mtp_draft_model:
