@@ -196,7 +196,15 @@ class TpPartBaseModel:
                 f"{type(self.decode_att_backend1).__name__}"
             )
 
-        self._autotune_warmup()
+        # A pure Decode worker uses DeepEP's legacy low-latency Buffer only.
+        # The generic warmup below feeds long prefill sequences into the MoE
+        # path, which is not a supported input shape for that buffer and is
+        # already covered by the Prefill worker. Decode graph/attention setup
+        # continues immediately after the padded one-token request.
+        if self.args.run_mode == "decode" and dist_group_manager.decode_low_latency_only:
+            logger.info("Skip generic prefill autotune on pure low-latency Decode worker")
+        else:
+            self._autotune_warmup()
         self._init_padded_req()
         self._init_cudagraph()
         self._init_prefill_cuda_graph()
