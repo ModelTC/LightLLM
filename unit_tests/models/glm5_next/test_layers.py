@@ -113,7 +113,8 @@ def test_kda_projections_need_no_sparse_attention_config(config):
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-def test_mla_loading_preserves_replicated_qkv_and_sharded_bmm(config, monkeypatch, rank):
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_mla_loading_preserves_replicated_qkv_and_sharded_bmm(config, monkeypatch, rank, is_prefill):
     monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", "2")
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", str(rank))
     layer = Glm5NextTransformerLayerInfer(3, config)
@@ -133,7 +134,7 @@ def test_mla_loading_preserves_replicated_qkv_and_sharded_bmm(config, monkeypatc
         {f"model.language_model.layers.3.self_attn.{name}": value for name, value in tensors.items()}
     )
     hidden = random_weight(3, 128)
-    state = SimpleNamespace(need_dp_prefill_balance=False)
+    state = SimpleNamespace(is_prefill=is_prefill, need_dp_prefill_balance=False)
     q, kv = layer._get_qkv(hidden, state, weight)
     q_lora = rmsnorm(F.linear(hidden, q_a), config["rms_norm_eps"])
     expected_q = F.linear(q_lora, q_b).view(3, 4, 128)[:, rank * 2 : (rank + 1) * 2]
