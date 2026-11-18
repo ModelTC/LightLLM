@@ -479,8 +479,12 @@ class DistributeGroupManager:
                 # its SM reservation based on decode's logical expert count.
                 deep_ep.Buffer.set_num_sms(low_latency_sms - low_latency_sms % 2)
             deep_gemm_sms = max(device_sms - deepep_sms, 2)
-            run_mode = get_env_start_args().run_mode
-            if (self.ep_low_latency_buffer is not None or self.ep_decode_use_v2) and run_mode == "decode":
+            args = get_env_start_args()
+            run_mode = args.run_mode
+            if run_mode == "prefill" and not args.enable_prefill_microbatch_overlap:
+                # Dispatch completes before routed GEMMs in this prefill path.
+                deep_gemm_sms = device_sms
+            elif (self.ep_low_latency_buffer is not None or self.ep_decode_use_v2) and run_mode == "decode":
                 # Decode executes routed GEMMs after dispatch instead of
                 # keeping Prefill's persistent communication/compute partition.
                 deep_gemm_sms = device_sms
