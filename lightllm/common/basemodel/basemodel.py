@@ -205,7 +205,15 @@ class TpPartBaseModel:
             logger.info("Skip generic prefill autotune on pure low-latency Decode worker")
         else:
             self._autotune_warmup()
-        self._init_padded_req()
+        if self.args.run_mode == "decode" and dist_group_manager.decode_low_latency_only:
+            # The padded request is a one-token Prefill.  A pure Decode worker
+            # deliberately has no ElasticBuffer, and DeepEP's legacy
+            # low-latency Buffer does not implement the Prefill dispatch API.
+            # Decode graph warmup below creates its own HOLD requests, so this
+            # generic Prefill priming step is unnecessary here.
+            logger.info("Skip padded Prefill request on pure low-latency Decode worker")
+        else:
+            self._init_padded_req()
         self._init_cudagraph()
         self._init_prefill_cuda_graph()
         if not self.is_mtp_draft_model:
