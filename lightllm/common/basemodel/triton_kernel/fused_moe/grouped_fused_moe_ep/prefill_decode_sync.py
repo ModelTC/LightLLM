@@ -222,7 +222,8 @@ def fused_experts_impl(
         # This is the low-latency Decode path used by the pure Decode worker.
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         expected_m = triton.cdiv(hidden_states.shape[0] * buffer.group_size * topk_idx.shape[1], num_experts)
-        recv_x, masked_m, handle, _, _ = buffer.low_latency_dispatch(
+        overlap = shared_expert_func is not None
+        recv_x, masked_m, handle, _, dispatch_hook = buffer.low_latency_dispatch(
             hidden_states,
             topk_idx,
             num_max_dispatch_tokens_per_rank,
@@ -230,8 +231,14 @@ def fused_experts_impl(
             use_fp8=use_fp8_w8a8,
             round_scale=get_env_use_ue8m0_scales(),
             async_finish=False,
-            return_recv_hook=False,
+            # The shared-expert path needs the explicit receive hook before
+            # launching GEMM. This is the ordering used by the optimized
+            # branch and keeps CUDA-graph capture from racing the dispatch
+            # buffer when combine overlaps the shared expert.
+            return_recv_hook=overlap,
         )
+        if overlap:
+            dispatch_hook()
         gemm_out_b = masked_group_gemm(
             recv_x,
             masked_m,
@@ -245,7 +252,6 @@ def fused_experts_impl(
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
         )
-        overlap = shared_expert_func is not None
         combined_x, _, hook = buffer.low_latency_combine(
             gemm_out_b,
             topk_idx,
