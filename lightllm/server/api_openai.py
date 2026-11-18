@@ -590,11 +590,34 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     _final_choice_nulls = ("logprobs", "token_ids", "stop_reason")
     _first_resp_nulls = ("prompt_token_ids",)
 
+    def delta_event(choice_index: int, delta: dict, logprobs=None) -> str:
+        # First, final, and usage events have different wire fields. Every
+        # ordinary delta has the same envelope and explicit null fields.
+        choice = {
+            "index": choice_index,
+            "delta": delta,
+            "logprobs": logprobs,
+            "token_ids": None,
+            "finish_reason": None,
+        }
+        chunk = {
+            "id": chat_completion_id,
+            "object": "chat.completion.chunk",
+            "created": created_time,
+            "model": request.model,
+            "choices": [choice],
+        }
+        return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
         has_emitted_tool_calls: Dict[int, bool] = collections.defaultdict(bool)
         has_emitted_first_chunk: Dict[int, bool] = collections.defaultdict(bool)
         stream_tool_call_ids: Dict[Tuple[int, int], str] = {}
+        tool_parser = None
+        if request.tools and request.tool_choice != "none":
+            tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
+        history_tool_calls_cnt = _get_history_tool_calls_cnt(request) if tool_parser == "kimi_k2" else 0
         from .httpserver.req_id_generator_server import convert_sub_id_to_group_id
 
         prompt_tokens = 0
@@ -642,22 +665,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 if reasoning_text:
                     if request.separate_reasoning:
                         choice_logprobs = logprob_buffer.reasoning_logprobs() if logprob_buffer is not None else None
-                        choice_data = ChatCompletionStreamResponseChoice(
-                            index=choice_index,
-                            delta=DeltaMessage(reasoning=reasoning_text),
-                            finish_reason=None,
-                        )
-                        chunk = ChatCompletionStreamResponse(
-                            id=chat_completion_id,
-                            created=created_time,
-                            choices=[choice_data],
-                            model=request.model,
-                        )
-                        yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls, logprobs=choice_logprobs)}\n\n"
+                        yield delta_event(choice_index, {"reasoning": reasoning_text}, choice_logprobs)
                     else:
                         delta = reasoning_text + (delta or "")
 
-            if request.tool_choice != "none" and request.tools:
+            if tool_parser is not None:
                 # parse_increment => returns (normal_text, calls)
                 normal_text, calls = _process_tools_stream(
                     index=choice_index, delta=delta, parser_dict=parser_dict, request=request
@@ -665,22 +677,10 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
                 # 1) if there's normal_text, output it as normal content
                 if normal_text and (normal_text.strip() or not has_emitted_tool_calls[sub_req_id]):
-                    choice_data = ChatCompletionStreamResponseChoice(
-                        index=choice_index,
-                        delta=DeltaMessage(content=normal_text),
-                        finish_reason=None,
-                    )
-                    chunk = ChatCompletionStreamResponse(
-                        id=chat_completion_id,
-                        created=created_time,
-                        choices=[choice_data],
-                        model=request.model,
-                    )
                     choice_logprobs = logprob_buffer.content_logprobs() if logprob_buffer is not None else None
-                    yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls, logprobs=choice_logprobs)}\n\n"
+                    yield delta_event(choice_index, {"content": normal_text}, choice_logprobs)
 
                 # 2) if we found calls, we output them as separate chunk(s)
-                history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
                 fc_parser = parser_dict[choice_index]
                 for call_item in calls:
                     has_emitted_tool_calls[sub_req_id] = True
@@ -703,7 +703,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             remaining_call = expected_call.replace(actual_call, "", 1)
                             call_item.parameters = remaining_call
 
-                    tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
                     stream_index = getattr(call_item, "tool_index", None)
                     id_key = (choice_index, stream_index)
                     if call_item.name:
@@ -729,36 +728,16 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 arguments="",
                             ),
                         )
-                        head_choice = ChatCompletionStreamResponseChoice(
-                            index=choice_index,
-                            delta=DeltaMessage(tool_calls=[head_tool_call]),
-                            finish_reason=None,
-                        )
-                        head_chunk = ChatCompletionStreamResponse(
-                            id=chat_completion_id,
-                            created=created_time,
-                            choices=[head_choice],
-                            model=request.model,
-                        )
-                        yield f"data: {_serialize_sse_chunk(head_chunk, _choice_nulls)}\n\n"
+                        yield delta_event(choice_index, {"tool_calls": [head_tool_call.model_dump(exclude_none=True)]})
 
                         for arg_delta in _split_tool_argument_delta(call_item.parameters):
                             arg_tool_call = ToolCall(
                                 index=stream_index,
                                 function=FunctionResponse(arguments=arg_delta),
                             )
-                            arg_choice = ChatCompletionStreamResponseChoice(
-                                index=choice_index,
-                                delta=DeltaMessage(tool_calls=[arg_tool_call]),
-                                finish_reason=None,
+                            yield delta_event(
+                                choice_index, {"tool_calls": [arg_tool_call.model_dump(exclude_none=True)]}
                             )
-                            arg_chunk = ChatCompletionStreamResponse(
-                                id=chat_completion_id,
-                                created=created_time,
-                                choices=[arg_choice],
-                                model=request.model,
-                            )
-                            yield f"data: {_serialize_sse_chunk(arg_chunk, _choice_nulls)}\n\n"
                     else:
                         tool_call = ToolCall(
                             id=tool_call_id if is_tool_head else None,
@@ -773,18 +752,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 ),
                             ),
                         )
-                        choice_data = ChatCompletionStreamResponseChoice(
-                            index=choice_index,
-                            delta=DeltaMessage(tool_calls=[tool_call]),
-                            finish_reason=None,
-                        )
-                        chunk = ChatCompletionStreamResponse(
-                            id=chat_completion_id,
-                            created=created_time,
-                            choices=[choice_data],
-                            model=request.model,
-                        )
-                        yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls)}\n\n"
+                        yield delta_event(choice_index, {"tool_calls": [tool_call.model_dump(exclude_none=True)]})
             else:
                 if delta:
                     content_logprobs = logprob_buffer.content_logprobs() if logprob_buffer is not None else None
@@ -807,18 +775,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         # Skip the separate final-chunk logic below
                         continue
                     else:
-                        delta_message = DeltaMessage(content=delta)
-                        stream_choice = ChatCompletionStreamResponseChoice(
-                            index=choice_index, delta=delta_message, finish_reason=None
-                        )
-                        stream_resp = ChatCompletionStreamResponse(
-                            id=chat_completion_id,
-                            created=created_time,
-                            model=request.model,
-                            choices=[stream_choice],
-                        )
-                        payload = _serialize_sse_chunk(stream_resp, _choice_nulls, logprobs=content_logprobs)
-                        yield f"data: {payload}\n\n"
+                        yield delta_event(choice_index, {"content": delta}, content_logprobs)
 
             # Emit a per-choice final chunk with finish_reason (for tool_calls path
             # or when no delta was emitted alongside finish_reason).
@@ -1063,6 +1020,8 @@ async def _handle_streaming_completion(
 ) -> Response:
     from .api_http import g_objs
 
+    if isinstance(raw_request, Request) and request.logprobs is None:
+        raw_request.state.batch_text_completions = True
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
     )
@@ -1074,37 +1033,76 @@ async def _handle_streaming_completion(
         completion_tokens = 0
         cached_tokens = 0
 
-        async for sub_req_id, request_output, metadata, finish_status in results_generator:
-            finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
-            group_request_id = convert_sub_id_to_group_id(sub_req_id)
-            choice_index = sub_req_id - group_request_id
-            prompt_tokens = metadata["prompt_tokens"]
-            cached_tokens = metadata.get("prompt_cache_len", 0)
-            completion_tokens += 1
-            current_finish_reason = None
-            if finish_status.is_finished():
-                current_finish_reason = finish_status.get_finish_reason()
+        emitted_choices = set()
+        pending_choices = {}
+        pending_tokens = pending_chars = 0
+        logprobs = None if request.logprobs is None else {}
 
-            output_text = request_output
-            if request.echo and metadata.get("is_first_token", False):
-                prompt_str = prompt
-                if isinstance(prompt, list):
-                    prompt_str = g_objs.httpserver_manager.tokenizer.decode(prompt, skip_special_tokens=False)
-                output_text = prompt_str + output_text
+        def flush():
+            nonlocal pending_tokens, pending_chars
+            chunk = {
+                "id": str(group_request_id),
+                "object": "text_completion",
+                "created": created_time,
+                "model": request.model,
+                "choices": list(pending_choices.values()),
+                "usage": None,
+            }
+            pending_choices.clear()
+            pending_tokens = pending_chars = 0
+            return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
-            stream_choice = CompletionStreamChoice(
-                index=choice_index,
-                text=output_text,
-                finish_reason=current_finish_reason,
-                logprobs=None if request.logprobs is None else {},
-            )
-            stream_resp = CompletionStreamResponse(
-                id=group_request_id,
-                created=created_time,
-                model=request.model,
-                choices=[stream_choice],
-            )
-            yield f"data: {json.dumps(stream_resp.model_dump(), ensure_ascii=False)}\n\n"
+        try:
+            async for sub_req_id, output_text, metadata, finish_status in results_generator:
+                finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
+                group_request_id = convert_sub_id_to_group_id(sub_req_id)
+                choice_index = sub_req_id - group_request_id
+                prompt_tokens = metadata["prompt_tokens"]
+                cached_tokens = metadata.get("prompt_cache_len", 0)
+                completion_tokens += 1
+                if request.echo and metadata.get("is_first_token", False):
+                    prompt_str = prompt
+                    if isinstance(prompt, list):
+                        prompt_str = g_objs.httpserver_manager.tokenizer.decode(prompt, skip_special_tokens=False)
+                    output_text = prompt_str + output_text
+
+                choice = pending_choices.get(choice_index)
+                if finish_status.is_finished():
+                    pending_choices[choice_index] = CompletionStreamChoice(
+                        index=choice_index,
+                        text=(choice["text"] if choice else "") + output_text,
+                        finish_reason=finish_status.get_finish_reason(),
+                        logprobs=logprobs,
+                    ).model_dump()
+                elif choice is None:
+                    pending_choices[choice_index] = {
+                        "text": output_text, "index": choice_index, "logprobs": logprobs, "finish_reason": None
+                    }
+                else:
+                    choice["text"] += output_text
+                pending_tokens += 1
+                pending_chars += len(output_text)
+                first = choice_index not in emitted_choices
+                emitted_choices.add(choice_index)
+                if (
+                    first
+                    or metadata.get("_pd_stream_batch_end", True)
+                    or finish_status.is_finished()
+                    or logprobs is not None
+                    or pending_tokens >= 32
+                    or pending_chars >= 64 * 1024
+                ):
+                    yield flush()
+        except ClientDisconnected:
+            raise
+        except Exception:
+            if pending_choices:
+                yield flush()
+            raise
+        if pending_choices:
+            yield flush()
+        if not completion_tokens:
+            raise GenerationError("Generation finished without producing output")
 
         usage = UsageInfo(
             prompt_tokens=prompt_tokens,

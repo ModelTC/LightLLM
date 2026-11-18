@@ -1,8 +1,9 @@
 import asyncio
 import copy
 import pickle
+import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import numpy as np
@@ -12,6 +13,7 @@ from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
 from lightllm.server.pd_io_struct import PD_Client_Obj
+from lightllm.utils.error_utils import ClientDisconnected
 
 pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
 
@@ -606,13 +608,42 @@ def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
+def test_buffered_pd_stream_polls_for_disconnect_while_draining(monkeypatch):
+    from lightllm.server.httpserver_for_pd_master import manager as pd_manager
+
+    manager = _make_manager(monkeypatch)
+    manager.first_time_costs = manager.per_token_costs = MagicMock()
+    manager.metric_client = MagicMock()
+    clock = SimpleNamespace(now=10.0)
+    monkeypatch.setattr(pd_manager, "time", SimpleNamespace(time=time.time, monotonic=lambda: clock.now))
+    request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=True))
+    params = SamplingParams()
+    params.init(SimpleNamespace(encode=lambda *a, **k: []), max_new_tokens=100, group_request_id=80)
+
+    async def buffered_tokens(*args):
+        for _ in range(100):
+            yield 80, "token", {"prompt_tokens": 1}, FinishStatus()
+
+    manager.fetch_pd_stream = buffered_tokens
+
+    async def run():
+        stream = manager._wait_to_token_package(None, None, time.time(), "prompt", params, None, request)
+        for _ in range(32):
+            await stream.__anext__()
+        request.is_disconnected.assert_not_awaited()
+        clock.now += 1.0
+        with pytest.raises(ClientDisconnected):
+            await stream.__anext__()
+        request.is_disconnected.assert_awaited_once()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "exit_mode, token_count", [("finish", 2), ("close", 1), ("error", 1), ("empty", 0), ("empty_prompt", 2)]
 )
 def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, token_count):
     import math
-    import time
-    from unittest.mock import MagicMock
 
     manager = _make_manager(monkeypatch)
     manager.first_time_costs = MagicMock()

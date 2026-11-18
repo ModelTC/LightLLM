@@ -231,7 +231,8 @@ class HttpServerManagerForPDMaster:
             )
 
         request_finished_successfully = True
-        async with aclosing(self._merge_choice_generators(generators)) as generator:
+        mark_batch_ends = getattr(getattr(request, "state", None), "batch_text_completions", False) is True
+        async with aclosing(self._merge_choice_generators(generators, mark_batch_ends=mark_batch_ends)) as generator:
             async for result in generator:
                 finish_status = result[3]
                 if finish_status.is_error_finished():
@@ -500,16 +501,19 @@ class HttpServerManagerForPDMaster:
             await self.remove_req(block_group_request_id)
         return
 
-    async def _merge_choice_generators(self, generators):
+    async def _merge_choice_generators(self, generators, *, mark_batch_ends=False):
         """Merge independent n=1 PD generators into one multi-choice stream."""
         result_queue = asyncio.Queue()
         generator_done = object()
+        queued_tokens = 0
 
         async def forward_results(generator):
+            nonlocal queued_tokens
             try:
                 async with aclosing(generator):
                     async for result in generator:
-                        await result_queue.put(result)
+                        result_queue.put_nowait(result)
+                        queued_tokens += 1
 
                 await result_queue.put(generator_done)
             except BaseException as error:
@@ -526,6 +530,11 @@ class HttpServerManagerForPDMaster:
                 elif isinstance(result, BaseException):
                     raise result
                 else:
+                    queued_tokens -= 1
+                    if mark_batch_ends:
+                        # Count only tokens. A sibling's end marker cannot
+                        # promise another immediately available output.
+                        result[2]["_pd_stream_batch_end"] = queued_tokens == 0
                     yield result
         finally:
             for task in tasks:
@@ -760,6 +769,7 @@ class HttpServerManagerForPDMaster:
         group_request_id = sampling_params.group_request_id
         unfinished_count = sampling_params.best_of
         is_first_token = True
+        last_disconnect_check = time.monotonic()
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
         sub_req_id_to_mtp_verify_step_num: Dict[int, int] = {}
 
@@ -767,11 +777,15 @@ class HttpServerManagerForPDMaster:
             async for sub_req_id, out_str, metadata, finish_status in self.fetch_pd_stream(
                 p_node, d_node, prompt, sampling_params, multimodal_params, request
             ):
-                if await request.is_disconnected():
-                    raise ClientDisconnected(
-                        group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
-                    )
-
+                # fetch_pd_stream checks disconnects while waiting. A slow HTTP
+                # client can also disconnect while draining a buffered batch.
+                now = time.monotonic()
+                if now - last_disconnect_check >= 1.0:
+                    last_disconnect_check = now
+                    if await request.is_disconnected():
+                        raise ClientDisconnected(
+                            group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
+                        )
                 prompt_tokens = metadata["prompt_tokens"]
                 out_token_counter += 1
                 prompt_cache_len = max(prompt_cache_len, metadata.get("prompt_cache_len", 0))

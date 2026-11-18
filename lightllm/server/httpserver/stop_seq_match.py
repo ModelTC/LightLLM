@@ -404,7 +404,11 @@ async def match_stop_token_ids_stream(
             buffer = buffers[req_id]
             await buffer.handle(req_id, text, metadata, finish_status)
             while buffer.ready_token_list:
-                yield buffer.ready_token_list.popleft()
+                result = buffer.ready_token_list.popleft()
+                if "_pd_stream_batch_end" in metadata:
+                    # A later input can be held back by stop matching.
+                    result[2]["_pd_stream_batch_end"] = not buffer.ready_token_list
+                yield result
 
 
 async def match_stop_str_stream(
@@ -436,7 +440,10 @@ async def match_stop_str_stream(
             await buffer.handle(req_id, text, metadata, raw_finish)
 
             while buffer.ready_token_list:
-                yield buffer.ready_token_list.popleft()
+                result = buffer.ready_token_list.popleft()
+                if "_pd_stream_batch_end" in metadata:
+                    result[2]["_pd_stream_batch_end"] = not buffer.ready_token_list
+                yield result
 
 
 def wrap_stop_match_stream(
