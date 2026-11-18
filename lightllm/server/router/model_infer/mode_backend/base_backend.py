@@ -218,11 +218,7 @@ class ModeBackend:
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
-            self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-            self.dp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-            self.dp_all_gather_tensor = torch.tensor(
-                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
-            )
+            self.dp_control_tensor = torch.zeros(2, dtype=torch.int32, device="cpu", requires_grad=False)
 
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
@@ -1026,33 +1022,25 @@ class ModeBackend:
         )
         return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu, output_topk_logprobs
 
-    def _dp_all_gather_prefill_and_decode_req_num(
+    def _dp_all_reduce_req_presence(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[bool, bool]:
         """
-        Gather the number of prefill requests across all DP ranks.
-        """
-        current_dp_prefill_num = len(prefill_reqs)
-        self.dp_gather_item_tensor.fill_(current_dp_prefill_num)
-        all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
-        dp_prefill_req_nums = self.dp_all_gather_tensor.cpu().numpy()
+        Return whether any DP rank has prefill or decode requests.
 
-        current_dp_decode_num = len(decode_reqs)
-        self.dp_gather_item_tensor.fill_(current_dp_decode_num)
-        all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
-        dp_decode_req_nums = self.dp_all_gather_tensor.cpu().numpy()
-
-        return dp_prefill_req_nums, dp_decode_req_nums
-
-    def _dp_all_reduce_decode_req_num(self, decode_reqs: List[InferReq]) -> int:
+        The scheduler only needs global presence for its run-way decision.
+        Keep this control-plane collective on CPU/Gloo so the completed CUDA
+        graph does not need to be synchronized back to the host each step.
         """
-        Reduce the number of decode requests across all DP ranks.
-        """
-        current_dp_decode_num = len(decode_reqs)
-        self.dp_reduce_tensor.fill_(current_dp_decode_num)
-        all_reduce(self.dp_reduce_tensor, op=dist.ReduceOp.MAX, group=None, async_op=False)
-        max_decode_num = self.dp_reduce_tensor.item()
-        return max_decode_num
+        self.dp_control_tensor[0] = bool(prefill_reqs)
+        self.dp_control_tensor[1] = bool(decode_reqs)
+        all_reduce(
+            self.dp_control_tensor,
+            op=dist.ReduceOp.MAX,
+            group=dist_group_manager.dp_control_group,
+            async_op=False,
+        )
+        return bool(self.dp_control_tensor[0]), bool(self.dp_control_tensor[1])
 
     def init_rank_infos(self):
         self.node_world_size = get_node_world_size()
