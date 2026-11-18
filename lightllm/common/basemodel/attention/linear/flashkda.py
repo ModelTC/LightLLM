@@ -94,19 +94,19 @@ def kda_prefill(
     state = gather_kda_state(ssm_states, state_indices)
     final_state = torch.empty_like(state)
     flash_kda_fwd(
-        q=q,
-        k=k,
-        v=v,
-        g=raw_g,
-        beta=raw_beta,
+        q=q.contiguous(),
+        k=k.contiguous(),
+        v=v.contiguous(),
+        g=raw_g.contiguous(),
+        beta=raw_beta.contiguous(),
         scale=q.shape[-1] ** -0.5,
         out=output,
-        A_log=A_log.reshape(-1).float(),
-        dt_bias=g_bias.reshape(q.shape[2], q.shape[3]).float(),
+        A_log=A_log.reshape(-1).float().contiguous(),
+        dt_bias=g_bias.reshape(q.shape[2], q.shape[3]).float().contiguous(),
         lower_bound=lower_bound,
         initial_state=state,
         final_state=final_state,
-        cu_seqlens=cu_seqlens,
+        cu_seqlens=cu_seqlens.contiguous(),
     )
     scatter_kda_state(final_state, ssm_states, state_indices, cu_seqlens)
     return output
