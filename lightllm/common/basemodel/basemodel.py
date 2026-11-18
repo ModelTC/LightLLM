@@ -1155,6 +1155,12 @@ class TpPartBaseModel:
         # 控制autotune的层数，用于适配不同模型
         return self.config.get("first_k_dense_replace", 0) + 1
 
+    def autotune_lengths(self):
+        warmup_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096]
+        if self.batch_max_tokens not in warmup_lengths:
+            warmup_lengths.append(self.batch_max_tokens)
+        return sorted((length for length in warmup_lengths if length <= self.batch_max_tokens), reverse=True)
+
     @final
     @torch.no_grad()
     @post_empty_cache
@@ -1162,18 +1168,9 @@ class TpPartBaseModel:
         Autotuner.start_autotune_warmup(AutotuneKernelType.GENERAL)
         torch.distributed.barrier()
 
-        warmup_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096]
-
-        if self.batch_max_tokens not in warmup_lengths:
-            warmup_lengths.append(self.batch_max_tokens)
-
-        warmup_lengths = [e for e in warmup_lengths if e <= self.batch_max_tokens]
-
-        warmup_lengths.sort(reverse=True)
-
         layer_num_bak = self.layers_num
         self.layers_num = self.autotune_layers()
-        for input_len in tqdm(warmup_lengths, desc="warming up"):
+        for input_len in tqdm(self.autotune_lengths(), desc="warming up"):
             try:
                 rand_gen = torch.Generator(device="cuda")
                 rand_gen.manual_seed(input_len)

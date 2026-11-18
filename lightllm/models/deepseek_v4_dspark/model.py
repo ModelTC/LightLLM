@@ -259,6 +259,50 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
     def _autotune_warmup(self):
         return
 
+    @torch.no_grad()
+    def _kernel_warmup(self):
+        if self.args.run_mode != "prefill":
+            return
+        torch.distributed.barrier()
+        lengths = self.main_model.autotune_lengths()
+        for input_len in lengths:
+            page_size = self.mem_manager.page_size
+            mem_indexes = self.mem_manager.alloc((input_len + page_size - 1) // page_size * page_size)
+            req_index = self.req_manager.alloc()
+            try:
+                self.req_manager.req_to_token_indexs[req_index, : len(mem_indexes)] = mem_indexes.cuda()
+                zeros = torch.zeros(1, dtype=torch.int32, device="cuda")
+                model_input = ModelInput(
+                    batch_size=1,
+                    total_token_num=input_len,
+                    max_q_seq_len=input_len,
+                    max_kv_seq_len=input_len,
+                    max_cache_len=0,
+                    input_ids=torch.ones(input_len, dtype=torch.int64, device="cuda"),
+                    b_req_idx=torch.tensor([req_index], dtype=torch.int32, device="cuda"),
+                    b_seq_len=torch.full_like(zeros, input_len),
+                    b_mtp_index=zeros,
+                    b_is_decode_req=torch.zeros(1, dtype=torch.bool, device="cuda"),
+                    is_prefill=True,
+                    b_ready_cache_len=zeros,
+                    b_prefill_start_loc=zeros,
+                    b_prefill_has_output_cpu=[False],
+                    multimodal_params=[{"images": [], "audios": []}],
+                    mtp_draft_input_hiddens=torch.zeros(
+                        (input_len, self.pre_post_weight.main_proj_weight_.in_dim),
+                        dtype=self.data_type,
+                        device="cuda",
+                    ),
+                )
+                self._commit_kv(model_input)
+                torch.cuda.synchronize()
+                del model_input
+            finally:
+                # Draft shares target pools; release only this temporary request and its pages.
+                self.req_manager.free([req_index], mem_indexes)
+        torch.distributed.barrier()
+        logger.info("Warmed DSpark prefill KV-only commits at lengths: %s", lengths)
+
     def _init_padded_req(self):
         return
 

@@ -11,6 +11,90 @@ from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import Deep
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
 
 
+def test_v41_warmup_reaches_all_declared_layer_paths():
+    from lightllm.models.deepseek_v41.model import DeepseekV41TpPartModel
+
+    model = DeepseekV41TpPartModel.__new__(DeepseekV41TpPartModel)
+    model.layers_num = 40
+    model.config = dict(
+        engram_layer_ids=[1, 14],
+        kv_source_layer_ids=[2, 8, 14, 20],
+        index_source_layer_ids=[2, 8, 14, 20, 24, 28, 32, 36],
+        dspark_target_layer_ids=[37, 38, 39],
+    )
+    count = model.autotune_layers()
+    assert count <= model.layers_num
+    assert all(layer < count for layers in model.config.values() for layer in layers)
+
+
+@pytest.mark.parametrize("mode,fail", [("prefill", False), ("prefill", True), ("decode", False), ("normal", False)])
+def test_dspark_prefill_warms_kv_commit_and_preserves_target_resources(monkeypatch, mode, fail):
+    from unittest.mock import Mock
+
+    from lightllm.common.req_manager.base import ReqManager, _ReqLinkedList
+    from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+
+    for name in ("tensor", "ones", "zeros", "full"):
+        original = getattr(torch, name)
+
+        def cpu_tensor(*args, _original=original, **kwargs):
+            kwargs.pop("device", None)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(torch, name, cpu_tensor)
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda self: self)
+    events, committed = [], []
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: events.append("sync"))
+    monkeypatch.setattr(torch.distributed, "barrier", lambda: None)
+    memory = SimpleNamespace(
+        page_size=4,
+        alloc=Mock(side_effect=lambda size: torch.arange(32, 32 + size, dtype=torch.int32)),
+        free=Mock(side_effect=lambda indexes: events.append("free")),
+        free_all=Mock(side_effect=AssertionError("must not reset the target allocator")),
+    )
+    requests = ReqManager.__new__(ReqManager)
+    requests.req_list = _ReqLinkedList(2)
+    requests.mem_manager = memory
+    requests.req_to_token_indexs = torch.full((3, 8), 99, dtype=torch.int32)
+    requests.HOLD_REQUEST_ID = 2
+    hold = requests.req_to_token_indexs[2].clone()
+
+    model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
+    model.args = SimpleNamespace(run_mode=mode)
+    model.main_model = SimpleNamespace(autotune_lengths=lambda: [7, 4, 1])
+    model.req_manager, model.mem_manager = requests, memory
+    model.data_type = torch.bfloat16
+    model.pre_post_weight = SimpleNamespace(main_proj_weight_=SimpleNamespace(in_dim=12))
+
+    def commit(model_input):
+        rows = model_input.input_ids.numel()
+        committed.append(rows)
+        events.append("commit")
+        assert model_input.is_prefill and model_input.batch_size == 1
+        assert model_input.b_req_idx.tolist() == [0]
+        assert model_input.b_seq_len.tolist() == [rows]
+        assert model_input.b_ready_cache_len.tolist() == [0]
+        assert model_input.mtp_draft_input_hiddens.shape == (rows, 12)
+        assert model_input.mtp_draft_input_hiddens.dtype == torch.bfloat16
+        assert torch.equal(requests.req_to_token_indexs[0, :rows], torch.arange(32, 32 + rows))
+        if fail:
+            raise RuntimeError("commit failed")
+
+    model._commit_kv = commit
+    if fail:
+        with pytest.raises(RuntimeError, match="commit failed"):
+            model._kernel_warmup()
+        assert committed == [7]
+    else:
+        model._kernel_warmup()
+        assert committed == ([7, 4, 1] if mode == "prefill" else [])
+        assert events == ["commit", "sync", "free"] * len(committed)
+    assert requests.req_list.is_all_free()
+    assert torch.equal(requests.req_to_token_indexs[2], hold)
+    assert memory.free.call_count == len(committed)
+    memory.free_all.assert_not_called()
+
+
 @pytest.mark.parametrize("method_name", ["_ffn", "overlap_tpsp_context_forward", "overlap_tpsp_token_forward"])
 def test_moe_calls_match_shared_weight_interface(method_name):
     method = getattr(DeepseekV4TransformerLayerInfer, method_name)

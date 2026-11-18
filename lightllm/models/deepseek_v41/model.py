@@ -55,6 +55,10 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
     post_layer_infer_class = DeepseekV41PostLayerInfer
     infer_state_class = DeepseekV41InferStateInfo
 
+    def autotune_layers(self):
+        # Engram, shared KV sources and decoder selection are absent from layer 0.
+        return self.layers_num
+
     def load_weights(self, weight_dict):
         super().load_weights(weight_dict)
         if self.is_mtp_draft_model or is_preloading_weights():
