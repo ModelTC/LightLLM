@@ -70,6 +70,23 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def method_name(self):
         return "fp8w8a8-b128-deepgemm"
 
+    @torch.no_grad()
+    def warmup(self, weight_pack: WeightPack, max_m: int, dtype: torch.dtype):
+        # SM90 normal GEMM selects layouts by ceil(M / {16, 32, 64, 128, 256}).
+        # Cover each 64-row interval without changing the Triton autotune grid.
+        n, k = weight_pack.weight.shape
+        device = weight_pack.weight.device
+        quant = torch.zeros((max_m, k), dtype=weight_pack.weight.dtype, device=device)
+        out = torch.empty((max_m, n), dtype=dtype, device=device)
+        lengths = sorted({1, 16, 32, max_m, *range(64, max_m + 1, 64)})
+        for m in lengths:
+            if m > max_m:
+                continue
+            # Each M needs its own TMA-aligned column-major scale stride.
+            scale = torch.ones((k // self.block_size, (m + 3) // 4 * 4), dtype=torch.float32, device=device).T[:m]
+            _deepgemm_fp8_nt((quant[:m], scale), (weight_pack.weight, weight_pack.weight_scale), out[:m])
+        torch.cuda.synchronize()
+
     def quantize(self, weight: torch.Tensor, output: WeightPack):
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant
 

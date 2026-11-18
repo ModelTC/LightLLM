@@ -263,6 +263,7 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
     def _kernel_warmup(self):
         if self.args.run_mode != "prefill":
             return
+        super()._kernel_warmup()
         torch.distributed.barrier()
         lengths = self.main_model.autotune_lengths()
         for input_len in lengths:

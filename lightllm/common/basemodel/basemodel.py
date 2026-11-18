@@ -418,7 +418,27 @@ class TpPartBaseModel:
 
     def _kernel_warmup(self):
         """Warm model-specific kernels before CUDA graph capture."""
-        return
+        from lightllm.common.basemodel.layer_weights.meta_weights import MMWeightTpl
+        from lightllm.common.quantization.deepgemm import DeepGEMMFP8w8a8B128QuantizationMethod
+        from lightllm.utils.device_utils import is_sm90_gpu
+
+        if self.args.run_mode != "prefill" or not is_sm90_gpu():
+            return
+        warmed = set()
+        for layer in [self.pre_post_weight, *self.trans_layers_weight]:
+            for weight in layer.named_weights().values():
+                if (
+                    not isinstance(weight, MMWeightTpl)
+                    or type(weight.quant_method) is not DeepGEMMFP8w8a8B128QuantizationMethod
+                ):
+                    continue
+                key = (weight.mm_param.weight.shape, weight.data_type_)
+                if key in warmed:
+                    continue
+                weight.quant_method.warmup(weight.mm_param, self.batch_max_tokens, weight.data_type_)
+                warmed.add(key)
+        if warmed:
+            logger.info("Warmed %s SM90 FP8 dense GEMM shapes through %s rows", len(warmed), self.batch_max_tokens)
 
     def _init_hidden_collector(self):
         self.hidden_collector_prototype = self.mtp_manager.create_hidden_collector(model=self)
