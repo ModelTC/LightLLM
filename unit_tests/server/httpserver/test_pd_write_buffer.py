@@ -26,6 +26,14 @@ class _WrapSend:
         await self.app(scope, receive, wrapped)
 
 
+def test_missing_transport_does_not_break_websocket_setup():
+    async def send(_message):
+        return None
+
+    websocket = type("WebSocketStub", (), {"_send": send})()
+    assert set_pd_websocket_write_buffer(websocket) is False
+
+
 @pytest.mark.parametrize("compression", [None, "deflate"])
 def test_pd_write_limits_and_cancelled_frame_preserve_following_messages(monkeypatch, compression):
     monkeypatch.setattr(run, "TCPServer", run.TCPServer)

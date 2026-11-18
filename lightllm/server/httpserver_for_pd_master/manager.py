@@ -1104,7 +1104,9 @@ class PDManager:
         return pd_client
 
     def remove_pd(self, pd_client: PD_Client_Obj):
-        # Invalidate this connection even if a replacement has already registered.
+        # ReqStatus objects may still hold this object after a reconnect. Clear
+        # its socket first so stale requests cannot send through a dead socket,
+        # even when a replacement already occupies the same connection key.
         pd_client.websocket = None
         if self.url_to_pd_nodes.get(pd_client.connection_key) is not pd_client:
             return
