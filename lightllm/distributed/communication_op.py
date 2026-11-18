@@ -18,11 +18,10 @@
 # limitations under the License.
 
 
-import os
 import torch
 import torch.distributed as dist
 from torch.distributed import ReduceOp, ProcessGroup
-from typing import List, Dict, Optional, Set, Union
+from typing import List, Optional, Set, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import has_nvlink
 from lightllm.utils.envs_utils import (
@@ -48,7 +47,7 @@ try:
     import deep_ep
 
     HAS_DEEPEP = True
-except:
+except Exception:
     HAS_DEEPEP = False
     logger.info("deep_ep is not installed, you can't use the api of it.")
 
@@ -106,6 +105,11 @@ class CustomProcessGroup:
 
 
 class DistributeGroupManager:
+    # The DP16/EP16 Decode deployment reserves this communication pool for the
+    # legacy low-latency kernels.  Prefill and mixed workers continue to derive
+    # their ElasticBuffer SM count from DeepEP's bandwidth model.
+    _DECODE_LOW_LATENCY_NUM_SMS = 14
+
     def __init__(self):
         self.groups = []
         self.dp_control_group = None
@@ -114,6 +118,7 @@ class DistributeGroupManager:
         self.ep_mega_moe_buffer = None
         self.ep_num_sms = None
         self.ep_non_overlap_num_sms = None
+        self.decode_low_latency_only = False
 
     def __len__(self):
         return len(self.groups)
@@ -172,13 +177,15 @@ class DistributeGroupManager:
         expert_quant_method_names: Set[str],
         num_experts_per_tok: int = 1,
         moe_intermediate_size: Optional[int] = None,
+        force_low_latency_decode: bool = False,
     ):
         """初始化 DeepEP 通信组以及当前模型实际需要的 MoE buffer。
 
         ``expert_quant_method_names`` 是各 MoE 层最终绑定的 quant method 名称集合。
         同一个模型可能逐层混用 FP4 和 FP8：SM100 FP4 层走 Mega MoE，其他层走
         DeepEP Elastic 路径。这里只为实际存在的执行路径分配 buffer，
-        避免为未使用的路径长期占用显存。
+        避免为未使用的路径长期占用显存。``force_low_latency_decode`` 用于
+        只走 low-latency 的 Decode worker，此时不创建 ElasticBuffer。
         """
         enable_ep_moe = get_env_start_args().enable_ep_moe
         if not enable_ep_moe:
@@ -187,13 +194,15 @@ class DistributeGroupManager:
             self.ep_mega_moe_buffer = None
             self.ep_num_sms = None
             self.ep_non_overlap_num_sms = None
+            self.decode_low_latency_only = False
             return
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"
 
         args = get_env_start_args()
-        # ElasticBuffer 覆盖 Prefill 和 Decode 两个阶段。Decode 额外使用
-        # DeepEP 的 legacy low-latency buffer，避免把低延迟通信路径强行
-        # 转成 ElasticBuffer 的 expanded layout。
+        is_low_latency_only_decode = args.run_mode == "decode" and force_low_latency_decode
+        self.decode_low_latency_only = is_low_latency_only_decode
+        # 纯 Decode worker 可以只使用 DeepEP legacy low-latency buffer。Prefill
+        # 和 mixed workers 仍然保留 ElasticBuffer，后者会在同一进程内处理两种阶段。
         prefill_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
         decode_num_max_dispatch_tokens_per_rank = (
             None if args.run_mode == "prefill" else get_deepep_num_max_dispatch_tokens_per_rank_decode()
@@ -220,14 +229,7 @@ class DistributeGroupManager:
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
         self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
-        self.ep_buffer = deep_ep.ElasticBuffer(
-            deepep_group,
-            num_max_tokens_per_rank=self.ll_num_tokens,
-            hidden=self.ll_hidden,
-            num_topk=num_experts_per_tok,
-            use_fp8_dispatch=True,
-            allow_multiple_reduction=True,
-        )
+        self.ep_buffer = None
         self.ep_low_latency_buffer = None
         self.ep_mega_moe_buffer = None
 
@@ -254,22 +256,49 @@ class DistributeGroupManager:
             )
 
         # FP4 Mega MoE has its own communication path. Legacy low-latency
-        # dispatch is only useful for the remaining FP8 Decode path. Keep a
-        # graceful fallback for DeepEP builds that removed the old Buffer API.
+        # dispatch is only useful for the remaining FP8 Decode path.
         has_legacy_moe_layer = any(
             method_name != mega_moe_quant_method for method_name in expert_quant_method_names
         )
+        if not is_low_latency_only_decode:
+            self.ep_buffer = deep_ep.ElasticBuffer(
+                deepep_group,
+                num_max_tokens_per_rank=self.ll_num_tokens,
+                hidden=self.ll_hidden,
+                num_topk=num_experts_per_tok,
+                use_fp8_dispatch=True,
+                allow_multiple_reduction=True,
+            )
+
+        if not hasattr(deep_ep, "Buffer"):
+            missing_low_latency_api = ["Buffer"]
+        else:
+            missing_low_latency_api = [
+                name
+                for name in (
+                    "get_low_latency_rdma_size_hint",
+                    "set_num_sms",
+                    "low_latency_dispatch",
+                    "low_latency_combine",
+                    "clean_low_latency_buffer",
+                )
+                if not hasattr(deep_ep.Buffer, name)
+            ]
         enable_low_latency_buffer = (
             args.run_mode != "prefill"
             and has_legacy_moe_layer
             and decode_num_max_dispatch_tokens_per_rank is not None
-            and hasattr(deep_ep, "Buffer")
-            and hasattr(deep_ep.Buffer, "get_low_latency_rdma_size_hint")
-            and hasattr(deep_ep.Buffer, "set_num_sms")
+            and not missing_low_latency_api
         )
+        if is_low_latency_only_decode and has_legacy_moe_layer and not enable_low_latency_buffer:
+            raise RuntimeError(
+                "Decode requires DeepEP's legacy low-latency Buffer API. "
+                "ElasticBuffer fallback is disabled, missing: "
+                + ", ".join(missing_low_latency_api)
+            )
         if args.run_mode != "prefill" and has_legacy_moe_layer and not enable_low_latency_buffer:
             logger.warning(
-                "DeepEP legacy low-latency Buffer API is unavailable, using ElasticBuffer for Decode"
+                "DeepEP legacy low-latency Buffer API is unavailable for mixed mode"
             )
         if enable_low_latency_buffer:
             decode_size_hint = deep_ep.Buffer.get_low_latency_rdma_size_hint(
@@ -285,8 +314,9 @@ class DistributeGroupManager:
                 num_qps_per_rank=max(1, self.ll_num_experts // global_world_size),
             )
         logger.info(
-            "Initialize DeepEP MoE buffers: elastic=True, low_latency=%s, mega_moe=%s, "
+            "Initialize DeepEP MoE buffers: elastic=%s, low_latency=%s, mega_moe=%s, "
             "prefill_capacity=%s, decode_capacity=%s, ll_num_experts=%s, expert_quant_method_names=%s",
+            self.ep_buffer is not None,
             enable_low_latency_buffer,
             enable_mega_moe_buffer,
             prefill_num_max_dispatch_tokens_per_rank,
@@ -294,12 +324,20 @@ class DistributeGroupManager:
             self.ll_num_experts,
             sorted(expert_quant_method_names),
         )
-        theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
-        low_latency_sms = (
-            self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
-            if enable_low_latency_buffer
-            else None
-        )
+        if self.ep_buffer is not None:
+            theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
+            low_latency_sms = (
+                self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
+                if enable_low_latency_buffer
+                else None
+            )
+        else:
+            # ElasticBuffer is intentionally absent on a pure Decode worker.
+            # Keep the tuned low-latency communication reservation used by the
+            # previous DP16/EP16 deployment and give DeepGEMM the full device
+            # pool in _set_num_sms_for_deep_gemm below.
+            low_latency_sms = self._DECODE_LOW_LATENCY_NUM_SMS if enable_low_latency_buffer else None
+            theoretical_sms = low_latency_sms or 0
         self._set_num_sms_for_deep_gemm(theoretical_sms, low_latency_sms)
 
         # 串行路径会在通信后立即等待，不需要为并行计算预留大部分 SM。
@@ -325,7 +363,7 @@ class DistributeGroupManager:
         try:
             try:
                 from deep_gemm.jit_kernels.utils import set_num_sms
-            except:
+            except ImportError:
                 from deep_gemm import set_num_sms
 
             device_sms = get_device_sm_count()

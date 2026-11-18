@@ -222,4 +222,5 @@ class Glm5NextTpPartModel(TpPartBaseModel):
                 expert_quant_method_names=dist_group_manager.get_moe_quant_methods(self.trans_layers_weight),
                 num_experts_per_tok=self.config["num_experts_per_tok"],
                 moe_intermediate_size=self.config["moe_intermediate_size"],
+                force_low_latency_decode=True,
             )

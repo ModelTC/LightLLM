@@ -52,8 +52,15 @@ def fused_experts(
         routed = mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method)
         return routed if shared is None else routed + shared
 
-    use_low_latency_decode = is_prefill is False and dist_group_manager.ep_low_latency_buffer is not None
-    buffer = dist_group_manager.ep_low_latency_buffer if use_low_latency_decode else dist_group_manager.ep_buffer
+    if is_prefill is False:
+        if dist_group_manager.ep_low_latency_buffer is None:
+            if dist_group_manager.decode_low_latency_only:
+                raise RuntimeError("Decode MoE requires DeepEP's low-latency Buffer")
+            buffer = dist_group_manager.ep_buffer
+        else:
+            buffer = dist_group_manager.ep_low_latency_buffer
+    else:
+        buffer = dist_group_manager.ep_buffer
     return fused_experts_impl(
         hidden_states=hidden_states,
         w1=w13.weight,
@@ -207,8 +214,7 @@ def fused_experts_impl(
     if buffer is dist_group_manager.ep_low_latency_buffer:
         # Legacy DeepEP low-latency dispatch keeps the expert-major masked
         # layout and fuses input quantization into the communication kernel.
-        # This is the Decode path used by glm53_optim. ElasticBuffer remains
-        # the fallback when the installed DeepEP no longer exposes Buffer.
+        # This is the low-latency Decode path used by the pure Decode worker.
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         expected_m = triton.cdiv(hidden_states.shape[0] * buffer.group_size * topk_idx.shape[1], num_experts)
         recv_x, masked_m, handle, _, _ = buffer.low_latency_dispatch(
@@ -251,6 +257,9 @@ def fused_experts_impl(
         elif shared_expert_func is not None:
             combined_x = combined_x + shared_expert_func()
         return combined_x
+
+    if is_prefill is False and dist_group_manager.decode_low_latency_only:
+        raise RuntimeError("Decode MoE cannot use DeepEP's ElasticBuffer path")
 
     qinput_tensor, input_scale = per_token_group_quant_fp8(
         hidden_states, block_size_k, dtype=w1.dtype, use_ue8m0_scales=get_env_use_ue8m0_scales()
