@@ -23,16 +23,17 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ReduceOp, ProcessGroup
 from typing import List, Dict, Optional, Set, Union
+from lightllm.common.eplb_utils import is_eplb_enabled
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import has_nvlink
 from lightllm.utils.envs_utils import (
     get_env_start_args,
     get_deepep_num_max_dispatch_tokens_per_rank,
-    get_redundancy_expert_num,
 )
 from lightllm.utils.dist_utils import (
     get_global_world_size,
     get_dp_world_size,
+    get_node_world_size,
     create_new_group_for_current_dp,
     create_dp_special_inter_group,
 )
@@ -65,7 +66,14 @@ class CustomProcessGroup:
         self.autotune_group = dist.new_group([i for i in range(get_global_world_size())], backend="gloo")
 
     def _support_custom_allreduce(self) -> bool:
-        return has_nvlink() and self.dp_world_size in [2, 4, 6, 8]
+        # CUDA IPC and symmetric-memory handles are local to one host.
+        node_world_size = get_node_world_size()
+        return (
+            self.dp_world_size <= node_world_size
+            and node_world_size % self.dp_world_size == 0
+            and self.dp_world_size in [2, 4, 6, 8]
+            and has_nvlink()
+        )
 
     def init_symm_mem_reduce(self) -> None:
         if not self._support_custom_allreduce():
@@ -198,7 +206,13 @@ class DistributeGroupManager:
         )
         self.ll_num_tokens = num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
-        self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
+        total_redundant_experts = (
+            get_env_start_args().eplb_num_redundant_experts_per_rank * global_world_size
+            if is_eplb_enabled(get_env_start_args())
+            else 0
+        )
+        # Both phases address the same published physical expert rows.
+        self.ll_num_experts = n_routed_experts + total_redundant_experts
         self.ep_buffer = deep_ep.ElasticBuffer(
             deepep_group,
             num_max_tokens_per_rank=self.ll_num_tokens,
