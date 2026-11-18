@@ -2,10 +2,16 @@
 
 from starlette.websockets import WebSocket
 
+from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
+
 # One 12k control message is about 100 KiB. 256 KiB lets that send return
 # without waiting for the socket, and the 32 KiB gap keeps a full buffer from
 # holding token traffic for megabytes.
 PD_WEBSOCKET_WRITE_LIMIT = (256 * 1024, 256 * 1024 - 32 * 1024)
+
+
+def websocket_message_exceeds_limit(payload: bytes) -> bool:
+    return len(payload) > get_lightllm_websocket_max_message_size()
 
 
 def set_pd_websocket_write_buffer(websocket: WebSocket) -> None:

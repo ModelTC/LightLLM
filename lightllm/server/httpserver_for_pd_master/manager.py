@@ -27,6 +27,7 @@ from lightllm.server.httpserver.stop_seq_match import wrap_stop_match_stream
 from lightllm.server.httpserver.grammar import create_output_grammar_compiler
 from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.utils.envs_utils import (
+    get_lightllm_websocket_max_message_size,
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
     get_pd_node_busy_retry_timeout_seconds,
@@ -34,6 +35,7 @@ from lightllm.utils.envs_utils import (
     get_pd_node_resource_wait_timeout_seconds,
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
+from lightllm.utils.websocket_utils import websocket_message_exceeds_limit
 from .pd_selector import PDSelectionExtraInfo, create_selector
 
 logger = init_logger(__name__)
@@ -585,7 +587,9 @@ class HttpServerManagerForPDMaster:
 
         old_max_new_tokens = sampling_params.max_new_tokens
         sampling_params.max_new_tokens = 1
-        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+        prefill_payload = pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params)))
+        self._reject_oversized_control_message(payload=prefill_payload, group_request_id=group_request_id)
+        await p_node.websocket.send_bytes(prefill_payload)
 
         try:
             await self._wait_for_event_or_disconnect(
@@ -604,9 +608,9 @@ class HttpServerManagerForPDMaster:
         logger.debug(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
         sampling_params.max_new_tokens = old_max_new_tokens
-        await d_node.websocket.send_bytes(
-            pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
-        )
+        decode_payload = pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
+        self._reject_oversized_control_message(payload=decode_payload, group_request_id=group_request_id)
+        await d_node.websocket.send_bytes(decode_payload)
 
         # Master 在等 Decode 上报。截止时间要盖住 Decode 拿到请求后的两段资源等待。
         # 两段各用一份预算，并且前后分开计时：_alloc_shm_req_indexes 先等共享请求槽，
@@ -688,6 +692,13 @@ class HttpServerManagerForPDMaster:
                         yield sub_req_id, request_output, metadata, finish_status
 
         return
+
+    def _reject_oversized_control_message(self, payload: bytes, group_request_id: int) -> None:
+        if websocket_message_exceeds_limit(payload=payload):
+            raise InvalidRequestError(
+                f"group_request_id {group_request_id} PD control message is {len(payload)} bytes, "
+                f"above the websocket limit of {get_lightllm_websocket_max_message_size()} bytes"
+            )
 
     async def _wait_for_prefill_token_if_needed(
         self,

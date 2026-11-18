@@ -97,3 +97,66 @@ def test_direct_requests_handshake_and_abort_preserve_int64_ids():
         assert d_node.websocket.send_bytes.await_count == 2
 
     asyncio.run(run())
+
+
+def test_oversized_prefill_control_message_is_not_sent(monkeypatch):
+    from lightllm.server.httpserver_for_pd_master import manager as manager_module
+    from lightllm.utils.error_utils import InvalidRequestError
+
+    monkeypatch.setattr(manager_module, "websocket_message_exceeds_limit", lambda payload: True)
+
+    async def run():
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.args = SimpleNamespace(pd_node_id=1)
+        manager.req_id_to_out_inf = {}
+        p_node, d_node = _node(), _node("decode")
+        params = SamplingParams()
+        params.group_request_id, params.max_new_tokens = 7, 1
+        request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
+        stream = manager.fetch_pd_stream(p_node, d_node, "prompt", params, MultimodalParams(), request)
+        try:
+            with pytest.raises(InvalidRequestError, match="websocket limit"):
+                await anext(stream)
+        finally:
+            await stream.aclose()
+        p_node.websocket.send_bytes.assert_not_awaited()
+        d_node.websocket.send_bytes.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_oversized_decode_control_message_is_not_sent(monkeypatch):
+    from lightllm.server.httpserver_for_pd_master import manager as manager_module
+    from lightllm.utils.error_utils import InvalidRequestError
+
+    calls = {"count": 0}
+
+    def exceeds(payload):
+        calls["count"] += 1
+        return calls["count"] >= 2
+
+    monkeypatch.setattr(manager_module, "websocket_message_exceeds_limit", exceeds)
+
+    async def run():
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.args = SimpleNamespace(pd_node_id=1)
+        manager.req_id_to_out_inf = {}
+        p_node, d_node = _node(), _node("decode")
+        params = SamplingParams()
+        params.group_request_id, params.max_new_tokens = 7, 1
+
+        async def wait(event, _request, **kwargs):
+            event.prompt_ids = [1, 2]
+
+        manager._wait_for_event_or_disconnect = wait
+        request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
+        stream = manager.fetch_pd_stream(p_node, d_node, "prompt", params, MultimodalParams(), request)
+        try:
+            with pytest.raises(InvalidRequestError, match="websocket limit"):
+                await anext(stream)
+        finally:
+            await stream.aclose()
+        p_node.websocket.send_bytes.assert_awaited()
+        d_node.websocket.send_bytes.assert_not_awaited()
+
+    asyncio.run(run())

@@ -291,6 +291,38 @@ def test_reported_load_key_matches_registered_connection_without_rewriting(monke
     assert updated_nodes[0].run_status.total_token_usage_rate == 0.7
 
 
+def test_token_packs_split_before_they_exceed_the_websocket_limit(monkeypatch):
+    from lightllm.server.httpserver.async_queue import AsyncQueue
+
+    sent = []
+
+    async def send(payload):
+        sent.append(pickle.loads(payload))
+
+    async def run():
+        load_info = {"connection_key": "p:8000/dpNone"}
+        one_item = pickle.dumps((ObjType.TOKEN_PACKS, ["a"], load_info))
+        monkeypatch.setattr(pd_loop, "_get_load_info", lambda dp_index=None: load_info)
+        monkeypatch.setattr(pd_loop, "websocket_message_exceeds_limit", lambda payload: len(payload) > len(one_item))
+        queue = AsyncQueue()
+        await queue.put("a")
+        await queue.put("b")
+        task = asyncio.create_task(
+            pd_loop._up_tokens_to_pd_master(forwarding_queue=queue, websocket=SimpleNamespace(send=send))
+        )
+        try:
+            for _ in range(50):
+                if len(sent) == 2:
+                    break
+                await asyncio.sleep(0)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        assert [message[1] for message in sent] == [["a"], ["b"]]
+
+    asyncio.run(run())
+
+
 def test_split_option_defaults_off_and_is_prefill_only():
     from lightllm.server.api_server import launch_server
 

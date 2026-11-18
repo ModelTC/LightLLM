@@ -17,7 +17,7 @@ from lightllm.server.httpserver.async_queue import AsyncQueue
 from lightllm.utils.net_utils import get_hostname_ip, format_host_port
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
-from lightllm.utils.websocket_utils import PD_WEBSOCKET_WRITE_LIMIT
+from lightllm.utils.websocket_utils import PD_WEBSOCKET_WRITE_LIMIT, websocket_message_exceeds_limit
 from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Client_Obj, PD_Master_Obj
 from lightllm.server.core.objs import StartArgs
@@ -99,7 +99,6 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 # 下方应用层心跳已负责存活检测，禁用协议层 keepalive，避免繁忙连接被误断。
                 ping_interval=None,
             ) as websocket:
-
                 sock = websocket.transport.get_extra_info("socket")
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
@@ -317,7 +316,17 @@ async def _up_tokens_to_pd_master(
 
         if handle_list:
             load_info: dict = _get_load_info(dp_index)
-            await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list, load_info)))
+            await _send_token_packs(websocket=websocket, handle_list=handle_list, load_info=load_info)
+
+
+async def _send_token_packs(websocket: ClientConnection, handle_list: list, load_info: dict) -> None:
+    payload = pickle.dumps((ObjType.TOKEN_PACKS, handle_list, load_info))
+    if len(handle_list) > 1 and websocket_message_exceeds_limit(payload=payload):
+        midpoint = len(handle_list) // 2
+        await _send_token_packs(websocket=websocket, handle_list=handle_list[:midpoint], load_info=load_info)
+        await _send_token_packs(websocket=websocket, handle_list=handle_list[midpoint:], load_info=load_info)
+    else:
+        await websocket.send(payload)
 
 
 async def _send_heartbeat_to_pd_master(websocket: ClientConnection):
@@ -329,7 +338,6 @@ async def _send_heartbeat_to_pd_master(websocket: ClientConnection):
 
 # 获取节点负载信息
 def _get_load_info(dp_index: Optional[int] = None) -> dict:
-
     from lightllm.server.api_http import g_objs
 
     assert g_objs.shared_token_load is not None, "shared_token_load is not initialized"
