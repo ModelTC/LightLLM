@@ -392,6 +392,11 @@ def get_pd_cache_high_priority_min_prompt_tokens() -> int:
     return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS", 2048)))
 
 
+def get_pd_cache_tree_max_nodes() -> int:
+    """Maximum number of prefix-routing metadata nodes per PD Master tree."""
+    return int(os.getenv("LIGHTLLM_PD_CACHE_TREE_MAX_NODES", 1_000_000))
+
+
 @lru_cache(maxsize=None)
 def get_pd_long_prefix_affinity_max_age_seconds() -> int:
     """长前缀可以越过空闲节点时，前缀记录允许的最大年龄，单位为秒。"""

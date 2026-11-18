@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from lightllm.server.pd_io_struct import PD_Client_Obj
-from lightllm.utils.envs_utils import get_pd_long_prefix_affinity_max_age_seconds
+from lightllm.utils.envs_utils import get_pd_cache_tree_max_nodes, get_pd_long_prefix_affinity_max_age_seconds
 from lightllm.utils.log_utils import init_logger
 
 from .pd_selector import PDSelectionExtraInfo
@@ -51,7 +51,7 @@ class CacheAwareConfig:
     # 相邻统计周期命中率变化时，负载均衡阈值的调整步长。
     balance_rel_threshold_step: float = 0.05
     # 前缀树允许的最大节点数（不含 root）。
-    max_node_count: int = 1_000_000
+    max_node_count: int = field(default_factory=get_pd_cache_tree_max_nodes)
     # 每次 LRU 驱逐的叶节点数量。
     evict_node_batch: int = 10_000
     # 每隔 sample_stride 个字符抽 1 个作为前缀树 key，降低匹配开销与内存。

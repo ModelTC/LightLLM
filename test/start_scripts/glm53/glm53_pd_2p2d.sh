@@ -13,7 +13,7 @@ P0/P1 and D0/D1 each form a TP16/DP16 group; the role supplies node_rank.
 Mount the same model at MODEL_DIR on all GPU hosts (default /nvme/sensenova-flash-320b-v22-v28-average-fp8-e8m0).
 Logs: RUN_DIR/logs/ROLE.log and stdout (RUN_DIR defaults /var/log/lightllm).
 Overrides: CONFIG_SERVER_PORT, CONFIG_SERVER_BIND_HOST, MODEL_DIR, MODEL_NAME, CPU_MODEL_DIR, SOURCE_DIR,
-CPU_SOURCE, GPU_SOURCE, PYTHON_BIN, RUN_DIR, MASTER_PORT, DISK_CACHE_DIR.
+CPU_SOURCE, GPU_SOURCE, PYTHON_BIN, RUN_DIR, MASTER_PORT, DISK_CACHE_DIR, LIGHTLLM_PD_CACHE_TREE_MAX_NODES.
 --dry-run prints commands and paths without starting services or writing files.
 EOF
 }
@@ -69,6 +69,7 @@ if [[ "$ROLE" == config || "$ROLE" == master* ]]; then
     ARGS=(--run_mode config_server --config_server_host "$CONFIG_SERVER_HOST" --config_server_port "$PORT")
   else
     PORT="${MASTER_PORT:-60011}"
+    SERVICE_ENV+=("LIGHTLLM_PD_CACHE_TREE_MAX_NODES=${LIGHTLLM_PD_CACHE_TREE_MAX_NODES:-4000000}")
     ARGS=(
       --run_mode pd_master --model_dir "$CPU_MODEL_DIR" --model_name "$MODEL_NAME" --host 0.0.0.0 --port "$PORT"
       --httpserver_workers 1 --config_server_host "$CONFIG_SERVER_HOST" --config_server_port "$CONFIG_SERVER_PORT"

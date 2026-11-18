@@ -21,6 +21,20 @@ from lightllm.server.httpserver_for_pd_master.pd_selector.pd_selector import (
 pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
 
 
+@pytest.mark.parametrize(("override", "expected"), [(None, 1_000_000), ("4000000", 4_000_000)])
+def test_prompt_tree_node_limit_reaches_local_and_rpc_trees(monkeypatch, override, expected):
+    from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree_server import PromptCacheTreeState
+
+    if override is None:
+        monkeypatch.delenv("LIGHTLLM_PD_CACHE_TREE_MAX_NODES", raising=False)
+    else:
+        monkeypatch.setenv("LIGHTLLM_PD_CACHE_TREE_MAX_NODES", override)
+
+    local_tree = create_prompt_cache_tree_client(CacheAwareConfig()).prompt_cache_tree
+    assert local_tree.max_node_count == expected
+    assert PromptCacheTreeState().prompt_cache_tree.max_node_count == expected
+
+
 def _worker(address: str, dispatched_prompt_chars: int = 0, dispatched_req_num: int = 0):
     return SimpleNamespace(
         client_ip_port=address,
