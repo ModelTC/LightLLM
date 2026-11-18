@@ -1,5 +1,6 @@
 import json
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -58,6 +59,59 @@ def test_persistent_cache_is_independent_of_checkout_and_invalidates_source(tmp_
     del kernel._cache_dir
     monkeypatch.setattr(autotuner_module, "_source_digest", lambda _: b"modified-kernel")
     assert kernel.cache_dir != first
+
+
+def test_collective_tunes_every_candidate_by_slowest_rank_and_reuses_cache(tmp_path, monkeypatch):
+    calls = []
+    group = object()
+    peers = {32: 9.0, 64: 3.0, 128: 5.0}
+
+    @autotune(
+        kernel_name="collective",
+        configs_gen_func=lambda: [{"alignment": a} for a in peers],
+        static_key_func=lambda: {},
+        run_key_func=lambda rows: rows,
+        collective_benchmark=True,
+        benchmark_repeats=1,
+        benchmark_retries=3,
+    )
+    def forward(rows, run_config=None):
+        calls.append((run_config["alignment"], Autotuner.is_autotune_warmup()))
+        return run_config
+
+    forward._cache_dir = str(tmp_path)
+    monkeypatch.setattr(autotuner_module.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(autotuner_module, "get_global_rank", lambda: 8)
+    monkeypatch.setattr(autotuner_module, "get_global_world_size", lambda: 16)
+    monkeypatch.setattr(autotuner_module, "get_current_rank_in_node", lambda: 0)
+    monkeypatch.setattr(forward, "_get_autotune_group", lambda: group)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(autotuner_module.dist, "barrier", lambda group: None)
+
+    def gather(out, obj, group):
+        out[:] = [obj] * len(out)
+
+    monkeypatch.setattr(autotuner_module.dist, "all_gather_object", gather)
+    clock = iter([0.0, 0.001] * 9)
+    monkeypatch.setattr(autotuner_module, "time", SimpleNamespace(perf_counter=lambda: next(clock)))
+
+    def reduce_slowest(times, op, group):
+        assert op == torch.distributed.ReduceOp.MAX
+        for row, peer_time in zip(times, peers.values()):
+            row.clamp_min_(peer_time)
+
+    monkeypatch.setattr(autotuner_module.dist, "all_reduce", reduce_slowest)
+    with Autotuner.autotune_warmup():
+        assert forward(64) == {"alignment": 64}
+    order = [32, 64, 128, 64, 128, 32, 128, 32, 64]
+    assert calls == [(a, False) for a in peers] + [(a, False) for a in order for _ in range(2)] + [(64, True)]
+    forward.cached_configs.clear()
+    forward.fast_match_configs.clear()
+    forward._missing_config_keys.clear()
+    assert forward.get_cached_config(rows=65) == {"alignment": 64}
+    assert forward(65) == {"alignment": 64}
+    assert calls[-1] == (64, False)
+    assert json.loads((tmp_path / "configs.json").read_text()) == {"64": {"alignment": 64}}
 
 
 def test_second_node_leader_persists_merged_autotune_results(tmp_path, monkeypatch):

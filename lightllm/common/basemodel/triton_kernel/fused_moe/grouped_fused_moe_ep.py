@@ -374,7 +374,9 @@ def fused_experts(
 
     assert quant_method.method_name in GROUP32_EP_METHODS or quant_method.block_size == 128
     buffer = dist_group_manager.ep_buffer if is_prefill else dist_group_manager.ep_low_latency_buffer
-    return fused_experts_impl(
+    humming = quant_method.method_name in HUMMING_QUANT_METHODS
+    forward = humming_prefill_experts if is_prefill and humming else fused_experts_impl
+    return forward(
         hidden_states=hidden_states,
         w1=w13.weight,
         w2=w2.weight,
@@ -382,9 +384,7 @@ def fused_experts(
         topk_idx=topk_idx,
         num_experts=num_experts,
         block_size_k=quant_method.block_size,
-        humming_gemms=(
-            (w13.humming_gemm, w2.humming_gemm) if quant_method.method_name in HUMMING_QUANT_METHODS else None
-        ),
+        humming_gemms=(w13.humming_gemm, w2.humming_gemm) if humming else None,
         buffer=buffer,
         is_prefill=is_prefill,
         use_fp8_w8a8=True,
@@ -424,6 +424,7 @@ def fused_experts_impl(
     clamp_up_add_one: bool = True,
     block_size_k: int = 128,
     humming_gemms=None,
+    run_config=None,
 ):
     assert clamp_limit is None or limit is None
     if clamp_limit is not None:
@@ -450,6 +451,7 @@ def fused_experts_impl(
             use_ue8m0_scales=block_size_k == 32 or is_sm100_gpu(),
         )
         allocate_on_comm_stream = previous_event is not None
+        alignment = 128 if run_config is None else run_config["expert_alignment"]
         # Expanded dispatch directly produces expert-contiguous, alignment-padded inputs:
         #   recv_x[0]: [num_expanded_tokens, hidden]
         #   recv_x[1]: [num_expanded_tokens, hidden // block_size_k], with a
@@ -469,7 +471,7 @@ def fused_experts_impl(
             topk_weights=topk_weights,
             num_experts=num_experts,
             num_max_tokens_per_rank=get_deepep_num_max_dispatch_tokens_per_rank_prefill(),
-            expert_alignment=128,
+            expert_alignment=alignment,
             previous_event=previous_event,
             allocate_on_comm_stream=allocate_on_comm_stream,
             do_cpu_sync=True,
@@ -478,7 +480,7 @@ def fused_experts_impl(
             use_tma_aligned_col_major_sf=True,
         )
         if ep_balance_counters is not None:
-            # Sent routes are globally conserved by all-to-all; recv_x[0] is the 128-aligned expanded compute load.
+            # Count the expanded rows produced by this dispatch, including alignment padding.
             ep_balance_counters.accumulate(
                 route_load=topk_idx.numel(),
                 compute_load=recv_x[0].shape[0],
@@ -505,6 +507,7 @@ def fused_experts_impl(
             clamp_up_add_one=clamp_up_add_one,
             expert_ends=handle.psum_num_recv_tokens_per_expert if block_size_k == 32 else None,
             humming_gemms=humming_gemms,
+            expert_alignment=alignment,
         )
         del recv_x
 
@@ -562,6 +565,39 @@ def fused_experts_impl(
                 gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=False
             )
     return combined_x
+
+
+def _humming_prefill_key(humming_gemms, buffer, topk_idx, num_experts):
+    import deep_ep
+
+    w1, w2 = humming_gemms
+    return {
+        "deepep": deep_ep.__version__,
+        "humming": w1.version,
+        "dtype": str(w1.config.b_dtype),
+        "hidden": w1.config.shape_k,
+        "intermediate": w2.config.shape_k,
+        "experts": num_experts,
+        "topk": topk_idx.shape[1],
+        "scaleup": buffer.num_scaleup_ranks,
+        "scaleout": buffer.num_scaleout_ranks,
+        "capacity": get_deepep_num_max_dispatch_tokens_per_rank_prefill(),
+        "workspace": dist_group_manager.ep_prefill_moe_workspace.numel(),
+        "microbatches": len(dist_group_manager.groups),
+    }
+
+
+humming_prefill_experts = autotune(
+    kernel_name="humming_prefill_expert_alignment:v1",
+    configs_gen_func=lambda: [{"expert_alignment": alignment} for alignment in (32, 64, 128)],
+    static_key_func=_humming_prefill_key,
+    run_key_func=lambda topk_idx: topk_idx.shape[0],
+    # Each trial owns a fresh DeepEP handle. Only the final forward advances balance telemetry.
+    rebuild_input_func=lambda **kwargs: ((), {**kwargs, "ep_balance_counters": None}),
+    collective_benchmark=True,
+    benchmark_retries=6,
+    benchmark_repeats=5,
+)(fused_experts_impl)
 
 
 def deepgemm_grouped_fp8_nt_contiguous(
@@ -677,7 +713,7 @@ def _get_max_chunk_rows(
 
 
 def chunked_expanded_moe_forward(
-    num_recv_tokens_per_expert_list: List[int],  # [num_local_experts], 128-aligned token counts
+    num_recv_tokens_per_expert_list: List[int],  # [num_local_experts], alignment-padded counts from dispatch
     num_unaligned_recv_tokens_per_expert: torch.Tensor,  # [num_local_experts], actual token counts
     recv_x: Tuple[
         torch.Tensor, torch.Tensor  # [fp8, scale]
@@ -697,12 +733,13 @@ def chunked_expanded_moe_forward(
     clamp_up_add_one: bool = True,
     expert_ends: Optional[torch.Tensor] = None,
     humming_gemms=None,
+    expert_alignment: int = 128,
 ):
     """Run bounded expanded MoE and rewrite metadata for dense DeepEP combine."""
     assert clamp_limit is None or limit is None
     if clamp_limit is not None:
         limit = clamp_limit
-    alignment = 128
+    alignment = expert_alignment
     all_tokens, intermediate_twice = sum(num_recv_tokens_per_expert_list), w1.shape[1]
     intermediate_size, hidden_size = intermediate_twice // 2, w2.shape[1]
     group32 = block_size_k == 32

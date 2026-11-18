@@ -5,6 +5,8 @@ import inspect
 import torch
 import torch.distributed as dist
 import random
+import statistics
+import time
 import collections
 import hashlib
 import tempfile
@@ -60,6 +62,7 @@ def autotune(
     warmup_all_exist_config: bool = True,
     benchmark_repeats: int = 3,
     benchmark_retries: int = 3,
+    collective_benchmark: bool = False,
 ):
     """Decorator that constructs and returns an Autotuner wrapper for a Triton kernel.
 
@@ -100,6 +103,8 @@ def autotune(
             最终正式执行；实际搜索仍需由调用方保证状态可以被反复更新，或提供相应的状态保护。
         benchmark_repeats (int): 每次 CUDA Graph 内重复调用的次数；微秒级短算子可增加以降低计时噪声。
         benchmark_retries (int): CUDA Graph 计时采样次数，默认 3。
+        collective_benchmark (bool): Benchmark each candidate eagerly on all ranks in the same order.
+            Use the slowest rank's wall time per trial. Inner autotuners only read their cached configs.
 
     Returns:
         Callable: A callable object that wraps the original function and performs autotuning
@@ -120,6 +125,7 @@ def autotune(
             warmup_all_exist_config=warmup_all_exist_config,
             benchmark_repeats=benchmark_repeats,
             benchmark_retries=benchmark_retries,
+            collective_benchmark=collective_benchmark,
         )
 
     return decorator
@@ -176,17 +182,20 @@ class Autotuner:
         warmup_all_exist_config: bool = True,
         benchmark_repeats: int = 3,
         benchmark_retries: int = 3,
+        collective_benchmark: bool = False,
     ):
 
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
         self.kernel_type = AutotuneKernelType(kernel_type)
         self.rebuild_input_func = rebuild_input_func
-        self.warmup_all_exist_config = warmup_all_exist_config
+        # Collective history can differ between hosts. Replay only the coordinated candidates.
+        self.warmup_all_exist_config = warmup_all_exist_config and not collective_benchmark
         if benchmark_repeats < 1 or benchmark_retries < 1:
             raise ValueError("autotune benchmark repeats and retries must be positive")
         self.benchmark_repeats = benchmark_repeats
         self.benchmark_retries = benchmark_retries
+        self.collective_benchmark = collective_benchmark
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
@@ -284,20 +293,30 @@ class Autotuner:
                     world_size=world_size,
                 )
 
-        closest_config = self.fast_match_configs.get(static_key, {}).get(run_key, None)
+        closest_config = self._match_config(static_key, run_key)
         if closest_config is not None:
             kwargs["run_config"] = closest_config
-            return self.fn(*args, **kwargs)
+        return self.fn(*args, **kwargs)
 
+    def get_cached_config(self, **key_args):
+        """Look up the same configuration for a split execution path without running the kernel."""
+        if get_triton_autotune_level() == AutotuneLevel.CLOSE_AUTOTUNE:
+            return None
+        static_key = frozendict(self._static_key(**key_args))
+        self._try_load_cache(static_key)
+        return self._match_config(static_key, str(self._run_key(**key_args)))
+
+    def _match_config(self, static_key, run_key):
+        closest_config = self.fast_match_configs.get(static_key, {}).get(run_key)
+        if closest_config is not None:
+            return closest_config
         all_configs = self.cached_configs.get(static_key, {})
         if len(all_configs) != 0:
             closest_config = min(
                 list(all_configs.items()), key=lambda item: self.run_key_distance_func(run_key, item[0])
             )[1]
-            kwargs["run_config"] = closest_config
             self.fast_match_configs[static_key][run_key] = closest_config
-
-        return self.fn(*args, **kwargs)
+        return closest_config
 
     @property
     def cache_dir(self) -> str:
@@ -397,9 +416,46 @@ class Autotuner:
         except (OutOfResources, PTXASError, CompileTimeAssertionFailure, RuntimeError, Exception):
             return float("inf")
 
+    def _bench_collective(self, configs, args, kwargs):
+        # DeepEP prefill waits for CPU-visible counts during dispatch, so graph capture cannot time it.
+        group = self._get_autotune_group() if dist.is_initialized() else None
+        args, kwargs, original, scratch = self._mutate_args_clone(args, kwargs)
+
+        def run(config):
+            self.fn(*args, **kwargs, run_config=config)
+            self._recover_mutated_args(original, scratch)
+
+        phase = Autotuner._autotune_warmup_kernel_type
+        Autotuner.end_autotune_warmup()
+        try:
+            # Compile every layout before sampling, then rotate which layout goes first.
+            for config in configs:
+                run(config)
+            samples = [[] for _ in configs]
+            for trial in range(self.benchmark_retries):
+                for offset in range(len(configs)):
+                    index = (trial + offset) % len(configs)
+                    config = configs[index]
+                    run(config)
+                    torch.cuda.synchronize()
+                    if group is not None:
+                        dist.barrier(group=group)
+                    start = time.perf_counter()
+                    for _ in range(self.benchmark_repeats):
+                        run(config)
+                    torch.cuda.synchronize()
+                    samples[index].append((time.perf_counter() - start) * 1000 / self.benchmark_repeats)
+            if group is not None:
+                times = torch.tensor(samples, dtype=torch.float64, device="cpu")
+                dist.all_reduce(times, op=dist.ReduceOp.MAX, group=group)
+                samples = times.tolist()
+            return [statistics.median(row) for row in samples]
+        finally:
+            Autotuner._autotune_warmup_kernel_type = phase
+
     def _autotune(self, args, kwargs, static_key, run_key, rank_id, world_size):
         is_key_all_same = True
-        if world_size > 1:
+        if world_size > 1 and not self.collective_benchmark:
             all_keys = [None for _ in range(world_size)]
             all_key_str = f"{run_key}_{static_key}"
             dist.all_gather_object(all_keys, obj=all_key_str, group=self._get_autotune_group())
@@ -420,26 +476,32 @@ class Autotuner:
         if self.rebuild_input_func is not None:
             args, kwargs = self.rebuild_input_func(*args, **kwargs)
 
-        best_config = None
-        best_time = float("inf")
-
-        bar = tqdm(
-            rank_tuning_configs,
-            desc=f"Autotuning {self.kernel_name} for {run_key}",
-            position=rank_id,
-            dynamic_ncols=True,
-        )
-        enum_configs = enumerate(bar)
-        for i, config in enum_configs:
-            kwargs_with_config = kwargs.copy()
-            kwargs_with_config["run_config"] = config
-            run_time = self._bench(*args, **kwargs_with_config)
-            if run_time < best_time:
-                best_time = run_time
-                best_config = config
-            bar.set_description(
-                f"Autotuning {self.kernel_name} [rank:{rank_id}] for {run_key}, best_time: {best_time:.5f}"
+        if self.collective_benchmark:
+            times = self._bench_collective(rank_tuning_configs, args, kwargs)
+            best_time, best_config = min(zip(times, rank_tuning_configs), key=lambda item: item[0])
+            if rank_id == 0:
+                logger.info(
+                    "%s run_key=%s collective_ms=%s", self.kernel_name, run_key, list(zip(rank_tuning_configs, times))
+                )
+        else:
+            best_config = None
+            best_time = float("inf")
+            bar = tqdm(
+                rank_tuning_configs,
+                desc=f"Autotuning {self.kernel_name} for {run_key}",
+                position=rank_id,
+                dynamic_ncols=True,
             )
+            for config in bar:
+                kwargs_with_config = kwargs.copy()
+                kwargs_with_config["run_config"] = config
+                run_time = self._bench(*args, **kwargs_with_config)
+                if run_time < best_time:
+                    best_time = run_time
+                    best_config = config
+                bar.set_description(
+                    f"Autotuning {self.kernel_name} [rank:{rank_id}] for {run_key}, best_time: {best_time:.5f}"
+                )
 
         update_static_key_list = []
         if world_size > 1:

@@ -3,6 +3,7 @@ import threading
 from typing import Dict, Any, Optional, Tuple, List
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.common.quantization.quantize_method import WeightPack
+from lightllm.common.quantization.humming import HUMMING_QUANT_METHODS
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer import (
     get_row_slice_mixin,
     get_col_slice_mixin,
@@ -303,6 +304,11 @@ class FusedMoeWeight(BaseWeightTpl):
             topk_idx=topk_idx,
             topk_weights=topk_weights,
             overlap_event=overlap_event,
+            humming_gemms=(
+                (self.w13.humming_gemm, self.w2.humming_gemm)
+                if self.quant_method.method_name in HUMMING_QUANT_METHODS
+                else None
+            ),
         )
 
     def masked_group_gemm(
@@ -335,6 +341,7 @@ class FusedMoeWeight(BaseWeightTpl):
         hidden_dtype=torch.bfloat16,
         microbatch_index: int = 0,
         clamp_limit: Optional[float] = None,
+        expert_alignment: int = 128,
     ):
         assert self.enable_ep_moe, "prefilled_group_gemm is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.prefilled_group_gemm(
@@ -349,6 +356,7 @@ class FusedMoeWeight(BaseWeightTpl):
             hidden_dtype=hidden_dtype,
             microbatch_index=microbatch_index,
             clamp_limit=clamp_limit,
+            expert_alignment=expert_alignment,
         )
 
     def low_latency_combine(

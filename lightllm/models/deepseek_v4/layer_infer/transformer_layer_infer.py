@@ -203,6 +203,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             recv_weights0,
             hidden_dtype=x0.dtype,
             microbatch_index=infer_state.microbatch_index,
+            expert_alignment=handle0.expert_alignment,
             clamp_limit=self.swiglu_limit,
         )
 
@@ -219,6 +220,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             recv_weights1,
             hidden_dtype=x1.dtype,
             microbatch_index=infer_state1.microbatch_index,
+            expert_alignment=handle1.expert_alignment,
             clamp_limit=self.swiglu_limit,
         )
 

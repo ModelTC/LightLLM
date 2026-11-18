@@ -15,6 +15,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     get_ep_num_sms,
     masked_group_gemm,
     chunked_expanded_moe_forward,
+    humming_prefill_experts,
     quantize_fused_experts_input,
     use_mega_moe,
     check_ep_expert_dtype,
@@ -134,16 +135,26 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
         overlap_event: Optional[Any] = None,
+        humming_gemms=None,
     ):
         buffer = dist_group_manager.ep_buffer
         num_max_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
+        num_experts = self.expert_parallel_state.num_total_physical_experts
+        alignment = 128
+        if humming_gemms is not None:
+            # GENERAL warmup uses the unsplit forward. Each overlapping microbatch keeps its own layout.
+            config = humming_prefill_experts.get_cached_config(
+                humming_gemms=humming_gemms, buffer=buffer, topk_idx=topk_idx, num_experts=num_experts
+            )
+            if config is not None:
+                alignment = config["expert_alignment"]
         recv_x, recv_topk_idx, recv_topk_weights, handle, event = buffer.dispatch(
             qinput_tensor,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
-            num_experts=self.expert_parallel_state.num_total_physical_experts,
+            num_experts=num_experts,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
-            expert_alignment=128,
+            expert_alignment=alignment,
             num_sms=get_ep_num_sms(),
             previous_event=overlap_event,
             async_with_compute_stream=True,
@@ -161,7 +172,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 event.current_stream_wait()
 
         else:
-            # Sent routes are globally conserved by all-to-all; recv_x[0] is the 128-aligned expanded compute load.
+            # Count the expanded rows produced by this dispatch, including alignment padding.
             route_load = topk_idx.numel()
             compute_load = recv_x[0].shape[0]
 
@@ -218,6 +229,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         hidden_dtype=torch.bfloat16,
         microbatch_index: int = 0,
         clamp_limit: Optional[float] = None,
+        expert_alignment: int = 128,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -236,6 +248,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
             hidden_dtype=hidden_dtype,
             clamp_limit=clamp_limit,
+            expert_alignment=expert_alignment,
             humming_gemms=(
                 (w13.humming_gemm, w2.humming_gemm) if self.quant_method.method_name in HUMMING_QUANT_METHODS else None
             ),
