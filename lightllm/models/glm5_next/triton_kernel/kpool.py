@@ -47,7 +47,11 @@ def _compress_pools(
     SINGLE_QUERY: tl.constexpr,
     TAIL_SIZE: tl.constexpr,
     HAS_MTP_INDEX: tl.constexpr,
+    DIRECT: tl.constexpr = False,
+    REQ_TABLE_STRIDE: tl.constexpr = 0,
 ):
+    # DIRECT: Ragged is req_to_token_indexs and Starts is unused, so the
+    # closing token's slot is read as req_to_token[req, length - 1].
     if SINGLE_QUERY:
         batch = tl.program_id(0)
         row = batch
@@ -65,7 +69,10 @@ def _compress_pools(
         valid = row < q_end
     req = tl.load(ReqIdx + batch)
     if valid and req != HOLD_REQ:
-        start = tl.load(Starts + row)
+        if DIRECT:
+            start = req.to(tl.int64) * REQ_TABLE_STRIDE
+        else:
+            start = tl.load(Starts + row)
         pool = tl.arange(0, 4)
         cols = tl.arange(0, 128)
         raw_rows = row - 3 + pool
@@ -145,7 +152,13 @@ def compress_pools(
     seq_lens,
     max_q_len,
     mtp_index=None,
+    req_to_token_indexs=None,
 ):
+    """Pass ragged=None and req_to_token_indexs to read slots from the request table directly."""
+    direct = ragged is None
+    if direct:
+        assert req_to_token_indexs is not None and req_to_token_indexs.stride(1) == 1
+        starts, ragged = lengths, req_to_token_indexs
     batch = req_idx.numel()
     single_query = max_q_len == 1 and lengths.numel() == batch
     blocks = batch if single_query else lengths.numel() // 4 + batch
@@ -169,6 +182,8 @@ def compress_pools(
         single_query,
         tail.shape[1],
         mtp_index is not None,
+        direct,
+        req_to_token_indexs.stride(0) if direct else 0,
         num_warps=4,
     )
     # Complete all boundary pools before replacing the previous chunk's tail.
@@ -392,11 +407,17 @@ def _expand_topk(
     WIDTH: tl.constexpr,
     DENSE: tl.constexpr,
     BLOCK: tl.constexpr,
+    DIRECT: tl.constexpr = False,
+    REQ_TABLE_STRIDE: tl.constexpr = 0,
 ):
     row = tl.program_id(0)
     lane = tl.arange(0, BLOCK)
     length = tl.load(Lengths + row)
-    start = tl.load(Starts + row)
+    if DIRECT:
+        # Starts holds one request index per row; Ragged is req_to_token_indexs.
+        start = tl.load(Starts + row).to(tl.int64) * REQ_TABLE_STRIDE
+    else:
+        start = tl.load(Starts + row)
     if DENSE:
         token = lane
         valid = lane < length
@@ -414,7 +435,13 @@ def _expand_topk(
     tl.store(Relative + row * WIDTH + lane, tl.where(valid, token, -1), lane < WIDTH)
 
 
-def expand_topk(groups, lengths, starts, ragged, topk, dense=False):
+def expand_topk(groups, lengths, starts, ragged, topk, dense=False, req_idx=None, req_to_token_indexs=None):
+    """Pass ragged=None with per-row req_idx and req_to_token_indexs to skip the ragged copy."""
+    direct = ragged is None
+    if direct:
+        assert req_idx is not None and req_idx.numel() == lengths.numel()
+        assert req_to_token_indexs is not None and req_to_token_indexs.stride(1) == 1
+        starts, ragged = req_idx, req_to_token_indexs
     width = triton.cdiv(topk + 3, 128) * 128
     out = torch.empty((lengths.numel(), width), dtype=torch.int32, device=lengths.device)
     relative = torch.empty_like(out)
@@ -429,6 +456,8 @@ def expand_topk(groups, lengths, starts, ragged, topk, dense=False):
         width,
         dense,
         triton.next_power_of_2(width),
+        direct,
+        req_to_token_indexs.stride(0) if direct else 0,
         num_warps=4,
     )
     return out, relative

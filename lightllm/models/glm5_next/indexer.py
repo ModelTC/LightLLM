@@ -52,6 +52,11 @@ class Glm5NextNsaInfer:
         raw = torch.cat((k, gate), -1)
         tail = infer_state.req_manager.get_indexer_tail_buffer(self.layer_idx)
         packed_buffer = infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx)
+        # Decode states may skip the ragged copy; kernels then read req_to_token directly.
+        req_to_token_indexs = infer_state.req_manager.req_to_token_indexs
+        direct_kwargs = {}
+        if att_state.ragged_mem_index is None:
+            direct_kwargs = {"req_idx": infer_state.b_req_idx, "req_to_token_indexs": req_to_token_indexs}
         compress_pools(
             raw=raw,
             tail=tail,
@@ -65,10 +70,19 @@ class Glm5NextNsaInfer:
             seq_lens=infer_state.b_seq_len,
             max_q_len=infer_state.max_q_seq_len,
             mtp_index=None if infer_state.is_prefill else infer_state.b_mtp_index,
+            req_to_token_indexs=req_to_token_indexs if att_state.ragged_mem_index is None else None,
         )
 
         if infer_state.max_kv_seq_len <= self.topk:
-            return expand_topk(None, att_state.lengths, att_state.ks, att_state.ragged_mem_index, self.topk, dense=True)
+            return expand_topk(
+                None,
+                att_state.lengths,
+                att_state.ks,
+                att_state.ragged_mem_index,
+                self.topk,
+                dense=True,
+                **direct_kwargs,
+            )
 
         # The small indexer is replicated: no all-gather of query heads and
         # identical pool selection on every TP rank.
@@ -83,7 +97,9 @@ class Glm5NextNsaInfer:
             groups = self._get_prefill_indices(q_fp8, weights, packed_buffer, infer_state, att_state, max_pools)
         else:
             groups = self._get_decode_indices(q_fp8, weights, packed_buffer, infer_state, att_state, max_pools)
-        return expand_topk(groups, att_state.lengths, att_state.ks, att_state.ragged_mem_index, self.topk)
+        return expand_topk(
+            groups, att_state.lengths, att_state.ks, att_state.ragged_mem_index, self.topk, **direct_kwargs
+        )
 
     def _get_prefill_indices(self, q_fp8, weights, packed_buffer, infer_state, att_state, max_pools):
         keys = gather_pools(

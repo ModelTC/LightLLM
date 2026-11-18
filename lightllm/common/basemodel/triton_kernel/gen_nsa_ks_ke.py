@@ -125,9 +125,12 @@ def gen_nsa_ks_ke(
     ragged_mem_index: torch.Tensor,
     hold_req_idx: int = -1,
     max_seq_len: Optional[int] = None,
+    copy_ragged: bool = True,
 ):
     """
     hold_req_idx 这是一个特殊req idx，主要是用于padding 请求数量时使用，所以其处理存在特殊性。
+    copy_ragged=False 只计算 ks/ke/lengths，不复制 ragged_mem_index（此时可传 None），
+    供直接按 req_to_token_index 取 mem index 的调用方使用。
     """
     batch_size = b_seq_len.shape[0]
     ks = torch.empty((q_token_num,), dtype=torch.int32, device=b_seq_len.device)
@@ -137,7 +140,10 @@ def gen_nsa_ks_ke(
     # Long GLM index tables otherwise traverse the entire prefix on one CTA.
     # init_att_state runs outside the model graph, so this bound is refreshed
     # for each decode call. Keep the established short/unspecified path.
-    parallel_copy = max_seq_len is not None and max_seq_len >= 32768
+    parallel_copy = copy_ragged and max_seq_len is not None and max_seq_len >= 32768
+    if not copy_ragged:
+        # The kernel never touches the ragged pointer when COPY_RAGGED is False.
+        ragged_mem_index = ks
     if parallel_copy:
         assert req_to_token_index.stride(1) == 1
 
@@ -155,7 +161,7 @@ def gen_nsa_ks_ke(
         ragged_mem_index=ragged_mem_index,
         BLOCK_REQ=triton.next_power_of_2(batch_size),
         BLOCK_SEQ_SPLIT=256,
-        COPY_RAGGED=not parallel_copy,
+        COPY_RAGGED=copy_ragged and not parallel_copy,
     )
     if parallel_copy:
         _copy_nsa_ragged_tiles[(batch_size, triton.cdiv(max_seq_len, 4096))](

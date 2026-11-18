@@ -182,6 +182,29 @@ class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
 class Fp8Glm5NextSparseDecodeState(NsaFlashMlaFp8SparseDecodeAttState):
     decode_topk_bound: int = None
 
+    def init_state(self):
+        """Build per-row lengths without copying every request's token table.
+
+        The GLM indexer reads slots from req_to_token_indexs by per-row request
+        index during decode, so the ragged copy (whose cost grows with context
+        length and repeats for every target and draft forward) is skipped.
+        """
+        from lightllm.common.basemodel.triton_kernel.gen_nsa_ks_ke import gen_nsa_ks_ke
+
+        infer_state = self.infer_state
+        self.ragged_mem_index = None
+        self.ks, self.ke, self.lengths = gen_nsa_ks_ke(
+            b_seq_len=infer_state.b_seq_len,
+            b_q_seq_len=infer_state.b_q_seq_len,
+            b_req_idx=infer_state.b_req_idx,
+            req_to_token_index=infer_state.req_manager.req_to_token_indexs,
+            q_token_num=infer_state.b_seq_len.shape[0],
+            ragged_mem_index=None,
+            hold_req_idx=infer_state.req_manager.HOLD_REQUEST_ID,
+            copy_ragged=False,
+        )
+        self.flashmla_sched_meta, _ = get_flash_mla().get_mla_metadata()
+
     def _nsa_decode_att(self, q, packed_kv, att_control):
         flash_mla = get_flash_mla()
 
