@@ -1,3 +1,5 @@
+import os
+
 import torch
 import triton
 from typing import List, Optional, Tuple
@@ -161,6 +163,21 @@ def masked_group_gemm(
     expert_count, intermediate_twice, _ = w1.shape
     block_size = 128
     expected_m = min(expected_m, padded_m)
+    debug = os.getenv("LIGHTLLM_DEBUG_DECODE_MOE") == "1" and not getattr(masked_group_gemm, "_debug_logged", False)
+    if debug:
+        masked_group_gemm._debug_logged = True
+        print(
+            "DECODE_MOE_DEBUG input="
+            f"{tuple(recv_x[0].shape)}/{recv_x[0].dtype}/{recv_x[0].stride()} "
+            f"scale={tuple(recv_x[1].shape)}/{recv_x[1].dtype}/{recv_x[1].stride()} "
+            f"w1={tuple(w1.shape)}/{w1.dtype}/{w1.stride()} "
+            f"w1_scale={tuple(w1_scale.shape)}/{w1_scale.dtype}/{w1_scale.stride()} "
+            f"w2={tuple(w2.shape)}/{w2.dtype}/{w2.stride()} "
+            f"w2_scale={tuple(w2_scale.shape)}/{w2_scale.dtype}/{w2_scale.stride()} "
+            f"masked={tuple(masked_m.shape)}/{masked_m.dtype}/min={int(masked_m.min().item())}/max={int(masked_m.max().item())} "
+            f"expected_m={expected_m}",
+            flush=True,
+        )
     gemm_out_a = torch.empty(
         (expert_count, padded_m, intermediate_twice),
         device=recv_x[0].device,
@@ -183,6 +200,9 @@ def masked_group_gemm(
         masked_m,
         expected_m,
     )
+    if debug:
+        torch.cuda.synchronize()
+        print("DECODE_MOE_DEBUG W1_DONE", flush=True)
     silu_and_mul_masked_post_quant_fwd(
         gemm_out_a,
         qsilu_out,
@@ -202,6 +222,14 @@ def masked_group_gemm(
         masked_m,
         expected_m,
     )
+    if debug:
+        torch.cuda.synchronize()
+        print(
+            "DECODE_MOE_DEBUG W2_DONE "
+            f"qsilu={tuple(qsilu_out.shape)}/{qsilu_out.dtype}/{qsilu_out.stride()} "
+            f"qsilu_scale={tuple(qsilu_out_scale.shape)}/{qsilu_out_scale.dtype}/{qsilu_out_scale.stride()}",
+            flush=True,
+        )
     return gemm_out_b
 
 
