@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, SamplingParams
+from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, Req, SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager, ReqStatus
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.utils.error_utils import (
@@ -568,7 +568,7 @@ def test_batch_allocation_retries_with_priority_backoff(high_priority):
         manager = _make_manager(NodeRole.D)
         manager.shm_req_manager.async_alloc_req_indexes = AsyncMock(side_effect=[None, None, [0, 1]])
         with patch("lightllm.server.httpserver.manager.asyncio.sleep", new_callable=AsyncMock) as sleep:
-            assert await manager._alloc_shm_req_indexes(2, pd_high_priority_request=high_priority) == [0, 1]
+            assert await manager._alloc_shm_req_indexes(2, high_priority_request=high_priority) == [0, 1]
         factor = 0.2 if high_priority else 1
         assert [call.args[0] for call in sleep.await_args_list] == pytest.approx([0.1 * factor, 0.11 * factor])
         assert [call.args for call in manager.shm_req_manager.async_alloc_req_indexes.await_args_list] == [(2,)] * 3
@@ -648,3 +648,68 @@ def test_real_supported_max_req_total_len_reserves_mtp_overlap_tokens():
     manager.args = SimpleNamespace(mtp_step=2, page_size=4)
 
     assert manager.get_real_supported_max_req_total_len() == 951
+
+
+@pytest.mark.parametrize("ending", ["close", "cancel", "complete"])
+def test_generate_marks_output_consumer_closed(ending):
+    async def run():
+        manager = _make_manager(NodeRole.D)
+        manager.tokenizer = None
+        manager.enable_multimodal = False
+        manager.args.chunked_prefill_size = 1
+        manager._alloc_shm_req_indexes = AsyncMock(return_value=[0])
+        manager.shm_req_manager.async_get_req_obj_by_index = AsyncMock(return_value=MagicMock())
+        manager.transfer_to_next_module_or_node = AsyncMock()
+        waiting = asyncio.Event()
+
+        async def results(*args):
+            finish = FinishStatus(FinishStatus.FINISHED_STOP if ending == "complete" else FinishStatus.NO_FINISH)
+            yield 123, "first", {"id": 1}, finish
+            if ending != "complete":
+                waiting.set()
+                await asyncio.Event().wait()
+
+        manager._wait_to_token_package = results
+        stream = manager.generate("prompt", _sampling_params(), _multimodal_params(), None)
+        await stream.__anext__()
+        status = manager.req_id_to_out_inf[123]
+        if ending == "close":
+            await stream.aclose()
+        elif ending == "cancel":
+            pending = asyncio.create_task(stream.__anext__())
+            await waiting.wait()
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        else:
+            with pytest.raises(StopAsyncIteration):
+                await stream.__anext__()
+        assert status.output_consumer_closed is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_closed_output_consumer_releases_shm_backpressure(closed):
+    async def run():
+        manager = _make_manager(NodeRole.NORMAL)
+        req = Req()
+        req.request_id = req.group_req_id = 123
+        req.ref_count = 1
+        req.finish_status.set_status(FinishStatus.FINISHED_ABORTED)
+        req.can_released_mark = True
+        req.out_tokens_queue.push("first", 0, False, 1)
+        req.out_tokens_queue.push("last", 1, False, 2)
+        status = _req_status([req])
+        status.output_consumer_closed = closed
+        status.out_token_info_list.append(object())
+        manager.req_id_to_out_inf = {123: status}
+        manager.zmq_recv_socket = SimpleNamespace(recv_pyobj=AsyncMock(side_effect=[None, StopAsyncIteration()]))
+        manager.recycle_resource_loop = AsyncMock()
+        with pytest.raises(StopAsyncIteration):
+            await manager.handle_loop()
+        assert req.out_tokens_queue.is_empty() is closed
+        assert req.can_release() is closed
+        assert bool(status.out_token_info_list) is not closed
+
+    asyncio.run(run())

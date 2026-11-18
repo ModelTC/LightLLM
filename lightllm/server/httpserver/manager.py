@@ -573,6 +573,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
             # RL：兜底注销 generation admission（含中途异常 / abort 提前 return），
             # 防止 pending 请求泄漏导致 pause 无法正确结束。
             with CancelScope(shield=True):
+                req_status = self.req_id_to_out_inf.get(group_request_id)
+                if req_status is not None:
+                    req_status.output_consumer_closed = True
                 if self.rl_controller is not None:
                     await self.rl_controller.unregister_generation_admission(group_request_id)
                 if running_request_registered:
@@ -1076,8 +1079,17 @@ class HttpServerManager(HttpRlManagerHelper, object):
             try:
                 for group_req_id_ in list(self.req_id_to_out_inf.keys()):
                     req_status = self.req_id_to_out_inf.get(group_req_id_, None)
+                    if req_status is None:
+                        continue
+                    if req_status.output_consumer_closed:
+                        # Keep detokenization moving until it can return its Req reference.
+                        req_status.out_token_info_list.clear()
+                        for req in req_status.group_req_objs.shm_req_objs:
+                            while not req.out_tokens_queue.is_empty():
+                                req.out_tokens_queue.pop_no_ret()
+                        continue
                     # Leave unread tokens in SHM while a batch is already queued.
-                    if req_status is None or req_status.out_token_info_list:
+                    if req_status.out_token_info_list:
                         continue
 
                     token_list = []
@@ -1185,6 +1197,7 @@ class ReqStatus:
             time_mark=start_time,
         )
         self.out_token_info_list = []
+        self.output_consumer_closed = False
 
     def has_timed_out_waiting_for_inference(self) -> bool:
         """按 PD Master 下发的资源等待上限判断请求是否在 Router 中超时。"""
