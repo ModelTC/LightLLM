@@ -280,12 +280,8 @@ def ep_zero_padding(
     )
 
 
-# TODO: 当前实现会为每个 chunk 重新遍历所有接收 token 的 top-k metadata，并反复
-# 读取、累加和写回长期保留的 gather_out，仍有较大的性能提升空间。后续可以考虑
-# 预先构建 chunk-local 的路由映射，减少无效 metadata 扫描和全局内存读写。
 @triton.jit
 def _ep_gather_chunk_kernel(
-    total_recv_tokens,
     chunk,
     chunk_stride_m,
     chunk_stride_k,
@@ -301,36 +297,26 @@ def _ep_gather_chunk_kernel(
     hidden_size,
     TOPK: tl.constexpr,
     BLOCK_D: tl.constexpr,
-    NEED_HIDDEN_MASK: tl.constexpr,
+    HIDDEN_BLOCKS: tl.constexpr,
+    INITIALIZE: tl.constexpr,
 ):
-    hidden_block_id = tl.program_id(0)
-    start_recv_token_id = tl.program_id(1)
-    recv_token_grid_size = tl.num_programs(1)
-    hidden_offsets = hidden_block_id * BLOCK_D + tl.arange(0, BLOCK_D)
-    if NEED_HIDDEN_MASK:
-        hidden_mask = hidden_offsets < hidden_size
-
-    for recv_token_id in range(start_recv_token_id, total_recv_tokens, recv_token_grid_size):
-        output_ptrs = output + recv_token_id * output_stride_m + hidden_offsets * output_stride_k
-        if NEED_HIDDEN_MASK:
-            accumulator = tl.load(output_ptrs, mask=hidden_mask, other=0.0).to(tl.float32)
-        else:
-            accumulator = tl.load(output_ptrs).to(tl.float32)
-        for topk_id in range(TOPK):
-            slot = tl.load(recv_src_metadata + recv_token_id * metadata_stride_m + (topk_id + 2) * metadata_stride_k)
-            if slot >= chunk_start and slot < chunk_end:
-                local_row = (slot - chunk_start).to(tl.int64)
-                chunk_ptrs = chunk + local_row * chunk_stride_m + hidden_offsets * chunk_stride_k
-                if NEED_HIDDEN_MASK:
-                    value = tl.load(chunk_ptrs, mask=hidden_mask, other=0.0)
-                else:
-                    value = tl.load(chunk_ptrs)
-                weight = tl.load(weights + slot)
-                accumulator += value.to(tl.float32) * weight
-        if NEED_HIDDEN_MASK:
-            tl.store(output_ptrs, accumulator, mask=hidden_mask)
-        else:
-            tl.store(output_ptrs, accumulator)
+    pid = tl.program_id(0)
+    row = (pid // HIDDEN_BLOCKS).to(tl.int64)
+    cols = (pid % HIDDEN_BLOCKS) * BLOCK_D + tl.arange(0, BLOCK_D)
+    valid_cols = cols < hidden_size
+    output_ptrs = output + row * output_stride_m + cols * output_stride_k
+    if INITIALIZE:
+        accumulator = tl.full((BLOCK_D,), 0, tl.float32)
+    else:
+        accumulator = tl.load(output_ptrs, mask=valid_cols, other=0.0).to(tl.float32)
+    for topk_id in tl.static_range(TOPK):
+        slot = tl.load(recv_src_metadata + row * metadata_stride_m + (topk_id + 2) * metadata_stride_k)
+        in_chunk = (slot >= chunk_start) & (slot < chunk_end)
+        local_row = (slot - chunk_start).to(tl.int64)
+        value = tl.load(chunk + local_row * chunk_stride_m + cols * chunk_stride_k, mask=in_chunk & valid_cols, other=0)
+        weight = tl.load(weights + slot, mask=in_chunk, other=0)
+        accumulator += value.to(tl.float32) * weight
+    tl.store(output_ptrs, accumulator, mask=valid_cols)
 
 
 @torch.no_grad()
@@ -340,6 +326,8 @@ def ep_gather_chunk(
     weights: torch.Tensor,  # [num_expanded_tokens]
     recv_src_metadata: torch.Tensor,  # [num_recv_tokens, topk + 2]
     output: torch.Tensor,  # [num_recv_tokens, hidden_size]
+    *,
+    initialize: bool = False,
 ):
     """Accumulate one expanded W2-output chunk into dense receive-token rows.
 
@@ -347,14 +335,15 @@ def ep_gather_chunk(
     token to global expanded-row IDs. Entries covered by this chunk are read,
     multiplied by ``weights``, and accumulated in-place into ``output``. This
     allows multiple chunks to contribute to the same dense output tensor.
+    With ``initialize=True``, write the first chunk's sum directly into fresh workspace.
     """
     topk = recv_src_metadata.shape[1] - 2
     block_d = 1024
     hidden_size = output.shape[1]
     assert chunk.shape[1] == hidden_size
-    grid = (triton.cdiv(output.shape[1], block_d), min(output.shape[0], 1024))
+    hidden_blocks = triton.cdiv(hidden_size, block_d)
+    grid = (output.shape[0] * hidden_blocks,)
     _ep_gather_chunk_kernel[grid](
-        total_recv_tokens=output.shape[0],
         chunk=chunk,
         chunk_stride_m=chunk.stride(0),
         chunk_stride_k=chunk.stride(1),
@@ -370,9 +359,9 @@ def ep_gather_chunk(
         hidden_size=hidden_size,
         TOPK=topk,
         BLOCK_D=block_d,
-        # 常见整块 hidden size 保持原来的无 mask kernel；仅尾块不完整时启用边界保护。
-        NEED_HIDDEN_MASK=hidden_size % block_d != 0,
-        num_warps=2,
+        HIDDEN_BLOCKS=hidden_blocks,
+        INITIALIZE=initialize,
+        num_warps=4,
     )
 
 

@@ -36,7 +36,7 @@ from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
 )
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType, autotune
-from lightllm.utils.device_utils import is_sm100_gpu
+from lightllm.utils.device_utils import is_sm90_gpu, is_sm100_gpu
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
 from lightllm.utils.tensor_buffer_manager import TensorBufferManager
 
@@ -749,14 +749,14 @@ def chunked_expanded_moe_forward(
     all_tokens, intermediate_twice = sum(num_recv_tokens_per_expert_list), w1.shape[1]
     intermediate_size, hidden_size = intermediate_twice // 2, w2.shape[1]
     group32 = block_size_k == 32
-    fused_activation = group32 and alpha is None
+    fused_activation = alpha is None and (group32 or is_sm90_gpu())
     is_autotune_warmup = Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL)
     if all_tokens == 0:
         # Empty ranks must join the same activation autotuner as the first chunk on their peers.
         if is_autotune_warmup:
             dummy = torch.zeros((1, intermediate_twice), device=recv_x[0].device, dtype=hidden_dtype)
             if fused_activation:
-                silu_and_mul_quant_fp8(dummy, block_size_k, recv_x[0].dtype, limit=limit)
+                silu_and_mul_quant_fp8(dummy, block_size_k, recv_x[0].dtype, limit=limit, use_ue8m0_scales=group32)
             else:
                 out = dummy.new_empty((1, intermediate_size))
                 silu_and_mul_fwd(dummy, out, alpha=alpha, limit=limit, clamp_up_add_one=clamp_up_add_one)
@@ -789,7 +789,8 @@ def chunked_expanded_moe_forward(
         hidden_dtype=hidden_dtype,
         quant_dtype=recv_x[0].dtype,
         expert_alignment=alignment,
-        fused_activation=fused_activation,
+        # B128 rounds the gather to hidden_dtype between chunks. Keep its original chunk boundaries.
+        fused_activation=group32 and fused_activation,
     )
 
     if max_chunk_rows == 0:
@@ -801,7 +802,6 @@ def chunked_expanded_moe_forward(
 
     workspace_manager = TensorBufferManager(workspace)
     gather_out = workspace_manager.alloc((gather_rows, hidden_size), hidden_dtype)
-    gather_out.zero_()
 
     # 不同 rank 接收到的 token 数不同，因此实际 chunk 数也可能不同。Autotuner warmup
     # 中的分布式通信要求各 rank 进入 autotuning 的次数一致，否则容易发生通信错位。
@@ -839,7 +839,9 @@ def chunked_expanded_moe_forward(
                     chunk_input, (w1, w1_scale), gemm_out_a, m_indices[chunk_start:chunk_end]
                 )
             if fused_activation:
-                silu_and_mul_quant_fp8_out(gemm_out_a, qsilu_out, qsilu_out_scale, block_size_k, limit=limit)
+                silu_and_mul_quant_fp8_out(
+                    gemm_out_a, qsilu_out, qsilu_out_scale, block_size_k, limit=limit, use_ue8m0_scales=group32
+                )
             else:
                 silu_and_mul_fwd(gemm_out_a, silu_out, alpha=alpha, limit=limit, clamp_up_add_one=clamp_up_add_one)
             workspace_manager.free(gemm_out_a)
@@ -889,7 +891,9 @@ def chunked_expanded_moe_forward(
             for quant_buffer in quant_buffers:
                 workspace_manager.free(quant_buffer)
 
-            ep_gather_chunk(gemm_out_b, chunk_start, recv_topk_weights, recv_src_metadata, gather_out)
+            ep_gather_chunk(
+                gemm_out_b, chunk_start, recv_topk_weights, recv_src_metadata, gather_out, initialize=chunk_index == 0
+            )
             workspace_manager.free(gemm_out_b)
     finally:
         if is_autotune_warmup:

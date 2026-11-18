@@ -4,6 +4,7 @@ import triton
 import triton.language as tl
 from lightllm.common.triton_utils.autotuner import autotune
 from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
+from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import _ceil_to_ue8m0, _pack_ue8m0_scales
 
 
@@ -25,6 +26,7 @@ def _silu_and_mul_quant_fp8(
     USE_GELU: tl.constexpr,
     USE_UE8M0_SCALE: tl.constexpr,
     USE_PACKED_UE8M0: tl.constexpr,
+    USE_SGL_FP32_SCALE: tl.constexpr,
 ):
     groups_per_row: tl.constexpr = size_n // GROUP_SIZE
     lane = tl.arange(0, GROUPS_PER_CTA)
@@ -56,10 +58,16 @@ def _silu_and_mul_quant_fp8(
     gate = gate.to(input_ptr.dtype.element_ty)
     # Preserve both rounding boundaries of activation -> BF16 buffer -> FP8.
     value = (up * gate.to(tl.float32)).to(input_ptr.dtype.element_ty).to(tl.float32)
-    scale = tl.maximum(tl.max(tl.abs(value), axis=1), eps) / fp8_max
+    amax = tl.maximum(tl.max(tl.abs(value), axis=1), eps)
+    scale = amax / fp8_max
     if USE_UE8M0_SCALE or USE_PACKED_UE8M0:
         scale = _ceil_to_ue8m0(scale)
-    quant = tl.clamp(value / scale[:, None], -fp8_max, fp8_max).to(quant_ptr.dtype.element_ty)
+    if USE_SGL_FP32_SCALE:
+        # SGL v2 computes this multiplier independently of its stored FP32 scale.
+        scaled = value * (fp8_max / amax)[:, None]
+    else:
+        scaled = value / scale[:, None]
+    quant = tl.clamp(scaled, -fp8_max, fp8_max).to(quant_ptr.dtype.element_ty)
     tl.store(quant_ptr + ids[:, None] * GROUP_SIZE + cols, quant, mask)
     if USE_PACKED_UE8M0:
         packs_per_cta: tl.constexpr = GROUPS_PER_CTA // 4
@@ -125,6 +133,7 @@ def silu_and_mul_quant_fp8_out(
         USE_GELU=ffn_use_tanh_approximate_gelu(),
         USE_UE8M0_SCALE=use_ue8m0_scales,
         USE_PACKED_UE8M0=use_packed_ue8m0,
+        USE_SGL_FP32_SCALE=HAS_SGL_KERNEL and not (use_ue8m0_scales or use_packed_ue8m0),
         GROUPS_PER_CTA=groups_per_cta,
         num_warps=run_config["num_warps"],
     )
