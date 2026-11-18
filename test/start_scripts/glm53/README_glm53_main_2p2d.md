@@ -23,9 +23,10 @@ P0/P1 构成 TP16/DP16 的 Prefill 组，D0/D1 构成独立的 TP16/DP16 Decode 
 /nvme/sensenova-flash-320b-v22-v28-average-fp8-e8m0
 ```
 
-脚本保留源分支的 1M 上下文、MTP3、BF16 SSM、Replay8/precompute 和 FP8 KV 设置。
+脚本保留源分支的 1M 上下文、BF16 SSM 和 FP8 KV 设置。Prefill 使用 MTP1/native，
+Decode 使用 MTP3/Replay8 precompute。
 使用主干当前接口：显式指定 BF16 模型 dtype，FP8 DSA 的 PD page size 为 32768，
-Replay 配置仅包含 `cache_len` 和 `compute_mode`。
+page num 为 2。Replay 配置仅包含 `cache_len` 和 `compute_mode`。
 
 ## 启动入口
 

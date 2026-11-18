@@ -101,31 +101,32 @@ else
     --nnodes 2 --node_rank "$NODE_RANK" --nccl_host "$CONFIG_SERVER_HOST" --nccl_port "$NCCL_PORT"
     --use_config_server_to_init_nccl
     --config_server_host "$CONFIG_SERVER_HOST" --config_server_port "$CONFIG_SERVER_PORT"
-    --pd_trans_mode nixl --pd_kv_page_size 32768 --pd_kv_page_num 1
+    --pd_trans_mode nixl --pd_kv_page_size 32768 --pd_kv_page_num 2
     --tp 16 --dp 16 --enable_ep_moe --host 0.0.0.0 --port "$PORT"
-    --graph_max_batch_size 16 --max_req_total_len 1048576
-    --mtp_mode eagle_with_att --mtp_draft_model_dir "$MODEL_DIR" --mtp_step 3
+    --max_req_total_len 1048576
+    --mtp_mode eagle_with_att --mtp_draft_model_dir "$MODEL_DIR"
     --quant_type fp8w8a8-b128-deepgemm --linear_att_ssm_data_type bfloat16
-    --llm_kv_type fp8kv_dsa --tool_call_parser glm47 --reasoning_parser glm45
+    --llm_kv_type fp8kv_dsa --llm_prefill_att_backend auto flashkda
+    --llm_decode_att_backend auto triton --tool_call_parser glm47 --reasoning_parser glm45
     --linear_att_hash_page_size 2048 --linear_att_cache_size 64
-    --ssm_state_mode replay
-    --ssm_replay_config '{"cache_len":8,"compute_mode":"precompute"}'
   )
   if [[ "$RUN_MODE" == prefill ]]; then
     ARGS+=(
       --use_dp_split_mode_connect_pd_master
-      --batch_max_tokens 4096 --chunked_prefill_size 2048
+      --batch_max_tokens 8192 --chunked_prefill_size 4096
       --running_max_req_size 128 --mem_fraction 0.75 --disable_cudagraph
+      --mtp_step 1 --ssm_state_mode native
       --linear_att_page_block_num 8
-      --enable_cpu_cache --cpu_cache_storage_size 1024
+      --enable_cpu_cache --cpu_cache_storage_size 512
       --enable_disk_cache --disk_cache_storage_size 10240
-      --disk_cache_dir "${DISK_CACHE_DIR:-${RUN_DIR}/disk_cache/${ROLE}}"
+      --disk_cache_dir "${DISK_CACHE_DIR:-/nvme/lightllm_disk_cache/glm53_main_v1/${ROLE}}"
     )
   else
     ARGS+=(
       --batch_max_tokens 1024 --running_max_req_size 256
-      --max_total_token_num 2800000 --mem_fraction 0.85
-      --enable_profiling torch_profiler
+      --mem_fraction 0.85 --graph_max_batch_size 16 --dp_balancer bs_balancer
+      --mtp_step 3 --ssm_state_mode replay
+      --ssm_replay_config '{"cache_len":8,"compute_mode":"precompute"}'
     )
   fi
 fi
