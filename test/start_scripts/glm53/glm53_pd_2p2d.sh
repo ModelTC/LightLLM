@@ -119,12 +119,12 @@ else
       --linear_att_page_block_num 8
       --enable_cpu_cache --cpu_cache_storage_size 512
       --enable_disk_cache --disk_cache_storage_size 10240
-      --disk_cache_dir "${DISK_CACHE_DIR:-/nvme/lightllm_disk_cache/glm53_main_v1/${ROLE}}"
+      --disk_cache_dir "${DISK_CACHE_DIR:-/mnt/openrouter/lightllm_disk_cache/glm53_main_v1/${ROLE}}"
     )
   else
     ARGS+=(
       --batch_max_tokens 1024 --running_max_req_size 256
-      --mem_fraction 0.85 --graph_max_batch_size 16 --dp_balancer bs_balancer
+      --mem_fraction 0.85 --graph_max_batch_size 32 --dp_balancer bs_balancer
       --mtp_step 3 --ssm_state_mode replay
       --ssm_replay_config '{"cache_len":8,"compute_mode":"precompute"}'
     )
