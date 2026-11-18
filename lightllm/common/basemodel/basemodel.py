@@ -264,17 +264,17 @@ class TpPartBaseModel:
     def _filter_hf_weight_keys(self, keys):
         return keys
 
-    def named_resident_weights(self):
+    def named_weights(self):
         layers = [
             ("pre_post", self.pre_post_weight),
             *((f"layers.{index}", layer) for index, layer in enumerate(self.trans_layers_weight)),
         ]
         return {
-            f"{prefix}.{name}": weight
-            for prefix, layer in layers
-            for name, weight in layer.named_weights().items()
-            if weight.supports_resident_cache
+            f"{prefix}.{name}": weight for prefix, layer in layers for name, weight in layer.named_weights().items()
         }
+
+    def named_resident_weights(self):
+        return {name: weight for name, weight in self.named_weights().items() if weight.supports_resident_cache}
 
     def _finalize_resident_weights(self):
         self.pre_post_weight.verify_load()
@@ -425,18 +425,17 @@ class TpPartBaseModel:
         if self.args.run_mode != "prefill" or not is_sm90_gpu():
             return
         warmed = set()
-        for layer in [self.pre_post_weight, *self.trans_layers_weight]:
-            for weight in layer.named_weights().values():
-                if (
-                    not isinstance(weight, MMWeightTpl)
-                    or type(weight.quant_method) is not DeepGEMMFP8w8a8B128QuantizationMethod
-                ):
-                    continue
-                key = (weight.mm_param.weight.shape, weight.data_type_)
-                if key in warmed:
-                    continue
-                weight.quant_method.warmup(weight.mm_param, self.batch_max_tokens, weight.data_type_)
-                warmed.add(key)
+        for weight in self.named_weights().values():
+            if (
+                not isinstance(weight, MMWeightTpl)
+                or type(weight.quant_method) is not DeepGEMMFP8w8a8B128QuantizationMethod
+            ):
+                continue
+            key = (weight.mm_param.weight.shape, weight.data_type_)
+            if key in warmed:
+                continue
+            weight.quant_method.warmup(weight.mm_param, self.batch_max_tokens, weight.data_type_)
+            warmed.add(key)
         if warmed:
             logger.info("Warmed %s SM90 FP8 dense GEMM shapes through %s rows", len(warmed), self.batch_max_tokens)
 

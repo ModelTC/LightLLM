@@ -86,3 +86,29 @@ def test_model_warms_selected_dense_shapes_once_and_propagates_failures(monkeypa
     monkeypatch.setattr(method, "warmup", fail)
     with pytest.raises(RuntimeError, match="native compilation failed"):
         model._kernel_warmup()
+
+
+def test_dspark_model_owned_projection_is_warmed_and_keeps_resident_filter(monkeypatch):
+    from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+
+    monkeypatch.setattr(device_utils, "is_sm90_gpu", lambda: True)
+    method = deepgemm.DeepGEMMFP8w8a8B128QuantizationMethod.__new__(deepgemm.DeepGEMMFP8w8a8B128QuantizationMethod)
+    projection = ROWMMWeight.__new__(ROWMMWeight)
+    projection.quant_method = method
+    projection.mm_param = WeightPack(torch.empty((1536, 5120)))
+    projection.data_type_ = torch.bfloat16
+    host = SimpleNamespace(supports_resident_cache=False)
+    model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
+    model.args = SimpleNamespace(run_mode="prefill")
+    model.batch_max_tokens = 8192
+    model.pre_post_weight = SimpleNamespace(named_weights=lambda: {"host": host})
+    model.trans_layers_weight = []
+    model.context_wkv_weight = projection
+    calls = []
+    monkeypatch.setattr(method, "warmup", lambda pack, rows, dtype: calls.append((pack, rows, dtype)))
+
+    TpPartBaseModel._kernel_warmup(model)
+
+    assert calls == [(projection.mm_param, 8192, torch.bfloat16)]
+    assert model.named_weights() == {"pre_post.host": host, "context_wkv": projection}
+    assert model.named_resident_weights() == {"context_wkv": projection}
