@@ -15,47 +15,42 @@ LIGHTLLM_DISABLE_DEEPGEMM_MHC = os.getenv("LIGHTLLM_DISABLE_DEEPGEMM_MHC", "Fals
 
 
 @triton.jit
-def _hc_prepare_prenorm_kernel(
+def _hc_mix_weights(
     gemm_partial,  # 输入 [P, T, M]，fp32；投影的 split-K 部分和。
     sqrsum_partial,  # 输入 [P, T]，fp32；残差平方和的 split-K 部分和。
     scale,  # 输入 [3]，fp32；pre、post、residual 三组缩放系数。
     base,  # 输入 [M]，fp32；M = 2 * S + S * S。
-    pre,  # 输出 [T, S]，fp32。
-    post,  # 输出 [T, S]，fp32。
-    residual_mix,  # 输出 [T, S, S]，fp32；最后两维为输入、输出 stream。
+    token,
     gemm_stride_s,
     gemm_stride_m: tl.constexpr,
     sqrsum_stride_s,
     sqrsum_stride_m: tl.constexpr,
-    pre_stride_m: tl.constexpr,
-    residual_stride_m: tl.constexpr,
     FLATTENED_HIDDEN: tl.constexpr,
     RMS_EPS: tl.constexpr,
     STREAMS: tl.constexpr,
     HC_EPS: tl.constexpr,
     POST_MULTIPLIER: tl.constexpr,
     SINKHORN_ITERS: tl.constexpr,
-    N_SPLITS: tl.constexpr,
+    N_SPLITS,
+    BLOCK_SPLITS: tl.constexpr,
+    UNROLL_SINKHORN: tl.constexpr,
 ):
-    """归并分片并准备混合权重：[P, T, M] / [P, T] -> [T, S] / [T, S, S]。
-
-    T = tokens，S = STREAMS，M = 2 * S + S * S，P = N_SPLITS。
-    FLATTENED_HIDDEN = S * H，用于从平方和计算每个 token 的 RMS 倒数。
-    每个 program 处理一个 token，写入 pre/post/residual_mix，不返回 Tensor。
-    """
-    token = tl.program_id(0)
+    """Reduce split-K partitions in parallel and compute the three mixing weights."""
+    splits = tl.arange(0, BLOCK_SPLITS)
     stream_offsets = tl.arange(0, STREAMS)
     matrix_offsets = tl.arange(0, STREAMS * STREAMS)
-    pre_raw = tl.zeros((STREAMS,), dtype=tl.float32)
-    post_raw = tl.zeros((STREAMS,), dtype=tl.float32)
-    matrix_raw = tl.zeros((STREAMS * STREAMS,), dtype=tl.float32)
-    sqrsum = 0.0
-    for split in tl.static_range(N_SPLITS):
-        partial_base = gemm_partial + split * gemm_stride_s + token * gemm_stride_m
-        pre_raw += tl.load(partial_base + stream_offsets)
-        post_raw += tl.load(partial_base + STREAMS + stream_offsets)
-        matrix_raw += tl.load(partial_base + 2 * STREAMS + matrix_offsets)
-        sqrsum += tl.load(sqrsum_partial + split * sqrsum_stride_s + token * sqrsum_stride_m)
+    partial_base = gemm_partial + splits[:, None] * gemm_stride_s + token * gemm_stride_m
+    pre_raw = tl.sum(tl.load(partial_base + stream_offsets[None, :], splits[:, None] < N_SPLITS, 0.0), axis=0)
+    post_raw = tl.sum(
+        tl.load(partial_base + STREAMS + stream_offsets[None, :], splits[:, None] < N_SPLITS, 0.0), axis=0
+    )
+    matrix_raw = tl.sum(
+        tl.load(partial_base + 2 * STREAMS + matrix_offsets[None, :], splits[:, None] < N_SPLITS, 0.0), axis=0
+    )
+    sqrsum = tl.sum(
+        tl.load(sqrsum_partial + splits * sqrsum_stride_s + token * sqrsum_stride_m, splits < N_SPLITS, 0.0),
+        axis=0,
+    )
     inv_rms = tl.rsqrt(sqrsum / FLATTENED_HIDDEN + RMS_EPS)
     pre_raw *= inv_rms
     post_raw *= inv_rms
@@ -68,42 +63,73 @@ def _hc_prepare_prenorm_kernel(
     residual_logits = tl.reshape(residual_logits, (STREAMS, STREAMS))
     residual_logits = residual_logits - tl.max(residual_logits, axis=1)[:, None]
     matrix = tl.exp(residual_logits)
+    # Keep the original division form instead of explicitly approximating reciprocals.
     matrix = matrix / tl.sum(matrix, axis=1)[:, None]
     matrix += HC_EPS
     matrix = matrix / (tl.sum(matrix, axis=0)[None, :] + HC_EPS)
-    for _ in tl.static_range(1, SINKHORN_ITERS):
+    for _ in tl.range(1, SINKHORN_ITERS, loop_unroll_factor=max(1, SINKHORN_ITERS - 1) if UNROLL_SINKHORN else 1):
         matrix = matrix / (tl.sum(matrix, axis=1)[:, None] + HC_EPS)
         matrix = matrix / (tl.sum(matrix, axis=0)[None, :] + HC_EPS)
 
-    tl.store(pre + token * pre_stride_m + stream_offsets, pre_values)
-    tl.store(post + token * pre_stride_m + stream_offsets, post_values)
-    tl.store(
-        residual_mix + token * residual_stride_m + matrix_offsets,
-        tl.reshape(matrix, (STREAMS * STREAMS,)),
-    )
+    return pre_values, post_values, matrix
 
 
-@triton.jit
-def _hc_pre_combine_norm_kernel(
+@triton.jit(do_not_specialize=["N_SPLITS", "gemm_stride_s", "sqrsum_stride_s"])
+def _hc_pre_norm_kernel(
     x,  # 输入 [T, S * H]，bf16；逻辑形状 [T, S, H]。
-    pre,  # 输入 [T, S]，fp32。
+    gemm_partial,
+    sqrsum_partial,
+    scale,
+    base,
+    post,
+    residual_mix,
     norm_weight,  # 输入 [H]，子层 RMSNorm 权重，通常为 bf16。
     output,  # 输出 [T, H]，bf16；加权合并后再做 RMSNorm。
     hidden: tl.constexpr,
     x_stride_m: tl.constexpr,
-    pre_stride_m: tl.constexpr,
+    gemm_stride_s,
+    gemm_stride_m: tl.constexpr,
+    sqrsum_stride_s,
+    sqrsum_stride_m: tl.constexpr,
     out_stride_m: tl.constexpr,
     STREAMS: tl.constexpr,
     NORM_EPS: tl.constexpr,
+    RMS_EPS: tl.constexpr,
+    HC_EPS: tl.constexpr,
+    POST_MULTIPLIER: tl.constexpr,
+    SINKHORN_ITERS: tl.constexpr,
+    N_SPLITS,
+    BLOCK_SPLITS: tl.constexpr,
     BLOCK_H: tl.constexpr,
+    UNROLL_SINKHORN: tl.constexpr = True,
 ):
-    """融合 stream 合并与子层 RMSNorm：[T, S, H] -> [T, H]。
-
-    T = tokens，S = STREAMS，H = hidden。每个 program 处理一个 token 的
-    整行 hidden；先把合并结果舍入到 bf16，再以 fp32 计算均方值、归一化并乘 norm_weight。
-    结果写入 output，不返回 Tensor。
-    """
+    """Fuse split reduction, Sinkhorn, stream mixing and sublayer RMSNorm."""
     token = tl.program_id(0)
+    pre_values, post_values, matrix = _hc_mix_weights(
+        gemm_partial,
+        sqrsum_partial,
+        scale,
+        base,
+        token,
+        gemm_stride_s,
+        gemm_stride_m,
+        sqrsum_stride_s,
+        sqrsum_stride_m,
+        STREAMS * hidden,
+        RMS_EPS,
+        STREAMS,
+        HC_EPS,
+        POST_MULTIPLIER,
+        SINKHORN_ITERS,
+        N_SPLITS,
+        BLOCK_SPLITS,
+        UNROLL_SINKHORN,
+    )
+    tl.store(post + token * STREAMS + tl.arange(0, STREAMS), post_values)
+    tl.store(
+        residual_mix + token * STREAMS * STREAMS + tl.arange(0, STREAMS * STREAMS),
+        tl.reshape(matrix, (STREAMS * STREAMS,)),
+    )
     hidden_offsets = tl.arange(0, BLOCK_H)
     hidden_mask = hidden_offsets < hidden
     accumulator = tl.zeros((BLOCK_H,), dtype=tl.float32)
@@ -113,7 +139,7 @@ def _hc_pre_combine_norm_kernel(
             mask=hidden_mask,
             other=0.0,
         ).to(tl.float32)
-        pre_value = tl.load(pre + token * pre_stride_m + stream)
+        pre_value = tl.sum(tl.where(tl.arange(0, STREAMS) == stream, pre_values, 0.0), axis=0)
         accumulator += residual * pre_value
 
     # Preserve the checkpoint's bf16 rounding between stream mixing and RMSNorm.
@@ -126,6 +152,11 @@ def _hc_pre_combine_norm_kernel(
         rounded * inv_rms * weight,
         mask=hidden_mask,
     )
+
+
+def _pre_norm_num_warps(tokens: int, hidden: int) -> int:
+    # Measured on H200 for hidden 4096/6144: 8 warps up to decode-sized batches, 4 for prefill.
+    return 8 if tokens <= 256 else 4
 
 
 def _compute_prenorm_splits(tokens: int, flattened_hidden: int, device: torch.device) -> int:
@@ -203,47 +234,39 @@ def hc_pre_norm(
         sqrsum_partial = torch.empty((n_splits, tokens), dtype=torch.float32, device=x.device)
         tf32_hc_prenorm_gemm(x, fn, gemm_partial, sqrsum_partial, n_splits)
 
-    pre = torch.empty((tokens, streams), dtype=torch.float32, device=x.device)
-    post = torch.empty_like(pre)
+    post = torch.empty((tokens, streams), dtype=torch.float32, device=x.device)
     residual_mix = torch.empty((tokens, streams, streams), dtype=torch.float32, device=x.device)
-    _hc_prepare_prenorm_kernel[(tokens,)](
+    layer_input = torch.empty((tokens, hidden), dtype=x.dtype, device=x.device)
+    # One program per token reduces the split-K partials, runs Sinkhorn, mixes the
+    # streams and applies RMSNorm (ported from upstream/main). Warps follow its
+    # H200 tuning for hidden=4096: small decode batches favour 8 warps.
+    _hc_pre_norm_kernel[(tokens,)](
+        x,
         gemm_partial,
         sqrsum_partial,
         scale,
         base,
-        pre,
         post,
         residual_mix,
-        gemm_partial.stride(0),
-        gemm_partial.stride(1),
-        sqrsum_partial.stride(0),
-        sqrsum_partial.stride(1),
-        pre.stride(0),
-        residual_mix.stride(0),
-        FLATTENED_HIDDEN=flattened_hidden,
-        RMS_EPS=rms_eps,
-        STREAMS=streams,
-        HC_EPS=hc_eps,
-        POST_MULTIPLIER=post_multiplier,
-        SINKHORN_ITERS=sinkhorn_iters,
-        N_SPLITS=n_splits,
-        num_warps=1,
-    )
-
-    layer_input = torch.empty((tokens, hidden), dtype=x.dtype, device=x.device)
-    block_h = triton.next_power_of_2(hidden)
-    _hc_pre_combine_norm_kernel[(tokens,)](
-        x,
-        pre,
         norm_weight,
         layer_input,
         hidden=hidden,
         x_stride_m=x.stride(0),
-        pre_stride_m=pre.stride(0),
+        gemm_stride_s=gemm_partial.stride(0),
+        gemm_stride_m=gemm_partial.stride(1),
+        sqrsum_stride_s=sqrsum_partial.stride(0),
+        sqrsum_stride_m=sqrsum_partial.stride(1),
         out_stride_m=layer_input.stride(0),
         STREAMS=streams,
         NORM_EPS=norm_eps,
-        BLOCK_H=block_h,
-        num_warps=8,
+        RMS_EPS=rms_eps,
+        HC_EPS=hc_eps,
+        POST_MULTIPLIER=post_multiplier,
+        SINKHORN_ITERS=sinkhorn_iters,
+        N_SPLITS=n_splits,
+        BLOCK_SPLITS=triton.next_power_of_2(n_splits),
+        BLOCK_H=triton.next_power_of_2(hidden),
+        UNROLL_SINKHORN=True,
+        num_warps=_pre_norm_num_warps(tokens, hidden),
     )
     return layer_input, residual_mix, post

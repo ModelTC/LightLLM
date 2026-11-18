@@ -59,7 +59,7 @@ def setup():
     triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))
 
 
-@pytest.mark.parametrize("tokens", [3, 19, 3073])
+@pytest.mark.parametrize("tokens", [1, 3, 19, 64, 3073])
 @pytest.mark.parametrize("disable_deepgemm", [False, True], ids=["deepgemm", "torch"])
 def test_mhc_matches_reference(tokens, disable_deepgemm, monkeypatch):
     monkeypatch.setattr(pre_norm, "LIGHTLLM_DISABLE_DEEPGEMM_MHC", disable_deepgemm)
