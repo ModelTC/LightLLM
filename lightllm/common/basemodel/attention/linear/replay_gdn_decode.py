@@ -13,7 +13,6 @@ import triton
 from lightllm.common.attention_state.bounded_att.conv_ssm_types import ConvSSMStateConfig
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_decode import (
     _decode_replay,
-    check_replay_sync_mark,
 )
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, autotune
 
@@ -31,7 +30,7 @@ def get_static_key(state, q) -> dict[str, object]:
     """区分头维度、状态精度、history 容量和投影模式。"""
     _, _, hv, kd, vd = state.ssm_state.shape
     return {
-        "v": 1,
+        "v": 2,
         "shape": str((q.shape[-2], hv, state.num_key_heads, kd, vd, state.verify_width)),
         "dtype": str((q.dtype, state.ssm_state.dtype)),
         "capacity": state.capacity,
@@ -147,16 +146,13 @@ def replay(
     # mtp_step == 0 时 verify_width 为 1。compute_mode=precompute 仍然投影；BV < 16 才退回逐 token。
     precompute_projections = state.compute_mode == "precompute" and bv >= 16
     padded_verify_width = triton.next_power_of_2(state.verify_width)
-    check_replay_sync_mark(
-        sync_mark=state.tile_sync_mark,
-        reqs=reqs,
-        value_heads=hv,
-        key_heads=state.num_key_heads,
-    )
-    _decode_replay[(triton.cdiv(vd, bv), hv, reqs.numel())](
+    double_buffer = getattr(state, "forward_cursors", None) is not None
+    capacity = state.keys.shape[-2] // 2 if double_buffer else state.keys.shape[-2]
+    history_length = 2 * capacity if double_buffer else capacity
+    _decode_replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](
         Q=q,
-        StepK=k,
-        StepV=v,
+        Kp=k,
+        Vp=v,
         A=a,
         B=b,
         Alog=a_log,
@@ -169,7 +165,7 @@ def replay(
         RawValues=state.raw_values[linear_layer_idx],
         Betas=state.betas[linear_layer_idx],
         Reqs=reqs,
-        Cursors=state.cursors,
+        Cursors=state.forward_cursors if double_buffer else state.cursors,
         SyncMark=state.tile_sync_mark,
         Cu=cu_seqlens,
         Out=out,
@@ -183,16 +179,21 @@ def replay(
         KH=state.num_key_heads,
         K=kd,
         V=vd,
-        L=state.capacity,
+        L=capacity,
         HOLD=state.hold_req_id,
         BK=triton.next_power_of_2(kd),
         BV=bv,
+        VARLEN=True,
         PRECOMPUTE_PROJECTIONS=precompute_projections,
         BW=padded_verify_width,
+        FUSED_FOLD=not double_buffer,
         KDA=False,
         LOWER=state.gate_lower_bound,
+        PARALLEL_SOLVE=False,
         BQK=max(16, 2 * padded_verify_width),
-        BR=triton.next_power_of_2(max(16, state.capacity + padded_verify_width)),
+        BR=triton.next_power_of_2(max(16, capacity + padded_verify_width)),
+        HIST=history_length,
+        DOUBLE_BUFFER=double_buffer,
         NV=triton.cdiv(vd, bv),
         num_warps=run_config["num_warps"],
         num_stages=run_config["num_stages"],

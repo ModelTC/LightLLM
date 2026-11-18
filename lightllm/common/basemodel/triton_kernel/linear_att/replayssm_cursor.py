@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Update the accepted-prefix cursor after replay has returned.
-
-Replay itself does not touch the cursor: every layer must still see the length
-from the start of this step. After the last layer returns, advance the cursor
-over the replayed window. MTP verify then trims the rejected tail.
-"""
+"""Update the accepted-prefix cursor after replay has returned."""
 
 import triton
 import triton.language as tl
@@ -18,15 +13,17 @@ def _advance_cursor(
     N,
     HOLD: tl.constexpr,
     CAPACITY: tl.constexpr,
+    DOUBLE_BUFFER: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    # 先按整窗全接受。放不下时新 token 占 [0, window)，cursor 记为 window；否则加上 window。
+    # Double-buffer preparation has already selected a half that fits the
+    # window. The legacy one-ring fixture keeps its old wrap behavior.
     row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     req = tl.load(reqs + row, row < N, HOLD)
     valid = (row < N) & (req != HOLD)
     cursor = tl.load(cursors + req, valid, 0)
     window = tl.load(cu + row + 1, valid, 0) - tl.load(cu + row, valid, 0)
-    updated = tl.where(cursor + window > CAPACITY, window, cursor + window)
+    updated = cursor + window if DOUBLE_BUFFER else tl.where(cursor + window > CAPACITY, window, cursor + window)
     tl.store(cursors + req, updated, valid)
 
 
@@ -40,6 +37,7 @@ def advance_cursor(state, reqs, cu_seqlens) -> None:
         return
     assert reqs.is_cuda and cu_seqlens.is_cuda, "advance_cursor requires CUDA inputs"
     assert cu_seqlens.numel() == reqs.numel() + 1, "cu_seqlens must cover every request"
+    double_buffer = getattr(state, "forward_cursors", None) is not None
     _advance_cursor[(triton.cdiv(reqs.numel(), 256),)](
         state.cursors,
         reqs,
@@ -47,6 +45,7 @@ def advance_cursor(state, reqs, cu_seqlens) -> None:
         reqs.numel(),
         state.hold_req_id,
         state.capacity,
+        double_buffer,
         256,
         num_warps=4,
     )

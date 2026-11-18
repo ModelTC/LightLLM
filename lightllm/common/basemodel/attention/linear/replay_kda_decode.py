@@ -12,7 +12,6 @@ import triton
 
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_decode import (
     _decode_replay,
-    check_replay_sync_mark,
 )
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, autotune
 
@@ -37,7 +36,7 @@ def get_static_key(
     """区分头维度、状态精度、history 容量、gate 下界和投影模式。"""
     _, hv, kd, vd = state_ssm.shape
     return {
-        "v": 1,
+        "v": 2,
         "shape": str((q.shape[-2], hv, state_keys.shape[-3], kd, vd, state_verify_width)),
         "dtype": str((q.dtype, state_ssm.dtype)),
         "capacity": state_keys.shape[-2],
@@ -86,6 +85,7 @@ def rebuild_inputs(
     state_verify_width: int,
     state_compute_mode: str,
     state_gate_lower_bound: float,
+    state_forward_cursors: torch.Tensor | None = None,
     run_config: dict[str, int] | None = None,
 ) -> tuple[tuple, dict[str, object]]:
     """为一层 scratch 和同形状激活分配调优输入。不复制服务状态池。"""
@@ -95,7 +95,10 @@ def rebuild_inputs(
     batch = run_count if tokens == run_count else min(run_count, triton.cdiv(tokens, state_verify_width))
     slots = batch + 1
     _, hv, kd, vd = state_ssm.shape
-    key_heads, capacity = state_keys.shape[-3], state_keys.shape[-2]
+    key_heads = state_keys.shape[-3]
+    double_buffer = state_forward_cursors is not None
+    capacity = state_keys.shape[-2] // 2 if double_buffer else state_keys.shape[-2]
+    history_length = 2 * capacity if double_buffer else capacity
     device = q.device
     rows_per_slot = state_tile_sync_mark.shape[0] // state_ssm.shape[0]
     copied = [
@@ -112,13 +115,16 @@ def rebuild_inputs(
     cu = (cu * state_verify_width).clamp_max(tokens)
     return (), dict(
         state_ssm=torch.empty(slots, hv, kd, vd, device=device, dtype=state_ssm.dtype).normal_(0, 0.02),
-        state_keys=torch.empty(slots, key_heads, capacity, kd, device=device, dtype=state_keys.dtype),
-        state_deltas=torch.empty(slots, hv, capacity, vd, device=device, dtype=state_deltas.dtype),
-        state_gates=torch.empty(slots, hv, capacity, kd, device=device, dtype=state_gates.dtype),
-        state_raw_keys=torch.empty(slots, key_heads, capacity, kd, device=device, dtype=state_raw_keys.dtype),
-        state_raw_values=torch.empty(slots, hv, capacity, vd, device=device, dtype=state_raw_values.dtype),
-        state_betas=torch.empty(slots, hv, capacity, device=device, dtype=state_betas.dtype),
+        state_keys=torch.empty(slots, key_heads, history_length, kd, device=device, dtype=state_keys.dtype),
+        state_deltas=torch.empty(slots, hv, history_length, vd, device=device, dtype=state_deltas.dtype),
+        state_gates=torch.empty(slots, hv, history_length, kd, device=device, dtype=state_gates.dtype),
+        state_raw_keys=torch.empty(slots, key_heads, history_length, kd, device=device, dtype=state_raw_keys.dtype),
+        state_raw_values=torch.empty(slots, hv, history_length, vd, device=device, dtype=state_raw_values.dtype),
+        state_betas=torch.empty(slots, hv, history_length, device=device, dtype=state_betas.dtype),
         state_cursors=torch.zeros(slots, dtype=torch.int32, device=device),
+        state_forward_cursors=(
+            torch.zeros(slots, dtype=torch.int32, device=device) if double_buffer else None
+        ),
         state_tile_sync_mark=torch.zeros((slots * rows_per_slot, key_heads), dtype=torch.int32, device=device),
         q=copied[0],
         k=copied[1],
@@ -171,12 +177,13 @@ def replay(
     state_verify_width: int,
     state_compute_mode: str,
     state_gate_lower_bound: float,
+    state_forward_cursors: torch.Tensor | None = None,
     run_config: dict[str, int] | None = None,
 ) -> torch.Tensor:
     """执行一层 KDA replay decode。
 
     state_* 张量已经是这一层的视图。ssm 是 [slots, value_heads, key_dim, value_dim]，
-    keys 是 [slots, key_heads, capacity, key_dim]。最后一个 slot 是 HOLD。
+    keys 是 [slots, key_heads, 2 * capacity, key_dim]。最后一个 slot 是 HOLD。
     q、k、v 是 [tokens, heads, dim]。cu_seqlens 与 reqs 逐行对齐，长度是请求数加一。
     宽度为 1 时它是 0, 1, 2, ...。
     """
@@ -186,23 +193,19 @@ def replay(
         run_config = {"BV": 32, "num_warps": 1, "num_stages": 3}
     _, hv, kd, vd = state_ssm.shape
     key_heads = state_keys.shape[-3]
-    capacity = state_keys.shape[-2]
+    double_buffer = state_forward_cursors is not None
+    capacity = state_keys.shape[-2] // 2 if double_buffer else state_keys.shape[-2]
+    history_length = 2 * capacity if double_buffer else capacity
     assert key_heads in (q.shape[-2], hv)
     out = torch.empty_like(v)
     bv = run_config["BV"]
     # mtp_step == 0 时 verify_width 为 1。compute_mode=precompute 仍然投影；BV < 16 才退回逐 token。
     precompute_projections = state_compute_mode == "precompute" and bv >= 16
     padded_verify_width = triton.next_power_of_2(state_verify_width)
-    check_replay_sync_mark(
-        sync_mark=state_tile_sync_mark,
-        reqs=reqs,
-        value_heads=hv,
-        key_heads=key_heads,
-    )
-    _decode_replay[(triton.cdiv(vd, bv), hv, reqs.numel())](
+    _decode_replay[(triton.cdiv(vd, bv), reqs.numel(), hv)](
         Q=q,
-        StepK=k,
-        StepV=v,
+        Kp=k,
+        Vp=v,
         A=a,
         B=b,
         Alog=a_log,
@@ -215,7 +218,7 @@ def replay(
         RawValues=state_raw_values,
         Betas=state_betas,
         Reqs=reqs,
-        Cursors=state_cursors,
+        Cursors=state_forward_cursors if double_buffer else state_cursors,
         SyncMark=state_tile_sync_mark,
         Cu=cu_seqlens,
         Out=out,
@@ -233,12 +236,17 @@ def replay(
         HOLD=state_ssm.shape[0] - 1,
         BK=triton.next_power_of_2(kd),
         BV=bv,
+        VARLEN=True,
         PRECOMPUTE_PROJECTIONS=precompute_projections,
         BW=padded_verify_width,
+        FUSED_FOLD=not double_buffer,
         KDA=True,
         LOWER=state_gate_lower_bound,
+        PARALLEL_SOLVE=False,
         BQK=max(16, 2 * padded_verify_width),
         BR=triton.next_power_of_2(max(16, capacity + padded_verify_width)),
+        HIST=history_length,
+        DOUBLE_BUFFER=double_buffer,
         NV=triton.cdiv(vd, bv),
         num_warps=run_config["num_warps"],
         num_stages=run_config["num_stages"],

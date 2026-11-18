@@ -13,6 +13,10 @@ import torch
 
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_cursor import advance_cursor
 from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_fold import fold_prefix
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_prepare import (
+    fold_current_history,
+    prepare_decode,
+)
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 from lightllm.utils.log_utils import init_logger
 
@@ -95,12 +99,19 @@ class ReplayKDAState(BoundedAttentionState):
         self.verify_width = verify_width
         self.compute_mode = compute_mode
         layers, slots, hv, k, v = self.ssm_state.shape
+        self.fold_programs = (
+            8 * torch.cuda.get_device_properties(self.ssm_state.device).multi_processor_count
+            if self.ssm_state.is_cuda
+            else 0
+        )
         self.num_key_heads = config.num_k_heads
         assert self.num_key_heads > 0 and hv % self.num_key_heads == 0
         # 最后一个 slot 是 HOLD，replay 写零并且不记 history。
         self.hold_req_id = slots - 1
-        # cursor 是已接受、尚未折回的长度。各层只读，最后一层返回后才按整窗推进。
+        # cursor packs the active history half and its accepted-token count.
+        # Each layer reads it, while the final layer advances it after replay.
         self.cursors = torch.zeros(slots, dtype=torch.int32, device=device)
+        self.forward_cursors = torch.zeros_like(self.cursors)
         # 按 launch 行和 key head 同步。每个请求槽留 mtp_step + 6 行，盖住验证窗口和重复的 HOLD。
         self.tile_sync_mark = torch.zeros(
             (slots * (mtp_step + 6), self.num_key_heads), dtype=torch.int32, device=device
@@ -121,13 +132,13 @@ class ReplayKDAState(BoundedAttentionState):
             else torch.float32
         )
         # KDA 的 g 按 key 通道存。
-        key_shape = (layers, slots, self.num_key_heads, capacity, k)
+        key_shape = (layers, slots, self.num_key_heads, 2 * capacity, k)
         self.keys = torch.empty(key_shape, dtype=history_dtype, device=device)
-        self.deltas = torch.empty((layers, slots, hv, capacity, v), dtype=history_dtype, device=device)
-        self.gates = torch.empty((layers, slots, hv, capacity, k), dtype=torch.float32, device=device)
+        self.deltas = torch.empty((layers, slots, hv, 2 * capacity, v), dtype=history_dtype, device=device)
+        self.gates = torch.empty((layers, slots, hv, 2 * capacity, k), dtype=torch.float32, device=device)
         self.raw_keys = torch.empty(key_shape, dtype=config.conv_dtype, device=device)
-        self.raw_values = torch.empty((layers, slots, hv, capacity, v), dtype=config.conv_dtype, device=device)
-        self.betas = torch.empty((layers, slots, hv, capacity), dtype=torch.float32, device=device)
+        self.raw_values = torch.empty((layers, slots, hv, 2 * capacity, v), dtype=config.conv_dtype, device=device)
+        self.betas = torch.empty((layers, slots, hv, 2 * capacity), dtype=torch.float32, device=device)
 
     def get_state_type(self) -> str:
         """返回算法名和 Conv/SSM 存储精度。"""
@@ -191,6 +202,7 @@ class ReplayKDAState(BoundedAttentionState):
             self.conv_state[:, req_idx].zero_()
             self.ssm_state[:, req_idx].zero_()
             self.cursors[req_idx].zero_()
+            self.forward_cursors[req_idx].zero_()
             if self.mtp_enabled:
                 self.mtp_state_index[req_idx].fill_(0)
 
@@ -233,6 +245,7 @@ class ReplayKDAState(BoundedAttentionState):
         copy_bounded_att_tensors(copies=ssm_copies)
         for req_idx in req_indices:
             self.cursors[req_idx].zero_()
+            self.forward_cursors[req_idx].zero_()
             if self.mtp_enabled:
                 self.mtp_state_index[req_idx].fill_(0)
 
@@ -368,6 +381,7 @@ class ReplayKDAState(BoundedAttentionState):
         copy_bounded_att_tensors(copies=ssm_copies)
         for dst_req in dst_req_indices:
             self.cursors[dst_req].zero_()
+            self.forward_cursors[dst_req].zero_()
             if self.mtp_enabled:
                 self.mtp_state_index[dst_req].fill_(0)
 
@@ -429,16 +443,15 @@ class ReplayKDAState(BoundedAttentionState):
         ):
             copy_bounded_att_tensors(copies=copies)
         self.cursors[req_idx].zero_()
+        self.forward_cursors[req_idx].zero_()
         if self.mtp_enabled:
             self.mtp_state_index[req_idx].fill_(0)
 
     # ========================================================================
     # 六、Replay history
     #
-    # cursor 是已接受、尚未折回的长度，各层只读。
-    # 最后一层返回后按整窗全接受推进：放不下时 cursor 变成窗口长度，否则加上窗口长度。
-    # MTP 验证后再减去没接受的尾部。宽度为 1 时窗口就是这一个 token，没有尾部可剪。
-    # 前缀放不下时，折回发生在 replay kernel 内。fold_accepted_prefix 把已接受前缀写回 canonical SSM。
+    # cursor packs the selected half and the accepted prefix length. Decode
+    # preparation toggles the half and folds the old prefix before the layers.
     # ========================================================================
 
     def finish_decode_token(self, logical_layer_id: int, reqs: torch.Tensor, cu_seqlens: torch.Tensor) -> None:
@@ -449,13 +462,23 @@ class ReplayKDAState(BoundedAttentionState):
             return
         advance_cursor(self, reqs, cu_seqlens)
 
+    def prepare_decode(self, reqs: torch.Tensor, cu_seqlens: torch.Tensor | None = None) -> None:
+        """Select the history half and fold any prefix that would overflow it."""
+
+        prepare_decode(self, reqs, cu_seqlens)
+
     def fold_accepted_prefix(self, reqs: torch.Tensor) -> None:
         """用原始 k/v 把 cursor 覆盖的已接受前缀折进 canonical SSM，并清掉这些请求的 cursor。"""
 
         if reqs.numel() == 0:
             return
-        fold_prefix(self, reqs)
+        if getattr(self, "forward_cursors", None) is not None:
+            fold_current_history(self, reqs)
+        else:
+            fold_prefix(self, reqs)
         self.cursors.index_fill_(0, reqs.long(), 0)
+        if getattr(self, "forward_cursors", None) is not None:
+            self.forward_cursors.index_fill_(0, reqs.long(), 0)
 
     # ========================================================================
     # 七、私有辅助实现

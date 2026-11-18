@@ -71,6 +71,13 @@ def fold_prefix(state, reqs, run_config=None) -> None:
     没传入 run_config 时用 BV=32、4 个 warp、3 个 stage。
     """
 
+    if getattr(state, "forward_cursors", None) is not None:
+        # Production states use the double-buffered raw history. Reuse the
+        # same recurrence as decode preparation for explicit materialization.
+        from .replayssm_prepare import fold_current_history
+
+        fold_current_history(state, reqs)
+        return
     if run_config is None:
         run_config = {"BV": 32, "num_warps": 4, "num_stages": 3}
     bv = run_config["BV"]

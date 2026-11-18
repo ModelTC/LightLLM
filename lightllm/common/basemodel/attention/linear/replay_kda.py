@@ -161,6 +161,7 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
             raise ValueError(f"expected one ReplayKDAState for {role}")
         self._init_indices(self.backend.mtp_step, matches[0].mtp_state_index)
         self.b_ssm_buffer_idx = self.b_conv_buffer_idx
+        matches[0].prepare_decode(self.b_conv_buffer_idx, self.b_cu_seqlens)
 
     def decode_att(
         self,
@@ -209,6 +210,7 @@ class ReplayKDADecodeAttState(BaseDecodeAttState):
             state_betas=state.betas[layer],
             state_cursors=state.cursors,
             state_tile_sync_mark=state.tile_sync_mark,
+            state_forward_cursors=state.forward_cursors,
             q=q,
             k=k,
             v=v,
