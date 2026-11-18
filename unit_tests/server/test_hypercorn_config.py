@@ -23,12 +23,12 @@ def test_hypercorn_args_use_builtin_config_without_file():
     assert _hypercorn_config_args(args) == ["--config", "python:lightllm.server.hypercorn_config"]
 
 
-def test_default_hypercorn_config_uses_128_mib_websocket_limit():
+def test_default_hypercorn_config_uses_256_mib_websocket_limit():
     config = Config.from_object("lightllm.server.hypercorn_config")
 
     assert config.keep_alive_timeout == 10
     assert config.websocket_max_message_size == get_lightllm_websocket_max_message_size()
-    assert config.websocket_max_message_size == 128 * 1024 * 1024
+    assert config.websocket_max_message_size == 256 * 1024 * 1024
 
 
 def test_hypercorn_args_do_not_set_keep_alive_with_config():
