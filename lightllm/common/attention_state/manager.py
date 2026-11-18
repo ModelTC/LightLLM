@@ -303,6 +303,16 @@ class AttentionStateManager:
         """返回全部或指定角色的 full-attention State；只缓存对象引用。"""
         return self._get_states(FullAttentionState, role)
 
+    def has_registered_full_attention_states(self, role: str | None = None) -> bool:
+        """检查注册阶段已经创建的 full-attention State，不要求注册完成标记。"""
+        assert role is None or role in MODEL_ROLES, f"unknown model role {role}"
+        prefix = None if role is None else role + "_"
+        return any(
+            isinstance(state, FullAttentionState)
+            and (prefix is None or getattr(state, "state_name", "").startswith(prefix))
+            for state in self.__dict__.values()
+        )
+
     def get_bounded_attention_states(self, role: str | None = None) -> tuple[BoundedAttentionState, ...]:
         """返回全部或指定角色的 bounded-attention State。"""
         return self._get_states(BoundedAttentionState, role)
