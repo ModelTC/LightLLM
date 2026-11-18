@@ -27,6 +27,7 @@ from lightllm.server.httpserver.stop_seq_match import wrap_stop_match_stream
 from lightllm.server.httpserver.grammar import create_output_grammar_compiler
 from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
 from lightllm.utils.envs_utils import (
+    get_lightllm_websocket_max_message_size,
     get_pd_allowed_node_addresses,
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
@@ -36,6 +37,7 @@ from lightllm.utils.envs_utils import (
     validate_pd_node_address,
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
+from lightllm.utils.websocket_utils import websocket_message_exceeds_limit
 from .pd_selector import PDSelectionExtraInfo, create_selector
 
 logger = init_logger(__name__)
@@ -100,11 +102,13 @@ class HttpServerManagerForPDMaster:
         return False
 
     async def register_pd(self, pd_info_json, websocket):
-        self.pd_manager.register_pd(pd_info_json, websocket)
-        return
+        return self.pd_manager.register_pd(pd_info_json, websocket)
 
-    async def remove_pd(self, pd_info_json):
-        self.pd_manager.remove_pd(pd_info_json)
+    async def remove_pd(self, pd_client: PD_Client_Obj):
+        self.pd_manager.remove_pd(pd_client)
+        for req_status in tuple(self.req_id_to_out_inf.values()):
+            if req_status.p_node is pd_client or req_status.d_node is pd_client:
+                await req_status.set_error(f"PD {pd_client.mode} node {pd_client.client_ip_port} disconnected")
         return
 
     async def update_req_status(self, upkv_status: PDUpKVStatus):
@@ -585,7 +589,9 @@ class HttpServerManagerForPDMaster:
 
         old_max_new_tokens = sampling_params.max_new_tokens
         sampling_params.max_new_tokens = 1
-        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+        prefill_payload = pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params)))
+        self._reject_oversized_control_message(payload=prefill_payload, group_request_id=group_request_id)
+        await p_node.websocket.send_bytes(prefill_payload)
 
         try:
             await self._wait_for_event_or_disconnect(
@@ -604,9 +610,9 @@ class HttpServerManagerForPDMaster:
         logger.debug(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
         sampling_params.max_new_tokens = old_max_new_tokens
-        await d_node.websocket.send_bytes(
-            pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
-        )
+        decode_payload = pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
+        self._reject_oversized_control_message(payload=decode_payload, group_request_id=group_request_id)
+        await d_node.websocket.send_bytes(decode_payload)
 
         # Master 在等 Decode 上报。截止时间要盖住 Decode 拿到请求后的两段资源等待。
         # 两段各用一份预算，并且前后分开计时：_alloc_shm_req_indexes 先等共享请求槽，
@@ -688,6 +694,13 @@ class HttpServerManagerForPDMaster:
                         yield sub_req_id, request_output, metadata, finish_status
 
         return
+
+    def _reject_oversized_control_message(self, payload: bytes, group_request_id: int) -> None:
+        if websocket_message_exceeds_limit(payload=payload):
+            raise InvalidRequestError(
+                f"group_request_id {group_request_id} PD control message is {len(payload)} bytes, "
+                f"above the websocket limit of {get_lightllm_websocket_max_message_size()} bytes"
+            )
 
     async def _wait_for_prefill_token_if_needed(
         self,
@@ -1098,13 +1111,14 @@ class PDManager:
         self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
 
         logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} registed")
-        return
+        return pd_client
 
-    def remove_pd(self, pd_info_json):
-        pd_client = PD_Client_Obj(**pd_info_json)
-        current = self.url_to_pd_nodes.get(pd_client.connection_key)
-        # 同一 key 可能已重新注册；旧连接退出时不能删除新连接。
-        if current is None or current.connection_id != pd_client.connection_id:
+    def remove_pd(self, pd_client: PD_Client_Obj):
+        # ReqStatus objects may still hold this object after a reconnect. Clear
+        # its socket first so stale requests cannot send through a dead socket,
+        # even when a replacement already occupies the same connection key.
+        pd_client.websocket = None
+        if self.url_to_pd_nodes.get(pd_client.connection_key) is not pd_client:
             return
 
         self.url_to_pd_nodes.pop(pd_client.connection_key, None)

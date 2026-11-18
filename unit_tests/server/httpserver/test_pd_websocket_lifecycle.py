@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from lightllm.server import api_http, api_http_pd
+from lightllm.utils.websocket_utils import PD_WEBSOCKET_WRITE_LIMIT
 
 
 def _websocket(**overrides):
@@ -120,7 +121,7 @@ def test_kv_status_is_forwarded_without_registration_or_reply(monkeypatch):
     websocket.send_bytes.assert_not_awaited()
 
 
-def test_master_registers_with_config_server_without_compression(monkeypatch):
+def test_config_registration_uses_pd_write_buffer_limits(monkeypatch):
     from lightllm.server.httpserver_for_pd_master import register_loop
     from lightllm.server.pd_io_struct import PD_Master_Obj
 
@@ -129,6 +130,7 @@ def test_master_registers_with_config_server_without_compression(monkeypatch):
     @asynccontextmanager
     async def connect(uri, **kwargs):
         assert uri == "ws://config:9000/pd_master_register"
+        assert kwargs["write_limit"] == PD_WEBSOCKET_WRITE_LIMIT
         assert kwargs["compression"] is None
         yield websocket
 

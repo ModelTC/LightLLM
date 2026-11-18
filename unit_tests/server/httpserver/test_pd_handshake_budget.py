@@ -7,6 +7,7 @@ import pytest
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, ReqStatus
 from lightllm.server.multimodal_params import MultimodalParams
+from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.utils.error_utils import ServerBusyError
 
 
@@ -31,7 +32,7 @@ def test_master_uses_the_current_segments_resource_budget(resource_wait: int, ex
                 raise RuntimeError("decode budget checked")
 
         manager._wait_for_event_or_disconnect = handshake
-        node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+        node = PD_Client_Obj(1, "node:8000", "prefill", {}, websocket=SimpleNamespace(send_bytes=AsyncMock()))
         stream = manager.fetch_pd_stream(
             p_node=node,
             d_node=node,

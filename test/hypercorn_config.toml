@@ -1,3 +1,4 @@
 h2_max_concurrent_streams = 2147483647
 keep_alive_max_requests = 2147483647
 keep_alive_timeout = 2147483647
+websocket_max_message_size = 268435456
