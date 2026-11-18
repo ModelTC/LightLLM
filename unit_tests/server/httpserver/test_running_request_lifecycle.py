@@ -604,3 +604,45 @@ def test_real_supported_max_req_total_len_reserves_mtp_overlap_tokens():
     manager.args = SimpleNamespace(mtp_step=2, page_size=4)
 
     assert manager.get_real_supported_max_req_total_len() == 951
+
+
+def test_wait_to_token_package_releases_lock_while_consumer_is_suspended():
+    # 慢速流式客户端会让生成器停在 yield 处；此时若仍持有 req_status.lock，
+    # handle_loop 无法继续搬运 token，请求资源也就无法回收。
+    async def run():
+        manager = _make_manager(NodeRole.NORMAL)
+        manager.first_time_costs = MagicMock()
+        manager.per_token_costs = MagicMock()
+        manager.latest_success_infer_time_mark = _ValueMark()
+        req = SimpleNamespace(infer_start_time=1.0)
+        req_status = _req_status([req])
+        sampling_params = _sampling_params()
+        sampling_params.best_of = 1
+
+        def token(text, status=FinishStatus.NO_FINISH):
+            return (123, text, {"prompt_cache_len": 0}, FinishStatus(status))
+
+        req_status.out_token_info_list.extend([token("a"), token("b")])
+        req_status.event.set()
+        output_generator = manager._wait_to_token_package(
+            start_time=0,
+            prompt_ids=[1, 2, 3],
+            group_request_id=123,
+            sampling_params=sampling_params,
+            req_status=req_status,
+            request=None,
+        )
+
+        first = await output_generator.__anext__()
+        assert not req_status.lock.locked()
+
+        async def produce():
+            async with req_status.lock:
+                req_status.out_token_info_list.append(token("c", FinishStatus.FINISHED_STOP))
+                req_status.event.set()
+
+        await asyncio.wait_for(produce(), timeout=1)
+        rest = [item async for item in output_generator]
+        assert [first[1]] + [item[1] for item in rest] == ["a", "b", "c"]
+
+    asyncio.run(run())
