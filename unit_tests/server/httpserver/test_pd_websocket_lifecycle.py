@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from lightllm.server import api_http, api_http_pd
+from lightllm.utils.websocket_utils import PD_WEBSOCKET_WRITE_LIMIT
 
 
 def _websocket(**overrides):
@@ -91,7 +92,7 @@ def test_config_registration_uses_pd_write_buffer_limits(monkeypatch):
     @asynccontextmanager
     async def connect(uri, **kwargs):
         assert uri == "ws://config:9000/pd_master_register"
-        assert kwargs["write_limit"] == (32 * 1024, 8 * 1024)
+        assert kwargs["write_limit"] == PD_WEBSOCKET_WRITE_LIMIT
         assert kwargs["compression"] is None
         yield websocket
 

@@ -132,9 +132,6 @@ def test_get_server_info_serializes_start_args_dataclass(monkeypatch):
 
 def test_pd_master_models_endpoint_has_created_timestamp(monkeypatch):
     from lightllm.server import api_http
-    from hypercorn.asyncio import run
-
-    monkeypatch.setattr(run, "TCPServer", run.TCPServer)
 
     args = StartArgs(run_mode="pd_master", model_dir="/tmp/test-model", model_name="test-model")
     manager = SimpleNamespace(get_real_supported_max_req_total_len=lambda: 1024, metric_client=object())

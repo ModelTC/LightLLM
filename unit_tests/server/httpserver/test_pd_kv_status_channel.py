@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from lightllm.server.pd_io_struct import PD_Master_Obj, PDUpKVStatus
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import up_status
+from lightllm.utils.websocket_utils import PD_WEBSOCKET_WRITE_LIMIT
 
 
 def _manager():
@@ -43,7 +44,7 @@ def test_status_is_sent_directly_without_control_frames_or_reply(monkeypatch):
         @asynccontextmanager
         async def connect(uri, **kwargs):
             assert uri == "ws://master:8100/kv_move_status"
-            assert kwargs["write_limit"] == (32 * 1024, 8 * 1024)
+            assert kwargs["write_limit"] == PD_WEBSOCKET_WRITE_LIMIT
             assert kwargs["compression"] is None
             yield websocket
 

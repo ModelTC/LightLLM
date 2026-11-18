@@ -12,7 +12,18 @@ from hypercorn.utils import wrap_app
 import pytest
 import websockets
 
-from lightllm.utils.websocket_utils import PD_WEBSOCKET_WRITE_LIMIT, configure_pd_master_write_buffer
+from lightllm.utils.websocket_utils import PD_WEBSOCKET_WRITE_LIMIT, set_pd_websocket_write_buffer
+
+
+class _WrapSend:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        async def wrapped(message):
+            await send(message)
+
+        await self.app(scope, receive, wrapped)
 
 
 @pytest.mark.parametrize("compression", [None, "deflate"])
@@ -27,7 +38,6 @@ def test_pd_write_limits_and_cancelled_frame_preserve_following_messages(monkeyp
 
         @asynccontextmanager
         async def lifespan(_app):
-            configure_pd_master_write_buffer()
             configured_server = run.TCPServer
 
             class RecordingTCPServer(configured_server):
@@ -40,6 +50,7 @@ def test_pd_write_limits_and_cancelled_frame_preserve_following_messages(monkeyp
             yield
 
         app = FastAPI(lifespan=lifespan)
+        app.add_middleware(_WrapSend)
 
         @app.websocket("/pd_register")
         async def exchange(websocket: WebSocket):
@@ -48,10 +59,13 @@ def test_pd_write_limits_and_cancelled_frame_preserve_following_messages(monkeyp
                 await websocket.accept()
                 assert await websocket.receive_bytes() == b"start"
                 writer = connections[-1].writer
-                assert writer.transport.get_write_buffer_limits() == (8 * 1024, 32 * 1024)
+                # Accepted sockets keep the event-loop default until the PD helper runs.
+                assert writer.transport.get_write_buffer_limits()[1] == 64 * 1024
+                set_pd_websocket_write_buffer(websocket=websocket)
+                high, low = PD_WEBSOCKET_WRITE_LIMIT
+                assert writer.transport.get_write_buffer_limits() == (low, high)
                 writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
-                # The default 32 KiB watermark is smaller than this payload. Raise it
-                # only inside the test so the first send can sit in the asyncio buffer.
+                # The payload matches the PD high watermark. Raise it so this send can sit in the buffer.
                 writer.transport.set_write_buffer_limits(high=1024 * 1024, low=256 * 1024)
 
                 await websocket.send_bytes(payload)
@@ -107,7 +121,8 @@ def test_pd_write_limits_and_cancelled_frame_preserve_following_messages(monkeyp
                 ping_interval=None,
                 proxy=None,
             ) as peer:
-                assert peer.transport.get_write_buffer_limits() == (8 * 1024, 32 * 1024)
+                high, low = PD_WEBSOCKET_WRITE_LIMIT
+                assert peer.transport.get_write_buffer_limits() == (low, high)
                 peer.transport.pause_reading()
                 try:
                     await peer.send(b"start")
@@ -123,6 +138,8 @@ def test_pd_write_limits_and_cancelled_frame_preserve_following_messages(monkeyp
             shutdown.set()
             await asyncio.wait_for(server, 5)
             if result.done() and not result.cancelled():
-                result.exception()
+                error = result.exception()
+                if error is not None:
+                    raise error
 
     asyncio.run(exercise())

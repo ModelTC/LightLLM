@@ -12,6 +12,7 @@ from lightllm.server.httpserver import pd_loop
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.httpserver_for_pd_master.manager import PDManager
 from lightllm.server.pd_io_struct import ObjType, PD_Master_Obj
+from lightllm.utils.websocket_utils import PD_WEBSOCKET_WRITE_LIMIT
 
 pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
 
@@ -207,7 +208,7 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
 
         def connect(uri, **kwargs):
             assert uri == "ws://master:8000/pd_register"
-            assert kwargs["write_limit"] == (32 * 1024, 8 * 1024)
+            assert kwargs["write_limit"] == PD_WEBSOCKET_WRITE_LIMIT
             assert kwargs["compression"] is None
             return Connection()
 
