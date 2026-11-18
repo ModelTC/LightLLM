@@ -147,9 +147,11 @@ def fused_experts_impl(
             num_experts=num_experts,
             num_max_tokens_per_rank=get_deepep_num_max_dispatch_tokens_per_rank_prefill(),
             expert_alignment=get_mk_alignment_for_contiguous_layout(),
-            # 当前 prefill 路径同步等待通信完成，不与 grouped GEMM 重叠，
-            # 因此使用非 overlap 配额，让通信可以占用更多 SM。
-            num_sms=get_ep_num_sms(overlap_with_compute=False),
+            # Combine 仍与共享专家计算重叠，dispatch 和 combine 必须使用同一
+            # 套 channel 布局。这里使用 overlap 配额，即使当前 dispatch 在
+            # grouped GEMM 前同步完成，也避免跨节点 combine 的 channel/SM
+            # 约束不匹配。
+            num_sms=get_ep_num_sms(overlap_with_compute=True),
             previous_event=previous_event,
             async_with_compute_stream=False,
             allocate_on_comm_stream=allocate_on_comm_stream,
