@@ -145,6 +145,10 @@ def test_deepep_decode_buffer_capacity_covers_mtp_rows_and_safety_margin(monkeyp
         "get_env_start_args",
         lambda: SimpleNamespace(running_max_req_size=256, mtp_step=2),
     )
+    monkeypatch.setattr(
+        "lightllm.utils.config_utils.get_running_max_req_size_per_dp",
+        lambda args: args.running_max_req_size,
+    )
     get_deepep_num_max_dispatch_tokens_per_rank_decode.cache_clear()
 
     assert get_deepep_num_max_dispatch_tokens_per_rank_decode() == 784
@@ -152,9 +156,37 @@ def test_deepep_decode_buffer_capacity_covers_mtp_rows_and_safety_margin(monkeyp
     get_deepep_num_max_dispatch_tokens_per_rank_decode.cache_clear()
 
 
+def test_deepep_decode_buffer_capacity_uses_per_dp_request_capacity(monkeypatch):
+    monkeypatch.delenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", raising=False)
+    monkeypatch.setattr(
+        envs_utils,
+        "get_env_start_args",
+        lambda: SimpleNamespace(
+            model_dir="/model",
+            running_max_req_size=256,
+            mtp_step=2,
+            dp=8,
+            nnodes=1,
+            enable_dp_prompt_cache_fetch=False,
+            diverse_mode=False,
+        ),
+    )
+    monkeypatch.setattr("lightllm.utils.config_utils.is_hybrid_att_model", lambda _: True)
+    get_deepep_num_max_dispatch_tokens_per_rank_decode.cache_clear()
+
+    # ceil(256 / 8) requests per local DP rank, then 3 MTP rows/request + 12 slack.
+    assert get_deepep_num_max_dispatch_tokens_per_rank_decode() == 112
+
+    get_deepep_num_max_dispatch_tokens_per_rank_decode.cache_clear()
+
+
 def test_deepep_prefill_buffer_capacity_adds_safety_margin(monkeypatch):
     monkeypatch.delenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_PREFILL", raising=False)
-    monkeypatch.setattr(envs_utils, "get_env_start_args", lambda: SimpleNamespace(batch_max_tokens=6000))
+    monkeypatch.setattr(
+        envs_utils,
+        "get_env_start_args",
+        lambda: SimpleNamespace(batch_max_tokens=6000, run_mode="normal"),
+    )
     get_deepep_num_max_dispatch_tokens_per_rank_prefill.cache_clear()
 
     assert get_deepep_num_max_dispatch_tokens_per_rank_prefill() == 6128
@@ -162,7 +194,22 @@ def test_deepep_prefill_buffer_capacity_adds_safety_margin(monkeypatch):
     get_deepep_num_max_dispatch_tokens_per_rank_prefill.cache_clear()
 
 
+def test_deepep_prefill_buffer_capacity_uses_decode_margin(monkeypatch):
+    monkeypatch.delenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_PREFILL", raising=False)
+    monkeypatch.setattr(
+        envs_utils,
+        "get_env_start_args",
+        lambda: SimpleNamespace(batch_max_tokens=6000, run_mode="decode"),
+    )
+    get_deepep_num_max_dispatch_tokens_per_rank_prefill.cache_clear()
+
+    assert get_deepep_num_max_dispatch_tokens_per_rank_prefill() == 6016
+
+    get_deepep_num_max_dispatch_tokens_per_rank_prefill.cache_clear()
+
+
 def test_deepep_buffer_capacity_uses_larger_phase_capacity(monkeypatch):
+    monkeypatch.setattr(envs_utils, "get_env_start_args", lambda: SimpleNamespace(run_mode="normal"))
     cases = [
         (4096, 256, 4096),
         (256, 512, 512),
@@ -181,6 +228,25 @@ def test_deepep_buffer_capacity_uses_larger_phase_capacity(monkeypatch):
         )
         get_deepep_num_max_dispatch_tokens_per_rank.cache_clear()
         assert get_deepep_num_max_dispatch_tokens_per_rank() == expected_capacity
+
+    get_deepep_num_max_dispatch_tokens_per_rank.cache_clear()
+
+
+def test_deepep_buffer_capacity_covers_both_startup_warmup_phases(monkeypatch):
+    monkeypatch.setattr(envs_utils, "get_env_start_args", lambda: SimpleNamespace(run_mode="normal"))
+    for prefill_capacity, decode_capacity in ((4096, 512), (256, 512)):
+        monkeypatch.setattr(
+            envs_utils,
+            "get_deepep_num_max_dispatch_tokens_per_rank_prefill",
+            lambda prefill_capacity=prefill_capacity: prefill_capacity,
+        )
+        monkeypatch.setattr(
+            envs_utils,
+            "get_deepep_num_max_dispatch_tokens_per_rank_decode",
+            lambda decode_capacity=decode_capacity: decode_capacity,
+        )
+        get_deepep_num_max_dispatch_tokens_per_rank.cache_clear()
+        assert get_deepep_num_max_dispatch_tokens_per_rank() == max(prefill_capacity, decode_capacity)
 
     get_deepep_num_max_dispatch_tokens_per_rank.cache_clear()
 

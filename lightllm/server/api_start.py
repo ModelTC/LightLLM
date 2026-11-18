@@ -307,14 +307,17 @@ def _launch_subprocesses(args: StartArgs):
     if args.run_mode == "decode":
         # Decode 节点的启动 warmup 仍会构造 batch_max_tokens 个 token 做一次
         # prefill-style model forward。Decode 节点没有必要沿用较大的 prefill
-        # batch 上限，但需要覆盖每个请求的一个 target token 和 mtp_step 个
-        # draft token。
-        decode_batch_max_tokens = int(args.running_max_req_size) * (1 + int(args.mtp_step))
+        # batch 上限，但需要覆盖每个本地 DP rank 请求的一个 target token
+        # 和 mtp_step 个 draft token。这里必须使用 per-DP 容量，否则
+        # DeepEP prefill buffer 会再次按全局请求数过度分配。
+        decode_request_capacity = get_running_max_req_size_per_dp(args)
+        decode_batch_max_tokens = int(decode_request_capacity) * (1 + int(args.mtp_step))
         logger.info(
             "Decode node overrides batch_max_tokens: configured=%s, running_max_req_size=%s, "
-            "mtp_step=%s, decode_batch_max_tokens=%s",
+            "request_capacity=%s, mtp_step=%s, decode_batch_max_tokens=%s",
             args.batch_max_tokens,
             args.running_max_req_size,
+            decode_request_capacity,
             args.mtp_step,
             decode_batch_max_tokens,
         )

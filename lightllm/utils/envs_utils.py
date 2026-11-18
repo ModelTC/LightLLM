@@ -85,18 +85,23 @@ def is_stop_matching_in_reasoning_enabled() -> bool:
 
 @lru_cache(maxsize=None)
 def get_deepep_num_max_dispatch_tokens_per_rank_prefill():
-    # 在单卡最大 prefill batch 之外额外保留 128 个 token，并向上对齐到 8，
+    # normal/prefill 模式在单卡最大 prefill batch 之外额外保留 128 个 token；
+    # decode 节点的 batch_max_tokens 已按本地请求容量重写，check max len
+    # 只需与 decode 相同的 12 个 token 余量。最后向上对齐到 8，
     # 避免 autotune warmup 或调度边界波动使实际输入超过 DeepEP buffer 上限。
     # 显式设置 NUM_MAX_DISPATCH_TOKENS_PER_RANK_PREFILL 时仍使用该覆盖值。
     configured = os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_PREFILL", None)
     if configured is not None:
         return int(configured)
 
-    batch_max_tokens = get_env_start_args().batch_max_tokens or 256
-    capacity = ((int(batch_max_tokens) + 128 + 7) // 8) * 8
+    args = get_env_start_args()
+    batch_max_tokens = args.batch_max_tokens or 256
+    safety_margin = 12 if args.run_mode == "decode" else 128
+    capacity = ((int(batch_max_tokens) + safety_margin + 7) // 8) * 8
     logger.info(
-        "DeepEP prefill buffer capacity: batch_max_tokens=%s, safety_margin=128, capacity=%s",
+        "DeepEP prefill buffer capacity: batch_max_tokens=%s, safety_margin=%s, capacity=%s",
         batch_max_tokens,
+        safety_margin,
         capacity,
     )
     return capacity
@@ -104,6 +109,10 @@ def get_deepep_num_max_dispatch_tokens_per_rank_prefill():
 
 @lru_cache(maxsize=None)
 def get_deepep_num_max_dispatch_tokens_per_rank_decode():
+    # DeepEP 的 num_max_tokens_per_rank 是每个源 rank 的最大输入 token 数，
+    # 不是 HTTP 层的全局请求容量。混合注意力模型在 DP 下会把
+    # running_max_req_size 拆到本机各 DP rank，必须使用和调度器相同的
+    # per-DP 容量，否则会按全局容量过度分配 DeepEP buffer，挤占 KV cache。
     # 每个请求最多产生 mtp_step + 1 个 verify token；额外保留 12 个 token
     # 处理调度和 CUDA Graph 的边界波动，最后向上对齐到 DeepEP 要求的 8。
     # 显式设置 NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE 时仍使用该覆盖值。
@@ -112,12 +121,18 @@ def get_deepep_num_max_dispatch_tokens_per_rank_decode():
         return int(configured)
 
     args = get_env_start_args()
-    required_tokens = int(args.running_max_req_size) * (int(args.mtp_step) + 1)
+    # Import lazily to avoid the config_utils -> envs_utils import cycle.
+    from lightllm.utils.config_utils import get_running_max_req_size_per_dp
+
+    request_capacity = get_running_max_req_size_per_dp(args)
+
+    required_tokens = int(request_capacity) * (int(args.mtp_step) + 1)
     capacity = ((required_tokens + 12 + 7) // 8) * 8
     logger.info(
-        "DeepEP decode buffer capacity: running_max_req_size=%s, mtp_step=%s, "
-        "required_tokens=%s, safety_margin=12, capacity=%s",
+        "DeepEP decode buffer capacity: running_max_req_size=%s, request_capacity=%s, "
+        "mtp_step=%s, required_tokens=%s, safety_margin=12, capacity=%s",
         args.running_max_req_size,
+        request_capacity,
         args.mtp_step,
         required_tokens,
         capacity,
@@ -127,7 +142,9 @@ def get_deepep_num_max_dispatch_tokens_per_rank_decode():
 
 @lru_cache(maxsize=None)
 def get_deepep_num_max_dispatch_tokens_per_rank() -> int:
-    """返回同时覆盖 prefill 和 decode 的单 rank DeepEP buffer 容量。"""
+    """返回覆盖启动 warmup 和运行期阶段的单 rank DeepEP buffer 容量。"""
+    # 启动 warmup 和运行期可能分别执行 prefill/decode；构造阶段统一覆盖
+    # 两种阶段，避免依赖模型内部 CUDA Graph 的具体捕获策略。
     return max(
         get_deepep_num_max_dispatch_tokens_per_rank_prefill(),
         get_deepep_num_max_dispatch_tokens_per_rank_decode(),
