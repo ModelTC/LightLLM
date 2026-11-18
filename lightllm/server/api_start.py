@@ -130,6 +130,20 @@ def _launch_subprocesses(args: StartArgs):
             f"graph_max_batch_size to 32"
         )
 
+    # running_max_req_size is the service-wide limit. A node with multiple local
+    # DP ranks receives only its local share, and Decode EP buffers must use that
+    # same share to avoid reserving a global-sized buffer on every rank.
+    args.per_dp_running_max_req_size = get_running_max_req_size_per_dp(args)
+    if not args.disable_cudagraph:
+        args.graph_max_batch_size = min(args.graph_max_batch_size, args.per_dp_running_max_req_size)
+    logger.info(
+        "Set per-DP Decode capacity: global=%s, local=%s, per_dp=%s, graph_max_batch_size=%s",
+        args.running_max_req_size,
+        max(1, args.dp // args.nnodes),
+        args.per_dp_running_max_req_size,
+        args.graph_max_batch_size,
+    )
+
     if not args.disable_shm_warning:
         check_recommended_shm_size(args)
 
@@ -309,12 +323,13 @@ def _launch_subprocesses(args: StartArgs):
         # prefill-style model forward。Decode 节点没有必要沿用较大的 prefill
         # batch 上限，但需要覆盖每个请求的一个 target token 和 mtp_step 个
         # draft token。
-        decode_batch_max_tokens = int(args.running_max_req_size) * (1 + int(args.mtp_step))
+        decode_batch_max_tokens = int(args.per_dp_running_max_req_size) * (1 + int(args.mtp_step))
         logger.info(
-            "Decode node overrides batch_max_tokens: configured=%s, running_max_req_size=%s, "
-            "mtp_step=%s, decode_batch_max_tokens=%s",
+            "Decode node overrides batch_max_tokens per DP rank: configured=%s, global_running_max_req_size=%s, "
+            "per_dp_running_max_req_size=%s, mtp_step=%s, decode_batch_max_tokens=%s",
             args.batch_max_tokens,
             args.running_max_req_size,
+            args.per_dp_running_max_req_size,
             args.mtp_step,
             decode_batch_max_tokens,
         )
@@ -396,7 +411,7 @@ def _launch_subprocesses(args: StartArgs):
         )
 
     auto_configure_allreduce_flags_from_args(args)
-    local_request_capacity = get_running_max_req_size_per_dp(args)
+    local_request_capacity = args.per_dp_running_max_req_size
 
     # Limit CUDA Graph batches to the local request capacity.
     if not args.disable_cudagraph and args.graph_max_batch_size > local_request_capacity:

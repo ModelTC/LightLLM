@@ -86,6 +86,8 @@ class StartArgs:
     )
     chat_template: Optional[str] = field(default=None)
     running_max_req_size: int = field(default=256)
+    # Derived request capacity for one DP rank on the current node.
+    per_dp_running_max_req_size: Optional[int] = field(default=None, init=False)
     tp: int = field(default=1)
     dp: int = field(default=1)
     nnodes: int = field(default=1)

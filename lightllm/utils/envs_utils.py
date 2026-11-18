@@ -112,12 +112,18 @@ def get_deepep_num_max_dispatch_tokens_per_rank_decode():
         return int(configured)
 
     args = get_env_start_args()
-    required_tokens = int(args.running_max_req_size) * (int(args.mtp_step) + 1)
+    per_dp_running_max_req_size = getattr(args, "per_dp_running_max_req_size", None)
+    if per_dp_running_max_req_size is None:
+        # Keep compatibility with processes started from an older serialized
+        # StartArgs object. New starts always populate the derived field.
+        per_dp_running_max_req_size = int(args.running_max_req_size)
+    required_tokens = int(per_dp_running_max_req_size) * (int(args.mtp_step) + 1)
     capacity = ((required_tokens + 12 + 7) // 8) * 8
     logger.info(
-        "DeepEP decode buffer capacity: running_max_req_size=%s, mtp_step=%s, "
+        "DeepEP decode buffer capacity: global_running_max_req_size=%s, per_dp_running_max_req_size=%s, mtp_step=%s, "
         "required_tokens=%s, safety_margin=12, capacity=%s",
         args.running_max_req_size,
+        per_dp_running_max_req_size,
         args.mtp_step,
         required_tokens,
         capacity,

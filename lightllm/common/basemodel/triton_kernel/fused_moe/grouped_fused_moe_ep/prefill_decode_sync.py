@@ -260,6 +260,7 @@ def fused_experts_impl(
         previous_event=None,
         allocate_on_comm_stream=False,
         shared_expert_func=shared_expert_func,
+        allow_shared_expert_overlap=False,
     )
 
 
@@ -270,9 +271,10 @@ def _combine_with_optional_shared_expert(
     previous_event,
     allocate_on_comm_stream: bool,
     shared_expert_func: Optional[Callable[[], torch.Tensor]],
+    allow_shared_expert_overlap: bool = True,
 ):
     """Launch combine, optionally running the shared expert while the transfer is in flight."""
-    overlap = shared_expert_func is not None
+    overlap = allow_shared_expert_overlap and shared_expert_func is not None
     if overlap:
         # Combine waits for the routed GEMM, then the shared expert overlaps the transfer.
         from deep_ep import ElasticBuffer
@@ -296,4 +298,6 @@ def _combine_with_optional_shared_expert(
         shared = shared_expert_func()
         event.current_stream_wait()
         combined_x.add_(shared)
+    elif shared_expert_func is not None:
+        combined_x.add_(shared_expert_func())
     return combined_x
