@@ -32,7 +32,6 @@ class UpStatusManager:
         asyncio.run(self.task_loop())
 
     async def task_loop(self):
-
         self.id_to_handle_task: Dict[int, asyncio.Task] = {}
         self.id_to_handle_queue: Dict[int, asyncio.Queue] = {}
 
@@ -81,9 +80,7 @@ class UpStatusManager:
         while True:
             try:
                 uri = f"ws://{pd_master_obj.host_ip_port}/kv_move_status"
-                async with websockets.connect(
-                    uri, compression=None, write_limit=PD_WEBSOCKET_WRITE_LIMIT
-                ) as websocket:
+                async with websockets.connect(uri, compression=None, write_limit=PD_WEBSOCKET_WRITE_LIMIT) as websocket:
                     import socket
 
                     sock = websocket.transport.get_extra_info("socket")
