@@ -22,8 +22,6 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     deepep_v2_decode_combine,
     GROUP32_EP_METHODS,
 )
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 
 
 class FuseMoeDeepGEMM(FuseMoeBaseImpl):
@@ -224,46 +222,24 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         assert recv_topk_idx is None
-        all_tokens = sum(num_recv_tokens_per_expert_list)
-        if all_tokens > 0:
-            gather_out = chunked_expanded_moe_forward(
-                num_recv_tokens_per_expert_list=num_recv_tokens_per_expert_list,
-                num_unaligned_recv_tokens_per_expert=num_unaligned_recv_tokens_per_expert,
-                recv_x=recv_x,
-                recv_topk_weights=recv_topk_weights,
-                recv_src_metadata=recv_src_metadata,
-                w1=w13_weight,
-                w1_scale=w13_scale,
-                w2=w2_weight,
-                w2_scale=w2_scale,
-                block_size_k=self.quant_method.block_size,
-                workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
-                hidden_dtype=hidden_dtype,
-                clamp_limit=clamp_limit,
-                humming_gemms=(
-                    (w13.humming_gemm, w2.humming_gemm)
-                    if self.quant_method.method_name in HUMMING_QUANT_METHODS
-                    else None
-                ),
-            )
-        else:
-            gather_out = torch.empty(
-                (recv_src_metadata.shape[0], w2_weight.shape[1]),
-                device=recv_x[0].device,
-                dtype=hidden_dtype,
-            )
-            ######################################## warning ##################################################
-            # A rank may receive no tokens during autotune warmup. Run one dummy token through
-            # silu_and_mul_fwd so the empty rank matches the first kernel call made by non-empty ranks.
-            # This branch does not synchronize additional calls caused by different positive chunk counts.
-            if Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL):
-                N = w13_weight.shape[1]
-                _gemm_out_a = torch.zeros((1, N), device=recv_x[0].device, dtype=hidden_dtype)
-                _silu_out = torch.zeros((1, N // 2), device=recv_x[0].device, dtype=hidden_dtype)
-                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out, limit=clamp_limit)
-                _gemm_out_a, _silu_out = None, None
-        del recv_x
-        return gather_out
+        return chunked_expanded_moe_forward(
+            num_recv_tokens_per_expert_list=num_recv_tokens_per_expert_list,
+            num_unaligned_recv_tokens_per_expert=num_unaligned_recv_tokens_per_expert,
+            recv_x=recv_x,
+            recv_topk_weights=recv_topk_weights,
+            recv_src_metadata=recv_src_metadata,
+            w1=w13_weight,
+            w1_scale=w13_scale,
+            w2=w2_weight,
+            w2_scale=w2_scale,
+            block_size_k=self.quant_method.block_size,
+            workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
+            hidden_dtype=hidden_dtype,
+            clamp_limit=clamp_limit,
+            humming_gemms=(
+                (w13.humming_gemm, w2.humming_gemm) if self.quant_method.method_name in HUMMING_QUANT_METHODS else None
+            ),
+        )
 
     def low_latency_combine(
         self,

@@ -1,3 +1,6 @@
+import json
+from collections import defaultdict
+
 import torch
 import pytest
 
@@ -14,8 +17,10 @@ if not is_fp8_native_supported():
     pytest.skip(reason="not support fp8 test in this gpu card", allow_module_level=True)
 
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
+    _expanded_swiglu_quant_1x32,
     silu_and_mul_masked_post_quant_fwd,
 )
+from lightllm.common.triton_utils import autotuner
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.utils.log_utils import init_logger
@@ -135,6 +140,49 @@ def test_clamped_swiglu_quantization_matches_reference(dtype, alpha, limit, add_
         torch.testing.assert_close(actual[expert, :count], expected[expert, :count], atol=0.05, rtol=0.02)
         assert torch.all(out[expert, count:].float() == 1)
         assert torch.all(scales[expert, count:] == 7)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_expanded_1x32_graph_replay_preserves_fp8_scales_and_padding(dtype, tmp_path, monkeypatch):
+    torch.manual_seed(782)
+    rows, width = 256, 320
+    x = torch.randn(rows, 2 * width, device="cuda", dtype=dtype) * 8
+    x[::7, :32] = 0
+    ends = torch.zeros(4, dtype=torch.int32, device="cuda")
+    qs = [torch.empty((rows, width), device="cuda", dtype=torch.float8_e4m3fn) for _ in range(2)]
+    scales = [torch.empty((width // 32, rows), device="cuda").T for _ in qs]
+    kwargs = dict(expert_alignment=32, use_ue8m0_scales=True, limit=10.0)
+    kernel = _expanded_swiglu_quant_1x32
+    monkeypatch.setattr(kernel, "_cache_dir", str(tmp_path), raising=False)
+    monkeypatch.setattr(kernel, "cached_configs", {})
+    monkeypatch.setattr(kernel, "fast_match_configs", defaultdict(dict))
+    monkeypatch.setattr(kernel, "_missing_config_keys", set())
+    monkeypatch.setattr(autotuner, "get_triton_autotune_level", lambda: autotuner.AutotuneLevel.ADAPTIVE_AUTOTUNE)
+    qs[1].view(torch.uint8).fill_(255)
+    scales[1].fill_(-1)
+    with autotuner.Autotuner.autotune_warmup(autotuner.AutotuneKernelType.DECODE):
+        silu_and_mul_masked_post_quant_fwd(x, qs[1], scales[1], 32, ends, expected_m=16, **kwargs)
+    assert (qs[1].view(torch.uint8) == 255).all() and (scales[1] == -1).all()
+    (cache_file,) = tmp_path.glob("*.json")
+    assert json.loads(cache_file.read_text())["16"] in kernel.configs_gen_func()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        silu_and_mul_masked_post_quant_fwd(x, qs[1], scales[1], 32, ends, expected_m=16, **kwargs)
+
+    for counts in ([0, 0, 0, 0], [0, 1, 35, 7], [32, 32, 32, 32], [11, 0, 5, 0], [0, 0, 0, 0]):
+        start, exclusive_ends = 0, []
+        for count in counts:
+            exclusive_ends.append(start + count)
+            start += (count + 31) // 32 * 32
+        ends.copy_(torch.tensor(exclusive_ends, dtype=ends.dtype))
+        for q, scale in zip(qs, scales):
+            q.view(torch.uint8).fill_(255)
+            scale.fill_(-1)
+        silu_and_mul_masked_post_quant_fwd(x, qs[0], scales[0], 32, ends, **kwargs)
+        graph.replay()
+        assert torch.equal(qs[0].view(torch.uint8), qs[1].view(torch.uint8))
+        assert torch.equal(scales[0], scales[1])
+        assert (scales[1][:, 0] > 0).sum().item() == sum(counts)
 
 
 if __name__ == "__main__":

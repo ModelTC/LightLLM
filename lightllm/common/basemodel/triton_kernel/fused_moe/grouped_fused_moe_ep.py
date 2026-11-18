@@ -9,7 +9,11 @@ from lightllm.common.quantization.humming import HUMMING_QUANT_METHODS
 from lightllm.common.quantization.w8a8 import FP8_MOE_B32_QUANT_METHOD
 from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_gemm_kernel import expanded_grouped_fp8_gemm
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
+    silu_and_mul_fwd,
+    silu_and_mul_quant_fp8,
+    silu_and_mul_quant_fp8_out,
+)
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
     silu_and_mul_masked_post_quant_fwd,
 )
@@ -188,6 +192,7 @@ def masked_group_gemm(
         clamp_up_add_one=clamp_up_add_one,
         expert_alignment=expert_alignment,
         use_ue8m0_scales=group32 or is_sm100_gpu(),
+        expected_m=expected_m,
     )
     del gemm_out_a
     gemm_out_b = alloc_tensor_func(recv_x[0].shape, device=recv_x[0].device, dtype=dtype)
@@ -482,49 +487,25 @@ def fused_experts_impl(
         # needed once the received tensors have been produced.
         del qinput_tensor, input_scale
 
-        all_tokens = sum(handle.num_recv_tokens_per_expert_list)
-        if all_tokens > 0:
-            gather_out = chunked_expanded_moe_forward(
-                num_recv_tokens_per_expert_list=handle.num_recv_tokens_per_expert_list,
-                num_unaligned_recv_tokens_per_expert=handle.num_unaligned_recv_tokens_per_expert,
-                recv_x=recv_x,
-                recv_topk_weights=recv_topk_weights,
-                recv_src_metadata=handle.recv_src_metadata,
-                w1=w1,
-                w1_scale=w1_scale,
-                w2=w2,
-                w2_scale=w2_scale,
-                block_size_k=block_size_k,
-                workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(),
-                hidden_dtype=hidden_states.dtype,
-                alpha=alpha,
-                limit=limit,
-                clamp_up_add_one=clamp_up_add_one,
-                expert_ends=handle.psum_num_recv_tokens_per_expert if block_size_k == 32 else None,
-                humming_gemms=humming_gemms,
-            )
-        else:
-            gather_out = torch.empty(
-                (handle.recv_src_metadata.shape[0], w2.shape[1]),
-                device=recv_x[0].device,
-                dtype=hidden_states.dtype,
-            )
-            ######################################## warning ##################################################
-            # A rank may receive no tokens during autotune warmup. Run one dummy token through
-            # silu_and_mul_fwd so the empty rank matches the first kernel call made by non-empty ranks.
-            # This branch does not synchronize additional calls caused by different positive chunk counts.
-            if Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL):
-                N = w1.shape[1]
-                _gemm_out_a = torch.zeros((1, N), device=hidden_states.device, dtype=hidden_states.dtype)
-                _silu_out = torch.zeros((1, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
-                silu_and_mul_fwd(
-                    _gemm_out_a.view(-1, N),
-                    _silu_out,
-                    alpha=alpha,
-                    limit=limit,
-                    clamp_up_add_one=clamp_up_add_one,
-                )
-                _gemm_out_a, _silu_out = None, None
+        gather_out = chunked_expanded_moe_forward(
+            num_recv_tokens_per_expert_list=handle.num_recv_tokens_per_expert_list,
+            num_unaligned_recv_tokens_per_expert=handle.num_unaligned_recv_tokens_per_expert,
+            recv_x=recv_x,
+            recv_topk_weights=recv_topk_weights,
+            recv_src_metadata=handle.recv_src_metadata,
+            w1=w1,
+            w1_scale=w1_scale,
+            w2=w2,
+            w2_scale=w2_scale,
+            block_size_k=block_size_k,
+            workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(),
+            hidden_dtype=hidden_states.dtype,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
+            expert_ends=handle.psum_num_recv_tokens_per_expert if block_size_k == 32 else None,
+            humming_gemms=humming_gemms,
+        )
         del recv_x
 
         # normal combine
@@ -617,6 +598,7 @@ def _get_max_chunk_rows(
     hidden_dtype: torch.dtype,
     quant_dtype: torch.dtype,
     expert_alignment: int,
+    fused_activation: bool,
 ) -> int:
     """计算并缓存当前 workspace 配置能够容纳的最大 chunk 行数。"""
     if not hasattr(_get_max_chunk_rows, "cache"):
@@ -636,6 +618,7 @@ def _get_max_chunk_rows(
         hidden_dtype,
         quant_dtype,
         expert_alignment,
+        fused_activation,
         HAS_SGL_KERNEL,
     )
     if cache_key in max_chunk_rows_cache:
@@ -646,6 +629,12 @@ def _get_max_chunk_rows(
         try:
             probe_manager = TensorBufferManager(workspace)
             probe_manager.alloc((cached_gather_rows, hidden_size), hidden_dtype)
+            if fused_activation:
+                # Quantized activations and scales stay live across the two GEMMs.
+                probe_manager.alloc((chunk_rows, intermediate_size), quant_dtype)
+                probe_manager.alloc((scale_cols, chunk_rows), torch.float32)
+                probe_manager.alloc((chunk_rows, max(intermediate_twice, hidden_size)), hidden_dtype)
+                return True
 
             # W1 阶段同时保存 GEMM 输出和 SwiGLU 输出。
             silu_out = probe_manager.alloc((chunk_rows, intermediate_size), hidden_dtype)
@@ -668,8 +657,7 @@ def _get_max_chunk_rows(
             return False
         return True
 
-    # W1 阶段必须同时保存 gemm_out_a 和 silu_out，可据此得到 chunk 数量的绝对上界。
-    w1_row_bytes = (intermediate_twice + intermediate_size) * hidden_dtype.itemsize
+    w1_row_bytes = intermediate_twice * hidden_dtype.itemsize
     left = 1
     right = workspace.numel() // w1_row_bytes // expert_alignment
     max_chunk_rows = 0
@@ -715,13 +703,24 @@ def chunked_expanded_moe_forward(
     if clamp_limit is not None:
         limit = clamp_limit
     alignment = 128
-    all_tokens, intermediate_twice = recv_x[0].shape[0], w1.shape[1]
+    all_tokens, intermediate_twice = sum(num_recv_tokens_per_expert_list), w1.shape[1]
     intermediate_size, hidden_size = intermediate_twice // 2, w2.shape[1]
-    assert all_tokens == sum(num_recv_tokens_per_expert_list) and all_tokens % alignment == 0
-    assert all_tokens > 0, "chunked_expanded_moe_forward requires non-empty input"
-    assert workspace.dtype == torch.uint8 and workspace.ndim == 1 and workspace.is_contiguous()
-
     group32 = block_size_k == 32
+    fused_activation = group32 and alpha is None
+    is_autotune_warmup = Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL)
+    if all_tokens == 0:
+        # Empty ranks must join the same activation autotuner as the first chunk on their peers.
+        if is_autotune_warmup:
+            dummy = torch.zeros((1, intermediate_twice), device=recv_x[0].device, dtype=hidden_dtype)
+            if fused_activation:
+                silu_and_mul_quant_fp8(dummy, block_size_k, recv_x[0].dtype, limit=limit)
+            else:
+                out = dummy.new_empty((1, intermediate_size))
+                silu_and_mul_fwd(dummy, out, alpha=alpha, limit=limit, clamp_up_add_one=clamp_up_add_one)
+        return torch.empty((recv_src_metadata.shape[0], hidden_size), device=recv_x[0].device, dtype=hidden_dtype)
+
+    assert all_tokens == recv_x[0].shape[0] and all_tokens % alignment == 0
+    assert workspace.dtype == torch.uint8 and workspace.ndim == 1 and workspace.is_contiguous()
     if group32:
         if expert_ends is None:
             counts = num_unaligned_recv_tokens_per_expert
@@ -747,6 +746,7 @@ def chunked_expanded_moe_forward(
         hidden_dtype=hidden_dtype,
         quant_dtype=recv_x[0].dtype,
         expert_alignment=alignment,
+        fused_activation=fused_activation,
     )
 
     if max_chunk_rows == 0:
@@ -763,8 +763,7 @@ def chunked_expanded_moe_forward(
     # 不同 rank 接收到的 token 数不同，因此实际 chunk 数也可能不同。Autotuner warmup
     # 中的分布式通信要求各 rank 进入 autotuning 的次数一致，否则容易发生通信错位。
     # 所以只允许第一个 chunk 保持 autotuning；从第二个 chunk 开始临时关闭，循环结束
-    # 后再恢复进入函数时的 warmup 状态。零 token rank 的首次调用由外层特殊分支补齐。
-    is_autotune_warmup = Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL)
+    # 后再恢复进入函数时的 warmup 状态。
     try:
         for chunk_index, chunk_start in enumerate(range(0, all_tokens, max_chunk_rows)):
             if is_autotune_warmup and chunk_index == 1:
@@ -772,7 +771,13 @@ def chunked_expanded_moe_forward(
 
             chunk_end = min(chunk_start + max_chunk_rows, all_tokens)
             chunk_rows = chunk_end - chunk_start
-            silu_out = workspace_manager.alloc((chunk_rows, intermediate_size), hidden_dtype)
+            if fused_activation:
+                qsilu_out = workspace_manager.alloc((chunk_rows, intermediate_size), recv_x[0].dtype)
+                scale_buffer = workspace_manager.alloc((scale_cols, chunk_rows), torch.float32)
+                qsilu_out_scale = scale_buffer.T
+                quant_buffers = [qsilu_out, scale_buffer]
+            else:
+                silu_out = workspace_manager.alloc((chunk_rows, intermediate_size), hidden_dtype)
             gemm_out_a = workspace_manager.alloc((chunk_rows, intermediate_twice), hidden_dtype)
             input_scale = recv_x[1][chunk_start:chunk_end]
             # Humming and Blackwell's FP32-to-UE8M0 packer use the chunk's own column pitch.
@@ -788,30 +793,34 @@ def chunked_expanded_moe_forward(
                 deepgemm_grouped_fp8_nt_contiguous(
                     chunk_input, (w1, w1_scale), gemm_out_a, m_indices[chunk_start:chunk_end]
                 )
-            silu_and_mul_fwd(gemm_out_a, silu_out, alpha=alpha, limit=limit, clamp_up_add_one=clamp_up_add_one)
+            if fused_activation:
+                silu_and_mul_quant_fp8_out(gemm_out_a, qsilu_out, qsilu_out_scale, block_size_k, limit=limit)
+            else:
+                silu_and_mul_fwd(gemm_out_a, silu_out, alpha=alpha, limit=limit, clamp_up_add_one=clamp_up_add_one)
             workspace_manager.free(gemm_out_a)
             del gemm_out_a
 
-            quant_buffers = []
+            if not fused_activation:
+                quant_buffers = []
 
-            def workspace_quant_alloc(shape, dtype, device):
-                if device != workspace.device:
-                    raise RuntimeError(f"quant buffer must be allocated on {workspace.device}, got {device}")
-                quant_buffer = workspace_manager.alloc(shape, dtype)
-                quant_buffers.append(quant_buffer)
-                return quant_buffer
+                def workspace_quant_alloc(shape, dtype, device):
+                    if device != workspace.device:
+                        raise RuntimeError(f"quant buffer must be allocated on {workspace.device}, got {device}")
+                    quant_buffer = workspace_manager.alloc(shape, dtype)
+                    quant_buffers.append(quant_buffer)
+                    return quant_buffer
 
-            qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
-                silu_out,
-                block_size_k,
-                dtype=recv_x[0].dtype,
-                column_major_scales=True,
-                scale_tma_aligned=True,
-                alloc_func=workspace_quant_alloc,
-                use_ue8m0_scales=group32 or is_sm100_gpu(),
-            )
-            workspace_manager.free(silu_out)
-            del silu_out
+                qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
+                    silu_out,
+                    block_size_k,
+                    dtype=recv_x[0].dtype,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    alloc_func=workspace_quant_alloc,
+                    use_ue8m0_scales=group32 or is_sm100_gpu(),
+                )
+                workspace_manager.free(silu_out)
+                del silu_out
 
             gemm_out_b = workspace_manager.alloc((chunk_rows, hidden_size), hidden_dtype)
             if humming_gemms is not None:

@@ -3,6 +3,7 @@ import torch
 import triton
 import triton.language as tl
 
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType, autotune
 from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import _ceil_to_ue8m0
 
@@ -102,6 +103,118 @@ def _silu_and_mul_post_quant_kernel(
         )
 
 
+@triton.jit
+def _expanded_swiglu_quant_1x32_kernel(
+    x,
+    quant,
+    scales,
+    expert_ends,
+    width: tl.constexpr,
+    stride_sm,
+    stride_sn,
+    limit: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    GROUPS: tl.constexpr,
+):
+    expert = tl.program_id(2)
+    previous = tl.load(expert_ends + expert - 1, expert > 0, 0)
+    start = tl.cdiv(previous, 32) * 32
+    end = tl.load(expert_ends + expert)
+    cols = tl.program_id(0) * (GROUPS * 32) + tl.arange(0, GROUPS * 32)
+    groups = tl.program_id(0) * GROUPS + tl.arange(0, GROUPS)
+    for first in range(start + tl.program_id(1) * BLOCK_M, end, tl.num_programs(1) * BLOCK_M):
+        rows = first + tl.arange(0, BLOCK_M)
+        mask = (rows[:, None] < end) & (cols[None, :] < width)
+        row_offsets = rows.to(tl.int64)[:, None]
+        offsets = row_offsets * (2 * width) + cols[None, :]
+        gate = tl.load(x + offsets, mask, 0).to(tl.float32)
+        up = tl.load(x + offsets + width, mask, 0).to(tl.float32)
+        gate = tl.minimum(gate, limit)
+        up = tl.clamp(up, -limit, limit)
+        gate = (gate / (1 + tl.exp(-gate))).to(x.dtype.element_ty)
+        values = tl.reshape(up * gate, (BLOCK_M, GROUPS, 32))
+        scale = _ceil_to_ue8m0(tl.maximum(tl.max(tl.abs(values), 2), 1e-10) / 448.0)
+        q = tl.reshape(tl.clamp(values / scale[:, :, None], -448.0, 448.0), (BLOCK_M, GROUPS * 32))
+        tl.store(quant + row_offsets * width + cols[None, :], q, mask)
+        tl.store(
+            scales + row_offsets * stride_sm + groups[None, :] * stride_sn,
+            scale,
+            (rows[:, None] < end) & (groups[None, :] < width // 32),
+        )
+
+
+def _expanded_swiglu_tuning_inputs(x, quant, scales, expert_ends, expected_m, limit):
+    # Capture warmup can send every dummy row to the same expert. Use separate
+    # buffers so tuning never populates padding in the caller's expanded layout.
+    # Keep the mean of the graph bucket while exercising different loop and tail lengths.
+    experts = expert_ends.numel()
+    light_m = expected_m // 2
+    counts = [light_m, expected_m, 2 * expected_m - light_m] * (experts // 3) + [expected_m] * (experts % 3)
+    ends, rows = [], 0
+    for count in counts:
+        ends.append(rows + count)
+        rows += triton.cdiv(count, 32) * 32
+    if scales.stride(0) == 1:
+        scale_strides = (1, max(rows, scales.stride(1)))
+    else:
+        scale_strides = (scales.shape[1], 1)
+    return (
+        x.new_zeros((rows, x.shape[1])),
+        quant.new_empty((rows, quant.shape[1])),
+        torch.empty_strided((rows, scales.shape[1]), scale_strides, dtype=scales.dtype, device=x.device),
+        expert_ends.new_tensor(ends),
+        expected_m,
+        limit,
+    ), {}
+
+
+@autotune(
+    kernel_name="expanded_swiglu_quant_1x32:v1",
+    configs_gen_func=lambda: [
+        {"BLOCK_M": m, "GROUPS": g, "row_programs": r, "num_warps": w}
+        for m, g, r, w in (
+            (1, 4, 4, 1),
+            (2, 4, 8, 4),
+            (4, 4, 8, 4),
+            (4, 8, 8, 4),
+            (4, 8, 4, 4),
+            (8, 4, 4, 4),
+            (8, 8, 4, 4),
+            (4, 16, 8, 4),
+        )
+    ],
+    static_key_func=lambda x, scales, expert_ends: {
+        "n": x.shape[1] // 2,
+        "experts": expert_ends.numel(),
+        "dtype": str(x.dtype),
+        "column_major_scales": scales.stride(0) == 1,
+    },
+    run_key_func=lambda expected_m: expected_m,
+    kernel_type=AutotuneKernelType.DECODE,
+    rebuild_input_func=_expanded_swiglu_tuning_inputs,
+    warmup_all_exist_config=False,
+    benchmark_repeats=32,
+)
+def _expanded_swiglu_quant_1x32(x, quant, scales, expert_ends, expected_m, limit, run_config=None):
+    if run_config is None:
+        run_config = {"BLOCK_M": 4, "GROUPS": 8, "row_programs": 8, "num_warps": 4}
+    width = quant.shape[1]
+    groups = run_config["GROUPS"]
+    grid = (triton.cdiv(width, groups * 32), run_config["row_programs"], expert_ends.numel())
+    _expanded_swiglu_quant_1x32_kernel[grid](
+        x,
+        quant,
+        scales,
+        expert_ends,
+        width,
+        *scales.stride(),
+        limit,
+        BLOCK_M=run_config["BLOCK_M"],
+        GROUPS=groups,
+        num_warps=run_config["num_warps"],
+    )
+
+
 def silu_and_mul_masked_post_quant_fwd(
     input: torch.Tensor,
     output: torch.Tensor,
@@ -114,14 +227,13 @@ def silu_and_mul_masked_post_quant_fwd(
     *,
     expert_alignment=None,
     use_ue8m0_scales=False,
+    expected_m=None,
 ):
     """
-    input shape [expert_num, token_num_padded, hidden_dim]
-    output shape [expert_num, token_num_padded, hidden_dim // 2], dtype fp8
-    output_scale [expert_num token_num_paddded, hidden_dim // 2 // 128] dtype float32
-    quant_group_size  int,
-    masked_m shape [expert_num]. For 2D expanded buffers, expert_alignment
-    selects exclusive expert row ends with aligned starts.
+    Quantize the valid SwiGLU rows in each expert segment. For 3D input,
+    masked_m holds row counts. For 2D expanded input it holds exclusive ends
+    whose starts are aligned to expert_alignment. expected_m selects a decode
+    tuning configuration. The kernel reads the row bounds from masked_m.
     """
 
     assert alpha is None or limit is not None
@@ -140,6 +252,15 @@ def silu_and_mul_masked_post_quant_fwd(
 
     size_n = input.shape[-1] // 2
     assert size_n % quant_group_size == 0
+    if (
+        expected_m is not None
+        and quant_group_size == expert_alignment == 32
+        and use_ue8m0_scales
+        and limit is not None
+        and alpha is None
+        and not ffn_use_tanh_approximate_gelu()
+    ):
+        return _expanded_swiglu_quant_1x32(input, output, output_scale, masked_m, expected_m, limit)
 
     expert_num = len(masked_m)
 

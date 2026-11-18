@@ -71,3 +71,45 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, alph
     scales = activation.abs().amax(-1, keepdim=True).clamp(min=1e-10) / 448
     expected = ((activation / scales).to(torch.float8_e4m3fn).float() * scales).bfloat16()
     torch.testing.assert_close(actual, expected, atol=0.05, rtol=0.02)
+
+
+def test_group32_prefill_activation_across_workspace_chunks():
+    dim, alignment = 128, 128
+    counts = [3, 0, 2]
+    active = [0, 1, 2, alignment, alignment + 1]
+    fp8 = torch.float8_e4m3fn
+    torch.manual_seed(154)
+    x = (torch.randn((len(active), dim), device="cuda") * 5).to(fp8)
+    recv = torch.zeros((2 * alignment, dim), dtype=fp8, device="cuda")
+    recv.view(torch.uint8)[active] = x.view(torch.uint8)
+    eye = torch.eye(dim, device="cuda")
+    w1 = torch.cat([eye, 2 * eye]).repeat(len(counts), 1, 1).to(fp8)
+    w2 = eye.repeat(len(counts), 1, 1).to(fp8)
+    unit_scales = torch.full((len(counts), 2 * dim, dim // 32), 127, dtype=torch.uint8, device="cuda")
+    metadata = torch.zeros((len(active), 3), device="cuda", dtype=torch.int32)
+    metadata[:, 2] = torch.tensor(active, device="cuda")
+    # The cached gather reservation rounds up to 1024 rows. The remainder fits exactly one 128-row chunk.
+    workspace_bytes = 1024 * dim * 2 + alignment * (4 * dim + dim + 4 * (dim // 32))
+    workspace = torch.empty(workspace_bytes, device="cuda", dtype=torch.uint8)
+    actual = ep.chunked_expanded_moe_forward(
+        [alignment, 0, alignment],
+        torch.tensor(counts, dtype=torch.int32, device="cuda"),
+        (recv, torch.ones((dim // 32, len(recv)), device="cuda").T),
+        torch.ones(len(recv), device="cuda"),
+        metadata,
+        w1,
+        unit_scales,
+        w2,
+        unit_scales[:, :dim].contiguous(),
+        32,
+        workspace,
+        torch.bfloat16,
+        limit=10.0,
+    )
+    gate_up = torch.cat((x.float(), x.float() * 2), dim=1).bfloat16()
+    activation = torch.empty_like(gate_up[:, :dim], memory_format=torch.contiguous_format)
+    ep.silu_and_mul_fwd(gate_up, activation, limit=10.0)
+    q, s = ep.per_token_group_quant_fp8(activation, 32, use_ue8m0_scales=True)
+    expected = (q.float() * s.repeat_interleave(32, 1)).bfloat16()
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    assert metadata[:, 2].tolist() == list(range(len(active)))

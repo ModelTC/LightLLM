@@ -75,10 +75,10 @@ def _silu_and_mul_quant_fp8(
     configs_gen_func=lambda: [
         {"GROUPS_PER_CTA": g, "num_warps": w} for g, w in [(1, 1), (4, 1), (4, 4), (8, 4), (16, 4)]
     ],
-    static_key_func=lambda input, group_size, dtype, limit, use_ue8m0_scales, use_packed_ue8m0: {
+    static_key_func=lambda input, group_size, quant, limit, use_ue8m0_scales, use_packed_ue8m0: {
         "N": input.shape[1] // 2,
         "input_dtype": str(input.dtype),
-        "output_dtype": str(dtype),
+        "output_dtype": str(quant.dtype),
         "group_size": group_size,
         "clamp": limit is not None,
         "gelu": ffn_use_tanh_approximate_gelu(),
@@ -87,6 +87,49 @@ def _silu_and_mul_quant_fp8(
     },
     run_key_func=lambda input: input.shape[0],
 )
+def silu_and_mul_quant_fp8_out(
+    input,
+    quant,
+    scale,
+    group_size,
+    limit=None,
+    use_ue8m0_scales=True,
+    use_packed_ue8m0=False,
+    eps=1e-10,
+    run_config=None,
+):
+    """Write the FP8 activation and its column-major scales into caller-owned buffers."""
+    m, n = quant.shape
+    groups_per_row = n // group_size
+    if run_config is None:
+        run_config = {"GROUPS_PER_CTA": 16 if use_packed_ue8m0 else 4, "num_warps": 4}
+    groups_per_cta = run_config["GROUPS_PER_CTA"]
+    if use_packed_ue8m0:
+        groups_per_cta = max(groups_per_cta, 4)
+        grid = (m, triton.cdiv(groups_per_row, groups_per_cta))
+    else:
+        grid = (triton.cdiv(m * groups_per_row, groups_per_cta),)
+    _silu_and_mul_quant_fp8[grid](
+        input,
+        quant,
+        scale,
+        input.stride(0),
+        n,
+        m * groups_per_row,
+        scale.stride(1),
+        limit,
+        eps,
+        torch.finfo(quant.dtype).max,
+        group_size,
+        USE_LIMIT=limit is not None,
+        USE_GELU=ffn_use_tanh_approximate_gelu(),
+        USE_UE8M0_SCALE=use_ue8m0_scales,
+        USE_PACKED_UE8M0=use_packed_ue8m0,
+        GROUPS_PER_CTA=groups_per_cta,
+        num_warps=run_config["num_warps"],
+    )
+
+
 def silu_and_mul_quant_fp8(
     input,
     group_size,
@@ -108,32 +151,8 @@ def silu_and_mul_quant_fp8(
     scale_cols = triton.cdiv(groups_per_row, 4) if use_packed_ue8m0 else groups_per_row
     scale_dtype = torch.int32 if use_packed_ue8m0 else torch.float32
     scale = alloc_func((scale_cols, aligned_m), device=input.device, dtype=scale_dtype).T[:m, :]
-    if run_config is None:
-        run_config = {"GROUPS_PER_CTA": 16 if use_packed_ue8m0 else 4, "num_warps": 4}
-    groups_per_cta = run_config["GROUPS_PER_CTA"]
-    if use_packed_ue8m0:
-        groups_per_cta = max(groups_per_cta, 4)
-        grid = (m, triton.cdiv(groups_per_row, groups_per_cta))
-    else:
-        grid = (triton.cdiv(m * groups_per_row, groups_per_cta),)
-    _silu_and_mul_quant_fp8[grid](
-        input,
-        quant,
-        scale,
-        input.stride(0),
-        n,
-        m * groups_per_row,
-        scale.stride(1),
-        limit,
-        eps,
-        torch.finfo(dtype).max,
-        group_size,
-        USE_LIMIT=limit is not None,
-        USE_GELU=ffn_use_tanh_approximate_gelu(),
-        USE_UE8M0_SCALE=use_ue8m0_scales,
-        USE_PACKED_UE8M0=use_packed_ue8m0,
-        GROUPS_PER_CTA=groups_per_cta,
-        num_warps=run_config["num_warps"],
+    silu_and_mul_quant_fp8_out(
+        input, quant, scale, group_size, limit, use_ue8m0_scales, use_packed_ue8m0, eps, run_config=run_config
     )
     return quant, scale
 

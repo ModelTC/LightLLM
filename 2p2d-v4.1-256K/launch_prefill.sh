@@ -38,7 +38,7 @@ exec /opt/conda/bin/python -u -m "${LIGHTLLM_SERVER_MODULE:-lightllm.server.api_
     --disable_audio \
     --batch_max_tokens 8192 \
     --chunked_prefill_size 8192 \
-    --prefill_queue_strategy default \
+    --prefill_queue_strategy hrrn \
     --mem_fraction 0.75 \
     --disable_cudagraph \
     --linear_att_page_block_num 16 \
