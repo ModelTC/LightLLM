@@ -17,6 +17,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from lightllm.server.pd_io_struct import ObjType
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.websocket_utils import set_pd_websocket_write_buffer
 
 logger = init_logger(__name__)
 
@@ -28,12 +29,13 @@ async def register_and_keep_alive(websocket: WebSocket):
     from .api_http import g_objs
 
     await websocket.accept()
+    set_pd_websocket_write_buffer(websocket=websocket)
     websocket._receive_bytes_max_size = get_lightllm_websocket_max_message_size()
     client_ip, client_port = websocket.client
     logger.info(f"Client connected from IP: {client_ip}, Port: {client_port}")
     regist_json = json.loads(await websocket.receive_text())
     logger.info(f"received regist_json {regist_json}")
-    await g_objs.httpserver_manager.register_pd(regist_json, websocket)
+    pd_client = await g_objs.httpserver_manager.register_pd(regist_json, websocket)
 
     try:
         heartbeat_timeout_seconds = 30
@@ -57,7 +59,7 @@ async def register_and_keep_alive(websocket: WebSocket):
         logger.exception(str(e))
     finally:
         logger.error(f"client {regist_json} removed")
-        await g_objs.httpserver_manager.remove_pd(regist_json)
+        await g_objs.httpserver_manager.remove_pd(pd_client)
     return
 
 
@@ -66,6 +68,7 @@ async def kv_move_status(websocket: WebSocket):
     from .api_http import g_objs
 
     await websocket.accept()
+    set_pd_websocket_write_buffer(websocket=websocket)
     client_ip, client_port = websocket.client
     logger.info(f"kv_move_status Client connected from IP: {client_ip}, Port: {client_port}")
     try:

@@ -13,8 +13,13 @@ from lightllm.server.httpserver_for_pd_master.manager import (
     ReqStatus,
 )
 from lightllm.server.multimodal_params import MultimodalParams
-from lightllm.server.pd_io_struct import ObjType
+from lightllm.server.pd_io_struct import ObjType, PD_Client_Obj
 from lightllm.utils.error_utils import InvalidRequestError, PDPrefillNodeStopGenToken, ServerBusyError
+
+
+def _pd_node(mode, send_bytes=None):
+    websocket = SimpleNamespace(send_bytes=send_bytes if send_bytes is not None else AsyncMock())
+    return PD_Client_Obj(1, f"{mode}:8000", mode, {}, websocket=websocket)
 
 
 class _FailingManager:
@@ -248,8 +253,8 @@ def test_pd_master_generate_error_marks_request_and_wakes_all_waiters():
         manager.timer_log = AsyncMock()
         manager.infos_queues = None
 
-        p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
-        d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+        p_node = _pd_node("prefill")
+        d_node = _pd_node("decode")
         req_status = ReqStatus(123, p_node, d_node)
         manager.req_id_to_out_inf = {123: req_status}
 
@@ -294,8 +299,8 @@ def test_pd_master_first_token_dedup_preserves_terminal_status(terminal_status, 
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
         manager.args = SimpleNamespace(pd_node_id=1)
         manager.req_id_to_out_inf = {}
-        p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
-        d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+        p_node = _pd_node("prefill")
+        d_node = _pd_node("decode")
         sampling_params = SamplingParams()
         sampling_params.group_request_id = 123
         sampling_params.max_new_tokens = 4
@@ -419,8 +424,8 @@ def test_pd_master_abort_removes_request_even_when_node_notifications_fail():
     async def run():
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
         manager.req_id_to_out_inf = {}
-        p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock(side_effect=ConnectionError("p down"))))
-        d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock(side_effect=ConnectionError("d down"))))
+        p_node = _pd_node("prefill", AsyncMock(side_effect=ConnectionError("p down")))
+        d_node = _pd_node("decode", AsyncMock(side_effect=ConnectionError("d down")))
         manager.req_id_to_out_inf[123] = ReqStatus(123, p_node, d_node)
 
         await manager.abort(123)
@@ -434,8 +439,8 @@ def test_pd_master_abort_uses_explicit_nodes_when_request_status_is_missing():
     async def run():
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
         manager.req_id_to_out_inf = {}
-        p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
-        d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+        p_node = _pd_node("prefill")
+        d_node = _pd_node("decode")
 
         await manager.abort(123, p_node=p_node, d_node=d_node)
 

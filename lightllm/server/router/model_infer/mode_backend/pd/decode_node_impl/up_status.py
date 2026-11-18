@@ -15,6 +15,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.pd_io_struct import PD_Master_Obj
 import torch.multiprocessing as mp
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.websocket_utils import PD_WEBSOCKET_WRITE_LIMIT
 from lightllm.utils.process_check import start_parent_check_thread
 
 logger = init_logger(__name__)
@@ -31,7 +32,6 @@ class UpStatusManager:
         asyncio.run(self.task_loop())
 
     async def task_loop(self):
-
         self.id_to_handle_task: Dict[int, asyncio.Task] = {}
         self.id_to_handle_queue: Dict[int, asyncio.Queue] = {}
 
@@ -80,7 +80,7 @@ class UpStatusManager:
         while True:
             try:
                 uri = f"ws://{pd_master_obj.host_ip_port}/kv_move_status"
-                async with websockets.connect(uri, compression=None) as websocket:
+                async with websockets.connect(uri, compression=None, write_limit=PD_WEBSOCKET_WRITE_LIMIT) as websocket:
                     import socket
 
                     sock = websocket.transport.get_extra_info("socket")
