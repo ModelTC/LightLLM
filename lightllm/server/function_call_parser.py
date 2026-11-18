@@ -1238,6 +1238,9 @@ class Glm47Detector(BaseFormatDetector):
         )
         self.func_name_regex = re.compile(r"<tool_call>([^<\n]+?)(?:\n|(?=<arg_key>)|(?=</tool_call>))")
         self._streaming_tool_name: Optional[str] = None
+        self._streaming_tool_chunks: Optional[List[str]] = None
+        self._streaming_tool_tail = ""
+        self._streaming_tool_name_checked = False
         # Extract arg_key/arg_value pairs
         self.func_arg_regex = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL)
 
@@ -1331,40 +1334,52 @@ class Glm47Detector(BaseFormatDetector):
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
         """Buffer XML arguments while emitting tool deltas to keep the stream alive."""
-        self._buffer += new_text
-        normal_text = ""
+        new_text = self._buffer + new_text
+        self._buffer = ""
+        normal_parts: List[str] = []
         calls: List[ToolCallItem] = []
-        while self._buffer:
-            start = self._buffer.find(self.bot_token)
-            if start == -1:
-                keep = self._ends_with_partial_token(self._buffer, self.bot_token)
-                end = len(self._buffer) - keep
-                normal_text += self._buffer[:end]
-                self._buffer = self._buffer[end:]
-                break
+        while new_text or self._streaming_tool_chunks is not None:
+            if self._streaming_tool_chunks is None:
+                start = new_text.find(self.bot_token)
+                if start == -1:
+                    keep = self._ends_with_partial_token(new_text, self.bot_token)
+                    end = len(new_text) - keep
+                    normal_parts.append(new_text[:end])
+                    self._buffer = new_text[end:]
+                    break
 
-            normal_text += self._buffer[:start]
-            self._buffer = self._buffer[start:]
-            end = self._buffer.find(self.eot_token)
+                normal_parts.append(new_text[:start])
+                new_text = new_text[start:]
+                self._streaming_tool_chunks = []
+
+            # Previously scanned arguments stay in chunks. Only the new text and
+            # a delimiter-sized overlap need searching, even for long tool calls.
+            search_text = self._streaming_tool_tail + new_text
+            end = search_text.find(self.eot_token)
             if end == -1:
+                if new_text:
+                    self._streaming_tool_chunks.append(new_text)
                 # Match the buffered Qwen3-Coder flow: announce the name once,
                 # then send empty argument deltas until the XML call is complete.
                 # Long Write/Bash arguments must not leave the HTTP stream idle.
                 name = None
-                if self._streaming_tool_name is None:
-                    match = self.func_name_regex.match(self._buffer)
+                if not self._streaming_tool_name_checked and ("\n" in search_text or "<arg_key>" in search_text):
+                    self._streaming_tool_name_checked = True
+                    match = self.func_name_regex.match("".join(self._streaming_tool_chunks))
                     if match and match.group(1).strip() in self._get_tool_indices(tools):
                         name = match.group(1).strip()
                         self._streaming_tool_name = name
                         self.current_tool_id += 1
+                self._streaming_tool_tail = search_text[-(len(self.eot_token) - 1) :]
                 if self._streaming_tool_name is not None:
                     calls.append(ToolCallItem(tool_index=self.current_tool_id, name=name, parameters=""))
                 break
 
-            end += len(self.eot_token)
+            end += len(self.eot_token) - len(self._streaming_tool_tail)
+            self._streaming_tool_chunks.append(new_text[:end])
             # Waiting for the closing tag avoids re-emitting partial JSON or
             # rewriting already sent arguments when another XML key arrives.
-            result = self.detect_and_parse(self._buffer[:end], tools)
+            result = self.detect_and_parse("".join(self._streaming_tool_chunks), tools)
             for call in result.calls:
                 if self._streaming_tool_name is None:
                     self.current_tool_id += 1
@@ -1373,9 +1388,12 @@ class Glm47Detector(BaseFormatDetector):
                 call.tool_index = self.current_tool_id
                 calls.append(call)
             self._streaming_tool_name = None
-            self._buffer = self._buffer[end:]
+            self._streaming_tool_chunks = None
+            self._streaming_tool_tail = ""
+            self._streaming_tool_name_checked = False
+            new_text = new_text[end:]
 
-        return StreamingParseResult(normal_text=normal_text, calls=calls)
+        return StreamingParseResult(normal_text="".join(normal_parts), calls=calls)
 
 
 class DeepSeekV32Detector(BaseFormatDetector):
