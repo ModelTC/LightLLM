@@ -122,7 +122,7 @@ def fused_experts_impl(
     # TODO: 共享专家目前整段只和 combine 重叠。可以拆开：dispatch 期间算 up，
     # combine 期间算 down，把两段通信的空闲都盖住。
 
-    if is_prefill:
+    if is_prefill and buffer is not dist_group_manager.ep_low_latency_buffer:
         qinput_tensor, input_scale = per_token_group_quant_fp8(
             hidden_states, block_size_k, dtype=w1.dtype, use_ue8m0_scales=get_env_use_ue8m0_scales()
         )
