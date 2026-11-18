@@ -214,7 +214,12 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
             async def __aexit__(self, *_args):
                 return False
 
-        monkeypatch.setattr(pd_loop.websockets, "connect", lambda *_args, **_kwargs: Connection())
+        def connect(uri, **kwargs):
+            assert uri == "ws://master:8000/pd_register"
+            assert kwargs["compression"] is None
+            return Connection()
+
+        monkeypatch.setattr(pd_loop.websockets, "connect", connect)
         monkeypatch.setattr(pd_loop, "_pd_process_generate", generate)
         await asyncio.wait_for(pd_loop._pd_handle_task(manager, PD_Master_Obj(1, "master:8000"), dp_index), 2)
         assert payloads[0].get("dp_index") == dp_index
