@@ -139,10 +139,14 @@ def _decode_replay(
         _arrive_value_tiles(SyncMark, seq, hv, HV, KH, NV)
 
     if PRECOMPUTE_PROJECTIONS:
-        # 输出用 tf32x3 tensor core 从冻结的 checkpoint 和 history 重建。
+        # 输出用 tensor core 从冻结的 checkpoint 和 history 重建。
         # 状态不在这里更新；压缩仍用原始 k/v 做 fp32 串行折回。
-        projection_dtype: tl.constexpr = tl.float32
-        projection_precision: tl.constexpr = "tf32x3"
+        # BF16 MTP replay 使用单次 TF32 MMA。FP32 输入保留三次 TF32
+        # 累加，避免把非 BF16 路径的精度和 kernel 选择一起改变。
+        projection_dtype: tl.constexpr = (
+            tl.bfloat16 if State.dtype.element_ty == tl.bfloat16 and Q.dtype.element_ty == tl.bfloat16 else tl.float32
+        )
+        projection_precision: tl.constexpr = "tf32" if Q.dtype.element_ty == tl.bfloat16 else "tf32x3"
         qk, projections, tt, tokens, valid, h = _project_qk(
             Q,
             StepK,

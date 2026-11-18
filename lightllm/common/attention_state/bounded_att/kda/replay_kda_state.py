@@ -105,13 +105,25 @@ class ReplayKDAState(BoundedAttentionState):
         self.tile_sync_mark = torch.zeros(
             (slots * (mtp_step + 6), self.num_key_heads), dtype=torch.int32, device=device
         )
-        # 归一化 k 有范围保证，bf16 激活用 fp16 保留更多尾数；d 无此保证，使用 fp32。
-        # 折回不用这份 d，而用下面的原始 k/v，避免把重建误差写进 SSM。g、beta 保持 fp32。
+        # MTP 的短 replay 窗口只需要保存验证窗口的 history。BF16 激活下，
+        # precompute 路径用 BF16 history 可以把带宽和显存访问降下来，和旧的
+        # glm53_optim replay 实现保持一致。inline 或较长窗口继续使用 FP32，
+        # 避免改变非目标路径的数值行为。折回不用这份 history，而用下面的
+        # 原始 k/v，避免重建误差写进 SSM。g、beta 保持 FP32。
+        history_dtype = (
+            torch.bfloat16
+            if (
+                config.conv_dtype == torch.bfloat16
+                and verify_width > 1
+                and compute_mode == "precompute"
+                and capacity <= 8
+            )
+            else torch.float32
+        )
         # KDA 的 g 按 key 通道存。
-        reconstruction_dtype = torch.float16 if config.conv_dtype == torch.bfloat16 else torch.float32
         key_shape = (layers, slots, self.num_key_heads, capacity, k)
-        self.keys = torch.empty(key_shape, dtype=reconstruction_dtype, device=device)
-        self.deltas = torch.empty((layers, slots, hv, capacity, v), dtype=torch.float32, device=device)
+        self.keys = torch.empty(key_shape, dtype=history_dtype, device=device)
+        self.deltas = torch.empty((layers, slots, hv, capacity, v), dtype=history_dtype, device=device)
         self.gates = torch.empty((layers, slots, hv, capacity, k), dtype=torch.float32, device=device)
         self.raw_keys = torch.empty(key_shape, dtype=config.conv_dtype, device=device)
         self.raw_values = torch.empty((layers, slots, hv, capacity, v), dtype=config.conv_dtype, device=device)

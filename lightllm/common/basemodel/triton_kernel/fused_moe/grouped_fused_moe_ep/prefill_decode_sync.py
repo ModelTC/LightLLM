@@ -22,6 +22,7 @@ from .deepgemm import (
     chunked_expanded_moe_forward,
     decode_masked_group_gemm,
     get_mk_alignment_for_contiguous_layout,
+    masked_group_gemm,
 )
 from .fp4_mega import mega_moe_impl, use_sm100_mega_moe
 
@@ -51,6 +52,8 @@ def fused_experts(
         routed = mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method)
         return routed if shared is None else routed + shared
 
+    use_low_latency_decode = is_prefill is False and dist_group_manager.ep_low_latency_buffer is not None
+    buffer = dist_group_manager.ep_low_latency_buffer if use_low_latency_decode else dist_group_manager.ep_buffer
     return fused_experts_impl(
         hidden_states=hidden_states,
         w1=w13.weight,
@@ -59,7 +62,7 @@ def fused_experts(
         topk_idx=topk_idx,
         num_experts=num_experts,
         block_size_k=quant_method.block_size,
-        buffer=dist_group_manager.ep_buffer,
+        buffer=buffer,
         is_prefill=is_prefill,
         use_fp8_w8a8=True,
         use_fp8_all2all=True,
@@ -199,6 +202,54 @@ def fused_experts_impl(
             allocate_on_comm_stream,
             shared_expert_func,
         )
+        return combined_x
+
+    if buffer is dist_group_manager.ep_low_latency_buffer:
+        # Legacy DeepEP low-latency dispatch keeps the expert-major masked
+        # layout and fuses input quantization into the communication kernel.
+        # This is the Decode path used by glm53_optim. ElasticBuffer remains
+        # the fallback when the installed DeepEP no longer exposes Buffer.
+        num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
+        expected_m = triton.cdiv(hidden_states.shape[0] * buffer.group_size * topk_idx.shape[1], num_experts)
+        recv_x, masked_m, handle, _, _ = buffer.low_latency_dispatch(
+            hidden_states,
+            topk_idx,
+            num_max_dispatch_tokens_per_rank,
+            num_experts,
+            use_fp8=use_fp8_w8a8,
+            round_scale=get_env_use_ue8m0_scales(),
+            async_finish=False,
+            return_recv_hook=False,
+        )
+        gemm_out_b = masked_group_gemm(
+            recv_x,
+            masked_m,
+            hidden_states.dtype,
+            w1,
+            w1_scale,
+            w2,
+            w2_scale,
+            expected_m,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
+        )
+        overlap = shared_expert_func is not None
+        combined_x, _, hook = buffer.low_latency_combine(
+            gemm_out_b,
+            topk_idx,
+            topk_weights,
+            handle,
+            async_finish=False,
+            return_recv_hook=overlap,
+        )
+        if overlap:
+            del gemm_out_b
+            shared = shared_expert_func()
+            hook()
+            combined_x = combined_x + shared
+        elif shared_expert_func is not None:
+            combined_x = combined_x + shared_expert_func()
         return combined_x
 
     qinput_tensor, input_scale = per_token_group_quant_fp8(

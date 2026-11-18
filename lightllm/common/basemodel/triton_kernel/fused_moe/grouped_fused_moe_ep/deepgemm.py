@@ -8,6 +8,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
     silu_and_mul_quant_fp8,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
+    silu_and_mul_masked_post_quant_fwd,
     silu_and_mul_psum_post_quant_fwd,
 )
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
@@ -117,6 +118,91 @@ def deepgemm_grouped_fp8_fp4_nt_contiguous(
             recipe=(1, 1, 32),
         )
     raise RuntimeError("deep_gemm does not provide grouped fp8-fp4 NT contiguous GEMM kernel")
+
+
+def _deepgemm_grouped_fp8_nt_masked(
+    input_tuple: Tuple[torch.Tensor, torch.Tensor],
+    w_tuple: Tuple[torch.Tensor, torch.Tensor],
+    out: torch.Tensor,
+    masked_m: torch.Tensor,
+    expected_m: int,
+):
+    """Run the legacy low-latency masked grouped GEMM entry point."""
+    if HAS_DEEPGEMM:
+        if hasattr(deep_gemm, "m_grouped_fp8_gemm_nt_masked"):
+            return deep_gemm.m_grouped_fp8_gemm_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)
+        if hasattr(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_masked"):
+            return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(
+                input_tuple, w_tuple, out, masked_m, expected_m
+            )
+    raise RuntimeError("deep_gemm does not provide grouped_gemm_fp8 NT masked GEMM kernel")
+
+
+def masked_group_gemm(
+    recv_x: Tuple[torch.Tensor, torch.Tensor],
+    masked_m: torch.Tensor,
+    dtype: torch.dtype,
+    w1: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    expected_m: int,
+    alpha: Optional[float] = None,
+    limit: Optional[float] = None,
+    clamp_up_add_one: bool = True,
+):
+    """Run the low-latency masked W1/SwiGLU/W2 sequence.
+
+    The legacy DeepEP buffer returns an expert-major ``[E, M, K]`` layout and
+    one valid-row count per expert. ElasticBuffer's psum layout cannot reuse
+    this kernel because its rows are physically flattened by expert.
+    """
+    padded_m = recv_x[0].shape[1]
+    expert_count, intermediate_twice, _ = w1.shape
+    block_size = 128
+    expected_m = min(expected_m, padded_m)
+    gemm_out_a = torch.empty(
+        (expert_count, padded_m, intermediate_twice),
+        device=recv_x[0].device,
+        dtype=dtype,
+    )
+    qsilu_out_scale = torch.empty(
+        (expert_count, padded_m, intermediate_twice // 2 // block_size),
+        device=recv_x[0].device,
+        dtype=torch.float32,
+    )
+    qsilu_out = torch.empty(
+        (expert_count, padded_m, intermediate_twice // 2),
+        device=recv_x[0].device,
+        dtype=w1.dtype,
+    )
+    _deepgemm_grouped_fp8_nt_masked(
+        recv_x,
+        (w1, w1_scale),
+        gemm_out_a,
+        masked_m,
+        expected_m,
+    )
+    silu_and_mul_masked_post_quant_fwd(
+        gemm_out_a,
+        qsilu_out,
+        qsilu_out_scale,
+        block_size,
+        masked_m,
+        alpha=alpha,
+        limit=limit,
+        clamp_up_add_one=clamp_up_add_one,
+    )
+    del gemm_out_a
+    gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
+    _deepgemm_grouped_fp8_nt_masked(
+        (qsilu_out, qsilu_out_scale),
+        (w2, w2_scale),
+        gemm_out_b,
+        masked_m,
+        expected_m,
+    )
+    return gemm_out_b
 
 
 # ==================== Decode 接口 ====================

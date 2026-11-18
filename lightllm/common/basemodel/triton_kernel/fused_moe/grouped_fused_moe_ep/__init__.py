@@ -15,6 +15,7 @@ from .deepgemm import (
     deepgemm_grouped_fp8_fp4_nt_contiguous,
     deepgemm_grouped_fp8_nt_contiguous,
     get_mk_alignment_for_contiguous_layout,
+    masked_group_gemm,
     set_mk_alignment_for_contiguous_layout,
 )
 from .fp4_mega import mega_moe_impl, use_sm100_mega_moe
@@ -33,6 +34,7 @@ __all__ = [
     "fused_experts_impl",
     "get_ep_num_sms",
     "get_mk_alignment_for_contiguous_layout",
+    "masked_group_gemm",
     "mega_moe_impl",
     "quantize_fused_experts_input",
     "set_mk_alignment_for_contiguous_layout",

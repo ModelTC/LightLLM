@@ -665,14 +665,18 @@ class HttpServerManagerForPDMaster:
             ready_kv_len=decode_node_info.ready_kv_len,
         )
 
+        last_disconnect_check = 0.0
         while True:
             await req_status.wait_to_ready()
             req_status.raise_if_error()
-            if await request.is_disconnected():
-                raise ClientDisconnected(
-                    group_request_id=group_request_id,
-                    reason="fetch_pd_stream decode period check network disconnected",
-                )
+            now = time.monotonic()
+            if now - last_disconnect_check >= 1.0:
+                last_disconnect_check = now
+                if await request.is_disconnected():
+                    raise ClientDisconnected(
+                        group_request_id=group_request_id,
+                        reason="fetch_pd_stream decode period check network disconnected",
+                    )
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
@@ -711,14 +715,18 @@ class HttpServerManagerForPDMaster:
             return ready_kv_len
 
         new_tokens = []
+        last_disconnect_check = 0.0
         while True:
             await req_status.wait_to_ready()
             req_status.raise_if_error()
-            if await request.is_disconnected():
-                raise ClientDisconnected(
-                    group_request_id=group_request_id,
-                    reason="fetch_pd_stream decode period check network disconnected",
-                )
+            now = time.monotonic()
+            if now - last_disconnect_check >= 1.0:
+                last_disconnect_check = now
+                if await request.is_disconnected():
+                    raise ClientDisconnected(
+                        group_request_id=group_request_id,
+                        reason="fetch_pd_stream decode period check network disconnected",
+                    )
             if not await req_status.can_read(self.req_id_to_out_inf):
                 continue
 
@@ -888,9 +896,13 @@ class HttpServerManagerForPDMaster:
                             group_req_id = convert_sub_id_to_group_id(sub_req_id)
                             try:
                                 req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]
-                                async with req_status.lock:
-                                    req_status.out_token_info_list.append((sub_req_id, text, metadata, finish_status))
-                                    req_status.event.set()
+                                # TOKEN_PACKS and the request generator are
+                                # consumed on this event loop. Avoid taking an
+                                # asyncio lock and creating an await point for
+                                # every streamed token. The consumer drains the
+                                # whole list in one batch below.
+                                req_status.out_token_info_list.append((sub_req_id, text, metadata, finish_status))
+                                req_status.event.set()
                             except:
                                 pass
                     elif obj[0] == ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS:
@@ -975,29 +987,25 @@ class ReqStatus:
             raise RuntimeError(f"PD node generate failed: {self.error_info}")
 
     async def can_read(self, req_id_to_out_inf):
-        async with self.lock:
-            self.event.clear()
-            assert self.req_id in req_id_to_out_inf, f"error state req_id {self.req_id}"
-            if len(self.out_token_info_list) == 0:
-                return False
-            else:
-                return True
+        """Clear the wakeup flag and report whether a token batch is ready."""
+        self.event.clear()
+        assert self.req_id in req_id_to_out_inf, f"error state req_id {self.req_id}"
+        return len(self.out_token_info_list) > 0
 
     async def pop_all_tokens(self):
-        async with self.lock:
-            ans = self.out_token_info_list.copy()
-            self.out_token_info_list.clear()
+        """Drain all tokens currently queued by the master event loop."""
+        ans = self.out_token_info_list.copy()
+        self.out_token_info_list.clear()
         return ans
 
     async def put_tokens_to_front(self, token_list: List[Tuple[int, str, dict, FinishStatus]]):
         if not token_list:
             return
 
-        async with self.lock:
-            merged_tokens = token_list + self.out_token_info_list
-            self.out_token_info_list.clear()
-            self.out_token_info_list.extend(merged_tokens)
-            self.event.set()
+        merged_tokens = token_list + self.out_token_info_list
+        self.out_token_info_list.clear()
+        self.out_token_info_list.extend(merged_tokens)
+        self.event.set()
 
 
 class PDManager:
