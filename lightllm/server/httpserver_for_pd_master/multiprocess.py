@@ -94,8 +94,10 @@ def start_multiprocess_pd_master(
 
 def _build_haproxy_config(args: StartArgs, worker_ports: list[int], server_state_path: Path) -> str:
     """生成 PD master 多 worker 的 HAProxy 配置。"""
+    # A wildcard server address enables HAProxy's original-destination forwarding.
+    worker_host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(args.host, args.host)
     worker_servers = [
-        f"    server worker_{worker_index} {format_host_port(args.host, worker_port)}"
+        f"    server worker_{worker_index} {format_host_port(worker_host, worker_port)}"
         for worker_index, worker_port in enumerate(worker_ports)
     ]
     worker_count = len(worker_ports)

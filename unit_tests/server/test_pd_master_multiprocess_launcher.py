@@ -176,9 +176,9 @@ def test_haproxy_config_streams_without_request_replay():
 
 @pytest.mark.parametrize(
     ("host", "expected_address"),
-    [("0.0.0.0", "0.0.0.0:8100"), ("::", "[::]:8100")],
+    [("0.0.0.0", "127.0.0.1:8100"), ("::", "[::1]:8100"), ("10.0.0.1", "10.0.0.1:8100")],
 )
-def test_haproxy_worker_addresses_follow_the_configured_listen_host(host, expected_address):
+def test_haproxy_worker_addresses_use_concrete_local_destinations(host, expected_address):
     config = multiprocess._build_haproxy_config(
         _args(host=host), _worker_ports(), Path("/tmp/lightllm-test-health.state")
     )

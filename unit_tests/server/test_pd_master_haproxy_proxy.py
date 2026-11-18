@@ -165,7 +165,7 @@ def haproxy_proxy(tmp_path, request):
             public_port = listener.getsockname()[1]
         args = StartArgs(
             run_mode="pd_master",
-            host="127.0.0.1",
+            host="0.0.0.0" if getattr(request, "param", None) == "wildcard_bind" else "127.0.0.1",
             port=public_port,
             httpserver_workers=2,
         )
@@ -215,6 +215,15 @@ def haproxy_proxy(tmp_path, request):
             server.server_close()
         for thread in threads:
             thread.join(timeout=1)
+
+
+@pytest.mark.parametrize("haproxy_proxy", ["wildcard_bind"], indirect=True)
+def test_wildcard_listener_keeps_worker_destination_independent_of_client_destination(haproxy_proxy):
+    base_url, opener, _state = haproxy_proxy
+    for url in (base_url, base_url.replace("127.0.0.1", "127.0.0.2")):
+        with opener.open(url + "/worker", timeout=3) as response:
+            assert response.status == 200
+            assert json.load(response)["worker_id"] in (0, 1)
 
 
 def test_real_haproxy_balances_workers_and_delivers_sse_before_stream_completion(haproxy_proxy):
@@ -280,7 +289,7 @@ def test_launcher_sigterm_drains_an_active_sse_response(haproxy_proxy, monkeypat
         "signal",
         lambda sig, handler: registered_handlers.__setitem__(sig, handler),
     )
-    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: None)
+    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda graceful=False: [])
     process_manager.setup_signal_handlers(
         state["haproxy"],
         graceful_shutdown_signal=signal.SIGUSR1,
