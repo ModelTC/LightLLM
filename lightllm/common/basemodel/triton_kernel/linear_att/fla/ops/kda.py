@@ -1122,6 +1122,7 @@ def _chunk_kda_fwd_with_cumulative_g(
         A=Akk,
         cu_seqlens=cu_seqlens,
         output_dtype=k.dtype,
+        split_diagonal=True,
     )
     del Akk
     # 3. Prepare U/W/Kg for the state update without reading the input state S_in.

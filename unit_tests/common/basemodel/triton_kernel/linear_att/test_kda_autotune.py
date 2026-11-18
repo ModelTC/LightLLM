@@ -1,5 +1,6 @@
 import collections
 import functools
+import importlib
 import inspect
 import json
 from itertools import accumulate
@@ -194,3 +195,93 @@ def test_kda_requires_packed_inputs(fused_gate, invalid_input):
     expected_message = "packed q" if invalid_input == "batch-dimension" else "cu_seqlens is required"
     with pytest.raises(AssertionError, match=expected_message):
         kernel(**inputs)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "heads,input_dtype,output_dtype,precision",
+    [
+        (2, torch.float32, torch.bfloat16, "ieee"),
+        (32, torch.bfloat16, torch.bfloat16, "ieee"),
+        (64, torch.float16, torch.float16, "ieee"),
+        (64, torch.float32, torch.float32, "ieee"),
+        (64, torch.float32, torch.bfloat16, "tf32"),
+        (64, torch.float32, torch.bfloat16, "tf32x3"),
+    ],
+)
+def test_split_diagonal_matches_unsplit(monkeypatch, heads, input_dtype, output_dtype, precision):
+    if precision != "ieee" and torch.cuda.get_device_capability()[0] < 8:
+        pytest.skip("TF32 requires SM80+")
+    solver = importlib.import_module("lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.solve_tril")
+    monkeypatch.setattr(solver, "FLA_TRIL_PRECISION", precision)
+    lengths = (1, 16, 1519)
+    cu_seqlens = torch.tensor([0, *accumulate(lengths)], device="cuda", dtype=torch.int32)
+    rows = torch.cat([torch.arange(length, device="cuda") % 64 for length in lengths])
+    matrix = torch.randn(1, sum(lengths), heads, 64, device="cuda", dtype=input_dtype) * 0.025
+    matrix.mul_((rows[:, None] > torch.arange(64, device="cuda"))[None, :, None, :])
+    expected = solver.solve_tril(matrix, cu_seqlens, output_dtype)
+    launches = []
+    original = solver._invert_64_diagonal_tiles.run
+
+    def observe(*args, **kwargs):
+        launches.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(solver._invert_64_diagonal_tiles, "run", observe)
+    actual = solver.solve_tril(matrix, cu_seqlens, output_dtype, split_diagonal=True)
+    assert len(launches) == 1
+    assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("batch,tokens,heads", [(1, 64, 2), (2, 65, 3), (3, 129, 2)])
+def test_split_diagonal_matches_unsplit_dense(monkeypatch, batch, tokens, heads):
+    solver = importlib.import_module("lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.solve_tril")
+    rows = torch.arange(tokens, device="cuda") % 64
+    matrix = torch.randn(batch, tokens, heads, 64, device="cuda") * 0.025
+    matrix.mul_((rows[:, None] > torch.arange(64, device="cuda"))[None, :, None, :])
+    expected = solver.solve_tril(matrix, output_dtype=torch.bfloat16)
+    launches = []
+    original = solver._invert_64_diagonal_tiles.run
+
+    def observe(*args, **kwargs):
+        launches.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(solver._invert_64_diagonal_tiles, "run", observe)
+    actual = solver.solve_tril(matrix, output_dtype=torch.bfloat16, split_diagonal=True)
+    assert len(launches) == 1
+    assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "lengths,expect_split",
+    [
+        ((512,) * 16, True),
+        ((64,) * 128, True),
+        ((16,) * 16, True),
+        ((128,) * 128, True),
+        ((1,) * 256, False),
+        ((32,), False),
+    ],
+    ids=["16-requests", "128-requests", "quarter-full-chunks", "16k-tokens", "mostly-empty-chunks", "tiny-batch"],
+)
+def test_split_diagonal_uses_chunk_occupancy(monkeypatch, lengths, expect_split):
+    solver = importlib.import_module("lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.solve_tril")
+    cu_seqlens = torch.tensor([0, *accumulate(lengths)], device="cuda", dtype=torch.int32)
+    rows = torch.cat([torch.arange(length, device="cuda") % 64 for length in lengths])
+    matrix = torch.randn(1, sum(lengths), 2, 64, device="cuda") * 0.025
+    matrix.mul_((rows[:, None] > torch.arange(64, device="cuda"))[None, :, None, :])
+    expected = solver.solve_tril(matrix, cu_seqlens, torch.bfloat16)
+    launches = []
+    original = solver._invert_64_diagonal_tiles.run
+
+    def observe(*args, **kwargs):
+        launches.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(solver._invert_64_diagonal_tiles, "run", observe)
+    actual = solver.solve_tril(matrix, cu_seqlens, torch.bfloat16, split_diagonal=True)
+    assert len(launches) == int(expect_split)
+    assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
