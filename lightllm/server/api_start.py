@@ -503,7 +503,7 @@ def _launch_subprocesses(args: StartArgs):
 def _hypercorn_config_args(args: StartArgs):
     if args.hypercorn_config is not None:
         return ["--config", args.hypercorn_config]
-    return ["--keep-alive", "10"]
+    return ["--config", "python:lightllm.server.hypercorn_config"]
 
 
 def normal_or_p_d_start(args: StartArgs):

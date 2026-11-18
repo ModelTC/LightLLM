@@ -91,7 +91,7 @@ def test_config_registration_uses_pd_write_buffer_limits(monkeypatch):
     @asynccontextmanager
     async def connect(uri, **kwargs):
         assert uri == "ws://config:9000/pd_master_register"
-        assert kwargs["write_limit"] == (8 * 1024 * 1024, 8 * 1024 * 1024 - 32 * 1024)
+        assert kwargs["write_limit"] == (32 * 1024, 8 * 1024)
         assert kwargs["compression"] is None
         yield websocket
 

@@ -1,5 +1,8 @@
+from hypercorn.config import Config
+
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.api_start import _hypercorn_config_args
+from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 
 
 def test_hypercorn_config_defaults_to_none():
@@ -14,10 +17,18 @@ def test_hypercorn_config_is_parsed():
     assert args.hypercorn_config == "hypercorn.toml"
 
 
-def test_hypercorn_args_use_default_keep_alive_without_config():
+def test_hypercorn_args_use_builtin_config_without_file():
     args = make_argument_parser().parse_args([])
 
-    assert _hypercorn_config_args(args) == ["--keep-alive", "10"]
+    assert _hypercorn_config_args(args) == ["--config", "python:lightllm.server.hypercorn_config"]
+
+
+def test_default_hypercorn_config_uses_128_mib_websocket_limit():
+    config = Config.from_object("lightllm.server.hypercorn_config")
+
+    assert config.keep_alive_timeout == 10
+    assert config.websocket_max_message_size == get_lightllm_websocket_max_message_size()
+    assert config.websocket_max_message_size == 128 * 1024 * 1024
 
 
 def test_hypercorn_args_do_not_set_keep_alive_with_config():

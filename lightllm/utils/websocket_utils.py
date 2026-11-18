@@ -1,6 +1,7 @@
 """Write-buffer limits shared by PD WebSocket clients and masters."""
 
-PD_WEBSOCKET_WRITE_LIMIT = (8 * 1024 * 1024, 8 * 1024 * 1024 - 32 * 1024)
+# websockets 默认 write_limit 是 32 KiB，低水位是高水位的 1/4。
+PD_WEBSOCKET_WRITE_LIMIT = (32 * 1024, 8 * 1024)
 
 
 def configure_pd_master_write_buffer():
