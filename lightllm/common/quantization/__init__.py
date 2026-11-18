@@ -133,6 +133,14 @@ class Quantcfg:
                     self.quant_type = "fp8w8a8-b128-vllm"
                 logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
             self._mapping_expert_quant_method()
+            if (
+                self.use_humming
+                and self.model_type == "deepseek_v41"
+                and block_size == [32, 32]
+                and self.hf_quantization_config.get("scale_fmt") == "ue8m0"
+            ):
+                for layer_num in range(self.layer_num):
+                    self.quant_cfg[layer_num].setdefault("wq_a", "fp8w8a8-b32-humming")
         elif self.hf_quantization_method == "awq":
             self.quant_type = "awq"
             if is_awq_marlin_compatible(self.hf_quantization_config):

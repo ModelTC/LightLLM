@@ -141,6 +141,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         num_max_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
         num_experts = self.expert_parallel_state.num_total_physical_experts
         alignment = 128
+        schedule = (0, 0)
         if humming_gemms is not None:
             # GENERAL warmup uses the unsplit forward. Each overlapping microbatch keeps its own layout.
             config = humming_prefill_experts.get_cached_config(
@@ -148,6 +149,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             )
             if config is not None:
                 alignment = config["expert_alignment"]
+                schedule = config["humming_schedule"]
         recv_x, recv_topk_idx, recv_topk_weights, handle, event = buffer.dispatch(
             qinput_tensor,
             topk_idx=topk_idx,
@@ -165,6 +167,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             use_tma_aligned_col_major_sf=True,
         )
 
+        handle.humming_schedule = schedule
         counters = self.ep_balance_counters
         if counters is None:
 
@@ -230,6 +233,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         microbatch_index: int = 0,
         clamp_limit: Optional[float] = None,
         expert_alignment: int = 128,
+        humming_schedule=(0, 0),
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -249,6 +253,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             hidden_dtype=hidden_dtype,
             clamp_limit=clamp_limit,
             expert_alignment=expert_alignment,
+            humming_schedule=humming_schedule,
             humming_gemms=(
                 (w13.humming_gemm, w2.humming_gemm) if self.quant_method.method_name in HUMMING_QUANT_METHODS else None
             ),

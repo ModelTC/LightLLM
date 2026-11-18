@@ -342,6 +342,7 @@ class FusedMoeWeight(BaseWeightTpl):
         microbatch_index: int = 0,
         clamp_limit: Optional[float] = None,
         expert_alignment: int = 128,
+        humming_schedule=(0, 0),
     ):
         assert self.enable_ep_moe, "prefilled_group_gemm is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.prefilled_group_gemm(
@@ -357,6 +358,7 @@ class FusedMoeWeight(BaseWeightTpl):
             microbatch_index=microbatch_index,
             clamp_limit=clamp_limit,
             expert_alignment=expert_alignment,
+            humming_schedule=humming_schedule,
         )
 
     def low_latency_combine(

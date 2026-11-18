@@ -29,6 +29,8 @@ def test_humming_checkpoint_selection(bits, method):
         config["quantization_config"]["expert_weight_block_size"] = [1, 32]
     quant_cfg = Quantcfg(config, enable_ep_moe=True, ep_moe_backend="deepep_v2_humming")
     assert quant_cfg.get_quant_type(0, "fused_moe") == method
+    assert quant_cfg.get_quant_type(0, "wq_a") == "fp8w8a8-b32-humming"
+    assert quant_cfg.get_quant_type(0, "wq_b") == "fp8w8a8-b32-triton"
 
 
 @pytest.mark.parametrize("bits", [8, 4])
@@ -88,3 +90,80 @@ def test_humming_experts_tune_then_replay_deepep_offsets(bits, tmp_path, monkeyp
         error = (output[start:end].float() - expected).norm() / expected.norm()
         assert error.item() < 0.015
     assert json.loads(cache_file.read_text()) == saved_config
+
+    offsets = ep_aligned_expert_offsets(ends, alignment=32, rows=rows)
+    for rows_per_expert in (0, 256, 512):
+        gemm(x, input_scale, output, offsets, 72, prefill_rows_per_expert=rows_per_expert)
+        for expert, start, end in ((0, 0, 11), (2, 32, 65)):
+            expected = (dense_input[start:end] @ dense_weight[expert].T).bfloat16().float()
+            error = (output[start:end].float() - expected).norm() / expected.norm()
+            assert error.item() < 0.015
+
+
+@pytest.mark.parametrize(
+    "rows,n,k", [(64, 256, 512), (128, 256, 512), (384, 256, 512), (16, 1792, 5120), (64, 1792, 5120)]
+)
+def test_humming_dense_b32_tune_and_replay(rows, n, k, tmp_path, monkeypatch):
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("requires an SM90 GPU")
+    pytest.importorskip("humming")
+    from lightllm.common.quantization.humming import HummingFP8B32QuantizationMethod, _humming_dense_b32
+    from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
+
+    monkeypatch.setattr(_humming_dense_b32, "_cache_dir", str(tmp_path), raising=False)
+    monkeypatch.setattr(_humming_dense_b32, "cached_configs", {})
+    monkeypatch.setattr(_humming_dense_b32, "fast_match_configs", defaultdict(dict))
+    monkeypatch.setattr(_humming_dense_b32, "_missing_config_keys", set())
+    method = HummingFP8B32QuantizationMethod()
+    method.hf_quantization_config = {"scale_fmt": "ue8m0"}
+    torch.manual_seed(351)
+    weight = torch.randn((n, k), device="cuda").to(torch.float8_e4m3fn)
+    scales = torch.exp2(torch.randint(-9, -3, (n // 32, k // 32), device="cuda").float())
+    pack = WeightPack(weight, scales)
+    x = torch.randn((rows, k), device="cuda", dtype=torch.bfloat16)
+    with Autotuner.autotune_warmup(AutotuneKernelType.DECODE):
+        method.apply(x, pack, use_custom_tensor_mananger=False)
+    assert _humming_dense_b32.cached_configs
+    before = weight.clone()
+    q, a_scale = per_token_group_quant_fp8(x, 32, eps=1e-4, use_ue8m0_scales=True)
+    reference = (q.float() * a_scale.repeat_interleave(32, -1)) @ (
+        weight.float() * scales.repeat_interleave(32, 0).repeat_interleave(32, 1)
+    ).T
+    output = torch.empty((rows, n), device="cuda", dtype=torch.bfloat16)
+    for backend in ("triton", "humming"):
+        _humming_dense_b32.fn(q, a_scale, output, pack, pack.humming_dense, None, {"backend": backend})
+        error = (output.float() - reference).norm() / reference.norm()
+        assert error < 0.015
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = method.apply(x, pack, out=output, use_custom_tensor_mananger=False)
+    x.mul_(0.5)
+    graph.replay()
+    expected = method.apply(x, pack, use_custom_tensor_mananger=False)
+    # Stream-K reduction order can differ between graph and eager launches.
+    assert (actual.float() - expected.float()).norm() / expected.float().norm() < 0.015
+    assert (actual.float() - reference * 0.5).norm() / reference.norm() < 0.015
+    assert torch.equal(weight.view(torch.uint8), before.view(torch.uint8))
+
+
+def test_humming_dense_respects_per_layer_override(tmp_path):
+    config = {
+        "model_type": "deepseek_v41",
+        "n_layer": 2,
+        "expert_dtype": "fp8",
+        "quantization_config": {
+            "quant_method": "fp8",
+            "weight_block_size": [32, 32],
+            "expert_weight_block_size": [1, 32],
+            "scale_fmt": "ue8m0",
+        },
+    }
+    custom = tmp_path / "quant.yaml"
+    custom.write_text(
+        "quant_type: fp8w8a8-b32-triton\nmix_bits:\n"
+        "  - name: wq_a\n    layer_nums: [0]\n    quant_type: fp8w8a8-b32-triton\n"
+    )
+    quant = Quantcfg(config, custom_cfg_path=str(custom), enable_ep_moe=True, ep_moe_backend="deepep_v2_humming")
+    assert quant.get_quant_type(0, "wq_a") == "fp8w8a8-b32-triton"
+    assert quant.get_quant_type(1, "wq_a") == "fp8w8a8-b32-humming"
+    assert quant.get_quant_type(1, "gate_up_proj") == "fp8w8a8-b32-triton"

@@ -204,6 +204,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             hidden_dtype=x0.dtype,
             microbatch_index=infer_state.microbatch_index,
             expert_alignment=handle0.expert_alignment,
+            humming_schedule=handle0.humming_schedule,
             clamp_limit=self.swiglu_limit,
         )
 
@@ -221,6 +222,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             hidden_dtype=x1.dtype,
             microbatch_index=infer_state1.microbatch_index,
             expert_alignment=handle1.expert_alignment,
+            humming_schedule=handle1.humming_schedule,
             clamp_limit=self.swiglu_limit,
         )
 

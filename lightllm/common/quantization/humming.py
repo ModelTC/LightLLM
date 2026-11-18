@@ -6,7 +6,7 @@ import torch
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, autotune
 
 from .registry import QUANTMETHODS
-from .w8a8 import FP8w8a8MoEB32TritonQuantizationMethod
+from .w8a8 import FP8w8a8MoEB32TritonQuantizationMethod, FP8w8a8B32TritonQuantizationMethod
 
 HUMMING_FP8_QUANT_METHOD = "fp8w8a8-moe-1x32-humming"
 HUMMING_FP4_QUANT_METHOD = "mxfp4w4a8-moe-1x32-humming"
@@ -140,13 +140,26 @@ class HummingExpertGemm:
 
         return replace(self.config, b_dtype=float4e2m1, use_fused_e8m0_scale=False)
 
-    def __call__(self, inputs, scales, output, offsets, valid_rows, *, expert_alignment=None):
+    def __call__(
+        self, inputs, scales, output, offsets, valid_rows, *, expert_alignment=None, prefill_rows_per_expert=0
+    ):
         # DeepEP and the SwiGLU quantizer already allocate the padded M-major pitch.
         m_pad = (inputs.shape[0] + 3) // 4 * 4
         assert scales.stride() == (1, m_pad), "Humming requires TMA-aligned column-major activation scales"
         scales = scales.as_strided((scales.shape[1], m_pad), (m_pad, 1))
         if expert_alignment is None:
-            self._forward(inputs, scales, output, offsets, valid_rows, self.locks)
+            tuning_config = None
+            if prefill_rows_per_expert:
+                from humming.tune import get_heuristics_config
+
+                tuning_config = get_heuristics_config(
+                    self.fp4_schedule_config,
+                    shape_m=prefill_rows_per_expert * self.config.num_experts,
+                    gemm_type="grouped_contiguous",
+                    use_m_major_input_scale=True,
+                    device=inputs.device,
+                )
+            self._forward(inputs, scales, output, offsets, valid_rows, self.locks, tuning_config)
         else:
             _humming_grouped_decode_gemm(
                 self, inputs, scales, output, offsets, valid_rows, expert_alignment, self.locks
@@ -199,3 +212,101 @@ class HummingFP4MoEQuantizationMethod(HummingFP8MoEQuantizationMethod):
             raise ValueError("Humming MXFP4 experts require two serialized E2M1 values per byte")
         weight_pack.weight.copy_(weight.view(torch.uint8))
         weight_pack.load_ok[0] = True
+
+
+def _humming_dense_key(packed, output):
+    config, _, _, version = packed
+    return {"humming": version, "n": config.shape_n, "k": config.shape_k, "dtype": str(output.dtype)}
+
+
+@autotune(
+    kernel_name="humming_dense_b32:v1",
+    configs_gen_func=lambda: [{"backend": backend} for backend in ("triton", "humming")],
+    static_key_func=_humming_dense_key,
+    run_key_func=lambda inputs: inputs.shape[0],
+    mutates_args=["output"],
+)
+def _humming_dense_b32(inputs, scales, output, weight_pack, packed, triton_config, run_config=None):
+    from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_gemm_kernel import w8a8_block_fp8_matmul
+
+    if run_config is None or run_config["backend"] == "triton":
+        w8a8_block_fp8_matmul.fn(
+            inputs,
+            weight_pack.weight.T,
+            scales,
+            weight_pack.weight_scale.T,
+            output,
+            (32, 32),
+            dtype=output.dtype,
+            run_config=triton_config,
+        )
+    else:
+        from humming.forward import humming_forward
+
+        config, tensors, locks, _ = packed
+        humming_forward(
+            config,
+            inputs,
+            input_scale=scales,
+            outputs=output,
+            locks=locks,
+            compute_config='{"gemm_type":"dense","use_m_major_input_scale":false}',
+            **tensors,
+        )
+    return output
+
+
+@QUANTMETHODS.register("fp8w8a8-b32-humming", platform="cuda")
+class HummingFP8B32QuantizationMethod(FP8w8a8B32TritonQuantizationMethod):
+    @property
+    def method_name(self):
+        return "fp8w8a8-b32-humming"
+
+    def apply(self, input_tensor, weight_pack, out=None, workspace=None, use_custom_tensor_mananger=True, bias=None):
+        from humming import __version__
+        from humming.schema import HummingInputSchema, HummingWeightSchema
+        from humming.transform import prepare_layer_config, transform_humming_tensors
+        from lightllm.common.triton_utils.autotuner import Autotuner
+        from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_gemm_kernel import w8a8_block_fp8_matmul
+
+        assert bias is None
+        assert input_tensor.dtype == torch.bfloat16
+        assert self.hf_quantization_config["scale_fmt"] == "ue8m0"
+        if not hasattr(weight_pack, "humming_dense"):
+            # Keep the original checkpoint layout for the Triton candidate.
+            n, k = weight_pack.weight.shape
+            config = prepare_layer_config(
+                n,
+                k,
+                HummingWeightSchema(b_dtype="float8e4m3", bs_dtype="float8e8m0", weight_scale_group_size=32),
+                HummingInputSchema(a_dtype="float8e4m3", input_scale_group_size=32, input_scale_dtype="float32"),
+                torch_dtype=input_tensor.dtype,
+                device=input_tensor.device,
+            )
+            if config.use_fused_e8m0_scale:
+                config = replace(config, use_fused_e8m0_scale=False, weight_scale_2_type="none")
+            scales = (torch.log2(weight_pack.weight_scale) + 127).to(torch.uint8).repeat_interleave(32, dim=0)
+            tensors = transform_humming_tensors(
+                config,
+                {
+                    "weight": weight_pack.weight.clone().view(torch.int32),
+                    "weight_scale": scales.view(torch.float8_e8m0fnu),
+                },
+            )
+            locks = torch.zeros(
+                torch.cuda.get_device_properties(input_tensor.device).multi_processor_count * 8,
+                dtype=torch.int32,
+                device=input_tensor.device,
+            )
+            weight_pack.humming_dense = (config, tensors, locks, __version__)
+
+        inputs, weights, scales, weight_scales, out = self._dynamic_quant_input(
+            input_tensor, weight_pack, out, use_custom_tensor_mananger
+        )
+        # Resolve the existing Triton tuner before the outer search partitions candidates across ranks.
+        if Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL):
+            w8a8_block_fp8_matmul(inputs, weights, scales, weight_scales, out, (32, 32), dtype=out.dtype)
+        triton_config = w8a8_block_fp8_matmul.get_cached_config(
+            A=inputs, B=weights, block_size=(32, 32), dtype=out.dtype
+        )
+        return _humming_dense_b32(inputs, scales, out, weight_pack, weight_pack.humming_dense, triton_config)

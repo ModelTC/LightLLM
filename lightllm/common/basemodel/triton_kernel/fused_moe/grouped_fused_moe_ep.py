@@ -508,6 +508,7 @@ def fused_experts_impl(
             expert_ends=handle.psum_num_recv_tokens_per_expert if block_size_k == 32 else None,
             humming_gemms=humming_gemms,
             expert_alignment=alignment,
+            humming_schedule=(0, 0) if run_config is None else run_config.get("humming_schedule", (0, 0)),
         )
         del recv_x
 
@@ -588,8 +589,12 @@ def _humming_prefill_key(humming_gemms, buffer, topk_idx, num_experts):
 
 
 humming_prefill_experts = autotune(
-    kernel_name="humming_prefill_expert_alignment:v1",
-    configs_gen_func=lambda: [{"expert_alignment": alignment} for alignment in (32, 64, 128)],
+    kernel_name="humming_prefill_expert_alignment:v2",
+    configs_gen_func=lambda: [
+        {"expert_alignment": alignment, "humming_schedule": schedule}
+        for alignment in (32, 64, 128)
+        for schedule in ((0, 0), (0, 256), (512, 256))
+    ],
     static_key_func=_humming_prefill_key,
     run_key_func=lambda topk_idx: topk_idx.shape[0],
     # Each trial owns a fresh DeepEP handle. Only the final forward advances balance telemetry.
@@ -734,6 +739,7 @@ def chunked_expanded_moe_forward(
     expert_ends: Optional[torch.Tensor] = None,
     humming_gemms=None,
     expert_alignment: int = 128,
+    humming_schedule=(0, 0),
 ):
     """Run bounded expanded MoE and rewrite metadata for dense DeepEP combine."""
     assert clamp_limit is None or limit is None
@@ -823,7 +829,9 @@ def chunked_expanded_moe_forward(
             chunk_input = (recv_x[0][chunk_start:chunk_end], input_scale)
             if humming_gemms is not None:
                 offsets = ep_aligned_expert_offsets(expert_ends, alignment, chunk_rows, chunk_start)
-                humming_gemms[0](*chunk_input, gemm_out_a, offsets, chunk_rows)
+                humming_gemms[0](
+                    *chunk_input, gemm_out_a, offsets, chunk_rows, prefill_rows_per_expert=humming_schedule[0]
+                )
             elif group32:
                 expanded_grouped_fp8_gemm(chunk_input, (w1, w1_scale), gemm_out_a, expert_ends, alignment, chunk_start)
             else:
@@ -861,7 +869,14 @@ def chunked_expanded_moe_forward(
 
             gemm_out_b = workspace_manager.alloc((chunk_rows, hidden_size), hidden_dtype)
             if humming_gemms is not None:
-                humming_gemms[1](qsilu_out, qsilu_out_scale, gemm_out_b, offsets, chunk_rows)
+                humming_gemms[1](
+                    qsilu_out,
+                    qsilu_out_scale,
+                    gemm_out_b,
+                    offsets,
+                    chunk_rows,
+                    prefill_rows_per_expert=humming_schedule[1],
+                )
             elif group32:
                 expanded_grouped_fp8_gemm(
                     (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, expert_ends, alignment, chunk_start
