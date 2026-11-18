@@ -503,7 +503,7 @@ def _launch_subprocesses(args: StartArgs):
 def _hypercorn_config_args(args: StartArgs):
     if args.hypercorn_config is not None:
         return ["--config", args.hypercorn_config]
-    return ["--keep-alive", "10"]
+    return ["--config", "python:lightllm.server.hypercorn_config"]
 
 
 def normal_or_p_d_start(args: StartArgs):
@@ -737,6 +737,12 @@ def config_server_start(args):
 
 
 def _validate_pd_features(args: StartArgs):
+    if args.run_mode in ("pd_master", "prefill", "decode") and args.hypercorn_config is not None:
+        # All PD roles share one WebSocket control-plane contract. A custom
+        # Hypercorn config could change message limits on one role and break
+        # control frames between the separated nodes, so PD deployments use
+        # the built-in Hypercorn defaults consistently.
+        raise ValueError("--hypercorn_config is not supported in PD mode")
     if args.run_mode in ("pd_master", "prefill", "decode") and (
         args.enable_rl or args.enable_return_routed_experts or args.enable_prompt_logprobs
     ):

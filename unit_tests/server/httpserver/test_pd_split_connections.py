@@ -12,6 +12,7 @@ from lightllm.server.httpserver import pd_loop
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.httpserver_for_pd_master.manager import PDManager
 from lightllm.server.pd_io_struct import ObjType, PD_Master_Obj
+from lightllm.utils.websocket_utils import PD_WEBSOCKET_WRITE_LIMIT
 
 pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
 
@@ -50,14 +51,14 @@ def test_split_connections_register_select_update_and_reconnect_independently():
     assert [node.run_status.total_token_usage_rate for node in manager.prefill_nodes] == [0, 0.1, 0.2, 0.3]
     replacement_socket = object()
     replacement_info = dict(_registration(args, 3), connection_id="replacement")
-    manager.register_pd(replacement_info, replacement_socket)
-    replacement = manager.url_to_pd_nodes["p:8000/dp3"]
+    replacement = manager.register_pd(replacement_info, replacement_socket)
     assert replacement.connection_key == cached_node.connection_key
-    manager.remove_pd(_registration(args, 3))
+    manager.remove_pd(cached_node)
+    assert cached_node.websocket is None
     assert manager.url_to_pd_nodes["p:8000/dp3"] is replacement
     assert replacement in manager.prefill_nodes
     assert replacement in manager.selector.prefill_nodes
-    manager.remove_pd(replacement_info)
+    manager.remove_pd(replacement)
     assert len(manager.prefill_nodes) == 3
     assert "p:8000/dp3" not in manager.url_to_pd_nodes
 
@@ -69,14 +70,14 @@ def test_unsplit_reconnection_ignores_old_connection_id_cleanup(mode):
     info = dict(_registration(args, mode=mode), connection_id="old")
     new_info = dict(info, connection_id="new")
     old_socket, new_socket = object(), object()
-    manager.register_pd(info, old_socket)
-    manager.register_pd(new_info, new_socket)
+    old = manager.register_pd(info, old_socket)
+    replacement = manager.register_pd(new_info, new_socket)
     key = f"{info['client_ip_port']}/dpNone"
-    replacement = manager.url_to_pd_nodes[key]
-    manager.remove_pd(info)
+    manager.remove_pd(old)
+    assert old.websocket is None
     assert manager.url_to_pd_nodes[key] is replacement
     assert replacement.websocket is new_socket
-    manager.remove_pd(new_info)
+    manager.remove_pd(replacement)
     assert key not in manager.url_to_pd_nodes
 
 
@@ -207,6 +208,7 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
 
         def connect(uri, **kwargs):
             assert uri == "ws://master:8000/pd_register"
+            assert kwargs["write_limit"] == PD_WEBSOCKET_WRITE_LIMIT
             assert kwargs["compression"] is None
             return Connection()
 
@@ -262,6 +264,7 @@ def test_reported_load_key_matches_registered_connection_without_rewriting(monke
     async def handle(obj):
         assert obj[2] == load_info
         manager.update_node_load_info(obj[2])
+        assert manager.url_to_pd_nodes[obj[2]["connection_key"]].websocket is websocket
         updated_nodes.append(manager.url_to_pd_nodes[obj[2]["connection_key"]])
 
     websocket = SimpleNamespace(
@@ -284,8 +287,40 @@ def test_reported_load_key_matches_registered_connection_without_rewriting(monke
     asyncio.run(api_http_pd.register_and_keep_alive(websocket))
     assert len(updated_nodes) == 1
     assert updated_nodes[0].dp_index == dp_index
-    assert updated_nodes[0].websocket is websocket
+    assert updated_nodes[0].websocket is None  # The handler invalidates its own connection on disconnect.
     assert updated_nodes[0].run_status.total_token_usage_rate == 0.7
+
+
+def test_token_packs_split_before_they_exceed_the_websocket_limit(monkeypatch):
+    from lightllm.server.httpserver.async_queue import AsyncQueue
+
+    sent = []
+
+    async def send(payload):
+        sent.append(pickle.loads(payload))
+
+    async def run():
+        load_info = {"connection_key": "p:8000/dpNone"}
+        one_item = pickle.dumps((ObjType.TOKEN_PACKS, ["a"], load_info))
+        monkeypatch.setattr(pd_loop, "_get_load_info", lambda dp_index=None: load_info)
+        monkeypatch.setattr(pd_loop, "websocket_message_exceeds_limit", lambda payload: len(payload) > len(one_item))
+        queue = AsyncQueue()
+        await queue.put("a")
+        await queue.put("b")
+        task = asyncio.create_task(
+            pd_loop._up_tokens_to_pd_master(forwarding_queue=queue, websocket=SimpleNamespace(send=send))
+        )
+        try:
+            for _ in range(50):
+                if len(sent) == 2:
+                    break
+                await asyncio.sleep(0)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        assert [message[1] for message in sent] == [["a"], ["b"]]
+
+    asyncio.run(run())
 
 
 def test_split_option_defaults_off_and_is_prefill_only():
