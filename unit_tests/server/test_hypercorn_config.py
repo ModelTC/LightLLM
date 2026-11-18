@@ -1,7 +1,10 @@
+import pytest
+
 from hypercorn.config import Config
 
 from lightllm.server.api_cli import make_argument_parser
-from lightllm.server.api_start import _hypercorn_config_args
+from lightllm.server.api_start import _hypercorn_config_args, _validate_pd_features
+from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 
 
@@ -35,3 +38,11 @@ def test_hypercorn_args_do_not_set_keep_alive_with_config():
     args = make_argument_parser().parse_args(["--hypercorn_config", "hypercorn.toml"])
 
     assert _hypercorn_config_args(args) == ["--config", "hypercorn.toml"]
+
+
+@pytest.mark.parametrize("run_mode", ["pd_master", "prefill", "decode"])
+def test_pd_nodes_reject_custom_hypercorn_config(run_mode):
+    args = StartArgs(run_mode=run_mode, hypercorn_config="custom.toml")
+
+    with pytest.raises(ValueError, match="not supported in PD mode"):
+        _validate_pd_features(args)

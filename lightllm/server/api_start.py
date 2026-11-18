@@ -737,6 +737,12 @@ def config_server_start(args):
 
 
 def _validate_pd_features(args: StartArgs):
+    if args.run_mode in ("pd_master", "prefill", "decode") and args.hypercorn_config is not None:
+        # All PD roles share one WebSocket control-plane contract. A custom
+        # Hypercorn config could change message limits on one role and break
+        # control frames between the separated nodes, so PD deployments use
+        # the built-in Hypercorn defaults consistently.
+        raise ValueError("--hypercorn_config is not supported in PD mode")
     if args.run_mode in ("pd_master", "prefill", "decode") and (
         args.enable_rl or args.enable_return_routed_experts or args.enable_prompt_logprobs
     ):
