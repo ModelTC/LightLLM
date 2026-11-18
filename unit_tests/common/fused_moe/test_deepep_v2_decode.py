@@ -29,6 +29,7 @@ def test_v2_dispatch_keeps_collective_capacity_and_compute_stream_ownership(monk
 
     monkeypatch.setattr(moe.dist_group_manager, "ep_buffer", SimpleNamespace(dispatch=dispatch, num_ranks=16))
     monkeypatch.setattr(moe, "get_deepep_num_max_dispatch_tokens_per_rank_decode", lambda: 384)
+    monkeypatch.setattr(moe, "is_sm100_gpu", lambda: False)
     monkeypatch.setattr(moe, "per_token_group_quant_fp8", lambda x, block, **kwargs: quantized)
     monkeypatch.setattr(
         moe, "deep_gemm", SimpleNamespace(get_mk_alignment_for_contiguous_layout=lambda: 128), raising=False
@@ -57,17 +58,18 @@ def test_v2_combine_uses_pre_reduced_output_and_compact_metadata(monkeypatch):
         assert x is dense and handle is native_handle
         assert handle.recv_src_metadata is compact_metadata
         assert kwargs["topk_weights"] is None
-        assert kwargs["async_with_compute_stream"] is False
+        assert kwargs["async_with_compute_stream"] is True
         assert kwargs["allocate_on_comm_stream"] is False
         calls.append("combine")
-        return output, None, None
+        return output, None, SimpleNamespace(current_stream_wait=lambda: calls.append("combine_recv"))
 
     monkeypatch.setattr(moe, "ep_reduce_decode_output", reduce)
     monkeypatch.setattr(moe.dist_group_manager, "ep_buffer", SimpleNamespace(combine=combine))
     actual, hook = moe.deepep_v2_decode_combine(gemm, (native_handle, weights))
     assert actual is output and calls == ["reduce", "combine"]
+    calls.append("shared")
     hook()
-    assert calls == ["reduce", "combine"]
+    assert calls == ["reduce", "combine", "shared", "combine_recv"]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
