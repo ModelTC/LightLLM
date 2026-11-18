@@ -52,13 +52,16 @@ def fused_experts(
         routed = mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method)
         return routed if shared is None else routed + shared
 
-    if is_prefill is False:
-        if dist_group_manager.ep_low_latency_buffer is None:
-            if dist_group_manager.decode_low_latency_only:
-                raise RuntimeError("Decode MoE requires DeepEP's low-latency Buffer")
-            buffer = dist_group_manager.ep_buffer
-        else:
-            buffer = dist_group_manager.ep_low_latency_buffer
+    # A pure Decode worker may execute a small ``prefill=True`` warmup while
+    # bringing the router online. It still has no ElasticBuffer, so route all
+    # of its MoE phases through the legacy low-latency Buffer. Prefill and
+    # mixed workers keep their ElasticBuffer for real prefill work.
+    if dist_group_manager.decode_low_latency_only:
+        buffer = dist_group_manager.ep_low_latency_buffer
+        if buffer is None:
+            raise RuntimeError("Decode MoE requires DeepEP's low-latency Buffer")
+    elif is_prefill is False:
+        buffer = dist_group_manager.ep_low_latency_buffer or dist_group_manager.ep_buffer
     else:
         buffer = dist_group_manager.ep_buffer
     return fused_experts_impl(
