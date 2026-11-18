@@ -614,14 +614,7 @@ def deepgemm_grouped_fp8_nt_contiguous(
 ):
     if HAS_DEEPGEMM:
         if expected_m_for_psum_layout is not None:
-            return deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
-                input_tuple,
-                w_tuple,
-                out,
-                m_indices,
-                use_psum_layout=True,
-                expected_m_for_psum_layout=expected_m_for_psum_layout,
-            )
+            return _deepgemm_grouped_fp8_nt_psum(input_tuple, w_tuple, out, m_indices, expected_m_for_psum_layout)
         if hasattr(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_contiguous"):
             return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(input_tuple, w_tuple, out, m_indices)
         if hasattr(deep_gemm, "m_grouped_fp8_gemm_nt_contiguous"):
@@ -906,6 +899,41 @@ def chunked_expanded_moe_forward(
 def _masked_gemm_configs():
     # expected_m changes native tiling heuristics; masked_m remains the work bound.
     return [{"expected_m_scale": scale} for scale in [0.5, 1.0, 2.0, 4.0]]
+
+
+def _psum_gemm_tuning_inputs(input_tuple, w_tuple, out, expert_ends, expected_m):
+    alignment = deep_gemm.get_mk_alignment_for_contiguous_layout()
+    stride = triton.cdiv(max(1, expected_m), alignment) * alignment
+    ends = torch.arange(w_tuple[0].shape[0], dtype=expert_ends.dtype, device=expert_ends.device) * stride + expected_m
+    ends = ends.clamp(max=out.shape[0])
+    return (input_tuple, w_tuple, out, ends, expected_m), {}
+
+
+@autotune(
+    kernel_name="deepgemm_grouped_fp8_nt_psum:v1",
+    configs_gen_func=_masked_gemm_configs,
+    static_key_func=lambda input_tuple, w_tuple, out: {
+        "groups": w_tuple[0].shape[0],
+        "capacity": out.shape[0],
+        "n": out.shape[1],
+        "k": input_tuple[0].shape[1],
+        "a": (str(input_tuple[0].dtype), str(input_tuple[1].dtype), tuple(input_tuple[1].stride())),
+        "b": (str(w_tuple[0].dtype), str(w_tuple[1].dtype), tuple(w_tuple[1].stride())),
+        "out": str(out.dtype),
+        "num_sms": deep_gemm.get_num_sms(),
+    },
+    run_key_func=lambda expected_m: expected_m,
+    kernel_type=AutotuneKernelType.DECODE,
+    rebuild_input_func=_psum_gemm_tuning_inputs,
+    warmup_all_exist_config=False,
+    benchmark_repeats=8,
+)
+def _deepgemm_grouped_fp8_nt_psum(input_tuple, w_tuple, out, expert_ends, expected_m, run_config=None):
+    if run_config is not None:
+        expected_m = max(1, int(expected_m * run_config["expected_m_scale"]))
+    return deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
+        input_tuple, w_tuple, out, expert_ends, use_psum_layout=True, expected_m_for_psum_layout=expected_m
+    )
 
 
 def _masked_gemm_key(input_tuple, w_tuple, out):

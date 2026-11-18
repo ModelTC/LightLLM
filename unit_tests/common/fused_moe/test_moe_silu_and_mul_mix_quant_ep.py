@@ -17,6 +17,8 @@ if not is_fp8_native_supported():
     pytest.skip(reason="not support fp8 test in this gpu card", allow_module_level=True)
 
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
+    _masked_swiglu_quant,
+    _masked_swiglu_tuning_inputs,
     _expanded_swiglu_quant_1x32,
     silu_and_mul_masked_post_quant_fwd,
 )
@@ -26,6 +28,66 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel im
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+def test_b128_swiglu_tuning_preserves_graph_scale_pitch_and_source_bounds():
+    x = torch.empty((4096, 512), device="cuda", dtype=torch.bfloat16)
+    q = torch.empty((4096, 256), device="cuda", dtype=torch.float8_e4m3fn)
+    scales = torch.empty((2, 4096), device="cuda").T
+    ends = torch.zeros(3, dtype=torch.int32, device="cuda")
+    args, kwargs = _masked_swiglu_tuning_inputs(x, q, scales, 128, ends, None, 10.0, True, 128, False, 4)
+    assert args[0].shape == (384, 512)
+    assert args[2].stride() == scales.stride()
+    assert ends.tolist() == [0, 0, 0]
+    assert args[4].tolist() == [2, 132, 262]
+    assert kwargs == {}
+
+
+@pytest.mark.parametrize("expanded", [False, True])
+def test_b128_swiglu_configs_preserve_padding_and_graph_row_bounds(expanded, tmp_path, monkeypatch):
+    torch.manual_seed(551)
+    width = 384
+    shape = (384,) if expanded else (3, 160)
+    x = torch.randn((*shape, 2 * width), device="cuda", dtype=torch.bfloat16) * 5
+    q = torch.empty((*shape, width), device="cuda", dtype=torch.float8_e4m3fn)
+    scales = torch.empty((*shape[:-1], width // 128, shape[-1]), device="cuda").transpose(-1, -2)
+    bounds = torch.tensor([0, 5, 131] if expanded else [0, 5, 3], device="cuda", dtype=torch.int32)
+    kernel = _masked_swiglu_quant
+    monkeypatch.setattr(kernel, "_cache_dir", str(tmp_path), raising=False)
+    monkeypatch.setattr(kernel, "cached_configs", {})
+    monkeypatch.setattr(kernel, "fast_match_configs", defaultdict(dict))
+    monkeypatch.setattr(kernel, "_missing_config_keys", set())
+    monkeypatch.setattr(autotuner, "get_triton_autotune_level", lambda: autotuner.AutotuneLevel.ADAPTIVE_AUTOTUNE)
+    args = (x, q, scales, 128, bounds, None, 10.0, True, 128 if expanded else None, False, 4)
+
+    def clear():
+        q.view(torch.uint8).fill_(255)
+        scales.fill_(-1)
+
+    clear()
+    kernel(*args, run_config=kernel.configs_gen_func()[0])
+    expected_q, expected_s = q.view(torch.uint8).clone(), scales.clone()
+    for config in kernel.configs_gen_func():
+        clear()
+        kernel(*args, run_config=config)
+        torch.testing.assert_close(q.view(torch.uint8), expected_q, rtol=0, atol=0)
+        torch.testing.assert_close(scales, expected_s, rtol=0, atol=0)
+    with autotuner.Autotuner.autotune_warmup(autotuner.AutotuneKernelType.DECODE):
+        kernel(*args)
+    torch.testing.assert_close(q.view(torch.uint8), expected_q, rtol=0, atol=0)
+    torch.testing.assert_close(scales, expected_s, rtol=0, atol=0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        kernel(*args)
+    bounds.copy_(torch.tensor([1, 128, 258] if expanded else [1, 0, 130], device="cuda", dtype=torch.int32))
+    x.mul_(2)
+    clear()
+    kernel(*args, run_config=kernel.configs_gen_func()[0])
+    expected_q, expected_s = q.view(torch.uint8).clone(), scales.clone()
+    clear()
+    graph.replay()
+    torch.testing.assert_close(q.view(torch.uint8), expected_q, rtol=0, atol=0)
+    torch.testing.assert_close(scales, expected_s, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(

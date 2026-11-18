@@ -66,3 +66,50 @@ def test_masked_gemm_tunes_then_replays_with_changed_counts(tmp_path, monkeypatc
     graph.replay()
     check()
     assert json.loads(files[0].read_text()) == saved
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not ep.HAS_DEEPGEMM or torch.cuda.get_device_capability()[0] != 9,
+    reason="SM90, DeepEP and DeepGEMM required",
+)
+@pytest.mark.parametrize("expected_m", [1, 17, 65])
+def test_psum_gemm_tunes_without_truncating_rows_and_replays_changed_ends(tmp_path, monkeypatch, expected_m):
+    torch.manual_seed(403)
+    kernel = ep._deepgemm_grouped_fp8_nt_psum
+    monkeypatch.setattr(kernel, "_cache_dir", str(tmp_path), raising=False)
+    monkeypatch.setattr(kernel, "cached_configs", {})
+    monkeypatch.setattr(kernel, "fast_match_configs", defaultdict(dict))
+    monkeypatch.setattr(kernel, "_missing_config_keys", set())
+    monkeypatch.setattr(Autotuner, "_autotune_warmup_kernel_type", None)
+    monkeypatch.setattr(tuner_module, "get_triton_autotune_level", lambda: AutotuneLevel.ADAPTIVE_AUTOTUNE)
+    monkeypatch.setattr(tuner_module.dist, "is_initialized", lambda: False)
+    a = torch.randn(256, 128, device="cuda").to(torch.float8_e4m3fn)
+    b = torch.randn(2, 256, 128, device="cuda").to(torch.float8_e4m3fn)
+    sa = torch.ones(1, 256, device="cuda").T
+    sb = torch.ones(2, 2, 1, device="cuda")
+    out = torch.empty(256, 256, device="cuda", dtype=torch.bfloat16)
+    ends = torch.tensor([0, 253], device="cuda", dtype=torch.int32)
+
+    def check():
+        start = 0
+        for expert, end in enumerate(ends.tolist()):
+            reference = (a[start:end].float() @ b[expert].float().T).bfloat16()
+            torch.testing.assert_close(out[start:end], reference, atol=0.05, rtol=0.02)
+            start = (end + 127) // 128 * 128
+
+    for config in kernel.configs_gen_func():
+        kernel((a, sa), (b, sb), out, ends, expected_m, run_config=config)
+        check()
+    with Autotuner.autotune_warmup(AutotuneKernelType.DECODE):
+        ep.deepgemm_grouped_fp8_nt_contiguous((a, sa), (b, sb), out, ends, expected_m)
+    check()
+    assert ends.tolist() == [0, 253]
+    saved = list(tmp_path.glob("*.json"))[0].read_text()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        ep.deepgemm_grouped_fp8_nt_contiguous((a, sa), (b, sb), out, ends, expected_m)
+    ends.copy_(torch.tensor([97, 129], device="cuda", dtype=torch.int32))
+    a.copy_((a.float() * 2).to(a.dtype))
+    graph.replay()
+    check()
+    assert list(tmp_path.glob("*.json"))[0].read_text() == saved
