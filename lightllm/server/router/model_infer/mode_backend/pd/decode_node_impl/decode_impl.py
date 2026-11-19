@@ -160,7 +160,9 @@ class PDDecodeNode(ChunkedPrefillBackend):
             assert req_obj.cur_kv_len == input_len - 1
 
         if not group.task_list:
-            # 没有实际传输页时仍要放一个空任务，让传输进程上报握手信息。
+            # 没有实际传输页时，仍要放一个 0 长度的 trans task。
+            # 传输进程收到任务后，才会经 pd_report 向 pd master 上报 upkv_status。
+            # 缺了这个任务，握手不会发出，推理流程走不完。
             self._create_pd_trans_task(
                 req_obj=req_obj,
                 mem_indexes=[],
