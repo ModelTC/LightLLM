@@ -1,7 +1,8 @@
 """PD separation control-plane WebSocket APIs.
 
 供 prefill / decode 节点与 pd_master 通信：
-  - ``/pd_register``：P/D 节点注册、请求转发，以及 Decode 上报 KV 握手状态
+  - ``/pd_register``：P/D 节点注册，接收请求，回传 token 和 prompt id。
+  - ``/pd_report``：只接收 Decode 的 KV 握手上报。不注册节点，不下发请求。
 
 路由在模块级 ``router`` 上注册，由 ``api_http`` ``include_router`` 挂载。
 ``g_objs`` 在 handler 内懒导入，避免与 api_http 循环依赖。

@@ -80,7 +80,15 @@ class PdReportManager:
             try:
                 masters = await _get_pd_master_objs(self._args)
                 if masters is not None:
-                    self._sync_masters(masters=masters)
+                    for node_id in list(self._tasks):
+                        if node_id not in masters:
+                            self._tasks.pop(node_id).cancel()
+                    for node_id, master in masters.items():
+                        if node_id in self._tasks:
+                            continue
+                        queue: asyncio.Queue = asyncio.Queue()
+                        self._queues[node_id] = queue
+                        self._tasks[node_id] = asyncio.create_task(self._serve_master(master=master, outgoing=queue))
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
                 raise
@@ -88,24 +96,19 @@ class PdReportManager:
                 logger.exception(f"pd report discovery failed: {exc}")
                 await asyncio.sleep(10)
 
-    def _sync_masters(self, masters: Dict[int, PD_Master_Obj]) -> None:
-        for node_id in list(self._tasks):
-            if node_id not in masters:
-                self._tasks.pop(node_id).cancel()
-        for node_id, master in masters.items():
-            if node_id in self._tasks:
-                continue
-            queue: asyncio.Queue = asyncio.Queue()
-            self._queues[node_id] = queue
-            self._tasks[node_id] = asyncio.create_task(self._serve_master(master=master, outgoing=queue))
-
     async def _serve_master(self, master: PD_Master_Obj, outgoing: asyncio.Queue) -> None:
         import websockets
 
         uri = f"ws://{master.host_ip_port}/pd_report"
+
+        async def heartbeat() -> None:
+            while True:
+                await asyncio.sleep(_HEARTBEAT_SECONDS)
+                outgoing.put_nowait((ObjType.HEARTBEAT,))
+
         try:
             while True:
-                heartbeat = None
+                heartbeat_task = None
                 try:
                     async with websockets.connect(
                         uri=uri,
@@ -114,36 +117,22 @@ class PdReportManager:
                         max_size=get_lightllm_websocket_max_message_size(),
                         write_limit=PD_WEBSOCKET_WRITE_LIMIT,
                     ) as websocket:
-                        _set_nodelay(websocket=websocket)
-                        heartbeat = asyncio.create_task(_heartbeat(outgoing=outgoing))
-                        await _send_outgoing(websocket=websocket, outgoing=outgoing)
+                        sock = websocket.transport.get_extra_info("socket")
+                        if sock is not None:
+                            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                        heartbeat_task = asyncio.create_task(heartbeat())
+                        while True:
+                            payload = await outgoing.get()
+                            await websocket.send(pickle.dumps(payload))
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     logger.exception(f"pd report master {master.node_id} failed: {exc}")
                 finally:
-                    if heartbeat is not None:
-                        heartbeat.cancel()
-                        await asyncio.gather(heartbeat, return_exceptions=True)
+                    if heartbeat_task is not None:
+                        heartbeat_task.cancel()
+                        await asyncio.gather(heartbeat_task, return_exceptions=True)
                 await asyncio.sleep(10)
         finally:
             if self._queues.get(master.node_id) is outgoing:
                 self._queues.pop(master.node_id, None)
-
-
-def _set_nodelay(websocket: object) -> None:
-    sock = websocket.transport.get_extra_info("socket")
-    if sock is not None:
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-
-
-async def _heartbeat(outgoing: asyncio.Queue) -> None:
-    while True:
-        await asyncio.sleep(_HEARTBEAT_SECONDS)
-        outgoing.put_nowait((ObjType.HEARTBEAT,))
-
-
-async def _send_outgoing(websocket: object, outgoing: asyncio.Queue) -> None:
-    while True:
-        payload = await outgoing.get()
-        await websocket.send(pickle.dumps(payload))

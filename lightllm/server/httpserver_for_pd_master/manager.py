@@ -917,7 +917,7 @@ class HttpServerManagerForPDMaster:
                         else:
                             await req_status.set_error(error_info)
                     elif obj[0] == ObjType.PD_UPLOAD_KV_STATUS:
-                        # Decode 经本机 httpserver 转来的 KV 握手，唤醒正在等端点信息的请求。
+                        # 注册连接上的 KV 握手，唤醒正在等端点信息的请求。
                         await self.update_req_status(obj[1])
                     elif obj[0] == ObjType.PD_UPLOAD_SERVER_BUSY:
                         _, group_req_id, error_info = obj
