@@ -71,6 +71,8 @@ async def receive_pd_report(websocket: WebSocket):
     await websocket.accept()
     set_pd_websocket_write_buffer(websocket=websocket)
     websocket._receive_bytes_max_size = get_lightllm_websocket_max_message_size()
+    client_ip, client_port = websocket.client
+    logger.info(f"pd_report Client connected from IP: {client_ip}, Port: {client_port}")
     try:
         heartbeat_timeout_seconds = 30
         while True:
@@ -81,15 +83,15 @@ async def receive_pd_report(websocket: WebSocket):
             if isinstance(obj, tuple) and obj and obj[0] == ObjType.PD_UPLOAD_KV_STATUS:
                 await g_objs.httpserver_manager.update_req_status(obj[1])
                 continue
-            logger.error(f"pd report dropped unexpected object {obj[0] if isinstance(obj, tuple) and obj else obj}")
+            logger.error(f"pd report {(client_ip, client_port)} dropped unexpected object {obj}")
     except asyncio.TimeoutError:
-        logger.warning("pd report heartbeat timed out")
+        logger.warning(f"pd report {(client_ip, client_port)} heartbeat timed out")
         try:
             await websocket.close(code=1011, reason="PD report heartbeat timed out")
         except BaseException:
-            logger.debug("failed to close timed-out pd report", exc_info=True)
+            logger.debug(f"failed to close timed-out pd report {(client_ip, client_port)}", exc_info=True)
     except WebSocketDisconnect as exc:
-        logger.info(f"pd report disconnected: {exc}")
+        logger.info(f"pd report {(client_ip, client_port)} disconnected: {exc}")
     except BaseException as exc:
-        logger.exception(f"pd report failed: {exc}")
+        logger.exception(f"pd report {(client_ip, client_port)} failed: {exc}")
     return
