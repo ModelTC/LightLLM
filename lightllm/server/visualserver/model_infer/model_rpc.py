@@ -7,6 +7,7 @@ import queue
 import threading
 import time
 import torch.distributed as dist
+from concurrent.futures import Future
 from typing import Dict, List, Tuple, Deque, Optional
 from transformers.configuration_utils import PretrainedConfig
 from rpyc.utils.classic import obtain
@@ -124,7 +125,6 @@ class VisualModelRpcServer(rpyc.Service):
 
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
-            self._hold_vision_peak_vram()
             if not self.is_visual_only_mode:
                 self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
                 self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -216,8 +216,10 @@ class VisualModelRpcServer(rpyc.Service):
         self.gloo_group = dist.new_group(ranks=list(range(self.vit_tp)), backend="gloo")
 
         # 启动任务处理线程
-        self._infer_thread = threading.Thread(target=self._infer_worker, daemon=True)
+        startup = Future()
+        self._infer_thread = threading.Thread(target=self._infer_worker, args=(startup,), daemon=True)
         self._infer_thread.start()
+        startup.result()
 
         self._store_thread = threading.Thread(target=self._store_worker, daemon=True)
         self._store_thread.start()
@@ -274,11 +276,18 @@ class VisualModelRpcServer(rpyc.Service):
 
         return tasks
 
-    def _infer_worker(self):
+    def _infer_worker(self, startup: Future):
         """
         任务处理循环: 从队列中取出任务, 执行完成后通知调用者
         """
-        torch.cuda.set_device(self.device_id)
+        try:
+            torch.cuda.set_device(self.device_id)
+            # cuBLAS handles and workspaces must be warmed in the serving thread.
+            self._hold_vision_peak_vram()
+        except BaseException as exc:
+            startup.set_exception(exc)
+            return
+        startup.set_result(None)
         while True:
             try:
                 # 从队列获取任务, 阻塞等待
