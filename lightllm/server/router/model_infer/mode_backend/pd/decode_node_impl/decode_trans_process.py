@@ -18,7 +18,7 @@ from lightllm.server.pd_io_struct import (
     PDDecodeNodeInfo,
     PDUpKVStatus,
 )
-from lightllm.server.pd_report.manager import ReportIpc
+from lightllm.server.pd_report.ipc import ReportIpc
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..kv_transporter import create_kv_transporter

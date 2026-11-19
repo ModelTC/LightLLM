@@ -12,6 +12,7 @@ import setproctitle
 
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.pd_io_struct import ObjType, PDUpKVStatus, PD_Master_Obj
+from lightllm.server.pd_report.ipc import ReportIpc
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size, get_unique_server_name
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.log_utils import init_logger
@@ -37,7 +38,7 @@ def start_pd_report_process(args: StartArgs, pipe_writer: Connection) -> None:
 class PdReportManager:
     """按 pd_master_node_id 把本机上报写到对应 Master。"""
 
-    def __init__(self, args: StartArgs, pull: "ReportIpc.Pull") -> None:
+    def __init__(self, args: StartArgs, pull: ReportIpc.Pull) -> None:
         self._args = args
         self._pull = pull
         self._queues: Dict[int, asyncio.Queue] = {}
@@ -128,78 +129,6 @@ class PdReportManager:
         finally:
             if self._queues.get(master.node_id) is outgoing:
                 self._queues.pop(master.node_id, None)
-
-
-class ReportIpc:
-    """本机到 pd_report 的 ZMQ PUSH/PULL。失败时退出进程。"""
-
-    class Push:
-        def __init__(self) -> None:
-            self._context = None
-            self._socket = None
-            self._address = get_pd_report_ipc_address()
-
-        def send(self, message: object) -> None:
-            try:
-                self._ensure_connected()
-                self._socket.send(pickle.dumps(message))
-            except Exception as exc:
-                _abort(action="send", address=self._address, exc=exc)
-
-        def close(self) -> None:
-            if self._socket is not None:
-                self._socket.close(linger=0)
-                self._socket = None
-            if self._context is not None:
-                self._context.term()
-                self._context = None
-
-        def _ensure_connected(self) -> None:
-            if self._socket is not None:
-                return
-            import zmq
-
-            self._context = zmq.Context(1)
-            sock = self._context.socket(zmq.PUSH)
-            sock.setsockopt(zmq.LINGER, 0)
-            sock.connect(self._address)
-            self._socket = sock
-
-    class Pull:
-        def __init__(self, address: str) -> None:
-            self._context = None
-            self._socket = None
-            self._address = address
-
-        def bind(self) -> None:
-            import zmq.asyncio
-
-            self._context = zmq.asyncio.Context(1)
-            self._socket = self._context.socket(zmq.PULL)
-            self._socket.setsockopt(zmq.LINGER, 0)
-            self._socket.bind(self._address)
-
-        async def recv(self) -> object:
-            try:
-                payload = await self._socket.recv()
-                return pickle.loads(payload)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                _abort(action="recv", address=self._address, exc=exc)
-
-        def close(self) -> None:
-            if self._socket is not None:
-                self._socket.close(linger=0)
-                self._socket = None
-            if self._context is not None:
-                self._context.term()
-                self._context = None
-
-
-def _abort(action: str, address: str, exc: BaseException) -> None:
-    logger.exception(f"pd report ipc {action} failed, address={address}: {exc}")
-    os._exit(1)
 
 
 def _set_nodelay(websocket: object) -> None:
