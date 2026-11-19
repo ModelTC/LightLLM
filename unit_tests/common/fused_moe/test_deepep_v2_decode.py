@@ -58,18 +58,17 @@ def test_v2_combine_uses_pre_reduced_output_and_compact_metadata(monkeypatch):
         assert x is dense and handle is native_handle
         assert handle.recv_src_metadata is compact_metadata
         assert kwargs["topk_weights"] is None
-        assert kwargs["async_with_compute_stream"] is True
+        assert kwargs["async_with_compute_stream"] is False
         assert kwargs["allocate_on_comm_stream"] is False
         calls.append("combine")
-        return output, None, SimpleNamespace(current_stream_wait=lambda: calls.append("combine_recv"))
+        return output, None, None
 
     monkeypatch.setattr(moe, "ep_reduce_decode_output", reduce)
     monkeypatch.setattr(moe.dist_group_manager, "ep_buffer", SimpleNamespace(combine=combine))
     actual, hook = moe.deepep_v2_decode_combine(gemm, (native_handle, weights))
     assert actual is output and calls == ["reduce", "combine"]
-    calls.append("shared")
     hook()
-    assert calls == ["reduce", "combine", "shared", "combine_recv"]
+    assert calls == ["reduce", "combine"]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

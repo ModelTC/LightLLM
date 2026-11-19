@@ -95,15 +95,15 @@ def deepep_v2_decode_combine(gemm_out, handle):
         native_handle.psum_num_recv_tokens_per_scaleup_rank[-1:],
     )
     native_handle.recv_src_metadata = metadata
-    output, _, event = dist_group_manager.ep_buffer.combine(
+    output, _, _ = dist_group_manager.ep_buffer.combine(
         dense,
         native_handle,
         topk_weights=None,
         num_sms=get_ep_num_sms(),
-        async_with_compute_stream=True,
+        async_with_compute_stream=False,
         allocate_on_comm_stream=False,
     )
-    return output, event.current_stream_wait
+    return output, lambda: None
 
 
 def use_mega_moe(quant_method: Any) -> bool:
