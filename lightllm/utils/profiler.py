@@ -72,6 +72,7 @@ class DecodeTimeLog(threading.local):
         if now - self.last_report < 60:
             return
         report = dict(rank=self.rank, steps=self.steps, sampled_steps=len(self.samples), sample_every=self.every)
+        report["tid"] = _get_thread_id()
         report["mean"] = {key: sum(row[key] for row in self.samples) / len(self.samples) for key in sample}
         report["max"] = {key: max(row[key] for row in self.samples) for key in sample}
         logger.info("decode_timelog %s", json.dumps(report, separators=(",", ":")))

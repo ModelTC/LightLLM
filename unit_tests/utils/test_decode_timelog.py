@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, get_native_id
 from unittest.mock import Mock
 
 import pytest
@@ -109,6 +110,36 @@ def test_timelog_sampling_state_is_local_to_each_inference_thread():
     with ThreadPoolExecutor(max_workers=1) as pool:
         assert pool.submit(sample_in_other_thread).result() == (True, 1)
     assert timer.active and timer.steps == 1
+
+
+def test_timelog_reports_identify_threads_with_independent_step_counters(monkeypatch):
+    import json
+
+    log = Mock()
+    monkeypatch.setattr(profiler.logger, "info", log)
+    timer = profiler.DecodeTimeLog(every=1, rank=9)
+    barrier = Barrier(2)
+
+    def emit_report():
+        timer.begin()
+        timer.last_report -= 61
+        timer.events = {
+            f"{phase}_{boundary}": Mock(elapsed_time=Mock(return_value=2.0))
+            for phase in ("round", "target", "kv_commit", "draft")
+            for boundary in ("start", "end")
+        }
+        barrier.wait(timeout=10)
+        timer.finish(requests=1, verify_rows=4, accepted_tokens=2)
+        return get_native_id()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(emit_report) for _ in range(2)]
+        tids = {future.result() for future in futures}
+
+    reports = [json.loads(call.args[1]) for call in log.call_args_list]
+    assert len(reports) == len(tids) == 2
+    assert {report["tid"] for report in reports} == tids
+    assert all(report["rank"] == 9 and report["steps"] == 1 for report in reports)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
