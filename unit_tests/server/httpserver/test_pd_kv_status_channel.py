@@ -127,6 +127,54 @@ def test_pd_report_holds_a_handshake_until_the_master_connects():
     assert manager._queues[300].get_nowait() == (ObjType.PD_UPLOAD_KV_STATUS, second)
 
 
+def test_failed_report_send_is_retried_after_reconnect(monkeypatch):
+    sent = []
+    attempts = {"count": 0}
+
+    class FlakySocket:
+        def __init__(self):
+            self.transport = SimpleNamespace(get_extra_info=lambda key: None)
+
+        async def send(self, payload):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise ConnectionError("send failed")
+            sent.append(payload)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr("websockets.connect", lambda **kwargs: FlakySocket())
+
+    original_sleep = asyncio.sleep
+
+    async def no_sleep(delay):
+        await original_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    async def run():
+        manager = PdReportManager(args=SimpleNamespace(), pull=None)
+        outgoing = asyncio.Queue()
+        payload = (ObjType.PD_UPLOAD_KV_STATUS, PDUpKVStatus(8, 100, b"metadata"))
+        outgoing.put_nowait(payload)
+        task = asyncio.create_task(
+            manager._serve_master(master=SimpleNamespace(node_id=100, host_ip_port="127.0.0.1:1"), outgoing=outgoing)
+        )
+        for _ in range(50):
+            if sent:
+                break
+            await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+    assert pickle.loads(sent[0]) == (ObjType.PD_UPLOAD_KV_STATUS, PDUpKVStatus(8, 100, b"metadata"))
+
+
 def test_master_reports_kv_status_from_the_register_channel(monkeypatch):
     async def run():
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)

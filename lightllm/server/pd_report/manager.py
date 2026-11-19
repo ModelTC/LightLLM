@@ -44,7 +44,7 @@ class PdReportManager:
         """记下启动参数、本地 PULL，以及每个 Master 的发送队列和连接任务。
 
         _queues 的 key 是 pd_master_node_id。上报比连接更早到时，先建好队列把握手留住。
-        队列在对应的 _serve_master 任务里被消费。重连期间队列保留，还没写出去的握手继续排在里面。
+        队列在对应的 _serve_master 任务里被消费。重连期间队列保留，没写成功的握手会先补发。
         """
         self._args = args
         self._pull = pull
@@ -86,11 +86,20 @@ class PdReportManager:
                 os._exit(1)
             master_id = status.pd_master_node_id
             queue = self._queues.get(master_id)
-            # 连接可能还没建立。先备好队列把这条握手留住，等 _serve_master 连上再发，避免上报先到就被丢掉。
+            # 连接可能还没建立。先备好队列把这条握手留住，等 _serve_master 连上再发。
             if queue is None:
                 queue = asyncio.Queue()
                 self._queues[master_id] = queue
                 logger.info(f"pd report create queue for master {master_id}, send after it connects")
+
+                async def drop_if_absent(master_id: int, queue: asyncio.Queue) -> None:
+                    # 给发现结果 3 分钟。到时这个 master 还没有连接任务，说明它不会来了，清掉自己的队列。
+                    await asyncio.sleep(3 * 60)
+                    if master_id not in self._tasks and self._queues.get(master_id) is queue:
+                        logger.info(f"pd report drop stale queue for master {master_id}")
+                        self._queues.pop(master_id, None)
+
+                asyncio.create_task(drop_if_absent(master_id=master_id, queue=queue))
             queue.put_nowait((ObjType.PD_UPLOAD_KV_STATUS, status))
             logger.info(f"pd report queued upkv_status for master {master_id}: {status}")
 
@@ -137,14 +146,15 @@ class PdReportManager:
         """维持到一个 PD Master /pd_report 的 websocket，并把发送队列里的内容写出去。
 
         连上后打开 TCP_NODELAY。存活靠协议层 Ping：每 60 秒发一次，60 秒等不到 Pong 就断开。
-        这条连接失败只重连这一个 Master，10 秒后再连，队列里还没发出的内容留着。
-        任务结束时，只有队列仍是自己这把才删掉，避免删掉后继任务新建的队列。
+        已经从队列取出但没写成功的报告留在本地，重连后先发它。这条连接失败只重连这一个
+        Master，10 秒后再连。任务结束时，只有队列仍是自己这把才删掉，避免删掉后继任务新建的队列。
         """
         import websockets
 
         uri = f"ws://{master.host_ip_port}/pd_report"
 
         logger.info(f"pd report serve master {master.node_id} {uri}")
+        pending = None
         try:
             while True:
                 try:
@@ -161,8 +171,10 @@ class PdReportManager:
                         if sock is not None:
                             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                         while True:
-                            payload = await outgoing.get()
-                            await websocket.send(pickle.dumps(payload))
+                            if pending is None:
+                                pending = await outgoing.get()
+                            await websocket.send(pickle.dumps(pending))
+                            pending = None
                 except asyncio.CancelledError:
                     raise
                 except BaseException as exc:
