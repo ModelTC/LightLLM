@@ -129,6 +129,7 @@ def test_forward_executes_every_loop_visit(monkeypatch, prefill, cache_mode):
     model.trans_layers_weight = [model.physical_layer_weights[i] for i in model.loop_layer_indices]
     visits = []
     cache_ids = []
+    writes = []
 
     class Layer:
         def __init__(self, layer_num, network_config):
@@ -137,6 +138,7 @@ def test_forward_executes_every_loop_visit(monkeypatch, prefill, cache_mode):
         def forward(self, hidden, infer_state, weight):
             visits.append(weight.layer_num_)
             cache_ids.append(self.layer_num_)
+            writes.append(getattr(self, "linear_att_write_state", True))
             return hidden + 1
 
         context_forward = token_forward = forward
@@ -168,6 +170,47 @@ def test_forward_executes_every_loop_visit(monkeypatch, prefill, cache_mode):
     assert visits == [0, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 6, 7]
     assert output.item() == 13
     assert cache_ids == (visits if cache_mode == "overwrite" else list(range(13)))
+    assert writes == ([True] + [False] * 5 + [True] * 7 if cache_mode == "overwrite" else [True] * 13)
+
+
+@pytest.mark.parametrize("prefill", [False, True])
+@pytest.mark.parametrize("write_state", [False, True])
+def test_linear_layer_forwards_state_write_policy(monkeypatch, prefill, write_state):
+    from lightllm.models.sensenova_loop.layer_infer.transformer_layer_infer import SenseNovaLoopTransformerLayerInfer
+
+    layer = object.__new__(SenseNovaLoopTransformerLayerInfer)
+    layer.is_linear_attention_layer = True
+    layer.linear_att_write_state = write_state
+    layer.layer_num_, layer.tp_world_size_ = 4, 1
+    mixed = torch.ones(1, 4)
+    layer._linear_in_proj = lambda *args: mixed
+    layer._linear_post = lambda output, *args: output
+    seen = []
+
+    def attention(*args, att_control, **kwargs):
+        params = att_control.linear_att_prefill_dict if prefill else att_control.linear_att_decode_dict
+        seen.append(params)
+        return mixed, None
+
+    infer = SimpleNamespace(
+        prefill_att_state1=SimpleNamespace(prefill_att=attention),
+        decode_att_state1=SimpleNamespace(decode_att=attention),
+    )
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    forward = layer.context_attention_forward if prefill else layer.token_attention_forward
+    assert forward(mixed, infer, object()) is mixed
+    assert len(seen) == 1
+    assert seen[0]["write_state"] is write_state
+    assert seen[0]["layer_num"] == 4
+
+
+@pytest.mark.parametrize("factory", ["create_full_att_states", "create_bounded_att_states"])
+def test_overwrite_requires_native_ssm(factory):
+    from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
+
+    args = StartArgs(loop_cache_mode="overwrite", ssm_state_mode="replay")
+    with pytest.raises(ValueError, match="requires ssm_state_mode=native"):
+        getattr(SenseNovaLoopTpPartModel, factory)(_config(), args, tuple(range(80)))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

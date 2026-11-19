@@ -20,6 +20,8 @@ logger = init_logger(__name__)
 
 
 class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
+    linear_att_write_state = True
+
     def __init__(self, layer_num, network_config):
         self.partial_rotary_factor = network_config.get("partial_rotary_factor", 1.0)
         self.n_routed_experts = network_config.get("num_experts", 0)
@@ -222,6 +224,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
                         "mixed_qkvzba": _mixed_qkvzba,
                         "layer_weight": layer_weight,
                         "layer_num": self.layer_num_,
+                        "write_state": self.linear_att_write_state,
                     },
                 ),
                 alloc_func=self.alloc_tensor,
@@ -259,6 +262,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
                         "mixed_qkvzba": mixed_qkvzba,
                         "layer_weight": layer_weight,
                         "layer_num": self.layer_num_,
+                        "write_state": self.linear_att_write_state,
                     },
                 ),
                 alloc_func=self.alloc_tensor,
@@ -290,6 +294,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
                     "mixed_qkvzba": mixed_qkvzba,
                     "layer_weight": layer_weight,
                     "layer_num": self.layer_num_,
+                    "write_state": self.linear_att_write_state,
                 },
             ),
             alloc_func=self.alloc_tensor,

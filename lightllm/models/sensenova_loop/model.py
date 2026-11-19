@@ -54,6 +54,8 @@ class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
         config = cls.normalize_model_config(model_config)
         if args.loop_cache_mode == "independent":
             return config, model_logical_layer_ids
+        if args.ssm_state_mode != "native":
+            raise ValueError("loop_cache_mode=overwrite requires ssm_state_mode=native")
 
         indices = config["loop_physical_indices"]
         physical_count = max(indices) + 1
@@ -90,6 +92,8 @@ class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
 
     def _init_config(self):
         super()._init_config()
+        if self.args.loop_cache_mode == "overwrite" and self.args.ssm_state_mode != "native":
+            raise ValueError("loop_cache_mode=overwrite requires ssm_state_mode=native")
         self.loop_layer_indices = self.config["loop_physical_indices"]
         self.num_physical_layers = max(self.loop_layer_indices) + 1
 
@@ -110,8 +114,12 @@ class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
     def _init_infer_layer(self, start_layer_index=0):
         super()._init_infer_layer(start_layer_index)
         if self.args.loop_cache_mode == "overwrite":
-            for layer, physical in zip(self.layers_infer, self.loop_layer_indices):
+            last_visits = {physical: execution for execution, physical in enumerate(self.loop_layer_indices)}
+            for execution, (layer, physical) in enumerate(zip(self.layers_infer, self.loop_layer_indices)):
                 layer.layer_num_ = start_layer_index + physical
+                # All visits start from the preceding forward's state. Only
+                # the final visit commits conv/SSM for the next forward.
+                layer.linear_att_write_state = execution == last_visits[physical]
         # Bind split projections once for each visit to a shared physical layer.
         for layer, weight in zip(self.layers_infer, self.trans_layers_weight):
             if getattr(weight, "linear_gate_proj", None) is not None:

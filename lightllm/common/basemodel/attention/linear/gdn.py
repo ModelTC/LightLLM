@@ -26,6 +26,27 @@ if TYPE_CHECKING:
     from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerWeight
 
 
+def _prepare_layer_state(att_state, conv_states, ssm_states, write_state):
+    """Use batch-local copies for loop visits that must preserve the input history."""
+    if write_state:
+        return att_state, conv_states, ssm_states
+
+    conv_indices = att_state.b_conv_buffer_idx
+    ssm_indices = att_state.b_ssm_buffer_idx
+    # Gather only this batch's requests/candidate slots, rather than cloning
+    # the entire request-capacity pool. Kernels may update these copies freely.
+    working_conv = conv_states.index_select(0, conv_indices)
+    working_ssm = ssm_states.index_select(0, ssm_indices.reshape(-1))
+    working_att = dataclasses.replace(
+        att_state,
+        b_conv_buffer_idx=torch.arange(conv_indices.numel(), dtype=conv_indices.dtype, device=conv_indices.device),
+        b_ssm_buffer_idx=torch.arange(ssm_indices.numel(), dtype=ssm_indices.dtype, device=ssm_indices.device).view_as(
+            ssm_indices
+        ),
+    )
+    return working_att, working_conv, working_ssm
+
+
 class LinearAttBackend(BaseAttBackend, ABC):
     def __init__(self, model: "TpPartBaseModel"):
         super().__init__(model=model)
@@ -37,7 +58,6 @@ class LinearAttBackend(BaseAttBackend, ABC):
         pass
 
     def _init_linear_layer_metadata(self, network_config, tp_world_size):
-
         self.mtp_step = get_env_start_args().mtp_step
 
         # Linear attention specific dimensions
@@ -109,7 +129,6 @@ class LinearAttBackend(BaseAttBackend, ABC):
 
 @dataclasses.dataclass
 class LinearAttPrefillAttState(BasePrefillAttState):
-
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
@@ -147,12 +166,15 @@ class LinearAttPrefillAttState(BasePrefillAttState):
             state_class=GDNState,
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
+        layer_att, conv_states, ssm_states = _prepare_layer_state(
+            self, conv_states, ssm_states, linear_att_dict.get("write_state", True)
+        )
         # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
         # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
         if backend.mtp_step > 0:
             conv_states = conv_states[:, :, : -backend.mtp_step]
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
-        core_attn_out = self._gdn_prefill_kernel(
+        core_attn_out = layer_att._gdn_prefill_kernel(
             mixed_qkv, conv_states, ssm_states, a, b, self.infer_state, layer_weight
         )
         return core_attn_out, z
@@ -207,7 +229,6 @@ class LinearAttPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class LinearAttDecodeAttState(BaseDecodeAttState):
-
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
@@ -306,10 +327,13 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             state_class=GDNState,
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
+        layer_att, conv_states, ssm_states = _prepare_layer_state(
+            self, conv_states, ssm_states, linear_att_dict.get("write_state", True)
+        )
 
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step > 0:
-            core_attn_out = self._gdn_mtp_kernel(
+            core_attn_out = layer_att._gdn_mtp_kernel(
                 mixed_qkv,
                 conv_states,
                 ssm_states,
@@ -320,7 +344,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             )
         else:
             # 非 MTP 模式下，使用线性层 decode 状态。
-            core_attn_out, z = self._gdn_decode_kernel(
+            core_attn_out, z = layer_att._gdn_decode_kernel(
                 mixed_qkv,
                 z,
                 conv_states,

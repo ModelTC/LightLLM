@@ -9,6 +9,10 @@ SenseNova Loop 部署指南
 * ``overwrite``：同一物理层的各轮执行复用并覆盖缓存。启用方式为
   ``--loop_cache_mode overwrite``，推理结果可能与独立缓存模式不同。
 
+覆盖模式下，linear attention 的各轮都从本次 forward 开始前的 conv/SSM 状态计算，
+只将最后一轮的结果写回持久缓存。中间轮使用当前 batch 的临时状态，后续轮不会
+读取前一轮刚产生的状态。该模式使用 ``--ssm_state_mode native``（默认）。
+
 两种模式的前向执行次数均由 ``loop_settings`` 决定。例如 32 个物理层、循环区间
 ``[4, 28)``、执行 3 轮时，共执行 80 次。独立模式分配 20 层 full attention
 和 60 层 linear attention 缓存，覆盖模式分配 8 层和 24 层。

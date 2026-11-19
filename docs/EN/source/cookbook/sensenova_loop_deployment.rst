@@ -10,6 +10,12 @@ SenseNova Loop Deployment Guide
   Enable it with ``--loop_cache_mode overwrite``. Inference results may
   differ from independent mode.
 
+In overwrite mode, each linear attention visit starts from the conv/SSM state
+saved before the current forward. Only the final visit writes back to persistent
+caches. Intermediate visits use temporary state for the current batch, so later
+visits do not consume state produced by earlier visits in the same forward.
+This mode requires ``--ssm_state_mode native`` (the default).
+
 ``loop_settings`` determines the number of forward executions in both modes.
 For example, 32 physical layers with three passes over ``[4, 28)`` execute 80 layer
 visits. Independent mode allocates 20 full attention and 60 linear attention cache
