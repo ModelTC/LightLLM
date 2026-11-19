@@ -294,7 +294,7 @@ def _create_shm(name: str, byte_size: int):
     try:
         shm = ServiceSharedMemory(name=name, create=True, size=byte_size)
         logger.info(f"create lock shm {name}")
-    except:
+    except Exception:
         shm = ServiceSharedMemory(name=name, create=False, size=byte_size)
         logger.info(f"link lock shm {name}")
     return shm
