@@ -32,7 +32,8 @@ def test_master_uses_the_current_segments_resource_budget(resource_wait: int, ex
                 raise RuntimeError("decode budget checked")
 
         manager._wait_for_event_or_disconnect = handshake
-        node = PD_Client_Obj(1, "node:8000", "prefill", {}, websocket=SimpleNamespace(send_bytes=AsyncMock()))
+        node = PD_Client_Obj(1, "node:8000", "prefill", {})
+        node.sub_connections["test"] = SimpleNamespace(send_bytes=AsyncMock())
         stream = manager.fetch_pd_stream(
             p_node=node,
             d_node=node,
@@ -53,7 +54,7 @@ def test_master_uses_the_current_segments_resource_budget(resource_wait: int, ex
 def test_node_error_wakes_handshake_without_retry() -> None:
     async def run() -> None:
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-        status = ReqStatus(req_id=123, p_node=None, d_node=None)
+        status = ReqStatus(req_id=123, p_node=None, d_node=None, p_websocket=object(), d_websocket=object())
         request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
         task = asyncio.create_task(
             coro=manager._wait_for_event_or_disconnect(

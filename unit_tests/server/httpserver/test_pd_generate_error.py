@@ -19,7 +19,13 @@ from lightllm.utils.error_utils import InvalidRequestError, PDPrefillNodeStopGen
 
 def _pd_node(mode, send_bytes=None):
     websocket = SimpleNamespace(send_bytes=send_bytes if send_bytes is not None else AsyncMock())
-    return PD_Client_Obj(1, f"{mode}:8000", mode, {}, websocket=websocket)
+    node = PD_Client_Obj(1, f"{mode}:8000", mode, {})
+    node.sub_connections["test"] = websocket
+    return node
+
+
+def _ws(node):
+    return next(iter(node.sub_connections.values()))
 
 
 class _FailingManager:
@@ -255,7 +261,7 @@ def test_pd_master_generate_error_marks_request_and_wakes_all_waiters():
 
         p_node = _pd_node("prefill")
         d_node = _pd_node("decode")
-        req_status = ReqStatus(123, p_node, d_node)
+        req_status = ReqStatus(123, p_node, d_node, _ws(p_node), _ws(d_node))
         manager.req_id_to_out_inf = {123: req_status}
 
         handle_task = asyncio.create_task(manager.handle_loop())
@@ -269,8 +275,8 @@ def test_pd_master_generate_error_marks_request_and_wakes_all_waiters():
             assert req_status.prefill_prompt_ids_event.is_set()
             assert req_status.up_status_event.is_set()
             assert manager.req_id_to_out_inf[123] is req_status
-            p_node.websocket.send_bytes.assert_not_awaited()
-            d_node.websocket.send_bytes.assert_not_awaited()
+            _ws(p_node).send_bytes.assert_not_awaited()
+            _ws(d_node).send_bytes.assert_not_awaited()
 
             with pytest.raises(
                 RuntimeError,
@@ -365,7 +371,7 @@ def test_pd_master_request_rejection_becomes_server_busy_error():
         manager.timer_log = AsyncMock()
         manager.infos_queues = None
 
-        req_status = ReqStatus(123, MagicMock(), MagicMock())
+        req_status = ReqStatus(123, MagicMock(), MagicMock(), MagicMock(), MagicMock())
         manager.req_id_to_out_inf = {123: req_status}
 
         handle_task = asyncio.create_task(manager.handle_loop())
@@ -396,7 +402,7 @@ def test_pd_master_request_rejection_becomes_server_busy_error():
 def test_pd_master_generate_error_wakes_resource_wait(event_name):
     async def run():
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-        req_status = ReqStatus(123, MagicMock(), MagicMock())
+        req_status = ReqStatus(123, MagicMock(), MagicMock(), MagicMock(), MagicMock())
         request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
         wait_task = asyncio.create_task(
             manager._wait_for_event_or_disconnect(
@@ -426,7 +432,7 @@ def test_pd_master_abort_removes_request_even_when_node_notifications_fail():
         manager.req_id_to_out_inf = {}
         p_node = _pd_node("prefill", AsyncMock(side_effect=ConnectionError("p down")))
         d_node = _pd_node("decode", AsyncMock(side_effect=ConnectionError("d down")))
-        manager.req_id_to_out_inf[123] = ReqStatus(123, p_node, d_node)
+        manager.req_id_to_out_inf[123] = ReqStatus(123, p_node, d_node, _ws(p_node), _ws(d_node))
 
         await manager.abort(123)
 
@@ -444,8 +450,8 @@ def test_pd_master_abort_uses_explicit_nodes_when_request_status_is_missing():
 
         await manager.abort(123, p_node=p_node, d_node=d_node)
 
-        p_node.websocket.send_bytes.assert_awaited_once_with(pickle.dumps((ObjType.ABORT, 123)))
-        d_node.websocket.send_bytes.assert_awaited_once_with(pickle.dumps((ObjType.ABORT, 123)))
+        _ws(p_node).send_bytes.assert_awaited_once_with(pickle.dumps((ObjType.ABORT, 123)))
+        _ws(d_node).send_bytes.assert_awaited_once_with(pickle.dumps((ObjType.ABORT, 123)))
 
     asyncio.run(run())
 
@@ -474,7 +480,7 @@ def test_pd_invalid_request_error_round_trip():
         kind, req_id, error_info = pickle.loads(websocket.send.await_args.args[0])
         assert kind == ObjType.PD_UPLOAD_GENERATE_ERROR
         assert req_id == 123
-        status = ReqStatus(req_id, MagicMock(), MagicMock())
+        status = ReqStatus(req_id, MagicMock(), MagicMock(), MagicMock(), MagicMock())
         await status.set_error(error_info)
         with pytest.raises(InvalidRequestError, match="invalid image tag num: 0 images vs 1 tags"):
             status.raise_if_error()
@@ -497,7 +503,7 @@ def test_pd_stream_validation_returns_bad_request(monkeypatch):
     app.add_exception_handler(InvalidRequestError, invalid_request_exception_handler)
 
     async def generate():
-        status = ReqStatus(123, MagicMock(), MagicMock())
+        status = ReqStatus(123, MagicMock(), MagicMock(), MagicMock(), MagicMock())
         await status.set_error("InvalidRequestError: invalid image tag num: 0 images vs 1 tags")
         status.raise_if_error()
         yield

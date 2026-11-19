@@ -58,5 +58,37 @@ async def register_and_keep_alive(websocket: WebSocket):
         logger.exception(str(e))
     finally:
         logger.error(f"client {regist_json} removed")
-        await g_objs.httpserver_manager.remove_pd(pd_client)
+        await g_objs.httpserver_manager.remove_pd(pd_client=pd_client, websocket=websocket)
+    return
+
+
+@router.websocket("/pd_report")
+async def receive_pd_report(websocket: WebSocket):
+    """Decode 的 pd_report 进程上报 KV 握手。这条连接不注册节点，也不下发请求。"""
+    from .api_http import g_objs
+
+    await websocket.accept()
+    set_pd_websocket_write_buffer(websocket=websocket)
+    websocket._receive_bytes_max_size = get_lightllm_websocket_max_message_size()
+    try:
+        heartbeat_timeout_seconds = 30
+        while True:
+            data = await asyncio.wait_for(websocket.receive_bytes(), timeout=heartbeat_timeout_seconds)
+            obj = pickle.loads(data)
+            if isinstance(obj, tuple) and obj and obj[0] == ObjType.HEARTBEAT:
+                continue
+            if isinstance(obj, tuple) and obj and obj[0] == ObjType.PD_UPLOAD_KV_STATUS:
+                await g_objs.httpserver_manager.update_req_status(obj[1])
+                continue
+            logger.error(f"pd report dropped unexpected object {obj[0] if isinstance(obj, tuple) and obj else obj}")
+    except asyncio.TimeoutError:
+        logger.warning("pd report heartbeat timed out")
+        try:
+            await websocket.close(code=1011, reason="PD report heartbeat timed out")
+        except BaseException:
+            logger.debug("failed to close timed-out pd report", exc_info=True)
+    except WebSocketDisconnect as exc:
+        logger.info(f"pd report disconnected: {exc}")
+    except BaseException as exc:
+        logger.exception(f"pd report failed: {exc}")
     return

@@ -58,14 +58,12 @@ def _node(
     chars=0,
     requests=0,
     load=0.0,
-    connection_id=None,
 ):
     node = PD_Client_Obj(
         node_id=node_id,
         client_ip_port=address,
         mode=mode,
         start_args={},
-        connection_id=connection_id or f"connection-{node_id}",
         dispatched_prompt_chars=chars,
         dispatched_req_num=requests,
     )
@@ -151,8 +149,8 @@ def test_cache_metadata_comes_from_the_selection_query(monkeypatch):
 
 @pytest.mark.parametrize("restarted", [False, True])
 def test_cache_hint_survives_endpoint_reconnect_or_process_restart(monkeypatch, restarted):
-    original = _node(100, "p2:8000", connection_id="old-socket")
-    current = _node(300 if restarted else 100, "p2:8000", connection_id="new-socket")
+    original = _node(100, "p2:8000")
+    current = _node(300 if restarted else 100, "p2:8000")
     other = _node(101, "p1:8000")
     selector = LoadBalancedCacheAwareSelector(None)
     selector.update_nodes([other, current], [_node(200, "d:8000", mode="decode")])

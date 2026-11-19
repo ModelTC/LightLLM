@@ -315,8 +315,8 @@ def test_prefill_reconnection_preserves_other_nodes_inflight_prompt_chars():
     manager.register_pd(pd_info(3, "10.0.0.2:8000"), websocket=object())
 
     assert [node.client_ip_port for node in manager.prefill_nodes] == ["10.0.0.1:8000", "10.0.0.2:8000"]
-    assert [node.dispatched_prompt_chars for node in manager.prefill_nodes] == [100, 0]
-    assert [node.dispatched_req_num for node in manager.prefill_nodes] == [1, 0]
+    assert [node.dispatched_prompt_chars for node in manager.prefill_nodes] == [100, 200]
+    assert [node.dispatched_req_num for node in manager.prefill_nodes] == [1, 2]
 
 
 def test_pd_master_inference_health_matches_normal_node_semantics(monkeypatch):

@@ -253,7 +253,6 @@ def rpc_stats_cluster():
 def test_real_rpc_clients_share_statistics(rpc_stats_cluster):
     _, clients = rpc_stats_cluster
     node = _node()
-    node.websocket = threading.Lock()
 
     async def run():
         await clients[0].add_dispatched_info(p_node=node, chars=17, req_num=1)

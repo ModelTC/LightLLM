@@ -48,11 +48,6 @@ async def pd_handle_loop(manager: HttpServerManager, dp_index: Optional[int] = N
     else:
         manager.host_ip = manager.args.host
 
-    if manager.pd_mode.is_D():
-        # Decode 才接收本机 KV 握手，转发器按 PD Master 节点记录连接。
-        manager.pd_master_forwarder = PDMasterForwarder()
-        asyncio.create_task(manager.pd_master_forwarder.run())
-
     id_to_handle_task: Dict[int, asyncio.Task] = {}
 
     while True:
@@ -92,7 +87,6 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
         forwarding_tokens_task = None
         heartbeat_task = None
         generation_tasks: Dict[int, asyncio.Task] = {}
-        registered_websocket = None
         try:
             uri = f"ws://{pd_master_obj.host_ip_port}/pd_register"
             async with websockets.connect(
@@ -123,9 +117,6 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
 
                 await websocket.send(json.dumps(regist_json))
                 logger.info(f"Sent registration JSON: {regist_json}")
-                if manager.pd_mode.is_D():
-                    manager.pd_master_forwarder.register(pd_master_obj.node_id, websocket)
-                    registered_websocket = websocket
 
                 # 转发任务
                 forwarding_tokens_task = asyncio.create_task(
@@ -206,8 +197,6 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.error("connetion to pd_master has error")
             logger.exception(str(e))
         finally:
-            if registered_websocket is not None:
-                manager.pd_master_forwarder.unregister(pd_master_obj.node_id, registered_websocket)
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
             child_tasks.extend(generation_tasks.values())
             for task in child_tasks:
@@ -371,51 +360,3 @@ def _get_load_info(dp_index: Optional[int] = None) -> dict:
         ),
     }
     return load_info
-
-
-class PDMasterForwarder:
-    """Decode 上把本机 IPC 收到的 KV 握手转发给 PD Master。
-
-    每个 httpserver worker 都连着所有 PD Master，握手里带着 pd_master_node_id，
-    所以不管 IPC 落到哪个 worker，都能沿该 worker 自己到这个 PD Master 的 /pd_register 连接送达。
-    """
-
-    def __init__(self) -> None:
-        self._node_id_to_websocket: Dict[int, ClientConnection] = {}
-
-    def register(self, node_id: int, websocket: ClientConnection) -> None:
-        self._node_id_to_websocket[node_id] = websocket
-
-    def unregister(self, node_id: int, websocket: ClientConnection) -> None:
-        # 重连时新连接可能已经登记，只删除自己那条。
-        if self._node_id_to_websocket.get(node_id) is websocket:
-            del self._node_id_to_websocket[node_id]
-
-    async def run(self) -> None:
-        from lightllm.server.pd_httpserver_ipc import PDHttpserverIpc
-
-        async def send_status(websocket, upkv_status):
-            try:
-                await websocket.send(pickle.dumps((ObjType.PD_UPLOAD_KV_STATUS, upkv_status)))
-            except BaseException as e:
-                logger.exception(f"upload pd kv status failed, request_id={upkv_status.group_request_id}: {str(e)}")
-
-        pull = PDHttpserverIpc.Pull()
-        try:
-            # 同一个地址只能绑一次。别的 httpserver 进程再 bind 会失败并记日志。
-            pull.bind()
-            logger.info("pd httpserver ipc receiver started in this httpserver worker")
-            while True:
-                upkv_status = await pull.recv()
-                websocket = self._node_id_to_websocket.get(upkv_status.pd_master_node_id)
-                if websocket is None:
-                    logger.warning(f"no connection to pd master, drop up kv status {upkv_status}")
-                    continue
-                # 单条连接的写入背压不能阻塞本机 IPC 和其他 Master 的握手。
-                asyncio.create_task(send_status(websocket, upkv_status))
-        except asyncio.CancelledError:
-            raise
-        except BaseException as e:
-            logger.exception(f"pd httpserver ipc loop failed: {str(e)}")
-        finally:
-            pull.close()

@@ -18,7 +18,7 @@ from lightllm.server.pd_io_struct import (
     PDDecodeNodeInfo,
     PDUpKVStatus,
 )
-from lightllm.server.pd_httpserver_ipc import PDHttpserverIpc
+from lightllm.server.pd_report.manager import ReportIpc
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..kv_transporter import create_kv_transporter
@@ -127,8 +127,8 @@ class _DecodeTransModule:
         self.task_in_queue = task_in_queue
         self.task_out_queue = task_out_queue
         self.resource_managers = resource_managers
-        # 本机 PUSH。第一次发送时才 connect，套接字在进程里一直留着。
-        self.pd_httpserver_push = PDHttpserverIpc.Push()
+        # 本机 PUSH 到 pd_report。第一次发送时才 connect。
+        self.pd_report_push = ReportIpc.Push()
         kv_move_buffer = allocate_transfer_buffer(
             self.resource_managers[device_id], self.args.pd_kv_page_num, device=f"cuda:{device_id}"
         )
@@ -251,8 +251,8 @@ class _DecodeTransModule:
             pd_master_node_id=task.pd_master_node_id,
             pd_kv_trans_params=pickle.dumps(decode_node_info),
         )
-        # 送给本机 httpserver，由它按 pd_master_node_id 找到 PD Master 连接再转发。
-        self.pd_httpserver_push.send(message=up_status)
+        # 送给本机 pd_report，由它按 pd_master_node_id 写到对应 Master 的 /pd_report。
+        self.pd_report_push.send(message=(task.pd_master_node_id, up_status))
 
     @log_exception
     def accept_peer_task_loop(
