@@ -26,7 +26,7 @@ _HEARTBEAT_SECONDS = 15
 
 
 def start_pd_report_process(args: StartArgs, pipe_writer: Connection) -> None:
-    start_parent_check_thread()
+    start_parent_check_thread(parent_pid=os.getppid())
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::pd_report")
     pull = ReportIpc.Pull(address=get_pd_report_ipc_address())
