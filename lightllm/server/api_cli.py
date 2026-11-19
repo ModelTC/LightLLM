@@ -994,6 +994,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         eviction, increasing linear_att_cache_size can improve hit rate at the cost of more memory.""",
     )
     parser.add_argument(
+        "--loop_cache_mode",
+        choices=["independent", "overwrite"],
+        default="independent",
+        help="SenseNova Loop KV/conv/SSM caches: separate slots per execution layer (independent), "
+        "or reuse and overwrite the same slots on each visit to a physical layer (overwrite).",
+    )
+    parser.add_argument(
         "--ssm_state_mode",
         choices=["native", "replay"],
         default="native",

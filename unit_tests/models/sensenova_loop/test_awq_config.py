@@ -26,6 +26,6 @@ def test_hf_awq_config_preserves_embedding_and_lm_head_metadata():
     config["text_config"]["layer_types"] *= 8
     normalized = SenseNovaLoopTpPartModel.normalize_model_config(config)
     assert normalized["quantization_config"] is config["quantization_config"]
-    assert normalized["num_hidden_layers"] == 56
+    assert normalized["n_layer"] == normalized["num_hidden_layers"] == 56
     assert len(normalized["loop_physical_indices"]) == 56
     assert normalized["loop_physical_indices"][4:8] == (4, 5, 6, 7)

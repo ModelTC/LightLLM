@@ -255,6 +255,8 @@ class StartArgs:
 
     weight_version: str = "default"
 
+    loop_cache_mode: str = field(default="independent", metadata={"choices": ["independent", "overwrite"]})
+
     # hybrid attention model (Qwen3Next)
     ssm_state_mode: str = "native"
     ssm_replay_config: dict[str, object] = field(default_factory=dict)

@@ -3,6 +3,16 @@
 SenseNova Loop 部署指南
 ===========================
 
+``--loop_cache_mode`` 控制各轮 Loop 的 KV、conv 和 SSM 状态：
+
+* ``independent``（默认）：每个执行层使用独立缓存。
+* ``overwrite``：同一物理层的各轮执行复用并覆盖缓存。启用方式为
+  ``--loop_cache_mode overwrite``，推理结果可能与独立缓存模式不同。
+
+两种模式的前向执行次数均由 ``loop_settings`` 决定。例如 32 个物理层、循环区间
+``[4, 28)``、执行 3 轮时，共执行 80 次。独立模式分配 20 层 full attention
+和 60 层 linear attention 缓存，覆盖模式分配 8 层和 24 层。
+
 启动服务
 --------
 
@@ -48,8 +58,10 @@ AWQ 部署
 ``PORT`` 指定服务端口，添加 ``DRY_RUN=1`` 可查看完整启动命令。
 脚本启用 FP8 KV 和解码 CUDA Graph，使用单卡、单个运行请求，禁用视觉、音频和 MTP。
 
-示例中的校准文件使用 SenseNova Loop BF16 模型和 WorkBuddy 数据生成，适用于 Loop 两轮。
-其他模型请替换 ``KV_CALIB``；FP8 KV 参数说明见 :doc:`../tutorial/fp8_kv_quantization`。
+示例标定文件使用 SenseNova Loop BF16 模型和 WorkBuddy 数据生成，适用于
+``independent`` 模式、Loop 两轮。``overwrite`` 模式需按物理层缓存布局重新标定，
+并通过 ``KV_CALIB`` 指定对应文件。
+FP8 KV 参数说明见 :doc:`../tutorial/fp8_kv_quantization`。
 
 启用 MTP
 --------

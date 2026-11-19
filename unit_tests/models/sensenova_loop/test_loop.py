@@ -21,6 +21,7 @@ def _config(layers=32, start=4, end=28, count=3):
             "full_attention_interval": 4,
             "layer_types": ["full_attention" if (i + 1) % 4 == 0 else "linear_attention" for i in range(layers)],
             "num_key_value_heads": 4,
+            "num_attention_heads": 16,
             "head_dim": 256,
             "linear_num_key_heads": 16,
             "linear_num_value_heads": 32,
@@ -31,41 +32,53 @@ def _config(layers=32, start=4, end=28, count=3):
     }
 
 
-@pytest.mark.parametrize("start,end,count", [(4, 28, 3), (4, 28, 2), (1, 6, 2)])
-def test_cache_slots_follow_execution_depth_including_unaligned_loop(monkeypatch, start, end, count):
+@pytest.mark.parametrize("start,end,count", [(4, 28, 1), (4, 28, 3), (4, 28, 2), (1, 6, 2), (0, 32, 3)])
+@pytest.mark.parametrize("cache_mode", ["independent", "overwrite"])
+def test_cache_slots_follow_selected_mode_including_unaligned_loop(monkeypatch, start, end, count, cache_mode):
     config = _config(start=start, end=end, count=count)
-    args = StartArgs(model_dir="unused", tp=4, dp=1, data_type="bfloat16", mtp_mode="eagle_with_att", mtp_step=3)
+    args = StartArgs(
+        model_dir="unused",
+        tp=4,
+        dp=1,
+        data_type="bfloat16",
+        mtp_mode="eagle_with_att",
+        mtp_step=3,
+        loop_cache_mode=cache_mode,
+    )
     monkeypatch.setattr("lightllm.models.qwen3next.config.get_env_start_args", lambda: args)
     monkeypatch.setattr("transformers.configuration_utils.PretrainedConfig.get_config_dict", lambda _: (config, {}))
     from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
 
     normalized = SenseNovaLoopTpPartModel.normalize_model_config(config)
-    cache = Qwen3NextResourceConfig.from_model_config(normalized, args)
-    full_layers = cache.get_full_att_layer_indices()
-    linear_layers = tuple(i for i in range(cache.all_layer_num) if i not in full_layers)
+    assert SenseNovaLoopTpPartModel.normalize_model_config(normalized) == normalized
     indices = get_loop_layer_indices(config["loop_settings"], 32)
+    assert normalized["n_layer"] == normalized["num_hidden_layers"] == len(indices)
+    logical_ids = tuple(range(len(indices)))
+    (full,) = SenseNovaLoopTpPartModel.create_full_att_states(normalized, args, logical_ids)
+    (bounded,) = SenseNovaLoopTpPartModel.create_bounded_att_states(normalized, args, logical_ids)
+    full_layers = tuple(group[0] for group in full.config.logical_layer_groups)
+    linear_layers = bounded.config.logical_layer_ids
     kinds = get_loop_layer_types(config["loop_settings"], config["text_config"])
     assert len(kinds) == 32 + (end - start) * (count - 1)
-    full = linear = 0
     slots = {}
     for execution, (physical, kind) in enumerate(zip(indices, kinds)):
+        layer_id = physical if cache_mode == "overwrite" else execution
         if kind == "full_attention":
-            slot = full_layers.index(execution)
-            assert slot == full
-            full += 1
+            slot = full_layers.index(layer_id)
         else:
-            slot = linear_layers.index(execution)
-            assert slot == linear
-            linear += 1
-        assert slot not in slots.setdefault(physical, set())
-        slots[physical].add(slot)
-    assert len(full_layers) == full
-    assert len(linear_layers) == linear
-    assert len(set(full_layers) | set(linear_layers)) == len(indices)
-    if (start, end, count) == (4, 28, 3):
-        assert (cache.all_layer_num, full, linear) == (80, 20, 60)
-    if (start, end, count) == (4, 28, 2):
-        assert (cache.all_layer_num, full, linear) == (56, 14, 42)
+            slot = linear_layers.index(layer_id)
+        visits = slots.setdefault(physical, set())
+        if cache_mode == "independent":
+            assert slot not in visits
+        elif visits:
+            assert slot in visits
+        visits.add(slot)
+    if cache_mode == "overwrite":
+        assert (len(full_layers), len(linear_layers)) == (8, 24)
+    else:
+        assert len(full_layers) + len(linear_layers) == len(indices)
+        assert len(full_layers) == kinds.count("full_attention")
+    assert len(slots) == 32
 
 
 def test_physical_weights_are_created_and_loaded_once(monkeypatch):
@@ -98,6 +111,102 @@ def test_physical_weights_are_created_and_loaded_once(monkeypatch):
     assert model.config["n_layer"] == 80
 
 
+@pytest.mark.parametrize("prefill", [False, True])
+@pytest.mark.parametrize("cache_mode", ["independent", "overwrite"])
+def test_forward_executes_every_loop_visit(monkeypatch, prefill, cache_mode):
+    from lightllm.common.basemodel.basemodel import dist_group_manager, g_cache_manager
+    from lightllm.common.basemodel.hidden_collector import NoopHiddenCollector
+    from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
+
+    config = _config(layers=8, start=1, end=6, count=2)
+    config["text_config"].update(hidden_size=128, num_attention_heads=1, vocab_size=128)
+    model = object.__new__(SenseNovaLoopTpPartModel)
+    model.args = StartArgs(loop_cache_mode=cache_mode)
+    model.tp_world_size_ = 1
+    model.config = model.normalize_model_config(config)
+    model.loop_layer_indices = model.config["loop_physical_indices"]
+    model.physical_layer_weights = [SimpleNamespace(layer_num_=i) for i in range(8)]
+    model.trans_layers_weight = [model.physical_layer_weights[i] for i in model.loop_layer_indices]
+    visits = []
+    cache_ids = []
+
+    class Layer:
+        def __init__(self, layer_num, network_config):
+            self.layer_num_ = layer_num
+
+        def forward(self, hidden, infer_state, weight):
+            visits.append(weight.layer_num_)
+            cache_ids.append(self.layer_num_)
+            return hidden + 1
+
+        context_forward = token_forward = forward
+
+    model.transformer_layer_infer_class = Layer
+    model.pre_layer_infer_class = lambda **_: SimpleNamespace(
+        context_forward=lambda input_ids, *_: input_ids,
+        token_forward=lambda input_ids, *_: input_ids,
+        _tpsp_sp_split=lambda input, **_: input,
+    )
+    model.post_layer_infer_class = lambda **_: SimpleNamespace(
+        _tpsp_allgather=lambda input, **_: input,
+        token_forward=lambda hidden, *_, **__: hidden,
+    )
+    model._init_infer_layer()
+    model._init_some_value()
+    model.pre_post_weight, model.prefill_graph = None, None
+    model._create_model_output = lambda output, _: output
+    monkeypatch.setattr(g_cache_manager, "cache_env_in", lambda: None)
+    monkeypatch.setattr(g_cache_manager, "cache_env_out", lambda: None)
+    monkeypatch.setattr(dist_group_manager, "clear_deepep_buffer", lambda: None)
+    infer = SimpleNamespace(
+        input_ids=torch.zeros(1, 1),
+        hidden_collector=NoopHiddenCollector(),
+        need_dp_prefill_balance=False,
+        is_cuda_graph_capture=False,
+    )
+    output = model._context_forward(infer) if prefill else model._token_forward(infer)
+    assert visits == [0, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 6, 7]
+    assert output.item() == 13
+    assert cache_ids == (visits if cache_mode == "overwrite" else list(range(13)))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("cache_mode", ["independent", "overwrite"])
+def test_loop_kv_writes_use_selected_cache_slots(cache_mode):
+    from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
+
+    config = _config(layers=8, start=1, end=6, count=3)
+    config["text_config"].update(num_key_value_heads=1, head_dim=32)
+    config = SenseNovaLoopTpPartModel.normalize_model_config(config)
+    (state,) = SenseNovaLoopTpPartModel.create_full_att_states(
+        model_config=config,
+        args=StartArgs(data_type="bfloat16", loop_cache_mode=cache_mode),
+        model_logical_layer_ids=tuple(range(config["n_layer"])),
+    )
+    state.device = torch.device("cuda")
+    state.allocate_storage(token_capacity=3)
+    state.k_storage.zero_()
+    state.v_storage.zero_()
+    assert state.k_storage.shape[0] == state.v_storage.shape[0] == (2 if cache_mode == "overwrite" else 4)
+    token_indices = torch.tensor([1], dtype=torch.int32, device="cuda")
+    for execution, physical in enumerate(config["loop_physical_indices"]):
+        if config["layer_types"][execution] == "linear_attention":
+            continue
+        kv = torch.full((1, 2, 32), execution + 1, dtype=torch.bfloat16, device="cuda")
+        kv[:, 1].neg_()
+        before_k, before_v = state.k_storage.clone(), state.v_storage.clone()
+        layer_id = physical if cache_mode == "overwrite" else execution
+        state.write_full_att_kv(layer_id, token_indices, kv)
+        k, v = state.get_layer_view(layer_id)
+        assert torch.equal(k[1], kv[0, :1])
+        assert torch.equal(v[1], kv[0, 1:])
+        other = [i for i in range(state.k_storage.shape[0]) if i != state.get_storage_layer_index(layer_id)]
+        assert torch.equal(state.k_storage[other], before_k[other])
+        assert torch.equal(state.v_storage[other], before_v[other])
+    assert torch.count_nonzero(state.k_storage[:, [0, 2]]) == 0
+    assert torch.count_nonzero(state.v_storage[:, [0, 2]]) == 0
+
+
 @pytest.mark.parametrize("streams,count", [(2, 2), (4, 3)])
 def test_mhc_registry_and_embedded_mtp_reuse_existing_qwen_draft(tmp_path, streams, count):
     from lightllm.models.draft_registry import get_draft_model_class
@@ -120,6 +229,7 @@ def test_mhc_registry_and_embedded_mtp_reuse_existing_qwen_draft(tmp_path, strea
     target.args = SimpleNamespace(**dataclasses.asdict(StartArgs()))
     target._init_config()
     assert target.config["n_layer"] == 32 + 24 * (count - 1)
+    assert len(target.loop_layer_indices) == 32 + 24 * (count - 1)
     assert target.num_physical_layers == 32
 
     draft = object.__new__(Qwen3_5MTPModel)
@@ -155,20 +265,22 @@ def test_loop_tokenizer_loads_without_hf_loop_autoconfig(tmp_path):
 
 
 @pytest.mark.parametrize("custom_layout", [False, True])
-def test_model_and_worker_use_the_same_loop_cache_layout(monkeypatch, custom_layout):
+@pytest.mark.parametrize("cache_mode", ["independent", "overwrite"])
+def test_model_and_worker_use_the_same_loop_cache_layout(monkeypatch, custom_layout, cache_mode):
     from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
 
     config = _config(start=1, end=6, count=2)
     if custom_layout:
         config["text_config"]["layer_types"] = ["full_attention", "linear_attention"] * 16
     original = deepcopy(config)
-    args = StartArgs(tp=4, dp=1, data_type="bfloat16", linear_att_hash_page_size=256)
+    args = StartArgs(tp=4, dp=1, data_type="bfloat16", linear_att_hash_page_size=256, loop_cache_mode=cache_mode)
     monkeypatch.setattr("lightllm.models.qwen3next.config.get_env_start_args", lambda: args)
     monkeypatch.setattr("transformers.configuration_utils.PretrainedConfig.get_config_dict", lambda _: (config, {}))
     config["text_config"]["num_attention_heads"] = 16
     original = deepcopy(config)
     normalized = SenseNovaLoopTpPartModel.normalize_model_config(config)
-    raw_cache = Qwen3NextResourceConfig.from_model_config(normalized, args)
+    cache_config = config["text_config"] if cache_mode == "overwrite" else normalized
+    raw_cache = Qwen3NextResourceConfig.from_model_config(cache_config, args)
     logical_ids = tuple(range(normalized["num_hidden_layers"]))
     (full,) = SenseNovaLoopTpPartModel.create_full_att_states(
         model_config=normalized,
@@ -182,7 +294,20 @@ def test_model_and_worker_use_the_same_loop_cache_layout(monkeypatch, custom_lay
     )
     full_layers = raw_cache.get_full_att_layer_indices()
     assert full.config.logical_layer_groups == tuple((i,) for i in full_layers)
-    assert bounded.config.logical_layer_ids == tuple(i for i in logical_ids if i not in full_layers)
+    assert bounded.config.logical_layer_ids == tuple(i for i in range(raw_cache.all_layer_num) if i not in full_layers)
+    runtime_ids = normalized["loop_physical_indices"] if cache_mode == "overwrite" else logical_ids
+    (runtime_full,) = SenseNovaLoopTpPartModel.create_full_att_states(
+        model_config=normalized,
+        args=args,
+        model_logical_layer_ids=runtime_ids,
+    )
+    (runtime_bounded,) = SenseNovaLoopTpPartModel.create_bounded_att_states(
+        model_config=normalized,
+        args=args,
+        model_logical_layer_ids=runtime_ids,
+    )
+    assert runtime_full.config == full.config
+    assert runtime_bounded.config == bounded.config
     assert config == original
 
 
@@ -190,6 +315,18 @@ def test_plain_loop_registry_does_not_enable_mhc():
     registration = ModelRegistry.get_model_config(_config())
     assert registration.model_class == "lightllm.models.sensenova_loop.model:SenseNovaLoopTpPartModel"
     assert registration.is_multimodal
+
+
+def test_cache_mode_cli_preserves_independent_default():
+    from lightllm.server.api_cli import make_argument_parser
+
+    parser = make_argument_parser()
+    assert parser.parse_args([]).loop_cache_mode == StartArgs().loop_cache_mode == "independent"
+    for mode in ("independent", "overwrite"):
+        args = StartArgs(**vars(parser.parse_args(["--loop_cache_mode", mode])))
+        assert args.loop_cache_mode == mode
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--loop_cache_mode", "unknown"])
 
 
 def test_awq_config_applies_to_main_model_and_excludes_float_mtp():
@@ -265,7 +402,10 @@ def test_loop_binds_split_gdn_projection_only_for_weights_with_separate_gates(mo
         linear_gate_proj=SimpleNamespace(mm=lambda _: gates),
     )
     model = object.__new__(SenseNovaLoopTpPartModel)
-    model.trans_layers_weight = [fused_weight, split_weight, split_weight]
+    model.loop_layer_indices = (0, 1, 1)
+    model.args = StartArgs()
+    model.physical_layer_weights = [fused_weight, split_weight]
+    model.trans_layers_weight = [model.physical_layer_weights[i] for i in model.loop_layer_indices]
     layers = [object.__new__(SenseNovaLoopTransformerLayerInfer) for _ in model.trans_layers_weight]
     for layer in layers:
         layer.embed_dim_ = 4
@@ -276,7 +416,8 @@ def test_loop_binds_split_gdn_projection_only_for_weights_with_separate_gates(mo
     assert layers[0]._linear_in_proj.__func__ is Qwen3NextTransformerLayerInfer._linear_in_proj
     for layer in layers[1:]:
         assert layer._linear_in_proj.__func__ is SenseNovaLoopTransformerLayerInfer._linear_in_proj_with_gates
-    for layer, weight in zip(layers, model.trans_layers_weight):
+    assert model.layers_infer == layers
+    for layer, weight in zip(model.layers_infer, model.trans_layers_weight):
         assert torch.equal(layer._linear_in_proj(torch.zeros(1, 2, 4), weight), fused)
 
 

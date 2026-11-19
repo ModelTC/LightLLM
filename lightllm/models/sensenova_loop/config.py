@@ -2,7 +2,7 @@
 
 
 def get_loop_layer_indices(settings: dict, num_layers: int) -> tuple[int, ...]:
-    """Map execution depth to checkpoint layers; caches use execution depth."""
+    """Map execution depth to shared checkpoint layers."""
     start, end = settings["start"], settings["end"]
     # Published checkpoints carry both the legacy scalar ``eval_count`` and
     # the newer ``counts`` list.  Accept either spelling and reject malformed

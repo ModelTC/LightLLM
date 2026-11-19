@@ -1,4 +1,4 @@
-"""SenseNova Loop: shared checkpoint weights and independent execution caches."""
+"""SenseNova Loop: shared checkpoint weights with configurable attention cache reuse."""
 
 from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
 from .config import get_loop_layer_indices, get_loop_layer_types
@@ -8,7 +8,7 @@ from .layer_weights.pre_and_post_layer_weight import SenseNovaLoopPreAndPostLaye
 
 
 class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
-    """Share physical weights, with separate KV/conv/SSM slots per execution layer."""
+    """Share physical weights, with independent execution caches or overwriting physical caches."""
 
     transformer_weight_class = SenseNovaLoopTransformerLayerWeight
     transformer_layer_infer_class = SenseNovaLoopTransformerLayerInfer
@@ -49,6 +49,45 @@ class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
             config["mhc"] = mhc
         return config
 
+    @classmethod
+    def _get_cache_layout(cls, model_config, args, model_logical_layer_ids):
+        config = cls.normalize_model_config(model_config)
+        if args.loop_cache_mode == "independent":
+            return config, model_logical_layer_ids
+
+        indices = config["loop_physical_indices"]
+        physical_count = max(indices) + 1
+        cache_config = {
+            **config,
+            "n_layer": physical_count,
+            "num_hidden_layers": physical_count,
+            "layer_types": tuple(config["layer_types"][indices.index(i)] for i in range(physical_count)),
+        }
+        # CPU queries use execution IDs; runtime IDs already repeat physical
+        # layers. Both describe the same physical slots in their unique prefix.
+        cache_ids = tuple(dict.fromkeys(model_logical_layer_ids))[:physical_count]
+        return cache_config, cache_ids
+
+    @classmethod
+    def create_full_att_states(cls, model_config, args, model_logical_layer_ids, **kwargs):
+        config, cache_ids = cls._get_cache_layout(model_config, args, model_logical_layer_ids)
+        return super().create_full_att_states(
+            model_config=config,
+            args=args,
+            model_logical_layer_ids=cache_ids,
+            **kwargs,
+        )
+
+    @classmethod
+    def create_bounded_att_states(cls, model_config, args, model_logical_layer_ids, **kwargs):
+        config, cache_ids = cls._get_cache_layout(model_config, args, model_logical_layer_ids)
+        return super().create_bounded_att_states(
+            model_config=config,
+            args=args,
+            model_logical_layer_ids=cache_ids,
+            **kwargs,
+        )
+
     def _init_config(self):
         super()._init_config()
         self.loop_layer_indices = self.config["loop_physical_indices"]
@@ -70,6 +109,9 @@ class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
 
     def _init_infer_layer(self, start_layer_index=0):
         super()._init_infer_layer(start_layer_index)
+        if self.args.loop_cache_mode == "overwrite":
+            for layer, physical in zip(self.layers_infer, self.loop_layer_indices):
+                layer.layer_num_ = start_layer_index + physical
         # Bind split projections once for each visit to a shared physical layer.
         for layer, weight in zip(self.layers_infer, self.trans_layers_weight):
             if getattr(weight, "linear_gate_proj", None) is not None:

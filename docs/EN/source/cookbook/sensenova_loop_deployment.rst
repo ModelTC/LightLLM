@@ -3,6 +3,18 @@
 SenseNova Loop Deployment Guide
 ==============================
 
+``--loop_cache_mode`` controls KV, conv, and SSM states across Loop passes:
+
+* ``independent`` (default): each execution layer uses separate caches.
+* ``overwrite``: visits to the same physical layer reuse and overwrite its caches.
+  Enable it with ``--loop_cache_mode overwrite``. Inference results may
+  differ from independent mode.
+
+``loop_settings`` determines the number of forward executions in both modes.
+For example, 32 physical layers with three passes over ``[4, 28)`` execute 80 layer
+visits. Independent mode allocates 20 full attention and 60 linear attention cache
+layers; overwrite mode allocates 8 and 24, respectively.
+
 Start the Server
 ----------------
 
@@ -50,9 +62,10 @@ input and generated tokens. Use ``PORT`` to set the server port and add
 ``DRY_RUN=1`` to print the full command. The script enables FP8 KV and decode
 CUDA Graph for one GPU and one active request, with vision, audio and MTP disabled.
 
-The example's calibration file was generated with the SenseNova Loop BF16 model
-and WorkBuddy data for two Loop passes. Use a matching ``KV_CALIB`` for other
-models. See :doc:`../tutorial/fp8_kv_quantization` for FP8 KV options.
+The example calibration file was generated with the SenseNova Loop BF16 model and
+WorkBuddy data for two Loop passes in ``independent`` mode. For ``overwrite`` mode,
+generate a calibration file for the physical-layer cache layout and select it with
+``KV_CALIB``. See :doc:`../tutorial/fp8_kv_quantization` for FP8 KV options.
 
 Enable MTP
 ----------

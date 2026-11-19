@@ -14,13 +14,14 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("mtp_step", [0, 2])
+@pytest.mark.parametrize("cache_mode", ["independent", "overwrite"])
 @pytest.mark.parametrize(
-    "start,end,count,logical_layer,storage_layer",
-    [(4, 28, 1, 4, 3), (4, 28, 3, 28, 21), (1, 6, 2, 13, 10)],
+    "start,end,count,execution_layer,independent_slot,overwrite_slot",
+    [(4, 28, 1, 4, 3, 3), (4, 28, 3, 28, 21, 3), (1, 6, 2, 13, 10, 6)],
     ids=["no-loop", "aligned-loop", "unaligned-loop"],
 )
-def test_gdn_decode_keeps_logical_layer_state(
-    monkeypatch, device, mtp_step, start, end, count, logical_layer, storage_layer
+def test_gdn_loop_visits_update_selected_layer_state(
+    monkeypatch, device, mtp_step, cache_mode, start, end, count, execution_layer, independent_slot, overwrite_slot
 ):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA required")
@@ -38,7 +39,10 @@ def test_gdn_decode_keeps_logical_layer_state(
         hidden_act="silu",
     )
     indices = get_loop_layer_indices(settings, 32)
-    kinds = get_loop_layer_types(settings, config)
+    physical_layer = indices[execution_layer]
+    logical_layer = physical_layer if cache_mode == "overwrite" else execution_layer
+    storage_layer = overwrite_slot if cache_mode == "overwrite" else independent_slot
+    kinds = config["layer_types"] if cache_mode == "overwrite" else get_loop_layer_types(settings, config)
     layers = tuple(i for i, kind in enumerate(kinds) if kind == "linear_attention")
     args = StartArgs(mtp_step=mtp_step, linear_att_ssm_data_type="float32")
     monkeypatch.setattr("lightllm.common.basemodel.attention.linear.gdn.get_env_start_args", lambda: args)
@@ -74,8 +78,8 @@ def test_gdn_decode_keeps_logical_layer_state(
         for i in range(32)
     ]
     execution_weights = [physical_weights[i] for i in indices]
-    weight = execution_weights[logical_layer]
-    assert weight is physical_weights[indices[logical_layer]]
+    weight = execution_weights[execution_layer]
+    assert weight is physical_weights[physical_layer]
 
     if device == "cpu":
 
@@ -148,4 +152,4 @@ def test_gdn_decode_keeps_logical_layer_state(
         assert not torch.equal(resource.ssm_state[storage_layer], before_ssm[storage_layer])
         assert torch.equal(resource.conv_state[untouched], before_conv[untouched])
         assert torch.equal(resource.ssm_state[untouched], before_ssm[untouched])
-        assert weight.layer_num_ == indices[logical_layer]
+        assert weight.layer_num_ == physical_layer
