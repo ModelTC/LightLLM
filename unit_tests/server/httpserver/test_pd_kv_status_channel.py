@@ -26,9 +26,7 @@ def test_decode_trans_sends_the_handshake_to_pd_report():
 
     module._push_up_kv_status(task=task)
 
-    packed = pickle.loads(sent[0])
-    assert packed[0] == 100
-    status = packed[1]
+    status = pickle.loads(sent[0])
     assert status == PDUpKVStatus(
         group_request_id=8,
         pd_master_node_id=100,
@@ -47,25 +45,46 @@ def test_decode_trans_sends_the_handshake_to_pd_report():
     )
 
 
+def _deliver(manager: PdReportManager, messages: list) -> None:
+    pending = list(messages)
+
+    async def recv():
+        if pending:
+            return pending.pop(0)
+        raise asyncio.CancelledError
+
+    manager._pull = SimpleNamespace(recv=recv)
+
+    async def run():
+        try:
+            await manager._recv_reports()
+        except asyncio.CancelledError:
+            return
+
+    asyncio.run(run())
+
+
 def test_pd_report_routes_the_handshake_by_master_id():
     manager = PdReportManager(args=SimpleNamespace(), pull=None)
     manager._queues[100] = asyncio.Queue()
     manager._queues[200] = asyncio.Queue()
     status = PDUpKVStatus(9, 100, b"metadata")
 
-    manager.forward_report(message=(100, status))
+    _deliver(manager, [status])
 
     assert manager._queues[100].get_nowait() == (ObjType.PD_UPLOAD_KV_STATUS, status)
     assert manager._queues[200].empty()
 
 
-def test_pd_report_drops_a_handshake_for_an_unknown_master():
+def test_pd_report_holds_a_handshake_until_the_master_connects():
     manager = PdReportManager(args=SimpleNamespace(), pull=None)
     manager._queues[100] = asyncio.Queue()
-    manager.forward_report(message=(100, PDUpKVStatus(8, 200, b"metadata")))
-    manager.forward_report(message=(300, PDUpKVStatus(8, 300, b"metadata")))
+    first = PDUpKVStatus(8, 200, b"metadata")
+    second = PDUpKVStatus(8, 300, b"metadata")
+    _deliver(manager, [first, second])
     assert manager._queues[100].empty()
-    assert 300 not in manager._queues
+    assert manager._queues[200].get_nowait() == (ObjType.PD_UPLOAD_KV_STATUS, first)
+    assert manager._queues[300].get_nowait() == (ObjType.PD_UPLOAD_KV_STATUS, second)
 
 
 def test_master_reports_kv_status_from_the_register_channel(monkeypatch):

@@ -251,8 +251,8 @@ class _DecodeTransModule:
             pd_master_node_id=task.pd_master_node_id,
             pd_kv_trans_params=pickle.dumps(decode_node_info),
         )
-        # 送给本机 pd_report，由它按 pd_master_node_id 写到对应 Master 的 /pd_report。
-        self.pd_report_push.send(message=(task.pd_master_node_id, up_status))
+        # 送给本机 pd_report，由它按状态上的 pd_master_node_id 写到对应 Master 的 /pd_report。
+        self.pd_report_push.send(message=up_status)
 
     @log_exception
     def accept_peer_task_loop(
