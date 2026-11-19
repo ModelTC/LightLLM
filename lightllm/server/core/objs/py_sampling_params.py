@@ -4,7 +4,6 @@
 """
 import os
 from typing import List, Optional, Union, Tuple
-from transformers import GenerationConfig
 from lightllm.server.httpserver.req_id_generator_server import MAX_BEST_OF
 from lightllm.utils.grammar_utils import validate_grammar
 from .sampling_params import MAX_SEED, StopStrMatchMode
@@ -125,6 +124,8 @@ class SamplingParams:
     @classmethod
     def load_generation_cfg(cls, weight_dir):
         try:
+            from transformers import GenerationConfig
+
             generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
 
             def _cfg(key, default):

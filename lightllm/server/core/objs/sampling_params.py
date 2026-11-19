@@ -3,7 +3,6 @@ import json
 import ctypes
 import math
 from typing import Optional, List, Tuple, Union
-from transformers import GenerationConfig
 from lightllm.server.httpserver.req_id_generator_server import MAX_BEST_OF
 from lightllm.utils.envs_utils import get_env_start_args
 from .pd_kv_trans_params import PDKVTransParamObj
@@ -443,6 +442,8 @@ class SamplingParams(ctypes.Structure):
     @classmethod
     def load_generation_cfg(cls, weight_dir):
         try:
+            from transformers import GenerationConfig
+
             generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
 
             def _cfg(key, default):

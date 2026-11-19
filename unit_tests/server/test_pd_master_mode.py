@@ -130,24 +130,31 @@ def test_get_server_info_serializes_start_args_dataclass(monkeypatch):
     assert server_info["run_mode"] == "normal"
 
 
-def test_pd_master_models_endpoint_has_created_timestamp(monkeypatch):
+@pytest.mark.parametrize("run_mode", ["normal", "pd_master"])
+def test_models_endpoint_has_created_timestamp(monkeypatch, run_mode):
     from lightllm.server import api_http
 
-    args = StartArgs(run_mode="pd_master", model_dir="/tmp/test-model", model_name="test-model")
-    manager = SimpleNamespace(get_real_supported_max_req_total_len=lambda: 1024, metric_client=object())
-    monkeypatch.setattr(api_http, "init_tokenizer", lambda *_args, **_kwargs: None)
+    args = StartArgs(run_mode=run_mode, model_dir="/tmp/test-model", model_name="test-model")
+    manager = SimpleNamespace(
+        get_real_supported_max_req_total_len=lambda: 1024, metric_client=object(), tokenizer=object()
+    )
+    init_tokenizer = Mock()
+    monkeypatch.setattr(api_http, "init_tokenizer", init_tokenizer)
     monkeypatch.setattr(api_http.SamplingParams, "load_generation_cfg", lambda _model_dir: None)
     monkeypatch.setattr(api_http.CompletionRequest, "load_generation_cfg", lambda _model_dir: None)
     monkeypatch.setattr(api_http.ChatCompletionRequest, "load_generation_cfg", lambda _model_dir: None)
     monkeypatch.setattr(api_http, "MetricClient", lambda _port: object())
     monkeypatch.setattr(api_http, "get_shm_port_args", lambda: SimpleNamespace(metric_port=1234))
     monkeypatch.setattr(api_http, "HttpServerManagerForPDMaster", lambda args: manager)
+    monkeypatch.setattr(api_http, "HttpServerManager", lambda args: manager)
+    monkeypatch.setattr(api_http, "TokenLoad", lambda *_args: object())
     monkeypatch.setattr(api_http, "get_unique_server_name", lambda: "test-server")
     monkeypatch.setattr(api_http.setproctitle, "setproctitle", lambda _title: None)
     monkeypatch.setattr(api_http.time, "time", lambda: 1234.9)
 
     global_objs = api_http.G_Objs()
     global_objs.set_args(args)
+    init_tokenizer.assert_called_once_with(args, manager.tokenizer)
     monkeypatch.setattr(api_http, "g_objs", global_objs)
 
     response = asyncio.run(api_http.get_models(None))

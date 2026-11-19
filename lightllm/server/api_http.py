@@ -100,7 +100,6 @@ class G_Objs:
 
         setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::api_server")
 
-        init_tokenizer(args)  # for openai api
         SamplingParams.load_generation_cfg(args.model_dir)
         CompletionRequest.load_generation_cfg(args.model_dir)
         ChatCompletionRequest.load_generation_cfg(args.model_dir)
@@ -116,6 +115,8 @@ class G_Objs:
             self.httpserver_manager = HttpServerManager(args=args)
             dp_size_in_node = max(1, args.dp // args.nnodes)  # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
             self.shared_token_load = TokenLoad("shared_token_load", dp_size_in_node)
+
+        init_tokenizer(args, self.httpserver_manager.tokenizer)  # for openai api
 
 
 g_objs = G_Objs()
