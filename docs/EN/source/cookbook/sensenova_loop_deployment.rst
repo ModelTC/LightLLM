@@ -3,23 +3,20 @@
 SenseNova Loop Deployment Guide
 ==============================
 
-``--loop_cache_mode`` controls KV, conv, and SSM states across Loop passes:
+``--loop_cache_mode`` controls KV caches across Loop passes:
 
-* ``independent`` (default): each execution layer uses separate caches.
-* ``overwrite``: visits to the same physical layer reuse and overwrite its caches.
+* ``independent`` (default): each execution layer uses separate KV caches.
+* ``overwrite``: visits to the same physical layer reuse and overwrite its KV caches.
   Enable it with ``--loop_cache_mode overwrite``. Inference results may
   differ from independent mode.
 
-In overwrite mode, each linear attention visit starts from the conv/SSM state
-saved before the current forward. Only the final visit writes back to persistent
-caches. Intermediate visits use temporary state for the current batch, so later
-visits do not consume state produced by earlier visits in the same forward.
-This mode requires ``--ssm_state_mode native`` (the default).
+In both modes, linear attention conv and SSM states remain separate for each
+execution layer, preserving an independent history for every Loop pass.
 
 ``loop_settings`` determines the number of forward executions in both modes.
 For example, 32 physical layers with three passes over ``[4, 28)`` execute 80 layer
 visits. Independent mode allocates 20 full attention and 60 linear attention cache
-layers; overwrite mode allocates 8 and 24, respectively.
+layers; overwrite mode allocates 8 KV cache layers and 60 linear attention state layers.
 
 Start the Server
 ----------------
@@ -103,7 +100,8 @@ Set ``GPU_IDS`` to select the GPUs, or add ``DRY_RUN=1`` to preview the commands
 Set ``MTP_DRAFT_MODEL_DIR`` to use a separate draft checkpoint; it defaults to
 ``MODEL_DIR``. Both prefill services and the decode service load that draft in
 ``eagle_with_att`` mode.
-Set ``LOOP_CACHE_MODE=overwrite`` to reuse and overwrite KV, conv, and SSM states;
+Set ``LOOP_CACHE_MODE=overwrite`` to reuse and overwrite KV caches while keeping
+linear attention states separate for each execution layer;
 the default is ``independent``. The setting applies to both prefill services, the
 decode service, and the PD master.
 Press ``Ctrl+C`` to stop all services.

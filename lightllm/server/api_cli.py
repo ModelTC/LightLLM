@@ -997,8 +997,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--loop_cache_mode",
         choices=["independent", "overwrite"],
         default="independent",
-        help="SenseNova Loop KV/conv/SSM caches: separate slots per execution layer (independent), "
-        "or reuse and overwrite the same slots on each visit to a physical layer (overwrite).",
+        help="SenseNova Loop KV caches: separate slots per execution layer (independent), "
+        "or overwrite the same slots on each visit to a physical layer (overwrite). "
+        "Linear attention conv/SSM states always use independent execution-layer slots.",
     )
     parser.add_argument(
         "--ssm_state_mode",

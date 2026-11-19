@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Two Prefill services and one Decode service; TP defaults to 2 / 4.
 # Set MODEL_DIR, MTP_DRAFT_MODEL_DIR and GPU_IDS as needed. DRY_RUN=1 prints the startup commands.
-# LOOP_CACHE_MODE=overwrite reuses KV/conv/SSM caches across loop visits.
+# LOOP_CACHE_MODE=overwrite reuses KV caches; conv/SSM states stay independent per visit.
 set -euo pipefail
 
 LIGHTLLM_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"

@@ -3,19 +3,17 @@
 SenseNova Loop 部署指南
 ===========================
 
-``--loop_cache_mode`` 控制各轮 Loop 的 KV、conv 和 SSM 状态：
+``--loop_cache_mode`` 控制各轮 Loop 的 KV 缓存：
 
-* ``independent``（默认）：每个执行层使用独立缓存。
-* ``overwrite``：同一物理层的各轮执行复用并覆盖缓存。启用方式为
+* ``independent``（默认）：每个执行层使用独立 KV 缓存。
+* ``overwrite``：同一物理层的各轮执行复用并覆盖 KV 缓存。启用方式为
   ``--loop_cache_mode overwrite``，推理结果可能与独立缓存模式不同。
 
-覆盖模式下，linear attention 的各轮都从本次 forward 开始前的 conv/SSM 状态计算，
-只将最后一轮的结果写回持久缓存。中间轮使用当前 batch 的临时状态，后续轮不会
-读取前一轮刚产生的状态。该模式使用 ``--ssm_state_mode native``（默认）。
+两种模式下，linear attention 的 conv 和 SSM 状态均按执行层展开，各轮保留独立历史。
 
 两种模式的前向执行次数均由 ``loop_settings`` 决定。例如 32 个物理层、循环区间
 ``[4, 28)``、执行 3 轮时，共执行 80 次。独立模式分配 20 层 full attention
-和 60 层 linear attention 缓存，覆盖模式分配 8 层和 24 层。
+和 60 层 linear attention 状态，覆盖模式分配 8 层 KV 和 60 层 linear attention 状态。
 
 启动服务
 --------
@@ -96,7 +94,7 @@ FP8 KV 参数说明见 :doc:`../tutorial/fp8_kv_quantization`。
 可通过 ``GPU_IDS`` 指定显卡列表，添加 ``DRY_RUN=1`` 可先查看启动命令。
 可通过 ``MTP_DRAFT_MODEL_DIR`` 单独指定 draft 模型目录，默认使用 ``MODEL_DIR``。
 两个 Prefill 和 Decode 均使用该目录，并按 ``eagle_with_att`` 模式加载 draft。
-设置 ``LOOP_CACHE_MODE=overwrite`` 可开启 KV、conv 和 SSM 状态覆盖模式，
+设置 ``LOOP_CACHE_MODE=overwrite`` 可开启 KV 覆盖模式，linear attention 状态保持展开，
 默认为 ``independent``。该设置会统一传给两个 Prefill、Decode 和 PD Master。
 按 ``Ctrl+C`` 会关闭所有服务。
 
