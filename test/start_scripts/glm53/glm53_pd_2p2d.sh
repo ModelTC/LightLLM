@@ -115,11 +115,12 @@ else
     SERVICE_ENV+=("LIGHTLLM_PD_TIER_AWARE_RANK=${LIGHTLLM_PD_TIER_AWARE_RANK:-1}")
     ARGS+=(
       --use_dp_split_mode_connect_pd_master
-      --batch_max_tokens 8192 --chunked_prefill_size 4096
+      --batch_max_tokens 8192 --chunked_prefill_size 8192
       --running_max_req_size 128 --mem_fraction 0.75 --disable_cudagraph
       --mtp_step 1 --ssm_state_mode native
       --linear_att_page_block_num 8
       --enable_cpu_cache --cpu_cache_storage_size 512
+      --cache_placement_strategy legacy
       --enable_disk_cache --disk_cache_storage_size 10240
       --disk_cache_dir "${DISK_CACHE_DIR:-/mnt/openrouter/lightllm_disk_cache/glm53_main_v1/${ROLE}}"
     )

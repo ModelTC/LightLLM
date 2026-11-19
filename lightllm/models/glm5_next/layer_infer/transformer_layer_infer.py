@@ -173,7 +173,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             shared_expert_func=shared_expert_func,
         )
 
-    def _project_sparse_qkv_a(self, input, infer_state, layer_weight):
+    def _project_sparse_qkv_a(self, input, infer_state, layer_weight, *, kv_only=False):
         if self.is_linear_attention_layer:
             raise AssertionError("KDA projections use _kda_projections")
 
@@ -182,7 +182,16 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_unbalance_get(data=input)
 
-        q, cache_kv = layer_weight.qkv_a_proj_with_mqa_.mm(input).split([self.q_lora_rank, self.kv_lora_rank], dim=-1)
+        projection = layer_weight.qkv_a_proj_with_mqa_
+        if kv_only:
+            method = projection.quant_method
+            # The KV child shares the packed scale stride of the fused weight,
+            # which DeepGEMM cannot use for a narrower output on SM100.
+            if method.method_name in ("none", "fp8w8a8-b128-deepgemm") and not getattr(
+                method, "use_packed_ue8m0", False
+            ):
+                return input, None, method.apply(input, projection.mm_param_list[1])
+        q, cache_kv = projection.mm(input).split([self.q_lora_rank, self.kv_lora_rank], dim=-1)
         return input, q, cache_kv
 
     def _normalize_sparse_kv(self, cache_kv, layer_weight):

@@ -263,7 +263,7 @@ class HttpServerManagerForPDMaster:
             )
 
         request_finished_successfully = True
-        mark_batch_ends = getattr(getattr(request, "state", None), "batch_text_completions", False) is True
+        mark_batch_ends = getattr(getattr(request, "state", None), "batch_sse", False) is True
         async with aclosing(self._merge_choice_generators(generators, mark_batch_ends=mark_batch_ends)) as generator:
             async for result in generator:
                 finish_status = result[3]

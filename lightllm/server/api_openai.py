@@ -76,13 +76,22 @@ from .api_models import (
 logger = init_logger(__name__)
 
 
-async def _safe_stream_wrapper(stream_generator):
+async def _safe_stream_wrapper(stream_generator, *, flush_pending=None):
     """Convert generation errors to SSE events after the response has started."""
     first_chunk_sent = False
     try:
-        async for item in stream_generator:
-            first_chunk_sent = True
-            yield item
+        try:
+            async for item in stream_generator:
+                first_chunk_sent = True
+                yield item
+        except ClientDisconnected:
+            raise
+        except Exception:
+            if flush_pending is not None:
+                for item in flush_pending():
+                    first_chunk_sent = True
+                    yield item
+            raise
     except InvalidRequestError as e:
         if not first_chunk_sent:
             raise
@@ -446,6 +455,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         _new_logprob_buffer()
         logprob_buffers = collections.defaultdict(_new_logprob_buffer)
 
+    if request.stream and isinstance(raw_request, Request):
+        raw_request.state.batch_sse = True
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
     )
@@ -609,10 +620,41 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         }
         return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
+    max_sse_events = 32
+    max_sse_chars = 64 * 1024
+    pending_sse = []
+    pending_sse_chars = 0
+
+    def queue_sse(event: str) -> None:
+        nonlocal pending_sse_chars
+        pending_sse.append(event)
+        pending_sse_chars += len(event)
+
+    def flush_sse():
+        nonlocal pending_sse_chars
+        while pending_sse:
+            if len(pending_sse) <= max_sse_events and pending_sse_chars <= max_sse_chars:
+                body = pending_sse[0] if len(pending_sse) == 1 else "".join(pending_sse)
+                pending_sse.clear()
+                pending_sse_chars = 0
+            else:
+                count, size = 1, len(pending_sse[0])
+                while count < min(len(pending_sse), max_sse_events):
+                    event_size = len(pending_sse[count])
+                    if size + event_size > max_sse_chars:
+                        break
+                    count += 1
+                    size += event_size
+                body = "".join(pending_sse[:count])
+                del pending_sse[:count]
+                pending_sse_chars -= size
+            yield body
+
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
         has_emitted_tool_calls: Dict[int, bool] = collections.defaultdict(bool)
         has_emitted_first_chunk: Dict[int, bool] = collections.defaultdict(bool)
+        emitted_delta_choices = set()
         stream_tool_call_ids: Dict[Tuple[int, int], str] = {}
         tool_parser = None
         if request.tools and request.tool_choice != "none":
@@ -644,6 +686,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             # OpenAI SSE spec: role appears only in the first delta with content="".
             if not has_emitted_first_chunk[choice_index]:
                 has_emitted_first_chunk[choice_index] = True
+                for body in flush_sse():
+                    yield body
                 first_choice = ChatCompletionStreamResponseChoice(
                     index=choice_index,
                     delta=DeltaMessage(role="assistant", content=""),
@@ -657,6 +701,10 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 )
                 yield f"data: {_serialize_sse_chunk(first_chunk, _first_choice_nulls, _first_resp_nulls)}\n\n"
 
+            needs_first_delta = choice_index not in emitted_delta_choices
+            pending_before_token = len(pending_sse) if needs_first_delta else 0
+            batch_end = metadata.get("_pd_stream_batch_end", True)
+            finished_with_content = False
             # Handle reasoning content
             if get_env_start_args().reasoning_parser:
                 reasoning_text, delta = _process_reasoning_stream(
@@ -665,7 +713,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 if reasoning_text:
                     if request.separate_reasoning:
                         choice_logprobs = logprob_buffer.reasoning_logprobs() if logprob_buffer is not None else None
-                        yield delta_event(choice_index, {"reasoning": reasoning_text}, choice_logprobs)
+                        queue_sse(delta_event(choice_index, {"reasoning": reasoning_text}, choice_logprobs))
                     else:
                         delta = reasoning_text + (delta or "")
 
@@ -678,7 +726,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 # 1) if there's normal_text, output it as normal content
                 if normal_text and (normal_text.strip() or not has_emitted_tool_calls[sub_req_id]):
                     choice_logprobs = logprob_buffer.content_logprobs() if logprob_buffer is not None else None
-                    yield delta_event(choice_index, {"content": normal_text}, choice_logprobs)
+                    queue_sse(delta_event(choice_index, {"content": normal_text}, choice_logprobs))
 
                 # 2) if we found calls, we output them as separate chunk(s)
                 fc_parser = parser_dict[choice_index]
@@ -728,15 +776,17 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 arguments="",
                             ),
                         )
-                        yield delta_event(choice_index, {"tool_calls": [head_tool_call.model_dump(exclude_none=True)]})
+                        queue_sse(
+                            delta_event(choice_index, {"tool_calls": [head_tool_call.model_dump(exclude_none=True)]})
+                        )
 
                         for arg_delta in _split_tool_argument_delta(call_item.parameters):
                             arg_tool_call = ToolCall(
                                 index=stream_index,
                                 function=FunctionResponse(arguments=arg_delta),
                             )
-                            yield delta_event(
-                                choice_index, {"tool_calls": [arg_tool_call.model_dump(exclude_none=True)]}
+                            queue_sse(
+                                delta_event(choice_index, {"tool_calls": [arg_tool_call.model_dump(exclude_none=True)]})
                             )
                     else:
                         tool_call = ToolCall(
@@ -752,7 +802,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 ),
                             ),
                         )
-                        yield delta_event(choice_index, {"tool_calls": [tool_call.model_dump(exclude_none=True)]})
+                        queue_sse(
+                            delta_event(choice_index, {"tool_calls": [tool_call.model_dump(exclude_none=True)]})
+                        )
             else:
                 if delta:
                     content_logprobs = logprob_buffer.content_logprobs() if logprob_buffer is not None else None
@@ -771,15 +823,20 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             choices=[stream_choice],
                         )
                         payload = _serialize_sse_chunk(stream_resp, _final_choice_nulls, logprobs=content_logprobs)
-                        yield f"data: {payload}\n\n"
-                        # Skip the separate final-chunk logic below
-                        continue
+                        queue_sse(f"data: {payload}\n\n")
+                        finished_with_content = True
                     else:
-                        yield delta_event(choice_index, {"content": delta}, content_logprobs)
+                        event = delta_event(choice_index, {"content": delta}, content_logprobs)
+                        if not pending_sse and (needs_first_delta or batch_end):
+                            if needs_first_delta:
+                                emitted_delta_choices.add(choice_index)
+                            yield event
+                            continue
+                        queue_sse(event)
 
             # Emit a per-choice final chunk with finish_reason (for tool_calls path
             # or when no delta was emitted alongside finish_reason).
-            if current_finish_reason is not None:
+            if current_finish_reason is not None and not finished_with_content:
                 # Flush any buffered reasoning content that was never released
                 # (e.g., max_completion_tokens hit before </think/> was seen).
                 if get_env_start_args().reasoning_parser:
@@ -813,7 +870,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 choices=[flush_choice],
                             )
                             payload = _serialize_sse_chunk(flush_chunk, _choice_nulls, logprobs=flush_logprobs)
-                            yield f"data: {payload}\n\n"
+                            queue_sse(f"data: {payload}\n\n")
                         if flush_text:
                             flush_choice = ChatCompletionStreamResponseChoice(
                                 index=choice_index,
@@ -828,7 +885,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             )
                             flush_logprobs = logprob_buffer.content_logprobs() if logprob_buffer is not None else None
                             payload = _serialize_sse_chunk(flush_chunk, _choice_nulls, logprobs=flush_logprobs)
-                            yield f"data: {payload}\n\n"
+                            queue_sse(f"data: {payload}\n\n")
                 if has_emitted_tool_calls[sub_req_id] and current_finish_reason == "stop":
                     current_finish_reason = "tool_calls"
                 final_choice = ChatCompletionStreamResponseChoice(
@@ -847,7 +904,25 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     content_tokens, reasoning_tokens = logprob_buffer.message_logprobs()
                     if content_tokens or reasoning_tokens:
                         final_logprobs = {"content": content_tokens, "reasoning_content": reasoning_tokens}
-                yield f"data: {_serialize_sse_chunk(final_chunk, _final_choice_nulls, logprobs=final_logprobs)}\n\n"
+                payload = _serialize_sse_chunk(final_chunk, _final_choice_nulls, logprobs=final_logprobs)
+                queue_sse(f"data: {payload}\n\n")
+
+            first_delta = needs_first_delta and len(pending_sse) > pending_before_token
+            if first_delta:
+                emitted_delta_choices.add(choice_index)
+            # Queue marks cover only tokens already ready on the Master. The
+            # first visible delta for a choice is flushed independently.
+            if pending_sse and (
+                first_delta
+                or batch_end
+                or len(pending_sse) >= max_sse_events
+                or pending_sse_chars >= max_sse_chars
+            ):
+                for body in flush_sse():
+                    yield body
+
+        for body in flush_sse():
+            yield body
 
         reasoning_parser = get_env_start_args().reasoning_parser
         completion_tokens_details = None
@@ -874,7 +949,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     background_tasks = BackgroundTasks()
     return CustomStreamingResponse(
-        _safe_stream_wrapper(stream_results()), media_type="text/event-stream", background=background_tasks
+        _safe_stream_wrapper(stream_results(), flush_pending=flush_sse),
+        media_type="text/event-stream",
+        background=background_tasks,
     )
 
 
@@ -1021,7 +1098,7 @@ async def _handle_streaming_completion(
     from .api_http import g_objs
 
     if isinstance(raw_request, Request) and request.logprobs is None:
-        raw_request.state.batch_text_completions = True
+        raw_request.state.batch_sse = True
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
     )
