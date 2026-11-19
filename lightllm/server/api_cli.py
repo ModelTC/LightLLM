@@ -519,6 +519,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                 (currently triton only); when omitted, it defaults to auto""",
     )
     parser.add_argument(
+        "--flashinfer_workspace_size",
+        type=int,
+        default=512,
+        help="FlashInfer attention workspace in MiB, shared by prefill and decode (default: 512).",
+    )
+    parser.add_argument(
         "--page_size",
         type=int,
         default=1,

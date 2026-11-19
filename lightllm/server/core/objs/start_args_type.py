@@ -182,6 +182,7 @@ class StartArgs:
     llm_decode_att_backend: List[str] = field(
         default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
     )
+    flashinfer_workspace_size: int = field(default=512)
     page_size: int = field(default=1)
     req_token_index_mode: str = field(
         default="pin_mem_cache",

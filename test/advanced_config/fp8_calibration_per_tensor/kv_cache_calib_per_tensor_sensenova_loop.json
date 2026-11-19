@@ -1,0 +1,130 @@
+{
+  "version": "1.0",
+  "architectures": "Qwen3_5LoopForConditionalGeneration",
+  "quant_type": "per_tensor",
+  "qmin": -448.0,
+  "qmax": 448.0,
+  "num_layers": 14,
+  "num_head": 4,
+  "scales_shape": [
+    14,
+    2
+  ],
+  "scales": [
+    [
+      0.03483537957072258,
+      0.03406808152794838
+    ],
+    [
+      0.03882533684372902,
+      0.07795758545398712
+    ],
+    [
+      0.04818638414144516,
+      0.12338169664144516
+    ],
+    [
+      0.04327567294239998,
+      0.11110491305589676
+    ],
+    [
+      0.04695870727300644,
+      0.18169642984867096
+    ],
+    [
+      0.04020647332072258,
+      0.10189732164144516
+    ],
+    [
+      0.04051339253783226,
+      0.21361608803272247
+    ],
+    [
+      0.03959263488650322,
+      0.08041294664144516
+    ],
+    [
+      0.04726562649011612,
+      0.12460937350988388
+    ],
+    [
+      0.04511718824505806,
+      0.11171875149011612
+    ],
+    [
+      0.04665178433060646,
+      0.1902901828289032
+    ],
+    [
+      0.04051339253783226,
+      0.15407367050647736
+    ],
+    [
+      0.04481026902794838,
+      0.2639508843421936
+    ],
+    [
+      0.03130580484867096,
+      0.23816965520381927
+    ]
+  ],
+  "metadata": {
+    "model_checkpoint": "/mtc/models/20261116_loop2_step300_finalmix_bankrp3_512k_24nodes_gbs96_cp4_bf16_ce_speed1_cosine0/step-540_hf_bf16",
+    "model_config_sha256": "5963f3ab5e11f0448bac86dd9750b37e43c06319117f82db9333d25ca2e32c78",
+    "dataset": "WorkBuddy v1.0 (code, office, sec, web)",
+    "text_only": true,
+    "method": "max(abs(K/V)) after normalization and RoPE, before cache write; prefill and greedy decode",
+    "headroom": 1.1,
+    "loop_settings": {
+      "start": 4,
+      "end": 28,
+      "counts": [
+        2
+      ],
+      "probabilities": [
+        1.0
+      ],
+      "eval_count": 2,
+      "gate_init": 0.02,
+      "seed": 42,
+      "use_gate": false
+    },
+    "logical_full_attention_layers": [
+      3,
+      7,
+      11,
+      15,
+      19,
+      23,
+      27,
+      31,
+      35,
+      39,
+      43,
+      47,
+      51,
+      55
+    ],
+    "physical_checkpoint_layers": [
+      3,
+      7,
+      11,
+      15,
+      19,
+      23,
+      27,
+      7,
+      11,
+      15,
+      19,
+      23,
+      27,
+      31
+    ],
+    "calibration_samples": 144,
+    "prefill_tokens": 1013054,
+    "decode_tokens": 2304,
+    "manifest_sha256": "018cf2d5f4e3f2f0a423ba239c2e9c76c6179e249bcca5840c7686d3d110549c",
+    "mtp": false
+  }
+}

@@ -17,6 +17,10 @@ class FlashInferAttBackend(BaseAttBackend):
     def __init__(self, model):
         set_flashinfer_envs()
         super().__init__(model=model)
+        workspace_mib = getattr(model.args, "flashinfer_workspace_size", 512)
+        if workspace_mib <= 0:
+            raise ValueError("--flashinfer_workspace_size must be positive (MiB)")
+        self.workspace_buffer_size = workspace_mib * 1024 * 1024
         self._init_infer_page_size()
         tp_world_size = get_dp_world_size()
         self.tp_q_head_num = model.config["num_attention_heads"] // tp_world_size
