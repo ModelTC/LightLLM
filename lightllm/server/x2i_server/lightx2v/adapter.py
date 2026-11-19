@@ -135,13 +135,13 @@ class LightX2VServer:
         _origin_run_infer_step = NeoppRunner._run_infer_step
         NeoppRunner._run_infer_step = _run_infer_step
 
-        self.pipe = LightX2VPipeline(
-            model_path=self.args.model_dir,
-            model_cls="neopp",
-            support_tasks=["t2i", "i2i"],
-        )
-        self.pipe.create_generator(config_json=self.args.x2v_gen_model_config)
-        self.pipe.modify_config({"load_kv_cache_in_pipeline_for_debug": False, "save_result_for_debug": False})
+        self.pipe = LightX2VPipeline({
+            "model_path": self.args.model_dir,
+            "model_cls": "neopp",
+            "config_json": self.args.x2v_gen_model_config,
+            "load_kv_cache_in_pipeline_for_debug": False,
+            "save_result_for_debug": False,
+        })
 
     async def run(self):
         while True:
@@ -174,7 +174,13 @@ class LightX2VServer:
                     await self.result_socket.send_pyobj(X2IResponse(request_id=param.request_id, images=None))
 
     async def _process(self, param: X2IParams):
-        is_t2i = param.past_kvcache_img.is_empty()
+        is_edit = param.past_kvcache.img_tokens > 0
+        has_unconditioned_image_kv = not param.past_kvcache_img.is_empty()
+        if is_edit and (param.image_guidance_scale != 1.0) != has_unconditioned_image_kv:
+            raise ValueError("Image guidance scale does not match the supplied conditioning caches")
+        if param.steps < 1:
+            raise ValueError("The number of generation steps must be positive")
+        self.pipe.runner.scheduler.infer_steps = param.steps
 
         self.pipe.runner.set_inference_params(
             index_offset_cond=param.past_kvcache.get_compressed_len(),
@@ -198,13 +204,11 @@ class LightX2VServer:
             else None
         )
 
-        past_kv_cache_img = (
-            self.past_kv_cache_client.get_kv_cache_for_x2i(
+        full_uncond_kv = None
+        if has_unconditioned_image_kv:
+            full_uncond_kv = self.past_kv_cache_client.get_kv_cache_for_x2i(
                 param.past_kvcache_img.get_all(), param.past_kvcache_img.token_len
             )
-            if not is_t2i
-            else None
-        )
 
         if self.world_size > 1:
             dist.barrier()  # ensure all workers have got the kv cache before generation starts
@@ -214,20 +218,16 @@ class LightX2VServer:
             await self.result_socket.send_pyobj(X2ICacheRelease(request_id=param.request_id))
 
         logger.info(
-            f"[{self.rank}/{self.world_size}/{self.nccl_port}] {'t2i' if is_t2i else 'it2i'} generate images with: {param}"
+            f"[{self.rank}/{self.world_size}/{self.nccl_port}] {'it2i' if is_edit else 't2i'} generate images with: {param}"
         )
 
-        if is_t2i:
-            self.pipe.runner.set_kvcache(
-                past_kv_cache,
-                past_kv_cache_text,
-            )
-        else:
-            self.pipe.runner.set_kvcache_i2i(
-                past_kv_cache,
-                past_kv_cache_text,
-                past_kv_cache_img,
-            )
+        self.pipe.runner.set_kvcache(
+            past_kv_cache,
+            past_kv_cache_text,
+            image_guidance_scale=param.image_guidance_scale if is_edit else None,
+            full_uncond_kv=full_uncond_kv,
+            full_uncond_offset=param.past_kvcache_img.get_compressed_len() if has_unconditioned_image_kv else None,
+        )
 
         session_id = param.session_id
         if param.first_image:
@@ -248,7 +248,8 @@ class LightX2VServer:
         image = self.pipe.generate(
             seed=seed,
             save_result_path="",
-            target_shape=[param.height, param.width],
+            task="i2i" if is_edit else "t2i",
+            size=[param.height, param.width],
         )
 
         # 保存当前 RNG state，供同一 session 下一张图使用

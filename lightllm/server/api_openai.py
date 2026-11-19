@@ -985,6 +985,8 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
     image_tag = g_objs.httpserver_manager.tokenizer.image_tag
     image_only = modalities == ["image"]
 
+    chat_request.chat_template_kwargs["neo_image_request"] = True
+    chat_request.chat_template_kwargs["neo_image_thinking"] = bool(request.chat_template_kwargs.get("enable_thinking", False))
     _apply_image_generation_stop(chat_request, image_start_tag, image_only=image_only)
 
     created_time = int(time.time())

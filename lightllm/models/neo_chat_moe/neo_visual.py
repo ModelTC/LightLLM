@@ -143,7 +143,8 @@ class NeoVisionTransformerPretrainedModel(nn.Module):
             kernel_size=self.downsample_factor,
             stride=self.downsample_factor,
         )
-        self.gelu = nn.GELU()
+        self.gelu = nn.SiLU() if kwargs.get("hidden_act") == "silu" else nn.GELU()
+        self.native_und = False
 
         self.repe_dim_part = self.embed_dim // 2
         self.cos_x, self.sin_x = self.precompute_rope_freqs_sincos()
@@ -178,6 +179,10 @@ class NeoVisionTransformerPretrainedModel(nn.Module):
             for file_ in hf_weight_files:
                 f = safe_open(os.path.join(weight_dir, file_), "pt", "cpu")
                 for k in f.keys():
+                    if k.startswith("patchEmbeddings."):
+                        self.native_und = True
+                        name = k.removeprefix("patchEmbeddings.").replace("spatial_embedding.", "dense_embedding.")
+                        weight_dict[name] = f.get_tensor(k)
                     if "vision_model" in k and "fm_modules" not in k:
                         weight_dict[k[len("vision_model.embeddings.") :]] = f.get_tensor(k)
         self.load_state_dict(weight_dict)
@@ -197,10 +202,10 @@ class NeoVisionTransformerPretrainedModel(nn.Module):
         abs_pos_x, abs_pos_y = build_abs_positions_from_grid_hw(grid_hw, device=patch_embeds.device)
         embeddings = apply_2d_rotary_pos_emb(
             patch_embeds.to(torch.float32),  # RoPE calculations are often more stable in float32
-            self.cos_x,
-            self.sin_x,
-            self.cos_y,
-            self.sin_y,
+            self.cos_x.to(self.patch_embedding.weight.dtype) if self.native_und else self.cos_x,
+            self.sin_x.to(self.patch_embedding.weight.dtype) if self.native_und else self.sin_x,
+            self.cos_y.to(self.patch_embedding.weight.dtype) if self.native_und else self.cos_y,
+            self.sin_y.to(self.patch_embedding.weight.dtype) if self.native_und else self.sin_y,
             abs_pos_x,
             abs_pos_y,
         ).to(self.patch_embedding.weight.dtype)

@@ -26,6 +26,8 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
                 non_blocking=True
             )
             self.position_ids = self.get_neo_position(self.multimodal_params)
+            if getattr(model, "image_position_scale", 1) != 1:
+                self.position_ids[1:].mul_(model.image_position_scale)
         else:
             b_position_delta = [0 for _ in range(self.b_seq_len.shape[0])]
             for batch_idx, p in enumerate(self.multimodal_params):

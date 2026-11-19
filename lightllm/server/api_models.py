@@ -443,6 +443,8 @@ class ImageConfig(BaseModel):
     steps: Optional[int] = None
     guidance_scale: Optional[float] = None
     image_guidance_scale: Optional[float] = None
+    timestep_shift: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    cfg_interval: Optional[tuple[float, float]] = None
     seed: Optional[int] = None
     num_images: Optional[int] = None
     cfg_norm: Optional[Literal["none", "cfg_zero_star", "global", "text_channel", "channel"]] = None
