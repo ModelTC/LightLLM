@@ -15,6 +15,7 @@ Logs: RUN_DIR/logs/ROLE.log and stdout (RUN_DIR defaults /var/log/lightllm).
 Overrides: CONFIG_SERVER_PORT, CONFIG_SERVER_BIND_HOST, MODEL_DIR, MODEL_NAME, CPU_MODEL_DIR, SOURCE_DIR,
 CPU_SOURCE, GPU_SOURCE, PYTHON_BIN, RUN_DIR, MASTER_PORT, DISK_CACHE_DIR, D_SAMPLING_BACKEND,
 P_CPU_CACHE_GIB, P_MEM_FRACTION, LIGHTLLM_PD_CACHE_TREE_MAX_NODES.
+P_BATCH_MAX_TOKENS, P_CHUNKED_PREFILL_SIZE, P_CACHE_PLACEMENT_STRATEGY.
 --dry-run prints commands and paths without starting services or writing files.
 EOF
 }
@@ -116,12 +117,12 @@ else
     SERVICE_ENV+=("LIGHTLLM_PD_TIER_AWARE_RANK=${LIGHTLLM_PD_TIER_AWARE_RANK:-1}")
     ARGS+=(
       --use_dp_split_mode_connect_pd_master
-      --batch_max_tokens 8192 --chunked_prefill_size 4096
+      --batch_max_tokens "${P_BATCH_MAX_TOKENS:-8192}" --chunked_prefill_size "${P_CHUNKED_PREFILL_SIZE:-4096}"
       --running_max_req_size 128 --mem_fraction "${P_MEM_FRACTION:-0.73}" --disable_cudagraph
       --mtp_step 1 --ssm_state_mode native
       --linear_att_page_block_num 8
       --enable_cpu_cache --cpu_cache_storage_size "${P_CPU_CACHE_GIB:-1024}"
-      --cache_placement_strategy legacy
+      --cache_placement_strategy "${P_CACHE_PLACEMENT_STRATEGY:-legacy}"
       --enable_disk_cache --disk_cache_storage_size 10240
       --disk_cache_dir "${DISK_CACHE_DIR:-/mnt/openrouter/lightllm_disk_cache/glm53_main_v1/${ROLE}}"
     )
