@@ -205,7 +205,7 @@ def test_awq_config_applies_to_main_model_and_excludes_float_mtp():
     assert config == original
 
     config["text_config"]["quantization_config"] = None
-    assert SenseNovaLoopTpPartModel.normalize_model_config(config)["quantization_config"] is None
+    assert SenseNovaLoopTpPartModel.normalize_model_config(config)["quantization_config"] == quantization
 
 
 @pytest.mark.parametrize("suffix,factor", [("qweight", 8), ("qzeros", 8), ("scales", 1)])

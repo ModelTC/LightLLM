@@ -26,6 +26,7 @@ def _fwd_kernel(
     APPLY_TEXT_EMBED_SCALE: tl.constexpr,
     TEXT_EMBED_SCALE: tl.constexpr,
     BLOCK_HIDDEN_DIM: tl.constexpr,
+    SKIP_TEXT_EMBEDDINGS: tl.constexpr,
 ):
 
     seq_index = tl.program_id(0).to(tl.int64)
@@ -37,7 +38,14 @@ def _fwd_kernel(
     # load store text emb
     for _ in range(
         0,
-        tl.where((img_handle_id == 0) & (token_id < tp_text_end_token_id) & (token_id >= tp_text_start_token_id), 1, 0),
+        tl.where(
+            (not SKIP_TEXT_EMBEDDINGS)
+            & (img_handle_id == 0)
+            & (token_id < tp_text_end_token_id)
+            & (token_id >= tp_text_start_token_id),
+            1,
+            0,
+        ),
         1,
     ):
         load_emb = tl.load(
@@ -89,6 +97,7 @@ def multimodal_emb(
     tp_text_end_token_id: int,
     tp_world_size: int,
     text_embed_scale: float = 1.0,
+    skip_text_embeddings: bool = False,
 ):
     total_len = prompt_ids.shape[0]
     BLOCK = triton.next_power_of_2(out.shape[1])
@@ -119,6 +128,7 @@ def multimodal_emb(
         APPLY_TEXT_EMBED_SCALE=apply_text_embed_scale,
         TEXT_EMBED_SCALE=text_embed_scale,
         BLOCK_HIDDEN_DIM=BLOCK,
+        SKIP_TEXT_EMBEDDINGS=skip_text_embeddings,
         num_warps=num_warps,
         num_stages=1,
     )
