@@ -14,6 +14,22 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_chat_template_uses_existing_tokenizer(monkeypatch, tmp_path, wrapped):
+    from lightllm.server import build_prompt
+
+    template_path = tmp_path / "chat.jinja"
+    template_path.write_text("{{ messages[0]['content'] }}")
+    base = SimpleNamespace(chat_template="default")
+    tokenizer = SimpleNamespace(tokenizer=base) if wrapped else base
+    monkeypatch.setattr(build_prompt, "tokenizer", None)
+
+    build_prompt.init_tokenizer(SimpleNamespace(model_dir=str(tmp_path), chat_template=str(template_path)), tokenizer)
+
+    assert build_prompt.tokenizer is tokenizer
+    assert base.chat_template == template_path.read_text()
+
+
 @pytest.mark.parametrize("model_type", ["deepseek_v32", "deepseek_v3"])
 def test_deepseek_bytelevel_checkpoint_preserves_whitespace(tmp_path: Path, model_type: str) -> None:
     from tokenizers import Tokenizer, decoders, pre_tokenizers, trainers

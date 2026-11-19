@@ -1,6 +1,5 @@
 import os
 import json
-import torch
 import uuid
 from easydict import EasyDict
 from functools import lru_cache
@@ -27,6 +26,8 @@ def get_unique_server_name():
 
 
 def set_cuda_arch(args):
+    import torch
+
     if not torch.cuda.is_available():
         return
     return
@@ -55,7 +56,9 @@ def get_model_infer_recursion_limit() -> int:
 
 
 @lru_cache(maxsize=None)
-def get_llm_data_type() -> torch.dtype:
+def get_llm_data_type():
+    import torch
+
     data_type: str = get_env_start_args().data_type
     if data_type in ["fp16", "float16"]:
         data_type = torch.float16
