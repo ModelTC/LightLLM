@@ -112,6 +112,7 @@ else
     --linear_att_hash_page_size 2048 --linear_att_cache_size 64
   )
   if [[ "$RUN_MODE" == prefill ]]; then
+    SERVICE_ENV+=("LIGHTLLM_PD_TIER_AWARE_RANK=${LIGHTLLM_PD_TIER_AWARE_RANK:-1}")
     ARGS+=(
       --use_dp_split_mode_connect_pd_master
       --batch_max_tokens 8192 --chunked_prefill_size 4096

@@ -13,6 +13,7 @@ import uuid
 from typing import Dict, Optional, Union, List
 from websockets import ClientConnection
 from lightllm.server.pd_io_struct import NodeRole, ObjType
+from lightllm.server.prefill_cache_probe import probe_enabled, reply_to_probe
 from lightllm.server.httpserver.async_queue import AsyncQueue
 from lightllm.utils.net_utils import get_hostname_ip, format_host_port
 from lightllm.utils.log_utils import init_logger
@@ -87,6 +88,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
         forwarding_tokens_task = None
         heartbeat_task = None
         generation_tasks: Dict[int, asyncio.Task] = {}
+        probe_tasks = set()
         try:
             uri = f"ws://{pd_master_obj.host_ip_port}/pd_register"
             async with websockets.connect(
@@ -114,6 +116,11 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     "dp_index": dp_index,
                     "connection_id": uuid.uuid4().hex,
                 }
+                if dp_index is not None and probe_enabled(manager.args):
+                    from lightllm.utils.config_utils import is_hybrid_att_model
+
+                    if is_hybrid_att_model(manager.args.model_dir):
+                        regist_json["cache_probe_page_size"] = manager.args.linear_att_hash_page_size
 
                 await websocket.send(json.dumps(regist_json))
                 logger.info(f"Sent registration JSON: {regist_json}")
@@ -129,7 +136,13 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 while True:
                     recv_bytes = await websocket.recv()
                     obj = pickle.loads(recv_bytes)
-                    if obj[0] == ObjType.REQ:
+                    if obj[0] == ObjType.CACHE_TIER_QUERY and regist_json.get("cache_probe_page_size"):
+                        task = asyncio.create_task(
+                            reply_to_probe(websocket, obj[1], dp_index, obj[2], manager.args.linear_att_page_block_num)
+                        )
+                        probe_tasks.add(task)
+                        task.add_done_callback(probe_tasks.discard)
+                    elif obj[0] == ObjType.REQ:
                         prompt, sampling_params, multimodal_params = obj[1]
                         if dp_index is not None:
                             if sampling_params.suggested_dp_index != -1:
@@ -199,6 +212,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
         finally:
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
             child_tasks.extend(generation_tasks.values())
+            child_tasks.extend(probe_tasks)
             for task in child_tasks:
                 task.cancel()
             if child_tasks:

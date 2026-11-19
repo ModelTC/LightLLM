@@ -193,6 +193,10 @@ class ModeBackend:
                     big_page_num=self.args.linear_att_page_block_num,
                     att_state_manager=self.model.att_state_manager,
                 )
+                from lightllm.server.prefill_cache_probe import probe_enabled, start_probe_reader
+
+                if self.is_master_in_dp and probe_enabled(self.args):
+                    start_probe_reader(self.dp_rank_in_node, self.radix_cache.probe_cache_tier)
             else:
                 self.radix_cache = RadixCache(
                     total_token_num=self.model.att_state_manager.full_att_allocator.size,

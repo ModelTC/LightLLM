@@ -146,6 +146,21 @@ class HybridAttPagedRadixCache:
         self.tree_total_tokens_num = SharedArray(f"tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.tree_total_tokens_num.arr[0] = 0
 
+    def probe_cache_tier(self, hashes):
+        """Presence of any restorable text prefix, without changing LRU or references."""
+        node = self.root_node
+        if len(hashes) >= self.big_page_num:
+            big = node.children.get(hashes[self.big_page_num - 1])
+            if big is not None and big.big_page_buffer_idx is not None:
+                return b"gpu"
+        for block_hash in hashes[: self.big_page_num - 1]:
+            node = node.children.get(block_hash)
+            if node is None:
+                break
+            if node.small_page_buffer_idx is not None:
+                return b"gpu"
+        return b"miss"
+
     def _release_pages(self, page_kind, page_slot_ids):
         resources = self.att_state_manager
         allocator = (

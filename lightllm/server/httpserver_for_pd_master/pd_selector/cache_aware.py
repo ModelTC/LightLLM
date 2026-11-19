@@ -186,7 +186,7 @@ class CacheAwarePolicy:
         return selected_worker, selection_extra_info
 
     async def select_shared_worker(
-        self, workers: List[PD_Client_Obj], request_text: str, loads=None, fallback_worker=None
+        self, workers: List[PD_Client_Obj], request_text: str, loads=None, fallback_worker=None, verified=None
     ) -> tuple[Optional[PD_Client_Obj], PDSelectionExtraInfo]:
         """Use cross-master pending uncached work while retaining long-prefix affinity."""
         if not workers:
@@ -200,7 +200,20 @@ class CacheAwarePolicy:
         cache_worker, cache_match = await self._get_cache_worker(workers, request_text)
         request_chars = len(request_text)
         matched_chars = min(request_chars, max(0, cache_match.matched_char_count))
-        if (
+        tier = verified[1] if verified is not None and verified[0] is cache_worker else None
+        host_hit = tier in (b"cpu", b"disk") and fallback_worker is None
+        if tier == b"gpu":
+            selected_worker, reason = cache_worker, "gpu_rank_affinity"
+        elif host_hit:
+            siblings = (
+                worker for worker in workers if worker.client_ip_port == cache_worker.client_ip_port
+                and worker.node_id == cache_worker.node_id and worker.dp_index is not None
+            )
+            selected_worker = min(
+                siblings, key=lambda w: (loads[w.connection_key][1], loads[w.connection_key][0], w is not cache_worker)
+            )
+            reason = "cpu_host_load" if tier == b"cpu" else "disk_host_load"
+        elif (
             cache_worker is not None
             and matched_chars >= self.config.long_prefix_min_chars
             and matched_chars / request_chars >= self.config.long_prefix_min_hit_rate
@@ -219,16 +232,17 @@ class CacheAwarePolicy:
                 workers, cache_worker, request_chars, max(1, request_chars - matched_chars), loads=loads
             )
             reason = "cache_work" if selected_worker is cache_worker else "cold_lower_work"
-        selected_cached_chars = matched_chars if selected_worker is cache_worker else 0
+        selected_cached_chars = matched_chars if selected_worker is cache_worker or host_hit else 0
         return selected_worker, PDSelectionExtraInfo(
             estimated_cache_hit_rate=selected_cached_chars / request_chars,
-            cache_last_insert_time=cache_match.last_insert_time if selected_worker is cache_worker else None,
+            cache_last_insert_time=cache_match.last_insert_time if selected_worker is cache_worker or host_hit else None,
             estimated_prefill_chars=max(1, request_chars - selected_cached_chars),
             selection_reason=reason,
             cache_candidate=cache_match.prefill_node,
             cache_candidate_online=cache_worker is not None,
             matched_chars=matched_chars,
             selected_pending_chars=loads[selected_worker.connection_key][1],
+            cache_tier=tier.decode("ascii") if tier is not None else None,
         )
 
     def record_prompt_cache_hit_rate(self, cache_hit_rate: float) -> None:

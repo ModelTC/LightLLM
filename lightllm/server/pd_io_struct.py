@@ -43,6 +43,8 @@ class ObjType(enum.Enum):
     HEARTBEAT = 6  # P/D 节点向 pd master 上报的心跳。
     PD_UPLOAD_GENERATE_ERROR = 7  # P/D 节点向 pd master 上报本地请求生成异常。
     PD_UPLOAD_SERVER_BUSY = 8  # P/D 节点向 pd master 上报本地服务繁忙。
+    CACHE_TIER_QUERY = 9
+    CACHE_TIER_RESULT = 10
 
 
 @dataclass
@@ -65,6 +67,8 @@ class PD_Client_Obj:
 
     dp_index: Optional[int] = None
     connection_id: Optional[str] = None
+    cache_probe_page_size: int = 0
+    cache_tier_queries: dict = field(default_factory=dict, init=False, repr=False, compare=False)
 
     @staticmethod
     def make_connection_key(client_ip_port: str, dp_index: Optional[int]) -> str:

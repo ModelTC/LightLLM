@@ -8,6 +8,7 @@ import ujson as json
 import pickle
 import httpx
 from contextlib import aclosing
+from functools import partial
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
@@ -36,7 +37,7 @@ from lightllm.utils.envs_utils import (
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.websocket_utils import websocket_message_exceeds_limit
-from .pd_selector import PDSelectionExtraInfo, create_selector
+from .pd_selector import LoadBalancedCacheAwareSelector, PDSelectionExtraInfo, create_selector
 
 logger = init_logger(__name__)
 
@@ -119,9 +120,17 @@ class HttpServerManagerForPDMaster:
             pass
         return
 
-    def tokens(self, prompt, multimodal_params, sampling_params: SamplingParams, kwargs=None):
+    def tokens(self, prompt, multimodal_params, sampling_params: SamplingParams, kwargs=None, *, cache_pages=None):
         kwargs = {"add_special_tokens": sampling_params.add_special_tokens, **(kwargs or {})}
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
+        if cache_pages is not None:
+            from lightllm.server.prefill_cache_probe import MAX_HASHES
+            from lightllm.utils.kv_cache_utils import compute_token_list_hash
+
+            page_size, raw = cache_pages
+            if (len(prompt_ids) - 1) // page_size <= MAX_HASHES:
+                for key in compute_token_list_hash(prompt_ids, page_size):
+                    raw.extend(key.to_bytes(16, "big"))
         image_tokens = 0
         audio_tokens = 0
         audio_count = 0
@@ -197,7 +206,26 @@ class HttpServerManagerForPDMaster:
         await multimodal_params.verify_and_preload(request)
         # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
         # sampling_params 的参数进行修正。
-        input_token_num = await asyncio.to_thread(self.tokens, prompt, multimodal_params, sampling_params)
+        selector = getattr(getattr(self, "pd_manager", None), "selector", None)
+        generate_one = self._generate_one
+        candidate = None
+        if (
+            isinstance(selector, LoadBalancedCacheAwareSelector)
+            and selector.shared_cache is not None
+            and any(w.cache_probe_page_size for w in selector.prefill_nodes)
+            and not (multimodal_params.images or multimodal_params.audios or sampling_params.disable_prompt_cache)
+            and sampling_params.prompt_logprobs < 0
+        ):
+            candidate, _ = await selector.policy._get_cache_worker(selector.prefill_nodes, prompt)
+        if candidate is not None and candidate.cache_probe_page_size:
+            raw = bytearray()
+            input_token_num = await asyncio.to_thread(
+                self.tokens, prompt, multimodal_params, sampling_params, cache_pages=(candidate.cache_probe_page_size, raw)
+            )
+            if raw:
+                generate_one = partial(generate_one, cache_probe=(candidate, bytes(raw)))
+        else:
+            input_token_num = await asyncio.to_thread(self.tokens, prompt, multimodal_params, sampling_params)
         # Length validation only checks emptiness and len(); no token list is needed.
         fake_prompt_ids = range(input_token_num)
         from lightllm.server.httpserver.manager import HttpServerManager
@@ -223,7 +251,7 @@ class HttpServerManagerForPDMaster:
             choice_sampling_params.n = 1
             choice_sampling_params.best_of = 1
             generators.append(
-                self._generate_one(
+                generate_one(
                     prompt,
                     choice_sampling_params,
                     multimodal_params,
@@ -255,6 +283,7 @@ class HttpServerManagerForPDMaster:
         start_time: float,
         origin_request_id: int,
         input_token_num: int,
+        cache_probe=None,
     ):
         """处理节点繁忙错误；配置正数探测周期时重新选择 P/D 节点并重试。"""
         retry_start_time = time.monotonic()
@@ -270,6 +299,7 @@ class HttpServerManagerForPDMaster:
                     start_time,
                     origin_request_id,
                     input_token_num,
+                    cache_probe,
                 )
                 async with aclosing(generator):
                     async for result in generator:
@@ -309,6 +339,7 @@ class HttpServerManagerForPDMaster:
         start_time: float,
         origin_request_id: int,
         input_token_num: int,
+        cache_probe=None,
     ):
         """执行一次完整的单 choice 生成尝试。
 
@@ -324,11 +355,21 @@ class HttpServerManagerForPDMaster:
 
         try:
             remaining_max_new_tokens = origin_sampling_params.max_new_tokens
+            select_nodes = self.select_p_d_node
+            if cache_probe is not None:
+                from lightllm.server.prefill_cache_probe import query_prefill_tier
+
+                worker, raw = cache_probe
+                selector = self.pd_manager.selector
+                if any(node is worker for node in selector.prefill_nodes):
+                    # Keep the network round trip outside the selection/reservation lock.
+                    tier = await query_prefill_tier(worker, raw)
+                    select_nodes = partial(selector.select_p_d_node, verified=(worker, tier))
             # cache-aware 会在读取共享统计和写入预占之间发生多次 await。同一 worker
             # 内若不串行化，突发请求可能全部依据同一份旧快照选中同一 P 节点。
             # 该锁只约束本 worker 的首次选点和预占，不覆盖后续网络转发与推理。
             async with self.pd_manager.selector.selection_lock:
-                p_node, d_node, selection_extra_info = await self.select_p_d_node(
+                p_node, d_node, selection_extra_info = await select_nodes(
                     prompt, origin_sampling_params, multimodal_params
                 )
                 if not p_node or not d_node:
@@ -349,7 +390,8 @@ class HttpServerManagerForPDMaster:
                     f"reason:{selection_extra_info.selection_reason} "
                     f"estimated_hit_rate:{selection_extra_info.estimated_cache_hit_rate:.6f} "
                     f"reserved_prefill_chars:{pending_prefill_load_chars} "
-                    f"pending_before_chars:{selection_extra_info.selected_pending_chars}"
+                    f"pending_before_chars:{selection_extra_info.selected_pending_chars} "
+                    f"cache_tier:{selection_extra_info.cache_tier}"
                 )
             if selection_extra_info.cache_last_insert_time is not None:
                 cache_age_seconds = max(0.0, time.monotonic() - selection_extra_info.cache_last_insert_time)

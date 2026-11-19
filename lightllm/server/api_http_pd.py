@@ -44,6 +44,11 @@ async def register_and_keep_alive(websocket: WebSocket):
             obj = pickle.loads(data)
             if isinstance(obj, tuple) and obj and obj[0] == ObjType.HEARTBEAT:
                 continue
+            if isinstance(obj, tuple) and obj and obj[0] == ObjType.CACHE_TIER_RESULT:
+                from .prefill_cache_probe import finish_probe
+
+                finish_probe(pd_client, obj[1], obj[2])
+                continue
             await g_objs.httpserver_manager.put_to_handle_queue(obj)
 
     except asyncio.TimeoutError:

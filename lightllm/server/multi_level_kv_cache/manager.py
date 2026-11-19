@@ -61,7 +61,29 @@ class MultiLevelKVCacheManager:
             )
             self.disk_cache_thread = threading.Thread(target=self.disk_cache_worker.run, daemon=True)
             self.disk_cache_thread.start()
+        from lightllm.server.prefill_cache_probe import probe_enabled, start_probe_reader
+
+        if probe_enabled(args):
+            start_probe_reader("host", self.probe_cache_tier)
         return
+
+    def probe_cache_tier(self, hashes):
+        """Peek at the same host page keys as Req; never pin a page or issue a disk read."""
+        block = self.args.linear_att_page_block_num
+        pages = hashes[block - 1 :: block]
+        if len(hashes) % block:
+            pages.append(hashes[-1])
+        client = self.cpu_cache_client
+        client.lock.acquire_sleep1ms()
+        try:
+            slot = client.page_hash_dict.get(pages[0])
+            if slot is not None and client.page_items.get_item_by_index(slot).is_data_ready():
+                return b"cpu"
+        finally:
+            client.lock.release()
+        if self.disk_cache_worker and self.disk_cache_worker.query_loadable_pages(pages, start_pos=0) > 0:
+            return b"disk"
+        return b"miss"
 
     def cpu_cache_hanle_loop(self):
         while True:

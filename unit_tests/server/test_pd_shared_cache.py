@@ -78,6 +78,80 @@ def _load(selector):
     }
 
 
+@pytest.mark.parametrize(
+    ("tier", "target", "reason"),
+    [(b"gpu", 0, "gpu_rank_affinity"), (b"cpu", 1, "cpu_host_load"), (b"disk", 1, "disk_host_load"),
+     (b"miss", 0, "long_prefix_affinity"), (b"unknown", 0, "long_prefix_affinity")],
+)
+def test_tier_locality_uses_original_gpu_or_same_host_least_pending_work(tier, target, reason):
+    selector = _selector()
+    nodes = [
+        PD_Client_Obj(8, "p0:8019", "prefill", {}, dp_index=0),
+        PD_Client_Obj(8, "p0:8019", "prefill", {}, dp_index=1),
+        PD_Client_Obj(9, "p1:8019", "prefill", {}, dp_index=0),
+    ]
+    selector.update_nodes(nodes, selector.decode_nodes)
+    prompt = "a" * 70000
+    state = selector.shared_cache
+    state.ready = True
+    state.tree.insert_key(prompt[::512], nodes[0].connection_key, time.monotonic(), nodes[0].node_id)
+    nodes[0].dispatched_req_num, nodes[0].dispatched_prompt_chars = 1, 100000
+    nodes[1].dispatched_req_num, nodes[1].dispatched_prompt_chars = 2, 100
+    chosen, _, info = asyncio.run(selector.select_p_d_node(prompt, None, None, verified=(nodes[0], tier)))
+    assert chosen is nodes[target] and info.selection_reason == reason
+    assert info.estimated_prefill_chars < 512
+    if tier == b"disk":
+        # A reconnect invalidates even a same-address, same-rank answer.
+        former = PD_Client_Obj(7, "p0:8019", "prefill", {}, dp_index=0)
+        chosen, _, info = asyncio.run(selector.select_p_d_node(prompt, None, None, verified=(former, tier)))
+        assert chosen is nodes[0] and info.selection_reason == "long_prefix_affinity"
+        state.ready = False
+        chosen, _, info = asyncio.run(selector.select_p_d_node(prompt, None, None, verified=(nodes[0], tier)))
+        assert chosen is nodes[0] and info.selection_reason == "long_prefix_affinity"
+
+
+def test_gpu_probe_uses_current_checkpoint_and_ignores_evicted_small_states():
+    from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
+
+    cache = object.__new__(HybridAttPagedRadixCache)
+    cache.big_page_num = 4
+    second = SimpleNamespace(children={}, small_page_buffer_idx=0)
+    first = SimpleNamespace(children={2: second}, small_page_buffer_idx=None)
+    cache.root_node = SimpleNamespace(children={1: first})
+    assert cache.probe_cache_tier([1, 2, 3, 4]) == b"gpu"
+    second.small_page_buffer_idx = None
+    assert cache.probe_cache_tier([1, 2, 3, 4]) == b"miss"
+    cache.root_node.children[4] = SimpleNamespace(big_page_buffer_idx=0)
+    assert cache.probe_cache_tier([1, 2, 3, 4, 5]) == b"gpu"
+    del cache.root_node.children[4]
+    assert cache.probe_cache_tier([1, 2, 3, 4, 5]) == b"miss"
+
+
+def test_host_probe_checks_ready_cpu_page_then_disk_with_real_big_and_tail_keys():
+    from unittest.mock import Mock
+    from lightllm.server.multi_level_kv_cache.manager import MultiLevelKVCacheManager
+
+    manager = object.__new__(MultiLevelKVCacheManager)
+    manager.args = SimpleNamespace(linear_att_page_block_num=4)
+    client = manager.cpu_cache_client = Mock()
+    disk = manager.disk_cache_worker = Mock()
+    client.page_hash_dict.get.return_value = 0
+    page = client.page_items.get_item_by_index.return_value
+    page.is_data_ready.return_value = True
+    assert manager.probe_cache_tier([1, 2, 3, 4, 5]) == b"cpu"
+    client.page_hash_dict.get.assert_called_once_with(4)
+    client.page_items.get_item_by_index.assert_called_once_with(0)
+    disk.query_loadable_pages.assert_not_called()
+    page.is_data_ready.return_value = False
+    disk.query_loadable_pages.return_value = 2
+    assert manager.probe_cache_tier([1, 2, 3, 4, 5]) == b"disk"
+    disk.query_loadable_pages.assert_called_once_with([4, 5], start_pos=0)
+    client.page_hash_dict.get.return_value = None
+    disk.query_loadable_pages.return_value = 0
+    assert manager.probe_cache_tier([1, 2]) == b"miss"
+    assert client.lock.release.call_count == 3
+
+
 def test_four_masters_share_success_hints_in_one_order_and_choose_same_p():
     relay = CacheMetadataRelay()
     selectors = [_selector(master=i) for i in range(4)]

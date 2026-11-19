@@ -26,6 +26,7 @@ class PDSelectionExtraInfo:
     cache_candidate_online: bool = field(default=False, compare=False)
     matched_chars: int = field(default=0, compare=False)
     selected_pending_chars: int = field(default=0, compare=False)
+    cache_tier: Optional[str] = field(default=None, compare=False)
 
 
 class PDSelector:
@@ -132,7 +133,8 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
             self.shared_cache = SharedCacheState(self, pd_manager.args)
 
     async def select_p_d_node(
-        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
+        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams,
+        *, verified=None,
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         assert isinstance(prompt, str), "prompt must be a string for cache-aware selection"
         if self.shared_cache is None:
@@ -144,7 +146,7 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
             loads = self.shared_cache.cluster_loads(self.prefill_nodes)
             fallback = self._importance_sampling(self.prefill_nodes) if loads is None else None
             p_node, selection_extra_info = await self.policy.select_shared_worker(
-                self.prefill_nodes, prompt, loads=loads, fallback_worker=fallback
+                self.prefill_nodes, prompt, loads=loads, fallback_worker=fallback, verified=verified
             )
         # 前缀查询期间 P 节点可能已经重连；即使 connection_key 相同，旧对象持有的 WebSocket 也已失效。
         # 必须按对象身份确认选中节点仍是当前连接，让上层通过 ServerBusyError 重新选点。
