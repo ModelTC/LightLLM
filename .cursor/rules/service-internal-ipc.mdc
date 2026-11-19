@@ -1,0 +1,22 @@
+---
+description: 服务内部的 ZMQ 必须成功。出错时记日志并退出进程，不为节点内通道加重试或吞掉异常。
+globs: lightllm/server/**/*.py
+alwaysApply: false
+---
+
+# 节点内 ZMQ 必须成功
+
+同一服务里进程之间的 ZMQ 是内部通道。调用方传入地址，接口只负责把对象送过去、取出来。节点内通信信任它是通的。
+
+发送、接收、反序列化失败时：记一条带地址和异常的日志，然后 `os._exit(1)` 让进程退出。启动阶段还没向 launcher 回报 `init ok` 时，绑定失败继续把异常抛给启动流程，由它结束进程。
+
+不要为这条通道加重试、`sleep` 后再试、丢弃这条消息后继续，或捕获后只打日志。取消任务时的 `CancelledError` 继续往外抛，那是进程在退出，不是通道坏了。
+
+```python
+def send(self, message: object) -> None:
+    try:
+        self._socket.send(pickle.dumps(message))
+    except Exception as exc:
+        logger.exception(f"service ipc send failed, address={self._address}: {exc}")
+        os._exit(1)
+```
