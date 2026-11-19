@@ -74,22 +74,14 @@ async def receive_pd_report(websocket: WebSocket):
     client_ip, client_port = websocket.client
     logger.info(f"pd_report Client connected from IP: {client_ip}, Port: {client_port}")
     try:
-        heartbeat_timeout_seconds = 30
+        # 协议层 Ping 由 Hypercorn 直接回 Pong，不会进到这里。空闲时没有业务包是正常的。
         while True:
-            data = await asyncio.wait_for(websocket.receive_bytes(), timeout=heartbeat_timeout_seconds)
+            data = await websocket.receive_bytes()
             obj = pickle.loads(data)
-            if isinstance(obj, tuple) and obj and obj[0] == ObjType.HEARTBEAT:
-                continue
             if isinstance(obj, tuple) and obj and obj[0] == ObjType.PD_UPLOAD_KV_STATUS:
                 await g_objs.httpserver_manager.update_req_status(obj[1])
                 continue
             logger.error(f"pd report {(client_ip, client_port)} dropped unexpected object {obj}")
-    except asyncio.TimeoutError:
-        logger.warning(f"pd report {(client_ip, client_port)} heartbeat timed out")
-        try:
-            await websocket.close(code=1011, reason="PD report heartbeat timed out")
-        except BaseException:
-            logger.debug(f"failed to close timed-out pd report {(client_ip, client_port)}", exc_info=True)
     except WebSocketDisconnect as exc:
         logger.info(f"pd report {(client_ip, client_port)} disconnected: {exc}")
     except BaseException as exc:

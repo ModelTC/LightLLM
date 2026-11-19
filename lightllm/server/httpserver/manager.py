@@ -144,6 +144,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
         # 会触发整个系统崩溃，所以httpserver需要知道真实的 max_total_token_num的数据，用于提前拦截非法请求等参数。
         # router 进程会在启动后向这个共享内存写入正确的max_total_token_num 参数，用于后续的请求控制。
         self.shm_max_total_token_num = SharedInt("shm_max_total_token_num")
+        wait_httpserver_workers(worker_num=self.args.httpserver_workers or 1)
         return
 
     def _log_stage_timing(self, group_request_id: int, start_time: float, stage: str, **kwargs):
@@ -1194,3 +1195,39 @@ class ReqStatus:
             if not req.can_release():
                 return False
         return True
+
+
+def wait_httpserver_workers(worker_num: int) -> None:
+    """等本节点全部 httpserver 完成初始化后再继续。
+
+    目录按服务名分开。进程先拿文件锁，数目录里已有的文件，再放一个随机名字的文件。
+    放下之后人数刚满的那个进程删掉整个目录。其他进程已经放开锁，看到目录没了就继续。
+    """
+    if worker_num <= 1:
+        return
+    import os
+    import shutil
+    import uuid
+    from filelock import FileLock
+    from lightllm.utils.envs_utils import get_unique_server_name
+
+    service_name = get_unique_server_name()
+    if not service_name:
+        raise RuntimeError("LIGHTLLM_UNIQUE_SERVICE_NAME_ID is unset")
+    start_dir = f"/tmp/{service_name}_httpserver_start"
+    # 锁放在目录外面。最后一个进程会删目录，锁文件不能一起被删掉。
+    lock = FileLock(f"{start_dir}.lock")
+    with lock:
+        os.makedirs(start_dir, exist_ok=True)
+        # 计数和创建都在锁里，避免两个进程读到同一个数量后各放一个文件。
+        arrived = len(os.listdir(start_dir)) + 1
+        with open(os.path.join(start_dir, f"{uuid.uuid4().hex}{arrived}"), "w", encoding="utf-8"):
+            pass
+        if arrived >= worker_num:
+            # 这是最后一个进程。删目录是放行信号，等在外面的进程靠这个信号继续。
+            shutil.rmtree(start_dir)
+            logger.info(f"httpserver start barrier {arrived}/{worker_num}, removed {start_dir}")
+            return
+    # 不能拿着锁等待，否则最后一个进程进不来，目录也就不会被删。
+    while os.path.exists(start_dir):
+        time.sleep(0.01)

@@ -64,6 +64,46 @@ def _deliver(manager: PdReportManager, messages: list) -> None:
     asyncio.run(run())
 
 
+def test_pd_report_connects_with_protocol_ping(monkeypatch):
+    import websockets
+
+    seen = {}
+
+    class IdleSocket:
+        def __init__(self):
+            self.transport = SimpleNamespace(get_extra_info=lambda key: None)
+
+        async def send(self, payload):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    def connect(**kwargs):
+        seen.update(kwargs)
+        return IdleSocket()
+
+    monkeypatch.setattr(websockets, "connect", connect)
+
+    async def run():
+        manager = PdReportManager(args=SimpleNamespace(), pull=None)
+        master = SimpleNamespace(node_id=1, host_ip_port="127.0.0.1:1")
+        task = asyncio.create_task(manager._serve_master(master=master, outgoing=asyncio.Queue()))
+        for _ in range(50):
+            if seen:
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+    assert seen["ping_interval"] == 60
+    assert seen["ping_timeout"] == 60
+
+
 def test_pd_report_routes_the_handshake_by_master_id():
     manager = PdReportManager(args=SimpleNamespace(), pull=None)
     manager._queues[100] = asyncio.Queue()

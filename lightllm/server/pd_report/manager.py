@@ -136,29 +136,23 @@ class PdReportManager:
     async def _serve_master(self, master: PD_Master_Obj, outgoing: asyncio.Queue) -> None:
         """维持到一个 PD Master /pd_report 的 websocket，并把发送队列里的内容写出去。
 
-        连上后打开 TCP_NODELAY。心跳每 15 秒往同一条队列放一个 HEARTBEAT，和 KV 握手共用发送循环。
-        Master 超过 30 秒没收到数据会关掉这条连接。这条连接失败只重连这一个 Master，10 秒后再连，
-        队列里还没发出的内容留着。任务结束时，只有队列仍是自己这把才删掉，避免删掉后继任务新建的队列。
+        连上后打开 TCP_NODELAY。存活靠协议层 Ping：每 60 秒发一次，60 秒等不到 Pong 就断开。
+        这条连接失败只重连这一个 Master，10 秒后再连，队列里还没发出的内容留着。
+        任务结束时，只有队列仍是自己这把才删掉，避免删掉后继任务新建的队列。
         """
         import websockets
 
         uri = f"ws://{master.host_ip_port}/pd_report"
 
-        async def heartbeat() -> None:
-            # 只负责把心跳放进发送队列，不自己写 socket。
-            while True:
-                await asyncio.sleep(15)
-                outgoing.put_nowait((ObjType.HEARTBEAT,))
-
         logger.info(f"pd report serve master {master.node_id} {uri}")
         try:
             while True:
-                heartbeat_task = None
                 try:
                     async with websockets.connect(
                         uri=uri,
                         compression=None,
-                        ping_interval=None,
+                        ping_interval=60,
+                        ping_timeout=60,
                         max_size=get_lightllm_websocket_max_message_size(),
                         write_limit=PD_WEBSOCKET_WRITE_LIMIT,
                     ) as websocket:
@@ -166,7 +160,6 @@ class PdReportManager:
                         sock = websocket.transport.get_extra_info("socket")
                         if sock is not None:
                             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                        heartbeat_task = asyncio.create_task(heartbeat())
                         while True:
                             payload = await outgoing.get()
                             await websocket.send(pickle.dumps(payload))
@@ -174,10 +167,6 @@ class PdReportManager:
                     raise
                 except BaseException as exc:
                     logger.exception(f"pd report master {master.node_id} failed: {exc}")
-                finally:
-                    if heartbeat_task is not None:
-                        heartbeat_task.cancel()
-                        await asyncio.gather(heartbeat_task, return_exceptions=True)
                 logger.info(f"pd report reconnect master {master.node_id} in 10s")
                 await asyncio.sleep(10)
         finally:
