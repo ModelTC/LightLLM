@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Two Prefill services and one Decode service; TP defaults to 2 / 4.
 # Set MODEL_DIR and GPU_IDS as needed. DRY_RUN=1 prints the startup commands.
+# LOOP_CACHE_MODE=overwrite reuses KV/conv/SSM caches across loop visits.
 set -euo pipefail
 
 LIGHTLLM_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -9,7 +10,13 @@ PORT="${PORT:-8000}"
 PREFILL_TP="${PREFILL_TP:-2}"
 DECODE_TP="${DECODE_TP:-4}"
 GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
+LOOP_CACHE_MODE="${LOOP_CACHE_MODE:-independent}"
 DRY_RUN="${DRY_RUN:-0}"
+
+case "$LOOP_CACHE_MODE" in
+    independent|overwrite) ;;
+    *) printf 'LOOP_CACHE_MODE must be independent or overwrite\n' >&2; exit 2 ;;
+esac
 
 CHAT_TEMPLATE_ARGS=()
 if [[ -n "${CHAT_TEMPLATE:-}" ]]; then
@@ -33,6 +40,7 @@ D_GPUS="$(join_gpus "${GPUS[@]:$((2 * PREFILL_TP)):DECODE_TP}")"
 
 MODEL_ARGS=(
     --model_dir "$MODEL_DIR" --model_name "${MODEL_NAME:-sensenova_loop}"
+    --loop_cache_mode "$LOOP_CACHE_MODE"
     --host 0.0.0.0 --max_image_token_count 4096 "${CHAT_TEMPLATE_ARGS[@]}"
 )
 COMMON_ARGS=(

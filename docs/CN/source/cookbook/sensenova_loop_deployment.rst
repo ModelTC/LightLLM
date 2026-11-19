@@ -90,6 +90,8 @@ FP8 KV 参数说明见 :doc:`../tutorial/fp8_kv_quantization`。
     bash test/start_scripts/sensenova_loop/sensenova_loop_pd_2p1d.sh
 
 可通过 ``GPU_IDS`` 指定显卡列表，添加 ``DRY_RUN=1`` 可先查看启动命令。
+设置 ``LOOP_CACHE_MODE=overwrite`` 可开启 KV、conv 和 SSM 状态覆盖模式，
+默认为 ``independent``。该设置会统一传给两个 Prefill、Decode 和 PD Master。
 按 ``Ctrl+C`` 会关闭所有服务。
 
 请求示例

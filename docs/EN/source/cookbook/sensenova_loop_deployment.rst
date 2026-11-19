@@ -94,6 +94,9 @@ This script uses eight GPUs to start two TP2 prefill services and one TP4 decode
     bash test/start_scripts/sensenova_loop/sensenova_loop_pd_2p1d.sh
 
 Set ``GPU_IDS`` to select the GPUs, or add ``DRY_RUN=1`` to preview the commands.
+Set ``LOOP_CACHE_MODE=overwrite`` to reuse and overwrite KV, conv, and SSM states;
+the default is ``independent``. The setting applies to both prefill services, the
+decode service, and the PD master.
 Press ``Ctrl+C`` to stop all services.
 
 Example Request
