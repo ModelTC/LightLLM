@@ -34,7 +34,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--httpserver_workers", type=int, default=1)
+    parser.add_argument(
+        "--httpserver_workers",
+        type=int,
+        default=None,
+        help=(
+            "Number of httpserver worker processes. When omitted, normal mode uses 1 and " "prefill/decode nodes use 2."
+        ),
+    )
     parser.add_argument(
         "--disable_delay_response_start",
         action="store_true",

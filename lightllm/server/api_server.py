@@ -7,6 +7,7 @@ logger = init_logger(__name__)
 
 
 def launch_server(args: StartArgs):
+    _fill_httpserver_workers(args=args)
     if args.use_dp_split_mode_connect_pd_master and args.run_mode != "prefill":
         raise ValueError("--use_dp_split_mode_connect_pd_master only supports prefill")
     set_log_node_role(args.run_mode)
@@ -40,6 +41,17 @@ def launch_server(args: StartArgs):
         visual_only_start(args)
     else:
         normal_or_p_d_start(args)
+
+
+def _fill_httpserver_workers(args: StartArgs) -> None:
+    """用户传入 --httpserver_workers 时保留该值。未传入时，prefill/decode 用 2，其余模式用 1。"""
+    if args.httpserver_workers is not None:
+        return
+    if args.run_mode in ("prefill", "decode"):
+        args.httpserver_workers = 2
+    else:
+        args.httpserver_workers = 1
+    logger.info(f"run_mode={args.run_mode}, set httpserver_workers to {args.httpserver_workers}")
 
 
 if __name__ == "__main__":
