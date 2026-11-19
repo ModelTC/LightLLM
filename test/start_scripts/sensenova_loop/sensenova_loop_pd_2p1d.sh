@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Two Prefill services and one Decode service; TP defaults to 2 / 4.
-# Set MODEL_DIR and GPU_IDS as needed. DRY_RUN=1 prints the startup commands.
+# Set MODEL_DIR, MTP_DRAFT_MODEL_DIR and GPU_IDS as needed. DRY_RUN=1 prints the startup commands.
 # LOOP_CACHE_MODE=overwrite reuses KV/conv/SSM caches across loop visits.
 set -euo pipefail
 
 LIGHTLLM_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 MODEL_DIR="${MODEL_DIR:-/mnt/afs_agents/yankuihao/model_ckpts/SenseNova-6.8-Loop-9B-Preview-mtp13200}"
+MTP_DRAFT_MODEL_DIR="${MTP_DRAFT_MODEL_DIR:-$MODEL_DIR}"
 PORT="${PORT:-8000}"
 PREFILL_TP="${PREFILL_TP:-2}"
 DECODE_TP="${DECODE_TP:-4}"
@@ -45,6 +46,7 @@ MODEL_ARGS=(
 )
 COMMON_ARGS=(
     "${MODEL_ARGS[@]}" --mtp_mode eagle_with_att --mtp_step 2
+    --mtp_draft_model_dir "$MTP_DRAFT_MODEL_DIR"
     --linear_att_cache_size 500
     --pd_trans_mode nixl --pd_kv_page_size 4096 --pd_master_ip 127.0.0.1 --pd_master_port "$PORT"
     --llm_prefill_att_backend fa3 triton --llm_decode_att_backend fa3 triton

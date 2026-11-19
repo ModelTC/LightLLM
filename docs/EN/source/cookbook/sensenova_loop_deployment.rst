@@ -94,6 +94,9 @@ This script uses eight GPUs to start two TP2 prefill services and one TP4 decode
     bash test/start_scripts/sensenova_loop/sensenova_loop_pd_2p1d.sh
 
 Set ``GPU_IDS`` to select the GPUs, or add ``DRY_RUN=1`` to preview the commands.
+Set ``MTP_DRAFT_MODEL_DIR`` to use a separate draft checkpoint; it defaults to
+``MODEL_DIR``. Both prefill services and the decode service load that draft in
+``eagle_with_att`` mode.
 Set ``LOOP_CACHE_MODE=overwrite`` to reuse and overwrite KV, conv, and SSM states;
 the default is ``independent``. The setting applies to both prefill services, the
 decode service, and the PD master.
