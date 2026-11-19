@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from lightllm.server import api_openai, api_stream_obj
-from lightllm.server.api_models import ChatCompletionRequest
+from lightllm.server.api_models import ChatCompletionRequest, CompletionRequest
 from lightllm.server.core.objs import FinishStatus, SamplingParams, StartArgs
 from lightllm.server.api_http import g_objs
 from lightllm.server.api_http import generation_exception_handler
@@ -34,21 +34,7 @@ def test_generation_failure_before_first_chunk_returns_http_500(monkeypatch):
     assert "Generation failed" in response.json()["error"]["message"]
 
 
-@pytest.mark.parametrize(
-    "early_headers, finish_status, expected_status",
-    [
-        (False, FinishStatus.FINISHED_ERROR, 500),
-        (True, FinishStatus.FINISHED_ERROR, 200),
-        (False, FinishStatus.FINISHED_STOP, 200),
-        (True, FinishStatus.FINISHED_STOP, 200),
-    ],
-)
-def test_chat_first_result_sets_http_status(monkeypatch, early_headers, finish_status, expected_status):
-    args = StartArgs(disable_delay_response_start=early_headers)
-
-    async def generate(*_args, **_kwargs):
-        yield 0, "answer", {"prompt_tokens": 2, "prompt_cache_len": 0}, FinishStatus(finish_status)
-
+def _openai_stream_app(monkeypatch, args, generate):
     monkeypatch.setattr(g_objs, "metric_client", Mock())
     monkeypatch.setattr(g_objs, "args", args)
     monkeypatch.setattr(
@@ -67,7 +53,29 @@ def test_chat_first_result_sets_http_status(monkeypatch, early_headers, finish_s
     async def chat(request: ChatCompletionRequest):
         return await api_openai.chat_completions_impl(request, Mock())
 
-    response = TestClient(app).post(
+    @app.post("/v1/completions")
+    async def completion(request: CompletionRequest):
+        return await api_openai.completions_impl(request, Mock())
+
+    return app
+
+
+@pytest.mark.parametrize(
+    "early_headers, finish_status, expected_status",
+    [
+        (False, FinishStatus.FINISHED_ERROR, 500),
+        (True, FinishStatus.FINISHED_ERROR, 200),
+        (False, FinishStatus.FINISHED_STOP, 200),
+        (True, FinishStatus.FINISHED_STOP, 200),
+    ],
+)
+def test_chat_first_result_sets_http_status(monkeypatch, early_headers, finish_status, expected_status):
+    args = StartArgs(disable_delay_response_start=early_headers)
+
+    async def generate(*_args, **_kwargs):
+        yield 0, "answer", {"prompt_tokens": 2, "prompt_cache_len": 0}, FinishStatus(finish_status)
+
+    response = TestClient(_openai_stream_app(monkeypatch, args, generate)).post(
         "/v1/chat/completions",
         json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
     )
@@ -89,3 +97,37 @@ def test_chat_first_result_sets_http_status(monkeypatch, early_headers, finish_s
     else:
         assert "answer" in response.text
         assert "data: [DONE]" in response.text
+
+
+@pytest.mark.parametrize("chat", [True, False], ids=["chat", "completions"])
+def test_openai_stream_flushes_pending_deltas_before_generation_error(monkeypatch, chat):
+    async def generate(*_args, **_kwargs):
+        metadata = {"prompt_tokens": 2, "prompt_cache_len": 0, "_pd_stream_batch_end": False}
+        yield 0, "answer", metadata, FinishStatus(FinishStatus.NO_FINISH)
+        yield 0, " queued", metadata, FinishStatus(FinishStatus.NO_FINISH)
+        yield 0, "error marker", metadata, FinishStatus(FinishStatus.FINISHED_ERROR)
+
+    client = TestClient(_openai_stream_app(monkeypatch, StartArgs(), generate))
+    if chat:
+        path = "/v1/chat/completions"
+        request = {"messages": [{"role": "user", "content": "hi"}]}
+    else:
+        path = "/v1/completions"
+        request = {"prompt": "hi"}
+    response = client.post(path, json={"model": "test", "stream": True, **request})
+
+    assert response.status_code == 200
+    events = response.text.strip().split("\n\n")
+    assert events[-1] == "data: [DONE]"
+    chunks = [json.loads(event.removeprefix("data: ")) for event in events[:-1]]
+    assert chunks[-1] == {
+        "error": {
+            "message": "Generation failed during streaming",
+            "type": "server_error",
+            "code": "stream_error",
+        }
+    }
+    choices = [choice for chunk in chunks[:-1] for choice in chunk["choices"]]
+    assert all(choice["finish_reason"] is None for choice in choices)
+    text = "".join((choice["delta"].get("content") or "") if chat else choice["text"] for choice in choices)
+    assert text == "answer queued"

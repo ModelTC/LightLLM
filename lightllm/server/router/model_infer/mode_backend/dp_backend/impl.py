@@ -525,6 +525,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     run_reqs,
                     self.eos_id,
                     b_mtp_index=model_input.b_mtp_index,
+                    recover_bad_samples=self.is_pd_decode_mode,
                 )
                 next_token_ranks = self._get_next_token_ranks(model_output.logits, next_token_ids)
 
@@ -635,6 +636,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 output_topk_logprobs=output_topk_logprobs,
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
+                recover_bad_samples=self.is_pd_decode_mode,
             )
 
             # 第四阶段

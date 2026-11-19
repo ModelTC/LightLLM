@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from math import isfinite
 import time
 import threading
 import torch.distributed as dist
@@ -831,7 +832,9 @@ class ModeBackend:
 
         # 先由控制器确定请求需要写入的缓存层级，再按是否包含 CPU cache 决定是否发起 offload。
         cache_controller = g_infer_context.cache_placement_controller
-        new_finished_reqs = [req for req in finished_reqs if req.cpu_cache_offload_task_status.is_not_started()]
+        new_finished_reqs = [
+            req for req in finished_reqs if req.cpu_cache_offload_task_status.is_not_started() and req.cache_tiers
+        ]
         cache_controller.set_req_cache_way(new_finished_reqs)
         if self.args.enable_cpu_cache:
             offload_reqs = [
@@ -918,6 +921,7 @@ class ModeBackend:
         run_reqs_update_packs: List[InferReqUpdatePack],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
         pd_prefill_chunked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
+        recover_bad_samples: bool = False,
     ):
         """
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
@@ -927,6 +931,7 @@ class ModeBackend:
         next_token_logprobs = next_token_logprobs.tolist()
         next_token_ranks = next_token_ranks.tolist()
 
+        failed_req_ids = set()
         for req_obj, next_token_id, next_token_logprob, next_token_rank, topk_row, pack in zip(
             run_reqs,
             next_token_ids,
@@ -937,6 +942,13 @@ class ModeBackend:
         ):
             req_obj: InferReq = req_obj
             pack: InferReqUpdatePack = pack
+            if recover_bad_samples:
+                if req_obj.req_id in failed_req_ids:
+                    continue
+                if pack.output_len > 0 and not isfinite(next_token_logprob):
+                    pack.fail_sampling(next_token_logprob, self.is_master_in_dp)
+                    failed_req_ids.add(req_obj.req_id)
+                    continue
             output_top_logprobs = None
             if topk_row is not None:
                 output_top_logprobs = (topk_row.token_ids.tolist(), topk_row.logprobs.tolist())
@@ -951,6 +963,10 @@ class ModeBackend:
                 output_top_logprobs=output_top_logprobs,
             )
 
+        if failed_req_ids:
+            remaining = [(req, token) for req, token in zip(run_reqs, next_token_ids) if req.req_id not in failed_req_ids]
+            run_reqs = [req for req, _ in remaining]
+            next_token_ids = [token for _, token in remaining]
         g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
             req_objs=run_reqs, next_token_ids=next_token_ids
         )

@@ -33,6 +33,7 @@ def sample(
     eos_id: List[int] = [2],
     has_output=None,
     b_mtp_index: Optional[torch.Tensor] = None,
+    recover_bad_samples: bool = False,
 ):
     sampling_params_manager = g_infer_context.req_manager.req_sampling_params_manager
     (
@@ -122,7 +123,7 @@ def sample(
             next_token_logprobs = probs.gather(1, next_token_ids.view(-1, 1)).log().view(-1)
         else:
             next_token_ids, next_token_logprobs = _top_p_top_k_sample(
-                reqs, probs, b_top_ps, b_top_ks, exist_req_use_random_seed
+                reqs, probs, b_top_ps, b_top_ks, exist_req_use_random_seed, recover_bad_samples=recover_bad_samples
             )
 
     output_topk_logprobs: TopkLogprobRows = [None] * len(reqs)
@@ -202,7 +203,7 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     probs_sort[(probs_sum - probs_sort) > top_ps.view(-1, 1)] = 0.0
 
-    probs_sort[torch.arange(0, probs.shape[-1], device="cuda").view(1, -1) >= top_ks.view(-1, 1)] = 0.0
+    probs_sort[torch.arange(0, probs.shape[-1], device=probs.device).view(1, -1) >= top_ks.view(-1, 1)] = 0.0
 
     return probs_sort, probs_idx
 
@@ -213,15 +214,18 @@ def _top_p_top_k_sample(
     b_top_ps: torch.Tensor,
     b_top_ks: torch.Tensor,
     exist_req_use_random_seed: bool,
+    recover_bad_samples: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     sampling_backend = get_env_start_args().sampling_backend
 
     if sampling_backend == "triton":
         probs_sort, probs_idx = _top_p_top_k(probs, b_top_ps, b_top_ks)
-        if not exist_req_use_random_seed:
-            sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
-        else:
+        # For one draw, multinomial also uses an exponential race. Avoid its
+        # batch-wide device assert so Decode can reject only the affected request.
+        if exist_req_use_random_seed or recover_bad_samples:
             sampled_index = _random_sample(probs_sort, reqs, exist_req_use_random_seed).view(-1, 1)
+        else:
+            sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
         next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
         next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
         return next_token_ids.view(-1), next_token_logprobs.view(-1)
@@ -251,7 +255,7 @@ def _random_sample(probs: torch.Tensor, reqs: List[InferReq], exist_req_use_rand
         for i, req in enumerate(reqs):
             if req.generator is not None:
                 q[i].exponential_(generator=req.generator)
-    return probs.div(q).argmax(dim=-1).view(-1)
+    return torch.div(probs, q, out=q).argmax(dim=-1).view(-1)
 
 
 def _get_post_sample_tensors(reqs: List[InferReq], sampling_params_manager, has_output=None):

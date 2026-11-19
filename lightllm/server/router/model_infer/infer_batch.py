@@ -1001,6 +1001,23 @@ class InferReqUpdatePack:
         self.req_obj = req_obj
         self.output_len = output_len
 
+    def fail_sampling(self, logprob: float, is_master_in_dp: bool):
+        req = self.req_obj
+        # MTP reserved all accepted rows before sampling results reached the CPU.
+        # Keep the allocations for cleanup and discard the uncached tail.
+        req.cur_output_len = self.output_len - 1
+        req.cache_tiers = ()
+        if req.finish_status.is_finished():
+            return
+
+        req.finish_status.set_status(FinishStatus.FINISHED_ERROR)
+        if is_master_in_dp:
+            req.shm_req.mark_simulated_finished(FinishStatus.FINISHED_ERROR, output_len=req.cur_output_len)
+            logger.error(
+                f"nonfinite sampled logprob {logprob} for req_id={req.req_id}, "
+                f"output_index={req.cur_output_len}, constrained={req.output_constraint is not None}"
+            )
+
     def handle(
         self,
         next_token_id: int,

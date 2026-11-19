@@ -667,6 +667,13 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         cached_tokens = 0
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
+            current_finish_reason = finish_status.get_finish_reason()
+            if current_finish_reason == "error":
+                raise GenerationError(
+                    "Generation failed during streaming"
+                    if completion_tokens
+                    else "Generation failed before producing output"
+                )
             prompt_tokens = metadata["prompt_tokens"]
             cached_tokens = metadata.get("prompt_cache_len", 0)
             completion_tokens += 1
@@ -678,10 +685,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             if logprob_buffers is not None:
                 logprob_buffer = logprob_buffers[sub_req_id]
                 logprob_buffer.record(text=delta, metadata=metadata, finish_status=finish_status)
-            current_finish_reason = finish_status.get_finish_reason()
-            if current_finish_reason == "error" and completion_tokens == 1:
-                raise GenerationError("Generation failed before producing output")
-
             # Emit the initial role-only chunk once per choice, as required by the
             # OpenAI SSE spec: role appears only in the first delta with content="".
             if not has_emitted_first_chunk[choice_index]:
@@ -1132,6 +1135,12 @@ async def _handle_streaming_completion(
         try:
             async for sub_req_id, output_text, metadata, finish_status in results_generator:
                 finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
+                if finish_status.is_finished_error():
+                    raise GenerationError(
+                        "Generation failed during streaming"
+                        if completion_tokens
+                        else "Generation failed before producing output"
+                    )
                 group_request_id = convert_sub_id_to_group_id(sub_req_id)
                 choice_index = sub_req_id - group_request_id
                 prompt_tokens = metadata["prompt_tokens"]

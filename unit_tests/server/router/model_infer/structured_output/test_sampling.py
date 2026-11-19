@@ -12,6 +12,8 @@ from unit_tests.server.grammar_helpers import (
 )
 from lightllm.common.req_manager import req_sampling_params
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
+from lightllm.server.core.objs import FinishStatus
+from lightllm.server.router.model_infer.infer_batch import InferReqUpdatePack
 from lightllm.server.router.model_infer.mode_backend import generic_post_process as sampling
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mtp_speculative.utils import scatter_mtp_next_tokens
@@ -107,6 +109,69 @@ def test_sample_returns_requested_output_logprobs(compiler, sampling_manager, mo
         torch.testing.assert_close(row.logprobs, reference[0, row.token_ids].cpu())
     else:
         assert output_topk_logprobs == [None]
+
+
+@pytest.mark.parametrize("output_topk", [-1, 0, 3])
+@pytest.mark.parametrize("bad_logit", [-torch.inf, torch.inf, torch.nan])
+def test_sample_preserves_invalid_row_for_recovery(compiler, sampling_manager, monkeypatch, output_topk, bad_logit):
+    reqs = [sampling_req(compiler, sampling_manager, req_idx=i, regular_constraint=None) for i in range(2)]
+    for req in reqs:
+        req.sampling_param.shm_param.top_k = 50
+        req.sampling_param.shm_param.top_p = 0.8
+        req.sampling_param.shm_param.output_top_logprobs = output_topk
+    monkeypatch.setattr(sampling, "get_env_start_args", lambda: SimpleNamespace(sampling_backend="triton"))
+    logits = torch.full((2, reqs[0].vocab_size), -torch.inf, device="cuda")
+    logits[0, 5] = 0.0
+    logits[1, 0] = bad_logit
+
+    token_ids, logprobs, _ = sampling.sample(logits, reqs, [256], recover_bad_samples=True)
+
+    assert token_ids[0].item() == 5
+    assert logprobs[0].item() == 0.0
+    assert not torch.isfinite(logprobs[1]).item()
+
+
+def test_bad_sample_finishes_only_its_request(sampling_manager, monkeypatch):
+    def request(req_id, output_len):
+        return SimpleNamespace(
+            req_id=req_id,
+            cur_output_len=output_len,
+            hold_kv_len=16,
+            finish_status=FinishStatus(),
+            shm_req=SimpleNamespace(mark_simulated_finished=MagicMock(), input_len=7),
+            output_constraint=None,
+            set_next_gen_token_id=MagicMock(),
+            update_finish_status=MagicMock(),
+        )
+
+    failed = request(101, 3)
+    healthy = request(202, 1)
+    packs = [InferReqUpdatePack(failed, n) for n in range(1, 4)] + [InferReqUpdatePack(healthy, 1)]
+    token_counter = MagicMock()
+    monkeypatch.setattr(sampling_manager, "update_reqs_token_counter", token_counter)
+    backend = SimpleNamespace(eos_id=[256], is_master_in_dp=True)
+
+    ModeBackend._post_handle(
+        backend,
+        [failed, failed, failed, healthy],
+        torch.tensor([7, 8, 9, 10]),
+        torch.tensor([0.0, torch.nan, 0.0, 0.0]),
+        torch.zeros(4, dtype=torch.int32),
+        [None] * 4,
+        packs,
+        recover_bad_samples=True,
+    )
+
+    assert failed.finish_status.is_finished_error()
+    assert failed.cur_output_len == 1
+    assert failed.hold_kv_len == 16
+    assert failed.cache_tiers == ()
+    failed.shm_req.mark_simulated_finished.assert_called_once_with(FinishStatus.FINISHED_ERROR, output_len=1)
+    failed.set_next_gen_token_id.assert_called_once_with(7, 0.0, 1, rank=0)
+    healthy.set_next_gen_token_id.assert_called_once_with(10, 0.0, 1, rank=0)
+    assert not healthy.finish_status.is_finished()
+    assert healthy.shm_req.candetoken_out_len == 1
+    token_counter.assert_called_once_with(req_objs=[healthy], next_token_ids=[10])
 
 
 def test_sample_candidate_logprobs_follow_mtp_row_selection(compiler, sampling_manager, monkeypatch):

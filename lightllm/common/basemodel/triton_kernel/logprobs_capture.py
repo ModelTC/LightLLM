@@ -146,7 +146,7 @@ def _output_logprobs_finish(
     higher_tiles = tl.arange(0, TILE_BLOCK)
     higher = tl.sum(tl.load(higher_counts + index * tiles + higher_tiles, higher_tiles < tiles, 0), 0)
     outside = (higher >= 20) | ~(tl.abs(sampled) < float("inf"))
-    tl.store(sampled_logprobs + row, -9999.0, mask=outside)
+    tl.store(sampled_logprobs + row, -9999.0, mask=outside & (tl.abs(sampled_logprob) < float("inf")))
 
 
 def capture_output_logprobs(

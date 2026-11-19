@@ -116,7 +116,7 @@ else
     ARGS+=(
       --use_dp_split_mode_connect_pd_master
       --batch_max_tokens 8192 --chunked_prefill_size 8192
-      --running_max_req_size 128 --mem_fraction 0.75 --disable_cudagraph
+      --running_max_req_size 128 --mem_fraction 0.72 --disable_cudagraph
       --mtp_step 1 --ssm_state_mode native
       --linear_att_page_block_num 8
       --enable_cpu_cache --cpu_cache_storage_size 512
