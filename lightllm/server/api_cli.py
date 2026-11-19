@@ -39,7 +39,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Number of httpserver worker processes. When omitted, normal mode uses 1 and " "prefill/decode nodes use 2."
+            "Number of httpserver worker processes. When omitted, normal mode uses 1 and "
+            "prefill/decode nodes use 2. Multinode TP slaves always use 1."
         ),
     )
     parser.add_argument(

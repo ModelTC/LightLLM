@@ -524,17 +524,27 @@ def test_httpserver_workers_cli_defaults_to_unset():
 
 
 @pytest.mark.parametrize(
-    ("run_mode", "workers", "expected"),
+    ("run_mode", "workers", "dp", "nnodes", "node_rank", "expected"),
     [
-        ("normal", None, 1),
-        ("prefill", None, 2),
-        ("decode", None, 2),
-        ("pd_master", None, 1),
-        ("prefill", 1, 1),
-        ("normal", 3, 3),
+        ("normal", None, 1, 1, 0, 1),
+        ("prefill", None, 1, 1, 0, 2),
+        ("decode", None, 1, 1, 0, 2),
+        ("pd_master", None, 1, 1, 0, 1),
+        ("prefill", 1, 1, 1, 0, 1),
+        ("normal", 3, 1, 1, 0, 3),
+        ("prefill", None, 1, 2, 0, 2),
+        ("prefill", None, 1, 2, 1, 1),
+        ("decode", None, 1, 2, 1, 1),
+        ("normal", None, 1, 2, 1, 1),
+        ("prefill", 4, 1, 2, 1, 1),
+        ("decode", 4, 1, 2, 1, 1),
+        ("normal", 3, 1, 2, 1, 1),
+        ("decode", None, 2, 2, 1, 2),
     ],
 )
-def test_unset_httpserver_workers_follow_run_mode(monkeypatch, run_mode, workers, expected):
+def test_httpserver_workers_follow_run_mode_and_topology(
+    monkeypatch, run_mode, workers, dp, nnodes, node_rank, expected
+):
     from lightllm.server import api_server, api_start
 
     seen = {}
@@ -548,7 +558,9 @@ def test_unset_httpserver_workers_follow_run_mode(monkeypatch, run_mode, workers
     monkeypatch.setattr(api_server, "set_log_node_role", Mock())
     monkeypatch.setattr(api_server.torch.multiprocessing, "set_start_method", Mock())
 
-    api_server.launch_server(StartArgs(run_mode=run_mode, httpserver_workers=workers))
+    api_server.launch_server(
+        StartArgs(run_mode=run_mode, httpserver_workers=workers, dp=dp, nnodes=nnodes, node_rank=node_rank)
+    )
     assert seen["workers"] == expected
 
 
