@@ -37,9 +37,9 @@ Architecture
    Prefill / Decode
      1. Read pd_master_multi_ports from /get_server_info on the public port
      2. Use each worker port as its local multiprocess pd_node_id
-     3. Connect directly to /pd_register and /kv_move_status on every worker
+     3. Connect directly to /pd_register on every worker; Decode also connects to /pd_report for KV handshakes
 
-HAProxy does not proxy P/D WebSockets. ``/pd_register`` and ``/kv_move_status`` return HTTP 426 on
+HAProxy does not proxy P/D WebSockets. ``/pd_register`` and ``/pd_report`` return HTTP 426 on
 the public port. P/D nodes must be able to reach every port in ``pd_master_multi_ports`` directly.
 Each request remains owned by the worker that accepted it, and per-token data never crosses a shared
 RPyC service.

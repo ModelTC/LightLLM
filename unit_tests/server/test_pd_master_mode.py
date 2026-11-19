@@ -315,8 +315,8 @@ def test_prefill_reconnection_preserves_other_nodes_inflight_prompt_chars():
     manager.register_pd(pd_info(3, "10.0.0.2:8000"), websocket=object())
 
     assert [node.client_ip_port for node in manager.prefill_nodes] == ["10.0.0.1:8000", "10.0.0.2:8000"]
-    assert [node.dispatched_prompt_chars for node in manager.prefill_nodes] == [100, 0]
-    assert [node.dispatched_req_num for node in manager.prefill_nodes] == [1, 0]
+    assert [node.dispatched_prompt_chars for node in manager.prefill_nodes] == [100, 200]
+    assert [node.dispatched_req_num for node in manager.prefill_nodes] == [1, 2]
 
 
 def test_pd_master_inference_health_matches_normal_node_semantics(monkeypatch):
@@ -515,6 +515,53 @@ def test_pd_rejects_final_metadata_features_before_startup(monkeypatch, run_mode
     start = getattr(api_start, start_name)
     with pytest.raises(ValueError, match="PD mode does not support"):
         start(StartArgs(run_mode=run_mode, httpserver_workers=workers, **{feature: True}))
+
+
+def test_httpserver_workers_cli_defaults_to_unset():
+    parser = make_argument_parser()
+    assert parser.parse_args([]).httpserver_workers is None
+    assert parser.parse_args(["--httpserver_workers", "4"]).httpserver_workers == 4
+
+
+@pytest.mark.parametrize(
+    ("run_mode", "workers", "dp", "nnodes", "node_rank", "expected"),
+    [
+        ("normal", None, 1, 1, 0, 1),
+        ("prefill", None, 1, 1, 0, 2),
+        ("decode", None, 1, 1, 0, 2),
+        ("pd_master", None, 1, 1, 0, 1),
+        ("prefill", 1, 1, 1, 0, 1),
+        ("normal", 3, 1, 1, 0, 3),
+        ("prefill", None, 1, 2, 0, 2),
+        ("prefill", None, 1, 2, 1, 1),
+        ("decode", None, 1, 2, 1, 1),
+        ("normal", None, 1, 2, 1, 1),
+        ("prefill", 4, 1, 2, 1, 1),
+        ("decode", 4, 1, 2, 1, 1),
+        ("normal", 3, 1, 2, 1, 1),
+        ("decode", None, 2, 2, 1, 2),
+    ],
+)
+def test_httpserver_workers_follow_run_mode_and_topology(
+    monkeypatch, run_mode, workers, dp, nnodes, node_rank, expected
+):
+    from lightllm.server import api_server, api_start
+
+    seen = {}
+
+    def capture(args):
+        seen["workers"] = args.httpserver_workers
+
+    monkeypatch.setattr(api_start, "normal_or_p_d_start", capture)
+    monkeypatch.setattr(api_start, "pd_master_start", capture)
+    monkeypatch.setattr(api_start, "pd_master_multi_worker_start", capture)
+    monkeypatch.setattr(api_server, "set_log_node_role", Mock())
+    monkeypatch.setattr(api_server.torch.multiprocessing, "set_start_method", Mock())
+
+    api_server.launch_server(
+        StartArgs(run_mode=run_mode, httpserver_workers=workers, dp=dp, nnodes=nnodes, node_rank=node_rank)
+    )
+    assert seen["workers"] == expected
 
 
 @pytest.mark.parametrize("workers", [1, 2, 0])

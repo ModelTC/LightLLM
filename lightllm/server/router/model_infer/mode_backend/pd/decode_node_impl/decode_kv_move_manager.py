@@ -41,18 +41,12 @@ def _init_env(args, info_queue: mp.Queue, event: mp.Event):
         graceful_registry(inspect.currentframe().f_code.co_name)
         setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::decode_kv_move_manager")
 
-        from .up_status import start_up_kv_status_process
-
-        up_status_in_queue = mp.SimpleQueue()
-        start_up_kv_status_process(args, up_status_in_queue)
-
         from .decode_trans_process import start_decode_trans_process
 
         manager = DecodeKVMoveManager(
             args=args,
             info_queue=info_queue,
             start_trans_process_func=start_decode_trans_process,
-            up_status_in_queue=up_status_in_queue,
         )
         assert manager is not None
         event.set()
@@ -67,18 +61,11 @@ def _init_env(args, info_queue: mp.Queue, event: mp.Event):
 
 
 class DecodeKVMoveManager(BaseKVMoveManager):
-    def __init__(
-        self,
-        args: StartArgs,
-        info_queue: mp.Queue,
-        start_trans_process_func: Callable,
-        up_status_in_queue: mp.SimpleQueue,
-    ):
+    def __init__(self, args: StartArgs, info_queue: mp.Queue, start_trans_process_func: Callable):
         super().__init__(
             args=args,
             info_queue=info_queue,
             start_trans_process_func=start_trans_process_func,
-            up_status_in_queue=up_status_in_queue,
         )
         return
 

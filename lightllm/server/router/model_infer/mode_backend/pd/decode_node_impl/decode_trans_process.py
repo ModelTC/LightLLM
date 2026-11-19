@@ -14,10 +14,11 @@ from lightllm.server.router.model_infer.mode_backend.pd.resource_io import alloc
 from lightllm.server.pd_io_struct import (
     PDChunckedTransTask,
     PDChunckedTransTaskGroup,
-    PDUpKVStatus,
     PDAbortReq,
+    PDDecodeNodeInfo,
+    PDUpKVStatus,
 )
-from lightllm.server.pd_io_struct import PDDecodeNodeInfo
+from lightllm.server.pd_report.ipc import ReportIpc
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..kv_transporter import create_kv_transporter
@@ -33,9 +34,8 @@ def start_decode_trans_process(
     device_id,
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
-    up_status_in_queue: Optional[mp.SimpleQueue],
 ):
-    proc = mp.Process(target=_init_env, args=(args, device_id, task_in_queue, task_out_queue, up_status_in_queue))
+    proc = mp.Process(target=_init_env, args=(args, device_id, task_in_queue, task_out_queue))
     proc.start()
     assert proc.is_alive()
     logger.info(f"prefill trans kv process for device: {device_id} started!")
@@ -47,7 +47,6 @@ def _init_env(
     device_id: int,
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
-    up_status_in_queue: Optional[mp.SimpleQueue],
 ):
     install_fatal_thread_excepthook()
     start_parent_check_thread()
@@ -99,7 +98,6 @@ def _init_env(
             task_in_queue=task_in_queue,
             task_out_queue=task_out_queue,
             resource_managers=resource_managers,
-            up_status_in_queue=up_status_in_queue,
         )
         assert manager is not None
         task_out_queue.put("module_ready")
@@ -122,7 +120,6 @@ class _DecodeTransModule:
         task_in_queue: mp.Queue,
         task_out_queue: mp.Queue,
         resource_managers: List[AttentionStateManager],
-        up_status_in_queue: Optional[mp.SimpleQueue],
     ):
         self.args = args
         self.dp_world_size = self.args.tp // self.args.dp
@@ -130,7 +127,8 @@ class _DecodeTransModule:
         self.task_in_queue = task_in_queue
         self.task_out_queue = task_out_queue
         self.resource_managers = resource_managers
-        self.up_status_in_queue = up_status_in_queue
+        # 本机 PUSH 到 pd_report。第一次发送时才 connect。
+        self.pd_report_push = ReportIpc.Push()
         kv_move_buffer = allocate_transfer_buffer(
             self.resource_managers[device_id], self.args.pd_kv_page_num, device=f"cuda:{device_id}"
         )
@@ -233,27 +231,28 @@ class _DecodeTransModule:
                         task.start_trans_time = time.time()
                         self.success_queue.put((None, None, task))
 
-            # up status
-            task = trans_task_group.task_list[0]
+            # 任务已经进 waiting_dict，这时才把 KV 握手交给本机 httpserver。
+            self._push_up_kv_status(task=trans_task_group.task_list[0])
 
-            decode_node_info = PDDecodeNodeInfo(
-                decode_node_id=self.args.pd_node_id,
-                pd_master_node_id=task.pd_master_node_id,
-                agent_name=self.transporter.agent_name,
-                agent_metadata=self.transporter.agent_metadata,
-                num_pages=self.transporter.num_pages,
-                page_reg_desc=self.transporter.local_page_mem_desc,
-                request_id=task.request_id,
-                ready_kv_len=task.start_kv_index,
-            )
-
-            up_status = PDUpKVStatus(
-                group_request_id=task.request_id,
-                pd_master_node_id=task.pd_master_node_id,
-                pd_kv_trans_params=pickle.dumps(decode_node_info),
-            )
-
-            self.up_status_in_queue.put(up_status)
+    def _push_up_kv_status(self, task: PDChunckedTransTask) -> None:
+        # Prefill 拿到端点就会来写，所以必须晚于 waiting_dict 插入。
+        decode_node_info = PDDecodeNodeInfo(
+            decode_node_id=self.args.pd_node_id,
+            pd_master_node_id=task.pd_master_node_id,
+            agent_name=self.transporter.agent_name,
+            agent_metadata=self.transporter.agent_metadata,
+            num_pages=self.transporter.num_pages,
+            page_reg_desc=self.transporter.local_page_mem_desc,
+            request_id=task.request_id,
+            ready_kv_len=task.start_kv_index,
+        )
+        up_status = PDUpKVStatus(
+            group_request_id=task.request_id,
+            pd_master_node_id=task.pd_master_node_id,
+            pd_kv_trans_params=pickle.dumps(decode_node_info),
+        )
+        # 送给本机 pd_report，由它按状态上的 pd_master_node_id 写到对应 Master 的 /pd_report。
+        self.pd_report_push.send(message=up_status)
 
     @log_exception
     def accept_peer_task_loop(

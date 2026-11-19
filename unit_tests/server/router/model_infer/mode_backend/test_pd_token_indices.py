@@ -45,23 +45,15 @@ def test_pd_uploads_cpu_indices_on_copy_stream_and_skips_runtime_pages(
     monkeypatch.setattr(implementation, "copy_page", capture_copy)
     monkeypatch.setattr(implementation, "create_kv_transporter", lambda **kwargs: SimpleNamespace())
     monkeypatch.setattr(implementation.threading.Thread, "start", lambda self: None)
-    if prefill:
-        module = module_class(
-            args=args,
-            device_id=device_id,
-            task_in_queue=None,
-            task_out_queue=None,
-            resource_managers=[resource, resource],
-        )
-    else:
-        module = module_class(
-            args=args,
-            device_id=device_id,
-            task_in_queue=None,
-            task_out_queue=None,
-            resource_managers=[resource, resource],
-            up_status_in_queue=None,
-        )
+    # 本用例只验证 GPU 索引拷贝，不启动 KV 握手上报通道。
+    monkeypatch.setattr(decode_trans_process.ReportIpc, "Push", Mock())
+    module = module_class(
+        args=args,
+        device_id=device_id,
+        task_in_queue=None,
+        task_out_queue=None,
+        resource_managers=[resource, resource],
+    )
 
     # 构造时两个 DP 的预热均上传单个零索引。
     assert [indices.cpu().tolist() for _, indices in copies] == [[0], [0]]

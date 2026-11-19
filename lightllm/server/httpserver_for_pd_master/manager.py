@@ -102,10 +102,12 @@ class HttpServerManagerForPDMaster:
     async def register_pd(self, pd_info_json, websocket):
         return self.pd_manager.register_pd(pd_info_json, websocket)
 
-    async def remove_pd(self, pd_client: PD_Client_Obj):
-        self.pd_manager.remove_pd(pd_client)
+    async def remove_pd(self, pd_client: PD_Client_Obj, websocket=None):
+        self.pd_manager.remove_pd(pd_client=pd_client, websocket=websocket)
+        if websocket is None:
+            return
         for req_status in tuple(self.req_id_to_out_inf.values()):
-            if req_status.p_node is pd_client or req_status.d_node is pd_client:
+            if websocket in (req_status.p_websocket, req_status.d_websocket):
                 await req_status.set_error(f"PD {pd_client.mode} node {pd_client.client_ip_port} disconnected")
         return
 
@@ -578,8 +580,11 @@ class HttpServerManagerForPDMaster:
     ):
         group_request_id = sampling_params.group_request_id
         sampling_params.pd_master_node_id.initialize(self.args.pd_node_id)
-
-        req_status = ReqStatus(group_request_id, p_node, d_node)
+        p_websocket = p_node.pick_websocket()
+        d_websocket = d_node.pick_websocket()
+        if p_websocket is None or d_websocket is None:
+            raise ServerBusyError("pd node has no live httpserver connection")
+        req_status = ReqStatus(group_request_id, p_node, d_node, p_websocket, d_websocket)
         self.req_id_to_out_inf[group_request_id] = req_status
 
         up_status_event = req_status.up_status_event
@@ -589,7 +594,7 @@ class HttpServerManagerForPDMaster:
         sampling_params.max_new_tokens = 1
         prefill_payload = pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params)))
         self._reject_oversized_control_message(payload=prefill_payload, group_request_id=group_request_id)
-        await p_node.websocket.send_bytes(prefill_payload)
+        await p_websocket.send_bytes(prefill_payload)
 
         try:
             await self._wait_for_event_or_disconnect(
@@ -610,7 +615,7 @@ class HttpServerManagerForPDMaster:
         sampling_params.max_new_tokens = old_max_new_tokens
         decode_payload = pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
         self._reject_oversized_control_message(payload=decode_payload, group_request_id=group_request_id)
-        await d_node.websocket.send_bytes(decode_payload)
+        await d_websocket.send_bytes(decode_payload)
 
         # Master 在等 Decode 上报。截止时间要盖住 Decode 拿到请求后的两段资源等待。
         # 两段各用一份预算，并且前后分开计时：_alloc_shm_req_indexes 先等共享请求槽，
@@ -645,7 +650,7 @@ class HttpServerManagerForPDMaster:
         upkv_status: PDUpKVStatus = up_status_event.upkv_status
         pd_kv_trans_params: bytes = upkv_status.pd_kv_trans_params
         decode_node_info: PDDecodeNodeInfo = pickle.loads(pd_kv_trans_params)
-        await p_node.websocket.send_bytes(
+        await p_websocket.send_bytes(
             pickle.dumps((ObjType.PD_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
         )
 
@@ -827,25 +832,20 @@ class HttpServerManagerForPDMaster:
         self, group_request_id, p_node: Optional[PD_Client_Obj] = None, d_node: Optional[PD_Client_Obj] = None
     ):
         logger.warning(f"aborted group_request_id {group_request_id}")
-
+        payload = pickle.dumps((ObjType.ABORT, group_request_id))
         try:
-            req_status = self.req_id_to_out_inf[group_request_id]
-            del self.req_id_to_out_inf[group_request_id]
-            p_node = req_status.p_node
-            d_node = req_status.d_node
-        except:
-            pass
-
-        try:
-            await p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
-        except:
-            pass
-
-        try:
-            await d_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
-        except:
-            pass
-
+            req_status = self.req_id_to_out_inf.pop(group_request_id)
+            targets = [req_status.p_websocket, req_status.d_websocket]
+        except KeyError:
+            targets = []
+            for node in (p_node, d_node):
+                if node is not None:
+                    targets.extend(node.sub_connections.values())
+        for websocket in targets:
+            try:
+                await websocket.send_bytes(payload)
+            except:
+                pass
         return
 
     async def remove_req(self, group_request_id):
@@ -916,6 +916,9 @@ class HttpServerManagerForPDMaster:
                             )
                         else:
                             await req_status.set_error(error_info)
+                    elif obj[0] == ObjType.PD_UPLOAD_KV_STATUS:
+                        # 注册连接上的 KV 握手，唤醒正在等端点信息的请求。
+                        await self.update_req_status(obj[1])
                     elif obj[0] == ObjType.PD_UPLOAD_SERVER_BUSY:
                         _, group_req_id, error_info = obj
                         logger.warning(
@@ -934,7 +937,7 @@ class HttpServerManagerForPDMaster:
 
 
 class ReqStatus:
-    def __init__(self, req_id, p_node, d_node) -> None:
+    def __init__(self, req_id, p_node, d_node, p_websocket, d_websocket) -> None:
         self.req_id = req_id
         self.lock = asyncio.Lock()
         self.event = asyncio.Event()
@@ -943,6 +946,8 @@ class ReqStatus:
         self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
+        self.p_websocket = p_websocket
+        self.d_websocket = d_websocket
         self.error_info: Optional[str] = None
         self.is_server_busy = False
 
@@ -1064,7 +1069,9 @@ class PDManager:
         return True
 
     def register_pd(self, pd_info_json, websocket):
-        pd_client = PD_Client_Obj(**pd_info_json)
+        info = dict(pd_info_json)
+        connection_id = info.pop("connection_id", None)
+        pd_client = PD_Client_Obj(**info)
         client_max_req_total_len = pd_client.start_args["max_req_total_len"]
         if client_max_req_total_len != self.args.max_req_total_len:
             logger.error(
@@ -1086,28 +1093,43 @@ class PDManager:
                     logger.error(error_info)
                     raise ValueError(error_info)
 
-        pd_client.websocket = websocket
-        self.url_to_pd_nodes[pd_client.connection_key] = pd_client
+        node = self.url_to_pd_nodes.get(pd_client.connection_key)
+        if node is None:
+            node = pd_client
+            self.url_to_pd_nodes[node.connection_key] = node
+            if node.mode == "prefill":
+                self.prefill_nodes.append(node)
+            elif node.mode == "decode":
+                self.decode_nodes.append(node)
+            else:
+                assert False, f"mode must in ['prefill', 'decode'], but get {node.mode}"
+            self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
 
-        if pd_client.mode == "prefill":
-            self.prefill_nodes = [e for e in self.prefill_nodes if e.connection_key != pd_client.connection_key]
-            self.prefill_nodes.append(pd_client)
-        elif pd_client.mode == "decode":
-            self.decode_nodes = [e for e in self.decode_nodes if e.connection_key != pd_client.connection_key]
-            self.decode_nodes.append(pd_client)
-        else:
-            assert False, f"mode must in ['prefill', 'decode'], but get {pd_client.mode}"
+        node.sub_connections[connection_id] = websocket
+        logger.info(
+            f"mode: {node.mode} url: {node.client_ip_port} dp_index: {node.dp_index} "
+            f"connection_id: {connection_id} registed"
+        )
+        return node
 
-        self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
+    def remove_pd(self, pd_client, websocket=None):
+        # 只摘掉这条 websocket。相同 connection_id 已经换上新连接时，不要把新的删掉。
+        if websocket is not None:
+            removed_connection_id = None
+            for connection_id, current in list(pd_client.sub_connections.items()):
+                if current is websocket:
+                    pd_client.sub_connections.pop(connection_id, None)
+                    removed_connection_id = connection_id
+                    break
+            if pd_client.sub_connections:
+                if removed_connection_id is not None:
+                    logger.info(
+                        f"mode: {pd_client.mode} url: {pd_client.client_ip_port} dp_index: {pd_client.dp_index} "
+                        f"connection_id: {removed_connection_id} removed, "
+                        f"{len(pd_client.sub_connections)} connections remain"
+                    )
+                return
 
-        logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} registed")
-        return pd_client
-
-    def remove_pd(self, pd_client: PD_Client_Obj):
-        # ReqStatus objects may still hold this object after a reconnect. Clear
-        # its socket first so stale requests cannot send through a dead socket,
-        # even when a replacement already occupies the same connection key.
-        pd_client.websocket = None
         if self.url_to_pd_nodes.get(pd_client.connection_key) is not pd_client:
             return
 

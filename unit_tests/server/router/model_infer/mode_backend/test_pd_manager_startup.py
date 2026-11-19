@@ -89,10 +89,6 @@ def _run_startup_failure(mode, late_monitor, result_connection):
         setattr(transport, f"start_{mode}_trans_process", lambda *args, **kwargs: None)
         sys.modules[transport.__name__] = transport
         sys.modules["lightllm.utils.rpyc_fix_utils"] = ModuleType("lightllm.utils.rpyc_fix_utils")
-        if mode == "decode":
-            up_status = ModuleType(f"{package_name}.up_status")
-            up_status.start_up_kv_status_process = start_worker
-            sys.modules[up_status.__name__] = up_status
 
         ready = ctx.Event()
         manager = ctx.Process(target=manager_module._init_env, args=(SimpleNamespace(), None, ready))
@@ -104,7 +100,7 @@ def _run_startup_failure(mode, late_monitor, result_connection):
 
         # In the late case workers are already reparented when they start the monitor.
         start_monitor.set()
-        worker_count = 2 if mode == "decode" else 1
+        worker_count = 1
         workers = set()
         monitor_parents = {}
         logged_failure = False

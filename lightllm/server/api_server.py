@@ -7,6 +7,7 @@ logger = init_logger(__name__)
 
 
 def launch_server(args: StartArgs):
+    _configure_httpserver_workers(args=args)
     if args.use_dp_split_mode_connect_pd_master and args.run_mode != "prefill":
         raise ValueError("--use_dp_split_mode_connect_pd_master only supports prefill")
     set_log_node_role(args.run_mode)
@@ -40,6 +41,25 @@ def launch_server(args: StartArgs):
         visual_only_start(args)
     else:
         normal_or_p_d_start(args)
+
+
+def _configure_httpserver_workers(args: StartArgs) -> None:
+    """设置 HTTP worker 数；跨机 TP 从节点固定为 1，其他节点保留用户配置或按模式取默认值。"""
+    is_multinode_tp_slave = args.dp == 1 and args.nnodes > 1 and args.node_rank > 0
+    if args.run_mode in ("normal", "prefill", "decode") and is_multinode_tp_slave:
+        # 每个 worker 都会绑定同一个 multinode_httpmanager_port，从节点只能启动一个。
+        if args.httpserver_workers not in (None, 1):
+            logger.warning("Multinode TP slave requires httpserver_workers=1; overriding the configured value")
+        args.httpserver_workers = 1
+        return
+
+    if args.httpserver_workers is not None:
+        return
+    if args.run_mode in ("prefill", "decode"):
+        args.httpserver_workers = 2
+    else:
+        args.httpserver_workers = 1
+    logger.info(f"run_mode={args.run_mode}, set httpserver_workers to {args.httpserver_workers}")
 
 
 if __name__ == "__main__":

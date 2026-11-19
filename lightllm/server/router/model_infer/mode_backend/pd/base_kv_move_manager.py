@@ -4,7 +4,7 @@ import signal
 import threading
 import queue
 import torch.multiprocessing as mp
-from typing import List, Dict, Union, Callable, Optional
+from typing import List, Dict, Union, Callable
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
 from lightllm.server.core.objs import StartArgs
@@ -21,7 +21,6 @@ class BaseKVMoveManager:
         args: StartArgs,
         info_queue: mp.Queue,
         start_trans_process_func: Callable,
-        up_status_in_queue: Optional[mp.SimpleQueue] = None,
     ):
         self.args = args
         # args.dp // args.nnodes 在跨机tp的场景下，可能为0
@@ -42,7 +41,6 @@ class BaseKVMoveManager:
                 device_id=device_id,
                 manager=self,
                 start_func=start_trans_process_func,
-                up_status_in_queue=up_status_in_queue,
             )
 
         for trans_process in self.kv_trans_processes:

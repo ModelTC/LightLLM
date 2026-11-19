@@ -76,15 +76,15 @@ def _make_manager(monkeypatch):
         client_ip_port="prefill:8000",
         mode="prefill",
         start_args={},
-        websocket=SimpleNamespace(send_bytes=AsyncMock()),
     )
+    p_node.sub_connections["test"] = SimpleNamespace(send_bytes=AsyncMock())
     d_node = PD_Client_Obj(
         node_id=200,
         client_ip_port="decode:8000",
         mode="decode",
         start_args={},
-        websocket=SimpleNamespace(send_bytes=AsyncMock()),
     )
+    d_node.sub_connections["test"] = SimpleNamespace(send_bytes=AsyncMock())
     mgr.pd_manager.prefill_nodes = [p_node]
     mgr.pd_manager.decode_nodes = [d_node]
     mgr.pd_manager.url_to_pd_nodes = {node.connection_key: node for node in [p_node, d_node]}
@@ -545,15 +545,18 @@ def test_pd_stop_request_marks_only_matching_choice(monkeypatch):
 
 def test_pd_abort_removes_output_channel_by_default(monkeypatch):
     manager = _make_manager(monkeypatch)
-    p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
-    d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
-    manager.req_id_to_out_inf = {88: SimpleNamespace(p_node=p_node, d_node=d_node), 96: object()}
+    p_ws = SimpleNamespace(send_bytes=AsyncMock())
+    d_ws = SimpleNamespace(send_bytes=AsyncMock())
+    manager.req_id_to_out_inf = {
+        88: SimpleNamespace(p_websocket=p_ws, d_websocket=d_ws),
+        96: object(),
+    }
 
     asyncio.run(manager.abort(88))
 
     assert set(manager.req_id_to_out_inf) == {96}
-    for node in (p_node, d_node):
-        node.websocket.send_bytes.assert_awaited_once()
+    p_ws.send_bytes.assert_awaited_once()
+    d_ws.send_bytes.assert_awaited_once()
 
 
 def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch):

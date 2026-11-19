@@ -491,6 +491,14 @@ def _launch_subprocesses(args: StartArgs):
         start_args=[(args,)],
     )
 
+    if args.run_mode == "decode":
+        from .pd_report.manager import start_pd_report_process
+
+        process_manager.start_submodule_processes(
+            start_funcs=[start_pd_report_process],
+            start_args=[(args,)],
+        )
+
     router_process, _ = process_manager.start_submodule_processes(
         start_funcs=[start_router_process, start_detokenization_process],
         start_args=[

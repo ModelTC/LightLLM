@@ -193,7 +193,8 @@ async def test_pd_first_token_uses_the_node_that_sampled_it(monkeypatch, needs_p
     manager.args = SimpleNamespace(pd_node_id=1)
     manager.req_id_to_out_inf = {}
     manager._wait_for_event_or_disconnect = AsyncMock()
-    node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+    socket = SimpleNamespace(send_bytes=AsyncMock())
+    node = SimpleNamespace(pick_websocket=lambda: socket)
     request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
     stream = pd_master.HttpServerManagerForPDMaster.fetch_pd_stream(
         manager, node, node, prompt_ids, params, {}, request
