@@ -13,7 +13,8 @@ P0/P1 and D0/D1 each form a TP16/DP16 group; the role supplies node_rank.
 Mount the same model at MODEL_DIR on all GPU hosts (default /nvme/sensenova-flash-320b-v22-v28-average-fp8-e8m0).
 Logs: RUN_DIR/logs/ROLE.log and stdout (RUN_DIR defaults /var/log/lightllm).
 Overrides: CONFIG_SERVER_PORT, CONFIG_SERVER_BIND_HOST, MODEL_DIR, MODEL_NAME, CPU_MODEL_DIR, SOURCE_DIR,
-CPU_SOURCE, GPU_SOURCE, PYTHON_BIN, RUN_DIR, MASTER_PORT, DISK_CACHE_DIR, LIGHTLLM_PD_CACHE_TREE_MAX_NODES.
+CPU_SOURCE, GPU_SOURCE, PYTHON_BIN, RUN_DIR, MASTER_PORT, DISK_CACHE_DIR, D_SAMPLING_BACKEND,
+LIGHTLLM_PD_CACHE_TREE_MAX_NODES.
 --dry-run prints commands and paths without starting services or writing files.
 EOF
 }
@@ -128,6 +129,7 @@ else
     ARGS+=(
       --batch_max_tokens 1024 --running_max_req_size 256
       --mem_fraction 0.85 --graph_max_batch_size 32 --dp_balancer bs_balancer
+      --sampling_backend "${D_SAMPLING_BACKEND:-triton}"
       --mtp_step 3 --ssm_state_mode replay
       --ssm_replay_config '{"cache_len":8,"compute_mode":"precompute"}'
     )

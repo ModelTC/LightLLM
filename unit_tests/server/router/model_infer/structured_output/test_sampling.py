@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Sampling 
 
 
 @pytest.fixture
-def sampling_manager(request, monkeypatch):
+def sampling_manager(request, monkeypatch, runtime_start_args):
     args = SimpleNamespace(
         penalty_counter_mode=getattr(request, "param", "cpu_counter"),
         model_dir="unused",

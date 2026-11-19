@@ -118,7 +118,13 @@ def sample(
         next_token_ids, next_token_logprobs = local_vocab_greedy_logprob(logits)
     else:
         probs = torch.softmax(logits, dim=-1)
-        if skip_top_k and skip_top_p:
+        skip_filters = skip_top_k and skip_top_p
+        if not exist_req_use_random_seed and get_env_start_args().sampling_backend == "flashinfer":
+            if skip_filters:
+                next_token_ids, next_token_logprobs = _flashinfer_sample(probs)
+            else:
+                next_token_ids, next_token_logprobs = _flashinfer_sample(probs, b_top_ps, b_top_ks)
+        elif skip_filters:
             next_token_ids = _random_sample(probs, reqs, exist_req_use_random_seed)
             next_token_logprobs = probs.gather(1, next_token_ids.view(-1, 1)).log().view(-1)
         else:
@@ -216,36 +222,40 @@ def _top_p_top_k_sample(
     exist_req_use_random_seed: bool,
     recover_bad_samples: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    sampling_backend = get_env_start_args().sampling_backend
-
-    if sampling_backend == "triton":
-        probs_sort, probs_idx = _top_p_top_k(probs, b_top_ps, b_top_ks)
-        # For one draw, multinomial also uses an exponential race. Avoid its
-        # batch-wide device assert so Decode can reject only the affected request.
-        if exist_req_use_random_seed or recover_bad_samples:
-            sampled_index = _random_sample(probs_sort, reqs, exist_req_use_random_seed).view(-1, 1)
-        else:
-            sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
-        next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
-        next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
-        return next_token_ids.view(-1), next_token_logprobs.view(-1)
-
-    elif sampling_backend == "flashinfer":
-        from flashinfer.sampling import top_k_top_p_sampling_from_probs
-
-        batch_next_token_ids = top_k_top_p_sampling_from_probs(
-            probs,
-            b_top_ks,
-            b_top_ps,
-            filter_apply_order="joint",
-            check_nan=False,
-        )
-        int64_batch_next_token_ids = torch.empty_like(batch_next_token_ids, dtype=torch.int64)
-        int64_batch_next_token_ids[:] = batch_next_token_ids
-        batch_next_token_probs = torch.gather(probs, dim=1, index=int64_batch_next_token_ids.view(-1, 1))
-        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
+    probs_sort, probs_idx = _top_p_top_k(probs, b_top_ps, b_top_ks)
+    # For one draw, multinomial also uses an exponential race. Avoid its
+    # batch-wide device assert so Decode can reject only the affected request.
+    if exist_req_use_random_seed or recover_bad_samples:
+        sampled_index = _random_sample(probs_sort, reqs, exist_req_use_random_seed).view(-1, 1)
     else:
-        assert False, "Unsupported sampling backend for top_p_top_k_sample"
+        sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
+    next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
+    next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
+    return next_token_ids.view(-1), next_token_logprobs.view(-1)
+
+
+def _flashinfer_sample(
+    probs: torch.Tensor, top_ps: Optional[torch.Tensor] = None, top_ks: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    from flashinfer.sampling import sampling_from_probs, top_k_top_p_sampling_from_probs
+
+    if top_ps is None:
+        token_ids, valid = sampling_from_probs(probs, return_valid=True)
+    else:
+        token_ids, valid = top_k_top_p_sampling_from_probs(
+            probs,
+            top_ks,
+            top_ps,
+            filter_apply_order="joint",
+            return_valid=True,
+        )
+
+    # EAGLE consumes int64 model input IDs. Invalid rows need an in-range
+    # placeholder until Decode postprocessing handles the nonfinite logprob.
+    invalid = ~valid
+    token_ids = token_ids.to(dtype=torch.int64).masked_fill_(invalid, 0)
+    token_logprobs = probs.gather(1, token_ids.unsqueeze(1)).squeeze(1).log_()
+    return token_ids, token_logprobs.masked_fill_(invalid, -torch.inf)
 
 
 def _random_sample(probs: torch.Tensor, reqs: List[InferReq], exist_req_use_random_seed: bool):
