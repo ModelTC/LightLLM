@@ -11,8 +11,10 @@ from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 
 
 @pytest.fixture(
-    params=[fp.FlashInferDecodeAttState, fp8.Fp8FlashInferDecodeAttState, mla.MlaFlashInferDecodeAttState],
-    ids=["fp", "fp8", "mla"],
+    # The GQA FlashInfer decode wrapper is built by FlashInferGQADecodeStepBuilder; see
+    # unit_tests/common/attention/backends/test_gqa_flashinfer.py.
+    params=[mla.MlaFlashInferDecodeAttState],
+    ids=["mla"],
 )
 def decode_init(request, monkeypatch):
     state_cls = request.param
