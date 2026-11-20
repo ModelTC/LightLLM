@@ -41,6 +41,11 @@ def get_device_sm_count():
 
 
 @lru_cache(maxsize=None)
+def is_sm90_gpu():
+    return torch.cuda.get_device_capability() == (9, 0)
+
+
+@lru_cache(maxsize=None)
 def is_sm100_gpu():
     return torch.cuda.get_device_capability()[0] == 10
 

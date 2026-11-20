@@ -24,6 +24,7 @@ from .deepgemm import (
     get_mk_alignment_for_contiguous_layout,
 )
 from .fp4_mega import mega_moe_impl, use_sm100_mega_moe
+from .fp8_mega import mega_moe_impl as fp8_mega_moe_impl, use_sm90_mega_moe
 
 
 def fused_experts(
@@ -43,6 +44,12 @@ def fused_experts(
 ):
     assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
     check_ep_expert_dtype(quant_method)
+    if use_sm90_mega_moe(quant_method):
+        if alpha not in (None, 1.0) or (limit is not None and clamp_up_add_one):
+            raise NotImplementedError("SM90 MegaMoE supports standard SwiGLU and GLM clamped SwiGLU")
+        shared = shared_expert_func() if shared_expert_func is not None else None
+        routed = fp8_mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, limit)
+        return routed if shared is None else routed + shared
     if use_sm100_mega_moe(quant_method):
         if limit is not None:
             raise NotImplementedError("FP4 Mega MoE does not support clamped SwiGLU")

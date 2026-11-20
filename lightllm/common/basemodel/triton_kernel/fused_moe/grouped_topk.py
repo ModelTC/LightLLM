@@ -230,6 +230,8 @@ def triton_grouped_topk(
     out_topk_ids = torch.empty((token_num, topk), dtype=torch.long, device="cuda")
 
     assert total_expert_num % num_expert_group == 0
+    if token_num == 0:
+        return out_topk_weights, out_topk_ids
 
     if token_num <= 256:
         num_warps = 4
