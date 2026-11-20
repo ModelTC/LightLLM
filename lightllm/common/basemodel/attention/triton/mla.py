@@ -1,11 +1,48 @@
 import dataclasses
 import weakref
 import torch
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from typing import Tuple
+from ..base_att import (
+    BaseAttBackend,
+    BasePrefillAttState,
+    BaseDecodeAttState,
+    AttControl,
+    build_attention_batch,
+)
+from typing import TYPE_CHECKING, Tuple
+from lightllm.common.attention.backend import TensorAllocator
+from lightllm.common.attention.backends.mla import (
+    MLADecodeLayerInputs,
+    MLADecodeLayerConfig,
+    MLAPrefillLayerInputs,
+    MLAPrefillLayerConfig,
+)
+from lightllm.common.attention.backends.mla.triton import (
+    TritonMLADecodeBackend,
+    TritonMLADecodeStepArgs,
+    TritonMLAPrefillBackend,
+    TritonMLAPrefillStepArgs,
+)
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 
 class MlaTritonAttBackend(BaseAttBackend):
+    def __init__(self, model: "TpPartBaseModel") -> None:
+        super().__init__(model=model)
+        self.prefill_step_builder = TritonMLAPrefillBackend.get_step_builder_cls()()
+        # BaseAttBackend reuses one instance per model but reruns __init__ on every construction.
+        # Keep the decode step builder: captured CUDA graphs read the schedule buffers it owns.
+        if getattr(self, "decode_step_builder", None) is None:
+            # One decode step builder serves all MLA layers of the model, which share these dimensions;
+            # TritonMLADecodeImpl rejects step args built for a different configuration.
+            self.decode_step_builder = TritonMLADecodeBackend.get_step_builder_cls()(
+                num_heads=model.config["num_attention_heads"] // model.tp_world_size_,
+                kv_lora_rank=model.kv_lora_rank,
+                qk_rope_head_dim=model.qk_rope_head_dim,
+                dtype=model.data_type,
+            )
+
     def create_att_prefill_state(self, infer_state) -> "MlaTritonPrefillAttState":
         return MlaTritonPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
@@ -15,8 +52,11 @@ class MlaTritonAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class MlaTritonPrefillAttState(BasePrefillAttState):
-    def init_state(self):
-        pass
+    step_args: TritonMLAPrefillStepArgs | None = None
+
+    def init_state(self) -> None:
+        batch = build_attention_batch(self.infer_state, self.backend)
+        self.step_args = self.backend.prefill_step_builder.build(batch)
 
     def prefill_att(
         self,
@@ -34,42 +74,25 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
         if q.shape[2] == 256:
             # glm model
             return self._contiguous_kv_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
-        else:
-            return self._mla_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
 
-    def _mla_prefill_att(
-        self,
-        q: torch.Tensor,
-        k: Tuple[torch.Tensor, torch.Tensor],
-        v: torch.Tensor,
-        att_control: AttControl,
-        alloc_func=torch.empty,
-    ):
-        from lightllm.common.attention.kernels.mla.prefill.context_flashattention_nopad_with_v import (
-            context_attention_fwd_with_v,
-        )
-
-        qk_rope_head_dim = 64
-        q_nope, q_rope = q[:, :, :-qk_rope_head_dim], q[:, :, -qk_rope_head_dim:]
-        o_tensor = alloc_func((q_nope.shape[0], q_nope.shape[1], v.shape[-1]), dtype=q_nope.dtype, device=q.device)
-        k_nope, k_rope = k
         assert att_control.mla_prefill
-        softmax_scale = att_control.mla_prefill_dict["softmax_scale"]
-        context_attention_fwd_with_v(
-            q_nope,
-            q_rope,
-            k_nope,
-            k_rope,
-            v,
-            o_tensor,
-            self.infer_state.b_q_start_loc,
-            self.infer_state.b1_cu_kv_seq_len,
-            self.infer_state.b_seq_len,
-            self.infer_state.b_ready_cache_len,
-            self.infer_state.max_q_seq_len,
-            softmax_scale,
+        k_nope, k_rope = k
+        layer_config = MLAPrefillLayerConfig(
+            num_heads=q.shape[1],
+            qk_nope_head_dim=k_nope.shape[-1],
+            qk_rope_head_dim=k_rope.shape[-1],
+            v_head_dim=v.shape[-1],
+            softmax_scale=att_control.mla_prefill_dict["softmax_scale"],
+            dtype=q.dtype,
         )
-        return o_tensor
+        impl = self.backend.get_attention_impl(TritonMLAPrefillBackend, layer_config)
+        out = alloc_func((q.shape[0], q.shape[1], v.shape[-1]), dtype=q.dtype, device=q.device)
+        return impl.forward(
+            self.step_args,
+            MLAPrefillLayerInputs(q=q, k_nope=k_nope, k_rope=k_rope, v=v),
+            out=out,
+            alloc_func=alloc_func,
+        )
 
     def _contiguous_kv_prefill_att(
         self,
@@ -106,11 +129,12 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class MlaTritonDecodeAttState(BaseDecodeAttState):
-    def init_state(self):
-        pass
+    step_args: TritonMLADecodeStepArgs | None = None
 
-    def copy_for_decode_cuda_graph(self, new_state: "MlaTritonDecodeAttState"):
-        super().copy_for_decode_cuda_graph(new_state)
+    def init_state(self) -> None:
+        # Replay steps also build: the step builder rewrites the captured step's split schedule in place.
+        batch = build_attention_batch(self.infer_state, self.backend)
+        self.step_args = self.backend.decode_step_builder.build(batch)
 
     def decode_att(
         self,
@@ -118,8 +142,8 @@ class MlaTritonDecodeAttState(BaseDecodeAttState):
         k: torch.Tensor,
         v: torch.Tensor,
         att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ):
+        alloc_func: TensorAllocator = torch.empty,
+    ) -> torch.Tensor:
         assert (
             att_control.use_sliding_window is False
             and att_control.use_att_sink is False
@@ -127,40 +151,20 @@ class MlaTritonDecodeAttState(BaseDecodeAttState):
         )
         assert v is None
 
-        return self._mla_decode_att(
-            q=q,
-            k=k,
-            v=v,
-            att_control=att_control,
+        assert att_control.mla_decode
+        q_nope, q_rope = q
+        layer_config = MLADecodeLayerConfig(
+            num_heads=q_nope.shape[1],
+            kv_lora_rank=q_nope.shape[-1],
+            qk_rope_head_dim=q_rope.shape[-1],
+            softmax_scale=att_control.mla_decode_dict["softmax_scale"],
+            dtype=q_nope.dtype,
+        )
+        impl = self.backend.get_attention_impl(TritonMLADecodeBackend, layer_config)
+        out = alloc_func(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
+        return impl.forward(
+            self.step_args,
+            MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=k),
+            out=out,
             alloc_func=alloc_func,
         )
-
-    def _mla_decode_att(
-        self,
-        q: Tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl,
-        alloc_func=torch.empty,
-    ):
-        assert att_control.mla_decode
-        softmax_scale = att_control.mla_decode_dict["softmax_scale"]
-
-        from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding import (
-            gqa_token_decode_attention_flash_decoding,
-        )
-
-        qk_rope_head_dim = 64
-        q_nope, q_rope = q
-        kv = k
-
-        out = gqa_token_decode_attention_flash_decoding(
-            q_nope=q_nope,
-            q_rope=q_rope,
-            kv_nope=kv[:, :, :-qk_rope_head_dim],
-            kv_rope=kv[:, :, -qk_rope_head_dim:],
-            infer_state=self.infer_state,
-            softmax_scale=softmax_scale,
-            alloc_tensor_func=alloc_func,
-        )
-        return out
