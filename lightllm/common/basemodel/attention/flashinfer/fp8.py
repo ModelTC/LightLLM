@@ -14,7 +14,9 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
     def __init__(self, model):
         set_flashinfer_envs()
         super().__init__(model=model)
-        self.kv_data_type = torch.float8_e4m3fn
+
+    def _kv_data_type(self) -> torch.dtype:
+        return torch.float8_e4m3fn
 
     def _init_infer_page_size(self):
         # TODO: FP8 FlashInfer 完成多 token 推理页适配后，改为继承模型 page_size。
