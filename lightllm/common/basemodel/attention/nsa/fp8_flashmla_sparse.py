@@ -5,6 +5,14 @@ from typing import TYPE_CHECKING, Tuple
 
 from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.common.attention.backends.sparse_mla.flashmla import (
+    FlashMLASparsePrefillBatch,
+    FlashMLASparsePrefillBackend,
+    SparseMLAPrefillInputs,
+    FlashMLASparseDecodeBatch,
+    FlashMLASparseDecodeBackend,
+    SparseMLADecodeInputs,
+)
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -13,6 +21,8 @@ if TYPE_CHECKING:
 class NsaFlashMlaFp8SparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
+        self.prefill_backend = FlashMLASparsePrefillBackend()
+        self.decode_backend = FlashMLASparseDecodeBackend()
         device = get_current_device_id()
         self.ragged_mem_buffers = [
             torch.empty(model.graph_max_batch_size * model.max_seq_length, dtype=torch.int32, device=device)
@@ -63,16 +73,6 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
     ) -> torch.Tensor:
         assert att_control.nsa_prefill, "nsa_prefill must be True for NSA prefill attention"
         assert att_control.nsa_prefill_dict is not None, "nsa_prefill_dict is required"
-        return self._nsa_prefill_att(q=q, packed_kv=k, att_control=att_control)
-
-    def _nsa_prefill_att(
-        self,
-        q: torch.Tensor,
-        packed_kv: torch.Tensor,
-        att_control: AttControl,
-    ) -> torch.Tensor:
-        import flash_mla
-
         nsa_dict = att_control.nsa_prefill_dict
         topk_indices = nsa_dict["topk_indices"]
         softmax_scale = nsa_dict["softmax_scale"]
@@ -89,7 +89,7 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
             )
 
             kv, topk_indices = get_prefill_kv_cache_and_remap_indices_triton(
-                packed_kv=packed_kv,
+                packed_kv=k,
                 topk_mem_indices=topk_mem_indices,
                 prefill_mem_index=self.infer_state.mem_index,
                 prefill_cache_kv=prefill_cache_kv,
@@ -98,17 +98,13 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
         else:
             kv = prefill_cache_kv
 
-        if topk_indices.ndim == 2:
-            topk_indices = topk_indices.unsqueeze(1)
-
-        mla_out, _, _ = flash_mla.flash_mla_sparse_fwd(
-            q=q,
-            kv=kv,
-            indices=topk_indices,
-            sm_scale=softmax_scale,
-            d_v=kv_lora_rank,
+        out = alloc_func((q.shape[0], q.shape[1], kv_lora_rank), dtype=q.dtype, device=q.device)
+        return self.backend.prefill_backend.forward(
+            batch=FlashMLASparsePrefillBatch(indices=topk_indices),
+            inputs=SparseMLAPrefillInputs(q=q, kv=kv, softmax_scale=softmax_scale),
+            out=out,
+            alloc_func=alloc_func,
         )
-        return mla_out
 
 
 @dataclasses.dataclass
@@ -162,43 +158,16 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
     ) -> torch.Tensor:
         assert att_control.nsa_decode, "nsa_decode must be True for NSA decode attention"
         assert att_control.nsa_decode_dict is not None, "nsa_decode_dict is required"
-        return self._nsa_decode_att(q=q, packed_kv=k, att_control=att_control)
-
-    def _nsa_decode_att(
-        self,
-        q: Tuple[torch.Tensor, torch.Tensor],
-        packed_kv: torch.Tensor,
-        att_control: AttControl,
-    ) -> torch.Tensor:
-        import flash_mla
-
-        nsa_dict = att_control.nsa_decode_dict
-        topk_mem_indices = nsa_dict["topk_mem_indices"]
-        softmax_scale = nsa_dict["softmax_scale"]
-        kv_lora_rank = nsa_dict["kv_lora_rank"]
-
-        if topk_mem_indices.ndim == 2:
-            topk_mem_indices = topk_mem_indices.unsqueeze(1)
-        assert topk_mem_indices.shape[1] == 1, "FlashMLA sparse decode path currently expects seq_len_q == 1"
-
+        params = att_control.nsa_decode_dict
         q_nope, q_rope = q
-        q_all = torch.cat([q_nope, q_rope], dim=-1).unsqueeze(1).contiguous()
-        kv = torch.as_strided(
-            packed_kv,
-            size=(packed_kv.shape[0], 1, 1, packed_kv.shape[-1]),
-            stride=(packed_kv.stride(0), packed_kv.shape[-1], packed_kv.shape[-1], packed_kv.stride(-1)),
+        out = alloc_func(
+            (q_nope.shape[0], q_nope.shape[1], params["kv_lora_rank"]), dtype=q_nope.dtype, device=q_nope.device
         )
-
-        o_tensor, _ = flash_mla.flash_mla_with_kvcache(
-            q=q_all,
-            k_cache=kv,
-            block_table=None,
-            cache_seqlens=None,
-            head_dim_v=kv_lora_rank,
-            tile_scheduler_metadata=self.flashmla_sched_meta,
-            softmax_scale=softmax_scale,
-            causal=False,
-            is_fp8_kvcache=True,
-            indices=topk_mem_indices,
+        return self.backend.decode_backend.forward(
+            batch=FlashMLASparseDecodeBatch(indices=params["topk_mem_indices"], sched_meta=self.flashmla_sched_meta),
+            inputs=SparseMLADecodeInputs(
+                q_nope=q_nope, q_rope=q_rope, packed_kv=k, softmax_scale=params["softmax_scale"]
+            ),
+            out=out,
+            alloc_func=alloc_func,
         )
-        return o_tensor[:, 0, :, :]  # [b, 1, h, d] -> [b, h, d]
