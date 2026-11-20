@@ -87,8 +87,8 @@ class TritonGQAPrefillBackend(AttentionBackend[TritonGQAPrefillBatch, GQAInputs]
         q, K/V and out are matching FP16/BF16 tensors on one CUDA device, with
         unit head-dimension stride and non-overlapping token/head strides that
         may include padding. K/V may be disjoint slices of shared storage;
-        arbitrary strided layouts are not supported. Select q.device as the
-        current device for execution. out must not alias inputs or batch tensors.
+        arbitrary strided layouts are not supported. The caller must make q.device
+        the current CUDA device. out must not alias inputs or batch tensors.
         Head dimensions 16, 32, 64, 128, 256 and 512 are supported.
         sliding_window (-1, -1) and (left, 0) are supported.
         Prefill needs no scratch and does not call alloc_func.
@@ -145,8 +145,8 @@ class TritonGQADecodeBackend(AttentionBackend[TritonGQADecodeBatch, GQAInputs]):
         q, K/V and out are matching FP16/BF16 tensors on one CUDA device, with
         unit head-dimension stride and non-overlapping token/head strides that
         may include padding. K/V may be disjoint slices of shared storage;
-        arbitrary strided layouts are not supported. Select q.device as the
-        current device for execution. out must not alias inputs or batch tensors.
+        arbitrary strided layouts are not supported. The caller must make q.device
+        the current CUDA device. out must not alias inputs or batch tensors.
         K and V must have identical strides.
         Head dimensions 16, 32, 64, 128 and 256 are supported, plus 512 for GQA.
         GQA (q_heads > kv_heads) supports sliding_window (-1, -1) and (left, 0);
@@ -156,6 +156,8 @@ class TritonGQADecodeBackend(AttentionBackend[TritonGQADecodeBatch, GQAInputs]):
         """
         q_head_num = inputs.q.shape[1]
         k_head_num = inputs.k_cache.shape[1]
+        if q_head_num % k_head_num != 0:
+            raise ValueError(f"q_heads ({q_head_num}) must be a positive multiple of kv_heads ({k_head_num})")
         if q_head_num == k_head_num:
             assert inputs.sliding_window == (-1, -1), "sliding_window not supported in non-gqa attention yet"
             from lightllm.common.attention.kernels.gqa.bf16.decode.flash_decoding import (
@@ -173,7 +175,7 @@ class TritonGQADecodeBackend(AttentionBackend[TritonGQADecodeBatch, GQAInputs]):
                 out=out,
                 alloc_tensor_func=alloc_func,
             )
-        elif q_head_num > k_head_num:
+        else:
             from lightllm.common.attention.kernels.gqa.bf16.decode.gqa_flash_decoding import (
                 gqa_token_decode_attention_flash_decoding,
             )
@@ -190,5 +192,3 @@ class TritonGQADecodeBackend(AttentionBackend[TritonGQADecodeBatch, GQAInputs]):
                 alloc_tensor_func=alloc_func,
                 sliding_window=inputs.sliding_window,
             )
-        else:
-            raise NotImplementedError("error")

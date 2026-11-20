@@ -17,7 +17,9 @@ class GQAInputs:
     including the current queries' KV; backends do not write q or K/V.
 
     sliding_window=(-1, -1) attends to the full causal prefix. (left, 0), with
-    left >= 0, includes positions [max(0, query_pos-left), query_pos].
+    left >= 0, includes positions [max(0, query_pos-left), query_pos]. Any
+    two-element sequence is accepted and stored as a tuple, so a list loaded
+    from a JSON model config compares equal to the tuple forms above.
 
     Supported dtypes, layouts and sliding-window modes are provider-specific
     and documented on each backend's forward.
@@ -27,3 +29,7 @@ class GQAInputs:
     k_cache: torch.Tensor
     v_cache: torch.Tensor
     sliding_window: tuple[int, int] = (-1, -1)
+
+    def __post_init__(self) -> None:
+        left, right = self.sliding_window
+        object.__setattr__(self, "sliding_window", (int(left), int(right)))

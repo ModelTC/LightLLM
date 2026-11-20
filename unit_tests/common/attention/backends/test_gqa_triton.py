@@ -160,3 +160,43 @@ def test_adapter_graph(q_heads, kv_heads, allocator):
     with pytest.raises(ReferenceError):
         _ = state.infer_state
     del backend._instances[(type(backend), model)]
+
+
+def test_list_sliding_window_matches_tuple():
+    # Model configs loaded from JSON provide windows as lists.
+    q = torch.randn(2, 4, 64, device="cuda", dtype=torch.bfloat16)
+    kv = torch.randn(64, 8, 64, device="cuda", dtype=q.dtype)
+    inputs = GQAInputs(q=q, k_cache=kv[:, :4], v_cache=kv[:, 4:], sliding_window=[-1, -1])
+    assert inputs.sliding_window == (-1, -1)
+    token_map = torch.arange(64, device="cuda", dtype=torch.int32).view(2, 32)
+    lengths = torch.tensor([5, 9], device="cuda", dtype=torch.int32)
+    req_ids = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+    backend = TritonGQADecodeBackend()
+    batch = backend.plan(
+        req_to_token_indexs=token_map,
+        b_req_idx=req_ids,
+        b_seq_len=lengths,
+        kv_seq_len_upper_bound=9,
+        tuning_kv_seq_len=9,
+    )
+    out = backend.forward(batch=batch, inputs=inputs, out=torch.empty_like(q))
+    expected = reference(q, kv[:, :4], kv[:, 4:], token_map, req_ids, lengths, [4, 8], (-1, -1))
+    torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
+
+
+@pytest.mark.parametrize("q_heads,kv_heads", [(2, 4), (6, 4)])
+def test_decode_rejects_heads_not_multiple_of_kv_heads(q_heads, kv_heads):
+    q = torch.empty(1, q_heads, 64, device="cuda", dtype=torch.bfloat16)
+    kv = torch.empty(8, kv_heads, 64, device="cuda", dtype=q.dtype)
+    backend = TritonGQADecodeBackend()
+    batch = backend.plan(
+        req_to_token_indexs=torch.zeros(1, 8, device="cuda", dtype=torch.int32),
+        b_req_idx=torch.zeros(1, device="cuda", dtype=torch.int32),
+        b_seq_len=torch.ones(1, device="cuda", dtype=torch.int32),
+        kv_seq_len_upper_bound=1,
+        tuning_kv_seq_len=1,
+    )
+    with pytest.raises(
+        ValueError, match=rf"q_heads \({q_heads}\) must be a positive multiple of kv_heads \({kv_heads}\)"
+    ):
+        backend.forward(batch=batch, inputs=GQAInputs(q=q, k_cache=kv, v_cache=kv), out=torch.empty_like(q))

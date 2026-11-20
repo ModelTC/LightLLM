@@ -24,8 +24,8 @@ class TritonMLAPrefillBatch:
 class MLAPrefillInputs:
     """Per-layer projected keys/values in request order, including cached prefixes.
 
-    q is [query_tokens, heads, nope_dim + 64]. k_nope and v are
-    [kv_tokens, heads, nope_dim]; k_rope is [kv_tokens, 1, 64].
+    q is [query_tokens, heads, nope_dim + rope_dim]. k_nope and v are
+    [kv_tokens, heads, nope_dim]; k_rope is [kv_tokens, 1, rope_dim].
     """
 
     q: torch.Tensor
@@ -70,9 +70,11 @@ class TritonMLAPrefillBackend(AttentionBackend[TritonMLAPrefillBatch, MLAPrefill
             context_attention_fwd_with_v,
         )
 
+        nope_dim = inputs.k_nope.shape[-1]
+        assert inputs.q.shape[-1] == nope_dim + inputs.k_rope.shape[-1]
         context_attention_fwd_with_v(
-            q_nope=inputs.q[:, :, :-64],
-            q_rope=inputs.q[:, :, -64:],
+            q_nope=inputs.q[:, :, :nope_dim],
+            q_rope=inputs.q[:, :, nope_dim:],
             k_nope=inputs.k_nope,
             k_rope=inputs.k_rope,
             v=inputs.v,

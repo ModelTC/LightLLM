@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.base_att import AttControl, BaseAttBackend
 from lightllm.common.basemodel.attention.nsa.fp8_flashmla_sparse import NsaFlashMlaFp8SparseAttBackend
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
@@ -15,6 +15,15 @@ class Model:
     graph_max_batch_size = 2
     graph_max_len_in_batch = 12
     max_seq_length = 12
+
+
+@pytest.fixture
+def backend():
+    model = Model()
+    backend = NsaFlashMlaFp8SparseAttBackend(model=model)
+    yield backend
+    # The per-model singleton also holds this test's GPU ragged buffers.
+    BaseAttBackend._instances.pop((NsaFlashMlaFp8SparseAttBackend, model), None)
 
 
 def packed_cache():
@@ -40,8 +49,7 @@ def reference(q, rows, indices):
 
 
 @pytest.mark.parametrize("cached", [False, True])
-def test_prefill_indices(cached):
-    backend = NsaFlashMlaFp8SparseAttBackend(model=Model())
+def test_prefill_indices(cached, backend):
     state = InferStateInfo()
     state.max_cache_len = int(cached)
     state.mem_index = torch.tensor([9, 2], dtype=torch.int32, device="cuda")
@@ -79,8 +87,7 @@ def test_prefill_indices(cached):
     assert torch.equal(original, packed)
 
 
-def test_decode_replay_reads_physical_indices():
-    backend = NsaFlashMlaFp8SparseAttBackend(model=Model())
+def test_decode_replay_reads_physical_indices(backend):
     state = InferStateInfo()
     state.batch_size, state.total_token_num, state.max_kv_seq_len, state.microbatch_index = 2, 12, 6, 0
     state.b_seq_len = torch.tensor([6, 6], dtype=torch.int32, device="cuda")
