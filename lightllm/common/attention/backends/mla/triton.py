@@ -73,7 +73,7 @@ class TritonMLAPrefillBackend(AttentionBackend[TritonMLAPrefillBatch, MLAPrefill
 class MLADecodeInputs:
     """One absorbed query per request, split into latent and rotary components.
 
-    kv_cache is a borrowed [physical_slots, 1, latent_dim + 64] cache. Its latent
+    kv_cache is a borrowed [physical_slots, 1, latent_dim + rope_dim] cache. Its latent
     prefix supplies both K and V. The cache includes the current token for each request.
     """
 
@@ -85,44 +85,57 @@ class MLADecodeInputs:
 
 @dataclass(frozen=True)
 class TritonMLADecodeBatch:
-    """At decode, request i reads physical slots req_to_token_indexs[b_req_idx[i], :b_seq_len[i]]."""
+    """At decode, request i reads physical slots req_to_token_indexs[b_req_idx[i], :b_seq_len[i]].
+
+    Built by TritonMLADecodeBackend.plan and shared by all layers of one decode batch.
+    """
 
     req_to_token_indexs: torch.Tensor
     b_req_idx: torch.Tensor
     b_seq_len: torch.Tensor
     schedule: "MLADecodeSchedule"
 
-    @classmethod
-    def prepare(
-        cls,
-        inputs: MLADecodeInputs,
+
+class TritonMLADecodeBackend(AttentionBackend[TritonMLADecodeBatch, MLADecodeInputs]):
+    def __init__(self, *, q_heads: int, latent_dim: int, rope_dim: int, dtype: torch.dtype) -> None:
+        """Fix the per-rank layer configuration so batches can be planned before any layer runs."""
+        self.q_heads = q_heads
+        self.latent_dim = latent_dim
+        self.rope_dim = rope_dim
+        self.dtype = dtype
+
+    def plan(
+        self,
         req_to_token_indexs: torch.Tensor,
         b_req_idx: torch.Tensor,
         b_seq_len: torch.Tensor,
         tuning_seq_len: int,
-    ) -> "TritonMLADecodeBatch":
-        """Prepare the split schedule once for layers with the same kernel geometry.
+    ) -> TritonMLADecodeBatch:
+        """Plan the split schedule from the current b_seq_len, outside CUDA graph capture.
 
-        Run during graph capture so replay recomputes the splits from live b_seq_len.
-        tuning_seq_len is a host-side configuration hint, independent of those lengths.
+        tuning_seq_len is a host-side configuration hint, independent of the actual lengths.
+        A batch reused by CUDA graph replay must be refreshed after b_seq_len changes.
         """
-        from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding import prepare_mla_decode_schedule
+        from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding import plan_mla_decode_schedule
 
-        schedule = prepare_mla_decode_schedule(
-            q_nope=inputs.q_nope,
-            q_rope=inputs.q_rope,
-            kv_nope=inputs.kv_cache[:, :, :-64],
-            kv_rope=inputs.kv_cache[:, :, -64:],
-            req_to_token_indexs=req_to_token_indexs,
-            b_req_idx=b_req_idx,
+        schedule = plan_mla_decode_schedule(
             b_seq_len=b_seq_len,
+            q_head_num=self.q_heads,
+            kv_lora_rank=self.latent_dim,
+            q_rope_dim=self.rope_dim,
+            dtype=self.dtype,
             tuning_seq_len=tuning_seq_len,
-            softmax_scale=inputs.softmax_scale,
         )
-        return cls(req_to_token_indexs=req_to_token_indexs, b_req_idx=b_req_idx, b_seq_len=b_seq_len, schedule=schedule)
+        return TritonMLADecodeBatch(
+            req_to_token_indexs=req_to_token_indexs, b_req_idx=b_req_idx, b_seq_len=b_seq_len, schedule=schedule
+        )
 
+    def refresh(self, batch: TritonMLADecodeBatch) -> None:
+        """Recompute splits in place after the caller rewrites batch.b_seq_len, e.g. before graph replay."""
+        from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding import update_mla_decode_schedule
 
-class TritonMLADecodeBackend(AttentionBackend[TritonMLADecodeBatch, MLADecodeInputs]):
+        update_mla_decode_schedule(batch.schedule, batch.b_seq_len)
+
     def forward(
         self,
         batch: TritonMLADecodeBatch,
@@ -133,17 +146,22 @@ class TritonMLADecodeBackend(AttentionBackend[TritonMLADecodeBatch, MLADecodeInp
     ) -> torch.Tensor:
         """Fill and return out with q_nope's [requests, heads, latent_dim] shape, dtype and device.
 
+        Inputs must match the configured heads, latent/rotary dims and dtype.
         Inputs and cache are read-only. out has unit last stride and must not overlap them.
         """
         from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding import (
             gqa_token_decode_attention_flash_decoding,
         )
 
+        q_nope, q_rope = inputs.q_nope, inputs.q_rope
+        assert q_nope.shape[1:] == (self.q_heads, self.latent_dim) and q_nope.dtype == self.dtype
+        assert q_rope.shape[-1] == self.rope_dim
+        assert inputs.kv_cache.shape[-1] == self.latent_dim + self.rope_dim
         gqa_token_decode_attention_flash_decoding(
-            q_nope=inputs.q_nope,
-            q_rope=inputs.q_rope,
-            kv_nope=inputs.kv_cache[:, :, :-64],
-            kv_rope=inputs.kv_cache[:, :, -64:],
+            q_nope=q_nope,
+            q_rope=q_rope,
+            kv_nope=inputs.kv_cache[:, :, : self.latent_dim],
+            kv_rope=inputs.kv_cache[:, :, self.latent_dim :],
             req_to_token_indexs=batch.req_to_token_indexs,
             b_req_idx=batch.b_req_idx,
             b_seq_len=batch.b_seq_len,

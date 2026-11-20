@@ -21,7 +21,12 @@ class MlaTritonAttBackend(BaseAttBackend):
     def __init__(self, model: "TpPartBaseModel") -> None:
         super().__init__(model=model)
         self.prefill_backend = TritonMLAPrefillBackend()
-        self.decode_backend = TritonMLADecodeBackend()
+        self.decode_backend = TritonMLADecodeBackend(
+            q_heads=model.config["num_attention_heads"] // model.tp_world_size_,
+            latent_dim=model.kv_lora_rank,
+            rope_dim=model.qk_rope_head_dim,
+            dtype=model.data_type,
+        )
 
     def create_att_prefill_state(self, infer_state) -> "MlaTritonPrefillAttState":
         return MlaTritonPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
@@ -103,10 +108,29 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
 @dataclasses.dataclass
 class MlaTritonDecodeAttState(BaseDecodeAttState):
     batch: TritonMLADecodeBatch | None = None
-    capture_batch: TritonMLADecodeBatch | None = None
 
     def init_state(self) -> None:
-        self.batch = self.capture_batch = None
+        state = self.infer_state
+        if state.is_cuda_graph_replay:
+            # Replay executes the captured state's plan, refreshed in copy_for_decode_cuda_graph.
+            self.batch = None
+            return
+        if state.is_cuda_graph_capture:
+            # Replays reuse this plan's kernel configuration, so it must not depend on capture-time lengths.
+            tuning_seq_len = self.backend.model.graph_max_len_in_batch
+        else:
+            tuning_seq_len = state.total_token_num // state.batch_size
+        self.batch = self.backend.decode_backend.plan(
+            req_to_token_indexs=state.req_manager.req_to_token_indexs,
+            b_req_idx=state.b_req_idx,
+            b_seq_len=state.b_seq_len,
+            tuning_seq_len=tuning_seq_len,
+        )
+
+    def copy_for_decode_cuda_graph(self, new_state: "MlaTritonDecodeAttState") -> None:
+        super().copy_for_decode_cuda_graph(new_state)
+        # The owning InferStateInfo has already copied the replay lengths into this batch's b_seq_len.
+        self.backend.decode_backend.refresh(self.batch)
 
     def decode_att(
         self,
@@ -128,22 +152,5 @@ class MlaTritonDecodeAttState(BaseDecodeAttState):
         inputs = MLADecodeInputs(
             q_nope=q_nope, q_rope=q_rope, kv_cache=k, softmax_scale=att_control.mla_decode_dict["softmax_scale"]
         )
-        # Warmup shares this attention state with capture. Capture its own split calculation
-        # so replay updates the schedule when the request lengths change.
-        capturing = torch.cuda.is_current_stream_capturing()
-        batch = self.capture_batch if capturing else self.batch
-        if batch is None:
-            state = self.infer_state
-            batch = TritonMLADecodeBatch.prepare(
-                inputs=inputs,
-                req_to_token_indexs=state.req_manager.req_to_token_indexs,
-                b_req_idx=state.b_req_idx,
-                b_seq_len=state.b_seq_len,
-                tuning_seq_len=state.max_kv_seq_len if capturing else state.total_token_num // state.batch_size,
-            )
-            if capturing:
-                self.capture_batch = batch
-            else:
-                self.batch = batch
         out = alloc_func(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
-        return self.backend.decode_backend.forward(batch=batch, inputs=inputs, out=out, alloc_func=alloc_func)
+        return self.backend.decode_backend.forward(batch=self.batch, inputs=inputs, out=out, alloc_func=alloc_func)

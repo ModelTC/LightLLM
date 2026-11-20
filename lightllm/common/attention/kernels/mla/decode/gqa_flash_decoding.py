@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Callable
 
 import torch
@@ -6,71 +7,85 @@ import triton
 import triton.language as tl
 
 from .gqa_flash_decoding_config import MlaDecodeAttentionKernelConfig
-from .gqa_flash_decoding_stage1 import flash_decode_stage1
+from .gqa_flash_decoding_stage1 import flash_decode_stage1, flash_decode_stage1_vsm_count
 from .gqa_flash_decoding_stage2 import flash_decode_stage2
 
 
 @dataclass(frozen=True)
 class MLADecodeSchedule:
+    """Split plan shared by every layer of one decode batch.
+
+    block_seq and batch_start_index are device buffers that update_mla_decode_schedule
+    rewrites in place from the current lengths; vsm_count and run_config stay fixed.
+    """
+
     block_seq: torch.Tensor
     batch_start_index: torch.Tensor
     vsm_count: int
     run_config: dict[str, int]
 
 
-def prepare_mla_decode_schedule(
-    q_nope: torch.Tensor,
-    q_rope: torch.Tensor,
-    kv_nope: torch.Tensor,
-    kv_rope: torch.Tensor,
-    req_to_token_indexs: torch.Tensor,
-    b_req_idx: torch.Tensor,
+@lru_cache(maxsize=256)
+def _vsm_count(
+    batch_size: int,
+    q_head_num: int,
+    kv_lora_rank: int,
+    q_rope_dim: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    run_config_items: tuple[tuple[str, int], ...],
+) -> int:
+    return flash_decode_stage1_vsm_count(
+        batch_size, q_head_num, kv_lora_rank, q_rope_dim, dtype, device, **dict(run_config_items)
+    )
+
+
+def plan_mla_decode_schedule(
     b_seq_len: torch.Tensor,
+    q_head_num: int,
+    kv_lora_rank: int,
+    q_rope_dim: int,
+    dtype: torch.dtype,
     tuning_seq_len: int,
-    softmax_scale: float,
     **run_config: int,
 ) -> MLADecodeSchedule:
-    batch_size, q_head_num, kv_lora_rank = q_nope.shape
-    assert q_rope.shape[-1] == 64
+    """Allocate the schedule buffers and compute splits for the current b_seq_len."""
+    batch_size = b_seq_len.shape[0]
     if not run_config:
         run_config = MlaDecodeAttentionKernelConfig.try_to_get_best_config(
             batch_size=batch_size,
             avg_seq_len_in_batch=tuning_seq_len,
             q_head_num=q_head_num,
             q_head_dim=kv_lora_rank,
-            q_rope_dim=q_rope.shape[-1],
+            q_rope_dim=q_rope_dim,
             out_dtype=torch.bfloat16,
         )
-    block_seq = torch.empty((1,), dtype=torch.int64, device=q_nope.device)
-    batch_start_index = torch.empty((batch_size,), dtype=torch.int64, device=q_nope.device)
-    # The occupancy probe compiles stage 1 for these strides without launching it.
-    vsm_count = flash_decode_stage1(
-        in_block_seq=block_seq,
-        q_nope=q_nope,
-        q_rope=q_rope,
-        kv_nope=kv_nope,
-        kv_rope=kv_rope,
-        Req_to_tokens=req_to_token_indexs,
-        B_req_idx=b_req_idx,
-        B_Seqlen=b_seq_len,
-        mid_out=torch.empty((q_head_num, 0, kv_lora_rank), dtype=torch.float32, device=q_nope.device),
-        mid_out_logsumexp=torch.empty((q_head_num, 0), dtype=torch.float32, device=q_nope.device),
-        softmax_scale=softmax_scale,
-        get_sm_count=True,
-        **run_config,
+    vsm_count = _vsm_count(
+        batch_size, q_head_num, kv_lora_rank, q_rope_dim, dtype, b_seq_len.device, tuple(sorted(run_config.items()))
     )
+    schedule = MLADecodeSchedule(
+        block_seq=torch.empty((1,), dtype=torch.int64, device=b_seq_len.device),
+        batch_start_index=torch.empty((batch_size,), dtype=torch.int64, device=b_seq_len.device),
+        vsm_count=vsm_count,
+        run_config=dict(run_config),
+    )
+    update_mla_decode_schedule(schedule, b_seq_len)
+    return schedule
+
+
+def update_mla_decode_schedule(schedule: MLADecodeSchedule, b_seq_len: torch.Tensor) -> None:
+    """Recompute splits in place from b_seq_len, keeping the buffer addresses and grid size."""
+    batch_size = schedule.batch_start_index.shape[0]
+    assert b_seq_len.shape[0] == batch_size
     _fwd_kernel_calcu_index_and_block_seq[(1,)](
         b_seq_len,
-        block_seq,
-        batch_start_index,
-        vsm_count,
+        schedule.block_seq,
+        schedule.batch_start_index,
+        schedule.vsm_count,
         batch_size,
-        BLOCK_N=run_config["BLOCK_N"],
+        BLOCK_N=schedule.run_config["BLOCK_N"],
         MAX_BATCH_SIZE=triton.next_power_of_2(batch_size),
         num_warps=4,
-    )
-    return MLADecodeSchedule(
-        block_seq=block_seq, batch_start_index=batch_start_index, vsm_count=vsm_count, run_config=run_config
     )
 
 
@@ -103,6 +118,7 @@ def gqa_token_decode_attention_flash_decoding(
         mid_out=mid_o,
         mid_out_logsumexp=mid_o_logexpsum,
         softmax_scale=softmax_scale,
+        num_sm=schedule.vsm_count,
         **schedule.run_config,
     )
     flash_decode_stage2(

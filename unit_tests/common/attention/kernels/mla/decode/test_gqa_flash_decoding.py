@@ -5,7 +5,7 @@ import numpy as np
 import torch.nn.functional as F
 import flashinfer
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.attention.backends.mla.triton import MLADecodeInputs, TritonMLADecodeBatch, TritonMLADecodeBackend
+from lightllm.common.attention.backends.mla.triton import MLADecodeInputs, TritonMLADecodeBackend
 
 logger = init_logger(__name__)
 
@@ -48,14 +48,14 @@ def test_gqa_flash_decoding(batch, seqlen, heads, nope_head, rope_head):
     o1 = torch.zeros((Z, H, D_HEAD), dtype=dtype, device="cuda")
 
     inputs = MLADecodeInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv, softmax_scale=sm_scale)
-    decode_batch = TritonMLADecodeBatch.prepare(
-        inputs=inputs,
+    backend = TritonMLADecodeBackend(q_heads=H, latent_dim=D_HEAD, rope_dim=ROPE_HEAD, dtype=dtype)
+    decode_batch = backend.plan(
         req_to_token_indexs=req_to_token_indexs,
         b_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
         tuning_seq_len=N_CTX,
     )
-    assert TritonMLADecodeBackend().forward(batch=decode_batch, inputs=inputs, out=o) is o
+    assert backend.forward(batch=decode_batch, inputs=inputs, out=o) is o
 
     kv_nope = kv[:, :, :D_HEAD]
     kv_rope = kv[:, :, D_HEAD:]
