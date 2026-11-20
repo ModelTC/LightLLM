@@ -146,13 +146,60 @@ class Glm5NextNsaInfer:
         return topk_pool_indices
 
     def _get_decode_indices(self, q_fp8, weights, indexer_k, infer_state, att_state, max_pools):
+        q_pool_seq_len = (att_state.q_kv_seq_len // 4).view(-1, 1)
+        req_to_token_indexs = infer_state.req_manager.req_to_token_indexs
+        b_req_idx = infer_state.b_req_idx
+
+        # The eager draft verify step uses all four MTP rows per request. Bound the
+        # packed page workspace without splitting the layer forward or its collectives.
+        # Each page contains 64 rows of 128 FP8 key bytes and four scale bytes.
+        bytes_per_query = triton.cdiv(max_pools, 64) * 64 * 132
+        chunk_rows = max(1, (192 * 1024 ** 2) // bytes_per_query)
+        if chunk_rows >= 4:
+            chunk_rows = chunk_rows // 4 * 4
+
+        if (
+            q_fp8.shape[0] <= chunk_rows
+            or getattr(infer_state, "is_cuda_graph_capture", False)
+            or getattr(infer_state, "is_cuda_graph_replay", False)
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return self._get_decode_indices_chunk(
+                q_fp8, weights, indexer_k, req_to_token_indexs, b_req_idx, q_pool_seq_len, max_pools
+            )
+
+        topk_pool_indices = torch.empty((q_fp8.shape[0], self.index_topk // 4), dtype=torch.int32, device=q_fp8.device)
+        for start in range(0, q_fp8.shape[0], chunk_rows):
+            end = min(start + chunk_rows, q_fp8.shape[0])
+            self._get_decode_indices_chunk(
+                q_fp8[start:end],
+                weights[start:end],
+                indexer_k,
+                req_to_token_indexs,
+                b_req_idx[start:end],
+                q_pool_seq_len[start:end],
+                max_pools,
+                topk_pool_indices=topk_pool_indices[start:end],
+            )
+        return topk_pool_indices
+
+    def _get_decode_indices_chunk(
+        self,
+        q_fp8,
+        weights,
+        indexer_k,
+        req_to_token_indexs,
+        b_req_idx,
+        q_pool_seq_len,
+        max_pools,
+        topk_pool_indices=None,
+    ):
         import deep_gemm
 
-        q_pool_seq_len = (att_state.q_kv_seq_len // 4).view(-1, 1)
         indexer_k_pages, block_table = gather_paged_pools(
             indexer_k,
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.b_req_idx,
+            req_to_token_indexs,
+            b_req_idx,
             q_pool_seq_len,
             max_pools,
         )
@@ -170,6 +217,9 @@ class Glm5NextNsaInfer:
             max_pools,
             clean_logits=False,
         )
-        topk_pool_indices = torch.empty((q_fp8.shape[0], self.index_topk // 4), dtype=torch.int32, device=q_fp8.device)
+        if topk_pool_indices is None:
+            topk_pool_indices = torch.empty(
+                (q_fp8.shape[0], self.index_topk // 4), dtype=torch.int32, device=q_fp8.device
+            )
         self.select_topk_indices(logits, q_pool_seq_len.view(-1), topk_pool_indices)
         return topk_pool_indices
