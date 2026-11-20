@@ -8,6 +8,13 @@ from ...triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from ...triton_kernel.repack_kv_index import repack_kv_index
 from .env_utils import set_flashinfer_envs
 from .utils import should_init_decode_wrapper
+from lightllm.common.attention.backends.gqa import GQAInputs
+from lightllm.common.attention.backends.gqa.flashinfer import (
+    FlashInferPrefillBatch,
+    FlashInferDecodeBatch,
+    FlashInferGQAPrefillBackend,
+    FlashInferGQADecodeBackend,
+)
 
 
 class FlashInferAttBackend(BaseAttBackend):
@@ -39,6 +46,8 @@ class FlashInferAttBackend(BaseAttBackend):
         ]
         self.q_data_type = model.data_type
         self.kv_data_type = model.data_type
+        self.prefill_backend = FlashInferGQAPrefillBackend()
+        self.decode_backend = FlashInferGQADecodeBackend()
 
     def _init_infer_page_size(self):
         self.infer_page_size = self.model.args.page_size
@@ -136,16 +145,15 @@ class FlashInferPrefillAttState(BasePrefillAttState):
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty
     ) -> torch.Tensor:
         self.backend: FlashInferAttBackend = self.backend  # for typing
-        o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
-        self.prefill_wrapper.run(
-            q,
-            (
-                k.view(-1, self.backend.infer_page_size, k.shape[1], k.shape[2]),
-                v.view(-1, self.backend.infer_page_size, v.shape[1], v.shape[2]),
+        return self.backend.prefill_backend.forward(
+            batch=FlashInferPrefillBatch(
+                wrapper=self.prefill_wrapper,
+                page_size=self.backend.infer_page_size,
             ),
-            out=o_tensor,
+            inputs=GQAInputs(q=q, k_cache=k, v_cache=v),
+            out=alloc_func(q.shape, dtype=q.dtype, device=q.device),
+            alloc_func=alloc_func,
         )
-        return o_tensor
 
 
 @dataclasses.dataclass
@@ -283,13 +291,12 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         v: torch.Tensor,
         alloc_func=torch.empty,
     ):
-        o_tensor = alloc_func(q.shape, q.dtype)
-        self.decode_wrapper.run(
-            q,
-            (
-                k.view(-1, self.backend.infer_page_size, k.shape[1], k.shape[2]),
-                v.view(-1, self.backend.infer_page_size, v.shape[1], v.shape[2]),
+        return self.backend.decode_backend.forward(
+            batch=FlashInferDecodeBatch(
+                wrapper=self.decode_wrapper,
+                page_size=self.backend.infer_page_size,
             ),
-            out=o_tensor,
+            inputs=GQAInputs(q=q, k_cache=k, v_cache=v),
+            out=alloc_func(q.shape, dtype=q.dtype, device=q.device),
+            alloc_func=alloc_func,
         )
-        return o_tensor
