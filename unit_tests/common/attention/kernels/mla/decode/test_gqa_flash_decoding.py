@@ -5,10 +5,9 @@ import numpy as np
 import torch.nn.functional as F
 import flashinfer
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding import (
-    gqa_token_decode_attention_flash_decoding,
-)
-from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
+from lightllm.common.attention.backend import AttentionBatch
+from lightllm.common.attention.backends.mla import MLADecodeLayerInputs, MLADecodeLayerConfig
+from lightllm.common.attention.backends.mla.triton import TritonMLADecodeBackend
 
 logger = init_logger(__name__)
 
@@ -50,28 +49,28 @@ def test_gqa_flash_decoding(batch, seqlen, heads, nope_head, rope_head):
     o = torch.zeros((Z, H, D_HEAD), dtype=dtype, device="cuda")
     o1 = torch.zeros((Z, H, D_HEAD), dtype=dtype, device="cuda")
 
-    infer_state = Deepseek2InferStateInfo()
-    infer_state.batch_size = Z
-    infer_state.max_len_in_batch = N_CTX
-    infer_state.total_token_num = Z * N_CTX
-    infer_state.req_manager = type("Object", (), {})()
-    infer_state.req_manager.req_to_token_indexs = req_to_token_indexs
-    infer_state.b_req_idx = b_req_idx
-    infer_state.b_seq_len = b_seq_len
-    infer_state.kv_starts = kv_starts
+    step_builder = TritonMLADecodeBackend.get_step_builder_cls()(
+        num_heads=H, kv_lora_rank=D_HEAD, qk_rope_head_dim=ROPE_HEAD, dtype=dtype
+    )
+    # Every request has N_CTX tokens, so the eager tuning length (the average) is N_CTX.
+    step_args = step_builder.build(
+        AttentionBatch(
+            req_to_token_indexs=req_to_token_indexs,
+            b_req_idx=b_req_idx,
+            b_seq_len=b_seq_len,
+            batch_size=Z,
+            max_kv_seq_len=N_CTX,
+            total_token_num=Z * N_CTX,
+        )
+    )
+    layer_config = MLADecodeLayerConfig(
+        num_heads=H, kv_lora_rank=D_HEAD, qk_rope_head_dim=ROPE_HEAD, softmax_scale=sm_scale, dtype=dtype
+    )
+    impl = TritonMLADecodeBackend.get_impl_cls()(layer_config)
+    assert impl.forward(step_args, MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv), out=o) is o
 
     kv_nope = kv[:, :, :D_HEAD]
     kv_rope = kv[:, :, D_HEAD:]
-    gqa_token_decode_attention_flash_decoding(
-        q_nope,
-        q_rope,
-        kv_nope,
-        kv_rope,
-        infer_state,
-        sm_scale,
-        o,
-    )
-
     batch_size = Z
     head_dim_ckv = D_HEAD
     head_dim_kpe = ROPE_HEAD
@@ -79,7 +78,7 @@ def test_gqa_flash_decoding(batch, seqlen, heads, nope_head, rope_head):
     page_size = 1
     workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(0)
     q_indptr = torch.arange(batch_size + 1).to(0).int()
-    kv_indptr = infer_state.kv_starts
+    kv_indptr = kv_starts
     kv_indices = torch.arange(Z * N_CTX).cuda().int()
     for b, sl, start in zip(b_req_idx, b_seq_len, b_start_loc):
         kv_indices[start : start + sl] = req_to_token_indexs[b][:sl]
