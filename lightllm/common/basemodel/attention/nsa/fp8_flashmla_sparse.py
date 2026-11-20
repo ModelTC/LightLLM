@@ -42,6 +42,7 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
     ragged_mem_index: torch.Tensor = None
+    batch: FlashMLASparsePrefillBatch = None
 
     def init_state(self):
         self.backend: NsaFlashMlaFp8SparseAttBackend = self.backend
@@ -61,6 +62,7 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
             ragged_mem_index=self.ragged_mem_index,
             hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
+        self.batch = self.backend.prefill_backend.plan()
         return
 
     def prefill_att(
@@ -100,8 +102,8 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
 
         out = alloc_func((q.shape[0], q.shape[1], kv_lora_rank), dtype=q.dtype, device=q.device)
         return self.backend.prefill_backend.forward(
-            batch=FlashMLASparsePrefillBatch(indices=topk_indices),
-            inputs=SparseMLAPrefillInputs(q=q, kv=kv, softmax_scale=softmax_scale),
+            batch=self.batch,
+            inputs=SparseMLAPrefillInputs(q=q, kv=kv, indices=topk_indices, softmax_scale=softmax_scale),
             out=out,
             alloc_func=alloc_func,
         )
@@ -113,7 +115,7 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
     ragged_mem_index: torch.Tensor = None
-    flashmla_sched_meta: object = None
+    batch: FlashMLASparseDecodeBatch = None
 
     def init_state(self):
         self.backend: NsaFlashMlaFp8SparseAttBackend = self.backend
@@ -143,9 +145,7 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
             ragged_mem_index=self.ragged_mem_index,
             hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
-        import flash_mla
-
-        self.flashmla_sched_meta, _ = flash_mla.get_mla_metadata()
+        self.batch = self.backend.decode_backend.plan()
         return
 
     def decode_att(
@@ -164,9 +164,13 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
             (q_nope.shape[0], q_nope.shape[1], params["kv_lora_rank"]), dtype=q_nope.dtype, device=q_nope.device
         )
         return self.backend.decode_backend.forward(
-            batch=FlashMLASparseDecodeBatch(indices=params["topk_mem_indices"], sched_meta=self.flashmla_sched_meta),
+            batch=self.batch,
             inputs=SparseMLADecodeInputs(
-                q_nope=q_nope, q_rope=q_rope, packed_kv=k, softmax_scale=params["softmax_scale"]
+                q_nope=q_nope,
+                q_rope=q_rope,
+                packed_kv=k,
+                indices=params["topk_mem_indices"],
+                softmax_scale=params["softmax_scale"],
             ),
             out=out,
             alloc_func=alloc_func,

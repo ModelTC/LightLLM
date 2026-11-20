@@ -28,8 +28,18 @@ class TritonAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class TritonPrefillAttState(BasePrefillAttState):
+    batch: Optional[TritonGQAPrefillBatch] = None
+
     def init_state(self):
-        pass
+        infer_state = self.infer_state
+        self.batch = self.backend.prefill_backend.plan(
+            req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
+            b_req_idx=infer_state.b_req_idx,
+            b_seq_len=infer_state.b_seq_len,
+            b_q_start_loc=infer_state.b_q_start_loc,
+            b_ready_cache_len=infer_state.b_ready_cache_len,
+            max_q_seq_len=infer_state.max_q_seq_len,
+        )
 
     def prefill_att(
         self,
@@ -86,17 +96,8 @@ class TritonPrefillAttState(BasePrefillAttState):
         else:
             sliding_window = (-1, -1)
 
-        infer_state = self.infer_state
-        batch = TritonGQAPrefillBatch(
-            req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
-            b_req_idx=infer_state.b_req_idx,
-            b_seq_len=infer_state.b_seq_len,
-            b_q_start_loc=infer_state.b_q_start_loc,
-            b_ready_cache_len=infer_state.b_ready_cache_len,
-            max_q_seq_len=infer_state.max_q_seq_len,
-        )
         return self.backend.prefill_backend.forward(
-            batch=batch,
+            batch=self.batch,
             inputs=GQAInputs(q=q, k_cache=k, v_cache=v, sliding_window=sliding_window),
             out=alloc_func(q.shape, dtype=q.dtype, device=q.device),
             alloc_func=alloc_func,
@@ -107,16 +108,32 @@ class TritonPrefillAttState(BasePrefillAttState):
 class TritonDecodeAttState(BaseDecodeAttState):
     b_mark_mtp_shared_group: torch.Tensor = None
     decode_max_kv_seq_len: int = None
+    batch: Optional[TritonGQADecodeBatch] = None
 
     def init_state(self):
+        infer_state = self.infer_state
         # Graph 捕获会改写 infer_state 的长度上限，提前保存真实长度用于 GQA decode 配置查找。
-        self.decode_max_kv_seq_len = self.infer_state.max_kv_seq_len
+        self.decode_max_kv_seq_len = infer_state.max_kv_seq_len
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step > 0:
+            # 投机解码走 MTP diverse kernel，不使用 GQA backend 的 batch。
             self.b_mark_mtp_shared_group = build_mtp_shared_group_markers(
                 self.infer_state.b_req_idx,
                 hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
             )
+            return
+        if infer_state.is_cuda_graph_capture:
+            # 捕获发生在 init_state 之后；replay 的长度可达 graph 容量，MHA scratch 必须按容量规划。
+            kv_seq_len_upper_bound = self.backend.model.graph_max_len_in_batch
+        else:
+            kv_seq_len_upper_bound = infer_state.max_kv_seq_len
+        self.batch = self.backend.decode_backend.plan(
+            req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
+            b_req_idx=infer_state.b_req_idx,
+            b_seq_len=infer_state.b_seq_len,
+            kv_seq_len_upper_bound=kv_seq_len_upper_bound,
+            tuning_kv_seq_len=self.decode_max_kv_seq_len,
+        )
 
     def copy_for_decode_cuda_graph(self, new_state: "TritonDecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
@@ -186,16 +203,8 @@ class TritonDecodeAttState(BaseDecodeAttState):
         else:
             sliding_window = (-1, -1)
 
-        infer_state = self.infer_state
-        batch = TritonGQADecodeBatch(
-            req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
-            b_req_idx=infer_state.b_req_idx,
-            b_seq_len=infer_state.b_seq_len,
-            kv_seq_len_upper_bound=infer_state.max_kv_seq_len,
-            tuning_kv_seq_len=self.decode_max_kv_seq_len,
-        )
         return self.backend.decode_backend.forward(
-            batch=batch,
+            batch=self.batch,
             inputs=GQAInputs(q=q, k_cache=k, v_cache=v, sliding_window=sliding_window),
             out=alloc_func(q.shape, dtype=q.dtype, device=q.device),
             alloc_func=alloc_func,

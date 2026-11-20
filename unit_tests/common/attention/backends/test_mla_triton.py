@@ -51,6 +51,7 @@ def test_cached_prefill(backend):
     state.b_ready_cache_len = torch.tensor([3, 0], dtype=torch.int32, device="cuda")
     state.max_q_seq_len = 3
     att = backend.create_att_prefill_state(infer_state=state)
+    att.init_state()
     q = torch.randn((5, 8, 192), device="cuda", dtype=torch.bfloat16)
     k_nope = torch.randn((8, 8, 128), device="cuda", dtype=q.dtype)
     k_rope = torch.randn((8, 1, 64), device="cuda", dtype=q.dtype)

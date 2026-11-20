@@ -11,20 +11,27 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class FlashMLASparsePrefillBatch:
-    # Indices address the rows of this layer's compact KV, including any cached prefix.
-    indices: torch.Tensor
+    """Sparse prefill has no state shared across layers; each layer supplies its own indices."""
 
 
 @dataclass(frozen=True)
 class SparseMLAPrefillInputs:
-    """q [tokens, heads, 576] and compact kv [rows, 1, 576] are borrowed BF16 operands."""
+    """q [tokens, heads, 576] and compact kv [rows, 1, 576] are borrowed BF16 operands.
+
+    indices [tokens, topk] or [tokens, 1, topk] are int32 rows of this layer's compact kv,
+    including any cached prefix; -1 is padding.
+    """
 
     q: torch.Tensor
     kv: torch.Tensor
+    indices: torch.Tensor
     softmax_scale: float
 
 
 class FlashMLASparsePrefillBackend(AttentionBackend[FlashMLASparsePrefillBatch, SparseMLAPrefillInputs]):
+    def plan(self) -> FlashMLASparsePrefillBatch:
+        return FlashMLASparsePrefillBatch()
+
     def forward(
         self,
         batch: FlashMLASparsePrefillBatch,
@@ -35,12 +42,11 @@ class FlashMLASparsePrefillBackend(AttentionBackend[FlashMLASparsePrefillBatch, 
     ) -> torch.Tensor:
         """Write to out [tokens, heads, 512] on q.device and return it. Causality is encoded in indices.
 
-        Each int32 index selects one KV row for that query (-1 is padding). out is BF16
-        with unit last stride and must be disjoint from the inputs and indices.
+        out is BF16 with unit last stride and must be disjoint from the inputs.
         """
         from flash_mla import flash_mla_sparse_fwd
 
-        indices = batch.indices
+        indices = inputs.indices
         flash_mla_sparse_fwd(
             q=inputs.q,
             kv=inputs.kv,
@@ -54,9 +60,7 @@ class FlashMLASparsePrefillBackend(AttentionBackend[FlashMLASparsePrefillBatch, 
 
 @dataclass(frozen=True)
 class FlashMLASparseDecodeBatch:
-    # Physical FP8 cache slots, one top-k row per query. -1 marks an unused slot.
-    indices: torch.Tensor
-    # Caller-owned. FlashMLA initializes this on first use for the batch geometry.
+    # FlashMLA fills this tile schedule on the first forward of the pass and every later layer reuses it.
     sched_meta: "FlashMLASchedMeta"
 
 
@@ -66,15 +70,25 @@ class SparseMLADecodeInputs:
 
     Each physical row has 512 latent FP8 bytes, four FP32 scales, and 64 BF16 rotary values.
     The row stride may include padding. Cache population belongs to the caller.
+    indices [requests, topk] or [requests, 1, topk] are int32 physical cache slots chosen
+    for this layer; -1 marks an unused slot.
     """
 
     q_nope: torch.Tensor
     q_rope: torch.Tensor
     packed_kv: torch.Tensor
+    indices: torch.Tensor
     softmax_scale: float
 
 
 class FlashMLASparseDecodeBackend(AttentionBackend[FlashMLASparseDecodeBatch, SparseMLADecodeInputs]):
+    def plan(self) -> FlashMLASparseDecodeBatch:
+        """Create an empty tile schedule. Under CUDA graphs it is filled before capture and reused by replay."""
+        from flash_mla import get_mla_metadata
+
+        sched_meta, _ = get_mla_metadata()
+        return FlashMLASparseDecodeBatch(sched_meta=sched_meta)
+
     def forward(
         self,
         batch: FlashMLASparseDecodeBatch,
@@ -89,7 +103,7 @@ class FlashMLASparseDecodeBackend(AttentionBackend[FlashMLASparseDecodeBatch, Sp
         """
         from flash_mla import flash_mla_with_kvcache
 
-        indices = batch.indices
+        indices = inputs.indices
         if indices.ndim == 2:
             indices = indices.unsqueeze(1)
         assert indices.shape[1] == 1, "FlashMLA sparse decode expects one query per request"

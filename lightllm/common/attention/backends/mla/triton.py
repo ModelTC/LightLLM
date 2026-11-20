@@ -36,6 +36,24 @@ class MLAPrefillInputs:
 
 
 class TritonMLAPrefillBackend(AttentionBackend[TritonMLAPrefillBatch, MLAPrefillInputs]):
+    def plan(
+        self,
+        *,
+        b_q_start_loc: torch.Tensor,
+        b_kv_start_loc: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        b_ready_cache_len: torch.Tensor,
+        max_q_seq_len: int,
+    ) -> TritonMLAPrefillBatch:
+        """The kernel reads the metadata tensors directly, so planning only records them."""
+        return TritonMLAPrefillBatch(
+            b_q_start_loc=b_q_start_loc,
+            b_kv_start_loc=b_kv_start_loc,
+            b_seq_len=b_seq_len,
+            b_ready_cache_len=b_ready_cache_len,
+            max_q_seq_len=max_q_seq_len,
+        )
+
     def forward(
         self,
         batch: TritonMLAPrefillBatch,
@@ -106,6 +124,7 @@ class TritonMLADecodeBackend(AttentionBackend[TritonMLADecodeBatch, MLADecodeInp
 
     def plan(
         self,
+        *,
         req_to_token_indexs: torch.Tensor,
         b_req_idx: torch.Tensor,
         b_seq_len: torch.Tensor,

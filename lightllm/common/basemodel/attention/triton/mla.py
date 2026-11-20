@@ -37,8 +37,17 @@ class MlaTritonAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class MlaTritonPrefillAttState(BasePrefillAttState):
-    def init_state(self):
-        pass
+    batch: TritonMLAPrefillBatch | None = None
+
+    def init_state(self) -> None:
+        state = self.infer_state
+        self.batch = self.backend.prefill_backend.plan(
+            b_q_start_loc=state.b_q_start_loc,
+            b_kv_start_loc=state.b1_cu_kv_seq_len,
+            b_seq_len=state.b_seq_len,
+            b_ready_cache_len=state.b_ready_cache_len,
+            max_q_seq_len=state.max_q_seq_len,
+        )
 
     def prefill_att(
         self,
@@ -58,19 +67,11 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
             return self._contiguous_kv_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
 
         assert att_control.mla_prefill
-        state = self.infer_state
         inputs = MLAPrefillInputs(
             q=q, k_nope=k[0], k_rope=k[1], v=v, softmax_scale=att_control.mla_prefill_dict["softmax_scale"]
         )
-        batch = TritonMLAPrefillBatch(
-            b_q_start_loc=state.b_q_start_loc,
-            b_kv_start_loc=state.b1_cu_kv_seq_len,
-            b_seq_len=state.b_seq_len,
-            b_ready_cache_len=state.b_ready_cache_len,
-            max_q_seq_len=state.max_q_seq_len,
-        )
         out = alloc_func((q.shape[0], q.shape[1], v.shape[-1]), dtype=q.dtype, device=q.device)
-        return self.backend.prefill_backend.forward(batch=batch, inputs=inputs, out=out, alloc_func=alloc_func)
+        return self.backend.prefill_backend.forward(batch=self.batch, inputs=inputs, out=out, alloc_func=alloc_func)
 
     def _contiguous_kv_prefill_att(
         self,

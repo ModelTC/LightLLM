@@ -45,7 +45,17 @@ def test_prefill_indices(cached):
     state = InferStateInfo()
     state.max_cache_len = int(cached)
     state.mem_index = torch.tensor([9, 2], dtype=torch.int32, device="cuda")
+    # One request whose two new tokens follow an optional cached token.
+    state.total_token_num = 2 + int(cached)
+    state.b_seq_len = torch.tensor([state.total_token_num], dtype=torch.int32, device="cuda")
+    state.b_q_seq_len = torch.tensor([2], dtype=torch.int32, device="cuda")
+    state.b_req_idx = torch.tensor([0], dtype=torch.int32, device="cuda")
+    state.input_ids = torch.zeros(2, dtype=torch.int64, device="cuda")
+    state.req_manager = SimpleNamespace(
+        req_to_token_indexs=torch.arange(12, dtype=torch.int32, device="cuda").view(1, 12), HOLD_REQUEST_ID=1
+    )
     att = backend.create_att_prefill_state(infer_state=state)
+    att.init_state()
     q = torch.randn((2, 64, 576), dtype=torch.bfloat16, device="cuda")
     packed, rows = packed_cache()
     original = packed.clone()

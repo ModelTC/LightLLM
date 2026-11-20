@@ -129,6 +129,7 @@ def test_rebuild_preserves_layout_and_bounds_indices(monkeypatch, num_tokens):
 @pytest.mark.parametrize("q_heads", [2, 8])
 def test_state_retains_actual_length_before_graph_capture(monkeypatch, q_heads):
     infer_state = InferStateInfo()
+    infer_state.is_cuda_graph_capture = True
     infer_state.max_kv_seq_len = 8193
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.empty(2, 32768, dtype=torch.int32))
     infer_state.b_req_idx = torch.arange(2, dtype=torch.int32)
@@ -136,7 +137,9 @@ def test_state_retains_actual_length_before_graph_capture(monkeypatch, q_heads):
     state = TritonDecodeAttState(
         backend=SimpleNamespace(
             model=SimpleNamespace(
-                is_mtp_draft_model=False, mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0)
+                is_mtp_draft_model=False,
+                mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
+                graph_max_len_in_batch=32768,
             ),
             decode_backend=TritonGQADecodeBackend(),
         ),

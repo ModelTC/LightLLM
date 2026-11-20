@@ -40,10 +40,10 @@ class TritonGQADecodeBatch:
     all addressed token-map entries must identify populated cache slots.
 
     kv_seq_len_upper_bound bounds actual lengths for MHA scratch sizing and
-    launch coverage. It may be CUDA graph capacity. tuning_kv_seq_len is only
-    a GQA configuration hint, saved before capture rewrites the upper bound.
-    It need not equal the current maximum during replay: a hint of 33 and
-    capacity of 512 remain valid when actual lengths later reach 300.
+    launch coverage; a batch planned for CUDA graph capture must use the graph
+    capacity. tuning_kv_seq_len is only a GQA configuration hint and need not
+    equal the current maximum during replay: a hint of 33 and capacity of 512
+    remain valid when actual lengths later reach 300.
     """
 
     req_to_token_indexs: torch.Tensor
@@ -54,6 +54,26 @@ class TritonGQADecodeBatch:
 
 
 class TritonGQAPrefillBackend(AttentionBackend[TritonGQAPrefillBatch, GQAInputs]):
+    def plan(
+        self,
+        *,
+        req_to_token_indexs: torch.Tensor,
+        b_req_idx: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        b_q_start_loc: torch.Tensor,
+        b_ready_cache_len: torch.Tensor,
+        max_q_seq_len: int,
+    ) -> TritonGQAPrefillBatch:
+        """Kernels read the metadata tensors directly, so planning only records them."""
+        return TritonGQAPrefillBatch(
+            req_to_token_indexs=req_to_token_indexs,
+            b_req_idx=b_req_idx,
+            b_seq_len=b_seq_len,
+            b_q_start_loc=b_q_start_loc,
+            b_ready_cache_len=b_ready_cache_len,
+            max_q_seq_len=max_q_seq_len,
+        )
+
     def forward(
         self,
         batch: TritonGQAPrefillBatch,
@@ -94,6 +114,24 @@ class TritonGQAPrefillBackend(AttentionBackend[TritonGQAPrefillBatch, GQAInputs]
 
 
 class TritonGQADecodeBackend(AttentionBackend[TritonGQADecodeBatch, GQAInputs]):
+    def plan(
+        self,
+        *,
+        req_to_token_indexs: torch.Tensor,
+        b_req_idx: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        kv_seq_len_upper_bound: int,
+        tuning_kv_seq_len: int,
+    ) -> TritonGQADecodeBatch:
+        """Kernels read the metadata tensors directly, so planning only records them and replay needs no refresh."""
+        return TritonGQADecodeBatch(
+            req_to_token_indexs=req_to_token_indexs,
+            b_req_idx=b_req_idx,
+            b_seq_len=b_seq_len,
+            kv_seq_len_upper_bound=kv_seq_len_upper_bound,
+            tuning_kv_seq_len=tuning_kv_seq_len,
+        )
+
     def forward(
         self,
         batch: TritonGQADecodeBatch,
