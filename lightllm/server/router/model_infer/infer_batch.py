@@ -79,9 +79,12 @@ class InferenceContext:
         return
 
     def _init_output_constraint_state_factory(self) -> Optional["OutputConstraintStateFactory"]:
-        if self.args.output_constraint_mode != "xgrammar":
-            return None
         from lightllm.server.router.model_infer.structured_output.state_factory import OutputConstraintStateFactory
+
+        if self.args.output_constraint_mode != "xgrammar":
+            if self.args.enable_thinking_budget:
+                return OutputConstraintStateFactory(None, self.vocab_size, self.args.eos_id)
+            return None
         from lightllm.server.tokenizer import get_tokenizer
 
         # HTTP workers already compiled the grammar. Inference needs only the

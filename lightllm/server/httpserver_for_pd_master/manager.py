@@ -124,6 +124,9 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
         return
 
     def tokens(self, prompt, multimodal_params, sampling_params: SamplingParams, kwargs=None):
+        return self._encode_and_count_tokens(prompt, multimodal_params, sampling_params, kwargs)[1]
+
+    def _encode_and_count_tokens(self, prompt, multimodal_params, sampling_params: SamplingParams, kwargs=None):
         kwargs = {"add_special_tokens": sampling_params.add_special_tokens, **(kwargs or {})}
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
         image_tokens = 0
@@ -146,7 +149,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
             self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
             audio_tokens += self.tokenizer.get_audio_token_length(audio)
         # Image boundaries are already in prompt_ids; expansion only inserts image tokens.
-        return len(prompt_ids) + image_tokens + audio_tokens + audio_count
+        return prompt_ids, len(prompt_ids) + image_tokens + audio_tokens + audio_count
 
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
@@ -201,7 +204,9 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
         await multimodal_params.verify_and_preload(request)
         # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
         # sampling_params 的参数进行修正。
-        input_token_num = await asyncio.to_thread(self.tokens, prompt, multimodal_params, sampling_params)
+        original_prompt_ids, input_token_num = await asyncio.to_thread(
+            self._encode_and_count_tokens, prompt, multimodal_params, sampling_params
+        )
         # Length validation only checks emptiness and len(); no token list is needed.
         fake_prompt_ids = range(input_token_num)
         from lightllm.server.httpserver.manager import HttpServerManager
@@ -235,6 +240,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     start_time,
                     origin_group_request_id + choice_index,
                     input_token_num,
+                    original_prompt_ids,
                 )
             )
 
@@ -258,6 +264,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
         start_time: float,
         origin_request_id: int,
         input_token_num: int,
+        original_prompt_ids: List[int],
     ):
         """处理节点繁忙错误；配置正数探测周期时重新选择 P/D 节点并重试。"""
         retry_start_time = time.monotonic()
@@ -273,6 +280,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     start_time,
                     origin_request_id,
                     input_token_num,
+                    original_prompt_ids,
                 )
                 async with aclosing(generator):
                     async for result in generator:
@@ -312,6 +320,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
         start_time: float,
         origin_request_id: int,
         input_token_num: int,
+        original_prompt_ids: List[int],
     ):
         """执行一次完整的单 choice 生成尝试。
 
@@ -361,6 +370,9 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
             )
 
             history_gen_token_strs = []
+            has_thinking_budget = origin_sampling_params.constraint_out_params.thinking_token_budget >= 0
+            if has_thinking_budget:
+                history_gen_token_ids = []
             origin_prompt_cache_len = None
             segment_index = 0
             # 后续分段的 prompt 会追加已生成内容；始终保留所有分段中最小的 prompt token 数，
@@ -399,7 +411,12 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                         p_node=p_node, chars=pending_prefill_load_chars, req_num=1
                     )
                 sampling_params.constraint_out_params.pd_previous_output_len = 0
-                if history_gen_token_strs and sampling_params.constraint_out_params.has_constraint():
+                generation_prompt = block_prompt
+                if history_gen_token_strs and has_thinking_budget:
+                    # 续跑时，直接接上模型之前实际生成的 token，不要把输出文字重新分词。
+                    generation_prompt = original_prompt_ids + history_gen_token_ids
+                    sampling_params.constraint_out_params.pd_previous_output_len = len(history_gen_token_ids)
+                elif history_gen_token_strs and sampling_params.constraint_out_params.has_constraint():
                     block_token_num = await asyncio.to_thread(
                         self.tokens, block_prompt, multimodal_params, sampling_params
                     )
@@ -419,7 +436,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     p_node,
                     d_node,
                     start_time,
-                    block_prompt,
+                    generation_prompt,
                     sampling_params,
                     multimodal_params,
                     request,
@@ -454,6 +471,8 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     # 容量 marker 已在上方过滤，能走到这里的每个 token 都立即扣减全局剩余输出额度。
                     remaining_max_new_tokens -= 1
                     history_gen_token_strs.append(request_output)
+                    if has_thinking_budget:
+                        history_gen_token_ids.append(metadata["id"])
                     prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
                     metadata["prompt_tokens"] = prompt_tokens
                     needs_prefill_first_token = metadata.pop("needs_prefill_first_token", True)
@@ -589,7 +608,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
         p_node: PD_Client_Obj,
         d_node: PD_Client_Obj,
         start_time: float,
-        prompt: str,
+        prompt: Union[str, List[int]],
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,

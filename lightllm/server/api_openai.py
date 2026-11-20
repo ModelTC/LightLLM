@@ -420,6 +420,16 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 request, g_objs.httpserver_manager.tokenizer
             )
 
+    if request.thinking_token_budget is not None and request.thinking_token_budget >= 0:
+        if not get_env_start_args().enable_thinking_budget:
+            return create_error_response(
+                HTTPStatus.BAD_REQUEST, "thinking_token_budget requires --enable_thinking_budget"
+            )
+        reasoning_end = _get_guided_reasoning_end(request, g_objs.httpserver_manager.tokenizer)
+        if reasoning_end:
+            sampling_params_dict["guided_reasoning_end"] = reasoning_end
+            sampling_params_dict["thinking_token_budget"] = request.thinking_token_budget
+
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
     await sampling_params.verify_cpu_async(g_objs.httpserver_manager.output_grammar_compiler)

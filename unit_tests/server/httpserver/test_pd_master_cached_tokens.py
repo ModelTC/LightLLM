@@ -49,7 +49,7 @@ def _make_manager(monkeypatch):
         return counter[0]
 
     mgr.metric_client = SimpleNamespace(counter_inc=lambda *a, **k: None, histogram_observe=lambda *a, **k: None)
-    mgr.tokens = lambda prompt, *a, **k: 10 + len(prompt) - len("hello")
+    mgr._encode_and_count_tokens = lambda prompt, *a, **k: ([1, 2], 10 + len(prompt) - len("hello"))
     mgr.tokenizer = SimpleNamespace(encode=lambda text, _multimodal=None, **kwargs: [1, 2])
     mgr._log_req_header = lambda *a, **k: asyncio.sleep(0)
     mgr.recorded_cache_hit_rates = []
@@ -196,7 +196,7 @@ def test_pd_token_id_stop_matches_across_capacity_segments(monkeypatch, mode, hi
         # 分段内仍由真实 InferReq 判断；跨分段匹配由对外生成流的包装层完成。
         from lightllm.server.httpserver.stop_seq_match import wrap_stop_match_stream
 
-        raw_generator = manager._generate_one_attempt("prompt", params, None, None, 0, 80, 2)
+        raw_generator = manager._generate_one_attempt("prompt", params, None, None, 0, 80, 2, [1, 2])
         results = [result async for result in wrap_stop_match_stream(manager, raw_generator, params, "prompt")]
         assert [result[2]["id"] for result in results] == stop_ids
         assert results[-1][3].is_stopped()
@@ -238,8 +238,9 @@ def test_dynamic_split_keeps_first_segment_hit(monkeypatch):
 @pytest.mark.parametrize("add_special_tokens", [False, True])
 @pytest.mark.parametrize("prompt,expected_lengths", [("P", (0, 1)), ("PP", (0, 0))])
 @pytest.mark.parametrize("constraint_enabled", [False, True])
+@pytest.mark.parametrize("budget", [None, 3])
 def test_continuation_uses_reencoded_length_difference(
-    monkeypatch, add_special_tokens, prompt, expected_lengths, constraint_enabled
+    monkeypatch, add_special_tokens, prompt, expected_lengths, constraint_enabled, budget
 ):
     from tokenizers import Tokenizer, models, processors
     from unittest.mock import Mock, call
@@ -247,7 +248,7 @@ def test_continuation_uses_reencoded_length_difference(
     tokenizer = Tokenizer(models.BPE({"P": 0, "x": 1, "Px": 2, "<bos>": 3, "PPx": 4}, [("P", "x"), ("P", "Px")]))
     tokenizer.post_processor = processors.TemplateProcessing(single="<bos> $A", special_tokens=[("<bos>", 3)])
     manager = _make_manager(monkeypatch)
-    del manager.tokens
+    del manager._encode_and_count_tokens
     manager.tokenizer = SimpleNamespace(
         encode=Mock(side_effect=lambda text, _multimodal=None, **kwargs: tokenizer.encode(text, **kwargs).ids)
     )
@@ -257,6 +258,8 @@ def test_continuation_uses_reencoded_length_difference(
         max_new_tokens=4,
         add_special_tokens=add_special_tokens,
         regular_constraint=".*" if constraint_enabled else "",
+        thinking_token_budget=budget,
+        guided_reasoning_end=[5] if budget is not None else [],
     )
     _collect(
         manager,
@@ -270,16 +273,72 @@ def test_continuation_uses_reencoded_length_difference(
         first_token_text="x",
         prompt=prompt,
     )
-    # 约束输出按拼接文本的编码长度差重放；普通请求跳过后续编码。
+    if budget is not None:
+        # Actual output IDs survive even when BPE would merge them with the prompt.
+        original_ids = tokenizer.encode(prompt, add_special_tokens=add_special_tokens).ids
+        assert manager.segment_inputs == [
+            (prompt, 0),
+            (original_ids + [ord("x")], 1),
+            (original_ids + [ord("x"), ord("x")], 2),
+        ]
+        assert manager.tokenizer.encode.call_args_list == [
+            call(prompt, None, add_special_tokens=add_special_tokens),
+        ]
+        return
+    # 无预算的约束输出沿用拼接文本的编码长度差；普通请求跳过后续编码。
+    needs_replay = constraint_enabled
     assert manager.segment_inputs == [
         (prompt, 0),
-        (prompt + "x", expected_lengths[0] if constraint_enabled else 0),
-        (prompt + "xx", expected_lengths[1] if constraint_enabled else 0),
+        (prompt + "x", expected_lengths[0] if needs_replay else 0),
+        (prompt + "xx", expected_lengths[1] if needs_replay else 0),
     ]
-    expected_encoded_prompts = (prompt, prompt + "x", prompt + "xx") if constraint_enabled else (prompt,)
+    expected_encoded_prompts = (prompt, prompt + "x", prompt + "xx") if needs_replay else (prompt,)
     assert manager.tokenizer.encode.call_args_list == [
         call(text, None, add_special_tokens=add_special_tokens) for text in expected_encoded_prompts
     ]
+
+
+@pytest.mark.parametrize("choice_count", [1, 3])
+def test_budget_reuses_initial_encoding_across_choices_and_busy_retries(monkeypatch, choice_count):
+    from unittest.mock import Mock
+
+    from lightllm.utils.error_utils import ServerBusyError
+
+    manager = _make_manager(monkeypatch)
+    del manager._encode_and_count_tokens
+    original_ids = [1, 2]
+    manager.tokenizer.encode = Mock(return_value=original_ids)
+    params = SamplingParams()
+    params.init(None, n=choice_count, best_of=choice_count, thinking_token_budget=3, guided_reasoning_end=[5])
+    attempts = {}
+    captured_ids = []
+
+    async def attempt(prompt, sampling_params, multimodal, request, start_time, req_id, input_token_num, prompt_ids):
+        captured_ids.append(prompt_ids)
+        assert input_token_num == len(original_ids)
+        attempts[req_id] = attempts.get(req_id, 0) + 1
+        if attempts[req_id] == 1:
+            raise ServerBusyError("busy")
+        yield req_id, "answer", {"id": 10}, FinishStatus(FinishStatus.FINISHED_STOP)
+
+    manager._generate_one_attempt = attempt
+
+    async def run():
+        return [
+            result
+            async for result in manager._generate_choices(
+                "prompt",
+                params,
+                SimpleNamespace(images=[], audios=[], verify_and_preload=AsyncMock()),
+                SimpleNamespace(is_disconnected=AsyncMock(return_value=False)),
+            )
+        ]
+
+    assert len(asyncio.run(run())) == choice_count
+    assert len(captured_ids) == choice_count * 2
+    assert all(prompt_ids is original_ids for prompt_ids in captured_ids)
+    assert original_ids == [1, 2]
+    manager.tokenizer.encode.assert_called_once_with("prompt", None, add_special_tokens=params.add_special_tokens)
 
 
 def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatch):
@@ -698,7 +757,7 @@ def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_sta
     manager.fetch_pd_stream = raw_stream
 
     async def run():
-        generator = manager._generate_one("prompt", params, None, request, time.time(), 80, 10)
+        generator = manager._generate_one("prompt", params, None, request, time.time(), 80, 10, [1, 2])
         assert (await generator.__anext__())[1] == "first"
         await manager.stop_request(80)
         # stop_request 只做标记，恢复生成时才停止当前 P/D 分段。

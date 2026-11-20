@@ -52,7 +52,7 @@ class ReqSamplingParamsManager:
 
         self.req_to_bitmask: Optional[torch.Tensor] = None
         self.req_to_bitmask_enabled: Optional[torch.Tensor] = None
-        if get_env_start_args().output_constraint_mode == "xgrammar":
+        if get_env_start_args().output_constraint_mode == "xgrammar" or get_env_start_args().enable_thinking_budget:
             # 每个请求和验证位置对应一个固定掩码槽；CPU matcher 在上一轮 post_handle 后填充，
             # 采样时在同一流上异步传到 GPU；已有完成事件保护下一轮 pinned 源缓冲区的复用。
             self.req_to_bitmask = torch.empty(

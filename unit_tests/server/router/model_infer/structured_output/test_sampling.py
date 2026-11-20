@@ -442,6 +442,53 @@ def copy_snapshot_and_wait(manager):
     completed.synchronize()
 
 
+@pytest.mark.parametrize("grammar", [None, "ab"])
+@pytest.mark.parametrize("sampling_manager", ["cpu_counter", "pin_mem_counter", "gpu_counter"], indirect=True)
+def test_sample_forces_budget_end_across_mtp_rows(compiler, sampling_manager, grammar):
+    req = sampling_req(compiler, sampling_manager, regular_constraint=grammar, guided_reasoning_end=tuple(b"]>"))
+    req.sampling_param.shm_param.constraint_out_params.thinking_token_budget = 2
+    req.output_constraint = compiler.output_constraint_state_factory.create_state(req.shm_req, req.sampling_param)
+    commit_token(req, ord("x"))
+    sampling_manager.req_to_next_token_ids[req.req_idx] = torch.tensor(list(b"xy]>"))
+    copy_snapshot_and_wait(sampling_manager)
+    logits = torch.zeros(4, 257, device="cuda")
+    logits[:, ord("!")] = 10
+    logits[0, ord("y")] = 20
+    tokens, scores, _ = sampling.sample(
+        logits, [req] * 4, [256], b_mtp_index=torch.arange(4, dtype=torch.int32, device="cuda")
+    )
+    assert tokens.tolist() == list(b"y]>a" if grammar else b"y]>!")
+    assert torch.isfinite(scores).all()
+    assert req.output_constraint.reasoning_tokens == 1
+    assert req.output_constraint.in_reasoning
+    for token in tokens.tolist():
+        commit_token(req, token)
+    assert req.output_constraint.error is None and not req.output_constraint.in_reasoning
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("mode", ["none", "xgrammar"])
+def test_budget_mask_buffers_without_grammar(monkeypatch, enabled, mode):
+    args = SimpleNamespace(
+        penalty_counter_mode="cpu_counter",
+        model_dir="unused",
+        mtp_step=0,
+        mtp_dynamic_verify=False,
+        output_constraint_mode=mode,
+        reasoning_parser="qwen3",
+        enable_thinking_budget=enabled,
+    )
+    monkeypatch.setattr(req_sampling_params, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(req_sampling_params, "get_vocab_size", lambda _: 257)
+    manager = req_sampling_params.ReqSamplingParamsManager(1)
+    if mode == "none" and not enabled:
+        assert manager.req_to_bitmask is None
+        assert manager.req_to_bitmask_enabled is None
+    else:
+        assert manager.req_to_bitmask.shape == (2, 1, 9)
+        assert not manager.req_to_bitmask_enabled.any()
+
+
 @pytest.mark.parametrize("vocab_size", [30, 2051, 32769])
 def test_capture_across_vocab_tiles_preserves_sampled_scores(vocab_size):
     logits = torch.linspace(3.0, 0.1, vocab_size, device="cuda").repeat(4, 1)
