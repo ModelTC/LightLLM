@@ -34,8 +34,8 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         return
 
     def _init_att_backend(self):
-        self.prefill_att_backend = get_mla_prefill_att_backend_class(index=0)(model=self)
-        self.decode_att_backend = get_mla_decode_att_backend_class(index=0)(model=self)
+        self.prefill_att_backend = get_mla_prefill_att_backend_class(model=self, index=0)(model=self)
+        self.decode_att_backend = get_mla_decode_att_backend_class(model=self, index=0)(model=self)
         return
 
     def _init_some_value(self):

@@ -20,9 +20,9 @@ class GptOssTpPartModel(LlamaTpPartModel):
         super().__init__(kvargs)
 
     def _init_att_backend(self):
-        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(index=0, priority_list=["fa3"])(
-            model=self
-        )
-        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0, priority_list=["fa3"])(
-            model=self
-        )
+        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(
+            model=self, index=0, priority_list=["fa3"]
+        )(model=self)
+        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(
+            model=self, index=0, priority_list=["fa3"]
+        )(model=self)

@@ -12,32 +12,32 @@ logger = init_logger(__name__)
 
 
 @lru_cache(maxsize=None)
+def _device_name(device: int) -> str:
+    return torch.cuda.get_device_name(device)
+
+
 def is_tesla():
-    return "Tesla" in torch.cuda.get_device_name(0)
+    return "Tesla" in _device_name(torch.cuda.current_device())
 
 
-@lru_cache(maxsize=None)
 def is_hopper():
-    return (
-        "H100" in torch.cuda.get_device_name(0)
-        or "H200" in torch.cuda.get_device_name(0)
-        or "H800" in torch.cuda.get_device_name(0)
-        or "Hopper" in torch.cuda.get_device_name(0)
-    )
+    name = _device_name(torch.cuda.current_device())
+    return any(model in name for model in ("H100", "H200", "H800", "Hopper"))
 
 
-@lru_cache(maxsize=None)
 def is_4090():
-    return "4090" in torch.cuda.get_device_name(0) or "RTX 4090" in torch.cuda.get_device_name(0)
+    return "4090" in _device_name(torch.cuda.current_device())
 
 
 @lru_cache(maxsize=None)
-def get_device_sm_count():
-    import triton
+def _triton_device_properties(device: int) -> dict:
     from triton.runtime import driver
 
-    properties = driver.active.utils.get_device_properties(0)
-    return properties["multiprocessor_count"]
+    return driver.active.utils.get_device_properties(device)
+
+
+def get_device_sm_count():
+    return _triton_device_properties(torch.cuda.current_device())["multiprocessor_count"]
 
 
 @lru_cache(maxsize=None)
@@ -45,31 +45,16 @@ def is_sm100_gpu():
     return torch.cuda.get_device_capability()[0] == 10
 
 
-@lru_cache(maxsize=None)
 def get_device_sm_regs_num():
-    import triton
-    from triton.runtime import driver
-
-    properties = driver.active.utils.get_device_properties(0)
-    return properties["max_num_regs"]
+    return _triton_device_properties(torch.cuda.current_device())["max_num_regs"]
 
 
-@lru_cache(maxsize=None)
 def get_device_sm_shared_mem_num():
-    import triton
-    from triton.runtime import driver
-
-    properties = driver.active.utils.get_device_properties(0)
-    return properties["max_shared_mem"]
+    return _triton_device_properties(torch.cuda.current_device())["max_shared_mem"]
 
 
-@lru_cache(maxsize=None)
 def get_device_warp_size():
-    import triton
-    from triton.runtime import driver
-
-    properties = driver.active.utils.get_device_properties(0)
-    return properties["warpSize"]
+    return _triton_device_properties(torch.cuda.current_device())["warpSize"]
 
 
 def calcu_kernel_best_vsm_count(kernel, num_warps):
