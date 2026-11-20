@@ -20,7 +20,7 @@ from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.server.core.objs import ShmReqManager, StartArgs
-from lightllm.server.core.objs.io_objs import AbortedReqCmd
+from lightllm.server.core.objs.io_objs import AbortedReqCmd, PfDecodeKvReadyCmd
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
@@ -570,6 +570,8 @@ class ModeBackend:
                     if obj.req_id in g_infer_context.requests_mapping:
                         req: InferReq = g_infer_context.requests_mapping[obj.req_id]
                         req.infer_aborted = True
+                elif isinstance(obj, PfDecodeKvReadyCmd):
+                    self._on_pf_decode_kv_ready(req_id=obj.req_id)
                 elif isinstance(obj, ProfilerCmd):
                     if self.profiler is not None:
                         self.profiler.cmd(obj)
@@ -577,6 +579,10 @@ class ModeBackend:
                     assert False, f"error type {type(obj)}"
             if init_reqs:
                 self._init_reqs(reqs=init_reqs)
+        return
+
+    def _on_pf_decode_kv_ready(self, req_id: int) -> None:
+        """PD 分离的 Prefill 先推理模式才处理这条命令。其他模式收到时忽略。"""
         return
 
     def _read_pd_trans_io_buffer_and_update_req_status(self):

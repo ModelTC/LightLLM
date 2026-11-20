@@ -36,12 +36,13 @@ from lightllm.utils.envs_utils import (
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.websocket_utils import websocket_message_exceeds_limit
+from .pd_prefill_first_mode_helper import HttpPdPrefillFirstManagerHelper
 from .pd_selector import PDSelectionExtraInfo, create_selector
 
 logger = init_logger(__name__)
 
 
-class HttpServerManagerForPDMaster:
+class HttpServerManagerForPDMaster(HttpPdPrefillFirstManagerHelper, object):
     def __init__(
         self,
         args: StartArgs,
@@ -762,9 +763,17 @@ class HttpServerManagerForPDMaster:
         sub_req_id_to_mtp_verify_step_num: Dict[int, int] = {}
 
         try:
-            async for sub_req_id, out_str, metadata, finish_status in self.fetch_pd_stream(
-                p_node, d_node, prompt, sampling_params, multimodal_params, request
-            ):
+            if self.args.pd_prefill_first:
+                token_stream = self.fetch_prefill_first_stream(
+                    p_node=p_node,
+                    prompt=prompt,
+                    sampling_params=sampling_params,
+                    multimodal_params=multimodal_params,
+                    request=request,
+                )
+            else:
+                token_stream = self.fetch_pd_stream(p_node, d_node, prompt, sampling_params, multimodal_params, request)
+            async for sub_req_id, out_str, metadata, finish_status in token_stream:
                 if await request.is_disconnected():
                     raise ClientDisconnected(
                         group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
@@ -842,6 +851,8 @@ class HttpServerManagerForPDMaster:
                 if node is not None:
                     targets.extend(node.sub_connections.values())
         for websocket in targets:
+            if websocket is None:
+                continue
             try:
                 await websocket.send_bytes(payload)
             except:
@@ -893,6 +904,8 @@ class HttpServerManagerForPDMaster:
                                     req_status.event.set()
                             except:
                                 pass
+                    elif obj[0] == ObjType.PF_PREFILL_KV_READY:
+                        self.record_pf_prefill_kv_ready(ready=obj[1])
                     elif obj[0] == ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS:
                         _, group_req_id, prompt_ids = obj
                         try:
@@ -943,6 +956,7 @@ class ReqStatus:
         self.event = asyncio.Event()
         self.up_status_event = asyncio.Event()
         self.prefill_prompt_ids_event = asyncio.Event()
+        self.pf_prefill_kv_ready_event = asyncio.Event()
         self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
@@ -961,11 +975,12 @@ class ReqStatus:
         async with self.lock:
             self.error_info = error_info
             self.is_server_busy = is_server_busy
-            # 请求可能正在等待 Prefill prompt ids、Decode KV 资源或输出 token，
+            # 请求可能正在等待 Prefill prompt ids、prefill KV 就绪、Decode KV 资源或输出 token，
             # 设置全部事件，让请求自己的执行循环立即醒来并抛出异常。
             self.event.set()
             self.up_status_event.set()
             self.prefill_prompt_ids_event.set()
+            self.pf_prefill_kv_ready_event.set()
 
     def raise_if_error(self):
         if self.error_info is not None:

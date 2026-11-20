@@ -347,6 +347,8 @@ class SamplingParams(ctypes.Structure):
         ("prompt_logprobs", ctypes.c_int),
         # -1 disables chat output logprobs, 0 returns just the sampled token.
         ("output_top_logprobs", ctypes.c_int),
+        # PD 分离的 Prefill 先推理模式。由 Master 下发，默认关闭，走原来的握手。
+        ("pd_prefill_first", ctypes.c_bool),
     ]
 
     _do_sample: bool = False
@@ -381,6 +383,7 @@ class SamplingParams(ctypes.Structure):
         self.high_priority_request = False
         self.infer_high_priority = 0
         self.pd_node_resource_wait_timeout_seconds = -1
+        self.pd_prefill_first = False
         self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
 
         self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)

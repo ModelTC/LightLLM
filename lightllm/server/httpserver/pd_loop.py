@@ -125,11 +125,49 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 heartbeat_task = asyncio.create_task(_send_heartbeat_to_pd_master(websocket))
 
                 group_req_id_to_event: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
+                decode_kv_ready_events: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
                 while True:
                     recv_bytes = await websocket.recv()
                     obj = pickle.loads(recv_bytes)
-                    if obj[0] == ObjType.REQ:
+                    if obj[0] == ObjType.PF_REQ:
+                        from lightllm.server.httpserver.pd_prefill_first_helper import (
+                            pd_run_prefill_first_process_generate,
+                        )
+
+                        prompt, sampling_params, multimodal_params = obj[1]
+                        if dp_index is not None:
+                            sampling_params.suggested_dp_index = dp_index
+                        group_req_id = sampling_params.group_request_id
+                        decode_kv_ready_event = asyncio.Event()
+                        decode_kv_ready_events[group_req_id] = decode_kv_ready_event
+                        generation_task = asyncio.create_task(
+                            pd_run_prefill_first_process_generate(
+                                manager=manager,
+                                prompt=prompt,
+                                sampling_params=sampling_params,
+                                multimodal_params=multimodal_params,
+                                forwarding_queue=forwarding_queue,
+                                pd_upload_websocket=websocket,
+                                decode_kv_ready_event=decode_kv_ready_event,
+                            )
+                        )
+                        generation_tasks[group_req_id] = generation_task
+
+                        def remove_prefill_first_task(task: asyncio.Task, request_id: int = group_req_id):
+                            if generation_tasks.get(request_id) is task:
+                                generation_tasks.pop(request_id, None)
+
+                        generation_task.add_done_callback(remove_prefill_first_task)
+                    elif obj[0] == ObjType.PF_DECODE_KV_READY:
+                        _, ready_group_req_id, decode_node_info = obj
+                        decode_kv_ready_event = decode_kv_ready_events.pop(ready_group_req_id, None)
+                        if decode_kv_ready_event is None:
+                            logger.error(f"error in find decode_kv_ready_event, info: {obj}")
+                            continue
+                        decode_kv_ready_event.decode_node_info = decode_node_info
+                        decode_kv_ready_event.set()
+                    elif obj[0] == ObjType.REQ:
                         prompt, sampling_params, multimodal_params = obj[1]
                         if dp_index is not None:
                             if sampling_params.suggested_dp_index != -1:
@@ -197,12 +235,16 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.error("connetion to pd_master has error")
             logger.exception(str(e))
         finally:
+            # 结束回调会把已完成的任务移出 generation_tasks，先记下还在跑的请求。
+            request_ids = list(generation_tasks)
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
             child_tasks.extend(generation_tasks.values())
             for task in child_tasks:
                 task.cancel()
             if child_tasks:
                 await asyncio.gather(*child_tasks, return_exceptions=True)
+            for request_id in request_ids:
+                await manager.abort(request_id)
 
         await asyncio.sleep(10)
         await forwarding_queue.get_all_data()

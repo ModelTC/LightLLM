@@ -77,6 +77,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="when run_mode set to prefill or decode, you need set this pd_mater_port",
     )
     parser.add_argument(
+        "--pd_prefill_first",
+        action="store_true",
+        help=(
+            "PD disaggregation prefill-first mode. Enable it only on the PD master. "
+            "Prefill computes and samples the first token before decode allocates KV pages. "
+            "On a full cache match, prefill still sends the last reserved token."
+        ),
+    )
+    parser.add_argument(
         "--pd_master_mode",
         type=str,
         default="elastic",
@@ -895,8 +904,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--schedule_time_interval",
         type=float,
-        default=0.03,
-        help="""The interval of the schedule time, default is 30ms.""",
+        default=0.005,
+        help="""The interval of the schedule time, default is 5ms.""",
     )
     parser.add_argument(
         "--afs_image_embed_dir",

@@ -31,3 +31,10 @@ class GroupReqObjs:
 @dataclass
 class AbortedReqCmd:
     req_id: int
+
+
+@dataclass
+class PfDecodeKvReadyCmd:
+    """PD 分离的 Prefill 先推理模式：decode KV 已就绪，推理进程可以结束占位并建立传输任务。"""
+
+    req_id: int
