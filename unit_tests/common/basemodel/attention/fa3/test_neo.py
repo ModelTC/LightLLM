@@ -6,7 +6,9 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.fa3 import fp, neo
+from lightllm.common.attention.backends.gqa.fa3 import FA3GQAPrefillStepBuilder
+from lightllm.common.basemodel.attention.fa3 import neo
+from lightllm.utils import sgl_utils
 
 
 def _load_neo(monkeypatch, attention_func):
@@ -27,12 +29,12 @@ def test_recognizes_neo_interface_without_replacing_regular_fa3(monkeypatch):
     def neo_attention(q, image_token_end=None):
         return q
 
-    regular_attention = fp.flash_attn_with_kvcache
+    regular_attention = sgl_utils.flash_attn_with_kvcache
     module = _load_neo(monkeypatch, neo_attention)
 
     assert module.HAS_FLASH_ATTN_INTERFACE
     assert module.flash_attn_with_kvcache_neo is neo_attention
-    assert fp.flash_attn_with_kvcache is regular_attention
+    assert sgl_utils.flash_attn_with_kvcache is regular_attention
 
 
 @pytest.mark.parametrize("interface_kind", ["missing", "regular", "legacy_tag"])
@@ -82,7 +84,12 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
     infer_state.b1_cu_kv_seq_len = indices([0, 2 * page_size, 4 * page_size - 1]).long()
     infer_state.b_image_token_end = image_ends
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token_indexs)
-    backend = SimpleNamespace(uses_causal_attention=lambda: True, infer_page_size=page_size)
+    backend = SimpleNamespace(
+        uses_causal_attention=lambda: True,
+        infer_page_size=page_size,
+        prefill_step_builder=FA3GQAPrefillStepBuilder(page_size=page_size),
+        model=SimpleNamespace(),
+    )
     state = neo.NeoFa3AttBackend.create_att_prefill_state(backend, infer_state)
     state.init_state()
 
