@@ -11,7 +11,7 @@ from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNS
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention.linear.gdn as gdn
 import lightllm.common.basemodel.attention.create_linear_utils as linear_create_utils
-import lightllm.common.attention.kernels.gdn.third_party_fla.ops as fla_ops
+import lightllm.common.attention.kernels.gdn.third_party_fla.ops.chunk as fla_chunk
 from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
@@ -143,7 +143,7 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch, role: str):
 def test_linear_backend_is_abstract_and_triton_supplies_chunk_kernel():
     assert inspect.isabstract(gdn.LinearAttBackend)
     backend = object.__new__(TritonLinearAttBackend)
-    assert backend.get_prefill_kernel() is fla_ops.chunk_gated_delta_rule
+    assert backend.get_prefill_kernel() is fla_chunk.chunk_gated_delta_rule
 
 
 @pytest.fixture
@@ -251,7 +251,7 @@ def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
     flashqla = ModuleType("flash_qla")
     flashqla.chunk_gated_delta_rule = kernel
     monkeypatch.setitem(sys.modules, "flash_qla", flashqla)
-    monkeypatch.setattr(fla_ops, "chunk_gated_delta_rule", kernel)
+    monkeypatch.setattr(fla_chunk, "chunk_gated_delta_rule", kernel)
 
     original_randn = torch.randn
     original_rand = torch.rand
