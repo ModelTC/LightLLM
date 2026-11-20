@@ -164,6 +164,7 @@ def flash_attn_with_kvcache_autotune(
     v_descale: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     return_softmax_lse: bool = False,
+    out: Optional[torch.Tensor] = None,
     run_config: Optional[dict] = None,
 ):
     # KV 长度、页表及 query 布局由调用方显式提供；四维 batched Q 的 cu_seqlens_q 可以显式传 None。
@@ -194,4 +195,5 @@ def flash_attn_with_kvcache_autotune(
         v_descale=v_descale,
         softmax_scale=softmax_scale,
         return_softmax_lse=return_softmax_lse,
+        out=out,
     )

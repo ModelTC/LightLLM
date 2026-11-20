@@ -1,0 +1,293 @@
+from dataclasses import dataclass
+from typing import Callable
+
+import torch
+import triton
+
+from lightllm.common.attention.backend import (
+    AttentionBackend,
+    AttentionBatch,
+    AttentionImpl,
+    AttentionStepBuilder,
+    TensorAllocator,
+)
+from .. import keep_for_cuda_graph
+from . import GQALayerConfig, GQALayerInputs
+
+
+@dataclass(frozen=True)
+class FA3GQAPrefillStepArgs:
+    """Paged-cache metadata for packed prefill queries, one page-table row per request.
+
+    page_table[i, j] is the physical page holding request i's tokens
+    [j * page_size, (j + 1) * page_size). cu_seqlens_q/cu_seqlens_k are the int32 cumulative
+    query and kv offsets that place each request's new keys in the paged cache.
+    """
+
+    page_table: torch.Tensor
+    cache_seqlens: torch.Tensor
+    cu_seqlens_q: torch.Tensor
+    cu_seqlens_k: torch.Tensor
+    max_seqlen_q: int
+    page_size: int
+
+
+@dataclass(frozen=True)
+class FA3GQADecodeStepArgs:
+    """Paged-cache metadata for decode, one page-table row per attention request.
+
+    With speculative decoding an attention request groups the query rows of one logical
+    request; cu_seqlens_q gives the int32 query offsets and cache_seqlens each request's kv
+    length. max_seqlen_k is this step's actual maximum, only a kernel-config hint.
+    """
+
+    page_table: torch.Tensor
+    cache_seqlens: torch.Tensor
+    cu_seqlens_q: torch.Tensor
+    cu_seqlens_k: torch.Tensor
+    max_seqlen_q: int
+    max_seqlen_k: int
+    page_size: int
+
+
+class FA3GQAPrefillStepBuilder(AttentionStepBuilder[FA3GQAPrefillStepArgs]):
+    def __init__(self, *, page_size: int) -> None:
+        self.page_size = page_size
+
+    def build(self, batch: AttentionBatch) -> FA3GQAPrefillStepArgs:
+        """Build a fresh page table for the step's requests."""
+        from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
+
+        page_table = torch.empty(
+            (batch.batch_size, triton.cdiv(batch.max_kv_seq_len, self.page_size)),
+            dtype=torch.int32,
+            device=batch.b_seq_len.device,
+        )
+        page_table_copy(
+            page_table=page_table,
+            req_to_token_indexs=batch.req_to_token_indexs,
+            b_req_idx=batch.b_req_idx,
+            page_size=self.page_size,
+        )
+        return FA3GQAPrefillStepArgs(
+            page_table=page_table,
+            cache_seqlens=batch.b_seq_len,
+            cu_seqlens_q=batch.cu_q_seq_len.int(),
+            cu_seqlens_k=batch.cu_kv_seq_len.int(),
+            max_seqlen_q=batch.max_q_seq_len,
+            page_size=self.page_size,
+        )
+
+
+class FA3GQADecodeStepBuilder(AttentionStepBuilder[FA3GQADecodeStepArgs]):
+    def __init__(self, *, page_size: int, page_table_view: Callable[[int, int, int], torch.Tensor]) -> None:
+        """page_table_view(rows, max_kv_len, microbatch_index) returns a [rows, pages] view of
+        caller-owned page-table storage, the same storage for the same arguments."""
+        self.page_size = page_size
+        self.page_table_view = page_table_view
+        self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
+
+    def build(self, batch: AttentionBatch) -> FA3GQADecodeStepArgs:
+        """Group query rows into attention requests and fill their page-table rows.
+
+        A CUDA graph step uses a page table as wide as the graph capacity and keeps every
+        derived tensor at a fixed address per (microbatch, batch size), rewriting them in place
+        on replay steps.
+        """
+        from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
+
+        cu_seqlens_q, cu_seqlens_k, cache_seqlens, att_req_idx = self._group_rows(batch)
+        width = batch.cuda_graph_max_kv_seq_len if batch.uses_cuda_graph else batch.max_kv_seq_len
+        page_table = self.page_table_view(att_req_idx.shape[0], width, batch.microbatch_index)
+        page_table_copy(
+            page_table=page_table[:, : triton.cdiv(batch.max_kv_seq_len, self.page_size)],
+            req_to_token_indexs=batch.req_to_token_indexs,
+            b_req_idx=att_req_idx,
+            page_size=self.page_size,
+        )
+        if batch.uses_cuda_graph:
+            key = (batch.microbatch_index, batch.batch_size)
+            store = self._cuda_graph_tensors
+            cu_seqlens_q = keep_for_cuda_graph(store, (*key, "cu_seqlens_q"), cu_seqlens_q)
+            cu_seqlens_k = keep_for_cuda_graph(store, (*key, "cu_seqlens_k"), cu_seqlens_k)
+            cache_seqlens = keep_for_cuda_graph(store, (*key, "cache_seqlens"), cache_seqlens)
+        return FA3GQADecodeStepArgs(
+            page_table=page_table,
+            cache_seqlens=cache_seqlens,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=batch.decode_rows_per_request,
+            max_seqlen_k=batch.max_kv_seq_len,
+            page_size=self.page_size,
+        )
+
+    @staticmethod
+    def _group_rows(batch: AttentionBatch):
+        """Return int32 query/kv offsets, kv lengths and request slots per attention request."""
+        from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
+
+        rows = batch.decode_rows_per_request
+        if batch.dynamic_decode_rows:
+            from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params
+            from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
+
+            markers = build_mtp_shared_group_markers(batch.b_req_idx, hold_req_id=batch.pad_req_idx)
+            q_lens, kv_lens, att_req_idx, cache_seqlens = build_dynamic_spec_fa3_decode_params(
+                b_req_idx=batch.b_req_idx,
+                b_seq_len=batch.b_seq_len,
+                b_mark_mtp_shared_group=markers,
+                att_batch_size=batch.batch_size,
+                hold_req_id=batch.pad_req_idx,
+            )
+        elif rows > 1:
+            assert batch.batch_size % rows == 0, (
+                "FA3 fixed-layout decode requires batch_size to be divisible by the rows per request, "
+                f"got batch_size={batch.batch_size}, rows={rows}"
+            )
+            # The last row of each request sees its longest prefix.
+            q_lens = torch.full((batch.batch_size // rows,), rows, dtype=torch.int32, device=batch.b_seq_len.device)
+            kv_lens = batch.b_seq_len[rows - 1 :: rows]
+            att_req_idx = batch.b_req_idx[rows - 1 :: rows]
+            cache_seqlens = kv_lens.contiguous()
+        else:
+            return batch.cu_q_seq_len.int(), batch.cu_kv_seq_len.int(), batch.b_seq_len, batch.b_req_idx
+        cu_seqlens_q, cu_seqlens_k = gen_cumsum_pad0_tensor(q_lens, kv_lens)
+        return cu_seqlens_q.int(), cu_seqlens_k.int(), cache_seqlens, att_req_idx
+
+
+def _check_supported(layer_config: GQALayerConfig) -> None:
+    if layer_config.dtype not in (torch.float16, torch.bfloat16) or layer_config.head_dim > 256:
+        raise NotImplementedError(
+            f"FA3 GQA supports FP16/BF16 with head_dim <= 256, got {layer_config.dtype}, {layer_config.head_dim}"
+        )
+
+
+def _paged(cache: torch.Tensor, page_size: int) -> torch.Tensor:
+    return cache.view(-1, page_size, cache.shape[1], cache.shape[2])
+
+
+def _check_inputs(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs) -> None:
+    assert (
+        layer_inputs.q.shape[1:] == (layer_config.num_heads, layer_config.head_dim)
+        and layer_inputs.q.dtype == layer_config.dtype
+    )
+    assert layer_inputs.k_cache.shape[1:] == (layer_config.num_kv_heads, layer_config.head_dim)
+    assert (
+        layer_inputs.sinks is not None
+    ) == layer_config.has_sinks, "sinks must be given exactly when the layer_config has sinks"
+
+
+class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillStepArgs, GQALayerInputs]):
+    def __init__(self, layer_config: GQALayerConfig) -> None:
+        """Supports any scale, causal or non-causal attention, one- or two-sided windows and sinks."""
+        super().__init__(layer_config)
+        _check_supported(layer_config)
+
+    def forward(
+        self,
+        step_args: FA3GQAPrefillStepArgs,
+        layer_inputs: GQALayerInputs,
+        *,
+        out: torch.Tensor,
+        alloc_func: TensorAllocator = torch.empty,
+    ) -> torch.Tensor:
+        """Fill and return out with q's shape, dtype and device.
+
+        Cache slots form complete pages and the current queries' KV is already in the cache.
+        Q/K/V are read-only; out must not overlap them. FA3 manages its own scratch, so forward
+        does not call alloc_func.
+        """
+        from lightllm.utils.sgl_utils import flash_attn_with_kvcache
+
+        layer_config = self.layer_config
+        _check_inputs(layer_config, layer_inputs)
+        flash_attn_with_kvcache(
+            q=layer_inputs.q,
+            k_cache=_paged(layer_inputs.k_cache, step_args.page_size),
+            v_cache=_paged(layer_inputs.v_cache, step_args.page_size),
+            page_table=step_args.page_table,
+            cache_seqlens=step_args.cache_seqlens,
+            cu_seqlens_q=step_args.cu_seqlens_q,
+            cu_seqlens_k_new=step_args.cu_seqlens_k,
+            max_seqlen_q=step_args.max_seqlen_q,
+            softmax_scale=layer_config.softmax_scale,
+            causal=layer_config.causal,
+            window_size=layer_config.sliding_window,
+            softcap=0.0,
+            return_softmax_lse=False,
+            sinks=layer_inputs.sinks,
+            out=out,
+        )
+        return out
+
+
+class FA3GQADecodeImpl(AttentionImpl[GQALayerConfig, FA3GQADecodeStepArgs, GQALayerInputs]):
+    def __init__(self, layer_config: GQALayerConfig) -> None:
+        """Supports any scale, causal or non-causal attention, one- or two-sided windows and sinks."""
+        super().__init__(layer_config)
+        _check_supported(layer_config)
+
+    def forward(
+        self,
+        step_args: FA3GQADecodeStepArgs,
+        layer_inputs: GQALayerInputs,
+        *,
+        out: torch.Tensor,
+        alloc_func: TensorAllocator = torch.empty,
+    ) -> torch.Tensor:
+        """Fill and return out with q's shape; layout rules match prefill.
+
+        q has one row per batch row; the step args group them into attention requests.
+        """
+        from lightllm.utils.sgl_utils import flash_attn_with_kvcache_autotune
+
+        layer_config = self.layer_config
+        _check_inputs(layer_config, layer_inputs)
+        flash_attn_with_kvcache_autotune(
+            q=layer_inputs.q,
+            k_cache=_paged(layer_inputs.k_cache, step_args.page_size),
+            v_cache=_paged(layer_inputs.v_cache, step_args.page_size),
+            page_table=step_args.page_table,
+            cache_seqlens=step_args.cache_seqlens,
+            cu_seqlens_q=step_args.cu_seqlens_q,
+            # The KV is already in the cache, so no new K/V segments are appended.
+            cu_seqlens_k_new=None,
+            max_seqlen_q=step_args.max_seqlen_q,
+            max_seqlen_k=step_args.max_seqlen_k,
+            softmax_scale=layer_config.softmax_scale,
+            causal=layer_config.causal,
+            window_size=layer_config.sliding_window,
+            softcap=0.0,
+            return_softmax_lse=False,
+            sinks=layer_inputs.sinks,
+            out=out,
+        )
+        return out
+
+
+class FA3GQAPrefillBackend(AttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "fa3_gqa_prefill"
+
+    @staticmethod
+    def get_step_builder_cls() -> type[FA3GQAPrefillStepBuilder]:
+        return FA3GQAPrefillStepBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type[FA3GQAPrefillImpl]:
+        return FA3GQAPrefillImpl
+
+
+class FA3GQADecodeBackend(AttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "fa3_gqa_decode"
+
+    @staticmethod
+    def get_step_builder_cls() -> type[FA3GQADecodeStepBuilder]:
+        return FA3GQADecodeStepBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type[FA3GQADecodeImpl]:
+        return FA3GQADecodeImpl

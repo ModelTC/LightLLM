@@ -10,6 +10,8 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention.base_att as base_att_module
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend
+from lightllm.common.attention.backend import AttentionBatch
+from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeStepBuilder, FA3GQAPrefillStepBuilder
 from lightllm.common.basemodel.attention.fa3.fp import Fa3DecodeAttState, Fa3PrefillAttState
 from lightllm.common.basemodel.attention.fa3.mla import MlaFa3DecodeAttState, MlaFa3PrefillAttState
 from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
@@ -116,7 +118,10 @@ def test_attention_backend_selects_causality(monkeypatch, mtp_mode, is_draft_mod
 
 @pytest.mark.parametrize("state_class", [Fa3PrefillAttState, MlaFa3PrefillAttState])
 def test_fa3_prefill_state_owns_causality(monkeypatch, state_class):
-    monkeypatch.setattr(import_module(Fa3PrefillAttState.__module__), "page_table_copy", lambda **kwargs: None)
+    # GQA prefill builds its page table in FA3GQAPrefillStepBuilder, which imports the kernel lazily.
+    kernel_module = "lightllm.common.basemodel.triton_kernel.fa3_utils"
+    patched = kernel_module if state_class is Fa3PrefillAttState else state_class.__module__
+    monkeypatch.setattr(import_module(patched), "page_table_copy", lambda **kwargs: None)
     infer_state = InferStateInfo()
     infer_state.b1_cu_q_seq_len = torch.tensor([0, 1, 2], dtype=torch.int32)
     infer_state.b1_cu_kv_seq_len = torch.tensor([0, 3, 7], dtype=torch.int32)
@@ -124,9 +129,17 @@ def test_fa3_prefill_state_owns_causality(monkeypatch, state_class):
     infer_state.batch_size = 2
     infer_state.max_kv_seq_len = 4
     infer_state.input_ids = torch.empty(2, dtype=torch.int64)
+    infer_state.b_seq_len = torch.tensor([3, 4], dtype=torch.int32)
+    infer_state.is_prefill = True
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(8, dtype=torch.int32).reshape(2, 4))
     state = state_class(
-        backend=SimpleNamespace(uses_causal_attention=lambda: False, page_size=1, infer_page_size=1),
+        backend=SimpleNamespace(
+            uses_causal_attention=lambda: False,
+            page_size=1,
+            infer_page_size=1,
+            prefill_step_builder=FA3GQAPrefillStepBuilder(page_size=1),
+            model=SimpleNamespace(),
+        ),
         _infer_state_weak_ref=weakref.ref(infer_state),
     )
 
@@ -142,15 +155,21 @@ def test_fa3_decode_state_owns_causality(state_class):
     infer_state.b1_cu_kv_seq_len = torch.tensor([0, 3, 7], dtype=torch.int32)
     infer_state.b_req_idx = torch.tensor([0, 1], dtype=torch.int32)
     infer_state.b_seq_len = torch.tensor([3, 4], dtype=torch.int32)
+    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.zeros((2, 4), dtype=torch.int32))
     model = SimpleNamespace(
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
+    )
+    step_args = SimpleNamespace(
+        cu_seqlens_q=None, cu_seqlens_k=None, page_table=None, cache_seqlens=None, max_seqlen_q=1, max_seqlen_k=4
     )
     state = state_class(
         backend=SimpleNamespace(
             model=model,
             uses_causal_attention=lambda: False,
             uses_dynamic_spec_verify_layout=lambda: False,
+            # GQA decode builds its page table in FA3GQADecodeStepBuilder.
+            decode_step_builder=SimpleNamespace(build=lambda batch: step_args),
         ),
         _infer_state_weak_ref=weakref.ref(infer_state),
     )
@@ -182,14 +201,13 @@ def test_triton_mtp_decode_state_builds_group_markers():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-@pytest.mark.parametrize("state_class", [Fa3DecodeAttState, MlaFa3DecodeAttState])
-def test_fa3_dynamic_decode_state_builds_group_markers(state_class):
+def test_fa3_dynamic_decode_state_builds_group_markers():
     model = SimpleNamespace(req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1))
     infer_state = InferStateInfo()
     infer_state.b_req_idx = torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda")
     infer_state.b_seq_len = torch.tensor([3, 4, 2, 2], dtype=torch.int32, device="cuda")
     infer_state.batch_size = 4
-    state = state_class(
+    state = MlaFa3DecodeAttState(
         backend=SimpleNamespace(model=model),
         _infer_state_weak_ref=weakref.ref(infer_state),
     )
@@ -200,6 +218,28 @@ def test_fa3_dynamic_decode_state_builds_group_markers(state_class):
     assert b_att_req_idx.cpu().tolist() == [7, -1, -1, -1]
     assert state.b_att_seq_len.cpu().tolist() == [4, 2, 2, 0]
     assert state.cu_seqlens_q.cpu().tolist() == [0, 2, 3, 4, 4]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_fa3_gqa_decode_step_builder_groups_dynamic_rows():
+    batch = AttentionBatch(
+        req_to_token_indexs=torch.zeros((8, 4), dtype=torch.int32, device="cuda"),
+        b_req_idx=torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda"),
+        b_seq_len=torch.tensor([3, 4, 2, 2], dtype=torch.int32, device="cuda"),
+        batch_size=4,
+        max_kv_seq_len=4,
+        total_token_num=11,
+        decode_rows_per_request=3,
+        dynamic_decode_rows=True,
+        pad_req_idx=-1,
+    )
+
+    cu_seqlens_q, _, cache_seqlens, att_req_idx = FA3GQADecodeStepBuilder._group_rows(batch)
+    torch.cuda.synchronize()
+
+    assert att_req_idx.cpu().tolist() == [7, -1, -1, -1]
+    assert cache_seqlens.cpu().tolist() == [4, 2, 2, 0]
+    assert cu_seqlens_q.cpu().tolist() == [0, 2, 3, 4, 4]
 
 
 @pytest.mark.parametrize(
