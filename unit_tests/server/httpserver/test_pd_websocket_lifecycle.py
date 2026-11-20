@@ -109,15 +109,36 @@ def test_heartbeat_wait_is_bounded(monkeypatch):
     asyncio.run(run())
 
 
-def test_kv_status_is_forwarded_without_registration_or_reply(monkeypatch):
+def test_kv_status_on_pd_report_updates_the_request(monkeypatch):
     from fastapi import WebSocketDisconnect
-    from lightllm.server.pd_io_struct import PDUpKVStatus
+    from lightllm.server.pd_io_struct import ObjType, PDUpKVStatus
 
     status = PDUpKVStatus(8, 100, b"metadata")
     manager = _manager(monkeypatch)
-    websocket = _websocket(receive_bytes=AsyncMock(side_effect=[pickle.dumps(status), WebSocketDisconnect()]))
-    asyncio.run(api_http_pd.kv_move_status(websocket))
+    websocket = _websocket(
+        receive_bytes=AsyncMock(
+            side_effect=[pickle.dumps((ObjType.PD_UPLOAD_KV_STATUS, status)), WebSocketDisconnect()]
+        )
+    )
+    asyncio.run(api_http_pd.receive_pd_report(websocket))
     manager.update_req_status.assert_awaited_once_with(status)
+    manager.register_pd.assert_not_awaited()
+    manager.put_to_handle_queue.assert_not_awaited()
+
+
+def test_kv_status_is_forwarded_on_the_register_connection(monkeypatch):
+    from fastapi import WebSocketDisconnect
+    from lightllm.server.pd_io_struct import ObjType, PDUpKVStatus
+
+    status = PDUpKVStatus(8, 100, b"metadata")
+    manager = _manager(monkeypatch)
+    websocket = _websocket(
+        receive_bytes=AsyncMock(
+            side_effect=[pickle.dumps((ObjType.PD_UPLOAD_KV_STATUS, status)), WebSocketDisconnect()]
+        )
+    )
+    asyncio.run(api_http_pd.register_and_keep_alive(websocket))
+    manager.put_to_handle_queue.assert_awaited_once_with((ObjType.PD_UPLOAD_KV_STATUS, status))
     websocket.send_bytes.assert_not_awaited()
 
 

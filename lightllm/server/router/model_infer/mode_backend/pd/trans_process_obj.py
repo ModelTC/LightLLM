@@ -2,7 +2,7 @@ import queue
 import threading
 import psutil
 import torch.multiprocessing as mp
-from typing import List, Callable, Optional
+from typing import Callable
 from dataclasses import dataclass
 from lightllm.utils.log_utils import init_logger
 
@@ -21,7 +21,6 @@ class KVTransProcess:
         device_id: int,
         manager,
         start_func: Callable,
-        up_status_in_queue: Optional[mp.SimpleQueue],
     ):
         from .base_kv_move_manager import BaseKVMoveManager
 
@@ -36,7 +35,6 @@ class KVTransProcess:
                 device_id,
                 self.task_in_queue,
                 self.task_out_queue,
-                up_status_in_queue,
             )
             assert self.task_out_queue.get(timeout=30) == "proc_start"
             assert self.task_out_queue.get(timeout=60) == "get_resources_ok"

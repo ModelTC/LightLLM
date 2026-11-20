@@ -1,6 +1,5 @@
 import os
 import json
-from lightllm.server.tokenizer import get_tokenizer
 from lightllm.utils.log_utils import init_logger
 from functools import lru_cache
 from lightllm.utils.config_utils import get_model_type_v1
@@ -10,10 +9,10 @@ logger = init_logger(__name__)
 tokenizer = None
 
 
-def init_tokenizer(args):
+def init_tokenizer(args, loaded_tokenizer):
     global tokenizer
 
-    tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
+    tokenizer = loaded_tokenizer
     chat_path = args.chat_template
     if chat_path is not None:
         with open(chat_path, "r", encoding="utf-8") as f:

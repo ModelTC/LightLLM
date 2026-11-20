@@ -51,15 +51,13 @@ def test_split_connections_register_select_update_and_reconnect_independently(mo
         manager.update_node_load_info({"connection_key": f"p:8000/dp{rank}", "total_token_usage_rate": rank / 10})
     assert [node.run_status.total_token_usage_rate for node in manager.prefill_nodes] == [0, 0.1, 0.2, 0.3]
     replacement_socket = object()
-    replacement_info = dict(_registration(args, 3), connection_id="replacement")
-    replacement = manager.register_pd(replacement_info, replacement_socket)
-    assert replacement.connection_key == cached_node.connection_key
-    manager.remove_pd(cached_node)
-    assert cached_node.websocket is None
-    assert manager.url_to_pd_nodes["p:8000/dp3"] is replacement
-    assert replacement in manager.prefill_nodes
-    assert replacement in manager.selector.prefill_nodes
-    manager.remove_pd(replacement)
+    manager.register_pd(dict(_registration(args, 3), connection_id="replacement"), replacement_socket)
+    assert manager.url_to_pd_nodes["p:8000/dp3"] is cached_node
+    manager.remove_pd(cached_node, sockets[3])
+    assert cached_node.sub_connections == {"replacement": replacement_socket}
+    assert cached_node in manager.prefill_nodes
+    assert cached_node in manager.selector.prefill_nodes
+    manager.remove_pd(cached_node, replacement_socket)
     assert len(manager.prefill_nodes) == 3
     assert "p:8000/dp3" not in manager.url_to_pd_nodes
 
@@ -72,15 +70,29 @@ def test_unsplit_reconnection_ignores_old_connection_id_cleanup(monkeypatch, mod
     info = dict(_registration(args, mode=mode), connection_id="old")
     new_info = dict(info, connection_id="new")
     old_socket, new_socket = object(), object()
-    old = manager.register_pd(info, old_socket)
-    replacement = manager.register_pd(new_info, new_socket)
+    node = manager.register_pd(info, old_socket)
+    manager.register_pd(new_info, new_socket)
     key = f"{info['client_ip_port']}/dpNone"
-    manager.remove_pd(old)
-    assert old.websocket is None
-    assert manager.url_to_pd_nodes[key] is replacement
-    assert replacement.websocket is new_socket
-    manager.remove_pd(replacement)
+    manager.remove_pd(node, old_socket)
+    assert manager.url_to_pd_nodes[key] is node
+    assert node.sub_connections == {"new": new_socket}
+    manager.remove_pd(node, new_socket)
     assert key not in manager.url_to_pd_nodes
+
+
+def test_master_picks_one_live_websocket(monkeypatch):
+    import lightllm.server.pd_io_struct as pd_io_struct
+
+    args = StartArgs()
+    manager = PDManager(args)
+    info = dict(_registration(args, mode="decode"), connection_id="worker-0")
+    first_ws, second_ws = object(), object()
+    node = manager.register_pd(info, first_ws)
+    manager.register_pd(dict(info, connection_id="worker-1"), second_ws)
+    del node.sub_connections["worker-0"]
+    assert node.pick_websocket() is second_ws
+    monkeypatch.setattr(pd_io_struct.random, "choice", lambda items: second_ws)
+    assert node.pick_websocket() is second_ws
 
 
 @pytest.mark.parametrize(
@@ -120,7 +132,7 @@ def test_prefill_opens_local_dp_connections(monkeypatch, split, dp, nnodes, expe
 @pytest.mark.parametrize("dp_index", [None, 0, 3])
 def test_pd_handle_loop_passes_its_fixed_rank_to_each_master(monkeypatch, dp_index):
     async def run():
-        manager = SimpleNamespace(args=StartArgs(host="p", run_mode="prefill"))
+        manager = SimpleNamespace(args=StartArgs(host="p", run_mode="prefill"), pd_mode=pd_loop.NodeRole.P)
         started = []
         tasks = []
         masters = {rank: PD_Master_Obj(rank, f"master{rank}:8000") for rank in (1, 2)}
@@ -161,7 +173,11 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
 
     async def run():
         args = StartArgs(run_mode="prefill", dp=8, nnodes=2)
-        manager = SimpleNamespace(args=args, host_ip="p", pd_mode=SimpleNamespace(value="prefill"))
+        manager = SimpleNamespace(
+            args=args,
+            host_ip="p",
+            pd_mode=pd_loop.NodeRole.P,
+        )
         monkeypatch.setattr(
             api_http,
             "g_objs",
@@ -282,7 +298,7 @@ def test_reported_load_key_matches_registered_connection_without_rewriting(monke
     async def handle(obj):
         assert obj[2] == load_info
         manager.update_node_load_info(obj[2])
-        assert manager.url_to_pd_nodes[obj[2]["connection_key"]].websocket is websocket
+        assert manager.url_to_pd_nodes[obj[2]["connection_key"]].sub_connections[info.get("connection_id")] is websocket
         updated_nodes.append(manager.url_to_pd_nodes[obj[2]["connection_key"]])
 
     websocket = SimpleNamespace(
@@ -306,7 +322,7 @@ def test_reported_load_key_matches_registered_connection_without_rewriting(monke
     asyncio.run(api_http_pd.register_and_keep_alive(websocket))
     assert len(updated_nodes) == 1
     assert updated_nodes[0].dp_index == dp_index
-    assert updated_nodes[0].websocket is None  # The handler invalidates its own connection on disconnect.
+    assert info.get("connection_id") not in updated_nodes[0].sub_connections
     assert updated_nodes[0].run_status.total_token_usage_rate == 0.7
 
 

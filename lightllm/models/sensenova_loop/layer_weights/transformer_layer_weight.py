@@ -5,15 +5,9 @@ from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import Qwen3
 
 
 class SenseNovaLoopTransformerLayerWeight(Qwen35TransformerLayerWeight):
-    def _init_weight(self):
-        execution_index = self.network_config_["loop_physical_indices"].index(self.layer_num_)
-        self.is_linear_attention_layer = self.network_config_["layer_types"][execution_index] == "linear_attention"
-        super()._init_weight()
-        self.mhc = self.network_config_.get("mhc")
-        if self.mhc is not None and self.mhc["start"] <= self.layer_num_ < self.mhc["end"]:
-            self._init_mhc()
-
     def _init_gdn_in_proj(self, out_dims, weight_names, quant_method):
+        """Keep the excluded beta/alpha projections in their floating-point layout."""
+        self.linear_gate_proj = None
         if quant_method.method_name in ("awq", "awq_marlin"):
             quantization = quant_method.hf_quantization_config or {}
             excluded = {
@@ -32,6 +26,14 @@ class SenseNovaLoopTransformerLayerWeight(Qwen35TransformerLayerWeight):
                 out_dims, weight_names = out_dims[:-2], weight_names[:-2]
 
         super()._init_gdn_in_proj(out_dims, weight_names, quant_method)
+
+    def _init_weight(self):
+        execution_index = self.network_config_["loop_physical_indices"].index(self.layer_num_)
+        self.is_linear_attention_layer = self.network_config_["layer_types"][execution_index] == "linear_attention"
+        super()._init_weight()
+        self.mhc = self.network_config_.get("mhc")
+        if self.mhc is not None and self.mhc["start"] <= self.layer_num_ < self.mhc["end"]:
+            self._init_mhc()
 
     def _init_mhc(self):
         prefix = f"model.layers.{self.layer_num_}"

@@ -18,9 +18,11 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         img_start_token_ids = []
         img_token_lens = []
         img_start_locs_in_cache = []
-        device = layer_weight.wte_weight_.weight.device
-        dtype = layer_weight.wte_weight_.weight.dtype
-        hidden_size = layer_weight.wte_weight_.weight.shape[1]
+        embedding = layer_weight.wte_weight_
+        device = input_ids.device
+        dtype = embedding.data_type_
+        hidden_size = embedding.dim
+        packed_embedding = getattr(embedding, "is_packed_embedding", False)
 
         for batch_id, p in enumerate(infer_state.multimodal_params):
             # images 与 audios 共用后续 multimodal_emb / apply_deepstack 的定位信息。
@@ -34,7 +36,11 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
                 img_start_token_ids.append(img["token_id"])
                 img_token_lens.append(img["token_num"])
                 img_start_locs_in_cache.append(img["start_index_in_embed_cache"])
-        out = torch.zeros((len(input_ids), hidden_size), dtype=dtype, device=device)
+        out = (
+            embedding(input_ids=input_ids, alloc_func=self.alloc_tensor)
+            if packed_embedding
+            else torch.zeros((len(input_ids), hidden_size), dtype=dtype, device=device)
+        )
 
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
@@ -65,7 +71,7 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         multimodal_emb(
             out=out,
             prompt_ids=input_ids,
-            text_weight_embs=layer_weight.wte_weight_.weight,
+            text_weight_embs=embedding.qweight if packed_embedding else embedding.weight,
             embed_cache=cpu_embed_cache_tensor,
             img_token_lens=infer_state.img_token_lens,
             img_start_token_ids=infer_state.img_start_token_ids,
@@ -73,6 +79,7 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
             tp_text_start_token_id=layer_weight.wte_weight_.tp_vocab_start_id,
             tp_text_end_token_id=layer_weight.wte_weight_.tp_vocab_end_id,
             tp_world_size=self.tp_world_size_,
+            skip_text_embeddings=packed_embedding,
         )
         if self.tp_world_size_ > 1:
             all_reduce(out, group=infer_state.dist_group, op=dist.ReduceOp.SUM, async_op=False)

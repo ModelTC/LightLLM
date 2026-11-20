@@ -130,24 +130,31 @@ def test_get_server_info_serializes_start_args_dataclass(monkeypatch):
     assert server_info["run_mode"] == "normal"
 
 
-def test_pd_master_models_endpoint_has_created_timestamp(monkeypatch):
+@pytest.mark.parametrize("run_mode", ["normal", "pd_master"])
+def test_models_endpoint_has_created_timestamp(monkeypatch, run_mode):
     from lightllm.server import api_http
 
-    args = StartArgs(run_mode="pd_master", model_dir="/tmp/test-model", model_name="test-model")
-    manager = SimpleNamespace(get_real_supported_max_req_total_len=lambda: 1024, metric_client=object())
-    monkeypatch.setattr(api_http, "init_tokenizer", lambda *_args, **_kwargs: None)
+    args = StartArgs(run_mode=run_mode, model_dir="/tmp/test-model", model_name="test-model")
+    manager = SimpleNamespace(
+        get_real_supported_max_req_total_len=lambda: 1024, metric_client=object(), tokenizer=object()
+    )
+    init_tokenizer = Mock()
+    monkeypatch.setattr(api_http, "init_tokenizer", init_tokenizer)
     monkeypatch.setattr(api_http.SamplingParams, "load_generation_cfg", lambda _model_dir: None)
     monkeypatch.setattr(api_http.CompletionRequest, "load_generation_cfg", lambda _model_dir: None)
     monkeypatch.setattr(api_http.ChatCompletionRequest, "load_generation_cfg", lambda _model_dir: None)
     monkeypatch.setattr(api_http, "MetricClient", lambda _port: object())
     monkeypatch.setattr(api_http, "get_shm_port_args", lambda: SimpleNamespace(metric_port=1234))
     monkeypatch.setattr(api_http, "HttpServerManagerForPDMaster", lambda args: manager)
+    monkeypatch.setattr(api_http, "HttpServerManager", lambda args: manager)
+    monkeypatch.setattr(api_http, "TokenLoad", lambda *_args: object())
     monkeypatch.setattr(api_http, "get_unique_server_name", lambda: "test-server")
     monkeypatch.setattr(api_http.setproctitle, "setproctitle", lambda _title: None)
     monkeypatch.setattr(api_http.time, "time", lambda: 1234.9)
 
     global_objs = api_http.G_Objs()
     global_objs.set_args(args)
+    init_tokenizer.assert_called_once_with(args, manager.tokenizer)
     monkeypatch.setattr(api_http, "g_objs", global_objs)
 
     response = asyncio.run(api_http.get_models(None))
@@ -308,8 +315,8 @@ def test_prefill_reconnection_preserves_other_nodes_inflight_prompt_chars():
     manager.register_pd(pd_info(3, "10.0.0.2:8000"), websocket=object())
 
     assert [node.client_ip_port for node in manager.prefill_nodes] == ["10.0.0.1:8000", "10.0.0.2:8000"]
-    assert [node.dispatched_prompt_chars for node in manager.prefill_nodes] == [100, 0]
-    assert [node.dispatched_req_num for node in manager.prefill_nodes] == [1, 0]
+    assert [node.dispatched_prompt_chars for node in manager.prefill_nodes] == [100, 200]
+    assert [node.dispatched_req_num for node in manager.prefill_nodes] == [1, 2]
 
 
 def test_pd_master_inference_health_matches_normal_node_semantics(monkeypatch):
@@ -508,6 +515,53 @@ def test_pd_rejects_final_metadata_features_before_startup(monkeypatch, run_mode
     start = getattr(api_start, start_name)
     with pytest.raises(ValueError, match="PD mode does not support"):
         start(StartArgs(run_mode=run_mode, httpserver_workers=workers, **{feature: True}))
+
+
+def test_httpserver_workers_cli_defaults_to_unset():
+    parser = make_argument_parser()
+    assert parser.parse_args([]).httpserver_workers is None
+    assert parser.parse_args(["--httpserver_workers", "4"]).httpserver_workers == 4
+
+
+@pytest.mark.parametrize(
+    ("run_mode", "workers", "dp", "nnodes", "node_rank", "expected"),
+    [
+        ("normal", None, 1, 1, 0, 1),
+        ("prefill", None, 1, 1, 0, 2),
+        ("decode", None, 1, 1, 0, 2),
+        ("pd_master", None, 1, 1, 0, 1),
+        ("prefill", 1, 1, 1, 0, 1),
+        ("normal", 3, 1, 1, 0, 3),
+        ("prefill", None, 1, 2, 0, 2),
+        ("prefill", None, 1, 2, 1, 1),
+        ("decode", None, 1, 2, 1, 1),
+        ("normal", None, 1, 2, 1, 1),
+        ("prefill", 4, 1, 2, 1, 1),
+        ("decode", 4, 1, 2, 1, 1),
+        ("normal", 3, 1, 2, 1, 1),
+        ("decode", None, 2, 2, 1, 2),
+    ],
+)
+def test_httpserver_workers_follow_run_mode_and_topology(
+    monkeypatch, run_mode, workers, dp, nnodes, node_rank, expected
+):
+    from lightllm.server import api_server, api_start
+
+    seen = {}
+
+    def capture(args):
+        seen["workers"] = args.httpserver_workers
+
+    monkeypatch.setattr(api_start, "normal_or_p_d_start", capture)
+    monkeypatch.setattr(api_start, "pd_master_start", capture)
+    monkeypatch.setattr(api_start, "pd_master_multi_worker_start", capture)
+    monkeypatch.setattr(api_server, "set_log_node_role", Mock())
+    monkeypatch.setattr(api_server.torch.multiprocessing, "set_start_method", Mock())
+
+    api_server.launch_server(
+        StartArgs(run_mode=run_mode, httpserver_workers=workers, dp=dp, nnodes=nnodes, node_rank=node_rank)
+    )
+    assert seen["workers"] == expected
 
 
 @pytest.mark.parametrize("workers", [1, 2, 0])

@@ -20,16 +20,16 @@ from lightllm.common.basemodel.attention.base_att import (
     BaseDecodeAttState,
     BasePrefillAttState,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
+from lightllm.common.attention.kernels.gdn.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
+from lightllm.common.attention.kernels.gdn.causal_conv1d_mtp import (
     causal_conv1d_update as causal_conv1d_update_mtp,
 )
 from lightllm.common.basemodel.attention.linear.flashkda import get_flash_kda_fwd, kda_prefill, select_kda_prefill
-from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_qkv import causal_conv1d_qkv
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
+from lightllm.common.attention.kernels.kda.causal_conv1d_qkv import causal_conv1d_qkv
+from lightllm.common.attention.kernels.gdn.mtp_state_params import (
     build_dynamic_mtp_linear_att_state_params,
 )
 

@@ -4,6 +4,7 @@ from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
 from .config import get_loop_layer_indices, get_loop_layer_types
 from .layer_infer.transformer_layer_infer import SenseNovaLoopTransformerLayerInfer
 from .layer_weights.transformer_layer_weight import SenseNovaLoopTransformerLayerWeight
+from .layer_weights.pre_and_post_layer_weight import SenseNovaLoopPreAndPostLayerWeight
 
 
 class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
@@ -11,12 +12,29 @@ class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
 
     transformer_weight_class = SenseNovaLoopTransformerLayerWeight
     transformer_layer_infer_class = SenseNovaLoopTransformerLayerInfer
+    pre_and_post_weight_class = SenseNovaLoopPreAndPostLayerWeight
 
     @classmethod
     def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
         config = super().normalize_model_config(model_config)
+        # Quantization metadata lives at the top level in the released
+        # SenseNova-Loop AWQ checkpoint.  Keep supporting nested text_config
+        # metadata because Transformers has emitted both layouts over time.
+        quantization = model_config.get("quantization_config")
+        if quantization is None:
+            text_config = model_config.get("text_config")
+            if isinstance(text_config, dict):
+                quantization = text_config.get("quantization_config")
+        if quantization is not None:
+            config["quantization_config"] = quantization
+
         if "loop_physical_indices" not in config:
-            settings = model_config["loop_settings"]
+            settings = model_config.get("loop_settings")
+            if settings is None:
+                text_config = model_config.get("text_config")
+                settings = text_config.get("loop_settings") if isinstance(text_config, dict) else None
+            if settings is None:
+                raise ValueError("SenseNova Loop config is missing loop_settings")
             indices = get_loop_layer_indices(settings, config["num_hidden_layers"])
             config.update(
                 layer_types=get_loop_layer_types(settings, config),
@@ -24,8 +42,11 @@ class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
                 num_hidden_layers=len(indices),
                 loop_physical_indices=indices,
             )
-        if model_config.get("mhc") is not None:
-            config["mhc"] = model_config["mhc"]
+        mhc = model_config.get("mhc")
+        if mhc is None and isinstance(model_config.get("text_config"), dict):
+            mhc = model_config["text_config"].get("mhc")
+        if mhc is not None:
+            config["mhc"] = mhc
         return config
 
     def _init_config(self):
@@ -55,6 +76,7 @@ class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
                 layer._linear_in_proj = layer._linear_in_proj_with_gates
 
     def load_weights(self, weight_dict):
+        assert weight_dict is None or isinstance(weight_dict, dict), "weight_dict must be a dict or None"
         execution_weights = self.trans_layers_weight
         self.trans_layers_weight = self.physical_layer_weights
         try:

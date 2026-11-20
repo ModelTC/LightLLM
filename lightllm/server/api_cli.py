@@ -34,7 +34,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--httpserver_workers", type=int, default=1)
+    parser.add_argument(
+        "--httpserver_workers",
+        type=int,
+        default=None,
+        help=(
+            "Number of httpserver worker processes. When omitted, normal mode uses 1 and "
+            "prefill/decode nodes use 2. Multinode TP slaves always use 1."
+        ),
+    )
     parser.add_argument(
         "--disable_delay_response_start",
         action="store_true",
@@ -517,6 +525,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                 otherwise: flashinfer > fa3 > triton)
                 for hybrid linear-attention models, the second value selects the linear-attention backend
                 (currently triton only); when omitted, it defaults to auto""",
+    )
+    parser.add_argument(
+        "--flashinfer_workspace_size",
+        type=int,
+        default=512,
+        help="FlashInfer attention workspace in MiB, shared by prefill and decode (default: 512).",
     )
     parser.add_argument(
         "--page_size",

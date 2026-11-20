@@ -10,11 +10,11 @@ import triton
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import set_env_start_args
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import (
+from lightllm.common.attention.kernels.gdn.third_party_fla.ops.kda import (
     chunk_kda_with_fused_gate,
     fused_kda_gate_chunk_cumsum,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
+from lightllm.common.attention.kernels.gdn.third_party_fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.models.glm5_next.triton_kernel.kpool import (
     compress_pools,
     gather_pools,
@@ -467,7 +467,7 @@ def test_mhc_keeps_streams_through_decode_autotuning(monkeypatch, tp_world_size)
 
 
 def test_shared_chunk_kernel_preserves_gdn_natural_log_decay():
-    from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import chunk_gated_delta_rule
+    from lightllm.common.attention.kernels.gdn.third_party_fla.ops.chunk import chunk_gated_delta_rule
 
     tokens, heads, dim = 67, 2, 128
     q, k, v = [torch.randn(1, tokens, heads, dim, device="cuda", dtype=torch.bfloat16) for _ in range(3)]

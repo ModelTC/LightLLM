@@ -130,7 +130,7 @@ def _build_haproxy_config(args: StartArgs, worker_ports: list[int], server_state
         # 对外入口：拒绝内部 P/D 通道，健康接口进入聚合 backend。
         "frontend pd_master_public",
         f"    bind {listen_address}",
-        "    acl private_pd_channel path -i /pd_register /kv_move_status",
+        "    acl private_pd_channel path -i /pd_register /pd_report",
         "    http-request return status 426 if private_pd_channel",
         "    http-request set-header X-Forwarded-Proto http",
         "    use_backend pd_master_liveness if { path /liveness } { method GET POST }",

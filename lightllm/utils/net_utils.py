@@ -21,6 +21,16 @@ def get_pd_master_unix_socket_address(service_name: str) -> bytes:
     return get_abstract_unix_socket_address(service_name, unique_server_name)
 
 
+def get_pd_report_ipc_address() -> str:
+    """Decode 推理进程把上报推给本机 pd_report。每次服务启动使用不同的路径。"""
+    from lightllm.utils.envs_utils import get_unique_server_name
+
+    unique_server_name = get_unique_server_name()
+    if unique_server_name is None:
+        raise RuntimeError("Unique server name is not initialized")
+    return f"ipc:///tmp/{unique_server_name}_pd_report"
+
+
 def format_host_port(host: str, port: int) -> str:
     """Format an HTTP/WebSocket authority, including bracketed IPv6 hosts."""
     if ":" in host and not host.startswith("["):

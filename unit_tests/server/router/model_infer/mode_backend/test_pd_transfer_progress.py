@@ -62,12 +62,12 @@ def make_module(*tasks):
         local_page_mem_desc=b"decode page",
         send_error_info_to_prefill_node=Mock(),
     )
+    module.pd_report_push = SimpleNamespace(send=lambda message: None)
     for name in (
         "request_page_task_queue",
         "ready_page_task_queue",
         "success_queue",
         "failed_queue",
-        "up_status_in_queue",
     ):
         setattr(module, name, queue.Queue())
     return module

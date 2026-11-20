@@ -166,7 +166,7 @@ def test_haproxy_config_streams_without_request_replay():
     assert "retry-on none" in config
     assert "timeout client 3600s" in config
     assert "timeout server 3600s" in config
-    assert "acl private_pd_channel path -i /pd_register /kv_move_status" in config
+    assert "acl private_pd_channel path -i /pd_register /pd_report" in config
     assert "http-request return status 426 if private_pd_channel" in config
     assert "option forwardfor" in config
     assert "registered_objects" not in config

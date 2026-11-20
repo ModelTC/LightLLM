@@ -1,10 +1,10 @@
 import enum
+import random
 import time
 import copy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
-from fastapi import WebSocket
 
 from lightllm.utils.log_utils import init_logger
 
@@ -43,6 +43,7 @@ class ObjType(enum.Enum):
     HEARTBEAT = 6  # P/D 节点向 pd master 上报的心跳。
     PD_UPLOAD_GENERATE_ERROR = 7  # P/D 节点向 pd master 上报本地请求生成异常。
     PD_UPLOAD_SERVER_BUSY = 8  # P/D 节点向 pd master 上报本地服务繁忙。
+    PD_UPLOAD_KV_STATUS = 9  # Decode 推理进程经 pd_report 上报 KV 握手信息。
 
 
 @dataclass
@@ -56,7 +57,6 @@ class PD_Client_Obj:
     client_ip_port: str
     mode: str  # 只能是 prefill 或者 decode 节点
     start_args: object  # 节点的启动参数信息，用于做匹配性的校验，防止运行过程中出现问题。
-    websocket: WebSocket = None  # 用于通信的 websocket 连接对象
     run_status: _PD_Client_RunStatus = field(default_factory=_PD_Client_RunStatus)
     # cache-aware 选点用：当前派发到该节点且尚未产出首 token 的 prompt 字符数。
     dispatched_prompt_chars: int = 0
@@ -64,7 +64,8 @@ class PD_Client_Obj:
     dispatched_req_num: int = 0
 
     dp_index: Optional[int] = None
-    connection_id: Optional[str] = None
+    # connection_id -> 该 httpserver worker 到本 Master 的存活 websocket。断开后从这里 pop 掉。
+    sub_connections: Dict[Optional[str], object] = field(default_factory=dict)
 
     @staticmethod
     def make_connection_key(client_ip_port: str, dp_index: Optional[int]) -> str:
@@ -83,6 +84,12 @@ class PD_Client_Obj:
 
     def to_llm_url(self):
         return f"http://{self.client_ip_port}/pd_generate_stream"
+
+    def pick_websocket(self):
+        """从 sub_connections 里随机选一条。字典里的连接都是存活的。"""
+        if not self.sub_connections:
+            return None
+        return random.choice(list(self.sub_connections.values()))
 
 
 @dataclass

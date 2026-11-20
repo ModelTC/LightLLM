@@ -254,7 +254,7 @@ def test_real_haproxy_never_replays_a_post_and_keeps_pd_websockets_direct(haprox
         "Sec-WebSocket-Version": "13",
         "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
     }
-    for path in ("/pd_register", "/kv_move_status"):
+    for path in ("/pd_register", "/pd_report"):
         for headers in ({}, websocket_headers):
             with pytest.raises(HTTPError) as response:
                 opener.open(Request(base_url + path, headers=headers), timeout=3)

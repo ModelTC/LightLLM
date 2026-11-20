@@ -54,9 +54,6 @@ class FakePDPeers:
                 response = await client.get("http://" + endpoint["host_ip_port"] + "/get_server_info")
                 response.raise_for_status()
                 start_args = response.json()
-                kv = await self.stack.enter_async_context(
-                    websockets.connect("ws://" + endpoint["host_ip_port"] + "/kv_move_status", proxy=None)
-                )
                 for mode, node_id in (("prefill", 501), ("decode", 502)):
                     websocket = await self.stack.enter_async_context(
                         websockets.connect(
@@ -76,7 +73,7 @@ class FakePDPeers:
                             }
                         )
                     )
-                    self.tasks.append(asyncio.create_task(self._run(mode, owner, websocket, kv)))
+                    self.tasks.append(asyncio.create_task(self._run(mode, owner, websocket)))
         return self
 
     async def __aexit__(self, *exc):
@@ -112,7 +109,7 @@ class FakePDPeers:
             )
         )
 
-    async def _run(self, mode, owner, websocket, kv):
+    async def _run(self, mode, owner, websocket):
         async for data in websocket:
             message = pickle.loads(data)
             if message[0] == ObjType.ABORT:
@@ -145,7 +142,7 @@ class FakePDPeers:
                     await self._token(websocket, mode, owner, request_id, 1, "hello", FinishStatus.FINISHED_LENGTH)
                     self._event(request_id).set()
             elif message[0] == ObjType.REQ:
-                task = asyncio.create_task(self._decode(owner, websocket, kv, message[1]))
+                task = asyncio.create_task(self._decode(owner, websocket, message[1]))
                 self.generations[(owner, message[1][1].group_request_id)] = task
                 task.add_done_callback(self._generation_finished)
 
@@ -153,7 +150,7 @@ class FakePDPeers:
         if not task.cancelled() and task.exception() is not None:
             self.generation_errors.append(task.exception())
 
-    async def _decode(self, owner, websocket, kv, request):
+    async def _decode(self, owner, websocket, request):
         prompt_ids, params, _ = request
         request_id = params.group_request_id
         assert params.pd_master_node_id.get() == owner
@@ -169,7 +166,9 @@ class FakePDPeers:
             ready_kv_len=0,
         )
         assert len(prompt_ids) == 3
-        await kv.send(pickle.dumps(PDUpKVStatus(request_id, owner, pickle.dumps(info))))
+        await websocket.send(
+            pickle.dumps((ObjType.PD_UPLOAD_KV_STATUS, PDUpKVStatus(request_id, owner, pickle.dumps(info))))
+        )
         await asyncio.wait_for(self._event(request_id).wait(), timeout=5)
         # Decode also reports the transferred first token. P/D WebSocket delivery
         # order is independent; the master deduplicates their index-one outputs.
