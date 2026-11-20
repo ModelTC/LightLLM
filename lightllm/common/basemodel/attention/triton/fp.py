@@ -1,12 +1,44 @@
 import dataclasses
 import weakref
 import torch
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import (
+    BaseAttBackend,
+    BasePrefillAttState,
+    BaseDecodeAttState,
+    AttControl,
+    build_attention_batch,
+)
 from typing import Optional
 from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
+from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+from lightllm.common.attention.backends.gqa.triton import (
+    TritonGQADecodeBackend,
+    TritonGQADecodeStepArgs,
+    TritonGQAPrefillBackend,
+    TritonGQAPrefillStepArgs,
+)
+
+
+def _gqa_layer_config(q: torch.Tensor, k: torch.Tensor, att_control: AttControl, causal: bool) -> GQALayerConfig:
+    # Pass every attention property the model asks for, so the impl rejects what Triton cannot run.
+    sliding_window = att_control.sliding_window if att_control.use_sliding_window else (-1, -1)
+    return GQALayerConfig(
+        num_heads=q.shape[1],
+        num_kv_heads=k.shape[1],
+        head_dim=q.shape[2],
+        dtype=q.dtype,
+        sliding_window=sliding_window,
+        causal=causal,
+        has_sinks=att_control.use_att_sink,
+    )
 
 
 class TritonAttBackend(BaseAttBackend):
+    def __init__(self, model):
+        super().__init__(model)
+        self.prefill_step_builder = TritonGQAPrefillBackend.get_step_builder_cls()()
+        self.decode_step_builder = TritonGQADecodeBackend.get_step_builder_cls()()
+
     def create_att_prefill_state(self, infer_state) -> "TritonPrefillAttState":
         return TritonPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
@@ -16,8 +48,13 @@ class TritonAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class TritonPrefillAttState(BasePrefillAttState):
+    step_args: Optional[TritonGQAPrefillStepArgs] = None
+    causal: bool = True
+
     def init_state(self):
-        pass
+        self.causal = self.backend.uses_causal_attention()
+        batch = build_attention_batch(self.infer_state, self.backend)
+        self.step_args = self.backend.prefill_step_builder.build(batch)
 
     def prefill_att(
         self,
@@ -69,46 +106,39 @@ class TritonPrefillAttState(BasePrefillAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        from lightllm.common.attention.kernels.gqa.bf16.prefill.context_flashattention_nopad import (
-            context_attention_fwd,
+        impl = self.backend.get_attention_impl(
+            TritonGQAPrefillBackend, _gqa_layer_config(q, k, att_control, self.causal)
         )
-
-        if att_control.use_sliding_window:
-            sliding_window = att_control.sliding_window
-        else:
-            sliding_window = (-1, -1)
-
-        out = alloc_func(q.shape, q.dtype)
-        context_attention_fwd(
-            q,
-            k,
-            v,
-            out,
-            self.infer_state.b_req_idx,
-            self.infer_state.b_q_start_loc,
-            self.infer_state.b_seq_len,
-            self.infer_state.b_ready_cache_len,
-            self.infer_state.max_q_seq_len,
-            self.infer_state.req_manager.req_to_token_indexs,
-            sliding_window=sliding_window,
+        return impl.forward(
+            self.step_args,
+            GQALayerInputs(q=q, k_cache=k, v_cache=v),
+            out=alloc_func(q.shape, dtype=q.dtype, device=q.device),
+            alloc_func=alloc_func,
         )
-        return out
 
 
 @dataclasses.dataclass
 class TritonDecodeAttState(BaseDecodeAttState):
     b_mark_mtp_shared_group: torch.Tensor = None
     decode_max_kv_seq_len: int = None
+    step_args: Optional[TritonGQADecodeStepArgs] = None
+    causal: bool = True
 
     def init_state(self):
+        infer_state = self.infer_state
         # Graph 捕获会改写 infer_state 的长度上限，提前保存真实长度用于 GQA decode 配置查找。
-        self.decode_max_kv_seq_len = self.infer_state.max_kv_seq_len
+        self.decode_max_kv_seq_len = infer_state.max_kv_seq_len
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step > 0:
+            # 投机解码走 MTP diverse kernel，不使用 GQA backend 的 step args。
             self.b_mark_mtp_shared_group = build_mtp_shared_group_markers(
                 self.infer_state.b_req_idx,
                 hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
             )
+            return
+        self.causal = self.backend.uses_causal_attention()
+        batch = build_attention_batch(infer_state, self.backend)
+        self.step_args = self.backend.decode_step_builder.build(batch)
 
     def copy_for_decode_cuda_graph(self, new_state: "TritonDecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
@@ -128,21 +158,11 @@ class TritonDecodeAttState(BaseDecodeAttState):
         else:
             draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
 
-            q_head_num = q.shape[1]
-            k_head_num = k.shape[1]
-
             if draft_step > 0:
-                assert q_head_num >= k_head_num, "speculative decode requires q_head_num >= k_head_num"
+                assert q.shape[1] >= k.shape[1], "speculative decode requires q_head_num >= k_head_num"
                 return self._spec_decode_gqa_att(q=q, k=k, v=v, alloc_func=alloc_func)
-            elif q_head_num == k_head_num:
-                assert att_control.use_sliding_window is False, "sliding_window not supported in non-gqa attention yet"
-                return self._normal_decode_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
-            elif q_head_num > k_head_num:
-                return self._normal_decode_gqa_flash_decoding_att(
-                    q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func
-                )
             else:
-                raise NotImplementedError("error")
+                return self._normal_decode_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
 
     def _alibi_decode_att(
         self,
@@ -171,30 +191,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         )
         return out
 
-    def _normal_decode_flash_decoding_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        alloc_func=torch.empty,
-    ):
-        from lightllm.common.attention.kernels.gqa.bf16.decode.flash_decoding import (
-            token_decode_attention_flash_decoding,
-        )
-
-        out = alloc_func(q.shape, q.dtype)
-
-        token_decode_attention_flash_decoding(
-            q=q,
-            infer_state=self.infer_state,
-            cache_k=k,
-            cache_v=v,
-            out=out,
-            alloc_tensor_func=alloc_func,
-        )
-        return out
-
-    def _normal_decode_gqa_flash_decoding_att(
+    def _normal_decode_att(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -202,29 +199,15 @@ class TritonDecodeAttState(BaseDecodeAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        from lightllm.common.attention.kernels.gqa.bf16.decode.gqa_flash_decoding import (
-            gqa_token_decode_attention_flash_decoding,
+        impl = self.backend.get_attention_impl(
+            TritonGQADecodeBackend, _gqa_layer_config(q, k, att_control, self.causal)
         )
-
-        if att_control.use_sliding_window:
-            sliding_window = att_control.sliding_window
-        else:
-            sliding_window = (-1, -1)
-
-        out = alloc_func(q.shape, q.dtype)
-
-        gqa_token_decode_attention_flash_decoding(
-            q=q,
-            infer_state=self.infer_state,
-            cache_k=k,
-            cache_v=v,
-            max_len_in_batch=self.decode_max_kv_seq_len,
-            out=out,
-            alloc_tensor_func=alloc_func,
-            sliding_window=sliding_window,
+        return impl.forward(
+            self.step_args,
+            GQALayerInputs(q=q, k_cache=k, v_cache=v),
+            out=alloc_func(q.shape, dtype=q.dtype, device=q.device),
+            alloc_func=alloc_func,
         )
-
-        return out
 
     def _spec_decode_gqa_att(
         self,

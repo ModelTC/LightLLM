@@ -11,7 +11,7 @@ from frozendict import frozendict
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
+from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend, TritonDecodeAttState
 from lightllm.common.attention.kernels.gqa.bf16.decode import (
     gqa_flash_decoding as decode_module,
     gqa_flash_decoding_stage1 as stage1_module,
@@ -19,6 +19,7 @@ from lightllm.common.attention.kernels.gqa.bf16.decode import (
 from lightllm.common.attention.kernels.gqa.bf16.decode.gqa_flash_decoding_stage2 import (
     flash_decode_stage2,
 )
+from lightllm.common.attention.kernels.gqa.bf16.decode import flash_decoding as mha_decode_module
 from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType, AutotuneLevel
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
@@ -124,30 +125,42 @@ def test_rebuild_preserves_layout_and_bounds_indices(monkeypatch, num_tokens):
         torch.testing.assert_close(inputs[name], value)
 
 
-def test_state_retains_actual_length_before_graph_capture(monkeypatch):
+@pytest.mark.parametrize("q_heads", [2, 8])
+def test_state_retains_actual_length_before_graph_capture(monkeypatch, q_heads):
     infer_state = InferStateInfo()
+    infer_state.is_cuda_graph_capture = True
     infer_state.max_kv_seq_len = 8193
-    state = TritonDecodeAttState(
-        backend=SimpleNamespace(
-            model=SimpleNamespace(
-                is_mtp_draft_model=False, mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0)
-            )
-        ),
-        _infer_state_weak_ref=weakref.ref(infer_state),
-    )
+    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.empty(2, 32768, dtype=torch.int32))
+    infer_state.b_req_idx = torch.arange(2, dtype=torch.int32)
+    infer_state.b_seq_len = torch.full((2,), 8193, dtype=torch.int32)
+    model = type("Model", (), {})()
+    model.is_mtp_draft_model = False
+    model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _: 0)
+    model.graph_max_len_in_batch = 32768
+    backend = TritonAttBackend(model=model)
+    state = TritonDecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer_state))
     state.init_state()
     state.infer_state.max_kv_seq_len = 32768
     calls = []
-    monkeypatch.setattr(
-        decode_module, "gqa_token_decode_attention_flash_decoding", lambda **kwargs: calls.append(kwargs)
-    )
+    if q_heads == 2:
+        monkeypatch.setattr(
+            mha_decode_module, "token_decode_attention_flash_decoding", lambda **kwargs: calls.append(kwargs)
+        )
+    else:
+        monkeypatch.setattr(
+            decode_module, "gqa_token_decode_attention_flash_decoding", lambda **kwargs: calls.append(kwargs)
+        )
     state.decode_att(
-        q=torch.empty(2, 8, 64),
+        q=torch.empty(2, q_heads, 64),
         k=torch.empty(16, 2, 64),
         v=torch.empty(16, 2, 64),
-        alloc_func=lambda shape, dtype: torch.empty(shape, dtype=dtype),
+        alloc_func=torch.empty,
     )
-    assert calls[0]["max_len_in_batch"] == 8193
+    if q_heads == 2:
+        assert calls[0]["max_kv_seq_len"] == 32768
+    else:
+        assert calls[0]["max_len_in_batch"] == 8193
+    del backend._instances[(type(backend), model)]
 
 
 def reference_attention(inputs):
