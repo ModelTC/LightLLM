@@ -85,7 +85,11 @@ def test_pd_decode_rejects_unaligned_transfer_page_size():
 def test_pd_prefill_rejects_unaligned_transfer_page_size():
     backend = prefill_impl.PDChunkedPrefillForPrefillNode.__new__(prefill_impl.PDChunkedPrefillForPrefillNode)
     backend.args = SimpleNamespace(pd_kv_page_size=3, page_size=4)
-    req = SimpleNamespace(cur_kv_len=4, shm_req=SimpleNamespace(input_len=10))
+    req = SimpleNamespace(
+        cur_kv_len=4,
+        shm_req=SimpleNamespace(input_len=10),
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(pd_prefill_first=False)),
+    )
 
     with pytest.raises(AssertionError, match="pd_kv_page_size must be divisible by page_size"):
         backend._prefill_chuncked_handle_func(

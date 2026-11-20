@@ -38,6 +38,8 @@ class HttpPdPrefillFirstManagerHelper:
 
         group_request_id = sampling_params.group_request_id
         sampling_params.pd_prefill_first = True
+        # 多 worker 时每个 master 的节点 ID 不同。请求带上它，P/D 才把状态送回这次接住请求的 master。
+        sampling_params.pd_master_node_id.initialize(self.args.pd_node_id)
         p_websocket = p_node.pick_websocket()
         if p_websocket is None:
             raise ServerBusyError("pd prefill node has no live httpserver connection")

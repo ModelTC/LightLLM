@@ -25,6 +25,7 @@ def test_hybrid_pd_uses_the_shared_att_state_task_without_model_flags(monkeypatc
         cur_kv_len=512 if role == "prefill" else 0,
         hold_kv_len=0,
         pd_trans_kv_start_index=0,
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(pd_prefill_first=False)),
     )
 
     def create(**kwargs):
