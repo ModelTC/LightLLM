@@ -83,6 +83,7 @@ def test_unsplit_reconnection_ignores_old_connection_id_cleanup(monkeypatch, mod
 def test_master_picks_one_live_websocket(monkeypatch):
     import lightllm.server.pd_io_struct as pd_io_struct
 
+    monkeypatch.setenv("LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES", '["d:8000"]')
     args = StartArgs()
     manager = PDManager(args)
     info = dict(_registration(args, mode="decode"), connection_id="worker-0")
@@ -339,7 +340,7 @@ def test_conflicting_address_owner_preserves_routing(monkeypatch, node_id, mode,
     with pytest.raises(ValueError):
         manager.register_pd(info, object())
     assert (manager.url_to_pd_nodes, manager.prefill_nodes, manager.decode_nodes) == before
-    assert incumbent.websocket is websocket
+    assert incumbent.sub_connections == {None: websocket}
     assert manager.selector.prefill_nodes == [incumbent]
     assert manager.selector.decode_nodes == []
 
