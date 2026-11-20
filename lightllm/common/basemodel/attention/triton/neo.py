@@ -25,7 +25,9 @@ class NeoTritonPrefillAttState(TritonPrefillAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        from ...triton_kernel.att.prefill_att.context_attention_fwd_neo import context_attention_fwd_neo
+        from lightllm.common.attention.kernels.gqa.bf16.prefill.context_attention_fwd_neo import (
+            context_attention_fwd_neo,
+        )
         from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
 
         self.infer_state: NeoChatInferStateInfo

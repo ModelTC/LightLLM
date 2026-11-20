@@ -94,7 +94,9 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
             quant_group_size=self.backend.quant_group_size,
         )
 
-        from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
+        from lightllm.common.attention.kernels.gqa.bf16.prefill.context_flashattention_nopad import (
+            context_attention_fwd_contiguous_kv,
+        )
 
         context_attention_fwd_contiguous_kv(
             q=q,
@@ -170,7 +172,7 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ) -> torch.Tensor:
 
-        from ...triton_kernel.att.decode_att.int8kv.int8kv_flash_decoding_diverse import (
+        from lightllm.common.attention.kernels.gqa.int8kv.int8kv_flash_decoding_diverse import (
             token_decode_attention_flash_decoding,
         )
 
@@ -193,7 +195,9 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         v_scale: torch.Tensor,
         alloc_func=torch.empty,
     ):
-        from ...triton_kernel.att.decode_att.int8kv.normal import token_decode_attention_flash_decoding
+        from lightllm.common.attention.kernels.gqa.int8kv.int8kv_flash_decoding import (
+            token_decode_attention_flash_decoding,
+        )
 
         return token_decode_attention_flash_decoding(
             q=q,
