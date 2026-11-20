@@ -8,12 +8,7 @@ import torch.nn.functional as F
 
 from lightllm.common.attention.backend import TensorAllocator
 from lightllm.common.attention.backends.gqa import GQAInputs
-from lightllm.common.attention.backends.gqa.flashinfer import (
-    FlashInferPrefillBatch,
-    FlashInferDecodeBatch,
-    FlashInferGQAPrefillBackend,
-    FlashInferGQADecodeBackend,
-)
+from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQADecodeBackend, FlashInferGQAPrefillBackend
 from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferAttBackend
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
@@ -71,57 +66,31 @@ def test_prefill_decode(dtype: torch.dtype, q_heads: int, kv_heads: int, page_si
     before = kv.clone()
     q_before = q.clone()
     workspace = torch.empty(32 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-    prefill = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="NHD")
-    prefill.plan(
-        qo_indptr=q_starts,
-        paged_kv_indptr=indptr,
-        paged_kv_indices=indices,
-        paged_kv_last_page_len=last_page_len,
-        num_qo_heads=q_heads,
-        num_kv_heads=kv_heads,
-        head_dim_qk=64,
-        page_size=page_size,
-        causal=True,
-        q_data_type=dtype,
-        kv_data_type=dtype,
+    config = dict(q_heads=q_heads, kv_heads=kv_heads, head_dim=64, page_size=page_size, q_dtype=dtype, kv_dtype=dtype)
+    prefill_backend = FlashInferGQAPrefillBackend()
+    prefill = prefill_backend.plan(
+        workspace=workspace,
+        q_starts=q_starts,
+        kv_starts=indptr,
+        kv_indices=indices,
+        kv_last_page_len=last_page_len,
+        **config,
     )
     out = torch.empty_like(q)
-    assert (
-        FlashInferGQAPrefillBackend().forward(
-            batch=FlashInferPrefillBatch(wrapper=prefill, page_size=page_size),
-            inputs=GQAInputs(q=q, k_cache=k, v_cache=v),
-            out=out,
-        )
-        is out
-    )
+    assert prefill_backend.forward(batch=prefill, inputs=GQAInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k, v, token_map, req_ids, lengths, ready), atol=0.02, rtol=0.02
     )
     torch.testing.assert_close(q, q_before, atol=0, rtol=0)
 
-    decode = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(workspace, kv_layout="NHD", use_tensor_cores=True)
-    decode.plan(
-        indptr=indptr,
-        indices=indices,
-        last_page_len=last_page_len,
-        num_qo_heads=q_heads,
-        num_kv_heads=kv_heads,
-        head_dim=64,
-        page_size=page_size,
-        q_data_type=dtype,
-        kv_data_type=dtype,
+    decode_backend = FlashInferGQADecodeBackend()
+    decode = decode_backend.plan(
+        workspace=workspace, kv_starts=indptr, kv_indices=indices, kv_last_page_len=last_page_len, **config
     )
     q = torch.randn(3, q_heads, 64, device="cuda", dtype=dtype)
     q_before = q.clone()
     out = torch.empty_like(q)
-    assert (
-        FlashInferGQADecodeBackend().forward(
-            batch=FlashInferDecodeBatch(wrapper=decode, page_size=page_size),
-            inputs=GQAInputs(q=q, k_cache=k, v_cache=v),
-            out=out,
-        )
-        is out
-    )
+    assert decode_backend.forward(batch=decode, inputs=GQAInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k, v, token_map, req_ids, lengths, [x - 1 for x in lengths]), atol=0.02, rtol=0.02
     )
@@ -181,6 +150,7 @@ def test_adapter_graph(page_size: int, dtype: torch.dtype, allocator: TensorAllo
     k, v = kv[:, :2], kv[:, 2:]
     kv_before = kv.clone()
     wrapper = captured.decode_wrapper
+    assert captured.batch.wrapper is wrapper
     pointers = {
         name: getattr(captured, name).data_ptr() for name in ("kv_starts", "kv_indices", "kv_last_page_len_buffer")
     }
@@ -197,9 +167,9 @@ def test_adapter_graph(page_size: int, dtype: torch.dtype, allocator: TensorAllo
         runtime_owner = owner(lengths, replay=True)
         runtime = backend.create_att_decode_state(infer_state=runtime_owner)
         runtime.init_state()
-        assert runtime.decode_wrapper is None
+        assert runtime.batch is None and runtime.decode_wrapper is None
         captured.copy_for_decode_cuda_graph(new_state=runtime)
-        assert captured.decode_wrapper is wrapper
+        assert captured.batch.wrapper is wrapper and captured.decode_wrapper is wrapper
         for name, pointer in pointers.items():
             assert getattr(captured, name).data_ptr() == pointer
         q.normal_()

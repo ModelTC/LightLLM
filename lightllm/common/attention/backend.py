@@ -37,20 +37,23 @@ class AttentionBackend(ABC, Generic[Batch, Inputs]):
        and per-layer indices.
     3. Before replaying a captured CUDA graph, the caller rewrites the
        metadata tensors the captured batch references, then calls
-       ``backend.refresh(batch)`` so derived state follows the new values.
+       ``backend.refresh(batch, ...)`` so derived state follows the new values.
 
-    plan arguments and the Batch representation are provider-specific. The
-    caller owns operands, outputs and the batch's lifetime.
+    plan and refresh arguments and the Batch representation are
+    provider-specific. The caller owns operands, outputs, workspace and the
+    batch's lifetime.
     """
 
     @abstractmethod
     def plan(self, *args: Any, **kwargs: Any) -> Batch:
         """Build the batch shared by every layer of one forward pass; providers define the arguments."""
 
-    def refresh(self, batch: Batch) -> None:
+    def refresh(self, batch: Batch, **kwargs: Any) -> None:
         """Update derived state in place after the caller rewrites batch metadata for graph replay.
 
-        Providers whose kernels read the metadata tensors directly have nothing to refresh.
+        Providers that re-plan from host-side values, such as the current maximum KV length,
+        take them as keyword arguments. Providers whose kernels read the metadata tensors
+        directly have nothing to refresh.
         """
 
     @abstractmethod

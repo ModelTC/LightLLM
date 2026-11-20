@@ -65,12 +65,12 @@ class FlashInferAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class FlashInferPrefillAttState(BasePrefillAttState):
+    batch: FlashInferPrefillBatch = None
+    # The planned wrapper; the FP8 subclass still runs it directly.
     prefill_wrapper: object = None
 
     def init_state(self):
         self.backend: FlashInferAttBackend = self.backend
-
-        import flashinfer
 
         batch_size = self.infer_state.batch_size
         device = self.infer_state.input_ids.device
@@ -95,31 +95,23 @@ class FlashInferPrefillAttState(BasePrefillAttState):
             out_page_indices=kv_indices,
             page_size=self.backend.infer_page_size,
         )
-        self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
-            self.backend.get_gpu_workspace_buffer(
+        self.batch = self.backend.prefill_backend.plan(
+            workspace=self.backend.get_gpu_workspace_buffer(
                 key_name=self.backend.workspace_buffer_key,
                 workspace_size=self.backend.workspace_buffer_size,
             ),
-            qo_indptr_buf=q_starts,
-            paged_kv_indptr_buf=kv_starts,
-            paged_kv_indices_buf=kv_indices,
-            paged_kv_last_page_len_buf=kv_last_page_len,
+            q_starts=q_starts,
+            kv_starts=kv_starts,
+            kv_indices=kv_indices,
+            kv_last_page_len=kv_last_page_len,
+            q_heads=self.backend.tp_q_head_num,
+            kv_heads=self.backend.tp_kv_head_num,
+            head_dim=self.backend.head_dim,
+            page_size=self.backend.infer_page_size,
+            q_dtype=self.backend.q_data_type,
+            kv_dtype=self.backend.kv_data_type,
         )
-        self.prefill_wrapper.plan(
-            q_starts,
-            kv_starts,
-            kv_indices,
-            kv_last_page_len,
-            self.backend.tp_q_head_num,
-            self.backend.tp_kv_head_num,
-            self.backend.head_dim,
-            self.backend.infer_page_size,
-            causal=True,
-            pos_encoding_mode="NONE",
-            logits_soft_cap=0.0,
-            q_data_type=self.backend.q_data_type,
-            kv_data_type=self.backend.kv_data_type,
-        )
+        self.prefill_wrapper = self.batch.wrapper
 
     def prefill_att(
         self,
@@ -146,10 +138,7 @@ class FlashInferPrefillAttState(BasePrefillAttState):
     ) -> torch.Tensor:
         self.backend: FlashInferAttBackend = self.backend  # for typing
         return self.backend.prefill_backend.forward(
-            batch=FlashInferPrefillBatch(
-                wrapper=self.prefill_wrapper,
-                page_size=self.backend.infer_page_size,
-            ),
+            batch=self.batch,
             inputs=GQAInputs(q=q, k_cache=k, v_cache=v),
             out=alloc_func(q.shape, dtype=q.dtype, device=q.device),
             alloc_func=alloc_func,
@@ -161,14 +150,14 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
     kv_last_page_len_buffer: torch.Tensor = None
     kv_indices: torch.Tensor = None
     kv_starts: torch.Tensor = None
+    batch: FlashInferDecodeBatch = None
+    # The planned wrapper; the FP8 subclass still runs it directly.
     decode_wrapper: object = None
 
     def _should_init_decode_wrapper(self) -> bool:
         return should_init_decode_wrapper(self.infer_state)
 
     def init_state(self):
-        import flashinfer
-
         self.backend: FlashInferAttBackend = self.backend
         device = self.infer_state.input_ids.device
         model = self.backend.model
@@ -204,64 +193,29 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
             # 处于 graph replay 回放阶段，不需要特殊初始化 decode wrapper。
             return
 
-        assert self.decode_wrapper is None
-        self.decode_wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
-            self.backend.get_gpu_workspace_buffer(
+        assert self.batch is None
+        self.batch = self.backend.decode_backend.plan(
+            workspace=self.backend.get_gpu_workspace_buffer(
                 key_name=self.backend.workspace_buffer_key,
                 workspace_size=self.backend.workspace_buffer_size,
             ),
-            "NHD",
-            use_cuda_graph=True,
-            use_tensor_cores=True,
-            paged_kv_indptr_buffer=self.kv_starts,
-            paged_kv_indices_buffer=self.kv_indices,
-            paged_kv_last_page_len_buffer=self.kv_last_page_len_buffer,
+            kv_starts=self.kv_starts,
+            kv_indices=self.kv_indices,
+            kv_last_page_len=self.kv_last_page_len_buffer,
+            q_heads=self.backend.tp_q_head_num,
+            kv_heads=self.backend.tp_kv_head_num,
+            head_dim=self.backend.head_dim,
+            page_size=self.backend.infer_page_size,
+            q_dtype=self.backend.q_data_type,
+            kv_dtype=self.backend.kv_data_type,
         )
-        self.decode_wrapper.plan(
-            self.kv_starts,
-            self.kv_indices,
-            self.kv_last_page_len_buffer,
-            self.backend.tp_q_head_num,
-            self.backend.tp_kv_head_num,
-            self.backend.head_dim,
-            self.backend.infer_page_size,
-            q_data_type=self.backend.q_data_type,
-            kv_data_type=self.backend.kv_data_type,
-            non_blocking=True,
-        )
+        self.decode_wrapper = self.batch.wrapper
         return
 
     def copy_for_decode_cuda_graph(self, new_state: "FlashInferDecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
-        self._refresh_cuda_graph_decode_plan(new_state.infer_state.max_kv_seq_len)
-        return
-
-    def _refresh_cuda_graph_decode_plan(self, max_kv_len: int):
-        from flashinfer.decode import fast_decode_plan
-
-        uniform_kv_indptr_cpu = (
-            torch.arange(
-                self.infer_state.batch_size + 1,
-                dtype=torch.int32,
-                device="cpu",
-            )
-            * triton.cdiv(max_kv_len, self.backend.infer_page_size)
-        )
-
-        fast_decode_plan(
-            self.decode_wrapper,
-            indptr=self.kv_starts,
-            indices=self.kv_indices,
-            last_page_len=self.kv_last_page_len_buffer,
-            num_qo_heads=self.backend.tp_q_head_num,
-            num_kv_heads=self.backend.tp_kv_head_num,
-            head_dim=self.backend.head_dim,
-            page_size=self.backend.infer_page_size,
-            q_data_type=self.backend.q_data_type,
-            kv_data_type=self.backend.kv_data_type,
-            non_blocking=True,
-            global_override_indptr_cpu=uniform_kv_indptr_cpu,
-        )
+        # 基类已把回放状态的页元数据写入本 batch 引用的缓冲区，这里按新的最大长度重新规划。
+        self.backend.decode_backend.refresh(self.batch, max_kv_len=new_state.infer_state.max_kv_seq_len)
         return
 
     def decode_att(
@@ -292,10 +246,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ):
         return self.backend.decode_backend.forward(
-            batch=FlashInferDecodeBatch(
-                wrapper=self.decode_wrapper,
-                page_size=self.backend.infer_page_size,
-            ),
+            batch=self.batch,
             inputs=GQAInputs(q=q, k_cache=k, v_cache=v),
             out=alloc_func(q.shape, dtype=q.dtype, device=q.device),
             alloc_func=alloc_func,

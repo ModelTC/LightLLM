@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQADecodeBackend
 from lightllm.common.basemodel.attention.flashinfer import fp, fp8, mla
 from lightllm.common.basemodel.attention.flashinfer.utils import should_init_decode_wrapper
 from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -74,6 +75,7 @@ def decode_init(request, monkeypatch):
         workspace_buffer_key="decode_init_test",
         workspace_buffer_size=1,
         get_gpu_workspace_buffer=Mock(return_value=torch.empty(1, dtype=torch.uint8)),
+        decode_backend=FlashInferGQADecodeBackend(),
     )
     return SimpleNamespace(
         module=module,
