@@ -547,8 +547,14 @@ class SamplingParams(ctypes.Structure):
     async def get_compiled_grammar(self, compiler) -> Optional[bytes]:
         """获取编译器缓存中的结果，未命中时执行异步编译；无输出约束时返回 None。"""
         # P/D node admission also uses this boundary for forwarded SamplingParams.
-        if self.constraint_out_params.thinking_token_budget >= 0 and not get_env_start_args().enable_thinking_budget:
-            raise ValueError("thinking_token_budget requires --enable_thinking_budget")
+        if self.constraint_out_params.thinking_token_budget >= 0:
+            args = get_env_start_args()
+            if not args.enable_thinking_budget:
+                raise ValueError("thinking_token_budget requires --enable_thinking_budget")
+            if not args.reasoning_parser:
+                raise ValueError("thinking_token_budget requires --reasoning_parser")
+            if args.target_vocab_topk_sampling is not None:
+                raise ValueError("thinking_token_budget requires disabling --target_vocab_topk_sampling")
         for kind, constraint in (
             ("grammar", self.constraint_out_params.guided_grammar),
             ("regex", self.constraint_out_params.regular_constraint),

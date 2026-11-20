@@ -131,9 +131,12 @@ def test_reasoning_marker_survives_serialization_and_parameter_reuse():
     assert round_trip.constraint_out_params.guided_reasoning_end.to_list() == []
 
 
-def test_budget_unavailable_service_returns_bad_request(monkeypatch):
+@pytest.mark.parametrize(
+    "enabled,parser,message", [(False, "qwen3", "--enable_thinking_budget"), (True, None, "reasoning parser")]
+)
+def test_budget_unavailable_service_returns_bad_request(monkeypatch, enabled, parser, message):
     monkeypatch.setattr(
-        api_openai, "get_env_start_args", lambda: StartArgs(reasoning_parser="qwen3", enable_thinking_budget=False)
+        api_openai, "get_env_start_args", lambda: StartArgs(reasoning_parser=parser, enable_thinking_budget=enabled)
     )
     monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value="prompt"))
     monkeypatch.setattr(
@@ -146,7 +149,7 @@ def test_budget_unavailable_service_returns_bad_request(monkeypatch):
     request = ChatCompletionRequest(messages=[], thinking_token_budget=1)
     response = asyncio.run(api_openai.chat_completions_impl(request, None))
     assert response.status_code == 400
-    assert "--enable_thinking_budget" in response.body.decode()
+    assert message in response.body.decode()
 
 
 @pytest.mark.parametrize("budget", [True, 1.5, "2", -2, 2 ** 31])

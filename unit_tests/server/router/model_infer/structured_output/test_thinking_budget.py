@@ -184,14 +184,17 @@ def test_unbudgeted_grammar_preserves_reasoning_and_grammar_progress(compiler):
     assert state.error is None and state.is_terminated()
 
 
-def test_thinking_budget_cli_defaults_to_disabled():
+def test_thinking_budget_cli_defaults_to_enabled():
     from lightllm.server.api_cli import make_argument_parser
     from lightllm.server.core.objs import StartArgs
 
     parser = make_argument_parser()
-    assert not StartArgs().enable_thinking_budget
-    assert not parser.parse_args([]).enable_thinking_budget
+    assert StartArgs().enable_thinking_budget
+    assert parser.parse_args([]).enable_thinking_budget
     assert parser.parse_args(["--enable_thinking_budget"]).enable_thinking_budget
+    assert not parser.parse_args(["--disable_thinking_budget"]).enable_thinking_budget
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--enable_thinking_budget", "--disable_thinking_budget"])
 
 
 def test_budget_rejects_excluded_end_token():
@@ -216,11 +219,14 @@ def test_budget_rejects_disabled_service(monkeypatch, grammar_enabled):
 
 
 @pytest.mark.parametrize("parser", ["qwen3", "deepseek-r1", "deepseek-v4", "gpt-oss", "gemma4"])
-def test_budget_startup_accepts_reasoning_parsers(parser):
-    from lightllm.server.api_start import _validate_thinking_budget
+def test_budget_request_accepts_reasoning_parsers(monkeypatch, parser):
+    from lightllm.server.core.objs import sampling_params
     from lightllm.server.core.objs import StartArgs
 
-    _validate_thinking_budget(StartArgs(model_dir="unused", reasoning_parser=parser, enable_thinking_budget=True))
+    monkeypatch.setattr(sampling_params, "get_env_start_args", lambda: StartArgs(reasoning_parser=parser))
+    params = SamplingParams()
+    params.init(None, thinking_token_budget=2, guided_reasoning_end=[7])
+    assert asyncio.run(params.get_compiled_grammar(None)) is None
 
 
 @pytest.mark.parametrize(
@@ -230,28 +236,26 @@ def test_budget_startup_accepts_reasoning_parsers(parser):
         ("qwen3", 2),
     ],
 )
-def test_budget_startup_rejects_unsupported_configuration(parser, candidates):
-    from lightllm.server.api_start import _validate_thinking_budget
+def test_budget_request_rejects_unsupported_configuration(monkeypatch, parser, candidates):
+    from lightllm.server.core.objs import sampling_params
     from lightllm.server.core.objs import StartArgs
 
-    with pytest.raises(ValueError, match="--enable_thinking_budget"):
-        _validate_thinking_budget(
-            StartArgs(
-                model_dir="unused",
-                reasoning_parser=parser,
-                target_vocab_topk_sampling=candidates,
-                enable_thinking_budget=True,
-            )
-        )
+    args = StartArgs(reasoning_parser=parser, target_vocab_topk_sampling=candidates)
+    monkeypatch.setattr(sampling_params, "get_env_start_args", lambda: args)
+    params = SamplingParams()
+    params.init(None, thinking_token_budget=2, guided_reasoning_end=[7])
+    with pytest.raises(ValueError, match="thinking_token_budget"):
+        asyncio.run(params.get_compiled_grammar(None))
 
 
-def test_disabled_budget_does_not_inspect_model_configuration(monkeypatch):
+def test_unbudgeted_request_does_not_inspect_budget_configuration(monkeypatch):
     from unittest.mock import Mock
 
-    from lightllm.server.api_start import _validate_thinking_budget
-    from lightllm.server.core.objs import StartArgs
+    from lightllm.server.core.objs import sampling_params
 
-    model_type = Mock(side_effect=AssertionError("Disabled budget must not load extra model metadata"))
-    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", model_type)
-    _validate_thinking_budget(StartArgs(model_dir="unused"))
-    model_type.assert_not_called()
+    configuration = Mock(side_effect=AssertionError("Unbudgeted requests must not inspect budget configuration"))
+    monkeypatch.setattr(sampling_params, "get_env_start_args", configuration)
+    params = SamplingParams()
+    params.init(None)
+    asyncio.run(params.verify_cpu_async(None))
+    configuration.assert_not_called()

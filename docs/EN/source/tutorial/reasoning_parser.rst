@@ -293,11 +293,13 @@ Configuration
   - ``thinking``: Enable reasoning (DeepSeek-V3)
 
 **thinking_token_budget** (integer, optional)
-  Start the service with ``--enable_thinking_budget`` (disabled by default) and a
-  reasoning parser. There is no model-type restriction; the parser and the model's
+  Enabled by default. Finite budgets require a reasoning parser (which may be
+  auto-detected). Use ``--disable_thinking_budget`` to turn the feature off;
+  ``--enable_thinking_budget`` remains available to enable it explicitly.
+  There is no model-type restriction; the parser and the model's
   tokenizer determine the reasoning-end sequence. Finite budgets return HTTP 400
   when the switch is off.
-  For P/D deployments, enable it on the Master, Prefill, and Decode services.
+  For P/D deployments, keep it enabled on the Master, Prefill, and Decode services.
   Maximum generated thinking tokens before forcing the parser's answer-transition
   token sequence (``</think>`` for Qwen3/Qwen3.5). Omit it or use ``-1`` for
   unlimited thinking; ``0`` transitions immediately to the answer. Explicitly
@@ -308,7 +310,7 @@ Configuration
   still limits the entire output, including the transition and answer.
   Finite budgets cannot be combined with ``--target_vocab_topk_sampling``.
   On ``/generate``, put the budget and ``guided_reasoning_end`` token ID sequence
-  in ``parameters``; ``--enable_thinking_budget`` is required there as well.
+  in ``parameters`` and configure a reasoning parser.
 
 **--reasoning_parser** (startup parameter)
   Specify parser type: ``deepseek-r1``, ``qwen3``, ``glm45``, ``gpt-oss``, etc.

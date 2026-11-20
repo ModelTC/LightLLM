@@ -368,7 +368,6 @@ def _launch_subprocesses(args: StartArgs):
         args.eos_id = get_eos_token_ids(args.model_dir)
 
     auto_set_response_parsers(args)
-    _validate_thinking_budget(args)
 
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype
@@ -563,7 +562,6 @@ def pd_master_start(args: StartArgs):
 
     auto_set_max_req_total_len(args)
     auto_set_response_parsers(args)
-    _validate_thinking_budget(args)
 
     # when use config_server to support multi pd_master node, we
     # need generate unique node id for each pd_master node.
@@ -635,7 +633,6 @@ def pd_master_multi_worker_start(args: StartArgs):
 
     auto_set_max_req_total_len(args)
     auto_set_response_parsers(args)
-    _validate_thinking_budget(args)
     process_manager.setup_exit_controller()
     set_env_start_args(args)
     get_env_start_args.cache_clear()
@@ -748,15 +745,6 @@ def config_server_start(args):
     http_server_process = subprocess.Popen(command)
     process_manager.setup_signal_handlers(http_server_process)
     process_manager.supervise_processes(http_server_process)
-
-
-def _validate_thinking_budget(args: StartArgs) -> None:
-    if not args.enable_thinking_budget:
-        return
-    if not args.reasoning_parser:
-        raise ValueError("--enable_thinking_budget requires --reasoning_parser")
-    if args.target_vocab_topk_sampling is not None:
-        raise ValueError("--enable_thinking_budget cannot be combined with --target_vocab_topk_sampling")
 
 
 def _validate_pd_features(args: StartArgs):

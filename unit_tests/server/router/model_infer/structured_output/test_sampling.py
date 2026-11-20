@@ -468,20 +468,21 @@ def test_sample_forces_budget_end_across_mtp_rows(compiler, sampling_manager, gr
 
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("mode", ["none", "xgrammar"])
-def test_budget_mask_buffers_without_grammar(monkeypatch, enabled, mode):
+@pytest.mark.parametrize("parser", [None, "qwen3"])
+def test_budget_mask_buffers_without_grammar(monkeypatch, enabled, mode, parser):
     args = SimpleNamespace(
         penalty_counter_mode="cpu_counter",
         model_dir="unused",
         mtp_step=0,
         mtp_dynamic_verify=False,
         output_constraint_mode=mode,
-        reasoning_parser="qwen3",
+        reasoning_parser=parser,
         enable_thinking_budget=enabled,
     )
     monkeypatch.setattr(req_sampling_params, "get_env_start_args", lambda: args)
     monkeypatch.setattr(req_sampling_params, "get_vocab_size", lambda _: 257)
     manager = req_sampling_params.ReqSamplingParamsManager(1)
-    if mode == "none" and not enabled:
+    if mode == "none" and not (enabled and parser):
         assert manager.req_to_bitmask is None
         assert manager.req_to_bitmask_enabled is None
     else:

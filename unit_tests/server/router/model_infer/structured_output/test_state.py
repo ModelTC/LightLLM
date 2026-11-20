@@ -65,7 +65,7 @@ def test_context_initializes_state_factory_with_resolved_eos_at_startup(monkeypa
             vocab_size=257,
         )
         if mode == "none":
-            assert (context.output_constraint_state_factory is None) == (not enabled)
+            assert (context.output_constraint_state_factory is None) == (not (enabled and parser))
             load_tokenizer.assert_not_called()
             build_tokenizer_info.assert_not_called()
             return
