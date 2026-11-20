@@ -53,6 +53,6 @@ class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
         return [state]
 
     def _init_att_backend(self):
-        self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0)(model=self)
-        self.decode_att_backend = get_nsa_decode_att_backend_class(index=0)(model=self)
+        self.prefill_att_backend = get_nsa_prefill_att_backend_class(model=self, index=0)(model=self)
+        self.decode_att_backend = get_nsa_decode_att_backend_class(model=self, index=0)(model=self)
         return
