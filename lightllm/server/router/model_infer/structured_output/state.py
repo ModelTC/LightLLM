@@ -19,14 +19,15 @@ logger = init_logger(__name__)
 class ConstraintState:
     """Request-owned reasoning/grammar progress; only committed output advances it permanently."""
 
-    # Budget-only requests do not need a grammar matcher; errors use the error field.
+    # 构造依赖和请求配置；仅预算请求不需要 grammar matcher。
     matcher: Optional["GrammarMatcher"]
-    in_reasoning: bool
-    error: Optional[str] = None
-    # 思考结束标记及其匹配后缀与 XGrammar matcher 一起由当前请求独立持有。
-    reasoning_end_token_ids: Tuple[int, ...] = ()
-    reasoning_tail: Tuple[int, ...] = field(default=(), init=False)
     thinking_token_budget: int = -1
+    reasoning_end_token_ids: Tuple[int, ...] = ()
+
+    # 运行时的阶段、错误、匹配后缀和计数。
+    in_reasoning: bool = False
+    error: Optional[str] = None
+    reasoning_tail: Tuple[int, ...] = field(default=(), init=False)
     reasoning_tokens: int = field(default=0, init=False)
     # 记录通过统一接口成功推进的 grammar token 数，用于恢复临时状态。
     _grammar_steps: int = field(default=0, init=False)
@@ -114,12 +115,10 @@ class ConstraintState:
             return False
         match self.in_reasoning:
             case True:
-                forced_token = self._forced_reasoning_token()
-                if forced_token is not None:
-                    if token_id != forced_token:
-                        return False
-                elif self.thinking_token_budget >= 0:
-                    self.reasoning_tokens += 1
+                forced_token = self._next_forced_reasoning_end_token()
+                if forced_token is not None and token_id != forced_token:
+                    return False
+                self.reasoning_tokens += 1
                 self.reasoning_tail = (self.reasoning_tail + (token_id,))[-len(self.reasoning_end_token_ids) :]
                 if self.reasoning_tail == self.reasoning_end_token_ids:
                     self.in_reasoning = False
@@ -137,9 +136,11 @@ class ConstraintState:
         """Fill one prediction row; report whether this row needs grammar masking."""
         match self.in_reasoning:
             case True:
-                forced_token = self._forced_reasoning_token()
+                forced_token = self._next_forced_reasoning_end_token()
                 if forced_token is not None:
+                    # 清空当前行，再只放开结束标记的下一个 token，强制模型生成它。
                     bitmask[index].zero_()
+                    # 每个 int32 存储 32 个 token 的许可位；第 31 位需用有符号负数表示，避免溢出。
                     word, bit = divmod(forced_token, 32)
                     bitmask[index, word] = (1 << bit) if bit < 31 else -(1 << 31)
                     return True
@@ -154,17 +155,19 @@ class ConstraintState:
                 self.matcher.fill_next_token_bitmask(bitmask, index)
                 return True
 
-    def _forced_reasoning_token(self) -> Optional[int]:
+    def _next_forced_reasoning_end_token(self) -> Optional[int]:
+        """预算耗尽时返回必须生成的下一个思考结束 token，否则返回 None。"""
         if self.thinking_token_budget < 0 or self.reasoning_tokens < self.thinking_token_budget:
             return None
-        # 结束标记可能只生成了一部分；MTP 验证和 PD 续跑时接着补完。
+
         end_tokens = self.reasoning_end_token_ids
-        matched_len = min(len(self.reasoning_tail), len(end_tokens) - 1)
-        while matched_len > 0:
-            if self.reasoning_tail[-matched_len:] == end_tokens[:matched_len]:
-                break
-            matched_len -= 1
-        return end_tokens[matched_len]
+        # 找出历史后缀与结束标记前缀的最长匹配，接着补完已生成的部分。
+        max_prefix_len = min(len(self.reasoning_tail), len(end_tokens) - 1)
+        for prefix_len in range(max_prefix_len, 0, -1):
+            if self.reasoning_tail[-prefix_len:] == end_tokens[:prefix_len]:
+                return end_tokens[prefix_len]
+        # 尚未开始结束标记，从第一个 token 开始生成。
+        return end_tokens[0]
 
     @contextmanager
     def _temporary_state(self) -> Generator[None, None, None]:

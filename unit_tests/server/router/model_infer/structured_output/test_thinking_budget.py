@@ -39,6 +39,7 @@ def test_budget_forces_end_before_grammar(compiler, budget, grammar):
         state.commit(token)
         assert state.error is None
     assert not state.in_reasoning
+    assert state.reasoning_tokens == budget + 2
     assert not state.is_terminated()
     if grammar is None:
         assert next_tokens(state).all()
@@ -49,6 +50,7 @@ def test_budget_forces_end_before_grammar(compiler, budget, grammar):
             state.commit(token)
         state.commit(256)
         assert state.is_terminated()
+    assert state.reasoning_tokens == budget + 2
     assert state.error is None
 
 
@@ -170,6 +172,7 @@ def test_unlimited_budget_does_not_force_end(compiler):
     for token in b"unlimited thinking":
         state.commit(token)
     assert next_tokens(state).all()
+    assert state.reasoning_tokens == len(b"unlimited thinking")
     assert state.error is None and state.in_reasoning
 
 
@@ -178,7 +181,7 @@ def test_unbudgeted_grammar_preserves_reasoning_and_grammar_progress(compiler):
     state.commit(ord("x"))
     next_tokens(state, b"]>a")
     assert state.in_reasoning and state.reasoning_tail == (ord("x"),)
-    assert state.reasoning_tokens == 0
+    assert state.reasoning_tokens == 1
     assert next_tokens(state).all()
     for token in b"]>ab":
         state.commit(token)

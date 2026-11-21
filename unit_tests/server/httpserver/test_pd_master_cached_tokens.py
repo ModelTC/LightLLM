@@ -394,7 +394,7 @@ def test_multimodal_budget_continuation_replays_partial_end_and_answer(monkeypat
 
     results = asyncio.run(run())
     assert "".join(item[1] for item in results) == "xy]>a"
-    assert restored_states == [(0, True, 0), (3, True, 2), (4, False, 2)]
+    assert restored_states == [(0, True, 0), (3, True, 3), (4, False, 4)]
 
 
 def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatch):

@@ -79,19 +79,21 @@ class InferenceContext:
         return
 
     def _init_output_constraint_state_factory(self) -> Optional["OutputConstraintStateFactory"]:
+        use_xgrammar = self.args.output_constraint_mode == "xgrammar"
+        if not use_xgrammar and not enable_thinking_budget():
+            return None
+
         from lightllm.server.router.model_infer.structured_output.state_factory import OutputConstraintStateFactory
 
-        if self.args.output_constraint_mode != "xgrammar":
-            if enable_thinking_budget():
-                return OutputConstraintStateFactory(None, self.vocab_size, self.args.eos_id)
-            return None
-        from lightllm.server.tokenizer import get_tokenizer
+        tokenizer = None
+        if use_xgrammar:
+            from lightllm.server.tokenizer import get_tokenizer
 
-        # HTTP workers already compiled the grammar. Inference needs only the
-        # shared tokenizer information to deserialize their artifacts.
-        tokenizer = get_tokenizer(
-            self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code
-        )
+            # HTTP workers already compiled the grammar. Inference needs only the
+            # shared tokenizer information to deserialize their artifacts.
+            tokenizer = get_tokenizer(
+                self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code
+            )
         return OutputConstraintStateFactory(
             tokenizer=tokenizer,
             vocab_size=self.vocab_size,
