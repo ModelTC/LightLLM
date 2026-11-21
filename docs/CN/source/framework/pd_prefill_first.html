@@ -57,7 +57,7 @@
 <body>
 <main>
   <h1>PD 分离的 Prefill 先推理模式</h1>
-  <p class="lead">Decode 仍然用 radix cache，命中的前缀不传。满匹配时也让 prefill 把预留的最后一个 token 传过来，首 token 挂在这最后一块上。不再走「不传页、decode 自己采样」。图中的 <code>PF_REQ</code>、<code>PF_PREFILL_KV_READY</code>、<code>PF_DECODE_KV_READY</code> 只用于这个模式。PF 是 PREFILL_FIRST 的简写。</p>
+  <p class="lead">Decode 仍然用 radix cache，命中的前缀不传。满匹配时也让 prefill 把预留的最后一个 token 传过来，首 token 挂在这最后一块上。不再走「不传页、decode 自己采样」。图中的 <code>PD_PF_PREFILL_REQ</code>、<code>PD_PF_PREFILL_KV_READY</code>、<code>PD_PF_DECODE_KV_READY</code> 只用于这个模式。PF 是 PREFILL_FIRST 的简写。</p>
 
   <div class="board">
     <svg viewBox="0 0 1000 980" role="img" aria-label="PD 分离的 Prefill 先推理模式时序">
@@ -81,7 +81,7 @@
       <!-- 1 -->
       <text class="n" x="28" y="92" fill="#57534e">1</text>
       <line x1="145" y1="88" x2="485" y2="88" stroke="#1c1917" marker-end="url(#arr)"/>
-      <text class="s" x="310" y="80" text-anchor="middle">PF_REQ</text>
+      <text class="s" x="310" y="80" text-anchor="middle">PD_PF_PREFILL_REQ</text>
       <text class="s" x="310" y="108" text-anchor="middle" fill="#57534e">先推理，不等 decode 端点</text>
 
       <!-- 2 -->
@@ -93,7 +93,7 @@
       <!-- 3 -->
       <text class="n" x="28" y="236" fill="#57534e">3</text>
       <line x1="485" y1="232" x2="155" y2="232" stroke="#0f766e" marker-end="url(#arrT)"/>
-      <text class="s" x="320" y="224" text-anchor="middle" fill="#0f766e">PF_PREFILL_KV_READY</text>
+      <text class="s" x="320" y="224" text-anchor="middle" fill="#0f766e">PD_PF_PREFILL_KV_READY</text>
       <text class="s" x="320" y="252" text-anchor="middle" fill="#57534e">KV 已算完并占住，只带 prompt ids</text>
 
       <!-- 4 -->
@@ -123,7 +123,7 @@
       <!-- 8 -->
       <text class="n" x="28" y="596" fill="#57534e">8</text>
       <line x1="145" y1="592" x2="485" y2="592" stroke="#1c1917" marker-end="url(#arr)"/>
-      <text class="s" x="310" y="584" text-anchor="middle">PF_DECODE_KV_READY</text>
+      <text class="s" x="310" y="584" text-anchor="middle">PD_PF_DECODE_KV_READY</text>
       <text class="s" x="310" y="612" text-anchor="middle" fill="#57534e">decode KV 已就绪，带上端点</text>
 
       <!-- 9 -->
@@ -196,7 +196,7 @@
         <td>现有 <code>PDAbortReq</code> 和失败计数</td>
       </tr>
       <tr>
-        <td><code>PF_DECODE_KV_READY</code> 到达时，prefill 上已经没有这份请求</td>
+        <td><code>PD_PF_DECODE_KV_READY</code> 到达时，prefill 上已经没有这份请求</td>
         <td>丢掉这条就绪通知，<code>ABORT</code> decode</td>
         <td>无事可做</td>
         <td>归还已占的页</td>
@@ -205,7 +205,7 @@
   </table>
 
   <h2>消息丢了，或某一侧已经不在</h2>
-  <p class="sec"><code>ABORT</code> 送不到时，prefill 由本节点 httpserver 等端点超时后自己 <code>abort</code>，decode 靠现有传输超时退出。会话进了失败之后，晚到的 <code>PF_PREFILL_KV_READY</code>、<code>PF_DECODE_KV_READY</code> 和 upkv 都丢掉。</p>
+  <p class="sec"><code>ABORT</code> 送不到时，prefill 由本节点 httpserver 等端点超时后自己 <code>abort</code>，decode 靠现有传输超时退出。会话进了失败之后，晚到的 <code>PD_PF_PREFILL_KV_READY</code>、<code>PD_PF_DECODE_KV_READY</code> 和 upkv 都丢掉。</p>
   <table>
     <thead>
       <tr><th>场景</th><th>谁还占着资源</th><th>怎么退出</th></tr>
@@ -214,7 +214,7 @@
       <tr>
         <td>Prefill 已算完并占住 KV，<code>ABORT</code> 没送到，或 master 已经不在</td>
         <td>Prefill 的 KV。传输任务还没建立，任务超时不会开始</td>
-        <td>Prefill 的 httpserver 等 <code>PF_DECODE_KV_READY</code> 超时后调用 <code>abort</code>。推理进程看到 <code>infer_aborted</code> 后，即使还挂着 <code>pd_wait_decode_kv_info_ready</code> 也不再拦住，下一轮现有结束路径回收 KV</td>
+        <td>Prefill 的 httpserver 等 <code>PD_PF_DECODE_KV_READY</code> 超时后调用 <code>abort</code>。推理进程看到 <code>infer_aborted</code> 后，即使还挂着 <code>pd_wait_decode_kv_info_ready</code> 也不再拦住，下一轮现有结束路径回收 KV</td>
       </tr>
       <tr>
         <td>Decode 的任务已进 <code>waiting_dict</code>，WRITE 没来</td>

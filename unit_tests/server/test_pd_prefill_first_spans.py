@@ -20,8 +20,8 @@ def test_empty_span_is_rejected():
 
 
 def test_prefill_first_messages_do_not_reuse_the_old_handshake_types():
-    assert ObjType.PF_REQ.value == 10
-    assert ObjType.PF_PREFILL_KV_READY.value == 11
-    assert ObjType.PF_DECODE_KV_READY.value == 12
-    assert ObjType.PF_REQ != ObjType.REQ
-    assert ObjType.PF_DECODE_KV_READY != ObjType.PD_REQ_DECODE_NODE_INFO
+    assert ObjType.PD_PF_PREFILL_REQ.value == 10
+    assert ObjType.PD_PF_PREFILL_KV_READY.value == 11
+    assert ObjType.PD_PF_DECODE_KV_READY.value == 12
+    assert ObjType.PD_PF_PREFILL_REQ != ObjType.REQ
+    assert ObjType.PD_PF_DECODE_KV_READY != ObjType.PD_REQ_DECODE_NODE_INFO

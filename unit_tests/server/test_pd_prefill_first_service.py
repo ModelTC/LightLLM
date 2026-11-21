@@ -201,7 +201,7 @@ class PrefillFirstPeers:
             if message[0] == ObjType.ABORT:
                 self.aborts.append((mode, master_id, message[1]))
                 continue
-            if mode == "prefill" and message[0] == ObjType.PF_REQ:
+            if mode == "prefill" and message[0] == ObjType.PD_PF_PREFILL_REQ:
                 self._track(
                     self._reply_prefill(
                         websocket=websocket,
@@ -211,7 +211,7 @@ class PrefillFirstPeers:
                     )
                 )
                 continue
-            if mode == "prefill" and message[0] == ObjType.PF_DECODE_KV_READY:
+            if mode == "prefill" and message[0] == ObjType.PD_PF_DECODE_KV_READY:
                 _, group_request_id, info = message
                 self.kv_ready.append((master_id, group_request_id, info))
                 continue
@@ -275,14 +275,14 @@ class PrefillFirstPeers:
             count=1,
             cache_len=segment.prefill_cache_len,
         )
-        kv_ready = (ObjType.PF_PREFILL_KV_READY, ready)
+        kv_ready = (ObjType.PD_PF_PREFILL_KV_READY, ready)
         if segment.token_before_kv_ready:
             self.prefill_sends.append(ObjType.TOKEN_PACKS)
             await self._send(websocket=websocket, message=token)
-            self.prefill_sends.append(ObjType.PF_PREFILL_KV_READY)
+            self.prefill_sends.append(ObjType.PD_PF_PREFILL_KV_READY)
             await self._send(websocket=websocket, message=kv_ready)
         else:
-            self.prefill_sends.append(ObjType.PF_PREFILL_KV_READY)
+            self.prefill_sends.append(ObjType.PD_PF_PREFILL_KV_READY)
             await self._send(websocket=websocket, message=kv_ready)
             self.prefill_sends.append(ObjType.TOKEN_PACKS)
             await self._send(websocket=websocket, message=token)
@@ -475,7 +475,7 @@ def test_02_prefill_receives_pf_req_not_the_old_handshake(prefill_first_service)
             response = await _generate(client=client, url=master.public_url)
             _assert_ok(response, ["hello world"])
             assert [item[2] for item in peers.message_types if item[0] == "prefill" and item[2] == ObjType.REQ] == []
-            assert ObjType.PF_REQ in [item[2] for item in peers.message_types]
+            assert ObjType.PD_PF_PREFILL_REQ in [item[2] for item in peers.message_types]
             assert ObjType.PD_REQ_DECODE_NODE_INFO not in [item[2] for item in peers.message_types]
 
     _run(prefill_first_service, scenario)
@@ -652,7 +652,7 @@ def test_16_decode_kv_ready_uses_the_prefill_first_message(prefill_first_service
         async with _open(master) as (peers, client):
             response = await _generate(client=client, url=master.public_url)
             _assert_ok(response, ["hello world"])
-            assert [item[2] for item in peers.message_types].count(ObjType.PF_DECODE_KV_READY) == 1
+            assert [item[2] for item in peers.message_types].count(ObjType.PD_PF_DECODE_KV_READY) == 1
             assert ObjType.PD_REQ_DECODE_NODE_INFO not in [item[2] for item in peers.message_types]
 
     _run(prefill_first_service, scenario)
@@ -852,7 +852,7 @@ def test_31_kv_ready_arriving_before_the_prefill_token_still_completes(prefill_f
         async with _open(master, segments=[Segment(token_before_kv_ready=False)]) as (peers, client):
             response = await _generate(client=client, url=master.public_url)
             _assert_ok(response, ["hello world"])
-            assert peers.prefill_sends[:2] == [ObjType.PF_PREFILL_KV_READY, ObjType.TOKEN_PACKS]
+            assert peers.prefill_sends[:2] == [ObjType.PD_PF_PREFILL_KV_READY, ObjType.TOKEN_PACKS]
 
     _run(prefill_first_service, scenario)
 

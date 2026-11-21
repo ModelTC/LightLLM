@@ -56,7 +56,7 @@ class HttpPdPrefillFirstManagerHelper:
         sampling_params.max_new_tokens = 1
         try:
             # 1. PD 分离的 Prefill 先推理模式。max_new_tokens 临时改成 1，只采样首 token，不等 decode 端点。
-            # 等 PF_PREFILL_KV_READY。资源等待和后面的 upkv 用同一档；计算另给 180 秒。
+            # 等 PD_PF_PREFILL_KV_READY。资源等待和后面的 upkv 用同一档；计算另给 180 秒。
             # Prefill 自己的资源到点会上报繁忙并叫醒这次等待，这里是它不再上报时的截止。
             resource_wait_seconds = sampling_params.pd_node_resource_wait_timeout_seconds
             if resource_wait_seconds < 0:
@@ -72,7 +72,7 @@ class HttpPdPrefillFirstManagerHelper:
                 f"negative resource_wait_seconds uses a 180s resource budget; otherwise two resource-wait budgets "
                 f"plus 15s margin, floored at 180s. another 180s is added for the prefill compute itself"
             )
-            prefill_payload = pickle.dumps((ObjType.PF_REQ, (prompt, sampling_params, multimodal_params)))
+            prefill_payload = pickle.dumps((ObjType.PD_PF_PREFILL_REQ, (prompt, sampling_params, multimodal_params)))
             self._reject_oversized_control_message(payload=prefill_payload, group_request_id=group_request_id)
             await p_websocket.send_bytes(prefill_payload)
             sampling_params.max_new_tokens = saved_max_new_tokens
@@ -158,7 +158,7 @@ class HttpPdPrefillFirstManagerHelper:
 
             upkv_status: PDUpKVStatus = req_status.up_status_event.upkv_status
             decode_node_info: PDDecodeNodeInfo = pickle.loads(upkv_status.pd_kv_trans_params)
-            ready_payload = pickle.dumps((ObjType.PF_DECODE_KV_READY, group_request_id, decode_node_info))
+            ready_payload = pickle.dumps((ObjType.PD_PF_DECODE_KV_READY, group_request_id, decode_node_info))
             await p_websocket.send_bytes(ready_payload)
 
             # 5. 继续交出后到的 token。Decode 会再上报同一个首 token，在下面丢掉。
@@ -197,7 +197,7 @@ class HttpPdPrefillFirstManagerHelper:
     ) -> None:
         req_status = self.req_id_to_out_inf.get(ready.group_request_id)
         if req_status is None:
-            logger.error(f"PF_PREFILL_KV_READY finds no request, group_request_id={ready.group_request_id}")
+            logger.error(f"PD_PF_PREFILL_KV_READY finds no request, group_request_id={ready.group_request_id}")
             return
         req_status.pf_prefill_kv_ready_event.ready = ready
         req_status.pf_prefill_kv_ready_event.set()
@@ -210,7 +210,7 @@ class HttpPdPrefillFirstManagerHelper:
         request: Request,
         saved_max_new_tokens: int,
     ):
-        # token 经转发队列送出，PF_PREFILL_KV_READY 在推理返回后直接发送，谁先到不固定。
+        # token 经转发队列送出，PD_PF_PREFILL_KV_READY 在推理返回后直接发送，谁先到不固定。
         while True:
             req_status.raise_if_error()
             if await request.is_disconnected():

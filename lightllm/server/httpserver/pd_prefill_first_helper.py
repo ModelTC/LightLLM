@@ -48,14 +48,14 @@ async def pd_run_prefill_first_process_generate(
             f"prefill-first stage=infer-finished, group_request_id={group_request_id}. kv still held by this request"
         )
 
-        # 2. 上报 PF_PREFILL_KV_READY。只带 prompt ids，供 master 交给 decode 做 radix 匹配。
+        # 2. 上报 PD_PF_PREFILL_KV_READY。只带 prompt ids，供 master 交给 decode 做 radix 匹配。
         req_status = manager.req_id_to_out_inf.get(group_request_id)
         if req_status is None:
             raise GenerationError(f"prefill-first request {group_request_id} disappeared before kv ready")
         shm_req = req_status.group_req_objs.shm_req_objs[0]
         prompt_ids = [int(token_id) for token_id in shm_req.shm_prompt_ids.arr[: shm_req.input_len]]
         ready = PfPrefillKvReady(group_request_id=group_request_id, prompt_ids=prompt_ids)
-        await pd_upload_websocket.send(pickle.dumps((ObjType.PF_PREFILL_KV_READY, ready)))
+        await pd_upload_websocket.send(pickle.dumps((ObjType.PD_PF_PREFILL_KV_READY, ready)))
         logger.info(
             f"prefill-first stage=report-prefill-kv-ready, group_request_id={group_request_id}, "
             f"prompt_len={len(prompt_ids)}"

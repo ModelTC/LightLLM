@@ -130,7 +130,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 while True:
                     recv_bytes = await websocket.recv()
                     obj = pickle.loads(recv_bytes)
-                    if obj[0] == ObjType.PF_REQ:
+                    if obj[0] == ObjType.PD_PF_PREFILL_REQ:
                         from lightllm.server.httpserver.pd_prefill_first_helper import (
                             pd_run_prefill_first_process_generate,
                         )
@@ -159,7 +159,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                                 generation_tasks.pop(request_id, None)
 
                         generation_task.add_done_callback(remove_prefill_first_task)
-                    elif obj[0] == ObjType.PF_DECODE_KV_READY:
+                    elif obj[0] == ObjType.PD_PF_DECODE_KV_READY:
                         _, ready_group_req_id, decode_node_info = obj
                         decode_kv_ready_event = decode_kv_ready_events.pop(ready_group_req_id, None)
                         if decode_kv_ready_event is None:

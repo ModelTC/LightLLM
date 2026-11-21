@@ -904,7 +904,7 @@ class HttpServerManagerForPDMaster(HttpPdPrefillFirstManagerHelper, object):
                                     req_status.event.set()
                             except:
                                 pass
-                    elif obj[0] == ObjType.PF_PREFILL_KV_READY:
+                    elif obj[0] == ObjType.PD_PF_PREFILL_KV_READY:
                         self.record_pf_prefill_kv_ready(ready=obj[1])
                     elif obj[0] == ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS:
                         _, group_req_id, prompt_ids = obj

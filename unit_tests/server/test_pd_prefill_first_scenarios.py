@@ -135,11 +135,11 @@ def test_03_empty_span_and_bad_page_size_are_rejected():
 
 
 def test_04_pf_messages_do_not_reuse_old_handshake_values():
-    assert ObjType.PF_REQ.value == 10
-    assert ObjType.PF_PREFILL_KV_READY.value == 11
-    assert ObjType.PF_DECODE_KV_READY.value == 12
-    assert ObjType.PF_REQ != ObjType.REQ
-    assert ObjType.PF_DECODE_KV_READY != ObjType.PD_REQ_DECODE_NODE_INFO
+    assert ObjType.PD_PF_PREFILL_REQ.value == 10
+    assert ObjType.PD_PF_PREFILL_KV_READY.value == 11
+    assert ObjType.PD_PF_DECODE_KV_READY.value == 12
+    assert ObjType.PD_PF_PREFILL_REQ != ObjType.REQ
+    assert ObjType.PD_PF_DECODE_KV_READY != ObjType.PD_REQ_DECODE_NODE_INFO
 
 
 def test_05_schedule_interval_default_is_5ms_and_cli_help_is_english():
