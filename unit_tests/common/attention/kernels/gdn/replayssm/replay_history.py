@@ -107,7 +107,7 @@ def replay_layer(
     """按测试 state 的类型调用对应的 replay decode。"""
 
     if state.kda:
-        from lightllm.common.basemodel.attention.linear.replay_kda_decode import replay
+        from lightllm.common.attention.kernels.kda.replay_kda import replay
 
         return replay(
             state_ssm=state.ssm_state[layer_idx],
@@ -133,7 +133,7 @@ def replay_layer(
             state_gate_lower_bound=state.gate_lower_bound,
             run_config=run_config,
         )
-    from lightllm.common.basemodel.attention.linear.replay_gdn_decode import replay
+    from lightllm.common.attention.kernels.gdn.replayssm.replay_gdn import replay
 
     return replay(
         state=state,

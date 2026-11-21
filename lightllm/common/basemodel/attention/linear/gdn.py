@@ -1,104 +1,86 @@
-from lightllm.common.attention_state.bounded_att import GDNState
+"""GDN linear attention adapters over the gdn backend family.
+
+Model layers pass the layer's operands, parameters and recurrent state views in
+AttControl.linear_att_*_dict (see Qwen3NextTransformerLayerInfer._gdn_att_dict); the adapter builds the
+layer config, runs the impl and, for replay state, advances the replay cursors after the last layer.
+"""
+
 import dataclasses
 import weakref
+from typing import TYPE_CHECKING, Optional
+
 import torch
-from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+
+from lightllm.common.attention.backends.gdn import GDNLayerConfig, GDNLayerInputs
+from lightllm.common.attention.backends.gdn.flashqla import FlashQLAGDNPrefillBackend
+from lightllm.common.attention.backends.gdn.replay import ReplayGDNDecodeBackend
+from lightllm.common.attention.backends.gdn.triton import (
+    GDNDecodeStepArgs,
+    GDNPrefillStepArgs,
+    TritonGDNDecodeBackend,
+    TritonGDNPrefillBackend,
+)
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.attention.kernels.gdn.causal_conv1d import causal_conv1d_fn
-from lightllm.common.attention.kernels.gdn.fused_gdn_gating import fused_gdn_gating
-from lightllm.common.attention.kernels.gdn.gdn_decode_pack import conv_pack_gdn_decode_inputs
-from lightllm.common.attention.kernels.gdn.mtp_fused_recurrent import (
-    mtp_fused_recurrent_gated_delta_rule,
-)
-from lightllm.common.attention.kernels.gdn.mtp_state_params import (
-    build_dynamic_mtp_linear_att_state_params,
-)
-from lightllm.common.attention.kernels.gdn.third_party_fla.ops.fused_recurrent import (
-    fused_recurrent_gated_delta_rule,
-)
+from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState, build_attention_batch
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from lightllm.common.basemodel.infer_struct import InferStateInfo
-    from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
-    from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerWeight
 
 
-class LinearAttBackend(BaseAttBackend, ABC):
+class LinearAttBackend(BaseAttBackend):
+    """GDN over native recurrent state with the Triton chunked prefill; subclasses pick other variants."""
+
+    prefill_backend = TritonGDNPrefillBackend
+    decode_backend = TritonGDNDecodeBackend
+    replay = False
+
     def __init__(self, model: "TpPartBaseModel"):
         super().__init__(model=model)
-        self._init_linear_layer_metadata(network_config=model.config, tp_world_size=model.tp_world_size_)
-        self.prefill_kernel = self.get_prefill_kernel()
-
-    @abstractmethod
-    def get_prefill_kernel(self):
-        pass
-
-    def _init_linear_layer_metadata(self, network_config, tp_world_size):
-
+        config, tp_world_size = model.config, model.tp_world_size_
         self.mtp_step = get_env_start_args().mtp_step
+        self.tp_num_k_heads = config["linear_num_key_heads"] // tp_world_size
+        self.tp_num_v_heads = config["linear_num_value_heads"] // tp_world_size
+        self.head_k_dim = config["linear_key_head_dim"]
+        self.head_v_dim = config["linear_value_head_dim"]
+        self.conv_kernel_dim = config["linear_conv_kernel_dim"]
+        self.activation = config["hidden_act"]
+        # Resolve the chunk kernel now, so a missing optional library fails at startup.
+        self.prefill_backend.get_impl_cls().chunk_gated_delta_rule()
+        self.prefill_step_builder = self.prefill_backend.get_step_builder_cls()(
+            ssm_slots_per_request=1 if self.replay else self.mtp_step + 1
+        )
+        # BaseAttBackend reuses one instance per model but reruns __init__ on every construction.
+        # Keep the decode step builder: captured CUDA graphs read the tensors it keeps.
+        if getattr(self, "decode_step_builder", None) is None:
+            self.decode_step_builder = self.decode_backend.get_step_builder_cls()(replay=self.replay)
 
-        # Linear attention specific dimensions
-        self.num_v_heads = network_config["linear_num_value_heads"]
-        self.num_k_heads = network_config["linear_num_key_heads"]
-        self.head_k_dim = network_config["linear_key_head_dim"]
-        self.head_v_dim = network_config["linear_value_head_dim"]
-        self.key_dim = self.head_k_dim * self.num_k_heads
-        self.value_dim = self.head_v_dim * self.num_v_heads
-        self.conv_kernel_dim = network_config["linear_conv_kernel_dim"]
-        self.activation = network_config["hidden_act"]
-
-        # Tensor parallelism dimensions
-        self.tp_qkvz_dim = (self.key_dim * 2 + self.value_dim * 2) // tp_world_size
-        self.tp_ba_dim = (self.num_v_heads * 2) // tp_world_size
-        self.tp_num_k_heads = self.num_k_heads // tp_world_size
-        self.tp_num_v_heads = self.num_v_heads // tp_world_size
-        self.tp_key_dim = self.key_dim // tp_world_size
-        self.tp_value_dim = self.value_dim // tp_world_size
-
-        assert self.num_v_heads % self.num_k_heads == 0, "num_v_heads must be divisible by num_k_heads"
-        self.num_v_heads_per_k_head = self.num_v_heads // self.num_k_heads
-
-        # SSM state dtype optimization
-        ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
-        self.ssm_state_dtype = ssm_dtype_dict.get(get_env_start_args().linear_att_ssm_data_type, torch.bfloat16)
-        return
-
-    def _split_qkvzba(self, mixed_qkvzba):
-        qkv_dim = self.tp_key_dim * 2 + self.tp_value_dim
-        z_end = qkv_dim + self.tp_value_dim
-        b_end = z_end + self.tp_num_v_heads
-        mixed_qkv = mixed_qkvzba[:, :qkv_dim]
-        z = mixed_qkvzba[:, qkv_dim:z_end].view(-1, self.tp_num_v_heads, self.head_v_dim)
-        b = mixed_qkvzba[:, z_end:b_end]
-        a = mixed_qkvzba[:, b_end:]
-        return mixed_qkv, z, b, a
-
-    def _rearrange_mixed_qkv(self, mixed_qkv, decode=False):
-        if decode:
-            query, key, value = torch.split(
-                mixed_qkv,
-                [self.tp_key_dim, self.tp_key_dim, self.tp_value_dim],
-                dim=-1,
-            )
-            batch_size = mixed_qkv.shape[0]
-            query = query.view(batch_size, 1, self.tp_num_k_heads, self.head_k_dim)
-            key = key.view(batch_size, 1, self.tp_num_k_heads, self.head_k_dim)
-            value = value.view(batch_size, 1, self.tp_num_v_heads, self.head_v_dim)
-            return query, key, value
-        else:
-            query, key, value = torch.split(
-                mixed_qkv,
-                [self.tp_key_dim, self.tp_key_dim, self.tp_value_dim],
-                dim=-1,
-            )
-            seq_len = query.shape[0]
-            query = query.view(1, seq_len, self.tp_num_k_heads, self.head_k_dim)
-            key = key.view(1, seq_len, self.tp_num_k_heads, self.head_k_dim)
-            value = value.view(1, seq_len, self.tp_num_v_heads, self.head_v_dim)
-            return query, key, value
+    def layer(self, params: dict, dtype: torch.dtype):
+        layer_config = GDNLayerConfig(
+            num_k_heads=self.tp_num_k_heads,
+            num_v_heads=self.tp_num_v_heads,
+            head_k_dim=self.head_k_dim,
+            head_v_dim=self.head_v_dim,
+            conv_kernel_dim=self.conv_kernel_dim,
+            activation=self.activation,
+            dtype=dtype,
+            state_mtp_step=self.mtp_step,
+        )
+        layer_inputs = GDNLayerInputs(
+            mixed_qkv=params["mixed_qkv"],
+            a=params["a"],
+            b=params["b"],
+            z=params["z"],
+            conv_weight=params["conv_weight"],
+            conv_bias=params["conv_bias"],
+            A_log=params["A_log"],
+            dt_bias=params["dt_bias"],
+            conv_states=params["conv_states"],
+            ssm_states=params.get("ssm_states"),
+            replay_state=params["state"] if self.replay else None,
+            layer_num=params["layer_num"],
+        )
+        return layer_inputs, layer_config
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "LinearAttPrefillAttState":
         return LinearAttPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
@@ -107,324 +89,63 @@ class LinearAttBackend(BaseAttBackend, ABC):
         return LinearAttDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
+def _run(backend: LinearAttBackend, backend_cls, step_args, params: dict, alloc_func):
+    layer_inputs, layer_config = backend.layer(params, params["mixed_qkv"].dtype)
+    impl = backend.get_attention_impl(backend_cls, layer_config)
+    z = layer_inputs.z
+    out = alloc_func((z.shape[0], layer_config.num_v_heads, layer_config.head_v_dim), dtype=z.dtype, device=z.device)
+    return impl.forward(step_args, layer_inputs, out=out, alloc_func=alloc_func)
+
+
 @dataclasses.dataclass
 class LinearAttPrefillAttState(BasePrefillAttState):
-
-    b_conv_buffer_idx: torch.Tensor = None
-    b_ssm_buffer_idx: torch.Tensor = None
+    step_args: Optional[GDNPrefillStepArgs] = None
 
     def init_state(self):
-        backend: LinearAttBackend = self.backend
-        mtp_step = backend.mtp_step
-        # 每次 _prefill 都会在 runtime infer_state 上调用 init_state。
-        # prefill cuda graph 回调必须走 new_infer_state.prefill_att_state1，
-        # 才能读到这里按当前 batch（含 token padding 后的 dummy request）更新的索引。
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (mtp_step + 1)
-        return
+        # The prefill CUDA graph's CPU callbacks enter through the runtime infer_state's state, so they
+        # read the indices built here for the current batch (padding requests included).
+        self.step_args = self.backend.prefill_step_builder.build(build_attention_batch(self.infer_state, self.backend))
 
-    def prefill_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        assert att_control.linear_att_prefill, "linear_att_prefill must be True for Linear prefill attention"
-        assert att_control.linear_att_prefill_dict is not None, "linear_att_prefill_dict is required"
-
-        linear_att_dict = att_control.linear_att_prefill_dict
-        mixed_qkvzba: torch.Tensor = linear_att_dict["mixed_qkvzba"]
-        layer_weight = linear_att_dict["layer_weight"]
-        layer_num = linear_att_dict["layer_num"]
-        backend: LinearAttBackend = self.backend
-
-        state = self.infer_state.att_state_manager.get_state(
-            model_role=self.infer_state.att_state_role,
-            state_type_filter="gdn",
-            logical_layer_id=layer_num,
-            state_class=GDNState,
-        )
-        conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
-        # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
-        # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
-        if backend.mtp_step > 0:
-            conv_states = conv_states[:, :, : -backend.mtp_step]
-        mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
-        core_attn_out = self._gdn_prefill_kernel(
-            mixed_qkv, conv_states, ssm_states, a, b, self.infer_state, layer_weight
-        )
-        return core_attn_out, z
-
-    def _gdn_prefill_kernel(
-        self,
-        mixed_qkv: torch.Tensor,
-        conv_states: torch.Tensor,
-        ssm_states: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        infer_state: "Qwen3NextInferStateInfo",
-        layer_weight: "Qwen3NextTransformerLayerWeight",
-    ):
-        g, beta = fused_gdn_gating(layer_weight.linear_A_log.weight, a, b, layer_weight.linear_dt_bias.weight)
-        mixed_qkv = mixed_qkv.transpose(0, 1)
-
-        backend: LinearAttBackend = self.backend
-        out_tensor = causal_conv1d_fn(
-            mixed_qkv,
-            layer_weight.linear_conv1d.mm_param.weight,
-            bias=layer_weight.linear_conv1d.bias,
-            query_start_loc=infer_state.b1_cu_q_seq_len,
-            cache_indices=self.b_conv_buffer_idx,
-            has_initial_state=infer_state.b_ready_cache_len > 0,
-            conv_states=conv_states,
-            activation=backend.activation,
-        )
-        mixed_qkv = out_tensor.transpose(0, 1)
-
-        # Recurrent processing
-        query, key, value = backend._rearrange_mixed_qkv(mixed_qkv)
-        initial_state = ssm_states[self.b_ssm_buffer_idx]
-        # g and beta have shape (total_tokens, num_heads), need to unsqueeze to get (1, total_tokens, num_heads)
-        core_attn_out, last_recurrent_state = backend.prefill_kernel(
-            q=query,
-            k=key,
-            v=value,
-            g=g.unsqueeze(0),
-            beta=beta.unsqueeze(0),
-            initial_state=initial_state,
-            output_final_state=True,
-            cu_seqlens=infer_state.b1_cu_q_seq_len,
-            use_qk_l2norm_in_kernel=True,
-        )
-        # The chunk kernel accumulates the recurrent state in float32 even when
-        # the state cache is configured as bfloat16. Advanced indexing does
-        # not perform an implicit dtype conversion for index_put.
-        ssm_states[self.b_ssm_buffer_idx] = last_recurrent_state.to(ssm_states.dtype, copy=False)
-        return core_attn_out
+    def prefill_att(self, q, k, v, att_control: AttControl = AttControl(), alloc_func=torch.empty) -> torch.Tensor:
+        assert att_control.linear_att_prefill and att_control.linear_att_prefill_dict is not None
+        params = att_control.linear_att_prefill_dict
+        return _run(self.backend, self.backend.prefill_backend, self.step_args, params, alloc_func)
 
 
 @dataclasses.dataclass
 class LinearAttDecodeAttState(BaseDecodeAttState):
-
-    b_conv_buffer_idx: torch.Tensor = None
-    b_ssm_buffer_idx: torch.Tensor = None
-    b1_mtp_cu_q_seq_len: torch.Tensor = None
-    b_num_accepted_tokens: torch.Tensor = None
+    step_args: Optional[GDNDecodeStepArgs] = None
 
     def init_state(self):
-        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
-        if draft_step == 0:
-            self._init_normal_decode_state()
-            return
+        batch = build_attention_batch(self.infer_state, self.backend)
+        if batch.decode_rows_per_request > 1:
+            # Speculative rows resume from each request's last accepted draft, kept by the recurrent state.
+            batch = dataclasses.replace(batch, req_to_mtp_state_index=_recurrent_state(self).mtp_state_index)
+        # Replay steps also build: the step builder rewrites the tensors the graph captured.
+        self.step_args = self.backend.decode_step_builder.build(batch)
 
-        # MTP 元数据按模型初始化，沿用每个角色只有一个 GDN State 的约束。
-        # 只在此读取游标；Backend 不保存 State，逐层计算按逻辑层号查询资源。
-        (state,) = (
-            state
-            for state in self.infer_state.att_state_manager.get_bounded_attention_states(
-                self.infer_state.att_state_role
-            )
-            if isinstance(state, GDNState)
-        )
-        if self.backend.uses_dynamic_spec_verify_layout():
-            self._init_dynamic_mtp_decode_state(draft_step + 1, req_to_mtp_state_index=state.mtp_state_index)
-        else:
-            self._init_fixed_mtp_decode_state(draft_step, req_to_mtp_state_index=state.mtp_state_index)
+    def decode_att(self, q, k, v, att_control: AttControl = AttControl(), alloc_func=torch.empty) -> torch.Tensor:
+        assert att_control.linear_att_decode and att_control.linear_att_decode_dict is not None
+        params = att_control.linear_att_decode_dict
+        out = _run(self.backend, self.backend.decode_backend, self.step_args, params, alloc_func)
+        if self.backend.replay:
+            # Every layer read the cursors of the step's start; the state advances them after the last layer.
+            params["state"].finish_decode_token(params["layer_num"], self.step_args.conv_idx, self.step_args.cu_seqlens)
+        return out
 
-    def _init_normal_decode_state(self):
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx
 
-    def _init_dynamic_mtp_decode_state(self, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
-        (
-            self.b1_mtp_cu_q_seq_len,
-            self.b_conv_buffer_idx,
-            self.b_num_accepted_tokens,
-        ) = build_dynamic_mtp_linear_att_state_params(
-            b_req_idx=self.infer_state.b_req_idx,
-            b_mtp_index=self.infer_state.b_mtp_index,
-            req_to_mtp_state_index=req_to_mtp_state_index,
-            hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
-        )
-        self._init_mtp_ssm_buffer_idx(mtp_size)
+def _recurrent_state(att_state):
+    """The role's single GDN state, which holds the speculative acceptance index."""
+    from lightllm.common.attention_state.bounded_att import GDNState
+    from lightllm.common.attention_state.bounded_att.gdn.replay_gdn_state import ReplayGDNState
 
-    def _init_fixed_mtp_decode_state(self, draft_step: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
-        mtp_size = draft_step + 1
-        batch_size = self.infer_state.batch_size
-        assert batch_size % mtp_size == 0, (
-            "GDN fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
-            f"got batch_size={batch_size}, draft_step={draft_step}."
-        )
-
-        att_batch_size = batch_size // mtp_size
-        self.b1_mtp_cu_q_seq_len = torch.arange(
-            0,
-            batch_size + 1,
-            mtp_size,
-            dtype=torch.int32,
-            device=self.infer_state.b_req_idx.device,
-        )
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        self.b_num_accepted_tokens = req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
-        self._init_mtp_ssm_buffer_idx(mtp_size)
-
-    def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
-        att_batch_size = self.b_conv_buffer_idx.shape[0]
-        # Each request owns mtp_size consecutive recurrent-state slots.
-        b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
-        state_offsets = torch.arange(
-            mtp_size,
-            device=self.infer_state.b_req_idx.device,
-            dtype=self.infer_state.b_req_idx.dtype,
-        ).view(1, mtp_size)
-        self.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets  # [att_batch_size, mtp_size]
-
-    def decode_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        assert att_control.linear_att_decode, "linear_att_decode must be True for Linear decode attention"
-        assert att_control.linear_att_decode_dict is not None, "linear_att_decode_dict is required"
-
-        linear_att_dict = att_control.linear_att_decode_dict
-        mixed_qkvzba = linear_att_dict["mixed_qkvzba"]
-        layer_weight = linear_att_dict["layer_weight"]
-        layer_num = linear_att_dict["layer_num"]
-        backend: LinearAttBackend = self.backend
-
-        mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
-        state = self.infer_state.att_state_manager.get_state(
-            model_role=self.infer_state.att_state_role,
-            state_type_filter="gdn",
-            logical_layer_id=layer_num,
-            state_class=GDNState,
-        )
-        conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
-
-        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
-        if draft_step > 0:
-            core_attn_out = self._gdn_mtp_kernel(
-                mixed_qkv,
-                conv_states,
-                ssm_states,
-                a,
-                b,
-                self.infer_state,
-                layer_weight,
-            )
-        else:
-            # 非 MTP 模式下，使用线性层 decode 状态。
-            core_attn_out, z = self._gdn_decode_kernel(
-                mixed_qkv,
-                z,
-                conv_states,
-                ssm_states,
-                a,
-                b,
-                self.infer_state,
-                layer_weight,
-            )
-        return core_attn_out, z
-
-    def _gdn_decode_kernel(
-        self,
-        mixed_qkv: torch.Tensor,
-        z: torch.Tensor,
-        conv_states: torch.Tensor,
-        ssm_states: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        infer_state: "Qwen3NextInferStateInfo",
-        layer_weight: "Qwen3NextTransformerLayerWeight",
-    ):
-        backend: LinearAttBackend = self.backend
-
-        # Recurrent processing with fused gating. Decode uses a specialized
-        # conv+pack kernel to avoid materializing the post-conv qkv tensor
-        # before immediately splitting it into q/k/v.
-        query, key, value, z, a, b = conv_pack_gdn_decode_inputs(
-            mixed_qkv,
-            z,
-            a,
-            b,
-            conv_states,
-            layer_weight.linear_conv1d.mm_param.weight,
-            layer_weight.linear_conv1d.bias,
-            self.b_conv_buffer_idx,
-            backend.activation,
-            backend.conv_kernel_dim,
-            backend.tp_num_k_heads,
-            backend.head_k_dim,
-            backend.tp_num_v_heads,
-            backend.head_v_dim,
-        )
-        core_attn_out, _ = fused_recurrent_gated_delta_rule(
-            q=query,
-            k=key,
-            v=value,
-            initial_state=ssm_states,
-            inplace_final_state=True,
-            ssm_state_indices=self.b_ssm_buffer_idx,
-            use_qk_l2norm_in_kernel=True,
-            A_log=layer_weight.linear_A_log.weight,
-            dt_bias=layer_weight.linear_dt_bias.weight,
-            a_raw=a,
-            b_raw=b,
-        )
-        return core_attn_out, z
-
-    def _gdn_mtp_kernel(
-        self,
-        mixed_qkv: torch.Tensor,
-        conv_states: torch.Tensor,
-        ssm_states: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        infer_state: "Qwen3NextInferStateInfo",
-        layer_weight: "Qwen3NextTransformerLayerWeight",
-    ):
-        from lightllm.common.attention.kernels.gdn.causal_conv1d_mtp import (
-            causal_conv1d_update as causal_conv1d_update_mtp,
-        )
-
-        backend: LinearAttBackend = self.backend
-
-        cu_seqlens_q = self.b1_mtp_cu_q_seq_len
-        mixed_qkv = causal_conv1d_update_mtp(
-            mixed_qkv,
-            conv_states,
-            layer_weight.linear_conv1d.mm_param.weight,
-            mtp_step=backend.model.mtp_manager.get_decode_draft_step(backend.model.is_mtp_draft_model),
-            bias=layer_weight.linear_conv1d.bias,
-            activation=backend.activation,
-            conv_state_indices=self.b_conv_buffer_idx,
-            num_accepted_tokens=self.b_num_accepted_tokens,
-            query_start_loc=cu_seqlens_q,
-        )
-
-        query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
-        assert self.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"
-        # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,
-        # and MTP decode only writes values in [1, mtp_step+1]. The old per-layer per-step
-        # .all() D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
-        core_attn_out, _ = mtp_fused_recurrent_gated_delta_rule(
-            q=query,
-            k=key,
-            v=value,
-            initial_state=ssm_states,
-            cu_seqlens=cu_seqlens_q.to(torch.long),
-            ssm_state_indices=self.b_ssm_buffer_idx,
-            ssm_state_write_indices=self.b_ssm_buffer_idx,
-            num_accepted_tokens=self.b_num_accepted_tokens,
-            A_log=layer_weight.linear_A_log.weight,
-            dt_bias=layer_weight.linear_dt_bias.weight,
-            a_raw=a,
-            b_raw=b,
-        )
-        return core_attn_out
+    infer_state = att_state.infer_state
+    state_class = ReplayGDNState if att_state.backend.replay else GDNState
+    matches = [
+        state
+        for state in infer_state.att_state_manager.get_bounded_attention_states(infer_state.att_state_role)
+        if isinstance(state, state_class)
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"expected one {state_class.__name__} for {infer_state.att_state_role}")
+    return matches[0]
