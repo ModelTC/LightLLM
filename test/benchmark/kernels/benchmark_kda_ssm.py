@@ -14,7 +14,7 @@ import torch
 import triton
 
 from lightllm.common.attention.kernels.gdn.third_party_fla.ops.kda_decode import fused_recurrent_kda
-from lightllm.common.basemodel.attention.linear.replay_kda_decode import get_configs, replay
+from lightllm.common.attention.kernels.kda.replay_kda import get_configs, replay
 from unit_tests.common.attention.kernels.gdn.replayssm.replay_history import (
     accept_replay_window,
     attach_replay_history as ReplaySSMExecutor,

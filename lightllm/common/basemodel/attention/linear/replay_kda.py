@@ -33,7 +33,7 @@ from lightllm.common.attention.kernels.gdn.mtp_state_params import (
     build_dynamic_mtp_linear_att_state_params,
 )
 
-from .replay_kda_decode import replay
+from lightllm.common.attention.kernels.kda.replay_kda import replay
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
