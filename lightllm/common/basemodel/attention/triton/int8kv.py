@@ -1,211 +1,117 @@
 import dataclasses
 import weakref
+from typing import Optional
+
 import torch
-from lightllm.utils.envs_utils import get_env_start_args
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from typing import Optional, Tuple
+
+from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+from lightllm.common.attention.backends.gqa.triton_quant import (
+    TritonQuantGQADecodeBackend,
+    TritonQuantGQADecodeStepArgs,
+    TritonQuantGQAPrefillBackend,
+    TritonQuantGQAPrefillStepArgs,
+)
 from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
-from lightllm.common.basemodel.triton_kernel.diverse_utils import build_diverse_shared_group_markers
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl, build_attention_batch
 
 
 class Int8kvTritonAttBackend(BaseAttBackend):
+    """Triton attention over a group-quantized int8 KV cache; scales come per layer in AttControl.kv_scales."""
+
+    kv_quant: str = "int8_group"
+
     def __init__(self, model):
         super().__init__(model)
-        self.quant_group_size: int = get_env_start_args().llm_kv_quant_group_size
+        self.prefill_step_builder = TritonQuantGQAPrefillBackend.get_step_builder_cls()()
+        # BaseAttBackend reuses one instance per model but reruns __init__ on every construction.
+        # Keep the decode step builder: captured CUDA graphs read the tensors it keeps.
+        if getattr(self, "decode_step_builder", None) is None:
+            self.decode_step_builder = TritonQuantGQADecodeBackend.get_step_builder_cls()(
+                diverse=self._uses_diverse_decode()
+            )
 
-    def create_att_prefill_state(self, infer_state) -> "Int8kvTritonPrefillAttState":
-        return Int8kvTritonPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
+    def _uses_diverse_decode(self) -> bool:
+        return enable_diverse_mode_gqa_decode_fast_kernel()
 
-    def create_att_decode_state(self, infer_state) -> "Int8kvTritonDecodeAttState":
-        return Int8kvTritonDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
+    def create_att_prefill_state(self, infer_state) -> "QuantTritonPrefillAttState":
+        return QuantTritonPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
+
+    def create_att_decode_state(self, infer_state) -> "QuantTritonDecodeAttState":
+        return QuantTritonDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
+
+
+def _quant_layer_inputs_and_config(q, k, v, att_control: AttControl, kv_quant: str, causal: bool):
+    assert att_control.use_alibi is False, "quantized Triton GQA does not support alibi"
+    scales = att_control.kv_scales
+    assert scales is not None, "a quantized KV cache needs AttControl.kv_scales"
+    head_dim = q.shape[2]
+    layer_config = GQALayerConfig(
+        num_heads=q.shape[1],
+        num_kv_heads=k.shape[1],
+        head_dim=head_dim,
+        dtype=q.dtype,
+        sliding_window=att_control.sliding_window if att_control.use_sliding_window else (-1, -1),
+        causal=causal,
+        has_sinks=att_control.use_att_sink,
+        kv_quant=kv_quant,
+        kv_quant_group_size=head_dim // scales.k_scale.shape[-1],
+    )
+    return GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), layer_config
 
 
 @dataclasses.dataclass
-class Int8kvTritonPrefillAttState(BasePrefillAttState):
-
-    # 用于反量化的时候使用，可以减少反量化占用的显存数量。按需使用。
-    b_kv_start_loc: torch.Tensor = None
+class QuantTritonPrefillAttState(BasePrefillAttState):
+    step_args: Optional[TritonQuantGQAPrefillStepArgs] = None
+    causal: bool = True
 
     def init_state(self):
-        self.b_kv_start_loc = (
-            torch.cumsum(self.infer_state.b_seq_len, dim=0, dtype=self.infer_state.b_seq_len.dtype)
-            - self.infer_state.b_seq_len
-        )
+        self.causal = self.backend.uses_causal_attention()
+        self.step_args = self.backend.prefill_step_builder.build(build_attention_batch(self.infer_state, self.backend))
 
     def prefill_att(
         self,
         q: torch.Tensor,
-        k: Tuple[torch.Tensor, torch.Tensor],
-        v: Tuple[torch.Tensor, torch.Tensor],
+        k: torch.Tensor,
+        v: torch.Tensor,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
+        layer_inputs, layer_config = _quant_layer_inputs_and_config(
+            q, k, v, att_control, self.backend.kv_quant, self.causal
         )
-
-        self.backend: Int8kvTritonAttBackend = self.backend  # for typing
-
-        k, k_scale = k
-        v, v_scale = v
-        o = self._groupsize_quant_prefill_att(
-            q=q,
-            k=k,
-            k_scale=k_scale,
-            v=v,
-            v_scale=v_scale,
-            alloc_func=alloc_func,
+        impl = self.backend.get_attention_impl(TritonQuantGQAPrefillBackend, layer_config)
+        return impl.forward(
+            self.step_args, layer_inputs, out=alloc_func(q.shape, dtype=q.dtype, device=q.device), alloc_func=alloc_func
         )
-        return o
-
-    def _groupsize_quant_prefill_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        k_scale: torch.Tensor,
-        v: torch.Tensor,
-        v_scale: torch.Tensor,
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        # 反量化内核分别使用 K/V 及 scale 的指针和 stride，兼容共享或独立存储。
-        total_token_num = self.infer_state.total_token_num
-        k_dequant = alloc_func((total_token_num, k.shape[1], k.shape[2]), dtype=q.dtype, device=q.device)
-        v_dequant = alloc_func((total_token_num, v.shape[1], v.shape[2]), dtype=q.dtype, device=q.device)
-        o_tensor = alloc_func(q.shape, dtype=q.dtype, device=q.device)
-
-        max_kv_seq_len = self.infer_state.max_kv_seq_len
-
-        from ...triton_kernel.kv_copy.ppl_int8kv_copy_kv import dequantize_int8kv
-
-        dequantize_int8kv(
-            k=k,
-            k_scale=k_scale,
-            v=v,
-            v_scale=v_scale,
-            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
-            b_seq_len=self.infer_state.b_seq_len,
-            b_req_idx=self.infer_state.b_req_idx,
-            b_kv_start_loc=self.b_kv_start_loc,
-            k_out=k_dequant,
-            v_out=v_dequant,
-            max_len_in_batch=max_kv_seq_len,
-            quant_group_size=self.backend.quant_group_size,
-        )
-
-        from lightllm.common.attention.kernels.gqa.bf16.prefill.context_flashattention_nopad import (
-            context_attention_fwd_contiguous_kv,
-        )
-
-        context_attention_fwd_contiguous_kv(
-            q=q,
-            k=k_dequant,
-            v=v_dequant,
-            o=o_tensor,
-            b_start_loc=self.infer_state.b_q_start_loc,
-            b_kv_start_loc=self.b_kv_start_loc,
-            b_seq_len=self.infer_state.b_seq_len,
-            max_q_input_len=self.infer_state.max_q_seq_len,
-            b_prompt_cache_len=self.infer_state.b_ready_cache_len,
-        )
-        return o_tensor
 
 
 @dataclasses.dataclass
-class Int8kvTritonDecodeAttState(BaseDecodeAttState):
-    b_shared_seq_len: torch.Tensor = None
-    b_mark_shared_group: torch.Tensor = None
-    decode_max_kv_seq_len: int = None
+class QuantTritonDecodeAttState(BaseDecodeAttState):
+    step_args: Optional[TritonQuantGQADecodeStepArgs] = None
+    causal: bool = True
 
     def init_state(self):
-        # Graph 捕获会改写 infer_state 的长度上限，提前保存真实长度用于普通 decode 配置查找。
-        self.decode_max_kv_seq_len = self.infer_state.max_kv_seq_len
-        if enable_diverse_mode_gqa_decode_fast_kernel():
-            self.b_mark_shared_group = build_diverse_shared_group_markers(
-                b_shared_radix_node_id=self.infer_state.b_shared_radix_node_id,
-            )
-            # A one-row group has no cross-request prefix sharing to accelerate.
-            self.b_shared_seq_len = torch.where(
-                self.b_mark_shared_group == 1,
-                0,
-                self.infer_state.b_shared_seq_len,
-            )
-
-    def copy_for_decode_cuda_graph(self, new_state: "Int8kvTritonDecodeAttState"):
-        super().copy_for_decode_cuda_graph(new_state)
+        self.causal = self.backend.uses_causal_attention()
+        # Replay steps also build: the step builder rewrites the group tensors the graph captured.
+        self.step_args = self.backend.decode_step_builder.build(build_attention_batch(self.infer_state, self.backend))
 
     def decode_att(
         self,
         q: torch.Tensor,
-        k: Tuple[torch.Tensor, torch.Tensor],
-        v: Tuple[torch.Tensor, torch.Tensor],
+        k: torch.Tensor,
+        v: torch.Tensor,
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
+        layer_inputs, layer_config = _quant_layer_inputs_and_config(
+            q, k, v, att_control, self.backend.kv_quant, self.causal
         )
-        k, k_scale = k
-        v, v_scale = v
-        if enable_diverse_mode_gqa_decode_fast_kernel():
-            return self.diverse_decode_att(q=q, k=k, k_scale=k_scale, v=v, v_scale=v_scale, alloc_func=alloc_func)
-        else:
-            return self.normal_decode_att(
-                q=q,
-                k=k,
-                k_scale=k_scale,
-                v=v,
-                v_scale=v_scale,
-                alloc_func=alloc_func,
-            )
-
-    def diverse_decode_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        k_scale: torch.Tensor,
-        v: torch.Tensor,
-        v_scale: torch.Tensor,
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-
-        from lightllm.common.attention.kernels.gqa.int8kv.int8kv_flash_decoding_diverse import (
-            token_decode_attention_flash_decoding,
+        impl = self.backend.get_attention_impl(TritonQuantGQADecodeBackend, layer_config)
+        return impl.forward(
+            self.step_args, layer_inputs, out=alloc_func(q.shape, dtype=q.dtype, device=q.device), alloc_func=alloc_func
         )
 
-        return token_decode_attention_flash_decoding(
-            q=q,
-            infer_state=self.infer_state,
-            cache_k=k,
-            cache_k_scale=k_scale,
-            cache_v=v,
-            cache_v_scale=v_scale,
-            alloc_tensor_func=alloc_func,
-        )
 
-    def normal_decode_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        k_scale: torch.Tensor,
-        v: torch.Tensor,
-        v_scale: torch.Tensor,
-        alloc_func=torch.empty,
-    ):
-        from lightllm.common.attention.kernels.gqa.int8kv.int8kv_flash_decoding import (
-            token_decode_attention_flash_decoding,
-        )
-
-        return token_decode_attention_flash_decoding(
-            q=q,
-            infer_state=self.infer_state,
-            cache_k=k,
-            cache_k_scale=k_scale,
-            cache_v=v,
-            cache_v_scale=v_scale,
-            max_len_in_batch=self.decode_max_kv_seq_len,
-            alloc_tensor_func=alloc_func,
-        )
+# Names kept for code that refers to the int8 states.
+Int8kvTritonPrefillAttState = QuantTritonPrefillAttState
+Int8kvTritonDecodeAttState = QuantTritonDecodeAttState

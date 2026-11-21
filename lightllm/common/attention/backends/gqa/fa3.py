@@ -160,6 +160,12 @@ def _check_supported(layer_config: GQALayerConfig) -> None:
         raise NotImplementedError(
             f"FA3 GQA supports FP16/BF16 with head_dim <= 256, got {layer_config.dtype}, {layer_config.head_dim}"
         )
+    if layer_config.kv_quant not in (None, "fp8_per_head"):
+        raise NotImplementedError(f"FA3 GQA supports kv_quant None or 'fp8_per_head', got {layer_config.kv_quant!r}")
+    if layer_config.kv_quant is not None and (
+        layer_config.sliding_window != (-1, -1) or layer_config.has_sinks or not layer_config.has_default_scale
+    ):
+        raise NotImplementedError("FA3 GQA with an FP8 cache supports only the default scale without window or sinks")
 
 
 def _paged(cache: torch.Tensor, page_size: int) -> torch.Tensor:
@@ -175,11 +181,54 @@ def _check_inputs(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs) ->
     assert (
         layer_inputs.sinks is not None
     ) == layer_config.has_sinks, "sinks must be given exactly when the layer_config has sinks"
+    assert (layer_inputs.kv_scales is not None) == (
+        layer_config.kv_quant is not None
+    ), "kv_scales must be given exactly when the layer_config has kv_quant"
+    if layer_config.kv_quant is not None:
+        assert (layer_inputs.kv_scales.q_scale is not None) == layer_config.has_q_scale
+
+
+def _fp8_operands(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs, step_args, page_size: int):
+    """Quantize q per KV head and return FA3's FP8 q, paged caches and [requests, kv_heads] descales."""
+    from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import (
+        q_per_head_fp8_quant,
+        q_per_head_static_fp8_quant,
+    )
+
+    kv_heads, scales = layer_config.num_kv_heads, layer_inputs.kv_scales
+    requests = step_args.cache_seqlens.shape[0]
+    q = layer_inputs.q.reshape(layer_inputs.q.shape[0], kv_heads, -1)
+    if scales.q_scale is None:
+        # Without a static scale, quantize each request's queries with their own per-head scale.
+        q, q_scale = q_per_head_fp8_quant(
+            q=q,
+            seq_lens=step_args.cu_seqlens_q[1:] - step_args.cu_seqlens_q[:-1],
+            b1_start_loc=step_args.cu_seqlens_q,
+        )
+    else:
+        q = q_per_head_static_fp8_quant(q=q, scales=scales.q_scale)
+        q_scale = scales.q_scale.view(1, kv_heads).expand(requests, kv_heads)
+
+    def paged(cache):
+        return _paged(cache, page_size).view(torch.float8_e4m3fn)
+
+    return dict(
+        q=q.reshape(-1, layer_config.num_heads, layer_config.head_dim),
+        k_cache=paged(layer_inputs.k_cache),
+        v_cache=paged(layer_inputs.v_cache),
+        q_descale=q_scale.view(requests, kv_heads),
+        k_descale=scales.k_scale.view(1, kv_heads).expand(requests, kv_heads),
+        v_descale=scales.v_scale.view(1, kv_heads).expand(requests, kv_heads),
+    )
 
 
 class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillStepArgs, GQALayerInputs]):
     def __init__(self, layer_config: GQALayerConfig) -> None:
-        """Supports any scale, causal or non-causal attention, one- or two-sided windows and sinks."""
+        """Supports any scale, causal or non-causal attention, one- or two-sided windows and sinks.
+
+        A per-head FP8 cache (kv_quant='fp8_per_head') supports the default scale without window or
+        sinks; q is quantized per KV head with the static q scale, or dynamically per request.
+        """
         super().__init__(layer_config)
         _check_supported(layer_config)
 
@@ -201,6 +250,21 @@ class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillStepArgs, GQA
 
         layer_config = self.layer_config
         _check_inputs(layer_config, layer_inputs)
+        if layer_config.kv_quant is not None:
+            flash_attn_with_kvcache(
+                **_fp8_operands(layer_config, layer_inputs, step_args, step_args.page_size),
+                page_table=step_args.page_table,
+                cache_seqlens=step_args.cache_seqlens,
+                cu_seqlens_q=step_args.cu_seqlens_q,
+                cu_seqlens_k_new=step_args.cu_seqlens_k,
+                max_seqlen_q=step_args.max_seqlen_q,
+                causal=layer_config.causal,
+                window_size=(-1, -1),
+                softcap=0.0,
+                return_softmax_lse=False,
+                out=out,
+            )
+            return out
         flash_attn_with_kvcache(
             q=layer_inputs.q,
             k_cache=_paged(layer_inputs.k_cache, step_args.page_size),
@@ -223,7 +287,11 @@ class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillStepArgs, GQA
 
 class FA3GQADecodeImpl(AttentionImpl[GQALayerConfig, FA3GQADecodeStepArgs, GQALayerInputs]):
     def __init__(self, layer_config: GQALayerConfig) -> None:
-        """Supports any scale, causal or non-causal attention, one- or two-sided windows and sinks."""
+        """Supports any scale, causal or non-causal attention, one- or two-sided windows and sinks.
+
+        A per-head FP8 cache (kv_quant='fp8_per_head') supports the default scale without window or
+        sinks; q is quantized per KV head with the static q scale, or dynamically per request.
+        """
         super().__init__(layer_config)
         _check_supported(layer_config)
 
@@ -239,10 +307,25 @@ class FA3GQADecodeImpl(AttentionImpl[GQALayerConfig, FA3GQADecodeStepArgs, GQALa
 
         q has one row per batch row; the step args group them into attention requests.
         """
-        from lightllm.utils.sgl_utils import flash_attn_with_kvcache_autotune
+        from lightllm.utils.sgl_utils import flash_attn_with_kvcache, flash_attn_with_kvcache_autotune
 
         layer_config = self.layer_config
         _check_inputs(layer_config, layer_inputs)
+        if layer_config.kv_quant is not None:
+            flash_attn_with_kvcache(
+                **_fp8_operands(layer_config, layer_inputs, step_args, step_args.page_size),
+                page_table=step_args.page_table,
+                cache_seqlens=step_args.cache_seqlens,
+                cu_seqlens_q=step_args.cu_seqlens_q,
+                cu_seqlens_k_new=step_args.cu_seqlens_k,
+                max_seqlen_q=step_args.max_seqlen_q,
+                causal=layer_config.causal,
+                window_size=(-1, -1),
+                softcap=0.0,
+                return_softmax_lse=False,
+                out=out,
+            )
+            return out
         flash_attn_with_kvcache_autotune(
             q=layer_inputs.q,
             k_cache=_paged(layer_inputs.k_cache, step_args.page_size),

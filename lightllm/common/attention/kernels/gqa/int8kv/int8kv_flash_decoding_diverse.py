@@ -8,7 +8,12 @@ from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
 
 def token_decode_attention_flash_decoding(
     q,
-    infer_state,
+    req_to_token_indexs,
+    b_req_idx,
+    b_seq_len,
+    b_shared_seq_len,
+    b_mark_shared_group,
+    max_kv_seq_len,
     cache_k,
     cache_k_scale,
     cache_v,
@@ -17,9 +22,6 @@ def token_decode_attention_flash_decoding(
     alloc_tensor_func=torch.empty,
     shared_streams_dict={},
 ):
-    b_shared_seq_len = infer_state.decode_att_state.b_shared_seq_len
-    b_mark_shared_group = infer_state.decode_att_state.b_mark_shared_group
-
     if "stream1" not in shared_streams_dict:
         shared_streams_dict["stream1"] = torch.cuda.Stream()
     if "stream2" not in shared_streams_dict:
@@ -32,8 +34,7 @@ def token_decode_attention_flash_decoding(
     head_dim = q.shape[2]
 
     BLOCK_SEQ = 256
-    batch_size = infer_state.batch_size
-    max_kv_seq_len = infer_state.max_kv_seq_len
+    batch_size = b_seq_len.shape[0]
     calcu_shape1 = (batch_size, q_head_num, head_dim)
 
     o_tensor = alloc_tensor_func(q.shape, q.dtype, q.device) if out is None else out
@@ -55,11 +56,11 @@ def token_decode_attention_flash_decoding(
             k_scale=cache_k_scale,
             v=cache_v,
             v_scale=cache_v_scale,
-            Req_to_tokens=infer_state.req_manager.req_to_token_indexs,
-            B_req_idx=infer_state.b_req_idx,
+            Req_to_tokens=req_to_token_indexs,
+            B_req_idx=b_req_idx,
             b_shared_seq_len=b_shared_seq_len,
             b_mark_shared_group=b_mark_shared_group,
-            max_len_in_batch=infer_state.max_kv_seq_len,
+            max_len_in_batch=max_kv_seq_len,
             mid_out=mid_o,
             mid_out_logsumexp=mid_o_logexpsum,
             block_seq=BLOCK_SEQ,
@@ -73,11 +74,11 @@ def token_decode_attention_flash_decoding(
             k_scale=cache_k_scale,
             v=cache_v,
             v_scale=cache_v_scale,
-            Req_to_tokens=infer_state.req_manager.req_to_token_indexs,
-            B_req_idx=infer_state.b_req_idx,
-            B_Seqlen=infer_state.b_seq_len,
+            Req_to_tokens=req_to_token_indexs,
+            B_req_idx=b_req_idx,
+            B_Seqlen=b_seq_len,
             b_shared_seq_len=b_shared_seq_len,
-            max_len_in_batch=infer_state.max_kv_seq_len,
+            max_len_in_batch=max_kv_seq_len,
             mid_out=mid_o,
             mid_out_logsumexp=mid_o_logexpsum,
             block_seq=BLOCK_SEQ,
@@ -89,7 +90,7 @@ def token_decode_attention_flash_decoding(
     flash_diverse_decode_stage3(
         mid_out=mid_o,
         mid_out_logexpsum=mid_o_logexpsum,
-        B_Seqlen=infer_state.b_seq_len,
+        B_Seqlen=b_seq_len,
         b_shared_seq_len=b_shared_seq_len,
         O=o_tensor.view(calcu_shape1),
         block_seq=BLOCK_SEQ,

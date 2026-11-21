@@ -10,6 +10,9 @@ import torch
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from lightllm.common.attention.backends.gqa import GQAKVScales
+from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeStepBuilder
+from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.attention.triton import int8kv as state_module
 from lightllm.common.basemodel.attention.triton.int8kv import Int8kvTritonDecodeAttState
@@ -143,10 +146,15 @@ def test_decode_passes_saved_length_to_stage1(monkeypatch):
     infer_state.b_req_idx = inputs["B_req_idx"]
     infer_state.b_seq_len = inputs["B_seq_len"]
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"])
-    state = Int8kvTritonDecodeAttState(
-        backend=SimpleNamespace(),
-        _infer_state_weak_ref=weakref.ref(infer_state),
+    infer_state.is_prefill = False
+    backend = SimpleNamespace(
+        model=SimpleNamespace(),
+        kv_quant="int8_group",
+        decode_step_builder=TritonQuantGQADecodeStepBuilder(),
+        get_attention_impl=lambda backend_cls, layer_config: backend_cls.get_impl_cls()(layer_config),
+        uses_causal_attention=lambda: True,
     )
+    state = Int8kvTritonDecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer_state))
     state.init_state()
     state.infer_state.max_kv_seq_len = 32768
     calls = []
@@ -154,8 +162,9 @@ def test_decode_passes_saved_length_to_stage1(monkeypatch):
     monkeypatch.setattr(decode_module, "flash_decode_stage2", lambda **kwargs: None)
     state.decode_att(
         inputs["q"],
-        (inputs["k"], inputs["k_scale"]),
-        (inputs["v"], inputs["v_scale"]),
+        inputs["k"],
+        inputs["v"],
+        AttControl(kv_scales=GQAKVScales(k_scale=inputs["k_scale"], v_scale=inputs["v_scale"])),
         alloc_func=lambda shape, dtype, device: torch.empty(shape, dtype=dtype),
     )
     assert calls[0]["max_len_in_batch"] == 8193

@@ -36,6 +36,7 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
                 logical_layer_id=self.layer_num_,
                 use_sliding_window=use_sliding_window,
                 sliding_window=(window, window) if use_sliding_window else (-1, -1),
+                kv_scales=state.get_layer_kv_scales(self.layer_num_),
             ),
             alloc_func=self.alloc_tensor,
         )

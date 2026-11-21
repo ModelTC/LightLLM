@@ -335,7 +335,9 @@ def test_deferred_storage_preserves_real_fp8_calibration(kind: str):
 def test_int4_prefill_with_separate_storage(device, monkeypatch):
     import weakref
     from types import SimpleNamespace
-    from lightllm.common.basemodel.attention.triton.int4kv import Int4kvTritonPrefillAttState
+    from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQAPrefillStepBuilder
+    from lightllm.common.basemodel.attention.base_att import AttControl
+    from lightllm.common.basemodel.attention.triton.int4kv import Int4kvTritonAttBackend, Int4kvTritonPrefillAttState
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.common.basemodel.triton_kernel.kv_copy import ppl_int4kv_copy_kv
     from lightllm.common.attention.kernels.gqa.bf16.prefill import context_flashattention_nopad
@@ -353,7 +355,9 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
         device=device,
     )
     state.allocate_storage(8)
-    (k, k_scale), (v, v_scale) = state.get_layer_view(0)
+    k, v = state.get_layer_view(0)
+    kv_scales = state.get_layer_kv_scales(0)
+    k_scale, v_scale = kv_scales.k_scale, kv_scales.v_scale
     k.view(torch.uint8).fill_(0x88)
     v.view(torch.uint8).fill_(0x99)
     k_scale.fill_(0.25)
@@ -366,9 +370,16 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
     owner.b_req_idx = torch.tensor([0], dtype=torch.int32, device=device)
     owner.b_ready_cache_len = owner.b_q_start_loc = torch.zeros(1, dtype=torch.int32, device=device)
     owner.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(8, device=device).view(1, -1))
-    prefill = Int4kvTritonPrefillAttState(
-        backend=SimpleNamespace(quant_group_size=8), _infer_state_weak_ref=weakref.ref(owner)
+    owner.is_prefill, owner.batch_size = True, 1
+    owner.b1_cu_q_seq_len = owner.b1_cu_kv_seq_len = torch.tensor([0, 2], dtype=torch.int32, device=device)
+    backend = SimpleNamespace(
+        model=SimpleNamespace(),
+        kv_quant=Int4kvTritonAttBackend.kv_quant,
+        prefill_step_builder=TritonQuantGQAPrefillStepBuilder(),
+        get_attention_impl=lambda backend_cls, layer_config: backend_cls.get_impl_cls()(layer_config),
+        uses_causal_attention=lambda: True,
     )
+    prefill = Int4kvTritonPrefillAttState(backend=backend, _infer_state_weak_ref=weakref.ref(owner))
     prefill.init_state()
     if device == "cpu":
 
@@ -384,5 +395,5 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
         monkeypatch.setattr(ppl_int4kv_copy_kv, "dequantize_int4kv", dequantize)
         monkeypatch.setattr(context_flashattention_nopad, "context_attention_fwd_contiguous_kv", attention)
     q = torch.randn(2, 2, 64, device=device)
-    output = prefill.prefill_att(q, (k, k_scale), (v, v_scale))
+    output = prefill.prefill_att(q, k, v, AttControl(kv_scales=kv_scales))
     torch.testing.assert_close(output, torch.ones_like(q))

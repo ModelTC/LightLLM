@@ -218,10 +218,11 @@ def _check_supported(layer_config: GQALayerConfig) -> None:
         and layer_config.sliding_window == (-1, -1)
         and layer_config.has_default_scale
         and not layer_config.has_sinks
+        and layer_config.kv_quant in (None, "fp8_per_tensor")
     ):
         raise NotImplementedError(
             "FlashInfer GQA supports only causal attention without sliding window or sinks, "
-            "with softmax_scale 1/sqrt(head_dim)"
+            "with softmax_scale 1/sqrt(head_dim) and kv_quant None or 'fp8_per_tensor'"
         )
 
 
@@ -238,13 +239,21 @@ def _run(
         layer_config.head_dim,
     ), "step args were built for a different GQA layer configuration"
     assert layer_inputs.q.dtype == layer_config.dtype == config.q_dtype, "q does not match the layer_config"
+    assert (layer_inputs.kv_scales is not None) == (
+        layer_config.kv_quant is not None
+    ), "kv_scales must be given exactly when the layer_config has kv_quant"
     k, v = layer_inputs.k_cache, layer_inputs.v_cache
+    k = k.view(-1, config.page_size, k.shape[1], k.shape[2])
+    v = v.view(-1, config.page_size, v.shape[1], v.shape[2])
+    if layer_config.kv_quant is None:
+        wrapper.run(q=layer_inputs.q, paged_kv_cache=(k, v), out=out)
+        return out
+    assert config.kv_dtype == torch.float8_e4m3fn, "step args were planned for a different KV cache dtype"
     wrapper.run(
         q=layer_inputs.q,
-        paged_kv_cache=(
-            k.view(-1, config.page_size, k.shape[1], k.shape[2]),
-            v.view(-1, config.page_size, v.shape[1], v.shape[2]),
-        ),
+        paged_kv_cache=(k.view(torch.float8_e4m3fn), v.view(torch.float8_e4m3fn)),
+        k_scale=layer_inputs.kv_scales.k_scale,
+        v_scale=layer_inputs.kv_scales.v_scale,
         out=out,
     )
     return out

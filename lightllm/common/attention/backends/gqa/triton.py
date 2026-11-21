@@ -98,6 +98,8 @@ def _check_supported(layer_config: GQALayerConfig) -> None:
         )
     if not layer_config.causal or layer_config.has_sinks:
         raise NotImplementedError("Triton GQA supports only causal attention without sinks")
+    if layer_config.kv_quant is not None:
+        raise NotImplementedError(f"Triton GQA does not support kv_quant={layer_config.kv_quant!r}")
 
 
 def _check_inputs(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs) -> None:
@@ -106,6 +108,8 @@ def _check_inputs(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs) ->
         q.shape[1:] == (layer_config.num_heads, layer_config.head_dim) and q.dtype == layer_config.dtype
     ), "q does not match the layer_config"
     assert k.shape[1:] == (layer_config.num_kv_heads, layer_config.head_dim), "KV cache does not match the layer_config"
+    # A quantized cache needs a kv_quant layer config and the quantized impls.
+    assert k.dtype == q.dtype and layer_inputs.v_cache.dtype == q.dtype, "Triton GQA needs a KV cache of q's dtype"
 
 
 class TritonGQAPrefillImpl(AttentionImpl[GQALayerConfig, TritonGQAPrefillStepArgs, GQALayerInputs]):
