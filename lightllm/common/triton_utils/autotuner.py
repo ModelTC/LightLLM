@@ -15,7 +15,7 @@ from lightllm.utils.device_utils import get_current_device_name
 from lightllm.utils.log_utils import init_logger
 from typing import Callable, List, Optional
 from lightllm.utils.envs_utils import get_triton_autotune_level
-from lightllm.common.kernel_config import KernelConfigs
+from lightllm.common.kernel_config import KernelConfigs, get_kernel_config_dir
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_rank_in_node
 
 logger = init_logger(__name__)
@@ -164,7 +164,6 @@ class Autotuner:
         benchmark_repeats: int = 3,
         benchmark_retries: int = 3,
     ):
-
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
         self.kernel_type = AutotuneKernelType(kernel_type)
@@ -282,11 +281,8 @@ class Autotuner:
                     f"Autotuner for kernel {self.kernel_name} requires a visible CUDA/MUSA device "
                     f"to resolve its cache directory, but torch.cuda.is_available() is False."
                 )
-            self._cache_dir = os.path.join(
-                Path(__file__).parent,
-                "autotune_kernel_configs",
-                get_triton_version(),
-                device_name,
+            self._cache_dir = get_kernel_config_dir(
+                os.path.join(Path(__file__).parent, "autotune_kernel_configs", get_triton_version(), device_name),
                 self.kernel_name,
             )
             os.makedirs(self._cache_dir, exist_ok=True)

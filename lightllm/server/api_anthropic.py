@@ -68,14 +68,18 @@ def get_anthropic_messages_adapter() -> Any:
         return _cached_adapter
 
     try:
-        from litellm.llms.anthropic.experimental_pass_through.adapters.transformation import (
-            LiteLLMAnthropicMessagesAdapter,
-        )
+        try:
+            from litellm.llms.anthropic.pass_through.adapters.transformation import LiteLLMAnthropicMessagesAdapter
+        except ModuleNotFoundError as exc:
+            if exc.name != "litellm.llms.anthropic.pass_through":
+                raise
+            from litellm.llms.anthropic.experimental_pass_through.adapters.transformation import (
+                LiteLLMAnthropicMessagesAdapter,
+            )
     except ImportError as exc:
         raise RuntimeError(
             "The Anthropic Messages API (/v1/messages) requires the 'litellm' package. "
-            "Install it with: pip install 'lightllm[anthropic]' "
-            "(or directly: pip install 'litellm>=1.52.0,<1.85'). "
+            "Reinstall the LiteLLM dependency required by this LightLLM build. "
             f"Original error: {exc}"
         ) from exc
 

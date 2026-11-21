@@ -12,6 +12,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .block_pointer import make_block_ptr, load_block, store_block
+
 from .index import prepare_chunk_indices
 from .utils import check_shared_mem, input_guard
 from lightllm.common.triton_utils.autotuner import autotune
@@ -50,18 +52,18 @@ def chunk_local_cumsum_scalar_kernel(
         bos, eos = i_b * T, i_b * T + T
 
     if HEAD_FIRST:
-        p_s = tl.make_block_ptr(s + bos * H + i_h * T, (T,), (1,), (i_t * BT,), (BT,), (0,))
-        p_o = tl.make_block_ptr(o + bos * H + i_h * T, (T,), (1,), (i_t * BT,), (BT,), (0,))
+        p_s = make_block_ptr(s + bos * H + i_h * T, (T,), (1,), (i_t * BT,), (BT,), (0,))
+        p_o = make_block_ptr(o + bos * H + i_h * T, (T,), (1,), (i_t * BT,), (BT,), (0,))
     else:
-        p_s = tl.make_block_ptr(s + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        p_o = tl.make_block_ptr(o + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+        p_s = make_block_ptr(s + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+        p_o = make_block_ptr(o + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     # [BT]
-    b_s = tl.load(p_s, boundary_check=(0,)).to(tl.float32)
+    b_s = load_block(p_s, boundary_check=(0,)).to(tl.float32)
     b_o = tl.cumsum(b_s, axis=0)
     if REVERSE:
         b_z = tl.sum(b_s, axis=0)
         b_o = -b_o + b_z[None] + b_s
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
+    store_block(p_o, b_o.to(p_o[0].dtype.element_ty), boundary_check=(0,))
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -103,7 +105,7 @@ def chunk_local_cumsum_vector_kernel(
         m_s = tl.where(o_i[:, None] >= o_i[None, :], 1.0, 0.0)
 
     if HEAD_FIRST:
-        p_s = tl.make_block_ptr(
+        p_s = make_block_ptr(
             s + (bos * H + i_h * T) * S,
             (T, S),
             (S, 1),
@@ -111,7 +113,7 @@ def chunk_local_cumsum_vector_kernel(
             (BT, BS),
             (1, 0),
         )
-        p_o = tl.make_block_ptr(
+        p_o = make_block_ptr(
             o + (bos * H + i_h * T) * S,
             (T, S),
             (S, 1),
@@ -120,7 +122,7 @@ def chunk_local_cumsum_vector_kernel(
             (1, 0),
         )
     else:
-        p_s = tl.make_block_ptr(
+        p_s = make_block_ptr(
             s + (bos * H + i_h) * S,
             (T, S),
             (H * S, 1),
@@ -128,7 +130,7 @@ def chunk_local_cumsum_vector_kernel(
             (BT, BS),
             (1, 0),
         )
-        p_o = tl.make_block_ptr(
+        p_o = make_block_ptr(
             o + (bos * H + i_h) * S,
             (T, S),
             (H * S, 1),
@@ -137,9 +139,9 @@ def chunk_local_cumsum_vector_kernel(
             (1, 0),
         )
     # [BT, BS]
-    b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+    b_s = load_block(p_s, boundary_check=(0, 1)).to(tl.float32)
     b_o = tl.dot(m_s, b_s, allow_tf32=False)
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    store_block(p_o, b_o.to(p_o[0].dtype.element_ty), boundary_check=(0, 1))
 
 
 def _get_cumsum_scalar_configs():

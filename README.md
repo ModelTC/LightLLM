@@ -32,6 +32,30 @@ LightLLM is a Python-based LLM (Large Language Model) inference and serving fram
 
 ## Get started
 
+From a checkout of this version, install the native CUDA 13 runtime and start a model:
+
+```bash
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install .
+lightllm serve /models/my-model
+```
+
+For a published release artifact, the driver-aware installer selects the
+highest compatible wheel profile before installing dependencies:
+
+```bash
+python lightllm-install.py
+lightllm serve /models/my-model
+```
+
+The installer reads `installer-manifest.json`. CUDA 12.8 or vendor-specific
+profiles can be added to that manifest without changing the installer.
+
+Use `lightllm serve --help` for common options, or `--help-all` for every server
+option. The existing `python -m lightllm.server.api_server` entry point remains
+available. See the installation guide for driver requirements and optional kernels.
+
 - [Install LightLLM](https://lightllm-en.readthedocs.io/en/latest/getting_started/installation.html)
 - [Quick Start](https://lightllm-en.readthedocs.io/en/latest/getting_started/quickstart.html)
 - [TuTorial](https://lightllm-en.readthedocs.io/en/latest/tutorial/deepseek_deployment.html)

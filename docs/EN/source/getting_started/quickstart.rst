@@ -43,10 +43,13 @@ After downloading the Qwen3-8B model, use the following code in the terminal to 
 
 .. code-block:: console
 
-    $ python -m lightllm.server.api_server --model_dir ~/models/Qwen3-8B
+    $ lightllm serve ~/models/Qwen3-8B
 
 .. note::
-    The ``--model_dir`` parameter in the above code needs to be modified to your actual local model path.
+    Replace the model path with your local model directory. Use ``lightllm serve --help``
+    for common options or ``--help-all`` for every server option. For example,
+    ``lightllm serve ~/models/Qwen3-8B --tp 2 --port 8080`` uses two GPUs.
+    The existing ``python -m lightllm.server.api_server --model_dir ...`` command remains available.
 
 3. Test Model Service
 ---------------------

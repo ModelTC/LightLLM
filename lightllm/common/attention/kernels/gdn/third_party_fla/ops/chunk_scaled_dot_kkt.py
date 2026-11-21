@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .block_pointer import make_block_ptr, load_block, store_block
+
 from .index import prepare_chunk_indices
 from .op import safe_exp
 from lightllm.common.triton_utils.autotuner import autotune
@@ -58,12 +60,12 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
 
-    p_beta = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    b_beta = tl.load(p_beta, boundary_check=(0,))
+    p_beta = make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    b_beta = load_block(p_beta, boundary_check=(0,))
 
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
-        p_k = tl.make_block_ptr(
+        p_k = make_block_ptr(
             k + (bos * Hg + i_h // (H // Hg)) * K,
             (T, K),
             (Hg * K, 1),
@@ -71,20 +73,20 @@ def chunk_scaled_dot_kkt_fwd_kernel(
             (BT, BK),
             (1, 0),
         )
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = load_block(p_k, boundary_check=(0, 1))
         b_A += tl.dot(b_k, tl.trans(b_k))
 
     if USE_G:
-        p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        b_g = tl.load(p_g, boundary_check=(0,))
+        p_g = make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+        b_g = load_block(p_g, boundary_check=(0,))
         b_g_diff = b_g[:, None] - b_g[None, :]
         b_A = b_A * safe_exp(b_g_diff)
 
     b_A *= b_beta[:, None]
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_A = tl.where(m_A, b_A, 0)
-    p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (BT * H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
+    p_A = make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (BT * H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    store_block(p_A, b_A.to(p_A[0].dtype.element_ty), boundary_check=(0, 1))
 
 
 def _get_chunk_scaled_dot_kkt_configs():
