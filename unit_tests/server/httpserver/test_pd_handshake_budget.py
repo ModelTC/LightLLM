@@ -15,6 +15,7 @@ from lightllm.utils.error_utils import ServerBusyError
 def test_master_uses_the_current_segments_resource_budget(resource_wait: int, expected: int) -> None:
     async def run() -> None:
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.active_req_ids = {80}
         manager.args = SimpleNamespace(pd_node_id=1)
         manager.req_id_to_out_inf = {}
         params = SamplingParams()
@@ -22,7 +23,12 @@ def test_master_uses_the_current_segments_resource_budget(resource_wait: int, ex
         params.pd_node_resource_wait_timeout_seconds = resource_wait
 
         async def handshake(
-            event: asyncio.Event, request: object, timeout: float, group_request_id: int, stage: str
+            event: asyncio.Event,
+            request: object,
+            timeout: float,
+            group_request_id: int,
+            origin_request_id: int,
+            stage: str,
         ) -> None:
             if stage == "prefill":
                 assert timeout == 60
@@ -41,6 +47,7 @@ def test_master_uses_the_current_segments_resource_budget(resource_wait: int, ex
             sampling_params=params,
             multimodal_params=MultimodalParams(),
             request=SimpleNamespace(is_disconnected=AsyncMock(return_value=False)),
+            origin_request_id=80,
         )
         try:
             with pytest.raises(expected_exception=RuntimeError, match="decode budget checked"):
@@ -54,11 +61,17 @@ def test_master_uses_the_current_segments_resource_budget(resource_wait: int, ex
 def test_node_error_wakes_handshake_without_retry() -> None:
     async def run() -> None:
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.active_req_ids = {80}
         status = ReqStatus(req_id=123, p_node=None, d_node=None, p_websocket=object(), d_websocket=object())
         request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
         task = asyncio.create_task(
             coro=manager._wait_for_event_or_disconnect(
-                event=status.up_status_event, request=request, timeout=415, group_request_id=123, stage="decode"
+                event=status.up_status_event,
+                request=request,
+                timeout=415,
+                group_request_id=123,
+                origin_request_id=80,
+                stage="decode",
             )
         )
         await status.set_error(error_info="allocation failed")
@@ -72,12 +85,14 @@ def test_node_error_wakes_handshake_without_retry() -> None:
 def test_finite_handshake_still_expires() -> None:
     async def run() -> None:
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.active_req_ids = {80}
         with pytest.raises(expected_exception=ServerBusyError):
             await manager._wait_for_event_or_disconnect(
                 event=asyncio.Event(),
                 request=SimpleNamespace(is_disconnected=AsyncMock(return_value=False)),
                 timeout=0.001,
                 group_request_id=123,
+                origin_request_id=80,
                 stage="decode",
             )
 

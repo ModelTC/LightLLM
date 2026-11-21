@@ -14,6 +14,14 @@ class GenerationError(Exception):
     """Generation stopped because of an internal server failure."""
 
 
+class RequestStopped(Exception):
+    """The original choice was stopped; abort its current segment and exit quietly."""
+
+    def __init__(self, origin_request_id: int):
+        super().__init__(f"request {origin_request_id} stopped")
+        self.origin_request_id = origin_request_id
+
+
 class ServerBusyError(Exception):
     """Custom exception for server busy/overload situations"""
 

@@ -18,6 +18,7 @@ from .req_queue import build_req_queue
 from lightllm.server.core.objs.io_objs import (
     GroupReqIndexes,
     AbortedReqCmd,
+    PdPfDecodeKvReadyCmd,
 )
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
@@ -51,7 +52,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         self.nnodes = args.nnodes
         self.node_rank = args.node_rank
         self.dp_size = args.dp
-        self.schedule_time_interval = args.schedule_time_interval  # 默认30ms 的调度周期
+        self.schedule_time_interval = args.schedule_time_interval  # 默认 5ms 的调度周期
         # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
         self.dp_size_in_node = max(1, args.dp // self.nnodes)
         self.dp_world_size = self.world_size // self.dp_size
@@ -226,12 +227,11 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
     async def loop_for_fwd(
         self,
     ):
-        counter_count = 0
         while True:
             await self._step()
-            counter_count += 1
             if self.running_batch is not None:
-                if counter_count % 100 == 0:
+                # 有运行请求时，5 秒打一次 batch 状态，并写 pause 指标。
+                if log_time_ready("router_running_batch_status", 5):
                     for dp_index in range(self.dp_size_in_node):
                         token_ratio1 = self.get_used_tokens(dp_index) / self.max_total_token_num
                         token_ratio2 = (
@@ -251,19 +251,22 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
                     self.metric_client.gauge_set("lightllm_batch_pause_size", self._get_paused_req_num())
                 # pd decode mode need to update token_load more frequently
                 self.req_queue.update_token_load(self.running_batch, force_update=self.is_pd_decode_mode)
-                self.metric_client.gauge_set("lightllm_batch_current_size", len(self.running_batch.reqs))
-                self.metric_client.gauge_set("lightllm_num_running_reqs", len(self.running_batch.reqs))
-                self.metric_client.gauge_set("lightllm_queue_size", self.req_queue.get_wait_req_num())
-                self.metric_client.gauge_set(
-                    "lightllm_batch_current_max_tokens",
-                    int(
-                        sum(self.shared_token_load.get_dynamic_max_load(d_i) for d_i in range(self.dp_size_in_node))
-                        * self.max_total_token_num
-                    ),
-                )
+                # 有运行请求时，5 秒写一次 batch 和队列的 metrics。
+                if log_time_ready("router_running_batch_metrics", 5):
+                    self.metric_client.gauge_set("lightllm_batch_current_size", len(self.running_batch.reqs))
+                    self.metric_client.gauge_set("lightllm_num_running_reqs", len(self.running_batch.reqs))
+                    self.metric_client.gauge_set("lightllm_queue_size", self.req_queue.get_wait_req_num())
+                    self.metric_client.gauge_set(
+                        "lightllm_batch_current_max_tokens",
+                        int(
+                            sum(self.shared_token_load.get_dynamic_max_load(d_i) for d_i in range(self.dp_size_in_node))
+                            * self.max_total_token_num
+                        ),
+                    )
             else:
                 self.req_queue.update_token_load(self.running_batch, force_update=True)
-                if counter_count % 300 == 0:
+                # 没有运行请求时，10 秒写一次空 batch 的 metrics。
+                if log_time_ready("router_empty_batch_metrics", 10):
                     self.metric_client.gauge_set("lightllm_batch_current_size", 0.0)
                     self.metric_client.gauge_set("lightllm_num_running_reqs", 0.0)
                     self.metric_client.gauge_set("lightllm_batch_pause_size", 0.0)
@@ -294,13 +297,15 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             await self._add_batch(new_batch)
 
         self._filter_reqs_from_running_batch()
-        # 多机 TP：abort 阶段2（从 running_batch 提取）；阶段1 在调度 new_batch 时完成
+        # 多机 TP：abort 阶段2（从 running_batch 提取）；阶段1 在调度 new_batch 时完成。
+        # 先取 abort，再取 PD 分离的 Prefill 先推理模式里端点已就绪的请求。两批合成一次写入，
+        # 不再各占一次共享内存命令通道。
         if self.is_multinode_tp:
             aborted_reqs = self.get_aborted_reqs_from_running_batch_multinode_tp()
         else:
             aborted_reqs = self._get_aborted_reqs_from_running_batch()
-        if aborted_reqs:
-            await self._aborted_reqs(aborted_reqs=aborted_reqs)
+        ready_reqs = self._get_pf_decode_kv_ready_reqs() if self.args.run_mode == "prefill" else []
+        await self._write_aborted_and_pf_decode_kv_ready(aborted_reqs=aborted_reqs, ready_reqs=ready_reqs)
         return
 
     async def _add_batch(self, batch: Batch):
@@ -329,13 +334,37 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         self.shm_reqs_io_buffer.set_ready()
         return
 
-    async def _aborted_reqs(self, aborted_reqs: List[Req]):
-        cmds = [AbortedReqCmd(req_id=r.request_id) for r in aborted_reqs]
+    async def _write_aborted_and_pf_decode_kv_ready(self, aborted_reqs: List[Req], ready_reqs: List[Req]) -> None:
+        """abort 在前，PD 分离的 Prefill 先推理模式的就绪通知在后，一次写入推理进程。"""
+        if not aborted_reqs and not ready_reqs:
+            return
+        cmds = [AbortedReqCmd(req_id=req.request_id) for req in aborted_reqs]
+        cmds.extend(PdPfDecodeKvReadyCmd(req_id=req.request_id) for req in ready_reqs)
         while not self.shm_reqs_io_buffer.is_empty():
             await asyncio.sleep(0.001)
         self.shm_reqs_io_buffer.write_obj(cmds)
         self.shm_reqs_io_buffer.set_ready()
+        for req in ready_reqs:
+            logger.info(f"prefill-first notify decode kv ready, request_id={req.request_id}")
         return
+
+    def _get_pf_decode_kv_ready_reqs(self) -> List[Req]:
+        """PD 分离的 Prefill 先推理模式：httpserver 把 decode 端点写入共享内存后，通知推理进程一次。"""
+        ans = []
+        if self.running_batch is None:
+            return ans
+        for req in self.running_batch.reqs:
+            if not req.sample_params.pd_prefill_first:
+                continue
+            if req.is_aborted or getattr(req, "_router_aborted", False):
+                continue
+            if getattr(req, "_router_pf_decode_kv_notified", False):
+                continue
+            if req.sample_params.pd_kv_trans_params.data_len <= 0:
+                continue
+            req._router_pf_decode_kv_notified = True
+            ans.append(req)
+        return ans
 
     def _add_new_batch_to_running_batch(self, new_batch: Batch):
         if self.running_batch is None:
@@ -403,6 +432,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             # 附加一个私有标记变量，标记请求是否已经被router发送过abort命令给推理进程，
             # 防止反复发送abort命令给推理进程
             req._router_aborted = False
+            req._router_pf_decode_kv_notified = False
             # 作用同 _router_aborted 类似
             req_group.append(req)
 
