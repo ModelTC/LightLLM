@@ -18,7 +18,7 @@ class RedisMetadataLib:
 
     def __init__(self, redis_url: str = "redis://localhost:6379/0", prefix: str = "meta"):
         # decode_responses=True 确保返回的是字符串而非字节
-        self.r = redis.Redis.from_url(redis_url, decode_responses=True)
+        self.r = redis.Redis.from_url(redis_url, decode_responses=True, protocol=2)
         self.lru_key = f"{prefix}:queue:lru"
         self._register_scripts()
 

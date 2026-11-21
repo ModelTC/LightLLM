@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "profiles": [
+    {
+      "name": "cuda13",
+      "min_driver": "580.0",
+      "python": "3.12",
+      "wheel": "../dist/lightllm-1.2.0-py3-none-any.whl",
+      "requirements": "../requirements/runtime.txt"
+    }
+  ]
+}

@@ -1,0 +1,130 @@
+name: Native package
+
+on:
+  pull_request:
+    paths:
+      - "lightllm/**"
+      - "setup.py"
+      - "pyproject.toml"
+      - "MANIFEST.in"
+      - "VERSION"
+      - "requirements/**"
+      - "tools/update_nightly.py"
+      - "unit_tests/test_nightly_resolution.py"
+      - "unit_tests/test_cli.py"
+      - "unit_tests/test_distribution.py"
+      - "unit_tests/common/test_kernel_config_paths.py"
+      - "test/test_api/test_anthropic_extra_body.py"
+      - ".github/workflows/package.yml"
+  push:
+    tags: ["v*.*.*"]
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Wheel build channel
+        type: choice
+        default: nightly
+        options: [nightly, stable]
+
+jobs:
+  wheel:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ${{ fromJSON((github.event_name == 'schedule' || inputs.channel == 'nightly') && '["3.12"]' || '["3.10", "3.12"]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Select package version
+        env:
+          BUILD_CHANNEL: ${{ inputs.channel }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path("VERSION")
+          version = path.read_text().strip()
+          if os.environ["GITHUB_REF_TYPE"] == "tag":
+              assert os.environ["GITHUB_REF_NAME"] == f"v{version}", "Tag must match VERSION"
+          elif os.environ["GITHUB_EVENT_NAME"] == "schedule" or os.environ["BUILD_CHANNEL"] == "nightly":
+              major, minor, patch = map(int, version.split("."))
+              version = f"{major}.{minor}.{patch + 1}.dev{os.environ['GITHUB_RUN_NUMBER']}"
+              path.write_text(version + "\n")
+          print(f"Building lightllm {version}")
+          PY
+      - name: Install packaging tools
+        run: |
+          python -m pip install uv==0.13.5 packaging
+      - name: Resolve nightly dependencies in priority order
+        if: github.event_name == 'schedule' || inputs.channel == 'nightly'
+        run: python tools/update_nightly.py
+      - name: Build sdist and wheel
+        run: uv build
+      - name: Include installer manifest in the release artifact
+        env:
+          BUILD_CHANNEL: ${{ inputs.channel }}
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          version = Path("VERSION").read_text().strip()
+          requirements = "lightllm-nightly.txt" if ".dev" in version else "lightllm-runtime.txt"
+          manifest = {
+              "schema": 1,
+              "profiles": [{
+                  "name": "cuda13",
+                  "min_driver": "580.0",
+                  "python": "3.12",
+                  "wheel": f"lightllm-{version}-py3-none-any.whl",
+                  "requirements": requirements,
+              }],
+          }
+          Path("dist/installer-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          Path("dist/lightllm-install.py").write_bytes(Path("tools/install.py").read_bytes())
+          Path(f"dist/{requirements}").write_bytes(
+              (Path("requirements") / ("nightly.txt" if ".dev" in version else "runtime.txt")).read_bytes()
+          )
+          PY
+      - name: Install wheel and check dependencies
+        run: |
+          uv venv
+          uv pip install dist/*.whl pytest
+          uv pip check
+          uv pip freeze > dist/installed-py${{ matrix.python-version }}.txt
+          if [[ "$(cat VERSION)" == *".dev"* ]]; then cp requirements/nightly.json dist/; fi
+      - name: Check native ABI when CUDA is available
+        run: |
+          .venv/bin/python - <<'PY'
+          import torch
+          if torch.cuda.is_available():
+              from sgl_kernel import causal_conv1d_fwd, causal_conv1d_update
+          else:
+              print("Native ABI and model validation require a GPU runner; this artifact is not GPU-validated.")
+          PY
+      - name: Verify the installed package outside the checkout
+        run: |
+          export LIGHTLLM_TEST_WHEEL="$(realpath dist/lightllm-*.whl)"
+          export PATH="$GITHUB_WORKSPACE/.venv/bin:$PATH"
+          cd "$RUNNER_TEMP"
+          lightllm --help
+          lightllm serve --help
+          lightllm serve --help-all
+          python -m lightllm.server.api_server --help
+          python -c 'import cupy; import lightllm.server.api_start; import lightllm.server.api_http; import lightllm.models.qwen3.model'
+          python -m pytest --import-mode=importlib -q \
+            "$GITHUB_WORKSPACE/unit_tests/test_cli.py" \
+            "$GITHUB_WORKSPACE/unit_tests/test_distribution.py" \
+            "$GITHUB_WORKSPACE/unit_tests/test_nightly_resolution.py" \
+            "$GITHUB_WORKSPACE/unit_tests/common/test_kernel_config_paths.py" \
+            "$GITHUB_WORKSPACE/unit_tests/common/test_autotuner.py" \
+            "$GITHUB_WORKSPACE/test/test_api/test_anthropic_extra_body.py"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lightllm-dist-py${{ matrix.python-version }}
+          path: dist/*

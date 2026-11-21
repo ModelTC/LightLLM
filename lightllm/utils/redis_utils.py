@@ -50,7 +50,7 @@ def start_redis_service(args):
 
         while time.time() - start_time < max_wait:
             try:
-                r = redis.Redis(host=args.config_server_host, port=redis_port, socket_connect_timeout=1)
+                r = redis.Redis(host=args.config_server_host, port=redis_port, socket_connect_timeout=1, protocol=2)
                 r.ping()
                 logger.info(f"Redis service started successfully on port {redis_port}")
                 del r

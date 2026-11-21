@@ -48,10 +48,13 @@
 
 .. code-block:: console
 
-    $ python -m lightllm.server.api_server --model_dir ~/models/Qwen3-8B
+    $ lightllm serve ~/models/Qwen3-8B
 
 .. note::
-    上面代码中的 ``--model_dir`` 参数需要修改为你本机实际的模型路径。
+    将模型路径替换为本机实际目录。``lightllm serve --help`` 显示常用参数，
+    ``--help-all`` 显示完整参数。例如，
+    ``lightllm serve ~/models/Qwen3-8B --tp 2 --port 8080`` 使用两张 GPU。
+    原有的 ``python -m lightllm.server.api_server --model_dir ...`` 命令仍然可用。
 
 3. 测试模型服务
 -------------------------
