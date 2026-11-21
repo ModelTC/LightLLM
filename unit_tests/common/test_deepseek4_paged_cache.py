@@ -1,6 +1,11 @@
 import json
 from types import SimpleNamespace
 
+from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+from lightllm.models.deepseek_v4.swa_prefill_workspace import (
+    prepare_swa_prefill_workspace,
+    reserve_swa_prefill_workspace,
+)
 import numpy as np
 import pytest
 import torch
@@ -283,8 +288,7 @@ def _prepare_prefill(requests, req_ids, starts, ends, microbatch_index=0):
     if not hasattr(requests, "_test_backend"):
         requests._test_backend = _test_backend(requests)
         requests._test_prefill_states = {}
-    state = requests._test_backend.create_att_prefill_state(None)
-    state.prepare_swa_workspace(
+    state = prepare_swa_prefill_workspace(
         SimpleNamespace(
             req_manager=requests,
             swa_state=requests.swa_state,
@@ -295,7 +299,8 @@ def _prepare_prefill(requests, req_ids, starts, ends, microbatch_index=0):
             b_ready_cache_len=starts,
             b_seq_len=ends,
             microbatch_index=microbatch_index,
-        )
+        ),
+        requests._test_backend.model,
     )
     requests._test_prefill_states.update((req, state) for req in req_ids.tolist())
     if not hasattr(requests, "_test_prefill_ends"):
@@ -523,7 +528,7 @@ def test_prefill_checkpoint_reads_precede_window_retention(cache):
     _write_swa(requests, 2, req, positions, packed.flip(0))
     _finish_prefill(requests, [req])
     # Reuse the scratch: only fixed request windows and CPU snapshots remain.
-    requests._test_backend.get_swa_prefill_workspace(requests._test_backend.model)[0].zero_()
+    reserve_swa_prefill_workspace(requests._test_backend.model)[0].zero_()
     requests.save_state(_checkpoint_req(req, 2048), index, states)
     saved_swa = states.get_state_cache(index)[0]
     torch.testing.assert_close(saved_swa[0].cuda(), packed[-requests.sliding_window :], rtol=0, atol=0)
@@ -1036,7 +1041,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
 
     reference_state = backend.create_att_decode_state(state_info)
     reference_state.init_state()
-    reference_kv = backend.get_att_input_params(
+    reference_kv = DeepseekV4InferStateInfo.get_att_kv(
         SimpleNamespace(
             req_manager=requests,
             swa_state=requests.swa_state,
@@ -1044,7 +1049,8 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
             get_compressed_kv_state=requests.get_compressed_kv_state,
             get_compressed_kv_view=requests.get_compressed_kv_view,
             is_prefill=True,
-            prefill_att_state=requests._test_prefill_states[source],
+            swa_prefill_workspace=requests._test_prefill_states[source],
+            dsv4_layer_compress_ratios=dict(enumerate(requests.cache_config.compress_ratios)),
         ),
         2,
     )
@@ -1495,7 +1501,7 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
         state.dsv4_swa_lengths, torch.full_like(state.dsv4_swa_lengths, 131 if proposal else 128)
     )
     expected_slots = _get_swa_token_indices(
-        requests, req_idx, state.position_ids, prefill_state=state.prefill_att_state if state.is_prefill else None
+        requests, req_idx, state.position_ids, prefill_state=state.swa_prefill_workspace
     ).to(torch.int32)
     torch.testing.assert_close(state.dsv4_swa_write_slots, expected_slots)
     requests.free([req_idx], slots)
@@ -1781,11 +1787,13 @@ def test_prefill_fused_writer_preserves_old_prefix_and_runtime_tail(cache):
             get_compressed_kv_state=requests.get_compressed_kv_state,
             get_compressed_kv_view=requests.get_compressed_kv_view,
             is_prefill=True,
-            prefill_att_state=requests._test_prefill_states[req],
+            swa_prefill_workspace=requests._test_prefill_states[req],
+            dsv4_layer_compress_ratios=dict(enumerate(requests.cache_config.compress_ratios)),
             dsv4_swa_write_slots=slots,
             dsv4_swa_runtime_write_slots=runtime,
             position_ids=positions,
         )
+        state.get_att_kv = DeepseekV4InferStateInfo.get_att_kv.__get__(state)
         layer._norm_rope_and_cache_kv(kv[start:end], state, layer_weight)
         fused_kv_norm_rope_to_swa(kv[start:end], weight, 1e-6, freqs, positions, positions, reference[0], 128)
         visible = torch.arange(max(0, start - 127), end, device="cuda")
@@ -2018,7 +2026,7 @@ def test_full_batch_unaligned_prefill_workspace_is_bounded_and_private(cache, mt
     required = request_count * ((end + page_token_num - 1) // page_token_num * page_token_num - first)
     requests._test_backend = _test_backend(requests, request_count * chunk_tokens)
     requests._test_prefill_states = {}
-    workspace, capacity = requests._test_backend.get_swa_prefill_workspace(requests._test_backend.model)
+    workspace, capacity = reserve_swa_prefill_workspace(requests._test_backend.model)
     assert capacity >= required
     assert workspace.untyped_storage().data_ptr() != requests.req_to_swa.untyped_storage().data_ptr()
     workspace[:, capacity : 2 * capacity].fill_(173)

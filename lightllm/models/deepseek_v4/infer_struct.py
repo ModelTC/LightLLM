@@ -8,6 +8,7 @@ from lightllm.common.attention_state.full_att.compressed_att.compressed_att_stat
     CompressedAttentionState,
     CompressedAttentionLayerView,
 )
+from lightllm.models.deepseek_v4.swa_prefill_workspace import prepare_swa_prefill_workspace
 
 C4_PREFILL_LOGITS_BUDGET_BYTES = 512 * 1024 * 1024
 
@@ -61,6 +62,21 @@ class DeepseekV4InferStateInfo(InferStateInfo):
     def get_compressed_kv_view(self, logical_layer_id: int) -> CompressedAttentionLayerView:
         return self.get_compressed_kv_state(logical_layer_id).get_layer_view(logical_layer_id)
 
+    def get_att_kv(self, logical_layer_id: int):
+        """Return the layer's packed SWA rows (the prefill workspace during prefill) and its packed
+        compressed KV, or None for a layer without compression."""
+        state = self.swa_state
+        config = state.config
+        row_bytes = config.get_packed_kv_bytes(config.page_token_size)
+        if self.is_prefill:
+            swa = self.swa_prefill_workspace.swa_buffer[config.logical_layer_ids.index(logical_layer_id)]
+        else:
+            swa = state.get_layer_view(logical_layer_id=logical_layer_id)
+        compressed_kv = None
+        if self.dsv4_layer_compress_ratios[logical_layer_id]:
+            compressed_kv = self.get_compressed_kv_view(logical_layer_id=logical_layer_id).kv
+        return swa.view(-1, row_bytes), compressed_kv
+
     def __init__(self):
         super().__init__()
         self.position_cos_sliding = None
@@ -80,6 +96,9 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.dsv4_c4_indices = None
         self.dsv4_c4_lengths = None
         self.dsv4_workspace = None
+        self.dsv4_layer_compress_ratios: dict[int, int] = {}
+        # Prefill only: the step's sliding-window cache staging, see swa_prefill_workspace.py.
+        self.swa_prefill_workspace = None
         # token -> batch-position map for the compressor; built per prefill forward in init_some_extra_state.
         self._dsv4_token_to_batch_idx = None
         # The first C4 layer builds metadata and later layers reuse it within this forward.
@@ -92,8 +111,10 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.first_c4_logical_layer_id = None
         has_c128_layer = False
         ratios = model.config["compress_ratios"]
+        self.dsv4_layer_compress_ratios = {}
         for layer in model.layers_infer:
             compress_ratio = ratios[layer.layer_num_] if layer.layer_num_ < len(ratios) else 0
+            self.dsv4_layer_compress_ratios[layer.layer_num_] = compress_ratio
             if compress_ratio == 4 and self.first_c4_logical_layer_id is None:
                 self.first_c4_logical_layer_id = layer.layer_num_
             if compress_ratio == 128:
@@ -104,8 +125,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.dsv4_c128_indices = None
         self.dsv4_c128_lengths = None
         super().init_some_extra_state(model)  # sets position_ids, b_q_seq_len, b_q_start_loc (prefill)
-        if self.is_prefill:
-            self.prefill_att_state.prepare_swa_workspace(self)
+        self.swa_prefill_workspace = prepare_swa_prefill_workspace(self, model) if self.is_prefill else None
         pos = self.position_ids
         self.position_cos_sliding = torch.index_select(model._cos_cached_sliding, 0, pos)  # [T, rope_dim//2]
         self.position_sin_sliding = torch.index_select(model._sin_cached_sliding, 0, pos)
@@ -196,7 +216,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             sliding_window=self.swa_state.config.window_size,
             image_left=self.dsv4_image_left,
             image_right=self.dsv4_image_right,
-            prefill_state=self.prefill_att_state if self.is_prefill else None,
+            prefill_state=self.swa_prefill_workspace,
             swa_runtime_write_slots=self.dsv4_swa_runtime_write_slots,
             token_to_batch_idx=self._dsv4_token_to_batch_idx,
             b_seq_len=self.b_seq_len,
