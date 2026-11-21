@@ -268,8 +268,9 @@ def test_adapter_rejects_attention_triton_cannot_run(phase, causal, att_control)
         run(q=q, k=k, v=v, att_control=att_control)
 
 
-@pytest.mark.parametrize("q_heads,kv_heads", [(8, 8), (8, 2)])
-def test_speculative_decode_rows_share_request_kv(q_heads, kv_heads):
+# The shared-group kernel has no window, so windowed layers must take the per-row kernel.
+@pytest.mark.parametrize("q_heads,kv_heads,window", [(8, 8, (-1, -1)), (8, 2, (-1, -1)), (8, 2, (15, 0))])
+def test_speculative_decode_rows_share_request_kv(q_heads, kv_heads, window):
     # Two rows per request; the last row of each sees the longest prefix. PAD rows are padding.
     pad = 7
     token_map = torch.randperm(8 * 512, device="cuda", dtype=torch.int32).view(8, 512)
@@ -281,12 +282,14 @@ def test_speculative_decode_rows_share_request_kv(q_heads, kv_heads):
     batch = make_batch(token_map, req_ids, lengths, cu_kv_seq_len=None, decode_rows_per_request=2, pad_req_idx=pad)
     step_args = TritonGQADecodeBackend.get_step_builder_cls()().build(batch)
     assert step_args.b_mark_shared_group.cpu().tolist() == [0, 2, 0, 2, 1, 1]
-    layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16)
+    layer_config = GQALayerConfig(
+        num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16, sliding_window=window
+    )
     out = torch.empty_like(q)
     TritonGQADecodeBackend.get_impl_cls()(layer_config).forward(
         step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out
     )
-    expected = reference(q, k, v, token_map, req_ids, lengths, (lengths - 1).tolist(), (-1, -1))
+    expected = reference(q, k, v, token_map, req_ids, lengths, (lengths - 1).tolist(), window)
     torch.testing.assert_close(out[:4].float(), expected[:4], atol=0.02, rtol=0.02)
 
 
