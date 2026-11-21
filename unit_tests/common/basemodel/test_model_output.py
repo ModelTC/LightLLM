@@ -184,6 +184,9 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
         return state.is_cuda_graph_capture, state.is_cuda_graph_replay
 
     class DecodeState(FlashInferDecodeAttState):
+        # Stands in for the wrapper a FlashInfer decode step builder plans.
+        decode_wrapper = None
+
         def init_state(self):
             infer_state = self.infer_state
             # Replace the external GPU wrapper allocation while preserving the

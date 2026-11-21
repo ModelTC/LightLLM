@@ -7,7 +7,9 @@ from .int8kv_flash_decoding_stage2 import flash_decode_stage2
 @torch.no_grad()
 def token_decode_attention_flash_decoding(
     q: torch.Tensor,
-    infer_state,
+    req_to_token_indexs: torch.Tensor,
+    b_req_idx: torch.Tensor,
+    b_seq_len: torch.Tensor,
     cache_k: torch.Tensor,
     cache_k_scale: torch.Tensor,
     cache_v: torch.Tensor,
@@ -21,7 +23,7 @@ def token_decode_attention_flash_decoding(
     head_dim = q.shape[2]
 
     BLOCK_SEQ = 256
-    batch_size = infer_state.batch_size
+    batch_size = b_seq_len.shape[0]
     calcu_shape1 = (batch_size, q_head_num, head_dim)
 
     o_tensor = alloc_tensor_func(q.shape, q.dtype, q.device) if out is None else out
@@ -45,9 +47,9 @@ def token_decode_attention_flash_decoding(
         k_scale=cache_k_scale,
         v=cache_v,
         v_scale=cache_v_scale,
-        Req_to_tokens=infer_state.req_manager.req_to_token_indexs,
-        B_req_idx=infer_state.b_req_idx,
-        B_seq_len=infer_state.b_seq_len,
+        Req_to_tokens=req_to_token_indexs,
+        B_req_idx=b_req_idx,
+        B_seq_len=b_seq_len,
         max_len_in_batch=max_len_in_batch,
         mid_out=mid_o,
         mid_out_logsumexp=mid_o_logexpsum,
@@ -57,7 +59,7 @@ def token_decode_attention_flash_decoding(
     flash_decode_stage2(
         mid_out=mid_o,
         mid_out_logexpsum=mid_o_logexpsum,
-        B_Seqlen=infer_state.b_seq_len,
+        B_Seqlen=b_seq_len,
         O=o_tensor.view(calcu_shape1),
         block_seq=BLOCK_SEQ,
     )

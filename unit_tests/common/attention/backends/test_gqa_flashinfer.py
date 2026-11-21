@@ -141,6 +141,7 @@ def test_adapter_rejects_attention_flashinfer_cannot_run(phase, causal, att_cont
     from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferDecodeAttState, FlashInferPrefillAttState
 
     backend = SimpleNamespace(
+        kv_quant=None,
         uses_causal_attention=lambda: causal,
         get_attention_impl=lambda backend_cls, layer_config: backend_cls.get_impl_cls()(layer_config),
     )

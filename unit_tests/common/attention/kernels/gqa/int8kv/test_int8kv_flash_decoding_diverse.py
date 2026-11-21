@@ -1,5 +1,4 @@
 import pytest
-from types import SimpleNamespace
 
 import torch
 
@@ -7,31 +6,6 @@ import torch
 def alloc_tensor_func(shape, dtype, device):
     """兼容的 tensor 分配函数"""
     return torch.empty(shape, dtype=dtype, device=device)
-
-
-class MockReqManager:
-    """Mock request manager for testing"""
-
-    def __init__(self, req_to_token_indexs):
-        self.req_to_token_indexs = req_to_token_indexs
-
-
-class MockInferState:
-    """Mock infer state for testing"""
-
-    def __init__(
-        self,
-        batch_size,
-        max_kv_seq_len,
-        req_to_tokens,
-        b_req_idx,
-        b_seq_len,
-    ):
-        self.batch_size = batch_size
-        self.max_kv_seq_len = max_kv_seq_len
-        self.req_manager = MockReqManager(req_to_tokens)
-        self.b_req_idx = b_req_idx
-        self.b_seq_len = b_seq_len
 
 
 # @pytest.mark.parametrize("shared_seq_len", [512])
@@ -85,32 +59,12 @@ def test_token_decode_attention_flash_decoding_diverse_matches_normal_decode(sha
     b_mark_shared_group = torch.zeros((batch_size,), dtype=torch.int32, device="cuda")
     b_mark_shared_group[mark_shared_group_size - 1 :: mark_shared_group_size] = mark_shared_group_size
 
-    # 标准 int8 decode（单路径 Triton）
-    baseline_infer_state = MockInferState(
-        batch_size=batch_size,
-        max_kv_seq_len=max_len_in_batch,
-        req_to_tokens=req_to_tokens,
-        b_req_idx=b_req_idx,
-        b_seq_len=b_seq_len,
-    )
-
-    # diverse：多流 + 共享前缀（Triton）
-    diverse_infer_state = MockInferState(
-        batch_size=batch_size,
-        max_kv_seq_len=max_len_in_batch,
-        req_to_tokens=req_to_tokens,
-        b_req_idx=b_req_idx,
-        b_seq_len=b_seq_len,
-    )
-    diverse_infer_state.decode_att_state = SimpleNamespace(
-        b_shared_seq_len=b_shared_seq_len,
-        b_mark_shared_group=b_mark_shared_group,
-    )
-
     # 运行 baseline
     normal_out = normal_decode(
         q=q.clone(),
-        infer_state=baseline_infer_state,
+        req_to_token_indexs=req_to_tokens,
+        b_req_idx=b_req_idx,
+        b_seq_len=b_seq_len,
         cache_k=cache_k,
         cache_k_scale=cache_k_scale,
         cache_v=cache_v,
@@ -121,7 +75,12 @@ def test_token_decode_attention_flash_decoding_diverse_matches_normal_decode(sha
     # 运行 diverse 版本
     diverse_out = diverse_attention(
         q=q.clone(),
-        infer_state=diverse_infer_state,
+        req_to_token_indexs=req_to_tokens,
+        b_req_idx=b_req_idx,
+        b_seq_len=b_seq_len,
+        b_shared_seq_len=b_shared_seq_len,
+        b_mark_shared_group=b_mark_shared_group,
+        max_kv_seq_len=max_len_in_batch,
         cache_k=cache_k,
         cache_k_scale=cache_k_scale,
         cache_v=cache_v,

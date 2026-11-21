@@ -98,6 +98,8 @@ def _check_supported(layer_config: GQALayerConfig) -> None:
         )
     if not layer_config.causal or layer_config.has_sinks:
         raise NotImplementedError("Triton GQA supports only causal attention without sinks")
+    if layer_config.kv_quant is not None:
+        raise NotImplementedError(f"Triton GQA does not support kv_quant={layer_config.kv_quant!r}")
 
 
 def _check_inputs(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs) -> None:

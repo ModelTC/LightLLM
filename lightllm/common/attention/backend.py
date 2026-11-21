@@ -75,6 +75,10 @@ class AttentionBatch:
     decode_rows_per_request: int = 1
     dynamic_decode_rows: bool = False
     pad_req_idx: Optional[int] = None
+    # Diverse sampling: rows that share a radix-tree prefix node form a group; b_shared_seq_len[i]
+    # is how many leading tokens row i shares with its group.
+    b_shared_seq_len: Optional[torch.Tensor] = None
+    b_shared_radix_node_id: Optional[torch.Tensor] = None
     # Graph capacity for kv lengths when this step is captured or replayed; None in eager mode.
     cuda_graph_max_kv_seq_len: Optional[int] = None
     # Distinguishes the concurrent steps of microbatch overlap.
