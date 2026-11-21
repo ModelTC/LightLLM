@@ -44,7 +44,9 @@ def _reference_decode(q, kv, slots, lengths, scale):
     return torch.stack([((q[i].float() @ r.T) * scale).softmax(-1) @ r[:, :512] for i, r in enumerate(rows)])
 
 
-def test_cached_prefill(backend):
+# 192 nope + 64 rope (GLM-4 MoE Lite) runs the expanded-key kernel, whose own default scale is 1/16.
+@pytest.mark.parametrize("nope_dim,v_dim", [(128, 128), (192, 256)])
+def test_cached_prefill(backend, nope_dim, v_dim):
     state = InferStateInfo()
     state.b_q_start_loc = torch.tensor([0, 2], dtype=torch.int32, device="cuda")
     state.b1_cu_kv_seq_len = torch.tensor([0, 5, 8], dtype=torch.int32, device="cuda")
@@ -54,18 +56,19 @@ def test_cached_prefill(backend):
     state.req_manager = SimpleNamespace(req_to_token_indexs=torch.zeros((2, 8), dtype=torch.int32, device="cuda"))
     att = backend.create_att_prefill_state(infer_state=state)
     att.init_state()
-    q = torch.randn((5, 8, 192), device="cuda", dtype=torch.bfloat16)
-    k_nope = torch.randn((8, 8, 128), device="cuda", dtype=q.dtype)
+    q = torch.randn((5, 8, nope_dim + 64), device="cuda", dtype=torch.bfloat16)
+    k_nope = torch.randn((8, 8, nope_dim), device="cuda", dtype=q.dtype)
     k_rope = torch.randn((8, 1, 64), device="cuda", dtype=q.dtype)
-    v = torch.randn_like(k_nope)
+    v = torch.randn((8, 8, v_dim), device="cuda", dtype=q.dtype)
     scale = 0.047
-    out = torch.empty_like(q[..., :128])
+    out = torch.empty((5, 8, v_dim), device="cuda", dtype=q.dtype)
     actual = att.prefill_att(
         q=q,
         k=(k_nope, k_rope),
         v=v,
         att_control=AttControl(mla_prefill=True, mla_prefill_dict={"softmax_scale": scale}),
-        alloc_func=lambda *a, **kw: out,
+        # The expanded-key path also allocates scratch keys.
+        alloc_func=lambda shape, **kw: out if tuple(shape) == out.shape else torch.empty(shape, **kw),
     )
     assert actual is out
     keys = torch.cat((k_nope, k_rope.expand(-1, 8, -1)), dim=-1).float()
