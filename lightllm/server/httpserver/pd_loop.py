@@ -131,8 +131,8 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     recv_bytes = await websocket.recv()
                     obj = pickle.loads(recv_bytes)
                     if obj[0] == ObjType.PD_PF_PREFILL_REQ:
-                        from lightllm.server.httpserver.pd_prefill_first_helper import (
-                            pd_run_prefill_first_process_generate,
+                        from lightllm.server.httpserver.pd_pf_prefill_node import (
+                            run_pd_pf_prefill_request,
                         )
 
                         prompt, sampling_params, multimodal_params = obj[1]
@@ -142,7 +142,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         decode_kv_ready_event = asyncio.Event()
                         decode_kv_ready_events[group_req_id] = decode_kv_ready_event
                         generation_task = asyncio.create_task(
-                            pd_run_prefill_first_process_generate(
+                            run_pd_pf_prefill_request(
                                 manager=manager,
                                 prompt=prompt,
                                 sampling_params=sampling_params,

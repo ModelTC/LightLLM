@@ -16,7 +16,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-async def pd_run_prefill_first_process_generate(
+async def run_pd_pf_prefill_request(
     manager: HttpServerManager,
     prompt,
     sampling_params: SamplingParams,
