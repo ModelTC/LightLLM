@@ -216,8 +216,12 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         # TODO: 支持其他 kv type
         if args.llm_kv_type != "fp8kv_dsa":
             raise RuntimeError("DeepSeek-V4 requires llm_kv_type=fp8kv_dsa for packed FlashMLA sparse attention")
-        self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0, backend_map=DSV4_NSA_BACKENDS)(model=self)
-        self.decode_att_backend = get_nsa_decode_att_backend_class(index=0, backend_map=DSV4_NSA_BACKENDS)(model=self)
+        self.prefill_att_backend = get_nsa_prefill_att_backend_class(
+            model=self, index=0, backend_map=DSV4_NSA_BACKENDS
+        )(model=self)
+        self.decode_att_backend = get_nsa_decode_att_backend_class(model=self, index=0, backend_map=DSV4_NSA_BACKENDS)(
+            model=self
+        )
 
         tp_q_head_num = self.prefill_att_backend.tp_q_head_num
         padded_q_head_num = self.prefill_att_backend.padded_q_head_num

@@ -67,8 +67,23 @@ class TestLazyAttentionImports(unittest.TestCase):
             llm_decode_att_backend=["triton"],
             enable_ep_moe=False,
             mtp_step=0,
+            page_size=16,
             ssm_state_mode="native",
         )
+        self.model = SimpleNamespace(
+            req_manager=SimpleNamespace(req_to_token_indexs=SimpleNamespace(device="musa:1")),
+            args=self.args,
+            data_type="bfloat16",
+            config={"num_attention_heads": 8, "index_topk": 128},
+            tp_world_size_=2,
+            tp_k_head_num_=1,
+            head_dim_=64,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            kv_lora_rank=512,
+            v_head_dim=128,
+        )
+        self.validate_attention = Mock(return_value=True)
         self.validate = Mock(return_value=True)
         dependencies = {
             f"{ATTENTION}.base_att": {
@@ -76,7 +91,10 @@ class TestLazyAttentionImports(unittest.TestCase):
                 for name in ("BaseAttBackend", "BasePrefillAttState", "BaseDecodeAttState", "AttControl")
             },
             "lightllm.utils.envs_utils": {"get_env_start_args": lambda: self.args},
-            "lightllm.utils.backend_validator": {"validate": self.validate},
+            "lightllm.utils.backend_validator": {
+                "validate": self.validate,
+                "validate_attention": self.validate_attention,
+            },
             "lightllm.utils.log_utils": {"init_logger": lambda name: Mock()},
         }
         for name, attributes in dependencies.items():
@@ -98,17 +116,20 @@ class TestLazyAttentionImports(unittest.TestCase):
         backend = self.imports.allow("fa3.fp", "Fa3AttBackend")
         self.args.llm_prefill_att_backend = ["fa3"]
 
-        self.assertIs(self.attention.get_prefill_att_backend_class(), backend)
+        self.assertIs(self.attention.get_prefill_att_backend_class(model=self.model), backend)
         self.assertEqual(self.imports.imported, [f"{ATTENTION}.fa3.fp"])
         self.validate.assert_not_called()
 
     def test_auto_selection_does_not_import_failed_candidates(self):
         backend = self.imports.allow("flashinfer.fp", "FlashInferAttBackend")
         self.args.llm_prefill_att_backend = ["auto"]
-        self.validate.side_effect = lambda name: name == "flashinfer"
+        self.validate_attention.side_effect = lambda backend_path, **kwargs: backend_path.startswith("flashinfer.")
 
-        self.assertIs(self.attention.get_prefill_att_backend_class(), backend)
-        self.assertEqual([call.args[0] for call in self.validate.call_args_list], ["fa3", "flashinfer"])
+        self.assertIs(self.attention.get_prefill_att_backend_class(model=self.model), backend)
+        self.assertEqual(
+            [c.kwargs["backend_path"] for c in self.validate_attention.call_args_list],
+            ["fa3.fp:Fa3AttBackend", "flashinfer.fp:FlashInferAttBackend"],
+        )
         self.assertEqual(self.imports.imported, [f"{ATTENTION}.flashinfer.fp"])
 
     def test_mtp_decode_preserves_fa3_priority(self):
@@ -116,32 +137,47 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.args.llm_decode_att_backend = ["auto"]
         self.args.mtp_step = 2
 
-        self.assertIs(self.attention.get_decode_att_backend_class(), backend)
-        self.validate.assert_called_once_with("fa3")
+        self.assertIs(self.attention.get_decode_att_backend_class(model=self.model), backend)
+        self.assertEqual(self.validate_attention.call_args.kwargs["backend_path"], "fa3.fp:Fa3AttBackend")
 
     def test_expert_parallelism_still_excludes_flashinfer(self):
         backend = self.imports.allow("triton.fp", "TritonAttBackend")
         self.args.llm_decode_att_backend = ["auto"]
         self.args.enable_ep_moe = True
-        self.validate.side_effect = lambda name: name == "triton"
+        self.validate_attention.side_effect = lambda backend_path, **kwargs: backend_path.startswith("triton.")
 
-        self.assertIs(self.attention.get_decode_att_backend_class(), backend)
-        self.assertEqual([call.args[0] for call in self.validate.call_args_list], ["fa3", "triton"])
+        self.assertIs(self.attention.get_decode_att_backend_class(model=self.model), backend)
+        self.assertEqual(
+            [c.kwargs["backend_path"] for c in self.validate_attention.call_args_list],
+            ["fa3.fp:Fa3AttBackend", "triton.fp:TritonAttBackend"],
+        )
 
-    def test_auto_selection_falls_back_to_triton(self):
-        backend = self.imports.allow("triton.mla", "MlaTritonAttBackend")
+    def test_mla_cannot_fall_back_to_a_failed_triton(self):
         self.args.llm_prefill_att_backend = ["auto"]
-        self.validate.return_value = False
+        self.validate_attention.return_value = False
+        with self.assertRaisesRegex(RuntimeError, "mla prefill.*triton"):
+            self.attention.get_mla_prefill_att_backend_class(model=self.model)
+        self.assertEqual(self.imports.imported, [])
 
-        self.assertIs(self.attention.get_mla_prefill_att_backend_class(), backend)
-        self.assertEqual(self.imports.imported, [f"{ATTENTION}.triton.mla"])
+    def test_explicit_provider_is_checked_for_the_requested_operation(self):
+        self.validate_attention.return_value = False
+        self.args.llm_kv_type = "fp8kv_dsa"
+        self.args.llm_decode_att_backend = ["flashmla_sparse"]
+        with self.assertRaisesRegex(RuntimeError, "sparse_mla decode.*fp8kv_dsa"):
+            self.attention.get_nsa_decode_att_backend_class(model=self.model)
+        call = self.validate_attention.call_args.kwargs
+        self.assertEqual(call["backend_path"], "nsa.fp8_flashmla_sparse:NsaFlashMlaFp8SparseAttBackend")
+        self.assertEqual(call["device"], "musa:1")
+        probe = call["probe"]
+        self.assertEqual((probe.phase, probe.q_heads, probe.dtype, probe.topk), ("decode", 4, "bfloat16", 128))
+        self.assertEqual(self.imports.imported, [])
 
     def test_nsa_selection_does_not_import_other_kv_types(self):
         backend = self.imports.allow("nsa.fp8_flashmla_sparse", "NsaFlashMlaFp8SparseAttBackend")
         self.args.llm_kv_type = "fp8kv_dsa"
         self.args.llm_decode_att_backend = ["flashmla_sparse"]
 
-        self.assertIs(self.attention.get_nsa_decode_att_backend_class(), backend)
+        self.assertIs(self.attention.get_nsa_decode_att_backend_class(model=self.model), backend)
         self.assertEqual(self.imports.imported, [f"{ATTENTION}.nsa.fp8_flashmla_sparse"])
 
     def test_custom_backend_map_uses_import_paths(self):
@@ -150,9 +186,13 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.args.llm_prefill_att_backend = ["custom"]
         self.args.llm_decode_att_backend = ["auto"]
 
-        self.assertIs(self.attention.get_nsa_prefill_att_backend_class(backend_map=backend_map), backend)
         self.assertIs(
-            self.attention.get_nsa_decode_att_backend_class(priority_list=["custom"], backend_map=backend_map),
+            self.attention.get_nsa_prefill_att_backend_class(model=self.model, backend_map=backend_map), backend
+        )
+        self.assertIs(
+            self.attention.get_nsa_decode_att_backend_class(
+                model=self.model, priority_list=["custom"], backend_map=backend_map
+            ),
             backend,
         )
         self.assertEqual(self.imports.imported, [f"{ATTENTION}.nsa.custom"])

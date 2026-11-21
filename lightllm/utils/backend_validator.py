@@ -6,6 +6,10 @@ import torch
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_global_rank
 from functools import lru_cache
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lightllm.utils.attention_probe import AttentionProbe
 
 logger = init_logger(__name__)
 
@@ -282,7 +286,7 @@ def _validate_flashmla_sparse():
     return True, None
 
 
-def _run_in_subprocess(backend_name, pipe):
+def _run_in_subprocess(backend_name, pipe, probe=None, device=None):
     """Run validation in subprocess with suppressed output."""
     import sys
 
@@ -292,7 +296,11 @@ def _run_in_subprocess(backend_name, pipe):
     sys.stderr = devnull
 
     try:
-        if backend_name == "fa3":
+        if probe is not None:
+            torch.get_device_module(device).set_device(device)
+            probe.run(backend_path=backend_name, device=device)
+            success, err = True, None
+        elif backend_name == "fa3":
             success, err = _validate_fa3()
         elif backend_name == "xformers":
             success, err = _validate_xformers()
@@ -309,8 +317,10 @@ def _run_in_subprocess(backend_name, pipe):
         else:
             success, err = False, f"Unknown backend: {backend_name}"
         pipe.send((success, err))
-    except Exception as e:
-        pipe.send((False, str(e)))
+    except Exception:
+        import traceback
+
+        pipe.send((False, traceback.format_exc(limit=-1).strip()[-2000:]))
     finally:
         devnull.close()
 
@@ -327,34 +337,47 @@ def validate(backend_name: str) -> bool:
     return validate_ok
 
 
-def _validate(backend_name: str) -> bool:
+def validate_attention(backend_path: str, probe: "AttentionProbe", device: torch.device) -> bool:
+    ok = _validate(backend_path, probe=probe, device=device)
+    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+        # Keep the collective outside the local cache. The same provider must work on every worker.
+        status = torch.tensor(int(ok), dtype=torch.int32, device=device)
+        torch.distributed.all_reduce(status, op=torch.distributed.ReduceOp.MIN)
+        return bool(status.item())
+    return ok
+
+
+@lru_cache(maxsize=None)
+def _validate(backend_name: str, probe: "AttentionProbe | None" = None, device: torch.device | None = None) -> bool:
     """Validate backend in subprocess with ground truth check."""
+    target = f"{backend_name} ({probe.family} {probe.phase} on {device})" if probe else backend_name
     try:
         ctx = mp.get_context("spawn")
         parent, child = ctx.Pipe(duplex=False)
-        logger.info(f"Validating {backend_name} backend start, please wait ...")
-        proc = ctx.Process(target=_run_in_subprocess, args=(backend_name, child))
+        logger.info(f"Validating {target} backend start, please wait ...")
+        proc = ctx.Process(target=_run_in_subprocess, args=(backend_name, child, probe, device))
         proc.start()
+        child.close()
         proc.join(timeout=_VALIDATION_TIMEOUT)
 
         if proc.is_alive():
             proc.kill()
             proc.join()
-            logger.warning(f"{backend_name} validation timed out")
+            logger.warning(f"{target} validation timed out")
             return False
 
         if proc.exitcode != 0:
-            logger.warning(f"{backend_name} validation crashed (exit {proc.exitcode})")
+            logger.warning(f"{target} validation crashed (exit {proc.exitcode})")
             return False
 
         if parent.poll():
             success, err = parent.recv()
             if success:
-                logger.info(f"{backend_name} validated")
+                logger.info(f"{target} validated")
                 return True
-            logger.warning(f"{backend_name} validation failed: {str(err)[0:88]}")
+            logger.warning(f"{target} validation failed: {err}")
         return False
 
     except Exception as e:
-        logger.warning(f"{backend_name} validation error: {e}")
+        logger.warning(f"{target} validation error: {e}")
         return False

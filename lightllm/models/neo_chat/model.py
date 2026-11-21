@@ -143,7 +143,7 @@ class NeoTpPartModel(NeoModelBase, Qwen3TpPartModel):
         self.prefill_att_backend: BaseAttBackend = get_neo_prefill_att_backend_class(
             index=0, priority_list=["fa3", "triton"]
         )(model=self)
-        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0)(model=self)
+        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(model=self, index=0)(model=self)
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
