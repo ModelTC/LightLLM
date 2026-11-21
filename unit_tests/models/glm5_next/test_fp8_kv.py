@@ -6,24 +6,26 @@ import torch
 import triton
 
 from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
+from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.attention.backends.sparse_mla.flashmla import (
+    FlashMLASparseDecodeBackend,
+    FlashMLASparseDecodeStepArgs,
+)
 from lightllm.common.basemodel.attention.nsa.glm5_next import (
+    Glm5NextSparseAttBackend,
     Glm5NextSparsePrefillState,
     Glm5NextSparseDecodeState,
 )
-from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import (
-    Fp8Glm5NextSparseAttBackend,
-    Fp8Glm5NextSparsePrefillState,
-    Fp8Glm5NextSparseDecodeState,
-)
-from lightllm.models.glm5_next.triton_kernel.fp8_sparse_decode import (
+from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+from lightllm.models.glm5_next.infer_struct import build_glm5_nsa_step
+from lightllm.common.attention.kernels.sparse_mla.fp8_group64_decode import (
     can_use_fp8_sparse_direct_decode,
     fp8_sparse_direct_decode,
 )
-from lightllm.models.glm5_next.triton_kernel.pad_query_heads import _fused_strided_qpad_kernel
+from lightllm.common.attention.kernels.sparse_mla.pad_query_heads import _fused_strided_qpad_kernel
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
 from lightllm.common.basemodel.attention.nsa import fp8_glm5_next
-from lightllm.models.glm5_next.triton_kernel.fp8_prefill import (
+from lightllm.common.attention.kernels.sparse_mla.fp8_group64_prefill import (
     _gather_prefill_kv_kernel,
 )
 
@@ -42,6 +44,40 @@ def _make_infer_state(**attributes):
     return state
 
 
+class _Fp8DecodeState:
+    """GLM-5 FP8 decode through the adapter state, with step args built from the owner's capture flag.
+
+    The step builder records whether each step runs in a CUDA graph; building per call lets a test
+    toggle the owner's flag around a capture.
+    """
+
+    backend = SimpleNamespace(
+        kv_cache_format=Fp8Glm5NextSparseAttBackend.kv_cache_format,
+        decode_backend=FlashMLASparseDecodeBackend,
+        get_attention_impl=lambda backend_cls, layer_config: backend_cls.get_impl_cls()(layer_config),
+    )
+
+    def __init__(self, owner, sched_meta=None, bound=None):
+        import flash_mla
+
+        self.owner = owner
+        self.sched_meta = flash_mla.get_mla_metadata()[0] if sched_meta is None else sched_meta
+        self.bound = bound
+
+    @property
+    def infer_state(self):
+        return self.owner
+
+    def decode_att(self, q, k, v, att_control):
+        state = Glm5NextSparseDecodeState(backend=self.backend, _infer_state_weak_ref=weakref.ref(self.owner))
+        state.step_args = FlashMLASparseDecodeStepArgs(
+            sched_meta=self.sched_meta,
+            uses_cuda_graph=bool(self.owner.is_cuda_graph_capture),
+            direct_decode_bound=self.bound,
+        )
+        return state.decode_att(q, k, v, att_control)
+
+
 def _make_workspace_backend(batch_max_tokens, overlap=False):
     backend = object.__new__(Fp8Glm5NextSparseAttBackend)
     backend.model = SimpleNamespace(
@@ -50,10 +86,11 @@ def _make_workspace_backend(batch_max_tokens, overlap=False):
         config={"index_topk": 2048, "index_kpool": 4},
         max_req_num=1,
         max_seq_length=fp8_glm5_next.KV_GATHER_CHUNK_SIZE,
+        graph_max_len_in_batch=fp8_glm5_next.KV_GATHER_CHUNK_SIZE,
         att_state_role="unit_test",
         args=SimpleNamespace(enable_prefill_microbatch_overlap=overlap, run_mode="normal"),
     )
-    backend._prefill_workspaces = backend.allocate_prefill_workspaces(backend.model)
+    backend.__init__(backend.model)
     return backend
 
 
@@ -125,6 +162,8 @@ class _PrefillCase:
             infer = self.infer_state
         state = self.backend.create_att_prefill_state(infer)
         state.init_state()
+        # The model's per-step NSA metadata, which it passes with each layer's indices.
+        state.nsa_step = build_glm5_nsa_step(infer)
         return infer, state
 
     def refresh(self):
@@ -138,6 +177,7 @@ class _PrefillCase:
     def run(self, state=None):
         self.refresh()
         active = self.att_state if state is None else state
+        self.control.nsa_prefill_dict["q_kv_start_loc"] = active.nsa_step.q_kv_start_loc
         return active.prefill_att(self.q, self.packed_kv[..., :584], None, self.control)
 
     def check(self, actual):
@@ -178,8 +218,9 @@ def test_main_and_native_mtp_backend_selection(monkeypatch, draft, kv_type):
     infer_state = InferStateInfo()
     prefill = model.prefill_att_backend.create_att_prefill_state(infer_state)
     decode = model.decode_att_backend.create_att_decode_state(infer_state)
-    assert type(prefill) is (Fp8Glm5NextSparsePrefillState if kv_type == "fp8kv_dsa" else Glm5NextSparsePrefillState)
-    assert type(decode) is (Fp8Glm5NextSparseDecodeState if kv_type == "fp8kv_dsa" else Glm5NextSparseDecodeState)
+    assert type(prefill) is Glm5NextSparsePrefillState and type(decode) is Glm5NextSparseDecodeState
+    backend_class = Fp8Glm5NextSparseAttBackend if kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
+    assert type(model.prefill_att_backend) is backend_class and type(model.decode_att_backend) is backend_class
     infer_state.prefill_att_state = prefill
     infer_state.decode_att_state = decode
     infer_state.check_att_states()
@@ -304,9 +345,7 @@ def test_fp8_nope_decode_and_cuda_graph(num_heads):
         nsa_decode=True, nsa_decode_dict={"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
     )
     infer_state = _make_infer_state()
-    state = Fp8Glm5NextSparseDecodeState(
-        _infer_state_weak_ref=weakref.ref(infer_state), flashmla_sched_meta=flash_mla.get_mla_metadata()[0]
-    )
+    state = _Fp8DecodeState(infer_state, sched_meta=flash_mla.get_mla_metadata()[0])
 
     def run():
         return state.decode_att((q, q[..., :0]), packed_kv[..., :584], None, control)
@@ -483,7 +522,7 @@ def test_fp8_prefill_graph_with_empty_requests_and_changing_boundaries():
     case.infer_state.b1_cu_q_seq_len.copy_(replacement.infer_state.b1_cu_q_seq_len)
     case.infer_state.position_ids.copy_(replacement.infer_state.position_ids)
     for name in ("q_kv_seq_len", "q_req_idx", "q_kv_start_loc"):
-        getattr(case.att_state, name).copy_(getattr(replacement.att_state, name))
+        getattr(case.att_state.nsa_step, name).copy_(getattr(replacement.att_state.nsa_step, name))
     graph.replay()
     case.check(output)
 
@@ -499,7 +538,7 @@ def test_fp8_one_query_prefill_and_decode_read_their_own_kv_sources():
     case.refresh()
     decode_infer = _make_infer_state(**vars(case.infer_state))
     decode_infer.is_prefill = False
-    decode_infer.graph_mode = GraphMode.CAPTURE
+    decode_infer.is_cuda_graph_capture = True
     decode_state = case.backend.create_att_decode_state(decode_infer)
     decode_state.init_state()
     control = AttControl(
@@ -545,12 +584,8 @@ def test_fp8_h64_b1_decode_uses_native_eager_and_direct_graph():
     control = AttControl(
         nsa_decode=True, nsa_decode_dict={"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
     )
-    infer = _make_infer_state(graph_mode=GraphMode.EAGER)
-    state = Fp8Glm5NextSparseDecodeState(
-        _infer_state_weak_ref=weakref.ref(infer),
-        decode_topk_bound=2051,
-        flashmla_sched_meta=flash_mla.get_mla_metadata()[0],
-    )
+    infer = _make_infer_state(is_cuda_graph_capture=False)
+    state = _Fp8DecodeState(infer, sched_meta=flash_mla.get_mla_metadata()[0], bound=2051)
 
     def run():
         return state.decode_att((q, q[..., :0]), packed[..., :584], None, control)
@@ -558,9 +593,9 @@ def test_fp8_h64_b1_decode_uses_native_eager_and_direct_graph():
     expected = _torch_sparse_attention(q, _dequantize_kv_cache(packed), indices)
     eager = run()
     torch.testing.assert_close(eager.float(), expected, atol=0.012, rtol=0.015)
-    infer.graph_mode = GraphMode.CAPTURE
+    infer.is_cuda_graph_capture = True
     graph, output = _capture_cuda_graph(run)
-    infer.graph_mode = GraphMode.EAGER
+    infer.is_cuda_graph_capture = False
     graph.replay()
     torch.testing.assert_close(output.float(), expected, atol=0.012, rtol=0.015)
 
@@ -614,10 +649,8 @@ def test_fp8_decode_infer_state_graph_qpad_and_mutation(num_heads):
         nsa_decode=True,
         nsa_decode_dict={"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512},
     )
-    infer_state = _make_infer_state(graph_mode=GraphMode.EAGER)
-    state = Fp8Glm5NextSparseDecodeState(
-        _infer_state_weak_ref=weakref.ref(infer_state), flashmla_sched_meta=flash_mla.get_mla_metadata()[0]
-    )
+    infer_state = _make_infer_state(is_cuda_graph_capture=False)
+    state = _Fp8DecodeState(infer_state, sched_meta=flash_mla.get_mla_metadata()[0])
 
     def run():
         return state.decode_att((q, q[..., :0]), packed[..., :584], None, control)
@@ -628,9 +661,9 @@ def test_fp8_decode_infer_state_graph_qpad_and_mutation(num_heads):
     eager = run()
     torch.testing.assert_close(eager.float(), reference(), atol=0.012, rtol=0.015)
     assert eager.shape == q.shape
-    infer_state.graph_mode = GraphMode.CAPTURE
+    infer_state.is_cuda_graph_capture = True
     graph, output = _capture_cuda_graph(run)
-    infer_state.graph_mode = GraphMode.EAGER
+    infer_state.is_cuda_graph_capture = False
     graph.replay()
     torch.testing.assert_close(output.float(), reference(), atol=0.012, rtol=0.015)
     q.copy_(q.roll(1, dims=-1))
@@ -643,13 +676,13 @@ def test_fp8_decode_infer_state_graph_qpad_and_mutation(num_heads):
 
 def test_fp8_sparse_direct_decode_factory_bound_guard():
     backend = object.__new__(Fp8Glm5NextSparseAttBackend)
-    backend.model = SimpleNamespace(config={"index_topk": 2048, "index_kpool": 4})
-    infer_state = InferStateInfo()
-    assert backend.create_att_decode_state(infer_state).decode_topk_bound == 2051
-    backend.model = SimpleNamespace(config={"index_topk": 2048, "index_kpool": 8})
-    assert backend.create_att_decode_state(infer_state).decode_topk_bound is None
-    backend.model = SimpleNamespace(config={"index_topk": 2047, "index_kpool": 4})
-    assert backend.create_att_decode_state(infer_state).decode_topk_bound is None
+
+    def bound(**config):
+        return backend._create_decode_step_builder(SimpleNamespace(config=config)).direct_decode_bound
+
+    assert bound(index_topk=2048, index_kpool=4) == 2051
+    assert bound(index_topk=2048, index_kpool=8) is None
+    assert bound(index_topk=2047, index_kpool=4) is None
 
 
 @pytest.mark.parametrize("batch", [1, 8])
@@ -678,12 +711,8 @@ def test_fp8_sparse_direct_decode_actual_entry_edges_and_graph(monkeypatch, batc
     control = AttControl(
         nsa_decode=True, nsa_decode_dict={"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
     )
-    state_owner = _make_infer_state(graph_mode=GraphMode.EAGER)
-    state = Fp8Glm5NextSparseDecodeState(
-        _infer_state_weak_ref=weakref.ref(state_owner),
-        flashmla_sched_meta=flash_mla.get_mla_metadata()[0],
-        decode_topk_bound=2051,
-    )
+    state_owner = _make_infer_state(is_cuda_graph_capture=False)
+    state = _Fp8DecodeState(state_owner, sched_meta=flash_mla.get_mla_metadata()[0], bound=2051)
 
     def native_must_not_run(*args, **kwargs):
         raise AssertionError("supported GLM-5.3 decode took native FlashMLA fallback")
@@ -698,9 +727,9 @@ def test_fp8_sparse_direct_decode_actual_entry_edges_and_graph(monkeypatch, batc
     if batch == 1:
         assert torch.count_nonzero(eager) > 0
     monkeypatch.setattr(flash_mla, "flash_mla_with_kvcache", native_must_not_run)
-    state.infer_state.graph_mode = GraphMode.CAPTURE
+    state.infer_state.is_cuda_graph_capture = True
     graph, output = _capture_cuda_graph(run)
-    state.infer_state.graph_mode = GraphMode.EAGER
+    state.infer_state.is_cuda_graph_capture = False
     graph.replay()
     torch.testing.assert_close(output.float(), expected, atol=0.02, rtol=0.02)
     q.copy_(q.roll(1, dims=-1))
@@ -770,17 +799,12 @@ def test_fp8_sparse_direct_decode_general_graph_factory_entry(monkeypatch, num_h
         nsa_decode_dict={"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512},
     )
     backend = object.__new__(Fp8Glm5NextSparseAttBackend)
-    backend.model = SimpleNamespace(config={"index_topk": 2048, "index_kpool": 4})
-    infer_state = _make_infer_state(graph_mode=GraphMode.EAGER)
-    state = backend.create_att_decode_state(infer_state)
-    state.flashmla_sched_meta = flash_mla.get_mla_metadata()[0]
-    assert state.decode_topk_bound == 2051
-    native_state_owner = _make_infer_state(graph_mode=GraphMode.EAGER)
-    native_state = Fp8Glm5NextSparseDecodeState(
-        _infer_state_weak_ref=weakref.ref(native_state_owner),
-        flashmla_sched_meta=flash_mla.get_mla_metadata()[0],
-        decode_topk_bound=None,
-    )
+    bound = backend._create_decode_step_builder(SimpleNamespace(config={"index_topk": 2048, "index_kpool": 4}))
+    assert bound.direct_decode_bound == 2051
+    infer_state = _make_infer_state(is_cuda_graph_capture=False)
+    state = _Fp8DecodeState(infer_state, sched_meta=flash_mla.get_mla_metadata()[0], bound=2051)
+    native_state_owner = _make_infer_state(is_cuda_graph_capture=False)
+    native_state = _Fp8DecodeState(native_state_owner, sched_meta=flash_mla.get_mla_metadata()[0], bound=None)
 
     def run(current_state):
         return current_state.decode_att((q, q[..., :0]), packed[..., :584], None, control)
@@ -804,9 +828,9 @@ def test_fp8_sparse_direct_decode_general_graph_factory_entry(monkeypatch, num_h
         raise AssertionError("supported graph shape did not use the direct packed-KV path")
 
     monkeypatch.setattr(flash_mla, "flash_mla_with_kvcache", native_must_not_run)
-    state.infer_state.graph_mode = GraphMode.CAPTURE
+    state.infer_state.is_cuda_graph_capture = True
     graph, output = _capture_cuda_graph(lambda: run(state))
-    state.infer_state.graph_mode = GraphMode.EAGER
+    state.infer_state.is_cuda_graph_capture = False
     graph.replay()
     torch.testing.assert_close(output.float(), expected, atol=0.02, rtol=0.02)
     q.copy_(q.roll(1, dims=-1))
@@ -849,10 +873,8 @@ def test_fp8_sparse_direct_decode_unknown_bound_fallback_and_strided_q(monkeypat
         return original(*args, **kwargs)
 
     monkeypatch.setattr(flash_mla, "flash_mla_with_kvcache", native)
-    unknown_owner = _make_infer_state(graph_mode=GraphMode.EAGER)
-    unknown = Fp8Glm5NextSparseDecodeState(
-        _infer_state_weak_ref=weakref.ref(unknown_owner), flashmla_sched_meta=flash_mla.get_mla_metadata()[0]
-    )
+    unknown_owner = _make_infer_state(is_cuda_graph_capture=False)
+    unknown = _Fp8DecodeState(unknown_owner, sched_meta=flash_mla.get_mla_metadata()[0])
     actual = unknown.decode_att((q, q[..., :0]), packed[..., :584], None, control)
     torch.testing.assert_close(
         actual.float(), _torch_sparse_attention(q, _dequantize_kv_cache(packed), late), atol=0.02, rtol=0.02
@@ -892,8 +914,8 @@ def test_fp8_sparse_direct_decode_strided_inputs_and_packed_row_padding(monkeypa
         return _torch_sparse_attention(q, _dequantize_kv_cache(packed), indices[:, 0])
 
     if (num_heads, batch) in ((1, 3), (7, 5)):
-        infer = _make_infer_state(graph_mode=GraphMode.CAPTURE)
-        state = Fp8Glm5NextSparseDecodeState(_infer_state_weak_ref=weakref.ref(infer), decode_topk_bound=2051)
+        infer = _make_infer_state(is_cuda_graph_capture=True)
+        state = _Fp8DecodeState(infer, bound=2051)
 
         def native_must_not_run(*args, **kwargs):
             raise AssertionError("supported strided decode took native fallback")
@@ -984,14 +1006,10 @@ def test_fp8_sparse_direct_decode_large_workload_retains_native_graph(monkeypatc
         raise AssertionError("larger workload took the slower direct path")
 
     monkeypatch.setattr(
-        "lightllm.models.glm5_next.triton_kernel.fp8_sparse_decode.fp8_sparse_direct_decode", direct_must_not_run
+        "lightllm.common.attention.kernels.sparse_mla.fp8_group64_decode.fp8_sparse_direct_decode", direct_must_not_run
     )
-    infer = _make_infer_state(graph_mode=GraphMode.CAPTURE)
-    state = Fp8Glm5NextSparseDecodeState(
-        _infer_state_weak_ref=weakref.ref(infer),
-        decode_topk_bound=2051,
-        flashmla_sched_meta=flash_mla.get_mla_metadata()[0],
-    )
+    infer = _make_infer_state(is_cuda_graph_capture=True)
+    state = _Fp8DecodeState(infer, sched_meta=flash_mla.get_mla_metadata()[0], bound=2051)
     control = AttControl(
         nsa_decode=True, nsa_decode_dict={"topk_mem_indices": topk, "softmax_scale": 0.0625, "kv_lora_rank": 512}
     )
@@ -1020,7 +1038,7 @@ def test_fp8_prefill_workspace_reuse_mutable_inputs_and_graph_replay(num_heads):
     fresh = _PrefillCase([16384, 32768, 16384], [9, 11, 13], num_heads, capacity=131072, backend=backend)
     fresh.check(fresh.run())
     assert {name: value.data_ptr() for name, value in backend._prefill_workspaces[0].items()} == pointers
-    for overrides in ({"prefill_cuda_graph_exe_list": []}, {"graph_mode": GraphMode.CAPTURE}):
+    for overrides in ({"prefill_cuda_graph_exe_list": []}, {"is_cuda_graph_capture": True}):
         infer, state = case.new_state(**overrides)
         case.check(case.run(state))
     graph, output = _capture_cuda_graph(case.run)

@@ -26,7 +26,7 @@ def test_prefill_workspace_is_reserved_once_and_reused_at_runtime(monkeypatch, o
         batch_max_tokens=8,
         max_req_num=2,
         max_seq_length=13,
-        config={"index_topk": 2048},
+        config={"index_topk": 2048, "index_kpool": 4},
         att_state_role=f"workspace_test_{run_mode}_{overlap}",
     )
     backend_class = fp8_glm5_next.Fp8Glm5NextSparseAttBackend
@@ -48,13 +48,10 @@ def test_prefill_workspace_is_reserved_once_and_reused_at_runtime(monkeypatch, o
     monkeypatch.setattr(backend, "allocate_prefill_workspaces", forbidden)
     monkeypatch.setattr(backend, "get_gpu_workspace_buffer", forbidden)
     for slot in range(1 + int(overlap)):
-        for q_tokens in (1, 8, 3):
-            topk = torch.empty((q_tokens, 2176), dtype=torch.int32, device="cuda")
-            views = backend.get_prefill_workspace(SimpleNamespace(microbatch_index=slot), topk)
-            assert {key: value.data_ptr() for key, value in views.items()} == pointers[slot]
-            torch.testing.assert_close(
-                views["cu_seqlens_q"], torch.arange(q_tokens + 1, dtype=torch.int32, device="cuda")
-            )
+        # Each step's prefill step args carry the scratch reserved for its microbatch.
+        views = backend.prefill_step_builder.workspace(slot)
+        assert {key: value.data_ptr() for key, value in views.items()} == pointers[slot]
+        torch.testing.assert_close(views["cu_seqlens_q"], torch.arange(9, dtype=torch.int32, device="cuda"))
 
 
 def test_prefill_microbatches_use_independent_scratch_during_graph_replay(monkeypatch):
@@ -63,6 +60,8 @@ def test_prefill_microbatches_use_independent_scratch_during_graph_replay(monkey
     first = _PrefillCase([15], [3], 8, backend=backend)
     second = _PrefillCase([17], [3], 8, backend=backend)
     second.infer_state.microbatch_index = 1
+    # Step args pick the microbatch's scratch when built, as serving sets the index before init_att_state.
+    _, second.att_state = second.new_state()
     first.check(first.run())
     second.check(second.run())
     pointers = [{key: value.data_ptr() for key, value in buffers.items()} for buffers in backend._prefill_workspaces]

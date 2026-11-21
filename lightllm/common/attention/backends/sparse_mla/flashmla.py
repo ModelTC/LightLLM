@@ -26,9 +26,15 @@ class FlashMLASparsePrefillStepArgs:
 
 @dataclass(frozen=True)
 class FlashMLASparseDecodeStepArgs:
-    """FlashMLA's tile scheduler metadata, filled on the step's first kernel call."""
+    """FlashMLA's tile scheduler metadata, filled on the step's first kernel call.
+
+    direct_decode_bound, when set, bounds the valid entries of every top-k row, which lets small
+    CUDA graph steps over the "fp8_group64_e8m0" cache use a direct Triton kernel.
+    """
 
     sched_meta: object
+    uses_cuda_graph: bool = False
+    direct_decode_bound: Optional[int] = None
 
 
 class FlashMLASparsePrefillStepBuilder(AttentionStepBuilder[FlashMLASparsePrefillStepArgs]):
@@ -37,7 +43,8 @@ class FlashMLASparsePrefillStepBuilder(AttentionStepBuilder[FlashMLASparsePrefil
 
 
 class FlashMLASparseDecodeStepBuilder(AttentionStepBuilder[FlashMLASparseDecodeStepArgs]):
-    def __init__(self) -> None:
+    def __init__(self, *, direct_decode_bound: Optional[int] = None) -> None:
+        self.direct_decode_bound = direct_decode_bound
         self._cuda_graph_sched_meta: dict[tuple[int, int], object] = {}
 
     def build(self, batch: AttentionBatch) -> FlashMLASparseDecodeStepArgs:
@@ -48,8 +55,14 @@ class FlashMLASparseDecodeStepBuilder(AttentionStepBuilder[FlashMLASparseDecodeS
             key = (batch.microbatch_index, batch.batch_size)
             if key not in self._cuda_graph_sched_meta:
                 self._cuda_graph_sched_meta[key] = flash_mla.get_mla_metadata()[0]
-            return FlashMLASparseDecodeStepArgs(sched_meta=self._cuda_graph_sched_meta[key])
-        return FlashMLASparseDecodeStepArgs(sched_meta=flash_mla.get_mla_metadata()[0])
+            sched_meta = self._cuda_graph_sched_meta[key]
+        else:
+            sched_meta = flash_mla.get_mla_metadata()[0]
+        return FlashMLASparseDecodeStepArgs(
+            sched_meta=sched_meta,
+            uses_cuda_graph=batch.uses_cuda_graph,
+            direct_decode_bound=self.direct_decode_bound,
+        )
 
 
 def _check_inputs(layer_config: SparseMLALayerConfig, q: torch.Tensor) -> None:
@@ -59,6 +72,11 @@ def _check_inputs(layer_config: SparseMLALayerConfig, q: torch.Tensor) -> None:
 class FlashMLASparsePrefillImpl(
     AttentionImpl[SparseMLALayerConfig, FlashMLASparsePrefillStepArgs, SparseMLAPrefillLayerInputs]
 ):
+    def __init__(self, layer_config: SparseMLALayerConfig) -> None:
+        super().__init__(layer_config)
+        if layer_config.kv_cache_format not in ("bf16", "fp8_ds_mla"):
+            raise NotImplementedError(f"FlashMLA sparse prefill does not support {layer_config.kv_cache_format!r}")
+
     def forward(
         self,
         step_args: FlashMLASparsePrefillStepArgs,
@@ -74,10 +92,17 @@ class FlashMLASparsePrefillImpl(
         """
         layer_config, q = self.layer_config, layer_inputs.q
         _check_inputs(layer_config, q)
+        heads = q.shape[1]
         if layer_config.kv_cache_format == "bf16":
             from sgl_kernel.flash_mla import flash_mla_sparse_fwd
 
             kv, indices = layer_inputs.kv_cache, layer_inputs.topk_mem_indices
+            # FlashMLA uses 64-head tiles; pad other head counts with zero queries.
+            padded_heads = -(-heads // 64) * 64
+            if padded_heads != heads:
+                padded = q.new_zeros((q.shape[0], padded_heads, q.shape[2]))
+                padded[:, :heads] = q
+                q = padded
         else:
             from flash_mla import flash_mla_sparse_fwd
 
@@ -101,7 +126,7 @@ class FlashMLASparsePrefillImpl(
             q=q, kv=kv, indices=indices, sm_scale=layer_config.softmax_scale, d_v=layer_config.kv_lora_rank
         )
         # FlashMLA allocates its own output.
-        out.copy_(result)
+        out.copy_(result[:, :heads])
         return out
 
 
@@ -110,8 +135,8 @@ class FlashMLASparseDecodeImpl(
 ):
     def __init__(self, layer_config: SparseMLALayerConfig) -> None:
         super().__init__(layer_config)
-        if layer_config.kv_cache_format != "fp8_ds_mla":
-            raise NotImplementedError("FlashMLA sparse decode supports only the packed FP8 cache")
+        if layer_config.kv_cache_format not in ("fp8_ds_mla", "fp8_group64_e8m0"):
+            raise NotImplementedError("FlashMLA sparse decode supports only the packed FP8 caches")
 
     def forward(
         self,
@@ -130,8 +155,28 @@ class FlashMLASparseDecodeImpl(
         if indices.ndim == 2:
             indices = indices.unsqueeze(1)
         assert indices.shape[1] == 1, "FlashMLA sparse decode expects one query row per request"
-        q = torch.cat([layer_inputs.q_nope, layer_inputs.q_rope], dim=-1).unsqueeze(1).contiguous()
         packed = layer_inputs.kv_cache
+        heads = layer_inputs.q_nope.shape[1]
+        if layer_config.kv_cache_format == "fp8_group64_e8m0":
+            from lightllm.common.attention.kernels.sparse_mla import fp8_group64_decode
+            from lightllm.common.attention.kernels.sparse_mla.pad_query_heads import pad_query_heads
+
+            q_nope = layer_inputs.q_nope
+            if fp8_group64_decode.can_use_fp8_sparse_direct_decode(
+                q_nope,
+                packed,
+                indices,
+                layer_config.kv_lora_rank,
+                step_args.direct_decode_bound,
+                is_cuda_graph_capture=step_args.uses_cuda_graph,
+            ):
+                out.copy_(
+                    fp8_group64_decode.fp8_sparse_direct_decode(q_nope, packed, indices, layer_config.softmax_scale)
+                )
+                return out
+            q = pad_query_heads(q_nope, is_cuda_graph_capture=step_args.uses_cuda_graph)
+        else:
+            q = torch.cat([layer_inputs.q_nope, layer_inputs.q_rope], dim=-1).unsqueeze(1).contiguous()
         kv = torch.as_strided(
             packed,
             size=(packed.shape[0], 1, 1, packed.shape[-1]),
@@ -150,7 +195,7 @@ class FlashMLASparseDecodeImpl(
             indices=indices,
         )
         # FlashMLA allocates its own output.
-        out.copy_(result[:, 0])
+        out.copy_(result[:, 0, :heads])
         return out
 
 

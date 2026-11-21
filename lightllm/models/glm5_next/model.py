@@ -1,3 +1,4 @@
+from lightllm.models.glm5_next.infer_struct import Glm5NextInferStateInfo
 import json
 import os
 from typing import TYPE_CHECKING
@@ -30,6 +31,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
     pre_layer_infer_class = Glm5NextPreLayerInfer
     post_layer_infer_class = LlamaPostLayerInfer
     transformer_layer_infer_class = Glm5NextTransformerLayerInfer
+    infer_state_class = Glm5NextInferStateInfo
 
     @classmethod
     def create_bounded_att_states(

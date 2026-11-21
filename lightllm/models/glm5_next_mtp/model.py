@@ -1,3 +1,4 @@
+from lightllm.models.glm5_next.infer_struct import Glm5NextInferStateInfo
 from typing import TYPE_CHECKING
 from copy import deepcopy
 import torch
@@ -26,6 +27,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
     pre_layer_infer_class = Glm5NextMTPPreLayerInfer
     post_layer_infer_class = Glm5NextMTPPostLayerInfer
     transformer_layer_infer_class = Glm5NextMTPTransformerLayerInfer
+    infer_state_class = Glm5NextInferStateInfo
 
     def __init__(self, kvargs):
         self.main_model = kvargs.pop("main_model")
