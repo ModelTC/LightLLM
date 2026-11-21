@@ -46,6 +46,7 @@ def test_context_initializes_state_factory_with_resolved_eos_at_startup(monkeypa
         eos_id=[255],
     )
     monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: args)
+    monkeypatch.setattr("lightllm.utils.envs_utils.get_env_start_args", lambda: args)
     tokenizer = SimpleNamespace(eos_token_id=256)
     tokenizer_info = xgr.TokenizerInfo([bytes([i]) for i in range(256)] + [b"<eos>"], stop_token_ids=[255])
     payload = xgr.GrammarCompiler(tokenizer_info).compile_regex("a").serialize_json().encode()

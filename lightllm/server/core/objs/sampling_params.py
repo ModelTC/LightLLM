@@ -549,17 +549,22 @@ class SamplingParams(ctypes.Structure):
         """在请求准入或发送流式响应头前完成编译校验；结果由编译器缓存，不保存在采样参数对象上。"""
         await self.get_compiled_grammar(compiler)
 
+    def _check_thinking_budget_config(self) -> None:
+        """Validate finite thinking budgets against this node's configuration."""
+        if self.constraint_out_params.thinking_token_budget < 0:
+            return
+        args = get_env_start_args()
+        if args.disable_thinking_budget:
+            raise ValueError("thinking_token_budget is disabled by --disable_thinking_budget")
+        if not args.reasoning_parser:
+            raise ValueError("thinking_token_budget requires --reasoning_parser")
+        if args.target_vocab_topk_sampling is not None:
+            raise ValueError("thinking_token_budget requires disabling --target_vocab_topk_sampling")
+
     async def get_compiled_grammar(self, compiler) -> Optional[bytes]:
         """获取编译器缓存中的结果，未命中时执行异步编译；无输出约束时返回 None。"""
         # P/D node admission also uses this boundary for forwarded SamplingParams.
-        if self.constraint_out_params.thinking_token_budget >= 0:
-            args = get_env_start_args()
-            if args.disable_thinking_budget:
-                raise ValueError("thinking_token_budget is disabled by --disable_thinking_budget")
-            if not args.reasoning_parser:
-                raise ValueError("thinking_token_budget requires --reasoning_parser")
-            if args.target_vocab_topk_sampling is not None:
-                raise ValueError("thinking_token_budget requires disabling --target_vocab_topk_sampling")
+        self._check_thinking_budget_config()
         for kind, constraint in (
             ("grammar", self.constraint_out_params.guided_grammar),
             ("regex", self.constraint_out_params.regular_constraint),

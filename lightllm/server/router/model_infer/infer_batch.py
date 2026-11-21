@@ -17,7 +17,7 @@ from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import (
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.multimodal_params import MultimodalParams
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, enable_thinking_budget
 from lightllm.utils.multimodal_chunk_utils import adjust_mm_chunk_end, get_mm_input_spans
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
@@ -82,7 +82,7 @@ class InferenceContext:
         from lightllm.server.router.model_infer.structured_output.state_factory import OutputConstraintStateFactory
 
         if self.args.output_constraint_mode != "xgrammar":
-            if not self.args.disable_thinking_budget and self.args.reasoning_parser:
+            if enable_thinking_budget():
                 return OutputConstraintStateFactory(None, self.vocab_size, self.args.eos_id)
             return None
         from lightllm.server.tokenizer import get_tokenizer

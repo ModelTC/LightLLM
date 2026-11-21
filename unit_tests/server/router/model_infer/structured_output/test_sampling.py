@@ -480,6 +480,7 @@ def test_budget_mask_buffers_without_grammar(monkeypatch, enabled, mode, parser)
         disable_thinking_budget=not enabled,
     )
     monkeypatch.setattr(req_sampling_params, "get_env_start_args", lambda: args)
+    monkeypatch.setattr("lightllm.utils.envs_utils.get_env_start_args", lambda: args)
     monkeypatch.setattr(req_sampling_params, "get_vocab_size", lambda _: 257)
     manager = req_sampling_params.ReqSamplingParamsManager(1)
     if mode == "none" and not (enabled and parser):
