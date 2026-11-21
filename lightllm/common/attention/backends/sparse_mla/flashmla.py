@@ -1,0 +1,182 @@
+"""FlashMLA sparse MLA: prefill over bf16 or packed FP8 caches and decode over packed FP8 caches."""
+
+from dataclasses import dataclass
+from typing import Optional
+
+import torch
+
+from lightllm.common.attention.backend import (
+    AttentionBackend,
+    AttentionBatch,
+    AttentionImpl,
+    AttentionStepBuilder,
+    TensorAllocator,
+)
+from . import SparseMLADecodeLayerInputs, SparseMLALayerConfig, SparseMLAPrefillLayerInputs
+
+
+@dataclass(frozen=True)
+class FlashMLASparsePrefillStepArgs:
+    """mem_index holds the cache slots of the step's new tokens; has_cached_prefix says whether any
+    request reads keys from earlier steps."""
+
+    mem_index: Optional[torch.Tensor]
+    has_cached_prefix: bool
+
+
+@dataclass(frozen=True)
+class FlashMLASparseDecodeStepArgs:
+    """FlashMLA's tile scheduler metadata, filled on the step's first kernel call."""
+
+    sched_meta: object
+
+
+class FlashMLASparsePrefillStepBuilder(AttentionStepBuilder[FlashMLASparsePrefillStepArgs]):
+    def build(self, batch: AttentionBatch) -> FlashMLASparsePrefillStepArgs:
+        return FlashMLASparsePrefillStepArgs(mem_index=batch.mem_index, has_cached_prefix=batch.max_ready_cache_len > 0)
+
+
+class FlashMLASparseDecodeStepBuilder(AttentionStepBuilder[FlashMLASparseDecodeStepArgs]):
+    def __init__(self) -> None:
+        self._cuda_graph_sched_meta: dict[tuple[int, int], object] = {}
+
+    def build(self, batch: AttentionBatch) -> FlashMLASparseDecodeStepArgs:
+        """A CUDA graph step keeps the captured scheduler metadata per (microbatch, batch size)."""
+        import flash_mla
+
+        if batch.uses_cuda_graph:
+            key = (batch.microbatch_index, batch.batch_size)
+            if key not in self._cuda_graph_sched_meta:
+                self._cuda_graph_sched_meta[key] = flash_mla.get_mla_metadata()[0]
+            return FlashMLASparseDecodeStepArgs(sched_meta=self._cuda_graph_sched_meta[key])
+        return FlashMLASparseDecodeStepArgs(sched_meta=flash_mla.get_mla_metadata()[0])
+
+
+def _check_inputs(layer_config: SparseMLALayerConfig, q: torch.Tensor) -> None:
+    assert q.shape[1] == layer_config.num_heads and q.dtype == layer_config.dtype, "q does not match the layer_config"
+
+
+class FlashMLASparsePrefillImpl(
+    AttentionImpl[SparseMLALayerConfig, FlashMLASparsePrefillStepArgs, SparseMLAPrefillLayerInputs]
+):
+    def forward(
+        self,
+        step_args: FlashMLASparsePrefillStepArgs,
+        layer_inputs: SparseMLAPrefillLayerInputs,
+        *,
+        out: torch.Tensor,
+        alloc_func: TensorAllocator = torch.empty,
+    ) -> torch.Tensor:
+        """Fill and return out [query_tokens, num_heads, kv_lora_rank].
+
+        A packed FP8 cache is not read directly: the step's own keys come from current_kv and, when
+        some request has a cached prefix, the selected history is dequantized next to them.
+        """
+        layer_config, q = self.layer_config, layer_inputs.q
+        _check_inputs(layer_config, q)
+        if layer_config.kv_cache_format == "bf16":
+            from sgl_kernel.flash_mla import flash_mla_sparse_fwd
+
+            kv, indices = layer_inputs.kv_cache, layer_inputs.topk_mem_indices
+        else:
+            from flash_mla import flash_mla_sparse_fwd
+
+            assert layer_inputs.current_kv is not None and layer_inputs.topk_indices is not None
+            kv, indices = layer_inputs.current_kv, layer_inputs.topk_indices
+            if step_args.has_cached_prefix:
+                from lightllm.common.basemodel.triton_kernel.kv_copy.prefill_compact_kv_flashmla_fp8 import (
+                    get_prefill_kv_cache_and_remap_indices_triton,
+                )
+
+                kv, indices = get_prefill_kv_cache_and_remap_indices_triton(
+                    packed_kv=layer_inputs.kv_cache,
+                    topk_mem_indices=layer_inputs.topk_mem_indices,
+                    prefill_mem_index=step_args.mem_index,
+                    prefill_cache_kv=layer_inputs.current_kv,
+                    prefill_dtype=layer_inputs.current_kv.dtype,
+                )
+        if indices.ndim == 2:
+            indices = indices.unsqueeze(1)
+        result, _, _ = flash_mla_sparse_fwd(
+            q=q, kv=kv, indices=indices, sm_scale=layer_config.softmax_scale, d_v=layer_config.kv_lora_rank
+        )
+        # FlashMLA allocates its own output.
+        out.copy_(result)
+        return out
+
+
+class FlashMLASparseDecodeImpl(
+    AttentionImpl[SparseMLALayerConfig, FlashMLASparseDecodeStepArgs, SparseMLADecodeLayerInputs]
+):
+    def __init__(self, layer_config: SparseMLALayerConfig) -> None:
+        super().__init__(layer_config)
+        if layer_config.kv_cache_format != "fp8_ds_mla":
+            raise NotImplementedError("FlashMLA sparse decode supports only the packed FP8 cache")
+
+    def forward(
+        self,
+        step_args: FlashMLASparseDecodeStepArgs,
+        layer_inputs: SparseMLADecodeLayerInputs,
+        *,
+        out: torch.Tensor,
+        alloc_func: TensorAllocator = torch.empty,
+    ) -> torch.Tensor:
+        """Fill and return out with q_nope's shape; each request has one query row."""
+        import flash_mla
+
+        layer_config = self.layer_config
+        _check_inputs(layer_config, layer_inputs.q_nope)
+        indices = layer_inputs.topk_mem_indices
+        if indices.ndim == 2:
+            indices = indices.unsqueeze(1)
+        assert indices.shape[1] == 1, "FlashMLA sparse decode expects one query row per request"
+        q = torch.cat([layer_inputs.q_nope, layer_inputs.q_rope], dim=-1).unsqueeze(1).contiguous()
+        packed = layer_inputs.kv_cache
+        kv = torch.as_strided(
+            packed,
+            size=(packed.shape[0], 1, 1, packed.shape[-1]),
+            stride=(packed.stride(0), packed.shape[-1], packed.shape[-1], packed.stride(-1)),
+        )
+        result, _ = flash_mla.flash_mla_with_kvcache(
+            q=q,
+            k_cache=kv,
+            block_table=None,
+            cache_seqlens=None,
+            head_dim_v=layer_config.kv_lora_rank,
+            tile_scheduler_metadata=step_args.sched_meta,
+            softmax_scale=layer_config.softmax_scale,
+            causal=False,
+            is_fp8_kvcache=True,
+            indices=indices,
+        )
+        # FlashMLA allocates its own output.
+        out.copy_(result[:, 0])
+        return out
+
+
+class FlashMLASparsePrefillBackend(AttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "flashmla_sparse_mla_prefill"
+
+    @staticmethod
+    def get_step_builder_cls() -> type[FlashMLASparsePrefillStepBuilder]:
+        return FlashMLASparsePrefillStepBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type[FlashMLASparsePrefillImpl]:
+        return FlashMLASparsePrefillImpl
+
+
+class FlashMLASparseDecodeBackend(AttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "flashmla_sparse_mla_decode"
+
+    @staticmethod
+    def get_step_builder_cls() -> type[FlashMLASparseDecodeStepBuilder]:
+        return FlashMLASparseDecodeStepBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type[FlashMLASparseDecodeImpl]:
+        return FlashMLASparseDecodeImpl
