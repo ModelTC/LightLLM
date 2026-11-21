@@ -250,7 +250,7 @@ def test_cache_only_matches_full_prefill_cache_writes(monkeypatch, kv_type, requ
         b1_cu_q_seq_len=torch.tensor([0, *q_lengths], device="cuda", dtype=torch.int32).cumsum(0).int(),
         max_q_seq_len=max(q_lengths),
         max_kv_seq_len=2048,
-        prefill_att_state=SimpleNamespace(q_kv_seq_len=lengths, q_req_idx=None),
+        nsa_step=SimpleNamespace(q_kv_seq_len=lengths, q_req_idx=None),
         req_manager=SimpleNamespace(req_to_token_indexs=None),
     )
     # Top-k outputs are discarded here; run the normal projections and cache writers.
@@ -259,7 +259,7 @@ def test_cache_only_matches_full_prefill_cache_writes(monkeypatch, kv_type, requ
     _, kv = layer._get_qkv(layer._att_norm(hidden, infer, weights), infer, weights)
     layer._post_cache_kv(kv, infer, weights)
     layer.indexer._get_indices(
-        **infer.get_topk_indices_params, infer_state=infer, att_state=infer.prefill_att_state, layer_weight=weights
+        **infer.get_topk_indices_params, infer_state=infer, nsa_step=infer.nsa_step, layer_weight=weights
     )
     expected = [s.clone() for s in stores]
     assert not torch.equal(initial[2], expected[2])

@@ -34,6 +34,7 @@ def sparse_mla_prefill_layer(
         topk_mem_indices=nsa["topk_mem_indices"],
         topk_indices=nsa.get("topk_indices"),
         current_kv=nsa.get("prefill_cache_kv"),
+        q_kv_start_loc=nsa.get("q_kv_start_loc"),
     )
     return layer_inputs, layer_config
 
