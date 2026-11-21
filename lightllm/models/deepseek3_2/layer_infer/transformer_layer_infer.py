@@ -1,6 +1,6 @@
 from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
@@ -12,6 +12,10 @@ from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import 
 from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import all_gather_into_tensor
+
+
+if TYPE_CHECKING:
+    from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2InferStateInfo
 
 
 class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
@@ -78,12 +82,10 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         q_all = torch.cat([q_nope, q_rope], dim=-1)
 
         # 计算 topk indices
-        att_state = infer_state.prefill_att_state
         topk_mem_indices, topk_indices = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=att_state,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
@@ -126,12 +128,10 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
 
         # 计算 topk mem indices
-        att_state = infer_state.decode_att_state
         topk_mem_indices, _ = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=att_state,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
@@ -185,8 +185,7 @@ class NsaInfer:
         self,
         hidden_states: torch.Tensor,
         q_lora: torch.Tensor,
-        infer_state: Deepseek2InferStateInfo,
-        att_state: Any,
+        infer_state: "Deepseek3_2InferStateInfo",
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ):
 
@@ -225,9 +224,9 @@ class NsaInfer:
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
         weights = weights.unsqueeze(-1) * q_scale
 
-        ks = att_state.ks
-        ke = att_state.ke
-        lengths = att_state.lengths
+        ks = infer_state.nsa_ks
+        ke = infer_state.nsa_ke
+        lengths = infer_state.nsa_lengths
 
         if infer_state.is_prefill:
             mtp_step = 0
@@ -269,7 +268,7 @@ class NsaInfer:
 
         b_topk_mem_index = trans_topk_index_to_mem_index(
             topk_index=b_topk_index,
-            ragged_mem_index=att_state.ragged_mem_index,
+            ragged_mem_index=infer_state.nsa_ragged_mem_index,
         )
 
         return b_topk_mem_index, b_topk_index

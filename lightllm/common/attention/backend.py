@@ -65,6 +65,9 @@ class AttentionBatch:
     b_q_start_loc: Optional[torch.Tensor] = None
     b_ready_cache_len: Optional[torch.Tensor] = None
     max_q_seq_len: int = 1
+    # Prefill only: the longest cached prefix and the cache slots of the step's new tokens, in q order.
+    max_ready_cache_len: int = 0
+    mem_index: Optional[torch.Tensor] = None
     # Prefill only, for layers that attend bidirectionally inside image spans: per query token, the
     # exclusive end of its image span in the request's kv positions, or 0 for a text token.
     b_image_token_end: Optional[torch.Tensor] = None
