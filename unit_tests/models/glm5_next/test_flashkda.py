@@ -446,6 +446,12 @@ def test_flashkda_backend_continues_cached_prefill(cuda_flashkda, backend_cls, s
         )
         assert isinstance(actual, torch.Tensor)
         torch.testing.assert_close(actual.float(), expected.float(), atol=4e-3, rtol=3e-2)
+        # An empty request clears its conv history (the kernel window; speculative columns follow it).
+        # The replay Triton reference (sgl causal_conv1d_fn) reads before the request's first token
+        # there, so its result depends on adjacent memory.
+        empty_slots = infer.b_req_idx[torch.tensor(lengths, device="cuda") == 0].long()
+        assert torch.count_nonzero(conv[empty_slots, :, :3]) == 0
+        conv_ref[empty_slots, :, :3] = 0
         torch.testing.assert_close(conv, conv_ref, atol=0, rtol=0)
         torch.testing.assert_close(ssm.float(), ssm_ref.float(), atol=8e-3, rtol=3e-2)
         for current in (infer, infer_ref):
