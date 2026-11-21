@@ -1,11 +1,11 @@
-"""GPU-resident builder for ``b_image_token_end``.
+"""GPU-resident builder for ``b_image_token_end`` and ``b_image_token_start``.
 
 Replaces a 3× D2H sync + Python per-batch-image slice-fill in CPU memory
 with a single small H2D copy (image metadata) + one Triton kernel that
 scatters the image-end markers into the flat-Q-token tensor on GPU.
 
 Adapted from neo_chat_moe's `get_neo_position_triton`. Same per-batch
-program structure; we only emit the `b_image_token_end` scatter (no 3D
+program structure; we only emit the image span [start, end) scatter (no 3D
 position_ids — gemma-4 uses 1D position ids).
 """
 
@@ -24,6 +24,7 @@ def _build_b_image_token_end_kernel(
     B_Ready_Cache_Len,  # (batch,)    int32, per-batch prompt-cache length
     B_Q_Seq_Len,  # (batch,)    int32, per-batch new-token count
     B_Image_Token_End,  # (sum_q,)    int32, output scatter target
+    B_Image_Token_Start,  # (sum_q,)  int32, output scatter target
     BLOCK_SIZE: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
@@ -52,6 +53,11 @@ def _build_b_image_token_end_kernel(
                 image_end_idx,
                 mask=in_image & in_new_tokens,
             )
+            tl.store(
+                B_Image_Token_Start + flat_image_start + off,
+                image_start_idx,
+                mask=in_image & in_new_tokens,
+            )
 
 
 def build_b_image_token_end(
@@ -63,6 +69,7 @@ def build_b_image_token_end(
     b_ready_cache_len: torch.Tensor,
     b_q_seq_len: torch.Tensor,
     b_image_token_end: torch.Tensor,
+    b_image_token_start: torch.Tensor,
 ):
     batch_size = b_q_start_loc.shape[0]
     assert b_image_nums.shape[0] == batch_size
@@ -77,6 +84,7 @@ def build_b_image_token_end(
         b_ready_cache_len,
         b_q_seq_len,
         b_image_token_end,
+        b_image_token_start,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 
@@ -94,6 +102,7 @@ def _reference(
     sum_q,
 ):
     out = torch.zeros((sum_q,), dtype=torch.int32)
+    start = torch.zeros((sum_q,), dtype=torch.int32)
     for batch_idx, params in enumerate(multimodal_params):
         cache_len = b_ready_cache_len_cpu[batch_idx]
         new_len = b_q_seq_len_cpu[batch_idx]
@@ -106,7 +115,8 @@ def _reference(
                 if req_off < 0 or req_off >= new_len:
                     continue
                 out[flat_start + req_off] = image_end_idx
-    return out
+                start[flat_start + req_off] = image_start_idx
+    return out, start
 
 
 def _check():
@@ -127,7 +137,7 @@ def _check():
     b_q_seq_len = torch.tensor([6, 10], dtype=torch.int32)
     sum_q = int(b_q_seq_len.sum().item())
 
-    ref = _reference(
+    ref, ref_start = _reference(
         multimodal,
         b_q_start_loc.tolist(),
         b_ready_cache_len.tolist(),
@@ -149,6 +159,7 @@ def _check():
             image_start_num += 1
 
     out_gpu = torch.zeros((sum_q,), dtype=torch.int32, device=device)
+    start_gpu = torch.zeros((sum_q,), dtype=torch.int32, device=device)
     build_b_image_token_end(
         b_image_start_idx=torch.tensor(b_image_start_idx, dtype=torch.int32, device=device),
         b_image_len=torch.tensor(b_image_len, dtype=torch.int32, device=device),
@@ -158,10 +169,12 @@ def _check():
         b_ready_cache_len=b_ready_cache_len.to(device),
         b_q_seq_len=b_q_seq_len.to(device),
         b_image_token_end=out_gpu,
+        b_image_token_start=start_gpu,
     )
 
     out_cpu = out_gpu.cpu()
     assert torch.equal(out_cpu, ref), f"\n got {out_cpu.tolist()}\n ref {ref.tolist()}"
+    assert torch.equal(start_gpu.cpu(), ref_start), f"\n got {start_gpu.tolist()}\n ref {ref_start.tolist()}"
     print("ok", out_cpu.tolist())
 
 

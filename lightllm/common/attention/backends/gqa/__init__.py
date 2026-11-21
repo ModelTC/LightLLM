@@ -54,7 +54,8 @@ class GQALayerConfig:
     GQALayerInputs.alibi_slopes.
 
     bidirectional_image_spans=True (prefill) lets each query inside an image span also see the rest
-    of its span, as given per step by AttentionBatch.b_image_token_end; text queries stay causal.
+    of its span, as given per step by AttentionBatch.b_image_token_end (and b_image_token_start with a
+    sliding window, whose span keys stay visible even outside the window); text queries stay causal.
 
     Supported dtypes, head dimensions, scales and sliding-window modes are documented on each impl.
     """
