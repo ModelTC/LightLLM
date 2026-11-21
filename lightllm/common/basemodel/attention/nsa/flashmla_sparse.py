@@ -1,62 +1,53 @@
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/nsa_backend.py
-# Uses sgl_kernel.flash_mla and sgl_kernel.flash_attn from the sglang kernel library.
+"""DeepSeek V3.2 sparse MLA over a bf16 latent cache: FlashMLA prefill, FA3 decode.
+
+The NSA indexer's per-step metadata lives on Deepseek3_2InferStateInfo; this adapter only runs attention.
+"""
 
 import dataclasses
 import weakref
+from typing import Optional, Tuple
+
 import torch
-from typing import Tuple, TYPE_CHECKING
 
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from lightllm.utils.dist_utils import get_current_device_id
-
-if TYPE_CHECKING:
-    from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.attention.backends.sparse_mla.fa3 import (
+    FA3SparseMLADecodeBackend,
+    FA3SparseMLADecodeStepArgs,
+)
+from lightllm.common.attention.backends.sparse_mla.flashmla import (
+    FlashMLASparsePrefillBackend,
+    FlashMLASparsePrefillStepArgs,
+)
+from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState, build_attention_batch
+from .sparse_mla_layer import sparse_mla_decode_layer, sparse_mla_prefill_layer
 
 
 class NsaFlashMlaSparseAttBackend(BaseAttBackend):
+    kv_cache_format = "bf16"
+
     def __init__(self, model):
         super().__init__(model=model)
-        device = get_current_device_id()
-        self.ragged_mem_buffers = [
-            torch.empty(model.graph_max_batch_size * model.max_seq_length, dtype=torch.int32, device=device)
-            for _ in range(2)
-        ]
+        self.prefill_step_builder = FlashMLASparsePrefillBackend.get_step_builder_cls()()
+        # BaseAttBackend reuses one instance per model but reruns __init__ on every construction.
+        # Keep the decode step builder: captured CUDA graphs read the tensors it keeps.
+        if getattr(self, "decode_step_builder", None) is None:
+            self.decode_step_builder = FA3SparseMLADecodeBackend.get_step_builder_cls()(
+                topk=model.config.get("index_topk", 2048)
+            )
 
-    def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaSparsePrefillAttState":
+    def create_att_prefill_state(self, infer_state) -> "NsaFlashMlaSparsePrefillAttState":
         return NsaFlashMlaSparsePrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
-    def create_att_decode_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaSparseDecodeAttState":
+    def create_att_decode_state(self, infer_state) -> "NsaFlashMlaSparseDecodeAttState":
         return NsaFlashMlaSparseDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass
 class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
-    """Prefill attention state for NSA using flash_mla_sparse_fwd."""
-
-    ks: torch.Tensor = None
-    ke: torch.Tensor = None
-    lengths: torch.Tensor = None
-    ragged_mem_index: torch.Tensor = None
+    step_args: Optional[FlashMLASparsePrefillStepArgs] = None
 
     def init_state(self):
-        self.backend: NsaFlashMlaSparseAttBackend = self.backend
-        self.ragged_mem_index = torch.empty(
-            self.infer_state.total_token_num,
-            dtype=torch.int32,
-            device=get_current_device_id(),
-        )
-        from lightllm.common.basemodel.triton_kernel.gen_nsa_ks_ke import gen_nsa_ks_ke
-
-        self.ks, self.ke, self.lengths = gen_nsa_ks_ke(
-            b_seq_len=self.infer_state.b_seq_len,
-            b_q_seq_len=self.infer_state.b_q_seq_len,
-            b_req_idx=self.infer_state.b_req_idx,
-            req_to_token_index=self.infer_state.req_manager.req_to_token_indexs,
-            q_token_num=self.infer_state.input_ids.shape[0],
-            ragged_mem_index=self.ragged_mem_index,
-            hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
-        )
-        return
+        self.step_args = self.backend.prefill_step_builder.build(build_attention_batch(self.infer_state, self.backend))
 
     def prefill_att(
         self,
@@ -66,83 +57,19 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.nsa_prefill, "nsa_prefill must be True for NSA prefill attention"
-        assert att_control.nsa_prefill_dict is not None, "nsa_prefill_dict is required"
-
-        return self._nsa_prefill_att(q=q, kv=k, att_control=att_control)
-
-    def _nsa_prefill_att(
-        self,
-        q: torch.Tensor,
-        kv: torch.Tensor,
-        att_control: AttControl,
-    ) -> torch.Tensor:
-        from sgl_kernel.flash_mla import flash_mla_sparse_fwd
-
-        nsa_dict = att_control.nsa_prefill_dict
-        topk_mem_indices = nsa_dict["topk_mem_indices"]
-        softmax_scale = nsa_dict["softmax_scale"]
-        kv_lora_rank = nsa_dict["kv_lora_rank"]
-
-        if topk_mem_indices.ndim == 2:
-            topk_mem_indices = topk_mem_indices.unsqueeze(1)
-
-        mla_out, _, _ = flash_mla_sparse_fwd(
-            q=q,
-            kv=kv,
-            indices=topk_mem_indices,
-            sm_scale=softmax_scale,
-            d_v=kv_lora_rank,
-        )
-        return mla_out
+        layer_inputs, layer_config = sparse_mla_prefill_layer(q, k, att_control, self.backend.kv_cache_format)
+        impl = self.backend.get_attention_impl(FlashMLASparsePrefillBackend, layer_config)
+        out = alloc_func((q.shape[0], q.shape[1], layer_config.kv_lora_rank), dtype=q.dtype, device=q.device)
+        return impl.forward(self.step_args, layer_inputs, out=out, alloc_func=alloc_func)
 
 
 @dataclasses.dataclass
 class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
-
-    ks: torch.Tensor = None
-    ke: torch.Tensor = None
-    lengths: torch.Tensor = None
-    ragged_mem_index: torch.Tensor = None
-    nsa_cache_seqlens: torch.Tensor = None
-    nsa_cu_seqlens_k_new: torch.Tensor = None
+    step_args: Optional[FA3SparseMLADecodeStepArgs] = None
 
     def init_state(self):
-        self.backend: NsaFlashMlaSparseAttBackend = self.backend
-        model = self.backend.model
-        use_cuda_graph = (
-            self.infer_state.batch_size <= model.graph_max_batch_size
-            and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch
-        )
-
-        if use_cuda_graph:
-            self.ragged_mem_index = self.backend.ragged_mem_buffers[self.infer_state.microbatch_index]
-        else:
-            self.ragged_mem_index = torch.empty(
-                self.infer_state.total_token_num,
-                dtype=torch.int32,
-                device=get_current_device_id(),
-            )
-
-        from lightllm.common.basemodel.triton_kernel.gen_nsa_ks_ke import gen_nsa_ks_ke
-
-        self.ks, self.ke, self.lengths = gen_nsa_ks_ke(
-            b_seq_len=self.infer_state.b_seq_len,
-            b_q_seq_len=self.infer_state.b_q_seq_len,
-            b_req_idx=self.infer_state.b_req_idx,
-            req_to_token_index=self.infer_state.req_manager.req_to_token_indexs,
-            q_token_num=self.infer_state.b_seq_len.shape[0],
-            ragged_mem_index=self.ragged_mem_index,
-            hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
-        )
-        self.nsa_cache_seqlens = torch.minimum(
-            torch.full(size=(self.infer_state.batch_size,), fill_value=2048, dtype=torch.int32, device="cuda"),
-            self.infer_state.b_seq_len,
-        )
-        padded_seq_lens = torch.zeros(size=(self.nsa_cache_seqlens.shape[0] + 1,), dtype=torch.int32, device="cuda")
-        # 进行 cumsum 操作
-        padded_seq_lens[1:].copy_(self.nsa_cache_seqlens, non_blocking=True)
-        self.nsa_cu_seqlens_k_new = padded_seq_lens.cumsum(dim=0, dtype=torch.int32)
+        # Replay steps also build: the step builder rewrites the tensors the graph captured.
+        self.step_args = self.backend.decode_step_builder.build(build_attention_batch(self.infer_state, self.backend))
 
     def decode_att(
         self,
@@ -152,42 +79,8 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.nsa_decode, "nsa_decode must be True for NSA decode attention"
-        assert att_control.nsa_decode_dict is not None, "nsa_decode_dict is required"
-
-        return self._nsa_decode_att(q=q, kv=k, att_control=att_control)
-
-    def _nsa_decode_att(
-        self,
-        q: Tuple[torch.Tensor, torch.Tensor],
-        kv: torch.Tensor,
-        att_control: AttControl,
-    ) -> torch.Tensor:
-        from sgl_kernel.flash_attn import flash_attn_with_kvcache
-
-        nsa_dict = att_control.nsa_decode_dict
-        topk_mem_indices = nsa_dict["topk_mem_indices"]
-        softmax_scale = nsa_dict["softmax_scale"]
-        kv_lora_rank = nsa_dict["kv_lora_rank"]
-        qk_rope_head_dim = nsa_dict["qk_rope_head_dim"]
-
-        q_nope, q_rope = q
-
-        # Extract k_rope and kv_nope from the KV buffer
-        k_rope = kv[:, :, -qk_rope_head_dim:].view(-1, 1, 1, qk_rope_head_dim)
-        kv_nope = kv[:, :, :-qk_rope_head_dim].view(-1, 1, 1, kv_lora_rank)
-
-        o_tensor = flash_attn_with_kvcache(
-            q=q_rope,
-            k_cache=k_rope,
-            v_cache=kv_nope,
-            qv=q_nope,
-            page_table=topk_mem_indices,
-            cache_seqlens=self.nsa_cache_seqlens,
-            cu_seqlens_q=self.infer_state.b1_cu_q_seq_len,
-            cu_seqlens_k_new=self.nsa_cu_seqlens_k_new,
-            max_seqlen_q=self.infer_state.max_q_seq_len,
-            softmax_scale=softmax_scale,
-            causal=True,
-        )
-        return o_tensor
+        layer_inputs, layer_config = sparse_mla_decode_layer(q, k, att_control, self.backend.kv_cache_format)
+        impl = self.backend.get_attention_impl(FA3SparseMLADecodeBackend, layer_config)
+        q_nope = layer_inputs.q_nope
+        out = alloc_func(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
+        return impl.forward(self.step_args, layer_inputs, out=out, alloc_func=alloc_func)

@@ -130,6 +130,8 @@ def build_attention_batch(infer_state: "InferStateInfo", backend: BaseAttBackend
         pad_req_idx=getattr(infer_state.req_manager, "HOLD_REQUEST_ID", None),
         b_shared_seq_len=getattr(infer_state, "b_shared_seq_len", None),
         b_image_token_end=getattr(infer_state, "b_image_token_end", None),
+        max_ready_cache_len=infer_state.max_cache_len or 0,
+        mem_index=infer_state.mem_index,
         b_shared_radix_node_id=getattr(infer_state, "b_shared_radix_node_id", None),
         cuda_graph_max_kv_seq_len=model.graph_max_len_in_batch if uses_cuda_graph else None,
         microbatch_index=infer_state.microbatch_index,
