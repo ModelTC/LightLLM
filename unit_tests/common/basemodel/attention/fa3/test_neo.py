@@ -6,7 +6,12 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.fa3 import fp, neo
+from lightllm.common.attention.backends.gqa.fa3 import FA3GQAPrefillStepBuilder
+from lightllm.common.attention.backends.gqa import GQALayerConfig
+from lightllm.common.attention.backends.gqa.fa3 import FA3GQAPrefillBackend
+from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.fa3 import neo
+from lightllm.utils import neo_fa3_utils, sgl_utils
 
 
 def _load_neo(monkeypatch, attention_func):
@@ -15,8 +20,8 @@ def _load_neo(monkeypatch, attention_func):
         interface = ModuleType("flash_attn_interface")
         interface.flash_attn_with_kvcache = attention_func
     monkeypatch.setitem(sys.modules, "flash_attn_interface", interface)
-    name = "lightllm.common.basemodel.attention.fa3._neo_import_test"
-    spec = importlib.util.spec_from_file_location(name, neo.__file__)
+    name = "lightllm.utils._neo_fa3_import_test"
+    spec = importlib.util.spec_from_file_location(name, neo_fa3_utils.__file__)
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, name, module)
     spec.loader.exec_module(module)
@@ -27,12 +32,12 @@ def test_recognizes_neo_interface_without_replacing_regular_fa3(monkeypatch):
     def neo_attention(q, image_token_end=None):
         return q
 
-    regular_attention = fp.flash_attn_with_kvcache
+    regular_attention = sgl_utils.flash_attn_with_kvcache
     module = _load_neo(monkeypatch, neo_attention)
 
     assert module.HAS_FLASH_ATTN_INTERFACE
     assert module.flash_attn_with_kvcache_neo is neo_attention
-    assert fp.flash_attn_with_kvcache is regular_attention
+    assert sgl_utils.flash_attn_with_kvcache is regular_attention
 
 
 @pytest.mark.parametrize("interface_kind", ["missing", "regular", "legacy_tag"])
@@ -82,14 +87,21 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
     infer_state.b1_cu_kv_seq_len = indices([0, 2 * page_size, 4 * page_size - 1]).long()
     infer_state.b_image_token_end = image_ends
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token_indexs)
-    backend = SimpleNamespace(uses_causal_attention=lambda: True, infer_page_size=page_size)
+    backend = SimpleNamespace(
+        uses_causal_attention=lambda: True,
+        infer_page_size=page_size,
+        kv_quant=None,
+        prefill_step_builder=FA3GQAPrefillStepBuilder(page_size=page_size),
+        get_attention_impl=lambda backend_cls, layer_config: backend_cls.get_impl_cls()(layer_config),
+        model=SimpleNamespace(),
+    )
     state = neo.NeoFa3AttBackend.create_att_prefill_state(backend, infer_state)
     state.init_state()
 
-    q = torch.randn(3, 2, 16, device="cuda")
-    k = torch.randn(4 * page_size, 1, 16, device="cuda")
+    q = torch.randn(3, 2, 16, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(4 * page_size, 1, 16, device="cuda", dtype=torch.bfloat16)
     v = torch.randn_like(k)
-    output = torch.empty_like(q)
+    output = torch.randn_like(q)
 
     def neo_attention(*, image_token_end, **kwargs):
         assert image_token_end is image_ends
@@ -107,13 +119,15 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
         assert "image_token_tag" not in kwargs
         return output
 
-    monkeypatch.setattr(neo, "HAS_FLASH_ATTN_INTERFACE", True)
-    monkeypatch.setattr(neo, "flash_attn_with_kvcache_neo", neo_attention)
-    assert state.prefill_att(q, k, v) is output
+    monkeypatch.setattr(neo_fa3_utils, "HAS_FLASH_ATTN_INTERFACE", True)
+    monkeypatch.setattr(neo_fa3_utils, "flash_attn_with_kvcache_neo", neo_attention)
+    torch.testing.assert_close(state.prefill_att(q, k, v, AttControl(image_spans=True)), output, rtol=0, atol=0)
 
 
 def test_prefill_missing_extension_reports_install_instructions(monkeypatch):
-    monkeypatch.setattr(neo, "HAS_FLASH_ATTN_INTERFACE", False)
-    state = neo.NeoFa3PrefillAttState()
-    with pytest.raises(ImportError, match="WANDY666/flash-attention"):
-        state.prefill_att(None, None, None)
+    monkeypatch.setattr(neo_fa3_utils, "HAS_FLASH_ATTN_INTERFACE", False)
+    layer_config = GQALayerConfig(
+        num_heads=2, num_kv_heads=1, head_dim=16, dtype=torch.bfloat16, bidirectional_image_spans=True
+    )
+    with pytest.raises(NotImplementedError, match="WANDY666/flash-attention"):
+        FA3GQAPrefillBackend.get_impl_cls()(layer_config)

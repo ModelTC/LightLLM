@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING, Tuple, Dict
 
+from lightllm.common.attention.backends.gqa import GQAKVScales
+from lightllm.common.attention.backend import AttentionBackend, AttentionImpl, AttentionBatch
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 
@@ -18,6 +20,11 @@ class BaseAttBackend:
     """
     用于创建支持各种不同的AttBackend, 如 fa3, flashinfer, triton 实现等。
     每个 model 复用一个 backend 实例。
+
+    这是模型侧的 adapter：把 InferStateInfo 和 AttControl 转换为
+    lightllm.common.attention.backend 中的 AttentionBatch、layer_config 与 inputs，
+    再调用其中的 AttentionStepBuilder 和 AttentionImpl；后者的 AttentionBackend
+    只描述某个实现的 step builder 与 impl 类，与本类不是同一层。
     """
 
     requires_cpu_cache_sync = False
@@ -40,6 +47,19 @@ class BaseAttBackend:
 
     def __init__(self, model: "TpPartBaseModel"):
         self.model = model
+        self._attention_impls: Dict[tuple, AttentionImpl] = {}
+
+    def get_attention_impl(self, backend: type[AttentionBackend], layer_config) -> AttentionImpl:
+        """Return the impl of backend for layers with this layer_config, creating it on first use.
+
+        Like vLLM's per-layer impls, an impl holds only static layer configuration, so all
+        layers with an equal layer_config share one instance.
+        """
+        key = (backend, layer_config)
+        impl = self._attention_impls.get(key)
+        if impl is None:
+            impl = self._attention_impls[key] = backend.get_impl_cls()(layer_config)
+        return impl
 
     @staticmethod
     def get_gpu_workspace_buffer(key_name: str, workspace_size: int, dtype: torch.dtype = torch.int8) -> torch.Tensor:
@@ -73,9 +93,51 @@ class BaseAttBackend:
         return is_main_model and has_decode_draft_step and dynamic_verify_enabled
 
     def uses_causal_attention(self) -> bool:
-        args = get_env_start_args()
-        is_parallel_block_draft = self.model.is_mtp_draft_model and args.mtp_mode in ("dspark", "dflash", "dflash2")
-        return not is_parallel_block_draft
+        # Only parallel block-draft models attend non-causally within a block.
+        if not self.model.is_mtp_draft_model:
+            return True
+        return get_env_start_args().mtp_mode not in ("dspark", "dflash", "dflash2")
+
+
+def build_attention_batch(infer_state: "InferStateInfo", backend: BaseAttBackend) -> AttentionBatch:
+    """Describe one step's requests for attention step builders, from its InferStateInfo.
+
+    CUDA graph capture and replay steps carry the model's graph kv length capacity, so step builders
+    can size and configure captured work for every length a replay may see. Decode steps of
+    speculative decoding describe how query rows group into requests. Fields the step does not
+    set are None.
+    """
+    model = backend.model
+    uses_cuda_graph = infer_state.is_cuda_graph_capture or infer_state.is_cuda_graph_replay
+    decode_rows_per_request, dynamic_decode_rows = 1, False
+    if not infer_state.is_prefill and getattr(model, "mtp_manager", None) is not None:
+        decode_rows_per_request = model.mtp_manager.get_decode_draft_step(model.is_mtp_draft_model) + 1
+        dynamic_decode_rows = decode_rows_per_request > 1 and backend.uses_dynamic_spec_verify_layout()
+    return AttentionBatch(
+        req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
+        b_req_idx=infer_state.b_req_idx,
+        b_seq_len=infer_state.b_seq_len,
+        batch_size=infer_state.batch_size,
+        max_kv_seq_len=infer_state.max_kv_seq_len,
+        total_token_num=infer_state.total_token_num,
+        cu_q_seq_len=infer_state.b1_cu_q_seq_len,
+        cu_kv_seq_len=infer_state.b1_cu_kv_seq_len,
+        b_q_start_loc=infer_state.b_q_start_loc,
+        b_ready_cache_len=infer_state.b_ready_cache_len,
+        max_q_seq_len=infer_state.max_q_seq_len if infer_state.max_q_seq_len is not None else 1,
+        decode_rows_per_request=decode_rows_per_request,
+        dynamic_decode_rows=dynamic_decode_rows,
+        pad_req_idx=getattr(infer_state.req_manager, "HOLD_REQUEST_ID", None),
+        b_shared_seq_len=getattr(infer_state, "b_shared_seq_len", None),
+        b_mtp_index=getattr(infer_state, "b_mtp_index", None),
+        b_image_token_end=getattr(infer_state, "b_image_token_end", None),
+        b_image_token_start=getattr(infer_state, "b_image_token_start", None),
+        max_ready_cache_len=infer_state.max_cache_len or 0,
+        mem_index=infer_state.mem_index,
+        b_shared_radix_node_id=getattr(infer_state, "b_shared_radix_node_id", None),
+        cuda_graph_max_kv_seq_len=model.graph_max_len_in_batch if uses_cuda_graph else None,
+        microbatch_index=infer_state.microbatch_index,
+    )
 
 
 @dataclass
@@ -107,6 +169,10 @@ class AttControl:
     linear_att_decode_dict: Dict = None
     # 静态 FP8 标定按此逻辑层号查询 State 的物理行；其他后端可不使用。
     logical_layer_id: Optional[int] = None
+    # 量化 KV cache 的本层 scale，由模型层从 attention State 取得（get_layer_kv_scales）；未量化时为 None。
+    kv_scales: Optional["GQAKVScales"] = None
+    # 本层在图像片段内做双向 attention（片段由 InferStateInfo.b_image_token_end 给出），仅用于 prefill。
+    image_spans: bool = False
 
 
 @dataclass

@@ -99,46 +99,56 @@ def test_fa3_runtime_matches_cached_config_by_actual_length(monkeypatch):
 
 @pytest.mark.parametrize("page_size, actual_kv_len", [(1, 8192), (16, 8191), (256, 8192)])
 def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, page_size, actual_kv_len):
-    graph = SimpleNamespace(can_run=lambda **kwargs: True, graph_max_len_in_batch=32768)
+    from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeStepBuilder
+    from lightllm.common.basemodel.triton_kernel import fa3_utils
+    from lightllm.utils import sgl_utils
+
     model = SimpleNamespace(
-        graph=graph,
-        req_manager=SimpleNamespace(req_to_token_indexs=torch.zeros(2, 8192, dtype=torch.int32)),
+        graph_max_len_in_batch=32768,
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
     )
     infer_state = InferStateInfo()
+    infer_state.is_prefill = False
+    infer_state.is_cuda_graph_capture = True
     infer_state.batch_size = 2
     infer_state.max_kv_seq_len = actual_kv_len
     infer_state.microbatch_index = 0
+    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.zeros(2, 8192, dtype=torch.int32))
     infer_state.b_req_idx = torch.tensor([0, 1], dtype=torch.int32)
     infer_state.b_seq_len = torch.tensor([4096, actual_kv_len], dtype=torch.int32)
     infer_state.b1_cu_q_seq_len = torch.tensor([0, 1, 2], dtype=torch.int32)
     infer_state.b1_cu_kv_seq_len = torch.tensor([0, 4096, 4096 + actual_kv_len], dtype=torch.int32)
+    page_table_view = lambda rows, max_kv_len, microbatch_index: torch.zeros(  # noqa: E731
+        rows, math.ceil(max_kv_len / page_size), dtype=torch.int32
+    )
     state = fa3_module.Fa3DecodeAttState(
         backend=SimpleNamespace(
             model=model,
             infer_page_size=page_size,
+            kv_quant=None,
             uses_causal_attention=lambda: True,
             uses_dynamic_spec_verify_layout=lambda: False,
-            get_page_table_view=lambda att_batch_size, max_kv_len, microbatch_index: torch.zeros(
-                att_batch_size, math.ceil(max_kv_len / page_size), dtype=torch.int32
-            ),
+            decode_step_builder=FA3GQADecodeStepBuilder(page_size=page_size, page_table_view=page_table_view),
+            get_attention_impl=lambda backend, layer_config: backend.get_impl_cls()(layer_config),
         ),
         _infer_state_weak_ref=weakref.ref(infer_state),
     )
     copy_calls = []
-    monkeypatch.setattr(fa3_module, "page_table_copy", lambda **kwargs: copy_calls.append(kwargs))
+    monkeypatch.setattr(fa3_utils, "page_table_copy", lambda **kwargs: copy_calls.append(kwargs))
     state.init_state()
     # 模拟 CudaGraph._capture_decode 对 infer_state 的修改。
-    state.infer_state.max_kv_seq_len = graph.graph_max_len_in_batch
+    state.infer_state.max_kv_seq_len = model.graph_max_len_in_batch
     calls = []
 
     def attention(**kwargs):
         calls.append(kwargs)
-        return kwargs["q"]
+        return kwargs["out"]
 
-    monkeypatch.setattr(fa3_module, "flash_attn_with_kvcache_autotune", attention)
-    state.decode_att(torch.empty(2, 4, 8), torch.empty(page_size, 2, 8), torch.empty(page_size, 2, 8))
+    monkeypatch.setattr(sgl_utils, "flash_attn_with_kvcache_autotune", attention)
+    q = torch.empty(2, 4, 8, dtype=torch.bfloat16)
+    cache = torch.empty(page_size, 2, 8, dtype=torch.bfloat16)
+    state.decode_att(q, cache, cache)
     assert calls[0]["max_seqlen_k"] == actual_kv_len
     assert calls[0]["page_table"].shape == (2, 32768 // page_size)
 

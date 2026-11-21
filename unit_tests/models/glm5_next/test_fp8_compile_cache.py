@@ -1,9 +1,7 @@
 import pytest
 import torch
 
-from lightllm.models.glm5_next.triton_kernel import (
-    fp8_prefill as fp8,
-)
+from lightllm.common.attention.kernels.sparse_mla import fp8_group64_prefill as fp8
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 

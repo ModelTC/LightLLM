@@ -1,8 +1,8 @@
+from lightllm.common.attention.backends.gdn.flashqla import FlashQLAGDNPrefillBackend
 from lightllm.common.basemodel.attention.linear.gdn import LinearAttBackend
 
 
 class FlashQlaLinearAttBackend(LinearAttBackend):
-    def get_prefill_kernel(self):
-        from flash_qla import chunk_gated_delta_rule
+    """Native GDN state, FlashQLA chunked prefill."""
 
-        return chunk_gated_delta_rule
+    prefill_backend = FlashQLAGDNPrefillBackend

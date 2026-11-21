@@ -145,10 +145,9 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         # once per infer_state on a single shape — both unworkable for the
         # heterogeneous layout. Both layer kinds go through triton.
         #
-        # Primary backend = sliding layers. Sliding prefill bypasses the
-        # backend and calls gemma4_mm directly (SWA + image bidi in one
-        # pass); the prefill_att_state created here is unused but the
-        # framework requires prefill_att_backend to be non-None.
+        # Primary backend = sliding layers. Their prefill also attends
+        # bidirectionally inside image spans (SWA + image bidi in one pass),
+        # which the Triton backend supports.
         self.prefill_att_backend = TritonAttBackend(model=self)
         self.decode_att_backend = TritonAttBackend(model=self)
 

@@ -2,16 +2,16 @@ import dataclasses
 import weakref
 import torch
 import triton
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from typing import Optional, TYPE_CHECKING
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl, build_attention_batch
+from typing import Optional
 from lightllm.utils.envs_utils import enable_env_vars
-from lightllm.utils.sgl_utils import flash_attn_with_kvcache, flash_attn_with_kvcache_autotune
-from lightllm.common.basemodel.triton_kernel.fa3_utils import (
-    build_dynamic_spec_fa3_decode_params,
-    page_table_copy,
+from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+from lightllm.common.attention.backends.gqa.fa3 import (
+    FA3GQADecodeBackend,
+    FA3GQADecodeStepArgs,
+    FA3GQAPrefillBackend,
+    FA3GQAPrefillStepArgs,
 )
-from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
-from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
 
 
 class Fa3AttBackend(BaseAttBackend):
@@ -20,10 +20,19 @@ class Fa3AttBackend(BaseAttBackend):
     # 设为 1 / TRUE / ON 时，FA3 与 CPU cache 搬运在 GPU 上互相等待。
     requires_cpu_cache_sync = enable_env_vars("LIGHTLLM_FA3_CPU_CACHE_SYNC")
     page_table_buffers = None
+    # How the KV cache this backend reads is quantized; see GQALayerConfig.kv_quant.
+    kv_quant: Optional[str] = None
 
     def __init__(self, model):
         super().__init__(model=model)
         self._init_infer_page_size()
+        self.prefill_step_builder = FA3GQAPrefillBackend.get_step_builder_cls()(page_size=self.infer_page_size)
+        # BaseAttBackend reuses one instance per model but reruns __init__ on every construction.
+        # Keep the decode step builder: captured CUDA graphs read the tensors it keeps.
+        if getattr(self, "decode_step_builder", None) is None:
+            self.decode_step_builder = FA3GQADecodeBackend.get_step_builder_cls()(
+                page_size=self.infer_page_size, page_table_view=self.get_page_table_view
+            )
 
     def _init_infer_page_size(self):
         self.infer_page_size = self.model.args.page_size
@@ -86,31 +95,33 @@ class Fa3AttBackend(BaseAttBackend):
         return Fa3DecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
+def _gqa_layer_inputs_and_config(q, k, v, att_control: AttControl, causal: bool, kv_quant: Optional[str]):
+    assert att_control.use_alibi is False, "FA3 GQA does not support alibi"
+    sinks = att_control.sink_weight if att_control.use_att_sink else None
+    kv_scales = att_control.kv_scales
+    layer_config = GQALayerConfig(
+        num_heads=q.shape[1],
+        num_kv_heads=k.shape[1],
+        head_dim=q.shape[2],
+        dtype=q.dtype,
+        sliding_window=att_control.sliding_window if att_control.use_sliding_window else (-1, -1),
+        causal=causal,
+        has_sinks=sinks is not None,
+        kv_quant=kv_quant,
+        bidirectional_image_spans=att_control.image_spans,
+        has_q_scale=kv_scales is not None and kv_scales.q_scale is not None,
+    )
+    return GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sinks, kv_scales=kv_scales), layer_config
+
+
 @dataclasses.dataclass
 class Fa3PrefillAttState(BasePrefillAttState):
-    cu_seqlens_q: torch.Tensor = None
-    cu_seqlens_k: torch.Tensor = None
-    page_table: torch.Tensor = None
+    step_args: Optional[FA3GQAPrefillStepArgs] = None
     causal: bool = None
 
     def init_state(self):
         self.causal = self.backend.uses_causal_attention()
-        self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
-        self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
-        self.page_table = torch.empty(
-            (
-                self.infer_state.batch_size,
-                triton.cdiv(self.infer_state.max_kv_seq_len, self.backend.infer_page_size),
-            ),
-            dtype=torch.int32,
-            device=self.infer_state.input_ids.device,
-        )
-        page_table_copy(
-            page_table=self.page_table,
-            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
-            b_req_idx=self.infer_state.b_req_idx,
-            page_size=self.backend.infer_page_size,
-        )
+        self.step_args = self.backend.prefill_step_builder.build(build_attention_batch(self.infer_state, self.backend))
 
     def prefill_att(
         self,
@@ -120,158 +131,24 @@ class Fa3PrefillAttState(BasePrefillAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.use_alibi is False
-        return self._nomarl_prefill_att(
-            q=q,
-            k=k,
-            v=v,
-            att_control=att_control,
-            alloc_func=alloc_func,
+        layer_inputs, layer_config = _gqa_layer_inputs_and_config(
+            q, k, v, att_control, self.causal, self.backend.kv_quant
         )
-
-    def _nomarl_prefill_att(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, att_control: AttControl, alloc_func=torch.empty
-    ) -> torch.Tensor:
-        self.backend: Fa3AttBackend = self.backend  # for typing
-
-        if att_control.use_sliding_window:
-            window_size = att_control.sliding_window
-        else:
-            window_size = (-1, -1)
-
-        if att_control.use_att_sink:
-            sink_weight: torch.Tensor = att_control.sink_weight
-        else:
-            sink_weight = None
-
-        k_descale, v_descale = None, None  # disable quantization
-        Lq = q.shape[-1]
-        sm_scale = 1.0 / (Lq ** 0.5)
-        o = flash_attn_with_kvcache(
-            q=q,
-            k_cache=k.view(-1, self.backend.infer_page_size, k.shape[1], k.shape[2]),
-            v_cache=v.view(-1, self.backend.infer_page_size, v.shape[1], v.shape[2]),
-            page_table=self.page_table,
-            cache_seqlens=self.infer_state.b_seq_len,
-            cu_seqlens_q=self.cu_seqlens_q,
-            cu_seqlens_k_new=self.cu_seqlens_k,
-            max_seqlen_q=self.infer_state.max_q_seq_len,
-            softmax_scale=sm_scale,
-            causal=self.causal,
-            window_size=window_size,
-            softcap=0.0,
-            k_descale=k_descale,
-            v_descale=v_descale,
-            return_softmax_lse=False,
-            sinks=sink_weight,
+        impl = self.backend.get_attention_impl(FA3GQAPrefillBackend, layer_config)
+        return impl.forward(
+            self.step_args, layer_inputs, out=alloc_func(q.shape, dtype=q.dtype, device=q.device), alloc_func=alloc_func
         )
-        return o
 
 
 @dataclasses.dataclass
 class Fa3DecodeAttState(BaseDecodeAttState):
-    cu_seqlens_q: torch.Tensor = None
-    cu_seqlens_k: torch.Tensor = None
-    page_table: torch.Tensor = None
-    b_att_seq_len: torch.Tensor = None
-    # 在是否开启mtp 的不同模式下，其设置不同的值，可以加速算子的运行。
-    decode_max_q_seq_len: int = None
-    decode_max_kv_seq_len: int = None
+    step_args: Optional[FA3GQADecodeStepArgs] = None
     causal: bool = None
 
     def init_state(self):
-        self.backend: Fa3AttBackend = self.backend
         self.causal = self.backend.uses_causal_attention()
-        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
-        if self.backend.uses_dynamic_spec_verify_layout():
-            b_att_req_idx = self._init_dynamic_spec_verify_state(draft_step)
-        elif draft_step > 0:
-            b_att_req_idx = self._init_fixed_spec_decode_state(draft_step)
-        else:
-            b_att_req_idx = self._init_normal_decode_state()
-
-        self._init_page_table(b_att_req_idx)
-
-    def _init_dynamic_spec_verify_state(self, draft_step: int) -> torch.Tensor:
-        b_mark_mtp_shared_group = build_mtp_shared_group_markers(
-            self.infer_state.b_req_idx,
-            hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
-        )
-        b_q_seq_len, b_kv_seq_len, b_att_req_idx, self.b_att_seq_len = build_dynamic_spec_fa3_decode_params(
-            b_req_idx=self.infer_state.b_req_idx,
-            b_seq_len=self.infer_state.b_seq_len,
-            b_mark_mtp_shared_group=b_mark_mtp_shared_group,
-            att_batch_size=self.infer_state.batch_size,
-            hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
-        )
-        self._init_spec_decode_cu_seqlens(b_q_seq_len, b_kv_seq_len)
-        self.decode_max_q_seq_len = draft_step + 1
-        return b_att_req_idx
-
-    def _init_fixed_spec_decode_state(self, draft_step: int) -> torch.Tensor:
-        mtp_size = draft_step + 1
-        assert self.infer_state.batch_size % mtp_size == 0, (
-            "FA3 fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
-            f"got batch_size={self.infer_state.batch_size}, draft_step={draft_step}."
-        )
-
-        b_q_seq_len = torch.full(
-            (self.infer_state.b_seq_len.shape[0] // mtp_size,),
-            fill_value=mtp_size,
-            dtype=torch.int32,
-            device=self.infer_state.b_seq_len.device,
-        )
-        b_kv_seq_len = self.infer_state.b_seq_len[draft_step::mtp_size]
-        b_att_req_idx = self.infer_state.b_req_idx[draft_step::mtp_size]
-        self.b_att_seq_len = b_kv_seq_len.contiguous()
-        self._init_spec_decode_cu_seqlens(b_q_seq_len, b_kv_seq_len)
-        self.decode_max_q_seq_len = mtp_size
-        return b_att_req_idx
-
-    def _init_normal_decode_state(self) -> torch.Tensor:
-        self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
-        self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
-        self.b_att_seq_len = self.infer_state.b_seq_len
-        self.decode_max_q_seq_len = 1
-        return self.infer_state.b_req_idx
-
-    def _init_spec_decode_cu_seqlens(self, b_q_seq_len: torch.Tensor, b_kv_seq_len: torch.Tensor):
-        b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_kv_seq_len)
-        self.cu_seqlens_q = b1_cu_q_seq_len.int()
-        self.cu_seqlens_k = b1_cu_kv_seq_len.int()
-
-    def _init_page_table(self, b_att_req_idx: torch.Tensor):
-        att_batch_size = b_att_req_idx.shape[0]
-        model = self.backend.model
-        actual_max_kv_len = self.infer_state.max_kv_seq_len
-        # Graph 捕获会将 infer_state.max_kv_seq_len 改为容量上限，提前保存真实长度用于 FA3 配置查找。
-        self.decode_max_kv_seq_len = actual_max_kv_len
-        actual_max_page_len = triton.cdiv(actual_max_kv_len, self.backend.infer_page_size)
-        page_table_width = actual_max_kv_len
-        if model.graph is not None and model.graph.can_run(
-            batch_size=self.infer_state.batch_size,
-            max_len_in_batch=actual_max_kv_len,
-        ):
-            # CUDA Graph replay uses the shape and strides captured with the
-            # graph-wide maximum KV length. Keep that fixed row stride while
-            # writing only the valid portion of each runtime row below.
-            page_table_width = model.graph.graph_max_len_in_batch
-
-        self.page_table = self.backend.get_page_table_view(
-            att_batch_size=att_batch_size,
-            max_kv_len=page_table_width,
-            microbatch_index=self.infer_state.microbatch_index,
-        )
-
-        page_table_copy(
-            page_table=self.page_table[:, :actual_max_page_len],
-            req_to_token_indexs=model.req_manager.req_to_token_indexs,
-            b_req_idx=b_att_req_idx,
-            page_size=self.backend.infer_page_size,
-        )
-
-    def copy_for_decode_cuda_graph(self, new_state: "Fa3DecodeAttState"):
-        super().copy_for_decode_cuda_graph(new_state)
+        # Replay steps also build: the step builder rewrites the tensors the graph captured.
+        self.step_args = self.backend.decode_step_builder.build(build_attention_batch(self.infer_state, self.backend))
 
     def decode_att(
         self,
@@ -281,53 +158,10 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        assert att_control.use_alibi is False
-        return self._normal_decode_att(
-            q=q,
-            k=k,
-            v=v,
-            att_control=att_control,
-            alloc_func=alloc_func,
+        layer_inputs, layer_config = _gqa_layer_inputs_and_config(
+            q, k, v, att_control, self.causal, self.backend.kv_quant
         )
-
-    def _normal_decode_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl,
-        alloc_func=torch.empty,
-    ):
-        if att_control.use_sliding_window:
-            window_size = att_control.sliding_window
-        else:
-            window_size = (-1, -1)
-
-        if att_control.use_att_sink:
-            sink_weight: torch.Tensor = att_control.sink_weight
-        else:
-            sink_weight = None
-
-        k_descale, v_descale = None, None  # disable quantization
-        Lq = q.shape[-1]
-        sm_scale = 1.0 / (Lq ** 0.5)
-        o = flash_attn_with_kvcache_autotune(
-            q=q,
-            k_cache=k.view(-1, self.backend.infer_page_size, k.shape[1], k.shape[2]),
-            v_cache=v.view(-1, self.backend.infer_page_size, v.shape[1], v.shape[2]),
-            page_table=self.page_table,
-            cache_seqlens=self.b_att_seq_len,
-            cu_seqlens_q=self.cu_seqlens_q,
-            cu_seqlens_k_new=None,  # KV 已提前写入缓存，此处不追加新的 K/V。
-            max_seqlen_q=self.decode_max_q_seq_len,
-            max_seqlen_k=self.decode_max_kv_seq_len,
-            softmax_scale=sm_scale,
-            causal=self.causal,
-            window_size=window_size,
-            softcap=0.0,
-            k_descale=k_descale,
-            v_descale=v_descale,
-            return_softmax_lse=False,
-            sinks=sink_weight,
+        impl = self.backend.get_attention_impl(FA3GQADecodeBackend, layer_config)
+        return impl.forward(
+            self.step_args, layer_inputs, out=alloc_func(q.shape, dtype=q.dtype, device=q.device), alloc_func=alloc_func
         )
-        return o

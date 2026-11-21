@@ -1,7 +1,7 @@
 """KDA replay 的 bounded attention 状态。
 
 Conv、canonical SSM、replay history、页布局和已接受快照都在本类。
-一层 decode 重放在 replay_kda_decode。
+一层 decode 重放在 kernels/kda/replay_kda.py。
 """
 
 from __future__ import annotations

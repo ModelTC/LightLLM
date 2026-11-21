@@ -18,6 +18,9 @@ logger = init_logger(__name__)
 class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     """ """
 
+    # Whether prefill attends bidirectionally inside image spans (InferStateInfo.b_image_token_end).
+    prefill_image_spans = False
+
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.eps_ = network_config["rms_norm_eps"]
@@ -58,7 +61,11 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             q=_q,
             k=_k,
             v=_v,
-            att_control=AttControl(logical_layer_id=self.layer_num_),
+            att_control=AttControl(
+                logical_layer_id=self.layer_num_,
+                kv_scales=state.get_layer_kv_scales(self.layer_num_),
+                image_spans=self.prefill_image_spans,
+            ),
             alloc_func=self.alloc_tensor,
         )
         o_tensor = o_tensor.view(q.shape)
@@ -82,7 +89,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             q=_q,
             k=_k,
             v=_v,
-            att_control=AttControl(logical_layer_id=self.layer_num_),
+            att_control=AttControl(
+                logical_layer_id=self.layer_num_, kv_scales=state.get_layer_kv_scales(self.layer_num_)
+            ),
             alloc_func=self.alloc_tensor,
         )
         return o_tensor.view(q.shape)

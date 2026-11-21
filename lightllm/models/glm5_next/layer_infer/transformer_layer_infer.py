@@ -211,7 +211,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=infer_state.prefill_att_state,
+            nsa_step=infer_state.nsa_step,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
@@ -230,6 +230,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 nsa_prefill_dict={
                     "topk_mem_indices": topk_mem_indices,
                     "topk_indices": topk_indices,
+                    "q_kv_start_loc": infer_state.nsa_step.q_kv_start_loc,
                     "prefill_cache_kv": kv,
                     "softmax_scale": self.softmax_scale,
                     "kv_lora_rank": self.kv_lora_rank,
@@ -297,7 +298,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=infer_state.decode_att_state,
+            nsa_step=infer_state.nsa_step,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
@@ -354,6 +355,25 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         raw_decay_gate, raw_output_gate = layer_weight.project_kda_fg_b(decay_gate_hidden, output_gate_hidden)
         return qkv, raw_decay_gate, beta_logits, raw_output_gate
 
+    def _kda_att_dict(self, mixed_qkv, raw_gate, raw_beta, infer_state, layer_weight) -> dict:
+        """Gather the layer's KDA operands, parameters and recurrent state views."""
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role, state_type_filter="kda", logical_layer_id=self.layer_num_
+        )
+        conv_states, ssm_states = state.get_layer_view(logical_layer_id=self.layer_num_)
+        return {
+            "mixed_qkv": mixed_qkv,
+            "raw_gate": raw_gate,
+            "raw_beta": raw_beta,
+            "conv_weight": layer_weight.get_merged_kda_conv_weight(),
+            "A_log": layer_weight.linear_A_log.weight,
+            "dt_bias": layer_weight.linear_dt_bias.weight,
+            "conv_states": conv_states,
+            "ssm_states": ssm_states,
+            "state": state,
+            "layer_num": self.layer_num_,
+        }
+
     def _kda_post(self, core_output, raw_output_gate, infer_state, layer_weight):
         tokens = raw_output_gate.shape[0]
         core_output = core_output.view(-1, self.linear_head_dim)
@@ -383,7 +403,6 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         output at stable addresses, then register it as a CPU-side replay step
         between the surrounding CUDA-graph segments.
         """
-        backend = infer_state.prefill_att_state1.backend
         mixed_qkv = mixed_qkv.contiguous()
         raw_decay_gate = raw_decay_gate.contiguous()
         beta_logits = beta_logits.contiguous()
@@ -394,11 +413,10 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
         pre_capture_graph.__exit__(None, None, None)
 
-        # chunk_kda_with_fused_gate returns [1, tokens, heads, head_dim].
-        # Construct this shape directly instead of dry-running the kernel:
+        # Construct the output shape directly instead of dry-running the kernel:
         # kernel setup may synchronize with the host, which is illegal while a
         # CUDA graph capture is active.
-        output_shape = (1, mixed_qkv.shape[0], backend.tp_num_heads, backend.head_dim)
+        output_shape = (mixed_qkv.shape[0], self.tp_linear_num_heads, self.linear_head_dim)
         infer_state.prefill_cuda_graph_create_graph_obj()
         infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
         output = torch.empty(output_shape, dtype=mixed_qkv.dtype, device=mixed_qkv.device)
@@ -411,13 +429,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 v=None,
                 att_control=AttControl(
                     linear_att_prefill=True,
-                    linear_att_prefill_dict={
-                        "mixed_qkv": _mixed_qkv,
-                        "raw_gate": _raw_decay_gate,
-                        "raw_beta": _beta_logits,
-                        "layer_weight": layer_weight,
-                        "layer_num": self.layer_num_,
-                    },
+                    linear_att_prefill_dict=self._kda_att_dict(
+                        _mixed_qkv, _raw_decay_gate, _beta_logits, new_infer_state, layer_weight
+                    ),
                 ),
                 alloc_func=self.alloc_tensor,
             )
@@ -451,13 +465,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 v=None,
                 att_control=AttControl(
                     linear_att_prefill=True,
-                    linear_att_prefill_dict={
-                        "mixed_qkv": qkv,
-                        "raw_gate": raw_decay_gate,
-                        "raw_beta": beta_logits,
-                        "layer_weight": layer_weight,
-                        "layer_num": self.layer_num_,
-                    },
+                    linear_att_prefill_dict=self._kda_att_dict(
+                        qkv, raw_decay_gate, beta_logits, infer_state, layer_weight
+                    ),
                 ),
                 alloc_func=self.alloc_tensor,
             )
@@ -475,13 +485,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             v=None,
             att_control=AttControl(
                 linear_att_decode=True,
-                linear_att_decode_dict={
-                    "mixed_qkv": qkv,
-                    "raw_gate": raw_decay_gate,
-                    "raw_beta": beta_logits,
-                    "layer_weight": layer_weight,
-                    "layer_num": self.layer_num_,
-                },
+                linear_att_decode_dict=self._kda_att_dict(qkv, raw_decay_gate, beta_logits, infer_state, layer_weight),
             ),
             alloc_func=self.alloc_tensor,
         )

@@ -1,8 +1,8 @@
-import dataclasses
-import weakref
+from typing import Optional
+
 import torch
-from ..base_att import AttControl
-from .fp import FlashInferAttBackend, FlashInferPrefillAttState, FlashInferDecodeAttState
+
+from .fp import FlashInferAttBackend
 from .env_utils import set_flashinfer_envs
 from lightllm.utils.log_utils import init_logger
 
@@ -11,10 +11,16 @@ logger = init_logger(__name__)
 
 
 class Fp8FlashInferAttBackend(FlashInferAttBackend):
+    """FlashInfer over a static per-tensor FP8 KV cache; scales come per layer in AttControl.kv_scales."""
+
+    kv_quant: Optional[str] = "fp8_per_tensor"
+
     def __init__(self, model):
         set_flashinfer_envs()
         super().__init__(model=model)
-        self.kv_data_type = torch.float8_e4m3fn
+
+    def _kv_data_type(self) -> torch.dtype:
+        return torch.float8_e4m3fn
 
     def _init_infer_page_size(self):
         # TODO: FP8 FlashInfer 完成多 token 推理页适配后，改为继承模型 page_size。
@@ -27,120 +33,3 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
             "Fp8FlashInferAttBackend temporarily uses infer_page_size=1 with "
             f"model page_size={self.model.args.page_size}; multi-token FP8 inference pages are not implemented yet."
         )
-
-    def create_att_prefill_state(self, infer_state) -> "Fp8FlashInferPrefillAttState":
-        return Fp8FlashInferPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
-
-    def create_att_decode_state(self, infer_state) -> "Fp8FlashInferDecodeAttState":
-        return Fp8FlashInferDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
-
-
-@dataclasses.dataclass
-class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
-    def init_state(self):
-        super().init_state()
-
-    def prefill_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
-        return self._fp8_prefill_att(
-            q=q,
-            k=k,
-            v=v,
-            alloc_func=alloc_func,
-            logical_layer_id=att_control.logical_layer_id,
-        )
-
-    def _fp8_prefill_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        logical_layer_id: int,
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
-        k = k.unsqueeze(1).view(torch.float8_e4m3fn)
-        v = v.unsqueeze(1).view(torch.float8_e4m3fn)
-        state = self.infer_state.att_state_manager.get_state(
-            self.infer_state.att_state_role, "gqa_fp8_static_per_tensor", logical_layer_id
-        )
-        storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
-        k_descale = state.cpu_scales[storage_layer_index][0]
-        v_descale = state.cpu_scales[storage_layer_index][1]
-        self.prefill_wrapper.run(
-            q=q,
-            paged_kv_cache=(k, v),
-            k_scale=k_descale,
-            v_scale=v_descale,
-            out=o_tensor,
-        )
-        return o_tensor
-
-
-@dataclasses.dataclass
-class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
-    def init_state(self):
-        super().init_state()
-
-    def copy_for_decode_cuda_graph(self, new_state):
-        return super().copy_for_decode_cuda_graph(new_state)
-
-    def decode_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ):
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
-        return self._fp8_decode_att(
-            q=q,
-            k=k,
-            v=v,
-            alloc_func=alloc_func,
-            logical_layer_id=att_control.logical_layer_id,
-        )
-
-    def _fp8_decode_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        logical_layer_id: int,
-        alloc_func=torch.empty,
-    ):
-        o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
-
-        k = k.unsqueeze(1).view(torch.float8_e4m3fn)
-        v = v.unsqueeze(1).view(torch.float8_e4m3fn)
-        state = self.infer_state.att_state_manager.get_state(
-            self.infer_state.att_state_role, "gqa_fp8_static_per_tensor", logical_layer_id
-        )
-        storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
-
-        k_descale = state.cpu_scales[storage_layer_index][0]
-        v_descale = state.cpu_scales[storage_layer_index][1]
-        self.decode_wrapper.run(
-            q=q,
-            paged_kv_cache=(k, v),
-            k_scale=k_descale,
-            v_scale=v_descale,
-            out=o_tensor,
-        )
-        return o_tensor

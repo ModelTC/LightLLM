@@ -8,6 +8,7 @@ from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNS
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerInfer
 from lightllm.models.sensenova_loop.config import get_loop_layer_indices, get_loop_layer_types
 from lightllm.server.core.objs.start_args_type import StartArgs
 
@@ -81,7 +82,9 @@ def test_gdn_decode_keeps_logical_layer_state(
 
         def conv_pack(mixed, z, a, b, conv, *args):
             conv[1].add_(1)
-            return (*backend._rearrange_mixed_qkv(mixed, decode=True), z, a, b)
+            q, k, v = mixed.split([32, 32, 64], dim=-1)
+            rows = mixed.shape[0]
+            return q.view(rows, 1, 1, 32), k.view(rows, 1, 1, 32), v.view(rows, 1, 2, 32), z, a, b
 
         def conv_mtp(mixed, conv, *args, **kwargs):
             conv[1].add_(1)
@@ -91,21 +94,33 @@ def test_gdn_decode_keeps_logical_layer_state(
             initial_state[mtp_step + 1 : 2 * (mtp_step + 1)].add_(1)
             return v, None
 
-        monkeypatch.setattr("lightllm.common.basemodel.attention.linear.gdn.conv_pack_gdn_decode_inputs", conv_pack)
+        monkeypatch.setattr(
+            "lightllm.common.attention.kernels.gdn.gdn_decode_pack.conv_pack_gdn_decode_inputs", conv_pack
+        )
         monkeypatch.setattr("lightllm.common.attention.kernels.gdn.causal_conv1d_mtp.causal_conv1d_update", conv_mtp)
         monkeypatch.setattr(
-            "lightllm.common.basemodel.attention.linear.gdn.fused_recurrent_gated_delta_rule", recurrent
+            "lightllm.common.attention.kernels.gdn.third_party_fla.ops.fused_recurrent."
+            "fused_recurrent_gated_delta_rule",
+            recurrent,
         )
         monkeypatch.setattr(
-            "lightllm.common.basemodel.attention.linear.gdn.mtp_fused_recurrent_gated_delta_rule",
+            "lightllm.common.attention.kernels.gdn.mtp_fused_recurrent.mtp_fused_recurrent_gated_delta_rule",
             recurrent,
         )
 
     infer = InferStateInfo()
     infer.att_state_manager, infer.att_state_role = resources, "main"
     infer.b_req_idx = torch.tensor([1], device=device, dtype=torch.int32)
-    control = dict(layer_num=logical_layer, layer_weight=weight)
-    mixed_dim = backend.tp_qkvz_dim + backend.tp_ba_dim
+    infer.req_manager = SimpleNamespace(req_to_token_indexs=torch.zeros(3, 8, device=device, dtype=torch.int32))
+    # The model layer resolves its state views and parameters by logical layer.
+    layer = Qwen3NextTransformerLayerInfer.__new__(Qwen3NextTransformerLayerInfer)
+    layer.layer_num_, layer.tp_linear_num_v_heads, layer.linear_head_v_dim, layer.tp_linear_key_dim = (
+        logical_layer,
+        2,
+        32,
+        32,
+    )
+    mixed_dim = 2 * 32 + 2 * 64 + 2 * 2
     if device == "cuda":
         infer.b1_cu_q_seq_len = torch.tensor([0, 5], device=device, dtype=torch.int32)
         infer.b_ready_cache_len = torch.zeros(1, device=device, dtype=torch.int32)
@@ -117,27 +132,29 @@ def test_gdn_decode_keeps_logical_layer_state(
             None,
             AttControl(
                 linear_att_prefill=True,
-                linear_att_prefill_dict=dict(
-                    **control, mixed_qkvzba=torch.randn(5, mixed_dim, device=device, dtype=dtype)
+                linear_att_prefill_dict=layer._gdn_att_dict(
+                    torch.randn(5, mixed_dim, device=device, dtype=dtype), infer, weight
                 ),
             ),
         )
 
     infer.batch_size = mtp_step + 1
     infer.b_req_idx = infer.b_req_idx.repeat(infer.batch_size)
+    infer.is_prefill = False
+    infer.b_seq_len = torch.ones_like(infer.b_req_idx)
     decode = backend.create_att_decode_state(infer)
     untouched = [i for i in range(len(layers)) if i != storage_layer]
     for _ in range(2):
         before_conv, before_ssm = resource.conv_state.clone(), resource.ssm_state.clone()
         decode.init_state()
-        output, _ = decode.decode_att(
+        output = decode.decode_att(
             None,
             None,
             None,
             AttControl(
                 linear_att_decode=True,
-                linear_att_decode_dict=dict(
-                    **control, mixed_qkvzba=torch.randn(infer.batch_size, mixed_dim, device=device, dtype=dtype)
+                linear_att_decode_dict=layer._gdn_att_dict(
+                    torch.randn(infer.batch_size, mixed_dim, device=device, dtype=dtype), infer, weight
                 ),
             ),
         )
