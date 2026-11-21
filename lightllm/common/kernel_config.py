@@ -9,8 +9,16 @@ from lightllm.utils.device_utils import get_current_device_name
 logger = init_logger(__name__)
 
 
-class KernelConfigs(ABC):
+def get_kernel_config_dir(parent, kernel_name: str) -> str:
+    # Colons in archive member paths are rejected by uv's source archive reader.
+    portable_path = os.path.join(parent, kernel_name.replace(":", "_"))
+    legacy_path = os.path.join(parent, kernel_name)
+    if not os.path.exists(portable_path) and os.path.exists(legacy_path):
+        return legacy_path
+    return portable_path
 
+
+class KernelConfigs(ABC):
     kernel_name: str = "unknown_kernel"
 
     @classmethod
@@ -27,8 +35,8 @@ class KernelConfigs(ABC):
         assert cls != KernelConfigs, "base class can not call this classmethod"
 
         json_file_name = KernelConfigs.get_config_file_name(params)
-        config_dir_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "all_kernel_configs", cls.kernel_name
+        config_dir_path = get_kernel_config_dir(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "all_kernel_configs"), cls.kernel_name
         )
 
         config_file_path = os.path.join(config_dir_path, json_file_name)
@@ -47,8 +55,8 @@ class KernelConfigs(ABC):
         assert cls != KernelConfigs, "base class can not call this classmethod"
 
         json_file_name = KernelConfigs.get_config_file_name(params)
-        config_dir_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "all_kernel_configs", cls.kernel_name
+        config_dir_path = get_kernel_config_dir(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "all_kernel_configs"), cls.kernel_name
         )
         os.makedirs(config_dir_path, exist_ok=True)
         config_file_path = os.path.join(config_dir_path, json_file_name)

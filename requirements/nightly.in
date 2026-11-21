@@ -1,0 +1,53 @@
+# Highest priority first. Resolve and freeze each entry before the next one.
+# Core execution stack; Torch chooses its compatible Triton and CUDA builds.
+torch
+triton
+cuda-toolkit
+# Model loading and inference.
+transformers
+tokenizers
+huggingface-hub
+safetensors
+xgrammar
+apache-tvm-ffi
+numpy
+cupy-cuda13x
+sglang-kernel
+torchvision
+einops
+# Serving and protocol adapters.
+fastapi
+starlette
+pydantic
+hypercorn
+uvloop
+litellm
+# Auxiliary libraries may yield to the packages above.
+librosa
+Pillow
+websockets
+redis
+httpx
+atomics
+easydict
+filelock
+frozendict
+ninja
+orjson
+packaging
+partial-json-parser
+prometheus-client
+psutil
+PyYAML
+pyzmq
+regex
+requests
+rpyc
+sentencepiece
+setproctitle
+sortedcontainers
+tiktoken
+tqdm
+typing-extensions
+ujson
+xxhash

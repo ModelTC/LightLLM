@@ -1,0 +1,5 @@
+include requirements/runtime.txt
+include requirements/nightly.txt
+include VERSION
+include installer/manifest.json
+include tools/install.py

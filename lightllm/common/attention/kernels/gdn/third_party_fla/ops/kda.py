@@ -25,6 +25,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .block_pointer import make_block_ptr, load_block, store_block
+
 from lightllm.common.triton_utils.autotuner import autotune
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
@@ -116,7 +118,7 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
     Akk += (seq_start * head_num + head_id) * chunk_size
     Aqk += (seq_start * head_num + head_id) * chunk_size
 
-    p_beta = tl.make_block_ptr(
+    p_beta = make_block_ptr(
         base=beta + seq_start * head_num + head_id,
         shape=(seq_len,),
         strides=(head_num,),
@@ -124,12 +126,12 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
         block_shape=(subchunk_size,),
         order=(0,),
     )
-    beta_tile = tl.load(p_beta, boundary_check=(0,))
+    beta_tile = load_block(p_beta, boundary_check=(0,))
 
     kk_tile = tl.zeros([subchunk_size, subchunk_size], dtype=tl.float32)
     qk_tile = tl.zeros([subchunk_size, subchunk_size], dtype=tl.float32)
     for key_block_id in range(tl.cdiv(head_dim, head_block_size)):
-        p_q = tl.make_block_ptr(
+        p_q = make_block_ptr(
             base=q,
             shape=(seq_len, head_dim),
             strides=(head_num * head_dim, 1),
@@ -137,7 +139,7 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
             block_shape=(subchunk_size, head_block_size),
             order=(1, 0),
         )
-        p_k = tl.make_block_ptr(
+        p_k = make_block_ptr(
             base=k,
             shape=(seq_len, head_dim),
             strides=(head_num * head_dim, 1),
@@ -145,7 +147,7 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
             block_shape=(subchunk_size, head_block_size),
             order=(1, 0),
         )
-        p_g = tl.make_block_ptr(
+        p_g = make_block_ptr(
             base=g,
             shape=(seq_len, head_dim),
             strides=(head_num * head_dim, 1),
@@ -153,7 +155,7 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
             block_shape=(subchunk_size, head_block_size),
             order=(1, 0),
         )
-        p_k_col = tl.make_block_ptr(
+        p_k_col = make_block_ptr(
             base=k,
             shape=(head_dim, seq_len),
             strides=(1, head_num * head_dim),
@@ -161,7 +163,7 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
             block_shape=(head_block_size, subchunk_size),
             order=(0, 1),
         )
-        p_g_cols = tl.make_block_ptr(
+        p_g_cols = make_block_ptr(
             base=g,
             shape=(head_dim, seq_len),
             strides=(1, head_num * head_dim),
@@ -177,22 +179,22 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
         # [head_block_size,]
         g_anchor = tl.load(g + row_start * head_num * head_dim + channel_offsets, mask=valid_channels, other=0)
         # [subchunk_size, head_block_size]
-        g_rows = tl.load(p_g, boundary_check=(0, 1))
-        gated_k_rows = tl.load(p_k, boundary_check=(0, 1)) * exp2(g_rows - g_anchor[None, :])
+        g_rows = load_block(p_g, boundary_check=(0, 1))
+        gated_k_rows = load_block(p_k, boundary_check=(0, 1)) * exp2(g_rows - g_anchor[None, :])
         # [head_block_size, subchunk_size]
-        g_cols = tl.load(p_g_cols, boundary_check=(0, 1))
-        k_cols = tl.load(p_k_col, boundary_check=(0, 1))
+        g_cols = load_block(p_g_cols, boundary_check=(0, 1))
+        k_cols = load_block(p_k_col, boundary_check=(0, 1))
         # [head_block_size, subchunk_size]
         gated_k_cols = k_cols * exp2(g_anchor[:, None] - g_cols)
         kk_tile += tl.dot(gated_k_rows, gated_k_cols)
 
-        q_rows = tl.load(p_q, boundary_check=(0, 1))
+        q_rows = load_block(p_q, boundary_check=(0, 1))
         gated_q_rows = q_rows * exp2(g_rows - g_anchor[None, :]) * scale
         qk_tile += tl.dot(gated_q_rows, gated_k_cols)
 
     kk_tile *= beta_tile[:, None]
 
-    p_Akk = tl.make_block_ptr(
+    p_Akk = make_block_ptr(
         base=Akk,
         shape=(seq_len, chunk_size),
         strides=(head_num * chunk_size, 1),
@@ -200,8 +202,8 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
         block_shape=(subchunk_size, subchunk_size),
         order=(1, 0),
     )
-    tl.store(p_Akk, kk_tile.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    p_Aqk = tl.make_block_ptr(
+    store_block(p_Akk, kk_tile.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    p_Aqk = make_block_ptr(
         base=Aqk,
         shape=(seq_len, chunk_size),
         strides=(head_num * chunk_size, 1),
@@ -209,7 +211,7 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
         block_shape=(subchunk_size, subchunk_size),
         order=(1, 0),
     )
-    tl.store(p_Aqk, qk_tile.to(Aqk.dtype.element_ty), boundary_check=(0, 1))
+    store_block(p_Aqk, qk_tile.to(Aqk.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.jit
@@ -257,7 +259,7 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_intra(
         + subtile_id * subchunk_size
     )
 
-    p_q = tl.make_block_ptr(
+    p_q = make_block_ptr(
         base=q + (seq_start * head_num + head_id) * head_dim,
         shape=(seq_len, head_dim),
         strides=(head_num * head_dim, 1),
@@ -265,7 +267,7 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_intra(
         block_shape=(subchunk_size, head_block_size),
         order=(1, 0),
     )
-    p_k = tl.make_block_ptr(
+    p_k = make_block_ptr(
         base=k + (seq_start * head_num + head_id) * head_dim,
         shape=(seq_len, head_dim),
         strides=(head_num * head_dim, 1),
@@ -273,7 +275,7 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_intra(
         block_shape=(subchunk_size, head_block_size),
         order=(1, 0),
     )
-    p_g = tl.make_block_ptr(
+    p_g = make_block_ptr(
         base=g + (seq_start * head_num + head_id) * head_dim,
         shape=(seq_len, head_dim),
         strides=(head_num * head_dim, 1),
@@ -281,9 +283,9 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_intra(
         block_shape=(subchunk_size, head_block_size),
         order=(1, 0),
     )
-    q_rows = tl.load(p_q, boundary_check=(0, 1))
-    beta_k_rows = tl.load(p_k, boundary_check=(0, 1))
-    g_rows = tl.load(p_g, boundary_check=(0, 1))
+    q_rows = load_block(p_q, boundary_check=(0, 1))
+    beta_k_rows = load_block(p_k, boundary_check=(0, 1))
+    g_rows = load_block(p_g, boundary_check=(0, 1))
 
     p_beta = beta + (seq_start + row_start + row_offsets) * head_num + head_id
     beta_k_rows = beta_k_rows * tl.load(p_beta, mask=valid_rows, other=0)[:, None]
@@ -494,7 +496,7 @@ def recompute_w_u_fwd_kernel(
     seq_len = seq_end - seq_start
     chunk_start = chunk_id_in_seq * chunk_size
     last_idx = min(chunk_start + chunk_size, seq_len) - 1
-    p_beta = tl.make_block_ptr(
+    p_beta = make_block_ptr(
         base=beta + seq_start * head_num + head_id,
         shape=(seq_len,),
         strides=(head_num,),
@@ -502,9 +504,9 @@ def recompute_w_u_fwd_kernel(
         block_shape=(chunk_size,),
         order=(0,),
     )
-    beta_tile = tl.load(p_beta, boundary_check=(0,))
+    beta_tile = load_block(p_beta, boundary_check=(0,))
 
-    p_r = tl.make_block_ptr(
+    p_r = make_block_ptr(
         base=R + (seq_start * head_num + head_id) * chunk_size,
         shape=(seq_len, chunk_size),
         strides=(head_num * chunk_size, 1),
@@ -512,10 +514,10 @@ def recompute_w_u_fwd_kernel(
         block_shape=(chunk_size, chunk_size),
         order=(1, 0),
     )
-    r_tile = tl.load(p_r, boundary_check=(0, 1))
+    r_tile = load_block(p_r, boundary_check=(0, 1))
 
     for value_block_id in range(tl.cdiv(value_head_dim, value_block_size)):
-        p_v = tl.make_block_ptr(
+        p_v = make_block_ptr(
             base=v + (seq_start * head_num + head_id) * value_head_dim,
             shape=(seq_len, value_head_dim),
             strides=(head_num * value_head_dim, 1),
@@ -523,7 +525,7 @@ def recompute_w_u_fwd_kernel(
             block_shape=(chunk_size, value_block_size),
             order=(1, 0),
         )
-        p_u = tl.make_block_ptr(
+        p_u = make_block_ptr(
             base=u + (seq_start * head_num + head_id) * value_head_dim,
             shape=(seq_len, value_head_dim),
             strides=(head_num * value_head_dim, 1),
@@ -531,14 +533,14 @@ def recompute_w_u_fwd_kernel(
             block_shape=(chunk_size, value_block_size),
             order=(1, 0),
         )
-        v_tile = tl.load(p_v, boundary_check=(0, 1))
+        v_tile = load_block(p_v, boundary_check=(0, 1))
         weighted_v = (v_tile * beta_tile[:, None]).to(v_tile.dtype)
         # U: [chunk_size, chunk_size] @ [chunk_size, value_block_size] -> [chunk_size, value_block_size].
         u_tile = tl.dot(r_tile, weighted_v, input_precision=DOT_PRECISION)
-        tl.store(p_u, u_tile.to(p_u.dtype.element_ty), boundary_check=(0, 1))
+        store_block(p_u, u_tile.to(p_u[0].dtype.element_ty), boundary_check=(0, 1))
 
     for key_block_id in range(tl.cdiv(head_dim, head_block_size)):
-        p_w = tl.make_block_ptr(
+        p_w = make_block_ptr(
             base=w + (seq_start * head_num + head_id) * head_dim,
             shape=(seq_len, head_dim),
             strides=(head_num * head_dim, 1),
@@ -546,7 +548,7 @@ def recompute_w_u_fwd_kernel(
             block_shape=(chunk_size, head_block_size),
             order=(1, 0),
         )
-        p_k = tl.make_block_ptr(
+        p_k = make_block_ptr(
             base=k + (seq_start * head_num + head_id) * head_dim,
             shape=(seq_len, head_dim),
             strides=(head_num * head_dim, 1),
@@ -554,10 +556,10 @@ def recompute_w_u_fwd_kernel(
             block_shape=(chunk_size, head_block_size),
             order=(1, 0),
         )
-        k_tile = tl.load(p_k, boundary_check=(0, 1))
+        k_tile = load_block(p_k, boundary_check=(0, 1))
         weighted_k = k_tile * beta_tile[:, None]
 
-        p_gk = tl.make_block_ptr(
+        p_gk = make_block_ptr(
             base=gk + (seq_start * head_num + head_id) * head_dim,
             shape=(seq_len, head_dim),
             strides=(head_num * head_dim, 1),
@@ -565,7 +567,7 @@ def recompute_w_u_fwd_kernel(
             block_shape=(chunk_size, head_block_size),
             order=(1, 0),
         )
-        g_tile = tl.load(p_gk, boundary_check=(0, 1))
+        g_tile = load_block(p_gk, boundary_check=(0, 1))
         weighted_k *= exp2(g_tile)
 
         # Kg carries each write forward to the last valid token of this chunk.
@@ -577,7 +579,7 @@ def recompute_w_u_fwd_kernel(
             other=0.0,
         )
         kg_tile = k_tile * exp2(g_last - g_tile)
-        p_kg = tl.make_block_ptr(
+        p_kg = make_block_ptr(
             base=kg + (seq_start * head_num + head_id) * head_dim,
             shape=(seq_len, head_dim),
             strides=(head_num * head_dim, 1),
@@ -585,11 +587,11 @@ def recompute_w_u_fwd_kernel(
             block_shape=(chunk_size, head_block_size),
             order=(1, 0),
         )
-        tl.store(p_kg, kg_tile.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
+        store_block(p_kg, kg_tile.to(p_kg[0].dtype.element_ty), boundary_check=(0, 1))
 
         # W maps the chunk-entry state to corrections: [chunk_size, chunk_size] @ [chunk_size, head_block_size].
         w_tile = tl.dot(r_tile, weighted_k.to(k_tile.dtype))
-        tl.store(p_w, w_tile.to(p_w.dtype.element_ty), boundary_check=(0, 1))
+        store_block(p_w, w_tile.to(p_w[0].dtype.element_ty), boundary_check=(0, 1))
 
 
 def _get_kda_w_u_configs():
@@ -711,7 +713,7 @@ def chunk_gla_fwd_kernel_o(
 
     output_tile = tl.zeros([chunk_size, value_block_size], dtype=tl.float32)
     for key_block_id in range(tl.cdiv(head_dim, head_block_size)):
-        p_q = tl.make_block_ptr(
+        p_q = make_block_ptr(
             base=q + (seq_start * head_num + head_id) * head_dim,
             shape=(seq_len, head_dim),
             strides=(head_num * head_dim, 1),
@@ -719,7 +721,7 @@ def chunk_gla_fwd_kernel_o(
             block_shape=(chunk_size, head_block_size),
             order=(1, 0),
         )
-        p_g = tl.make_block_ptr(
+        p_g = make_block_ptr(
             base=g + (seq_start * head_num + head_id) * head_dim,
             shape=(seq_len, head_dim),
             strides=(head_num * head_dim, 1),
@@ -727,7 +729,7 @@ def chunk_gla_fwd_kernel_o(
             block_shape=(chunk_size, head_block_size),
             order=(1, 0),
         )
-        p_h = tl.make_block_ptr(
+        p_h = make_block_ptr(
             base=h + (global_chunk_id * head_num + head_id) * head_dim * value_head_dim,
             shape=(head_dim, value_head_dim),
             strides=(value_head_dim, 1),
@@ -737,17 +739,17 @@ def chunk_gla_fwd_kernel_o(
         )
 
         # [chunk_size, head_block_size]
-        q_tile = tl.load(p_q, boundary_check=(0, 1))
+        q_tile = load_block(p_q, boundary_check=(0, 1))
         q_tile = (q_tile * scale).to(q_tile.dtype)
         # [chunk_size, head_block_size]
-        g_tile = tl.load(p_g, boundary_check=(0, 1))
+        g_tile = load_block(p_g, boundary_check=(0, 1))
         # [chunk_size, head_block_size]
         gated_q_tile = (q_tile * exp2(g_tile)).to(q_tile.dtype)
         # Chunk-entry state tile S_in: [head_block_size, value_block_size].
-        state_tile = tl.load(p_h, boundary_check=(0, 1))
+        state_tile = load_block(p_h, boundary_check=(0, 1))
         # Historical contribution: scale * (Q * exp2(G)) @ S_in, [chunk_size, value_block_size].
         output_tile += tl.dot(gated_q_tile, state_tile.to(gated_q_tile.dtype))
-    p_e = tl.make_block_ptr(
+    p_e = make_block_ptr(
         base=v + (seq_start * head_num + head_id) * value_head_dim,
         shape=(seq_len, value_head_dim),
         strides=(head_num * value_head_dim, 1),
@@ -755,7 +757,7 @@ def chunk_gla_fwd_kernel_o(
         block_shape=(chunk_size, value_block_size),
         order=(1, 0),
     )
-    p_o = tl.make_block_ptr(
+    p_o = make_block_ptr(
         base=o + (seq_start * head_num + head_id) * value_head_dim,
         shape=(seq_len, value_head_dim),
         strides=(head_num * value_head_dim, 1),
@@ -763,7 +765,7 @@ def chunk_gla_fwd_kernel_o(
         block_shape=(chunk_size, value_block_size),
         order=(1, 0),
     )
-    p_Aqk = tl.make_block_ptr(
+    p_Aqk = make_block_ptr(
         base=Aqk + (seq_start * head_num + head_id) * chunk_size,
         shape=(seq_len, chunk_size),
         strides=(head_num * chunk_size, 1),
@@ -772,12 +774,12 @@ def chunk_gla_fwd_kernel_o(
         order=(1, 0),
     )
     # E: [chunk_size, value_block_size], already includes beta and earlier-token corrections.
-    residual_tile = tl.load(p_e, boundary_check=(0, 1))
+    residual_tile = load_block(p_e, boundary_check=(0, 1))
     # Aqk: [chunk_size, chunk_size], causal including the diagonal; scale is already included.
-    qk_tile = tl.load(p_Aqk, boundary_check=(0, 1))
+    qk_tile = load_block(p_Aqk, boundary_check=(0, 1))
     qk_tile = tl.where(causal_mask, qk_tile, 0.0).to(residual_tile.dtype)
     output_tile += tl.dot(qk_tile, residual_tile, allow_tf32=False)  # Current-chunk contribution Aqk @ E.
-    tl.store(p_o, output_tile.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    store_block(p_o, output_tile.to(p_o[0].dtype.element_ty), boundary_check=(0, 1))
 
 
 def _get_kda_output_configs():
@@ -923,7 +925,7 @@ def kda_gate_cumsum_fwd_kernel(
     # Moving one token/channel advances by stride_*_token/stride_*_dim elements.
     g_seq_head = g + seq_start * stride_g_token + head_id * stride_g_head
     y_seq_head = y + seq_start * stride_y_token + head_id * stride_y_head
-    p_g = tl.make_block_ptr(
+    p_g = make_block_ptr(
         base=g_seq_head,
         shape=(seq_len, head_dim),
         strides=(stride_g_token, stride_g_dim),
@@ -931,7 +933,7 @@ def kda_gate_cumsum_fwd_kernel(
         block_shape=(chunk_size, head_block_size),
         order=(1, 0),
     )
-    p_y = tl.make_block_ptr(
+    p_y = make_block_ptr(
         base=y_seq_head,
         shape=(seq_len, head_dim),
         strides=(stride_y_token, stride_y_dim),
@@ -940,7 +942,7 @@ def kda_gate_cumsum_fwd_kernel(
         order=(1, 0),
     )
 
-    b_g = tl.load(p_g, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+    b_g = load_block(p_g, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
     if HAS_BIAS:
         head_dim_indices = head_dim_start + tl.arange(0, head_block_size)
         b_bias = tl.load(
@@ -970,7 +972,7 @@ def kda_gate_cumsum_fwd_kernel(
     o_t = tl.arange(0, chunk_size)
     m_cumsum = tl.where(o_t[:, None] >= o_t[None, :], 1.0, 0.0)
     b_y = tl.dot(m_cumsum, b_gate, allow_tf32=False) * cumsum_scale
-    tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
+    store_block(p_y, b_y.to(p_y[0].dtype.element_ty), boundary_check=(0, 1))
 
 
 def _get_kda_gate_cumsum_configs():
