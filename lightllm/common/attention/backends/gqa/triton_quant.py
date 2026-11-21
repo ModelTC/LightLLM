@@ -117,6 +117,7 @@ def _check_supported(layer_config: GQALayerConfig) -> None:
         and layer_config.has_default_scale
         and not layer_config.has_sinks
         and not layer_config.has_alibi
+        and not layer_config.bidirectional_image_spans
     ):
         raise NotImplementedError(
             "Triton quantized GQA supports only causal attention with softmax_scale 1/sqrt(head_dim), "

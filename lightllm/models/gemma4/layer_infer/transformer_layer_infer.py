@@ -1,3 +1,4 @@
+import dataclasses
 from lightllm.common.attention_state.full_att import FullAttentionState
 import math
 import torch
@@ -7,9 +8,6 @@ from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
-from lightllm.models.gemma4.triton_kernel.context_attention_fwd_gemma4_mm import (
-    context_attention_fwd_gemma4_mm,
-)
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -232,23 +230,16 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         _k, _v = self._get_layer_kv(infer_state)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         if self.is_sliding:
-            # Sliding layers always go through the gemma4_mm Triton kernel: it
-            # handles SWA + image bidirectional masking in one pass.
-            o_tensor = self.alloc_tensor(_q.shape, q.dtype)
-            sw = (self.sliding_window_ - 1, 0) if self.sliding_window_ > 0 else (-1, -1)
-            context_attention_fwd_gemma4_mm(
-                _q,
-                _k,
-                _v,
-                o_tensor,
-                infer_state.b_req_idx,
-                infer_state.b_q_start_loc,
-                infer_state.b_seq_len,
-                infer_state.b_ready_cache_len,
-                infer_state.max_q_seq_len,
-                infer_state.req_manager.req_to_token_indexs,
-                infer_state.b_image_token_end,
-                sliding_window=sw,
+            # Sliding layers attend bidirectionally inside image spans (SWA + image bidi in one pass);
+            # the primary backend is always Triton, which supports it.
+            o_tensor = infer_state.prefill_att_state.prefill_att(
+                q=_q,
+                k=_k,
+                v=_v,
+                att_control=dataclasses.replace(
+                    self._att_control(self._get_layer_kv_scales(infer_state)), image_spans=True
+                ),
+                alloc_func=self.alloc_tensor,
             )
             return o_tensor.view(q.shape)
 

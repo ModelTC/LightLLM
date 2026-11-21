@@ -96,6 +96,7 @@ def _gqa_layer_config(
         causal=causal,
         has_sinks=att_control.use_att_sink,
         kv_quant=kv_quant,
+        bidirectional_image_spans=att_control.image_spans,
     )
 
 
