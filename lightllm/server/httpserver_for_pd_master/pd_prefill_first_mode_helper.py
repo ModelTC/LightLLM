@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import pickle
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 
 from fastapi import Request
 
@@ -28,7 +28,7 @@ class HttpPdPrefillFirstManagerHelper:
     async def fetch_prefill_first_stream(
         self: HttpServerManagerForPDMaster,
         p_node: PD_Client_Obj,
-        prompt: Union[str, list],
+        prompt: str,
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
@@ -99,9 +99,10 @@ class HttpPdPrefillFirstManagerHelper:
             )
 
             ready: PfPrefillKvReady = req_status.pf_prefill_kv_ready_event.ready
-            # 3. 这一个 token 已经是成功结束。不再选 decode，直接 abort prefill，让它放开 KV，然后把 token 交出去。
+            # 3. 首 token 已经结束就不再选 decode。stop / length 直接交回。
+            # error 和 abort 也是终态：继续选 decode 会先占页，生成器退出时才 abort。
             _, _, _, first_finish_status = first_token
-            if not first_finish_status.is_error_finished() and first_finish_status.is_finished():
+            if first_finish_status.is_finished():
                 await self.abort(group_request_id=group_request_id, p_node=p_node, d_node=None)
                 yield first_token
                 return
