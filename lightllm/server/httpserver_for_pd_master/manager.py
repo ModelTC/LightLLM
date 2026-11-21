@@ -36,7 +36,7 @@ from lightllm.utils.envs_utils import (
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.websocket_utils import websocket_message_exceeds_limit
-from .pd_prefill_first_mode_helper import HttpPdPrefillFirstManagerHelper
+from .pd_pf_master import HttpPdPrefillFirstManagerHelper
 from .pd_selector import PDSelectionExtraInfo, create_selector
 
 logger = init_logger(__name__)
