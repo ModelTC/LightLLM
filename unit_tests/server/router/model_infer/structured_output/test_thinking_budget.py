@@ -99,6 +99,8 @@ def test_budget_sampling_params_round_trip(budget):
     restored.init(None, **params.to_dict())
     for candidate in (params, restored, SamplingParams.from_buffer_copy(params)):
         assert candidate.constraint_out_params.thinking_token_budget == (-1 if budget is None else budget)
+        assert candidate.constraint_out_params.has_constraint() == (budget is not None and budget >= 0)
+        assert not candidate.constraint_out_params.has_grammar_constraint()
     py_params = PySamplingParams(
         thinking_token_budget=budget,
         guided_reasoning_end=[248069],
@@ -189,12 +191,11 @@ def test_thinking_budget_cli_defaults_to_enabled():
     from lightllm.server.core.objs import StartArgs
 
     parser = make_argument_parser()
-    assert StartArgs().enable_thinking_budget
-    assert parser.parse_args([]).enable_thinking_budget
-    assert parser.parse_args(["--enable_thinking_budget"]).enable_thinking_budget
-    assert not parser.parse_args(["--disable_thinking_budget"]).enable_thinking_budget
+    assert not StartArgs().disable_thinking_budget
+    assert not parser.parse_args([]).disable_thinking_budget
+    assert parser.parse_args(["--disable_thinking_budget"]).disable_thinking_budget
     with pytest.raises(SystemExit):
-        parser.parse_args(["--enable_thinking_budget", "--disable_thinking_budget"])
+        parser.parse_args(["--enable_thinking_budget"])
 
 
 def test_budget_rejects_excluded_end_token():
@@ -210,11 +211,11 @@ def test_budget_rejects_disabled_service(monkeypatch, grammar_enabled):
     monkeypatch.setattr(
         sampling_params,
         "get_env_start_args",
-        lambda: SimpleNamespace(enable_thinking_budget=False),
+        lambda: SimpleNamespace(disable_thinking_budget=True),
     )
     params = SamplingParams()
     params.init(None, thinking_token_budget=1, guided_reasoning_end=[7])
-    with pytest.raises(ValueError, match="--enable_thinking_budget"):
+    with pytest.raises(ValueError, match="--disable_thinking_budget"):
         asyncio.run(params.verify_cpu_async(object() if grammar_enabled else None))
 
 

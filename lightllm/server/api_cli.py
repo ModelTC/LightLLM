@@ -449,17 +449,10 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default="xgrammar",
         help="Output constraint backend used on demand in the regular inference pipeline; none rejects constraints.",
     )
-    thinking_budget_group = parser.add_mutually_exclusive_group()
-    thinking_budget_group.add_argument(
-        "--enable_thinking_budget",
-        action="store_true",
-        default=True,
-        help="Enable per-request thinking_token_budget using the configured reasoning parser; enabled by default.",
-    )
-    thinking_budget_group.add_argument(
+    parser.add_argument(
         "--disable_thinking_budget",
-        dest="enable_thinking_budget",
-        action="store_false",
+        action="store_true",
+        default=False,
         help="Disable per-request thinking token budgets.",
     )
     parser.add_argument(

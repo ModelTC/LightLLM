@@ -558,7 +558,7 @@ def _params(max_new_tokens=3):
 
 
 async def _consume(manager, params):
-    return [item async for item in manager._generate_one_attempt("prompt", params, None, None, 0, 80, 2, [1, 2])]
+    return [item async for item in manager._generate_one_attempt("prompt", params, None, None, 0, 80, 2)]
 
 
 def test_cache_aware_selection_and_initial_reservation_are_serialized_per_worker(backend):
@@ -618,7 +618,7 @@ def test_cache_aware_selection_and_initial_reservation_are_serialized_per_worker
             return [
                 item
                 async for item in manager._generate_one_attempt(
-                    PROMPT, _params(max_new_tokens=1), None, None, 0, origin_request_id, 2, [1, 2]
+                    PROMPT, _params(max_new_tokens=1), None, None, 0, origin_request_id, 2
                 )
             ]
 

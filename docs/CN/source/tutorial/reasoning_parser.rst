@@ -293,7 +293,7 @@ Responses API 会在 ``usage.output_tokens_details.reasoning_tokens`` 中返回�
 
 **thinking_token_budget** (整数, 可选)
   服务默认支持该参数，使用有限预算时需要配置 reasoning parser（支持自动识别）。
-  可通过 ``--disable_thinking_budget`` 显式关闭；``--enable_thinking_budget`` 仍可显式开启。
+  可通过 ``--disable_thinking_budget`` 显式关闭。
   不限制模型类型，思考结束序列由 parser 和当前模型的 tokenizer 确定。
   开关关闭时传入有限预算会返回 HTTP 400；P/D 部署需确保 Master、P、D 均未关闭此功能。
   限制本次生成的思考 token 数，耗尽后强制输出 parser 的正文切换序列

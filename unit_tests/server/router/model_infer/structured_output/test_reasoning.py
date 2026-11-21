@@ -60,7 +60,7 @@ def test_chat_grammar_activation_matches_template_thinking(monkeypatch, parser, 
 def test_chat_passes_reasoning_marker_through_shared_sampling_params(
     monkeypatch, compiler, runtime_start_args, response_type, thinking, budget
 ):
-    args = StartArgs(reasoning_parser="qwen3", enable_thinking_budget=True)
+    args = StartArgs(reasoning_parser="qwen3")
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: args)
     monkeypatch.setattr("lightllm.server.core.objs.sampling_params.get_env_start_args", lambda: args)
     monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: True)
@@ -132,11 +132,13 @@ def test_reasoning_marker_survives_serialization_and_parameter_reuse():
 
 
 @pytest.mark.parametrize(
-    "enabled,parser,message", [(False, "qwen3", "--enable_thinking_budget"), (True, None, "reasoning parser")]
+    "enabled,parser,message", [(False, "qwen3", "--disable_thinking_budget"), (True, None, "reasoning parser")]
 )
 def test_budget_unavailable_service_returns_bad_request(monkeypatch, enabled, parser, message):
     monkeypatch.setattr(
-        api_openai, "get_env_start_args", lambda: StartArgs(reasoning_parser=parser, enable_thinking_budget=enabled)
+        api_openai,
+        "get_env_start_args",
+        lambda: StartArgs(reasoning_parser=parser, disable_thinking_budget=not enabled),
     )
     monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value="prompt"))
     monkeypatch.setattr(
@@ -183,7 +185,7 @@ def test_fixed_reasoning_does_not_require_a_template_thinking_switch(monkeypatch
 def test_deepseek_r1_json_answer_stays_in_content(
     monkeypatch, compiler, runtime_start_args, stream, response_type, parser, budget
 ):
-    args = StartArgs(reasoning_parser=parser, enable_thinking_budget=budget is not None)
+    args = StartArgs(reasoning_parser=parser, disable_thinking_budget=budget is None)
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: args)
     monkeypatch.setattr("lightllm.server.core.objs.sampling_params.get_env_start_args", lambda: args)
     monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: parser == "qwen3")

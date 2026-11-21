@@ -294,8 +294,7 @@ Configuration
 
 **thinking_token_budget** (integer, optional)
   Enabled by default. Finite budgets require a reasoning parser (which may be
-  auto-detected). Use ``--disable_thinking_budget`` to turn the feature off;
-  ``--enable_thinking_budget`` remains available to enable it explicitly.
+  auto-detected). Use ``--disable_thinking_budget`` to turn the feature off.
   There is no model-type restriction; the parser and the model's
   tokenizer determine the reasoning-end sequence. Finite budgets return HTTP 400
   when the switch is off.

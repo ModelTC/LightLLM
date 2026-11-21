@@ -23,7 +23,7 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.id_gen.generate_id.return_value = 800
     manager.metric_client = MagicMock()
     manager._log_req_header = AsyncMock()
-    manager._encode_and_count_tokens = MagicMock(return_value=([1, 2], 2))
+    manager.tokens = MagicMock(return_value=2)
     manager.tokenizer = MagicMock()
     manager.tokenizer.encode.return_value = [1, 2]
     manager.enable_pd_node_self_request_limit = True
@@ -48,9 +48,7 @@ def test_closing_pd_choice_stream_closes_all_forwarders(choice_count):
         closed = set()
         all_started = asyncio.Event()
 
-        async def generate_one(
-            prompt, params, multimodal, request, start_time, req_id, input_token_num, original_prompt_ids
-        ):
+        async def generate_one(prompt, params, multimodal, request, start_time, req_id, input_token_num):
             try:
                 started.add(req_id)
                 if len(started) == choice_count:
@@ -173,7 +171,6 @@ def test_pd_master_n_one_uses_the_same_choice_merge_path():
             start_time,
             origin_request_id,
             input_token_num,
-            original_prompt_ids,
         ):
             assert input_token_num == 2
             yield (
@@ -301,7 +298,6 @@ def test_pd_master_hides_capacity_finish_token_and_continues_next_segment(
             0,
             800,
             0,
-            [1, 2],
         ):
             results.append(result)
 
@@ -379,7 +375,7 @@ def test_pd_master_stopped_choice_does_not_forward_late_output(late_status):
             yield params.group_request_id, "late", dict(metadata), FinishStatus(late_status)
 
         manager._wait_to_token_package = wait_to_token_package
-        choice = manager._generate_one("prompt", sampling_params, MagicMock(), MagicMock(), 0, 800, 2, [1, 2])
+        choice = manager._generate_one("prompt", sampling_params, MagicMock(), MagicMock(), 0, 800, 2)
 
         async def sibling():
             yield "other"
@@ -444,7 +440,6 @@ def test_pd_master_releases_prefill_load_when_generation_fails():
                 0,
                 800,
                 0,
-                [1, 2],
             ):
                 pass
 
@@ -522,7 +517,6 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
             0,
             800,
             0,
-            [1, 2],
         ):
             results.append(result)
 
@@ -592,7 +586,6 @@ def test_pd_master_counts_segment_tokens_without_relying_on_metadata():
             0,
             800,
             0,
-            [1, 2],
         ):
             pass
 
@@ -673,7 +666,6 @@ def test_pd_master_promotes_only_fresh_high_estimated_cache_hit(
                 0,
                 800,
                 input_token_num,
-                [1, 2],
             ):
                 pass
 
@@ -732,7 +724,6 @@ def test_pd_master_sets_resource_wait_timeout_when_enabled(enable_limit, expecte
             0,
             800,
             8192,
-            [1, 2],
         ):
             pass
 
@@ -767,7 +758,6 @@ def test_pd_master_retries_generate_one_when_node_is_busy():
                 0,
                 800,
                 0,
-                [1, 2],
             )
         ]
 
@@ -802,7 +792,6 @@ def test_pd_master_stops_busy_retry_when_client_disconnects():
                 0,
                 800,
                 0,
-                [1, 2],
             ):
                 pass
 
@@ -836,7 +825,6 @@ def test_pd_master_does_not_retry_busy_error_when_self_limit_is_disabled():
                 0,
                 800,
                 0,
-                [1, 2],
             ):
                 pass
 
@@ -868,7 +856,6 @@ def test_pd_master_stops_busy_retry_when_probe_period_expires():
                 0,
                 800,
                 0,
-                [1, 2],
             ):
                 pass
 
@@ -900,7 +887,6 @@ def test_pd_master_does_not_retry_busy_error_after_streaming_output():
                 0,
                 800,
                 0,
-                [1, 2],
             ):
                 results.append(result)
 
@@ -940,7 +926,6 @@ def test_pd_master_releases_prefill_load_when_stream_is_closed():
             0,
             800,
             0,
-            [1, 2],
         )
 
         assert (await generator.__anext__())[1] == "first"

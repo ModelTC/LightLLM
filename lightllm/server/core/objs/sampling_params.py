@@ -239,7 +239,12 @@ class ConstraintOutParams(ctypes.Structure):
         self.thinking_token_budget = thinking_token_budget
         self.pd_previous_output_len = pd_previous_output_len
 
-    def has_constraint(self):
+    def has_constraint(self) -> bool:
+        """Whether reasoning or answer generation needs constraint state."""
+        return self.thinking_token_budget >= 0 or self.has_grammar_constraint()
+
+    def has_grammar_constraint(self) -> bool:
+        """Whether this request needs a compiled answer grammar."""
         return bool(self.regular_constraint.length or self.guided_grammar.length or self.guided_json.length)
 
 
@@ -549,8 +554,8 @@ class SamplingParams(ctypes.Structure):
         # P/D node admission also uses this boundary for forwarded SamplingParams.
         if self.constraint_out_params.thinking_token_budget >= 0:
             args = get_env_start_args()
-            if not args.enable_thinking_budget:
-                raise ValueError("thinking_token_budget requires --enable_thinking_budget")
+            if args.disable_thinking_budget:
+                raise ValueError("thinking_token_budget is disabled by --disable_thinking_budget")
             if not args.reasoning_parser:
                 raise ValueError("thinking_token_budget requires --reasoning_parser")
             if args.target_vocab_topk_sampling is not None:

@@ -421,9 +421,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             )
 
     if request.thinking_token_budget is not None and request.thinking_token_budget >= 0:
-        if not get_env_start_args().enable_thinking_budget:
+        if get_env_start_args().disable_thinking_budget:
             return create_error_response(
-                HTTPStatus.BAD_REQUEST, "thinking_token_budget requires --enable_thinking_budget"
+                HTTPStatus.BAD_REQUEST, "thinking_token_budget is disabled by --disable_thinking_budget"
             )
         if not get_env_start_args().reasoning_parser:
             return create_error_response(HTTPStatus.BAD_REQUEST, "thinking_token_budget requires a reasoning parser")

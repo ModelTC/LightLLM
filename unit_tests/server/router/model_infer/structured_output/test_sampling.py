@@ -477,7 +477,7 @@ def test_budget_mask_buffers_without_grammar(monkeypatch, enabled, mode, parser)
         mtp_dynamic_verify=False,
         output_constraint_mode=mode,
         reasoning_parser=parser,
-        enable_thinking_budget=enabled,
+        disable_thinking_budget=not enabled,
     )
     monkeypatch.setattr(req_sampling_params, "get_env_start_args", lambda: args)
     monkeypatch.setattr(req_sampling_params, "get_vocab_size", lambda _: 257)

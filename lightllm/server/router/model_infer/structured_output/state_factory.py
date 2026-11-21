@@ -30,10 +30,10 @@ class OutputConstraintStateFactory:
 
     def create_state(self, shm_req: "Req", sampling_params: "InferSamplingParams") -> Optional[ConstraintState]:
         try:
-            payload = shm_req.get_compiled_grammar()
             constraint_params = sampling_params.shm_param.constraint_out_params
-            if payload is None and constraint_params.thinking_token_budget < 0:
+            if not constraint_params.has_constraint():
                 return None
+            payload = shm_req.get_compiled_grammar()
             previous_output_len = constraint_params.pd_previous_output_len
             if not 0 <= previous_output_len <= shm_req.input_len:
                 raise ValueError("pd_previous_output_len must be between 0 and the prompt length")

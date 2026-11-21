@@ -39,7 +39,7 @@ def test_context_initializes_state_factory_with_resolved_eos_at_startup(monkeypa
     args = SimpleNamespace(
         output_constraint_mode=mode,
         reasoning_parser=parser,
-        enable_thinking_budget=enabled,
+        disable_thinking_budget=not enabled,
         model_dir="unused",
         tokenizer_mode="auto",
         trust_remote_code=False,

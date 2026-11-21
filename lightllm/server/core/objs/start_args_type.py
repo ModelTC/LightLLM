@@ -119,7 +119,7 @@ class StartArgs:
         default=None, metadata={"choices": [2, 8, 16, 32, 64, 128, 256, 512]}
     )
     output_constraint_mode: str = field(default="xgrammar", metadata={"choices": ["xgrammar", "none"]})
-    enable_thinking_budget: bool = field(default=True)
+    disable_thinking_budget: bool = field(default=False)
     grammar_compile_timeout: float = field(default=30.0)
     enable_multimodal: bool = field(default=False)
     disable_vision: Optional[bool] = field(default=None)
