@@ -211,7 +211,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=infer_state.prefill_att_state,
+            nsa_step=infer_state.nsa_step,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
@@ -230,6 +230,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 nsa_prefill_dict={
                     "topk_mem_indices": topk_mem_indices,
                     "topk_indices": topk_indices,
+                    "q_kv_start_loc": infer_state.nsa_step.q_kv_start_loc,
                     "prefill_cache_kv": kv,
                     "softmax_scale": self.softmax_scale,
                     "kv_lora_rank": self.kv_lora_rank,
@@ -297,7 +298,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=infer_state.decode_att_state,
+            nsa_step=infer_state.nsa_step,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params

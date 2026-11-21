@@ -1,12 +1,43 @@
+"""GLM-5 NoPE sparse MLA over a bf16 latent cache: FlashMLA prefill, FA3 decode.
+
+The NSA indexer's per-step metadata lives on Glm5NextInferStateInfo; this adapter only runs attention.
+"""
+
 import dataclasses
 import weakref
+from typing import Optional
 
 import torch
 
-from ..base_att import AttControl, BaseAttBackend, BasePrefillAttState, BaseDecodeAttState
+from lightllm.common.attention.backend import AttentionStepBuilder
+from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend
+from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparsePrefillBackend
+from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState, build_attention_batch
+from .sparse_mla_layer import sparse_mla_decode_layer, sparse_mla_prefill_layer
 
 
 class Glm5NextSparseAttBackend(BaseAttBackend):
+    kv_cache_format = "bf16"
+    prefill_backend = FlashMLASparsePrefillBackend
+    decode_backend = FA3SparseMLADecodeBackend
+
+    def __init__(self, model):
+        super().__init__(model=model)
+        self.prefill_step_builder = self._create_prefill_step_builder(model)
+        # BaseAttBackend reuses one instance per model but reruns __init__ on every construction.
+        # Keep the decode step builder: captured CUDA graphs read the state it keeps.
+        if getattr(self, "decode_step_builder", None) is None:
+            self.decode_step_builder = self._create_decode_step_builder(model)
+
+    def _create_prefill_step_builder(self, model) -> AttentionStepBuilder:
+        return FlashMLASparsePrefillBackend.get_step_builder_cls()()
+
+    def _create_decode_step_builder(self, model) -> AttentionStepBuilder:
+        # The indexer selects whole pools of index_kpool keys plus the newest partial pool.
+        return FA3SparseMLADecodeBackend.get_step_builder_cls()(
+            topk=model.config["index_topk"], kpool=model.config["index_kpool"], causal=False
+        )
+
     def create_att_prefill_state(self, infer_state):
         return Glm5NextSparsePrefillState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
@@ -16,85 +47,31 @@ class Glm5NextSparseAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class Glm5NextSparsePrefillState(BasePrefillAttState):
-    q_kv_seq_len: torch.Tensor = None
-    q_req_idx: torch.Tensor = None
-    q_kv_start_loc: torch.Tensor = None
+    step_args: Optional[object] = None
 
     def init_state(self):
-        from lightllm.models.glm5_next.triton_kernel.kpool import prefill_nsa_params
-
-        infer_state = self.infer_state
-        self.q_kv_seq_len, self.q_req_idx, self.q_kv_start_loc = prefill_nsa_params(
-            infer_state.position_ids, infer_state.b_req_idx, infer_state.b1_cu_q_seq_len, infer_state.b1_cu_kv_seq_len
-        )
+        self.step_args = self.backend.prefill_step_builder.build(build_attention_batch(self.infer_state, self.backend))
 
     def prefill_att(self, q, k, v, att_control=AttControl(), alloc_func=torch.empty):
-        assert att_control.nsa_prefill and att_control.nsa_prefill_dict is not None
-        return self._nsa_prefill_att(q, k, att_control)
-
-    def _nsa_prefill_att(self, q, kv, att_control):
-        from sgl_kernel.flash_mla import flash_mla_sparse_fwd
-
-        q_token_num, q_head_num, head_dim = q.shape
-        # FlashMLA uses 64-head tiles.
-        padded_q_head_num = ((q_head_num + 63) // 64) * 64
-        padded_q = q
-        if padded_q_head_num != q_head_num:
-            padded_q = q.new_zeros((q_token_num, padded_q_head_num, head_dim))
-            padded_q[:, :q_head_num] = q
-        nsa_prefill_dict = att_control.nsa_prefill_dict
-        output, _, _ = flash_mla_sparse_fwd(
-            q=padded_q,
-            kv=kv,
-            indices=nsa_prefill_dict["topk_mem_indices"].unsqueeze(1),
-            sm_scale=nsa_prefill_dict["softmax_scale"],
-            d_v=nsa_prefill_dict["kv_lora_rank"],
-        )
-        return output[:, :q_head_num]
+        backend = self.backend
+        layer_inputs, layer_config = sparse_mla_prefill_layer(q, k, att_control, backend.kv_cache_format)
+        impl = backend.get_attention_impl(backend.prefill_backend, layer_config)
+        out = alloc_func((q.shape[0], q.shape[1], layer_config.kv_lora_rank), dtype=q.dtype, device=q.device)
+        return impl.forward(self.step_args, layer_inputs, out=out, alloc_func=alloc_func)
 
 
 @dataclasses.dataclass
 class Glm5NextSparseDecodeState(BaseDecodeAttState):
-    q_kv_seq_len: torch.Tensor = None
-    q_req_idx: torch.Tensor = None
-    nsa_cache_seqlens: torch.Tensor = None
-    nsa_cu_seqlens_k_new: torch.Tensor = None
+    step_args: Optional[object] = None
 
     def init_state(self):
-        self.q_kv_seq_len = self.infer_state.b_seq_len
-        self.q_req_idx = self.infer_state.b_req_idx
-        index_kpool = self.backend.model.config["index_kpool"]
-        index_topk = self.backend.model.config["index_topk"]
-        self.nsa_cache_seqlens = (
-            torch.minimum(
-                self.q_kv_seq_len // index_kpool * index_kpool, torch.full_like(self.q_kv_seq_len, index_topk)
-            )
-            + self.q_kv_seq_len % index_kpool
-        )
-        self.nsa_cu_seqlens_k_new = torch.nn.functional.pad(self.nsa_cache_seqlens.cumsum(0, dtype=torch.int32), (1, 0))
+        # Replay steps also build: the step builder rewrites the state the graph captured.
+        self.step_args = self.backend.decode_step_builder.build(build_attention_batch(self.infer_state, self.backend))
 
     def decode_att(self, q, k, v, att_control=AttControl(), alloc_func=torch.empty):
-        assert att_control.nsa_decode and att_control.nsa_decode_dict is not None
-        return self._nsa_decode_att(q, k, att_control)
-
-    def _nsa_decode_att(self, q, kv, att_control):
-        from sgl_kernel.flash_attn import flash_attn_with_kvcache
-
-        nsa_decode_dict = att_control.nsa_decode_dict
-        q_nope, _ = q
-        kv_nope = kv.view(-1, 1, 1, nsa_decode_dict["kv_lora_rank"])
-        # NoPE has no RoPE Q/K tensors; only_qv uses q_nope and kv_nope directly.
-        return flash_attn_with_kvcache(
-            q=None,
-            qv=q_nope,
-            k_cache=None,
-            v_cache=kv_nope,
-            page_table=nsa_decode_dict["topk_mem_indices"],
-            cache_seqlens=self.nsa_cache_seqlens,
-            cu_seqlens_q=self.infer_state.b1_cu_q_seq_len,
-            cu_seqlens_k_new=self.nsa_cu_seqlens_k_new,
-            max_seqlen_q=self.infer_state.max_q_seq_len,
-            softmax_scale=nsa_decode_dict["softmax_scale"],
-            causal=False,
-            only_qv=True,
-        )
+        backend = self.backend
+        layer_inputs, layer_config = sparse_mla_decode_layer(q, k, att_control, backend.kv_cache_format)
+        impl = backend.get_attention_impl(backend.decode_backend, layer_config)
+        q_nope = layer_inputs.q_nope
+        out = alloc_func(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
+        return impl.forward(self.step_args, layer_inputs, out=out, alloc_func=alloc_func)
