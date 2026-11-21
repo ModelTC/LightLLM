@@ -37,8 +37,9 @@ class TritonGQAPrefillStepArgs:
     b_q_start_loc: torch.Tensor
     b_ready_cache_len: torch.Tensor
     max_q_seq_len: int
-    # Per query token: exclusive end of its image span, 0 for text (see AttentionBatch).
+    # Per query token: exclusive end of its image span, 0 for text, and the span's start (see AttentionBatch).
     b_image_token_end: Optional[torch.Tensor] = None
+    b_image_token_start: Optional[torch.Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ class TritonGQAPrefillStepBuilder(AttentionStepBuilder[TritonGQAPrefillStepArgs]
             b_ready_cache_len=batch.b_ready_cache_len,
             max_q_seq_len=batch.max_q_seq_len,
             b_image_token_end=batch.b_image_token_end,
+            b_image_token_start=batch.b_image_token_start,
         )
 
 
@@ -202,7 +204,11 @@ class TritonGQAPrefillImpl(AttentionImpl[GQALayerConfig, TritonGQAPrefillStepArg
                     context_attention_fwd_gemma4_mm,
                 )
 
-                context_attention_fwd_gemma4_mm(*args, sliding_window=self.layer_config.sliding_window)
+                # A span may reach back past the window, so the kernel also needs each span's start.
+                assert step_args.b_image_token_start is not None, "windowed image spans need b_image_token_start"
+                context_attention_fwd_gemma4_mm(
+                    *args, step_args.b_image_token_start, sliding_window=self.layer_config.sliding_window
+                )
             return out
         if self.layer_config.has_alibi:
             from lightllm.common.basemodel.triton_kernel.alibi_att.context_flashattention_nopad import (

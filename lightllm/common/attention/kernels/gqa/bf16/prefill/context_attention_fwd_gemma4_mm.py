@@ -11,13 +11,15 @@ req_to_token_indexs, prompt_cache_len for chunked prefill, sliding window
 support, head_dim=256/512 with BLOCK_M reduction) and adds two ideas borrowed
 from `lightllm-neo/.../context_attention_fwd_neo`:
 
-1. Per-Q `b_image_token_end` tensor of shape (sum_q,). For Q tokens inside an
-   image span it carries the span's end index; for text tokens it is 0.
-   The attention mask becomes `local_or_causal_mask | (k_pos < q_image_end)`.
-2. K/V iteration upper bound is extended to `max(local_end, block_image_end)`
-   so a Q tile in the middle of an image span actually loads K/V tiles past
-   its causal end. Without this, the bidi mask in the original diff was a
-   no-op on every tile but the last one of the image span.
+1. Per-Q `b_image_token_end` and `b_image_token_start` tensors of shape
+   (sum_q,). For Q tokens inside an image span they carry the span's
+   [start, end); for text tokens end is 0. The attention mask becomes
+   `local_or_causal_mask | (q_image_start <= k_pos < q_image_end)`, so an image
+   token sees its whole span even where the span reaches back past the window
+   (HF's sliding mask OR same-vision-group mask).
+2. K/V iteration bounds are extended to `max(local_end, block_image_end)` and,
+   with a sliding window, down to the block's earliest image start, so a Q tile
+   loads every K/V tile its span covers.
 
 The standalone `reference_attention` and `check_once` are runnable as a script
 for unit testing image bidi correctness.
@@ -43,6 +45,7 @@ def _fwd_kernel(
     Req_to_tokens,
     B_req_idx,
     B_Image_Token_End,
+    B_Image_Token_Start,
     stride_qbs,
     stride_qh,
     stride_qd,
@@ -101,6 +104,12 @@ def _fwd_kernel(
         mask=q_valid,
         other=0,
     ).to(tl.int32)
+    q_image_start = tl.load(
+        B_Image_Token_Start + cur_batch_in_all_start_index + offs_m,
+        mask=q_valid,
+        other=0,
+    ).to(tl.int32)
+    q_is_image = q_image_end > 0
 
     # Absolute position in the request (prompt_cache_len + offset within new tokens).
     q_pos = prompt_cache_len + offs_m  # [M]
@@ -116,6 +125,9 @@ def _fwd_kernel(
     if USE_SLIDING_WINDOW:
         kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_LEFT
         kv_start_index = tl.maximum(kv_start_index, 0)
+        # Image tokens also see their span's keys that lie before the window.
+        block_image_start = tl.min(tl.where(q_is_image, q_image_start, total_len), axis=0)
+        kv_start_index = tl.minimum(kv_start_index, block_image_start)
         block_kv_len = block_end_loc - kv_start_index
     else:
         kv_start_index = 0
@@ -141,10 +153,10 @@ def _fwd_kernel(
             local_mask = ((q_pos[:, None] - k_pos[None, :]) <= SLIDING_WINDOW_LEFT) & (q_pos[:, None] >= k_pos[None, :])
         else:
             local_mask = q_pos[:, None] >= k_pos[None, :]
-        # Image bidi: a Q in image span [_, e) attends to all K with k_pos < e.
-        # For text Q (q_image_end == 0) this is k_pos < 0 = always False, so
-        # the union with local_mask leaves text-attention unchanged.
-        image_mask = k_pos[None, :] < q_image_end[:, None]
+        # Image bidi: a Q in image span [s, e) attends to all K with s <= k_pos < e.
+        # For text Q (q_image_end == 0) this is always False, so the union with
+        # local_mask leaves text-attention unchanged.
+        image_mask = (k_pos[None, :] >= q_image_start[:, None]) & (k_pos[None, :] < q_image_end[:, None])
         mask = local_mask | image_mask
 
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
@@ -187,6 +199,7 @@ def context_attention_fwd_gemma4_mm(
     max_input_len,
     req_to_token_indexs,
     b_image_token_end,
+    b_image_token_start=None,
     sliding_window=(-1, -1),
 ):
     """Prefill attention with image bidirectional masking on sliding layers.
@@ -198,6 +211,10 @@ def context_attention_fwd_gemma4_mm(
             position (in the flattened new-token layout), value is the image
             span's end index (in absolute request position) if the token is
             inside an image span, else 0.
+        b_image_token_start: int32 tensor of shape (sum_q,) with each image
+            token's span start (absolute request position); read only for image
+            tokens. Required with a sliding window; without one, every key before
+            the span is already causal.
     """
     BLOCK_M = 128 if not is_tesla() else 64
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
@@ -224,6 +241,9 @@ def context_attention_fwd_gemma4_mm(
         use_sliding_window = True
         assert int(sliding_window[1]) == 0, "sliding_window right must be 0"
         sliding_window_left = int(sliding_window[0])
+    if b_image_token_start is None:
+        assert not use_sliding_window, "a sliding window needs b_image_token_start"
+        b_image_token_start = torch.zeros_like(b_image_token_end)
 
     _fwd_kernel[grid](
         q,
@@ -236,6 +256,7 @@ def context_attention_fwd_gemma4_mm(
         req_to_token_indexs,
         b_req_idx,
         b_image_token_end,
+        b_image_token_start,
         q.stride(0),
         q.stride(1),
         q.stride(2),
@@ -278,6 +299,7 @@ def reference_attention(
     b_prompt_cache_len,
     req_to_token_indexs,
     b_image_token_end,
+    b_image_token_start,
     sliding_window=(-1, -1),
 ):
     """Slow torch reference for the gemma4 mm prefill kernel.
@@ -312,6 +334,7 @@ def reference_attention(
 
         q_blk = q[q_start : q_start + new_len]  # [M, Hq, D]
         q_image_end = b_image_token_end[q_start : q_start + new_len].to(torch.int64)  # [M]
+        q_image_start = b_image_token_start[q_start : q_start + new_len].to(torch.int64)  # [M]
 
         token_locs = req_to_token_indexs[req, :total_len].to(torch.int64)
         k_blk = k[token_locs]
@@ -327,7 +350,7 @@ def reference_attention(
             causal = ((q_pos[:, None] - k_pos[None, :]) <= sliding_window_left) & (q_pos[:, None] >= k_pos[None, :])
         else:
             causal = k_pos[None, :] <= q_pos[:, None]
-        image = k_pos[None, :] < q_image_end[:, None]
+        image = (k_pos[None, :] >= q_image_start[:, None]) & (k_pos[None, :] < q_image_end[:, None])
         allow = causal | image
 
         q_t = q_blk.permute(1, 0, 2).to(torch.float32)
@@ -387,6 +410,7 @@ def make_test_case(
 
     # Inject one image span per batch into the new-token region with prob 0.7.
     b_image_token_end = torch.zeros((sum_q,), device=device, dtype=torch.int32)
+    b_image_token_start = torch.zeros((sum_q,), device=device, dtype=torch.int32)
     for b in range(batch):
         M = int(new_lens[b].item())
         P = int(prompt_lens[b].item())
@@ -397,6 +421,7 @@ def make_test_case(
             e = min(M, s + span_len)
             # image_end is absolute (request-position) = prompt_len + new-offset
             b_image_token_end[start + s : start + e] = P + e
+            b_image_token_start[start + s : start + e] = P + s
 
     q = torch.randn((sum_q, Hq, D), device=device, dtype=dtype)
     k = torch.randn((kv_size, Hk, D), device=device, dtype=dtype)
@@ -415,6 +440,7 @@ def make_test_case(
         max_new_len,
         req_to_token_indexs,
         b_image_token_end,
+        b_image_token_start,
         sliding_window,
     )
 
@@ -433,6 +459,7 @@ def check_once(seed=0, dtype=torch.bfloat16, sliding_window=(-1, -1), D=256):
         max_new_len,
         req_to_token_indexs,
         b_image_token_end,
+        b_image_token_start,
         sliding_window,
     ) = case
 
@@ -448,6 +475,7 @@ def check_once(seed=0, dtype=torch.bfloat16, sliding_window=(-1, -1), D=256):
         max_new_len,
         req_to_token_indexs,
         b_image_token_end,
+        b_image_token_start,
         sliding_window=sliding_window,
     )
 
@@ -461,6 +489,7 @@ def check_once(seed=0, dtype=torch.bfloat16, sliding_window=(-1, -1), D=256):
         b_prompt_cache_len,
         req_to_token_indexs,
         b_image_token_end,
+        b_image_token_start,
         sliding_window=sliding_window,
     )
 

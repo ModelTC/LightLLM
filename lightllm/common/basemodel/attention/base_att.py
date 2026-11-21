@@ -131,6 +131,7 @@ def build_attention_batch(infer_state: "InferStateInfo", backend: BaseAttBackend
         b_shared_seq_len=getattr(infer_state, "b_shared_seq_len", None),
         b_mtp_index=getattr(infer_state, "b_mtp_index", None),
         b_image_token_end=getattr(infer_state, "b_image_token_end", None),
+        b_image_token_start=getattr(infer_state, "b_image_token_start", None),
         max_ready_cache_len=infer_state.max_cache_len or 0,
         mem_index=infer_state.mem_index,
         b_shared_radix_node_id=getattr(infer_state, "b_shared_radix_node_id", None),

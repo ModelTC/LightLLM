@@ -71,8 +71,10 @@ class AttentionBatch:
     max_ready_cache_len: int = 0
     mem_index: Optional[torch.Tensor] = None
     # Prefill only, for layers that attend bidirectionally inside image spans: per query token, the
-    # exclusive end of its image span in the request's kv positions, or 0 for a text token.
+    # exclusive end of its image span in the request's kv positions, or 0 for a text token, and the
+    # span's start (read only for image tokens; needed with a sliding window).
     b_image_token_end: Optional[torch.Tensor] = None
+    b_image_token_start: Optional[torch.Tensor] = None
     # Decode query layout. Normally each request has one query row. Speculative decoding gives
     # each logical request decode_rows_per_request consecutive rows that share its KV, the last
     # row seeing the longest prefix. With dynamic_decode_rows the row count varies per request,

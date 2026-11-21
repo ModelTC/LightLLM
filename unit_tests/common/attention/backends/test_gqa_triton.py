@@ -399,7 +399,14 @@ def test_alibi_is_supported_only_for_triton_mha_without_window():
 
 @pytest.mark.parametrize(
     "window,head_dim,spans",
-    [((-1, -1), 128, {0: (4, 30), 2: (100, 160)}), ((15, 0), 256, {})],
+    [
+        ((-1, -1), 128, {0: (4, 30), 2: (100, 160)}),
+        ((15, 0), 256, {}),
+        # Spans longer than the window, one starting inside the cached prefix: image queries still
+        # see their whole span, and keys outside both the window and the span stay hidden.
+        ((15, 0), 256, {0: (4, 30), 2: (100, 160)}),
+        ((15, 0), 128, {0: (4, 30), 2: (100, 160)}),
+    ],
 )
 def test_bidirectional_image_spans_prefill_matches_reference(window, head_dim, spans):
     q_heads, kv_heads = 8, 2
@@ -409,14 +416,17 @@ def test_bidirectional_image_spans_prefill_matches_reference(window, head_dim, s
     ready = [0, 5, 128]
     # spans: request index -> image positions [start, end)
     q_lens = [n - r for n, r in zip(lengths.tolist(), ready)]
-    image_end = torch.tensor(
-        [
-            spans[i][1] if i in spans and spans[i][0] <= pos < spans[i][1] else 0
-            for i, (n, r) in enumerate(zip(lengths.tolist(), ready))
-            for pos in range(r, n)
-        ],
-        device="cuda",
-        dtype=torch.int32,
+    image_start, image_end = (
+        torch.tensor(
+            [
+                spans[i][side] if i in spans and spans[i][0] <= pos < spans[i][1] else 0
+                for i, (n, r) in enumerate(zip(lengths.tolist(), ready))
+                for pos in range(r, n)
+            ],
+            device="cuda",
+            dtype=torch.int32,
+        )
+        for side in (0, 1)
     )
     kv = torch.randn(3 * 512, 2 * kv_heads, head_dim, device="cuda", dtype=torch.bfloat16)
     k, v = kv[:, :kv_heads], kv[:, kv_heads:]
@@ -430,6 +440,7 @@ def test_bidirectional_image_spans_prefill_matches_reference(window, head_dim, s
         b_ready_cache_len=torch.tensor(ready, device="cuda", dtype=torch.int32),
         max_q_seq_len=max(q_lens),
         b_image_token_end=image_end,
+        b_image_token_start=image_start,
     )
     layer_config = GQALayerConfig(
         num_heads=q_heads,
@@ -457,8 +468,8 @@ def test_bidirectional_image_spans_prefill_matches_reference(window, head_dim, s
         mask = key_pos <= query_pos
         if window != (-1, -1):
             mask &= key_pos >= query_pos - window[0]
-        # Image queries also see every key before their span's end.
-        mask |= key_pos < image_end[row : row + count, None]
+        # Image queries also see their whole span.
+        mask |= (key_pos >= image_start[row : row + count, None]) & (key_pos < image_end[row : row + count, None])
         scores = torch.einsum("qhd,khd->hqk", q[row : row + count].float(), keys) * head_dim ** -0.5
         scores.masked_fill_(~mask[None], float("-inf"))
         expected.append(torch.einsum("hqk,khd->qhd", scores.softmax(-1), values))
