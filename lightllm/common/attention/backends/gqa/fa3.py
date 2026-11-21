@@ -175,6 +175,9 @@ def _check_supported(layer_config: GQALayerConfig) -> None:
         layer_config.sliding_window != (-1, -1) or layer_config.has_sinks or not layer_config.has_default_scale
     ):
         raise NotImplementedError("FA3 GQA with an FP8 cache supports only the default scale without window or sinks")
+    if layer_config.kv_quant is not None and layer_config.dtype != torch.bfloat16:
+        # FA3 writes FP8 attention output only as BF16.
+        raise NotImplementedError(f"FA3 GQA with an FP8 cache needs a BF16 model, got {layer_config.dtype}")
 
 
 def _paged(cache: torch.Tensor, page_size: int) -> torch.Tensor:
