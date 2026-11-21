@@ -53,7 +53,8 @@ def kda_prefill(
         k=k,
         v=v,
         g=raw_g,
-        beta=raw_beta,
+        # FlashKDA needs contiguous inputs; layers pass beta as a column slice of their fused projection.
+        beta=raw_beta.contiguous(),
         scale=q.shape[-1] ** -0.5,
         out=output,
         A_log=A_log.reshape(-1).float(),
