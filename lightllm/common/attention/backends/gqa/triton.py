@@ -304,7 +304,8 @@ class TritonGQADecodeImpl(AttentionImpl[GQALayerConfig, TritonGQADecodeStepArgs,
                 alloc_tensor_func=alloc_func,
             )
             return out
-        if step_args.b_mark_shared_group is not None:
+        # The shared-group kernel has no sliding window; windowed layers decode each row on its own.
+        if step_args.b_mark_shared_group is not None and self.layer_config.sliding_window == (-1, -1):
             from lightllm.common.attention.kernels.gqa.bf16.decode.mtp_diverse import (
                 token_decode_attention_mtp_diverse_single_token,
             )
