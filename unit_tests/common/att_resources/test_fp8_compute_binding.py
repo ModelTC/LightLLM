@@ -17,9 +17,8 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.allocators import FullAttKVAllocator
-from lightllm.common.basemodel.attention.base_att import AttControl, BaseAttBackend
-from lightllm.common.basemodel.attention.fa3 import fp8 as fa3
-from lightllm.common.basemodel.attention.flashinfer import fp8 as flashinfer
+from lightllm.common.basemodel.attention.base_att import AttControl
+from unit_tests.common.att_resources.fp8_attention_helpers import fp8_attention_state
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from unit_tests.common.att_resources.test_capacity import definition
 
@@ -83,32 +82,17 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
     infer.att_state_role = role
     infer.batch_size, infer.max_q_seq_len = 2, 1
     infer.b_seq_len = torch.ones(2, dtype=torch.int32, device="cpu")
-    backend = object.__new__(BaseAttBackend)
     observed = {}
-
-    if kind == "static_head":
-        state_cls = fa3.Fp8Fa3PrefillAttState if prefill else fa3.Fp8Fa3DecodeAttState
-        parent_cls = fa3.Fa3PrefillAttState if prefill else fa3.Fa3DecodeAttState
-        monkeypatch.setattr(parent_cls, "init_state", lambda self: None)
-        att = state_cls(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
-        att.b_att_seq_len = infer.b_seq_len
-        att.init_state()
-
-        def quantize(q: torch.Tensor, scales: torch.Tensor):
-            observed["q_scales"] = scales
-            return q
-
-        def attention(**kwargs: object):
-            observed.update(kwargs)
-            return kwargs["q"]
-
-        monkeypatch.setattr(fa3, "q_per_head_static_fp8_quant", quantize)
-        monkeypatch.setattr(fa3, "flash_attn_with_kvcache", attention)
-    else:
-        state_cls = flashinfer.Fp8FlashInferPrefillAttState if prefill else flashinfer.Fp8FlashInferDecodeAttState
-        att = state_cls(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
-        wrapper = SimpleNamespace(run=lambda *args, **kwargs: observed.update(kwargs))
-        att.prefill_wrapper = att.decode_wrapper = wrapper
+    att = fp8_attention_state(
+        monkeypatch,
+        kind=kind,
+        prefill=prefill,
+        infer=infer,
+        observed=observed,
+        heads=selected.config.head_num,
+        head_dim=selected.config.head_dim,
+        requests=2,
+    )
 
     q = torch.zeros((2, selected.config.head_num, selected.config.head_dim), dtype=torch.bfloat16, device="cpu")
 
@@ -120,7 +104,7 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
             q=q,
             k=k,
             v=v,
-            att_control=AttControl(logical_layer_id=8),
+            att_control=AttControl(logical_layer_id=8, kv_scales=selected.get_layer_kv_scales(8)),
             alloc_func=allocate,
         )
     else:
@@ -128,7 +112,7 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
             q=q,
             k=k,
             v=v,
-            att_control=AttControl(logical_layer_id=8),
+            att_control=AttControl(logical_layer_id=8, kv_scales=selected.get_layer_kv_scales(8)),
             alloc_func=allocate,
         )
     if kind == "static_head":

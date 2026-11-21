@@ -19,6 +19,8 @@ from .env_utils import set_flashinfer_envs
 class FlashInferAttBackend(BaseAttBackend):
     workspace_buffer_key = "flashinfer_fp"
     workspace_buffer_size = 512 * 1024 * 1024
+    # How the KV cache this backend reads is quantized; see GQALayerConfig.kv_quant.
+    kv_quant: Optional[str] = None
 
     def __init__(self, model):
         set_flashinfer_envs()
@@ -80,7 +82,9 @@ class FlashInferAttBackend(BaseAttBackend):
         return FlashInferDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
-def _gqa_layer_config(q: torch.Tensor, k: torch.Tensor, att_control: AttControl, causal: bool) -> GQALayerConfig:
+def _gqa_layer_config(
+    q: torch.Tensor, k: torch.Tensor, att_control: AttControl, causal: bool, kv_quant: Optional[str]
+) -> GQALayerConfig:
     # Pass every attention property the model asks for, so the impl rejects what FlashInfer cannot run.
     assert att_control.use_alibi is False, "FlashInfer GQA does not support alibi"
     return GQALayerConfig(
@@ -91,20 +95,18 @@ def _gqa_layer_config(q: torch.Tensor, k: torch.Tensor, att_control: AttControl,
         sliding_window=att_control.sliding_window if att_control.use_sliding_window else (-1, -1),
         causal=causal,
         has_sinks=att_control.use_att_sink,
+        kv_quant=kv_quant,
     )
 
 
 @dataclasses.dataclass
 class FlashInferPrefillAttState(BasePrefillAttState):
     step_args: Optional[FlashInferGQAPrefillStepArgs] = None
-    # The planned wrapper; the FP8 subclass still runs it directly.
-    prefill_wrapper: object = None
     causal: bool = True
 
     def init_state(self):
         self.causal = self.backend.uses_causal_attention()
         self.step_args = self.backend.prefill_step_builder.build(build_attention_batch(self.infer_state, self.backend))
-        self.prefill_wrapper = self.step_args.wrapper
 
     def prefill_att(
         self,
@@ -115,11 +117,11 @@ class FlashInferPrefillAttState(BasePrefillAttState):
         alloc_func=torch.empty,
     ) -> torch.Tensor:
         impl = self.backend.get_attention_impl(
-            FlashInferGQAPrefillBackend, _gqa_layer_config(q, k, att_control, self.causal)
+            FlashInferGQAPrefillBackend, _gqa_layer_config(q, k, att_control, self.causal, self.backend.kv_quant)
         )
         return impl.forward(
             self.step_args,
-            GQALayerInputs(q=q, k_cache=k, v_cache=v),
+            GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=att_control.kv_scales),
             out=alloc_func(q.shape, dtype=q.dtype, device=q.device),
             alloc_func=alloc_func,
         )
@@ -128,15 +130,12 @@ class FlashInferPrefillAttState(BasePrefillAttState):
 @dataclasses.dataclass
 class FlashInferDecodeAttState(BaseDecodeAttState):
     step_args: Optional[FlashInferGQADecodeStepArgs] = None
-    # The planned wrapper; the FP8 subclass still runs it directly.
-    decode_wrapper: object = None
     causal: bool = True
 
     def init_state(self):
         self.causal = self.backend.uses_causal_attention()
         # Replay steps also build: the step builder re-plans the wrapper the graph captured.
         self.step_args = self.backend.decode_step_builder.build(build_attention_batch(self.infer_state, self.backend))
-        self.decode_wrapper = self.step_args.wrapper
 
     def decode_att(
         self,
@@ -147,11 +146,11 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ):
         impl = self.backend.get_attention_impl(
-            FlashInferGQADecodeBackend, _gqa_layer_config(q, k, att_control, self.causal)
+            FlashInferGQADecodeBackend, _gqa_layer_config(q, k, att_control, self.causal, self.backend.kv_quant)
         )
         return impl.forward(
             self.step_args,
-            GQALayerInputs(q=q, k_cache=k, v_cache=v),
+            GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=att_control.kv_scales),
             out=alloc_func(q.shape, dtype=q.dtype, device=q.device),
             alloc_func=alloc_func,
         )

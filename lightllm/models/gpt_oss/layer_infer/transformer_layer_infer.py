@@ -91,6 +91,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
                 sliding_window=window_size,
                 use_att_sink=True,
                 sink_weight=layer_weight.attn_sinks.weight,
+                kv_scales=state.get_layer_kv_scales(self.layer_num_),
             ),
             alloc_func=self.alloc_tensor,
         )
@@ -124,6 +125,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
                 sliding_window=window_size,
                 use_att_sink=True,
                 sink_weight=layer_weight.attn_sinks.weight,
+                kv_scales=state.get_layer_kv_scales(self.layer_num_),
             ),
             alloc_func=self.alloc_tensor,
         )

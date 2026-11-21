@@ -176,11 +176,24 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     # ----- Attention kernels (sliding window + per-layer KV reshape) ---
 
-    def _att_control(self):
+    def _att_control(self, kv_scales=None):
         if self.is_sliding and self.sliding_window_ > 0:
             w = self.sliding_window_ - 1
-            return AttControl(use_sliding_window=True, sliding_window=(w, 0), logical_layer_id=self.layer_num_)
-        return AttControl(use_sliding_window=False, sliding_window=(-1, -1), logical_layer_id=self.layer_num_)
+            return AttControl(
+                use_sliding_window=True, sliding_window=(w, 0), logical_layer_id=self.layer_num_, kv_scales=kv_scales
+            )
+        return AttControl(
+            use_sliding_window=False, sliding_window=(-1, -1), logical_layer_id=self.layer_num_, kv_scales=kv_scales
+        )
+
+    def _get_layer_kv_scales(self, infer_state: InferStateInfo):
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
+        return state.get_layer_kv_scales(self.layer_num_)
 
     def _get_layer_kv(self, infer_state: InferStateInfo):
         # 直接用当前逻辑层号访问；共享层由 State 的 logical_layer_groups 映射到生产层的物理 KV。
@@ -242,7 +255,11 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         # Full-attn layers: head_dim=512, no SWA, no image bidi — standard
         # triton via backend1.
         o_tensor = infer_state.prefill_att_state1.prefill_att(
-            q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor
+            q=_q,
+            k=_k,
+            v=_v,
+            att_control=self._att_control(self._get_layer_kv_scales(infer_state)),
+            alloc_func=self.alloc_tensor,
         )
         return o_tensor.view(q.shape)
 
@@ -256,7 +273,13 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         _k, _v = self._get_layer_kv(infer_state)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         att_state = infer_state.decode_att_state if self.is_sliding else infer_state.decode_att_state1
-        o_tensor = att_state.decode_att(q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor)
+        o_tensor = att_state.decode_att(
+            q=_q,
+            k=_k,
+            v=_v,
+            att_control=self._att_control(self._get_layer_kv_scales(infer_state)),
+            alloc_func=self.alloc_tensor,
+        )
         return o_tensor.view(q.shape)
 
     # ----- FFN (Gemma gelu-tanh, fused gate_up + down) -----------------

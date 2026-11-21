@@ -139,6 +139,10 @@ class GQAFullAttentionState(FullAttentionState):
         storage_layer_index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
         return self.k_storage[storage_layer_index], self.v_storage[storage_layer_index]
 
+    def get_layer_kv_scales(self, logical_layer_id: int) -> None:
+        """未量化的 KV 没有 scale。"""
+        return None
+
     def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
         """通过 CUDA 算子将形状匹配的 K/V 数据写入指定物理 token 位置。"""
         assert token_indices.is_cuda, "token indices must reside on CUDA"

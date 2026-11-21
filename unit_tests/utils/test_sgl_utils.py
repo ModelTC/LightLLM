@@ -126,6 +126,7 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, pa
         backend=SimpleNamespace(
             model=model,
             infer_page_size=page_size,
+            kv_quant=None,
             uses_causal_attention=lambda: True,
             uses_dynamic_spec_verify_layout=lambda: False,
             decode_step_builder=FA3GQADecodeStepBuilder(page_size=page_size, page_table_view=page_table_view),

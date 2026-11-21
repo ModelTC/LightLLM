@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING, Tuple, Dict
 
+from lightllm.common.attention.backends.gqa import GQAKVScales
 from lightllm.common.attention.backend import AttentionBackend, AttentionImpl, AttentionBatch
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
@@ -127,6 +128,8 @@ def build_attention_batch(infer_state: "InferStateInfo", backend: BaseAttBackend
         decode_rows_per_request=decode_rows_per_request,
         dynamic_decode_rows=dynamic_decode_rows,
         pad_req_idx=getattr(infer_state.req_manager, "HOLD_REQUEST_ID", None),
+        b_shared_seq_len=getattr(infer_state, "b_shared_seq_len", None),
+        b_shared_radix_node_id=getattr(infer_state, "b_shared_radix_node_id", None),
         cuda_graph_max_kv_seq_len=model.graph_max_len_in_batch if uses_cuda_graph else None,
         microbatch_index=infer_state.microbatch_index,
     )
@@ -161,6 +164,8 @@ class AttControl:
     linear_att_decode_dict: Dict = None
     # 静态 FP8 标定按此逻辑层号查询 State 的物理行；其他后端可不使用。
     logical_layer_id: Optional[int] = None
+    # 量化 KV cache 的本层 scale，由模型层从 attention State 取得（get_layer_kv_scales）；未量化时为 None。
+    kv_scales: Optional["GQAKVScales"] = None
 
 
 @dataclass

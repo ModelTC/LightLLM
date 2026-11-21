@@ -58,7 +58,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             q=_q,
             k=_k,
             v=_v,
-            att_control=AttControl(logical_layer_id=self.layer_num_),
+            att_control=AttControl(
+                logical_layer_id=self.layer_num_, kv_scales=state.get_layer_kv_scales(self.layer_num_)
+            ),
             alloc_func=self.alloc_tensor,
         )
         o_tensor = o_tensor.view(q.shape)
@@ -82,7 +84,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             q=_q,
             k=_k,
             v=_v,
-            att_control=AttControl(logical_layer_id=self.layer_num_),
+            att_control=AttControl(
+                logical_layer_id=self.layer_num_, kv_scales=state.get_layer_kv_scales(self.layer_num_)
+            ),
             alloc_func=self.alloc_tensor,
         )
         return o_tensor.view(q.shape)

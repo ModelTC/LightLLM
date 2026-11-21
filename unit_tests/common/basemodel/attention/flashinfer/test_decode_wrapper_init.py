@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.flashinfer import fp, fp8, mla
+from lightllm.common.basemodel.attention.flashinfer import fp, mla
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 
 
@@ -19,7 +19,7 @@ from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 def decode_init(request, monkeypatch):
     state_cls = request.param
     module = mla if state_cls is mla.MlaFlashInferDecodeAttState else fp
-    page_size = 1 if state_cls is fp8.Fp8FlashInferDecodeAttState else 4
+    page_size = 4
     max_page_num = 64 // page_size
     wrapper = SimpleNamespace(plan=Mock())
     create_wrapper = Mock(return_value=wrapper)

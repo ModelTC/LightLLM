@@ -41,7 +41,11 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
             q=_q,
             k=_k,
             v=_v,
-            att_control=AttControl(use_alibi=True, tp_alibi=layer_weight.tp_alibi),
+            att_control=AttControl(
+                use_alibi=True,
+                tp_alibi=layer_weight.tp_alibi,
+                kv_scales=state.get_layer_kv_scales(self.layer_num_),
+            ),
             alloc_func=self.alloc_tensor,
         )
         o_tensor = o_tensor.view(q.shape)
@@ -62,7 +66,11 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
             q=_q,
             k=_k,
             v=_v,
-            att_control=AttControl(use_alibi=True, tp_alibi=layer_weight.tp_alibi),
+            att_control=AttControl(
+                use_alibi=True,
+                tp_alibi=layer_weight.tp_alibi,
+                kv_scales=state.get_layer_kv_scales(self.layer_num_),
+            ),
             alloc_func=self.alloc_tensor,
         )
         return o_tensor.view(q.shape)

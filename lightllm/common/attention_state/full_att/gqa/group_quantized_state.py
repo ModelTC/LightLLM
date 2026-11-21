@@ -17,6 +17,7 @@ from .group_quantized_transfer import transfer_group_quantized_pages
 from ..dp_transfer import copy_group_quantized_tokens
 
 if TYPE_CHECKING:
+    from lightllm.common.attention.backends.gqa import GQAKVScales
     from lightllm.common.attention_state.types import StateTransferLayout
 
 
@@ -150,15 +151,17 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         """按逻辑层号查询存储及配套字段的物理行；共享逻辑层返回同一下标。"""
         return self._logical_to_storage_layer[logical_layer_id]
 
-    def get_layer_view(
-        self, logical_layer_id: int
-    ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
-        """返回该层 K/V 编码数据及各自的分组 scale 视图。"""
+    def get_layer_view(self, logical_layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """返回该层 K/V 编码数据视图；分组 scale 由 get_layer_kv_scales 返回。"""
         storage_layer_index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
-        return (self.k_storage[storage_layer_index], self.k_scales[storage_layer_index]), (
-            self.v_storage[storage_layer_index],
-            self.v_scales[storage_layer_index],
-        )
+        return self.k_storage[storage_layer_index], self.v_storage[storage_layer_index]
+
+    def get_layer_kv_scales(self, logical_layer_id: int) -> "GQAKVScales":
+        """返回该层 K/V 逐 token 分组 scale 视图，与 KV 数据按相同 token 位置寻址。"""
+        from lightllm.common.attention.backends.gqa import GQAKVScales
+
+        storage_layer_index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
+        return GQAKVScales(k_scale=self.k_scales[storage_layer_index], v_scale=self.v_scales[storage_layer_index])
 
     def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
         """量化输入浮点 K/V，并将编码数据和分组 scale 写入相同 token 位置。"""

@@ -8,7 +8,15 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeStepArgs, FA3GQAPrefillStepArgs
+from lightllm.common.attention.backends.gqa.flashinfer import (
+    FlashInferGQABuilderConfig,
+    FlashInferGQADecodeStepArgs,
+    FlashInferGQAPrefillStepArgs,
+)
+from lightllm.common.basemodel.attention.fa3 import fp as fa3_fp
 from lightllm.common.basemodel.attention.fa3 import fp8 as fa3_fp8
+from lightllm.common.basemodel.attention.flashinfer import fp as fi_fp
 from lightllm.common.basemodel.attention.flashinfer import fp8 as flashinfer_fp8
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
@@ -49,7 +57,11 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     infer.max_q_seq_len = 1
     calls = []
 
-    # 仅替换外部计算内核，保留推理层、公开 attention 接口及 State 标定查询链路。
+    # 仅替换外部计算内核，保留推理层、公开 attention 接口、impl 及 State 标定查询链路。
+    import lightllm.utils.sgl_utils as sgl_utils
+    from lightllm.common.basemodel.triton_kernel.quantization import q_per_head_fp8_quant
+
+    head_num, head_dim = state.config.head_num, state.config.head_dim
     if backend_name == "fa3":
         state.q_scales[0].fill_(3)
         state.q_scales[1].fill_(7)
@@ -59,29 +71,34 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
             assert torch.all(scales == expected_q_scale)
             return q
 
-        def attend(**kwargs: object) -> torch.Tensor:
+        def attend(**kwargs: object) -> None:
             assert torch.all(kwargs["k_descale"] == expected_scale)
             assert torch.all(kwargs["v_descale"] == expected_scale)
             assert torch.all(kwargs["q_descale"] == expected_q_scale)
             calls.append(operation)
-            return kwargs["q"]
+            kwargs["out"].copy_(kwargs["q"])
 
-        monkeypatch.setattr(fa3_fp8, "q_per_head_static_fp8_quant", quantize)
-        monkeypatch.setattr(fa3_fp8, "flash_attn_with_kvcache", attend)
-        state_class = fa3_fp8.Fp8Fa3PrefillAttState if operation == "prefill" else fa3_fp8.Fp8Fa3DecodeAttState
-    else:
-        state_class = (
-            flashinfer_fp8.Fp8FlashInferPrefillAttState
-            if operation == "prefill"
-            else flashinfer_fp8.Fp8FlashInferDecodeAttState
+        monkeypatch.setattr(q_per_head_fp8_quant, "q_per_head_static_fp8_quant", quantize)
+        monkeypatch.setattr(sgl_utils, "flash_attn_with_kvcache", attend)
+        if operation == "prefill":
+            attention = fa3_fp.Fa3PrefillAttState(backend=None, _infer_state_weak_ref=weakref.ref(infer))
+            step_args_cls = FA3GQAPrefillStepArgs
+            extra = {}
+        else:
+            attention = fa3_fp.Fa3DecodeAttState(backend=None, _infer_state_weak_ref=weakref.ref(infer))
+            step_args_cls = FA3GQADecodeStepArgs
+            extra = {"max_seqlen_k": 1}
+        attention.step_args = step_args_cls(
+            page_table=None,
+            cache_seqlens=infer.b_seq_len,
+            cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+            cu_seqlens_k=None,
+            max_seqlen_q=1,
+            page_size=1,
+            **extra,
         )
-
-    attention = state_class(backend=SimpleNamespace(), _infer_state_weak_ref=weakref.ref(infer))
-    if backend_name == "fa3":
-        attention.page_table = attention.cu_seqlens_q = attention.cu_seqlens_k = None
-        attention.b_att_seq_len = infer.b_seq_len
-        attention.decode_max_q_seq_len = 1
         attention.causal = True
+        kv_quant = fa3_fp8.Fp8Fa3AttBackend.kv_quant
     else:
 
         def run(
@@ -95,7 +112,18 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
             calls.append(operation)
             out.copy_(q)
 
-        attention.prefill_wrapper = attention.decode_wrapper = SimpleNamespace(run=run)
+        prefill = operation == "prefill"
+        attention = (fi_fp.FlashInferPrefillAttState if prefill else fi_fp.FlashInferDecodeAttState)(
+            backend=None, _infer_state_weak_ref=weakref.ref(infer)
+        )
+        config = FlashInferGQABuilderConfig(head_num, head_num, head_dim, 1, torch.bfloat16, torch.float8_e4m3fn)
+        step_args_cls = FlashInferGQAPrefillStepArgs if prefill else FlashInferGQADecodeStepArgs
+        attention.step_args = step_args_cls(wrapper=SimpleNamespace(run=run), config=config)
+        attention.causal = True
+        kv_quant = flashinfer_fp8.Fp8FlashInferAttBackend.kv_quant
+    attention.backend = SimpleNamespace(
+        kv_quant=kv_quant, get_attention_impl=lambda backend_cls, layer_config: backend_cls.get_impl_cls()(layer_config)
+    )
 
     infer.prefill_att_state = infer.decode_att_state = attention
     layer = LlamaTransformerLayerInfer.__new__(LlamaTransformerLayerInfer)
@@ -103,7 +131,7 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     layer.tp_q_head_num_ = layer.tp_k_head_num_ = state.config.head_num
     layer.head_dim_ = state.config.head_dim
     layer.alloc_tensor = lambda shape, dtype, device: torch.empty(shape, dtype=dtype, device="cpu")
-    q = torch.ones((1, state.config.head_num, state.config.head_dim))
+    q = torch.ones((1, state.config.head_num, state.config.head_dim), dtype=torch.bfloat16)
     if operation == "prefill":
         output = layer._context_attention_kernel(
             q=q,

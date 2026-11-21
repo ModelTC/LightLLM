@@ -19,6 +19,7 @@ from .static_fp8_transfer import transfer_static_fp8_pages
 from ..dp_transfer import copy_gqa_tokens
 
 if TYPE_CHECKING:
+    from lightllm.common.attention.backends.gqa import GQAKVScales
     from lightllm.common.attention_state.types import StateTransferLayout
 
 
@@ -230,6 +231,20 @@ class StaticFP8FullAttentionState(FullAttentionState):
         """按逻辑层号返回 K、V 视图，head 数使用当前 TP 分片配置。"""
         storage_layer_index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
         return self.k_storage[storage_layer_index], self.v_storage[storage_layer_index]
+
+    def get_layer_kv_scales(self, logical_layer_id: int) -> "GQAKVScales":
+        """返回该层 attention 使用的 scale：per_tensor 为 CPU 浮点数，per_head 为本地 K/V head 的 Tensor。"""
+        from lightllm.common.attention.backends.gqa import GQAKVScales
+
+        index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
+        if self.config.scale_mode == "per_tensor":
+            return GQAKVScales(k_scale=self.cpu_scales[index][0], v_scale=self.cpu_scales[index][1])
+        head_num = self.config.head_num
+        return GQAKVScales(
+            k_scale=self.scales[index, :head_num],
+            v_scale=self.scales[index, head_num:],
+            q_scale=None if self.q_scales is None else self.q_scales[index],
+        )
 
     def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
         """按固定 per-tensor 或 per-head scale 量化输入 K/V，写入 FP8 编码。"""

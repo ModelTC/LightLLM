@@ -20,6 +20,8 @@ class Fa3AttBackend(BaseAttBackend):
     # 设为 1 / TRUE / ON 时，FA3 与 CPU cache 搬运在 GPU 上互相等待。
     requires_cpu_cache_sync = enable_env_vars("LIGHTLLM_FA3_CPU_CACHE_SYNC")
     page_table_buffers = None
+    # How the KV cache this backend reads is quantized; see GQALayerConfig.kv_quant.
+    kv_quant: Optional[str] = None
 
     def __init__(self, model):
         super().__init__(model=model)
@@ -93,9 +95,10 @@ class Fa3AttBackend(BaseAttBackend):
         return Fa3DecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
-def _gqa_layer_inputs_and_config(q, k, v, att_control: AttControl, causal: bool):
+def _gqa_layer_inputs_and_config(q, k, v, att_control: AttControl, causal: bool, kv_quant: Optional[str]):
     assert att_control.use_alibi is False, "FA3 GQA does not support alibi"
     sinks = att_control.sink_weight if att_control.use_att_sink else None
+    kv_scales = att_control.kv_scales
     layer_config = GQALayerConfig(
         num_heads=q.shape[1],
         num_kv_heads=k.shape[1],
@@ -104,14 +107,16 @@ def _gqa_layer_inputs_and_config(q, k, v, att_control: AttControl, causal: bool)
         sliding_window=att_control.sliding_window if att_control.use_sliding_window else (-1, -1),
         causal=causal,
         has_sinks=sinks is not None,
+        kv_quant=kv_quant,
+        has_q_scale=kv_scales is not None and kv_scales.q_scale is not None,
     )
-    return GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sinks), layer_config
+    return GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sinks, kv_scales=kv_scales), layer_config
 
 
 @dataclasses.dataclass
 class Fa3PrefillAttState(BasePrefillAttState):
     step_args: Optional[FA3GQAPrefillStepArgs] = None
-    # Mirrors of the step args; the FP8 and neo subclasses still call FA3 directly with them.
+    # Mirrors of the step args; the neo subclass still calls its kernel directly with them.
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
     page_table: torch.Tensor = None
@@ -135,7 +140,9 @@ class Fa3PrefillAttState(BasePrefillAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        layer_inputs, layer_config = _gqa_layer_inputs_and_config(q, k, v, att_control, self.causal)
+        layer_inputs, layer_config = _gqa_layer_inputs_and_config(
+            q, k, v, att_control, self.causal, self.backend.kv_quant
+        )
         impl = self.backend.get_attention_impl(FA3GQAPrefillBackend, layer_config)
         return impl.forward(
             self.step_args, layer_inputs, out=alloc_func(q.shape, dtype=q.dtype, device=q.device), alloc_func=alloc_func
@@ -145,27 +152,12 @@ class Fa3PrefillAttState(BasePrefillAttState):
 @dataclasses.dataclass
 class Fa3DecodeAttState(BaseDecodeAttState):
     step_args: Optional[FA3GQADecodeStepArgs] = None
-    # Mirrors of the step args; the FP8 subclass still calls FA3 directly with them.
-    cu_seqlens_q: torch.Tensor = None
-    cu_seqlens_k: torch.Tensor = None
-    page_table: torch.Tensor = None
-    b_att_seq_len: torch.Tensor = None
-    decode_max_q_seq_len: int = None
-    decode_max_kv_seq_len: int = None
     causal: bool = None
 
     def init_state(self):
         self.causal = self.backend.uses_causal_attention()
         # Replay steps also build: the step builder rewrites the tensors the graph captured.
-        step_args = self.backend.decode_step_builder.build(build_attention_batch(self.infer_state, self.backend))
-        self.step_args = step_args
-        self.cu_seqlens_q, self.cu_seqlens_k, self.page_table = (
-            step_args.cu_seqlens_q,
-            step_args.cu_seqlens_k,
-            step_args.page_table,
-        )
-        self.b_att_seq_len = step_args.cache_seqlens
-        self.decode_max_q_seq_len, self.decode_max_kv_seq_len = step_args.max_seqlen_q, step_args.max_seqlen_k
+        self.step_args = self.backend.decode_step_builder.build(build_attention_batch(self.infer_state, self.backend))
 
     def decode_att(
         self,
@@ -175,7 +167,9 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        layer_inputs, layer_config = _gqa_layer_inputs_and_config(q, k, v, att_control, self.causal)
+        layer_inputs, layer_config = _gqa_layer_inputs_and_config(
+            q, k, v, att_control, self.causal, self.backend.kv_quant
+        )
         impl = self.backend.get_attention_impl(FA3GQADecodeBackend, layer_config)
         return impl.forward(
             self.step_args, layer_inputs, out=alloc_func(q.shape, dtype=q.dtype, device=q.device), alloc_func=alloc_func
