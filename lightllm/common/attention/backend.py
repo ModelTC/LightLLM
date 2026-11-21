@@ -81,6 +81,10 @@ class AttentionBatch:
     decode_rows_per_request: int = 1
     dynamic_decode_rows: bool = False
     pad_req_idx: Optional[int] = None
+    # Dynamic speculative rows: each row's draft position within its request. With recurrent
+    # state, req_to_mtp_state_index[slot] is the request's last accepted draft position.
+    b_mtp_index: Optional[torch.Tensor] = None
+    req_to_mtp_state_index: Optional[torch.Tensor] = None
     # Diverse sampling: rows that share a radix-tree prefix node form a group; b_shared_seq_len[i]
     # is how many leading tokens row i shares with its group.
     b_shared_seq_len: Optional[torch.Tensor] = None

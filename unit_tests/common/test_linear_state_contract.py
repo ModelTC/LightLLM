@@ -109,16 +109,16 @@ class _CaptureKernel:
 @pytest.mark.parametrize(
     "module_name,cls,bv,precompute",
     [
-        ("replay_gdn_decode", ReplayGDNState, 32, True),
-        ("replay_gdn_decode", ReplayGDNState, 8, False),
-        ("replay_kda_decode", ReplayKDAState, 32, True),
-        ("replay_kda_decode", ReplayKDAState, 8, False),
+        ("gdn.replayssm.replay_gdn", ReplayGDNState, 32, True),
+        ("gdn.replayssm.replay_gdn", ReplayGDNState, 8, False),
+        ("kda.replay_kda", ReplayKDAState, 32, True),
+        ("kda.replay_kda", ReplayKDAState, 8, False),
     ],
 )
 def test_mtp0_precompute_reaches_replay_kernel(monkeypatch, linear_config, module_name, cls, bv, precompute):
     import importlib
 
-    decode = importlib.import_module(f"lightllm.common.basemodel.attention.linear.{module_name}")
+    decode = importlib.import_module(f"lightllm.common.attention.kernels.{module_name}")
     captured = _CaptureKernel()
     monkeypatch.setattr(decode, "_decode_replay", captured)
     owner = cls(

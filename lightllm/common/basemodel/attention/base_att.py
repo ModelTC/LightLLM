@@ -129,6 +129,7 @@ def build_attention_batch(infer_state: "InferStateInfo", backend: BaseAttBackend
         dynamic_decode_rows=dynamic_decode_rows,
         pad_req_idx=getattr(infer_state.req_manager, "HOLD_REQUEST_ID", None),
         b_shared_seq_len=getattr(infer_state, "b_shared_seq_len", None),
+        b_mtp_index=getattr(infer_state, "b_mtp_index", None),
         b_image_token_end=getattr(infer_state, "b_image_token_end", None),
         max_ready_cache_len=infer_state.max_cache_len or 0,
         mem_index=infer_state.mem_index,
