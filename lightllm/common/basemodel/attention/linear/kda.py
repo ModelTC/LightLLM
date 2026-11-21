@@ -1,32 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""KDA attention backend for GLM-5-Next."""
+"""KDA linear attention adapters (GLM-5-Next) over the kda backend family.
+
+Model layers pass the layer's operands, parameters and recurrent state views in
+AttControl.linear_att_*_dict; the adapter builds the layer config, runs the impl and, for replay
+state, advances the replay cursors after the last layer.
+"""
 
 from __future__ import annotations
 
 import dataclasses
 import weakref
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from lightllm.common.attention_state.bounded_att import KDAState
+from lightllm.common.attention.backends.gdn.triton import GDNDecodeStepArgs
+from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
+from lightllm.common.attention.backends.kda.triton import (
+    KDAPrefillStepArgs,
+    TritonKDADecodeBackend,
+    TritonKDAPrefillBackend,
+)
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
     BaseAttBackend,
     BaseDecodeAttState,
     BasePrefillAttState,
+    build_attention_batch,
 )
-from lightllm.common.attention.kernels.gdn.causal_conv1d import causal_conv1d_update
-from lightllm.common.attention.kernels.kda.causal_conv1d_qkv import causal_conv1d_qkv
-from lightllm.common.basemodel.attention.linear.flashkda import get_flash_kda_fwd, kda_prefill, select_kda_prefill
-from lightllm.common.attention.kernels.gdn.third_party_fla.ops.kda_decode import fused_recurrent_kda
-from lightllm.common.attention.kernels.gdn.causal_conv1d_mtp import (
-    causal_conv1d_update as causal_conv1d_update_mtp,
-)
-from lightllm.common.attention.kernels.gdn.mtp_state_params import (
-    build_dynamic_mtp_linear_att_state_params,
-)
+from lightllm.common.basemodel.attention.linear.flashkda import get_flash_kda_fwd
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -34,6 +37,12 @@ if TYPE_CHECKING:
 
 
 class KDALinearAttBackend(BaseAttBackend):
+    """KDA over native recurrent state; ReplayKDALinearAttBackend uses replay state."""
+
+    prefill_backend = TritonKDAPrefillBackend
+    decode_backend = TritonKDADecodeBackend
+    replay = False
+
     def __init__(self, model: "TpPartBaseModel"):
         super().__init__(model=model)
         config = model.config["linear_attn_config"]
@@ -46,6 +55,42 @@ class KDALinearAttBackend(BaseAttBackend):
         self.lower_bound = config.get("gate_lower_bound", -5.0)
         self.mtp_step = model.args.mtp_step
         self.flash_kda_fwd = get_flash_kda_fwd(model)
+        backends = model.args.llm_prefill_att_backend
+        requested = backends[1] if len(backends) > 1 else "auto"
+        # Automatic selection keeps FlashKDA to the step lengths it was validated on.
+        max_flash_len = (2048 if self.tp_num_heads < 16 else 8192) if requested == "auto" else None
+        self.prefill_step_builder = self.prefill_backend.get_step_builder_cls()(
+            ssm_slots_per_request=1 if self.replay else self.mtp_step + 1,
+            flash_kda_fwd=self.flash_kda_fwd,
+            max_flash_len=max_flash_len,
+        )
+        # BaseAttBackend reuses one instance per model but reruns __init__ on every construction.
+        # Keep the decode step builder: captured CUDA graphs read the tensors it keeps.
+        if getattr(self, "decode_step_builder", None) is None:
+            self.decode_step_builder = self.decode_backend.get_step_builder_cls()(replay=self.replay)
+
+    def layer(self, params: dict):
+        layer_config = KDALayerConfig(
+            num_heads=self.tp_num_heads,
+            head_dim=self.head_dim,
+            conv_kernel_size=self.conv_kernel_size,
+            lower_bound=self.lower_bound,
+            dtype=params["mixed_qkv"].dtype,
+            state_mtp_step=self.mtp_step,
+        )
+        layer_inputs = KDALayerInputs(
+            mixed_qkv=params["mixed_qkv"],
+            raw_gate=params["raw_gate"],
+            raw_beta=params["raw_beta"],
+            conv_weight=params["conv_weight"],
+            A_log=params["A_log"],
+            dt_bias=params["dt_bias"],
+            conv_states=params["conv_states"],
+            ssm_states=params.get("ssm_states"),
+            replay_state=params["state"] if self.replay else None,
+            layer_num=params["layer_num"],
+        )
+        return layer_inputs, layer_config
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo"):
         return KDAPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
@@ -53,208 +98,70 @@ class KDALinearAttBackend(BaseAttBackend):
     def create_att_decode_state(self, infer_state: "InferStateInfo"):
         return KDADecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
-    def split_qkv(self, mixed_qkv: torch.Tensor):
-        return mixed_qkv.split(self.tp_hidden_size, dim=-1)
+
+def _run(backend: KDALinearAttBackend, backend_cls, step_args, params: dict, alloc_func):
+    layer_inputs, layer_config = backend.layer(params)
+    impl = backend.get_attention_impl(backend_cls, layer_config)
+    x = layer_inputs.mixed_qkv
+    rows = x.shape[0]
+    out = alloc_func((rows, layer_config.num_heads, layer_config.head_dim), dtype=x.dtype, device=x.device)
+    return impl.forward(step_args, layer_inputs, out=out, alloc_func=alloc_func)
 
 
 @dataclasses.dataclass
 class KDAPrefillAttState(BasePrefillAttState):
-    b_conv_buffer_idx: torch.Tensor = None
-    b_ssm_buffer_idx: torch.Tensor = None
-    cu_seqlens: torch.Tensor = None
-    flash_kda_fwd: Callable = None
+    step_args: Optional[KDAPrefillStepArgs] = None
 
     def init_state(self):
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (self.backend.mtp_step + 1)
-        self.flash_kda_fwd = select_kda_prefill(self.backend, self.infer_state.max_q_seq_len)
-        self.cu_seqlens = self.infer_state.b1_cu_q_seq_len
-        if self.flash_kda_fwd is not None:
-            self.cu_seqlens = self.cu_seqlens.to(torch.int64).contiguous()
+        self.step_args = self.backend.prefill_step_builder.build(build_attention_batch(self.infer_state, self.backend))
 
-    def prefill_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ):
+    def prefill_att(self, q, k, v, att_control: AttControl = AttControl(), alloc_func=torch.empty):
         assert att_control.linear_att_prefill
-        params = att_control.linear_att_prefill_dict
-        layer_weight = params["layer_weight"]
-        layer_num = params["layer_num"]
-        mixed_qkv = params["mixed_qkv"]
-        raw_gate = params["raw_gate"]
-        raw_beta = params["raw_beta"]
-        backend: KDALinearAttBackend = self.backend
-
-        state = self.infer_state.att_state_manager.get_state(
-            model_role=self.infer_state.att_state_role,
-            state_type_filter="kda",
-            logical_layer_id=layer_num,
-            state_class=KDAState,
-        )
-        conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
-        conv_states = conv_states[..., : backend.conv_kernel_size - 1]
-        q, k, v = causal_conv1d_qkv(
-            mixed_qkv,
-            layer_weight.get_merged_kda_conv_weight(),
-            conv_states,
-            self.infer_state.b1_cu_q_seq_len,
-            self.b_conv_buffer_idx,
-            self.infer_state.b_ready_cache_len,
-            self.infer_state.max_q_seq_len,
-            use_qk_l2norm=self.flash_kda_fwd is None,
-        )
-        raw_beta = raw_beta.view(1, -1, backend.tp_num_heads)
-
-        return kda_prefill(
-            q=q,
-            k=k,
-            v=v,
-            raw_g=raw_gate.view(1, -1, backend.tp_num_heads, backend.head_dim),
-            raw_beta=raw_beta,
-            A_log=layer_weight.linear_A_log.weight,
-            g_bias=layer_weight.linear_dt_bias.weight,
-            ssm_states=ssm_states,
-            state_indices=self.b_ssm_buffer_idx,
-            qk_normalized=self.flash_kda_fwd is None,
-            cu_seqlens=self.cu_seqlens,
-            lower_bound=backend.lower_bound,
-            flash_kda_fwd=self.flash_kda_fwd,
+        return _run(
+            self.backend, self.backend.prefill_backend, self.step_args, att_control.linear_att_prefill_dict, alloc_func
         )
 
 
 @dataclasses.dataclass
 class KDADecodeAttState(BaseDecodeAttState):
-    b_conv_buffer_idx: torch.Tensor = None
-    b_ssm_buffer_idx: torch.Tensor = None
-    b1_mtp_cu_q_seq_len: torch.Tensor = None
-    b_num_accepted_tokens: torch.Tensor = None
+    step_args: Optional[GDNDecodeStepArgs] = None
 
     def init_state(self):
-        mtp_step = self.backend.mtp_step
-        if mtp_step == 0:
-            self._init_normal_decode_state()
-            return
-
-        # MTP 元数据按模型初始化，沿用每个角色只有一个 KDA State 的约束。
-        # 只在此读取游标；Backend 不保存 State，逐层计算按逻辑层号查询资源。
-        (state,) = (
-            state
-            for state in self.infer_state.att_state_manager.get_bounded_attention_states(
-                self.infer_state.att_state_role
-            )
-            if isinstance(state, KDAState)
+        backend = self.backend
+        batch = build_attention_batch(self.infer_state, backend)
+        # KDA groups decode rows by the configured speculative depth.
+        rows = backend.mtp_step + 1
+        batch = dataclasses.replace(
+            batch,
+            decode_rows_per_request=rows,
+            dynamic_decode_rows=rows > 1 and backend.uses_dynamic_spec_verify_layout(),
+            req_to_mtp_state_index=_recurrent_state(self).mtp_state_index if rows > 1 else None,
         )
-        if self.backend.uses_dynamic_spec_verify_layout():
-            self._init_dynamic_mtp_decode_state(mtp_step + 1, req_to_mtp_state_index=state.mtp_state_index)
-        else:
-            self._init_fixed_mtp_decode_state(mtp_step, req_to_mtp_state_index=state.mtp_state_index)
+        # Replay steps also build: the step builder rewrites the tensors the graph captured.
+        self.step_args = backend.decode_step_builder.build(batch)
 
-    def _init_normal_decode_state(self):
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx
-
-    def _init_dynamic_mtp_decode_state(self, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
-        (
-            self.b1_mtp_cu_q_seq_len,
-            self.b_conv_buffer_idx,
-            self.b_num_accepted_tokens,
-        ) = build_dynamic_mtp_linear_att_state_params(
-            b_req_idx=self.infer_state.b_req_idx,
-            b_mtp_index=self.infer_state.b_mtp_index,
-            req_to_mtp_state_index=req_to_mtp_state_index,
-            hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
-        )
-        self._init_mtp_ssm_buffer_idx(mtp_size)
-
-    def _init_fixed_mtp_decode_state(self, mtp_step: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
-        mtp_size = mtp_step + 1
-        batch_size = self.infer_state.batch_size
-        assert batch_size % mtp_size == 0, (
-            "KDA fixed-layout decode requires batch_size to be divisible by mtp_step + 1, "
-            f"got batch_size={batch_size}, mtp_step={mtp_step}."
-        )
-
-        att_batch_size = batch_size // mtp_size
-        self.b1_mtp_cu_q_seq_len = torch.arange(
-            0,
-            batch_size + 1,
-            mtp_size,
-            dtype=torch.int32,
-            device=self.infer_state.b_req_idx.device,
-        )
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        self.b_num_accepted_tokens = req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
-        self._init_mtp_ssm_buffer_idx(mtp_size)
-
-    def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
-        att_batch_size = self.b_conv_buffer_idx.shape[0]
-        # Each request owns mtp_size consecutive recurrent-state slots.
-        b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
-        state_offsets = torch.arange(
-            mtp_size,
-            device=self.infer_state.b_req_idx.device,
-            dtype=self.infer_state.b_req_idx.dtype,
-        ).view(1, mtp_size)
-        self.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets  # [att_batch_size, mtp_size]
-
-    def decode_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ):
+    def decode_att(self, q, k, v, att_control: AttControl = AttControl(), alloc_func=torch.empty):
         assert att_control.linear_att_decode
         params = att_control.linear_att_decode_dict
-        layer_weight = params["layer_weight"]
-        layer_num = params["layer_num"]
-        mixed_qkv = params["mixed_qkv"]
-        raw_gate = params["raw_gate"]
-        raw_beta = params["raw_beta"]
-        backend: KDALinearAttBackend = self.backend
+        out = _run(self.backend, self.backend.decode_backend, self.step_args, params, alloc_func)
+        if self.backend.replay:
+            # Every layer read the cursors of the step's start; the state advances them after the last layer.
+            params["state"].finish_decode_token(params["layer_num"], self.step_args.conv_idx, self.step_args.cu_seqlens)
+        return out
 
-        state = self.infer_state.att_state_manager.get_state(
-            model_role=self.infer_state.att_state_role,
-            state_type_filter="kda",
-            logical_layer_id=layer_num,
-            state_class=KDAState,
-        )
-        conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
-        conv_kwargs = dict(bias=None, activation="silu", conv_state_indices=self.b_conv_buffer_idx)
-        conv_update = causal_conv1d_update
-        if backend.mtp_step > 0:
-            conv_update = causal_conv1d_update_mtp
-            conv_kwargs.update(
-                mtp_step=backend.mtp_step,
-                num_accepted_tokens=self.b_num_accepted_tokens,
-                query_start_loc=self.b1_mtp_cu_q_seq_len,
-            )
-        mixed_qkv = conv_update(mixed_qkv, conv_states, layer_weight.get_merged_kda_conv_weight(), **conv_kwargs)
-        q, k, v = backend.split_qkv(mixed_qkv)
-        shape = (1, -1) if backend.mtp_step > 0 else (-1, 1)
-        q = q.view(*shape, backend.tp_num_heads, backend.head_dim)
-        k = k.view(*shape, backend.tp_num_heads, backend.head_dim)
-        v = v.view(*shape, backend.tp_num_heads, backend.head_dim)
-        raw_gate = raw_gate.view(*shape, backend.tp_hidden_size)
-        raw_beta = raw_beta.view(*shape, backend.tp_num_heads)
-        output, _ = fused_recurrent_kda(
-            q=q,
-            k=k,
-            v=v,
-            raw_gate=raw_gate,
-            raw_beta=raw_beta,
-            a_log=layer_weight.linear_A_log.weight,
-            gate_bias=layer_weight.linear_dt_bias.weight,
-            initial_state=ssm_states,
-            lower_bound=backend.lower_bound,
-            inplace_final_state=True,
-            ssm_state_indices=self.b_ssm_buffer_idx,
-            cu_seqlens=self.b1_mtp_cu_q_seq_len,
-            num_accepted_tokens=self.b_num_accepted_tokens,
-        )
-        return output
+
+def _recurrent_state(att_state):
+    """The role's single KDA state, which holds the speculative acceptance index."""
+    from lightllm.common.attention_state.bounded_att import KDAState
+    from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import ReplayKDAState
+
+    infer_state = att_state.infer_state
+    state_class = ReplayKDAState if att_state.backend.replay else KDAState
+    matches = [
+        state
+        for state in infer_state.att_state_manager.get_bounded_attention_states(infer_state.att_state_role)
+        if isinstance(state, state_class)
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"expected one {state_class.__name__} for {infer_state.att_state_role}")
+    return matches[0]
