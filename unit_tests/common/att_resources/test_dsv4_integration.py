@@ -1,5 +1,6 @@
 """通过模型工厂和生产 fused kernel 验证 V4 State 接入。"""
 
+from lightllm.models.deepseek_v4.swa_prefill_workspace import prepare_swa_prefill_workspace
 import json
 from types import SimpleNamespace
 
@@ -100,13 +101,14 @@ def read_packed_rows(buffer, slots, page_tokens):
     return torch.cat((buffer[page_ids[:, None], data], buffer[page_ids[:, None], scale]), dim=-1)
 
 
-def test_backend_reads_owned_state_views(cache):
+def test_infer_state_reads_owned_state_views(cache):
     manager, window, backend = cache
     infer = make_infer(manager, window)
     assert infer.swa_state is window
     infer.is_prefill = False
+    infer.dsv4_layer_compress_ratios = dict(enumerate(backend.model.config["compress_ratios"]))
     for layer in range(3):
-        swa, compressed = backend.get_att_input_params(infer, layer)
+        swa, compressed = infer.get_att_kv(layer)
         assert swa.shape[1] == 74880
         assert (compressed is None) == (layer == 2)
         if layer != 2:
@@ -198,9 +200,9 @@ def test_long_prefill_keeps_swa_prefix_and_runtime_tail(cache):
         infer.b_ready_cache_len, infer.b_seq_len = (
             torch.tensor([value], dtype=torch.int32, device="cuda") for value in (start, end)
         )
-        prefill = backend.create_att_prefill_state(infer)
-        prefill.prepare_swa_workspace(infer)
-        infer.prefill_att_state = prefill
+        prefill = prepare_swa_prefill_workspace(infer, backend.model)
+        infer.swa_prefill_workspace = prefill
+        infer.dsv4_layer_compress_ratios = dict(enumerate(backend.model.config["compress_ratios"]))
         indices = torch.empty((positions.numel(), 128), dtype=torch.int32, device="cuda")
         lengths, writes, runtime = (torch.empty_like(positions) for _ in range(3))
         build_swa_indices(

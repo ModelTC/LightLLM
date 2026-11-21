@@ -27,6 +27,7 @@ from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import (
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
 from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+from lightllm.models.deepseek_v4.swa_prefill_workspace import reserve_swa_prefill_workspace
 from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 from lightllm.models.llama.yarn_rotary_utils import (
     find_correction_range,
@@ -198,7 +199,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     def prepare_attention_states(self) -> None:
         super().prepare_attention_states()
         # 在统一容量规划前预留长 prefill 的 SWA 临时区，避免 KV 分配挤占计算所需空间。
-        DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(self)
+        reserve_swa_prefill_workspace(self)
 
     def _init_quant(self):
         if not self.is_mtp_draft_model:
