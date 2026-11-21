@@ -17,6 +17,9 @@ logger = init_logger(__name__)
 
 
 class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
+    # Neo attends bidirectionally inside image spans during prefill.
+    prefill_image_spans = True
+
     def __init__(self, data_type, network_config):
         super().__init__(data_type, network_config)
         return

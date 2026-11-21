@@ -392,3 +392,81 @@ def test_alibi_is_supported_only_for_triton_mha_without_window():
     for backend in (FA3GQAPrefillBackend, FlashInferGQAPrefillBackend):
         with pytest.raises(NotImplementedError):
             backend.get_impl_cls()(layer_config())
+
+
+@pytest.mark.parametrize(
+    "window,head_dim,spans",
+    [((-1, -1), 128, {0: (4, 30), 2: (100, 160)}), ((15, 0), 256, {})],
+)
+def test_bidirectional_image_spans_prefill_matches_reference(window, head_dim, spans):
+    q_heads, kv_heads = 8, 2
+    token_map = torch.randperm(3 * 512, device="cuda", dtype=torch.int32).view(3, 512)
+    req_ids = torch.tensor([2, 0, 1], device="cuda", dtype=torch.int32)
+    lengths = torch.tensor([33, 9, 259], device="cuda", dtype=torch.int32)
+    ready = [0, 5, 128]
+    # spans: request index -> image positions [start, end)
+    q_lens = [n - r for n, r in zip(lengths.tolist(), ready)]
+    image_end = torch.tensor(
+        [
+            spans[i][1] if i in spans and spans[i][0] <= pos < spans[i][1] else 0
+            for i, (n, r) in enumerate(zip(lengths.tolist(), ready))
+            for pos in range(r, n)
+        ],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    kv = torch.randn(3 * 512, 2 * kv_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    k, v = kv[:, :kv_heads], kv[:, kv_heads:]
+    q = torch.randn(sum(q_lens), q_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    cu_q = torch.tensor([0, *q_lens], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    batch = make_batch(
+        token_map,
+        req_ids,
+        lengths,
+        b_q_start_loc=cu_q[:-1],
+        b_ready_cache_len=torch.tensor(ready, device="cuda", dtype=torch.int32),
+        max_q_seq_len=max(q_lens),
+        b_image_token_end=image_end,
+    )
+    layer_config = GQALayerConfig(
+        num_heads=q_heads,
+        num_kv_heads=kv_heads,
+        head_dim=head_dim,
+        dtype=torch.bfloat16,
+        sliding_window=window,
+        bidirectional_image_spans=True,
+    )
+    out = torch.empty_like(q)
+    TritonGQAPrefillBackend.get_impl_cls()(layer_config).forward(
+        TritonGQAPrefillBackend.get_step_builder_cls()().build(batch),
+        GQALayerInputs(q=q, k_cache=k, v_cache=v),
+        out=out,
+    )
+
+    expected, row = [], 0
+    for req_id, length, cached in zip(req_ids.tolist(), lengths.tolist(), ready):
+        indices = token_map[req_id, :length].long()
+        keys = k[indices].float().repeat_interleave(q_heads // kv_heads, dim=1)
+        values = v[indices].float().repeat_interleave(q_heads // kv_heads, dim=1)
+        count = length - cached
+        query_pos = torch.arange(cached, length, device="cuda")[:, None]
+        key_pos = torch.arange(length, device="cuda")[None, :]
+        mask = key_pos <= query_pos
+        if window != (-1, -1):
+            mask &= key_pos >= query_pos - window[0]
+        # Image queries also see every key before their span's end.
+        mask |= key_pos < image_end[row : row + count, None]
+        scores = torch.einsum("qhd,khd->hqk", q[row : row + count].float(), keys) * head_dim ** -0.5
+        scores.masked_fill_(~mask[None], float("-inf"))
+        expected.append(torch.einsum("hqk,khd->qhd", scores.softmax(-1), values))
+        row += count
+    torch.testing.assert_close(out.float(), torch.cat(expected), atol=0.02, rtol=0.02)
+
+
+def test_bidirectional_image_spans_are_prefill_only():
+    layer_config = GQALayerConfig(
+        num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16, bidirectional_image_spans=True
+    )
+    TritonGQAPrefillBackend.get_impl_cls()(layer_config)
+    with pytest.raises(NotImplementedError, match="prefill only"):
+        TritonGQADecodeBackend.get_impl_cls()(layer_config)

@@ -37,6 +37,8 @@ class TritonGQAPrefillStepArgs:
     b_q_start_loc: torch.Tensor
     b_ready_cache_len: torch.Tensor
     max_q_seq_len: int
+    # Per query token: exclusive end of its image span, 0 for text (see AttentionBatch).
+    b_image_token_end: Optional[torch.Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,7 @@ class TritonGQAPrefillStepBuilder(AttentionStepBuilder[TritonGQAPrefillStepArgs]
             b_q_start_loc=batch.b_q_start_loc,
             b_ready_cache_len=batch.b_ready_cache_len,
             max_q_seq_len=batch.max_q_seq_len,
+            b_image_token_end=batch.b_image_token_end,
         )
 
 
@@ -128,6 +131,8 @@ def _check_supported(layer_config: GQALayerConfig) -> None:
         raise NotImplementedError("Triton GQA supports only causal attention without sinks")
     if layer_config.kv_quant is not None:
         raise NotImplementedError(f"Triton GQA does not support kv_quant={layer_config.kv_quant!r}")
+    if layer_config.bidirectional_image_spans and layer_config.has_alibi:
+        raise NotImplementedError("Triton GQA does not combine ALiBi with bidirectional image spans")
     if layer_config.has_alibi and (
         layer_config.num_heads != layer_config.num_kv_heads or layer_config.sliding_window != (-1, -1)
     ):
@@ -171,6 +176,34 @@ class TritonGQAPrefillImpl(AttentionImpl[GQALayerConfig, TritonGQAPrefillStepArg
         )
 
         _check_inputs(self.layer_config, layer_inputs)
+        if self.layer_config.bidirectional_image_spans:
+            assert step_args.b_image_token_end is not None, "bidirectional image spans need b_image_token_end"
+            args = (
+                layer_inputs.q,
+                layer_inputs.k_cache,
+                layer_inputs.v_cache,
+                out,
+                step_args.b_req_idx,
+                step_args.b_q_start_loc,
+                step_args.b_seq_len,
+                step_args.b_ready_cache_len,
+                step_args.max_q_seq_len,
+                step_args.req_to_token_indexs,
+                step_args.b_image_token_end,
+            )
+            if self.layer_config.sliding_window == (-1, -1):
+                from lightllm.common.attention.kernels.gqa.bf16.prefill.context_attention_fwd_neo import (
+                    context_attention_fwd_neo,
+                )
+
+                context_attention_fwd_neo(*args)
+            else:
+                from lightllm.common.attention.kernels.gqa.bf16.prefill.context_attention_fwd_gemma4_mm import (
+                    context_attention_fwd_gemma4_mm,
+                )
+
+                context_attention_fwd_gemma4_mm(*args, sliding_window=self.layer_config.sliding_window)
+            return out
         if self.layer_config.has_alibi:
             from lightllm.common.basemodel.triton_kernel.alibi_att.context_flashattention_nopad import (
                 context_attention_fwd as alibi_context_attention_fwd,
@@ -215,6 +248,8 @@ class TritonGQADecodeImpl(AttentionImpl[GQALayerConfig, TritonGQADecodeStepArgs,
         """
         super().__init__(layer_config)
         _check_supported(layer_config)
+        if layer_config.bidirectional_image_spans:
+            raise NotImplementedError("bidirectional image spans apply to prefill only")
         self.is_mha = layer_config.num_heads == layer_config.num_kv_heads
         if self.is_mha and layer_config.sliding_window != (-1, -1):
             raise NotImplementedError("sliding_window is not supported by the MHA decode kernel")

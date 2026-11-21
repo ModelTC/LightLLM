@@ -220,6 +220,7 @@ def _check_supported(layer_config: GQALayerConfig) -> None:
         and not layer_config.has_sinks
         and layer_config.kv_quant in (None, "fp8_per_tensor")
         and not layer_config.has_alibi
+        and not layer_config.bidirectional_image_spans
     ):
         raise NotImplementedError(
             "FlashInfer GQA supports only causal attention without sliding window or sinks, "

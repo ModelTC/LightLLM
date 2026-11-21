@@ -129,6 +129,7 @@ def build_attention_batch(infer_state: "InferStateInfo", backend: BaseAttBackend
         dynamic_decode_rows=dynamic_decode_rows,
         pad_req_idx=getattr(infer_state.req_manager, "HOLD_REQUEST_ID", None),
         b_shared_seq_len=getattr(infer_state, "b_shared_seq_len", None),
+        b_image_token_end=getattr(infer_state, "b_image_token_end", None),
         b_shared_radix_node_id=getattr(infer_state, "b_shared_radix_node_id", None),
         cuda_graph_max_kv_seq_len=model.graph_max_len_in_batch if uses_cuda_graph else None,
         microbatch_index=infer_state.microbatch_index,
@@ -166,6 +167,8 @@ class AttControl:
     logical_layer_id: Optional[int] = None
     # 量化 KV cache 的本层 scale，由模型层从 attention State 取得（get_layer_kv_scales）；未量化时为 None。
     kv_scales: Optional["GQAKVScales"] = None
+    # 本层在图像片段内做双向 attention（片段由 InferStateInfo.b_image_token_end 给出），仅用于 prefill。
+    image_spans: bool = False
 
 
 @dataclass
