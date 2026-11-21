@@ -6,9 +6,9 @@ import pytest
 import torch
 
 from lightllm.common.attention.backend import AttentionBatch
-from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
-from lightllm.common.basemodel.attention.base_att import BaseAttBackend
+from lightllm.common.basemodel.attention.base_att import AttControl, BaseAttBackend
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
@@ -18,6 +18,12 @@ pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or flash_attn_with_kvcache is None, reason="FA3 (sgl_kernel) is required"
 )
 PAD = 7  # padding request id; its token-map row is valid but its output is ignored
+FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
+# The FP8 references use the same dequantized K/V and FP8-rounded q as the kernel, but FA3's FP8 path also
+# rounds the softmax probabilities to E4M3 (relative error <= 2**-4) before P @ V, which moves each output by
+# up to ~6% of the probability-weighted |V| (observed: <= 0.055 where |expected| reaches 2.3). The V scales
+# are ~2x the K scales, so a swapped K/V descale, like a lost q descale, moves outputs by far more.
+FP8_TOL = 0.06
 
 
 def reference(q, k, v, token_map, rows, *, causal=True, window=(-1, -1), sinks=None):
@@ -85,6 +91,44 @@ def make_cache(kv_heads, dtype, seed):
     return kv, kv[:, :kv_heads], kv[:, kv_heads:]
 
 
+def make_fp8_cache(kv_heads, seed):
+    """Return per-head FP8 K/V cache bytes, their dequantized values and the float32 [kv_heads] scales."""
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    kv = torch.randn(8 * 512, 2, kv_heads, 64, device="cuda", generator=generator)
+    # Per-head scales differ between heads and between K and V; |kv| / scale stays inside E4M3's 448.
+    scales = torch.stack(
+        (torch.linspace(0.02, 0.025, kv_heads, device="cuda"), torch.linspace(0.04, 0.045, kv_heads, device="cuda"))
+    )
+    encoded = (kv / scales[None, :, :, None]).to(torch.float8_e4m3fn)
+    decoded = encoded.float() * scales[None, :, :, None]
+    k_scale, v_scale = scales.unbind(0)
+    return (
+        encoded[:, 0].view(torch.uint8),
+        encoded[:, 1].view(torch.uint8),
+        decoded[:, 0],
+        decoded[:, 1],
+        k_scale,
+        v_scale,
+    )
+
+
+def fp8_round_q(q, kv_heads, groups, static_scale=None):
+    """Round q to FP8 as FA3's per-KV-head quantization does: the static [kv_heads] scale, or one dynamic
+    amax / FP8_MAX scale per KV head and query group."""
+    shape = q.shape
+    q = q.float().view(shape[0], kv_heads, -1)
+    out = torch.empty_like(q)
+    for rows in groups:
+        if static_scale is None:
+            amax = q[rows].abs().amax(dim=(0, 2))
+            scale = torch.where(amax > 0, amax / FP8_MAX, torch.ones_like(amax))
+        else:
+            scale = static_scale.float()
+        encoded = (q[rows] / scale[None, :, None]).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
+        out[rows] = encoded.float() * scale[None, :, None]
+    return out.view(shape)
+
+
 @pytest.mark.parametrize("page_size", [1, 16])
 @pytest.mark.parametrize(
     "causal,window,sinks", [(True, (-1, -1), False), (True, (15, 0), True), (False, (6, 6), False)]
@@ -119,6 +163,39 @@ def test_prefill(page_size, causal, window, sinks, cached):
     torch.testing.assert_close(kv, before, atol=0, rtol=0)
 
 
+@pytest.mark.parametrize("static_q", [False, True])
+def test_fp8_prefill(static_q):
+    q_heads, kv_heads = 8, 2
+    lengths, ready, req_ids = [33, 9, 259], [16, 5, 128], [2, 0, 1]
+    token_map = paged_token_map(8, 1, seed=0)
+    k, v, k_ref, v_ref, k_scale, v_scale = make_fp8_cache(kv_heads, seed=1)
+    query_lengths = [n - r for n, r in zip(lengths, ready)]
+    generator = torch.Generator(device="cuda").manual_seed(4)
+    q = torch.randn(sum(query_lengths), q_heads, 64, device="cuda", generator=generator).bfloat16()
+    q_scale = q.float().abs().view(q.shape[0], kv_heads, -1).amax(dim=(0, 2)) / FP8_MAX if static_q else None
+    layer_config = GQALayerConfig(
+        num_heads=q_heads,
+        num_kv_heads=kv_heads,
+        head_dim=64,
+        dtype=torch.bfloat16,
+        kv_quant="fp8_per_head",
+        has_q_scale=static_q,
+    )
+    batch = make_batch(token_map, req_ids, lengths, query_lengths, b_ready_cache_len=torch.tensor(ready).cuda())
+    step_args = FA3GQAPrefillBackend.get_step_builder_cls()(page_size=1).build(batch)
+    out = torch.empty_like(q)
+    layer_inputs = GQALayerInputs(
+        q=q, k_cache=k, v_cache=v, kv_scales=GQAKVScales(k_scale=k_scale, v_scale=v_scale, q_scale=q_scale)
+    )
+    assert FA3GQAPrefillBackend.get_impl_cls()(layer_config).forward(step_args, layer_inputs, out=out) is out
+    # Dynamic q scales are per prefill request.
+    starts = [0, *torch.tensor(query_lengths).cumsum(0).tolist()]
+    q_ref = fp8_round_q(q, kv_heads, [list(range(s, e)) for s, e in zip(starts, starts[1:])], q_scale)
+    rows = [(r, pos + 1, n) for r, n, c in zip(req_ids, lengths, ready) for pos in range(c, n)]
+    expected = reference(q_ref, k_ref, v_ref, token_map, rows)
+    torch.testing.assert_close(out.float(), expected, atol=FP8_TOL, rtol=FP8_TOL)
+
+
 # Decode layouts: (b_req_idx per row, b_seq_len per row, rows per request, dynamic rows).
 LAYOUTS = {
     "normal": ([2, 0, 1], [34, 10, 260], 1, False),
@@ -135,6 +212,20 @@ def decode_rows(req_ids, lengths, causal):
     for r, n in zip(req_ids, lengths):
         request_len[r] = max(request_len.get(r, 0), n)
     return [(r, n, request_len[r] if not causal else n) for r, n in zip(req_ids, lengths)]
+
+
+def decode_groups(req_ids, rows_per_request, dynamic):
+    """Row indices of each attention request: fixed groups of rows, or runs of one request id with every
+    padding row on its own."""
+    if not dynamic:
+        return [list(range(i, i + rows_per_request)) for i in range(0, len(req_ids), rows_per_request)]
+    groups = []
+    for i, r in enumerate(req_ids):
+        if groups and r != PAD and req_ids[groups[-1][-1]] == r:
+            groups[-1].append(i)
+        else:
+            groups.append([i])
+    return groups
 
 
 @pytest.mark.parametrize("layout", list(LAYOUTS))
@@ -161,6 +252,68 @@ def test_decode_layouts(layout, sinks, page_size):
     keep = [i for i, r in enumerate(req_ids) if r != PAD]
     expected = reference(q, k, v, token_map, decode_rows(req_ids, lengths, True), sinks=sink_logits)
     torch.testing.assert_close(out[keep].float(), expected[keep], atol=0.02, rtol=0.02)
+
+
+# With one row per request non-causal decode equals causal decode, so only multi-row layouts are checked.
+@pytest.mark.parametrize("layout", ["fixed", "dynamic"])
+@pytest.mark.parametrize("window", [(-1, -1), (6, 6)])
+def test_decode_non_causal(layout, window):
+    # Block-drafting models (DFlash) let every row of a request see all of the request's keys.
+    dtype, q_heads, kv_heads, page_size = torch.bfloat16, 8, 2, 16
+    req_ids, lengths, rows_per_request, dynamic = LAYOUTS[layout]
+    token_map = paged_token_map(8, page_size, seed=2)
+    _, k, v = make_cache(kv_heads, dtype, seed=3)
+    generator = torch.Generator(device="cuda").manual_seed(4)
+    q = torch.randn(len(req_ids), q_heads, 64, device="cuda", dtype=dtype, generator=generator)
+    layer_config = GQALayerConfig(
+        num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=dtype, causal=False, sliding_window=window
+    )
+    batch = make_batch(
+        token_map, req_ids, lengths, decode_rows_per_request=rows_per_request, dynamic_decode_rows=dynamic
+    )
+    step_args = FA3GQADecodeBackend.get_step_builder_cls()(
+        page_size=page_size, page_table_view=_PageTables(page_size)
+    ).build(batch)
+    out = torch.empty_like(q)
+    FA3GQADecodeBackend.get_impl_cls()(layer_config).forward(
+        step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out
+    )
+    keep = [i for i, r in enumerate(req_ids) if r != PAD]
+    expected = reference(q, k, v, token_map, decode_rows(req_ids, lengths, False), causal=False, window=window)
+    torch.testing.assert_close(out[keep].float(), expected[keep], atol=0.02, rtol=0.02)
+
+
+@pytest.mark.parametrize("layout", list(LAYOUTS))
+@pytest.mark.parametrize("static_q", [False, True])
+def test_fp8_decode_layouts(layout, static_q):
+    q_heads, kv_heads = 8, 2
+    req_ids, lengths, rows_per_request, dynamic = LAYOUTS[layout]
+    token_map = paged_token_map(8, 1, seed=2)
+    k, v, k_ref, v_ref, k_scale, v_scale = make_fp8_cache(kv_heads, seed=3)
+    generator = torch.Generator(device="cuda").manual_seed(4)
+    q = torch.randn(len(req_ids), q_heads, 64, device="cuda", generator=generator).bfloat16()
+    q_scale = q.float().abs().view(q.shape[0], kv_heads, -1).amax(dim=(0, 2)) / FP8_MAX if static_q else None
+    layer_config = GQALayerConfig(
+        num_heads=q_heads,
+        num_kv_heads=kv_heads,
+        head_dim=64,
+        dtype=torch.bfloat16,
+        kv_quant="fp8_per_head",
+        has_q_scale=static_q,
+    )
+    batch = make_batch(
+        token_map, req_ids, lengths, decode_rows_per_request=rows_per_request, dynamic_decode_rows=dynamic
+    )
+    step_args = FA3GQADecodeBackend.get_step_builder_cls()(page_size=1, page_table_view=_PageTables(1)).build(batch)
+    out = torch.empty_like(q)
+    layer_inputs = GQALayerInputs(
+        q=q, k_cache=k, v_cache=v, kv_scales=GQAKVScales(k_scale=k_scale, v_scale=v_scale, q_scale=q_scale)
+    )
+    assert FA3GQADecodeBackend.get_impl_cls()(layer_config).forward(step_args, layer_inputs, out=out) is out
+    q_ref = fp8_round_q(q, kv_heads, decode_groups(req_ids, rows_per_request, dynamic), q_scale)
+    keep = [i for i, r in enumerate(req_ids) if r != PAD]
+    expected = reference(q_ref, k_ref, v_ref, token_map, decode_rows(req_ids, lengths, True))
+    torch.testing.assert_close(out[keep].float(), expected[keep], atol=FP8_TOL, rtol=FP8_TOL)
 
 
 def test_decode_step_builder_keeps_graph_tensors_per_microbatch_and_batch_size():
@@ -206,9 +359,9 @@ def test_impl_rejects_unsupported_specs():
 def start_args(monkeypatch):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
-    def configure(overlap: bool) -> None:
+    def configure(overlap: bool, **overrides) -> None:
         args = {f.name: getattr(StartArgs(), f.name) for f in dataclasses.fields(StartArgs)}
-        args.update(enable_decode_microbatch_overlap=overlap, enable_torch_memory_saver=False)
+        args.update(enable_decode_microbatch_overlap=overlap, enable_torch_memory_saver=False, **overrides)
         monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(args))
         get_env_start_args.cache_clear()
         return args
@@ -229,6 +382,23 @@ class _Model:
         self.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _: rows_per_request - 1)
 
 
+def _decode_state(backend, token_map, req_ids, lengths, microbatch_index=0, *, capture=False, replay=False):
+    s = InferStateInfo()
+    s.is_prefill = False
+    s.is_cuda_graph_capture, s.is_cuda_graph_replay = capture, replay
+    s.input_ids = torch.zeros(len(lengths), device="cuda", dtype=torch.int64)
+    s.batch_size, s.microbatch_index = len(lengths), microbatch_index
+    s.b_req_idx = torch.tensor(req_ids, device="cuda", dtype=torch.int32)
+    s.b_seq_len = torch.tensor(lengths, device="cuda", dtype=torch.int32)
+    s.max_kv_seq_len, s.total_token_num = max(lengths), sum(lengths)
+    s.b1_cu_q_seq_len = torch.arange(len(lengths) + 1, device="cuda", dtype=torch.int32)
+    s.b1_cu_kv_seq_len = torch.tensor([0, *lengths], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    s.req_manager = SimpleNamespace(req_to_token_indexs=token_map, HOLD_REQUEST_ID=PAD)
+    s.decode_att_state = backend.create_att_decode_state(infer_state=s)
+    s.init_att_state()
+    return s
+
+
 class _Microbatch:
     def __init__(self, backend, page_size, req_ids, seed):
         self.backend, self.req_ids = backend, req_ids
@@ -238,20 +408,9 @@ class _Microbatch:
         self.q = torch.randn(len(req_ids), 8, 64, device="cuda", dtype=torch.bfloat16, generator=generator)
 
     def state(self, lengths, microbatch_index, *, capture=False, replay=False):
-        s = InferStateInfo()
-        s.is_prefill = False
-        s.is_cuda_graph_capture, s.is_cuda_graph_replay = capture, replay
-        s.input_ids = torch.zeros(len(lengths), device="cuda", dtype=torch.int64)
-        s.batch_size, s.microbatch_index = len(lengths), microbatch_index
-        s.b_req_idx = torch.tensor(self.req_ids, device="cuda", dtype=torch.int32)
-        s.b_seq_len = torch.tensor(lengths, device="cuda", dtype=torch.int32)
-        s.max_kv_seq_len, s.total_token_num = max(lengths), sum(lengths)
-        s.b1_cu_q_seq_len = torch.arange(len(lengths) + 1, device="cuda", dtype=torch.int32)
-        s.b1_cu_kv_seq_len = torch.tensor([0, *lengths], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
-        s.req_manager = SimpleNamespace(req_to_token_indexs=self.token_map, HOLD_REQUEST_ID=PAD)
-        s.decode_att_state = self.backend.create_att_decode_state(infer_state=s)
-        s.init_att_state()
-        return s
+        return _decode_state(
+            self.backend, self.token_map, self.req_ids, lengths, microbatch_index, capture=capture, replay=replay
+        )
 
     def forward(self, state):
         return state.decode_att_state.decode_att(q=self.q, k=self.k, v=self.v)
@@ -297,3 +456,50 @@ def test_adapter_replays_through_cuda_graph(start_args, overlap, rows_per_reques
                 mb.check(graph.replay(mb.state(lengths, 0, replay=True)), lengths)
     finally:
         BaseAttBackend._instances.pop((Fa3AttBackend, model), None)
+
+
+# Dynamic verify steps of 6 rows and up to 3 rows per request: (b_req_idx, b_seq_len). After the captured
+# step the grouping changes, a padding row appears, lengths grow up to the graph capacity and shrink back.
+DYNAMIC_STEPS = [
+    ([2, 2, 2, 0, 1, 1], [12, 13, 14, 8, 20, 21]),
+    ([3, 0, 0, 0, 1, PAD], [300, 40, 41, 42, 7, 2]),
+    ([4, 5, 6, 1, 1, 1], [3, 9, 511, 100, 101, 102]),
+    ([2, 2, 2, 0, 1, 1], [12, 13, 14, 8, 20, 21]),
+]
+
+
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8_per_head"])
+def test_adapter_replays_dynamic_verify_layout_through_cuda_graph(start_args, fp8):
+    from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
+    from lightllm.common.basemodel.attention.fa3.fp8 import Fp8Fa3AttBackend
+    from lightllm.common.basemodel.cuda_graph import CudaGraph
+
+    args = start_args(overlap=False, mtp_dynamic_verify=True)
+    backend_cls = Fp8Fa3AttBackend if fp8 else Fa3AttBackend
+    model = _Model(args, 16, rows_per_request=3)
+    backend = backend_cls(model=model)
+    try:
+        assert backend.uses_dynamic_spec_verify_layout()
+        token_map = paged_token_map(8, 16, seed=7)
+        generator = torch.Generator(device="cuda").manual_seed(9)
+        q = torch.randn(6, 8, 64, device="cuda", generator=generator).bfloat16()
+        if fp8:
+            k, v, k_ref, v_ref, k_scale, v_scale = make_fp8_cache(2, seed=8)
+            att_control, tol = AttControl(kv_scales=GQAKVScales(k_scale=k_scale, v_scale=v_scale)), FP8_TOL
+        else:
+            _, k, v = make_cache(2, torch.bfloat16, seed=8)
+            k_ref, v_ref, att_control, tol = k, v, AttControl(), 0.02
+
+        def forward(state):
+            return state.decode_att_state.decode_att(q=q, k=k, v=v, att_control=att_control)
+
+        graph = CudaGraph(6, 6, 6, max_batch_size=6, max_len_in_batch=512)
+        graph.capture_decode(forward, _decode_state(backend, token_map, *DYNAMIC_STEPS[0], capture=True))
+        for req_ids, lengths in DYNAMIC_STEPS[1:]:
+            out = graph.replay(_decode_state(backend, token_map, req_ids, lengths, replay=True))
+            q_ref = fp8_round_q(q, 2, decode_groups(req_ids, 3, True)) if fp8 else q
+            expected = reference(q_ref, k_ref, v_ref, token_map, decode_rows(req_ids, lengths, True))
+            keep = [i for i, r in enumerate(req_ids) if r != PAD]
+            torch.testing.assert_close(out[keep].float(), expected[keep], atol=tol, rtol=tol)
+    finally:
+        BaseAttBackend._instances.pop((backend_cls, model), None)
