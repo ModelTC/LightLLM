@@ -353,8 +353,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
 
         state = infer_state.swa_state
-        att_state = infer_state.prefill_att_state if infer_state.is_prefill else infer_state.decode_att_state
-        swa, _ = att_state.backend.get_att_input_params(infer_state, self.layer_num_)
+        swa, _ = infer_state.get_att_kv(self.layer_num_)
         # 一次完成 RMSNorm、RoPE、FP8 打包和 SWA 写入。
         fused_kv_norm_rope_to_swa(
             kv=kv,
@@ -511,7 +510,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         )
         return infer_state.prefill_att_state.prefill_att(
             q=q,
-            k=infer_state.prefill_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
+            k=infer_state.get_att_kv(self.layer_num_),
             v=None,
             att_control=att_control,
             alloc_func=self.alloc_tensor,
@@ -542,7 +541,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         )
         return infer_state.decode_att_state.decode_att(
             q=q,
-            k=infer_state.decode_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
+            k=infer_state.get_att_kv(self.layer_num_),
             v=None,
             att_control=att_control,
         )

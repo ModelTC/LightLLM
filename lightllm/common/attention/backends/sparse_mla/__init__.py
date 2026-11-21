@@ -68,3 +68,43 @@ class SparseMLADecodeLayerInputs:
     q_rope: torch.Tensor
     kv_cache: torch.Tensor
     topk_mem_indices: torch.Tensor
+
+
+@dataclass(frozen=True)
+class SWASparseMLALayerConfig:
+    """Static configuration of sparse MLA over a sliding-window cache plus an optional compressed cache
+    (DeepSeek V4).
+
+    num_heads is the per-rank head count padded to FlashMLA's 64-head tiles. Each query attends to
+    its selected sliding-window rows and, when compress_ratio is not 0, to selected rows of the cache
+    that compresses every compress_ratio tokens into one. has_attn_sink adds a learned sink logit per
+    head.
+    """
+
+    num_heads: int
+    head_dim_v: int
+    softmax_scale: float
+    dtype: torch.dtype
+    compress_ratio: int = 0
+    has_attn_sink: bool = False
+
+    def __post_init__(self) -> None:
+        require_positive(self, "num_heads", "head_dim_v")
+        if self.compress_ratio < 0:
+            raise ValueError(f"compress_ratio must be >= 0, got {self.compress_ratio}")
+
+
+@dataclass(frozen=True)
+class SWASparseMLALayerInputs:
+    """One layer's operands: q [rows, num_heads, head_dim], FlashMLA attention views of the packed FP8
+    sliding-window cache and of the compressed cache (None without compression), per-row selected
+    indices with their valid lengths for each cache, and attn_sink [num_heads] when the layer has one."""
+
+    q: torch.Tensor
+    swa_cache: torch.Tensor
+    swa_indices: torch.Tensor
+    swa_lengths: torch.Tensor
+    compressed_cache: Optional[torch.Tensor] = None
+    extra_indices: Optional[torch.Tensor] = None
+    extra_lengths: Optional[torch.Tensor] = None
+    attn_sink: Optional[torch.Tensor] = None
