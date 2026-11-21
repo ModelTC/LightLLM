@@ -9,7 +9,7 @@ import pickle
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.multimodal_params import MultimodalParams
-from lightllm.server.pd_io_struct import ObjType, PfPrefillKvReady
+from lightllm.server.pd_io_struct import ObjType, PdPfPrefillKvReady
 from lightllm.utils.error_utils import GenerationError, ServerBusyError
 from lightllm.utils.log_utils import init_logger
 
@@ -54,7 +54,7 @@ async def pd_run_prefill_first_process_generate(
             raise GenerationError(f"prefill-first request {group_request_id} disappeared before kv ready")
         shm_req = req_status.group_req_objs.shm_req_objs[0]
         prompt_ids = [int(token_id) for token_id in shm_req.shm_prompt_ids.arr[: shm_req.input_len]]
-        ready = PfPrefillKvReady(group_request_id=group_request_id, prompt_ids=prompt_ids)
+        ready = PdPfPrefillKvReady(group_request_id=group_request_id, prompt_ids=prompt_ids)
         await pd_upload_websocket.send(pickle.dumps((ObjType.PD_PF_PREFILL_KV_READY, ready)))
         logger.info(
             f"prefill-first stage=report-prefill-kv-ready, group_request_id={group_request_id}, "

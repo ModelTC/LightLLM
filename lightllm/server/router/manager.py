@@ -18,7 +18,7 @@ from .req_queue import build_req_queue
 from lightllm.server.core.objs.io_objs import (
     GroupReqIndexes,
     AbortedReqCmd,
-    PfDecodeKvReadyCmd,
+    PdPfDecodeKvReadyCmd,
 )
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
@@ -339,7 +339,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         if not aborted_reqs and not ready_reqs:
             return
         cmds = [AbortedReqCmd(req_id=req.request_id) for req in aborted_reqs]
-        cmds.extend(PfDecodeKvReadyCmd(req_id=req.request_id) for req in ready_reqs)
+        cmds.extend(PdPfDecodeKvReadyCmd(req_id=req.request_id) for req in ready_reqs)
         while not self.shm_reqs_io_buffer.is_empty():
             await asyncio.sleep(0.001)
         self.shm_reqs_io_buffer.write_obj(cmds)

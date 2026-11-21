@@ -12,7 +12,7 @@ from fastapi import Request
 
 from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
-from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus, PD_Client_Obj, PfPrefillKvReady
+from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus, PD_Client_Obj, PdPfPrefillKvReady
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.utils.log_utils import init_logger
 
@@ -98,7 +98,7 @@ class HttpPdPrefillFirstManagerHelper:
                 saved_max_new_tokens=saved_max_new_tokens,
             )
 
-            ready: PfPrefillKvReady = req_status.pf_prefill_kv_ready_event.ready
+            ready: PdPfPrefillKvReady = req_status.pf_prefill_kv_ready_event.ready
             # 3. 首 token 已经结束就不再选 decode。stop / length 直接交回。
             # error 和 abort 也是终态：继续选 decode 会先占页，生成器退出时才 abort。
             _, _, _, first_finish_status = first_token
@@ -193,7 +193,7 @@ class HttpPdPrefillFirstManagerHelper:
     # 记下 prefill KV 就绪上报并唤醒等待。请求还要等 decode KV 就绪，这里不结束。
     def record_pf_prefill_kv_ready(
         self: HttpServerManagerForPDMaster,
-        ready: PfPrefillKvReady,
+        ready: PdPfPrefillKvReady,
     ) -> None:
         req_status = self.req_id_to_out_inf.get(ready.group_request_id)
         if req_status is None:

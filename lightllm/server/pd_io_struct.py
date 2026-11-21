@@ -51,7 +51,7 @@ class ObjType(enum.Enum):
 
 
 @dataclass
-class PfPrefillKvReady:
+class PdPfPrefillKvReady:
     """PD_PF_PREFILL_KV_READY 的载荷。PF 是 PREFILL_FIRST，只用于 PD 分离的 Prefill 先推理模式。
 
     只带对上请求和交给 decode 的 prompt。首 token 走 token 流，并在最后一块传输 done 上带给 decode。

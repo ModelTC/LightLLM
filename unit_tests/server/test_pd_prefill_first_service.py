@@ -17,7 +17,7 @@ from prometheus_client.parser import text_string_to_metric_families
 from websockets.exceptions import ConnectionClosed
 
 from lightllm.server.core.objs import FinishStatus
-from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus, PfPrefillKvReady
+from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus, PdPfPrefillKvReady
 from unit_tests.server.pd_master_test_utils import running_pd_master
 
 
@@ -265,7 +265,7 @@ class PrefillFirstPeers:
                 message=(ObjType.PD_UPLOAD_GENERATE_ERROR, group_request_id, segment.prefill_error),
             )
             return
-        ready = PfPrefillKvReady(group_request_id=group_request_id, prompt_ids=list(prompt_ids))
+        ready = PdPfPrefillKvReady(group_request_id=group_request_id, prompt_ids=list(prompt_ids))
         token = _token_message(
             mode="prefill",
             master_id=master_id,

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.server.core.objs.io_objs import AbortedReqCmd, PfDecodeKvReadyCmd
+from lightllm.server.core.objs.io_objs import AbortedReqCmd, PdPfDecodeKvReadyCmd
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo
 from lightllm.server.router.manager import RouterManager
@@ -374,7 +374,7 @@ def test_22_selected_request_is_written_once_and_not_selected_again():
     )
     selected = RouterManager._get_pf_decode_kv_ready_reqs(router)
     asyncio.run(RouterManager._write_aborted_and_pf_decode_kv_ready(router, aborted_reqs=[], ready_reqs=selected))
-    assert [type(cmd) for cmd in router.shm_reqs_io_buffer.obj] == [PfDecodeKvReadyCmd]
+    assert [type(cmd) for cmd in router.shm_reqs_io_buffer.obj] == [PdPfDecodeKvReadyCmd]
     assert ready._router_pf_decode_kv_notified is True
     assert RouterManager._get_pf_decode_kv_ready_reqs(router) == []
 
@@ -394,7 +394,7 @@ def test_23_one_queue_carries_abort_before_prefill_first_ready(monkeypatch):
             router, aborted_reqs=[abort_router_req], ready_reqs=[ready_router_req]
         )
     )
-    assert [type(cmd) for cmd in buffer.obj] == [AbortedReqCmd, PfDecodeKvReadyCmd]
+    assert [type(cmd) for cmd in buffer.obj] == [AbortedReqCmd, PdPfDecodeKvReadyCmd]
     reader = SimpleNamespace(
         shm_reqs_io_buffer=SimpleNamespace(read_obj=lambda: buffer.obj, sub_state=lambda: None),
         _on_pf_decode_kv_ready=lambda req_id: PDChunkedPrefillForPrefillNode._on_pf_decode_kv_ready(
@@ -406,7 +406,7 @@ def test_23_one_queue_carries_abort_before_prefill_first_ready(monkeypatch):
     both.pd_wait_decode_kv_info_ready = lambda **_kwargs: calls.append("built")
     monkeypatch.setattr(g_infer_context, "requests_mapping", {1: abort_req, 2: ready_req, 7: both})
     reader.shm_reqs_io_buffer = SimpleNamespace(
-        read_obj=lambda: [AbortedReqCmd(req_id=7), PfDecodeKvReadyCmd(req_id=7)],
+        read_obj=lambda: [AbortedReqCmd(req_id=7), PdPfDecodeKvReadyCmd(req_id=7)],
         sub_state=lambda: None,
     )
     ModeBackend._read_reqs_buffer_and_init_reqs(reader)
