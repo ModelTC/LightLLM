@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 
 import torch
 import triton
@@ -30,6 +30,8 @@ class FA3GQAPrefillStepArgs:
     cu_seqlens_k: torch.Tensor
     max_seqlen_q: int
     page_size: int
+    # Per query token: exclusive end of its image span, 0 for text (see AttentionBatch).
+    b_image_token_end: Optional[torch.Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,7 @@ class FA3GQAPrefillStepBuilder(AttentionStepBuilder[FA3GQAPrefillStepArgs]):
             cu_seqlens_k=batch.cu_kv_seq_len.int(),
             max_seqlen_q=batch.max_q_seq_len,
             page_size=self.page_size,
+            b_image_token_end=batch.b_image_token_end,
         )
 
 
@@ -162,6 +165,10 @@ def _check_supported(layer_config: GQALayerConfig) -> None:
         )
     if layer_config.has_alibi:
         raise NotImplementedError("FA3 GQA does not support ALiBi")
+    if layer_config.bidirectional_image_spans and (
+        layer_config.kv_quant is not None or layer_config.sliding_window != (-1, -1) or layer_config.has_sinks
+    ):
+        raise NotImplementedError("FA3 GQA supports bidirectional image spans without KV quantization, window or sinks")
     if layer_config.kv_quant not in (None, "fp8_per_head"):
         raise NotImplementedError(f"FA3 GQA supports kv_quant None or 'fp8_per_head', got {layer_config.kv_quant!r}")
     if layer_config.kv_quant is not None and (
@@ -233,6 +240,13 @@ class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillStepArgs, GQA
         """
         super().__init__(layer_config)
         _check_supported(layer_config)
+        if layer_config.bidirectional_image_spans:
+            from lightllm.utils.neo_fa3_utils import HAS_FLASH_ATTN_INTERFACE, NEO_FA3_INSTALL_HINT
+
+            if not HAS_FLASH_ATTN_INTERFACE:
+                raise NotImplementedError(
+                    "FA3 bidirectional image spans need FA3 with image_token_end support.\n" + NEO_FA3_INSTALL_HINT
+                )
 
     def forward(
         self,
@@ -252,6 +266,32 @@ class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillStepArgs, GQA
 
         layer_config = self.layer_config
         _check_inputs(layer_config, layer_inputs)
+        if layer_config.bidirectional_image_spans:
+            from lightllm.utils.neo_fa3_utils import flash_attn_with_kvcache_neo
+
+            assert step_args.b_image_token_end is not None, "bidirectional image spans need b_image_token_end"
+            # The Neo FA3 build returns its own output, so copy it into out.
+            out.copy_(
+                flash_attn_with_kvcache_neo(
+                    q=layer_inputs.q,
+                    k_cache=_paged(layer_inputs.k_cache, step_args.page_size),
+                    v_cache=_paged(layer_inputs.v_cache, step_args.page_size),
+                    page_table=step_args.page_table,
+                    cache_seqlens=step_args.cache_seqlens,
+                    cu_seqlens_q=step_args.cu_seqlens_q,
+                    cu_seqlens_k_new=step_args.cu_seqlens_k,
+                    max_seqlen_q=step_args.max_seqlen_q,
+                    softmax_scale=layer_config.softmax_scale,
+                    causal=layer_config.causal,
+                    window_size=(-1, -1),
+                    softcap=0.0,
+                    k_descale=None,
+                    v_descale=None,
+                    return_softmax_lse=False,
+                    image_token_end=step_args.b_image_token_end,
+                )
+            )
+            return out
         if layer_config.kv_quant is not None:
             flash_attn_with_kvcache(
                 **_fp8_operands(layer_config, layer_inputs, step_args, step_args.page_size),
@@ -296,6 +336,8 @@ class FA3GQADecodeImpl(AttentionImpl[GQALayerConfig, FA3GQADecodeStepArgs, GQALa
         """
         super().__init__(layer_config)
         _check_supported(layer_config)
+        if layer_config.bidirectional_image_spans:
+            raise NotImplementedError("bidirectional image spans apply to prefill only")
 
     def forward(
         self,

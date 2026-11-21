@@ -108,6 +108,7 @@ def _gqa_layer_inputs_and_config(q, k, v, att_control: AttControl, causal: bool,
         causal=causal,
         has_sinks=sinks is not None,
         kv_quant=kv_quant,
+        bidirectional_image_spans=att_control.image_spans,
         has_q_scale=kv_scales is not None and kv_scales.q_scale is not None,
     )
     return GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sinks, kv_scales=kv_scales), layer_config
@@ -116,21 +117,11 @@ def _gqa_layer_inputs_and_config(q, k, v, att_control: AttControl, causal: bool,
 @dataclasses.dataclass
 class Fa3PrefillAttState(BasePrefillAttState):
     step_args: Optional[FA3GQAPrefillStepArgs] = None
-    # Mirrors of the step args; the neo subclass still calls its kernel directly with them.
-    cu_seqlens_q: torch.Tensor = None
-    cu_seqlens_k: torch.Tensor = None
-    page_table: torch.Tensor = None
     causal: bool = None
 
     def init_state(self):
         self.causal = self.backend.uses_causal_attention()
-        step_args = self.backend.prefill_step_builder.build(build_attention_batch(self.infer_state, self.backend))
-        self.step_args = step_args
-        self.cu_seqlens_q, self.cu_seqlens_k, self.page_table = (
-            step_args.cu_seqlens_q,
-            step_args.cu_seqlens_k,
-            step_args.page_table,
-        )
+        self.step_args = self.backend.prefill_step_builder.build(build_attention_batch(self.infer_state, self.backend))
 
     def prefill_att(
         self,

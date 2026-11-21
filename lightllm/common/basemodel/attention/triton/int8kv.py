@@ -55,6 +55,7 @@ def _quant_layer_inputs_and_config(q, k, v, att_control: AttControl, kv_quant: s
         has_sinks=att_control.use_att_sink,
         kv_quant=kv_quant,
         kv_quant_group_size=head_dim // scales.k_scale.shape[-1],
+        bidirectional_image_spans=att_control.image_spans,
     )
     return GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), layer_config
 

@@ -34,6 +34,7 @@ def _gqa_layer_inputs_and_config(
         causal=causal,
         has_sinks=att_control.use_att_sink,
         has_alibi=att_control.use_alibi,
+        bidirectional_image_spans=att_control.image_spans,
     )
     alibi_slopes = att_control.tp_alibi if att_control.use_alibi else None
     return GQALayerInputs(q=q, k_cache=k, v_cache=v, alibi_slopes=alibi_slopes), layer_config

@@ -53,6 +53,9 @@ class GQALayerConfig:
     has_alibi=True adds ALiBi position biases, one slope per query head, supplied per layer as
     GQALayerInputs.alibi_slopes.
 
+    bidirectional_image_spans=True (prefill) lets each query inside an image span also see the rest
+    of its span, as given per step by AttentionBatch.b_image_token_end; text queries stay causal.
+
     Supported dtypes, head dimensions, scales and sliding-window modes are documented on each impl.
     """
 
@@ -68,6 +71,7 @@ class GQALayerConfig:
     kv_quant_group_size: Optional[int] = None
     has_q_scale: bool = False
     has_alibi: bool = False
+    bidirectional_image_spans: bool = False
 
     def __post_init__(self) -> None:
         require_positive(self, "num_heads", "num_kv_heads", "head_dim")
