@@ -133,6 +133,46 @@ be replayed. SSE responses are streamed directly.
 Deployment
 ----------
 
+PD registration security
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every PD Master and Prefill/Decode process must receive the same nonempty
+``LIGHTLLM_PD_REGISTER_TOKEN`` through its environment. Provision a high-entropy ASCII secret through
+your deployment's secret manager; do not put it in command-line arguments, ``StartArgs``, or
+registration JSON. P/D connections send it in the ``Authorization: Bearer <token>`` header on
+every connection and retry. Missing, empty, or invalid tokens are rejected before the Master
+accepts the WebSocket or reads registration data.
+
+On the Master, set ``LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES`` to a nonempty JSON array of exact P/D
+listening authorities. For example:
+
+.. code-block:: bash
+
+   export LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES='["10.0.0.21:8017", "[fd00::22]:8017", "decode.cluster.local:8017"]'
+
+Enroll every advertised ``client_ip_port`` explicitly, including private cluster addresses.
+Use canonical IPv4, lowercase compressed bracketed IPv6, or lowercase DNS names without a trailing
+dot, followed by a decimal port in 1..65535 without leading zeroes. URLs, userinfo, paths,
+queries, fragments, and whitespace are rejected. Missing, empty, or malformed allowlist
+configuration rejects registration. A registered address belongs to one node ID and mode across
+all DP ranks; that owner may reconnect or register independent ranks. Health checks use exactly
+the enrolled authority with the ``http://`` scheme and ``/health`` path.
+
+Set both variables in the Master's launcher environment before startup so every HTTP worker
+inherits them. P/D nodes need the token but do not need the Master's allowlist. Hostname entries
+depend on operator-controlled, trusted DNS: the allowlist restricts names and ports, not the IP
+addresses those names resolve to. Protect the control-plane network and its transport, since the
+shared token authorizes cluster membership and does not establish a separate identity for each node.
+
+This is a deployment migration: existing installations must provision the token on both sides
+and enroll all P/D addresses on the Master before restarting. To rotate the secret, update the
+deployment environments and restart the Master workers and P/D connection processes together.
+Existing authenticated sockets retain their session until disconnected; reconnects require the
+current token, and there is no unauthenticated retry fallback.
+
+Starting the Master
+~~~~~~~~~~~~~~~~~~~
+
 The entry point uses the native HAProxy bundled in the
 `ray-haproxy <https://pypi.org/project/ray-haproxy/>`_ wheel. The dependency is pinned in
 ``requirements.txt``:
@@ -172,6 +212,14 @@ Inspect the published topology and aggregate probes with:
 
 End-to-end and performance tests
 --------------------------------
+
+The focused registration and DP connection regressions use mocked transports:
+
+.. code-block:: bash
+
+   PYTHONPATH=. pytest -q \
+     unit_tests/server/httpserver/test_pd_websocket_lifecycle.py \
+     unit_tests/server/httpserver/test_pd_split_connections.py
 
 The CPU-only end-to-end suite starts the real launcher, HAProxy, HTTP workers, and RPyC services.
 Lightweight protocol peers replace GPU-backed P/D nodes. Coverage includes:

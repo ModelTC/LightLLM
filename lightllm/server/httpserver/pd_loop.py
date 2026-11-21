@@ -16,7 +16,7 @@ from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.server.httpserver.async_queue import AsyncQueue
 from lightllm.utils.net_utils import get_hostname_ip, format_host_port
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
+from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size, get_pd_register_token
 from lightllm.utils.websocket_utils import PD_WEBSOCKET_WRITE_LIMIT, websocket_message_exceeds_limit
 from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Client_Obj, PD_Master_Obj
@@ -91,6 +91,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             uri = f"ws://{pd_master_obj.host_ip_port}/pd_register"
             async with websockets.connect(
                 uri,
+                additional_headers={"Authorization": f"Bearer {get_pd_register_token()}"},
                 # Compression runs on the event loop and stalls heartbeats for large prompts.
                 compression=None,
                 max_size=get_lightllm_websocket_max_message_size(),
