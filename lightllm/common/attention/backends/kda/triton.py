@@ -1,0 +1,289 @@
+"""KDA implementations: chunked prefill (Triton, or FlashKDA for short steps) and decode over native or
+replay recurrent state. Decode rows group into requests with the GDN decode step builder."""
+
+from dataclasses import dataclass
+from typing import Callable, Optional
+
+import torch
+
+from lightllm.common.attention.backend import (
+    AttentionBackend,
+    AttentionBatch,
+    AttentionImpl,
+    AttentionStepBuilder,
+    TensorAllocator,
+)
+from ..gdn.triton import GDNDecodeStepArgs, GDNDecodeStepBuilder
+from . import KDALayerConfig, KDALayerInputs
+
+
+@dataclass(frozen=True)
+class KDAPrefillStepArgs:
+    """Packed prefill: request i's tokens start at cu_seqlens[i] (int64 when FlashKDA runs), its conv
+    and SSM states are slots conv_idx[i] and ssm_idx[i], and b_ready_cache_len[i] tokens precede the
+    step. flash_kda_fwd is the FlashKDA kernel chosen for this step, or None for Triton."""
+
+    conv_idx: torch.Tensor
+    ssm_idx: torch.Tensor
+    cu_seqlens_q: torch.Tensor
+    cu_seqlens: torch.Tensor
+    b_ready_cache_len: torch.Tensor
+    max_q_seq_len: int
+    flash_kda_fwd: Optional[Callable]
+
+
+class KDAPrefillStepBuilder(AttentionStepBuilder[KDAPrefillStepArgs]):
+    def __init__(
+        self,
+        *,
+        ssm_slots_per_request: int,
+        flash_kda_fwd: Optional[Callable] = None,
+        max_flash_len: Optional[int] = None,
+    ) -> None:
+        """flash_kda_fwd is FlashKDA's kernel when it may run; steps whose longest request exceeds
+        max_flash_len (None: no limit) use Triton instead."""
+        self.ssm_slots_per_request = ssm_slots_per_request
+        self.flash_kda_fwd = flash_kda_fwd
+        self.max_flash_len = max_flash_len
+
+    def build(self, batch: AttentionBatch) -> KDAPrefillStepArgs:
+        req = batch.b_req_idx
+        flash = self.flash_kda_fwd
+        if flash is not None and self.max_flash_len is not None and batch.max_q_seq_len > self.max_flash_len:
+            flash = None
+        cu = batch.cu_q_seq_len
+        return KDAPrefillStepArgs(
+            conv_idx=req,
+            ssm_idx=req * self.ssm_slots_per_request,
+            cu_seqlens_q=cu,
+            cu_seqlens=cu.to(torch.int64).contiguous() if flash is not None else cu,
+            b_ready_cache_len=batch.b_ready_cache_len,
+            max_q_seq_len=batch.max_q_seq_len,
+            flash_kda_fwd=flash,
+        )
+
+
+def _conv_states(cfg: KDALayerConfig, inputs: KDALayerInputs):
+    # Prefill uses only the kernel window; speculative columns follow it.
+    return inputs.conv_states[..., : cfg.conv_kernel_size - 1]
+
+
+def _prefill(cfg: KDALayerConfig, step_args: KDAPrefillStepArgs, inputs: KDALayerInputs, q, k, v, qk_normalized, out):
+    from lightllm.common.attention.kernels.kda.kda_prefill import kda_prefill
+
+    output = kda_prefill(
+        q=q,
+        k=k,
+        v=v,
+        raw_g=inputs.raw_gate.view(1, -1, cfg.num_heads, cfg.head_dim),
+        raw_beta=inputs.raw_beta.view(1, -1, cfg.num_heads),
+        A_log=inputs.A_log,
+        g_bias=inputs.dt_bias,
+        ssm_states=inputs.ssm_states,
+        state_indices=step_args.ssm_idx,
+        qk_normalized=qk_normalized,
+        cu_seqlens=step_args.cu_seqlens,
+        lower_bound=cfg.lower_bound,
+        flash_kda_fwd=step_args.flash_kda_fwd,
+    )
+    out.copy_(output.view(out.shape))
+    return out
+
+
+class TritonKDAPrefillImpl(AttentionImpl[KDALayerConfig, KDAPrefillStepArgs, KDALayerInputs]):
+    """Prefill over native state: the fused conv emits q/k/v (L2-normalized unless FlashKDA runs)."""
+
+    def forward(self, step_args, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
+        from lightllm.common.attention.kernels.kda.causal_conv1d_qkv import causal_conv1d_qkv
+
+        cfg, inputs = self.layer_config, layer_inputs
+        flash = step_args.flash_kda_fwd is not None
+        q, k, v = causal_conv1d_qkv(
+            inputs.mixed_qkv,
+            inputs.conv_weight,
+            _conv_states(cfg, inputs),
+            step_args.cu_seqlens_q,
+            step_args.conv_idx,
+            step_args.b_ready_cache_len,
+            step_args.max_q_seq_len,
+            use_qk_l2norm=not flash,
+        )
+        return _prefill(cfg, step_args, inputs, q, k, v, qk_normalized=not flash, out=out)
+
+
+class ReplayKDAPrefillImpl(AttentionImpl[KDALayerConfig, KDAPrefillStepArgs, KDALayerInputs]):
+    """Prefill over replay state, which keeps raw q/k: the fused conv runs only for FlashKDA with width 4."""
+
+    def forward(self, step_args, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
+        cfg, inputs = self.layer_config, layer_inputs
+        conv_states = _conv_states(cfg, inputs)
+        if step_args.flash_kda_fwd is not None and cfg.conv_kernel_size == 4:
+            from lightllm.common.attention.kernels.kda.causal_conv1d_qkv import causal_conv1d_qkv
+
+            q, k, v = causal_conv1d_qkv(
+                inputs.mixed_qkv,
+                inputs.conv_weight,
+                conv_states,
+                step_args.cu_seqlens_q,
+                step_args.conv_idx,
+                step_args.b_ready_cache_len,
+                step_args.max_q_seq_len,
+                use_qk_l2norm=False,
+            )
+        else:
+            from lightllm.common.attention.kernels.gdn.causal_conv1d import causal_conv1d_fn
+
+            mixed_qkv = causal_conv1d_fn(
+                inputs.mixed_qkv.transpose(0, 1),
+                inputs.conv_weight,
+                bias=None,
+                query_start_loc=step_args.cu_seqlens_q,
+                cache_indices=step_args.conv_idx,
+                has_initial_state=step_args.b_ready_cache_len > 0,
+                conv_states=conv_states,
+                activation="silu",
+            ).transpose(0, 1)
+            q, k, v = (
+                x.view(1, -1, cfg.num_heads, cfg.head_dim) for x in mixed_qkv.split(cfg.num_heads * cfg.head_dim, -1)
+            )
+        return _prefill(cfg, step_args, inputs, q, k, v, qk_normalized=False, out=out)
+
+
+def _conv_update(inputs: KDALayerInputs, step_args: GDNDecodeStepArgs):
+    from lightllm.common.attention.kernels.gdn.causal_conv1d import causal_conv1d_update
+    from lightllm.common.attention.kernels.gdn.causal_conv1d_mtp import causal_conv1d_update as causal_conv1d_update_mtp
+
+    kwargs = dict(bias=None, activation="silu", conv_state_indices=step_args.conv_idx)
+    update = causal_conv1d_update
+    if step_args.draft_step > 0:
+        update = causal_conv1d_update_mtp
+        kwargs.update(
+            mtp_step=step_args.draft_step,
+            num_accepted_tokens=step_args.num_accepted_tokens,
+            query_start_loc=step_args.cu_seqlens,
+        )
+    return update(inputs.mixed_qkv, inputs.conv_states, inputs.conv_weight, **kwargs)
+
+
+class TritonKDADecodeImpl(AttentionImpl[KDALayerConfig, GDNDecodeStepArgs, KDALayerInputs]):
+    def forward(self, step_args, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
+        """Fill and return out [rows, num_heads, head_dim]; update the conv and SSM states in place."""
+        from lightllm.common.attention.kernels.gdn.third_party_fla.ops.kda_decode import fused_recurrent_kda
+
+        cfg, inputs = self.layer_config, layer_inputs
+        hidden = cfg.num_heads * cfg.head_dim
+        q, k, v = _conv_update(inputs, step_args).split(hidden, dim=-1)
+        shape = (1, -1) if step_args.draft_step > 0 else (-1, 1)
+        output, _ = fused_recurrent_kda(
+            q=q.view(*shape, cfg.num_heads, cfg.head_dim),
+            k=k.view(*shape, cfg.num_heads, cfg.head_dim),
+            v=v.view(*shape, cfg.num_heads, cfg.head_dim),
+            raw_gate=inputs.raw_gate.view(*shape, hidden),
+            raw_beta=inputs.raw_beta.view(*shape, cfg.num_heads),
+            a_log=inputs.A_log,
+            gate_bias=inputs.dt_bias,
+            initial_state=inputs.ssm_states,
+            lower_bound=cfg.lower_bound,
+            inplace_final_state=True,
+            ssm_state_indices=step_args.ssm_idx,
+            cu_seqlens=step_args.cu_seqlens,
+            num_accepted_tokens=step_args.num_accepted_tokens,
+        )
+        out.copy_(output.view(out.shape))
+        return out
+
+
+class ReplayKDADecodeImpl(AttentionImpl[KDALayerConfig, GDNDecodeStepArgs, KDALayerInputs]):
+    def forward(self, step_args, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
+        """Fill and return out [rows, num_heads, head_dim]; update the conv state and append history.
+
+        The caller advances the replay cursors after the step's last layer.
+        """
+        from lightllm.common.attention.kernels.kda.replay_kda import replay
+
+        cfg, inputs = self.layer_config, layer_inputs
+        hidden = cfg.num_heads * cfg.head_dim
+        q, k, v = (x.view(-1, cfg.num_heads, cfg.head_dim) for x in _conv_update(inputs, step_args).split(hidden, -1))
+        state = inputs.replay_state
+        layer = state.storage_layer(inputs.layer_num)
+        output = replay(
+            state_ssm=state.ssm_state[layer],
+            state_keys=state.keys[layer],
+            state_deltas=state.deltas[layer],
+            state_gates=state.gates[layer],
+            state_raw_keys=state.raw_keys[layer],
+            state_raw_values=state.raw_values[layer],
+            state_betas=state.betas[layer],
+            state_cursors=state.cursors,
+            state_tile_sync_mark=state.tile_sync_mark,
+            q=q,
+            k=k,
+            v=v,
+            a=inputs.raw_gate.reshape(-1, hidden),
+            b=inputs.raw_beta.reshape(-1, cfg.num_heads),
+            a_log=inputs.A_log,
+            bias=inputs.dt_bias,
+            reqs=step_args.conv_idx,
+            cu_seqlens=step_args.cu_seqlens,
+            state_verify_width=state.verify_width,
+            state_compute_mode=state.compute_mode,
+            state_gate_lower_bound=state.gate_lower_bound,
+        )
+        out.copy_(output.view(out.shape))
+        return out
+
+
+class TritonKDAPrefillBackend(AttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "triton_kda_prefill"
+
+    @staticmethod
+    def get_step_builder_cls() -> type[KDAPrefillStepBuilder]:
+        return KDAPrefillStepBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type[TritonKDAPrefillImpl]:
+        return TritonKDAPrefillImpl
+
+
+class ReplayKDAPrefillBackend(AttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "replay_kda_prefill"
+
+    @staticmethod
+    def get_step_builder_cls() -> type[KDAPrefillStepBuilder]:
+        return KDAPrefillStepBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type[ReplayKDAPrefillImpl]:
+        return ReplayKDAPrefillImpl
+
+
+class TritonKDADecodeBackend(AttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "triton_kda_decode"
+
+    @staticmethod
+    def get_step_builder_cls() -> type[GDNDecodeStepBuilder]:
+        return GDNDecodeStepBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type[TritonKDADecodeImpl]:
+        return TritonKDADecodeImpl
+
+
+class ReplayKDADecodeBackend(AttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "replay_kda_decode"
+
+    @staticmethod
+    def get_step_builder_cls() -> type[GDNDecodeStepBuilder]:
+        return GDNDecodeStepBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type[ReplayKDADecodeImpl]:
+        return ReplayKDADecodeImpl

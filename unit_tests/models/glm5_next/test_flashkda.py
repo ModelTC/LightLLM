@@ -10,7 +10,9 @@ from lightllm.common.basemodel.attention.linear import flashkda
 from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.linear.replay_kda import ReplayKDALinearAttBackend
 from lightllm.common.attention.kernels.gdn.third_party_fla.ops.kda import chunk_kda_with_fused_gate
+from lightllm.common.attention.kernels.kda.kda_prefill import kda_prefill
 from lightllm.common.attention.kernels.kda.kda_state_io import gather_kda_state, scatter_kda_state
+from unit_tests.models.glm5_next.kda_test_utils import kda_params, prefill_batch, prepare_prefill_infer
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
 
@@ -113,17 +115,18 @@ def test_prefill_metadata_is_rebuilt_for_each_forward(flash_module, backend_cls)
     infer.b_req_idx = torch.tensor([3, 1], dtype=torch.int32)
     infer.b1_cu_q_seq_len = torch.tensor([0, 65, 68], dtype=torch.int32)
     infer.max_q_seq_len = 65
+    prepare_prefill_infer(infer)
     att = backend.create_att_prefill_state(infer)
     att.init_state()
-    first_cu = att.cu_seqlens
-    assert att.flash_kda_fwd is flash_module.fwd
+    first_cu = att.step_args.cu_seqlens
+    assert att.step_args.flash_kda_fwd is flash_module.fwd
     assert first_cu.dtype == torch.int64
     torch.testing.assert_close(first_cu, infer.b1_cu_q_seq_len.long())
     infer.b1_cu_q_seq_len = torch.tensor([0, 2049, 2050], dtype=torch.int32)
     infer.max_q_seq_len = 2049
     att.init_state()
-    assert att.flash_kda_fwd is None
-    assert att.cu_seqlens is infer.b1_cu_q_seq_len
+    assert att.step_args.flash_kda_fwd is None
+    assert att.step_args.cu_seqlens is infer.b1_cu_q_seq_len
     torch.testing.assert_close(first_cu, torch.tensor([0, 65, 68], dtype=torch.int64))
 
 
@@ -138,12 +141,13 @@ def test_automatic_dispatch_accounts_for_heads_and_length(flash_module, heads, l
     model.config["linear_attn_config"]["num_heads"] = 64
     model.tp_world_size_ = 64 // heads
     backend = backend_cls(model=model)
-    assert (flashkda.select_kda_prefill(backend, length) is flash_module.fwd) == uses_flash
+    step_args = backend.prefill_step_builder.build(prefill_batch(length))
+    assert (step_args.flash_kda_fwd is flash_module.fwd) == uses_flash
 
 
 def test_explicit_flashkda_overrides_performance_policy(flash_module):
     backend = KDALinearAttBackend(model=make_model())
-    assert flashkda.select_kda_prefill(backend, 32768) is flash_module.fwd
+    assert backend.prefill_step_builder.build(prefill_batch(32768)).flash_kda_fwd is flash_module.fwd
 
 
 def test_fp8_sparse_kv_does_not_change_kda_selection(flash_module):
@@ -218,7 +222,7 @@ def run_prefill(inputs, fwd):
     kwargs = inputs.copy()
     states = kwargs.pop("initial_state").clone()
     kwargs["cu_seqlens"] = kwargs["cu_seqlens"].to(torch.int64 if fwd is not None else torch.int32)
-    output = flashkda.kda_prefill(
+    output = kda_prefill(
         **kwargs,
         ssm_states=states,
         state_indices=torch.arange(states.shape[0], device=states.device, dtype=torch.int32),
@@ -413,6 +417,7 @@ def test_flashkda_backend_continues_cached_prefill(cuda_flashkda, backend_cls, s
         infer.att_state_role = "main"
         infer.b_req_idx = torch.tensor([3, 1], device="cuda", dtype=torch.int32)
         infer.b_ready_cache_len = torch.tensor([0, 7], device="cuda", dtype=torch.int32)
+        prepare_prefill_infer(infer)
         att = att_backend.create_att_prefill_state(infer)
         return infer, att
 
@@ -427,15 +432,12 @@ def test_flashkda_backend_continues_cached_prefill(cuda_flashkda, backend_cls, s
         att.init_state()
         att_ref.init_state()
         if requested == "auto":
-            assert (att.flash_kda_fwd is not None) == (max(lengths) <= 2048)
-        params = dict(
-            layer_weight=layer_weight,
-            layer_num=0,
-            mixed_qkv=torch.randn(sum(lengths), channels + heads + 256, **opts)[:, :channels],
-            raw_gate=inputs["raw_g"],
-            raw_beta=inputs["raw_beta"],
+            assert (att.step_args.flash_kda_fwd is not None) == (max(lengths) <= 2048)
+        mixed_qkv = torch.randn(sum(lengths), channels + heads + 256, **opts)[:, :channels]
+        params = kda_params(conv, ssm, layer_weight, mixed_qkv, inputs["raw_g"], inputs["raw_beta"])
+        reference_params = kda_params(
+            conv_ref, ssm_ref, layer_weight, mixed_qkv.clone(), inputs["raw_g"], inputs["raw_beta"]
         )
-        reference_params = {**params, "mixed_qkv": params["mixed_qkv"].clone()}
         expected = att_ref.prefill_att(
             None, None, None, att_control=AttControl(linear_att_prefill=True, linear_att_prefill_dict=reference_params)
         )
@@ -449,7 +451,7 @@ def test_flashkda_backend_continues_cached_prefill(cuda_flashkda, backend_cls, s
         for current in (infer, infer_ref):
             current.b_ready_cache_len += torch.tensor(lengths, device="cuda", dtype=torch.int32)
     untouched = torch.ones(ssm.shape[0], device="cuda", dtype=torch.bool)
-    untouched[att.b_ssm_buffer_idx] = False
+    untouched[att.step_args.ssm_idx] = False
     torch.testing.assert_close(ssm[untouched], before[untouched], rtol=0, atol=0)
 
 

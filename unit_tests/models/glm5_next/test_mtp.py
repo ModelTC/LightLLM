@@ -1,4 +1,3 @@
-import weakref
 import pytest
 import torch
 
@@ -146,10 +145,10 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
     from types import SimpleNamespace
 
     from lightllm.common.basemodel.attention.base_att import AttControl
-    from lightllm.common.basemodel.attention.linear.kda import KDADecodeAttState
-    from lightllm.common.basemodel.attention.linear.replay_kda import (
-        ReplayKDADecodeAttState,
-    )
+    from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
+    from lightllm.common.basemodel.attention.linear.replay_kda import ReplayKDALinearAttBackend
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from unit_tests.models.glm5_next.kda_test_utils import kda_params
     from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import (
         ReplayKDAState,
     )
@@ -208,15 +207,14 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
             expected.append(output.reshape(1, heads, dim))
             expected_ssm[req * width + token] = state[0]
             row += 1
-    backend = SimpleNamespace(
-        mtp_step=mtp_step,
-        tp_num_heads=heads,
-        head_dim=dim,
-        tp_hidden_size=hidden,
-        lower_bound=-5.0,
-        uses_dynamic_spec_verify_layout=lambda: dynamic,
-        split_qkv=lambda x: x.split(hidden, -1),
-    )
+    # Attention backends are cached per model object, so each case needs its own hashable model.
+    model = type("Model", (), {})()
+    model.config = {"linear_attn_config": {"num_heads": heads, "head_dim": dim, "short_conv_kernel_size": 4}}
+    model.tp_world_size_ = 1
+    model.args = StartArgs(llm_prefill_att_backend=["triton", "triton"], mtp_step=mtp_step)
+    model.data_type = torch.bfloat16
+    backend = (ReplayKDALinearAttBackend if mode == "replay" else KDALinearAttBackend)(model=model)
+    backend.uses_dynamic_spec_verify_layout = lambda: dynamic
     resources = AttentionStateManager(request_capacity=4)
     config = ConvSSMStateConfig(
         logical_layer_ids=(0,),
@@ -244,10 +242,12 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
             selected = linear
         resources.register_state(model_role, linear)
     resources.finish_state_registration()
-    manager = SimpleNamespace(HOLD_REQUEST_ID=3)
+    manager = SimpleNamespace(HOLD_REQUEST_ID=3, req_to_token_indexs=None)
     infer = InferStateInfo()
+    infer.is_prefill = False
     infer.batch_size = tokens
     infer.b_req_idx = torch.tensor(request_rows, device="cuda", dtype=torch.int32)
+    infer.b_seq_len = torch.ones(tokens, device="cuda", dtype=torch.int32)
     infer.b_mtp_index = torch.tensor(offsets, device="cuda", dtype=torch.int32)
     infer.req_manager = manager
     infer.att_state_manager = resources
@@ -257,22 +257,16 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
         linear_A_log=SimpleNamespace(weight=a),
         linear_dt_bias=SimpleNamespace(weight=bias),
     )
-    decode_cls = ReplayKDADecodeAttState if mode == "replay" else KDADecodeAttState
-    state = decode_cls(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
+    state = backend.create_att_decode_state(infer)
     state.init_state()
+    conv_view, ssm_view = selected.get_layer_view(logical_layer_id=0)
     actual = state.decode_att(
         None,
         None,
         None,
         AttControl(
             linear_att_decode=True,
-            linear_att_decode_dict=dict(
-                layer_weight=weight,
-                layer_num=0,
-                mixed_qkv=mixed,
-                raw_gate=gate,
-                raw_beta=beta,
-            ),
+            linear_att_decode_dict=kda_params(conv_view, ssm_view, weight, mixed, gate, beta, state=selected),
         ),
     )
     torch.testing.assert_close(
