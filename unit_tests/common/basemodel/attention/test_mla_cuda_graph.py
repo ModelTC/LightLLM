@@ -32,6 +32,7 @@ class _Model:
     kv_lora_rank = LATENT
     qk_rope_head_dim = ROPE
     data_type = torch.bfloat16
+    is_mtp_draft_model = False
     graph_max_len_in_batch = CAPACITY
 
 

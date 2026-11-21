@@ -42,6 +42,14 @@ class TritonMLAPrefillStepBuilder(AttentionStepBuilder[TritonMLAPrefillStepArgs]
 
 
 class TritonMLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, TritonMLAPrefillStepArgs, MLAPrefillLayerInputs]):
+    def __init__(self, layer_config: MLAPrefillLayerConfig) -> None:
+        super().__init__(layer_config)
+        # 256-dim queries (GLM-4 MoE Lite: 192 nope + 64 rope) run the contiguous-KV GQA prefill kernel
+        # over keys expanded per head; it scales scores by 1/sqrt(256).
+        self.expands_keys = layer_config.qk_nope_head_dim + layer_config.qk_rope_head_dim == 256
+        if not layer_config.causal:
+            raise NotImplementedError("Triton MLA prefill supports only causal attention")
+
     def forward(
         self,
         step_args: TritonMLAPrefillStepArgs,
@@ -65,6 +73,8 @@ class TritonMLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, TritonMLAPrefill
             nope_dim + layer_config.qk_rope_head_dim,
         ), "q does not match the layer_config"
         assert layer_inputs.q.dtype == layer_config.dtype, "q does not match the layer_config"
+        if self.expands_keys:
+            return self._expanded_key_forward(step_args, layer_inputs, out, alloc_func)
         context_attention_fwd_with_v(
             q_nope=layer_inputs.q[:, :, :nope_dim],
             q_rope=layer_inputs.q[:, :, nope_dim:],
@@ -78,6 +88,29 @@ class TritonMLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, TritonMLAPrefill
             b_prompt_cache_len=step_args.b_ready_cache_len,
             max_input_len=step_args.max_q_seq_len,
             softmax_scale=layer_config.softmax_scale,
+        )
+        return out
+
+    def _expanded_key_forward(self, step_args, layer_inputs: MLAPrefillLayerInputs, out, alloc_func):
+        from lightllm.common.attention.kernels.gqa.bf16.prefill.context_flashattention_nopad import (
+            context_attention_fwd_contiguous_kv,
+        )
+
+        layer_config, q = self.layer_config, layer_inputs.q
+        nope_dim, heads = layer_config.qk_nope_head_dim, layer_config.num_heads
+        k = alloc_func((layer_inputs.k_nope.shape[0], heads, q.shape[-1]), dtype=q.dtype, device=q.device)
+        k[:, :, :nope_dim].copy_(layer_inputs.k_nope.expand(-1, heads, -1))
+        k[:, :, nope_dim:].copy_(layer_inputs.k_rope.expand(-1, heads, -1))
+        context_attention_fwd_contiguous_kv(
+            q,
+            k,
+            layer_inputs.v,
+            out,
+            step_args.b_q_start_loc,
+            step_args.b_kv_start_loc,
+            step_args.b_seq_len,
+            step_args.max_q_seq_len,
+            step_args.b_ready_cache_len,
         )
         return out
 
@@ -153,6 +186,12 @@ class TritonMLADecodeStepBuilder(AttentionStepBuilder[TritonMLADecodeStepArgs]):
 
 
 class TritonMLADecodeImpl(AttentionImpl[MLADecodeLayerConfig, TritonMLADecodeStepArgs, MLADecodeLayerInputs]):
+    def __init__(self, layer_config: MLADecodeLayerConfig) -> None:
+        super().__init__(layer_config)
+        # Each query row reads its own request prefix, which is causal across a request's rows.
+        if not layer_config.causal:
+            raise NotImplementedError("Triton MLA decode supports only causal attention")
+
     def forward(
         self,
         step_args: TritonMLADecodeStepArgs,

@@ -11,7 +11,8 @@ class MLAPrefillLayerConfig:
 
     Head counts are per rank. Queries and keys have qk_nope_head_dim + qk_rope_head_dim
     channels; values and outputs have v_head_dim. Prefill and decode have separate layer configs
-    because they see different projections of the same layer.
+    because they see different projections of the same layer. causal=False lets the queries of
+    one request see all of its keys, as block-drafting models need.
     """
 
     num_heads: int
@@ -20,6 +21,7 @@ class MLAPrefillLayerConfig:
     v_head_dim: int
     softmax_scale: float
     dtype: torch.dtype
+    causal: bool = True
 
     def __post_init__(self) -> None:
         require_positive(self, "num_heads", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim")
@@ -45,7 +47,8 @@ class MLADecodeLayerConfig:
     """Static configuration of MLA decode over the compressed latent cache.
 
     Head counts are per rank. The absorbed query has kv_lora_rank latent channels plus
-    qk_rope_head_dim rotary channels, matching each cache row.
+    qk_rope_head_dim rotary channels, matching each cache row. causal applies when speculative
+    decoding gives a request several query rows (see AttentionBatch.decode_rows_per_request).
     """
 
     num_heads: int
@@ -53,6 +56,7 @@ class MLADecodeLayerConfig:
     qk_rope_head_dim: int
     softmax_scale: float
     dtype: torch.dtype
+    causal: bool = True
 
     def __post_init__(self) -> None:
         require_positive(self, "num_heads", "kv_lora_rank", "qk_rope_head_dim")
@@ -60,9 +64,9 @@ class MLADecodeLayerConfig:
 
 @dataclass(frozen=True)
 class MLADecodeLayerInputs:
-    """One absorbed query per request, split into latent and rotary components.
+    """Absorbed query rows, split into latent and rotary components.
 
-    q_nope is [requests, num_heads, kv_lora_rank] and q_rope is [requests, num_heads,
+    q_nope is [rows, num_heads, kv_lora_rank] and q_rope is [rows, num_heads,
     qk_rope_head_dim]. kv_cache is a borrowed [physical_slots, 1, kv_lora_rank +
     qk_rope_head_dim] cache whose latent prefix supplies both K and V. The cache includes
     the current token for each request.

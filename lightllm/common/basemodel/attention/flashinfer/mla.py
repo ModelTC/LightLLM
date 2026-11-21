@@ -1,15 +1,20 @@
 import dataclasses
 import weakref
+from typing import Optional, Tuple
+
 import torch
-import triton
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
-from ...triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
-from ...triton_kernel.repack_kv_index import repack_kv_index
-from ...triton_kernel.flashinfer_mla_plan import fill_mla_decode_plan_for_cuda_graph
-from typing import Tuple
+
+from lightllm.common.attention.backends.mla.flashinfer import (
+    FlashInferMLABuilderConfig,
+    FlashInferMLADecodeBackend,
+    FlashInferMLADecodeStepArgs,
+    FlashInferMLAPrefillBackend,
+    FlashInferMLAPrefillStepArgs,
+)
+from lightllm.utils.dist_utils import get_current_device_id, get_dp_world_size
+from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl, build_attention_batch
+from ..mla_layer import mla_decode_layer, mla_prefill_layer
 from .env_utils import set_flashinfer_envs
-from .utils import should_init_decode_wrapper
 
 
 class MlaFlashInferAttBackend(BaseAttBackend):
@@ -20,42 +25,52 @@ class MlaFlashInferAttBackend(BaseAttBackend):
         set_flashinfer_envs()
         super().__init__(model=model)
         self._init_infer_page_size()
-        num_heads = model.config["num_attention_heads"]
-        self.tp_q_head_num = num_heads // get_dp_world_size()
-        self.qk_nope_head_dim = model.qk_nope_head_dim
-        self.qk_rope_head_dim = model.qk_rope_head_dim
-        self.kv_lora_rank = model.kv_lora_rank
-        self.v_head_dim = model.v_head_dim
-        self.q_data_type = model.data_type
-        self.kv_data_type = model.data_type
-        self.max_seq_length = model.max_seq_length
-        self.max_page_num = triton.cdiv(self.max_seq_length, self.infer_page_size)
-        self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
-        self.kv_indices_buffer = [
-            torch.empty(
-                model.graph_max_batch_size * self.max_page_num, dtype=torch.int32, device=get_current_device_id()
-            ),
-            torch.empty(
-                model.graph_max_batch_size * self.max_page_num, dtype=torch.int32, device=get_current_device_id()
-            ),
-        ]
-
-        from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
-
+        softmax_scale = (model.qk_nope_head_dim + model.qk_rope_head_dim) ** (-0.5)
         if model.config["rope_scaling"] is not None:
+            from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
+
             rope_scaling = model.config["rope_scaling"]
             mscale_all_dim = rope_scaling.get("mscale_all_dim", 0)
-            scaling_factor = rope_scaling["factor"]
             if mscale_all_dim:
-                mscale = get_deepseek_mscale(scaling_factor, mscale_all_dim)
-                self.softmax_scale = self.softmax_scale * mscale * mscale
-        return
+                mscale = get_deepseek_mscale(rope_scaling["factor"], mscale_all_dim)
+                softmax_scale = softmax_scale * mscale * mscale
+        # FlashInfer plans with the scale before the first layer; the impls check that every layer
+        # passes the same value.
+        config = FlashInferMLABuilderConfig(
+            num_heads=model.config["num_attention_heads"] // get_dp_world_size(),
+            qk_nope_head_dim=model.qk_nope_head_dim,
+            qk_rope_head_dim=model.qk_rope_head_dim,
+            v_head_dim=model.v_head_dim,
+            kv_lora_rank=model.kv_lora_rank,
+            page_size=self.infer_page_size,
+            dtype=model.data_type,
+            softmax_scale=softmax_scale,
+        )
+        self.prefill_step_builder = FlashInferMLAPrefillBackend.get_step_builder_cls()(
+            config, workspace=self._workspace
+        )
+        # BaseAttBackend reuses one instance per model but reruns __init__ on every construction.
+        # Keep the decode step builder: captured CUDA graphs use the wrappers and buffers it owns.
+        if getattr(self, "decode_step_builder", None) is None:
+            self.decode_step_builder = FlashInferMLADecodeBackend.get_step_builder_cls()(
+                config,
+                workspace=self._workspace,
+                max_seq_len=model.max_seq_length,
+                max_batch_size=model.graph_max_batch_size,
+                device=get_current_device_id(),
+            )
 
     def _init_infer_page_size(self):
         self.infer_page_size = self.model.args.page_size
         assert self.model.args.page_size % self.infer_page_size == 0, (
             f"model page_size {self.model.args.page_size} "
             f"must be divisible by infer_page_size {self.infer_page_size}"
+        )
+
+    def _workspace(self) -> torch.Tensor:
+        # Allocated on first use, so prefill-only and decode-only nodes create it only when needed.
+        return self.get_gpu_workspace_buffer(
+            key_name=self.workspace_buffer_key, workspace_size=self.workspace_buffer_size
         )
 
     def create_att_prefill_state(self, infer_state) -> "MlaFlashInferPrefillAttState":
@@ -67,35 +82,12 @@ class MlaFlashInferAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class MlaFlashInferPrefillAttState(BasePrefillAttState):
-    prefill_wrapper: object = None
+    step_args: Optional[FlashInferMLAPrefillStepArgs] = None
+    causal: bool = True
 
     def init_state(self):
-        self.backend: MlaFlashInferAttBackend = self.backend
-
-        import flashinfer
-
-        q_starts = self.infer_state.b1_cu_q_seq_len.int()
-        kv_starts = self.infer_state.b1_cu_kv_seq_len.int()
-        if self.prefill_wrapper is None:
-            self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
-                self.backend.get_gpu_workspace_buffer(
-                    key_name=self.backend.workspace_buffer_key,
-                    workspace_size=self.backend.workspace_buffer_size,
-                ),
-                "NHD",
-            )
-        self.prefill_wrapper.plan(
-            qo_indptr=q_starts,
-            kv_indptr=kv_starts,
-            num_qo_heads=self.backend.tp_q_head_num,
-            num_kv_heads=self.backend.tp_q_head_num,
-            head_dim_qk=self.backend.qk_nope_head_dim + self.backend.qk_rope_head_dim,
-            head_dim_vo=self.backend.v_head_dim,
-            q_data_type=self.backend.q_data_type,
-            causal=True,
-            sm_scale=self.backend.softmax_scale,
-        )
-        return
+        self.causal = self.backend.uses_causal_attention()
+        self.step_args = self.backend.prefill_step_builder.build(build_attention_batch(self.infer_state, self.backend))
 
     def prefill_att(
         self,
@@ -105,124 +97,21 @@ class MlaFlashInferPrefillAttState(BasePrefillAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
-        return self._mla_prefill_att(
-            q=q,
-            k=k,
-            v=v,
-            alloc_func=alloc_func,
-        )
-
-    def _mla_prefill_att(
-        self, q: torch.Tensor, k: Tuple[torch.Tensor, torch.Tensor], v: torch.Tensor, alloc_func=torch.empty
-    ) -> torch.Tensor:
-        self.backend: MlaFlashInferAttBackend = self.backend  # for typing
-        k_nope, k_rope = k
-        o_tensor = alloc_func((q.shape[0], q.shape[1], v.shape[-1]), q.dtype, device="cuda")
-        q_head_num = q.shape[1]
-        k = torch.cat([k_nope, torch.repeat_interleave(k_rope, q_head_num, dim=-2)], dim=-1)
-        self.prefill_wrapper.run(q, k, v, out=o_tensor)
-        return o_tensor
+        layer_inputs, layer_config = mla_prefill_layer(q, k, v, att_control, self.causal)
+        impl = self.backend.get_attention_impl(FlashInferMLAPrefillBackend, layer_config)
+        out = alloc_func((q.shape[0], q.shape[1], v.shape[-1]), dtype=q.dtype, device=q.device)
+        return impl.forward(self.step_args, layer_inputs, out=out, alloc_func=alloc_func)
 
 
 @dataclasses.dataclass
 class MlaFlashInferDecodeAttState(BaseDecodeAttState):
-    kv_indices: torch.Tensor = None
-    kv_starts: torch.Tensor = None
-    q_indptr_host: torch.Tensor = None
-    decode_wrapper: object = None
-
-    def _should_init_decode_wrapper(self) -> bool:
-        return should_init_decode_wrapper(self.infer_state)
+    step_args: Optional[FlashInferMLADecodeStepArgs] = None
+    causal: bool = True
 
     def init_state(self):
-        import flashinfer
-
-        self.backend: MlaFlashInferAttBackend = self.backend
-        model = self.backend.model
-        device = self.infer_state.input_ids.device
-        batch_size = self.infer_state.batch_size
-
-        # TODO: 将页数及页数前缀和的计算融合为一个 Triton 算子。
-        # token 长度除以页大小并向上取整，末页不足一页也计为一页。
-        b_page_len = (self.infer_state.b_seq_len + (self.backend.infer_page_size - 1)) // self.backend.infer_page_size
-        self.kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
-
-        self.q_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device="cuda")
-        self.q_indptr_host = torch.arange(batch_size + 1, dtype=torch.int32, device="cpu")
-        if batch_size <= model.graph_max_batch_size and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch:
-            self.kv_indices = self.backend.kv_indices_buffer[self.infer_state.microbatch_index][
-                : batch_size * self.backend.max_page_num
-            ]
-        else:
-            self.kv_indices = torch.empty(
-                batch_size * self.backend.max_page_num,
-                dtype=torch.int32,
-                device=device,
-            )
-
-        repack_kv_index(
-            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
-            b_req_idx=self.infer_state.b_req_idx,
-            b_token_len=self.infer_state.b_seq_len,
-            b_page_start_loc=self.kv_starts[:-1],
-            max_token_len=self.infer_state.max_kv_seq_len,
-            out_page_indices=self.kv_indices,
-            page_size=self.backend.infer_page_size,
-        )
-
-        if not self._should_init_decode_wrapper():
-            return
-
-        assert self.decode_wrapper is None
-
-        self.decode_wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(
-            self.backend.get_gpu_workspace_buffer(
-                key_name=self.backend.workspace_buffer_key,
-                workspace_size=self.backend.workspace_buffer_size,
-            ),
-            use_cuda_graph=True,
-            qo_indptr=self.q_indptr,
-            kv_indices=self.kv_indices,
-            kv_indptr=self.kv_starts,
-            kv_len_arr=self.infer_state.b_seq_len,
-        )
-        self.decode_wrapper.plan(
-            self.q_indptr,
-            self.kv_starts,
-            self.kv_indices,
-            self.infer_state.b_seq_len,
-            self.backend.tp_q_head_num,
-            self.backend.kv_lora_rank,
-            self.backend.qk_rope_head_dim,
-            self.backend.infer_page_size,
-            False,  # causal
-            self.backend.softmax_scale,
-            self.backend.q_data_type,
-            self.backend.kv_data_type,
-        )
-        return
-
-    def copy_for_decode_cuda_graph(self, new_state: "MlaFlashInferDecodeAttState"):
-        super().copy_for_decode_cuda_graph(new_state)
-        self._refresh_cuda_graph_decode_plan(new_state.infer_state.b_seq_len, new_state.infer_state.max_kv_seq_len)
-        return
-
-    def _refresh_cuda_graph_decode_plan(self, kv_lens: torch.Tensor, max_kv_len: int):
-        # Prefer the GPU-generated split plan for long decode; use exact non-split for
-        # short or unsupported graph shapes.
-        fill_mla_decode_plan_for_cuda_graph(
-            decode_wrapper=self.decode_wrapper,
-            kv_page_indptr=self.kv_starts,
-            kv_lens=kv_lens,
-            batch_size=self.infer_state.batch_size,
-            num_heads=self.backend.tp_q_head_num,
-            max_kv_len=max_kv_len,
-        )
+        self.causal = self.backend.uses_causal_attention()
+        # Replay steps also build: the step builder refills the plan of the wrapper the graph captured.
+        self.step_args = self.backend.decode_step_builder.build(build_attention_batch(self.infer_state, self.backend))
 
     def decode_att(
         self,
@@ -232,41 +121,8 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
-
-        assert v is None
-
-        return self._mla_decode_att(
-            q=q,
-            k=k,
-            v=v,
-            att_control=att_control,
-            alloc_func=alloc_func,
-        )
-
-    def _mla_decode_att(
-        self,
-        q: Tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl,
-        alloc_func=torch.empty,
-    ):
-        qk_rope_head_dim = 64
-        q_nope, q_rope = q
-        o_tensor = alloc_func(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
-        assert att_control.mla_decode
-
-        self.decode_wrapper.run(
-            q_nope,
-            q_rope,
-            k[:, :, :-qk_rope_head_dim].view(-1, self.backend.infer_page_size, 1, k.shape[-1] - qk_rope_head_dim),
-            k[:, :, -qk_rope_head_dim:].view(-1, self.backend.infer_page_size, 1, qk_rope_head_dim),
-            out=o_tensor,
-            return_lse=False,
-        )
-        return o_tensor
+        layer_inputs, layer_config = mla_decode_layer(q, k, v, att_control, self.causal)
+        impl = self.backend.get_attention_impl(FlashInferMLADecodeBackend, layer_config)
+        q_nope = layer_inputs.q_nope
+        out = alloc_func(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
+        return impl.forward(self.step_args, layer_inputs, out=out, alloc_func=alloc_func)
