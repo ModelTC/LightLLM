@@ -6,7 +6,6 @@ import pytest
 
 from lightllm.common.basemodel import basemodel
 from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferDecodeAttState
-from lightllm.common.basemodel.attention.flashinfer.utils import should_init_decode_wrapper
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
 from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -191,7 +190,9 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
             infer_state = self.infer_state
             # Replace the external GPU wrapper allocation while preserving the
             # production decision and InferStateInfo's initialization entry point.
-            if should_init_decode_wrapper(infer_state):
+            # Graph-owned state serves replays, so only eager and capture steps create a wrapper.
+            assert not (infer_state.is_cuda_graph_capture and infer_state.is_cuda_graph_replay)
+            if not infer_state.is_cuda_graph_replay:
                 self.decode_wrapper = object()
             initializations.append(
                 (infer_state.microbatch_index, graph_flags(infer_state), self.decode_wrapper is not None)
