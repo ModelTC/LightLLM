@@ -70,6 +70,7 @@ class SamplingParams:
         stop_str_match_mode: int = StopStrMatchMode.ALL_TEXT,
         guided_reasoning_end: Optional[List[int]] = None,
         pd_previous_output_len: int = 0,
+        thinking_token_budget: Optional[int] = None,
     ) -> None:
         self.best_of = best_of
         self.n = n
@@ -103,6 +104,7 @@ class SamplingParams:
         self.guided_json = guided_json
         self.guided_reasoning_end = guided_reasoning_end
         self.pd_previous_output_len = pd_previous_output_len
+        self.thinking_token_budget = -1 if thinking_token_budget is None else thinking_token_budget
         self.invalid_token_ids = invalid_token_ids
         self.group_request_id = group_request_id
         self.suggested_dp_index = suggested_dp_index
@@ -144,6 +146,10 @@ class SamplingParams:
             pass
 
     def verify(self):
+        if type(self.thinking_token_budget) is not int or not -1 <= self.thinking_token_budget <= 2 ** 31 - 1:
+            raise ValueError("thinking_token_budget must be -1 (unlimited) or an integer in [0, 2147483647]")
+        if self.thinking_token_budget >= 0 and not self.guided_reasoning_end:
+            raise ValueError("thinking_token_budget requires non-empty guided_reasoning_end token IDs")
         if self.best_of <= 0 or self.best_of > MAX_BEST_OF:
             raise ValueError(f"need 0 < best_of <= {MAX_BEST_OF}, but get {self.best_of}")
         if self.n != self.best_of:
@@ -258,6 +264,7 @@ class SamplingParams:
         ret["guided_grammar"] = self.guided_grammar
         ret["guided_json"] = self.guided_json
         ret["guided_reasoning_end"] = self.guided_reasoning_end
+        ret["thinking_token_budget"] = self.thinking_token_budget
         ret["pd_previous_output_len"] = self.pd_previous_output_len
         ret["invalid_token_ids"] = self.invalid_token_ids
         ret["seed"] = self.seed

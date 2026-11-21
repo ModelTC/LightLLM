@@ -207,6 +207,8 @@ class ConstraintOutParams(ctypes.Structure):
         # 思考结束标记的 token ID 序列；完整匹配后，从下一个 token 开始启用输出约束。
         # 标记本身不参与语法匹配，也不会触发请求停止；为空时立即启用输出约束。
         ("guided_reasoning_end", StopSequence),
+        # -1 表示不限；耗尽后强制结束思考，再进入正文约束。
+        ("thinking_token_budget", ctypes.c_int),
         # PD 续跑输入末尾需要重放的 token 数，首段为 0。
         # PD Master 按拼接文本与原始 prompt 的编码长度差设置，推理侧重放该后缀恢复思考和语法进度。
         # 支持从序列化参数恢复该值。
@@ -221,6 +223,7 @@ class ConstraintOutParams(ctypes.Structure):
         guided_json: Union[str, dict],
         guided_reasoning_end: List[int],
         pd_previous_output_len: int = 0,
+        thinking_token_budget: Optional[int] = None,
     ):
         if not isinstance(pd_previous_output_len, int) or not 0 <= pd_previous_output_len <= 2 ** 31 - 1:
             raise ValueError("pd_previous_output_len must be an integer in [0, 2147483647]")
@@ -228,9 +231,20 @@ class ConstraintOutParams(ctypes.Structure):
         self.guided_grammar.initialize(guided_grammar, tokenizer)
         self.guided_json.initialize(guided_json, tokenizer)
         self.guided_reasoning_end.initialize(guided_reasoning_end)
+        thinking_token_budget = -1 if thinking_token_budget is None else thinking_token_budget
+        if type(thinking_token_budget) is not int or not -1 <= thinking_token_budget <= 2 ** 31 - 1:
+            raise ValueError("thinking_token_budget must be -1 (unlimited) or an integer in [0, 2147483647]")
+        if thinking_token_budget >= 0 and not guided_reasoning_end:
+            raise ValueError("thinking_token_budget requires non-empty guided_reasoning_end token IDs")
+        self.thinking_token_budget = thinking_token_budget
         self.pd_previous_output_len = pd_previous_output_len
 
-    def has_constraint(self):
+    def has_constraint(self) -> bool:
+        """Whether reasoning or answer generation needs constraint state."""
+        return self.thinking_token_budget >= 0 or self.has_grammar_constraint()
+
+    def has_grammar_constraint(self) -> bool:
+        """Whether this request needs a compiled answer grammar."""
         return bool(self.regular_constraint.length or self.guided_grammar.length or self.guided_json.length)
 
 
@@ -414,6 +428,7 @@ class SamplingParams(ctypes.Structure):
             guided_json=kwargs.get("guided_json", ""),
             guided_reasoning_end=kwargs.get("guided_reasoning_end", []),
             pd_previous_output_len=kwargs.get("pd_previous_output_len", 0),
+            thinking_token_budget=kwargs.get("thinking_token_budget"),
         )
 
         # Initialize stop_sequence_groups
@@ -429,6 +444,10 @@ class SamplingParams(ctypes.Structure):
         invalid_token_ids = map(int, kwargs.get("logit_bias", {}).keys())
         self.invalid_token_ids = InvalidTokenIds()
         self.invalid_token_ids.initialize(list[int](invalid_token_ids))
+        if self.constraint_out_params.thinking_token_budget >= 0 and set(self.invalid_token_ids.to_list()).intersection(
+            self.constraint_out_params.guided_reasoning_end.to_list()
+        ):
+            raise ValueError("thinking_token_budget cannot force a token excluded by logit_bias")
 
         if self.do_sample is False:
             self.temperature = 1.0
@@ -530,8 +549,22 @@ class SamplingParams(ctypes.Structure):
         """在请求准入或发送流式响应头前完成编译校验；结果由编译器缓存，不保存在采样参数对象上。"""
         await self.get_compiled_grammar(compiler)
 
+    def _check_thinking_budget_config(self) -> None:
+        """Validate finite thinking budgets against this node's configuration."""
+        if self.constraint_out_params.thinking_token_budget < 0:
+            return
+        args = get_env_start_args()
+        if args.disable_thinking_budget:
+            raise ValueError("thinking_token_budget is disabled by --disable_thinking_budget")
+        if not args.reasoning_parser:
+            raise ValueError("thinking_token_budget requires --reasoning_parser")
+        if args.target_vocab_topk_sampling is not None:
+            raise ValueError("thinking_token_budget requires disabling --target_vocab_topk_sampling")
+
     async def get_compiled_grammar(self, compiler) -> Optional[bytes]:
         """获取编译器缓存中的结果，未命中时执行异步编译；无输出约束时返回 None。"""
+        # P/D node admission also uses this boundary for forwarded SamplingParams.
+        self._check_thinking_budget_config()
         for kind, constraint in (
             ("grammar", self.constraint_out_params.guided_grammar),
             ("regex", self.constraint_out_params.regular_constraint),
@@ -569,6 +602,7 @@ class SamplingParams(ctypes.Structure):
             "guided_grammar": self.constraint_out_params.guided_grammar.to_str(),
             "guided_json": self.constraint_out_params.guided_json.to_str(),
             "guided_reasoning_end": self.constraint_out_params.guided_reasoning_end.to_list(),
+            "thinking_token_budget": self.constraint_out_params.thinking_token_budget,
             "pd_previous_output_len": self.constraint_out_params.pd_previous_output_len,
             "invalid_token_ids": self.invalid_token_ids.to_list(),
             "group_request_id": self.group_request_id,

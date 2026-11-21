@@ -33,11 +33,20 @@ def test_sampling_preparation_without_constraint_buffers():
 
 
 @pytest.mark.parametrize("mode", ["none", "xgrammar"])
-def test_context_initializes_state_factory_with_resolved_eos_at_startup(monkeypatch, mode):
+@pytest.mark.parametrize("parser", [None, "qwen3"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_context_initializes_state_factory_with_resolved_eos_at_startup(monkeypatch, mode, parser, enabled):
     args = SimpleNamespace(
-        output_constraint_mode=mode, model_dir="unused", tokenizer_mode="auto", trust_remote_code=False, eos_id=[255]
+        output_constraint_mode=mode,
+        reasoning_parser=parser,
+        disable_thinking_budget=not enabled,
+        model_dir="unused",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        eos_id=[255],
     )
     monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: args)
+    monkeypatch.setattr("lightllm.utils.envs_utils.get_env_start_args", lambda: args)
     tokenizer = SimpleNamespace(eos_token_id=256)
     tokenizer_info = xgr.TokenizerInfo([bytes([i]) for i in range(256)] + [b"<eos>"], stop_token_ids=[255])
     payload = xgr.GrammarCompiler(tokenizer_info).compile_regex("a").serialize_json().encode()
@@ -57,7 +66,7 @@ def test_context_initializes_state_factory_with_resolved_eos_at_startup(monkeypa
             vocab_size=257,
         )
         if mode == "none":
-            assert context.output_constraint_state_factory is None
+            assert (context.output_constraint_state_factory is None) == (not (enabled and parser))
             load_tokenizer.assert_not_called()
             build_tokenizer_info.assert_not_called()
             return

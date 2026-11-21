@@ -450,6 +450,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="Output constraint backend used on demand in the regular inference pipeline; none rejects constraints.",
     )
     parser.add_argument(
+        "--disable_thinking_budget",
+        action="store_true",
+        default=False,
+        help="Disable per-request thinking token budgets.",
+    )
+    parser.add_argument(
         "--grammar_compile_timeout",
         type=float,
         default=30.0,

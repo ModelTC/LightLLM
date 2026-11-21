@@ -56,8 +56,13 @@ def test_chat_grammar_activation_matches_template_thinking(monkeypatch, parser, 
 
 @pytest.mark.parametrize("response_type", ["json_schema", "json_object", "text"])
 @pytest.mark.parametrize("thinking", [False, True])
-def test_chat_passes_reasoning_marker_through_shared_sampling_params(monkeypatch, compiler, response_type, thinking):
-    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: StartArgs(reasoning_parser="qwen3"))
+@pytest.mark.parametrize("budget", [None, -1, 0, 2])
+def test_chat_passes_reasoning_marker_through_shared_sampling_params(
+    monkeypatch, compiler, runtime_start_args, response_type, thinking, budget
+):
+    args = StartArgs(reasoning_parser="qwen3")
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: args)
+    monkeypatch.setattr("lightllm.server.core.objs.sampling_params.get_env_start_args", lambda: args)
     monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: True)
 
     async def prompt(*args):
@@ -95,17 +100,24 @@ def test_chat_passes_reasoning_marker_through_shared_sampling_params(monkeypatch
         messages=[],
         response_format=response_format,
         chat_template_kwargs={"enable_thinking": thinking},
+        thinking_token_budget=budget,
     )
     with pytest.raises(RequestCaptured):
         asyncio.run(api_openai.chat_completions_impl(request, None))
-    expected = (7, 8) if thinking and response_type != "text" else ()
+    budget_active = thinking and budget is not None and budget >= 0
+    expected = (7, 8) if thinking and (response_type != "text" or budget_active) else ()
     state = captured[0]
-    if response_type == "text":
+    if response_type == "text" and not budget_active:
         assert state is None
     else:
         assert state.error is None
         assert state.reasoning_end_token_ids == expected
         assert state.in_reasoning == bool(expected)
+        if budget_active:
+            assert state.thinking_token_budget == budget
+        else:
+            assert type(state) is ConstraintState
+            assert state.thinking_token_budget == -1
 
 
 def test_reasoning_marker_survives_serialization_and_parameter_reuse():
@@ -117,6 +129,35 @@ def test_reasoning_marker_survives_serialization_and_parameter_reuse():
     assert round_trip.constraint_out_params.guided_reasoning_end.to_list() == [11, 12]
     round_trip.init(None)
     assert round_trip.constraint_out_params.guided_reasoning_end.to_list() == []
+
+
+@pytest.mark.parametrize(
+    "enabled,parser,message", [(False, "qwen3", "--disable_thinking_budget"), (True, None, "reasoning parser")]
+)
+def test_budget_unavailable_service_returns_bad_request(monkeypatch, enabled, parser, message):
+    monkeypatch.setattr(
+        api_openai,
+        "get_env_start_args",
+        lambda: StartArgs(reasoning_parser=parser, disable_thinking_budget=not enabled),
+    )
+    monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value="prompt"))
+    monkeypatch.setattr(
+        api_http,
+        "g_objs",
+        SimpleNamespace(
+            httpserver_manager=SimpleNamespace(), metric_client=SimpleNamespace(counter_inc=lambda *_: None)
+        ),
+    )
+    request = ChatCompletionRequest(messages=[], thinking_token_budget=1)
+    response = asyncio.run(api_openai.chat_completions_impl(request, None))
+    assert response.status_code == 400
+    assert message in response.body.decode()
+
+
+@pytest.mark.parametrize("budget", [True, 1.5, "2", -2, 2 ** 31])
+def test_chat_rejects_invalid_thinking_budget(budget):
+    with pytest.raises(ValueError, match="thinking_token_budget"):
+        ChatCompletionRequest(messages=[], thinking_token_budget=budget)
 
 
 @pytest.mark.parametrize(
@@ -140,13 +181,18 @@ def test_fixed_reasoning_does_not_require_a_template_thinking_switch(monkeypatch
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("response_type", ["json_object", "json_schema"])
-def test_deepseek_r1_json_answer_stays_in_content(monkeypatch, compiler, stream, response_type):
-    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: StartArgs(reasoning_parser="deepseek-r1"))
-    monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: False)
+@pytest.mark.parametrize("parser,budget", [("deepseek-r1", None), ("deepseek-r1", 2), ("qwen3", 0), ("qwen3", 2)])
+def test_deepseek_r1_json_answer_stays_in_content(
+    monkeypatch, compiler, runtime_start_args, stream, response_type, parser, budget
+):
+    args = StartArgs(reasoning_parser=parser, disable_thinking_budget=budget is None)
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: args)
+    monkeypatch.setattr("lightllm.server.core.objs.sampling_params.get_env_start_args", lambda: args)
+    monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: parser == "qwen3")
     monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value="<think>"))
     monkeypatch.setattr("lightllm.server.reasoning_parser.get_token_id", lambda token: ord(">"))
     tokenizer = SimpleNamespace(encode=lambda text, **kwargs: list(text.encode()))
-    reasoning = "Let me think."
+    reasoning = "Let me think." if budget is None else "xy"[:budget]
     prefix = reasoning + "</think>"
     answer = '{"ok":true}'
 
@@ -159,7 +205,7 @@ def test_deepseek_r1_json_answer_stays_in_content(monkeypatch, compiler, stream,
         for index, token_id in enumerate([*tokenizer.encode(prefix + answer), 256]):
             # The real matcher must allow thinking and its delimiter before constraining JSON.
             masked = state.fill_masks(bitmask, [])
-            assert masked == (index >= len(prefix))
+            assert masked == (index >= (len(prefix) if budget is None else len(reasoning)))
             if masked:
                 assert (int(bitmask[0, token_id // 32]) >> (token_id % 32)) & 1
             state.commit(token_id)
@@ -172,7 +218,9 @@ def test_deepseek_r1_json_answer_stays_in_content(monkeypatch, compiler, stream,
     response_format = {"type": response_type}
     if response_type == "json_schema":
         response_format["json_schema"] = {"name": "result", "schema": {"const": {"ok": True}}}
-    request = ChatCompletionRequest(model="test", messages=[], response_format=response_format, stream=stream)
+    request = ChatCompletionRequest(
+        model="test", messages=[], response_format=response_format, stream=stream, thinking_token_budget=budget
+    )
 
     async def run():
         response = await api_openai.chat_completions_impl(request, None)
@@ -190,5 +238,5 @@ def test_deepseek_r1_json_answer_stays_in_content(monkeypatch, compiler, stream,
         )
 
     actual_reasoning, content = asyncio.run(run())
-    assert actual_reasoning == reasoning
+    assert (actual_reasoning or "") == reasoning
     assert content == answer

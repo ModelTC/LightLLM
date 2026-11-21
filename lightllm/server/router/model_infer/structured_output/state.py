@@ -1,6 +1,6 @@
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Iterator, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Generator, Optional, Sequence, Tuple
 
 from torch import Tensor
 
@@ -17,27 +17,34 @@ logger = init_logger(__name__)
 
 @dataclass
 class ConstraintState:
-    """Request-owned grammar progress; only committed output advances it permanently."""
+    """Request-owned reasoning/grammar progress; only committed output advances it permanently."""
 
-    # A valid artifact creates its matcher at admission; None denotes a load failure.
+    # 构造依赖和请求配置；仅预算请求不需要 grammar matcher。
     matcher: Optional["GrammarMatcher"]
-    in_reasoning: bool
-    error: Optional[str] = None
-    # 思考结束标记及其匹配后缀与 XGrammar matcher 一起由当前请求独立持有。
+    thinking_token_budget: int = -1
     reasoning_end_token_ids: Tuple[int, ...] = ()
+
+    # 运行时的阶段、错误、匹配后缀和计数。
+    in_reasoning: bool = False
+    error: Optional[str] = None
     reasoning_tail: Tuple[int, ...] = field(default=(), init=False)
+    reasoning_tokens: int = field(default=0, init=False)
     # 记录通过统一接口成功推进的 grammar token 数，用于恢复临时状态。
     _grammar_steps: int = field(default=0, init=False)
 
     @classmethod
-    def from_grammar(cls, grammar: "CompiledGrammar", params: "ConstraintOutParams") -> "ConstraintState":
-        import xgrammar as xgr
+    def from_grammar(cls, grammar: Optional["CompiledGrammar"], params: "ConstraintOutParams") -> "ConstraintState":
+        matcher = None
+        if grammar is not None:
+            import xgrammar as xgr
 
+            matcher = xgr.GrammarMatcher(grammar)
         reasoning_end_token_ids = tuple(params.guided_reasoning_end.to_list())
         return cls(
-            matcher=xgr.GrammarMatcher(grammar),
+            matcher=matcher,
             in_reasoning=bool(reasoning_end_token_ids),
             reasoning_end_token_ids=reasoning_end_token_ids,
+            thinking_token_budget=params.thinking_token_budget,
         )
 
     def commit(self, token_id: int) -> None:
@@ -108,12 +115,18 @@ class ConstraintState:
             return False
         match self.in_reasoning:
             case True:
+                forced_token = self._next_forced_reasoning_end_token()
+                if forced_token is not None and token_id != forced_token:
+                    return False
+                self.reasoning_tokens += 1
                 self.reasoning_tail = (self.reasoning_tail + (token_id,))[-len(self.reasoning_end_token_ids) :]
                 if self.reasoning_tail == self.reasoning_end_token_ids:
                     self.in_reasoning = False
                 # 思考内容和结束标记只推进 reasoning 状态，不进入 grammar matcher。
                 return True
             case False:
+                if self.matcher is None:
+                    return True
                 accepted = self.matcher.accept_token(token_id)
                 if accepted:
                     self._grammar_steps += 1
@@ -123,24 +136,47 @@ class ConstraintState:
         """Fill one prediction row; report whether this row needs grammar masking."""
         match self.in_reasoning:
             case True:
-                # 思考阶段不限制 token，当前预测行保持全允许。
+                forced_token = self._next_forced_reasoning_end_token()
+                if forced_token is not None:
+                    # 清空当前行，再只放开结束标记的下一个 token，强制模型生成它。
+                    bitmask[index].zero_()
+                    # 每个 int32 存储 32 个 token 的许可位；第 31 位需用有符号负数表示，避免溢出。
+                    word, bit = divmod(forced_token, 32)
+                    bitmask[index, word] = (1 << bit) if bit < 31 else -(1 << 31)
+                    return True
+                # 预算未耗尽或不限预算时，当前预测行保持全允许。
                 bitmask[index].fill_(-1)
                 return False
             case False:
-                if self.is_terminated():
-                    # grammar 已结束，这一行预测不可达，保持全允许。
+                if self.matcher is None or self.is_terminated():
+                    # 无正文 grammar 或 grammar 已结束时保持全允许。
                     bitmask[index].fill_(-1)
                     return False
                 self.matcher.fill_next_token_bitmask(bitmask, index)
                 return True
 
+    def _next_forced_reasoning_end_token(self) -> Optional[int]:
+        """预算耗尽时返回必须生成的下一个思考结束 token，否则返回 None。"""
+        if self.thinking_token_budget < 0 or self.reasoning_tokens < self.thinking_token_budget:
+            return None
+
+        end_tokens = self.reasoning_end_token_ids
+        # 找出历史后缀与结束标记前缀的最长匹配，接着补完已生成的部分。
+        max_prefix_len = min(len(self.reasoning_tail), len(end_tokens) - 1)
+        for prefix_len in range(max_prefix_len, 0, -1):
+            if self.reasoning_tail[-prefix_len:] == end_tokens[:prefix_len]:
+                return end_tokens[prefix_len]
+        # 尚未开始结束标记，从第一个 token 开始生成。
+        return end_tokens[0]
+
     @contextmanager
-    def _temporary_state(self) -> Iterator[None]:
+    def _temporary_state(self) -> Generator[None, None, None]:
         """Restore reasoning and grammar progress after speculative traversal."""
         # 保存已提交的 reasoning 阶段和匹配后缀。tail 是不可变 tuple，直接保存引用即可；
         # 临时推进会生成新 tuple，不会修改快照，所以只需保留结束标记长度的后缀。
         saved_in_reasoning = self.in_reasoning
         saved_tail = self.reasoning_tail
+        saved_reasoning_tokens = self.reasoning_tokens
         saved_grammar_steps = self._grammar_steps
         try:
             yield
@@ -159,6 +195,7 @@ class ConstraintState:
                 # matcher 回滚若失败，仍恢复这些 Python 状态，异常交给请求错误路径处理。
                 self.in_reasoning = saved_in_reasoning
                 self.reasoning_tail = saved_tail
+                self.reasoning_tokens = saved_reasoning_tokens
                 self._grammar_steps = saved_grammar_steps
 
     def _record_error(self, exc: BaseException) -> None:

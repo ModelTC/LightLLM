@@ -7,7 +7,7 @@ from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.config_utils import get_vocab_size
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, enable_thinking_budget
 
 
 if TYPE_CHECKING:
@@ -52,7 +52,7 @@ class ReqSamplingParamsManager:
 
         self.req_to_bitmask: Optional[torch.Tensor] = None
         self.req_to_bitmask_enabled: Optional[torch.Tensor] = None
-        if get_env_start_args().output_constraint_mode == "xgrammar":
+        if get_env_start_args().output_constraint_mode == "xgrammar" or enable_thinking_budget():
             # 每个请求和验证位置对应一个固定掩码槽；CPU matcher 在上一轮 post_handle 后填充，
             # 采样时在同一流上异步传到 GPU；已有完成事件保护下一轮 pinned 源缓冲区的复用。
             self.req_to_bitmask = torch.empty(

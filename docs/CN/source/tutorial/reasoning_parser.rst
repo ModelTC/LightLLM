@@ -291,6 +291,21 @@ Responses API 会在 ``usage.output_tokens_details.reasoning_tokens`` 中返回�
   - ``enable_thinking``: 启用推理（Qwen3, GLM45）
   - ``thinking``: 启用推理（DeepSeek-V3）
 
+**thinking_token_budget** (整数, 可选)
+  服务默认支持该参数，使用有限预算时需要配置 reasoning parser（支持自动识别）。
+  可通过 ``--disable_thinking_budget`` 显式关闭。
+  不限制模型类型，思考结束序列由 parser 和当前模型的 tokenizer 确定。
+  开关关闭时传入有限预算会返回 HTTP 400；P/D 部署需确保 Master、P、D 均未关闭此功能。
+  限制本次生成的思考 token 数，耗尽后强制输出 parser 的正文切换序列
+  （Qwen3/Qwen3.5 为 ``</think>``）。不传或设为 ``-1`` 表示不限，``0`` 表示立即
+  切换正文；显式关闭 thinking 时预算不生效。需要配置 reasoning parser。
+  OpenAI SDK 示例：``extra_body={"thinking_token_budget": 1024}``。
+  支持流式输出、MTP，以及 JSON Schema/grammar 约束；切换后才启用正文约束。
+  ``max_completion_tokens`` 仍限制思考、切换序列和正文的总输出长度。
+  有限预算不能与 ``--target_vocab_topk_sampling`` 同时使用。
+  使用 ``/generate`` 时，在 ``parameters`` 中同时传入预算和
+  ``guided_reasoning_end`` token ID 序列，并配置 reasoning parser。
+
 **--reasoning_parser** (启动参数)
   指定解析器类型：``deepseek-r1``, ``qwen3``, ``glm45``, ``gpt-oss`` 等
 
