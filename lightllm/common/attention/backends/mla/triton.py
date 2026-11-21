@@ -45,7 +45,7 @@ class TritonMLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, TritonMLAPrefill
     def __init__(self, layer_config: MLAPrefillLayerConfig) -> None:
         super().__init__(layer_config)
         # 256-dim queries (GLM-4 MoE Lite: 192 nope + 64 rope) run the contiguous-KV GQA prefill kernel
-        # over keys expanded per head; it scales scores by 1/sqrt(256).
+        # over keys expanded per head.
         self.expands_keys = layer_config.qk_nope_head_dim + layer_config.qk_rope_head_dim == 256
         if not layer_config.causal:
             raise NotImplementedError("Triton MLA prefill supports only causal attention")
@@ -111,6 +111,7 @@ class TritonMLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, TritonMLAPrefill
             step_args.b_seq_len,
             step_args.max_q_seq_len,
             step_args.b_ready_cache_len,
+            softmax_scale=layer_config.softmax_scale,
         )
         return out
 

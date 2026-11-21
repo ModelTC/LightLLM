@@ -507,8 +507,9 @@ def _fwd_kernel_contiguous_kv(
 
 @torch.no_grad()
 def context_attention_fwd_contiguous_kv(
-    q, k, v, o, b_start_loc, b_kv_start_loc, b_seq_len, max_q_input_len, b_prompt_cache_len
+    q, k, v, o, b_start_loc, b_kv_start_loc, b_seq_len, max_q_input_len, b_prompt_cache_len, softmax_scale=None
 ):
+    """softmax_scale defaults to 1 / sqrt(head_dim)."""
     BLOCK_M = 128 if not is_tesla() else 64
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
@@ -524,7 +525,7 @@ def context_attention_fwd_contiguous_kv(
 
     # 计算scale系数, 并乘以 1/log(2) = 1.4426950408889634,
     # 算子内部使用 tl.math.exp2 来使计算与标准attention等价。
-    sm_scale = 1.0 / (Lq ** 0.5) * 1.4426950408889634
+    sm_scale = (1.0 / (Lq ** 0.5) if softmax_scale is None else softmax_scale) * 1.4426950408889634
     batch, head = b_seq_len.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k.shape[1]
 
