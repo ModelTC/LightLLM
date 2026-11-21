@@ -13,7 +13,7 @@ from fastapi import Request
 from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus, PD_Client_Obj, PdPfPrefillKvReady
-from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, RequestStopped, ServerBusyError
 from lightllm.utils.log_utils import init_logger
 
 if TYPE_CHECKING:
@@ -32,6 +32,7 @@ class HttpPdPrefillFirstManagerHelper:
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
+        origin_request_id: int,
     ):
         """Prefill 先算完，再让 decode 占页，然后通知 prefill：decode KV 已就绪。"""
         from lightllm.server.httpserver_for_pd_master.manager import ReqStatus
@@ -82,6 +83,7 @@ class HttpPdPrefillFirstManagerHelper:
                     request=request,
                     timeout=prefill_ready_timeout_seconds,
                     group_request_id=group_request_id,
+                    origin_request_id=origin_request_id,
                     stage="pf-prefill-kv-ready",
                 )
             except ServerBusyError:
@@ -147,6 +149,7 @@ class HttpPdPrefillFirstManagerHelper:
                     request=request,
                     timeout=decode_handshake_timeout,
                     group_request_id=group_request_id,
+                    origin_request_id=origin_request_id,
                     stage="prefill-first-decode",
                 )
             except ServerBusyError:
@@ -164,6 +167,10 @@ class HttpPdPrefillFirstManagerHelper:
             # 5. 继续交出后到的 token。Decode 会再上报同一个首 token，在下面丢掉。
             while True:
                 await req_status.wait_to_ready()
+                # stop_request 标记的是原始 choice ID，group_request_id 只是当前 P/D 分段 ID。
+                # Decode 不再输出 token 时，外层无法及时检查 stop；每次等待结束后主动检查，
+                # 通过专用异常交由外层统一 abort 当前分段并结束该 choice。
+                self.raise_if_request_stopped(origin_request_id)
                 req_status.raise_if_error()
                 if await request.is_disconnected():
                     raise ClientDisconnected(
@@ -184,6 +191,9 @@ class HttpPdPrefillFirstManagerHelper:
                     ):
                         continue
                     yield item
+        except RequestStopped:
+            await self.abort(group_request_id=group_request_id, p_node=p_node, d_node=req_status.d_node)
+            return
         finally:
             # 生成器退出时请求还在就 abort。正常结束后多通知一次没有实质影响。
             if group_request_id in self.req_id_to_out_inf:

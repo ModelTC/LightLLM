@@ -62,6 +62,7 @@ def test_direct_requests_handshake_and_abort_preserve_int64_ids():
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
         manager.args = SimpleNamespace(pd_node_id=1)
         manager.req_id_to_out_inf = {}
+        manager.active_req_ids = {80}
         p_node, d_node = _node(), _node("decode")
         params = SamplingParams()
         params.group_request_id, params.max_new_tokens = 123, 4
@@ -86,7 +87,9 @@ def test_direct_requests_handshake_and_abort_preserve_int64_ids():
 
         manager._wait_for_event_or_disconnect = handshake
         request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
-        stream = manager.fetch_pd_stream(p_node, d_node, "prompt", params, MultimodalParams(), request)
+        stream = manager.fetch_pd_stream(
+            p_node, d_node, "prompt", params, MultimodalParams(), request, origin_request_id=80
+        )
         try:
             token = await asyncio.wait_for(anext(stream), 1)
             assert token[1] == "done"
@@ -120,7 +123,9 @@ def test_oversized_prefill_control_message_is_not_sent(monkeypatch):
         params = SamplingParams()
         params.group_request_id, params.max_new_tokens = 7, 1
         request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
-        stream = manager.fetch_pd_stream(p_node, d_node, "prompt", params, MultimodalParams(), request)
+        stream = manager.fetch_pd_stream(
+            p_node, d_node, "prompt", params, MultimodalParams(), request, origin_request_id=80
+        )
         try:
             with pytest.raises(InvalidRequestError, match="websocket limit"):
                 await anext(stream)
@@ -157,7 +162,9 @@ def test_oversized_decode_control_message_is_not_sent(monkeypatch):
 
         manager._wait_for_event_or_disconnect = wait
         request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
-        stream = manager.fetch_pd_stream(p_node, d_node, "prompt", params, MultimodalParams(), request)
+        stream = manager.fetch_pd_stream(
+            p_node, d_node, "prompt", params, MultimodalParams(), request, origin_request_id=80
+        )
         try:
             with pytest.raises(InvalidRequestError, match="websocket limit"):
                 await anext(stream)
