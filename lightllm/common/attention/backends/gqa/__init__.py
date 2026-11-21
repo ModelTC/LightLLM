@@ -50,6 +50,9 @@ class GQALayerConfig:
     has_q_scale applies to "fp8_per_head": True quantizes q with static per-KV-head scales,
     False quantizes it dynamically per request.
 
+    has_alibi=True adds ALiBi position biases, one slope per query head, supplied per layer as
+    GQALayerInputs.alibi_slopes.
+
     Supported dtypes, head dimensions, scales and sliding-window modes are documented on each impl.
     """
 
@@ -64,6 +67,7 @@ class GQALayerConfig:
     kv_quant: Optional[str] = None
     kv_quant_group_size: Optional[int] = None
     has_q_scale: bool = False
+    has_alibi: bool = False
 
     def __post_init__(self) -> None:
         require_positive(self, "num_heads", "num_kv_heads", "head_dim")
@@ -110,6 +114,7 @@ class GQALayerInputs:
 
     sinks is the layer's [num_heads] sink logits in q's dtype when the layer_config has has_sinks, else None.
     kv_scales holds the cache's scales when the layer_config has kv_quant, else None.
+    alibi_slopes is the layer's float32 [num_heads] ALiBi slopes when the layer_config has has_alibi, else None.
     """
 
     q: torch.Tensor
@@ -117,3 +122,4 @@ class GQALayerInputs:
     v_cache: torch.Tensor
     sinks: Optional[torch.Tensor] = None
     kv_scales: Optional[GQAKVScales] = None
+    alibi_slopes: Optional[torch.Tensor] = None

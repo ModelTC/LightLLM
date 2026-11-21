@@ -219,6 +219,7 @@ def _check_supported(layer_config: GQALayerConfig) -> None:
         and layer_config.has_default_scale
         and not layer_config.has_sinks
         and layer_config.kv_quant in (None, "fp8_per_tensor")
+        and not layer_config.has_alibi
     ):
         raise NotImplementedError(
             "FlashInfer GQA supports only causal attention without sliding window or sinks, "
