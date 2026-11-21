@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 
 from lightllm.common.attention.backend import AttentionBatch
-from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.flashinfer import (
     FlashInferGQABuilderConfig,
     FlashInferGQADecodeBackend,
@@ -106,6 +106,51 @@ def test_prefill_decode(dtype, q_heads, kv_heads, page_size, cached):
     expected = reference(q, k, v, token_map, req_ids, lengths, [x - 1 for x in lengths])
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
     torch.testing.assert_close(kv, before, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("q_heads,kv_heads", [(4, 4), (8, 2)])
+@pytest.mark.parametrize("page_size", [1, 16])
+def test_fp8_prefill_decode(q_heads, kv_heads, page_size):
+    # A per-tensor FP8 cache with host-float scales; FlashInfer dequantizes K/V in the kernel and keeps q in
+    # BF16, so against the dequantized cache only BF16 rounding remains and the BF16 tolerance applies.
+    lengths, ready, req_ids = [33, 9, 259], [16, 5, 128], [2, 0, 1]
+    token_map = paged_token_map(3, page_size, seed=0)
+    generator = torch.Generator(device="cuda").manual_seed(1)
+    kv = torch.randn(3 * 512, 2, kv_heads, 64, device="cuda", generator=generator)
+    # Different K and V scales, so swapping them changes the result; |kv| / scale stays inside E4M3's 448.
+    k_scale, v_scale = 0.02, 0.035
+    encoded = (kv / torch.tensor([k_scale, v_scale], device="cuda")[None, :, None, None]).to(torch.float8_e4m3fn)
+    k, v = encoded[:, 0].view(torch.uint8), encoded[:, 1].view(torch.uint8)
+    k_ref, v_ref = encoded[:, 0].float() * k_scale, encoded[:, 1].float() * v_scale
+    workspace = torch.empty(32 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+    config = FlashInferGQABuilderConfig(q_heads, kv_heads, 64, page_size, torch.bfloat16, torch.float8_e4m3fn)
+    layer_config = GQALayerConfig(
+        num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16, kv_quant="fp8_per_tensor"
+    )
+    scales = GQAKVScales(k_scale=k_scale, v_scale=v_scale)
+
+    query_lengths = [n - r for n, r in zip(lengths, ready)]
+    q = torch.randn(sum(query_lengths), q_heads, 64, device="cuda", generator=generator).bfloat16()
+    step_args = FlashInferGQAPrefillBackend.get_step_builder_cls()(
+        config, workspace=lambda: workspace, max_seq_len=512
+    ).build(make_batch(token_map, req_ids, lengths, query_lengths))
+    out = torch.empty_like(q)
+    FlashInferGQAPrefillBackend.get_impl_cls()(layer_config).forward(
+        step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out
+    )
+    expected = reference(q, k_ref, v_ref, token_map, req_ids, lengths, ready)
+    torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
+
+    step_args = FlashInferGQADecodeBackend.get_step_builder_cls()(
+        config, workspace=lambda: workspace, max_seq_len=512, max_batch_size=3, device=torch.device("cuda")
+    ).build(make_batch(token_map, req_ids, lengths))
+    q = torch.randn(3, q_heads, 64, device="cuda", generator=generator).bfloat16()
+    out = torch.empty_like(q)
+    FlashInferGQADecodeBackend.get_impl_cls()(layer_config).forward(
+        step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out
+    )
+    expected = reference(q, k_ref, v_ref, token_map, req_ids, lengths, [x - 1 for x in lengths])
+    torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
 
 
 def test_decode_step_builder_keeps_one_graph_wrapper_per_microbatch_and_batch_size():
