@@ -162,7 +162,8 @@ def test_adapter_graph(q_heads, kv_heads, allocator):
         graph.replay()
         expected = reference(q, k, v, token_map, owner.b_req_idx, owner.b_seq_len, [x - 1 for x in lengths], (-1, -1))
         torch.testing.assert_close(actual.float(), expected, atol=0.02, rtol=0.02)
-    assert state.decode_max_kv_seq_len == 33
+    # The step args keep the capture step's actual length as the config hint and the capacity as the bound.
+    assert (state.step_args.max_kv_seq_len, state.step_args.kv_seq_len_bound) == (33, 512)
     owner_ref = weakref.ref(owner)
     del owner
     assert owner_ref() is None
@@ -265,3 +266,129 @@ def test_adapter_rejects_attention_triton_cannot_run(phase, causal, att_control)
     run = state.prefill_att if phase == "prefill" else state.decode_att
     with pytest.raises(NotImplementedError, match="causal attention without sinks"):
         run(q=q, k=k, v=v, att_control=att_control)
+
+
+@pytest.mark.parametrize("q_heads,kv_heads", [(8, 8), (8, 2)])
+def test_speculative_decode_rows_share_request_kv(q_heads, kv_heads):
+    # Two rows per request; the last row of each sees the longest prefix. PAD rows are padding.
+    pad = 7
+    token_map = torch.randperm(8 * 512, device="cuda", dtype=torch.int32).view(8, 512)
+    req_ids = torch.tensor([2, 2, 0, 0, pad, pad], device="cuda", dtype=torch.int32)
+    lengths = torch.tensor([40, 41, 299, 300, 1, 1], device="cuda", dtype=torch.int32)
+    kv = torch.randn(8 * 512, 2 * kv_heads, 64, device="cuda", dtype=torch.bfloat16)
+    k, v = kv[:, :kv_heads], kv[:, kv_heads:]
+    q = torch.randn(6, q_heads, 64, device="cuda", dtype=torch.bfloat16)
+    batch = make_batch(token_map, req_ids, lengths, cu_kv_seq_len=None, decode_rows_per_request=2, pad_req_idx=pad)
+    step_args = TritonGQADecodeBackend.get_step_builder_cls()().build(batch)
+    assert step_args.b_mark_shared_group.cpu().tolist() == [0, 2, 0, 2, 1, 1]
+    layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16)
+    out = torch.empty_like(q)
+    TritonGQADecodeBackend.get_impl_cls()(layer_config).forward(
+        step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out
+    )
+    expected = reference(q, k, v, token_map, req_ids, lengths, (lengths - 1).tolist(), (-1, -1))
+    torch.testing.assert_close(out[:4].float(), expected[:4], atol=0.02, rtol=0.02)
+
+
+def test_speculative_decode_groups_are_kept_per_microbatch_and_batch_size():
+    token_map = torch.zeros(8, 512, device="cuda", dtype=torch.int32)
+    lengths = torch.tensor([5, 6, 5, 6], device="cuda", dtype=torch.int32)
+    step_builder = TritonGQADecodeBackend.get_step_builder_cls()()
+
+    def build(req_ids, **kwargs):
+        req_ids = torch.tensor(req_ids, device="cuda", dtype=torch.int32)
+        batch = make_batch(token_map, req_ids, lengths, decode_rows_per_request=2, pad_req_idx=7, **kwargs)
+        return step_builder.build(batch)
+
+    captured = build([1, 1, 2, 2], cuda_graph_max_kv_seq_len=512)
+    assert captured.b_mark_shared_group.cpu().tolist() == [0, 2, 0, 2]
+    # A replay rewrites the captured groups in place, so the graph reads the new layout.
+    replayed = build([3, 4, 4, 7], cuda_graph_max_kv_seq_len=512)
+    assert replayed.b_mark_shared_group is captured.b_mark_shared_group
+    assert captured.b_mark_shared_group.cpu().tolist() == [1, 0, 2, 1]
+    other = build([1, 1, 2, 2], cuda_graph_max_kv_seq_len=512, microbatch_index=1)
+    assert other.b_mark_shared_group is not captured.b_mark_shared_group
+    assert build([1, 1, 2, 2]).b_mark_shared_group is not captured.b_mark_shared_group
+
+
+def alibi_reference(q, k, v, token_map, req_ids, lengths, ready, slopes):
+    outputs, offset = [], 0
+    for req_id, length, cached in zip(req_ids.tolist(), lengths.tolist(), ready):
+        count = length - cached
+        indices = token_map[req_id, :length].long()
+        scores = torch.einsum("qhd,khd->hqk", q[offset : offset + count].float(), k[indices].float()) * 64 ** -0.5
+        query_pos = torch.arange(cached, length, device=q.device)[:, None]
+        key_pos = torch.arange(length, device=q.device)[None, :]
+        scores = scores + slopes.float()[:, None, None] * (key_pos - query_pos)[None]
+        scores.masked_fill_(~(key_pos <= query_pos)[None], float("-inf"))
+        outputs.append(torch.einsum("hqk,khd->qhd", scores.softmax(-1), v[indices].float()))
+        offset += count
+    return torch.cat(outputs)
+
+
+def test_alibi_prefill_and_decode_match_reference():
+    heads = 4
+    token_map = torch.randperm(3 * 512, device="cuda", dtype=torch.int32).view(3, 512)
+    req_ids = torch.tensor([2, 0, 1], device="cuda", dtype=torch.int32)
+    lengths = torch.tensor([33, 9, 259], device="cuda", dtype=torch.int32)
+    ready = [16, 5, 128]
+    kv = torch.randn(3 * 512, 2 * heads, 64, device="cuda", dtype=torch.bfloat16)
+    k, v = kv[:, :heads], kv[:, heads:]
+    slopes = torch.tensor([0.5, 0.25, 0.125, 0.0625], device="cuda")
+    layer_config = GQALayerConfig(
+        num_heads=heads, num_kv_heads=heads, head_dim=64, dtype=torch.bfloat16, has_alibi=True
+    )
+    q_lens = [n - r for n, r in zip(lengths.tolist(), ready)]
+    q = torch.randn(sum(q_lens), heads, 64, device="cuda", dtype=torch.bfloat16)
+    cu_q = torch.tensor([0, *q_lens], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    batch = make_batch(
+        token_map,
+        req_ids,
+        lengths,
+        b_q_start_loc=cu_q[:-1],
+        b_ready_cache_len=torch.tensor(ready, device="cuda", dtype=torch.int32),
+        max_q_seq_len=max(q_lens),
+    )
+    out = torch.empty_like(q)
+    TritonGQAPrefillBackend.get_impl_cls()(layer_config).forward(
+        TritonGQAPrefillBackend.get_step_builder_cls()().build(batch),
+        GQALayerInputs(q=q, k_cache=k, v_cache=v, alibi_slopes=slopes),
+        out=out,
+    )
+    expected = alibi_reference(q, k, v, token_map, req_ids, lengths, ready, slopes)
+    torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
+
+    q = torch.randn(3, heads, 64, device="cuda", dtype=torch.bfloat16)
+    cu_kv = torch.tensor([0, *lengths.tolist()], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    step_args = TritonGQADecodeBackend.get_step_builder_cls()().build(
+        make_batch(token_map, req_ids, lengths, cu_kv_seq_len=cu_kv)
+    )
+    out = torch.empty_like(q)
+    TritonGQADecodeBackend.get_impl_cls()(layer_config).forward(
+        step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v, alibi_slopes=slopes), out=out
+    )
+    expected = alibi_reference(q, k, v, token_map, req_ids, lengths, (lengths - 1).tolist(), slopes)
+    torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
+
+
+def test_alibi_is_supported_only_for_triton_mha_without_window():
+    from lightllm.common.attention.backends.gqa.fa3 import FA3GQAPrefillBackend
+    from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQAPrefillBackend
+
+    def layer_config(**fields):
+        fields = {
+            "num_heads": 4,
+            "num_kv_heads": 4,
+            "head_dim": 64,
+            "dtype": torch.bfloat16,
+            "has_alibi": True,
+            **fields,
+        }
+        return GQALayerConfig(**fields)
+
+    for fields in (dict(num_kv_heads=2), dict(sliding_window=(15, 0))):
+        with pytest.raises(NotImplementedError, match="ALiBi"):
+            TritonGQAPrefillBackend.get_impl_cls()(layer_config(**fields))
+    for backend in (FA3GQAPrefillBackend, FlashInferGQAPrefillBackend):
+        with pytest.raises(NotImplementedError):
+            backend.get_impl_cls()(layer_config())

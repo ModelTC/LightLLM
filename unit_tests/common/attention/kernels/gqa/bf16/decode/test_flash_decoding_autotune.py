@@ -129,7 +129,7 @@ def test_rebuild_preserves_layout_and_bounds_indices(monkeypatch, num_tokens):
 def test_state_retains_actual_length_before_graph_capture(monkeypatch, q_heads):
     infer_state = InferStateInfo()
     infer_state.is_cuda_graph_capture = True
-    infer_state.max_kv_seq_len = 8193
+    infer_state.batch_size, infer_state.max_kv_seq_len, infer_state.total_token_num = 2, 8193, 2 * 8193
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.empty(2, 32768, dtype=torch.int32))
     infer_state.b_req_idx = torch.arange(2, dtype=torch.int32)
     infer_state.b_seq_len = torch.full((2,), 8193, dtype=torch.int32)

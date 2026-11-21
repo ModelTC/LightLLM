@@ -160,6 +160,8 @@ def _check_supported(layer_config: GQALayerConfig) -> None:
         raise NotImplementedError(
             f"FA3 GQA supports FP16/BF16 with head_dim <= 256, got {layer_config.dtype}, {layer_config.head_dim}"
         )
+    if layer_config.has_alibi:
+        raise NotImplementedError("FA3 GQA does not support ALiBi")
     if layer_config.kv_quant not in (None, "fp8_per_head"):
         raise NotImplementedError(f"FA3 GQA supports kv_quant None or 'fp8_per_head', got {layer_config.kv_quant!r}")
     if layer_config.kv_quant is not None and (

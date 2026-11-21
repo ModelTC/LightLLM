@@ -12,7 +12,9 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel import cuda_graph as graph_module
+from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeStepBuilder
 from lightllm.common.basemodel.attention.triton import fp as state_module
+from lightllm.common.basemodel.triton_kernel import mtp_utils
 from lightllm.common.attention.kernels.gqa.bf16.decode.mtp_diverse import (
     mtp_diverse_attn as decode_module,
     stage1_single_token as stage1_module,
@@ -134,19 +136,27 @@ def test_rebuild_rejects_empty_or_mismatched_cache():
 def test_decode_passes_saved_length_and_selected_block_n(monkeypatch):
     inputs = make_inputs()
     infer_state = InferStateInfo()
+    infer_state.is_prefill = False
     infer_state.max_kv_seq_len = 8193
     infer_state.b_req_idx = inputs["B_req_idx"]
     infer_state.b_seq_len = inputs["b_seq_len"]
-    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"])
+    infer_state.batch_size = inputs["b_seq_len"].shape[0]
+    infer_state.total_token_num = int(inputs["b_seq_len"].sum())
+    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"], HOLD_REQUEST_ID=-1)
     model = SimpleNamespace(
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 2),
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
     )
-    monkeypatch.setattr(state_module, "build_mtp_shared_group_markers", lambda *a, **kw: inputs["b_mark_shared_group"])
-    state = state_module.TritonDecodeAttState(
-        backend=SimpleNamespace(model=model), _infer_state_weak_ref=weakref.ref(infer_state)
+    monkeypatch.setattr(mtp_utils, "build_mtp_shared_group_markers", lambda *a, **kw: inputs["b_mark_shared_group"])
+    backend = SimpleNamespace(
+        model=model,
+        uses_causal_attention=lambda: True,
+        uses_dynamic_spec_verify_layout=lambda: False,
+        decode_step_builder=TritonGQADecodeStepBuilder(),
+        get_attention_impl=lambda backend_cls, layer_config: backend_cls.get_impl_cls()(layer_config),
     )
+    state = state_module.TritonDecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer_state))
     state.init_state()
     infer_state.max_kv_seq_len = 32768
     calls = []

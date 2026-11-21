@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -9,6 +10,7 @@ from lightllm.common.attention.backend import (
     AttentionBatch,
     TensorAllocator,
 )
+from .. import keep_for_cuda_graph
 from . import GQALayerConfig, GQALayerInputs
 
 
@@ -49,7 +51,12 @@ class TritonGQADecodeStepArgs:
     the step args may run with: the actual maximum for an eager step, the graph capacity for a
     CUDA graph step, whose replays reuse it. max_kv_seq_len is this step's actual maximum.
     It is valid only as a hint, since replays may see longer lengths: a hint of 33 and a
-    bound of 512 remain correct when lengths later reach 300.
+    bound of 512 remain correct when lengths later reach 300. total_token_bound likewise bounds
+    the sum of lengths, and b_kv_start_loc[i] is that sum over the rows before row i.
+
+    With speculative decoding, consecutive rows of one request form a group sharing its KV;
+    b_mark_shared_group is 0 inside a group and holds the group size on its last row (padding
+    rows form one-row groups). It is None when every request has one row.
     """
 
     req_to_token_indexs: torch.Tensor
@@ -57,6 +64,9 @@ class TritonGQADecodeStepArgs:
     b_seq_len: torch.Tensor
     kv_seq_len_bound: int
     max_kv_seq_len: int
+    total_token_bound: int = 0
+    b_kv_start_loc: Optional[torch.Tensor] = None
+    b_mark_shared_group: Optional[torch.Tensor] = None
 
 
 class TritonGQAPrefillStepBuilder(AttentionStepBuilder[TritonGQAPrefillStepArgs]):
@@ -74,15 +84,33 @@ class TritonGQAPrefillStepBuilder(AttentionStepBuilder[TritonGQAPrefillStepArgs]
 
 
 class TritonGQADecodeStepBuilder(AttentionStepBuilder[TritonGQADecodeStepArgs]):
+    def __init__(self) -> None:
+        self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
+
     def build(self, batch: AttentionBatch) -> TritonGQADecodeStepArgs:
-        """Kernels read the request tensors directly; a CUDA graph step bounds lengths by the graph capacity."""
-        bound = batch.cuda_graph_max_kv_seq_len if batch.uses_cuda_graph else batch.max_kv_seq_len
+        """Kernels read the request tensors directly; a CUDA graph step bounds lengths by the graph
+        capacity and keeps the speculative-decode groups per (microbatch, batch size)."""
+        if batch.uses_cuda_graph:
+            bound, total_bound = batch.cuda_graph_max_kv_seq_len, batch.cuda_graph_max_kv_seq_len * batch.batch_size
+        else:
+            bound, total_bound = batch.max_kv_seq_len, batch.total_token_num
+        markers = None
+        if batch.decode_rows_per_request > 1:
+            from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
+
+            markers = build_mtp_shared_group_markers(batch.b_req_idx, hold_req_id=batch.pad_req_idx)
+            if batch.uses_cuda_graph:
+                key = (batch.microbatch_index, batch.batch_size, "mtp_groups")
+                markers = keep_for_cuda_graph(self._cuda_graph_tensors, key, markers)
         return TritonGQADecodeStepArgs(
             req_to_token_indexs=batch.req_to_token_indexs,
             b_req_idx=batch.b_req_idx,
             b_seq_len=batch.b_seq_len,
             kv_seq_len_bound=bound,
             max_kv_seq_len=batch.max_kv_seq_len,
+            total_token_bound=total_bound,
+            b_kv_start_loc=None if batch.cu_kv_seq_len is None else batch.cu_kv_seq_len[:-1],
+            b_mark_shared_group=markers,
         )
 
 
@@ -100,6 +128,10 @@ def _check_supported(layer_config: GQALayerConfig) -> None:
         raise NotImplementedError("Triton GQA supports only causal attention without sinks")
     if layer_config.kv_quant is not None:
         raise NotImplementedError(f"Triton GQA does not support kv_quant={layer_config.kv_quant!r}")
+    if layer_config.has_alibi and (
+        layer_config.num_heads != layer_config.num_kv_heads or layer_config.sliding_window != (-1, -1)
+    ):
+        raise NotImplementedError("Triton GQA supports ALiBi only for MHA without sliding window")
 
 
 def _check_inputs(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs) -> None:
@@ -108,6 +140,7 @@ def _check_inputs(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs) ->
         q.shape[1:] == (layer_config.num_heads, layer_config.head_dim) and q.dtype == layer_config.dtype
     ), "q does not match the layer_config"
     assert k.shape[1:] == (layer_config.num_kv_heads, layer_config.head_dim), "KV cache does not match the layer_config"
+    assert (layer_inputs.alibi_slopes is not None) == layer_config.has_alibi, "alibi_slopes must match has_alibi"
 
 
 class TritonGQAPrefillImpl(AttentionImpl[GQALayerConfig, TritonGQAPrefillStepArgs, GQALayerInputs]):
@@ -138,6 +171,25 @@ class TritonGQAPrefillImpl(AttentionImpl[GQALayerConfig, TritonGQAPrefillStepArg
         )
 
         _check_inputs(self.layer_config, layer_inputs)
+        if self.layer_config.has_alibi:
+            from lightllm.common.basemodel.triton_kernel.alibi_att.context_flashattention_nopad import (
+                context_attention_fwd as alibi_context_attention_fwd,
+            )
+
+            alibi_context_attention_fwd(
+                layer_inputs.q,
+                layer_inputs.k_cache,
+                layer_inputs.v_cache,
+                out,
+                step_args.b_req_idx,
+                layer_inputs.alibi_slopes,
+                step_args.b_q_start_loc,
+                step_args.b_seq_len,
+                step_args.b_ready_cache_len,
+                step_args.max_q_seq_len,
+                step_args.req_to_token_indexs,
+            )
+            return out
         context_attention_fwd(
             q=layer_inputs.q,
             k=layer_inputs.k_cache,
@@ -187,6 +239,46 @@ class TritonGQADecodeImpl(AttentionImpl[GQALayerConfig, TritonGQADecodeStepArgs,
         scoped to one device must be used only on that device.
         """
         _check_inputs(self.layer_config, layer_inputs)
+        if self.layer_config.has_alibi:
+            from lightllm.common.basemodel.triton_kernel.alibi_att.token_flashattention_nopad import (
+                token_attention_fwd,
+            )
+
+            token_attention_fwd(
+                layer_inputs.q,
+                layer_inputs.k_cache,
+                layer_inputs.v_cache,
+                out,
+                layer_inputs.alibi_slopes,
+                step_args.req_to_token_indexs,
+                step_args.b_req_idx,
+                step_args.b_kv_start_loc,
+                step_args.b_seq_len,
+                # Scratch and launch sizes must cover every length a replay may bring.
+                step_args.kv_seq_len_bound,
+                step_args.total_token_bound,
+                alloc_tensor_func=alloc_func,
+            )
+            return out
+        if step_args.b_mark_shared_group is not None:
+            from lightllm.common.attention.kernels.gqa.bf16.decode.mtp_diverse import (
+                token_decode_attention_mtp_diverse_single_token,
+            )
+
+            # The rows of one request share its KV, so one pass over the KV serves the whole group.
+            return token_decode_attention_mtp_diverse_single_token(
+                q=layer_inputs.q,
+                k=layer_inputs.k_cache,
+                v=layer_inputs.v_cache,
+                Req_to_tokens=step_args.req_to_token_indexs,
+                B_req_idx=step_args.b_req_idx,
+                b_seq_len=step_args.b_seq_len,
+                b_mark_shared_group=step_args.b_mark_shared_group,
+                # Only selects kernel configs; the kernel reads actual lengths on the GPU.
+                max_kv_len=step_args.max_kv_seq_len,
+                out=out,
+                alloc_tensor_func=alloc_func,
+            )
         if self.is_mha:
             from lightllm.common.attention.kernels.gqa.bf16.decode.flash_decoding import (
                 token_decode_attention_flash_decoding,

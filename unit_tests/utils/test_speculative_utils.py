@@ -14,6 +14,7 @@ from lightllm.common.attention.backend import AttentionBatch
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeStepBuilder, FA3GQAPrefillStepBuilder
 from lightllm.common.basemodel.attention.fa3.fp import Fa3DecodeAttState, Fa3PrefillAttState
 from lightllm.common.basemodel.attention.fa3.mla import MlaFa3DecodeAttState, MlaFa3PrefillAttState
+from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeStepBuilder
 from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
@@ -188,16 +189,27 @@ def test_triton_mtp_decode_state_builds_group_markers():
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
     )
     infer_state = InferStateInfo()
+    infer_state.is_prefill = False
+    infer_state.batch_size = 4
     infer_state.b_req_idx = torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda")
-    infer_state.max_kv_seq_len = 4
+    infer_state.b_seq_len = torch.tensor([3, 4, 1, 1], dtype=torch.int32, device="cuda")
+    infer_state.max_kv_seq_len, infer_state.total_token_num = 4, 9
+    infer_state.req_manager = SimpleNamespace(
+        req_to_token_indexs=torch.zeros(8, 8, dtype=torch.int32), HOLD_REQUEST_ID=-1
+    )
     state = TritonDecodeAttState(
-        backend=SimpleNamespace(model=model),
+        backend=SimpleNamespace(
+            model=model,
+            uses_causal_attention=lambda: True,
+            uses_dynamic_spec_verify_layout=lambda: False,
+            decode_step_builder=TritonGQADecodeStepBuilder(),
+        ),
         _infer_state_weak_ref=weakref.ref(infer_state),
     )
 
     state.init_state()
 
-    assert state.b_mark_mtp_shared_group.cpu().tolist() == [0, 2, 1, 1]
+    assert state.step_args.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
