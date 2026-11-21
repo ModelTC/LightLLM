@@ -66,6 +66,17 @@ def test_fa3_fp8_rejects_window_and_sinks():
             FA3GQADecodeBackend.get_impl_cls()(config(kv_quant="fp8_per_head", **fields))
 
 
+def test_fa3_fp8_needs_a_bf16_model():
+    # FA3 writes FP8 attention output only as BF16, so an FP16 model would get BF16 activations.
+    layer_config = GQALayerConfig(
+        num_heads=HEADS, num_kv_heads=KV_HEADS, head_dim=DIM, dtype=torch.float16, kv_quant="fp8_per_head"
+    )
+    for backend in (FA3GQAPrefillBackend, FA3GQADecodeBackend):
+        with pytest.raises(NotImplementedError, match="BF16 model"):
+            backend.get_impl_cls()(layer_config)
+    FA3GQADecodeBackend.get_impl_cls()(config(kv_quant="fp8_per_head"))
+
+
 # ---- numerics on GPU ----
 
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
