@@ -229,7 +229,7 @@ def test_budget_rejects_disabled_service(monkeypatch, grammar_enabled):
         asyncio.run(params.verify_cpu_async(object() if grammar_enabled else None))
 
 
-@pytest.mark.parametrize("parser", ["qwen3", "deepseek-r1", "deepseek-v4", "gpt-oss", "gemma4"])
+@pytest.mark.parametrize("parser", ["qwen3", "deepseek-r1", "deepseek-v4", "gemma4"])
 def test_budget_request_accepts_reasoning_parsers(monkeypatch, parser, tmp_path):
     from lightllm.server.core.objs import sampling_params
     from lightllm.server.core.objs import StartArgs
@@ -240,6 +240,26 @@ def test_budget_request_accepts_reasoning_parsers(monkeypatch, parser, tmp_path)
     params = SamplingParams()
     params.init(None, thinking_token_budget=2, guided_reasoning_end=[7])
     assert asyncio.run(params.get_compiled_grammar(None)) is None
+
+
+@pytest.mark.parametrize("parser", ["gpt-oss", "GPT-OSS"])
+@pytest.mark.parametrize("budget", [0, 2])
+@pytest.mark.parametrize("grammar_enabled", [False, True])
+def test_gpt_oss_budget_rejected_after_serialization(monkeypatch, parser, budget, grammar_enabled):
+    from lightllm.server.core.objs import StartArgs
+
+    args = StartArgs(reasoning_parser=parser)
+    monkeypatch.setattr("lightllm.server.core.objs.sampling_params.get_env_start_args", lambda: args)
+    params = SamplingParams()
+    params.init(None, thinking_token_budget=budget, guided_reasoning_end=[7])
+    if grammar_enabled:
+        params.constraint_out_params.guided_grammar.initialize("json", None)
+    # Both native requests and forwarded P/D structs must fail before compilation or inference.
+    restored = SamplingParams()
+    restored.init(None, **params.to_dict())
+    for candidate in (params, SamplingParams.from_buffer_copy(params), restored):
+        with pytest.raises(ValueError, match="thinking_token_budget is not supported by the gpt-oss"):
+            asyncio.run(candidate.verify_cpu_async(None))
 
 
 @pytest.mark.parametrize("grammar_enabled", [False, True])

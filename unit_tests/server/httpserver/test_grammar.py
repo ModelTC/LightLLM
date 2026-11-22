@@ -101,6 +101,28 @@ def test_invalid_reasoning_end_returns_400_before_generation(
     assert "guided_reasoning_end token ID 257" in error
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("budget", [0, 2])
+def test_gpt_oss_chat_budget_returns_400_before_generation(http_client, monkeypatch, stream, budget):
+    configure(monkeypatch, reasoning_parser="gpt-oss")
+    error = assert_bad_request(
+        http_client, "/v1/chat/completions", {"messages": [], "stream": stream, "thinking_token_budget": budget}
+    )
+    assert "thinking_token_budget is not supported by the gpt-oss" in error
+
+
+@pytest.mark.parametrize("path", ["/generate", "/generate_stream"])
+@pytest.mark.parametrize("budget", [0, 2])
+@pytest.mark.parametrize("grammar_enabled", [False, True])
+def test_gpt_oss_native_budget_returns_400_before_generation(http_client, monkeypatch, path, budget, grammar_enabled):
+    configure(monkeypatch, reasoning_parser="gpt-oss")
+    parameters = {"thinking_token_budget": budget, "guided_reasoning_end": [7]}
+    if grammar_enabled:
+        parameters["guided_grammar"] = "json"
+    error = assert_bad_request(http_client, path, {"inputs": "test", "parameters": parameters})
+    assert "thinking_token_budget is not supported by the gpt-oss" in error
+
+
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/completions"])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("failure", ["syntax", "exception", "timeout"])

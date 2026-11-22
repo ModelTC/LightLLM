@@ -563,6 +563,9 @@ class SamplingParams(ctypes.Structure):
             raise ValueError("thinking_token_budget is disabled by --disable_thinking_budget")
         if not args.reasoning_parser:
             raise ValueError("thinking_token_budget requires --reasoning_parser")
+        # GPT-OSS's grammar marker is a final-header suffix, not a complete Harmony message transition.
+        if args.reasoning_parser.lower() == "gpt-oss":
+            raise ValueError("thinking_token_budget is not supported by the gpt-oss reasoning parser")
         if args.target_vocab_topk_sampling is not None:
             raise ValueError("thinking_token_budget requires disabling --target_vocab_topk_sampling")
 
