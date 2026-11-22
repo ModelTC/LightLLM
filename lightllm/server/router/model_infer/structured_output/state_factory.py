@@ -17,7 +17,10 @@ class OutputConstraintStateFactory:
     """缓存已加载的语法，并为每个请求创建独立的输出约束状态机。"""
 
     def __init__(self, tokenizer, vocab_size: int, eos_ids: Sequence[int], cache_size: int = 512):
-        self.tokenizer_info = create_tokenizer_info(tokenizer, vocab_size, list(eos_ids))
+        # Budget-only services reuse the mask pipeline without loading XGrammar.
+        self.tokenizer_info = (
+            create_tokenizer_info(tokenizer, vocab_size, list(eos_ids)) if tokenizer is not None else None
+        )
         self.get_grammar = lru_cache(maxsize=cache_size)(self._deserialize)
 
     def _deserialize(self, payload: bytes) -> "CompiledGrammar":
@@ -27,15 +30,15 @@ class OutputConstraintStateFactory:
 
     def create_state(self, shm_req: "Req", sampling_params: "InferSamplingParams") -> Optional[ConstraintState]:
         try:
-            payload = shm_req.get_compiled_grammar()
-            # None 表示当前请求没有输出约束，无需创建语法状态机。
-            if payload is None:
-                return None
             constraint_params = sampling_params.shm_param.constraint_out_params
+            if not constraint_params.has_constraint():
+                return None
+            payload = shm_req.get_compiled_grammar()
             previous_output_len = constraint_params.pd_previous_output_len
             if not 0 <= previous_output_len <= shm_req.input_len:
                 raise ValueError("pd_previous_output_len must be between 0 and the prompt length")
-            state = ConstraintState.from_grammar(self.get_grammar(payload), constraint_params)
+            grammar = self.get_grammar(payload) if payload is not None else None
+            state = ConstraintState.from_grammar(grammar, constraint_params)
             # A new PD segment includes earlier output in its prompt. Replay only
             # that suffix to restore reasoning delimiters and grammar progress;
             # the current segment's first token is committed by normal post_handle.

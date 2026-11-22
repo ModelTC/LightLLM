@@ -17,7 +17,7 @@ from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import (
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.multimodal_params import MultimodalParams
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, enable_thinking_budget
 from lightllm.utils.multimodal_chunk_utils import adjust_mm_chunk_end, get_mm_input_spans
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
@@ -79,16 +79,21 @@ class InferenceContext:
         return
 
     def _init_output_constraint_state_factory(self) -> Optional["OutputConstraintStateFactory"]:
-        if self.args.output_constraint_mode != "xgrammar":
+        use_xgrammar = self.args.output_constraint_mode == "xgrammar"
+        if not use_xgrammar and not enable_thinking_budget():
             return None
-        from lightllm.server.router.model_infer.structured_output.state_factory import OutputConstraintStateFactory
-        from lightllm.server.tokenizer import get_tokenizer
 
-        # HTTP workers already compiled the grammar. Inference needs only the
-        # shared tokenizer information to deserialize their artifacts.
-        tokenizer = get_tokenizer(
-            self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code
-        )
+        from lightllm.server.router.model_infer.structured_output.state_factory import OutputConstraintStateFactory
+
+        tokenizer = None
+        if use_xgrammar:
+            from lightllm.server.tokenizer import get_tokenizer
+
+            # HTTP workers already compiled the grammar. Inference needs only the
+            # shared tokenizer information to deserialize their artifacts.
+            tokenizer = get_tokenizer(
+                self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code
+            )
         return OutputConstraintStateFactory(
             tokenizer=tokenizer,
             vocab_size=self.vocab_size,

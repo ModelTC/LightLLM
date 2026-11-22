@@ -229,6 +229,7 @@ class ChatCompletionRequest(BaseModel):
 
     # OpenAI parameters for reasoning and others
     reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]] = None
+    thinking_token_budget: Optional[int] = Field(default=None, ge=-1, le=2 ** 31 - 1, strict=True)
     chat_template_kwargs: Optional[Dict] = None
     separate_reasoning: Optional[bool] = True
     stream_reasoning: Optional[bool] = False

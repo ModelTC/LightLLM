@@ -182,7 +182,13 @@ assert matcher.accept_token(256) and matcher.is_terminated()
     assert result.returncode == 0, result.stderr.decode()
 
 
-def test_reused_request_slot_does_not_expose_previous_grammar(compiler, grammar_req):
+@pytest.mark.parametrize("budget", [None, -1, 0, 2])
+def test_reused_request_slot_does_not_expose_previous_grammar(compiler, grammar_req, monkeypatch, budget):
+    from lightllm.server.core.objs import StartArgs
+
+    monkeypatch.setattr(
+        "lightllm.server.core.objs.sampling_params.get_env_start_args", lambda: StartArgs(reasoning_parser="qwen3")
+    )
     for constraint in (
         {"regular_constraint": "ab"},
         {},
@@ -190,13 +196,19 @@ def test_reused_request_slot_does_not_expose_previous_grammar(compiler, grammar_
         {},
         {"regular_constraint": "ab"},
     ):
-        grammar_req.sample_params.init(None, **constraint)
+        grammar_req.sample_params.init(None, thinking_token_budget=budget, guided_reasoning_end=[7], **constraint)
         payload = asyncio.run(grammar_req.sample_params.get_compiled_grammar(compiler))
-        # Unconstrained requests must ignore old slot storage even without a write.
+        # Requests without a grammar must ignore old slot storage even without a write.
         if payload is not None:
             grammar_req.set_compiled_grammar(payload)
         req = Req.from_buffer_copy(grammar_req)
         assert req.get_compiled_grammar() == payload
+
+
+@pytest.mark.parametrize("budget", [0, 2])
+def test_budget_only_request_does_not_require_compiled_grammar_storage(grammar_req, budget):
+    grammar_req.sample_params.init(None, thinking_token_budget=budget, guided_reasoning_end=[7])
+    assert grammar_req.get_compiled_grammar() is None
 
 
 def test_backend_rejects_incompatible_tokenizer_metadata(compiler):

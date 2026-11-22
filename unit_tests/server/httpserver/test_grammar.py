@@ -82,6 +82,25 @@ def test_invalid_sampling_params_return_400(http_client, monkeypatch, path, earl
     assert_bad_request(http_client, path, {"inputs": "test", "parameters": invalid_params})
 
 
+@pytest.mark.parametrize("path", ["/generate", "/generate_stream"])
+@pytest.mark.parametrize("early_headers", [False, True])
+@pytest.mark.parametrize("grammar_enabled", [False, True])
+def test_invalid_reasoning_end_returns_400_before_generation(
+    http_client, monkeypatch, tmp_path, path, early_headers, grammar_enabled
+):
+    from lightllm.server import api_http
+
+    (tmp_path / "config.json").write_text('{"vocab_size": 257}')
+    configure(
+        monkeypatch, reasoning_parser="qwen3", model_dir=str(tmp_path), disable_delay_response_start=early_headers
+    )
+    if not grammar_enabled:
+        monkeypatch.setattr(api_http.g_objs.httpserver_manager, "output_grammar_compiler", None)
+    body = {"inputs": "test", "parameters": {"thinking_token_budget": 0, "guided_reasoning_end": [257]}}
+    error = assert_bad_request(http_client, path, body)
+    assert "guided_reasoning_end token ID 257" in error
+
+
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/completions"])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("failure", ["syntax", "exception", "timeout"])
