@@ -295,9 +295,12 @@ Configuration
 **thinking_token_budget** (integer, optional)
   Enabled by default. Finite budgets require a reasoning parser (which may be
   auto-detected). Use ``--disable_thinking_budget`` to turn the feature off.
-  There is no model-type restriction; the parser and the model's
-  tokenizer determine the reasoning-end sequence. Finite budgets return HTTP 400
-  when the switch is off.
+  The parser and the model's tokenizer determine the reasoning-end sequence.
+  The ``gpt-oss`` parser does not support finite budgets: any value >= 0 returns
+  HTTP 400 on Chat and native generation interfaces, including P/D forwarding.
+  Omit the budget or use ``-1`` with GPT-OSS. Its final-header suffix cannot be
+  used to force a complete Harmony message transition.
+  Finite budgets also return HTTP 400 when the switch is off.
   For P/D deployments, keep it enabled on the Master, Prefill, and Decode services.
   Maximum generated thinking tokens before forcing the parser's answer-transition
   token sequence (``</think>`` for Qwen3/Qwen3.5). Omit it or use ``-1`` for

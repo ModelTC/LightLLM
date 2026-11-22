@@ -57,10 +57,12 @@ def test_chat_grammar_activation_matches_template_thinking(monkeypatch, parser, 
 @pytest.mark.parametrize("response_type", ["json_schema", "json_object", "text"])
 @pytest.mark.parametrize("thinking", [False, True])
 @pytest.mark.parametrize("budget", [None, -1, 0, 2])
+@pytest.mark.parametrize("parser", ["qwen3", "gpt-oss"])
+@pytest.mark.parametrize("stream", [False, True])
 def test_chat_passes_reasoning_marker_through_shared_sampling_params(
-    monkeypatch, compiler, runtime_start_args, response_type, thinking, budget
+    monkeypatch, compiler, runtime_start_args, response_type, thinking, budget, parser, stream
 ):
-    args = StartArgs(reasoning_parser="qwen3")
+    args = StartArgs(reasoning_parser=parser)
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: args)
     monkeypatch.setattr("lightllm.server.core.objs.sampling_params.get_env_start_args", lambda: args)
     monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: True)
@@ -89,9 +91,13 @@ def test_chat_passes_reasoning_marker_through_shared_sampling_params(
         raise RequestCaptured
         yield
 
-    tokenizer = SimpleNamespace(encode=lambda *args, **kwargs: [7, 8])
+    tokenizer = SimpleNamespace(encode=lambda text, **kwargs: list(text.encode()))
     manager = SimpleNamespace(tokenizer=tokenizer, generate=generate, output_grammar_compiler=compiler)
-    monkeypatch.setattr(api_http, "g_objs", SimpleNamespace(httpserver_manager=manager))
+    monkeypatch.setattr(
+        api_http,
+        "g_objs",
+        SimpleNamespace(httpserver_manager=manager, metric_client=SimpleNamespace(counter_inc=lambda *_: None)),
+    )
     response_format = {"type": response_type}
     if response_type == "json_schema":
         response_format["json_schema"] = {"name": "result", "schema": {"type": "object"}}
@@ -101,11 +107,27 @@ def test_chat_passes_reasoning_marker_through_shared_sampling_params(
         response_format=response_format,
         chat_template_kwargs={"enable_thinking": thinking},
         thinking_token_budget=budget,
+        stream=stream,
     )
+    if parser == "gpt-oss" and budget is not None and budget >= 0:
+        response = asyncio.run(api_openai.chat_completions_impl(request, None))
+        assert response.status_code == 400
+        assert "thinking_token_budget is not supported by the gpt-oss" in response.body.decode()
+        assert captured == []
+        return
+
+    async def run():
+        response = await api_openai.chat_completions_impl(request, None)
+        if stream:
+            async for _ in response.body_iterator:
+                pass
+
     with pytest.raises(RequestCaptured):
-        asyncio.run(api_openai.chat_completions_impl(request, None))
+        asyncio.run(run())
+    thinking = thinking or parser == "gpt-oss"
     budget_active = thinking and budget is not None and budget >= 0
-    expected = (7, 8) if thinking and (response_type != "text" or budget_active) else ()
+    marker = b"</think>" if parser == "qwen3" else b"<|channel|>final<|message|>"
+    expected = tuple(marker) if thinking and (response_type != "text" or budget_active) else ()
     state = captured[0]
     if response_type == "text" and not budget_active:
         assert state is None
