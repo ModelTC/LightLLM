@@ -310,6 +310,7 @@ Configuration
   Finite budgets cannot be combined with ``--target_vocab_topk_sampling``.
   On ``/generate``, put the budget and ``guided_reasoning_end`` token ID sequence
   in ``parameters`` and configure a reasoning parser.
+  For custom markers during PD continuation, see :doc:`known_constraints`.
 
 **--reasoning_parser** (startup parameter)
   Specify parser type: ``deepseek-r1``, ``qwen3``, ``glm45``, ``gpt-oss``, etc.

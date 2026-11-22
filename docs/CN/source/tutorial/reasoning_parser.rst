@@ -305,6 +305,7 @@ Responses API 会在 ``usage.output_tokens_details.reasoning_tokens`` 中返回�
   有限预算不能与 ``--target_vocab_topk_sampling`` 同时使用。
   使用 ``/generate`` 时，在 ``parameters`` 中同时传入预算和
   ``guided_reasoning_end`` token ID 序列，并配置 reasoning parser。
+  自定义标记在 PD 分段续跑时的使用约束见 :doc:`known_constraints`。
 
 **--reasoning_parser** (启动参数)
   指定解析器类型：``deepseek-r1``, ``qwen3``, ``glm45``, ``gpt-oss`` 等

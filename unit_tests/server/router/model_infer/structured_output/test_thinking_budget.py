@@ -131,6 +131,13 @@ def test_budget_requires_reasoning_end():
         PySamplingParams(thinking_token_budget=2).verify()
 
 
+@pytest.mark.parametrize("marker", [[-1], [True], [1.5], ["7"], [2 ** 31], None])
+def test_invalid_reasoning_end_ids_rejected_before_ctypes_conversion(marker):
+    params = SamplingParams()
+    with pytest.raises(ValueError, match="guided_reasoning_end"):
+        params.init(None, thinking_token_budget=0, guided_reasoning_end=marker)
+
+
 @pytest.mark.parametrize("marker", [[31], [255], list(b"aba")])
 def test_forced_marker_supports_signed_mask_words_and_overlapping_prefixes(compiler, marker):
     state = make_state(compiler, 0, marker=marker)
@@ -223,14 +230,50 @@ def test_budget_rejects_disabled_service(monkeypatch, grammar_enabled):
 
 
 @pytest.mark.parametrize("parser", ["qwen3", "deepseek-r1", "deepseek-v4", "gpt-oss", "gemma4"])
-def test_budget_request_accepts_reasoning_parsers(monkeypatch, parser):
+def test_budget_request_accepts_reasoning_parsers(monkeypatch, parser, tmp_path):
     from lightllm.server.core.objs import sampling_params
     from lightllm.server.core.objs import StartArgs
 
-    monkeypatch.setattr(sampling_params, "get_env_start_args", lambda: StartArgs(reasoning_parser=parser))
+    (tmp_path / "config.json").write_text('{"vocab_size": 257}')
+    args = StartArgs(reasoning_parser=parser, model_dir=str(tmp_path))
+    monkeypatch.setattr(sampling_params, "get_env_start_args", lambda: args)
     params = SamplingParams()
     params.init(None, thinking_token_budget=2, guided_reasoning_end=[7])
     assert asyncio.run(params.get_compiled_grammar(None)) is None
+
+
+@pytest.mark.parametrize("grammar_enabled", [False, True])
+@pytest.mark.parametrize("budget", [None, 0])
+@pytest.mark.parametrize("marker", [[-1], [257], [287], [2 ** 31 - 1], [7, 257]])
+def test_reasoning_end_rejects_ids_outside_output_vocab(
+    monkeypatch, tmp_path, compiler, grammar_enabled, budget, marker
+):
+    from lightllm.server.core.objs import StartArgs
+
+    (tmp_path / "config.json").write_text('{"vocab_size": 257}')
+    args = StartArgs(reasoning_parser="qwen3", model_dir=str(tmp_path))
+    monkeypatch.setattr("lightllm.server.core.objs.sampling_params.get_env_start_args", lambda: args)
+    params = SamplingParams()
+    params.init(None, thinking_token_budget=budget, guided_reasoning_end=[0] * len(marker))
+    # Validate copied/forwarded structs too, rather than relying on init().
+    params = SamplingParams.from_buffer_copy(params)
+    params.constraint_out_params.guided_reasoning_end.sequence[: len(marker)] = marker
+    with pytest.raises(ValueError, match=r"guided_reasoning_end token ID .* must be in \[0, 257\)"):
+        asyncio.run(params.verify_cpu_async(compiler if grammar_enabled else None))
+
+
+@pytest.mark.parametrize("grammar_enabled", [False, True])
+@pytest.mark.parametrize("marker", [[0], [256], [31, 32, 255, 256]])
+def test_reasoning_end_accepts_output_vocab_boundaries(monkeypatch, tmp_path, compiler, grammar_enabled, marker):
+    from lightllm.server.core.objs import StartArgs
+
+    (tmp_path / "config.json").write_text('{"vocab_size": 257}')
+    args = StartArgs(reasoning_parser="qwen3", model_dir=str(tmp_path))
+    monkeypatch.setattr("lightllm.server.core.objs.sampling_params.get_env_start_args", lambda: args)
+    params = SamplingParams()
+    # Added tokens can be outside tokenizer.vocab_size while valid for model output.
+    params.init(SimpleNamespace(vocab_size=128), thinking_token_budget=0, guided_reasoning_end=marker)
+    assert asyncio.run(params.get_compiled_grammar(compiler if grammar_enabled else None)) is None
 
 
 @pytest.mark.parametrize(

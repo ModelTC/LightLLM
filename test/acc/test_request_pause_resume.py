@@ -12,7 +12,7 @@ from pathlib import Path
 import requests
 
 
-def generate_stream(url, prompt, output_tokens, request_id, timeout):
+def generate_stream(url, prompt, output_tokens, request_id, timeout, constraint_params=None):
     token_ids = []
     finish_reason = None
     with requests.post(
@@ -27,6 +27,7 @@ def generate_stream(url, prompt, output_tokens, request_id, timeout):
                 "ignore_eos": False,
                 "min_new_tokens": output_tokens,
                 "max_new_tokens": output_tokens,
+                **(constraint_params or {}),
             },
         },
         stream=True,
@@ -84,7 +85,17 @@ def main():
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--warmup-requests", type=int, default=64)
     parser.add_argument("--timeout", type=float, default=600)
+    parser.add_argument("--thinking-token-budget", type=int)
+    parser.add_argument("--reasoning-end-token-ids", type=int, nargs="+")
     args = parser.parse_args()
+    constraint_params = {}
+    if args.thinking_token_budget is not None:
+        if not args.reasoning_end_token_ids:
+            parser.error("--thinking-token-budget requires --reasoning-end-token-ids")
+        constraint_params = {
+            "thinking_token_budget": args.thinking_token_budget,
+            "guided_reasoning_end": args.reasoning_end_token_ids,
+        }
     from lightllm.server.tokenizer import get_tokenizer
 
     tokenizer = get_tokenizer(args.model_dir)
@@ -99,8 +110,9 @@ def main():
     try:
         # Obtain the reference before preemption, one request at a time.
         prompts = [build_prompt(i) for i in range(args.concurrency)]
+        report["prompts"] = prompts
         reference = [
-            generate_stream(args.url, p, args.output_tokens, f"{run_id}-reference-{i}", args.timeout)
+            generate_stream(args.url, p, args.output_tokens, f"{run_id}-reference-{i}", args.timeout, constraint_params)
             for i, p in enumerate(prompts)
         ]
         report["reference"] = reference
@@ -114,7 +126,12 @@ def main():
         def run_pressure_request(index):
             barrier.wait(timeout=args.timeout)
             return generate_stream(
-                args.url, prompts[index], args.output_tokens, f"{run_id}-pressure-{index}", args.timeout
+                args.url,
+                prompts[index],
+                args.output_tokens,
+                f"{run_id}-pressure-{index}",
+                args.timeout,
+                constraint_params,
             )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:

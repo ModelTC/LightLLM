@@ -4,6 +4,7 @@ import ctypes
 import math
 from typing import Optional, List, Tuple, Union
 from lightllm.server.httpserver.req_id_generator_server import MAX_BEST_OF
+from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_env_start_args
 from .pd_kv_trans_params import PDKVTransParamObj
 
@@ -230,6 +231,10 @@ class ConstraintOutParams(ctypes.Structure):
         self.regular_constraint.initialize(regular_constraint)
         self.guided_grammar.initialize(guided_grammar, tokenizer)
         self.guided_json.initialize(guided_json, tokenizer)
+        if not isinstance(guided_reasoning_end, (list, tuple)) or any(
+            type(token_id) is not int or not 0 <= token_id < 2 ** 31 for token_id in guided_reasoning_end
+        ):
+            raise ValueError("guided_reasoning_end must contain integer token IDs in [0, 2147483647]")
         self.guided_reasoning_end.initialize(guided_reasoning_end)
         thinking_token_budget = -1 if thinking_token_budget is None else thinking_token_budget
         if type(thinking_token_budget) is not int or not -1 <= thinking_token_budget <= 2 ** 31 - 1:
@@ -565,6 +570,19 @@ class SamplingParams(ctypes.Structure):
         """获取编译器缓存中的结果，未命中时执行异步编译；无输出约束时返回 None。"""
         # P/D node admission also uses this boundary for forwarded SamplingParams.
         self._check_thinking_budget_config()
+        reasoning_end = self.constraint_out_params.guided_reasoning_end.to_list()
+        if reasoning_end:
+            # Use the output vocabulary, including added tokens, rather than the tokenizer's base vocabulary.
+            if compiler is not None:
+                vocab_size = compiler.vocab_size
+            else:
+                cls = type(self)
+                if not hasattr(cls, "vocab_size"):
+                    setattr(cls, "vocab_size", get_vocab_size(get_env_start_args().model_dir))
+                vocab_size = cls.vocab_size
+            for token_id in reasoning_end:
+                if not 0 <= token_id < vocab_size:
+                    raise ValueError(f"guided_reasoning_end token ID {token_id} must be in [0, {vocab_size})")
         for kind, constraint in (
             ("grammar", self.constraint_out_params.guided_grammar),
             ("regex", self.constraint_out_params.regular_constraint),
