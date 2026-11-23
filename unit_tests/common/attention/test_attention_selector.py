@@ -112,3 +112,31 @@ def test_mla_phases_have_their_own_layer_config_types():
     assert selector.auto_priority(decode, "decode", 1) == ("fa3", "flashinfer", "triton")
     with pytest.raises(ValueError, match="no decode attention implementations"):
         selector.select(prefill, "decode", "triton")
+
+
+@pytest.mark.parametrize(
+    "kv_cache_format, rope, expected",
+    [
+        ("bf16", 64, ("flashmla_sparse_mla_prefill", "fa3_sparse_mla_decode")),
+        ("fp8_ds_mla", 64, ("flashmla_sparse_mla_prefill", "flashmla_sparse_mla_decode")),
+        ("bf16", 0, ("flashmla_sparse_mla_prefill", "fa3_sparse_mla_decode")),
+        ("fp8_group64_e8m0", 0, ("fa3_sparse_mla_prefill", "flashmla_sparse_mla_decode")),
+    ],
+)
+def test_sparse_mla_runs_flashmla_where_it_supports_the_cache_and_fa3_elsewhere(kv_cache_format, rope, expected):
+    from lightllm.common.attention.backends.sparse_mla import SparseMLALayerConfig
+
+    config = SparseMLALayerConfig(
+        num_heads=64,
+        kv_lora_rank=512,
+        qk_rope_head_dim=rope,
+        softmax_scale=0.1,
+        dtype=torch.bfloat16,
+        kv_cache_format=kv_cache_format,
+        topk=2048,
+    )
+    names = tuple(selector.select(config, phase, "flashmla_sparse").backend.get_name() for phase in selector.PHASES)
+    assert names == expected
+    assert selector.auto_priority(config, "decode", 2) == ("flashmla_sparse",)
+    with pytest.raises(ValueError, match="not available"):
+        selector.select(config, "decode", "fa3")

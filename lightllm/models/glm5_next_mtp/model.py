@@ -4,8 +4,7 @@ from copy import deepcopy
 import torch
 
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
-from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+from lightllm.models.glm5_next.prefill_workspace import reserve_fp8_sparse_prefill_workspaces
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 from .layer_infer.post_layer_infer import Glm5NextMTPPostLayerInfer
 from .layer_infer.pre_layer_infer import Glm5NextMTPPreLayerInfer
@@ -22,6 +21,9 @@ if TYPE_CHECKING:
 
 class Glm5NextMTPModel(TpPartBaseModel):
     is_mtp_draft_model = True
+    uses_attention_groups = True
+    # Sparse MLA runs FlashMLA and FA3 whatever --llm_*_att_backend names for full attention.
+    att_implementation = "flashmla_sparse"
     pre_and_post_weight_class = Glm5NextMTPPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight
     pre_layer_infer_class = Glm5NextMTPPreLayerInfer
@@ -175,14 +177,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
             self.att_state_role
         ):
             # Reserve fixed scratch space before the shared KV capacity is profiled.
-            Fp8Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
-
-    def _init_att_backend(self):
-        backend_class = (
-            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
-        )
-        self.prefill_att_backend = backend_class(model=self)
-        self.decode_att_backend = self.prefill_att_backend
+            self.attention_prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(self)
 
     def autotune_layers(self):
         return 1

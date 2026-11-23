@@ -10,6 +10,7 @@ from lightllm.common.attention.backend import (
     AttentionBatch,
     AttentionImpl,
     AttentionStepBuilder,
+    StepBuilderContext,
     TensorAllocator,
 )
 from . import SWASparseMLALayerConfig, SWASparseMLALayerInputs
@@ -100,8 +101,25 @@ class FlashMLASWAPrefillBackend(AttentionBackend):
     def get_impl_cls() -> type[FlashMLASWAImpl]:
         return FlashMLASWAImpl
 
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: SWASparseMLALayerConfig, ctx: StepBuilderContext
+    ) -> FlashMLASWAStepBuilder:
+        # Layers with one compress ratio share the scheduler metadata of their kernel calls.
+        return FlashMLASWAStepBuilder(compress_ratios=(layer_config.compress_ratio,), for_cuda_graph_capture=False)
+
+    @classmethod
+    def step_builder_key(cls, layer_config: SWASparseMLALayerConfig) -> int:
+        return layer_config.compress_ratio
+
 
 class FlashMLASWADecodeBackend(FlashMLASWAPrefillBackend):
     @staticmethod
     def get_name() -> str:
         return "flashmla_swa_sparse_mla_decode"
+
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: SWASparseMLALayerConfig, ctx: StepBuilderContext
+    ) -> FlashMLASWAStepBuilder:
+        return FlashMLASWAStepBuilder(compress_ratios=(layer_config.compress_ratio,), for_cuda_graph_capture=True)

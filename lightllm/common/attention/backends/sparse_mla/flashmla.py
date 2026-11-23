@@ -10,6 +10,7 @@ from lightllm.common.attention.backend import (
     AttentionBatch,
     AttentionImpl,
     AttentionStepBuilder,
+    StepBuilderContext,
     TensorAllocator,
 )
 from . import SparseMLADecodeLayerInputs, SparseMLALayerConfig, SparseMLAPrefillLayerInputs
@@ -212,6 +213,12 @@ class FlashMLASparsePrefillBackend(AttentionBackend):
     def get_impl_cls() -> type[FlashMLASparsePrefillImpl]:
         return FlashMLASparsePrefillImpl
 
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: SparseMLALayerConfig, ctx: StepBuilderContext
+    ) -> FlashMLASparsePrefillStepBuilder:
+        return FlashMLASparsePrefillStepBuilder()
+
 
 class FlashMLASparseDecodeBackend(AttentionBackend):
     @staticmethod
@@ -225,3 +232,20 @@ class FlashMLASparseDecodeBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[FlashMLASparseDecodeImpl]:
         return FlashMLASparseDecodeImpl
+
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: SparseMLALayerConfig, ctx: StepBuilderContext
+    ) -> FlashMLASparseDecodeStepBuilder:
+        return FlashMLASparseDecodeStepBuilder(direct_decode_bound=_direct_decode_bound(layer_config))
+
+    @classmethod
+    def step_builder_key(cls, layer_config: SparseMLALayerConfig) -> Optional[int]:
+        return _direct_decode_bound(layer_config)
+
+
+def _direct_decode_bound(layer_config: SparseMLALayerConfig) -> Optional[int]:
+    # 2048 pooled entries plus at most three kpool remainder entries fit the 2112 rounded direct window.
+    if (layer_config.topk, layer_config.kpool) == (2048, 4):
+        return layer_config.topk + layer_config.kpool - 1
+    return None

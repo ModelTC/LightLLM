@@ -200,39 +200,65 @@ class _PrefillCase:
 
 
 @pytest.mark.parametrize("draft", [False, True])
-@pytest.mark.parametrize("kv_type", ["None", "fp8kv_dsa"])
-def test_main_and_native_mtp_backend_selection(monkeypatch, draft, kv_type):
+@pytest.mark.parametrize(
+    "kv_type, expected",
+    [
+        ("None", ("flashmla_sparse_mla_prefill", "fa3_sparse_mla_decode")),
+        ("fp8kv_dsa", ("fa3_sparse_mla_prefill", "flashmla_sparse_mla_decode")),
+    ],
+)
+def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_type, expected):
+    from lightllm.common.attention.layer import Attention
+    from lightllm.common.basemodel.attention_groups import AttentionGroups
+    from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
     from lightllm.models.glm5_next.model import Glm5NextTpPartModel
+    from lightllm.models.glm5_next.prefill_workspace import reserve_fp8_sparse_prefill_workspaces
     from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
-    model = object.__new__(Glm5NextMTPModel if draft else Glm5NextTpPartModel)
-    model.args = SimpleNamespace(llm_kv_type=kv_type, enable_prefill_microbatch_overlap=False, run_mode="normal")
+    model_class = Glm5NextMTPModel if draft else Glm5NextTpPartModel
+    assert model_class.uses_attention_groups and model_class.att_implementation == "flashmla_sparse"
+    model = object.__new__(model_class)
+    # GLM-5 runs its sparse implementations whatever the command line names for full attention.
+    model.args = SimpleNamespace(
+        llm_kv_type=kv_type,
+        llm_prefill_att_backend=["fa3"],
+        llm_decode_att_backend=["triton"],
+        enable_prefill_microbatch_overlap=False,
+        enable_decode_microbatch_overlap=False,
+        enable_tpsp_mix_mode=False,
+        enable_ep_moe=False,
+        run_mode="normal",
+        mtp_step=0,
+        page_size=1,
+        running_max_req_size=2,
+    )
     model.config = {"index_topk": 2048, "index_kpool": 4}
+    model.data_type = torch.bfloat16
     model.graph_max_batch_size = 4
     model.max_seq_length = 128
     model.max_req_num = 2
     model.batch_max_tokens = 4
     model.mtp_previous_draft_models = []
-    model._init_att_backend()
-    infer_state = InferStateInfo()
-    prefill = model.prefill_att_backend.create_att_prefill_state(infer_state)
-    decode = model.decode_att_backend.create_att_decode_state(infer_state)
-    assert type(prefill) is Glm5NextSparsePrefillState and type(decode) is Glm5NextSparseDecodeState
-    backend_class = Fp8Glm5NextSparseAttBackend if kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
-    assert type(model.prefill_att_backend) is backend_class and type(model.decode_att_backend) is backend_class
-    infer_state.prefill_att_state = prefill
-    infer_state.decode_att_state = decode
-    infer_state.check_att_states()
-    assert prefill.infer_state is infer_state
-    assert decode.infer_state is infer_state
-    owner_ref = weakref.ref(infer_state)
-    del infer_state
-    assert owner_ref() is None
-    with pytest.raises(ReferenceError):
-        prefill.infer_state
-    with pytest.raises(ReferenceError):
-        decode.infer_state
+    if kv_type == "fp8kv_dsa":
+        model.attention_prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(model)
+    model.att_groups = AttentionGroups(model)
+    layer = SimpleNamespace(
+        is_linear_attention_layer=False,
+        tp_q_head_num_=64,
+        kv_lora_rank=512,
+        softmax_scale=0.0625,
+        network_config_=model.config,
+    )
+    Glm5NextTransformerLayerInfer.init_attention(layer, model)
+    assert isinstance(layer.attn, Attention)
+    assert layer.attn.decode_impl.layer_config.causal is False
+    ((name, backends),) = model.att_groups.groups.items()
+    assert (backends["prefill"].get_name(), backends["decode"].get_name()) == expected
+    # The step builders can be created from the layer config and the model's context.
+    (group,) = model.att_groups._groups.values()
+    for phase in ("prefill", "decode"):
+        group.step_builder(phase, model.att_groups.ctx)
 
 
 def _dequantize_kv_cache(packed_kv):
@@ -1089,3 +1115,24 @@ def test_fp8_state_preserves_kv_and_indexer_across_cpu_and_pd(monkeypatch):
         actual = state.get_layer_view(logical_layer_id=3)
         torch.testing.assert_close(actual.kv[begin : begin + 4], actual.kv[:4], rtol=0, atol=0)
         torch.testing.assert_close(actual.indexer_k[begin : begin + 4], actual.indexer_k[:4], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("prefill", [False, True])
+def test_indexer_metadata_is_built_with_the_step_attention(prefill):
+    from lightllm.models.glm5_next.infer_struct import Glm5NextInferStateInfo
+
+    state = Glm5NextInferStateInfo()
+    state.is_prefill = prefill
+    state.b_req_idx = torch.tensor([1, 0], device="cuda", dtype=torch.int32)
+    state.b_seq_len = torch.tensor([3, 2], device="cuda", dtype=torch.int32)
+    state.position_ids = torch.tensor([0, 1, 2, 0, 1] if prefill else [2, 1], device="cuda", dtype=torch.int64)
+    state.b1_cu_q_seq_len = torch.tensor([0, 3, 5] if prefill else [0, 1, 2], device="cuda", dtype=torch.int32)
+    state.b1_cu_kv_seq_len = torch.tensor([0, 3, 5], device="cuda", dtype=torch.int32)
+    # A model without attention builds no indexer metadata.
+    state.init_att_state()
+    assert state.nsa_step is None
+    state.att_groups = SimpleNamespace(build_step_args=lambda infer_state: {})
+    state.init_att_state()
+    assert torch.equal(state.nsa_step.q_req_idx, torch.tensor([1, 1, 1, 0, 0] if prefill else [1, 0]).cuda().int())
+    if prefill:
+        assert state.nsa_step.q_kv_start_loc.tolist() == [0, 0, 0, 3, 3]

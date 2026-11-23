@@ -34,8 +34,7 @@ class Glm5NextInferStateInfo(InferStateInfo):
         self.nsa_step: Optional[Glm5NsaStep] = None
 
     def init_att_state(self):
-        # Built with the sparse attention state, after the model has set every request field.
-        att_state = self.prefill_att_state if self.is_prefill else self.decode_att_state
-        if att_state is not None:
+        # Built with the step's attention step args, after the model has set every request field.
+        if self.att_groups is not None:
             self.nsa_step = build_glm5_nsa_step(self)
         super().init_att_state()

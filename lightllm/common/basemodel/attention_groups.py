@@ -149,6 +149,7 @@ def step_builder_context(model: "TpPartBaseModel") -> StepBuilderContext:
         tp_size = model.tp_world_size_
         max_decode_rows = triton.cdiv(max_decode_rows, tp_size) * tp_size
     workspace_mib = getattr(args, "flashinfer_workspace_size", 512)
+    prefill_workspaces = getattr(model, "attention_prefill_workspaces", None)
     return StepBuilderContext(
         device=get_current_device_id(),
         page_size=args.page_size,
@@ -160,6 +161,7 @@ def step_builder_context(model: "TpPartBaseModel") -> StepBuilderContext:
         workspace_bytes=workspace_mib * 1024 * 1024,
         get_workspace=get_gpu_workspace_buffer,
         diverse_decode=bool(getattr(args, "diverse_mode", False)),
+        prefill_workspace=None if prefill_workspaces is None else prefill_workspaces.__getitem__,
     )
 
 
@@ -197,13 +199,13 @@ class AttentionGroups:
             logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
 
     def _requested(self, phase: str, layer_config: Any) -> str:
-        if self.model.att_implementation is not None:
-            return self.model.att_implementation
         # The first value of --llm_{prefill,decode}_att_backend names full-attention implementations,
         # the second linear-attention ones; a missing value is "auto".
+        index = selector.arg_index(layer_config)
+        if index == 0 and self.model.att_implementation is not None:
+            return self.model.att_implementation
         args = self.model.args
         values = args.llm_prefill_att_backend if phase == "prefill" else args.llm_decode_att_backend
-        index = selector.arg_index(layer_config)
         return values[index] if index < len(values) else "auto"
 
     def _select(self, phase: str, layer_config: Any) -> Optional[selector.Selection]:

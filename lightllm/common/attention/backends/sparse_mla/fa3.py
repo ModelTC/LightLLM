@@ -5,7 +5,7 @@ which it dequantizes chunk by chunk.
 """
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, NamedTuple, Optional
 
 import torch
 
@@ -14,6 +14,7 @@ from lightllm.common.attention.backend import (
     AttentionBatch,
     AttentionImpl,
     AttentionStepBuilder,
+    StepBuilderContext,
     TensorAllocator,
 )
 from .. import keep_for_cuda_graph
@@ -135,6 +136,24 @@ class FA3SparseMLADecodeBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[FA3SparseMLADecodeImpl]:
         return FA3SparseMLADecodeImpl
+
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: SparseMLALayerConfig, ctx: StepBuilderContext
+    ) -> FA3SparseMLADecodeStepBuilder:
+        if layer_config.topk is None:
+            raise ValueError("FA3 sparse MLA decode needs the layer config's topk")
+        return FA3SparseMLADecodeStepBuilder(**cls.step_builder_key(layer_config)._asdict())
+
+    @classmethod
+    def step_builder_key(cls, layer_config: SparseMLALayerConfig) -> "_FA3DecodeKey":
+        return _FA3DecodeKey(layer_config.topk, layer_config.kpool, layer_config.causal)
+
+
+class _FA3DecodeKey(NamedTuple):
+    topk: Optional[int]
+    kpool: int
+    causal: bool
 
 
 @dataclass(frozen=True)
@@ -307,3 +326,12 @@ class FA3SparseMLAPrefillBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[FA3SparseMLAPrefillImpl]:
         return FA3SparseMLAPrefillImpl
+
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: SparseMLALayerConfig, ctx: StepBuilderContext
+    ) -> FA3SparseMLAPrefillStepBuilder:
+        # The model reserves the scratch before it sizes the KV cache.
+        if ctx.prefill_workspace is None:
+            raise ValueError("FA3 sparse MLA prefill needs the model's prefill workspace (StepBuilderContext)")
+        return FA3SparseMLAPrefillStepBuilder(workspace=ctx.prefill_workspace)
