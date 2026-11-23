@@ -1,10 +1,12 @@
 """Build KDA layer inputs and attention the way GLM-5-Next layers do (see _kda_layer_inputs)."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import torch
 
 from lightllm.common.attention.backend import AttentionMetadata
+from lightllm.common.basemodel.infer_struct import GraphMode
 
 
 def kda_params(conv_states, ssm_states, layer_weight, mixed_qkv, raw_gate, raw_beta, *, state=None, layer_num=0):
@@ -25,8 +27,7 @@ def kda_params(conv_states, ssm_states, layer_weight, mixed_qkv, raw_gate, raw_b
 def prepare_prefill_infer(infer, device="cuda"):
     """Fill the request fields a prefill step builder reads but a test stub does not set."""
     infer.is_prefill = True
-    for name in ("is_cuda_graph_capture", "is_cuda_graph_replay"):
-        setattr(infer, name, getattr(infer, name, False))
+    infer.graph_mode = getattr(infer, "graph_mode", GraphMode.EAGER)
     infer.batch_size = infer.b_req_idx.shape[0]
     infer.b_seq_len = getattr(infer, "b_seq_len", None)
     infer.max_kv_seq_len = getattr(infer, "max_kv_seq_len", None)
@@ -87,14 +88,15 @@ def kda_layer_config(
 class KDAAttention:
     """A KDA layer's attention outside a model: the impls and step builders its layer group uses.
 
-    model supplies what build_attention_metadata reads (mtp_manager, is_mtp_draft_model for decode rows).
+    step_config describes the model's decode rows; each step adds the role's recurrent state index.
     """
 
-    def __init__(self, layer_config, model=None, *, dynamic_layout=False):
+    def __init__(self, layer_config, step_config=None):
         from lightllm.common.attention.backends.kda import triton as kda
+        from lightllm.common.basemodel.attention_runtime import AttentionStepConfig
 
-        self.layer_config, self.dynamic_layout = layer_config, dynamic_layout
-        self.model = SimpleNamespace(is_mtp_draft_model=False, mtp_manager=None) if model is None else model
+        self.layer_config = layer_config
+        self.step_config = AttentionStepConfig() if step_config is None else step_config
         replay = layer_config.replay
         backends = {
             "prefill": kda.ReplayKDAPrefillBackend if replay else kda.TritonKDAPrefillBackend,
@@ -128,9 +130,7 @@ class KDAStep:
         if getattr(infer, "att_state_manager", None) is not None:
             role = SimpleNamespace(att_state_manager=infer.att_state_manager, att_state_role=infer.att_state_role)
             index = recurrent_mtp_state_index(role)
-        batch = build_attention_metadata(
-            infer, attention.model, lambda: attention.dynamic_layout, req_to_mtp_state_index=index
-        )
+        batch = build_attention_metadata(infer, replace(attention.step_config, req_to_mtp_state_index=index))
         self.att_state = attention.step_builders[self.phase].prepare(batch)
 
     def run(self, params, alloc_func=torch.empty):

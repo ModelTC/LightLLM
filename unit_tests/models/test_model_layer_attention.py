@@ -114,10 +114,7 @@ def test_gemma4_sliding_and_full_layers_share_one_triton_group(runtime_start_arg
     window = dict(num_heads=4, head_dim=256, sliding_window=(47, 0))
     assert layer_configs(sliding) == (config(**window, bidirectional_image_spans=True), config(**window))
     assert layer_configs(full) == (config(num_heads=4, num_kv_heads=1, head_dim=512),) * 2
-    assert all(
-        len(tuple(group.backend for group in model.attention_build_contexts[phase].values())) == 1
-        for phase in ("prefill", "decode")
-    )
+    assert all(len(model.attention_runtime.backends(phase)) == 1 for phase in ("prefill", "decode"))
 
 
 def test_gpt_oss_layers_have_sinks_and_sliding_layers_a_window(runtime_start_args):

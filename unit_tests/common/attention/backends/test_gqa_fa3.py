@@ -9,7 +9,7 @@ from lightllm.common.attention.backend import AttentionMetadata
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
 from lightllm.common.basemodel.attention_runtime import uses_dynamic_spec_verify_layout
-from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from unit_tests.common.attention.backends.groups_runner import GroupsRunner
@@ -390,7 +390,7 @@ class _Model:
 def _decode_state(runner, token_map, req_ids, lengths, microbatch_index=0, *, capture=False, replay=False):
     s = InferStateInfo()
     s.is_prefill = False
-    s.is_cuda_graph_capture, s.is_cuda_graph_replay = capture, replay
+    s.graph_mode = GraphMode.CAPTURE if capture else GraphMode.REPLAY if replay else GraphMode.EAGER
     s.input_ids = torch.zeros(len(lengths), device="cuda", dtype=torch.int64)
     s.batch_size, s.microbatch_index = len(lengths), microbatch_index
     s.b_req_idx = torch.tensor(req_ids, device="cuda", dtype=torch.int32)

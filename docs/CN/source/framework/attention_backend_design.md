@@ -17,12 +17,11 @@
 
 ```mermaid
 flowchart TD
-    Layer[模型层 layer infer] -->|attention_spec| Binder[模型初始化时的 AttentionBinder]
-    Binder -->|绑定 prefill_impl 和 decode_impl| Layer
-    Binder -->|保存构建上下文| Groups[模型的 attention_build_contexts]
-    Infer[model.prepare_attention] -->|build_attention_metadata| Batch[AttentionMetadata]
-    Batch --> Groups
-    Groups -->|每个 state_key 一次 backend.build| AttState[infer_state.att_states]
+    Layer[模型层 layer infer] -->|attention_spec| Runtime[model.attention_runtime]
+    Runtime -->|bind：绑定 prefill_impl 和 decode_impl| Layer
+    Infer[model._create_inferstate] -->|prepare：build_attention_metadata| Batch[AttentionMetadata]
+    Batch --> Runtime
+    Runtime -->|每个 state_key 一次 backend.build| AttState[infer_state.att_states]
     Layer -->|写 KV cache / 解析逐层数据| State[AttentionStateManager]
     AttState -->|按 impl 取本步参数| Layer
     Layer -->|forward| Impl[backend 实例]
@@ -47,14 +46,21 @@ GQA 层共用 `lightllm/common/basemodel/layer_infer/gqa_attention.py` 中的 `G
 
 主模型和每个 MTP 草稿模型在各自的 `_init_attention` 中初始化层，因为各模型的 CUDA graph 上限和缓存布局不同。
 
-- 模型调用 `AttentionBinder.bind(spec)`，为每个阶段独立选择实现并分组，然后将两个 impl 赋给层。阶段、layer config 和请求的 backend 都相同的层复用 impl。选择缓存仅在初始化期间存在。某阶段的 layer config 为 `None` 时，该阶段返回 `None`，例如 DFlash 草稿层只在 decode 计算。
-- `model.attention_build_contexts` 按阶段保存构建上下文，首次 build 时才分配该阶段的资源。
-- `model.prepare_attention(infer_state)` 每步构造一个 `AttentionMetadata`，对本阶段的每个上下文调用一次 `backend.build`，返回 `{state_key: att_state}`。
-- `requires_cpu_cache_sync`：是否有组的实现不能与 CPU cache 搬运在 GPU 上并行。
+`_init_attention` 为每个模型创建 `model.attention_runtime`（`AttentionRuntime`），纯 FFN 模型也不例外，只是不绑定任何层、`has_attention` 为假。它负责从绑定到每步构建的全部过程：
 
-`step_builder_context(model)` 把模型的资源与容量写入 `AttentionBuildResources`，供 backend 创建构建上下文（第 3 节）。`attention_runtime.py` 从模型读取因果性、投机解码的 dynamic verify 布局和线性注意力的投机状态索引。
+- `bind(spec)` 为每个阶段独立选择实现，然后将两个 impl 赋给层。阶段、layer config 和请求的 backend 都相同的层复用 impl。某阶段的 layer config 为 `None` 时，该阶段返回 `None`，例如 DFlash 草稿层只在 decode 计算。每个阶段的每个新 `state_key` 登记一个 `_StateBuilder`，它在首次 build 时才创建构建上下文、分配该阶段的资源。
+- `prepare(infer_state)` 每步构造一个 `AttentionMetadata`，对本阶段的每个 `_StateBuilder` 调用一次 `backend.build`，返回 `{state_key: att_state}`；没有 builder 的阶段返回空字典。
+- `model.requires_cpu_cache_sync`：是否有实现不能与 CPU cache 搬运在 GPU 上并行。
 
-调用方通过 `infer_state.att_states = model.prepare_attention(infer_state)` 保存当前 microbatch 的参数。纯 FFN 模型返回空字典。
+运行时创建时从模型读取一次全部静态信息，之后不再持有模型：
+
+- `step_builder_context(model)` 把模型的资源与容量写入 `AttentionBuildResources`，供 backend 创建构建上下文（第 3 节）。
+- `attention_step_config(model)` 生成冻结的 `AttentionStepConfig`：decode 每请求行数、是否为 dynamic verify 布局、线性注意力的投机状态索引和 CUDA graph 的 KV 长度容量。`build_attention_metadata(infer_state, step_config)` 只读这两者，每步不再查询模型或启动参数。
+- 因此 graph 容量必须在 `_init_attention` 之前确定：`graph_max_len_in_batch` 的 MTP 余量调整在模型构造函数中完成，而不是在 `_init_cudagraph` 中。
+
+层的因果性（`attention_is_causal`）在绑定时写入 layer config。
+
+每步只有一个入口：`model._create_inferstate(model_input, microbatch_index, graph_mode=...)` 填充请求字段，调用 `init_some_extra_state` 生成索引张量，再执行 `infer_state.att_states = model.attention_runtime.prepare(infer_state)`，返回完整的状态。`graph_mode`（`GraphMode.EAGER`、`CAPTURE`、`REPLAY`）在创建时传入并保存在 `infer_state.graph_mode` 上，backend 据此准备 eager、捕获和 replay 步。只写 KV cache 的步骤（DSpark 的 KV-only 提交）传 `build_attention=False`。
 
 ### 2.3 模型层直接调用 impl
 
@@ -118,10 +124,10 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 ### 4.2 AttentionMetadata
 
-- 由 `model.prepare_attention` 每步从 `InferStateInfo` 构造一次，字段均为调用方持有的设备张量或主机整数。
+- 由 `build_attention_metadata(infer_state, step_config)` 每步从 `InferStateInfo` 和模型的 `AttentionStepConfig` 构造一次，字段均为调用方持有的设备张量或主机整数。
 - `req_to_token_indexs[b_req_idx[i], pos]` 是请求 i 第 pos 个 token 的物理 cache 槽位。
 - decode 默认每个请求一行。投机解码时，固定布局下每个请求有 `decode_rows_per_request` 个连续行；dynamic verify 布局下行数可变，相同 `b_req_idx` 的连续行属于同一请求，`pad_req_idx` 的行是 padding，各自独立。
-- 线性注意力的投机解码行从请求最后一个被接受的行恢复状态；`req_to_mtp_state_index` 由模型在初始化时从本角色的 recurrent 状态取得，decode 行数大于 1 时写入 batch。
+- 线性注意力的投机解码行从请求最后一个被接受的行恢复状态；`req_to_mtp_state_index` 在运行时创建时从本角色的 recurrent 状态取得，存于 `AttentionStepConfig`，decode 行数大于 1 时写入 batch。
 - `cuda_graph_max_kv_seq_len` 在捕获和 replay 步给出 graph 的长度容量，eager 步为 `None`；`uses_cuda_graph` 是唯一的 graph 开关。
 
 ### 4.3 AttentionBackend.build
@@ -179,11 +185,11 @@ main 与 MTP draft 模型不共用组的 attention state。
 
 1. 构造各层。
 2. `prepare_attention_states` 与 KV 容量 profiling。GLM-5 及其 MTP 草稿模型在这一步按 prefill microbatch 预留 FP8 KV 反量化 workspace。稀疏注意力层将当前 microbatch 的 workspace 作为 `SparseMLAPrefillLayerInputs.fp8_workspace` 传给 FA3。
-3. `init_runtime` 中的 `_init_attention` 创建临时的 `AttentionBinder`，读取每层的 `attention_spec`，绑定两个阶段的 impl 并保存构建上下文，随后执行 warmup 和 CUDA graph 捕获。
+3. `init_runtime` 中的 `_init_attention` 创建 `AttentionRuntime`，读取每层的 `attention_spec`，绑定两个阶段的 impl 并登记 `_StateBuilder`，随后执行 warmup 和 CUDA graph 捕获。
 
 layer config 在 KV 分配之后确定，因为 KV head 数、量化 KV 的 group size 和是否有静态 q scale 都来自该层的 attention state。
 
-每步由 `_create_inferstate` 创建状态，`model.prepare_attention(infer_state)` 为本阶段的每个 `state_key` 准备一份状态。microbatch overlap 的两个 `InferStateInfo` 各自持有 `att_states`。
+每步由 `_create_inferstate` 创建完整的状态，其中 `attention_runtime.prepare` 为本阶段的每个 `state_key` 准备一份状态。microbatch overlap 的两个 `InferStateInfo` 各自持有 `att_states`。
 
 ## 7. CUDA Graph 时序
 
@@ -193,12 +199,12 @@ sequenceDiagram
     participant A as InferStateInfo
     participant B as AttentionBackend
     participant G as CUDA graph
-    M->>M: 捕获步 prepare_attention(infer_state)
+    M->>M: 捕获步 _create_inferstate(graph_mode=CAPTURE)
     M->>B: build(metadata, context)
     B-->>M: attention state（保存的地址）
     M->>A: 保存 att_states
     M->>G: 在 torch.cuda.graph 中运行各层 forward
-    M->>M: replay 步 prepare_attention(infer_state)
+    M->>M: replay 步 _create_inferstate(graph_mode=REPLAY)
     M->>B: build(metadata, context)，原地更新张量 / wrapper
     M->>G: copy_for_cuda_graph 把请求张量拷入捕获时的 InferStateInfo
     M->>G: graph.replay()
@@ -229,10 +235,10 @@ lightllm/common/attention/          # 不知道模型的存在
 │       └── <impl>.py               # AttState、BuildContext、Backend
 └── kernels/<family>/               # Triton kernel 与封装
 lightllm/common/basemodel/
-├── attention_runtime.py             # AttentionBinder、build_attention_metadata、step_builder_context
+├── attention_runtime.py            # AttentionRuntime、AttentionStepConfig、build_attention_metadata、step_builder_context
 ├── layer_infer/gqa_attention.py    # GQA 层的 attention_spec 与调用
-├── basemodel.py                    # prepare_attention
-└── infer_struct.py                 # 当前 microbatch 的 att_states
+├── basemodel.py                    # _init_attention、_create_inferstate
+└── infer_struct.py                 # GraphMode、当前 microbatch 的 att_states
 ```
 
 视觉编码器的 `attention_vit/` 不使用 KV cache，不属于本层。

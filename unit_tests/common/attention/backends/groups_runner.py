@@ -6,8 +6,12 @@ from typing import Any, Optional
 import torch
 
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerInputs
-from lightllm.common.basemodel.attention_runtime import AttentionBinder, AttentionSpec, recurrent_mtp_state_index
-from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.attention_runtime import (
+    AttentionRuntime,
+    AttentionSpec,
+    AttentionStepConfig,
+    build_attention_metadata,
+)
 
 
 class GroupsRunner:
@@ -15,13 +19,11 @@ class GroupsRunner:
 
     def __init__(self, model, prefill_config: Any, decode_config: Any) -> None:
         self.model = model
-        attention = AttentionBinder(model)
-        self.prefill_impl, self.decode_impl = attention.bind(AttentionSpec(prefill_config, decode_config))
-        model.attention_build_contexts = attention.contexts
-        model.req_to_mtp_state_index = recurrent_mtp_state_index(model)
+        model.attention_runtime = AttentionRuntime(model)
+        self.prefill_impl, self.decode_impl = model.attention_runtime.bind(AttentionSpec(prefill_config, decode_config))
 
     def step(self, infer_state) -> None:
-        infer_state.att_states = TpPartBaseModel.prepare_attention(self.model, infer_state)
+        infer_state.att_states = self.model.attention_runtime.prepare(infer_state)
 
     def run_gqa(
         self,
@@ -57,14 +59,10 @@ class LayerAttention:
     def backend_name(self, phase: str) -> str:
         return self.selections[phase].backend.get_name()
 
-    def att_state(self, infer_state, model=None) -> Any:
+    def att_state(self, infer_state, step_config: Optional[AttentionStepConfig] = None) -> Any:
         """Prepare the backend state for this microbatch."""
-        from types import SimpleNamespace
-
-        from lightllm.common.basemodel.attention_runtime import build_attention_metadata
-
         phase = "prefill" if infer_state.is_prefill else "decode"
-        batch = build_attention_metadata(infer_state, SimpleNamespace() if model is None else model)
+        batch = build_attention_metadata(infer_state, step_config or AttentionStepConfig())
         return self.selections[phase].backend.build(batch, self.builders[phase])
 
     def run(self, phase: str, att_state, layer_inputs, *, out: torch.Tensor, alloc_func=torch.empty) -> torch.Tensor:

@@ -89,7 +89,7 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token_indexs)
     infer_state.is_prefill = True
     att_state = FA3GQAPrefillBackend.build(
-        build_attention_metadata(infer_state, SimpleNamespace()), FA3GQAPrefillBuildContext(page_size=page_size)
+        build_attention_metadata(infer_state), FA3GQAPrefillBuildContext(page_size=page_size)
     )
 
     q = torch.randn(3, 2, 16, device="cuda", dtype=torch.bfloat16)

@@ -8,8 +8,8 @@ import torch
 from lightllm.common.attention.backend import AttentionMetadata, TensorAllocator
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQAPrefillBackend
-from lightllm.common.basemodel.attention_runtime import build_attention_metadata
-from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, build_attention_metadata
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -133,18 +133,14 @@ def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
     owner.max_kv_seq_len = 33
     token_map = torch.randperm(2 * 512, device="cuda", dtype=torch.int32).view(2, 512)
     owner.req_manager = SimpleNamespace(req_to_token_indexs=token_map)
-    model = SimpleNamespace(
-        is_mtp_draft_model=False,
-        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
-        graph_max_len_in_batch=512,
-    )
+    step_config = AttentionStepConfig(cuda_graph_max_kv_seq_len=512)
     layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16)
     impl = TritonGQADecodeBackend(layer_config)
     # As in the serving decode path, the capture flag is set before the attention state are built and
     # capture raises max_kv_seq_len to the graph capacity only afterwards.
-    owner.is_cuda_graph_capture = True
+    owner.graph_mode = GraphMode.CAPTURE
     att_state = TritonGQADecodeBackend.build(
-        build_attention_metadata(owner, model), TritonGQADecodeBackend.create_build_context(layer_config, None)
+        build_attention_metadata(owner, step_config), TritonGQADecodeBackend.create_build_context(layer_config, None)
     )
     owner.max_kv_seq_len = 512
     q = torch.randn(2, q_heads, 64, device="cuda", dtype=torch.bfloat16)

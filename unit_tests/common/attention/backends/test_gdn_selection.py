@@ -151,15 +151,16 @@ def test_decode_step_builder_groups_dynamic_speculative_rows(monkeypatch):
 
 
 @pytest.mark.parametrize("role", ["main", "draft0"])
-def test_decode_reads_the_acceptance_index_of_its_role(role: str):
+def test_decode_reads_the_acceptance_index_of_its_role(monkeypatch, role: str):
+    monkeypatch.setattr(attention_runtime, "get_env_start_args", lambda: SimpleNamespace(mtp_dynamic_verify=False))
     b_req_idx = torch.tensor([2, 2, 2, 4, 4, 4], dtype=torch.int32)
     req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
     model, infer_state = _speculative_decode(
         draft_step=2, b_req_idx=b_req_idx, req_to_mtp_state_index=req_to_mtp_state_index, role=role
     )
-    index = attention_runtime.recurrent_mtp_state_index(model)
-    assert index is req_to_mtp_state_index
-    batch = attention_runtime.build_attention_metadata(infer_state, model, lambda: False, req_to_mtp_state_index=index)
+    step_config = attention_runtime.attention_step_config(model)
+    assert step_config.req_to_mtp_state_index is req_to_mtp_state_index
+    batch = attention_runtime.build_attention_metadata(infer_state, step_config)
     att_state = GDNDecodeBuildContext(replay=False).prepare(batch)
 
     torch.testing.assert_close(att_state.num_accepted_tokens, torch.tensor([2, 3], dtype=torch.int32))
@@ -294,6 +295,7 @@ def _speculative_decode(*, draft_step, b_req_idx, req_to_mtp_state_index, role="
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
         att_state_role=role,
+        graph_max_len_in_batch=8,
     )
     infer_state = InferStateInfo()
     infer_state.batch_size = b_req_idx.shape[0]

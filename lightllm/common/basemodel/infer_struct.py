@@ -15,7 +15,7 @@ from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
 
 
 class GraphMode(enum.Enum):
-    """How a decode step runs: eagerly, capturing a CUDA graph, or replaying one."""
+    """How a step runs: eagerly, captured into a decode CUDA graph, or replaying one."""
 
     EAGER = "eager"
     CAPTURE = "capture"
@@ -63,6 +63,7 @@ class InferStateInfo:
         # 仅在 prefill 阶段且需要返回 prompt logprobs 时才会被填充。
         self.prompt_logics: Optional[torch.Tensor] = None
         self.multimodal_params: dict = None
+        # 本步的执行方式：eager、捕获 decode CUDA Graph，或为回放准备输入。
         self.graph_mode: GraphMode = GraphMode.EAGER
         self.dist_group: CustomProcessGroup = None
 

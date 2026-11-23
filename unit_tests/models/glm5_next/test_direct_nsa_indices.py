@@ -175,10 +175,10 @@ def test_fp8_prefill_reads_request_table_without_ragged_buffer(monkeypatch, quer
             "prefill_graph": None,
             "max_req_num": batch,
             "max_seq_length": max(seqs),
+            "graph_max_len_in_batch": max(seqs),
             "att_state_role": "indices_test",
             "config": {"index_topk": 2048, "index_kpool": 4},
             "args": SimpleNamespace(enable_prefill_microbatch_overlap=False, run_mode="normal"),
-            "mtp_manager": None,
         },
     )()
     backend = _Fp8SparseAttention(model)

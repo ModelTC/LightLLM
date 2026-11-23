@@ -7,7 +7,7 @@ from lightllm.common.attention import selector
 from lightllm.common.attention.backends.gdn import GDNLayerConfig
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel.attention_runtime import build_attention_metadata
+from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, build_attention_metadata
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerInfer
 from lightllm.models.sensenova_loop.config import get_loop_layer_indices, get_loop_layer_types
@@ -42,9 +42,6 @@ def test_gdn_decode_keeps_logical_layer_state(
     indices = get_loop_layer_indices(settings, 32)
     kinds = get_loop_layer_types(settings, config)
     layers = tuple(i for i, kind in enumerate(kinds) if kind == "linear_attention")
-    model = SimpleNamespace(
-        is_mtp_draft_model=False, mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: mtp_step)
-    )
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
     # The GDN layers' attention: Triton prefill and decode over native state.
     layer_config = GDNLayerConfig(1, 2, 32, 32, 4, "silu", dtype, state_mtp_step=mtp_step)
@@ -122,7 +119,10 @@ def test_gdn_decode_keeps_logical_layer_state(
 
     def build_attention_states(backend):
         # The attention state the layers' group builds for this step.
-        batch = build_attention_metadata(infer, model, lambda: False, req_to_mtp_state_index=resource.mtp_state_index)
+        step_config = AttentionStepConfig(
+            decode_rows_per_request=mtp_step + 1, req_to_mtp_state_index=resource.mtp_state_index
+        )
+        batch = build_attention_metadata(infer, step_config)
         impl = layer.prefill_impl if infer.is_prefill else layer.decode_impl
         infer.att_states = {impl.state_key: backend.build(batch, backend.create_build_context(layer_config, None))}
 

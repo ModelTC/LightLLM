@@ -40,8 +40,8 @@ class Glm5NextMTPModel(TpPartBaseModel):
         # preceding draft output.
         return args.mtp_mode == "eagle_with_att" or (args.mtp_mode == "vanilla_with_att" and args.mtp_step == 1)
 
-    def _create_inferstate(self, model_input, microbatch_index=0):
-        infer_state = super()._create_inferstate(model_input, microbatch_index=microbatch_index)
+    def _create_inferstate(self, model_input, microbatch_index=0, **kwargs):
+        infer_state = super()._create_inferstate(model_input, microbatch_index=microbatch_index, **kwargs)
         # Keep the mode-specific marker on this model's infer state so the
         # generic BaseModel pipeline remains unchanged.
         infer_state.prefill_kv_only = infer_state.is_prefill and self._supports_prefill_kv_only()

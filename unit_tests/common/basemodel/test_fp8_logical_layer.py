@@ -13,7 +13,7 @@ from lightllm.common.attention.backends.gqa.flashinfer import (
     FlashInferGQADecodeAttState,
     FlashInferGQAPrefillAttState,
 )
-from lightllm.common.basemodel.attention_runtime import AttentionBinder
+from lightllm.common.basemodel.attention_runtime import AttentionRuntime
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state
@@ -128,13 +128,15 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
         is_mtp_draft_model=False,
         max_seq_length=8,
         graph_max_batch_size=1,
+        graph_max_len_in_batch=8,
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda is_draft: 0),
     )
     layer = LlamaTransformerLayerInfer.__new__(LlamaTransformerLayerInfer)
     layer.layer_num_ = logical_layer_id
     layer.tp_q_head_num_ = layer.tp_k_head_num_ = state.config.head_num
     layer.head_dim_ = state.config.head_dim
     layer.alloc_tensor = lambda shape, dtype, device: torch.empty(shape, dtype=dtype, device="cpu")
-    layer.prefill_impl, layer.decode_impl = AttentionBinder(model).bind(layer.attention_spec(model))
+    layer.prefill_impl, layer.decode_impl = AttentionRuntime(model).bind(layer.attention_spec(model))
     infer.att_states = {(layer.prefill_impl if operation == "prefill" else layer.decode_impl).state_key: att_state}
     q = torch.ones((1, state.config.head_num, state.config.head_dim), dtype=torch.bfloat16)
     if operation == "prefill":

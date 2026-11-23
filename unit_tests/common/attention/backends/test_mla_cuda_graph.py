@@ -15,7 +15,7 @@ import torch
 
 from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLADecodeLayerInputs
 from lightllm.common.attention.backends.mla import MLAPrefillLayerConfig
-from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 from unit_tests.common.attention.backends.groups_runner import GroupsRunner
 
@@ -76,7 +76,7 @@ class _Microbatch:
     def state(self, runner, lengths, microbatch_index, *, capture=False, replay=False) -> InferStateInfo:
         state = InferStateInfo()
         state.is_prefill = False
-        state.is_cuda_graph_capture, state.is_cuda_graph_replay = capture, replay
+        state.graph_mode = GraphMode.CAPTURE if capture else GraphMode.REPLAY if replay else GraphMode.EAGER
         state.input_ids = torch.zeros(BATCH, device="cuda", dtype=torch.int64)
         state.batch_size, state.microbatch_index = BATCH, microbatch_index
         state.b_req_idx = torch.arange(BATCH, device="cuda", dtype=torch.int32)

@@ -15,7 +15,8 @@ from lightllm.common.attention.backends.sparse_mla import (
     SparseMLALayerConfig,
     SparseMLAPrefillLayerInputs,
 )
-from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.attention_runtime import AttentionStepConfig
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_prefill_params
 from unit_tests.common.attention.backends.groups_runner import LayerAttention
@@ -33,8 +34,8 @@ RANK, ROPE, TOPK, SCALE = 512, 64, 2048, 1 / 24
 SLOTS, MAX_LEN = 16384, 4096
 
 
-# What build_attention_metadata reads from the model.
-MODEL = SimpleNamespace(graph_max_len_in_batch=MAX_LEN, mtp_manager=None)
+# The model's step config: graph steps cover MAX_LEN.
+STEP_CONFIG = AttentionStepConfig(cuda_graph_max_kv_seq_len=MAX_LEN)
 
 
 def layer_attention(heads, kv_cache_format):
@@ -69,7 +70,7 @@ def make_infer(req_to_token, lengths, *, capture=False, replay=False, microbatch
     infer.max_kv_seq_len, infer.total_token_num = max(lengths), sum(lengths)
     infer.max_q_seq_len = 1
     infer.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token, HOLD_REQUEST_ID=len(lengths) + 1)
-    infer.is_cuda_graph_capture, infer.is_cuda_graph_replay = capture, replay
+    infer.graph_mode = GraphMode.CAPTURE if capture else GraphMode.REPLAY if replay else GraphMode.EAGER
     infer.microbatch_index = microbatch
     (
         infer.b_q_seq_len,
@@ -82,7 +83,7 @@ def make_infer(req_to_token, lengths, *, capture=False, replay=False, microbatch
 
 
 def decode_att_state(attention, infer):
-    return attention.att_state(infer, MODEL)
+    return attention.att_state(infer, STEP_CONFIG)
 
 
 def select(req_to_token, lengths, out, seed):
@@ -265,6 +266,6 @@ def test_fp8_ds_mla_flashmla_prefill_matches_reference(ready, ends):
         current_kv=current_kv,
     )
     out = torch.empty((rows, heads, RANK), device="cuda", dtype=q.dtype)
-    out = attention.run("prefill", attention.att_state(infer, MODEL), inputs, out=out)
+    out = attention.run("prefill", attention.att_state(infer, STEP_CONFIG), inputs, out=out)
     assert out.shape == (rows, heads, RANK)
     torch.testing.assert_close(out.float(), torch.stack(expected), atol=0.02, rtol=0.02)

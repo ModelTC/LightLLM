@@ -83,17 +83,8 @@ def test_batch_step_size_after_split_controls_capture_range(_graph_args):
     ]
 
 
-@pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
-@pytest.mark.parametrize("mtp_step", [1, 2])
-@pytest.mark.parametrize("dynamic,is_draft", [(False, False), (True, False), (False, True)])
-@pytest.mark.parametrize("overlap", [False, True])
-def test_mtp_tpsp_layout(monkeypatch, _graph_args, tp_size, mtp_step, dynamic, is_draft, overlap):
-    args = _graph_args
-    args.enable_tpsp_mix_mode = True
-    args.enable_decode_microbatch_overlap = overlap
-    args.mtp_mode = "eagle_with_att"
-    args.mtp_step = mtp_step
-    args.mtp_dynamic_verify = dynamic
+def _construct_until_weights(monkeypatch, args, *, is_draft=False, tp_size=1, **kvargs):
+    """Run the real constructor's capacity setup and stop before it reads the model config or allocates weights."""
     monkeypatch.setattr(mtp_manager_module, "get_env_start_args", lambda: args)
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.is_mtp_draft_model = is_draft
@@ -108,10 +99,25 @@ def test_mtp_tpsp_layout(monkeypatch, _graph_args, tp_size, mtp_step, dynamic, i
     def stop_before_weights():
         raise StopBeforeWeights
 
-    # 执行真实构造函数的容量计算，在读取模型配置、分配 GPU 权重前停止。
     monkeypatch.setattr(model, "_init_config", stop_before_weights)
     with pytest.raises(StopBeforeWeights):
-        model.__init__(dict(run_mode="normal", weight_dir="", max_total_token_num=1024, graph_max_batch_size=7))
+        model.__init__(dict(run_mode="normal", weight_dir="", max_total_token_num=1024, **kvargs))
+    return model
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
+@pytest.mark.parametrize("mtp_step", [1, 2])
+@pytest.mark.parametrize("dynamic,is_draft", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("overlap", [False, True])
+def test_mtp_tpsp_layout(monkeypatch, _graph_args, tp_size, mtp_step, dynamic, is_draft, overlap):
+    args = _graph_args
+    args.enable_tpsp_mix_mode = True
+    args.enable_decode_microbatch_overlap = overlap
+    args.mtp_mode = "eagle_with_att"
+    args.mtp_step = mtp_step
+    args.mtp_dynamic_verify = dynamic
+    args.max_req_total_len = 16384
+    model = _construct_until_weights(monkeypatch, args, is_draft=is_draft, tp_size=tp_size, graph_max_batch_size=7)
 
     width = 1 if dynamic or is_draft else mtp_step + 1
     logical_max = 7 // 2 if overlap else 7
@@ -131,3 +137,23 @@ def test_mtp_tpsp_layout(monkeypatch, _graph_args, tp_size, mtp_step, dynamic, i
     assert all(size % width == 0 and size % tp_size == 0 for size in sizes)
     if tp_size == 8 and width == 3:
         assert sizes == [24]
+
+
+@pytest.mark.parametrize(
+    "mtp_mode, graph_len, expected",
+    [
+        # A graph covering the configured request length also covers the MTP token margin.
+        ("eagle_with_att", 1024, 1030),
+        # A graph shorter than the request length keeps its configured capacity.
+        ("eagle_with_att", 512, 512),
+        (None, 1024, 1024),
+    ],
+)
+def test_graph_kv_capacity_is_final_once_the_model_is_constructed(
+    monkeypatch, _graph_args, mtp_mode, graph_len, expected
+):
+    # Attention reads the capacity when the runtime is created, before the CUDA graphs are built.
+    args = _graph_args
+    args.mtp_mode, args.mtp_step, args.mtp_dynamic_verify, args.max_req_total_len = mtp_mode, 1, False, 1024
+    model = _construct_until_weights(monkeypatch, args, graph_max_len_in_batch=graph_len, max_seq_length=1030)
+    assert model.graph_max_len_in_batch == expected

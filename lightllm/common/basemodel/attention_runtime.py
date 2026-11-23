@@ -1,11 +1,11 @@
-"""Bind layer specs at load time and build one attention state per distinct state key in each microbatch."""
+"""A model's AttentionRuntime: bind layer specs at load time and build one attention state per state key each step."""
 
 from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import triton
@@ -16,6 +16,7 @@ from lightllm.common.attention.backend import (
     AttentionMetadata,
     AttentionBuildResources,
 )
+from lightllm.common.basemodel.infer_struct import GraphMode
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
@@ -77,28 +78,46 @@ def recurrent_mtp_state_index(model: "TpPartBaseModel") -> Optional[torch.Tensor
     return states[0].mtp_state_index if states else None
 
 
+@dataclass(frozen=True)
+class AttentionStepConfig:
+    """What a model's steps share when describing themselves to step builders, fixed once the model loads."""
+
+    # Query rows of each request in decode steps; above 1 with speculative decoding.
+    decode_rows_per_request: int = 1
+    # Decode steps pack a varying number of speculative rows per request.
+    dynamic_decode_rows: bool = False
+    # Linear attention: the slot of each request's last accepted speculative row in the role's
+    # recurrent state (recurrent_mtp_state_index); None without recurrent state.
+    req_to_mtp_state_index: Optional[torch.Tensor] = None
+    # KV length capacity of the model's CUDA graphs; required for capture and replay steps.
+    cuda_graph_max_kv_seq_len: Optional[int] = None
+
+
+def attention_step_config(model: "TpPartBaseModel") -> AttentionStepConfig:
+    """Read the step facts from a model whose CUDA graph capacity is final."""
+    rows = model.mtp_manager.get_decode_draft_step(model.is_mtp_draft_model) + 1
+    return AttentionStepConfig(
+        decode_rows_per_request=rows,
+        dynamic_decode_rows=rows > 1 and uses_dynamic_spec_verify_layout(model),
+        req_to_mtp_state_index=recurrent_mtp_state_index(model),
+        cuda_graph_max_kv_seq_len=model.graph_max_len_in_batch,
+    )
+
+
 def build_attention_metadata(
-    infer_state: "InferStateInfo",
-    model: "TpPartBaseModel",
-    uses_dynamic_layout: Optional[Callable[[], bool]] = None,
-    req_to_mtp_state_index: Optional[torch.Tensor] = None,
+    infer_state: "InferStateInfo", step_config: AttentionStepConfig = AttentionStepConfig()
 ) -> AttentionMetadata:
     """Describe one step's requests for attention step builders, from its InferStateInfo.
 
-    CUDA graph capture and replay steps carry the model's graph kv length capacity, so step builders
-    can size and configure captured work for every length a replay may see. Decode steps of
-    speculative decoding describe how query rows group into requests and, given
-    req_to_mtp_state_index (recurrent_mtp_state_index), where each request's accepted recurrent
-    state lies. Fields the step does not set are None. uses_dynamic_layout overrides
-    uses_dynamic_spec_verify_layout(model).
+    CUDA graph capture and replay steps carry the graph kv length capacity, so step builders can
+    size and configure captured work for every length a replay may see. Decode steps of
+    speculative decoding describe how query rows group into requests and where each request's
+    accepted recurrent state lies. Fields the step does not set are None.
     """
-    if uses_dynamic_layout is None:
-        uses_dynamic_layout = lambda: uses_dynamic_spec_verify_layout(model)  # noqa: E731
-    uses_cuda_graph = infer_state.is_cuda_graph_capture or infer_state.is_cuda_graph_replay
-    decode_rows_per_request, dynamic_decode_rows = 1, False
-    if not infer_state.is_prefill and getattr(model, "mtp_manager", None) is not None:
-        decode_rows_per_request = model.mtp_manager.get_decode_draft_step(model.is_mtp_draft_model) + 1
-        dynamic_decode_rows = decode_rows_per_request > 1 and uses_dynamic_layout()
+    uses_cuda_graph = infer_state.graph_mode is not GraphMode.EAGER
+    if uses_cuda_graph and step_config.cuda_graph_max_kv_seq_len is None:
+        raise ValueError(f"a {infer_state.graph_mode.value} step needs the CUDA graph kv length capacity")
+    rows = 1 if infer_state.is_prefill else step_config.decode_rows_per_request
     return AttentionMetadata(
         req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
         b_req_idx=infer_state.b_req_idx,
@@ -111,9 +130,9 @@ def build_attention_metadata(
         b_q_start_loc=infer_state.b_q_start_loc,
         b_ready_cache_len=infer_state.b_ready_cache_len,
         max_q_seq_len=infer_state.max_q_seq_len if infer_state.max_q_seq_len is not None else 1,
-        decode_rows_per_request=decode_rows_per_request,
-        dynamic_decode_rows=dynamic_decode_rows,
-        req_to_mtp_state_index=req_to_mtp_state_index if decode_rows_per_request > 1 else None,
+        decode_rows_per_request=rows,
+        dynamic_decode_rows=rows > 1 and step_config.dynamic_decode_rows,
+        req_to_mtp_state_index=step_config.req_to_mtp_state_index if rows > 1 else None,
         pad_req_idx=getattr(infer_state.req_manager, "HOLD_REQUEST_ID", None),
         b_shared_seq_len=getattr(infer_state, "b_shared_seq_len", None),
         b_mtp_index=getattr(infer_state, "b_mtp_index", None),
@@ -122,7 +141,7 @@ def build_attention_metadata(
         max_ready_cache_len=infer_state.max_cache_len or 0,
         mem_index=infer_state.mem_index,
         b_shared_radix_node_id=getattr(infer_state, "b_shared_radix_node_id", None),
-        cuda_graph_max_kv_seq_len=model.graph_max_len_in_batch if uses_cuda_graph else None,
+        cuda_graph_max_kv_seq_len=step_config.cuda_graph_max_kv_seq_len if uses_cuda_graph else None,
         microbatch_index=infer_state.microbatch_index,
     )
 
@@ -179,14 +198,23 @@ def step_builder_context(model: "TpPartBaseModel") -> AttentionBuildResources:
 
 
 @dataclass
-class _LazyBuildContext:
+class _StateBuilder:
+    """Builds, each step, the attention state shared by the layers of one state_key in one phase.
+
+    The backend's build context is created on the first build, so a phase a node never runs
+    (such as decode on a PD prefill node) allocates nothing.
+    """
+
     backend: type[AttentionBackend]
     layer_config: Any
-    ctx: AttentionBuildResources
+    resources: AttentionBuildResources
 
     @cached_property
     def context(self) -> Any:
-        return self.backend.create_build_context(self.layer_config, self.ctx)
+        return self.backend.create_build_context(self.layer_config, self.resources)
+
+    def build(self, metadata: AttentionMetadata) -> Any:
+        return self.backend.build(metadata, self.context)
 
 
 def requested_backend(args, phase, layer_config):
@@ -202,13 +230,24 @@ class AttentionSpec:
     implementation: Optional[str] = None
 
 
-class AttentionBinder:
-    """Bind layer specs during initialization and retain the contexts needed for inference."""
+class AttentionRuntime:
+    """A model's attention: binds each layer's implementations at load time and builds each step's states.
 
-    def __init__(self, model):
+    bind() selects a layer's prefill and decode implementations and registers one _StateBuilder per
+    distinct state_key and phase. prepare(infer_state) builds one AttentionMetadata from infer_state
+    and returns {state_key: att_state} for its phase; the model stores it as infer_state.att_states,
+    where each layer looks up impl.state_key. A model without attention has a runtime with no
+    builders, whose prepare() returns {}.
+
+    Create it once the model's attention states and CUDA graph capacity are final: it keeps what
+    the steps need from the model, not the model itself.
+    """
+
+    def __init__(self, model: "TpPartBaseModel"):
         self.args = model.args
-        self.ctx = step_builder_context(model)
-        self.contexts = {phase: {} for phase in selector.PHASES}
+        self.resources = step_builder_context(model)
+        self.step_config = attention_step_config(model)
+        self.state_builders: dict[str, dict[tuple, _StateBuilder]] = {phase: {} for phase in selector.PHASES}
         self._impls = {}
         if self.args.enable_ep_moe:
             logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
@@ -231,10 +270,27 @@ class AttentionBinder:
                 priority=selector.auto_priority(layer_config, phase, self.args.mtp_step),
                 excluded=("flashinfer",) if self.args.enable_ep_moe else (),
             )
-            backend = selection.backend
-            state_key = selection.impl.state_key
-            contexts = self.contexts[phase]
-            if state_key not in contexts:
-                contexts[state_key] = _LazyBuildContext(backend, layer_config, self.ctx)
+            builders = self.state_builders[phase]
+            if selection.impl.state_key not in builders:
+                builders[selection.impl.state_key] = _StateBuilder(selection.backend, layer_config, self.resources)
             self._impls[key] = selection.impl
         return self._impls[key]
+
+    def backends(self, phase: str) -> list[type[AttentionBackend]]:
+        """The backend of each state built in phase, in binding order."""
+        return [builder.backend for builder in self.state_builders[phase].values()]
+
+    @property
+    def has_attention(self) -> bool:
+        return any(self.state_builders.values())
+
+    def requires_cpu_cache_sync(self) -> bool:
+        return any(backend.requires_cpu_cache_sync() for phase in selector.PHASES for backend in self.backends(phase))
+
+    def prepare(self, infer_state: "InferStateInfo") -> dict[tuple, Any]:
+        """Build one attention state per state_key of infer_state's phase, for this microbatch."""
+        builders = self.state_builders["prefill" if infer_state.is_prefill else "decode"]
+        if not builders:
+            return {}
+        metadata = build_attention_metadata(infer_state, self.step_config)
+        return {key: builder.build(metadata) for key, builder in builders.items()}

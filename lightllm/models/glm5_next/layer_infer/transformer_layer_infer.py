@@ -474,7 +474,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         _output = tensor_to_no_ref_tensor(output)
 
         def kda_prefill_func(new_infer_state):
-            # The replayed step's own attention state, built by model.prepare_attention().
+            # The replayed step's own attention state, built by model._create_inferstate().
             inputs = self._kda_layer_inputs(_mixed_qkv, _raw_decay_gate, _beta_logits, new_infer_state, layer_weight)
             tmp_output = self._kda_attention(inputs, new_infer_state, prefill=True)
             assert tmp_output.shape == _output.shape

@@ -163,8 +163,8 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             return ModelOutput(logits=model_input.mtp_draft_input_hiddens.new_empty((0, 1)))
 
         assert model_input.mtp_draft_input_hiddens.shape[0] == model_input.batch_size
-        infer_state = self._create_inferstate(model_input)
-        infer_state.init_some_extra_state(self)
+        # The stages only write their KV cache here, so the step needs no attention state.
+        infer_state = self._create_inferstate(model_input, build_attention=False)
 
         hidden = self.pre_infer.context_forward(None, infer_state, self.pre_post_weight)
         for layer, layer_weight in zip(self.layers_infer, self.trans_layers_weight):
