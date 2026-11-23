@@ -20,7 +20,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_ke
     ep_zero_padding,
 )
 from lightllm.utils.envs_utils import get_env_use_ue8m0_scales
-from lightllm.utils.device_utils import is_hopper
+from lightllm.utils.device_utils import get_device_sm_count, is_hopper
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 
 logger = init_logger(__name__)
@@ -210,6 +210,8 @@ def chunked_expanded_moe_forward(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
+    *,
+    allow_full_sms: bool = False,
 ):
     """以最多 32K 行为一个 chunk 执行 expanded MoE，并重写 combine metadata。"""
     alignment = get_mk_alignment_for_contiguous_layout()
@@ -258,6 +260,30 @@ def chunked_expanded_moe_forward(
         and not clamp_up_add_one
         and is_hopper()
     )
+    # The caller waits for dispatch and starts combine after this function.
+    # Give the routed GEMMs the whole device only inside that serial window.
+    previous_num_sms = None
+    if (
+        allow_full_sms
+        and not is_autotune_warmup
+        and 6144 <= all_tokens <= 44032
+        and (all_tokens % max_chunk_rows == 0 or all_tokens % max_chunk_rows >= 6144)
+        and (w1.shape[0], hidden_size, intermediate_size, block_size_k, alignment) == (18, 4096, 2048, 128, 128)
+        and hidden_dtype == torch.bfloat16
+        and w1.dtype == w2.dtype == torch.float8_e4m3fn
+        and alpha == 1.0
+        and limit == 10.0
+        and not clamp_up_add_one
+        and is_hopper()
+        and get_device_sm_count() == 132
+        and hasattr(deep_gemm, "get_num_sms")
+        and hasattr(deep_gemm, "set_num_sms")
+        and not torch.cuda.is_current_stream_capturing()
+    ):
+        num_sms = deep_gemm.get_num_sms()
+        if num_sms == 120:
+            deep_gemm.set_num_sms(132)
+            previous_num_sms = num_sms
     try:
         for chunk_index, chunk_start in enumerate(range(0, all_tokens, max_chunk_rows)):
             if is_autotune_warmup and chunk_index == 1:
@@ -324,6 +350,8 @@ def chunked_expanded_moe_forward(
             )
             del gemm_out_b
     finally:
+        if previous_num_sms is not None:
+            deep_gemm.set_num_sms(previous_num_sms)
         if is_autotune_warmup:
             Autotuner.start_autotune_warmup(AutotuneKernelType.GENERAL)
 

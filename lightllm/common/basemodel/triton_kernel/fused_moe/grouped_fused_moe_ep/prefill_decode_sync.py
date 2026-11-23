@@ -11,9 +11,12 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_ke
     ep_reduce_decode_output,
 )
 from lightllm.utils.envs_utils import (
+    enable_env_vars,
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
+    get_env_start_args,
     get_env_use_ue8m0_scales,
+    get_model_init_status,
 )
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 
@@ -151,6 +154,18 @@ def fused_experts_impl(
 
         all_tokens = sum(handle.num_recv_tokens_per_expert_list)
         if all_tokens > 0:
+            allow_full_sms = False
+            if (
+                previous_event is None
+                and enable_env_vars("LIGHTLLM_GLM53_PREFILL_EXPERT_FULL_SMS")
+                and get_model_init_status()
+            ):
+                args = get_env_start_args()
+                allow_full_sms = (
+                    args.run_mode == "prefill"
+                    and not args.enable_prefill_microbatch_overlap
+                    and not args.enable_prefill_cudagraph
+                )
             gather_out = chunked_expanded_moe_forward(
                 num_recv_tokens_per_expert_list=handle.num_recv_tokens_per_expert_list,
                 num_unaligned_recv_tokens_per_expert=handle.num_unaligned_recv_tokens_per_expert,
@@ -166,6 +181,7 @@ def fused_experts_impl(
                 alpha=alpha,
                 limit=limit,
                 clamp_up_add_one=clamp_up_add_one,
+                allow_full_sms=allow_full_sms,
             )
         else:
             gather_out = torch.empty(
