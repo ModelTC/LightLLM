@@ -56,7 +56,7 @@ def test_every_linear_execution_layer_can_split_its_gdn_projection(settings):
             for name in ("tp_linear_num_v_heads", "linear_head_v_dim", "tp_linear_key_dim")
         }
         assert dims == {"tp_linear_num_v_heads": 4, "linear_head_v_dim": 48, "tp_linear_key_dim": 64}, layer_num
-        # The layer splits the fused projection for the GDN adapter with these dims.
+        # The layer splits the fused projection into the GDN layer inputs with these dims.
         qkv, value = 2 * 64 + 4 * 48, 4 * 48
         mixed = torch.arange(3 * (qkv + 2 * value + 2 * 4), dtype=torch.float32).view(3, -1)
         state = SimpleNamespace(get_layer_view=lambda logical_layer_id: ("conv", "ssm"))
@@ -68,9 +68,10 @@ def test_every_linear_execution_layer_can_split_its_gdn_projection(settings):
             linear_A_log=SimpleNamespace(weight=None),
             linear_dt_bias=SimpleNamespace(weight=None),
         )
-        params = layer._gdn_att_dict(mixed, infer_state, weight)
-        assert torch.equal(params["mixed_qkv"], mixed[:, :qkv])
-        assert torch.equal(params["z"].reshape(3, -1), mixed[:, qkv : qkv + value])
-        assert torch.equal(params["b"], mixed[:, qkv + value : qkv + value + 4])
-        assert torch.equal(params["a"], mixed[:, qkv + value + 4 :])
+        layer.linear_replay = False
+        inputs = layer._gdn_layer_inputs(mixed, infer_state, weight)
+        assert torch.equal(inputs.mixed_qkv, mixed[:, :qkv])
+        assert torch.equal(inputs.z.reshape(3, -1), mixed[:, qkv : qkv + value])
+        assert torch.equal(inputs.b, mixed[:, qkv + value : qkv + value + 4])
+        assert torch.equal(inputs.a, mixed[:, qkv + value + 4 :])
     assert linear_layers == sum(kind == "linear_attention" for kind in kinds)

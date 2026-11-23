@@ -12,6 +12,8 @@ import torch
 
 from .. import require_positive
 
+PREFILL_KERNELS = ("triton", "flashkda", "auto")
+
 
 @dataclass(frozen=True)
 class KDALayerConfig:
@@ -19,7 +21,13 @@ class KDALayerConfig:
 
     q, k and v each have num_heads heads of head_dim; conv_kernel_size is the conv width. Decay gates
     are clamped below at lower_bound. state_mtp_step is the speculative depth of the state layout
-    (native SSM states keep state_mtp_step + 1 slots per request).
+    (native SSM states keep state_mtp_step + 1 slots per request). replay=True selects replay state:
+    one SSM slot per request, and decode appends history to KDALayerInputs.replay_state. ssm_dtype is
+    the dtype of the SSM state.
+
+    prefill_kernel chooses FlashKDA for prefill steps: "triton" never uses it, "flashkda" always does
+    and fails if it cannot load, and "auto" uses it for BF16 layers with a BF16 SSM state on SM90,
+    for steps no longer than the lengths it was validated on.
     """
 
     num_heads: int
@@ -28,11 +36,16 @@ class KDALayerConfig:
     lower_bound: float
     dtype: torch.dtype
     state_mtp_step: int = 0
+    replay: bool = False
+    ssm_dtype: torch.dtype = torch.float32
+    prefill_kernel: str = "triton"
 
     def __post_init__(self) -> None:
         require_positive(self, "num_heads", "head_dim", "conv_kernel_size")
         if self.state_mtp_step < 0:
             raise ValueError("state_mtp_step must be >= 0")
+        if self.prefill_kernel not in PREFILL_KERNELS:
+            raise ValueError(f"prefill_kernel must be one of {PREFILL_KERNELS}, got {self.prefill_kernel!r}")
 
 
 @dataclass(frozen=True)

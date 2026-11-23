@@ -103,6 +103,7 @@ def test_gdn_prefill_then_speculative_decode_matches_reference(prefill, replay, 
     torch.manual_seed(11)
     # FlashQLA's chunk kernel supports only 128-dim key heads, as in Qwen3-Next.
     family = GDNFamily(mtp_step, GDNShape(dk=128, dv=128) if prefill == "flashqla" else None)
+    family.config = dataclasses.replace(family.config, replay=replay)
     if prefill == "flashqla":
         from lightllm.common.attention.backends.gdn.flashqla import FlashQLAGDNPrefillImpl as prefill_cls
     else:

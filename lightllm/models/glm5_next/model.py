@@ -197,15 +197,6 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.v_head_dim = self.config.get("v_head_dim", self.qk_nope_head_dim)
         self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
 
-    def _init_att_backend1(self):
-        from lightllm.common.basemodel.attention.create_linear_utils import (
-            get_kda_linear_att_backend_class,
-        )
-
-        backend_cls = get_kda_linear_att_backend_class()
-        self.prefill_att_backend1 = backend_cls(model=self)
-        self.decode_att_backend1 = self.prefill_att_backend1
-
     def _init_custom(self):
         triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))
         if self.args.enable_ep_moe:

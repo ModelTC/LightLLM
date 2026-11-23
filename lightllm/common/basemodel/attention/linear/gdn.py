@@ -65,6 +65,7 @@ class LinearAttBackend(BaseAttBackend):
             activation=self.activation,
             dtype=dtype,
             state_mtp_step=self.mtp_step,
+            replay=self.replay,
         )
         layer_inputs = GDNLayerInputs(
             mixed_qkv=params["mixed_qkv"],
@@ -127,11 +128,8 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
     def decode_att(self, q, k, v, att_control: AttControl = AttControl(), alloc_func=torch.empty) -> torch.Tensor:
         assert att_control.linear_att_decode and att_control.linear_att_decode_dict is not None
         params = att_control.linear_att_decode_dict
-        out = _run(self.backend, self.backend.decode_backend, self.step_args, params, alloc_func)
-        if self.backend.replay:
-            # Every layer read the cursors of the step's start; the state advances them after the last layer.
-            params["state"].finish_decode_token(params["layer_num"], self.step_args.conv_idx, self.step_args.cu_seqlens)
-        return out
+        # Replay decode impls advance the replay cursors after the last layer.
+        return _run(self.backend, self.backend.decode_backend, self.step_args, params, alloc_func)
 
 
 def _recurrent_state(att_state):

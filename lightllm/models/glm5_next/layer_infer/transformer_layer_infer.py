@@ -7,7 +7,7 @@ from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
 from lightllm.common.attention.backends.sparse_mla import (
     SparseMLADecodeLayerInputs,
     SparseMLALayerConfig,
@@ -76,8 +76,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
 
     def init_attention(self, model) -> None:
         if self.is_linear_attention_layer:
-            # KDA layers still run through the model's linear-attention adapter.
-            return
+            return self._init_kda_attention(model)
         # NoPE sparse MLA: absorbed queries attend to the indexer's selected latent slots, which it
         # restricts to visible keys.
         config = SparseMLALayerConfig(
@@ -368,24 +367,57 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         raw_decay_gate, raw_output_gate = layer_weight.project_kda_fg_b(decay_gate_hidden, output_gate_hidden)
         return qkv, raw_decay_gate, beta_logits, raw_output_gate
 
-    def _kda_att_dict(self, mixed_qkv, raw_gate, raw_beta, infer_state, layer_weight) -> dict:
+    def _init_kda_attention(self, model) -> None:
+        linear = self.network_config_["linear_attn_config"]
+        assert linear["num_heads"] % self.tp_world_size_ == 0
+        args = model.args
+        prefill_backends = args.llm_prefill_att_backend
+        layer_config = KDALayerConfig(
+            num_heads=self.tp_linear_num_heads,
+            head_dim=self.linear_head_dim,
+            conv_kernel_size=linear["short_conv_kernel_size"],
+            lower_bound=linear.get("gate_lower_bound", -5.0),
+            dtype=model.data_type,
+            state_mtp_step=args.mtp_step,
+            replay=args.ssm_state_mode == "replay",
+            ssm_dtype=getattr(torch, args.linear_att_ssm_data_type),
+            # The second --llm_prefill_att_backend value chooses FlashKDA for prefill.
+            prefill_kernel=prefill_backends[1] if len(prefill_backends) > 1 else "auto",
+        )
+        # Replay state takes decode history through KDALayerInputs.replay_state.
+        self.linear_replay = layer_config.replay
+        self.attn = model.att_groups.create_attention(layer_config, layer_config)
+
+    def _kda_layer_inputs(self, mixed_qkv, raw_gate, raw_beta, infer_state, layer_weight) -> KDALayerInputs:
         """Gather the layer's KDA operands, parameters and recurrent state views."""
         state = infer_state.att_state_manager.get_state(
             model_role=infer_state.att_state_role, state_type_filter="kda", logical_layer_id=self.layer_num_
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=self.layer_num_)
-        return {
-            "mixed_qkv": mixed_qkv,
-            "raw_gate": raw_gate,
-            "raw_beta": raw_beta,
-            "conv_weight": layer_weight.get_merged_kda_conv_weight(),
-            "A_log": layer_weight.linear_A_log.weight,
-            "dt_bias": layer_weight.linear_dt_bias.weight,
-            "conv_states": conv_states,
-            "ssm_states": ssm_states,
-            "state": state,
-            "layer_num": self.layer_num_,
-        }
+        return KDALayerInputs(
+            mixed_qkv=mixed_qkv,
+            raw_gate=raw_gate,
+            raw_beta=raw_beta,
+            conv_weight=layer_weight.get_merged_kda_conv_weight(),
+            A_log=layer_weight.linear_A_log.weight,
+            dt_bias=layer_weight.linear_dt_bias.weight,
+            conv_states=conv_states,
+            ssm_states=ssm_states,
+            replay_state=state if self.linear_replay else None,
+            layer_num=self.layer_num_,
+        )
+
+    def _kda_attention(self, inputs: KDALayerInputs, infer_state, *, prefill: bool) -> torch.Tensor:
+        x = inputs.mixed_qkv
+        run = self.attn.prefill if prefill else self.attn.decode
+        return run(
+            infer_state.att_step_args[self.attn.group],
+            inputs,
+            out=self.alloc_tensor(
+                (x.shape[0], self.tp_linear_num_heads, self.linear_head_dim), dtype=x.dtype, device=x.device
+            ),
+            alloc_func=self.alloc_tensor,
+        )
 
     def _kda_post(self, core_output, raw_output_gate, infer_state, layer_weight):
         tokens = raw_output_gate.shape[0]
@@ -436,18 +468,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         _output = tensor_to_no_ref_tensor(output)
 
         def kda_prefill_func(new_infer_state):
-            tmp_output = new_infer_state.prefill_att_state1.prefill_att(
-                q=None,
-                k=None,
-                v=None,
-                att_control=AttControl(
-                    linear_att_prefill=True,
-                    linear_att_prefill_dict=self._kda_att_dict(
-                        _mixed_qkv, _raw_decay_gate, _beta_logits, new_infer_state, layer_weight
-                    ),
-                ),
-                alloc_func=self.alloc_tensor,
-            )
+            # The replayed step's own step args, built by its init_att_state().
+            inputs = self._kda_layer_inputs(_mixed_qkv, _raw_decay_gate, _beta_logits, new_infer_state, layer_weight)
+            tmp_output = self._kda_attention(inputs, new_infer_state, prefill=True)
             assert tmp_output.shape == _output.shape
             _output.copy_(tmp_output)
 
@@ -472,18 +495,8 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 layer_weight,
             )
         else:
-            core_output = infer_state.prefill_att_state1.prefill_att(
-                q=None,
-                k=None,
-                v=None,
-                att_control=AttControl(
-                    linear_att_prefill=True,
-                    linear_att_prefill_dict=self._kda_att_dict(
-                        qkv, raw_decay_gate, beta_logits, infer_state, layer_weight
-                    ),
-                ),
-                alloc_func=self.alloc_tensor,
-            )
+            inputs = self._kda_layer_inputs(qkv, raw_decay_gate, beta_logits, infer_state, layer_weight)
+            core_output = self._kda_attention(inputs, infer_state, prefill=True)
         return self._kda_post(core_output, raw_output_gate, infer_state, layer_weight)
 
     def token_attention_forward(self, input_embeddings, infer_state, layer_weight):
@@ -492,16 +505,8 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         qkv, raw_decay_gate, beta_logits, raw_output_gate = self._kda_projections(
             input_embeddings, infer_state, layer_weight
         )
-        core_output = infer_state.decode_att_state1.decode_att(
-            q=None,
-            k=None,
-            v=None,
-            att_control=AttControl(
-                linear_att_decode=True,
-                linear_att_decode_dict=self._kda_att_dict(qkv, raw_decay_gate, beta_logits, infer_state, layer_weight),
-            ),
-            alloc_func=self.alloc_tensor,
-        )
+        inputs = self._kda_layer_inputs(qkv, raw_decay_gate, beta_logits, infer_state, layer_weight)
+        core_output = self._kda_attention(inputs, infer_state, prefill=False)
         return self._kda_post(core_output, raw_output_gate, infer_state, layer_weight)
 
     def _hc_pre(self, streams, layer_weight, prefix, norm_weight):

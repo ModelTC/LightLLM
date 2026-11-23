@@ -11,10 +11,12 @@ from lightllm.common.attention.backend import (
     AttentionBatch,
     AttentionImpl,
     AttentionStepBuilder,
+    StepBuilderContext,
     TensorAllocator,
 )
 from ..gdn.triton import GDNDecodeStepArgs, GDNDecodeStepBuilder
 from . import KDALayerConfig, KDALayerInputs
+from .flashkda import load_flash_kda_fwd
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,11 @@ def _prefill(cfg: KDALayerConfig, step_args: KDAPrefillStepArgs, inputs: KDALaye
 class TritonKDAPrefillImpl(AttentionImpl[KDALayerConfig, KDAPrefillStepArgs, KDALayerInputs]):
     """Prefill over native state: the fused conv emits q/k/v (L2-normalized unless FlashKDA runs)."""
 
+    def __init__(self, layer_config: KDALayerConfig) -> None:
+        super().__init__(layer_config)
+        _check_state(layer_config, replay=False)
+        _check_prefill_kernel(layer_config)
+
     def forward(self, step_args, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
         from lightllm.common.attention.kernels.kda.causal_conv1d_qkv import causal_conv1d_qkv
 
@@ -113,6 +120,11 @@ class TritonKDAPrefillImpl(AttentionImpl[KDALayerConfig, KDAPrefillStepArgs, KDA
 
 class ReplayKDAPrefillImpl(AttentionImpl[KDALayerConfig, KDAPrefillStepArgs, KDALayerInputs]):
     """Prefill over replay state, which keeps raw q/k: the fused conv runs only for FlashKDA with width 4."""
+
+    def __init__(self, layer_config: KDALayerConfig) -> None:
+        super().__init__(layer_config)
+        _check_state(layer_config, replay=True)
+        _check_prefill_kernel(layer_config)
 
     def forward(self, step_args, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
         cfg, inputs = self.layer_config, layer_inputs
@@ -166,6 +178,10 @@ def _conv_update(inputs: KDALayerInputs, step_args: GDNDecodeStepArgs):
 
 
 class TritonKDADecodeImpl(AttentionImpl[KDALayerConfig, GDNDecodeStepArgs, KDALayerInputs]):
+    def __init__(self, layer_config: KDALayerConfig) -> None:
+        super().__init__(layer_config)
+        _check_state(layer_config, replay=False)
+
     def forward(self, step_args, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
         """Fill and return out [rows, num_heads, head_dim]; update the conv and SSM states in place."""
         from lightllm.common.attention.kernels.gdn.third_party_fla.ops.kda_decode import fused_recurrent_kda
@@ -194,10 +210,14 @@ class TritonKDADecodeImpl(AttentionImpl[KDALayerConfig, GDNDecodeStepArgs, KDALa
 
 
 class ReplayKDADecodeImpl(AttentionImpl[KDALayerConfig, GDNDecodeStepArgs, KDALayerInputs]):
+    def __init__(self, layer_config: KDALayerConfig) -> None:
+        super().__init__(layer_config)
+        _check_state(layer_config, replay=True)
+
     def forward(self, step_args, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
         """Fill and return out [rows, num_heads, head_dim]; update the conv state and append history.
 
-        The caller advances the replay cursors after the step's last layer.
+        Every layer reads the cursors of the step's start; the last layer's call advances them.
         """
         from lightllm.common.attention.kernels.kda.replay_kda import replay
 
@@ -230,7 +250,49 @@ class ReplayKDADecodeImpl(AttentionImpl[KDALayerConfig, GDNDecodeStepArgs, KDALa
             state_gate_lower_bound=state.gate_lower_bound,
         )
         out.copy_(output.view(out.shape))
+        state.finish_decode_token(inputs.layer_num, step_args.conv_idx, step_args.cu_seqlens)
         return out
+
+
+def _check_state(layer_config: KDALayerConfig, *, replay: bool) -> None:
+    if layer_config.replay != replay:
+        state = "replay" if layer_config.replay else "native"
+        raise NotImplementedError(f"this KDA implementation does not run over {state} state")
+
+
+def _check_prefill_kernel(layer_config: KDALayerConfig) -> None:
+    # A requested FlashKDA must load when the model loads, not on the first prefill step.
+    if layer_config.prefill_kernel == "flashkda":
+        try:
+            import flash_kda  # noqa: F401
+        except Exception as e:
+            raise NotImplementedError(f"the flashkda prefill kernel cannot be loaded: {e!r}") from e
+
+
+def _create_prefill_step_builder(layer_config: KDALayerConfig) -> KDAPrefillStepBuilder:
+    flash_kda_fwd = load_flash_kda_fwd(
+        layer_config.prefill_kernel, dtype=layer_config.dtype, ssm_dtype=layer_config.ssm_dtype
+    )
+    # Automatic selection keeps FlashKDA to the step lengths it was validated on.
+    max_flash_len = None
+    if layer_config.prefill_kernel == "auto":
+        max_flash_len = 2048 if layer_config.num_heads < 16 else 8192
+    return KDAPrefillStepBuilder(
+        ssm_slots_per_request=1 if layer_config.replay else layer_config.state_mtp_step + 1,
+        flash_kda_fwd=flash_kda_fwd,
+        max_flash_len=max_flash_len,
+    )
+
+
+def _prefill_step_builder_key(layer_config: KDALayerConfig):
+    return (
+        layer_config.replay,
+        layer_config.state_mtp_step,
+        layer_config.prefill_kernel,
+        layer_config.num_heads,
+        layer_config.dtype,
+        layer_config.ssm_dtype,
+    )
 
 
 class TritonKDAPrefillBackend(AttentionBackend):
@@ -246,6 +308,14 @@ class TritonKDAPrefillBackend(AttentionBackend):
     def get_impl_cls() -> type[TritonKDAPrefillImpl]:
         return TritonKDAPrefillImpl
 
+    @classmethod
+    def create_step_builder(cls, layer_config: KDALayerConfig, ctx: StepBuilderContext) -> KDAPrefillStepBuilder:
+        return _create_prefill_step_builder(layer_config)
+
+    @classmethod
+    def step_builder_key(cls, layer_config: KDALayerConfig):
+        return _prefill_step_builder_key(layer_config)
+
 
 class ReplayKDAPrefillBackend(AttentionBackend):
     @staticmethod
@@ -259,6 +329,14 @@ class ReplayKDAPrefillBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[ReplayKDAPrefillImpl]:
         return ReplayKDAPrefillImpl
+
+    @classmethod
+    def create_step_builder(cls, layer_config: KDALayerConfig, ctx: StepBuilderContext) -> KDAPrefillStepBuilder:
+        return _create_prefill_step_builder(layer_config)
+
+    @classmethod
+    def step_builder_key(cls, layer_config: KDALayerConfig):
+        return _prefill_step_builder_key(layer_config)
 
 
 class TritonKDADecodeBackend(AttentionBackend):
@@ -274,6 +352,14 @@ class TritonKDADecodeBackend(AttentionBackend):
     def get_impl_cls() -> type[TritonKDADecodeImpl]:
         return TritonKDADecodeImpl
 
+    @classmethod
+    def create_step_builder(cls, layer_config: KDALayerConfig, ctx: StepBuilderContext) -> GDNDecodeStepBuilder:
+        return GDNDecodeStepBuilder(replay=layer_config.replay)
+
+    @classmethod
+    def step_builder_key(cls, layer_config: KDALayerConfig):
+        return layer_config.replay
+
 
 class ReplayKDADecodeBackend(AttentionBackend):
     @staticmethod
@@ -287,3 +373,11 @@ class ReplayKDADecodeBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[ReplayKDADecodeImpl]:
         return ReplayKDADecodeImpl
+
+    @classmethod
+    def create_step_builder(cls, layer_config: KDALayerConfig, ctx: StepBuilderContext) -> GDNDecodeStepBuilder:
+        return GDNDecodeStepBuilder(replay=layer_config.replay)
+
+    @classmethod
+    def step_builder_key(cls, layer_config: KDALayerConfig):
+        return layer_config.replay

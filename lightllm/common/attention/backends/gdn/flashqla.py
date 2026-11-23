@@ -1,7 +1,8 @@
 """GDN prefill with the FlashQLA chunk kernel; decode uses the Triton implementations."""
 
-from lightllm.common.attention.backend import AttentionBackend
-from .triton import GDNPrefillStepBuilder, TritonGDNPrefillImpl
+from lightllm.common.attention.backend import AttentionBackend, StepBuilderContext
+from . import GDNLayerConfig
+from .triton import GDNPrefillStepBuilder, TritonGDNPrefillImpl, create_gdn_prefill_step_builder
 
 
 class FlashQLAGDNPrefillImpl(TritonGDNPrefillImpl):
@@ -24,3 +25,11 @@ class FlashQLAGDNPrefillBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[FlashQLAGDNPrefillImpl]:
         return FlashQLAGDNPrefillImpl
+
+    @classmethod
+    def create_step_builder(cls, layer_config: GDNLayerConfig, ctx: StepBuilderContext) -> GDNPrefillStepBuilder:
+        return create_gdn_prefill_step_builder(layer_config)
+
+    @classmethod
+    def step_builder_key(cls, layer_config: GDNLayerConfig):
+        return (layer_config.replay, layer_config.state_mtp_step)

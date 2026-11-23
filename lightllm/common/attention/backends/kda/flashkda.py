@@ -12,7 +12,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-def load_flash_kda_fwd(requested: str, *, dtype: torch.dtype, ssm_dtype: str) -> Optional[Callable]:
+def load_flash_kda_fwd(requested: str, *, dtype: torch.dtype, ssm_dtype: torch.dtype) -> Optional[Callable]:
     """Return FlashKDA's fwd for the requested prefill provider, or None to use Triton.
 
     requested is "auto", "flashkda" or "triton". "auto" uses FlashKDA only for BF16 models with a
@@ -24,7 +24,7 @@ def load_flash_kda_fwd(requested: str, *, dtype: torch.dtype, ssm_dtype: str) ->
         raise ValueError(f"Unsupported KDA prefill backend: {requested}; use auto, triton, or flashkda")
     if requested == "auto" and (
         dtype != torch.bfloat16
-        or ssm_dtype != "bfloat16"
+        or ssm_dtype != torch.bfloat16
         or torch.version.hip is not None
         or not torch.cuda.is_available()
         or torch.cuda.get_device_capability() != (9, 0)

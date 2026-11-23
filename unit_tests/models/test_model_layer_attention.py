@@ -48,7 +48,9 @@ def make_model(state, model_cls=None, backend="fa3", draft=False):
         att_implementation=getattr(model_cls, "att_implementation", None),
         data_type=torch.bfloat16,
         att_state_role="main",
-        att_state_manager=SimpleNamespace(get_state=lambda **query: state),
+        att_state_manager=SimpleNamespace(
+            get_state=lambda **query: state, get_bounded_attention_states=lambda role: ()
+        ),
     )
     model.att_groups = AttentionGroups(model)
     return model
@@ -239,3 +241,35 @@ def test_deepseek_v32_layers_attend_to_the_indexer_selection(runtime_start_args,
         topk=2048,
     )
     assert layer_configs(layer) == (expected, expected)
+
+
+@pytest.mark.parametrize("prefill_backends, prefill_kernel", [(["auto"], "auto"), (["fa3", "flashkda"], "flashkda")])
+@pytest.mark.parametrize("ssm_state_mode", ["native", "replay"])
+def test_glm5_kda_layers_follow_the_linear_backend_and_state_mode(
+    runtime_start_args, monkeypatch, prefill_backends, prefill_kernel, ssm_state_mode
+):
+    from lightllm.common.attention.backends.kda import KDALayerConfig
+    from lightllm.common.attention.backends.kda import triton as kda_triton
+    from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
+
+    monkeypatch.setattr(kda_triton, "_check_prefill_kernel", lambda layer_config: None)
+    layer = Glm5NextTransformerLayerInfer.__new__(Glm5NextTransformerLayerInfer)
+    layer.is_linear_attention_layer = True
+    layer.tp_world_size_, layer.tp_linear_num_heads, layer.linear_head_dim = 1, 4, 128
+    layer.network_config_ = {"linear_attn_config": {"num_heads": 4, "head_dim": 128, "short_conv_kernel_size": 4}}
+    model = make_model(None, backend="triton")
+    model.args.llm_prefill_att_backend = prefill_backends
+    model.args.ssm_state_mode, model.args.linear_att_ssm_data_type = ssm_state_mode, "bfloat16"
+    layer.init_attention(model)
+    expected = KDALayerConfig(
+        4,
+        128,
+        4,
+        -5.0,
+        torch.bfloat16,
+        replay=ssm_state_mode == "replay",
+        ssm_dtype=torch.bfloat16,
+        prefill_kernel=prefill_kernel,
+    )
+    assert layer_configs(layer) == (expected, expected)
+    assert layer.linear_replay == (ssm_state_mode == "replay")
