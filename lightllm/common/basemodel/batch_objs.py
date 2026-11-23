@@ -52,6 +52,9 @@ class ModelInput:
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
+    # Predecessor tokens for models with n-gram embeddings, on first use of a cached prefix.
+    token_lookback: Optional[list[tuple[int, int, list[int]]]] = None
+
     def to_cuda(self):
         self.check_input()
 

@@ -114,6 +114,9 @@ def _hc_pre_norm_kernel(
     BLOCK_SPLITS: tl.constexpr,
     BLOCK_H: tl.constexpr,
     UNROLL_SINKHORN: tl.constexpr = True,
+    previous_pre=None,
+    next_pre=None,
+    SHIFT_PRE: tl.constexpr = False,
 ):
     """Fuse split reduction, Sinkhorn, stream mixing and sublayer RMSNorm."""
     token = tl.program_id(0)
@@ -138,6 +141,10 @@ def _hc_pre_norm_kernel(
         UNROLL_SINKHORN,
     )
     tl.store(post + token * STREAMS + tl.arange(0, STREAMS), post_values)
+    if SHIFT_PRE:
+        offsets = token * STREAMS + tl.arange(0, STREAMS)
+        tl.store(next_pre + offsets, pre_values)
+        pre_values = tl.load(previous_pre + offsets)
     tl.store(
         residual_mix + token * STREAMS * STREAMS + tl.arange(0, STREAMS * STREAMS),
         tl.reshape(matrix, (STREAMS * STREAMS,)),
@@ -254,6 +261,7 @@ def _finish_pre_norm(
     sinkhorn_iters,
     post_multiplier,
     run_config=None,
+    previous_pre=None,
 ):
     tokens, flattened_hidden = x.shape
     hidden = flattened_hidden // streams
@@ -261,6 +269,7 @@ def _finish_pre_norm(
     post = torch.empty((tokens, streams), dtype=torch.float32, device=x.device)
     residual_mix = torch.empty((tokens, streams, streams), dtype=torch.float32, device=x.device)
     layer_input = torch.empty((tokens, hidden), dtype=x.dtype, device=x.device)
+    next_pre = torch.empty_like(previous_pre) if previous_pre is not None else None
     _hc_pre_norm_kernel[(tokens,)](
         x,
         gemm_partial,
@@ -289,7 +298,12 @@ def _finish_pre_norm(
         BLOCK_H=triton.next_power_of_2(hidden),
         UNROLL_SINKHORN=run_config.get("unroll_sinkhorn", True) if run_config else True,
         num_warps=run_config["num_warps"] if run_config else 4,
+        previous_pre=previous_pre,
+        next_pre=next_pre,
+        SHIFT_PRE=previous_pre is not None,
     )
+    if previous_pre is not None:
+        return layer_input, residual_mix, post, next_pre
     return layer_input, residual_mix, post
 
 
@@ -514,3 +528,28 @@ def hc_post_pre_norm(
             post_multiplier,
         )
     return layer_input, updated, next_residual_mix, next_post_mix
+
+
+def hc_pre_norm_shifted(x, previous_pre, fn, scale, base, norm_weight, rms_eps, norm_eps, hc_eps, sinkhorn_iters):
+    """V4.1: mix with the previous sublayer's coefficients and publish our own."""
+    if LIGHTLLM_DISABLE_DEEPGEMM_MHC:
+        xf = x.float()
+        projection = (xf @ fn.T).unsqueeze(0)
+        sqrsum = xf.square().sum(-1).unsqueeze(0)
+    else:
+        projection, sqrsum = _hc_prenorm_projection(x, fn)
+    return _finish_pre_norm(
+        x,
+        projection,
+        sqrsum,
+        scale,
+        base,
+        norm_weight,
+        previous_pre.shape[1],
+        rms_eps,
+        norm_eps,
+        hc_eps,
+        sinkhorn_iters,
+        2.0,
+        previous_pre=previous_pre,
+    )

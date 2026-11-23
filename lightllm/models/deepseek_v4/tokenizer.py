@@ -11,6 +11,8 @@ class DeepSeekV4Tokenizer:
     # chat_template_kwargs={"thinking": true}. It has no Jinja chat_template string,
     # so advertise thinking support explicitly for tokenizer_supports_force_thinking().
     supports_thinking = True
+    supports_content_blocks = False
+    row_major_images = False
 
     def __init__(self, tokenizer, model_dir, model_config=None):
         self.tokenizer = tokenizer
@@ -72,7 +74,7 @@ class DeepSeekV4Tokenizer:
 
             image = images[image_index]
             image.start_idx = len(input_ids)
-            cache_skip = image.start_idx % 4
+            cache_skip = 0 if self.row_major_images else image.start_idx % 4
             input_ids.extend(range(image.token_id + cache_skip, image.token_id + image.token_num))
             image_index += 1
 
@@ -87,15 +89,17 @@ class DeepSeekV4Tokenizer:
             ]
         return self.tokenizer.decode(token_ids, **kwargs)
 
-    def _get_encoding_module(self):
-        if self._encoding_module is not None:
-            return self._encoding_module
-
+    def _get_encoding_path(self):
         # Prefer checkpoint customizations; use the bundled encoder when absent.
         encoding_path = os.path.join(self.model_dir, "encoding", "encoding_dsv4.py")
         if not os.path.exists(encoding_path):
             encoding_path = os.path.join(os.path.dirname(__file__), "encoding", "encoding_dsv4.py")
-        spec = importlib.util.spec_from_file_location("lightllm_deepseek_v4_encoding_dsv4", encoding_path)
+        return encoding_path
+
+    def _get_encoding_module(self):
+        if self._encoding_module is not None:
+            return self._encoding_module
+        spec = importlib.util.spec_from_file_location("lightllm_deepseek_v4_encoding_dsv4", self._get_encoding_path())
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         self._encoding_module = module
@@ -122,7 +126,7 @@ class DeepSeekV4Tokenizer:
         # JSON strings to encode each named argument separately.
         for msg in msgs:
             content = msg.get("content")
-            if isinstance(content, list):
+            if isinstance(content, list) and not self.supports_content_blocks:
                 parts = []
                 for part in content:
                     if part["type"] == "text":

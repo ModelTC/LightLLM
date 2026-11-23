@@ -58,6 +58,7 @@ torch.backends.cudnn.enabled = True
 
 
 class TpPartBaseModel:
+    token_lookback_depth = 0
     is_mtp_draft_model = False
 
     # weight class

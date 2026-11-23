@@ -117,9 +117,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             tp_world_size=tp_world_size,
         )
         states = []
-        for ratio in (4, 128):
-            if ratio not in config.compress_ratios:
-                continue
+        for ratio in sorted(set(config.compress_ratios) - {0}):
             states.append(
                 create_compressed_att_state(
                     config=config.create_compressed_config(compress_ratio=ratio),
@@ -162,12 +160,12 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
                 device=device,
             )
         ]
-        # 模型决定窗口组合：CSA 使用 W8/S4，HCA 使用 W128/S128；State 本身不识别 C4/C128。
-        for ratio, window_size in ((4, 8), (128, 128)):
+        # V4.1 的 C2 只在 KV 源层保留未闭合的 token 对；V4 的 C4/C128 各层独立。
+        for ratio, window_size in ((2, 2), (4, 8), (128, 128)):
             layers = tuple(
                 layer
                 for layer, compress_ratio in zip(model_logical_layer_ids, config.compress_ratios)
-                if compress_ratio == ratio
+                if compress_ratio == ratio and (not config.kv_source_layer_ids or layer in config.kv_source_layer_ids)
             )
             if not layers:
                 continue

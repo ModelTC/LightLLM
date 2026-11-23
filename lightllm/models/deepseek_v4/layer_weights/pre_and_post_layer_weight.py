@@ -26,6 +26,9 @@ class DeepseekV4PreAndPostLayerWeight(PreAndPostLayerWeight):
         )
         self.final_norm_weight_ = RMSNormWeight(dim=hidden, weight_name="norm.weight", data_type=self.data_type_)
 
+        if network_config.get("model_type") == "deepseek_v41":
+            return  # The V4.1 head mixes streams using the last FFN's coefficients.
+
         # final hyper-connection head (collapses the hc_mult residual streams before the lm_head)
         self.hc_head_fn_ = ParameterWeight(
             weight_name="hc_head_fn", data_type=torch.float32, weight_shape=(hc_mult, hc_mult * hidden)

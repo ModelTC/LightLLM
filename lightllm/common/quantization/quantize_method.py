@@ -84,6 +84,10 @@ class QuantizationMethod(ABC):
             num_experts=num_experts,
         )
 
+    def finalize_moe_weight(self, moe_weight):
+        """Finish formats that pack gate/up together after loading all expert shards."""
+        return
+
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
         if self._check_weight_need_quanted(weight):
             self.quantize(weight, weight_pack)

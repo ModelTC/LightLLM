@@ -53,6 +53,7 @@ def cache(monkeypatch, tmp_path, request):
                 "model_dir": str(tmp_path),
                 "penalty_counter_mode": "cpu_counter",
                 "output_constraint_mode": "none",
+                "disable_thinking_budget": True,
                 "mtp_step": mtp_step,
                 "mtp_dynamic_verify": False,
                 "enable_ep_moe": False,
@@ -1276,7 +1277,6 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     state.att_state_manager = requests.memory.manager
     state.att_state_role = "main"
     state.first_logical_layer_id = 0
-    state.first_c4_logical_layer_id = 0
     state.is_prefill = mode != "decode"
     state.microbatch_index, state.max_kv_seq_len = 0, 4096
     state.b_req_idx = torch.tensor([req_idx] if state.is_prefill else [req_idx] * tokens, device="cuda")
@@ -1301,7 +1301,7 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         select()
-        state.c4_indexer_metadata = None
+        state.indexer_metadata = None
     torch.cuda.current_stream().wait_stream(stream)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=stream):
@@ -1313,7 +1313,7 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     graph.replay()
     actual = captured.clone()
     actual_lengths = captured_lengths.clone()
-    state.c4_indexer_metadata = None
+    state.indexer_metadata = None
     eager, eager_lengths = select()
     torch.testing.assert_close(actual.sort(dim=-1).values, eager.sort(dim=-1).values, rtol=0, atol=0)
     torch.testing.assert_close(actual_lengths, eager_lengths, rtol=0, atol=0)
@@ -1358,7 +1358,6 @@ def test_forward_indices_are_isolated_and_graph_inputs_refresh(cache, is_prefill
         state.att_state_manager = requests.memory.manager
         state.att_state_role = "main"
         state.first_logical_layer_id = 0
-        state.first_c4_logical_layer_id = 0
         state.batch_size = 2
         state.max_kv_seq_len = max(lengths)
         state.input_ids = torch.zeros(2, dtype=torch.int64, device="cuda")
@@ -1467,7 +1466,6 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
     state.att_state_manager = requests.memory.manager
     state.att_state_role = "main"
     state.first_logical_layer_id = 0
-    state.first_c4_logical_layer_id = 0
     if state.is_prefill:
         state.batch_size = 1
         state.input_ids = torch.ones(3, dtype=torch.int64, device="cuda")
@@ -1894,7 +1892,6 @@ def test_image_metadata_and_embeddings_preserve_canonical_cache(cache, prefix_le
     state.att_state_manager = requests.memory.manager
     state.att_state_role = "main"
     state.first_logical_layer_id = 0
-    state.first_c4_logical_layer_id = 0
     state.input_ids = torch.tensor(input_ids[ready:], dtype=torch.int64, device="cuda")
     state.b_req_idx = torch.tensor([req_idx], dtype=torch.int32, device="cuda")
     state.b_seq_len = torch.tensor([len(input_ids)], dtype=torch.int32, device="cuda")
@@ -1956,7 +1953,6 @@ def test_prefill_metadata_does_not_read_cuda_scalars(cache, padding_tokens):
     infer_state.att_state_manager = requests.memory.manager
     infer_state.att_state_role = "main"
     infer_state.first_logical_layer_id = 0
-    infer_state.first_c4_logical_layer_id = 0
     infer_state.mem_manager = manager
     infer_state.input_ids = torch.ones(5, dtype=torch.int64, device="cuda")
     infer_state.b_req_idx = torch.tensor(req_ids, dtype=torch.int32, device="cuda")

@@ -29,6 +29,7 @@ def req(
     request = InferReq.__new__(InferReq)
     request.req_id = group_id
     request.cur_kv_len = kv_len
+    request.cur_output_len = 0 if total_len is None else total_len - input_len
     request.finish_status = FinishStatus(finish_status)
     request.infer_aborted = infer_aborted
     request.filter_mark = filter_mark
@@ -36,6 +37,7 @@ def req(
     request.paused = paused
     request.shm_req = SimpleNamespace(
         input_len=input_len,
+        shm_prompt_ids=SimpleNamespace(arr=[0] * input_len),
         group_req_id=group_id,
         sample_params=SimpleNamespace(
             high_priority_request=router_priority,

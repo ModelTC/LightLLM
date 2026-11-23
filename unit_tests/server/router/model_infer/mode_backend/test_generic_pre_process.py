@@ -10,6 +10,7 @@ def _patch_empty_input_context(monkeypatch):
         alloc=lambda size: torch.empty((size,), dtype=torch.int32),
     )
     infer_context = SimpleNamespace(
+        backend=SimpleNamespace(model=SimpleNamespace(token_lookback_depth=0)),
         args=SimpleNamespace(page_size=1),
         req_manager=SimpleNamespace(
             HOLD_REQUEST_ID=-1,

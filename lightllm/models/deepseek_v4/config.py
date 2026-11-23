@@ -26,13 +26,17 @@ class DSV4AttentionConfig:
     tp_rank: int = 0
     tp_world_size: int = 1
 
+    # V4.1 consumers read compressed KV and indexer keys from the preceding source layer.
+    kv_source_layer_ids: tuple[int, ...] = ()
+
     # 压缩 KV 按原始 token 的 256-token 块存储，KV 与 indexer 不得跨块拆开。
     compressed_kv_token_alignment: ClassVar[int] = 256
 
     def __post_init__(self) -> None:
         assert self.logical_layer_ids and len(set(self.logical_layer_ids)) == len(self.logical_layer_ids)
         assert len(self.logical_layer_ids) == len(self.compress_ratios)
-        assert all(ratio in (0, 4, 128) for ratio in self.compress_ratios)
+        allowed_ratios = (0, 1, 2) if self.kv_source_layer_ids else (0, 4, 128)
+        assert all(ratio in allowed_ratios for ratio in self.compress_ratios)
         assert self.head_dim > self.rope_head_dim > 0 and (self.head_dim - self.rope_head_dim) % 64 == 0
         assert self.indexer_head_dim > 0 and self.sliding_window > 0
         assert 0 <= self.tp_rank < self.tp_world_size
@@ -50,17 +54,29 @@ class DSV4AttentionConfig:
 
     def create_compressed_config(self, compress_ratio: int) -> CompressedAttentionConfig:
         """按模型层组合创建一种压缩历史配置，供 State 创建和 backend 使用。"""
+        layers = [
+            layer for layer, ratio in zip(self.logical_layer_ids, self.compress_ratios) if ratio == compress_ratio
+        ]
+        if self.kv_source_layer_ids:
+            groups = []
+            for layer in layers:
+                if layer in self.kv_source_layer_ids:
+                    groups.append([])
+                groups[-1].append(layer)
+            # DeepGEMM scores one slab of 64 indexer keys per physical block.
+            block_tokens = 64 * compress_ratio
+            indexer_dim = self.indexer_head_dim
+        else:
+            groups = [(layer,) for layer in layers]
+            block_tokens = self.compressed_kv_token_alignment
+            indexer_dim = self.indexer_head_dim if compress_ratio == 4 else 0
         return CompressedAttentionConfig(
-            logical_layer_groups=tuple(
-                (layer,)
-                for layer, ratio in zip(self.logical_layer_ids, self.compress_ratios)
-                if ratio == compress_ratio
-            ),
+            logical_layer_groups=tuple(tuple(group) for group in groups),
             compress_ratio=compress_ratio,
             kv_dim=self.head_dim,
             rope_dim=self.rope_head_dim,
-            block_token_size=self.compressed_kv_token_alignment,
-            indexer_dim=self.indexer_head_dim if compress_ratio == 4 else 0,
+            block_token_size=block_tokens,
+            indexer_dim=indexer_dim,
             tp_rank=self.tp_rank,
             tp_world_size=self.tp_world_size,
         )
@@ -75,6 +91,7 @@ def create_attention_config(
     ratios = model_config["compress_ratios"]
     return DSV4AttentionConfig(
         logical_layer_ids=model_logical_layer_ids,
+        kv_source_layer_ids=tuple(model_config.get("kv_source_layer_ids", ())),
         compress_ratios=tuple(ratios[layer] if layer < len(ratios) else 0 for layer in model_logical_layer_ids),
         head_dim=model_config["head_dim"],
         rope_head_dim=model_config["qk_rope_head_dim"],

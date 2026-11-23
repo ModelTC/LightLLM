@@ -161,6 +161,7 @@ class InferenceContext:
             else:
                 self._hybrid_att_free_req(free_token_index=free_token_index, req=req)
                 assert len(req.hybrid_len_to_big_page_id) == 0
+        req.token_history_ready = False
         req.cur_kv_len = 0
         req.hold_kv_len = 0
         # 待释放列表已持有 CPU 快照或 GPU 行视图；reset 清理扩展状态，不改写 GPU 表。
@@ -615,6 +616,7 @@ class InferReq:
         if self.sampling_param.pd_decode_node is not None:
             self.pd_trans_kv_start_index = self.sampling_param.pd_decode_node.ready_kv_len
 
+        self.token_history_ready = False
         self.cur_kv_len = 0
         self.cur_output_len = 0
         self.prompt_selected_logprobs = PromptSelectedLogprobsExt(self)
@@ -831,6 +833,14 @@ class InferReq:
 
     def get_input_token_ids(self):
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
+
+    def get_token_lookback(self, depth):
+        if self.token_history_ready:
+            return None
+        self.token_history_ready = True
+        start = self.cur_kv_len
+        if start:
+            return self.req_idx, start, self.get_input_token_ids()[max(0, start - depth) : start].tolist()
 
     def get_chuncked_input_token_ids(self):
         chunked_start = self.cur_kv_len

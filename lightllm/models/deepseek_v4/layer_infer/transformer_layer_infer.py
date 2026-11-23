@@ -30,6 +30,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             setattr(cls, "_prefill_aux_stream", stream)
         return stream
 
+    q_head_norm = True
+    kv_bf16_rounding = False
+
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.eps_ = network_config["rms_norm_eps"]
@@ -367,6 +370,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             swa_kv_buffer=swa,
             swa_page_token_num=state.config.page_token_size,
             req_to_swa=state.get_layer_view(logical_layer_id=self.layer_num_),
+            bf16_rounding=self.kv_bf16_rounding,
         )
 
     def _get_qkv(
@@ -389,7 +393,14 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         else:
             q = self.alloc_tensor((T, self.flashmla_q_head_num_, self.head_dim_), dtype=q_in.dtype, device=q_in.device)
             q[:, self.tp_q_head_num_ :, :].zero_()
-        fused_q_norm_rope(q_in, q[:, : self.tp_q_head_num_, :], self.eps_, self.freqs_cis, infer_state.position_ids)
+        fused_q_norm_rope(
+            q_in,
+            q[:, : self.tp_q_head_num_, :],
+            self.eps_,
+            self.freqs_cis,
+            infer_state.position_ids,
+            apply_norm=self.q_head_norm,
+        )
         self._norm_rope_and_cache_kv(qkv[:, -self.head_dim_ :], infer_state, layer_weight)
         return q, qa, input
 

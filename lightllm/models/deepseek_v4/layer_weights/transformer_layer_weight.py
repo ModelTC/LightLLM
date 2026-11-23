@@ -52,7 +52,7 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         self.num_fused_shared_experts = 0
         if args.enable_fused_shared_experts and not args.enable_ep_moe:
             moe_quant = self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe")
-            if moe_quant.method_name != "fp4fp8-b32-deepgemm":
+            if moe_quant.method_name not in ("fp4fp8-b32-deepgemm", "mxfp4w4a16-b32-marlin"):
                 self.num_fused_shared_experts = int(cfg.get("n_shared_experts", 1))
 
     def _init_weight(self):
@@ -175,6 +175,10 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             tp_rank=0,
             tp_world_size=1,
         )
+        self._init_indexer_k()
+
+    def _init_indexer_k(self):
+        p = f"{self.prefix}.attn.indexer"
         coff = 2  # indexer compressor always uses ratio 4 (overlap)
         # wkv/wgate share the same input -> one fused bf16 GEMM producing the [kv | gate] layout
         # directly (same as the attention compressor_wkv_gate_).
@@ -302,7 +306,12 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         matrix_weights = (
             weight for weight in self.__dict__.values() if isinstance(weight, (MMWeightTpl, BMMWeightTpl))
         )
-        prepare_fp8_weights(weights, matrix_weights, self.data_type_)
+        prepare_fp8_weights(
+            weights,
+            matrix_weights,
+            self.data_type_,
+            (self.network_config_.get("quantization_config") or {}).get("weight_block_size", [128, 128])[0],
+        )
         if self.num_fused_shared_experts > 0:
             self._rename_shared_experts(weights)
 
