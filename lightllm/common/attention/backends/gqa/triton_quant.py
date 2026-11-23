@@ -10,6 +10,7 @@ from lightllm.common.attention.backend import (
     AttentionBatch,
     AttentionImpl,
     AttentionStepBuilder,
+    StepBuilderContext,
     TensorAllocator,
 )
 from .. import keep_for_cuda_graph
@@ -260,6 +261,12 @@ class TritonQuantGQAPrefillBackend(AttentionBackend):
     def get_impl_cls() -> type[TritonQuantGQAPrefillImpl]:
         return TritonQuantGQAPrefillImpl
 
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: GQALayerConfig, ctx: StepBuilderContext
+    ) -> TritonQuantGQAPrefillStepBuilder:
+        return TritonQuantGQAPrefillStepBuilder()
+
 
 class TritonQuantGQADecodeBackend(AttentionBackend):
     @staticmethod
@@ -273,3 +280,14 @@ class TritonQuantGQADecodeBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[TritonQuantGQADecodeImpl]:
         return TritonQuantGQADecodeImpl
+
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: GQALayerConfig, ctx: StepBuilderContext
+    ) -> TritonQuantGQADecodeStepBuilder:
+        # Only the int8 decode kernel has a diverse-sampling variant.
+        return TritonQuantGQADecodeStepBuilder(diverse=ctx.diverse_decode and layer_config.kv_quant == "int8_group")
+
+    @classmethod
+    def step_builder_key(cls, layer_config: GQALayerConfig):
+        return layer_config.kv_quant

@@ -9,10 +9,15 @@ from lightllm.common.attention.backend import (
     AttentionBatch,
     AttentionImpl,
     AttentionStepBuilder,
+    StepBuilderContext,
     TensorAllocator,
 )
+from lightllm.utils.envs_utils import enable_env_vars
+from lightllm.utils.log_utils import init_logger
 from .. import keep_for_cuda_graph
 from . import GQALayerConfig, GQALayerInputs
+
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -395,6 +400,50 @@ class FA3GQADecodeImpl(AttentionImpl[GQALayerConfig, FA3GQADecodeStepArgs, GQALa
         return out
 
 
+def fa3_page_size(layer_config: GQALayerConfig, ctx: StepBuilderContext) -> int:
+    """The page size FA3 runs with for this layer config: the cache's, except 1 for an FP8 cache."""
+    if layer_config.kv_quant is None:
+        return ctx.page_size
+    # TODO: use the cache's page size once FP8 FA3 supports multi-token pages.
+    logger.warning(f"FP8 FA3 temporarily uses page size 1 with model page_size={ctx.page_size}")
+    return 1
+
+
+class FA3PageTables:
+    """Fixed page-table storage for FA3 decode, one buffer per microbatch, allocated on first use.
+
+    Each buffer holds ctx.max_decode_rows rows of pages for ctx.max_seq_len tokens and is shared
+    by name with every FA3 decode step builder of the process.
+    """
+
+    def __init__(self, ctx: StepBuilderContext, page_size: int) -> None:
+        self.ctx = ctx
+        self.page_size = page_size
+        self._buffers: Optional[list[torch.Tensor]] = None
+
+    def view(self, rows: int, max_kv_len: int, microbatch_index: int) -> torch.Tensor:
+        """Return a contiguous [rows, pages] view of microbatch_index's buffer."""
+        ctx = self.ctx
+        if self._buffers is None:
+            # Allocated lazily, so a prefill-only node never allocates decode-only storage.
+            numel = ctx.max_decode_rows * triton.cdiv(ctx.max_seq_len, self.page_size)
+            self._buffers = [
+                ctx.get_workspace(f"fa3_page_table_{index}", numel, torch.int32)
+                for index in range(ctx.microbatch_count)
+            ]
+        if rows > ctx.max_decode_rows:
+            raise RuntimeError(f"FA3 attention batch size {rows} exceeds page-table capacity {ctx.max_decode_rows}")
+        if max_kv_len > ctx.max_seq_len:
+            raise RuntimeError(f"FA3 max KV sequence length {max_kv_len} exceeds page-table capacity {ctx.max_seq_len}")
+        max_pages = triton.cdiv(max_kv_len, self.page_size)
+        return self._buffers[microbatch_index][: rows * max_pages].view(rows, max_pages)
+
+
+def _requires_cpu_cache_sync() -> bool:
+    # 设为 1 / TRUE / ON 时，FA3 与 CPU cache 搬运在 GPU 上互相等待。
+    return enable_env_vars("LIGHTLLM_FA3_CPU_CACHE_SYNC")
+
+
 class FA3GQAPrefillBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
@@ -407,6 +456,18 @@ class FA3GQAPrefillBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[FA3GQAPrefillImpl]:
         return FA3GQAPrefillImpl
+
+    @classmethod
+    def create_step_builder(cls, layer_config: GQALayerConfig, ctx: StepBuilderContext) -> FA3GQAPrefillStepBuilder:
+        return FA3GQAPrefillStepBuilder(page_size=fa3_page_size(layer_config, ctx))
+
+    @classmethod
+    def step_builder_key(cls, layer_config: GQALayerConfig):
+        return layer_config.kv_quant
+
+    @classmethod
+    def requires_cpu_cache_sync(cls) -> bool:
+        return _requires_cpu_cache_sync()
 
 
 class FA3GQADecodeBackend(AttentionBackend):
@@ -421,3 +482,16 @@ class FA3GQADecodeBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[FA3GQADecodeImpl]:
         return FA3GQADecodeImpl
+
+    @classmethod
+    def create_step_builder(cls, layer_config: GQALayerConfig, ctx: StepBuilderContext) -> FA3GQADecodeStepBuilder:
+        page_size = fa3_page_size(layer_config, ctx)
+        return FA3GQADecodeStepBuilder(page_size=page_size, page_table_view=FA3PageTables(ctx, page_size).view)
+
+    @classmethod
+    def step_builder_key(cls, layer_config: GQALayerConfig):
+        return layer_config.kv_quant
+
+    @classmethod
+    def requires_cpu_cache_sync(cls) -> bool:
+        return _requires_cpu_cache_sync()

@@ -8,6 +8,7 @@ from lightllm.common.attention.backend import (
     AttentionImpl,
     AttentionStepBuilder,
     AttentionBatch,
+    StepBuilderContext,
     TensorAllocator,
 )
 from .. import keep_for_cuda_graph
@@ -379,6 +380,10 @@ class TritonGQAPrefillBackend(AttentionBackend):
     def get_impl_cls() -> type[TritonGQAPrefillImpl]:
         return TritonGQAPrefillImpl
 
+    @classmethod
+    def create_step_builder(cls, layer_config: GQALayerConfig, ctx: StepBuilderContext) -> TritonGQAPrefillStepBuilder:
+        return TritonGQAPrefillStepBuilder()
+
 
 class TritonGQADecodeBackend(AttentionBackend):
     @staticmethod
@@ -392,3 +397,7 @@ class TritonGQADecodeBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[TritonGQADecodeImpl]:
         return TritonGQADecodeImpl
+
+    @classmethod
+    def create_step_builder(cls, layer_config: GQALayerConfig, ctx: StepBuilderContext) -> TritonGQADecodeStepBuilder:
+        return TritonGQADecodeStepBuilder()
