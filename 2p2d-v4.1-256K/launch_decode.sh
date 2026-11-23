@@ -42,5 +42,6 @@ exec /opt/conda/bin/python -u -m "${LIGHTLLM_SERVER_MODULE:-lightllm.server.api_
     --mem_fraction 0.72 \
     --graph_max_batch_size 96 \
     --graph_split_batch_size 16 \
+    --sampling_backend flashinfer \
     --enable_profiling torch_profiler \
     "${WEIGHT_CACHE_ARGS[@]}"

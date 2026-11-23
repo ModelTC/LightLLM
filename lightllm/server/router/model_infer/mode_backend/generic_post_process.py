@@ -135,7 +135,8 @@ def _top_p_top_k_sample(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     sampling_backend = get_env_start_args().sampling_backend
 
-    if sampling_backend == "triton":
+    # Keep explicit request generators on the seed-aware sampler.
+    if sampling_backend == "triton" or (sampling_backend == "flashinfer" and exist_req_use_random_seed):
         probs_sort, probs_idx = _top_p_top_k(probs, b_top_ps, b_top_ks)
         if not exist_req_use_random_seed:
             sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
@@ -158,7 +159,7 @@ def _top_p_top_k_sample(
         int64_batch_next_token_ids = torch.empty_like(batch_next_token_ids, dtype=torch.int64)
         int64_batch_next_token_ids[:] = batch_next_token_ids
         batch_next_token_probs = torch.gather(probs, dim=1, index=int64_batch_next_token_ids.view(-1, 1))
-        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
+        return int64_batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
     else:
         assert False, "Unsupported sampling backend for top_p_top_k_sample"
 
