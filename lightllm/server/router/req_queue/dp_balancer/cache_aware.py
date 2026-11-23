@@ -2,7 +2,8 @@
 
 The router owns this heuristic index. It records dispatch history rather than querying
 the infer processes' radix trees, so stale entries can only affect placement, not KV
-cache correctness. Prefill load uses remaining prompt tokens; other modes count requests.
+cache correctness. Host pages matched by the cache manager are reusable on every local
+DP rank. Prefill load uses remaining prompt tokens; other modes count requests.
 """
 
 from __future__ import annotations
@@ -101,9 +102,12 @@ class DpCacheAwareBalancer(DpBalancer):
         inner_queues: List[BaseQueue],
         run_mode: str,
         config: Optional[DpCacheAwareConfig] = None,
+        *,
+        enable_host_cache: bool = False,
     ) -> None:
         super().__init__(dp_size_in_node, inner_queues)
         self.run_mode = run_mode
+        self.use_host_cache = run_mode == "prefill" and enable_host_cache
         self.config = config or DpCacheAwareConfig()
         self.prefix_cache = TokenPrefixCache(
             block_size=self.config.block_size,
@@ -118,8 +122,13 @@ class DpCacheAwareBalancer(DpBalancer):
         prefill = self.run_mode == "prefill"
         all_dp_indexes = range(self.dp_size_in_node)
         if prefill:
-            # Queued requests have not matched real KV yet; dispatch history is only a routing hint.
-            total_load_per_dp = [sum(req.input_len for req in queue.waiting_req_list) for queue in self.inner_queues]
+            total_load_per_dp = [
+                sum(
+                    max(1, req.input_len - req.get_host_cache_match_len()) if self.use_host_cache else req.input_len
+                    for req in queue.waiting_req_list
+                )
+                for queue in self.inner_queues
+            ]
             free_req_slots = [queue.running_max_req_size - len(queue.waiting_req_list) for queue in self.inner_queues]
             if current_batch is not None:
                 for req in current_batch.reqs:
@@ -138,7 +147,12 @@ class DpCacheAwareBalancer(DpBalancer):
         for req_group in reqs_waiting_for_dp_index:
             first_req = req_group[0]
             group_size = len(req_group)
-            group_load = sum(req.input_len for req in req_group) if prefill else group_size
+            host_lens = [req.get_host_cache_match_len() for req in req_group] if self.use_host_cache else []
+            group_load = group_size
+            if host_lens:
+                group_load = sum(req.input_len - host_len for req, host_len in zip(req_group, host_lens))
+            elif prefill:
+                group_load = sum(req.input_len for req in req_group)
             dp_indexes = all_dp_indexes
             if prefill:
                 # Prefer ranks that can admit the whole group. Queue by token load if all ranks are full.
@@ -163,7 +177,13 @@ class DpCacheAwareBalancer(DpBalancer):
                     cache_dp_index = matched_dp_index
 
             idle_dp_indexes = [dp for dp in dp_indexes if total_load_per_dp[dp] == 0]
-            if idle_dp_indexes:
+            if host_lens and host_lens[0] > 0 and all(host_len >= matched_token_count for host_len in host_lens):
+                # The shared host pool covers the known prefix on every eligible rank.
+                # Keep GPU history as a tie-breaker to avoid a redundant copy.
+                selected_dp_index = min(
+                    dp_indexes, key=lambda dp: (total_load_per_dp[dp], -free_req_slots[dp], dp != cache_dp_index)
+                )
+            elif idle_dp_indexes:
                 if cache_dp_index in idle_dp_indexes:
                     selected_dp_index = cache_dp_index
                 else:
@@ -175,7 +195,11 @@ class DpCacheAwareBalancer(DpBalancer):
                 if cache_dp_index is None:
                     selected_dp_index = least_loaded_dp_index
                 else:
-                    cache_projected_load = total_load_per_dp[cache_dp_index] + group_load
+                    gpu_only_savings = sum(
+                        max(0, min(matched_token_count, req.input_len - 1) - host_len)
+                        for req, host_len in zip(req_group, host_lens)
+                    )
+                    cache_projected_load = total_load_per_dp[cache_dp_index] + group_load - gpu_only_savings
                     least_projected_load = total_load_per_dp[least_loaded_dp_index] + group_load
                     if cache_projected_load > least_projected_load * self.config.balance_rel_threshold:
                         selected_dp_index = least_loaded_dp_index

@@ -390,6 +390,15 @@ class Req(ctypes.Structure):
     def get_prompt_ids_numpy(self):
         return self.shm_prompt_ids.arr[: self.input_len]
 
+    def get_host_cache_match_len(self) -> int:
+        """Prefix staged in the node-wide host pool before router admission."""
+        if self.sample_params.disable_prompt_cache or self.sample_params.prompt_logprobs >= 0:
+            return 0
+        page_count = self.cpu_cache_match_page_indexes.size
+        if not page_count:
+            return 0
+        return min(self.token_hash_page_len_list.items[page_count - 1], self.input_len - 1)
+
     def to_router_rpc_obj(self):
         assert hasattr(self, "multimodal_params")
         return (
