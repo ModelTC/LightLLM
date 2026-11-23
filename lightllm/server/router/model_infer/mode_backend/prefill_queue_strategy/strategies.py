@@ -11,6 +11,8 @@ def remaining_prefill_tokens(req: "InferReq") -> int:
 
 
 def infer_priority(req: "InferReq") -> int:
+    # 默认为 0；PD Master 在 Decode 容量不足、重新发起第二段及后续生成时设为 -1。
+    # 这是生成分段的内部优先级，普通 chunked prefill 续算不会因此自动变为 -1。
     return req.shm_req.sample_params.infer_high_priority
 
 
@@ -84,19 +86,30 @@ class HRRNPrefillStrategy(PrefillQueueStrategy):
 
 
 class HRRNResumePrefillStrategy(HRRNPrefillStrategy):
-    """Give one overdue PD continuation its original chunk budget ahead of normal HRRN work."""
+    """在 HRRN 基础上，周期性将一个过久未发 KV 页的 PD prefill 续算请求移到普通队列头部。
+
+    只调整排队顺序，不修改 infer_high_priority 或 chunk 大小；实际执行仍受后续预算和容量检查约束。
+    """
 
     def __init__(self, backend):
         super().__init__(backend)
+        # 下次允许额外提权的累计 prefill token 门槛；初始为 0，首次检查无需等待冷却。
+        # 提权后会更新为当前累计值加间隔，并不是一直为 0。
         self.next_resume_priority_tokens = 0
 
     def reorder_prefill(self, prefill_reqs: List["InferReq"]) -> List["InferReq"]:
+        # 先保留父类的高优先级分组及 HRRN 排序，再尝试额外提升一个普通请求。
         ordered = super().reorder_prefill(prefill_reqs)
+        # 本后端累计提交执行的 prefill token 数，用作工作量时钟，不是墙上时间。
         processed = self.backend.processed_prefill_tokens
         if processed < self.next_resume_priority_tokens:
             return ordered
 
+        # 提权最多到普通队列头部，不能越过 infer_high_priority < 0 的内部高优先级请求。
         first_normal = next((index for index, req in enumerate(ordered) if infer_priority(req) >= 0), len(ordered))
+        # 只考虑发过 KV 页且 prefill 尚未完成的普通请求；仅命中缓存不代表发过页。
+        # pd_last_page_processed_tokens 是最近发布 KV 页任务时的累计 token 数，不是传输完成时间。
+        # 该值越小，距上次发页越久；相同时按请求 ID、队列位置确定顺序。
         oldest = min(
             (
                 (req.pd_last_page_processed_tokens, req.req_id, index)
@@ -109,9 +122,11 @@ class HRRNResumePrefillStrategy(HRRNPrefillStrategy):
         )
         if oldest is not None:
             last_page_tokens, _, index = oldest
-            # Measure the gap and the reservation interval in local token work.
+            # 用四个 batch token 上限的工作量同时限制请求等待门槛和相邻两次提权的间隔。
+            # 这不等于固定经过四轮调度：每轮实际提交的 token 数可能不足 batch_max_tokens。
             interval = 4 * self.backend.batch_max_tokens
             if processed - last_page_tokens >= interval:
                 ordered.insert(first_normal, ordered.pop(index))
+                # 本次调整顺序后就进入冷却，不等待请求实际执行；没有合格候选时不更新门槛。
                 self.next_resume_priority_tokens = processed + interval
         return ordered
