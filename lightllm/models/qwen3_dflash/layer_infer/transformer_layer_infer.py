@@ -13,7 +13,11 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
     The model path is built from two explicit layer primitives:
     - commit accepted target hidden rows into draft KV
     - run one non-causal draft block over prefix KV + scratch KV
+
+    Only decode attends; its attention is non-causal, which only FA3 supports so far.
     """
+
+    attends_in_prefill = False
 
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)

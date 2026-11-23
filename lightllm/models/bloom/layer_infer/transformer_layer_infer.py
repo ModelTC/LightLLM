@@ -1,13 +1,12 @@
-from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 from typing import Tuple
 from lightllm.common.basemodel import TransformerLayerInferTpl
+from lightllm.common.basemodel.layer_infer.gqa_attention import GQAAttentionLayerMixin
 from lightllm.models.bloom.layer_weights.transformer_layer_weight import BloomTransformerLayerWeight
 from lightllm.common.basemodel import InferStateInfo
-from lightllm.common.basemodel.attention.base_att import AttControl
 
 
-class BloomTransformerLayerInfer(TransformerLayerInferTpl):
+class BloomTransformerLayerInfer(GQAAttentionLayerMixin, TransformerLayerInferTpl):
     """ """
 
     def __init__(self, layer_num, network_config):
@@ -21,59 +20,11 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         self.embed_dim_ = network_config["n_embed"]
         return
 
-    def _context_attention_kernel(
-        self,
-        q: torch.Tensor,
-        kv: torch.Tensor,
-        infer_state: InferStateInfo,
-        layer_weight: BloomTransformerLayerWeight,
-        out=None,
-    ) -> torch.Tensor:
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
-        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = infer_state.prefill_att_state.prefill_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            att_control=AttControl(
-                use_alibi=True,
-                tp_alibi=layer_weight.tp_alibi,
-                kv_scales=state.get_layer_kv_scales(self.layer_num_),
-            ),
-            alloc_func=self.alloc_tensor,
-        )
-        o_tensor = o_tensor.view(q.shape)
-        return o_tensor
+    def _gqa_layer_config_fields(self):
+        return dict(has_alibi=True)
 
-    def _token_attention_kernel(
-        self, q: torch.Tensor, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None
-    ) -> torch.Tensor:
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
-        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = infer_state.decode_att_state.decode_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            att_control=AttControl(
-                use_alibi=True,
-                tp_alibi=layer_weight.tp_alibi,
-                kv_scales=state.get_layer_kv_scales(self.layer_num_),
-            ),
-            alloc_func=self.alloc_tensor,
-        )
-        return o_tensor.view(q.shape)
+    def _gqa_layer_weights(self, layer_weight: BloomTransformerLayerWeight):
+        return dict(alibi_slopes=layer_weight.tp_alibi)
 
     def _att_norm(
         self, input: torch.Tensor, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight

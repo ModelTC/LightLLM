@@ -2,7 +2,6 @@ from typing import TYPE_CHECKING
 import os
 import json
 import torch
-from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
 from lightllm.common.build_utils import repair_config
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.gemma4.infer_struct import Gemma4InferStateInfo
@@ -25,8 +24,10 @@ if TYPE_CHECKING:
 
 
 class Gemma4TpPartModel(LlamaTpPartModel):
-    # Still on the attention adapters until its sliding-window and image-span layers migrate to AttentionGroups.
-    uses_attention_groups = False
+    # Sliding layers (head_dim 256, sliding window, image spans in prefill) and full-attention layers
+    # (head_dim 512) all run on Triton: FA3 caps head_dim at 256. Triton's step builder does not depend
+    # on the layer config, so both kinds share one group and one set of step args.
+    att_implementation = "triton"
 
     pre_and_post_weight_class = Gemma4PreAndPostLayerWeight
     transformer_weight_class = Gemma4TransformerLayerWeight
@@ -140,24 +141,6 @@ class Gemma4TpPartModel(LlamaTpPartModel):
             device="meta",
         )
         return [state]
-
-    def _init_att_backend(self):
-        # Gemma-4 has per-layer heterogeneous attention: sliding layers use
-        # (head_dim=256, kv_heads=16); full-attn layers use (head_dim=512,
-        # kv_heads=4, k_eq_v). FA3 caps head_dim at 256 and flashinfer plans
-        # once per infer_state on a single shape — both unworkable for the
-        # heterogeneous layout. Both layer kinds go through triton.
-        #
-        # Primary backend = sliding layers. Their prefill also attends
-        # bidirectionally inside image spans (SWA + image bidi in one pass),
-        # which the Triton backend supports.
-        self.prefill_att_backend = TritonAttBackend(model=self)
-        self.decode_att_backend = TritonAttBackend(model=self)
-
-    def _init_att_backend1(self):
-        # Secondary backend = full-attn layers (head_dim=512, plain causal).
-        self.prefill_att_backend1 = TritonAttBackend(model=self)
-        self.decode_att_backend1 = TritonAttBackend(model=self)
 
     def _init_custom(self):
         self._init_to_get_rotary_gemma4()

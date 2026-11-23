@@ -8,7 +8,7 @@ import json
 import torch
 import torch.nn.functional as F
 import triton
-from typing import final, List, TYPE_CHECKING
+from typing import final, List, Optional, TYPE_CHECKING
 from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
@@ -79,6 +79,9 @@ class TpPartBaseModel:
     # their prefill_att_backend/decode_att_backend slots are then unused.
     uses_attention_groups = False
     att_groups: AttentionGroups = None
+    # The attention implementation (lightllm.common.attention.selector) all its layers use, overriding
+    # --llm_prefill_att_backend/--llm_decode_att_backend; None follows them.
+    att_implementation: Optional[str] = None
 
     def __init__(self, kvargs):
         self.args = get_env_start_args()
@@ -195,10 +198,8 @@ class TpPartBaseModel:
         self._init_hidden_collector()
         role = self.att_state_role
         if self.att_groups is not None:
-            for name, backends in self.att_groups.groups.items():
-                logger.info(
-                    f"{role} attention group {name}: {backends['prefill'].get_name()} / {backends['decode'].get_name()}"
-                )
+            for name in self.att_groups.groups:
+                logger.info(f"{role} attention group (prefill+decode): {name}")
         if self.prefill_att_backend is not None:
             logger.info(
                 f"{role} prefill/decode attention: {type(self.prefill_att_backend).__name__} / "

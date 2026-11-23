@@ -1,10 +1,8 @@
-import dataclasses
 from lightllm.common.attention_state.full_att import FullAttentionState
 import math
 import torch
 import torch.nn as nn
 
-from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
@@ -34,6 +32,8 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         layer_type = network_config["layer_types"][layer_num]
         self.is_sliding = layer_type == "sliding_attention"
+        # Sliding layers' prefill also attends bidirectionally inside image spans (SWA + image bidi in one pass).
+        self.prefill_image_spans = self.is_sliding
 
         # Some E-series checkpoints leave num_global_key_value_heads = null;
         # HF treats that as "fall back to num_key_value_heads".
@@ -174,33 +174,13 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     # ----- Attention kernels (sliding window + per-layer KV reshape) ---
 
-    def _att_control(self, kv_scales=None):
+    def _gqa_layer_config_fields(self):
         if self.is_sliding and self.sliding_window_ > 0:
-            w = self.sliding_window_ - 1
-            return AttControl(
-                use_sliding_window=True, sliding_window=(w, 0), logical_layer_id=self.layer_num_, kv_scales=kv_scales
-            )
-        return AttControl(
-            use_sliding_window=False, sliding_window=(-1, -1), logical_layer_id=self.layer_num_, kv_scales=kv_scales
-        )
+            return dict(sliding_window=(self.sliding_window_ - 1, 0))
+        return {}
 
-    def _get_layer_kv_scales(self, infer_state: InferStateInfo):
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        return state.get_layer_kv_scales(self.layer_num_)
-
-    def _get_layer_kv(self, infer_state: InferStateInfo):
+    def _gqa_kv_cache(self, state: FullAttentionState):
         # 直接用当前逻辑层号访问；共享层由 State 的 logical_layer_groups 映射到生产层的物理 KV。
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
         _k_raw, _v_raw = state.get_layer_view(logical_layer_id=self.layer_num_)
         # _k_raw / _v_raw shape (S, cache_slot_num, cache_slot_dim). Use .view
         # (not .reshape) so any non-contiguous layout from a future mem_manager
@@ -218,60 +198,6 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         _k = _k_raw[:, :used_cache_slots, :].view(-1, kv_heads, head_dim)
         _v = _v_raw[:, :used_cache_slots, :].view(-1, kv_heads, head_dim)
         return _k, _v
-
-    def _context_attention_kernel(
-        self,
-        q: torch.Tensor,
-        kv,
-        infer_state: InferStateInfo,
-        layer_weight: Gemma4TransformerLayerWeight,
-        out=None,
-    ) -> torch.Tensor:
-        _k, _v = self._get_layer_kv(infer_state)
-        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        if self.is_sliding:
-            # Sliding layers attend bidirectionally inside image spans (SWA + image bidi in one pass);
-            # the primary backend is always Triton, which supports it.
-            o_tensor = infer_state.prefill_att_state.prefill_att(
-                q=_q,
-                k=_k,
-                v=_v,
-                att_control=dataclasses.replace(
-                    self._att_control(self._get_layer_kv_scales(infer_state)), image_spans=True
-                ),
-                alloc_func=self.alloc_tensor,
-            )
-            return o_tensor.view(q.shape)
-
-        # Full-attn layers: head_dim=512, no SWA, no image bidi — standard
-        # triton via backend1.
-        o_tensor = infer_state.prefill_att_state1.prefill_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            att_control=self._att_control(self._get_layer_kv_scales(infer_state)),
-            alloc_func=self.alloc_tensor,
-        )
-        return o_tensor.view(q.shape)
-
-    def _token_attention_kernel(
-        self,
-        q: torch.Tensor,
-        infer_state: InferStateInfo,
-        layer_weight: Gemma4TransformerLayerWeight,
-        out=None,
-    ) -> torch.Tensor:
-        _k, _v = self._get_layer_kv(infer_state)
-        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        att_state = infer_state.decode_att_state if self.is_sliding else infer_state.decode_att_state1
-        o_tensor = att_state.decode_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            att_control=self._att_control(self._get_layer_kv_scales(infer_state)),
-            alloc_func=self.alloc_tensor,
-        )
-        return o_tensor.view(q.shape)
 
     # ----- FFN (Gemma gelu-tanh, fused gate_up + down) -----------------
 
