@@ -31,6 +31,8 @@ from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
 class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
+    fp8_sparse_prefill_workspaces = None
+
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.eps_ = network_config["rms_norm_eps"]
@@ -67,16 +69,16 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             self.q_lora_rank = network_config["q_lora_rank"]
             self.kv_lora_rank = network_config["kv_lora_rank"]
             self.v_head_dim = network_config["v_head_dim"]
-            self.softmax_scale = self.qk_nope_head_dim ** -0.5
+            self.softmax_scale = self.qk_nope_head_dim**-0.5
             self.indexer = Glm5NextNsaInfer(
                 layer_idx=self.layer_num_,
                 network_config=self.network_config_,
                 tp_world_size=self.tp_world_size_,
             )
 
-    def init_attention(self, model) -> None:
+    def init_attention(self, model, select_impls) -> None:
         if self.is_linear_attention_layer:
-            return self._init_kda_attention(model)
+            return self._init_kda_attention(model, select_impls)
         # NoPE sparse MLA: absorbed queries attend to the indexer's selected latent slots, which it
         # restricts to visible keys.
         config = SparseMLALayerConfig(
@@ -90,7 +92,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             kpool=self.network_config_["index_kpool"],
             causal=False,
         )
-        self.attn = model.att_groups.create_attention(config, config)
+        if config.kv_cache_format == "fp8_group64_e8m0":
+            self.fp8_sparse_prefill_workspaces = model.fp8_sparse_prefill_workspaces
+        self.prefill_impl, self.decode_impl = select_impls(config, config, implementation="flashmla_sparse")
 
     def _att_norm(self, input, infer_state, layer_weight):
         return layer_weight.att_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
@@ -245,9 +249,14 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             topk_indices=topk_indices,
             current_kv=kv,
             q_kv_start_loc=infer_state.nsa_step.q_kv_start_loc,
+            fp8_workspace=(
+                self.fp8_sparse_prefill_workspaces[infer_state.microbatch_index]
+                if self.fp8_sparse_prefill_workspaces is not None
+                else None
+            ),
         )
-        return self.attn.prefill(
-            infer_state.att_step_args[self.attn.group],
+        return self.prefill_impl.forward(
+            infer_state.att_states[self.prefill_impl],
             inputs,
             out=torch.empty((q.shape[0], q.shape[1], self.kv_lora_rank), dtype=q.dtype, device=q.device),
         )
@@ -331,8 +340,8 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             kv_cache=self._sparse_kv_cache(infer_state),
             topk_mem_indices=topk_mem_indices,
         )
-        return self.attn.decode(
-            infer_state.att_step_args[self.attn.group],
+        return self.decode_impl.forward(
+            infer_state.att_states[self.decode_impl],
             inputs,
             out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device),
         )
@@ -367,7 +376,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         raw_decay_gate, raw_output_gate = layer_weight.project_kda_fg_b(decay_gate_hidden, output_gate_hidden)
         return qkv, raw_decay_gate, beta_logits, raw_output_gate
 
-    def _init_kda_attention(self, model) -> None:
+    def _init_kda_attention(self, model, select_impls) -> None:
         linear = self.network_config_["linear_attn_config"]
         assert linear["num_heads"] % self.tp_world_size_ == 0
         args = model.args
@@ -386,7 +395,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         )
         # Replay state takes decode history through KDALayerInputs.replay_state.
         self.linear_replay = layer_config.replay
-        self.attn = model.att_groups.create_attention(layer_config, layer_config)
+        self.prefill_impl, self.decode_impl = select_impls(layer_config, layer_config)
 
     def _kda_layer_inputs(self, mixed_qkv, raw_gate, raw_beta, infer_state, layer_weight) -> KDALayerInputs:
         """Gather the layer's KDA operands, parameters and recurrent state views."""
@@ -409,9 +418,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
 
     def _kda_attention(self, inputs: KDALayerInputs, infer_state, *, prefill: bool) -> torch.Tensor:
         x = inputs.mixed_qkv
-        run = self.attn.prefill if prefill else self.attn.decode
-        return run(
-            infer_state.att_step_args[self.attn.group],
+        impl = self.prefill_impl if prefill else self.decode_impl
+        return impl.forward(
+            infer_state.att_states[impl],
             inputs,
             out=self.alloc_tensor(
                 (x.shape[0], self.tp_linear_num_heads, self.linear_head_dim), dtype=x.dtype, device=x.device
@@ -468,7 +477,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         _output = tensor_to_no_ref_tensor(output)
 
         def kda_prefill_func(new_infer_state):
-            # The replayed step's own step args, built by its init_att_state().
+            # The replayed step's own attention state, built by its init_att_state().
             inputs = self._kda_layer_inputs(_mixed_qkv, _raw_decay_gate, _beta_logits, new_infer_state, layer_weight)
             tmp_output = self._kda_attention(inputs, new_infer_state, prefill=True)
             assert tmp_output.shape == _output.shape

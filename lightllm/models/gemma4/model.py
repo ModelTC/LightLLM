@@ -24,11 +24,6 @@ if TYPE_CHECKING:
 
 
 class Gemma4TpPartModel(LlamaTpPartModel):
-    # Sliding layers (head_dim 256, sliding window, image spans in prefill) and full-attention layers
-    # (head_dim 512) all run on Triton: FA3 caps head_dim at 256. Triton's step builder does not depend
-    # on the layer config, so both kinds share one group and one set of step args.
-    att_implementation = "triton"
-
     pre_and_post_weight_class = Gemma4PreAndPostLayerWeight
     transformer_weight_class = Gemma4TransformerLayerWeight
 

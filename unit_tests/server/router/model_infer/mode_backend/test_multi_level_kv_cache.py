@@ -507,7 +507,6 @@ def test_fa3_cpu_cache_sync_defaults_off():
 
 @pytest.mark.parametrize("requires_sync", [None, False, True])
 def test_cpu_cache_io_waits_on_compute_when_an_attention_group_requires_it(requires_sync):
-    groups = None if requires_sync is None else SimpleNamespace(requires_cpu_cache_sync=requires_sync)
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
-    module.backend = SimpleNamespace(model=SimpleNamespace(att_groups=groups))
+    module.backend = SimpleNamespace(model=SimpleNamespace(requires_cpu_cache_sync=bool(requires_sync)))
     assert MultiLevelKvCacheModule.need_sync_compute_stream.__wrapped__(module) is bool(requires_sync)

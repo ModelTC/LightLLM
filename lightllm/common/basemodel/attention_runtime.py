@@ -1,9 +1,8 @@
 """Model-side ownership of attention: impl selection, layer groups and their step builders.
 
-A model creates one AttentionGroups when it loads. Each layer asks it for an Attention with its
-prefill and decode layer configs; layers whose backends and step_builder_key match form one
-group, which shares one step builder per phase. Every step, InferStateInfo.init_att_state builds
-each group's step args once, from one AttentionBatch, into infer_state.att_step_args.
+A model selects each layer's implementations at load time. Within each phase, implementations
+with the same backend and step_builder_key share one builder. Each batch maps its implementations
+to the arguments produced by those builders.
 """
 
 from __future__ import annotations
@@ -18,11 +17,11 @@ import triton
 from lightllm.common.attention import selector
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionBatch,
+    AttentionMetadata,
+    AttentionImpl,
     AttentionStepBuilder,
     StepBuilderContext,
 )
-from lightllm.common.attention.layer import Attention
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
@@ -84,12 +83,12 @@ def recurrent_mtp_state_index(model: "TpPartBaseModel") -> Optional[torch.Tensor
     return states[0].mtp_state_index if states else None
 
 
-def build_attention_batch(
+def build_attention_metadata(
     infer_state: "InferStateInfo",
     model: "TpPartBaseModel",
     uses_dynamic_layout: Optional[Callable[[], bool]] = None,
     req_to_mtp_state_index: Optional[torch.Tensor] = None,
-) -> AttentionBatch:
+) -> AttentionMetadata:
     """Describe one step's requests for attention step builders, from its InferStateInfo.
 
     CUDA graph capture and replay steps carry the model's graph kv length capacity, so step builders
@@ -106,7 +105,7 @@ def build_attention_batch(
     if not infer_state.is_prefill and getattr(model, "mtp_manager", None) is not None:
         decode_rows_per_request = model.mtp_manager.get_decode_draft_step(model.is_mtp_draft_model) + 1
         dynamic_decode_rows = decode_rows_per_request > 1 and uses_dynamic_layout()
-    return AttentionBatch(
+    return AttentionMetadata(
         req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
         b_req_idx=infer_state.b_req_idx,
         b_seq_len=infer_state.b_seq_len,
@@ -171,7 +170,6 @@ def step_builder_context(model: "TpPartBaseModel") -> StepBuilderContext:
         tp_size = model.tp_world_size_
         max_decode_rows = triton.cdiv(max_decode_rows, tp_size) * tp_size
     workspace_mib = getattr(args, "flashinfer_workspace_size", 512)
-    prefill_workspaces = getattr(model, "attention_prefill_workspaces", None)
     return StepBuilderContext(
         device=get_current_device_id(),
         page_size=args.page_size,
@@ -183,108 +181,74 @@ def step_builder_context(model: "TpPartBaseModel") -> StepBuilderContext:
         workspace_bytes=workspace_mib * 1024 * 1024,
         get_workspace=get_gpu_workspace_buffer,
         diverse_decode=bool(getattr(args, "diverse_mode", False)),
-        prefill_workspace=None if prefill_workspaces is None else prefill_workspaces.__getitem__,
     )
 
 
 @dataclass
 class _Group:
-    name: str
-    # None for a phase in which the group's layers do not attend.
-    backends: dict[str, Optional[type[AttentionBackend]]]
-    # The layer config of the group's first layer per phase; its step_builder_key fields are the group's.
-    layer_configs: dict[str, Any]
-    step_builders: dict[str, AttentionStepBuilder] = field(default_factory=dict)
+    backend: type[AttentionBackend]
+    layer_config: Any
+    ctx: StepBuilderContext
+    impls: list[AttentionImpl] = field(default_factory=list)
+    builder: Optional[AttentionStepBuilder] = None
 
-    def step_builder(self, phase: str, ctx: StepBuilderContext) -> AttentionStepBuilder:
-        # Created on first use, so a prefill-only node never creates decode builders or their storage.
-        builder = self.step_builders.get(phase)
-        if builder is None:
-            backend = self.backends[phase]
-            builder = self.step_builders[phase] = backend.create_step_builder(self.layer_configs[phase], ctx)
-        return builder
+    def build(self, batch: AttentionMetadata):
+        if self.builder is None:
+            self.builder = self.backend.create_step_builder(self.layer_config, self.ctx)
+        return self.builder.build(batch)
 
 
-class AttentionGroups:
-    """One model's attention: chooses implementations, creates impls and groups layers by step builder.
+def requested_backend(args, phase, layer_config):
+    index = selector.arg_index(layer_config)
+    values = args.llm_prefill_att_backend if phase == "prefill" else args.llm_decode_att_backend
+    return values[index] if index < len(values) else "auto"
 
-    The main model and each draft model own one each, since their CUDA graph capacities and cache
-    layouts differ.
-    """
 
-    def __init__(self, model: "TpPartBaseModel") -> None:
-        self.model = model
-        self.ctx = step_builder_context(model)
-        self._selections: dict[tuple[str, Any], selector.Selection] = {}
-        self._groups: dict[tuple, _Group] = {}
-        # Speculative decode rows of recurrent layers resume from the request's last accepted row.
-        self._req_to_mtp_state_index = recurrent_mtp_state_index(model)
-        if model.args.enable_ep_moe:
-            logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
+def layer_impl_selector(model):
+    """Share implementations during model initialization. Only step builders are needed afterward."""
+    args = model.args
+    ctx = step_builder_context(model)
+    model.attention_step_groups = groups = {phase: {} for phase in selector.PHASES}
+    model.req_to_mtp_state_index = recurrent_mtp_state_index(model)
+    impls = {}
+    if args.enable_ep_moe:
+        logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
 
-    def _requested(self, phase: str, layer_config: Any) -> str:
-        # The first value of --llm_{prefill,decode}_att_backend names full-attention implementations,
-        # the second linear-attention ones; a missing value is "auto".
-        index = selector.arg_index(layer_config)
-        if index == 0 and self.model.att_implementation is not None:
-            return self.model.att_implementation
-        args = self.model.args
-        values = args.llm_prefill_att_backend if phase == "prefill" else args.llm_decode_att_backend
-        return values[index] if index < len(values) else "auto"
-
-    def _select(self, phase: str, layer_config: Any) -> Optional[selector.Selection]:
+    def select(phase, layer_config, implementation):
         if layer_config is None:
             return None
-        key = (phase, layer_config)
-        selection = self._selections.get(key)
-        if selection is None:
-            args = self.model.args
-            selection = self._selections[key] = selector.select(
+        requested = requested_backend(args, phase, layer_config) if implementation is None else implementation
+        key = (phase, layer_config, requested)
+        if key not in impls:
+            selection = selector.select(
                 layer_config,
                 phase,
-                self._requested(phase, layer_config),
+                requested,
                 priority=selector.auto_priority(layer_config, phase, args.mtp_step),
                 excluded=("flashinfer",) if args.enable_ep_moe else (),
             )
-        return selection
+            backend = selection.backend
+            group_key = (backend, backend.step_builder_key(layer_config))
+            if group_key not in groups[phase]:
+                groups[phase][group_key] = _Group(backend, layer_config, ctx)
+            groups[phase][group_key].impls.append(selection.impl)
+            impls[key] = selection.impl
+        return impls[key]
 
-    def create_attention(self, prefill_config: Any, decode_config: Any) -> Attention:
-        """Choose and construct the layer's impls and add it to the group of its step builders.
+    def select_impls(prefill_config, decode_config, *, implementation=None):
+        return select("prefill", prefill_config, implementation), select("decode", decode_config, implementation)
 
-        A None layer config means the layer does not attend in that phase.
-        """
-        configs = {"prefill": prefill_config, "decode": decode_config}
-        selections = {phase: self._select(phase, config) for phase, config in configs.items()}
-        backends = {phase: None if sel is None else sel.backend for phase, sel in selections.items()}
-        key = tuple(
-            (backends[phase], None if backends[phase] is None else backends[phase].step_builder_key(configs[phase]))
-            for phase in selector.PHASES
-        )
-        group = self._groups.get(key)
-        if group is None:
-            name = "+".join("-" if backend is None else backend.get_name() for backend in backends.values())
-            same_name = sum(existing.name.split("#")[0] == name for existing in self._groups.values())
-            group = self._groups[key] = _Group(
-                name=f"{name}#{same_name}" if same_name else name, backends=backends, layer_configs=configs
-            )
-        impls = {phase: None if sel is None else sel.impl for phase, sel in selections.items()}
-        return Attention(group.name, impls["prefill"], impls["decode"])
+    return select_impls
 
-    @property
-    def groups(self) -> dict[str, dict[str, Optional[type[AttentionBackend]]]]:
-        """Each group's name and its backend per phase (None where its layers do not attend)."""
-        return {group.name: dict(group.backends) for group in self._groups.values()}
 
-    @property
-    def requires_cpu_cache_sync(self) -> bool:
-        backends = (backend for group in self._groups.values() for backend in group.backends.values())
-        return any(backend.requires_cpu_cache_sync() for backend in backends if backend is not None)
-
-    def build_step_args(self, infer_state: "InferStateInfo") -> dict[str, Any]:
-        """Build, from one AttentionBatch, the step args of every group whose layers attend in this step's phase."""
-        phase = "prefill" if infer_state.is_prefill else "decode"
-        groups = [group for group in self._groups.values() if group.backends[phase] is not None]
-        if not groups:
-            return {}
-        batch = build_attention_batch(infer_state, self.model, req_to_mtp_state_index=self._req_to_mtp_state_index)
-        return {group.name: group.step_builder(phase, self.ctx).build(batch) for group in groups}
+def build_attention_states(model, infer_state):
+    phase = "prefill" if infer_state.is_prefill else "decode"
+    groups = model.attention_step_groups[phase]
+    if not groups:
+        return {}
+    batch = build_attention_metadata(infer_state, model, req_to_mtp_state_index=model.req_to_mtp_state_index)
+    states = {}
+    for group in groups.values():
+        state = group.build(batch)
+        states.update(dict.fromkeys(group.impls, state))
+    return states

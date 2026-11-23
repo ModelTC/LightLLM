@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
-from lightllm.common.attention.backends.kda.triton import KDAPrefillStepArgs, TritonKDAPrefillImpl
+from lightllm.common.attention.backends.kda.triton import KDAPrefillAttState, TritonKDAPrefillImpl
 from unit_tests.models.glm5_next.kda_test_utils import kda_params
 from lightllm.common.attention.kernels.gdn.causal_conv1d import causal_conv1d_fn
 from lightllm.common.attention.kernels.kda.causal_conv1d_qkv import (
@@ -125,7 +125,7 @@ def test_backend_fused_conv_output_and_state(lengths):
     cu_seqlens = torch.tensor([0, *lengths], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
     b_ready_cache_len = torch.arange(len(lengths), device="cuda", dtype=torch.int32) % 2 * 7
     slots = torch.arange(1, len(lengths) + 1, device="cuda", dtype=torch.int32)
-    step_args = KDAPrefillStepArgs(
+    att_state = KDAPrefillAttState(
         conv_idx=slots,
         ssm_idx=slots,
         cu_seqlens_q=cu_seqlens,
@@ -175,7 +175,7 @@ def test_backend_fused_conv_output_and_state(lengths):
     )
     expected_ssm[slots] = final_state.to(ssm_states.dtype)
     out = torch.empty(tokens, heads, 128, **opts)
-    actual = impl.forward(step_args, KDALayerInputs(**{k: v for k, v in params.items() if k != "state"}), out=out)
+    actual = impl.forward(att_state, KDALayerInputs(**{k: v for k, v in params.items() if k != "state"}), out=out)
     assert torch.equal(actual.view(torch.uint8), expected.view(actual.shape).view(torch.uint8))
     assert torch.equal(conv_states, expected_conv)
     assert torch.equal(ssm_states, expected_ssm)

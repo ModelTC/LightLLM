@@ -67,6 +67,7 @@ class SparseMLAPrefillLayerInputs:
     topk_indices: Optional[torch.Tensor] = None
     current_kv: Optional[torch.Tensor] = None
     q_kv_start_loc: Optional[torch.Tensor] = None
+    fp8_workspace: Optional[dict[str, torch.Tensor]] = None
 
 
 @dataclass(frozen=True)

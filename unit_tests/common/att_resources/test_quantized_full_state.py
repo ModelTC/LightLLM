@@ -336,7 +336,7 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
     from types import SimpleNamespace
     from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
     from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQAPrefillBackend
-    from lightllm.common.basemodel.attention_groups import build_attention_batch, gqa_kv_quant_fields
+    from lightllm.common.basemodel.attention_runtime import build_attention_metadata, gqa_kv_quant_fields
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.common.basemodel.triton_kernel.kv_copy import ppl_int4kv_copy_kv
     from lightllm.common.attention.kernels.gqa.bf16.prefill import context_flashattention_nopad
@@ -371,13 +371,13 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
     owner.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(8, device=device).view(1, -1))
     owner.is_prefill, owner.batch_size = True, 1
     owner.b1_cu_q_seq_len = owner.b1_cu_kv_seq_len = torch.tensor([0, 2], dtype=torch.int32, device=device)
-    # The layer config a layer creates from the int4 cache, and the step args of its group.
+    # The layer config a layer creates from the int4 cache, and the attention state of its group.
     layer_config = GQALayerConfig(
         num_heads=2, num_kv_heads=1, head_dim=64, dtype=torch.float32, **gqa_kv_quant_fields("int4kv", kv_scales, 64)
     )
     impl = TritonQuantGQAPrefillBackend.get_impl_cls()(layer_config)
     builder = TritonQuantGQAPrefillBackend.create_step_builder(layer_config, None)
-    step_args = builder.build(build_attention_batch(owner, SimpleNamespace()))
+    att_state = builder.build(build_attention_metadata(owner, SimpleNamespace()))
     if device == "cpu":
 
         def dequantize(**kwargs):
@@ -393,5 +393,5 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
         monkeypatch.setattr(context_flashattention_nopad, "context_attention_fwd_contiguous_kv", attention)
     q = torch.randn(2, 2, 64, device=device)
     inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
-    output = impl.forward(step_args, inputs, out=torch.empty_like(q))
+    output = impl.forward(att_state, inputs, out=torch.empty_like(q))
     torch.testing.assert_close(output, torch.ones_like(q))

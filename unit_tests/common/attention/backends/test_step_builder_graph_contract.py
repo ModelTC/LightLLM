@@ -1,6 +1,6 @@
 """The CUDA graph contract every decode step builder must keep (see AttentionStepBuilder).
 
-A captured graph reruns its kernels with the capture step's step args, so a replay step can change
+A captured graph reruns its kernels with the capture step's attention state, so a replay step can change
 only tensor contents. For each decode step builder this checks, with a capture step followed by a
 replay step of the same (microbatch, batch size) but different requests and lengths:
 
@@ -16,7 +16,7 @@ import dataclasses
 import pytest
 import torch
 
-from lightllm.common.attention.backend import AttentionBatch
+from lightllm.common.attention.backend import AttentionMetadata
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
@@ -59,7 +59,7 @@ def make_batch(token_map, step, layout, *, capacity, microbatch, extra):
         fields.update(decode_rows_per_request=2)
     elif layout == "dynamic_rows":
         fields.update(decode_rows_per_request=3, dynamic_decode_rows=True, b_mtp_index=as_tensor(mtp_index))
-    return AttentionBatch(**{**fields, **extra(step)})
+    return AttentionMetadata(**{**fields, **extra(step)})
 
 
 def diverse_groups(step):
@@ -160,7 +160,7 @@ def recurrent(replay):
     return factory
 
 
-# (builder factory, layouts it serves, batch fields it needs, step-args scalars that are only hints).
+# (builder factory, layouts it serves, batch fields it needs, attention state scalars that are only hints).
 # Hints select kernel configs or bound nothing a replay reads: kernels read actual lengths on the GPU.
 # FlashInfer page-index buffers are valid only up to their indptr's last entry.
 CASES = {
@@ -180,7 +180,7 @@ SCALARS = (int, float, bool, str, torch.dtype, type(None))
 
 
 def leaves(value, path=()):
-    """Yield (path, value) for every tensor, scalar and other object reachable through step args."""
+    """Yield (path, value) for every tensor, scalar and other object reachable through attention state."""
     if isinstance(value, torch.Tensor) or isinstance(value, SCALARS):
         yield path, value
     elif dataclasses.is_dataclass(value):
@@ -204,15 +204,15 @@ def batch_storage(batch):
     return {t.untyped_storage().data_ptr() for _, t in leaves(batch) if isinstance(t, torch.Tensor)}
 
 
-def owned_tensors(step_args, *batches):
-    """The tensors of step args the builder owns, as opposed to the batches' own tensors.
+def owned_tensors(att_state, *batches):
+    """The tensors of attention state the builder owns, as opposed to the batches' own tensors.
 
-    Step args may keep the capture batch's tensors; the caller rewrites those before each replay.
+    Attention state may keep the capture batch's tensors; the caller rewrites those before each replay.
     """
     caller = set().union(*map(batch_storage, batches))
     return {
         path: t
-        for path, t in leaves(step_args)
+        for path, t in leaves(att_state)
         if isinstance(t, torch.Tensor) and t.untyped_storage().data_ptr() not in caller
     }
 
@@ -224,11 +224,11 @@ def leading_block(tensor, shape):
     return tensor[tuple(slice(0, n) for n in shape)]
 
 
-def valid_part(step_args_leaves, path, tensor):
+def valid_part(att_state_leaves, path, tensor):
     indptr = VALID_PREFIX.get(path[-1])
     if indptr is None:
         return tensor
-    return tensor[: int(step_args_leaves[(*path[:-1], indptr)][-1])]
+    return tensor[: int(att_state_leaves[(*path[:-1], indptr)][-1])]
 
 
 PARAMS = [(name, layout) for name, (_, layouts, _, _) in CASES.items() for layout in layouts]

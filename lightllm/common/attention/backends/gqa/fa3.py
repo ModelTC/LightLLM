@@ -6,7 +6,7 @@ import triton
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionBatch,
+    AttentionMetadata,
     AttentionImpl,
     AttentionStepBuilder,
     StepBuilderContext,
@@ -21,7 +21,7 @@ logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
-class FA3GQAPrefillStepArgs:
+class FA3GQAPrefillAttState:
     """Paged-cache metadata for packed prefill queries, one page-table row per request.
 
     page_table[i, j] is the physical page holding request i's tokens
@@ -35,12 +35,12 @@ class FA3GQAPrefillStepArgs:
     cu_seqlens_k: torch.Tensor
     max_seqlen_q: int
     page_size: int
-    # Per query token: exclusive end of its image span, 0 for text (see AttentionBatch).
+    # Per query token: exclusive end of its image span, 0 for text (see AttentionMetadata).
     b_image_token_end: Optional[torch.Tensor] = None
 
 
 @dataclass(frozen=True)
-class FA3GQADecodeStepArgs:
+class FA3GQADecodeAttState:
     """Paged-cache metadata for decode, one page-table row per attention request.
 
     With speculative decoding an attention request groups the query rows of one logical
@@ -57,11 +57,11 @@ class FA3GQADecodeStepArgs:
     page_size: int
 
 
-class FA3GQAPrefillStepBuilder(AttentionStepBuilder[FA3GQAPrefillStepArgs]):
+class FA3GQAPrefillStepBuilder(AttentionStepBuilder[FA3GQAPrefillAttState]):
     def __init__(self, *, page_size: int) -> None:
         self.page_size = page_size
 
-    def build(self, batch: AttentionBatch) -> FA3GQAPrefillStepArgs:
+    def build(self, batch: AttentionMetadata) -> FA3GQAPrefillAttState:
         """Build a fresh page table for the step's requests."""
         from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 
@@ -76,7 +76,7 @@ class FA3GQAPrefillStepBuilder(AttentionStepBuilder[FA3GQAPrefillStepArgs]):
             b_req_idx=batch.b_req_idx,
             page_size=self.page_size,
         )
-        return FA3GQAPrefillStepArgs(
+        return FA3GQAPrefillAttState(
             page_table=page_table,
             cache_seqlens=batch.b_seq_len,
             cu_seqlens_q=batch.cu_q_seq_len.int(),
@@ -87,7 +87,7 @@ class FA3GQAPrefillStepBuilder(AttentionStepBuilder[FA3GQAPrefillStepArgs]):
         )
 
 
-class FA3GQADecodeStepBuilder(AttentionStepBuilder[FA3GQADecodeStepArgs]):
+class FA3GQADecodeStepBuilder(AttentionStepBuilder[FA3GQADecodeAttState]):
     def __init__(self, *, page_size: int, page_table_view: Callable[[int, int, int], torch.Tensor]) -> None:
         """page_table_view(rows, max_kv_len, microbatch_index) returns a [rows, pages] view of
         caller-owned page-table storage, the same storage for the same arguments."""
@@ -95,7 +95,7 @@ class FA3GQADecodeStepBuilder(AttentionStepBuilder[FA3GQADecodeStepArgs]):
         self.page_table_view = page_table_view
         self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
 
-    def build(self, batch: AttentionBatch) -> FA3GQADecodeStepArgs:
+    def build(self, batch: AttentionMetadata) -> FA3GQADecodeAttState:
         """Group query rows into attention requests and fill their page-table rows.
 
         A CUDA graph step uses a page table as wide as the graph capacity and keeps every
@@ -119,7 +119,7 @@ class FA3GQADecodeStepBuilder(AttentionStepBuilder[FA3GQADecodeStepArgs]):
             cu_seqlens_q = keep_for_cuda_graph(store, (*key, "cu_seqlens_q"), cu_seqlens_q)
             cu_seqlens_k = keep_for_cuda_graph(store, (*key, "cu_seqlens_k"), cu_seqlens_k)
             cache_seqlens = keep_for_cuda_graph(store, (*key, "cache_seqlens"), cache_seqlens)
-        return FA3GQADecodeStepArgs(
+        return FA3GQADecodeAttState(
             page_table=page_table,
             cache_seqlens=cache_seqlens,
             cu_seqlens_q=cu_seqlens_q,
@@ -130,7 +130,7 @@ class FA3GQADecodeStepBuilder(AttentionStepBuilder[FA3GQADecodeStepArgs]):
         )
 
     @staticmethod
-    def _group_rows(batch: AttentionBatch):
+    def _group_rows(batch: AttentionMetadata):
         """Return int32 query/kv offsets, kv lengths and request slots per attention request."""
         from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 
@@ -205,7 +205,7 @@ def _check_inputs(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs) ->
         assert (layer_inputs.kv_scales.q_scale is not None) == layer_config.has_q_scale
 
 
-def _fp8_operands(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs, step_args, page_size: int):
+def _fp8_operands(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs, att_state, page_size: int):
     """Quantize q per KV head and return FA3's FP8 q, paged caches and [requests, kv_heads] descales."""
     from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import (
         q_per_head_fp8_quant,
@@ -213,14 +213,14 @@ def _fp8_operands(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs, st
     )
 
     kv_heads, scales = layer_config.num_kv_heads, layer_inputs.kv_scales
-    requests = step_args.cache_seqlens.shape[0]
+    requests = att_state.cache_seqlens.shape[0]
     q = layer_inputs.q.reshape(layer_inputs.q.shape[0], kv_heads, -1)
     if scales.q_scale is None:
         # Without a static scale, quantize each request's queries with their own per-head scale.
         q, q_scale = q_per_head_fp8_quant(
             q=q,
-            seq_lens=step_args.cu_seqlens_q[1:] - step_args.cu_seqlens_q[:-1],
-            b1_start_loc=step_args.cu_seqlens_q,
+            seq_lens=att_state.cu_seqlens_q[1:] - att_state.cu_seqlens_q[:-1],
+            b1_start_loc=att_state.cu_seqlens_q,
         )
     else:
         q = q_per_head_static_fp8_quant(q=q, scales=scales.q_scale)
@@ -239,7 +239,7 @@ def _fp8_operands(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs, st
     )
 
 
-class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillStepArgs, GQALayerInputs]):
+class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillAttState, GQALayerInputs]):
     def __init__(self, layer_config: GQALayerConfig) -> None:
         """Supports any scale, causal or non-causal attention, one- or two-sided windows and sinks.
 
@@ -258,7 +258,7 @@ class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillStepArgs, GQA
 
     def forward(
         self,
-        step_args: FA3GQAPrefillStepArgs,
+        att_state: FA3GQAPrefillAttState,
         layer_inputs: GQALayerInputs,
         *,
         out: torch.Tensor,
@@ -277,18 +277,18 @@ class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillStepArgs, GQA
         if layer_config.bidirectional_image_spans:
             from lightllm.utils.neo_fa3_utils import flash_attn_with_kvcache_neo
 
-            assert step_args.b_image_token_end is not None, "bidirectional image spans need b_image_token_end"
+            assert att_state.b_image_token_end is not None, "bidirectional image spans need b_image_token_end"
             # The Neo FA3 build returns its own output, so copy it into out.
             out.copy_(
                 flash_attn_with_kvcache_neo(
                     q=layer_inputs.q,
-                    k_cache=_paged(layer_inputs.k_cache, step_args.page_size),
-                    v_cache=_paged(layer_inputs.v_cache, step_args.page_size),
-                    page_table=step_args.page_table,
-                    cache_seqlens=step_args.cache_seqlens,
-                    cu_seqlens_q=step_args.cu_seqlens_q,
-                    cu_seqlens_k_new=step_args.cu_seqlens_k,
-                    max_seqlen_q=step_args.max_seqlen_q,
+                    k_cache=_paged(layer_inputs.k_cache, att_state.page_size),
+                    v_cache=_paged(layer_inputs.v_cache, att_state.page_size),
+                    page_table=att_state.page_table,
+                    cache_seqlens=att_state.cache_seqlens,
+                    cu_seqlens_q=att_state.cu_seqlens_q,
+                    cu_seqlens_k_new=att_state.cu_seqlens_k,
+                    max_seqlen_q=att_state.max_seqlen_q,
                     softmax_scale=layer_config.softmax_scale,
                     causal=layer_config.causal,
                     window_size=(-1, -1),
@@ -296,18 +296,18 @@ class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillStepArgs, GQA
                     k_descale=None,
                     v_descale=None,
                     return_softmax_lse=False,
-                    image_token_end=step_args.b_image_token_end,
+                    image_token_end=att_state.b_image_token_end,
                 )
             )
             return out
         if layer_config.kv_quant is not None:
             flash_attn_with_kvcache(
-                **_fp8_operands(layer_config, layer_inputs, step_args, step_args.page_size),
-                page_table=step_args.page_table,
-                cache_seqlens=step_args.cache_seqlens,
-                cu_seqlens_q=step_args.cu_seqlens_q,
-                cu_seqlens_k_new=step_args.cu_seqlens_k,
-                max_seqlen_q=step_args.max_seqlen_q,
+                **_fp8_operands(layer_config, layer_inputs, att_state, att_state.page_size),
+                page_table=att_state.page_table,
+                cache_seqlens=att_state.cache_seqlens,
+                cu_seqlens_q=att_state.cu_seqlens_q,
+                cu_seqlens_k_new=att_state.cu_seqlens_k,
+                max_seqlen_q=att_state.max_seqlen_q,
                 causal=layer_config.causal,
                 window_size=(-1, -1),
                 softcap=0.0,
@@ -317,13 +317,13 @@ class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillStepArgs, GQA
             return out
         flash_attn_with_kvcache(
             q=layer_inputs.q,
-            k_cache=_paged(layer_inputs.k_cache, step_args.page_size),
-            v_cache=_paged(layer_inputs.v_cache, step_args.page_size),
-            page_table=step_args.page_table,
-            cache_seqlens=step_args.cache_seqlens,
-            cu_seqlens_q=step_args.cu_seqlens_q,
-            cu_seqlens_k_new=step_args.cu_seqlens_k,
-            max_seqlen_q=step_args.max_seqlen_q,
+            k_cache=_paged(layer_inputs.k_cache, att_state.page_size),
+            v_cache=_paged(layer_inputs.v_cache, att_state.page_size),
+            page_table=att_state.page_table,
+            cache_seqlens=att_state.cache_seqlens,
+            cu_seqlens_q=att_state.cu_seqlens_q,
+            cu_seqlens_k_new=att_state.cu_seqlens_k,
+            max_seqlen_q=att_state.max_seqlen_q,
             softmax_scale=layer_config.softmax_scale,
             causal=layer_config.causal,
             window_size=layer_config.sliding_window,
@@ -335,7 +335,7 @@ class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillStepArgs, GQA
         return out
 
 
-class FA3GQADecodeImpl(AttentionImpl[GQALayerConfig, FA3GQADecodeStepArgs, GQALayerInputs]):
+class FA3GQADecodeImpl(AttentionImpl[GQALayerConfig, FA3GQADecodeAttState, GQALayerInputs]):
     def __init__(self, layer_config: GQALayerConfig) -> None:
         """Supports any scale, causal or non-causal attention, one- or two-sided windows and sinks.
 
@@ -349,7 +349,7 @@ class FA3GQADecodeImpl(AttentionImpl[GQALayerConfig, FA3GQADecodeStepArgs, GQALa
 
     def forward(
         self,
-        step_args: FA3GQADecodeStepArgs,
+        att_state: FA3GQADecodeAttState,
         layer_inputs: GQALayerInputs,
         *,
         out: torch.Tensor,
@@ -357,7 +357,7 @@ class FA3GQADecodeImpl(AttentionImpl[GQALayerConfig, FA3GQADecodeStepArgs, GQALa
     ) -> torch.Tensor:
         """Fill and return out with q's shape; layout rules match prefill.
 
-        q has one row per batch row; the step args group them into attention requests.
+        q has one row per batch row; the attention state group them into attention requests.
         """
         from lightllm.utils.sgl_utils import flash_attn_with_kvcache, flash_attn_with_kvcache_autotune
 
@@ -365,12 +365,12 @@ class FA3GQADecodeImpl(AttentionImpl[GQALayerConfig, FA3GQADecodeStepArgs, GQALa
         _check_inputs(layer_config, layer_inputs)
         if layer_config.kv_quant is not None:
             flash_attn_with_kvcache(
-                **_fp8_operands(layer_config, layer_inputs, step_args, step_args.page_size),
-                page_table=step_args.page_table,
-                cache_seqlens=step_args.cache_seqlens,
-                cu_seqlens_q=step_args.cu_seqlens_q,
-                cu_seqlens_k_new=step_args.cu_seqlens_k,
-                max_seqlen_q=step_args.max_seqlen_q,
+                **_fp8_operands(layer_config, layer_inputs, att_state, att_state.page_size),
+                page_table=att_state.page_table,
+                cache_seqlens=att_state.cache_seqlens,
+                cu_seqlens_q=att_state.cu_seqlens_q,
+                cu_seqlens_k_new=att_state.cu_seqlens_k,
+                max_seqlen_q=att_state.max_seqlen_q,
                 causal=layer_config.causal,
                 window_size=(-1, -1),
                 softcap=0.0,
@@ -380,15 +380,15 @@ class FA3GQADecodeImpl(AttentionImpl[GQALayerConfig, FA3GQADecodeStepArgs, GQALa
             return out
         flash_attn_with_kvcache_autotune(
             q=layer_inputs.q,
-            k_cache=_paged(layer_inputs.k_cache, step_args.page_size),
-            v_cache=_paged(layer_inputs.v_cache, step_args.page_size),
-            page_table=step_args.page_table,
-            cache_seqlens=step_args.cache_seqlens,
-            cu_seqlens_q=step_args.cu_seqlens_q,
+            k_cache=_paged(layer_inputs.k_cache, att_state.page_size),
+            v_cache=_paged(layer_inputs.v_cache, att_state.page_size),
+            page_table=att_state.page_table,
+            cache_seqlens=att_state.cache_seqlens,
+            cu_seqlens_q=att_state.cu_seqlens_q,
             # The KV is already in the cache, so no new K/V segments are appended.
             cu_seqlens_k_new=None,
-            max_seqlen_q=step_args.max_seqlen_q,
-            max_seqlen_k=step_args.max_seqlen_k,
+            max_seqlen_q=att_state.max_seqlen_q,
+            max_seqlen_k=att_state.max_seqlen_k,
             softmax_scale=layer_config.softmax_scale,
             causal=layer_config.causal,
             window_size=layer_config.sliding_window,

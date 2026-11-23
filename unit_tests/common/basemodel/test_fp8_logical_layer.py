@@ -7,13 +7,13 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeStepArgs, FA3GQAPrefillStepArgs
+from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeAttState, FA3GQAPrefillAttState
 from lightllm.common.attention.backends.gqa.flashinfer import (
     FlashInferGQABuilderConfig,
-    FlashInferGQADecodeStepArgs,
-    FlashInferGQAPrefillStepArgs,
+    FlashInferGQADecodeAttState,
+    FlashInferGQAPrefillAttState,
 )
-from lightllm.common.basemodel.attention_groups import AttentionGroups
+from lightllm.common.basemodel.attention_runtime import layer_impl_selector
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state
@@ -76,9 +76,9 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
 
         monkeypatch.setattr(q_per_head_fp8_quant, "q_per_head_static_fp8_quant", quantize)
         monkeypatch.setattr(sgl_utils, "flash_attn_with_kvcache", attend)
-        step_args_cls = FA3GQAPrefillStepArgs if operation == "prefill" else FA3GQADecodeStepArgs
+        att_state_cls = FA3GQAPrefillAttState if operation == "prefill" else FA3GQADecodeAttState
         extra = {} if operation == "prefill" else {"max_seqlen_k": 1}
-        step_args = step_args_cls(
+        att_state = att_state_cls(
             page_table=None,
             cache_seqlens=infer.b_seq_len,
             cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
@@ -102,12 +102,12 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
             out.copy_(q)
 
         config = FlashInferGQABuilderConfig(head_num, head_num, head_dim, 1, torch.bfloat16, torch.float8_e4m3fn)
-        step_args_cls = FlashInferGQAPrefillStepArgs if operation == "prefill" else FlashInferGQADecodeStepArgs
-        step_args = step_args_cls(wrapper=SimpleNamespace(run=run), config=config)
+        att_state_cls = FlashInferGQAPrefillAttState if operation == "prefill" else FlashInferGQADecodeAttState
+        att_state = att_state_cls(wrapper=SimpleNamespace(run=run), config=config)
         kv_type = "fp8kv_spt"
 
     # The layer creates its attention as the model loads it: kv_quant and the static q scale come
-    # from the State, and the layer's group then reads the step's step args.
+    # from the State, and the layer's group then reads the step's attention state.
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     args = SimpleNamespace(
         llm_prefill_att_backend=[backend_name],
@@ -126,18 +126,17 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
         att_state_role=role,
         data_type=torch.bfloat16,
         is_mtp_draft_model=False,
-        att_implementation=None,
         max_seq_length=8,
         graph_max_batch_size=1,
     )
-    model.att_groups = AttentionGroups(model)
+    model.select_impls = layer_impl_selector(model)
     layer = LlamaTransformerLayerInfer.__new__(LlamaTransformerLayerInfer)
     layer.layer_num_ = logical_layer_id
     layer.tp_q_head_num_ = layer.tp_k_head_num_ = state.config.head_num
     layer.head_dim_ = state.config.head_dim
     layer.alloc_tensor = lambda shape, dtype, device: torch.empty(shape, dtype=dtype, device="cpu")
-    layer.init_attention(model)
-    infer.att_step_args = {layer.attn.group: step_args}
+    layer.init_attention(model, model.select_impls)
+    infer.att_states = {layer.prefill_impl if operation == "prefill" else layer.decode_impl: att_state}
     q = torch.ones((1, state.config.head_num, state.config.head_dim), dtype=torch.bfloat16)
     if operation == "prefill":
         output = layer._context_attention_kernel(

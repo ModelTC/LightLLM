@@ -25,8 +25,6 @@ if TYPE_CHECKING:
 
 class Glm5NextTpPartModel(TpPartBaseModel):
     is_hybrid_att_model = True
-    # Sparse MLA runs FlashMLA and FA3 whatever --llm_*_att_backend names for full attention.
-    att_implementation = "flashmla_sparse"
     pre_and_post_weight_class = Glm5NextPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight
     pre_layer_infer_class = Glm5NextPreLayerInfer
@@ -166,7 +164,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
             from lightllm.models.glm5_next.prefill_workspace import reserve_fp8_sparse_prefill_workspaces
 
             # Reserve fixed scratch space before the shared KV capacity is profiled.
-            self.attention_prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(self)
+            self.fp8_sparse_prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(self)
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json")) as f:

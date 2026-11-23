@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F
 
-from lightllm.common.attention.backend import AttentionBatch
+from lightllm.common.attention.backend import AttentionMetadata
 
 
 def conv_token(history: torch.Tensor, x: torch.Tensor, weight: torch.Tensor):
@@ -58,7 +58,7 @@ def gdn_token(shape: GDNShape, params, history, state, x, a, b):
     y, history = conv_token(history, x, params["conv_weight"])
     q, k, v = y.split([shape.hk * shape.dk, shape.hk * shape.dk, shape.hv * shape.dv])
     group = shape.hv // shape.hk
-    q = (l2norm(q.view(shape.hk, shape.dk)) * shape.dk ** -0.5).repeat_interleave(group, 0)
+    q = (l2norm(q.view(shape.hk, shape.dk)) * shape.dk**-0.5).repeat_interleave(group, 0)
     k = l2norm(k.view(shape.hk, shape.dk)).repeat_interleave(group, 0)
     v = v.view(shape.hv, shape.dv)
     g = -params["A_log"].float().exp() * F.softplus(a.float() + params["dt_bias"].float())
@@ -69,7 +69,7 @@ def gdn_token(shape: GDNShape, params, history, state, x, a, b):
 def kda_token(shape: KDAShape, params, history, state, x, gate, beta):
     y, history = conv_token(history, x, params["conv_weight"])
     q, k, v = (part.view(shape.h, shape.d) for part in y.split(shape.h * shape.d))
-    q, k = l2norm(q) * shape.d ** -0.5, l2norm(k)
+    q, k = l2norm(q) * shape.d**-0.5, l2norm(k)
     amplitude = params["A_log"].float().exp()[:, None]
     gate = gate.float().view(shape.h, shape.d) + params["dt_bias"].float().view(shape.h, shape.d)
     decay = torch.exp(shape.lower_bound * torch.sigmoid(amplitude * gate))
@@ -108,7 +108,7 @@ def decode_batch(reqs, lengths, width, hold, req_to_mtp_state_index, *, dynamic,
         pad = width * len(reqs) - len(rows)
         rows, mtp_index = rows + [hold] * pad, mtp_index + [0] * pad
     b_req_idx = torch.tensor(rows, dtype=torch.int32, device="cuda")
-    return AttentionBatch(
+    return AttentionMetadata(
         req_to_token_indexs=None,
         b_req_idx=b_req_idx,
         b_seq_len=torch.full_like(b_req_idx, 64),
@@ -129,7 +129,7 @@ def prefill_batch(reqs, lengths, ready):
     b_req_idx = torch.tensor(reqs, dtype=torch.int32, device="cuda")
     lens = torch.tensor(lengths, dtype=torch.int32, device="cuda")
     ready = torch.tensor(ready, dtype=torch.int32, device="cuda")
-    return AttentionBatch(
+    return AttentionMetadata(
         req_to_token_indexs=None,
         b_req_idx=b_req_idx,
         b_seq_len=ready + lens,

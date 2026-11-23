@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any, Callable, Optional, Sequence
 
+import torch.distributed as dist
+
 from lightllm.utils.log_utils import init_logger
 from .backend import AttentionBackend, AttentionImpl
 from .backends.gqa import GQALayerConfig
@@ -193,15 +195,35 @@ def auto_priority(layer_config: Any, phase: str, mtp_step: int = 0) -> tuple[str
     return priority
 
 
-def _construct(name: str, layer_config: Any, phase: str) -> tuple[Optional[Selection], list[str]]:
+def _construction_failures(reason: Optional[str]) -> list[str]:
+    """Agree on each candidate before any rank enters the validation broadcast."""
+    if not dist.is_initialized() or dist.get_world_size() == 1:
+        return [reason] if reason else []
+    reports = [None] * dist.get_world_size()
+    dist.all_gather_object(reports, reason)
+    if all(report == reports[0] for report in reports):
+        return [reports[0]] if reports[0] else []
+    return [f"rank {rank}: {report}" for rank, report in enumerate(reports) if report]
+
+
+def _construct(
+    name: str, layer_config: Any, phase: str, *, agree: bool = False
+) -> tuple[Optional[Selection], list[str]]:
     """Return the first backend under name whose impl accepts layer_config, and why the others did not."""
     reasons = []
     for path in _phase_backends(layer_config, phase).get(name, ()):
-        backend = _load(path)
+        reason = None
+        label = path
         try:
-            return Selection(backend, backend.get_impl_cls()(layer_config)), reasons
-        except NotImplementedError as e:
-            reasons.append(f"{backend.get_name()}: {e}")
+            backend = _load(path)
+            label = backend.get_name()
+            selection = Selection(backend, backend.get_impl_cls()(layer_config))
+        except (NotImplementedError, ImportError, OSError) as error:
+            reason = f"{label}: {error}"
+        failures = _construction_failures(reason) if agree else ([reason] if reason else [])
+        if not failures:
+            return selection, reasons
+        reasons.extend(failures)
     return None, reasons
 
 
@@ -241,16 +263,23 @@ def select(
         return selection
 
     priority = auto_priority(layer_config, phase) if priority is None else tuple(priority)
-    for name in priority:
-        if name in excluded or name not in names:
+    candidates = [name for name in priority if name in names and name not in excluded]
+    reasons = []
+    fallback = None
+    for name in dict.fromkeys([*candidates, "triton"]):
+        selection, failures = _construct(name, layer_config, phase, agree=True)
+        reasons.extend(failures)
+        if selection is None:
             continue
-        selection, _ = _construct(name, layer_config, phase)
-        # Validate only libraries that could run the layer, since validation starts a subprocess.
-        if selection is not None and (name in _family(layer_config).unvalidated or validate(name)):
+        if name == "triton":
+            fallback = selection
+        if name not in candidates:
+            continue
+        if name in _family(layer_config).unvalidated or validate(name):
             logger.info(f"Auto-selected {name} for {phase} attention (validated)")
             return selection
-    selection, reasons = _construct("triton", layer_config, phase)
-    if selection is None:
+        reasons.append(f"{name}: validation failed")
+    if fallback is None:
         raise ValueError(f"no {phase} attention implementation supports {layer_config}: {'; '.join(reasons)}")
     logger.warning(f"No validated {phase} attention implementation supports the layer; falling back to triton")
-    return selection
+    return fallback

@@ -88,12 +88,12 @@ class _Microbatch:
         return state
 
     def forward(self, state: InferStateInfo):
-        attn = self.runner.attn
+        impl = self.runner.decode_impl
         outputs = []
         for q_nope in self.q_nope:
             inputs = MLADecodeLayerInputs(q_nope=q_nope, q_rope=self.q_rope, kv_cache=self.kv)
             out = torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
-            outputs.append(attn.decode(state.att_step_args[attn.group], inputs, out=out))
+            outputs.append(impl.forward(state.att_states[impl], inputs, out=out))
         return outputs
 
     def check(self, outputs, lengths) -> None:

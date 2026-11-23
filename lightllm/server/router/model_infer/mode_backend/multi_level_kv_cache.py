@@ -47,7 +47,7 @@ class MultiLevelKvCacheModule(object):
         """不支持异步 CPU cache 的 backend（目前是 FA3）仍要等计算流，否则搬运可能崩溃。"""
 
         model = self.backend.model
-        if model.att_groups is not None and model.att_groups.requires_cpu_cache_sync:
+        if model.requires_cpu_cache_sync:
             logger.info("MultiLevelKvCacheModule: an attention group requires synchronous CPU cache IO.")
             return True
         logger.info("MultiLevelKvCacheModule: CPU cache load waits on a recorded event.")

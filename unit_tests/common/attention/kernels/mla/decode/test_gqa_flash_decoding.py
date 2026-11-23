@@ -5,7 +5,7 @@ import numpy as np
 import torch.nn.functional as F
 import flashinfer
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.attention.backend import AttentionBatch
+from lightllm.common.attention.backend import AttentionMetadata
 from lightllm.common.attention.backends.mla import MLADecodeLayerInputs, MLADecodeLayerConfig
 from lightllm.common.attention.backends.mla.triton import TritonMLADecodeBackend
 
@@ -53,8 +53,8 @@ def test_gqa_flash_decoding(batch, seqlen, heads, nope_head, rope_head):
         num_heads=H, kv_lora_rank=D_HEAD, qk_rope_head_dim=ROPE_HEAD, dtype=dtype
     )
     # Every request has N_CTX tokens, so the eager tuning length (the average) is N_CTX.
-    step_args = step_builder.build(
-        AttentionBatch(
+    att_state = step_builder.build(
+        AttentionMetadata(
             req_to_token_indexs=req_to_token_indexs,
             b_req_idx=b_req_idx,
             b_seq_len=b_seq_len,
@@ -67,7 +67,7 @@ def test_gqa_flash_decoding(batch, seqlen, heads, nope_head, rope_head):
         num_heads=H, kv_lora_rank=D_HEAD, qk_rope_head_dim=ROPE_HEAD, softmax_scale=sm_scale, dtype=dtype
     )
     impl = TritonMLADecodeBackend.get_impl_cls()(layer_config)
-    assert impl.forward(step_args, MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv), out=o) is o
+    assert impl.forward(att_state, MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv), out=o) is o
 
     kv_nope = kv[:, :, :D_HEAD]
     kv_rope = kv[:, :, D_HEAD:]

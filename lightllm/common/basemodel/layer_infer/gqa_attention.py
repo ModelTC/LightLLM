@@ -3,9 +3,9 @@ from typing import Any, Optional
 import torch
 
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
-from lightllm.common.attention.layer import Attention
+from lightllm.common.attention.backend import AttentionImpl
 from lightllm.common.attention_state.full_att import FullAttentionState
-from lightllm.common.basemodel.attention_groups import attention_is_causal, gqa_kv_quant_fields
+from lightllm.common.basemodel.attention_runtime import attention_is_causal, gqa_kv_quant_fields
 
 
 class GQAAttentionLayerMixin:
@@ -13,15 +13,17 @@ class GQAAttentionLayerMixin:
 
     The layer sets layer_num_, tp_q_head_num_ and head_dim_, and overrides the hooks below for its
     static attention properties (sliding window, sinks, ALiBi), its per-layer weights and the cache
-    view it reads. init_attention creates the layer's Attention once the cache is allocated;
-    _context_attention_kernel and _token_attention_kernel run it with the step args of its group.
+    view it reads. After cache allocation, init_attention selects the layer's prefill and decode
+    implementations. Each runs with the arguments prepared for it in the current batch.
     """
 
     # Whether prefill attends bidirectionally inside image spans (InferStateInfo.b_image_token_end).
     prefill_image_spans = False
     # False for layers that only write their KV cache in prefill and attend only in decode.
     attends_in_prefill = True
-    attn: Optional[Attention] = None
+    att_implementation: Optional[str] = None
+    prefill_impl: Optional[AttentionImpl] = None
+    decode_impl: Optional[AttentionImpl] = None
 
     def _full_att_state(self, att_state_manager, att_state_role: str) -> FullAttentionState:
         return att_state_manager.get_state(
@@ -43,7 +45,7 @@ class GQAAttentionLayerMixin:
         """GQALayerInputs fields from the layer's weights, such as sinks and alibi_slopes."""
         return {}
 
-    def init_attention(self, model) -> None:
+    def init_attention(self, model, select_impls) -> None:
         state = self._full_att_state(model.att_state_manager, model.att_state_role)
         k, _ = self._gqa_kv_cache(state)
         config = dict(
@@ -58,7 +60,9 @@ class GQAAttentionLayerMixin:
         prefill_config = None
         if self.attends_in_prefill:
             prefill_config = GQALayerConfig(**config, bidirectional_image_spans=self.prefill_image_spans)
-        self.attn = model.att_groups.create_attention(prefill_config, GQALayerConfig(**config))
+        self.prefill_impl, self.decode_impl = select_impls(
+            prefill_config, GQALayerConfig(**config), implementation=self.att_implementation
+        )
 
     def _gqa_attention(self, q: torch.Tensor, infer_state, layer_weight, *, prefill: bool) -> torch.Tensor:
         state = self._full_att_state(infer_state.att_state_manager, infer_state.att_state_role)
@@ -70,9 +74,9 @@ class GQAAttentionLayerMixin:
             kv_scales=state.get_layer_kv_scales(self.layer_num_),
             **self._gqa_layer_weights(layer_weight),
         )
-        run = self.attn.prefill if prefill else self.attn.decode
-        o_tensor = run(
-            infer_state.att_step_args[self.attn.group],
+        impl = self.prefill_impl if prefill else self.decode_impl
+        o_tensor = impl.forward(
+            infer_state.att_states[impl],
             inputs,
             out=self.alloc_tensor(inputs.q.shape, dtype=inputs.q.dtype, device=inputs.q.device),
             alloc_func=self.alloc_tensor,

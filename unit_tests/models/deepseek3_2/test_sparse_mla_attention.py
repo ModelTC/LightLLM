@@ -2,7 +2,7 @@
 
 A bf16 cache runs FA3 decode with rotary channels; the FP8 cache runs FlashMLA over DeepSeek's packed
 "fp8_ds_mla" rows (512 FP8 latent channels, four fp32 scales per 128 channels and 64 bf16 rotary channels).
-CUDA graph steps rebuild their step args on replay, so a replay with new lengths and indices must match eager.
+CUDA graph steps rebuild their attention state on replay, so a replay with new lengths and indices must match eager.
 """
 
 from types import SimpleNamespace
@@ -33,7 +33,7 @@ RANK, ROPE, TOPK, SCALE = 512, 64, 2048, 1 / 24
 SLOTS, MAX_LEN = 16384, 4096
 
 
-# What build_attention_batch reads from the model.
+# What build_attention_metadata reads from the model.
 MODEL = SimpleNamespace(graph_max_len_in_batch=MAX_LEN, mtp_manager=None)
 
 
@@ -81,8 +81,8 @@ def make_infer(req_to_token, lengths, *, capture=False, replay=False, microbatch
     return infer
 
 
-def decode_step_args(attention, infer):
-    return attention.step_args(infer, MODEL)
+def decode_att_state(attention, infer):
+    return attention.att_state(infer, MODEL)
 
 
 def select(req_to_token, lengths, out, seed):
@@ -148,30 +148,30 @@ def check_decode_and_graph(attention, cache, reference_cache, heads):
     q_rope = torch.randn(4, heads, ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(2)) * 0.5
     inputs = SparseMLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=cache, topk_mem_indices=indices)
 
-    def run(step_args):
-        return attention.run("decode", step_args, inputs, out=torch.empty_like(q_nope))
+    def run(att_state):
+        return attention.run("decode", att_state, inputs, out=torch.empty_like(q_nope))
 
     def reference():
         q = torch.cat((q_nope, q_rope), dim=-1)
         return torch.stack([attend(q[row], reference_cache[ids[ids >= 0].long()]) for row, ids in enumerate(indices)])
 
     def eager(lengths):
-        return run(decode_step_args(attention, make_infer(req_to_token, lengths))).clone()
+        return run(decode_att_state(attention, make_infer(req_to_token, lengths))).clone()
 
     first_eager = eager(first)
     torch.testing.assert_close(first_eager.float(), reference(), atol=0.02, rtol=0.02)
 
     graph_infer = make_infer(req_to_token, first, capture=True)
-    graph_step_args = decode_step_args(attention, graph_infer)
-    graph, graph_out = capture(lambda: run(graph_step_args))
+    graph_att_state = decode_att_state(attention, graph_infer)
+    graph, graph_out = capture(lambda: run(graph_att_state))
     graph.replay()
     assert torch.equal(graph_out, first_eager)
 
-    # Serving replay: the replay step builds its own step args, then its request tensors are copied into the graph's.
+    # Replay prepares its own state before copying request tensors into the captured buffers.
     select(req_to_token, second, indices, seed=20)
     q_nope.normal_(generator=gen(3)).mul_(0.5)
     replay_infer = make_infer(req_to_token, second, replay=True)
-    decode_step_args(attention, replay_infer)
+    decode_att_state(attention, replay_infer)
     graph_infer.copy_for_cuda_graph(replay_infer)
     graph.replay()
     replayed = graph_out.clone()
@@ -265,6 +265,6 @@ def test_fp8_ds_mla_flashmla_prefill_matches_reference(ready, ends):
         current_kv=current_kv,
     )
     out = torch.empty((rows, heads, RANK), device="cuda", dtype=q.dtype)
-    out = attention.run("prefill", attention.step_args(infer, MODEL), inputs, out=out)
+    out = attention.run("prefill", attention.att_state(infer, MODEL), inputs, out=out)
     assert out.shape == (rows, heads, RANK)
     torch.testing.assert_close(out.float(), torch.stack(expected), atol=0.02, rtol=0.02)

@@ -6,7 +6,6 @@ import triton.language as tl
 @triton.jit
 def _conv_pack_gdn_decode_kernel(
     mixed_qkv,
-    z_raw,
     a_raw,
     b_raw,
     conv_state,
@@ -16,14 +15,10 @@ def _conv_pack_gdn_decode_kernel(
     q_out,
     k_out,
     v_out,
-    z_out,
     a_out,
     b_out,
     stride_m_b: tl.constexpr,
     stride_m_d: tl.constexpr,
-    stride_z_b: tl.constexpr,
-    stride_z_h: tl.constexpr,
-    stride_z_d: tl.constexpr,
     stride_a_b: tl.constexpr,
     stride_a_d: tl.constexpr,
     stride_b_b: tl.constexpr,
@@ -81,10 +76,6 @@ def _conv_pack_gdn_decode_kernel(
     tl.store(k_out + row * k_dim + (offs - q_dim), y, mask=k_mask)
     tl.store(v_out + row * v_dim + (offs - q_dim - k_dim), y, mask=v_mask)
 
-    z_mask = offs < v_dim
-    z_vals = tl.load(z_raw + row * stride_z_b + offs, mask=z_mask, other=0.0)
-    tl.store(z_out + row * v_dim + offs, z_vals, mask=z_mask)
-
     gate_mask = offs < gate_dim
     a_vals = tl.load(a_raw + row * stride_a_b + offs * stride_a_d, mask=gate_mask, other=0.0)
     b_vals = tl.load(b_raw + row * stride_b_b + offs * stride_b_d, mask=gate_mask, other=0.0)
@@ -95,7 +86,6 @@ def _conv_pack_gdn_decode_kernel(
 @torch.no_grad()
 def conv_pack_gdn_decode_inputs(
     mixed_qkv: torch.Tensor,
-    z_raw: torch.Tensor,
     a_raw: torch.Tensor,
     b_raw: torch.Tensor,
     conv_state: torch.Tensor,
@@ -128,7 +118,6 @@ def conv_pack_gdn_decode_inputs(
     q = torch.empty((batch, 1, num_k_heads, head_k_dim), dtype=mixed_qkv.dtype, device=mixed_qkv.device)
     k = torch.empty_like(q)
     v = torch.empty((batch, 1, num_v_heads, head_v_dim), dtype=mixed_qkv.dtype, device=mixed_qkv.device)
-    z = torch.empty((batch, num_v_heads, head_v_dim), dtype=z_raw.dtype, device=z_raw.device)
     a = torch.empty((batch, gate_dim), dtype=a_raw.dtype, device=a_raw.device)
     b = torch.empty((batch, gate_dim), dtype=b_raw.dtype, device=b_raw.device)
 
@@ -136,7 +125,6 @@ def conv_pack_gdn_decode_inputs(
     grid = (batch, triton.cdiv(conv_dim, block_size))
     _conv_pack_gdn_decode_kernel[grid](
         mixed_qkv,
-        z_raw,
         a_raw,
         b_raw,
         conv_state,
@@ -146,14 +134,10 @@ def conv_pack_gdn_decode_inputs(
         q,
         k,
         v,
-        z,
         a,
         b,
         mixed_qkv.stride(0),
         mixed_qkv.stride(1),
-        z_raw.stride(0),
-        z_raw.stride(1),
-        z_raw.stride(2),
         a_raw.stride(0),
         a_raw.stride(1),
         b_raw.stride(0),
@@ -174,4 +158,4 @@ def conv_pack_gdn_decode_inputs(
         BLOCK_SIZE=block_size,
         num_warps=8,
     )
-    return q, k, v, z, a, b
+    return q, k, v, a, b

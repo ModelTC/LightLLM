@@ -1002,13 +1002,13 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     )
     swa_view = create_attention_config(model_config=model_config, model_logical_layer_ids=(2,)).create_swa_config()
     layer_config = SWASparseMLALayerConfig(
-        num_heads=64, head_dim_v=512, softmax_scale=512 ** -0.5, dtype=torch.bfloat16, has_attn_sink=True
+        num_heads=64, head_dim_v=512, softmax_scale=512**-0.5, dtype=torch.bfloat16, has_attn_sink=True
     )
     impl = FlashMLASWADecodeBackend.get_impl_cls()(layer_config)
     builder = FlashMLASWADecodeBackend.create_step_builder(layer_config, None)
     attn_sink = torch.zeros(64, device="cuda")
 
-    def decode(step_args, packed_kv, swa_indices, swa_lengths):
+    def decode(att_state, packed_kv, swa_indices, swa_lengths):
         inputs = SWASparseMLALayerInputs(
             q=q,
             swa_cache=swa_view.get_attention_view(packed_kv=packed_kv[0]),
@@ -1017,15 +1017,15 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
             attn_sink=attn_sink,
         )
         out = torch.empty((q.shape[0], 64, 512), dtype=q.dtype, device=q.device)
-        return impl.forward(step_args, inputs, out=out)
+        return impl.forward(att_state, inputs, out=out)
 
-    step_args = builder.build()
+    att_state = builder.build()
     q = torch.randn((token_num, 64, 512), dtype=torch.bfloat16, device="cuda") * 0.1
     packed_kv = requests.get_att_input_params(2)
 
     def forward():
         build()
-        return decode(step_args, packed_kv, indices.unsqueeze(1), lengths)
+        return decode(att_state, packed_kv, indices.unsqueeze(1), lengths)
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -1036,7 +1036,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     with torch.cuda.graph(graph, stream=stream):
         actual = forward()
 
-    reference_step_args = builder.build()
+    reference_att_state = builder.build()
     reference_kv = DeepseekV4InferStateInfo.get_att_kv(
         SimpleNamespace(
             req_manager=requests,
@@ -1081,7 +1081,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
             reference_indices, (0, width - reference_indices.shape[1]), value=-1
         )
         reference_indices = reference_indices.to(torch.int32)
-        expected = decode(reference_step_args, reference_kv, reference_indices.unsqueeze(1), reference_lengths)
+        expected = decode(reference_att_state, reference_kv, reference_indices.unsqueeze(1), reference_lengths)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0, msg=f"SWA mismatch at position {start}")
         torch.testing.assert_close(write_slots, _swa_slots(requests, destination, logical_positions).to(torch.int32))
         # Accept one position; speculative future rows stay dirty until the next write.
@@ -1859,7 +1859,7 @@ def test_image_metadata_and_embeddings_preserve_canonical_cache(cache, prefix_le
         SimpleNamespace(convert_tokens_to_ids=lambda token: 99), "/unused", {"vision_n_layers": 1}
     )
     params = MultimodalParams(images=[{"type": "url", "data": "unused"} for _ in range(3)])
-    token_base, canonical_length = 2 ** 62, 13
+    token_base, canonical_length = 2**62, 13
     for image in params.images:
         image.token_id, image.token_num, image.start_index_in_embed_cache = token_base, canonical_length, 0
     input_ids = tokenizer.encode([7] * prefix_len + [99, 99, 8, 99, 8], params)

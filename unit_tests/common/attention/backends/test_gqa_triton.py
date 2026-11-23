@@ -5,10 +5,10 @@ from typing import Iterator
 import pytest
 import torch
 
-from lightllm.common.attention.backend import AttentionBatch, TensorAllocator
+from lightllm.common.attention.backend import AttentionMetadata, TensorAllocator
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQAPrefillBackend
-from lightllm.common.basemodel.attention_groups import build_attention_batch
+from lightllm.common.basemodel.attention_runtime import build_attention_metadata
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
@@ -51,8 +51,8 @@ def reference(q, k, v, token_map, req_ids, lengths, ready, window):
     return torch.cat(outputs)
 
 
-def make_batch(token_map, req_ids, lengths, **kwargs) -> AttentionBatch:
-    return AttentionBatch(
+def make_batch(token_map, req_ids, lengths, **kwargs) -> AttentionMetadata:
+    return AttentionMetadata(
         req_to_token_indexs=token_map,
         b_req_idx=req_ids,
         b_seq_len=lengths,
@@ -81,7 +81,7 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
     layer_config = GQALayerConfig(
         num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=dtype, sliding_window=window
     )
-    step_args = TritonGQAPrefillBackend.get_step_builder_cls()().build(
+    att_state = TritonGQAPrefillBackend.get_step_builder_cls()().build(
         make_batch(
             token_map,
             req_ids,
@@ -93,7 +93,7 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
     )
     out = torch.empty(q.shape[0], q_heads + 1, 64, device=q.device, dtype=q.dtype)[:, :q_heads]
     impl = TritonGQAPrefillBackend.get_impl_cls()(layer_config)
-    assert impl.forward(step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
+    assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k, v, token_map, req_ids, lengths, ready, window), atol=0.02, rtol=0.02
     )
@@ -107,10 +107,10 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
         lengths += 1
         q = torch.randn(3, q_heads + 1, 64, device="cuda", dtype=dtype)[:, :q_heads]
         q_before = q.clone()
-        step_args = TritonGQADecodeBackend.get_step_builder_cls()().build(make_batch(token_map, req_ids, lengths))
+        att_state = TritonGQADecodeBackend.get_step_builder_cls()().build(make_batch(token_map, req_ids, lengths))
         out = torch.empty(3, q_heads + 1, 64, device=q.device, dtype=q.dtype)[:, :q_heads]
         impl = TritonGQADecodeBackend.get_impl_cls()(layer_config)
-        assert impl.forward(step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out, alloc_func=allocate) is out
+        assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out, alloc_func=allocate) is out
         torch.testing.assert_close(
             out.float(),
             reference(q, k, v, token_map, req_ids, lengths, (lengths - 1).tolist(), window),
@@ -138,11 +138,11 @@ def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
     )
     layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16)
     impl = TritonGQADecodeBackend.get_impl_cls()(layer_config)
-    # As in the serving decode path, the capture flag is set before the step args are built and
+    # As in the serving decode path, the capture flag is set before the attention state are built and
     # capture raises max_kv_seq_len to the graph capacity only afterwards.
     owner.is_cuda_graph_capture = True
-    step_args = TritonGQADecodeBackend.create_step_builder(layer_config, None).build(
-        build_attention_batch(owner, model)
+    att_state = TritonGQADecodeBackend.create_step_builder(layer_config, None).build(
+        build_attention_metadata(owner, model)
     )
     owner.max_kv_seq_len = 512
     q = torch.randn(2, q_heads, 64, device="cuda", dtype=torch.bfloat16)
@@ -151,7 +151,7 @@ def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
 
     def forward() -> torch.Tensor:
         out = allocator(q.shape, dtype=q.dtype, device=q.device)
-        return impl.forward(step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out, alloc_func=allocator)
+        return impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out, alloc_func=allocator)
 
     forward()
     torch.cuda.synchronize()
@@ -164,9 +164,9 @@ def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
         graph.replay()
         expected = reference(q, k, v, token_map, owner.b_req_idx, owner.b_seq_len, [x - 1 for x in lengths], (-1, -1))
         torch.testing.assert_close(actual.float(), expected, atol=0.02, rtol=0.02)
-    # The step args keep the capture step's actual length as the config hint and the capacity as the bound.
-    assert (step_args.max_kv_seq_len, step_args.kv_seq_len_bound) == (33, 512)
-    # Step args do not keep the step's InferStateInfo alive.
+    # The attention state keep the capture step's actual length as the config hint and the capacity as the bound.
+    assert (att_state.max_kv_seq_len, att_state.kv_seq_len_bound) == (33, 512)
+    # Attention state do not keep the step's InferStateInfo alive.
     owner_ref = weakref.ref(owner)
     del owner
     assert owner_ref() is None
@@ -183,9 +183,9 @@ def test_list_sliding_window_matches_tuple():
     token_map = torch.arange(64, device="cuda", dtype=torch.int32).view(2, 32)
     lengths = torch.tensor([5, 9], device="cuda", dtype=torch.int32)
     req_ids = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
-    step_args = TritonGQADecodeBackend.get_step_builder_cls()().build(make_batch(token_map, req_ids, lengths))
+    att_state = TritonGQADecodeBackend.get_step_builder_cls()().build(make_batch(token_map, req_ids, lengths))
     impl = TritonGQADecodeBackend.get_impl_cls()(layer_config)
-    out = impl.forward(step_args, GQALayerInputs(q=q, k_cache=kv[:, :4], v_cache=kv[:, 4:]), out=torch.empty_like(q))
+    out = impl.forward(att_state, GQALayerInputs(q=q, k_cache=kv[:, :4], v_cache=kv[:, 4:]), out=torch.empty_like(q))
     expected = reference(q, kv[:, :4], kv[:, 4:], token_map, req_ids, lengths, [4, 8], (-1, -1))
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
 
@@ -269,14 +269,14 @@ def test_speculative_decode_rows_share_request_kv(q_heads, kv_heads, window):
     k, v = kv[:, :kv_heads], kv[:, kv_heads:]
     q = torch.randn(6, q_heads, 64, device="cuda", dtype=torch.bfloat16)
     batch = make_batch(token_map, req_ids, lengths, cu_kv_seq_len=None, decode_rows_per_request=2, pad_req_idx=pad)
-    step_args = TritonGQADecodeBackend.get_step_builder_cls()().build(batch)
-    assert step_args.b_mark_shared_group.cpu().tolist() == [0, 2, 0, 2, 1, 1]
+    att_state = TritonGQADecodeBackend.get_step_builder_cls()().build(batch)
+    assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 0, 2, 1, 1]
     layer_config = GQALayerConfig(
         num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16, sliding_window=window
     )
     out = torch.empty_like(q)
     TritonGQADecodeBackend.get_impl_cls()(layer_config).forward(
-        step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out
+        att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out
     )
     expected = reference(q, k, v, token_map, req_ids, lengths, (lengths - 1).tolist(), window)
     torch.testing.assert_close(out[:4].float(), expected[:4], atol=0.02, rtol=0.02)
@@ -308,7 +308,7 @@ def alibi_reference(q, k, v, token_map, req_ids, lengths, ready, slopes):
     for req_id, length, cached in zip(req_ids.tolist(), lengths.tolist(), ready):
         count = length - cached
         indices = token_map[req_id, :length].long()
-        scores = torch.einsum("qhd,khd->hqk", q[offset : offset + count].float(), k[indices].float()) * 64 ** -0.5
+        scores = torch.einsum("qhd,khd->hqk", q[offset : offset + count].float(), k[indices].float()) * 64**-0.5
         query_pos = torch.arange(cached, length, device=q.device)[:, None]
         key_pos = torch.arange(length, device=q.device)[None, :]
         scores = scores + slopes.float()[:, None, None] * (key_pos - query_pos)[None]
@@ -352,12 +352,12 @@ def test_alibi_prefill_and_decode_match_reference():
 
     q = torch.randn(3, heads, 64, device="cuda", dtype=torch.bfloat16)
     cu_kv = torch.tensor([0, *lengths.tolist()], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
-    step_args = TritonGQADecodeBackend.get_step_builder_cls()().build(
+    att_state = TritonGQADecodeBackend.get_step_builder_cls()().build(
         make_batch(token_map, req_ids, lengths, cu_kv_seq_len=cu_kv)
     )
     out = torch.empty_like(q)
     TritonGQADecodeBackend.get_impl_cls()(layer_config).forward(
-        step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v, alibi_slopes=slopes), out=out
+        att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, alibi_slopes=slopes), out=out
     )
     expected = alibi_reference(q, k, v, token_map, req_ids, lengths, (lengths - 1).tolist(), slopes)
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
@@ -459,7 +459,7 @@ def test_bidirectional_image_spans_prefill_matches_reference(window, head_dim, s
             mask &= key_pos >= query_pos - window[0]
         # Image queries also see their whole span.
         mask |= (key_pos >= image_start[row : row + count, None]) & (key_pos < image_end[row : row + count, None])
-        scores = torch.einsum("qhd,khd->hqk", q[row : row + count].float(), keys) * head_dim ** -0.5
+        scores = torch.einsum("qhd,khd->hqk", q[row : row + count].float(), keys) * head_dim**-0.5
         scores.masked_fill_(~mask[None], float("-inf"))
         expected.append(torch.einsum("hqk,khd->qhd", scores.softmax(-1), values))
         row += count

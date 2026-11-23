@@ -14,12 +14,12 @@ from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQADecod
 from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLAPrefillLayerConfig
 from lightllm.common.attention.backends.mla.fa3 import FA3MLADecodeBackend
 from lightllm.common.attention.backends.mla.flashinfer import FlashInferMLADecodeBackend, FlashInferMLAPrefillBackend
-from lightllm.common.basemodel import attention_groups
-from lightllm.common.basemodel.attention_groups import step_builder_context
+from lightllm.common.basemodel import attention_runtime
+from lightllm.common.basemodel.attention_runtime import step_builder_context
 
 
 def context(monkeypatch, **overrides):
-    monkeypatch.setattr(attention_groups, "get_current_device_id", lambda: 0)
+    monkeypatch.setattr(attention_runtime, "get_current_device_id", lambda: 0)
     args = dict(
         mtp_step=0,
         page_size=16,
@@ -48,12 +48,12 @@ def test_flashinfer_gqa_builders_share_one_workspace_and_mla_has_its_own(monkeyp
         allocations.append((workspace, size, dtype, device))
         return workspace
 
-    monkeypatch.setattr(attention_groups, "get_current_device_id", lambda: current_device_id)
-    monkeypatch.setattr(attention_groups.torch, "empty", fake_empty)
-    monkeypatch.setattr(attention_groups, "_workspace_buffers", {})
+    monkeypatch.setattr(attention_runtime, "get_current_device_id", lambda: current_device_id)
+    monkeypatch.setattr(attention_runtime.torch, "empty", fake_empty)
+    monkeypatch.setattr(attention_runtime, "_workspace_buffers", {})
     ctx = context(monkeypatch)
     # The context's workspaces come from the process-wide store, keyed by the current device.
-    monkeypatch.setattr(attention_groups, "get_current_device_id", lambda: current_device_id)
+    monkeypatch.setattr(attention_runtime, "get_current_device_id", lambda: current_device_id)
 
     fp = FlashInferGQAPrefillBackend.create_step_builder(gqa(), ctx).workspace()
     fp8 = FlashInferGQAPrefillBackend.create_step_builder(gqa(kv_quant="fp8_per_tensor"), ctx).workspace()
@@ -68,10 +68,10 @@ def test_flashinfer_gqa_builders_share_one_workspace_and_mla_has_its_own(monkeyp
 
 
 def test_workspace_key_includes_size_and_dtype(monkeypatch):
-    monkeypatch.setattr(attention_groups, "get_current_device_id", lambda: 0)
-    monkeypatch.setattr(attention_groups.torch, "empty", lambda *args, **kwargs: object())
-    monkeypatch.setattr(attention_groups, "_workspace_buffers", {})
-    get = attention_groups.get_gpu_workspace_buffer
+    monkeypatch.setattr(attention_runtime, "get_current_device_id", lambda: 0)
+    monkeypatch.setattr(attention_runtime.torch, "empty", lambda *args, **kwargs: object())
+    monkeypatch.setattr(attention_runtime, "_workspace_buffers", {})
+    get = attention_runtime.get_gpu_workspace_buffer
 
     small = get("shared", 1024)
     assert get("shared", 1024) is small

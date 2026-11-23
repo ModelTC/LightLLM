@@ -43,7 +43,7 @@ from lightllm.utils.torch_memory_saver_utils import (
     TorchMemorySaverWrapper,
     MemoryTag,
 )
-from .attention_groups import AttentionGroups
+from .attention_runtime import layer_impl_selector
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -73,13 +73,8 @@ class TpPartBaseModel:
     is_hybrid_att_model = False
 
     # Its layers' attention, created when the runtime starts; None for a model without attention states.
-    att_groups: Optional[AttentionGroups] = None
-    # The attention implementation (lightllm.common.attention.selector) its full-attention layers use,
-    # overriding the first value of --llm_prefill_att_backend/--llm_decode_att_backend; None follows them.
-    att_implementation: Optional[str] = None
-    # Scratch per prefill microbatch that the model reserves before it sizes the KV cache, for
-    # attention implementations that need it (StepBuilderContext.prefill_workspace); None if none.
-    attention_prefill_workspaces: Optional[list] = None
+    attention_step_groups = None
+    requires_cpu_cache_sync = False
 
     def __init__(self, kvargs):
         self.args = get_env_start_args()
@@ -192,10 +187,6 @@ class TpPartBaseModel:
         self._check_mem_size()
         self._init_attention()
         self._init_hidden_collector()
-        if self.att_groups is not None:
-            for name in self.att_groups.groups:
-                logger.info(f"{self.att_state_role} attention group (prefill+decode): {name}")
-
         self._autotune_warmup()
         self._init_padded_req()
         self._init_cudagraph()
@@ -338,15 +329,20 @@ class TpPartBaseModel:
 
     def _init_attention(self):
         """Create each layer's Attention, so unsupported layer configs fail before warmup."""
-        self.att_groups = None
+        self.attention_step_groups = None
+        self.requires_cpu_cache_sync = False
         role = self.att_state_role
         manager = self.att_state_manager
         if not (manager.get_full_attention_states(role) or manager.get_bounded_attention_states(role)):
             # FFN-only models need no attention.
             return
-        self.att_groups = AttentionGroups(self)
+        select_impls = layer_impl_selector(self)
         for layer in self.layers_infer:
-            layer.init_attention(self)
+            layer.init_attention(self, select_impls)
+        for phase, groups in self.attention_step_groups.items():
+            names = [group.backend.get_name() for group in groups.values()]
+            logger.info(f"{self.att_state_role} {phase} attention builders: {names}")
+            self.requires_cpu_cache_sync |= any(group.backend.requires_cpu_cache_sync() for group in groups.values())
 
     def _align_decode_batch_size(self, batch_size: int) -> int:
         alignment = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
@@ -455,7 +451,6 @@ class TpPartBaseModel:
 
         infer_state.req_manager = self.req_manager
         infer_state.att_state_manager = self.att_state_manager
-        infer_state.att_groups = self.att_groups
 
         infer_state.mem_index = self._select_mem_indexes(model_input)
         infer_state.microbatch_index = microbatch_index
@@ -629,7 +624,7 @@ class TpPartBaseModel:
         prefill_mem_indexes_ready_event.record()
 
         infer_state.init_some_extra_state(self)
-        infer_state.init_att_state()
+        infer_state.init_att_state(self)
         model_output = self._context_forward(infer_state=infer_state)
 
         model_output = self._create_unpad_prefill_model_output(
@@ -683,7 +678,7 @@ class TpPartBaseModel:
         infer_state.is_cuda_graph_capture = need_capture
         infer_state.is_cuda_graph_replay = use_cuda_graph and not need_capture
         infer_state.init_some_extra_state(self)
-        infer_state.init_att_state()
+        infer_state.init_att_state(self)
 
         if use_cuda_graph:
             if need_capture:
@@ -697,7 +692,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -830,11 +824,11 @@ class TpPartBaseModel:
 
         infer_state0 = self._create_inferstate(model_input0, 0)
         infer_state0.init_some_extra_state(self)
-        infer_state0.init_att_state()
+        infer_state0.init_att_state(self)
 
         infer_state1 = self._create_inferstate(model_input1, 1)
         infer_state1.init_some_extra_state(self)
-        infer_state1.init_att_state()
+        infer_state1.init_att_state(self)
 
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
@@ -896,13 +890,13 @@ class TpPartBaseModel:
             infer_state0.is_cuda_graph_capture = need_capture
             infer_state0.is_cuda_graph_replay = not need_capture
             infer_state0.init_some_extra_state(self)
-            infer_state0.init_att_state()
+            infer_state0.init_att_state(self)
 
             infer_state1 = self._create_inferstate(padded_model_input1, 1)
             infer_state1.is_cuda_graph_capture = need_capture
             infer_state1.is_cuda_graph_replay = not need_capture
             infer_state1.init_some_extra_state(self)
-            infer_state1.init_att_state()
+            infer_state1.init_att_state(self)
 
             if need_capture:
                 model_output0, model_output1 = self.graph.capture_decode(
@@ -923,11 +917,11 @@ class TpPartBaseModel:
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(model_input0, 0)
             infer_state0.init_some_extra_state(self)
-            infer_state0.init_att_state()
+            infer_state0.init_att_state(self)
 
             infer_state1 = self._create_inferstate(model_input1, 1)
             infer_state1.init_some_extra_state(self)
-            infer_state1.init_att_state()
+            infer_state1.init_att_state(self)
 
             model_output0, model_output1 = self._overlap_tpsp_token_forward(infer_state0, infer_state1=infer_state1)
             model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)

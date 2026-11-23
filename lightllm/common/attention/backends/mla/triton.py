@@ -7,7 +7,8 @@ from lightllm.common.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionStepBuilder,
-    AttentionBatch,
+    AttentionMetadata,
+    PrefillStateBuilder,
     StepBuilderContext,
     TensorAllocator,
 )
@@ -17,32 +18,7 @@ if TYPE_CHECKING:
     from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding import MLADecodeSchedule
 
 
-@dataclass(frozen=True)
-class TritonMLAPrefillStepArgs:
-    """Packed query and KV row offsets, total lengths and cached prefix lengths per request."""
-
-    b_q_start_loc: torch.Tensor
-    b_kv_start_loc: torch.Tensor
-    b_seq_len: torch.Tensor
-    b_ready_cache_len: torch.Tensor
-    max_q_seq_len: int
-
-
-class TritonMLAPrefillStepBuilder(AttentionStepBuilder[TritonMLAPrefillStepArgs]):
-    def build(self, batch: AttentionBatch) -> TritonMLAPrefillStepArgs:
-        """The kernel reads the request tensors directly, so the step args only record them."""
-        assert batch.b_q_start_loc is not None and batch.cu_kv_seq_len is not None, "prefill batch fields required"
-        assert batch.b_ready_cache_len is not None, "prefill batch fields required"
-        return TritonMLAPrefillStepArgs(
-            b_q_start_loc=batch.b_q_start_loc,
-            b_kv_start_loc=batch.cu_kv_seq_len,
-            b_seq_len=batch.b_seq_len,
-            b_ready_cache_len=batch.b_ready_cache_len,
-            max_q_seq_len=batch.max_q_seq_len,
-        )
-
-
-class TritonMLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, TritonMLAPrefillStepArgs, MLAPrefillLayerInputs]):
+class TritonMLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, AttentionMetadata, MLAPrefillLayerInputs]):
     def __init__(self, layer_config: MLAPrefillLayerConfig) -> None:
         super().__init__(layer_config)
         # 256-dim queries (GLM-4 MoE Lite: 192 nope + 64 rope) run the contiguous-KV GQA prefill kernel
@@ -53,7 +29,7 @@ class TritonMLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, TritonMLAPrefill
 
     def forward(
         self,
-        step_args: TritonMLAPrefillStepArgs,
+        att_state: AttentionMetadata,
         layer_inputs: MLAPrefillLayerInputs,
         *,
         out: torch.Tensor,
@@ -67,6 +43,8 @@ class TritonMLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, TritonMLAPrefill
             context_attention_fwd_with_v,
         )
 
+        assert att_state.b_q_start_loc is not None and att_state.cu_kv_seq_len is not None, "prefill fields required"
+        assert att_state.b_ready_cache_len is not None, "prefill fields required"
         layer_config = self.layer_config
         nope_dim = layer_config.qk_nope_head_dim
         assert layer_inputs.q.shape[1:] == (
@@ -75,7 +53,7 @@ class TritonMLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, TritonMLAPrefill
         ), "q does not match the layer_config"
         assert layer_inputs.q.dtype == layer_config.dtype, "q does not match the layer_config"
         if self.expands_keys:
-            return self._expanded_key_forward(step_args, layer_inputs, out, alloc_func)
+            return self._expanded_key_forward(att_state, layer_inputs, out, alloc_func)
         context_attention_fwd_with_v(
             q_nope=layer_inputs.q[:, :, :nope_dim],
             q_rope=layer_inputs.q[:, :, nope_dim:],
@@ -83,16 +61,16 @@ class TritonMLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, TritonMLAPrefill
             k_rope=layer_inputs.k_rope,
             v=layer_inputs.v,
             o=out,
-            b_start_loc=step_args.b_q_start_loc,
-            b_kv_start_loc=step_args.b_kv_start_loc,
-            b_seq_len=step_args.b_seq_len,
-            b_prompt_cache_len=step_args.b_ready_cache_len,
-            max_input_len=step_args.max_q_seq_len,
+            b_start_loc=att_state.b_q_start_loc,
+            b_kv_start_loc=att_state.cu_kv_seq_len,
+            b_seq_len=att_state.b_seq_len,
+            b_prompt_cache_len=att_state.b_ready_cache_len,
+            max_input_len=att_state.max_q_seq_len,
             softmax_scale=layer_config.softmax_scale,
         )
         return out
 
-    def _expanded_key_forward(self, step_args, layer_inputs: MLAPrefillLayerInputs, out, alloc_func):
+    def _expanded_key_forward(self, att_state, layer_inputs: MLAPrefillLayerInputs, out, alloc_func):
         from lightllm.common.attention.kernels.gqa.bf16.prefill.context_flashattention_nopad import (
             context_attention_fwd_contiguous_kv,
         )
@@ -107,18 +85,18 @@ class TritonMLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, TritonMLAPrefill
             k,
             layer_inputs.v,
             out,
-            step_args.b_q_start_loc,
-            step_args.b_kv_start_loc,
-            step_args.b_seq_len,
-            step_args.max_q_seq_len,
-            step_args.b_ready_cache_len,
+            att_state.b_q_start_loc,
+            att_state.cu_kv_seq_len,
+            att_state.b_seq_len,
+            att_state.max_q_seq_len,
+            att_state.b_ready_cache_len,
             softmax_scale=layer_config.softmax_scale,
         )
         return out
 
 
 @dataclass(frozen=True)
-class TritonMLADecodeStepArgs:
+class TritonMLADecodeAttState:
     """At decode, request i reads physical slots req_to_token_indexs[b_req_idx[i], :b_seq_len[i]].
 
     The split schedule was built for the recorded head count, latent/rotary dims and dtype.
@@ -134,7 +112,7 @@ class TritonMLADecodeStepArgs:
     dtype: torch.dtype
 
 
-class TritonMLADecodeStepBuilder(AttentionStepBuilder[TritonMLADecodeStepArgs]):
+class TritonMLADecodeStepBuilder(AttentionStepBuilder[TritonMLADecodeAttState]):
     def __init__(self, *, num_heads: int, kv_lora_rank: int, qk_rope_head_dim: int, dtype: torch.dtype) -> None:
         """Fix the layer group's per-rank configuration, which selects the split schedule's kernel config."""
         self.num_heads = num_heads
@@ -143,7 +121,7 @@ class TritonMLADecodeStepBuilder(AttentionStepBuilder[TritonMLADecodeStepArgs]):
         self.dtype = dtype
         self._cuda_graph_schedules: dict[tuple[int, int], "MLADecodeSchedule"] = {}
 
-    def build(self, batch: AttentionBatch) -> TritonMLADecodeStepArgs:
+    def build(self, batch: AttentionMetadata) -> TritonMLADecodeAttState:
         """Compute the split schedule from the current b_seq_len, shared by every layer of the step.
 
         A CUDA graph step reuses one schedule per (microbatch, batch size) and rewrites it in
@@ -163,7 +141,7 @@ class TritonMLADecodeStepBuilder(AttentionStepBuilder[TritonMLADecodeStepArgs]):
         else:
             tuning_seq_len = batch.total_token_num // batch.batch_size
             schedule = self._new_schedule(batch.b_seq_len, tuning_seq_len)
-        return TritonMLADecodeStepArgs(
+        return TritonMLADecodeAttState(
             req_to_token_indexs=batch.req_to_token_indexs,
             b_req_idx=batch.b_req_idx,
             b_seq_len=batch.b_seq_len,
@@ -187,7 +165,7 @@ class TritonMLADecodeStepBuilder(AttentionStepBuilder[TritonMLADecodeStepArgs]):
         )
 
 
-class TritonMLADecodeImpl(AttentionImpl[MLADecodeLayerConfig, TritonMLADecodeStepArgs, MLADecodeLayerInputs]):
+class TritonMLADecodeImpl(AttentionImpl[MLADecodeLayerConfig, TritonMLADecodeAttState, MLADecodeLayerInputs]):
     def __init__(self, layer_config: MLADecodeLayerConfig) -> None:
         super().__init__(layer_config)
         # Each query row reads its own request prefix, which is causal across a request's rows.
@@ -196,7 +174,7 @@ class TritonMLADecodeImpl(AttentionImpl[MLADecodeLayerConfig, TritonMLADecodeSte
 
     def forward(
         self,
-        step_args: TritonMLADecodeStepArgs,
+        att_state: TritonMLADecodeAttState,
         layer_inputs: MLADecodeLayerInputs,
         *,
         out: torch.Tensor,
@@ -211,12 +189,12 @@ class TritonMLADecodeImpl(AttentionImpl[MLADecodeLayerConfig, TritonMLADecodeSte
         )
 
         layer_config = self.layer_config
-        assert (step_args.num_heads, step_args.kv_lora_rank, step_args.qk_rope_head_dim, step_args.dtype) == (
+        assert (att_state.num_heads, att_state.kv_lora_rank, att_state.qk_rope_head_dim, att_state.dtype) == (
             layer_config.num_heads,
             layer_config.kv_lora_rank,
             layer_config.qk_rope_head_dim,
             layer_config.dtype,
-        ), "step args were built for a different MLA layer configuration"
+        ), "attention state were built for a different MLA layer configuration"
         q_nope, q_rope = layer_inputs.q_nope, layer_inputs.q_rope
         assert (
             q_nope.shape[1:] == (layer_config.num_heads, layer_config.kv_lora_rank)
@@ -229,11 +207,11 @@ class TritonMLADecodeImpl(AttentionImpl[MLADecodeLayerConfig, TritonMLADecodeSte
             q_rope=q_rope,
             kv_nope=layer_inputs.kv_cache[:, :, : layer_config.kv_lora_rank],
             kv_rope=layer_inputs.kv_cache[:, :, layer_config.kv_lora_rank :],
-            req_to_token_indexs=step_args.req_to_token_indexs,
-            b_req_idx=step_args.b_req_idx,
-            b_seq_len=step_args.b_seq_len,
+            req_to_token_indexs=att_state.req_to_token_indexs,
+            b_req_idx=att_state.b_req_idx,
+            b_seq_len=att_state.b_seq_len,
             softmax_scale=layer_config.softmax_scale,
-            schedule=step_args.schedule,
+            schedule=att_state.schedule,
             out=out,
             alloc_tensor_func=alloc_func,
         )
@@ -246,18 +224,16 @@ class TritonMLAPrefillBackend(AttentionBackend):
         return "triton_mla_prefill"
 
     @staticmethod
-    def get_step_builder_cls() -> type[TritonMLAPrefillStepBuilder]:
-        return TritonMLAPrefillStepBuilder
+    def get_step_builder_cls() -> type[PrefillStateBuilder]:
+        return PrefillStateBuilder
 
     @staticmethod
     def get_impl_cls() -> type[TritonMLAPrefillImpl]:
         return TritonMLAPrefillImpl
 
     @classmethod
-    def create_step_builder(
-        cls, layer_config: MLAPrefillLayerConfig, ctx: StepBuilderContext
-    ) -> TritonMLAPrefillStepBuilder:
-        return TritonMLAPrefillStepBuilder()
+    def create_step_builder(cls, layer_config: MLAPrefillLayerConfig, ctx: StepBuilderContext) -> PrefillStateBuilder:
+        return PrefillStateBuilder()
 
 
 class TritonMLADecodeBackend(AttentionBackend):

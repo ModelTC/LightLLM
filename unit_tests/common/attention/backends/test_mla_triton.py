@@ -6,15 +6,15 @@ import torch
 from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLADecodeLayerInputs
 from lightllm.common.attention.backends.mla import MLAPrefillLayerConfig, MLAPrefillLayerInputs
 from lightllm.common.attention.backends.mla.triton import TritonMLADecodeBackend, TritonMLAPrefillBackend
-from lightllm.common.basemodel.attention_groups import build_attention_batch
+from lightllm.common.basemodel.attention_runtime import build_attention_metadata
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
-# The model fields build_attention_batch reads.
+# The model fields build_attention_metadata reads.
 MODEL = SimpleNamespace(is_mtp_draft_model=False, graph_max_len_in_batch=192)
-DECODE_SCALE = 576 ** -0.5
+DECODE_SCALE = 576**-0.5
 
 
 def decode_config(scale=DECODE_SCALE):
@@ -29,10 +29,10 @@ def decode_builder():
     return TritonMLADecodeBackend.create_step_builder(decode_config(), None)
 
 
-def decode(step_args, q_nope, q_rope, kv):
+def decode(att_state, q_nope, q_rope, kv):
     impl = TritonMLADecodeBackend.get_impl_cls()(decode_config())
     out = torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
-    return impl.forward(step_args, MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv), out=out)
+    return impl.forward(att_state, MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv), out=out)
 
 
 def _decode_state(lengths, *, capture=False, replay=False):
@@ -74,11 +74,11 @@ def test_cached_prefill(nope_dim, v_dim):
         softmax_scale=scale,
         dtype=q.dtype,
     )
-    step_args = TritonMLAPrefillBackend.create_step_builder(layer_config, None).build(
-        build_attention_batch(state, MODEL)
+    att_state = TritonMLAPrefillBackend.create_step_builder(layer_config, None).build(
+        build_attention_metadata(state, MODEL)
     )
     actual = TritonMLAPrefillBackend.get_impl_cls()(layer_config).forward(
-        step_args,
+        att_state,
         MLAPrefillLayerInputs(q=q, k_nope=k_nope, k_rope=k_rope, v=v),
         out=out,
         # The expanded-key path also allocates scratch keys.
@@ -97,7 +97,7 @@ def test_decode_plans_once_per_step_independent_of_query_layout(decode_builder):
     slots = torch.randperm(768, device="cuda", dtype=torch.int32).view(2, 384)
     state = _decode_state(lengths)
     state.req_manager = SimpleNamespace(req_to_token_indexs=slots)
-    step_args = decode_builder.build(build_attention_batch(state, MODEL))
+    att_state = decode_builder.build(build_attention_metadata(state, MODEL))
     kv = torch.randn((768, 1, 576), dtype=torch.bfloat16, device="cuda")
     scale = DECODE_SCALE
     # Layers may present the absorbed query with different strides; both reuse the step's args.
@@ -106,7 +106,7 @@ def test_decode_plans_once_per_step_independent_of_query_layout(decode_builder):
     q_rope = torch.randn((2, 16, 192), dtype=kv.dtype, device="cuda")[..., -64:]
     expected = _reference_decode(torch.cat((q_transposed, q_rope), dim=-1), kv, slots, lengths, scale)
     for q_nope in (q_transposed, q_contiguous):
-        actual = decode(step_args, q_nope, q_rope, kv)
+        actual = decode(att_state, q_nope, q_rope, kv)
         torch.testing.assert_close(actual, expected.to(kv.dtype), rtol=0.02, atol=0.012)
 
 
@@ -115,8 +115,8 @@ def test_decode_replay_rebuilds_captured_schedule(decode_builder):
     req_manager = SimpleNamespace(req_to_token_indexs=slots)
     state = _decode_state((7, 5), capture=True)
     state.req_manager = req_manager
-    step_args = decode_builder.build(build_attention_batch(state, MODEL))
-    captured_schedule = step_args.schedule
+    att_state = decode_builder.build(build_attention_metadata(state, MODEL))
+    captured_schedule = att_state.schedule
     kv = torch.randn((384, 1, 576), dtype=torch.bfloat16, device="cuda")
     # The model produces the absorbed query by transposing the head-major BMM output.
     q_nope = torch.randn((16, 2, 512), dtype=kv.dtype, device=kv.device).transpose(0, 1)
@@ -125,7 +125,7 @@ def test_decode_replay_rebuilds_captured_schedule(decode_builder):
     scale = DECODE_SCALE
 
     def run():
-        return decode(step_args, q_nope, q_rope, kv)
+        return decode(att_state, q_nope, q_rope, kv)
 
     run()
     graph = torch.cuda.CUDAGraph()
@@ -135,9 +135,9 @@ def test_decode_replay_rebuilds_captured_schedule(decode_builder):
     for lengths in [(7, 5), (150, 83)]:
         replay_state = _decode_state(lengths, replay=True)
         replay_state.req_manager = req_manager
-        replay_step_args = decode_builder.build(build_attention_batch(replay_state, MODEL))
+        replay_att_state = decode_builder.build(build_attention_metadata(replay_state, MODEL))
         # Building the replay step's args rewrites the schedule the graph captured instead of making a new one.
-        assert replay_step_args.schedule is captured_schedule
+        assert replay_att_state.schedule is captured_schedule
         state.copy_for_cuda_graph(replay_state)
         graph.replay()
         expected = _reference_decode(q, kv, slots, lengths, scale)
@@ -146,11 +146,11 @@ def test_decode_replay_rebuilds_captured_schedule(decode_builder):
 
 
 def test_decode_step_builder_keeps_one_graph_schedule_per_microbatch_and_batch_size(decode_builder):
-    from lightllm.common.attention.backend import AttentionBatch
+    from lightllm.common.attention.backend import AttentionMetadata
 
     def make_batch(lengths, microbatch_index=0, graph=True):
         b_seq_len = torch.tensor(lengths, device="cuda", dtype=torch.int32)
-        return AttentionBatch(
+        return AttentionMetadata(
             req_to_token_indexs=torch.zeros((len(lengths), 192), device="cuda", dtype=torch.int32),
             b_req_idx=torch.arange(len(lengths), device="cuda", dtype=torch.int32),
             b_seq_len=b_seq_len,
