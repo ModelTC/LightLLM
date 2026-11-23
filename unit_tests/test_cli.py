@@ -96,6 +96,37 @@ def test_auto_tp_respects_model_heads(tmp_path, monkeypatch, config, gpu_count, 
 
 
 @pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        pytest.param({}, 8, id="qwen3-next-80b"),
+        pytest.param({"model_type": "qwen3"}, 8, id="qwen3-replication"),
+        pytest.param({"model_type": "llama"}, 2, id="llama-requires-kv-shards"),
+        pytest.param({"linear_num_key_heads": 4}, 4, id="linear-heads-require-shards"),
+        pytest.param(
+            {"num_attention_heads": 24, "num_key_value_heads": 6, "model_type": "qwen3"},
+            6,
+            id="kv-heads-require-complete-replicas",
+        ),
+    ],
+)
+def test_auto_tp_kv_head_replication(tmp_path, monkeypatch, overrides, expected):
+    config = {
+        "model_type": "qwen3_next",
+        "num_attention_heads": 16,
+        "num_key_value_heads": 2,
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 32,
+    }
+    config.update(overrides)
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    with (tmp_path / "model.safetensors").open("wb") as weights:
+        weights.truncate(162649725440)
+    monkeypatch.setattr("lightllm.cli_defaults._gpu_memories_mib", lambda: [40 * 1024] * 8)
+
+    assert resolve_tp(str(tmp_path)) == expected
+
+
+@pytest.mark.parametrize(
     "arguments,message",
     [
         ([], "required"),
