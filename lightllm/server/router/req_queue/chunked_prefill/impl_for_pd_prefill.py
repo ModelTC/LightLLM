@@ -9,8 +9,11 @@ logger = init_logger(__name__)
 
 
 class PDPrefillQueue(BaseQueue):
+    _CACHE_LOOKAHEAD = 8
+
     def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
         super().__init__(args, router, dp_index, dp_size_in_node)
+        self._bypassed_request_id = None
         logger.info(
             "PD prefill requests normally generate only one output token; "
             "estimate peak KV usage by summing each request's a_len + b_len, "
@@ -67,24 +70,41 @@ class PDPrefillQueue(BaseQueue):
         batch_req_num = exist_req_num
 
         can_run_list = []
-        consumed_req_count = 0
-
         waiting_queue = self.waiting_req_list
-
         for req in waiting_queue:
-            ok_insert, estimated_peak_token_num, batch_req_num = self._can_add_new_req(
-                req=req, estimated_peak_token_num=estimated_peak_token_num, batch_req_num=batch_req_num
-            )
-            if ok_insert:
-                consumed_req_count += 1
-                can_run_list.append(req)
-            else:
+            ok_insert, next_peak, next_count = self._can_add_new_req(req, estimated_peak_token_num, batch_req_num)
+            if not ok_insert:
                 break
-        new_batch = None
-        if len(can_run_list) != 0:
-            new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)
-        self.waiting_req_list = self.waiting_req_list[consumed_req_count:]
-        return new_batch
+            estimated_peak_token_num, batch_req_num = next_peak, next_count
+            can_run_list.append(req)
+
+        first_waiting = len(can_run_list)
+        if (
+            first_waiting < len(waiting_queue)
+            and batch_req_num < self.running_max_req_size
+            and self.args.enable_cpu_cache
+            and self.args.prefill_queue_strategy == "hrrn_resume"
+            and not self.args.diverse_mode
+        ):
+            blocked = waiting_queue[first_waiting]
+            if not blocked.sample_params.high_priority_request and blocked.request_id != self._bypassed_request_id:
+                # Each blocked head can yield once to a nearby host hit that fits in one chunk.
+                search_end = min(first_waiting + 1 + self._CACHE_LOOKAHEAD, len(waiting_queue))
+                for index in range(first_waiting + 1, search_end):
+                    req = waiting_queue[index]
+                    host_len = req.get_host_cache_match_len()
+                    if host_len == 0 or req.input_len - host_len > self.args.chunked_prefill_size:
+                        continue
+                    ok_insert, _, _ = self._can_add_new_req(req, estimated_peak_token_num, batch_req_num)
+                    if ok_insert:
+                        self._bypassed_request_id = blocked.request_id
+                        can_run_list.append(waiting_queue.pop(index))
+                        break
+
+        self.waiting_req_list = waiting_queue[first_waiting:]
+        if can_run_list:
+            return Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)
+        return None
 
     def _calcu_batch_token_load_batch_not_none(self, current_batch: Batch):
 

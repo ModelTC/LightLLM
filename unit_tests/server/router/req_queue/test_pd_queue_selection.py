@@ -199,3 +199,48 @@ def test_host_cache_boundary_comes_from_the_last_staged_page():
     assert Req.get_host_cache_match_len(req) == 4608
     req.sample_params.prompt_logprobs = 0
     assert Req.get_host_cache_match_len(req) == 0
+
+
+@pytest.mark.parametrize(
+    "strategy,blocked_priority,expect_bypass",
+    [("hrrn_resume", False, True), ("hrrn_resume", True, False), ("default", False, False)],
+)
+def test_pd_prefill_bypasses_a_blocked_head_once_for_a_host_hit(strategy, blocked_priority, expect_bypass):
+    queue = PDPrefillQueue.__new__(PDPrefillQueue)
+    queue.dp_index = 0
+    queue.dp_size_in_node = 1
+    queue.max_total_tokens = 100
+    queue.running_max_req_size = 6
+    queue._bypassed_request_id = None
+    queue.args = SimpleNamespace(
+        prefill_queue_strategy=strategy, enable_cpu_cache=True, chunked_prefill_size=8, diverse_mode=False
+    )
+    queue.is_busy = lambda: False
+    queue.filter_aborted_reqs = lambda: None
+    queue.router = SimpleNamespace(router_statics=SimpleNamespace(ema_req_out_len=10), shared_token_load=MagicMock())
+
+    def req(req_id, length, host=0, high_priority=False):
+        return SimpleNamespace(
+            request_id=req_id,
+            input_len=length,
+            sample_params=SimpleNamespace(suggested_dp_index=0, high_priority_request=high_priority),
+            get_host_cache_match_len=lambda: host,
+            get_tuple_tokens=lambda *args: (length, 0),
+        )
+
+    running = Batch(1, [req("running", 50)], dp_size_in_node=1)
+    small = req("small", 10, high_priority=blocked_priority)
+    blocked = req("blocked", 70, high_priority=blocked_priority)
+    cold = req("cold", 20)
+    too_large = req("too_large", 45, host=40)
+    warm = req("warm", 20, host=16)
+    another_warm = req("another_warm", 20, host=16)
+    queue.waiting_req_list = [small, blocked, cold, too_large, warm, another_warm]
+
+    batch = queue.generate_new_batch(running)
+    assert batch.reqs == ([small, warm] if expect_bypass else [small])
+    assert queue.waiting_req_list == (
+        [blocked, cold, too_large, another_warm] if expect_bypass else [blocked, cold, too_large, warm, another_warm]
+    )
+    assert queue.generate_new_batch(running) is None
+    assert queue.generate_new_batch(None).reqs[0] is blocked
