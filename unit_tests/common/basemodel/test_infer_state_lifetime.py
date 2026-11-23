@@ -8,19 +8,13 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.cuda_graph import CudaGraph
+from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
 class _AttState:
     def __init__(self, positions):
         self.positions = positions
-
-
-class _Groups:
-    """Builds one group's attention state from the step's tensors, as step builders do."""
-
-    def build_attention_states(self, infer_state):
-        return {"group": _AttState(infer_state.position_ids)}
 
 
 @pytest.fixture
@@ -40,12 +34,14 @@ def _create_state(is_prefill):
     owner = InferStateInfo()
     owner.is_prefill = is_prefill
     owner.position_ids = torch.arange(4)
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(
-            "lightllm.common.basemodel.infer_struct.build_attention_states",
-            lambda model, state: _Groups().build_attention_states(state),
-        )
-        owner.init_att_state(SimpleNamespace(attention_step_groups={}))
+    owner.b_req_idx = owner.position_ids
+    owner.req_manager = SimpleNamespace(req_to_token_indexs=None)
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    backend = SimpleNamespace(build=lambda metadata, context: _AttState(metadata.b_req_idx))
+    phase = "prefill" if is_prefill else "decode"
+    model.attention_build_contexts = {phase: {"group": SimpleNamespace(backend=backend, context=None)}}
+    model.req_to_mtp_state_index = None
+    owner.att_states = model.prepare_attention(owner)
     return owner
 
 
@@ -69,7 +65,8 @@ def test_att_state_do_not_keep_their_infer_state_alive(no_cycle_gc, is_prefill):
 def test_infer_state_without_attention_builds_no_att_state():
     owner = InferStateInfo()
     owner.is_prefill = False
-    owner.init_att_state(SimpleNamespace(attention_step_groups=None))
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    owner.att_states = model.prepare_attention(owner)
     assert owner.att_states == {}
 
 

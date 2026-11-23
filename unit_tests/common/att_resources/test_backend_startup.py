@@ -162,7 +162,7 @@ def test_backend_allocates_all_roles_before_warmup(
                             )
                             is state
                         )
-        model.attention_step_groups = None
+        model.attention_build_contexts = None
         model.backends_bound = True
 
     def warmup(model: TpPartBaseModel):

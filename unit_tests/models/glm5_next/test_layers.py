@@ -184,19 +184,15 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     state.b1_cu_q_seq_len = torch.arange(4, device="cuda", dtype=torch.int32)
     state.max_q_seq_len = 1
 
-    # The layer creates its attention as the model loads it; selection follows the bf16 cache.
-    def select_impls(prefill_config, decode_config, *, implementation):
-        prefill = selector.select(prefill_config, "prefill", implementation)
-        decode = selector.select(decode_config, "decode", implementation)
-        assert (prefill.backend, decode.backend) == (FlashMLASparsePrefillBackend, FA3SparseMLADecodeBackend)
-        return prefill.impl, decode.impl
-
     model = SimpleNamespace(
         data_type=torch.bfloat16,
         args=SimpleNamespace(llm_kv_type="None"),
-        select_impls=select_impls,
     )
-    layer.init_attention(model, model.select_impls)
+    spec = layer.attention_spec(model)
+    prefill = selector.select(spec.prefill, "prefill", spec.implementation)
+    decode = selector.select(spec.decode, "decode", spec.implementation)
+    assert (prefill.backend, decode.backend) == (FlashMLASparsePrefillBackend, FA3SparseMLADecodeBackend)
+    layer.prefill_impl, layer.decode_impl = prefill.impl, decode.impl
     # The attention state the group's step builders would build for this batch.
     prefill_att_state = FlashMLASparsePrefillAttState(mem_index=None, has_cached_prefix=False)
     decode_att_state = FA3SparseMLADecodeAttState(
@@ -213,10 +209,10 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
         scores = projected[row].float() @ keys.T * config["qk_nope_head_dim"] ** -0.5
         expected.append(scores.softmax(-1) @ keys)
     expected = torch.stack(expected)
-    state.att_states = {layer.prefill_impl: prefill_att_state}
+    state.att_states = {layer.prefill_impl.state_key: prefill_att_state}
     prefill = layer._context_attention_kernel(q, None, state, weight)
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
-    state.att_states = {layer.decode_impl: decode_att_state}
+    state.att_states = {layer.decode_impl.state_key: decode_att_state}
     decode = layer._token_attention_kernel(q, state, weight)
     for output in (prefill, decode):
         torch.testing.assert_close(output.float(), expected, atol=1e-3, rtol=0.015)

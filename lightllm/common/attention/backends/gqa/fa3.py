@@ -7,9 +7,7 @@ import triton
 from lightllm.common.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
-    AttentionImpl,
-    AttentionStepBuilder,
-    StepBuilderContext,
+    AttentionBuildResources,
     TensorAllocator,
 )
 from lightllm.utils.envs_utils import enable_env_vars
@@ -57,37 +55,12 @@ class FA3GQADecodeAttState:
     page_size: int
 
 
-class FA3GQAPrefillStepBuilder(AttentionStepBuilder[FA3GQAPrefillAttState]):
+class FA3GQAPrefillBuildContext:
     def __init__(self, *, page_size: int) -> None:
         self.page_size = page_size
 
-    def build(self, batch: AttentionMetadata) -> FA3GQAPrefillAttState:
-        """Build a fresh page table for the step's requests."""
-        from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 
-        page_table = torch.empty(
-            (batch.batch_size, triton.cdiv(batch.max_kv_seq_len, self.page_size)),
-            dtype=torch.int32,
-            device=batch.b_seq_len.device,
-        )
-        page_table_copy(
-            page_table=page_table,
-            req_to_token_indexs=batch.req_to_token_indexs,
-            b_req_idx=batch.b_req_idx,
-            page_size=self.page_size,
-        )
-        return FA3GQAPrefillAttState(
-            page_table=page_table,
-            cache_seqlens=batch.b_seq_len,
-            cu_seqlens_q=batch.cu_q_seq_len.int(),
-            cu_seqlens_k=batch.cu_kv_seq_len.int(),
-            max_seqlen_q=batch.max_q_seq_len,
-            page_size=self.page_size,
-            b_image_token_end=batch.b_image_token_end,
-        )
-
-
-class FA3GQADecodeStepBuilder(AttentionStepBuilder[FA3GQADecodeAttState]):
+class FA3GQADecodeBuildContext:
     def __init__(self, *, page_size: int, page_table_view: Callable[[int, int, int], torch.Tensor]) -> None:
         """page_table_view(rows, max_kv_len, microbatch_index) returns a [rows, pages] view of
         caller-owned page-table storage, the same storage for the same arguments."""
@@ -95,7 +68,7 @@ class FA3GQADecodeStepBuilder(AttentionStepBuilder[FA3GQADecodeAttState]):
         self.page_table_view = page_table_view
         self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
 
-    def build(self, batch: AttentionMetadata) -> FA3GQADecodeAttState:
+    def prepare(self, batch: AttentionMetadata) -> FA3GQADecodeAttState:
         """Group query rows into attention requests and fill their page-table rows.
 
         A CUDA graph step uses a page table as wide as the graph capacity and keeps every
@@ -239,7 +212,7 @@ def _fp8_operands(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs, at
     )
 
 
-class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillAttState, GQALayerInputs]):
+class FA3GQAPrefillBackend(AttentionBackend[GQALayerConfig, FA3GQAPrefillAttState, GQALayerInputs]):
     def __init__(self, layer_config: GQALayerConfig) -> None:
         """Supports any scale, causal or non-causal attention, one- or two-sided windows and sinks.
 
@@ -334,8 +307,54 @@ class FA3GQAPrefillImpl(AttentionImpl[GQALayerConfig, FA3GQAPrefillAttState, GQA
         )
         return out
 
+    @staticmethod
+    def get_name() -> str:
+        return "fa3_gqa_prefill"
 
-class FA3GQADecodeImpl(AttentionImpl[GQALayerConfig, FA3GQADecodeAttState, GQALayerInputs]):
+    build_context_type = FA3GQAPrefillBuildContext
+
+    @classmethod
+    def build(cls, metadata: AttentionMetadata, context: FA3GQAPrefillBuildContext) -> FA3GQAPrefillAttState:
+        """Build a fresh page table for the step's requests."""
+        from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
+
+        page_table = torch.empty(
+            (metadata.batch_size, triton.cdiv(metadata.max_kv_seq_len, context.page_size)),
+            dtype=torch.int32,
+            device=metadata.b_seq_len.device,
+        )
+        page_table_copy(
+            page_table=page_table,
+            req_to_token_indexs=metadata.req_to_token_indexs,
+            b_req_idx=metadata.b_req_idx,
+            page_size=context.page_size,
+        )
+        return FA3GQAPrefillAttState(
+            page_table=page_table,
+            cache_seqlens=metadata.b_seq_len,
+            cu_seqlens_q=metadata.cu_q_seq_len.int(),
+            cu_seqlens_k=metadata.cu_kv_seq_len.int(),
+            max_seqlen_q=metadata.max_q_seq_len,
+            page_size=context.page_size,
+            b_image_token_end=metadata.b_image_token_end,
+        )
+
+    @classmethod
+    def create_build_context(
+        cls, layer_config: GQALayerConfig, ctx: AttentionBuildResources
+    ) -> FA3GQAPrefillBuildContext:
+        return FA3GQAPrefillBuildContext(page_size=fa3_page_size(layer_config, ctx))
+
+    @classmethod
+    def build_context_key(cls, layer_config: GQALayerConfig):
+        return layer_config.kv_quant
+
+    @classmethod
+    def requires_cpu_cache_sync(cls) -> bool:
+        return fa3_requires_cpu_cache_sync()
+
+
+class FA3GQADecodeBackend(AttentionBackend[GQALayerConfig, FA3GQADecodeAttState, GQALayerInputs]):
     def __init__(self, layer_config: GQALayerConfig) -> None:
         """Supports any scale, causal or non-causal attention, one- or two-sided windows and sinks.
 
@@ -399,8 +418,33 @@ class FA3GQADecodeImpl(AttentionImpl[GQALayerConfig, FA3GQADecodeAttState, GQALa
         )
         return out
 
+    @staticmethod
+    def get_name() -> str:
+        return "fa3_gqa_decode"
 
-def fa3_page_size(layer_config: GQALayerConfig, ctx: StepBuilderContext) -> int:
+    build_context_type = FA3GQADecodeBuildContext
+
+    @classmethod
+    def build(cls, metadata: AttentionMetadata, context: FA3GQADecodeBuildContext) -> FA3GQADecodeAttState:
+        return context.prepare(metadata)
+
+    @classmethod
+    def create_build_context(
+        cls, layer_config: GQALayerConfig, ctx: AttentionBuildResources
+    ) -> FA3GQADecodeBuildContext:
+        page_size = fa3_page_size(layer_config, ctx)
+        return FA3GQADecodeBuildContext(page_size=page_size, page_table_view=FA3PageTables(ctx, page_size).view)
+
+    @classmethod
+    def build_context_key(cls, layer_config: GQALayerConfig):
+        return layer_config.kv_quant
+
+    @classmethod
+    def requires_cpu_cache_sync(cls) -> bool:
+        return fa3_requires_cpu_cache_sync()
+
+
+def fa3_page_size(layer_config: GQALayerConfig, ctx: AttentionBuildResources) -> int:
     """The page size FA3 runs with for this layer config: the cache's, except 1 for an FP8 cache."""
     if layer_config.kv_quant is None:
         return ctx.page_size
@@ -416,7 +460,7 @@ class FA3PageTables:
     by name with every FA3 decode step builder of the process.
     """
 
-    def __init__(self, ctx: StepBuilderContext, page_size: int) -> None:
+    def __init__(self, ctx: AttentionBuildResources, page_size: int) -> None:
         self.ctx = ctx
         self.page_size = page_size
         self._buffers: Optional[list[torch.Tensor]] = None
@@ -442,56 +486,3 @@ class FA3PageTables:
 def fa3_requires_cpu_cache_sync() -> bool:
     # 设为 1 / TRUE / ON 时，FA3 与 CPU cache 搬运在 GPU 上互相等待。
     return enable_env_vars("LIGHTLLM_FA3_CPU_CACHE_SYNC")
-
-
-class FA3GQAPrefillBackend(AttentionBackend):
-    @staticmethod
-    def get_name() -> str:
-        return "fa3_gqa_prefill"
-
-    @staticmethod
-    def get_step_builder_cls() -> type[FA3GQAPrefillStepBuilder]:
-        return FA3GQAPrefillStepBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[FA3GQAPrefillImpl]:
-        return FA3GQAPrefillImpl
-
-    @classmethod
-    def create_step_builder(cls, layer_config: GQALayerConfig, ctx: StepBuilderContext) -> FA3GQAPrefillStepBuilder:
-        return FA3GQAPrefillStepBuilder(page_size=fa3_page_size(layer_config, ctx))
-
-    @classmethod
-    def step_builder_key(cls, layer_config: GQALayerConfig):
-        return layer_config.kv_quant
-
-    @classmethod
-    def requires_cpu_cache_sync(cls) -> bool:
-        return fa3_requires_cpu_cache_sync()
-
-
-class FA3GQADecodeBackend(AttentionBackend):
-    @staticmethod
-    def get_name() -> str:
-        return "fa3_gqa_decode"
-
-    @staticmethod
-    def get_step_builder_cls() -> type[FA3GQADecodeStepBuilder]:
-        return FA3GQADecodeStepBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[FA3GQADecodeImpl]:
-        return FA3GQADecodeImpl
-
-    @classmethod
-    def create_step_builder(cls, layer_config: GQALayerConfig, ctx: StepBuilderContext) -> FA3GQADecodeStepBuilder:
-        page_size = fa3_page_size(layer_config, ctx)
-        return FA3GQADecodeStepBuilder(page_size=page_size, page_table_view=FA3PageTables(ctx, page_size).view)
-
-    @classmethod
-    def step_builder_key(cls, layer_config: GQALayerConfig):
-        return layer_config.kv_quant
-
-    @classmethod
-    def requires_cpu_cache_sync(cls) -> bool:
-        return fa3_requires_cpu_cache_sync()

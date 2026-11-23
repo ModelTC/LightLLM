@@ -12,7 +12,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel import cuda_graph as graph_module
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
-from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQADecodeStepBuilder
+from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQADecodeBuildContext
 from lightllm.common.basemodel.attention_runtime import build_attention_metadata
 from lightllm.common.basemodel.triton_kernel import mtp_utils
 from lightllm.common.attention.kernels.gqa.bf16.decode.mtp_diverse import (
@@ -150,7 +150,9 @@ def test_decode_passes_saved_length_and_selected_block_n(monkeypatch):
     )
     monkeypatch.setattr(mtp_utils, "build_mtp_shared_group_markers", lambda *a, **kw: inputs["b_mark_shared_group"])
     # Fixed-layout speculative decode: three rows per request.
-    att_state = TritonGQADecodeStepBuilder().build(build_attention_metadata(infer_state, model, lambda: False))
+    att_state = TritonGQADecodeBackend.build(
+        build_attention_metadata(infer_state, model, lambda: False), TritonGQADecodeBuildContext()
+    )
     infer_state.max_kv_seq_len = 32768
     calls = []
 
@@ -163,7 +165,7 @@ def test_decode_passes_saved_length_and_selected_block_n(monkeypatch):
     q, k = inputs["q"], inputs["k"]
     layer_config = GQALayerConfig(num_heads=q.shape[1], num_kv_heads=k.shape[1], head_dim=q.shape[2], dtype=q.dtype)
     layer_inputs = GQALayerInputs(q=q, k_cache=k, v_cache=inputs["v"])
-    TritonGQADecodeBackend.get_impl_cls()(layer_config).forward(att_state, layer_inputs, out=torch.empty_like(q))
+    TritonGQADecodeBackend(layer_config).forward(att_state, layer_inputs, out=torch.empty_like(q))
     assert calls[0]["max_kv_len"] == 8193
     assert calls[0]["b_mark_shared_group"] is inputs["b_mark_shared_group"]
     assert calls[1]["block_n"] == 32

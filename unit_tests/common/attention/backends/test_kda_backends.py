@@ -10,11 +10,11 @@ import torch
 
 from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
 from lightllm.common.attention.backends.kda.triton import (
-    KDAPrefillStepBuilder,
-    ReplayKDADecodeImpl,
-    ReplayKDAPrefillImpl,
-    TritonKDADecodeImpl,
-    TritonKDAPrefillImpl,
+    KDAPrefillBuildContext,
+    ReplayKDADecodeBackend,
+    ReplayKDAPrefillBackend,
+    TritonKDADecodeBackend,
+    TritonKDAPrefillBackend,
 )
 from unit_tests.common.attention.backends.linear_ref import CAPACITY, KDAShape, kda_token, run_prefill_then_decode
 
@@ -104,8 +104,8 @@ def test_kda_prefill_then_speculative_decode_matches_reference(prefill, replay, 
     torch.manual_seed(13)
     family = KDAFamily(mtp_step)
     family.config = dataclasses.replace(family.config, replay=replay)
-    prefill_cls = ReplayKDAPrefillImpl if replay else TritonKDAPrefillImpl
-    decode_cls = ReplayKDADecodeImpl if replay else TritonKDADecodeImpl
+    prefill_cls = ReplayKDAPrefillBackend if replay else TritonKDAPrefillBackend
+    decode_cls = ReplayKDADecodeBackend if replay else TritonKDADecodeBackend
     run_prefill_then_decode(
         family,
         replay=replay,
@@ -113,7 +113,7 @@ def test_kda_prefill_then_speculative_decode_matches_reference(prefill, replay, 
         dynamic=dynamic,
         prefill_impl=prefill_cls(family.config),
         decode_impl=decode_cls(family.config),
-        prefill_builder=KDAPrefillStepBuilder(
+        prefill_builder=KDAPrefillBuildContext(
             ssm_slots_per_request=1 if replay else mtp_step + 1,
             flash_kda_fwd=_flash_kda_fwd() if prefill == "flashkda" else None,
         ),

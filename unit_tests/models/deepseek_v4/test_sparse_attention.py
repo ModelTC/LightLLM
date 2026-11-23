@@ -127,8 +127,8 @@ def _case(heads, ratio):
         compress_ratio=ratio,
         has_attn_sink=True,
     )
-    layer.prefill_impl = FlashMLASWAPrefillBackend.get_impl_cls()(layer_config)
-    layer.decode_impl = FlashMLASWADecodeBackend.get_impl_cls()(layer_config)
+    layer.prefill_impl = FlashMLASWAPrefillBackend(layer_config)
+    layer.decode_impl = FlashMLASWADecodeBackend(layer_config)
     q = torch.randn((tokens, padded_heads, 512), dtype=torch.bfloat16, device="cuda") * 0.1
     q[:, heads:] = 0
     pool, decoded = _pool(128, 2)
@@ -172,7 +172,9 @@ def _infer_state(case, phase, *, params=None, infer_state=None):
     infer_state.attn_params = case.params if params is None else params
     infer_state.get_att_kv = lambda logical_layer_id: case.packed_kv
     impl = case.layer.prefill_impl if phase == "prefill" else case.layer.decode_impl
-    infer_state.att_states = {impl: backend.create_step_builder(case.layer_config, None).build(None)}
+    infer_state.att_states = {
+        impl.state_key: backend.build(None, backend.create_build_context(case.layer_config, None))
+    }
     return infer_state
 
 
@@ -272,7 +274,7 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
     outputs = runner.capture_decode(decode_func, *(case[0] for case in cases))
     outputs = outputs if overlap else (outputs,)
     for state_info, _, _, _ in cases:
-        att_state = state_info.att_states[state_info.case.layer.decode_impl]
+        att_state = state_info.att_states[state_info.case.layer.decode_impl.state_key]
         eager_meta = att_state.sched_meta_by_ratio[ratio]
         capture_meta = att_state.capture_sched_meta_by_ratio[ratio]
         assert eager_meta.tile_scheduler_metadata.data_ptr() != capture_meta.tile_scheduler_metadata.data_ptr()
@@ -392,11 +394,11 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         atol=5e-4,
     )
     assert len(infer_state.prefill_cuda_graph_exe_list) == 3
-    previous_meta = infer_state.att_states[case.layer.prefill_impl].sched_meta_by_ratio[ratio]
+    previous_meta = infer_state.att_states[case.layer.prefill_impl.state_key].sched_meta_by_ratio[ratio]
     for length in (128, 64, 1, 64):
         q.mul_(1.25)
         infer_state = new_request(length)
-        current_meta = infer_state.att_states[case.layer.prefill_impl].sched_meta_by_ratio[ratio]
+        current_meta = infer_state.att_states[case.layer.prefill_impl.state_key].sched_meta_by_ratio[ratio]
         assert current_meta.tile_scheduler_metadata is None
         actual = runner.replay([q, q_lora, x], infer_state)[0]
         assert callback_states[-1] is infer_state

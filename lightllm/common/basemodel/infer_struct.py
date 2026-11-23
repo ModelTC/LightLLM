@@ -11,7 +11,6 @@ from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
-from .attention_runtime import build_attention_states
 
 
 class InferStateInfo:
@@ -20,7 +19,7 @@ class InferStateInfo:
     """
 
     def __init__(self):
-        # init_att_state 为当前阶段的每组构造一次参数，以该组的 impl 实例为键。
+        # 用 backend.state_key 保存当前 microbatch 跨层共享的参数。
         # attention state 不持有 InferStateInfo，因此不会形成引用环。
         self.att_states: dict = {}
 
@@ -128,14 +127,6 @@ class InferStateInfo:
                 self.position_ids,
             ) = gen_decode_params(self.b_seq_len)
             self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
-
-    def init_att_state(self, model):
-        """Build this step's attention attention state, once per group, after every request field is set.
-
-        CUDA graph replay steps build them too: step builders rewrite the tensors the graph captured.
-        """
-        if model.attention_step_groups is not None:
-            self.att_states = build_attention_states(model, self)
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
         for attr_name, attr_value in vars(new_infer_state).items():

@@ -26,7 +26,7 @@ def make_projection(layer, heads: int, inner: int, cols: int, dtype: torch.dtype
         state = SimpleNamespace(
             att_state_role="main",
             att_state_manager=Mock(),
-            att_states={layer.prefill_impl: None},
+            att_states={layer.prefill_impl.state_key: None},
             nsa_step=SimpleNamespace(q_kv_start_loc=None),
         )
         weight = SimpleNamespace(k_b_proj_=projection)

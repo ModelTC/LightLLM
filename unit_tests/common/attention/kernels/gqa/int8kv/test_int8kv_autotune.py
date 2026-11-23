@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from lightllm.common.attention.backends.gqa import GQAKVScales
-from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeStepBuilder
+from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeBuildContext
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeBackend
@@ -145,7 +145,9 @@ def test_decode_passes_saved_length_to_stage1(monkeypatch):
     infer_state.b_seq_len = inputs["B_seq_len"]
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"])
     infer_state.is_prefill = False
-    att_state = TritonQuantGQADecodeStepBuilder().build(build_attention_metadata(infer_state, SimpleNamespace()))
+    att_state = TritonQuantGQADecodeBackend.build(
+        build_attention_metadata(infer_state, SimpleNamespace()), TritonQuantGQADecodeBuildContext()
+    )
     infer_state.max_kv_seq_len = 32768
     calls = []
     monkeypatch.setattr(decode_module, "flash_decode_stage1", lambda **kwargs: calls.append(kwargs))
@@ -161,7 +163,7 @@ def test_decode_passes_saved_length_to_stage1(monkeypatch):
         kv_quant_group_size=q.shape[2] // kv_scales.k_scale.shape[-1],
     )
     layer_inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
-    impl = TritonQuantGQADecodeBackend.get_impl_cls()(layer_config)
+    impl = TritonQuantGQADecodeBackend(layer_config)
     impl.forward(
         att_state,
         layer_inputs,

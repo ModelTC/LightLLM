@@ -7,12 +7,10 @@ import torch
 from lightllm.common.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
-    AttentionImpl,
-    AttentionStepBuilder,
-    StepBuilderContext,
+    AttentionBuildResources,
     TensorAllocator,
 )
-from ..gqa.fa3 import FA3GQADecodeAttState, FA3GQADecodeStepBuilder, FA3PageTables, fa3_requires_cpu_cache_sync
+from ..gqa.fa3 import FA3GQADecodeAttState, FA3GQADecodeBuildContext, FA3PageTables, fa3_requires_cpu_cache_sync
 from . import MLADecodeLayerConfig, MLADecodeLayerInputs, MLAPrefillLayerConfig, MLAPrefillLayerInputs
 
 
@@ -26,18 +24,7 @@ class FA3MLAPrefillAttState:
     max_seqlen_k: int
 
 
-class FA3MLAPrefillStepBuilder(AttentionStepBuilder[FA3MLAPrefillAttState]):
-    def build(self, batch: AttentionMetadata) -> FA3MLAPrefillAttState:
-        assert batch.cu_q_seq_len is not None and batch.cu_kv_seq_len is not None, "prefill batch fields required"
-        return FA3MLAPrefillAttState(
-            cu_seqlens_q=batch.cu_q_seq_len.int(),
-            cu_seqlens_k=batch.cu_kv_seq_len.int(),
-            max_seqlen_q=batch.max_q_seq_len,
-            max_seqlen_k=batch.max_kv_seq_len,
-        )
-
-
-class FA3MLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, FA3MLAPrefillAttState, MLAPrefillLayerInputs]):
+class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefillAttState, MLAPrefillLayerInputs]):
     def forward(
         self,
         att_state: FA3MLAPrefillAttState,
@@ -73,8 +60,28 @@ class FA3MLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, FA3MLAPrefillAttSta
         )
         return out
 
+    @staticmethod
+    def get_name() -> str:
+        return "fa3_mla_prefill"
 
-class FA3MLADecodeImpl(AttentionImpl[MLADecodeLayerConfig, FA3GQADecodeAttState, MLADecodeLayerInputs]):
+    @classmethod
+    def build(cls, metadata: AttentionMetadata, context: None = None) -> FA3MLAPrefillAttState:
+        assert (
+            metadata.cu_q_seq_len is not None and metadata.cu_kv_seq_len is not None
+        ), "prefill metadata fields required"
+        return FA3MLAPrefillAttState(
+            cu_seqlens_q=metadata.cu_q_seq_len.int(),
+            cu_seqlens_k=metadata.cu_kv_seq_len.int(),
+            max_seqlen_q=metadata.max_q_seq_len,
+            max_seqlen_k=metadata.max_kv_seq_len,
+        )
+
+    @classmethod
+    def requires_cpu_cache_sync(cls) -> bool:
+        return fa3_requires_cpu_cache_sync()
+
+
+class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAttState, MLADecodeLayerInputs]):
     def forward(
         self,
         att_state: FA3GQADecodeAttState,
@@ -109,50 +116,22 @@ class FA3MLADecodeImpl(AttentionImpl[MLADecodeLayerConfig, FA3GQADecodeAttState,
         )
         return out
 
-
-class FA3MLAPrefillBackend(AttentionBackend):
-    @staticmethod
-    def get_name() -> str:
-        return "fa3_mla_prefill"
-
-    @staticmethod
-    def get_step_builder_cls() -> type[FA3MLAPrefillStepBuilder]:
-        return FA3MLAPrefillStepBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[FA3MLAPrefillImpl]:
-        return FA3MLAPrefillImpl
-
-    @classmethod
-    def create_step_builder(
-        cls, layer_config: MLAPrefillLayerConfig, ctx: StepBuilderContext
-    ) -> FA3MLAPrefillStepBuilder:
-        return FA3MLAPrefillStepBuilder()
-
-    @classmethod
-    def requires_cpu_cache_sync(cls) -> bool:
-        return fa3_requires_cpu_cache_sync()
-
-
-class FA3MLADecodeBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "fa3_mla_decode"
 
-    @staticmethod
-    def get_step_builder_cls() -> type[FA3GQADecodeStepBuilder]:
-        return FA3GQADecodeStepBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[FA3MLADecodeImpl]:
-        return FA3MLADecodeImpl
+    build_context_type = FA3GQADecodeBuildContext
 
     @classmethod
-    def create_step_builder(
-        cls, layer_config: MLADecodeLayerConfig, ctx: StepBuilderContext
-    ) -> FA3GQADecodeStepBuilder:
+    def build(cls, metadata: AttentionMetadata, context: FA3GQADecodeBuildContext) -> FA3GQADecodeAttState:
+        return context.prepare(metadata)
+
+    @classmethod
+    def create_build_context(
+        cls, layer_config: MLADecodeLayerConfig, ctx: AttentionBuildResources
+    ) -> FA3GQADecodeBuildContext:
         # The latent cache is paged like an unquantized GQA cache.
-        return FA3GQADecodeStepBuilder(page_size=ctx.page_size, page_table_view=FA3PageTables(ctx, ctx.page_size).view)
+        return FA3GQADecodeBuildContext(page_size=ctx.page_size, page_table_view=FA3PageTables(ctx, ctx.page_size).view)
 
     @classmethod
     def requires_cpu_cache_sync(cls) -> bool:

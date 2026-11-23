@@ -1,4 +1,5 @@
 from lightllm.common.attention_state.full_att import FullAttentionState
+from lightllm.common.basemodel.attention_runtime import AttentionSpec
 import torch
 from typing import TYPE_CHECKING, Any
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
@@ -32,7 +33,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         )
         return
 
-    def init_attention(self, model, select_impls) -> None:
+    def attention_spec(self, model) -> AttentionSpec:
         # Absorbed queries attend to the indexer's top-k slots of the latent cache in both phases.
         config = SparseMLALayerConfig(
             num_heads=self.tp_q_head_num_,
@@ -43,7 +44,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             kv_cache_format="fp8_ds_mla" if model.args.llm_kv_type == "fp8kv_dsa" else "bf16",
             topk=self.index_topk,
         )
-        self.prefill_impl, self.decode_impl = select_impls(config, config)
+        return AttentionSpec(config, config)
 
     def _get_qkv(
         self,
@@ -116,7 +117,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             current_kv=kv,
         )
         return self.prefill_impl.forward(
-            infer_state.att_states[self.prefill_impl],
+            infer_state.att_states[self.prefill_impl.state_key],
             inputs,
             out=torch.empty(
                 (q_all.shape[0], q_all.shape[1], self.kv_lora_rank), dtype=q_all.dtype, device=q_all.device
@@ -151,7 +152,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             topk_mem_indices=topk_mem_indices,
         )
         return self.decode_impl.forward(
-            infer_state.att_states[self.decode_impl],
+            infer_state.att_states[self.decode_impl.state_key],
             inputs,
             out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device),
         )

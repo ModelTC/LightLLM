@@ -5,7 +5,10 @@ if not torch.cuda.is_available():
     pytest.skip("requires CUDA", allow_module_level=True)
 
 from lightllm.common.attention.backend import AttentionMetadata
-from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeStepBuilder
+from lightllm.common.attention.backends.gqa.triton_quant import (
+    TritonQuantGQADecodeBackend,
+    TritonQuantGQADecodeBuildContext,
+)
 from lightllm.common.basemodel.triton_kernel import diverse_utils
 
 
@@ -47,9 +50,9 @@ def _batch(shared_len, node_ids, *, graph_capacity=None, microbatch_index=0):
 
 def test_int8kv_decode_step_builder_rebuilds_diverse_metadata(monkeypatch):
     monkeypatch.setattr(diverse_utils, "get_diverse_max_batch_shared_group_size", lambda: 3)
-    step_builder = TritonQuantGQADecodeStepBuilder(diverse=True)
+    step_builder = TritonQuantGQADecodeBuildContext(diverse=True)
 
-    att_state = step_builder.build(_batch([8, 8, 5, 0], [10, 10, 20, -1]))
+    att_state = TritonQuantGQADecodeBackend.build(_batch([8, 8, 5, 0], [10, 10, 20, -1]), step_builder)
 
     assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
     assert att_state.b_shared_seq_len.cpu().tolist() == [8, 8, 0, 0]
@@ -57,15 +60,19 @@ def test_int8kv_decode_step_builder_rebuilds_diverse_metadata(monkeypatch):
 
 def test_int8kv_decode_step_builder_keeps_graph_metadata_per_microbatch_and_batch_size(monkeypatch):
     monkeypatch.setattr(diverse_utils, "get_diverse_max_batch_shared_group_size", lambda: 3)
-    step_builder = TritonQuantGQADecodeStepBuilder(diverse=True)
-    captured = step_builder.build(_batch([8, 8, 5, 0], [10, 10, 20, -1], graph_capacity=64))
-    replayed = step_builder.build(_batch([4, 4, 4, 4], [7, 7, 7, 9], graph_capacity=64))
+    step_builder = TritonQuantGQADecodeBuildContext(diverse=True)
+    captured = TritonQuantGQADecodeBackend.build(
+        _batch([8, 8, 5, 0], [10, 10, 20, -1], graph_capacity=64), step_builder
+    )
+    replayed = TritonQuantGQADecodeBackend.build(_batch([4, 4, 4, 4], [7, 7, 7, 9], graph_capacity=64), step_builder)
     # Replays rewrite the captured tensors in place, so the graph reads the new groups.
     assert replayed.b_mark_shared_group is captured.b_mark_shared_group
     assert replayed.b_shared_seq_len is captured.b_shared_seq_len
     assert captured.b_mark_shared_group.cpu().tolist() == [0, 0, 3, 1]
     assert captured.b_shared_seq_len.cpu().tolist() == [4, 4, 4, 0]
-    other = step_builder.build(_batch([8, 8, 5, 0], [10, 10, 20, -1], graph_capacity=64, microbatch_index=1))
+    other = TritonQuantGQADecodeBackend.build(
+        _batch([8, 8, 5, 0], [10, 10, 20, -1], graph_capacity=64, microbatch_index=1), step_builder
+    )
     assert other.b_mark_shared_group is not captured.b_mark_shared_group
-    eager = step_builder.build(_batch([8, 8, 5, 0], [10, 10, 20, -1]))
+    eager = TritonQuantGQADecodeBackend.build(_batch([8, 8, 5, 0], [10, 10, 20, -1]), step_builder)
     assert eager.b_mark_shared_group is not captured.b_mark_shared_group

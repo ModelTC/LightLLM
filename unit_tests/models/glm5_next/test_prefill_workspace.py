@@ -7,7 +7,6 @@ from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next import prefill_workspace
 from lightllm.models.glm5_next.model import Glm5NextTpPartModel
-from lightllm.models.glm5_next_mtp import model as glm5_next_mtp_model
 from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 from unit_tests.models.glm5_next.test_fp8_kv import _PrefillCase, _make_workspace_backend, _capture_cuda_graph
 
@@ -87,6 +86,9 @@ def test_glm_reserves_prefill_workspace_during_resource_preparation(monkeypatch,
     model = object.__new__(model_class)
     model.args = SimpleNamespace(llm_kv_type=kv_type)
     model.mtp_previous_draft_models = []
+    sparse = SimpleNamespace(is_linear_attention_layer=False)
+    linear = SimpleNamespace(is_linear_attention_layer=True)
+    model.layers_infer = [linear, sparse]
     model.att_state_manager = SimpleNamespace(get_full_attention_states=lambda role: [object()])
     calls = []
 
@@ -103,31 +105,28 @@ def test_glm_reserves_prefill_workspace_during_resource_preparation(monkeypatch,
 
     monkeypatch.setattr(TpPartBaseModel, "prepare_attention_states", prepare)
     monkeypatch.setattr(prefill_workspace, "reserve_fp8_sparse_prefill_workspaces", reserve)
-    monkeypatch.setattr(glm5_next_mtp_model, "reserve_fp8_sparse_prefill_workspaces", reserve)
     model.prepare_attention_states()
     assert calls == (["prepare_states", "reserve_workspace"] if kv_type == "fp8kv_dsa" else ["prepare_states"])
-    assert getattr(model, "fp8_sparse_prefill_workspaces", None) is (workspaces if kv_type == "fp8kv_dsa" else None)
+    assert getattr(sparse, "fp8_sparse_prefill_workspaces", None) is (workspaces if kv_type == "fp8kv_dsa" else None)
+    assert not hasattr(linear, "fp8_sparse_prefill_workspaces")
 
 
 def test_sparse_layer_passes_each_microbatch_its_reserved_workspace():
     class CapturePrefill:
+        state_key = object()
+
         def forward(self, att_state, inputs, *, out):
             return inputs.fp8_workspace
 
     impl = CapturePrefill()
     regions = [{"gathered_kv": torch.empty(1)} for _ in range(2)]
-    model = SimpleNamespace(
-        args=SimpleNamespace(llm_kv_type="fp8kv_dsa"),
-        fp8_sparse_prefill_workspaces=regions,
-        data_type=torch.bfloat16,
-        select_impls=lambda *configs, implementation: (impl, None),
-    )
     layer = object.__new__(Glm5NextTransformerLayerInfer)
     layer.is_linear_attention_layer = False
     layer.tp_q_head_num_ = layer.kv_lora_rank = 1
     layer.softmax_scale = 1.0
     layer.network_config_ = {"index_topk": 1, "index_kpool": 1}
-    layer.init_attention(model, model.select_impls)
+    layer.fp8_sparse_prefill_workspaces = regions
+    layer.prefill_impl = impl
     query = torch.zeros(1, 1, 1)
     layer.alloc_tensor = torch.empty
     layer.indexer = SimpleNamespace(_get_indices=lambda **kwargs: (None, None))
@@ -136,7 +135,7 @@ def test_sparse_layer_passes_each_microbatch_its_reserved_workspace():
     for slot in (0, 1, 0):
         state = SimpleNamespace(
             microbatch_index=slot,
-            att_states={impl: None},
+            att_states={impl.state_key: None},
             nsa_step=SimpleNamespace(q_kv_start_loc=None),
             get_topk_indices_params={"hidden_states": query, "q_lora": query},
         )

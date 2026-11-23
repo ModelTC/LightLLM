@@ -9,8 +9,8 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention_runtime as attention_groups_module
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from lightllm.common.attention.backend import AttentionMetadata
-from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeStepBuilder
-from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeStepBuilder
+from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBuildContext
+from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQADecodeBuildContext
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 from lightllm.utils import envs_utils
@@ -126,7 +126,7 @@ def test_triton_mtp_decode_step_builds_group_markers():
         req_to_token_indexs=torch.zeros(8, 8, dtype=torch.int32), HOLD_REQUEST_ID=-1
     )
     batch = attention_groups_module.build_attention_metadata(infer_state, model, lambda: False)
-    att_state = TritonGQADecodeStepBuilder().build(batch)
+    att_state = TritonGQADecodeBackend.build(batch, TritonGQADecodeBuildContext())
 
     assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
 
@@ -146,7 +146,7 @@ def test_fa3_gqa_decode_step_builder_groups_dynamic_rows():
         pad_req_idx=-1,
     )
 
-    cu_seqlens_q, _, cache_seqlens, att_req_idx = FA3GQADecodeStepBuilder._group_rows(batch)
+    cu_seqlens_q, _, cache_seqlens, att_req_idx = FA3GQADecodeBuildContext._group_rows(batch)
     torch.cuda.synchronize()
 
     assert att_req_idx.cpu().tolist() == [7, -1, -1, -1]

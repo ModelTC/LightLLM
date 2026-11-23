@@ -185,7 +185,7 @@ def accepted_ssm(state, replay, reqs):
 def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_impl, decode_impl, prefill_builder, seed=7):
     """Prefill fresh and cached requests, then run speculative decode steps with acceptance commits, comparing
     outputs and accepted conv/SSM state against the sequential reference after every step."""
-    from lightllm.common.attention.backends.gdn.triton import GDNDecodeStepBuilder
+    from lightllm.common.attention.backends.gdn.triton import GDNDecodeBuildContext
 
     torch.manual_seed(seed)
     width = mtp_step + 1
@@ -208,7 +208,7 @@ def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_impl, 
     # Prefill.
     rows = sum(lengths)
     tensors = family.make_inputs(rows)
-    step = prefill_builder.build(prefill_batch(REQS, lengths, ready))
+    step = prefill_impl.build(prefill_batch(REQS, lengths, ready), prefill_builder)
     out = family.alloc_out(rows)
     prefill_impl.forward(step, family.layer_inputs(_clones(tensors), conv, ssm, state if replay else None), out=out)
     start = 0
@@ -219,13 +219,13 @@ def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_impl, 
     _check_state(state, conv, replay, refs, "prefill")
 
     # Decode.
-    builder = GDNDecodeStepBuilder(replay=replay)
+    builder = GDNDecodeBuildContext(replay=replay)
     steps = SPEC_STEPS[dynamic] if width > 1 else [([1, 1, 1], [1, 1, 1])] * 3
     for step_index, (step_lengths, accepted) in enumerate(steps):
         step_lengths = step_lengths if dynamic else [width] * len(REQS)
         batch = decode_batch(REQS, step_lengths, width, HOLD, state.mtp_state_index, dynamic=dynamic)
         tensors = family.make_inputs(batch.batch_size)
-        step = builder.build(batch)
+        step = decode_impl.build(batch, builder)
         out = family.alloc_out(batch.batch_size)
         # A replay decode impl advances the replay cursors itself after the last layer.
         decode_impl.forward(step, family.layer_inputs(_clones(tensors), conv, ssm, state if replay else None), out=out)

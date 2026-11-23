@@ -1,14 +1,10 @@
-"""Model-side ownership of attention: impl selection, layer groups and their step builders.
-
-A model selects each layer's implementations at load time. Within each phase, implementations
-with the same backend and step_builder_key share one builder. Each batch maps its implementations
-to the arguments produced by those builders.
-"""
+"""Bind layer specs at load time and build one attention state per distinct state key in each microbatch."""
 
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
@@ -18,9 +14,7 @@ from lightllm.common.attention import selector
 from lightllm.common.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
-    AttentionImpl,
-    AttentionStepBuilder,
-    StepBuilderContext,
+    AttentionBuildResources,
 )
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
@@ -161,7 +155,7 @@ def gqa_kv_quant_fields(llm_kv_type: str, kv_scales: Optional["GQAKVScales"], he
     )
 
 
-def step_builder_context(model: "TpPartBaseModel") -> StepBuilderContext:
+def step_builder_context(model: "TpPartBaseModel") -> AttentionBuildResources:
     args = model.args
     # Dynamic verification may keep the target row and all MTP draft rows for every running
     # request. TPSP and CUDA graphs may pad that physical batch further.
@@ -170,7 +164,7 @@ def step_builder_context(model: "TpPartBaseModel") -> StepBuilderContext:
         tp_size = model.tp_world_size_
         max_decode_rows = triton.cdiv(max_decode_rows, tp_size) * tp_size
     workspace_mib = getattr(args, "flashinfer_workspace_size", 512)
-    return StepBuilderContext(
+    return AttentionBuildResources(
         device=get_current_device_id(),
         page_size=args.page_size,
         # max_seq_length is max_req_total_len plus the MTP headroom reserved at model init.
@@ -185,17 +179,14 @@ def step_builder_context(model: "TpPartBaseModel") -> StepBuilderContext:
 
 
 @dataclass
-class _Group:
+class _LazyBuildContext:
     backend: type[AttentionBackend]
     layer_config: Any
-    ctx: StepBuilderContext
-    impls: list[AttentionImpl] = field(default_factory=list)
-    builder: Optional[AttentionStepBuilder] = None
+    ctx: AttentionBuildResources
 
-    def build(self, batch: AttentionMetadata):
-        if self.builder is None:
-            self.builder = self.backend.create_step_builder(self.layer_config, self.ctx)
-        return self.builder.build(batch)
+    @cached_property
+    def context(self) -> Any:
+        return self.backend.create_build_context(self.layer_config, self.ctx)
 
 
 def requested_backend(args, phase, layer_config):
@@ -204,51 +195,46 @@ def requested_backend(args, phase, layer_config):
     return values[index] if index < len(values) else "auto"
 
 
-def layer_impl_selector(model):
-    """Share implementations during model initialization. Only step builders are needed afterward."""
-    args = model.args
-    ctx = step_builder_context(model)
-    model.attention_step_groups = groups = {phase: {} for phase in selector.PHASES}
-    model.req_to_mtp_state_index = recurrent_mtp_state_index(model)
-    impls = {}
-    if args.enable_ep_moe:
-        logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
+@dataclass(frozen=True)
+class AttentionSpec:
+    prefill: Any
+    decode: Any
+    implementation: Optional[str] = None
 
-    def select(phase, layer_config, implementation):
+
+class AttentionBinder:
+    """Bind layer specs during initialization and retain the contexts needed for inference."""
+
+    def __init__(self, model):
+        self.args = model.args
+        self.ctx = step_builder_context(model)
+        self.contexts = {phase: {} for phase in selector.PHASES}
+        self._impls = {}
+        if self.args.enable_ep_moe:
+            logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
+
+    def bind(self, spec: AttentionSpec) -> tuple[Optional[AttentionBackend], Optional[AttentionBackend]]:
+        prefill = self._select("prefill", spec.prefill, spec.implementation)
+        decode = self._select("decode", spec.decode, spec.implementation)
+        return prefill, decode
+
+    def _select(self, phase, layer_config, implementation):
         if layer_config is None:
             return None
-        requested = requested_backend(args, phase, layer_config) if implementation is None else implementation
+        requested = requested_backend(self.args, phase, layer_config) if implementation is None else implementation
         key = (phase, layer_config, requested)
-        if key not in impls:
+        if key not in self._impls:
             selection = selector.select(
                 layer_config,
                 phase,
                 requested,
-                priority=selector.auto_priority(layer_config, phase, args.mtp_step),
-                excluded=("flashinfer",) if args.enable_ep_moe else (),
+                priority=selector.auto_priority(layer_config, phase, self.args.mtp_step),
+                excluded=("flashinfer",) if self.args.enable_ep_moe else (),
             )
             backend = selection.backend
-            group_key = (backend, backend.step_builder_key(layer_config))
-            if group_key not in groups[phase]:
-                groups[phase][group_key] = _Group(backend, layer_config, ctx)
-            groups[phase][group_key].impls.append(selection.impl)
-            impls[key] = selection.impl
-        return impls[key]
-
-    def select_impls(prefill_config, decode_config, *, implementation=None):
-        return select("prefill", prefill_config, implementation), select("decode", decode_config, implementation)
-
-    return select_impls
-
-
-def build_attention_states(model, infer_state):
-    phase = "prefill" if infer_state.is_prefill else "decode"
-    groups = model.attention_step_groups[phase]
-    if not groups:
-        return {}
-    batch = build_attention_metadata(infer_state, model, req_to_mtp_state_index=model.req_to_mtp_state_index)
-    states = {}
-    for group in groups.values():
-        state = group.build(batch)
-        states.update(dict.fromkeys(group.impls, state))
-    return states
+            state_key = selection.impl.state_key
+            contexts = self.contexts[phase]
+            if state_key not in contexts:
+                contexts[state_key] = _LazyBuildContext(backend, layer_config, self.ctx)
+            self._impls[key] = selection.impl
+        return self._impls[key]

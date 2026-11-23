@@ -8,9 +8,7 @@ import torch
 from lightllm.common.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
-    AttentionImpl,
-    AttentionStepBuilder,
-    StepBuilderContext,
+    AttentionBuildResources,
     TensorAllocator,
 )
 from .. import keep_for_cuda_graph
@@ -46,12 +44,12 @@ class GDNDecodeAttState:
     draft_step: int
 
 
-class GDNPrefillStepBuilder(AttentionStepBuilder[GDNPrefillAttState]):
+class GDNPrefillBuildContext:
     def __init__(self, *, ssm_slots_per_request: int) -> None:
         """Native state keeps state_mtp_step + 1 SSM slots per request; replay state keeps one."""
         self.ssm_slots_per_request = ssm_slots_per_request
 
-    def build(self, batch: AttentionMetadata) -> GDNPrefillAttState:
+    def prepare(self, batch: AttentionMetadata) -> GDNPrefillAttState:
         req = batch.b_req_idx
         return GDNPrefillAttState(
             conv_idx=req,
@@ -61,13 +59,13 @@ class GDNPrefillStepBuilder(AttentionStepBuilder[GDNPrefillAttState]):
         )
 
 
-class GDNDecodeStepBuilder(AttentionStepBuilder[GDNDecodeAttState]):
+class GDNDecodeBuildContext:
     def __init__(self, *, replay: bool) -> None:
         """replay selects replay state, which keeps one SSM slot per request and needs cu_seqlens."""
         self.replay = replay
         self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
 
-    def build(self, batch: AttentionMetadata) -> GDNDecodeAttState:
+    def prepare(self, batch: AttentionMetadata) -> GDNDecodeAttState:
         """A CUDA graph step keeps derived tensors per (microbatch, batch size), rewritten in place."""
         from lightllm.common.attention.kernels.gdn.mtp_state_params import build_dynamic_mtp_linear_att_state_params
 
@@ -130,7 +128,7 @@ def _prefill_state_views(layer_config: GDNLayerConfig, layer_inputs: GDNLayerInp
     return conv_states
 
 
-class TritonGDNPrefillImpl(AttentionImpl[GDNLayerConfig, GDNPrefillAttState, GDNLayerInputs]):
+class TritonGDNPrefillBackend(AttentionBackend[GDNLayerConfig, GDNPrefillAttState, GDNLayerInputs]):
     """Chunked prefill with the in-tree FLA kernel; subclasses swap chunk_gated_delta_rule."""
 
     def __init__(self, layer_config: GDNLayerConfig) -> None:
@@ -191,6 +189,24 @@ class TritonGDNPrefillImpl(AttentionImpl[GDNLayerConfig, GDNPrefillAttState, GDN
         out.copy_(core.view(out.shape))
         return out
 
+    @staticmethod
+    def get_name() -> str:
+        return "triton_gdn_prefill"
+
+    build_context_type = GDNPrefillBuildContext
+
+    @classmethod
+    def build(cls, metadata: AttentionMetadata, context: GDNPrefillBuildContext) -> GDNPrefillAttState:
+        return context.prepare(metadata)
+
+    @classmethod
+    def create_build_context(cls, layer_config: GDNLayerConfig, ctx: AttentionBuildResources) -> GDNPrefillBuildContext:
+        return create_gdn_prefill_step_builder(layer_config)
+
+    @classmethod
+    def build_context_key(cls, layer_config: GDNLayerConfig):
+        return (layer_config.replay, layer_config.state_mtp_step)
+
 
 def _pack_decode_inputs(cfg: GDNLayerConfig, inputs: GDNLayerInputs, conv_idx: torch.Tensor):
     from lightllm.common.attention.kernels.gdn.gdn_decode_pack import conv_pack_gdn_decode_inputs
@@ -229,7 +245,7 @@ def _mtp_conv(cfg: GDNLayerConfig, inputs: GDNLayerInputs, att_state: GDNDecodeA
     )
 
 
-class TritonGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeAttState, GDNLayerInputs]):
+class TritonGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState, GDNLayerInputs]):
     def __init__(self, layer_config: GDNLayerConfig) -> None:
         super().__init__(layer_config)
         if layer_config.replay:
@@ -289,51 +305,25 @@ class TritonGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeAttState, GDNLa
         out.copy_(core.view(out.shape))
         return out
 
-
-class TritonGDNPrefillBackend(AttentionBackend):
-    @staticmethod
-    def get_name() -> str:
-        return "triton_gdn_prefill"
-
-    @staticmethod
-    def get_step_builder_cls() -> type[GDNPrefillStepBuilder]:
-        return GDNPrefillStepBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[TritonGDNPrefillImpl]:
-        return TritonGDNPrefillImpl
-
-    @classmethod
-    def create_step_builder(cls, layer_config: GDNLayerConfig, ctx: StepBuilderContext) -> GDNPrefillStepBuilder:
-        return create_gdn_prefill_step_builder(layer_config)
-
-    @classmethod
-    def step_builder_key(cls, layer_config: GDNLayerConfig):
-        return (layer_config.replay, layer_config.state_mtp_step)
-
-
-class TritonGDNDecodeBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "triton_gdn_decode"
 
-    @staticmethod
-    def get_step_builder_cls() -> type[GDNDecodeStepBuilder]:
-        return GDNDecodeStepBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[TritonGDNDecodeImpl]:
-        return TritonGDNDecodeImpl
+    build_context_type = GDNDecodeBuildContext
 
     @classmethod
-    def create_step_builder(cls, layer_config: GDNLayerConfig, ctx: StepBuilderContext) -> GDNDecodeStepBuilder:
-        return GDNDecodeStepBuilder(replay=layer_config.replay)
+    def build(cls, metadata: AttentionMetadata, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
+        return context.prepare(metadata)
 
     @classmethod
-    def step_builder_key(cls, layer_config: GDNLayerConfig):
+    def create_build_context(cls, layer_config: GDNLayerConfig, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:
+        return GDNDecodeBuildContext(replay=layer_config.replay)
+
+    @classmethod
+    def build_context_key(cls, layer_config: GDNLayerConfig):
         return layer_config.replay
 
 
-def create_gdn_prefill_step_builder(layer_config) -> GDNPrefillStepBuilder:
+def create_gdn_prefill_step_builder(layer_config) -> GDNPrefillBuildContext:
     """The prefill step builder of GDN or KDA layers: native state keeps state_mtp_step + 1 SSM slots per request."""
-    return GDNPrefillStepBuilder(ssm_slots_per_request=1 if layer_config.replay else layer_config.state_mtp_step + 1)
+    return GDNPrefillBuildContext(ssm_slots_per_request=1 if layer_config.replay else layer_config.state_mtp_step + 1)

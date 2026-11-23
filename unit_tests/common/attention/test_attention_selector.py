@@ -109,7 +109,7 @@ def test_auto_reports_all_rejected_backends():
 
 def _select_with_missing_flashqla(rank, store):
     from lightllm.common.attention.backends.gdn import GDNLayerConfig
-    from lightllm.common.attention.backends.gdn.flashqla import FlashQLAGDNPrefillImpl
+    from lightllm.common.attention.backends.gdn.flashqla import FlashQLAGDNPrefillBackend
 
     torch.distributed.init_process_group(
         "gloo", init_method=store, rank=rank, world_size=2, timeout=timedelta(seconds=20)
@@ -126,7 +126,7 @@ def _select_with_missing_flashqla(rank, store):
             return True
 
         config = GDNLayerConfig(2, 4, 64, 64, 4, "silu", torch.bfloat16)
-        with patch.object(FlashQLAGDNPrefillImpl, "chunk_gated_delta_rule", staticmethod(load_kernel)):
+        with patch.object(FlashQLAGDNPrefillBackend, "chunk_gated_delta_rule", staticmethod(load_kernel)):
             choice = selector.select(config, "prefill", "auto", validate=validate)
         assert choice.backend.get_name() == "triton_gdn_prefill"
     finally:
@@ -150,6 +150,9 @@ def test_mla_phases_have_their_own_layer_config_types():
     decode = MLADecodeLayerConfig(kv_lora_rank=512, **common)
     assert selector.select(prefill, "prefill", "flashinfer").backend.get_name() == "flashinfer_mla_prefill"
     assert selector.select(decode, "decode", "fa3").backend.get_name() == "fa3_mla_decode"
+    triton = selector.select(decode, "decode", "triton")
+    assert type(triton.impl) is triton.backend
+    assert triton.impl.layer_config is decode
     assert selector.auto_priority(decode, "decode", 1) == ("fa3", "flashinfer", "triton")
     with pytest.raises(ValueError, match="no decode attention implementations"):
         selector.select(prefill, "decode", "triton")
@@ -198,7 +201,7 @@ def test_linear_attention_takes_triton_without_validation_and_follows_the_state_
     assert selection.backend.get_name() == decode
     # Each decode impl runs over one kind of state.
     with pytest.raises(NotImplementedError, match="replay"):
-        selection.backend.get_impl_cls()(dataclasses.replace(config, replay=not replay))
+        selection.backend(dataclasses.replace(config, replay=not replay))
 
 
 def _imports(module):

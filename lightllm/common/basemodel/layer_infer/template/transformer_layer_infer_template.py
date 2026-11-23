@@ -1,4 +1,5 @@
 from lightllm.common.attention_state.full_att import FullAttentionState
+from lightllm.common.basemodel.attention_runtime import AttentionSpec
 import os
 import torch
 import torch.distributed as dist
@@ -24,12 +25,9 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         self.embed_dim_ = -1
         return
 
-    def init_attention(self, model, select_impls) -> None:
-        """Select this layer's prefill and decode implementations; called once the model's cache is allocated.
-
-        Every layer of a model with attention states implements it.
-        """
-        raise NotImplementedError(f"{type(self).__name__} does not implement init_attention")
+    def attention_spec(self, model) -> AttentionSpec:
+        """Describe this layer's attention once the model's cache has been allocated."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement attention_spec")
 
     def _att_norm(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")

@@ -81,7 +81,7 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
     layer_config = GQALayerConfig(
         num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=dtype, sliding_window=window
     )
-    att_state = TritonGQAPrefillBackend.get_step_builder_cls()().build(
+    att_state = TritonGQAPrefillBackend.build(
         make_batch(
             token_map,
             req_ids,
@@ -89,10 +89,10 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
             b_q_start_loc=query_lengths.cumsum(0, dtype=torch.int32) - query_lengths,
             b_ready_cache_len=torch.tensor(ready, device="cuda", dtype=torch.int32),
             max_q_seq_len=int(query_lengths.max()),
-        )
+        ),
     )
     out = torch.empty(q.shape[0], q_heads + 1, 64, device=q.device, dtype=q.dtype)[:, :q_heads]
-    impl = TritonGQAPrefillBackend.get_impl_cls()(layer_config)
+    impl = TritonGQAPrefillBackend(layer_config)
     assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k, v, token_map, req_ids, lengths, ready, window), atol=0.02, rtol=0.02
@@ -107,9 +107,11 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
         lengths += 1
         q = torch.randn(3, q_heads + 1, 64, device="cuda", dtype=dtype)[:, :q_heads]
         q_before = q.clone()
-        att_state = TritonGQADecodeBackend.get_step_builder_cls()().build(make_batch(token_map, req_ids, lengths))
+        att_state = TritonGQADecodeBackend.build(
+            make_batch(token_map, req_ids, lengths), TritonGQADecodeBackend.build_context_type()
+        )
         out = torch.empty(3, q_heads + 1, 64, device=q.device, dtype=q.dtype)[:, :q_heads]
-        impl = TritonGQADecodeBackend.get_impl_cls()(layer_config)
+        impl = TritonGQADecodeBackend(layer_config)
         assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out, alloc_func=allocate) is out
         torch.testing.assert_close(
             out.float(),
@@ -137,12 +139,12 @@ def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
         graph_max_len_in_batch=512,
     )
     layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16)
-    impl = TritonGQADecodeBackend.get_impl_cls()(layer_config)
+    impl = TritonGQADecodeBackend(layer_config)
     # As in the serving decode path, the capture flag is set before the attention state are built and
     # capture raises max_kv_seq_len to the graph capacity only afterwards.
     owner.is_cuda_graph_capture = True
-    att_state = TritonGQADecodeBackend.create_step_builder(layer_config, None).build(
-        build_attention_metadata(owner, model)
+    att_state = TritonGQADecodeBackend.build(
+        build_attention_metadata(owner, model), TritonGQADecodeBackend.create_build_context(layer_config, None)
     )
     owner.max_kv_seq_len = 512
     q = torch.randn(2, q_heads, 64, device="cuda", dtype=torch.bfloat16)
@@ -183,8 +185,10 @@ def test_list_sliding_window_matches_tuple():
     token_map = torch.arange(64, device="cuda", dtype=torch.int32).view(2, 32)
     lengths = torch.tensor([5, 9], device="cuda", dtype=torch.int32)
     req_ids = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
-    att_state = TritonGQADecodeBackend.get_step_builder_cls()().build(make_batch(token_map, req_ids, lengths))
-    impl = TritonGQADecodeBackend.get_impl_cls()(layer_config)
+    att_state = TritonGQADecodeBackend.build(
+        make_batch(token_map, req_ids, lengths), TritonGQADecodeBackend.build_context_type()
+    )
+    impl = TritonGQADecodeBackend(layer_config)
     out = impl.forward(att_state, GQALayerInputs(q=q, k_cache=kv[:, :4], v_cache=kv[:, 4:]), out=torch.empty_like(q))
     expected = reference(q, kv[:, :4], kv[:, 4:], token_map, req_ids, lengths, [4, 8], (-1, -1))
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
@@ -203,16 +207,18 @@ def test_mha_decode_rejects_sliding_window_at_construction():
         num_heads=4, num_kv_heads=4, head_dim=64, dtype=torch.bfloat16, sliding_window=(15, 0)
     )
     with pytest.raises(NotImplementedError, match="MHA decode"):
-        TritonGQADecodeBackend.get_impl_cls()(layer_config)
+        TritonGQADecodeBackend(layer_config)
 
 
 def test_graph_decode_bounds_lengths_by_capacity():
     lengths = torch.tensor([33, 17], device="cuda", dtype=torch.int32)
     req_ids = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
     token_map = torch.zeros(2, 512, device="cuda", dtype=torch.int32)
-    step_builder = TritonGQADecodeBackend.get_step_builder_cls()()
-    eager = step_builder.build(make_batch(token_map, req_ids, lengths))
-    graph = step_builder.build(make_batch(token_map, req_ids, lengths, cuda_graph_max_kv_seq_len=512))
+    step_builder = TritonGQADecodeBackend.build_context_type()
+    eager = TritonGQADecodeBackend.build(make_batch(token_map, req_ids, lengths), step_builder)
+    graph = TritonGQADecodeBackend.build(
+        make_batch(token_map, req_ids, lengths, cuda_graph_max_kv_seq_len=512), step_builder
+    )
     assert (eager.kv_seq_len_bound, eager.max_kv_seq_len) == (33, 33)
     assert (graph.kv_seq_len_bound, graph.max_kv_seq_len) == (512, 33)
 
@@ -227,17 +233,15 @@ def test_spec_defaults_scale_and_triton_rejects_other_scales_and_right_windows()
     layer_config = GQALayerConfig(num_heads=4, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16)
     assert layer_config.softmax_scale == 0.125 and layer_config.has_default_scale
     for backend in (TritonGQAPrefillBackend, TritonGQADecodeBackend):
-        backend.get_impl_cls()(layer_config)
+        backend(layer_config)
         with pytest.raises(NotImplementedError, match="softmax_scale"):
-            backend.get_impl_cls()(
-                GQALayerConfig(num_heads=4, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16, softmax_scale=1.0)
-            )
+            backend(GQALayerConfig(num_heads=4, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16, softmax_scale=1.0))
         # A two-sided window is a valid layer_config (non-causal block drafting) but not a Triton GQA mode.
         two_sided = GQALayerConfig(
             num_heads=4, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16, sliding_window=(7, 7), causal=False
         )
         with pytest.raises(NotImplementedError, match="causal sliding windows"):
-            backend.get_impl_cls()(two_sided)
+            backend(two_sided)
 
 
 def test_spec_rejects_causal_window_that_looks_right():
@@ -269,15 +273,13 @@ def test_speculative_decode_rows_share_request_kv(q_heads, kv_heads, window):
     k, v = kv[:, :kv_heads], kv[:, kv_heads:]
     q = torch.randn(6, q_heads, 64, device="cuda", dtype=torch.bfloat16)
     batch = make_batch(token_map, req_ids, lengths, cu_kv_seq_len=None, decode_rows_per_request=2, pad_req_idx=pad)
-    att_state = TritonGQADecodeBackend.get_step_builder_cls()().build(batch)
+    att_state = TritonGQADecodeBackend.build(batch, TritonGQADecodeBackend.build_context_type())
     assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 0, 2, 1, 1]
     layer_config = GQALayerConfig(
         num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16, sliding_window=window
     )
     out = torch.empty_like(q)
-    TritonGQADecodeBackend.get_impl_cls()(layer_config).forward(
-        att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out
-    )
+    TritonGQADecodeBackend(layer_config).forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out)
     expected = reference(q, k, v, token_map, req_ids, lengths, (lengths - 1).tolist(), window)
     torch.testing.assert_close(out[:4].float(), expected[:4], atol=0.02, rtol=0.02)
 
@@ -285,12 +287,12 @@ def test_speculative_decode_rows_share_request_kv(q_heads, kv_heads, window):
 def test_speculative_decode_groups_are_kept_per_microbatch_and_batch_size():
     token_map = torch.zeros(8, 512, device="cuda", dtype=torch.int32)
     lengths = torch.tensor([5, 6, 5, 6], device="cuda", dtype=torch.int32)
-    step_builder = TritonGQADecodeBackend.get_step_builder_cls()()
+    step_builder = TritonGQADecodeBackend.build_context_type()
 
     def build(req_ids, **kwargs):
         req_ids = torch.tensor(req_ids, device="cuda", dtype=torch.int32)
         batch = make_batch(token_map, req_ids, lengths, decode_rows_per_request=2, pad_req_idx=7, **kwargs)
-        return step_builder.build(batch)
+        return TritonGQADecodeBackend.build(batch, step_builder)
 
     captured = build([1, 1, 2, 2], cuda_graph_max_kv_seq_len=512)
     assert captured.b_mark_shared_group.cpu().tolist() == [0, 2, 0, 2]
@@ -342,8 +344,8 @@ def test_alibi_prefill_and_decode_match_reference():
         max_q_seq_len=max(q_lens),
     )
     out = torch.empty_like(q)
-    TritonGQAPrefillBackend.get_impl_cls()(layer_config).forward(
-        TritonGQAPrefillBackend.get_step_builder_cls()().build(batch),
+    TritonGQAPrefillBackend(layer_config).forward(
+        TritonGQAPrefillBackend.build(batch),
         GQALayerInputs(q=q, k_cache=k, v_cache=v, alibi_slopes=slopes),
         out=out,
     )
@@ -352,11 +354,11 @@ def test_alibi_prefill_and_decode_match_reference():
 
     q = torch.randn(3, heads, 64, device="cuda", dtype=torch.bfloat16)
     cu_kv = torch.tensor([0, *lengths.tolist()], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
-    att_state = TritonGQADecodeBackend.get_step_builder_cls()().build(
-        make_batch(token_map, req_ids, lengths, cu_kv_seq_len=cu_kv)
+    att_state = TritonGQADecodeBackend.build(
+        make_batch(token_map, req_ids, lengths, cu_kv_seq_len=cu_kv), TritonGQADecodeBackend.build_context_type()
     )
     out = torch.empty_like(q)
-    TritonGQADecodeBackend.get_impl_cls()(layer_config).forward(
+    TritonGQADecodeBackend(layer_config).forward(
         att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, alibi_slopes=slopes), out=out
     )
     expected = alibi_reference(q, k, v, token_map, req_ids, lengths, (lengths - 1).tolist(), slopes)
@@ -380,10 +382,10 @@ def test_alibi_is_supported_only_for_triton_mha_without_window():
 
     for fields in (dict(num_kv_heads=2), dict(sliding_window=(15, 0))):
         with pytest.raises(NotImplementedError, match="ALiBi"):
-            TritonGQAPrefillBackend.get_impl_cls()(layer_config(**fields))
+            TritonGQAPrefillBackend(layer_config(**fields))
     for backend in (FA3GQAPrefillBackend, FlashInferGQAPrefillBackend):
         with pytest.raises(NotImplementedError):
-            backend.get_impl_cls()(layer_config())
+            backend(layer_config())
 
 
 @pytest.mark.parametrize(
@@ -440,8 +442,8 @@ def test_bidirectional_image_spans_prefill_matches_reference(window, head_dim, s
         bidirectional_image_spans=True,
     )
     out = torch.empty_like(q)
-    TritonGQAPrefillBackend.get_impl_cls()(layer_config).forward(
-        TritonGQAPrefillBackend.get_step_builder_cls()().build(batch),
+    TritonGQAPrefillBackend(layer_config).forward(
+        TritonGQAPrefillBackend.build(batch),
         GQALayerInputs(q=q, k_cache=k, v_cache=v),
         out=out,
     )
@@ -470,9 +472,9 @@ def test_bidirectional_image_spans_are_prefill_only():
     layer_config = GQALayerConfig(
         num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16, bidirectional_image_spans=True
     )
-    TritonGQAPrefillBackend.get_impl_cls()(layer_config)
+    TritonGQAPrefillBackend(layer_config)
     with pytest.raises(NotImplementedError, match="prefill only"):
-        TritonGQADecodeBackend.get_impl_cls()(layer_config)
+        TritonGQADecodeBackend(layer_config)
 
 
 def test_head_dim_limit_of_alibi_and_unwindowed_image_span_kernels_is_checked_at_construction():
@@ -481,10 +483,10 @@ def test_head_dim_limit_of_alibi_and_unwindowed_image_span_kernels_is_checked_at
         return GQALayerConfig(**{"num_heads": 8, "num_kv_heads": 8, "dtype": torch.bfloat16, **fields})
 
     for fields in (dict(has_alibi=True), dict(num_kv_heads=2, bidirectional_image_spans=True)):
-        TritonGQAPrefillBackend.get_impl_cls()(layer_config(head_dim=256, **fields))
+        TritonGQAPrefillBackend(layer_config(head_dim=256, **fields))
         with pytest.raises(NotImplementedError, match="head_dim <= 256"):
-            TritonGQAPrefillBackend.get_impl_cls()(layer_config(head_dim=512, **fields))
-    TritonGQAPrefillBackend.get_impl_cls()(
+            TritonGQAPrefillBackend(layer_config(head_dim=512, **fields))
+    TritonGQAPrefillBackend(
         layer_config(head_dim=512, num_kv_heads=2, bidirectional_image_spans=True, sliding_window=(1023, 0))
     )
-    TritonGQAPrefillBackend.get_impl_cls()(layer_config(head_dim=512, num_kv_heads=2))
+    TritonGQAPrefillBackend(layer_config(head_dim=512, num_kv_heads=2))

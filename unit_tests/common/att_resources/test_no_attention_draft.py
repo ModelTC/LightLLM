@@ -47,7 +47,7 @@ def test_ffn_only_draft_has_no_state_or_attention(monkeypatch: pytest.MonkeyPatc
     draft.prepare_attention_states()
     resources.finish_state_registration()
     draft._init_attention()
-    assert draft.attention_step_groups is None
+    assert draft.attention_build_contexts is None
     assert draft.att_state_manager is resources
     assert not hasattr(draft, "full_att_state")
     assert not resources.get_full_attention_states("draft0")
@@ -65,7 +65,7 @@ def test_ffn_only_draft_has_no_state_or_attention(monkeypatch: pytest.MonkeyPatc
     assert state.att_state_manager is resources
     assert state.is_draft_model
     assert state.req_manager is draft.req_manager
-    state.init_att_state(draft)
+    state.att_states = draft.prepare_attention(state)
     assert state.att_states == {}
     if not prefill:
         state.copy_for_cuda_graph(draft._create_inferstate(model_input))

@@ -533,10 +533,10 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
     layer_config = SparseMLALayerConfig(
         num_heads=heads, kv_lora_rank=512, qk_rope_head_dim=0, softmax_scale=0.0625, dtype=torch.bfloat16
     )
-    prefill_impl = FlashMLASparsePrefillBackend.get_impl_cls()(layer_config)
+    prefill_impl = FlashMLASparsePrefillBackend(layer_config)
     prefill_args = FlashMLASparsePrefillAttState(mem_index=None, has_cached_prefix=False)
     prefill_inputs = SparseMLAPrefillLayerInputs(q=q, kv_cache=kv, topk_mem_indices=indexes)
-    decode_impl = FA3SparseMLADecodeBackend.get_impl_cls()(layer_config)
+    decode_impl = FA3SparseMLADecodeBackend(layer_config)
     cu_seqlens_k = torch.nn.functional.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
     decode_args = FA3SparseMLADecodeAttState(
         cache_seqlens=lengths,

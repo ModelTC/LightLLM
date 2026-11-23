@@ -28,17 +28,10 @@ pytestmark = pytest.mark.skipif(not _flash_kda_usable(), reason="FlashKDA on SM9
 
 
 def _model(requested):
-    from lightllm.common.attention import selector
-
     model = type("Model", (), {})()
     model.args = StartArgs(llm_prefill_att_backend=["auto", requested], linear_att_ssm_data_type="bfloat16")
     model.data_type = torch.bfloat16
 
-    def select_impls(prefill_config, decode_config):
-        model.prefill = selector.select(prefill_config, "prefill", requested)
-        return model.prefill.impl, selector.select(decode_config, "decode", "triton").impl
-
-    model.select_impls = select_impls
     return model
 
 
@@ -111,11 +104,16 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0):
     infer.req_manager = SimpleNamespace(req_to_token_indexs=None)
     prepare_prefill_infer(infer)
     model = _model(requested)
-    layer.init_attention(model, model.select_impls)
+    from lightllm.common.attention import selector
+
+    spec = layer.attention_spec(model)
+    prefill = selector.select(spec.prefill, "prefill", requested)
+    layer.prefill_impl = prefill.impl
+    layer.decode_impl = selector.select(spec.decode, "decode", "triton").impl
     # The attention state the layer's group builds for this step.
-    builder = model.prefill.backend.create_step_builder(layer.prefill_impl.layer_config, None)
-    att_state = builder.build(build_attention_metadata(infer, model))
-    infer.att_states = {layer.prefill_impl: att_state}
+    builder = prefill.backend.create_build_context(spec.prefill, None)
+    att_state = prefill.backend.build(build_attention_metadata(infer, model), builder)
+    infer.att_states = {layer.prefill_impl.state_key: att_state}
     assert (att_state.flash_kda_fwd is not None) == (requested == "flashkda")
     output = layer.context_attention_forward(hidden, infer, layer_weight)
     return output, ssm

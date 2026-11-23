@@ -14,7 +14,7 @@ from typing import Any, Callable, Optional, Sequence
 import torch.distributed as dist
 
 from lightllm.utils.log_utils import init_logger
-from .backend import AttentionBackend, AttentionImpl
+from .backend import AttentionBackend
 from .backends.gqa import GQALayerConfig
 from .backends.mla import MLADecodeLayerConfig, MLAPrefillLayerConfig
 from .backends.sparse_mla import SparseMLALayerConfig, SWASparseMLALayerConfig
@@ -152,7 +152,7 @@ _REGISTRY: dict[type, Family] = {
 @dataclass(frozen=True)
 class Selection:
     backend: type[AttentionBackend]
-    impl: AttentionImpl
+    impl: AttentionBackend
 
 
 def _load(path: str) -> type[AttentionBackend]:
@@ -217,7 +217,7 @@ def _construct(
         try:
             backend = _load(path)
             label = backend.get_name()
-            selection = Selection(backend, backend.get_impl_cls()(layer_config))
+            selection = Selection(backend, backend(layer_config))
         except (NotImplementedError, ImportError, OSError) as error:
             reason = f"{label}: {error}"
         failures = _construction_failures(reason) if agree else ([reason] if reason else [])

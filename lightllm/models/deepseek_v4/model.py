@@ -240,6 +240,8 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             )
         for layer_infer in self.layers_infer:
             layer_infer.flashmla_q_head_num_ = padded_q_head_num
+            layer_infer.swa_cache_config = self.swa_cache_config
+            layer_infer.compressed_cache_config = self.compressed_cache_configs.get(layer_infer.compress_ratio)
         super()._init_attention()
 
     def _init_custom(self):
@@ -308,7 +310,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         orig_max = rs.get("original_max_position_embeddings", 0)
 
         def build_inv_freq(base):
-            freqs = 1.0 / (base ** freq_exponents)
+            freqs = 1.0 / (base**freq_exponents)
             if rope_type == "yarn" and orig_max > 0:
                 beta_fast = rs.get("beta_fast", 32)
                 beta_slow = rs.get("beta_slow", 1)
