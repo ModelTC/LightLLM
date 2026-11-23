@@ -32,7 +32,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         )
         return
 
-    def init_attention(self, model) -> None:
+    def init_attention(self, model, select_impls) -> None:
         # Absorbed queries attend to the indexer's top-k slots of the latent cache in both phases.
         config = SparseMLALayerConfig(
             num_heads=self.tp_q_head_num_,
@@ -43,7 +43,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             kv_cache_format="fp8_ds_mla" if model.args.llm_kv_type == "fp8kv_dsa" else "bf16",
             topk=self.index_topk,
         )
-        self.attn = model.att_groups.create_attention(config, config)
+        self.prefill_impl, self.decode_impl = select_impls(config, config)
 
     def _get_qkv(
         self,
@@ -115,8 +115,8 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             topk_indices=topk_indices,
             current_kv=kv,
         )
-        return self.attn.prefill(
-            infer_state.att_step_args[self.attn.group],
+        return self.prefill_impl.forward(
+            infer_state.att_states[self.prefill_impl],
             inputs,
             out=torch.empty(
                 (q_all.shape[0], q_all.shape[1], self.kv_lora_rank), dtype=q_all.dtype, device=q_all.device
@@ -150,8 +150,8 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             kv_cache=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
             topk_mem_indices=topk_mem_indices,
         )
-        return self.attn.decode(
-            infer_state.att_step_args[self.attn.group],
+        return self.decode_impl.forward(
+            infer_state.att_states[self.decode_impl],
             inputs,
             out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device),
         )
@@ -171,7 +171,7 @@ class NsaInfer:
         self.scale_fmt = network_config["quantization_config"]["scale_fmt"]
         self.softmax_scale = (self.index_head_dim) ** (-0.5)
         self.index_n_heads = network_config["index_n_heads"]
-        self.index_n_heads_scale = (self.index_n_heads ** -0.5) * self.softmax_scale
+        self.index_n_heads_scale = (self.index_n_heads**-0.5) * self.softmax_scale
         self.tp_world_size_ = tp_world_size
         self.tp_index_n_heads = self.index_n_heads // self.tp_world_size_
 
@@ -182,7 +182,6 @@ class NsaInfer:
         infer_state: "Deepseek3_2InferStateInfo",
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ):
-
         q, k = self._get_q_k_bf16(hidden_states, q_lora, infer_state, layer_weight)
 
         if self.tp_world_size_ > 1:
@@ -274,7 +273,7 @@ class NsaInfer:
 
         hidden_size = x.size(-1)
         assert (hidden_size & (hidden_size - 1)) == 0, "Hidden size must be a power of 2 for Hadamard transform."
-        return hadamard_transform(x, scale=hidden_size ** -0.5)
+        return hadamard_transform(x, scale=hidden_size**-0.5)
 
     def _get_q_k_bf16(
         self,

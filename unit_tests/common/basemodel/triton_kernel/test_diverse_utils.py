@@ -4,7 +4,7 @@ import torch
 if not torch.cuda.is_available():
     pytest.skip("requires CUDA", allow_module_level=True)
 
-from lightllm.common.attention.backend import AttentionBatch
+from lightllm.common.attention.backend import AttentionMetadata
 from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeStepBuilder
 from lightllm.common.basemodel.triton_kernel import diverse_utils
 
@@ -31,7 +31,7 @@ def test_build_diverse_shared_group_markers(monkeypatch, node_ids, expected_mark
 
 def _batch(shared_len, node_ids, *, graph_capacity=None, microbatch_index=0):
     rows = len(shared_len)
-    return AttentionBatch(
+    return AttentionMetadata(
         req_to_token_indexs=torch.zeros(rows, 8, dtype=torch.int32, device="cuda"),
         b_req_idx=torch.arange(rows, dtype=torch.int32, device="cuda"),
         b_seq_len=torch.full((rows,), 8, dtype=torch.int32, device="cuda"),
@@ -49,10 +49,10 @@ def test_int8kv_decode_step_builder_rebuilds_diverse_metadata(monkeypatch):
     monkeypatch.setattr(diverse_utils, "get_diverse_max_batch_shared_group_size", lambda: 3)
     step_builder = TritonQuantGQADecodeStepBuilder(diverse=True)
 
-    step_args = step_builder.build(_batch([8, 8, 5, 0], [10, 10, 20, -1]))
+    att_state = step_builder.build(_batch([8, 8, 5, 0], [10, 10, 20, -1]))
 
-    assert step_args.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
-    assert step_args.b_shared_seq_len.cpu().tolist() == [8, 8, 0, 0]
+    assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
+    assert att_state.b_shared_seq_len.cpu().tolist() == [8, 8, 0, 0]
 
 
 def test_int8kv_decode_step_builder_keeps_graph_metadata_per_microbatch_and_batch_size(monkeypatch):

@@ -4,6 +4,8 @@ from lightllm.models.bloom.layer_infer.transformer_layer_infer import BloomTrans
 class StarcoderTransformerLayerInfer(BloomTransformerLayerInfer):
     """Bloom's layer with multi-query attention and no ALiBi."""
 
+    att_implementation = None
+
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.tp_k_head_num_ = 1

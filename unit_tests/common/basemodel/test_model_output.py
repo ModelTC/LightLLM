@@ -123,7 +123,7 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
                 is_cuda_graph_capture=False,
                 is_cuda_graph_replay=False,
             )
-            infer_state.init_att_state = lambda: graph_flags_at_att_init.append(
+            infer_state.init_att_state = lambda _: graph_flags_at_att_init.append(
                 (infer_state.is_cuda_graph_capture, infer_state.is_cuda_graph_replay)
             )
             return infer_state
@@ -180,16 +180,13 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
     def graph_flags(state):
         return state.is_cuda_graph_capture, state.is_cuda_graph_replay
 
-    class AttentionGroups:
-        """Stands in for a group whose step builder plans a decode wrapper, as FlashInfer's does."""
-
-        def build_step_args(self, infer_state):
-            # Graph-owned wrappers serve replays, so only eager and capture steps create one; the
-            # entry point is still InferStateInfo.init_att_state.
-            assert not (infer_state.is_cuda_graph_capture and infer_state.is_cuda_graph_replay)
-            decode_wrapper = None if infer_state.is_cuda_graph_replay else object()
-            initializations.append((infer_state.microbatch_index, graph_flags(infer_state), decode_wrapper is not None))
-            return {"group": SimpleNamespace(decode_wrapper=decode_wrapper)}
+    def build_attention_states(model, infer_state):
+        # Graph-owned wrappers serve replays, so only eager and capture steps create one; the
+        # entry point is still InferStateInfo.init_att_state.
+        assert not (infer_state.is_cuda_graph_capture and infer_state.is_cuda_graph_replay)
+        decode_wrapper = None if infer_state.is_cuda_graph_replay else object()
+        initializations.append((infer_state.microbatch_index, graph_flags(infer_state), decode_wrapper is not None))
+        return {"group": SimpleNamespace(decode_wrapper=decode_wrapper)}
 
     def create_state(model_input, microbatch_index=0):
         state = InferStateInfo()
@@ -200,7 +197,7 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
         state.b_req_idx = model_input.b_req_idx
         state.b_seq_len = model_input.b_seq_len
         state.microbatch_index = microbatch_index
-        state.att_groups = AttentionGroups()
+        state.init_att_state = lambda model: setattr(state, "att_states", build_attention_states(model, state))
         state.init_some_extra_state = lambda _: None
         return state
 
@@ -209,8 +206,8 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
 
     def forward(state, infer_state1):
         # Eager and capture execute attention using these newly prepared states.
-        assert state.att_step_args["group"].decode_wrapper is not None
-        assert infer_state1.att_step_args["group"].decode_wrapper is not None
+        assert state.att_states["group"].decode_wrapper is not None
+        assert infer_state1.att_states["group"].decode_wrapper is not None
         executions.append(("forward", graph_flags(state), graph_flags(infer_state1)))
         return outputs(state, infer_state1)
 
@@ -220,8 +217,8 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
 
     def replay(state, infer_state1):
         # Replay uses graph-owned wrappers, so temporary states need none.
-        assert state.att_step_args["group"].decode_wrapper is None
-        assert infer_state1.att_step_args["group"].decode_wrapper is None
+        assert state.att_states["group"].decode_wrapper is None
+        assert infer_state1.att_states["group"].decode_wrapper is None
         executions.append(("replay", graph_flags(state), graph_flags(infer_state1)))
         return outputs(state, infer_state1)
 
@@ -270,7 +267,7 @@ def test_mtp_decode_preserves_groups_and_real_rows(overlap, dynamic, graph_mode,
     seen_sizes = []
 
     def create_state(model_input, microbatch_index=0):
-        def check_layout():
+        def check_layout(_):
             if not dynamic:
                 assert model_input.batch_size % 3 == 0
             assert model_input.batch_size % 8 == 0

@@ -18,14 +18,15 @@ def make_projection(layer, heads: int, inner: int, cols: int, dtype: torch.dtype
     if inner == 256:
         layer.kv_lora_rank = cols
         layer.layer_num_ = 0
-        layer.softmax_scale = inner ** -0.5
+        layer.softmax_scale = inner**-0.5
         layer.indexer = SimpleNamespace(_get_indices=lambda **kwargs: (None, None))
         # Attention returns the projected query it receives.
-        layer.attn = SimpleNamespace(group="sparse", prefill=lambda step_args, layer_inputs, **kwargs: layer_inputs.q)
+        layer.prefill_impl = Mock()
+        layer.prefill_impl.forward.side_effect = lambda att_state, layer_inputs, **kwargs: layer_inputs.q
         state = SimpleNamespace(
             att_state_role="main",
             att_state_manager=Mock(),
-            att_step_args={"sparse": None},
+            att_states={layer.prefill_impl: None},
             nsa_step=SimpleNamespace(q_kv_start_loc=None),
         )
         weight = SimpleNamespace(k_b_proj_=projection)

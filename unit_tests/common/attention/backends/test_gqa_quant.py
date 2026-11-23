@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from lightllm.common.attention.backend import AttentionBatch
+from lightllm.common.attention.backend import AttentionMetadata
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
 from lightllm.common.attention.backends.gqa.flashinfer import (
@@ -90,7 +90,7 @@ def make_batch(token_map, *, prefill):
     lengths = torch.tensor(LENGTHS, device="cuda", dtype=torch.int32)
     q_lens = [n - r for n, r in zip(LENGTHS, READY)] if prefill else [1] * len(LENGTHS)
     cu_q = torch.tensor([0, *q_lens], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
-    return AttentionBatch(
+    return AttentionMetadata(
         req_to_token_indexs=token_map,
         b_req_idx=torch.tensor(REQ_IDS, device="cuda", dtype=torch.int32),
         b_seq_len=lengths,
@@ -113,7 +113,7 @@ def reference(q, k, v, token_map, *, prefill):
         keys = k[slots].float().repeat_interleave(HEADS // KV_HEADS, dim=1)
         values = v[slots].float().repeat_interleave(HEADS // KV_HEADS, dim=1)
         for pos in range(ready, length):
-            scores = torch.einsum("hd,khd->hk", q[row].float(), keys[: pos + 1]) * DIM ** -0.5
+            scores = torch.einsum("hd,khd->hk", q[row].float(), keys[: pos + 1]) * DIM**-0.5
             out.append(torch.einsum("hk,khd->hd", scores.softmax(-1), values[: pos + 1]))
             row += 1
     return torch.stack(out)
@@ -156,11 +156,11 @@ def test_triton_group_quant_matches_dequantized_reference(bits, prefill):
     k, v, scales, k_ref, v_ref = group_cache(bits)
     token_map = torch.randperm(3 * CAP, device="cuda", dtype=torch.int32, generator=gen(0)).view(3, CAP)
     backend = TritonQuantGQAPrefillBackend if prefill else TritonQuantGQADecodeBackend
-    step_args = backend.get_step_builder_cls()().build(make_batch(token_map, prefill=prefill))
+    att_state = backend.get_step_builder_cls()().build(make_batch(token_map, prefill=prefill))
     impl = backend.get_impl_cls()(config(kv_quant=f"int{bits}_group", kv_quant_group_size=8))
     q = queries(prefill)
     out = torch.empty_like(q)
-    assert impl.forward(step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out) is out
+    assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k_ref, v_ref, token_map, prefill=prefill), atol=0.03, rtol=0.03
     )
@@ -188,19 +188,19 @@ def test_fa3_fp8_per_head_matches_dequantized_reference(static_q, prefill):
     batch = make_batch(token_map, prefill=prefill)
     if prefill:
         backend = FA3GQAPrefillBackend
-        step_args = backend.get_step_builder_cls()(page_size=1).build(batch)
+        att_state = backend.get_step_builder_cls()(page_size=1).build(batch)
     else:
         backend = FA3GQADecodeBackend
         storage = torch.empty(3 * CAP, dtype=torch.int32, device="cuda")
         step_builder = backend.get_step_builder_cls()(
             page_size=1, page_table_view=lambda rows, width, mb: storage[: rows * width].view(rows, width)
         )
-        step_args = step_builder.build(batch)
+        att_state = step_builder.build(batch)
     impl = backend.get_impl_cls()(config(kv_quant="fp8_per_head", has_q_scale=static_q))
     q = queries(prefill)
     out = torch.empty_like(q)
     scales = GQAKVScales(k_scale=k_scale, v_scale=v_scale, q_scale=q_scale)
-    impl.forward(step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
+    impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
     k_ref = k.view(torch.float8_e4m3fn).float() * k_scale[None, :, None]
     v_ref = v.view(torch.float8_e4m3fn).float() * v_scale[None, :, None]
     # q is quantized to FP8 as well, so compare against the full-precision reference loosely.
@@ -223,12 +223,12 @@ def test_flashinfer_fp8_per_tensor_matches_dequantized_reference(prefill):
         step_builder = backend.get_step_builder_cls()(
             builder_config, workspace=lambda: workspace, max_seq_len=CAP, max_batch_size=3, device=torch.device("cuda")
         )
-    step_args = step_builder.build(make_batch(token_map, prefill=prefill))
+    att_state = step_builder.build(make_batch(token_map, prefill=prefill))
     impl = backend.get_impl_cls()(config(kv_quant="fp8_per_tensor"))
     q = queries(prefill)
     out = torch.empty_like(q)
     scales = GQAKVScales(k_scale=0.03, v_scale=0.05)
-    impl.forward(step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
+    impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
     k_ref, v_ref = k.view(torch.float8_e4m3fn).float() * 0.03, v.view(torch.float8_e4m3fn).float() * 0.05
     torch.testing.assert_close(
         out.float(), reference(q, k_ref, v_ref, token_map, prefill=prefill), atol=0.03, rtol=0.03
@@ -250,7 +250,7 @@ def test_unquantized_triton_rejects_a_quantized_cache(prefill):
     k, v, _, _, _ = group_cache(8)
     token_map = torch.randperm(3 * CAP, device="cuda", dtype=torch.int32, generator=gen(0)).view(3, CAP)
     backend = TritonGQAPrefillBackend if prefill else TritonGQADecodeBackend
-    step_args = backend.get_step_builder_cls()().build(make_batch(token_map, prefill=prefill))
+    att_state = backend.get_step_builder_cls()().build(make_batch(token_map, prefill=prefill))
     q = queries(prefill)
     with pytest.raises(AssertionError, match="KV cache of q's dtype"):
-        backend.get_impl_cls()(config()).forward(step_args, GQALayerInputs(q, k, v), out=torch.empty_like(q))
+        backend.get_impl_cls()(config()).forward(att_state, GQALayerInputs(q, k, v), out=torch.empty_like(q))

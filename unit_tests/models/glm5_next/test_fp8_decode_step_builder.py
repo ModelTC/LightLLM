@@ -1,6 +1,6 @@
-"""GLM-5 FP8 sparse decode through the serving path: InferStateInfo -> build_attention_batch -> step builder.
+"""GLM-5 FP8 sparse decode through the serving path: InferStateInfo -> build_attention_metadata -> step builder.
 
-Unlike test_fp8_kv.py, the step args here come from the layer group's step builder, so these tests cover how
+Unlike test_fp8_kv.py, the attention state here come from the layer group's step builder, so these tests cover how
 the builder marks CUDA graph steps (which picks the direct Triton decode for small graph workloads) and keeps
 FlashMLA's scheduler metadata per (microbatch, batch size) for replays.
 """
@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
-from lightllm.common.basemodel.attention_groups import build_attention_batch
+from lightllm.common.basemodel.attention_runtime import build_attention_metadata
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 
@@ -27,7 +27,7 @@ SLOTS, TOPK_WIDTH, SCALE = 8192, 2176, 0.0625
 
 
 def make_backend():
-    """A GLM-5 FP8 layer group's decode step builder, with the model fields build_attention_batch reads."""
+    """A GLM-5 FP8 layer group's decode step builder, with the model fields build_attention_metadata reads."""
     pytest.importorskip("flash_mla")
     from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparseDecodeBackend
     from unit_tests.models.glm5_next.test_fp8_kv import _layer_config
@@ -65,11 +65,11 @@ def make_infer(lengths, *, capture=False, replay=False, microbatch=0):
 
 
 def init_decode_state(backend, infer):
-    """The step's attention: its step args, built as InferStateInfo.init_att_state builds them."""
+    """The step's attention: its attention state, built as InferStateInfo.init_att_state builds them."""
     from unit_tests.models.glm5_next.test_fp8_kv import _decode
 
-    step_args = backend.decode_step_builder.build(build_attention_batch(infer, backend.model))
-    return SimpleNamespace(step_args=step_args, decode_att=lambda q, kv, params: _decode(step_args, q, kv, params))
+    att_state = backend.decode_step_builder.build(build_attention_metadata(infer, backend.model))
+    return SimpleNamespace(att_state=att_state, decode_att=lambda q, kv, params: _decode(att_state, q, kv, params))
 
 
 def select(lengths, out, seed):
@@ -141,7 +141,7 @@ def test_fp8_decode_graph_replays_steps_built_by_the_step_builder(monkeypatch, b
 
     def eager(lengths):
         state = init_decode_state(backend, make_infer(lengths))
-        assert not state.step_args.uses_cuda_graph and state.step_args.direct_decode_bound == 2051
+        assert not state.att_state.uses_cuda_graph and state.att_state.direct_decode_bound == 2051
         return run(state).clone()
 
     eager_first = eager(first)
@@ -151,7 +151,7 @@ def test_fp8_decode_graph_replays_steps_built_by_the_step_builder(monkeypatch, b
 
     graph_infer = make_infer(first, capture=True)
     graph_state = init_decode_state(backend, graph_infer)
-    assert graph_state.step_args.uses_cuda_graph
+    assert graph_state.att_state.uses_cuda_graph
     graph, graph_out = capture(lambda: run(graph_state))
     assert (True in direct_calls) == direct
     graph.replay()
@@ -162,7 +162,7 @@ def test_fp8_decode_graph_replays_steps_built_by_the_step_builder(monkeypatch, b
     replay_infer = make_infer(second, replay=True)
     replay_state = init_decode_state(backend, replay_infer)
     # A replay step's state carries the scheduler metadata the graph captured.
-    assert replay_state.step_args.sched_meta is graph_state.step_args.sched_meta
+    assert replay_state.att_state.sched_meta is graph_state.att_state.sched_meta
     graph_infer.copy_for_cuda_graph(replay_infer)
     graph.replay()
     replayed = graph_out.clone()
@@ -175,7 +175,7 @@ def test_fp8_decode_scheduler_metadata_is_kept_per_microbatch_and_batch_size():
     backend = make_backend()
 
     def sched_meta(lengths, **kwargs):
-        return init_decode_state(backend, make_infer(lengths, **kwargs)).step_args.sched_meta
+        return init_decode_state(backend, make_infer(lengths, **kwargs)).att_state.sched_meta
 
     captured = sched_meta([9, 10], capture=True)
     assert sched_meta([3000, 1], replay=True) is captured

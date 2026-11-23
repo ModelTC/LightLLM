@@ -6,10 +6,10 @@ import torch
 
 from lightllm.common.attention.backend import AttentionBackend, AttentionImpl, StepBuilderContext, TensorAllocator
 from . import GDNLayerConfig, GDNLayerInputs
-from .triton import GDNDecodeStepArgs, GDNDecodeStepBuilder, _mtp_conv, _pack_decode_inputs, _split_qkv
+from .triton import GDNDecodeAttState, GDNDecodeStepBuilder, _mtp_conv, _pack_decode_inputs, _split_qkv
 
 
-class ReplayGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeStepArgs, GDNLayerInputs]):
+class ReplayGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeAttState, GDNLayerInputs]):
     def __init__(self, layer_config: GDNLayerConfig) -> None:
         super().__init__(layer_config)
         if not layer_config.replay:
@@ -17,7 +17,7 @@ class ReplayGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeStepArgs, GDNLa
 
     def forward(
         self,
-        step_args: GDNDecodeStepArgs,
+        att_state: GDNDecodeAttState,
         layer_inputs: GDNLayerInputs,
         *,
         out: torch.Tensor,
@@ -31,13 +31,13 @@ class ReplayGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeStepArgs, GDNLa
 
         cfg, inputs = self.layer_config, layer_inputs
         assert inputs.replay_state is not None and inputs.layer_num is not None, "replay decode needs replay_state"
-        if step_args.draft_step == 0:
-            query, key, value, a, b = _pack_decode_inputs(cfg, inputs, step_args.conv_idx)
+        if att_state.draft_step == 0:
+            query, key, value, a, b = _pack_decode_inputs(cfg, inputs, att_state.conv_idx)
             query = query.view(query.shape[0], cfg.num_k_heads, cfg.head_k_dim)
             key = key.view(key.shape[0], cfg.num_k_heads, cfg.head_k_dim)
             value = value.view(value.shape[0], cfg.num_v_heads, cfg.head_v_dim)
         else:
-            query, key, value = _split_qkv(cfg, _mtp_conv(cfg, inputs, step_args))
+            query, key, value = _split_qkv(cfg, _mtp_conv(cfg, inputs, att_state))
             query = query.view(-1, cfg.num_k_heads, cfg.head_k_dim)
             key = key.view(-1, cfg.num_k_heads, cfg.head_k_dim)
             value = value.view(-1, cfg.num_v_heads, cfg.head_v_dim)
@@ -53,11 +53,11 @@ class ReplayGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeStepArgs, GDNLa
             b,
             inputs.A_log,
             inputs.dt_bias,
-            step_args.conv_idx,
-            step_args.cu_seqlens,
+            att_state.conv_idx,
+            att_state.cu_seqlens,
         )
         out.copy_(core.view(out.shape))
-        state.finish_decode_token(inputs.layer_num, step_args.conv_idx, step_args.cu_seqlens)
+        state.finish_decode_token(inputs.layer_num, att_state.conv_idx, att_state.cu_seqlens)
         return out
 
 

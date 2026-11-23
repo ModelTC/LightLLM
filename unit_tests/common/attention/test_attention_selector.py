@@ -1,6 +1,8 @@
 """The selector chooses an implementation per layer config and phase, skipping implementations that reject it."""
 
 import dataclasses
+from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -96,6 +98,43 @@ def test_decode_priority_puts_fa3_first_with_mtp():
     assert selector.auto_priority(gqa(), "decode", 0) == ("flashinfer", "fa3", "triton")
     assert selector.auto_priority(gqa(), "decode", 2) == ("fa3", "flashinfer", "triton")
     assert selector.auto_priority(gqa(), "prefill", 2) == ("fa3", "flashinfer", "triton")
+
+
+def test_auto_reports_all_rejected_backends():
+    with pytest.raises(ValueError) as error:
+        selector.select(gqa(dtype=torch.float16, kv_quant="fp8_per_head"), "prefill", "auto")
+    for reason in ("needs a BF16 model", "flashinfer_gqa_prefill", "triton_gqa_prefill"):
+        assert reason in str(error.value)
+
+
+def _select_with_missing_flashqla(rank, store):
+    from lightllm.common.attention.backends.gdn import GDNLayerConfig
+    from lightllm.common.attention.backends.gdn.flashqla import FlashQLAGDNPrefillImpl
+
+    torch.distributed.init_process_group(
+        "gloo", init_method=store, rank=rank, world_size=2, timeout=timedelta(seconds=20)
+    )
+    try:
+
+        def load_kernel():
+            if rank == 1:
+                raise ImportError("missing FlashQLA")
+            return object()
+
+        def validate(name):
+            torch.distributed.barrier()
+            return True
+
+        config = GDNLayerConfig(2, 4, 64, 64, 4, "silu", torch.bfloat16)
+        with patch.object(FlashQLAGDNPrefillImpl, "chunk_gated_delta_rule", staticmethod(load_kernel)):
+            choice = selector.select(config, "prefill", "auto", validate=validate)
+        assert choice.backend.get_name() == "triton_gdn_prefill"
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+def test_auto_falls_back_on_every_rank_if_one_cannot_load_flashqla(tmp_path):
+    torch.multiprocessing.spawn(_select_with_missing_flashqla, args=((tmp_path / "store").as_uri(),), nprocs=2)
 
 
 def test_unregistered_layer_config_type_is_rejected():

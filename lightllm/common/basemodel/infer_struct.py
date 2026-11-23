@@ -12,7 +12,7 @@ from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
-from .attention_groups import AttentionGroups
+from .attention_runtime import build_attention_states
 
 
 class GraphMode(enum.Enum):
@@ -29,10 +29,9 @@ class InferStateInfo:
     """
 
     def __init__(self):
-        # 模型的 attention 分组；init_att_state 为每组构造一次本步的 step args，以组名为键。
-        # step args 不持有 InferStateInfo，因此不会形成引用环。
-        self.att_groups: Optional[AttentionGroups] = None
-        self.att_step_args: dict = {}
+        # init_att_state 为当前阶段的每组构造一次参数，以该组的 impl 实例为键。
+        # attention state 不持有 InferStateInfo，因此不会形成引用环。
+        self.att_states: dict = {}
 
         self.input_ids: torch.Tensor = None
         self.batch_size: int = None
@@ -138,13 +137,13 @@ class InferStateInfo:
             ) = gen_decode_params(self.b_seq_len)
             self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
-    def init_att_state(self):
-        """Build this step's attention step args, once per group, after every request field is set.
+    def init_att_state(self, model):
+        """Build this step's attention attention state, once per group, after every request field is set.
 
         CUDA graph replay steps build them too: step builders rewrite the tensors the graph captured.
         """
-        if self.att_groups is not None:
-            self.att_step_args = self.att_groups.build_step_args(self)
+        if model.attention_step_groups is not None:
+            self.att_states = build_attention_states(model, self)
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
         for attr_name, attr_value in vars(new_infer_state).items():

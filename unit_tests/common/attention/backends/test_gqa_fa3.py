@@ -5,10 +5,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.attention.backend import AttentionBatch
+from lightllm.common.attention.backend import AttentionMetadata
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
-from lightllm.common.basemodel.attention_groups import uses_dynamic_spec_verify_layout
+from lightllm.common.basemodel.attention_runtime import uses_dynamic_spec_verify_layout
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
@@ -59,7 +59,7 @@ def make_batch(token_map, req_ids, lengths, query_lengths=None, **kwargs):
     query_lengths = query_lengths or [1] * len(lengths)
     cu_q = torch.tensor([0, *query_lengths], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
     cu_kv = torch.tensor([0, *lengths], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
-    return AttentionBatch(
+    return AttentionMetadata(
         req_to_token_indexs=token_map,
         b_req_idx=torch.tensor(req_ids, device="cuda", dtype=torch.int32),
         b_seq_len=torch.tensor(lengths, device="cuda", dtype=torch.int32),
@@ -154,10 +154,10 @@ def test_prefill(page_size, causal, window, sinks, cached):
         has_sinks=sinks,
     )
     batch = make_batch(token_map, req_ids, lengths, query_lengths, b_ready_cache_len=torch.tensor(ready).cuda())
-    step_args = FA3GQAPrefillBackend.get_step_builder_cls()(page_size=page_size).build(batch)
+    att_state = FA3GQAPrefillBackend.get_step_builder_cls()(page_size=page_size).build(batch)
     out = torch.empty_like(q)
     impl = FA3GQAPrefillBackend.get_impl_cls()(layer_config)
-    assert impl.forward(step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sink_logits), out=out) is out
+    assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sink_logits), out=out) is out
     rows = [(r, pos + 1, n) for r, n, c in zip(req_ids, lengths, ready) for pos in range(c, n)]
     expected = reference(q, k, v, token_map, rows, causal=causal, window=window, sinks=sink_logits)
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
@@ -183,12 +183,12 @@ def test_fp8_prefill(static_q):
         has_q_scale=static_q,
     )
     batch = make_batch(token_map, req_ids, lengths, query_lengths, b_ready_cache_len=torch.tensor(ready).cuda())
-    step_args = FA3GQAPrefillBackend.get_step_builder_cls()(page_size=1).build(batch)
+    att_state = FA3GQAPrefillBackend.get_step_builder_cls()(page_size=1).build(batch)
     out = torch.empty_like(q)
     layer_inputs = GQALayerInputs(
         q=q, k_cache=k, v_cache=v, kv_scales=GQAKVScales(k_scale=k_scale, v_scale=v_scale, q_scale=q_scale)
     )
-    assert FA3GQAPrefillBackend.get_impl_cls()(layer_config).forward(step_args, layer_inputs, out=out) is out
+    assert FA3GQAPrefillBackend.get_impl_cls()(layer_config).forward(att_state, layer_inputs, out=out) is out
     # Dynamic q scales are per prefill request.
     starts = [0, *torch.tensor(query_lengths).cumsum(0).tolist()]
     q_ref = fp8_round_q(q, kv_heads, [list(range(s, e)) for s, e in zip(starts, starts[1:])], q_scale)
@@ -246,10 +246,10 @@ def test_decode_layouts(layout, sinks, page_size):
     step_builder = FA3GQADecodeBackend.get_step_builder_cls()(
         page_size=page_size, page_table_view=_PageTables(page_size)
     )
-    step_args = step_builder.build(batch)
+    att_state = step_builder.build(batch)
     out = torch.empty_like(q)
     impl = FA3GQADecodeBackend.get_impl_cls()(layer_config)
-    assert impl.forward(step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sink_logits), out=out) is out
+    assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sink_logits), out=out) is out
     keep = [i for i, r in enumerate(req_ids) if r != PAD]
     expected = reference(q, k, v, token_map, decode_rows(req_ids, lengths, True), sinks=sink_logits)
     torch.testing.assert_close(out[keep].float(), expected[keep], atol=0.02, rtol=0.02)
@@ -272,12 +272,12 @@ def test_decode_non_causal(layout, window):
     batch = make_batch(
         token_map, req_ids, lengths, decode_rows_per_request=rows_per_request, dynamic_decode_rows=dynamic
     )
-    step_args = FA3GQADecodeBackend.get_step_builder_cls()(
+    att_state = FA3GQADecodeBackend.get_step_builder_cls()(
         page_size=page_size, page_table_view=_PageTables(page_size)
     ).build(batch)
     out = torch.empty_like(q)
     FA3GQADecodeBackend.get_impl_cls()(layer_config).forward(
-        step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out
+        att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out
     )
     keep = [i for i, r in enumerate(req_ids) if r != PAD]
     expected = reference(q, k, v, token_map, decode_rows(req_ids, lengths, False), causal=False, window=window)
@@ -305,12 +305,12 @@ def test_fp8_decode_layouts(layout, static_q):
     batch = make_batch(
         token_map, req_ids, lengths, decode_rows_per_request=rows_per_request, dynamic_decode_rows=dynamic
     )
-    step_args = FA3GQADecodeBackend.get_step_builder_cls()(page_size=1, page_table_view=_PageTables(1)).build(batch)
+    att_state = FA3GQADecodeBackend.get_step_builder_cls()(page_size=1, page_table_view=_PageTables(1)).build(batch)
     out = torch.empty_like(q)
     layer_inputs = GQALayerInputs(
         q=q, k_cache=k, v_cache=v, kv_scales=GQAKVScales(k_scale=k_scale, v_scale=v_scale, q_scale=q_scale)
     )
-    assert FA3GQADecodeBackend.get_impl_cls()(layer_config).forward(step_args, layer_inputs, out=out) is out
+    assert FA3GQADecodeBackend.get_impl_cls()(layer_config).forward(att_state, layer_inputs, out=out) is out
     q_ref = fp8_round_q(q, kv_heads, decode_groups(req_ids, rows_per_request, dynamic), q_scale)
     keep = [i for i, r in enumerate(req_ids) if r != PAD]
     expected = reference(q_ref, k_ref, v_ref, token_map, decode_rows(req_ids, lengths, True))
@@ -376,7 +376,7 @@ def gqa_config(**fields) -> GQALayerConfig:
 
 
 class _Model:
-    """The model fields AttentionGroups reads; its layers run FA3."""
+    """The model fields used during attention initialization; its layers run FA3."""
 
     def __init__(self, args, page_size: int, rows_per_request: int) -> None:
         backends = {"llm_prefill_att_backend": ["fa3"], "llm_decode_att_backend": ["fa3"]}

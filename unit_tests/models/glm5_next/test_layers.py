@@ -8,13 +8,12 @@ import torch
 import torch.nn.functional as F
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend, FA3SparseMLADecodeStepArgs
+from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend, FA3SparseMLADecodeAttState
 from lightllm.common.attention.backends.sparse_mla.flashmla import (
     FlashMLASparsePrefillBackend,
-    FlashMLASparsePrefillStepArgs,
+    FlashMLASparsePrefillAttState,
 )
 from lightllm.common.attention import selector
-from lightllm.common.attention.layer import Attention
 from lightllm.common.quantization import Quantcfg
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
@@ -186,21 +185,21 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     state.max_q_seq_len = 1
 
     # The layer creates its attention as the model loads it; selection follows the bf16 cache.
-    def create_attention(prefill_config, decode_config):
-        prefill = selector.select(prefill_config, "prefill", "flashmla_sparse")
-        decode = selector.select(decode_config, "decode", "flashmla_sparse")
+    def select_impls(prefill_config, decode_config, *, implementation):
+        prefill = selector.select(prefill_config, "prefill", implementation)
+        decode = selector.select(decode_config, "decode", implementation)
         assert (prefill.backend, decode.backend) == (FlashMLASparsePrefillBackend, FA3SparseMLADecodeBackend)
-        return Attention("sparse", prefill.impl, decode.impl)
+        return prefill.impl, decode.impl
 
     model = SimpleNamespace(
         data_type=torch.bfloat16,
         args=SimpleNamespace(llm_kv_type="None"),
-        att_groups=SimpleNamespace(create_attention=create_attention),
+        select_impls=select_impls,
     )
-    layer.init_attention(model)
-    # The step args the group's step builders would build for this batch.
-    prefill_step_args = FlashMLASparsePrefillStepArgs(mem_index=None, has_cached_prefix=False)
-    decode_step_args = FA3SparseMLADecodeStepArgs(
+    layer.init_attention(model, model.select_impls)
+    # The attention state the group's step builders would build for this batch.
+    prefill_att_state = FlashMLASparsePrefillAttState(mem_index=None, has_cached_prefix=False)
+    decode_att_state = FA3SparseMLADecodeAttState(
         cache_seqlens=lengths,
         cu_seqlens_q=state.b1_cu_q_seq_len,
         cu_seqlens_k=F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0)),
@@ -214,10 +213,10 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
         scores = projected[row].float() @ keys.T * config["qk_nope_head_dim"] ** -0.5
         expected.append(scores.softmax(-1) @ keys)
     expected = torch.stack(expected)
-    state.att_step_args = {"sparse": prefill_step_args}
+    state.att_states = {layer.prefill_impl: prefill_att_state}
     prefill = layer._context_attention_kernel(q, None, state, weight)
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
-    state.att_step_args = {"sparse": decode_step_args}
+    state.att_states = {layer.decode_impl: decode_att_state}
     decode = layer._token_attention_kernel(q, state, weight)
     for output in (prefill, decode):
         torch.testing.assert_close(output.float(), expected, atol=1e-3, rtol=0.015)

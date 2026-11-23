@@ -6,7 +6,7 @@ import triton
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionBatch,
+    AttentionMetadata,
     AttentionImpl,
     AttentionStepBuilder,
     StepBuilderContext,
@@ -43,7 +43,7 @@ class FlashInferMLABuilderConfig:
 
 
 @dataclass(frozen=True)
-class FlashInferMLAPrefillStepArgs:
+class FlashInferMLAPrefillAttState:
     """A planned causal ragged-KV wrapper over the step's expanded keys and values."""
 
     wrapper: "BatchPrefillWithRaggedKVCacheWrapper"
@@ -51,20 +51,20 @@ class FlashInferMLAPrefillStepArgs:
 
 
 @dataclass(frozen=True)
-class FlashInferMLADecodeStepArgs:
+class FlashInferMLADecodeAttState:
     """A planned paged MLA wrapper with one query row per request."""
 
     wrapper: "BatchMLAPagedAttentionWrapper"
     config: FlashInferMLABuilderConfig
 
 
-class FlashInferMLAPrefillStepBuilder(AttentionStepBuilder[FlashInferMLAPrefillStepArgs]):
+class FlashInferMLAPrefillStepBuilder(AttentionStepBuilder[FlashInferMLAPrefillAttState]):
     def __init__(self, config: FlashInferMLABuilderConfig, *, workspace: Callable[[], torch.Tensor]) -> None:
         """workspace returns the caller-owned FlashInfer workspace."""
         self.config = config
         self.workspace = workspace
 
-    def build(self, batch: AttentionBatch) -> FlashInferMLAPrefillStepArgs:
+    def build(self, batch: AttentionMetadata) -> FlashInferMLAPrefillAttState:
         """Plan a fresh wrapper for the step's query and kv offsets."""
         import flashinfer
 
@@ -81,10 +81,10 @@ class FlashInferMLAPrefillStepBuilder(AttentionStepBuilder[FlashInferMLAPrefillS
             causal=True,
             sm_scale=config.softmax_scale,
         )
-        return FlashInferMLAPrefillStepArgs(wrapper=wrapper, config=config)
+        return FlashInferMLAPrefillAttState(wrapper=wrapper, config=config)
 
 
-class FlashInferMLADecodeStepBuilder(AttentionStepBuilder[FlashInferMLADecodeStepArgs]):
+class FlashInferMLADecodeStepBuilder(AttentionStepBuilder[FlashInferMLADecodeAttState]):
     def __init__(
         self,
         config: FlashInferMLABuilderConfig,
@@ -108,7 +108,7 @@ class FlashInferMLADecodeStepBuilder(AttentionStepBuilder[FlashInferMLADecodeSte
         self._cuda_graph_wrappers: dict[tuple[int, int], "BatchMLAPagedAttentionWrapper"] = {}
         self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
 
-    def build(self, batch: AttentionBatch) -> FlashInferMLADecodeStepArgs:
+    def build(self, batch: AttentionMetadata) -> FlashInferMLADecodeAttState:
         """Plan the step's wrapper; every query row is its own request.
 
         A CUDA graph step keeps one wrapper and its index buffers per (microbatch, batch size).
@@ -158,7 +158,7 @@ class FlashInferMLADecodeStepBuilder(AttentionStepBuilder[FlashInferMLADecodeSte
                 num_heads=config.num_heads,
                 max_kv_len=batch.max_kv_seq_len,
             )
-            return FlashInferMLADecodeStepArgs(wrapper=wrapper, config=config)
+            return FlashInferMLADecodeAttState(wrapper=wrapper, config=config)
         wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(
             self.workspace(),
             use_cuda_graph=True,
@@ -184,17 +184,19 @@ class FlashInferMLADecodeStepBuilder(AttentionStepBuilder[FlashInferMLADecodeSte
         )
         if batch.uses_cuda_graph:
             self._cuda_graph_wrappers[key] = wrapper
-        return FlashInferMLADecodeStepArgs(wrapper=wrapper, config=config)
+        return FlashInferMLADecodeAttState(wrapper=wrapper, config=config)
 
 
 def _check_config(layer_config, config: FlashInferMLABuilderConfig) -> None:
     assert layer_config.num_heads == config.num_heads and layer_config.dtype == config.dtype
     assert layer_config.qk_rope_head_dim == config.qk_rope_head_dim
-    assert layer_config.softmax_scale == config.softmax_scale, "step args were planned with a different softmax_scale"
+    assert (
+        layer_config.softmax_scale == config.softmax_scale
+    ), "attention state were planned with a different softmax_scale"
 
 
 class FlashInferMLAPrefillImpl(
-    AttentionImpl[MLAPrefillLayerConfig, FlashInferMLAPrefillStepArgs, MLAPrefillLayerInputs]
+    AttentionImpl[MLAPrefillLayerConfig, FlashInferMLAPrefillAttState, MLAPrefillLayerInputs]
 ):
     def __init__(self, layer_config: MLAPrefillLayerConfig) -> None:
         super().__init__(layer_config)
@@ -203,14 +205,14 @@ class FlashInferMLAPrefillImpl(
 
     def forward(
         self,
-        step_args: FlashInferMLAPrefillStepArgs,
+        att_state: FlashInferMLAPrefillAttState,
         layer_inputs: MLAPrefillLayerInputs,
         *,
         out: torch.Tensor,
         alloc_func: TensorAllocator = torch.empty,
     ) -> torch.Tensor:
         """Fill and return out [query_tokens, num_heads, v_head_dim]; keys are expanded into alloc_func scratch."""
-        layer_config, config = self.layer_config, step_args.config
+        layer_config, config = self.layer_config, att_state.config
         _check_config(layer_config, config)
         assert (layer_config.qk_nope_head_dim, layer_config.v_head_dim) == (config.qk_nope_head_dim, config.v_head_dim)
         q, k_nope = layer_inputs.q, layer_inputs.k_nope
@@ -218,11 +220,11 @@ class FlashInferMLAPrefillImpl(
         k = alloc_func((k_nope.shape[0], heads, q.shape[-1]), dtype=q.dtype, device=q.device)
         k[:, :, :nope_dim].copy_(k_nope)
         k[:, :, nope_dim:].copy_(layer_inputs.k_rope.expand(-1, heads, -1))
-        step_args.wrapper.run(q, k, layer_inputs.v, out=out)
+        att_state.wrapper.run(q, k, layer_inputs.v, out=out)
         return out
 
 
-class FlashInferMLADecodeImpl(AttentionImpl[MLADecodeLayerConfig, FlashInferMLADecodeStepArgs, MLADecodeLayerInputs]):
+class FlashInferMLADecodeImpl(AttentionImpl[MLADecodeLayerConfig, FlashInferMLADecodeAttState, MLADecodeLayerInputs]):
     def __init__(self, layer_config: MLADecodeLayerConfig) -> None:
         super().__init__(layer_config)
         # Each query row reads its own request prefix, which is causal across a request's rows.
@@ -231,18 +233,18 @@ class FlashInferMLADecodeImpl(AttentionImpl[MLADecodeLayerConfig, FlashInferMLAD
 
     def forward(
         self,
-        step_args: FlashInferMLADecodeStepArgs,
+        att_state: FlashInferMLADecodeAttState,
         layer_inputs: MLADecodeLayerInputs,
         *,
         out: torch.Tensor,
         alloc_func: TensorAllocator = torch.empty,
     ) -> torch.Tensor:
         """Fill and return out with q_nope's shape; the planned workspace holds the scratch."""
-        layer_config, config = self.layer_config, step_args.config
+        layer_config, config = self.layer_config, att_state.config
         _check_config(layer_config, config)
         assert layer_config.kv_lora_rank == config.kv_lora_rank
         kv, rank, page_size = layer_inputs.kv_cache, layer_config.kv_lora_rank, config.page_size
-        step_args.wrapper.run(
+        att_state.wrapper.run(
             layer_inputs.q_nope,
             layer_inputs.q_rope,
             kv[:, :, :rank].view(-1, page_size, 1, rank),

@@ -4,17 +4,17 @@ Each type is named for how long it lives:
 
 - LayerConfig: one layer's static attention configuration, fixed when the model loads. An
   AttentionImpl is created once per layer config.
-- AttentionBatch: one forward step's requests, independent of any implementation.
-- StepArgs: an implementation's kernel arguments for one step, shared by every layer of a layer
-  group. Its AttentionStepBuilder builds them from the batch before the first layer.
+- AttentionMetadata: request layout and KV cache indices for one forward step.
+- AttState: the attention state shared by compatible layers in one microbatch. Backends that
+  prepare page tables, recurrent indices or wrappers keep them on their state.
 - LayerInputs: one layer call's tensors.
 
 A model creates its step builders through AttentionBackend.create_step_builder, passing a
 StepBuilderContext with the resources and capacities they need. Layers whose backends and
-step_builder_key match share one step builder, so its step args are built once per step.
+step_builder_key match share one step builder and prepare their attention state once per step.
 
-Step args are built every step, including CUDA graph replay steps. The caller writes the KV cache
-before attention and passes the step args explicitly rather than through a global forward context.
+Attention states are built every step, including CUDA graph replay steps. The caller writes the KV cache
+before attention and passes the attention state explicitly rather than through a global forward context.
 """
 
 from abc import ABC, abstractmethod
@@ -25,7 +25,7 @@ import torch
 
 
 LayerConfig = TypeVar("LayerConfig")
-StepArgs = TypeVar("StepArgs")
+AttState = TypeVar("AttState")
 LayerInputs = TypeVar("LayerInputs")
 
 
@@ -45,8 +45,8 @@ class TensorAllocator(Protocol):
 
 
 @dataclass(frozen=True)
-class AttentionBatch:
-    """The requests of one forward step, independent of any attention implementation.
+class AttentionMetadata:
+    """Request layout and KV cache indices shared by attention backends for one forward step.
 
     The caller builds it once per step. Tensors are caller-owned int32/int64 vectors on the
     attention device. req_to_token_indexs[b_req_idx[i], pos] is the physical cache slot of
@@ -121,7 +121,7 @@ class StepBuilderContext:
     # Decode rows any step may have (running requests times rows per request, padded as the
     # model pads its batches); at least max_cuda_graph_batch_size.
     max_decode_rows: int
-    # Concurrent steps of microbatch overlap; AttentionBatch.microbatch_index is below it.
+    # Concurrent steps of microbatch overlap; AttentionMetadata.microbatch_index is below it.
     microbatch_count: int
     # Size of the scratch workspace that implementations needing one share by name.
     workspace_bytes: int
@@ -129,16 +129,12 @@ class StepBuilderContext:
     # tensor for the same arguments, so builders of one implementation share it.
     get_workspace: Callable[[str, int, torch.dtype], torch.Tensor]
     # Decode batches carry the shared-prefix groups of diverse sampling
-    # (AttentionBatch.b_shared_seq_len and b_shared_radix_node_id).
+    # (AttentionMetadata.b_shared_seq_len and b_shared_radix_node_id).
     diverse_decode: bool = False
-    # prefill_workspace(microbatch_index) returns scratch the model reserved before it sized the
-    # KV cache, for implementations whose prefill needs a fixed workspace (FA3 sparse MLA over
-    # GLM-5's FP8 cache); None when the model reserved none.
-    prefill_workspace: Optional[Callable[[int], Any]] = None
 
 
-class AttentionStepBuilder(ABC, Generic[StepArgs]):
-    """Build an implementation's step args for one step of one layer group.
+class AttentionStepBuilder(ABC, Generic[AttState]):
+    """Build an implementation's attention state for one step of one layer group.
 
     build() runs once per step, including CUDA graph capture and replay steps, before the first
     layer and outside capture. All layers of the group share its result. For a CUDA graph step,
@@ -146,18 +142,23 @@ class AttentionStepBuilder(ABC, Generic[StepArgs]):
     that (microbatch, batch size), so that a replay sees the values of the step being replayed.
     Eager steps may use fresh storage.
 
-    A replay reruns the kernels captured with the capture step's step args, so only tensor
-    contents change between replays. Step-args fields read on the host, such as launch sizes or
-    kernel configs, stay as captured: a replay step's own step args are not used by the graph,
+    A replay reruns the kernels captured with the capture step's attention state, so only tensor
+    contents change between replays. Attention state fields read on the host, such as launch sizes or
+    kernel configs, stay as captured: a replay step's own attention state is not used by the graph,
     and such fields must be valid for every step the graph may replay.
     """
 
     @abstractmethod
-    def build(self, batch: AttentionBatch) -> StepArgs:
+    def build(self, batch: AttentionMetadata) -> AttState:
         pass
 
 
-class AttentionImpl(ABC, Generic[LayerConfig, StepArgs, LayerInputs]):
+class PrefillStateBuilder(AttentionStepBuilder[AttentionMetadata]):
+    def build(self, batch: AttentionMetadata) -> AttentionMetadata:
+        return batch
+
+
+class AttentionImpl(ABC, Generic[LayerConfig, AttState, LayerInputs]):
     """Run attention for every layer that shares one layer config."""
 
     def __init__(self, layer_config: LayerConfig) -> None:
@@ -166,7 +167,7 @@ class AttentionImpl(ABC, Generic[LayerConfig, StepArgs, LayerInputs]):
     @abstractmethod
     def forward(
         self,
-        step_args: StepArgs,
+        att_state: AttState,
         layer_inputs: LayerInputs,
         *,
         out: torch.Tensor,
@@ -178,7 +179,7 @@ class AttentionImpl(ABC, Generic[LayerConfig, StepArgs, LayerInputs]):
 class AttentionBackend(ABC):
     """Describe one attention implementation for one family and phase by naming its step builder and impl.
 
-    Models reach implementations through lightllm.common.basemodel.attention_groups, which chooses
+    Models reach implementations through lightllm.common.basemodel.attention_runtime, which chooses
     them per layer config (lightllm.common.attention.selector) and owns their step builders.
     """
 

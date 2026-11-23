@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from lightllm.common.attention.backend import AttentionBatch
+from lightllm.common.attention.backend import AttentionMetadata
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.flashinfer import (
     FlashInferGQABuilderConfig,
@@ -44,7 +44,7 @@ def make_batch(token_map, req_ids, lengths, query_lengths=None, *, graph_capacit
     lengths_t = torch.tensor(lengths, device="cuda", dtype=torch.int32)
     query_lengths = query_lengths or [1] * len(lengths)
     cu_q = torch.tensor([0, *query_lengths], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
-    return AttentionBatch(
+    return AttentionMetadata(
         req_to_token_indexs=token_map,
         b_req_idx=torch.tensor(req_ids, device="cuda", dtype=torch.int32),
         b_seq_len=lengths_t,
@@ -85,10 +85,10 @@ def test_prefill_decode(dtype, q_heads, kv_heads, page_size, cached):
     step_builder = FlashInferGQAPrefillBackend.get_step_builder_cls()(
         config, workspace=lambda: workspace, max_seq_len=512
     )
-    step_args = step_builder.build(make_batch(token_map, req_ids, lengths, query_lengths))
+    att_state = step_builder.build(make_batch(token_map, req_ids, lengths, query_lengths))
     out = torch.empty_like(q)
     impl = FlashInferGQAPrefillBackend.get_impl_cls()(layer_config)
-    assert impl.forward(step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
+    assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k, v, token_map, req_ids, lengths, ready), atol=0.02, rtol=0.02
     )
@@ -97,11 +97,11 @@ def test_prefill_decode(dtype, q_heads, kv_heads, page_size, cached):
     step_builder = FlashInferGQADecodeBackend.get_step_builder_cls()(
         config, workspace=lambda: workspace, max_seq_len=512, max_batch_size=3, device=torch.device("cuda")
     )
-    step_args = step_builder.build(make_batch(token_map, req_ids, lengths))
+    att_state = step_builder.build(make_batch(token_map, req_ids, lengths))
     q = torch.randn(3, q_heads, 64, device="cuda", dtype=dtype)
     out = torch.empty_like(q)
     impl = FlashInferGQADecodeBackend.get_impl_cls()(layer_config)
-    assert impl.forward(step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
+    assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     expected = reference(q, k, v, token_map, req_ids, lengths, [x - 1 for x in lengths])
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
     torch.testing.assert_close(kv, before, atol=0, rtol=0)
@@ -130,23 +130,23 @@ def test_fp8_prefill_decode(q_heads, kv_heads, page_size):
 
     query_lengths = [n - r for n, r in zip(lengths, ready)]
     q = torch.randn(sum(query_lengths), q_heads, 64, device="cuda", generator=generator).bfloat16()
-    step_args = FlashInferGQAPrefillBackend.get_step_builder_cls()(
+    att_state = FlashInferGQAPrefillBackend.get_step_builder_cls()(
         config, workspace=lambda: workspace, max_seq_len=512
     ).build(make_batch(token_map, req_ids, lengths, query_lengths))
     out = torch.empty_like(q)
     FlashInferGQAPrefillBackend.get_impl_cls()(layer_config).forward(
-        step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out
+        att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out
     )
     expected = reference(q, k_ref, v_ref, token_map, req_ids, lengths, ready)
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
 
-    step_args = FlashInferGQADecodeBackend.get_step_builder_cls()(
+    att_state = FlashInferGQADecodeBackend.get_step_builder_cls()(
         config, workspace=lambda: workspace, max_seq_len=512, max_batch_size=3, device=torch.device("cuda")
     ).build(make_batch(token_map, req_ids, lengths))
     q = torch.randn(3, q_heads, 64, device="cuda", generator=generator).bfloat16()
     out = torch.empty_like(q)
     FlashInferGQADecodeBackend.get_impl_cls()(layer_config).forward(
-        step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out
+        att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out
     )
     expected = reference(q, k_ref, v_ref, token_map, req_ids, lengths, [x - 1 for x in lengths])
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
@@ -207,7 +207,7 @@ def start_args(monkeypatch):
 
 
 class _Model:
-    """The model fields AttentionGroups reads; its layers run FlashInfer."""
+    """The model fields used during attention initialization; its layers run FlashInfer."""
 
     def __init__(self, args, page_size: int) -> None:
         backends = {"llm_prefill_att_backend": ["flashinfer"], "llm_decode_att_backend": ["flashinfer"]}

@@ -2,20 +2,20 @@
 
 FA3 sparse MLA prefill dequantizes the selected keys chunk by chunk into a fixed BF16 workspace.
 The model reserves it, one region per prefill microbatch, before it sizes the KV cache, and hands it
-to the step builders through TpPartBaseModel.attention_prefill_workspaces.
+to sparse prefill layers through their model.
 """
 
 import torch
 import triton
 
-from lightllm.common.basemodel.attention_groups import get_gpu_workspace_buffer
+from lightllm.common.basemodel.attention_runtime import get_gpu_workspace_buffer
 
 # Cap each microbatch's BF16 KV workspace at 2 GiB (2097152 × 512 × 2 bytes).
 KV_GATHER_CHUNK_SIZE = 2097152
 
 
 def reserve_fp8_sparse_prefill_workspaces(model) -> list[dict[str, torch.Tensor]]:
-    """Reserve the workspace regions of model's prefill microbatches; see FA3SparseMLAPrefillStepArgs."""
+    """Reserve one workspace region per prefill microbatch for the FA3 sparse MLA kernel."""
     regions = 1 + int(model.args.enable_prefill_microbatch_overlap)
     q_token_capacity = model.batch_max_tokens
     topk_size = triton.cdiv(model.config["index_topk"] + 3, 128) * 128

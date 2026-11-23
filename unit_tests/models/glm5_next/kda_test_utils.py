@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import torch
 
-from lightllm.common.attention.backend import AttentionBatch
+from lightllm.common.attention.backend import AttentionMetadata
 
 
 def kda_params(conv_states, ssm_states, layer_weight, mixed_qkv, raw_gate, raw_beta, *, state=None, layer_num=0):
@@ -43,7 +43,7 @@ def prepare_prefill_infer(infer, device="cuda"):
 
 def prefill_batch(max_q_seq_len, device="cpu"):
     b_req_idx = torch.zeros(1, dtype=torch.int32, device=device)
-    return AttentionBatch(
+    return AttentionMetadata(
         req_to_token_indexs=None,
         b_req_idx=b_req_idx,
         b_seq_len=b_req_idx,
@@ -87,7 +87,7 @@ def kda_layer_config(
 class KDAAttention:
     """A KDA layer's attention outside a model: the impls and step builders its layer group uses.
 
-    model supplies what build_attention_batch reads (mtp_manager, is_mtp_draft_model for decode rows).
+    model supplies what build_attention_metadata reads (mtp_manager, is_mtp_draft_model for decode rows).
     """
 
     def __init__(self, layer_config, model=None, *, dynamic_layout=False):
@@ -114,24 +114,24 @@ class KDAAttention:
 
 
 class KDAStep:
-    """One step of a KDA layer: init_state builds the step args as InferStateInfo.init_att_state does."""
+    """One step of a KDA layer: init_state builds the attention state as InferStateInfo.init_att_state does."""
 
     def __init__(self, attention, infer, phase):
         self.attention, self.infer, self.phase = attention, infer, phase
-        self.step_args = None
+        self.att_state = None
 
     def init_state(self):
-        from lightllm.common.basemodel.attention_groups import build_attention_batch, recurrent_mtp_state_index
+        from lightllm.common.basemodel.attention_runtime import build_attention_metadata, recurrent_mtp_state_index
 
         infer, attention = self.infer, self.attention
         index = None
         if getattr(infer, "att_state_manager", None) is not None:
             role = SimpleNamespace(att_state_manager=infer.att_state_manager, att_state_role=infer.att_state_role)
             index = recurrent_mtp_state_index(role)
-        batch = build_attention_batch(
+        batch = build_attention_metadata(
             infer, attention.model, lambda: attention.dynamic_layout, req_to_mtp_state_index=index
         )
-        self.step_args = attention.step_builders[self.phase].build(batch)
+        self.att_state = attention.step_builders[self.phase].build(batch)
 
     def run(self, params, alloc_func=torch.empty):
         """params is kda_params(...); returns [rows, num_heads, head_dim]."""
@@ -152,4 +152,4 @@ class KDAStep:
         )
         x = inputs.mixed_qkv
         out = alloc_func((x.shape[0], config.num_heads, config.head_dim), dtype=x.dtype, device=x.device)
-        return self.attention.impls[self.phase].forward(self.step_args, inputs, out=out, alloc_func=alloc_func)
+        return self.attention.impls[self.phase].forward(self.att_state, inputs, out=out, alloc_func=alloc_func)

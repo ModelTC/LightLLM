@@ -14,9 +14,6 @@ if TYPE_CHECKING:
 
 
 class BloomTpPartModel(TpPartBaseModel):
-    # ALiBi attention runs only on Triton.
-    att_implementation = "triton"
-
     # weight class
     pre_and_post_weight_class = BloomPreAndPostLayerWeight
     transformer_weight_class = BloomTransformerLayerWeight

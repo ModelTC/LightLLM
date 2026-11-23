@@ -7,7 +7,7 @@ import torch
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionBatch,
+    AttentionMetadata,
     AttentionImpl,
     AttentionStepBuilder,
     StepBuilderContext,
@@ -17,7 +17,7 @@ from . import SWASparseMLALayerConfig, SWASparseMLALayerInputs
 
 
 @dataclass(frozen=True)
-class FlashMLASWAStepArgs:
+class FlashMLASWAAttState:
     """FlashMLA scheduler metadata per compress ratio, filled on the step's first kernel call per ratio.
 
     A decode step also carries a second set used while a CUDA graph is captured, so warm-up runs do not
@@ -28,29 +28,29 @@ class FlashMLASWAStepArgs:
     capture_sched_meta_by_ratio: Optional[dict] = None
 
 
-class FlashMLASWAStepBuilder(AttentionStepBuilder[FlashMLASWAStepArgs]):
+class FlashMLASWAStepBuilder(AttentionStepBuilder[FlashMLASWAAttState]):
     def __init__(self, *, compress_ratios: tuple, for_cuda_graph_capture: bool) -> None:
         """compress_ratios lists the model's distinct ratios; for_cuda_graph_capture adds the capture set (decode)."""
         self.compress_ratios = compress_ratios
         self.for_cuda_graph_capture = for_cuda_graph_capture
 
-    def build(self, batch: Optional[AttentionBatch] = None) -> FlashMLASWAStepArgs:
+    def build(self, batch: Optional[AttentionMetadata] = None) -> FlashMLASWAAttState:
         """The metadata is planned on the GPU at the first kernel call, so it does not depend on batch."""
         import flash_mla
 
         def new_set():
             return {ratio: flash_mla.get_mla_metadata()[0] for ratio in self.compress_ratios}
 
-        return FlashMLASWAStepArgs(
+        return FlashMLASWAAttState(
             sched_meta_by_ratio=new_set(),
             capture_sched_meta_by_ratio=new_set() if self.for_cuda_graph_capture else None,
         )
 
 
-class FlashMLASWAImpl(AttentionImpl[SWASparseMLALayerConfig, FlashMLASWAStepArgs, SWASparseMLALayerInputs]):
+class FlashMLASWAImpl(AttentionImpl[SWASparseMLALayerConfig, FlashMLASWAAttState, SWASparseMLALayerInputs]):
     def forward(
         self,
-        step_args: FlashMLASWAStepArgs,
+        att_state: FlashMLASWAAttState,
         layer_inputs: SWASparseMLALayerInputs,
         *,
         out: torch.Tensor,
@@ -63,9 +63,9 @@ class FlashMLASWAImpl(AttentionImpl[SWASparseMLALayerConfig, FlashMLASWAStepArgs
         assert layer_inputs.q.shape[1] == layer_config.num_heads, "q does not match the layer_config"
         assert (layer_inputs.compressed_cache is not None) == (layer_config.compress_ratio != 0)
         assert (layer_inputs.attn_sink is not None) == layer_config.has_attn_sink
-        sched_meta_by_ratio = step_args.sched_meta_by_ratio
-        if step_args.capture_sched_meta_by_ratio is not None and torch.cuda.is_current_stream_capturing():
-            sched_meta_by_ratio = step_args.capture_sched_meta_by_ratio
+        sched_meta_by_ratio = att_state.sched_meta_by_ratio
+        if att_state.capture_sched_meta_by_ratio is not None and torch.cuda.is_current_stream_capturing():
+            sched_meta_by_ratio = att_state.capture_sched_meta_by_ratio
         flash_mla.flash_mla_with_kvcache(
             q=layer_inputs.q.unsqueeze(1),
             k_cache=layer_inputs.swa_cache,

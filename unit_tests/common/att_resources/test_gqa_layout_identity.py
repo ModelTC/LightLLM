@@ -80,7 +80,7 @@ def test_fa3_reads_descale_for_each_head_layout(prefill, monkeypatch):
         max_q_seq_len=1,
     )
     observed = {}
-    # The step args group decode rows into 3 attention requests; prefill has one per batch row.
+    # The attention state group decode rows into 3 attention requests; prefill has one per batch row.
     batch_size = infer.b_seq_len.shape[0] if prefill else 3
     for state in manager.get_full_attention_states("main"):
         heads = state.config.head_num

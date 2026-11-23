@@ -54,7 +54,7 @@ class GQALayerConfig:
     GQALayerInputs.alibi_slopes.
 
     bidirectional_image_spans=True (prefill) lets each query inside an image span also see the rest
-    of its span, as given per step by AttentionBatch.b_image_token_end (and b_image_token_start with a
+    of its span, as given per step by AttentionMetadata.b_image_token_end (and b_image_token_start with a
     sliding window, whose span keys stay visible even outside the window); text queries stay causal.
 
     Supported dtypes, head dimensions, scales and sliding-window modes are documented on each impl.
@@ -109,12 +109,12 @@ class GQALayerInputs:
 
     q is [total_query_tokens, num_heads, head_dim] in prefill, packed in batch order, or
     [decode_rows, num_heads, head_dim] in decode, one row per batch row (see
-    AttentionBatch.decode_rows_per_request).
+    AttentionMetadata.decode_rows_per_request).
 
     k_cache/v_cache are already populated per-layer physical cache views of shape
     [cache_slots, num_kv_heads, head_dim], stored as the layer config's kv_quant: dtype, FP8 E4M3
     (or its uint8 bytes), int8, or int8 bytes packing two int4 values ([..., head_dim // 2]).
-    Each implementation's step args address their first dimension. The caller owns and populates
+    Each implementation's attention state address their first dimension. The caller owns and populates
     the cache, including the current queries' KV; impls do not write q or K/V.
 
     sinks is the layer's [num_heads] sink logits in q's dtype when the layer_config has has_sinks, else None.

@@ -6,9 +6,9 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-import lightllm.common.basemodel.attention_groups as attention_groups_module
+import lightllm.common.basemodel.attention_runtime as attention_groups_module
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
-from lightllm.common.attention.backend import AttentionBatch
+from lightllm.common.attention.backend import AttentionMetadata
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeStepBuilder
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeStepBuilder
 from lightllm.models import get_draft_model_class
@@ -125,16 +125,16 @@ def test_triton_mtp_decode_step_builds_group_markers():
     infer_state.req_manager = SimpleNamespace(
         req_to_token_indexs=torch.zeros(8, 8, dtype=torch.int32), HOLD_REQUEST_ID=-1
     )
-    batch = attention_groups_module.build_attention_batch(infer_state, model, lambda: False)
-    step_args = TritonGQADecodeStepBuilder().build(batch)
+    batch = attention_groups_module.build_attention_metadata(infer_state, model, lambda: False)
+    att_state = TritonGQADecodeStepBuilder().build(batch)
 
-    assert step_args.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
+    assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_fa3_gqa_decode_step_builder_groups_dynamic_rows():
     # FA3 GQA and MLA decode share this step builder.
-    batch = AttentionBatch(
+    batch = AttentionMetadata(
         req_to_token_indexs=torch.zeros((8, 4), dtype=torch.int32, device="cuda"),
         b_req_idx=torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda"),
         b_seq_len=torch.tensor([3, 4, 2, 2], dtype=torch.int32, device="cuda"),

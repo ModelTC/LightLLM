@@ -6,18 +6,18 @@ import torch
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionBatch,
+    AttentionMetadata,
     AttentionImpl,
     AttentionStepBuilder,
     StepBuilderContext,
     TensorAllocator,
 )
-from ..gqa.fa3 import FA3GQADecodeStepArgs, FA3GQADecodeStepBuilder, FA3PageTables, fa3_requires_cpu_cache_sync
+from ..gqa.fa3 import FA3GQADecodeAttState, FA3GQADecodeStepBuilder, FA3PageTables, fa3_requires_cpu_cache_sync
 from . import MLADecodeLayerConfig, MLADecodeLayerInputs, MLAPrefillLayerConfig, MLAPrefillLayerInputs
 
 
 @dataclass(frozen=True)
-class FA3MLAPrefillStepArgs:
+class FA3MLAPrefillAttState:
     """int32 cumulative query and kv offsets of the step's packed, expanded keys and values."""
 
     cu_seqlens_q: torch.Tensor
@@ -26,10 +26,10 @@ class FA3MLAPrefillStepArgs:
     max_seqlen_k: int
 
 
-class FA3MLAPrefillStepBuilder(AttentionStepBuilder[FA3MLAPrefillStepArgs]):
-    def build(self, batch: AttentionBatch) -> FA3MLAPrefillStepArgs:
+class FA3MLAPrefillStepBuilder(AttentionStepBuilder[FA3MLAPrefillAttState]):
+    def build(self, batch: AttentionMetadata) -> FA3MLAPrefillAttState:
         assert batch.cu_q_seq_len is not None and batch.cu_kv_seq_len is not None, "prefill batch fields required"
-        return FA3MLAPrefillStepArgs(
+        return FA3MLAPrefillAttState(
             cu_seqlens_q=batch.cu_q_seq_len.int(),
             cu_seqlens_k=batch.cu_kv_seq_len.int(),
             max_seqlen_q=batch.max_q_seq_len,
@@ -37,10 +37,10 @@ class FA3MLAPrefillStepBuilder(AttentionStepBuilder[FA3MLAPrefillStepArgs]):
         )
 
 
-class FA3MLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, FA3MLAPrefillStepArgs, MLAPrefillLayerInputs]):
+class FA3MLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, FA3MLAPrefillAttState, MLAPrefillLayerInputs]):
     def forward(
         self,
-        step_args: FA3MLAPrefillStepArgs,
+        att_state: FA3MLAPrefillAttState,
         layer_inputs: MLAPrefillLayerInputs,
         *,
         out: torch.Tensor,
@@ -62,10 +62,10 @@ class FA3MLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, FA3MLAPrefillStepAr
             q=q,
             k=k,
             v=layer_inputs.v,
-            cu_seqlens_q=step_args.cu_seqlens_q,
-            cu_seqlens_k=step_args.cu_seqlens_k,
-            max_seqlen_q=step_args.max_seqlen_q,
-            max_seqlen_k=step_args.max_seqlen_k,
+            cu_seqlens_q=att_state.cu_seqlens_q,
+            cu_seqlens_k=att_state.cu_seqlens_k,
+            max_seqlen_q=att_state.max_seqlen_q,
+            max_seqlen_k=att_state.max_seqlen_k,
             softmax_scale=layer_config.softmax_scale,
             causal=layer_config.causal,
             return_softmax_lse=False,
@@ -74,10 +74,10 @@ class FA3MLAPrefillImpl(AttentionImpl[MLAPrefillLayerConfig, FA3MLAPrefillStepAr
         return out
 
 
-class FA3MLADecodeImpl(AttentionImpl[MLADecodeLayerConfig, FA3GQADecodeStepArgs, MLADecodeLayerInputs]):
+class FA3MLADecodeImpl(AttentionImpl[MLADecodeLayerConfig, FA3GQADecodeAttState, MLADecodeLayerInputs]):
     def forward(
         self,
-        step_args: FA3GQADecodeStepArgs,
+        att_state: FA3GQADecodeAttState,
         layer_inputs: MLADecodeLayerInputs,
         *,
         out: torch.Tensor,
@@ -87,17 +87,17 @@ class FA3MLADecodeImpl(AttentionImpl[MLADecodeLayerConfig, FA3GQADecodeStepArgs,
         from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 
         layer_config = self.layer_config
-        kv, rank, page_size = layer_inputs.kv_cache, layer_config.kv_lora_rank, step_args.page_size
+        kv, rank, page_size = layer_inputs.kv_cache, layer_config.kv_lora_rank, att_state.page_size
         flash_attn_with_kvcache(
             q=layer_inputs.q_rope,
             k_cache=kv[:, :, rank:].view(-1, page_size, 1, layer_config.qk_rope_head_dim),
             v_cache=kv[:, :, :rank].view(-1, page_size, 1, rank),
             qv=layer_inputs.q_nope,
-            page_table=step_args.page_table,
-            cache_seqlens=step_args.cache_seqlens,
-            cu_seqlens_q=step_args.cu_seqlens_q,
-            cu_seqlens_k_new=step_args.cu_seqlens_k,
-            max_seqlen_q=step_args.max_seqlen_q,
+            page_table=att_state.page_table,
+            cache_seqlens=att_state.cache_seqlens,
+            cu_seqlens_q=att_state.cu_seqlens_q,
+            cu_seqlens_k_new=att_state.cu_seqlens_k,
+            max_seqlen_q=att_state.max_seqlen_q,
             softmax_scale=layer_config.softmax_scale,
             causal=layer_config.causal,
             window_size=(-1, -1),

@@ -7,7 +7,7 @@ import torch
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionBatch,
+    AttentionMetadata,
     AttentionImpl,
     AttentionStepBuilder,
     StepBuilderContext,
@@ -18,7 +18,7 @@ from . import GDNLayerConfig, GDNLayerInputs
 
 
 @dataclass(frozen=True)
-class GDNPrefillStepArgs:
+class GDNPrefillAttState:
     """Packed prefill: request i's tokens start at cu_seqlens[i]; its conv state is slot conv_idx[i] and
     its SSM state slot ssm_idx[i]; has_initial_state[i] says whether it continues earlier tokens."""
 
@@ -29,7 +29,7 @@ class GDNPrefillStepArgs:
 
 
 @dataclass(frozen=True)
-class GDNDecodeStepArgs:
+class GDNDecodeAttState:
     """Decode rows grouped into requests.
 
     Without speculative decoding (draft_step 0) each row is a request with conv and SSM slots
@@ -46,14 +46,14 @@ class GDNDecodeStepArgs:
     draft_step: int
 
 
-class GDNPrefillStepBuilder(AttentionStepBuilder[GDNPrefillStepArgs]):
+class GDNPrefillStepBuilder(AttentionStepBuilder[GDNPrefillAttState]):
     def __init__(self, *, ssm_slots_per_request: int) -> None:
         """Native state keeps state_mtp_step + 1 SSM slots per request; replay state keeps one."""
         self.ssm_slots_per_request = ssm_slots_per_request
 
-    def build(self, batch: AttentionBatch) -> GDNPrefillStepArgs:
+    def build(self, batch: AttentionMetadata) -> GDNPrefillAttState:
         req = batch.b_req_idx
-        return GDNPrefillStepArgs(
+        return GDNPrefillAttState(
             conv_idx=req,
             ssm_idx=req * self.ssm_slots_per_request if self.ssm_slots_per_request != 1 else req,
             cu_seqlens=batch.cu_q_seq_len,
@@ -61,13 +61,13 @@ class GDNPrefillStepBuilder(AttentionStepBuilder[GDNPrefillStepArgs]):
         )
 
 
-class GDNDecodeStepBuilder(AttentionStepBuilder[GDNDecodeStepArgs]):
+class GDNDecodeStepBuilder(AttentionStepBuilder[GDNDecodeAttState]):
     def __init__(self, *, replay: bool) -> None:
         """replay selects replay state, which keeps one SSM slot per request and needs cu_seqlens."""
         self.replay = replay
         self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
 
-    def build(self, batch: AttentionBatch) -> GDNDecodeStepArgs:
+    def build(self, batch: AttentionMetadata) -> GDNDecodeAttState:
         """A CUDA graph step keeps derived tensors per (microbatch, batch size), rewritten in place."""
         from lightllm.common.attention.kernels.gdn.mtp_state_params import build_dynamic_mtp_linear_att_state_params
 
@@ -111,7 +111,7 @@ class GDNDecodeStepBuilder(AttentionStepBuilder[GDNDecodeStepArgs]):
             conv_idx = kept.get("conv_idx", conv_idx)
             accepted = kept.get("accepted", accepted)
             ssm_idx = kept["conv_idx"] if self.replay and "conv_idx" in kept else kept.get("ssm_idx", ssm_idx)
-        return GDNDecodeStepArgs(
+        return GDNDecodeAttState(
             conv_idx=conv_idx, ssm_idx=ssm_idx, cu_seqlens=cu, num_accepted_tokens=accepted, draft_step=width - 1
         )
 
@@ -130,7 +130,7 @@ def _prefill_state_views(layer_config: GDNLayerConfig, layer_inputs: GDNLayerInp
     return conv_states
 
 
-class TritonGDNPrefillImpl(AttentionImpl[GDNLayerConfig, GDNPrefillStepArgs, GDNLayerInputs]):
+class TritonGDNPrefillImpl(AttentionImpl[GDNLayerConfig, GDNPrefillAttState, GDNLayerInputs]):
     """Chunked prefill with the in-tree FLA kernel; subclasses swap chunk_gated_delta_rule."""
 
     def __init__(self, layer_config: GDNLayerConfig) -> None:
@@ -150,7 +150,7 @@ class TritonGDNPrefillImpl(AttentionImpl[GDNLayerConfig, GDNPrefillStepArgs, GDN
 
     def forward(
         self,
-        step_args: GDNPrefillStepArgs,
+        att_state: GDNPrefillAttState,
         layer_inputs: GDNLayerInputs,
         *,
         out: torch.Tensor,
@@ -166,9 +166,9 @@ class TritonGDNPrefillImpl(AttentionImpl[GDNLayerConfig, GDNPrefillStepArgs, GDN
             inputs.mixed_qkv.transpose(0, 1),
             inputs.conv_weight,
             bias=inputs.conv_bias,
-            query_start_loc=step_args.cu_seqlens,
-            cache_indices=step_args.conv_idx,
-            has_initial_state=step_args.has_initial_state,
+            query_start_loc=att_state.cu_seqlens,
+            cache_indices=att_state.conv_idx,
+            has_initial_state=att_state.has_initial_state,
             conv_states=_prefill_state_views(cfg, inputs),
             activation=cfg.activation,
         ).transpose(0, 1)
@@ -181,13 +181,13 @@ class TritonGDNPrefillImpl(AttentionImpl[GDNLayerConfig, GDNPrefillStepArgs, GDN
             v=value.view(1, tokens, cfg.num_v_heads, cfg.head_v_dim),
             g=g.unsqueeze(0),
             beta=beta.unsqueeze(0),
-            initial_state=ssm_states[step_args.ssm_idx],
+            initial_state=ssm_states[att_state.ssm_idx],
             output_final_state=True,
-            cu_seqlens=step_args.cu_seqlens,
+            cu_seqlens=att_state.cu_seqlens,
             use_qk_l2norm_in_kernel=True,
         )
         # The chunk kernel accumulates in float32; index_put does not convert dtypes implicitly.
-        ssm_states[step_args.ssm_idx] = last_state.to(ssm_states.dtype, copy=False)
+        ssm_states[att_state.ssm_idx] = last_state.to(ssm_states.dtype, copy=False)
         out.copy_(core.view(out.shape))
         return out
 
@@ -196,9 +196,8 @@ def _pack_decode_inputs(cfg: GDNLayerConfig, inputs: GDNLayerInputs, conv_idx: t
     from lightllm.common.attention.kernels.gdn.gdn_decode_pack import conv_pack_gdn_decode_inputs
 
     # Fused conv update and q/k/v/gate packing, without materializing the post-conv qkv.
-    query, key, value, _, a, b = conv_pack_gdn_decode_inputs(
+    return conv_pack_gdn_decode_inputs(
         inputs.mixed_qkv,
-        inputs.z,
         inputs.a,
         inputs.b,
         inputs.conv_states,
@@ -212,26 +211,25 @@ def _pack_decode_inputs(cfg: GDNLayerConfig, inputs: GDNLayerInputs, conv_idx: t
         cfg.num_v_heads,
         cfg.head_v_dim,
     )
-    return query, key, value, a, b
 
 
-def _mtp_conv(cfg: GDNLayerConfig, inputs: GDNLayerInputs, step_args: GDNDecodeStepArgs):
+def _mtp_conv(cfg: GDNLayerConfig, inputs: GDNLayerInputs, att_state: GDNDecodeAttState):
     from lightllm.common.attention.kernels.gdn.causal_conv1d_mtp import causal_conv1d_update
 
     return causal_conv1d_update(
         inputs.mixed_qkv,
         inputs.conv_states,
         inputs.conv_weight,
-        mtp_step=step_args.draft_step,
+        mtp_step=att_state.draft_step,
         bias=inputs.conv_bias,
         activation=cfg.activation,
-        conv_state_indices=step_args.conv_idx,
-        num_accepted_tokens=step_args.num_accepted_tokens,
-        query_start_loc=step_args.cu_seqlens,
+        conv_state_indices=att_state.conv_idx,
+        num_accepted_tokens=att_state.num_accepted_tokens,
+        query_start_loc=att_state.cu_seqlens,
     )
 
 
-class TritonGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeStepArgs, GDNLayerInputs]):
+class TritonGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeAttState, GDNLayerInputs]):
     def __init__(self, layer_config: GDNLayerConfig) -> None:
         super().__init__(layer_config)
         if layer_config.replay:
@@ -239,7 +237,7 @@ class TritonGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeStepArgs, GDNLa
 
     def forward(
         self,
-        step_args: GDNDecodeStepArgs,
+        att_state: GDNDecodeAttState,
         layer_inputs: GDNLayerInputs,
         *,
         out: torch.Tensor,
@@ -247,19 +245,19 @@ class TritonGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeStepArgs, GDNLa
     ) -> torch.Tensor:
         """Fill and return out [rows, num_v_heads, head_v_dim]; update the conv and SSM states in place."""
         cfg, inputs = self.layer_config, layer_inputs
-        if step_args.draft_step == 0:
+        if att_state.draft_step == 0:
             from lightllm.common.attention.kernels.gdn.third_party_fla.ops.fused_recurrent import (
                 fused_recurrent_gated_delta_rule,
             )
 
-            query, key, value, a, b = _pack_decode_inputs(cfg, inputs, step_args.conv_idx)
+            query, key, value, a, b = _pack_decode_inputs(cfg, inputs, att_state.conv_idx)
             core, _ = fused_recurrent_gated_delta_rule(
                 q=query,
                 k=key,
                 v=value,
                 initial_state=inputs.ssm_states,
                 inplace_final_state=True,
-                ssm_state_indices=step_args.ssm_idx,
+                ssm_state_indices=att_state.ssm_idx,
                 use_qk_l2norm_in_kernel=True,
                 A_log=inputs.A_log,
                 dt_bias=inputs.dt_bias,
@@ -269,7 +267,7 @@ class TritonGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeStepArgs, GDNLa
         else:
             from lightllm.common.attention.kernels.gdn.mtp_fused_recurrent import mtp_fused_recurrent_gated_delta_rule
 
-            mixed_qkv = _mtp_conv(cfg, inputs, step_args)
+            mixed_qkv = _mtp_conv(cfg, inputs, att_state)
             query, key, value = _split_qkv(cfg, mixed_qkv)
             rows = query.shape[0]
             # num_accepted_tokens >= 1 is guaranteed upstream: cache restore sets 1 and MTP decode
@@ -279,10 +277,10 @@ class TritonGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeStepArgs, GDNLa
                 k=key.view(1, rows, cfg.num_k_heads, cfg.head_k_dim),
                 v=value.view(1, rows, cfg.num_v_heads, cfg.head_v_dim),
                 initial_state=inputs.ssm_states,
-                cu_seqlens=step_args.cu_seqlens.to(torch.long),
-                ssm_state_indices=step_args.ssm_idx,
-                ssm_state_write_indices=step_args.ssm_idx,
-                num_accepted_tokens=step_args.num_accepted_tokens,
+                cu_seqlens=att_state.cu_seqlens.to(torch.long),
+                ssm_state_indices=att_state.ssm_idx,
+                ssm_state_write_indices=att_state.ssm_idx,
+                num_accepted_tokens=att_state.num_accepted_tokens,
                 A_log=inputs.A_log,
                 dt_bias=inputs.dt_bias,
                 a_raw=inputs.a,

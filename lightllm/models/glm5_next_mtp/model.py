@@ -21,8 +21,6 @@ if TYPE_CHECKING:
 
 class Glm5NextMTPModel(TpPartBaseModel):
     is_mtp_draft_model = True
-    # Sparse MLA runs FlashMLA and FA3 whatever --llm_*_att_backend names for full attention.
-    att_implementation = "flashmla_sparse"
     pre_and_post_weight_class = Glm5NextMTPPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight
     pre_layer_infer_class = Glm5NextMTPPreLayerInfer
@@ -176,7 +174,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
             self.att_state_role
         ):
             # Reserve fixed scratch space before the shared KV capacity is profiled.
-            self.attention_prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(self)
+            self.fp8_sparse_prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(self)
 
     def autotune_layers(self):
         return 1

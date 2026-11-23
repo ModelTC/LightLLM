@@ -9,6 +9,8 @@ from lightllm.common.basemodel import InferStateInfo
 class BloomTransformerLayerInfer(GQAAttentionLayerMixin, TransformerLayerInferTpl):
     """ """
 
+    att_implementation = "triton"
+
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.eps_ = network_config["layer_norm_epsilon"]

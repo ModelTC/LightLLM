@@ -73,9 +73,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _gdn_attention(self, inputs: GDNLayerInputs, infer_state, *, prefill: bool) -> torch.Tensor:
         z = inputs.z
-        run = self.attn.prefill if prefill else self.attn.decode
-        return run(
-            infer_state.att_step_args[self.attn.group],
+        impl = self.prefill_impl if prefill else self.decode_impl
+        return impl.forward(
+            infer_state.att_states[impl],
             inputs,
             out=self.alloc_tensor(
                 (z.shape[0], self.tp_linear_num_v_heads, self.linear_head_v_dim), dtype=z.dtype, device=z.device
@@ -248,8 +248,8 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         _o = tensor_to_no_ref_tensor(o)
 
         def gdn_prefill_func(new_infer_state: "Qwen3NextInferStateInfo"):
-            # 通过 new_infer_state.att_step_args 读取 runtime 上 init_att_state() 为本步构造的
-            # step args（含 padding 请求的 buffer idx），而不是 capture 时的 step args。
+            # 通过 new_infer_state.att_states 读取 runtime 上 init_att_state() 为本步构造的
+            # attention state（含 padding 请求的 buffer idx），而不是 capture 时的 attention state。
             inputs = self._gdn_layer_inputs(_mixed_qkvzba, new_infer_state, layer_weight)
             tmp_o = self._gdn_attention(inputs, new_infer_state, prefill=True)
             _o.copy_(tmp_o.view(_o.shape))
@@ -261,9 +261,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         z = z[:, : self.tp_linear_num_v_heads * self.linear_head_v_dim]
         return o, z.view(-1, self.tp_linear_num_v_heads, self.linear_head_v_dim)
 
-    def init_attention(self, model) -> None:
+    def init_attention(self, model, select_impls) -> None:
         if not self.is_linear_attention_layer:
-            return super().init_attention(model)
+            return super().init_attention(model, select_impls)
         config, tp_world_size = self.network_config_, self.tp_world_size_
         layer_config = GDNLayerConfig(
             num_k_heads=config["linear_num_key_heads"] // tp_world_size,
@@ -278,7 +278,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         # Replay state takes decode history through GDNLayerInputs.replay_state.
         self.linear_replay = layer_config.replay
-        self.attn = model.att_groups.create_attention(layer_config, layer_config)
+        self.prefill_impl, self.decode_impl = select_impls(layer_config, layer_config)
 
     def context_attention_forward(
         self,

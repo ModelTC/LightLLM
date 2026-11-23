@@ -9,7 +9,7 @@ import triton
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention.backends.sparse_mla.flashmla import (
     FlashMLASparseDecodeBackend,
-    FlashMLASparseDecodeStepArgs,
+    FlashMLASparseDecodeAttState,
 )
 from lightllm.common.attention.backends.sparse_mla import (
     SparseMLADecodeLayerInputs,
@@ -17,7 +17,7 @@ from lightllm.common.attention.backends.sparse_mla import (
     SparseMLAPrefillLayerInputs,
 )
 from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLAPrefillBackend
-from lightllm.common.basemodel.attention_groups import build_attention_batch
+from lightllm.common.basemodel.attention_runtime import build_attention_metadata
 from lightllm.models.glm5_next.infer_struct import build_glm5_nsa_step
 from lightllm.common.attention.kernels.sparse_mla.fp8_group64_decode import (
     can_use_fp8_sparse_direct_decode,
@@ -61,21 +61,23 @@ def _layer_config(q, softmax_scale):
     )
 
 
-def _decode(step_args, q, kv, params):
+def _decode(att_state, q, kv, params):
     """Run a GLM-5 layer's FP8 decode; params holds the indexer's topk_mem_indices and the softmax_scale."""
     q_nope, q_rope = q
     impl = FlashMLASparseDecodeBackend.get_impl_cls()(_layer_config(q_nope, params["softmax_scale"]))
     inputs = SparseMLADecodeLayerInputs(
         q_nope=q_nope, q_rope=q_rope, kv_cache=kv, topk_mem_indices=params["topk_mem_indices"]
     )
-    return impl.forward(step_args, inputs, out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device))
+    return impl.forward(att_state, inputs, out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device))
 
 
 class _Fp8PrefillState:
-    """One prefill step's attention: its step args and the model's indexer metadata."""
+    """One prefill step's attention: its attention state and the model's indexer metadata."""
 
-    def __init__(self, step_args, nsa_step=None):
-        self.step_args, self.nsa_step = step_args, nsa_step
+    def __init__(self, att_state, workspace):
+        self.att_state = att_state
+        self.workspace = workspace
+        self.nsa_step = None
 
     def prefill_att(self, q, kv, params):
         impl = FA3SparseMLAPrefillBackend.get_impl_cls()(_layer_config(q, params["softmax_scale"]))
@@ -86,13 +88,14 @@ class _Fp8PrefillState:
             topk_indices=params.get("topk_indices"),
             current_kv=params.get("prefill_cache_kv"),
             q_kv_start_loc=params.get("q_kv_start_loc"),
+            fp8_workspace=self.workspace,
         )
         out = torch.empty((q.shape[0], q.shape[1], 512), dtype=q.dtype, device=q.device)
-        return impl.forward(self.step_args, inputs, out=out)
+        return impl.forward(self.att_state, inputs, out=out)
 
 
 class _Fp8DecodeState:
-    """GLM-5 FP8 decode with step args built from the owner's capture flag.
+    """GLM-5 FP8 decode with attention state built from the owner's capture flag.
 
     The step builder records whether each step runs in a CUDA graph; building per call lets a test
     toggle the owner's flag around a capture.
@@ -110,12 +113,12 @@ class _Fp8DecodeState:
         return self.owner
 
     def decode_att(self, q, kv, params):
-        step_args = FlashMLASparseDecodeStepArgs(
+        att_state = FlashMLASparseDecodeAttState(
             sched_meta=self.sched_meta,
             uses_cuda_graph=bool(self.owner.is_cuda_graph_capture),
             direct_decode_bound=self.bound,
         )
-        return _decode(step_args, q, kv, params)
+        return _decode(att_state, q, kv, params)
 
 
 class _Fp8SparseAttention:
@@ -125,17 +128,20 @@ class _Fp8SparseAttention:
     def __init__(self, model):
         self.model = model
         self._prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(model)
-        ctx = SimpleNamespace(prefill_workspace=self._prefill_workspaces.__getitem__)
+        ctx = SimpleNamespace()
         config = _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), 1.0)
         self.prefill_step_builder = FA3SparseMLAPrefillBackend.create_step_builder(config, ctx)
         self.decode_step_builder = FlashMLASparseDecodeBackend.create_step_builder(config, ctx)
 
     def create_att_prefill_state(self, infer):
-        return _Fp8PrefillState(self.prefill_step_builder.build(build_attention_batch(infer, self.model)))
+        batch = build_attention_metadata(infer, self.model)
+        return _Fp8PrefillState(
+            self.prefill_step_builder.build(batch), self._prefill_workspaces[batch.microbatch_index]
+        )
 
     def create_att_decode_state(self, infer):
-        step_args = self.decode_step_builder.build(build_attention_batch(infer, self.model))
-        return SimpleNamespace(decode_att=lambda q, kv, params: _decode(step_args, q, kv, params))
+        att_state = self.decode_step_builder.build(build_attention_metadata(infer, self.model))
+        return SimpleNamespace(decode_att=lambda q, kv, params: _decode(att_state, q, kv, params))
 
 
 def _make_workspace_backend(batch_max_tokens, overlap=False):
@@ -262,16 +268,13 @@ class _PrefillCase:
     ],
 )
 def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_type, expected):
-    from lightllm.common.attention.layer import Attention
-    from lightllm.common.basemodel.attention_groups import AttentionGroups
-    from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
+    from lightllm.common.basemodel.attention_runtime import layer_impl_selector, step_builder_context
     from lightllm.models.glm5_next.model import Glm5NextTpPartModel
     from lightllm.models.glm5_next.prefill_workspace import reserve_fp8_sparse_prefill_workspaces
     from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     model_class = Glm5NextMTPModel if draft else Glm5NextTpPartModel
-    assert model_class.att_implementation == "flashmla_sparse"
     model = object.__new__(model_class)
     # GLM-5 runs its sparse implementations whatever the command line names for full attention.
     model.args = SimpleNamespace(
@@ -295,8 +298,8 @@ def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_t
     model.batch_max_tokens = 4
     model.mtp_previous_draft_models = []
     if kv_type == "fp8kv_dsa":
-        model.attention_prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(model)
-    model.att_groups = AttentionGroups(model)
+        model.fp8_sparse_prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(model)
+    model.select_impls = layer_impl_selector(model)
     layer = SimpleNamespace(
         is_linear_attention_layer=False,
         tp_q_head_num_=64,
@@ -304,15 +307,13 @@ def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_t
         softmax_scale=0.0625,
         network_config_=model.config,
     )
-    Glm5NextTransformerLayerInfer.init_attention(layer, model)
-    assert isinstance(layer.attn, Attention)
-    assert layer.attn.decode_impl.layer_config.causal is False
-    ((name, backends),) = model.att_groups.groups.items()
-    assert (backends["prefill"].get_name(), backends["decode"].get_name()) == expected
+    model_class.transformer_layer_infer_class.init_attention(layer, model, model.select_impls)
+    assert layer.decode_impl.layer_config.causal is False
     # The step builders can be created from the layer config and the model's context.
-    (group,) = model.att_groups._groups.values()
-    for phase in ("prefill", "decode"):
-        group.step_builder(phase, model.att_groups.ctx)
+    for phase, impl, name in zip(("prefill", "decode"), (layer.prefill_impl, layer.decode_impl), expected):
+        (backend,) = tuple(group.backend for group in model.attention_step_groups[phase].values())
+        assert backend.get_name() == name
+        backend.create_step_builder(impl.layer_config, step_builder_context(model))
 
 
 def _dequantize_kv_cache(packed_kv):
@@ -453,7 +454,7 @@ def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chun
     monkeypatch.setattr(prefill_workspace, "KV_GATHER_CHUNK_SIZE", chunk_size)
     torch.manual_seed(53)
     prefix = 4 if cached else 0
-    case = _PrefillCase([prefix + 3] * 2, [3, 3], num_heads, width=128, capacity=64, softmax_scale=512 ** -0.5)
+    case = _PrefillCase([prefix + 3] * 2, [3, 3], num_heads, width=128, capacity=64, softmax_scale=512**-0.5)
     case.q = torch.randn(num_heads, 6, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
     case.topk_indices[0].fill_(-1)
     case.topk_indices[1, :2] = prefix
@@ -491,7 +492,7 @@ def test_fp8_uncached_prefill_reuses_current_kv(monkeypatch, num_heads, chunk_si
 
 
 @pytest.mark.parametrize("num_heads", [8, 16, 64, 128])
-@pytest.mark.parametrize("softmax_scale", [0.0625, 512 ** -0.5])
+@pytest.mark.parametrize("softmax_scale", [0.0625, 512**-0.5])
 def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softmax_scale):
     monkeypatch.setattr(prefill_workspace, "KV_GATHER_CHUNK_SIZE", 129)
     torch.manual_seed(53)
@@ -1024,7 +1025,7 @@ def test_fp8_sparse_direct_decode_offsets_beyond_int32(strided_input):
     storage_size = (batch - 1) * stride + shape[-1]
     required_bytes = storage_size * torch.empty((), dtype=dtype).element_size()
     torch.cuda.empty_cache()
-    if torch.cuda.mem_get_info()[0] < required_bytes + 512 * 1024 ** 2:
+    if torch.cuda.mem_get_info()[0] < required_bytes + 512 * 1024**2:
         pytest.skip("Large-stride regression requires sufficient free GPU memory")
     # Allocate address space without initializing the gaps between logical rows.
     storage = torch.empty(storage_size, device="cuda", dtype=dtype)
@@ -1157,10 +1158,9 @@ def test_indexer_metadata_is_built_with_the_step_attention(prefill):
     state.b1_cu_q_seq_len = torch.tensor([0, 3, 5] if prefill else [0, 1, 2], device="cuda", dtype=torch.int32)
     state.b1_cu_kv_seq_len = torch.tensor([0, 3, 5], device="cuda", dtype=torch.int32)
     # A model without attention builds no indexer metadata.
-    state.init_att_state()
+    state.init_att_state(SimpleNamespace(attention_step_groups=None))
     assert state.nsa_step is None
-    state.att_groups = SimpleNamespace(build_step_args=lambda infer_state: {})
-    state.init_att_state()
+    state.init_att_state(SimpleNamespace(attention_step_groups={"prefill": {}, "decode": {}}))
     assert torch.equal(state.nsa_step.q_req_idx, torch.tensor([1, 1, 1, 0, 0] if prefill else [1, 0]).cuda().int())
     if prefill:
         assert state.nsa_step.q_kv_start_loc.tolist() == [0, 0, 0, 3, 3]

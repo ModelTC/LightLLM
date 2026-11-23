@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from lightllm.common.attention.backend import AttentionBatch
+from lightllm.common.attention.backend import AttentionMetadata
 from lightllm.common.attention.backends.mla import (
     MLADecodeLayerConfig,
     MLADecodeLayerInputs,
@@ -58,7 +58,7 @@ def paged_token_map(requests, page_size, max_len, seed=0):
 def make_batch(token_map, req_ids, lengths, *, prefill=False, ready=None, rows=1, capacity=None, microbatch=0):
     q_lens = [n - r for n, r in zip(lengths, ready)] if prefill else [1] * len(lengths)
     cu = lambda xs: torch.tensor([0, *xs], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)  # noqa: E731
-    return AttentionBatch(
+    return AttentionMetadata(
         req_to_token_indexs=token_map,
         b_req_idx=torch.tensor(req_ids, device="cuda", dtype=torch.int32),
         b_seq_len=torch.tensor(lengths, device="cuda", dtype=torch.int32),
@@ -200,13 +200,13 @@ def test_flashinfer_decode_graph_replays_refill_the_captured_plan(lengths, num_h
 
     # The caller rewrites the captured step's b_seq_len in place before each replay.
     captured_batch = graph_batch([2] * batch_size)
-    step_args = builder.build(captured_batch)
+    att_state = builder.build(captured_batch)
     graph_out = torch.empty_like(q_nope)
-    impl.forward(step_args, inputs, out=graph_out)
+    impl.forward(att_state, inputs, out=graph_out)
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        impl.forward(step_args, inputs, out=graph_out)
+        impl.forward(att_state, inputs, out=graph_out)
 
     eager_workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
     eager_builder = FlashInferMLADecodeBackend.get_step_builder_cls()(
@@ -214,7 +214,7 @@ def test_flashinfer_decode_graph_replays_refill_the_captured_plan(lengths, num_h
     )
     for replay_lengths in (lengths, [1] * batch_size, lengths):
         replay_batch = graph_batch(replay_lengths)
-        assert builder.build(replay_batch).wrapper is step_args.wrapper
+        assert builder.build(replay_batch).wrapper is att_state.wrapper
         captured_batch.b_seq_len.copy_(replay_batch.b_seq_len)
         graph.replay()
         expected = torch.empty_like(q_nope)

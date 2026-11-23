@@ -501,7 +501,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         if out is None:
             out = self.alloc_tensor((q.shape[0], q.shape[1], self.v_head_dim), dtype=q.dtype, device=q.device)
         inputs = self._sparse_layer_inputs(q, meta, infer_state, layer_weight)
-        out = self.attn.prefill(infer_state.att_step_args[self.attn.group], inputs, out=out)
+        out = self.prefill_impl.forward(infer_state.att_states[self.prefill_impl], inputs, out=out)
         return out[:, : self.tp_q_head_num_]
 
     # ------------------------------------------------------------------ attention (decode)
@@ -518,10 +518,10 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         meta = self._compress_and_index(q_lora, x, infer_state, layer_weight)
         out = torch.empty((q.shape[0], q.shape[1], self.v_head_dim), dtype=q.dtype, device=q.device)
         inputs = self._sparse_layer_inputs(q, meta, infer_state, layer_weight)
-        out = self.attn.decode(infer_state.att_step_args[self.attn.group], inputs, out=out)
+        out = self.decode_impl.forward(infer_state.att_states[self.decode_impl], inputs, out=out)
         return out[:, : self.tp_q_head_num_]
 
-    def init_attention(self, model) -> None:
+    def init_attention(self, model, select_impls) -> None:
         """Create the layer's attention once the model has set flashmla_q_head_num_ and the cache views."""
         self.swa_cache_config = model.swa_cache_config
         self.compressed_cache_config = model.compressed_cache_configs.get(self.compress_ratio)
@@ -533,7 +533,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             compress_ratio=self.compress_ratio,
             has_attn_sink=True,
         )
-        self.attn = model.att_groups.create_attention(config, config)
+        self.prefill_impl, self.decode_impl = select_impls(config, config)
 
     def _sparse_layer_inputs(self, q, meta, infer_state: DeepseekV4InferStateInfo, layer_weight):
         """FlashMLA views of the layer's packed caches, with the indexer's selection and the layer's sink."""
