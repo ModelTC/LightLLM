@@ -9,6 +9,7 @@ from lightllm.common.attention import selector
 from lightllm.common.attention.backend import AttentionBackend, AttentionImpl, AttentionStepBuilder
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig
 from lightllm.common.attention.backends.gqa.fa3 import FA3PageTables
+from lightllm.common.basemodel import attention_groups
 from lightllm.common.basemodel.attention_groups import AttentionGroups, gqa_kv_quant_fields, step_builder_context
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
@@ -259,6 +260,76 @@ def test_fa3_page_tables_allocate_lazily_per_microbatch_and_check_capacity(monke
         tables.view(rows=1, max_kv_len=ctx.max_seq_len + 1, microbatch_index=0)
 
 
+class FakeState:
+    def __init__(self, kv_heads=2, scales=None):
+        self.k = torch.empty(16, kv_heads, 64)
+        self.scales = scales
+
+    def get_layer_view(self, logical_layer_id):
+        return self.k, self.k
+
+    def get_layer_kv_scales(self, logical_layer_id):
+        return self.scales
+
+
+def llama_layer(image_spans=False):
+    from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
+
+    layer = LlamaTransformerLayerInfer(
+        3, {"rms_norm_eps": 1e-6, "num_attention_heads": 8, "num_key_value_heads": 2, "hidden_size": 512}
+    )
+    layer.prefill_image_spans = image_spans
+    return layer
+
+
+def model_with_state(state, **args):
+    model = fake_model(**args)
+    model.data_type = torch.bfloat16
+    model.att_state_role = "draft0"
+    model.att_state_manager = SimpleNamespace(get_state=lambda **query: state)
+    model.att_groups = AttentionGroups(model)
+    return model
+
+
+def test_llama_layer_creates_its_attention_from_its_cache(runtime_start_args):
+    scales = GQAKVScales(torch.ones(16, 2, 8), torch.ones(16, 2, 8))
+    model = model_with_state(FakeState(scales=scales), llm_kv_type="int8kv")
+    layer = llama_layer()
+    layer.init_attention(model)
+    expected = gqa(kv_quant="int8_group", kv_quant_group_size=8)
+    assert layer.attn.prefill_impl.layer_config == layer.attn.decode_impl.layer_config == expected
+    assert layer.attn.group == "triton_quant_gqa_prefill+triton_quant_gqa_decode"
+
+
+def test_only_prefill_attends_inside_image_spans(runtime_start_args):
+    layer = llama_layer(image_spans=True)
+    layer.init_attention(model_with_state(FakeState()))
+    assert layer.attn.prefill_impl.layer_config == gqa(bidirectional_image_spans=True)
+    assert layer.attn.decode_impl.layer_config == gqa()
+
+
+def test_block_draft_layers_are_not_causal(monkeypatch):
+    monkeypatch.setattr(attention_groups, "get_env_start_args", lambda: SimpleNamespace(mtp_mode="dflash"))
+    model = model_with_state(FakeState(), llm_prefill_att_backend=["fa3"], llm_decode_att_backend=["fa3"])
+    model.is_mtp_draft_model = True
+    layer = llama_layer()
+    layer.init_attention(model)
+    assert layer.attn.decode_impl.layer_config == gqa(causal=False)
+
+
+def test_unsupported_layer_configs_fail_when_the_model_loads(runtime_start_args):
+    # FlashInfer cannot run the static FP8 per-head cache that only FA3 supports.
+    scales = GQAKVScales(torch.ones(2), torch.ones(2))
+    model = model_with_state(
+        FakeState(scales=scales),
+        llm_kv_type="fp8kv_sph",
+        llm_prefill_att_backend=["flashinfer"],
+        llm_decode_att_backend=["flashinfer"],
+    )
+    with pytest.raises(ValueError, match="does not support"):
+        llama_layer().init_attention(model)
+
+
 def test_models_on_attention_groups_skip_the_full_attention_adapters():
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
@@ -290,3 +361,18 @@ def test_models_on_attention_groups_skip_the_full_attention_adapters():
     states.clear()
     model._init_attention()
     assert model.att_groups is None
+
+
+def test_qwen3next_linear_layers_create_no_full_attention(runtime_start_args):
+    from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerInfer
+
+    layer = Qwen3NextTransformerLayerInfer.__new__(Qwen3NextTransformerLayerInfer)
+    layer.is_linear_attention_layer = True
+    layer.init_attention(model=None)
+    assert layer.attn is None
+
+    full = llama_layer()
+    full.__class__ = Qwen3NextTransformerLayerInfer
+    full.is_linear_attention_layer = False
+    full.init_attention(model_with_state(FakeState()))
+    assert full.attn.group == "triton_gqa_prefill+triton_gqa_decode"

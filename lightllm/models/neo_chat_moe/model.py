@@ -166,6 +166,8 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
 
 
 class NeoTpMOEPartModel(NeoModelBase, Qwen3MOEModel):
+    # Still on the attention adapters until its image-span layers migrate to AttentionGroups.
+    uses_attention_groups = False
 
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer
     transformer_layer_infer_class = NeoChatMOETransformerLayerInfer

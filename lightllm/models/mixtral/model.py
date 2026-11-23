@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 
 
 class MixtralTpPartModel(TpPartBaseModel):
+    # Full-attention layers run through AttentionGroups (lightllm.common.basemodel.attention_groups).
+    uses_attention_groups = True
+
     # weight class
     pre_and_post_weight_class = LlamaPreAndPostLayerWeight
     transformer_weight_class = MixtralTransformerLayerWeight

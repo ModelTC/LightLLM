@@ -18,6 +18,9 @@ if TYPE_CHECKING:
 
 
 class Starcoder2TpPartModel(TpPartBaseModel):
+    # Full-attention layers run through AttentionGroups (lightllm.common.basemodel.attention_groups).
+    uses_attention_groups = True
+
     # weight class
     pre_and_post_weight_class = Starcoder2PreAndPostLayerWeight
     transformer_weight_class = Starcoder2TransformerLayerWeight

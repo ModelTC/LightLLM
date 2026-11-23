@@ -7,7 +7,7 @@
 `lightllm/common/attention/backends/` 把"如何为一步推理准备 kernel 参数"和"如何为一层计算 attention"从模型代码与推理状态中分离出来。设计满足：
 
 - kernel 不读写 `InferStateInfo`，所有输入通过显式类型传入。
-- 一层的静态配置在模型加载后即可确定，不支持的配置在创建 impl 时报错，而不是在第一次推理时。（当前实现在 warmup 的第一次前向时才创建 impl，见第 10.1 节。）
+- 一层的静态配置在模型加载后即可确定，不支持的配置在创建 impl 时报错，而不是在第一次推理时。（仍使用适配层的模型在 warmup 的第一次前向时才创建 impl，见第 10.1 节；已迁移的模型在启动时创建，见第 10.4 节。）
 - 每步共用的派生参数（页表、累积偏移、split 调度、FlashInfer plan 等）在第一层之前计算一次，所有层共用。
 - CUDA graph 的捕获和 replay 走同一条路径；replay 只改变 Tensor 内容，graph 依赖的地址和主机侧参数保持不变。
 - microbatch overlap 的两个并发步各自持有参数，互不共享存储。
@@ -182,7 +182,7 @@ lightllm/common/basemodel/attention/   # 适配层：实现选择、build_attent
 
 ## 10. 目标架构：移除适配层
 
-状态：设计评审中，代码尚未迁移。第 2–9 节描述当前实现，本节描述目标和迁移方式。
+状态：第 10.8 节的第 1 步已实现，使用 Llama 层 attention 的模型（含量化 KV）已通过 `AttentionGroups` 运行，其余模型仍使用适配层。第 2–9 节描述适配层路径，本节描述目标和迁移方式。
 
 ### 10.1 现状的问题
 
@@ -229,8 +229,8 @@ lightllm/common/attention/          # 不知道模型的存在
 ├── backends/<family>/<impl>.py
 └── kernels/<family>/
 lightllm/common/basemodel/
-├── attention_groups.py             # AttentionGroups：分组、step builder 生命周期、每步 build
-└── infer_struct.py                 # build_attention_batch、att_step_args
+├── attention_groups.py             # AttentionGroups：分组、step builder 生命周期、每步 build；build_attention_batch
+└── infer_struct.py                 # att_groups、att_step_args
 ```
 
 `lightllm/common/basemodel/attention/` 整体删除。
@@ -263,15 +263,17 @@ o = self.attn.decode(infer_state.att_step_args[self.attn.group], GQALayerInputs(
 
 - 命令行参数语义不变：`--llm_prefill_att_backend` / `--llm_decode_att_backend` 的第一个值用于全注意力族（`gqa`、`mla`、`sparse_mla`），第二个值用于线性注意力族（`gdn`、`kda`）。
 - `--llm_kv_type` 决定 layer config 的 `kv_quant`，选择器只在支持该量化方式的实现中挑选。
-- `auto` 按现有优先级依次尝试：第三方库通过 `validate()`，且 impl 能以该 layer config 构造（不抛出 `NotImplementedError`）。这取代按模型维护的映射表，例如 Neo 的图像 span 不被 FlashInfer 支持，会被自动跳过。显式指定的实现不支持该配置时直接报错。
+- `auto` 按现有优先级依次尝试：impl 能以该 layer config 构造（不抛出 `NotImplementedError`），且第三方库通过 `validate()`。先构造再验证，因为验证要启动子进程。都不满足时与原来一样退回 Triton（不验证）。这取代按 KV 类型和模型维护的映射表，例如 Neo 的图像 span 不被 FlashInfer 支持，会被自动跳过。显式指定的实现不支持该配置时直接报错。
+- 一个名称可以对应同一族的多个 backend：`triton` 包括普通与量化 KV 的 Triton GQA，取第一个接受该 layer config 的。
 - EP MoE 排除 FlashInfer、MTP 时 decode 优先 FA3 等现有规则保留在选择器中。
 
-**`StepBuilderContext`（`backend.py`）**：模型交给 step builder 的资源与容量，不含模型对象。字段以迁移时的实际需要为准，预计包括设备、page size、最大序列长度、CUDA graph 最大 batch size、decode 行数上限（含 MTP 和 TPSP 对齐）、microbatch 数和按名称共享的 workspace 分配函数。
+**`StepBuilderContext`（`backend.py`）**：模型交给 step builder 的资源与容量，不含模型对象。字段：设备、page size、最大序列长度、CUDA graph 最大 batch size、decode 行数上限（含 MTP 和 TPSP 对齐）、microbatch 数、共享 workspace 的大小与按名称共享的分配函数，以及 decode batch 是否带 diverse 分组。
 
 `AttentionBackend` 新增两个类方法：
 
 - `create_step_builder(layer_config, ctx)`：从 layer config 和 context 构造本实现的 step builder。各 step builder 的构造参数保持显式，不统一成同一签名。
-- `step_builder_key(layer_config)`：layer config 中 step builder 依赖的部分，默认返回 `None`（不依赖）。FlashInfer 的 plan 依赖 head 数、head dim、dtype 和 MLA 的 softmax scale，因此返回这些字段。
+- `step_builder_key(layer_config)`：layer config 中 step builder 依赖的部分，默认返回 `None`（不依赖）。FlashInfer 的 plan 依赖 head 数、head dim、dtype、`kv_quant` 和 MLA 的 softmax scale，因此返回这些字段；FA3 与量化 Triton 返回 `kv_quant`（FP8 FA3 的 page size 为 1，只有 int8 decode 有 diverse 变体）。
+- `requires_cpu_cache_sync()`：其 kernel 是否不能与 CPU cache 搬运在 GPU 上并行，默认 `False`；FA3 在设置 `LIGHTLLM_FA3_CPU_CACHE_SYNC` 时返回 `True`。
 
 **`AttentionGroups`（`basemodel/attention_groups.py`）**：每个模型对象一个，main 和各 MTP draft 模型各自持有，因为它们的 CUDA graph 上限和缓存布局不同。
 
@@ -283,8 +285,8 @@ o = self.attn.decode(infer_state.att_step_args[self.attn.group], GQALayerInputs(
 **`InferStateInfo`**：
 
 - `att_step_args: dict[str, StepArgs]` 取代 `prefill_att_state`、`decode_att_state` 及其 `*1` 版本。
-- `init_att_state()` 变为 `self.att_step_args = model.att_groups.build_step_args(self)`。
-- `build_attention_batch` 移到模型侧。因果性已在 layer config 中；动态 verify 布局由模型决定，不再询问 backend。
+- `init_att_state()` 执行 `self.att_step_args = self.att_groups.build_step_args(self)`，`att_groups` 由 `_create_inferstate` 设为模型的 `AttentionGroups`。
+- `build_attention_batch` 移到模型侧（`attention_groups.py`）。因果性已在 layer config 中；动态 verify 布局由模型决定，不再询问 backend。
 - step args 不持有 `InferStateInfo`，弱引用和 `check_att_states` 不再需要。
 
 ### 10.4 时序
@@ -292,11 +294,10 @@ o = self.attn.decode(infer_state.att_step_args[self.attn.group], GQALayerInputs(
 模型加载：
 
 1. 构造各层。
-2. 创建 `AttentionGroups`；各层调用 `create_attention`，完成选择、impl 构造和分组。
-3. `prepare_attention_states` 与 KV 容量 profiling。需要计入 profiling 的固定 workspace（如 GLM-5 FP8 prefill）由对应实现的可选钩子在这一步之前预留。
-4. `init_runtime`：warmup、CUDA graph 捕获。
+2. `prepare_attention_states` 与 KV 容量 profiling。
+3. `init_runtime`：先创建 `AttentionGroups`，各层调用 `init_attention`，经 `create_attention` 完成选择、impl 构造和分组；然后 warmup、CUDA graph 捕获。
 
-步骤 2 必须早于步骤 3，这要求各层的 layer config 在 KV 分配前即可确定；head 数、dtype、`kv_quant` 等都来自配置和启动参数，预计满足，迁移时逐模型确认。
+layer config 在 KV 分配之后确定，因为 KV head 数、量化 KV 的 group size 和是否有静态 q scale 都来自该层的 attention state。impl 仍在第一次前向之前创建，不支持的配置在 warmup 之前报错。需要计入 profiling 的固定 workspace（如 GLM-5 FP8 prefill）迁移时再由对应实现的可选钩子在第 2 步之前预留。
 
 每步：`_create_inferstate` → `init_att_state()` 为每组 build 一次 → 各层用本组 step args 调用 `Attention`。
 
@@ -336,17 +337,20 @@ microbatch overlap 的两个 `InferStateInfo` 各自持有 `att_step_args`。pre
 | 模型的 `prefill_att_backend` / `decode_att_backend` 及 `*1`、`_init_att_backend1` | `AttentionGroups` 自动分组 |
 | `InferStateInfo` 的四个 attention state 字段、`copy_for_decode_cuda_graph` | `att_step_args` |
 | `create_utils.py`、`create_linear_utils.py`、各族映射表与 Neo 映射表 | `selector.py` |
+| `TpPartBaseModel.uses_attention_groups`、Llama 层中走适配层的分支 | 全部模型迁移后不再需要 |
 | 按库划分的适配器子类（`int8kv`、`int4kv`、`fp8`、`neo` 等） | layer config 的 `kv_quant`、`bidirectional_image_spans` 与选择器 |
 
 ### 10.8 迁移步骤
 
 在第 2–9 节描述的实现合入后进行，每步一个 PR。迁移期间新旧路径并存，`InferStateInfo` 同时保留 `att_step_args` 和旧的 state 字段，直到最后一步。
 
-1. 新增 `Attention`、`selector.py`、`StepBuilderContext`、`AttentionGroups`，并迁移 Llama 系 GQA 模型。
-2. GQA 变体：Gemma4（多种层配置）、Bloom（ALiBi）、GPT-OSS（sinks）、Neo（图像 span）、量化 KV。
+1. 新增 `Attention`、`selector.py`、`StepBuilderContext`、`AttentionGroups`，并迁移 Llama 系 GQA 模型，包括量化 KV。（已完成）
+2. GQA 变体：Gemma4（多种层配置）、Bloom/Starcoder（ALiBi）、GPT-OSS（sinks）、Neo（图像 span）、DFlash/DSpark 草稿模型（非因果）。
 3. MLA（DeepSeek V2/V3），然后稀疏 MLA（DeepSeek V3.2、GLM-5、DeepSeek V4）。
 4. 线性注意力：GDN、KDA。
 5. 删除 `lightllm/common/basemodel/attention/`、`AttControl`、旧 state 和 slot 字段，更新本文第 2–9 节。
+
+迁移期间按模型切换：`TpPartBaseModel.uses_attention_groups` 为 `True` 的模型在启动时创建 `AttentionGroups`，各层调用 `init_attention`，并且不再创建全注意力适配器（slot 0）；其余模型照旧。第 1 步对 `LlamaTpPartModel` 以及 Mistral、Mixtral、Starcoder2 打开，覆盖其全部子类，包括 Qwen2/3、Qwen3-MoE、Qwen-VL 系列、Qwen3-Next/Qwen3.5 的全注意力层（GDN 层仍走 slot 1）和 Eagle、MTP 草稿模型；尚未迁移的子类显式关闭：DeepSeek V2/V3 系（MLA，含 DeepSeek V3.2、GLM-4 MoE Lite 和各自的 MTP）、DeepSeek V4、Gemma4、GPT-OSS、Neo、DFlash/DSpark。Bloom、Starcoder、GLM-5 不继承 Llama 模型，默认关闭。
 
 每步的验证：
 
@@ -358,7 +362,7 @@ microbatch overlap 的两个 `InferStateInfo` 各自持有 `att_step_args`。pre
 ### 10.9 待定问题
 
 - replay 游标推进放在 impl 中（第 10.6 节的方案），还是由模型层在调用后执行。
-- 各 step builder 的 `step_builder_key` 字段，尤其是 FlashInfer 和稀疏 MLA。
+- MLA 和稀疏 MLA 各 step builder 的 `step_builder_key` 字段（GQA 的见第 10.3 节）。
 - main 与 MTP draft 模型是否可以共用某些组的 step args。当前不共用，目标设计也不共用。
 
 ## 11. 非目标

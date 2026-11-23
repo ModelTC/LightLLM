@@ -123,6 +123,8 @@ class NeoModelBase:
 
 
 class NeoTpPartModel(NeoModelBase, Qwen3TpPartModel):
+    # Still on the attention adapters until its image-span layers migrate to AttentionGroups.
+    uses_attention_groups = False
 
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer
     transformer_layer_infer_class = NeoChatTransformerLayerInfer

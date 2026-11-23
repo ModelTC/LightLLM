@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 
 
 class Deepseek2TpPartModel(LlamaTpPartModel):
+    # Still on the attention adapters until its MLA layers migrate to AttentionGroups.
+    uses_attention_groups = False
+
     # weight class
     transformer_weight_class = Deepseek2TransformerLayerWeight
 

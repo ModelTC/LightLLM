@@ -16,6 +16,9 @@ from lightllm.models.qwen3_dflash.layer_weights.transformer_layer_weight import 
 class Qwen3DFlashModel(LlamaTpPartModel):
     """Qwen3 DFlash draft model."""
 
+    # Still on the attention adapters until its non-causal block-draft layers migrate to AttentionGroups.
+    uses_attention_groups = False
+
     is_mtp_draft_model = True
 
     pre_and_post_weight_class = Qwen3DFlashPreAndPostLayerWeight
