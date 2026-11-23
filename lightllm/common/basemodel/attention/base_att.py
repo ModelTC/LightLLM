@@ -1,4 +1,3 @@
-import threading
 import weakref
 
 import torch
@@ -8,8 +7,7 @@ from typing import Optional, TYPE_CHECKING, Tuple, Dict
 
 from lightllm.common.attention.backends.gqa import GQAKVScales
 from lightllm.common.attention.backend import AttentionBackend, AttentionImpl, AttentionBatch
-from lightllm.utils.dist_utils import get_current_device_id
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.common.basemodel import attention_groups
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -30,8 +28,6 @@ class BaseAttBackend:
     requires_cpu_cache_sync = False
 
     _instances = {}
-    _workspace_buffers = {}
-    _workspace_buffer_lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
         """
@@ -63,20 +59,8 @@ class BaseAttBackend:
 
     @staticmethod
     def get_gpu_workspace_buffer(key_name: str, workspace_size: int, dtype: torch.dtype = torch.int8) -> torch.Tensor:
-        """Return a process-local workspace shared by key name and CUDA device."""
-        if not key_name:
-            raise ValueError("workspace key_name must not be empty")
-        if workspace_size <= 0:
-            raise ValueError(f"workspace_size must be positive, got {workspace_size}")
-
-        device_id = get_current_device_id()
-        buffer_key = (device_id, key_name, workspace_size, dtype)
-        with BaseAttBackend._workspace_buffer_lock:
-            workspace_buffer = BaseAttBackend._workspace_buffers.get(buffer_key)
-            if workspace_buffer is None:
-                workspace_buffer = torch.empty(workspace_size, dtype=dtype, device=device_id)
-                BaseAttBackend._workspace_buffers[buffer_key] = workspace_buffer
-            return workspace_buffer
+        """Return a process-local workspace shared by key name and CUDA device, with AttentionGroups'."""
+        return attention_groups.get_gpu_workspace_buffer(key_name, workspace_size, dtype)
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "BasePrefillAttState":
         raise NotImplementedError("not impl")
@@ -85,58 +69,16 @@ class BaseAttBackend:
         raise NotImplementedError("not impl")
 
     def uses_dynamic_spec_verify_layout(self) -> bool:
-        args = get_env_start_args()
-        draft_step = self.model.mtp_manager.get_decode_draft_step(self.model.is_mtp_draft_model)
-        is_main_model = not self.model.is_mtp_draft_model
-        has_decode_draft_step = draft_step > 0
-        dynamic_verify_enabled = args.mtp_dynamic_verify
-        return is_main_model and has_decode_draft_step and dynamic_verify_enabled
+        return attention_groups.uses_dynamic_spec_verify_layout(self.model)
 
     def uses_causal_attention(self) -> bool:
-        # Only parallel block-draft models attend non-causally within a block.
-        if not self.model.is_mtp_draft_model:
-            return True
-        return get_env_start_args().mtp_mode not in ("dspark", "dflash", "dflash2")
+        return attention_groups.attention_is_causal(self.model)
 
 
 def build_attention_batch(infer_state: "InferStateInfo", backend: BaseAttBackend) -> AttentionBatch:
-    """Describe one step's requests for attention step builders, from its InferStateInfo.
-
-    CUDA graph capture and replay steps carry the model's graph kv length capacity, so step builders
-    can size and configure captured work for every length a replay may see. Decode steps of
-    speculative decoding describe how query rows group into requests. Fields the step does not
-    set are None.
-    """
-    model = backend.model
-    uses_cuda_graph = infer_state.is_cuda_graph_capture or infer_state.is_cuda_graph_replay
-    decode_rows_per_request, dynamic_decode_rows = 1, False
-    if not infer_state.is_prefill and getattr(model, "mtp_manager", None) is not None:
-        decode_rows_per_request = model.mtp_manager.get_decode_draft_step(model.is_mtp_draft_model) + 1
-        dynamic_decode_rows = decode_rows_per_request > 1 and backend.uses_dynamic_spec_verify_layout()
-    return AttentionBatch(
-        req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
-        b_req_idx=infer_state.b_req_idx,
-        b_seq_len=infer_state.b_seq_len,
-        batch_size=infer_state.batch_size,
-        max_kv_seq_len=infer_state.max_kv_seq_len,
-        total_token_num=infer_state.total_token_num,
-        cu_q_seq_len=infer_state.b1_cu_q_seq_len,
-        cu_kv_seq_len=infer_state.b1_cu_kv_seq_len,
-        b_q_start_loc=infer_state.b_q_start_loc,
-        b_ready_cache_len=infer_state.b_ready_cache_len,
-        max_q_seq_len=infer_state.max_q_seq_len if infer_state.max_q_seq_len is not None else 1,
-        decode_rows_per_request=decode_rows_per_request,
-        dynamic_decode_rows=dynamic_decode_rows,
-        pad_req_idx=getattr(infer_state.req_manager, "HOLD_REQUEST_ID", None),
-        b_shared_seq_len=getattr(infer_state, "b_shared_seq_len", None),
-        b_mtp_index=getattr(infer_state, "b_mtp_index", None),
-        b_image_token_end=getattr(infer_state, "b_image_token_end", None),
-        b_image_token_start=getattr(infer_state, "b_image_token_start", None),
-        max_ready_cache_len=infer_state.max_cache_len or 0,
-        mem_index=infer_state.mem_index,
-        b_shared_radix_node_id=getattr(infer_state, "b_shared_radix_node_id", None),
-        cuda_graph_max_kv_seq_len=model.graph_max_len_in_batch if uses_cuda_graph else None,
-        microbatch_index=infer_state.microbatch_index,
+    """attention_groups.build_attention_batch for the adapter's model, asking the adapter for the decode layout."""
+    return attention_groups.build_attention_batch(
+        infer_state, backend.model, lambda: backend.uses_dynamic_spec_verify_layout()
     )
 
 

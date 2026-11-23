@@ -92,3 +92,35 @@ def test_models_and_adapters_do_not_import_attention_kernels():
         if ATTENTION_KERNEL_MODULES.match(module)
     ]
     assert not offenders, "call attention through lightllm.common.attention.backends:\n" + "\n".join(offenders)
+
+
+# The backend layer knows nothing about models: models and lightllm.common.basemodel import it, not the
+# reverse. Generic Triton helpers that happen to live under basemodel/triton_kernel are allowed.
+MODEL_SIDE_MODULES = re.compile(r"^lightllm\.(models|common\.basemodel)(\.|$)(?!triton_kernel(\.|$))")
+
+
+@pytest.mark.parametrize(
+    "module,is_model_side",
+    [
+        ("lightllm.models.llama.model", True),
+        ("lightllm.common.basemodel", True),
+        ("lightllm.common.basemodel.infer_struct", True),
+        ("lightllm.common.basemodel.attention.base_att", True),
+        ("lightllm.common.basemodel.triton_kernel.fa3_utils", False),
+        ("lightllm.common.attention.backend", False),
+    ],
+)
+def test_model_side_module_pattern(module, is_model_side):
+    assert bool(MODEL_SIDE_MODULES.match(module)) == is_model_side
+
+
+def test_backend_layer_does_not_import_model_side_code():
+    files = sorted(ROOT.glob("lightllm/common/attention/**/*.py"))
+    assert any(path.name == "selector.py" for path in files)
+    offenders = [
+        f"{path.relative_to(ROOT)}:{lineno} imports {module}"
+        for path in files
+        for lineno, module in imported_modules(path)
+        if MODEL_SIDE_MODULES.match(module)
+    ]
+    assert not offenders, "lightllm.common.attention must not depend on models:\n" + "\n".join(offenders)

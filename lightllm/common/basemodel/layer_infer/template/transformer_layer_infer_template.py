@@ -24,6 +24,13 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         self.embed_dim_ = -1
         return
 
+    def init_attention(self, model) -> None:
+        """Create this layer's Attention through model.att_groups; called once the model's cache is allocated.
+
+        Only models with uses_attention_groups call it.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not create its attention through AttentionGroups")
+
     def _att_norm(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
 
