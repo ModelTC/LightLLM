@@ -8,9 +8,7 @@ import torch
 from lightllm.common.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
-    AttentionImpl,
-    AttentionStepBuilder,
-    StepBuilderContext,
+    AttentionBuildResources,
     TensorAllocator,
 )
 from . import SWASparseMLALayerConfig, SWASparseMLALayerInputs
@@ -28,26 +26,16 @@ class FlashMLASWAAttState:
     capture_sched_meta_by_ratio: Optional[dict] = None
 
 
-class FlashMLASWAStepBuilder(AttentionStepBuilder[FlashMLASWAAttState]):
+class FlashMLASWABuildContext:
     def __init__(self, *, compress_ratios: tuple, for_cuda_graph_capture: bool) -> None:
         """compress_ratios lists the model's distinct ratios; for_cuda_graph_capture adds the capture set (decode)."""
         self.compress_ratios = compress_ratios
         self.for_cuda_graph_capture = for_cuda_graph_capture
 
-    def build(self, batch: Optional[AttentionMetadata] = None) -> FlashMLASWAAttState:
-        """The metadata is planned on the GPU at the first kernel call, so it does not depend on batch."""
-        import flash_mla
 
-        def new_set():
-            return {ratio: flash_mla.get_mla_metadata()[0] for ratio in self.compress_ratios}
-
-        return FlashMLASWAAttState(
-            sched_meta_by_ratio=new_set(),
-            capture_sched_meta_by_ratio=new_set() if self.for_cuda_graph_capture else None,
-        )
-
-
-class FlashMLASWAImpl(AttentionImpl[SWASparseMLALayerConfig, FlashMLASWAAttState, SWASparseMLALayerInputs]):
+class FlashMLASWAPrefillBackend(
+    AttentionBackend[SWASparseMLALayerConfig, FlashMLASWAAttState, SWASparseMLALayerInputs]
+):
     def forward(
         self,
         att_state: FlashMLASWAAttState,
@@ -87,29 +75,34 @@ class FlashMLASWAImpl(AttentionImpl[SWASparseMLALayerConfig, FlashMLASWAAttState
         )
         return out
 
-
-class FlashMLASWAPrefillBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "flashmla_swa_sparse_mla_prefill"
 
-    @staticmethod
-    def get_step_builder_cls() -> type[FlashMLASWAStepBuilder]:
-        return FlashMLASWAStepBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[FlashMLASWAImpl]:
-        return FlashMLASWAImpl
+    build_context_type = FlashMLASWABuildContext
 
     @classmethod
-    def create_step_builder(
-        cls, layer_config: SWASparseMLALayerConfig, ctx: StepBuilderContext
-    ) -> FlashMLASWAStepBuilder:
+    def build(cls, metadata: Optional[AttentionMetadata], context: FlashMLASWABuildContext) -> FlashMLASWAAttState:
+        """The metadata is planned on the GPU at the first kernel call, so it does not depend on metadata."""
+        import flash_mla
+
+        def new_set():
+            return {ratio: flash_mla.get_mla_metadata()[0] for ratio in context.compress_ratios}
+
+        return FlashMLASWAAttState(
+            sched_meta_by_ratio=new_set(),
+            capture_sched_meta_by_ratio=new_set() if context.for_cuda_graph_capture else None,
+        )
+
+    @classmethod
+    def create_build_context(
+        cls, layer_config: SWASparseMLALayerConfig, ctx: AttentionBuildResources
+    ) -> FlashMLASWABuildContext:
         # Layers with one compress ratio share the scheduler metadata of their kernel calls.
-        return FlashMLASWAStepBuilder(compress_ratios=(layer_config.compress_ratio,), for_cuda_graph_capture=False)
+        return FlashMLASWABuildContext(compress_ratios=(layer_config.compress_ratio,), for_cuda_graph_capture=False)
 
     @classmethod
-    def step_builder_key(cls, layer_config: SWASparseMLALayerConfig) -> int:
+    def build_context_key(cls, layer_config: SWASparseMLALayerConfig) -> int:
         return layer_config.compress_ratio
 
 
@@ -119,7 +112,7 @@ class FlashMLASWADecodeBackend(FlashMLASWAPrefillBackend):
         return "flashmla_swa_sparse_mla_decode"
 
     @classmethod
-    def create_step_builder(
-        cls, layer_config: SWASparseMLALayerConfig, ctx: StepBuilderContext
-    ) -> FlashMLASWAStepBuilder:
-        return FlashMLASWAStepBuilder(compress_ratios=(layer_config.compress_ratio,), for_cuda_graph_capture=True)
+    def create_build_context(
+        cls, layer_config: SWASparseMLALayerConfig, ctx: AttentionBuildResources
+    ) -> FlashMLASWABuildContext:
+        return FlashMLASWABuildContext(compress_ratios=(layer_config.compress_ratio,), for_cuda_graph_capture=True)

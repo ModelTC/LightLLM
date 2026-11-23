@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
-from lightllm.common.attention.backends.kda.triton import KDAPrefillAttState, TritonKDAPrefillImpl
+from lightllm.common.attention.backends.kda.triton import KDAPrefillAttState, TritonKDAPrefillBackend
 from unit_tests.models.glm5_next.kda_test_utils import kda_params
 from lightllm.common.attention.kernels.gdn.causal_conv1d import causal_conv1d_fn
 from lightllm.common.attention.kernels.kda.causal_conv1d_qkv import (
@@ -147,7 +147,7 @@ def test_backend_fused_conv_output_and_state(lengths):
         torch.randn(tokens, heads * 128, **opts) * 0.1,
         torch.randn(tokens, heads, **opts),
     )
-    impl = TritonKDAPrefillImpl(KDALayerConfig(heads, 128, 4, -5.0, torch.bfloat16))
+    impl = TritonKDAPrefillBackend(KDALayerConfig(heads, 128, 4, -5.0, torch.bfloat16))
     expected_conv, expected_ssm = conv_states.clone(), ssm_states.clone()
     q, k, v = reference(
         projection[:, :channels],

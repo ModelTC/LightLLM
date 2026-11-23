@@ -136,7 +136,6 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
             b_seq_len=model_input.b_seq_len,
             mem_index=torch.empty((model_input.batch_size,), dtype=torch.int32, device="cuda"),
             init_some_extra_state=lambda _: None,
-            init_att_state=lambda _: None,
         )
 
     model._create_inferstate = fake_create_inferstate

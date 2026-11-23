@@ -4,12 +4,13 @@ with one SSM slot per request."""
 
 import torch
 
-from lightllm.common.attention.backend import AttentionBackend, AttentionImpl, StepBuilderContext, TensorAllocator
+from lightllm.common.attention.backend import AttentionMetadata
+from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
 from . import GDNLayerConfig, GDNLayerInputs
-from .triton import GDNDecodeAttState, GDNDecodeStepBuilder, _mtp_conv, _pack_decode_inputs, _split_qkv
+from .triton import GDNDecodeAttState, GDNDecodeBuildContext, _mtp_conv, _pack_decode_inputs, _split_qkv
 
 
-class ReplayGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeAttState, GDNLayerInputs]):
+class ReplayGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState, GDNLayerInputs]):
     def __init__(self, layer_config: GDNLayerConfig) -> None:
         super().__init__(layer_config)
         if not layer_config.replay:
@@ -60,24 +61,20 @@ class ReplayGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeAttState, GDNLa
         state.finish_decode_token(inputs.layer_num, att_state.conv_idx, att_state.cu_seqlens)
         return out
 
-
-class ReplayGDNDecodeBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "replay_gdn_decode"
 
-    @staticmethod
-    def get_step_builder_cls() -> type[GDNDecodeStepBuilder]:
-        return GDNDecodeStepBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[ReplayGDNDecodeImpl]:
-        return ReplayGDNDecodeImpl
+    build_context_type = GDNDecodeBuildContext
 
     @classmethod
-    def create_step_builder(cls, layer_config: GDNLayerConfig, ctx: StepBuilderContext) -> GDNDecodeStepBuilder:
-        return GDNDecodeStepBuilder(replay=True)
+    def build(cls, metadata: AttentionMetadata, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
+        return context.prepare(metadata)
 
     @classmethod
-    def step_builder_key(cls, layer_config: GDNLayerConfig):
+    def create_build_context(cls, layer_config: GDNLayerConfig, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:
+        return GDNDecodeBuildContext(replay=True)
+
+    @classmethod
+    def build_context_key(cls, layer_config: GDNLayerConfig):
         return True

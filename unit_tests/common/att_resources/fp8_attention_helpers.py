@@ -37,7 +37,7 @@ class FP8Attention:
             dtype=q.dtype,
             **gqa_kv_quant_fields(self.kv_type, kv_scales, q.shape[2]),
         )
-        impl = self.backend.get_impl_cls()(layer_config)
+        impl = self.backend(layer_config)
         inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
         out = alloc_func(q.shape, dtype=q.dtype, device=q.device)
         return impl.forward(self.att_state, inputs, out=out, alloc_func=alloc_func)

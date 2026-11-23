@@ -117,7 +117,6 @@ def test_gdn_decode_keeps_logical_layer_state(
         32,
     )
     layer.prefill_impl, layer.decode_impl = prefill_selection.impl, decode_selection.impl
-    layer.linear_replay = False
     layer.alloc_tensor = lambda shape, dtype=None, device=None, **_: torch.empty(shape, dtype=dtype, device=device)
     mixed_dim = 2 * 32 + 2 * 64 + 2 * 2
 
@@ -125,7 +124,7 @@ def test_gdn_decode_keeps_logical_layer_state(
         # The attention state the layers' group builds for this step.
         batch = build_attention_metadata(infer, model, lambda: False, req_to_mtp_state_index=resource.mtp_state_index)
         impl = layer.prefill_impl if infer.is_prefill else layer.decode_impl
-        infer.att_states = {impl: backend.create_step_builder(layer_config, None).build(batch)}
+        infer.att_states = {impl.state_key: backend.build(batch, backend.create_build_context(layer_config, None))}
 
     if device == "cuda":
         infer.b1_cu_q_seq_len = torch.tensor([0, 5], device=device, dtype=torch.int32)

@@ -41,14 +41,7 @@ def layer_config(model) -> KDALayerConfig:
         tp_linear_num_heads=linear["num_heads"] // model.tp_world_size_,
         linear_head_dim=linear["head_dim"],
     )
-    configs = []
-
-    def select_impls(prefill, decode):
-        configs.append(prefill)
-        return None, None
-
-    Glm5NextTransformerLayerInfer._init_kda_attention(layer, model, select_impls)
-    return configs[0]
+    return Glm5NextTransformerLayerInfer._kda_config(layer, model)
 
 
 def kda_attention(model) -> KDAAttention:
@@ -171,13 +164,13 @@ def test_automatic_dispatch_accounts_for_heads_and_length(flash_module, heads, l
     model.args.ssm_state_mode = mode
     model.config["linear_attn_config"]["num_heads"] = 64
     model.tp_world_size_ = 64 // heads
-    att_state = kda_attention(model).step_builders["prefill"].build(prefill_batch(length))
+    att_state = kda_attention(model).step_builders["prefill"].prepare(prefill_batch(length))
     assert (att_state.flash_kda_fwd is flash_module.fwd) == uses_flash
 
 
 def test_explicit_flashkda_overrides_performance_policy(flash_module):
     step_builder = kda_attention(make_model()).step_builders["prefill"]
-    assert step_builder.build(prefill_batch(32768)).flash_kda_fwd is flash_module.fwd
+    assert step_builder.prepare(prefill_batch(32768)).flash_kda_fwd is flash_module.fwd
 
 
 def test_fp8_sparse_kv_does_not_change_kda_selection(flash_module):

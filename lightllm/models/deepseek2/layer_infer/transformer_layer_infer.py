@@ -9,7 +9,7 @@ from lightllm.common.attention.backends.mla import (
     MLAPrefillLayerConfig,
     MLAPrefillLayerInputs,
 )
-from lightllm.common.basemodel.attention_runtime import attention_is_causal
+from lightllm.common.basemodel.attention_runtime import AttentionSpec, attention_is_causal
 from lightllm.models.deepseek2.triton_kernel.sample_kv import sample_kv
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -87,7 +87,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             state_class=FullAttentionState,
         )
 
-    def init_attention(self, model, select_impls) -> None:
+    def attention_spec(self, model) -> AttentionSpec:
         # Prefill attends over keys and values expanded from the latent cache; decode over the
         # latent cache with absorbed queries.
         common = dict(
@@ -97,7 +97,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             dtype=model.data_type,
             causal=attention_is_causal(model),
         )
-        self.prefill_impl, self.decode_impl = select_impls(
+        return AttentionSpec(
             MLAPrefillLayerConfig(qk_nope_head_dim=self.qk_nope_head_dim, v_head_dim=self.v_head_dim, **common),
             MLADecodeLayerConfig(kv_lora_rank=self.kv_lora_rank, **common),
         )
@@ -115,7 +115,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             layer_weight=layer_weight,
         )
         return self.prefill_impl.forward(
-            infer_state.att_states[self.prefill_impl],
+            infer_state.att_states[self.prefill_impl.state_key],
             MLAPrefillLayerInputs(q=q, k_nope=k_nope, k_rope=k_rope, v=v),
             out=self.alloc_tensor((q.shape[0], q.shape[1], v.shape[-1]), dtype=q.dtype, device=q.device),
             alloc_func=self.alloc_tensor,
@@ -133,7 +133,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         state = self._mla_state(infer_state.att_state_manager, infer_state.att_state_role)
         kv = state.get_layer_view(logical_layer_id=self.layer_num_)
         return self.decode_impl.forward(
-            infer_state.att_states[self.decode_impl],
+            infer_state.att_states[self.decode_impl.state_key],
             MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv),
             out=self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device),
             alloc_func=self.alloc_tensor,

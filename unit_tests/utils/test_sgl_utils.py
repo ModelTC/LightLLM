@@ -99,7 +99,7 @@ def test_fa3_runtime_matches_cached_config_by_actual_length(monkeypatch):
 @pytest.mark.parametrize("page_size, actual_kv_len", [(1, 8192), (16, 8191), (256, 8192)])
 def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, page_size, actual_kv_len):
     from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
-    from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQADecodeStepBuilder
+    from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQADecodeBuildContext
     from lightllm.common.basemodel.triton_kernel import fa3_utils
     from lightllm.utils import sgl_utils
 
@@ -122,10 +122,10 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, pa
     page_table_view = lambda rows, max_kv_len, microbatch_index: torch.zeros(  # noqa: E731
         rows, math.ceil(max_kv_len / page_size), dtype=torch.int32
     )
-    builder = FA3GQADecodeStepBuilder(page_size=page_size, page_table_view=page_table_view)
+    builder = FA3GQADecodeBuildContext(page_size=page_size, page_table_view=page_table_view)
     copy_calls = []
     monkeypatch.setattr(fa3_utils, "page_table_copy", lambda **kwargs: copy_calls.append(kwargs))
-    att_state = builder.build(build_attention_metadata(infer_state, model, lambda: False))
+    att_state = FA3GQADecodeBackend.build(build_attention_metadata(infer_state, model, lambda: False), builder)
     # 模拟 CudaGraph._capture_decode 对 infer_state 的修改。
     infer_state.max_kv_seq_len = model.graph_max_len_in_batch
     calls = []
@@ -138,7 +138,7 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, pa
     q = torch.empty(2, 4, 8, dtype=torch.bfloat16)
     cache = torch.empty(page_size, 2, 8, dtype=torch.bfloat16)
     layer_config = GQALayerConfig(num_heads=4, num_kv_heads=2, head_dim=8, dtype=torch.bfloat16)
-    impl = FA3GQADecodeBackend.get_impl_cls()(layer_config)
+    impl = FA3GQADecodeBackend(layer_config)
     impl.forward(att_state, GQALayerInputs(q=q, k_cache=cache, v_cache=cache), out=torch.empty_like(q))
     assert calls[0]["max_seqlen_k"] == actual_kv_len
     assert calls[0]["page_table"].shape == (2, 32768 // page_size)

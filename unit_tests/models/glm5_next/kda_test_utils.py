@@ -68,7 +68,7 @@ def kda_layer_config(
     lower_bound=-5.0,
     dtype=torch.bfloat16,
 ):
-    """The layer config a GLM-5 KDA layer creates (Glm5NextTransformerLayerInfer._init_kda_attention)."""
+    """The config for the linear attention branch of a GLM-5 layer."""
     from lightllm.common.attention.backends.kda import KDALayerConfig
 
     return KDALayerConfig(
@@ -100,9 +100,9 @@ class KDAAttention:
             "prefill": kda.ReplayKDAPrefillBackend if replay else kda.TritonKDAPrefillBackend,
             "decode": kda.ReplayKDADecodeBackend if replay else kda.TritonKDADecodeBackend,
         }
-        self.impls = {phase: backend.get_impl_cls()(layer_config) for phase, backend in backends.items()}
+        self.impls = {phase: backend(layer_config) for phase, backend in backends.items()}
         self.step_builders = {
-            phase: backend.create_step_builder(layer_config, None) for phase, backend in backends.items()
+            phase: backend.create_build_context(layer_config, None) for phase, backend in backends.items()
         }
         self.flash_kda_fwd = self.step_builders["prefill"].flash_kda_fwd
 
@@ -114,7 +114,7 @@ class KDAAttention:
 
 
 class KDAStep:
-    """One step of a KDA layer: init_state builds the attention state as InferStateInfo.init_att_state does."""
+    """One step of a KDA layer with the backend state for that microbatch."""
 
     def __init__(self, attention, infer, phase):
         self.attention, self.infer, self.phase = attention, infer, phase
@@ -131,7 +131,7 @@ class KDAStep:
         batch = build_attention_metadata(
             infer, attention.model, lambda: attention.dynamic_layout, req_to_mtp_state_index=index
         )
-        self.att_state = attention.step_builders[self.phase].build(batch)
+        self.att_state = attention.step_builders[self.phase].prepare(batch)
 
     def run(self, params, alloc_func=torch.empty):
         """params is kda_params(...); returns [rows, num_heads, head_dim]."""

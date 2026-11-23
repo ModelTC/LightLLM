@@ -1,4 +1,4 @@
-"""The CUDA graph contract every decode step builder must keep (see AttentionStepBuilder).
+"""The CUDA graph contract every decode backend must keep (see AttentionBackend.build).
 
 A captured graph reruns its kernels with the capture step's attention state, so a replay step can change
 only tensor contents. For each decode step builder this checks, with a capture step followed by a
@@ -97,7 +97,7 @@ def flashinfer_gqa():
 
     workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
     config = FlashInferGQABuilderConfig(8, 2, 64, 1, torch.bfloat16, torch.bfloat16)
-    return FlashInferGQADecodeBackend.get_step_builder_cls()(
+    return FlashInferGQADecodeBackend, FlashInferGQADecodeBackend.build_context_type(
         config, workspace=lambda: workspace, max_seq_len=MAX_LEN, max_batch_size=8, device="cuda"
     )
 
@@ -111,7 +111,7 @@ def flashinfer_mla():
 
     workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
     config = FlashInferMLABuilderConfig(16, 128, 64, 128, 512, 1, torch.bfloat16, 0.1)
-    return FlashInferMLADecodeBackend.get_step_builder_cls()(
+    return FlashInferMLADecodeBackend, FlashInferMLADecodeBackend.build_context_type(
         config, workspace=lambda: workspace, max_seq_len=MAX_LEN, max_batch_size=8, device="cuda"
     )
 
@@ -120,7 +120,9 @@ def fa3_gqa(page_size):
     def factory():
         from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend
 
-        return FA3GQADecodeBackend.get_step_builder_cls()(page_size=page_size, page_table_view=PageTables(page_size))
+        return FA3GQADecodeBackend, FA3GQADecodeBackend.build_context_type(
+            page_size=page_size, page_table_view=PageTables(page_size)
+        )
 
     return factory
 
@@ -128,19 +130,19 @@ def fa3_gqa(page_size):
 def triton_gqa():
     from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend
 
-    return TritonGQADecodeBackend.get_step_builder_cls()()
+    return TritonGQADecodeBackend, TritonGQADecodeBackend.build_context_type()
 
 
 def triton_quant_gqa_diverse():
     from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeBackend
 
-    return TritonQuantGQADecodeBackend.get_step_builder_cls()(diverse=True)
+    return TritonQuantGQADecodeBackend, TritonQuantGQADecodeBackend.build_context_type(diverse=True)
 
 
 def triton_mla():
     from lightllm.common.attention.backends.mla.triton import TritonMLADecodeBackend
 
-    return TritonMLADecodeBackend.get_step_builder_cls()(
+    return TritonMLADecodeBackend, TritonMLADecodeBackend.build_context_type(
         num_heads=16, kv_lora_rank=512, qk_rope_head_dim=64, dtype=torch.bfloat16
     )
 
@@ -148,14 +150,14 @@ def triton_mla():
 def fa3_sparse_mla():
     from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend
 
-    return FA3SparseMLADecodeBackend.get_step_builder_cls()(topk=64, kpool=4)
+    return FA3SparseMLADecodeBackend, FA3SparseMLADecodeBackend.build_context_type(topk=64, kpool=4)
 
 
 def recurrent(replay):
     def factory():
         from lightllm.common.attention.backends.gdn.triton import TritonGDNDecodeBackend
 
-        return TritonGDNDecodeBackend.get_step_builder_cls()(replay=replay)
+        return TritonGDNDecodeBackend, TritonGDNDecodeBackend.build_context_type(replay=replay)
 
     return factory
 
@@ -243,7 +245,8 @@ def test_decode_step_builder_keeps_the_cuda_graph_contract(name, layout):
 
     def build(step, *, capacity=CAPACITY, microbatch=0, step_builder=builder):
         batch = make_batch(token_map, step, layout, capacity=capacity, microbatch=microbatch, extra=extra)
-        return batch, step_builder.build(batch)
+        backend, context = step_builder
+        return batch, backend.build(batch, context)
 
     capture_batch, captured = build(capture_step)
     captured_leaves = dict(leaves(captured))

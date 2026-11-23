@@ -82,25 +82,23 @@ def test_prefill_decode(dtype, q_heads, kv_heads, page_size, cached):
     config = FlashInferGQABuilderConfig(q_heads, kv_heads, 64, page_size, dtype, dtype)
     layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=dtype)
 
-    step_builder = FlashInferGQAPrefillBackend.get_step_builder_cls()(
-        config, workspace=lambda: workspace, max_seq_len=512
-    )
-    att_state = step_builder.build(make_batch(token_map, req_ids, lengths, query_lengths))
+    step_builder = FlashInferGQAPrefillBackend.build_context_type(config, workspace=lambda: workspace, max_seq_len=512)
+    att_state = FlashInferGQAPrefillBackend.build(make_batch(token_map, req_ids, lengths, query_lengths), step_builder)
     out = torch.empty_like(q)
-    impl = FlashInferGQAPrefillBackend.get_impl_cls()(layer_config)
+    impl = FlashInferGQAPrefillBackend(layer_config)
     assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k, v, token_map, req_ids, lengths, ready), atol=0.02, rtol=0.02
     )
     torch.testing.assert_close(q, q_before, atol=0, rtol=0)
 
-    step_builder = FlashInferGQADecodeBackend.get_step_builder_cls()(
+    step_builder = FlashInferGQADecodeBackend.build_context_type(
         config, workspace=lambda: workspace, max_seq_len=512, max_batch_size=3, device=torch.device("cuda")
     )
-    att_state = step_builder.build(make_batch(token_map, req_ids, lengths))
+    att_state = FlashInferGQADecodeBackend.build(make_batch(token_map, req_ids, lengths), step_builder)
     q = torch.randn(3, q_heads, 64, device="cuda", dtype=dtype)
     out = torch.empty_like(q)
-    impl = FlashInferGQADecodeBackend.get_impl_cls()(layer_config)
+    impl = FlashInferGQADecodeBackend(layer_config)
     assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     expected = reference(q, k, v, token_map, req_ids, lengths, [x - 1 for x in lengths])
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
@@ -130,22 +128,26 @@ def test_fp8_prefill_decode(q_heads, kv_heads, page_size):
 
     query_lengths = [n - r for n, r in zip(lengths, ready)]
     q = torch.randn(sum(query_lengths), q_heads, 64, device="cuda", generator=generator).bfloat16()
-    att_state = FlashInferGQAPrefillBackend.get_step_builder_cls()(
-        config, workspace=lambda: workspace, max_seq_len=512
-    ).build(make_batch(token_map, req_ids, lengths, query_lengths))
+    att_state = FlashInferGQAPrefillBackend.build(
+        make_batch(token_map, req_ids, lengths, query_lengths),
+        FlashInferGQAPrefillBackend.build_context_type(config, workspace=lambda: workspace, max_seq_len=512),
+    )
     out = torch.empty_like(q)
-    FlashInferGQAPrefillBackend.get_impl_cls()(layer_config).forward(
+    FlashInferGQAPrefillBackend(layer_config).forward(
         att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out
     )
     expected = reference(q, k_ref, v_ref, token_map, req_ids, lengths, ready)
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
 
-    att_state = FlashInferGQADecodeBackend.get_step_builder_cls()(
-        config, workspace=lambda: workspace, max_seq_len=512, max_batch_size=3, device=torch.device("cuda")
-    ).build(make_batch(token_map, req_ids, lengths))
+    att_state = FlashInferGQADecodeBackend.build(
+        make_batch(token_map, req_ids, lengths),
+        FlashInferGQADecodeBackend.build_context_type(
+            config, workspace=lambda: workspace, max_seq_len=512, max_batch_size=3, device=torch.device("cuda")
+        ),
+    )
     q = torch.randn(3, q_heads, 64, device="cuda", generator=generator).bfloat16()
     out = torch.empty_like(q)
-    FlashInferGQADecodeBackend.get_impl_cls()(layer_config).forward(
+    FlashInferGQADecodeBackend(layer_config).forward(
         att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out
     )
     expected = reference(q, k_ref, v_ref, token_map, req_ids, lengths, [x - 1 for x in lengths])
@@ -156,14 +158,26 @@ def test_decode_step_builder_keeps_one_graph_wrapper_per_microbatch_and_batch_si
     token_map = paged_token_map(2, 16, seed=1)
     workspace = torch.empty(32 * 1024 * 1024, dtype=torch.uint8, device="cuda")
     config = FlashInferGQABuilderConfig(8, 2, 64, 16, torch.bfloat16, torch.bfloat16)
-    step_builder = FlashInferGQADecodeBackend.get_step_builder_cls()(
+    step_builder = FlashInferGQADecodeBackend.build_context_type(
         config, workspace=lambda: workspace, max_seq_len=512, max_batch_size=2, device=torch.device("cuda")
     )
-    captured = step_builder.build(make_batch(token_map, [0, 1], [33, 17], graph_capacity=512)).wrapper
-    assert step_builder.build(make_batch(token_map, [0, 1], [300, 257], graph_capacity=512)).wrapper is captured
-    other = step_builder.build(make_batch(token_map, [0, 1], [33, 17], graph_capacity=512, microbatch_index=1)).wrapper
+    captured = FlashInferGQADecodeBackend.build(
+        make_batch(token_map, [0, 1], [33, 17], graph_capacity=512), step_builder
+    ).wrapper
+    assert (
+        FlashInferGQADecodeBackend.build(
+            make_batch(token_map, [0, 1], [300, 257], graph_capacity=512), step_builder
+        ).wrapper
+        is captured
+    )
+    other = FlashInferGQADecodeBackend.build(
+        make_batch(token_map, [0, 1], [33, 17], graph_capacity=512, microbatch_index=1), step_builder
+    ).wrapper
     assert other is not captured
-    eager = [step_builder.build(make_batch(token_map, [0, 1], [33, 17])).wrapper for _ in range(2)]
+    eager = [
+        FlashInferGQADecodeBackend.build(make_batch(token_map, [0, 1], [33, 17]), step_builder).wrapper
+        for _ in range(2)
+    ]
     assert eager[0] is not eager[1] and all(wrapper is not captured for wrapper in eager)
 
 
@@ -175,7 +189,7 @@ def test_impls_reject_unsupported_specs(fields):
     layer_config = GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16, **fields)
     for backend in (FlashInferGQAPrefillBackend, FlashInferGQADecodeBackend):
         with pytest.raises(NotImplementedError, match="FlashInfer GQA"):
-            backend.get_impl_cls()(layer_config)
+            backend(layer_config)
 
 
 @pytest.mark.parametrize("phase", ["prefill", "decode"])

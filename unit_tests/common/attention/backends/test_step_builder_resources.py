@@ -20,6 +20,7 @@ from lightllm.common.basemodel.attention_runtime import step_builder_context
 
 def context(monkeypatch, **overrides):
     monkeypatch.setattr(attention_runtime, "get_current_device_id", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
     args = dict(
         mtp_step=0,
         page_size=16,
@@ -29,7 +30,7 @@ def context(monkeypatch, **overrides):
         flashinfer_workspace_size=512,
     )
     model = SimpleNamespace(args=SimpleNamespace(**args), max_seq_length=64, graph_max_batch_size=2, tp_world_size_=1)
-    return dataclasses.replace(step_builder_context(model), **overrides)
+    return dataclasses.replace(step_builder_context(model), device="cpu", **overrides)
 
 
 def gqa(**fields) -> GQALayerConfig:
@@ -55,15 +56,15 @@ def test_flashinfer_gqa_builders_share_one_workspace_and_mla_has_its_own(monkeyp
     # The context's workspaces come from the process-wide store, keyed by the current device.
     monkeypatch.setattr(attention_runtime, "get_current_device_id", lambda: current_device_id)
 
-    fp = FlashInferGQAPrefillBackend.create_step_builder(gqa(), ctx).workspace()
-    fp8 = FlashInferGQAPrefillBackend.create_step_builder(gqa(kv_quant="fp8_per_tensor"), ctx).workspace()
+    fp = FlashInferGQAPrefillBackend.create_build_context(gqa(), ctx).workspace()
+    fp8 = FlashInferGQAPrefillBackend.create_build_context(gqa(kv_quant="fp8_per_tensor"), ctx).workspace()
     mla_config = MLAPrefillLayerConfig(qk_nope_head_dim=128, v_head_dim=128, **MLA_COMMON)
-    mla = FlashInferMLAPrefillBackend.create_step_builder(mla_config, ctx).workspace()
+    mla = FlashInferMLAPrefillBackend.create_build_context(mla_config, ctx).workspace()
 
     assert fp8 is fp and mla is not fp
     assert [allocation[1] for allocation in allocations] == [512 * 1024 * 1024, 256 * 1024 * 1024]
     current_device_id = 1
-    assert FlashInferGQAPrefillBackend.create_step_builder(gqa(), ctx).workspace() is not fp
+    assert FlashInferGQAPrefillBackend.create_build_context(gqa(), ctx).workspace() is not fp
     assert allocations[-1][3] == 1
 
 
@@ -82,21 +83,21 @@ def test_workspace_key_includes_size_and_dtype(monkeypatch):
 @pytest.mark.parametrize("backend", [FA3GQAPrefillBackend, FA3GQADecodeBackend])
 def test_fa3_gqa_pages_like_the_cache_except_fp8_which_uses_single_token_pages(monkeypatch, backend):
     ctx = context(monkeypatch)
-    assert backend.create_step_builder(gqa(), ctx).page_size == 16
+    assert backend.create_build_context(gqa(), ctx).page_size == 16
     with patch.object(gqa_fa3.logger, "warning") as warning:
-        assert backend.create_step_builder(gqa(kv_quant="fp8_per_head"), ctx).page_size == 1
+        assert backend.create_build_context(gqa(kv_quant="fp8_per_head"), ctx).page_size == 1
     warning.assert_called_once()
 
 
 def test_flashinfer_pages_like_the_cache_except_fp8_which_uses_single_token_pages(monkeypatch):
     ctx = context(monkeypatch)
-    assert FlashInferGQADecodeBackend.create_step_builder(gqa(), ctx).config.page_size == 16
-    fp8 = FlashInferGQADecodeBackend.create_step_builder(gqa(kv_quant="fp8_per_tensor"), ctx)
+    assert FlashInferGQADecodeBackend.create_build_context(gqa(), ctx).config.page_size == 16
+    fp8 = FlashInferGQADecodeBackend.create_build_context(gqa(kv_quant="fp8_per_tensor"), ctx)
     assert fp8.config.page_size == 1
 
 
 def test_mla_decode_pages_like_the_cache(monkeypatch):
     ctx = context(monkeypatch)
     config = MLADecodeLayerConfig(kv_lora_rank=512, **MLA_COMMON)
-    assert FA3MLADecodeBackend.create_step_builder(config, ctx).page_size == 16
-    assert FlashInferMLADecodeBackend.create_step_builder(config, ctx).config.page_size == 16
+    assert FA3MLADecodeBackend.create_build_context(config, ctx).page_size == 16
+    assert FlashInferMLADecodeBackend.create_build_context(config, ctx).config.page_size == 16

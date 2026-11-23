@@ -123,10 +123,13 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
                 is_cuda_graph_capture=False,
                 is_cuda_graph_replay=False,
             )
-            infer_state.init_att_state = lambda _: graph_flags_at_att_init.append(
-                (infer_state.is_cuda_graph_capture, infer_state.is_cuda_graph_replay)
-            )
             return infer_state
+
+        def prepare_attention(state):
+            graph_flags_at_att_init.append((state.is_cuda_graph_capture, state.is_cuda_graph_replay))
+            return {}
+
+        model.prepare_attention = prepare_attention
 
         def execute(mode, infer_state):
             executions.append((mode, infer_state.is_cuda_graph_capture, infer_state.is_cuda_graph_replay))
@@ -180,9 +183,7 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
     def graph_flags(state):
         return state.is_cuda_graph_capture, state.is_cuda_graph_replay
 
-    def build_attention_states(model, infer_state):
-        # Graph-owned wrappers serve replays, so only eager and capture steps create one; the
-        # entry point is still InferStateInfo.init_att_state.
+    def prepare_attention(infer_state):
         assert not (infer_state.is_cuda_graph_capture and infer_state.is_cuda_graph_replay)
         decode_wrapper = None if infer_state.is_cuda_graph_replay else object()
         initializations.append((infer_state.microbatch_index, graph_flags(infer_state), decode_wrapper is not None))
@@ -197,7 +198,6 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
         state.b_req_idx = model_input.b_req_idx
         state.b_seq_len = model_input.b_seq_len
         state.microbatch_index = microbatch_index
-        state.init_att_state = lambda model: setattr(state, "att_states", build_attention_states(model, state))
         state.init_some_extra_state = lambda _: None
         return state
 
@@ -223,6 +223,7 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
         return outputs(state, infer_state1)
 
     model._create_inferstate = create_state
+    model.prepare_attention = prepare_attention
     model._overlap_tpsp_token_forward = forward
     model.graph = None
     if graph_mode is not None:
@@ -267,23 +268,25 @@ def test_mtp_decode_preserves_groups_and_real_rows(overlap, dynamic, graph_mode,
     seen_sizes = []
 
     def create_state(model_input, microbatch_index=0):
-        def check_layout(_):
-            if not dynamic:
-                assert model_input.batch_size % 3 == 0
-            assert model_input.batch_size % 8 == 0
-            seen_sizes.append(model_input.batch_size)
-
         return SimpleNamespace(
+            batch_size=model_input.batch_size,
             b_req_idx=model_input.b_req_idx,
             b_seq_len=model_input.b_seq_len,
             init_some_extra_state=lambda _: None,
-            init_att_state=check_layout,
         )
+
+    def prepare_attention(state):
+        if not dynamic:
+            assert state.batch_size % 3 == 0
+        assert state.batch_size % 8 == 0
+        seen_sizes.append(state.batch_size)
+        return {}
 
     def forward(state):
         return ModelOutput(logits=torch.stack((state.b_req_idx, state.b_seq_len), dim=1))
 
     model._create_inferstate = create_state
+    model.prepare_attention = prepare_attention
     model._token_forward = forward
     model._overlap_tpsp_token_forward = lambda state, infer_state1: (forward(state), forward(infer_state1))
     model.graph = None

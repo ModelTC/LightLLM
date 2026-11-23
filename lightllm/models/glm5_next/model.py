@@ -157,14 +157,10 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         return [state]
 
     def prepare_attention_states(self) -> None:
-        super().prepare_attention_states()
-        if self.args.llm_kv_type == "fp8kv_dsa" and self.att_state_manager.get_full_attention_states(
-            self.att_state_role
-        ):
-            from lightllm.models.glm5_next.prefill_workspace import reserve_fp8_sparse_prefill_workspaces
+        from lightllm.models.glm5_next.prefill_workspace import prepare_sparse_prefill_workspaces
 
-            # Reserve fixed scratch space before the shared KV capacity is profiled.
-            self.fp8_sparse_prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(self)
+        super().prepare_attention_states()
+        prepare_sparse_prefill_workspaces(self)
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json")) as f:

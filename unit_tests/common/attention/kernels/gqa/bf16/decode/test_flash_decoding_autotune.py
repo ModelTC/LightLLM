@@ -139,8 +139,8 @@ def test_state_retains_actual_length_before_graph_capture(monkeypatch, q_heads):
     model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _: 0)
     model.graph_max_len_in_batch = 32768
     layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=2, head_dim=64, dtype=torch.float32)
-    builder = TritonGQADecodeBackend.create_step_builder(layer_config, None)
-    att_state = builder.build(build_attention_metadata(infer_state, model))
+    builder = TritonGQADecodeBackend.create_build_context(layer_config, None)
+    att_state = TritonGQADecodeBackend.build(build_attention_metadata(infer_state, model), builder)
     # Graph capture raises max_kv_seq_len only after the attention state are built.
     infer_state.max_kv_seq_len = 32768
     calls = []
@@ -154,7 +154,7 @@ def test_state_retains_actual_length_before_graph_capture(monkeypatch, q_heads):
         )
     q = torch.empty(2, q_heads, 64)
     inputs = GQALayerInputs(q=q, k_cache=torch.empty(16, 2, 64), v_cache=torch.empty(16, 2, 64))
-    TritonGQADecodeBackend.get_impl_cls()(layer_config).forward(att_state, inputs, out=torch.empty_like(q))
+    TritonGQADecodeBackend(layer_config).forward(att_state, inputs, out=torch.empty_like(q))
     if q_heads == 2:
         assert calls[0]["max_kv_seq_len"] == 32768
     else:

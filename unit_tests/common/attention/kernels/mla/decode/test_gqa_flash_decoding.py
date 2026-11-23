@@ -49,11 +49,11 @@ def test_gqa_flash_decoding(batch, seqlen, heads, nope_head, rope_head):
     o = torch.zeros((Z, H, D_HEAD), dtype=dtype, device="cuda")
     o1 = torch.zeros((Z, H, D_HEAD), dtype=dtype, device="cuda")
 
-    step_builder = TritonMLADecodeBackend.get_step_builder_cls()(
+    step_builder = TritonMLADecodeBackend.build_context_type(
         num_heads=H, kv_lora_rank=D_HEAD, qk_rope_head_dim=ROPE_HEAD, dtype=dtype
     )
     # Every request has N_CTX tokens, so the eager tuning length (the average) is N_CTX.
-    att_state = step_builder.build(
+    att_state = TritonMLADecodeBackend.build(
         AttentionMetadata(
             req_to_token_indexs=req_to_token_indexs,
             b_req_idx=b_req_idx,
@@ -61,12 +61,13 @@ def test_gqa_flash_decoding(batch, seqlen, heads, nope_head, rope_head):
             batch_size=Z,
             max_kv_seq_len=N_CTX,
             total_token_num=Z * N_CTX,
-        )
+        ),
+        step_builder,
     )
     layer_config = MLADecodeLayerConfig(
         num_heads=H, kv_lora_rank=D_HEAD, qk_rope_head_dim=ROPE_HEAD, softmax_scale=sm_scale, dtype=dtype
     )
-    impl = TritonMLADecodeBackend.get_impl_cls()(layer_config)
+    impl = TritonMLADecodeBackend(layer_config)
     assert impl.forward(att_state, MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv), out=o) is o
 
     kv_nope = kv[:, :, :D_HEAD]

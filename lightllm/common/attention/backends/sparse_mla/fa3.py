@@ -12,10 +12,7 @@ import torch
 from lightllm.common.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
-    PrefillStateBuilder,
-    AttentionImpl,
-    AttentionStepBuilder,
-    StepBuilderContext,
+    AttentionBuildResources,
     TensorAllocator,
 )
 from .. import keep_for_cuda_graph
@@ -35,7 +32,7 @@ class FA3SparseMLADecodeAttState:
     causal: bool = True
 
 
-class FA3SparseMLADecodeStepBuilder(AttentionStepBuilder[FA3SparseMLADecodeAttState]):
+class FA3SparseMLADecodeBuildContext:
     def __init__(self, *, topk: int, kpool: int = 1, causal: bool = True) -> None:
         """topk is the indexer's selection width. An indexer that scores pools of kpool keys selects
         whole pools within the top-k width plus the newest partial pool."""
@@ -44,32 +41,9 @@ class FA3SparseMLADecodeStepBuilder(AttentionStepBuilder[FA3SparseMLADecodeAttSt
         self.causal = causal
         self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
 
-    def build(self, batch: AttentionMetadata) -> FA3SparseMLADecodeAttState:
-        """A CUDA graph step keeps the length tensors per (microbatch, batch size), rewritten in place."""
-        device, lengths, kpool = batch.b_seq_len.device, batch.b_seq_len, self.kpool
-        topk = torch.full((batch.batch_size,), self.topk, dtype=lengths.dtype, device=device)
-        if kpool == 1:
-            cache_seqlens = torch.minimum(topk, lengths)
-        else:
-            cache_seqlens = torch.minimum(lengths // kpool * kpool, topk) + lengths % kpool
-        padded = torch.zeros(batch.batch_size + 1, dtype=torch.int32, device=device)
-        padded[1:].copy_(cache_seqlens, non_blocking=True)
-        cu_seqlens_k = padded.cumsum(dim=0, dtype=torch.int32)
-        if batch.uses_cuda_graph:
-            key, store = (batch.microbatch_index, batch.batch_size), self._cuda_graph_tensors
-            cache_seqlens = keep_for_cuda_graph(store, (*key, "cache_seqlens"), cache_seqlens)
-            cu_seqlens_k = keep_for_cuda_graph(store, (*key, "cu_seqlens_k"), cu_seqlens_k)
-        return FA3SparseMLADecodeAttState(
-            cache_seqlens=cache_seqlens,
-            cu_seqlens_q=batch.cu_q_seq_len,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=batch.max_q_seq_len,
-            causal=self.causal,
-        )
 
-
-class FA3SparseMLADecodeImpl(
-    AttentionImpl[SparseMLALayerConfig, FA3SparseMLADecodeAttState, SparseMLADecodeLayerInputs]
+class FA3SparseMLADecodeBackend(
+    AttentionBackend[SparseMLALayerConfig, FA3SparseMLADecodeAttState, SparseMLADecodeLayerInputs]
 ):
     def __init__(self, layer_config: SparseMLALayerConfig) -> None:
         super().__init__(layer_config)
@@ -124,30 +98,46 @@ class FA3SparseMLADecodeImpl(
         )
         return out
 
-
-class FA3SparseMLADecodeBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "fa3_sparse_mla_decode"
 
-    @staticmethod
-    def get_step_builder_cls() -> type[FA3SparseMLADecodeStepBuilder]:
-        return FA3SparseMLADecodeStepBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[FA3SparseMLADecodeImpl]:
-        return FA3SparseMLADecodeImpl
+    build_context_type = FA3SparseMLADecodeBuildContext
 
     @classmethod
-    def create_step_builder(
-        cls, layer_config: SparseMLALayerConfig, ctx: StepBuilderContext
-    ) -> FA3SparseMLADecodeStepBuilder:
+    def build(cls, metadata: AttentionMetadata, context: FA3SparseMLADecodeBuildContext) -> FA3SparseMLADecodeAttState:
+        """A CUDA graph step keeps the length tensors per (microbatch, metadata size), rewritten in place."""
+        device, lengths, kpool = metadata.b_seq_len.device, metadata.b_seq_len, context.kpool
+        topk = torch.full((metadata.batch_size,), context.topk, dtype=lengths.dtype, device=device)
+        if kpool == 1:
+            cache_seqlens = torch.minimum(topk, lengths)
+        else:
+            cache_seqlens = torch.minimum(lengths // kpool * kpool, topk) + lengths % kpool
+        padded = torch.zeros(metadata.batch_size + 1, dtype=torch.int32, device=device)
+        padded[1:].copy_(cache_seqlens, non_blocking=True)
+        cu_seqlens_k = padded.cumsum(dim=0, dtype=torch.int32)
+        if metadata.uses_cuda_graph:
+            key, store = (metadata.microbatch_index, metadata.batch_size), context._cuda_graph_tensors
+            cache_seqlens = keep_for_cuda_graph(store, (*key, "cache_seqlens"), cache_seqlens)
+            cu_seqlens_k = keep_for_cuda_graph(store, (*key, "cu_seqlens_k"), cu_seqlens_k)
+        return FA3SparseMLADecodeAttState(
+            cache_seqlens=cache_seqlens,
+            cu_seqlens_q=metadata.cu_q_seq_len,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=metadata.max_q_seq_len,
+            causal=context.causal,
+        )
+
+    @classmethod
+    def create_build_context(
+        cls, layer_config: SparseMLALayerConfig, ctx: AttentionBuildResources
+    ) -> FA3SparseMLADecodeBuildContext:
         if layer_config.topk is None:
             raise ValueError("FA3 sparse MLA decode needs the layer config's topk")
-        return FA3SparseMLADecodeStepBuilder(**cls.step_builder_key(layer_config)._asdict())
+        return FA3SparseMLADecodeBuildContext(**cls.build_context_key(layer_config)._asdict())
 
     @classmethod
-    def step_builder_key(cls, layer_config: SparseMLALayerConfig) -> "_FA3DecodeKey":
+    def build_context_key(cls, layer_config: SparseMLALayerConfig) -> "_FA3DecodeKey":
         return _FA3DecodeKey(layer_config.topk, layer_config.kpool, layer_config.causal)
 
 
@@ -157,7 +147,9 @@ class _FA3DecodeKey(NamedTuple):
     causal: bool
 
 
-class FA3SparseMLAPrefillImpl(AttentionImpl[SparseMLALayerConfig, AttentionMetadata, SparseMLAPrefillLayerInputs]):
+class FA3SparseMLAPrefillBackend(
+    AttentionBackend[SparseMLALayerConfig, AttentionMetadata, SparseMLAPrefillLayerInputs]
+):
     def __init__(self, layer_config: SparseMLALayerConfig) -> None:
         super().__init__(layer_config)
         if layer_config.kv_cache_format != "fp8_group64_e8m0" or layer_config.qk_rope_head_dim != 0:
@@ -281,20 +273,10 @@ class FA3SparseMLAPrefillImpl(AttentionImpl[SparseMLALayerConfig, AttentionMetad
         out.copy_(output)
         return out
 
-
-class FA3SparseMLAPrefillBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "fa3_sparse_mla_prefill"
 
-    @staticmethod
-    def get_step_builder_cls() -> type[PrefillStateBuilder]:
-        return PrefillStateBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[FA3SparseMLAPrefillImpl]:
-        return FA3SparseMLAPrefillImpl
-
     @classmethod
-    def create_step_builder(cls, layer_config: SparseMLALayerConfig, ctx: StepBuilderContext) -> PrefillStateBuilder:
-        return PrefillStateBuilder()
+    def build(cls, metadata: AttentionMetadata, context: None = None) -> AttentionMetadata:
+        return metadata

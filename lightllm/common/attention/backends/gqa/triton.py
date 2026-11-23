@@ -5,11 +5,8 @@ import torch
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionImpl,
-    AttentionStepBuilder,
     AttentionMetadata,
-    PrefillStateBuilder,
-    StepBuilderContext,
+    AttentionBuildResources,
     TensorAllocator,
 )
 from .. import keep_for_cuda_graph
@@ -46,35 +43,9 @@ class TritonGQADecodeAttState:
     b_mark_shared_group: Optional[torch.Tensor] = None
 
 
-class TritonGQADecodeStepBuilder(AttentionStepBuilder[TritonGQADecodeAttState]):
+class TritonGQADecodeBuildContext:
     def __init__(self) -> None:
         self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
-
-    def build(self, batch: AttentionMetadata) -> TritonGQADecodeAttState:
-        """Kernels read the request tensors directly; a CUDA graph step bounds lengths by the graph
-        capacity and keeps the speculative-decode groups per (microbatch, batch size)."""
-        if batch.uses_cuda_graph:
-            bound, total_bound = batch.cuda_graph_max_kv_seq_len, batch.cuda_graph_max_kv_seq_len * batch.batch_size
-        else:
-            bound, total_bound = batch.max_kv_seq_len, batch.total_token_num
-        markers = None
-        if batch.decode_rows_per_request > 1:
-            from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
-
-            markers = build_mtp_shared_group_markers(batch.b_req_idx, hold_req_id=batch.pad_req_idx)
-            if batch.uses_cuda_graph:
-                key = (batch.microbatch_index, batch.batch_size, "mtp_groups")
-                markers = keep_for_cuda_graph(self._cuda_graph_tensors, key, markers)
-        return TritonGQADecodeAttState(
-            req_to_token_indexs=batch.req_to_token_indexs,
-            b_req_idx=batch.b_req_idx,
-            b_seq_len=batch.b_seq_len,
-            kv_seq_len_bound=bound,
-            max_kv_seq_len=batch.max_kv_seq_len,
-            total_token_bound=total_bound,
-            b_kv_start_loc=None if batch.cu_kv_seq_len is None else batch.cu_kv_seq_len[:-1],
-            b_mark_shared_group=markers,
-        )
 
 
 def _check_supported(layer_config: GQALayerConfig) -> None:
@@ -117,7 +88,7 @@ def _check_inputs(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs) ->
     assert (layer_inputs.alibi_slopes is not None) == layer_config.has_alibi, "alibi_slopes must match has_alibi"
 
 
-class TritonGQAPrefillImpl(AttentionImpl[GQALayerConfig, AttentionMetadata, GQALayerInputs]):
+class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, AttentionMetadata, GQALayerInputs]):
     def __init__(self, layer_config: GQALayerConfig) -> None:
         """Head dimensions 16, 32, 64, 128, 256 and 512 are supported, with softmax_scale 1/sqrt(head_dim)."""
         super().__init__(layer_config)
@@ -214,8 +185,16 @@ class TritonGQAPrefillImpl(AttentionImpl[GQALayerConfig, AttentionMetadata, GQAL
         )
         return out
 
+    @staticmethod
+    def get_name() -> str:
+        return "triton_gqa_prefill"
 
-class TritonGQADecodeImpl(AttentionImpl[GQALayerConfig, TritonGQADecodeAttState, GQALayerInputs]):
+    @classmethod
+    def build(cls, metadata: AttentionMetadata, context: None = None) -> AttentionMetadata:
+        return metadata
+
+
+class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAttState, GQALayerInputs]):
     def __init__(self, layer_config: GQALayerConfig) -> None:
         """Head dimensions 16, 32, 64, 128 and 256 are supported, plus 512 for GQA, with softmax_scale 1/sqrt(head_dim).
 
@@ -326,38 +305,44 @@ class TritonGQADecodeImpl(AttentionImpl[GQALayerConfig, TritonGQADecodeAttState,
             sliding_window=self.layer_config.sliding_window,
         )
 
-
-class TritonGQAPrefillBackend(AttentionBackend):
-    @staticmethod
-    def get_name() -> str:
-        return "triton_gqa_prefill"
-
-    @staticmethod
-    def get_step_builder_cls() -> type[PrefillStateBuilder]:
-        return PrefillStateBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[TritonGQAPrefillImpl]:
-        return TritonGQAPrefillImpl
-
-    @classmethod
-    def create_step_builder(cls, layer_config: GQALayerConfig, ctx: StepBuilderContext) -> PrefillStateBuilder:
-        return PrefillStateBuilder()
-
-
-class TritonGQADecodeBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "triton_gqa_decode"
 
-    @staticmethod
-    def get_step_builder_cls() -> type[TritonGQADecodeStepBuilder]:
-        return TritonGQADecodeStepBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[TritonGQADecodeImpl]:
-        return TritonGQADecodeImpl
+    build_context_type = TritonGQADecodeBuildContext
 
     @classmethod
-    def create_step_builder(cls, layer_config: GQALayerConfig, ctx: StepBuilderContext) -> TritonGQADecodeStepBuilder:
-        return TritonGQADecodeStepBuilder()
+    def build(cls, metadata: AttentionMetadata, context: TritonGQADecodeBuildContext) -> TritonGQADecodeAttState:
+        """Kernels read the request tensors directly; a CUDA graph step bounds lengths by the graph
+        capacity and keeps the speculative-decode groups per (microbatch, metadata size)."""
+        if metadata.uses_cuda_graph:
+            bound, total_bound = (
+                metadata.cuda_graph_max_kv_seq_len,
+                metadata.cuda_graph_max_kv_seq_len * metadata.batch_size,
+            )
+        else:
+            bound, total_bound = metadata.max_kv_seq_len, metadata.total_token_num
+        markers = None
+        if metadata.decode_rows_per_request > 1:
+            from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
+
+            markers = build_mtp_shared_group_markers(metadata.b_req_idx, hold_req_id=metadata.pad_req_idx)
+            if metadata.uses_cuda_graph:
+                key = (metadata.microbatch_index, metadata.batch_size, "mtp_groups")
+                markers = keep_for_cuda_graph(context._cuda_graph_tensors, key, markers)
+        return TritonGQADecodeAttState(
+            req_to_token_indexs=metadata.req_to_token_indexs,
+            b_req_idx=metadata.b_req_idx,
+            b_seq_len=metadata.b_seq_len,
+            kv_seq_len_bound=bound,
+            max_kv_seq_len=metadata.max_kv_seq_len,
+            total_token_bound=total_bound,
+            b_kv_start_loc=None if metadata.cu_kv_seq_len is None else metadata.cu_kv_seq_len[:-1],
+            b_mark_shared_group=markers,
+        )
+
+    @classmethod
+    def create_build_context(
+        cls, layer_config: GQALayerConfig, ctx: AttentionBuildResources
+    ) -> TritonGQADecodeBuildContext:
+        return TritonGQADecodeBuildContext()

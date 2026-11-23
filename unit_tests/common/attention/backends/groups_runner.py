@@ -6,7 +6,8 @@ from typing import Any, Optional
 import torch
 
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerInputs
-from lightllm.common.basemodel.attention_runtime import layer_impl_selector
+from lightllm.common.basemodel.attention_runtime import AttentionBinder, AttentionSpec, recurrent_mtp_state_index
+from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 
 class GroupsRunner:
@@ -14,12 +15,13 @@ class GroupsRunner:
 
     def __init__(self, model, prefill_config: Any, decode_config: Any) -> None:
         self.model = model
-        select_impls = layer_impl_selector(model)
-        self.prefill_impl, self.decode_impl = select_impls(prefill_config, decode_config)
+        attention = AttentionBinder(model)
+        self.prefill_impl, self.decode_impl = attention.bind(AttentionSpec(prefill_config, decode_config))
+        model.attention_build_contexts = attention.contexts
+        model.req_to_mtp_state_index = recurrent_mtp_state_index(model)
 
     def step(self, infer_state) -> None:
-        """Build the attention state of infer_state's step, as InferStateInfo.init_att_state does."""
-        infer_state.init_att_state(self.model)
+        infer_state.att_states = TpPartBaseModel.prepare_attention(self.model, infer_state)
 
     def run_gqa(
         self,
@@ -35,7 +37,7 @@ class GroupsRunner:
         impl = self.prefill_impl if infer_state.is_prefill else self.decode_impl
         inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
         out = alloc_func(q.shape, dtype=q.dtype, device=q.device)
-        return impl.forward(infer_state.att_states[impl], inputs, out=out, alloc_func=alloc_func)
+        return impl.forward(infer_state.att_states[impl.state_key], inputs, out=out, alloc_func=alloc_func)
 
 
 class LayerAttention:
@@ -48,7 +50,7 @@ class LayerAttention:
         configs = {"prefill": prefill_config, "decode": decode_config}
         self.selections = {phase: selector.select(config, phase, name) for phase, config in configs.items()}
         self.builders = {
-            phase: selection.backend.create_step_builder(configs[phase], ctx)
+            phase: selection.backend.create_build_context(configs[phase], ctx)
             for phase, selection in self.selections.items()
         }
 
@@ -63,7 +65,7 @@ class LayerAttention:
 
         phase = "prefill" if infer_state.is_prefill else "decode"
         batch = build_attention_metadata(infer_state, SimpleNamespace() if model is None else model)
-        return self.builders[phase].build(batch)
+        return self.selections[phase].backend.build(batch, self.builders[phase])
 
     def run(self, phase: str, att_state, layer_inputs, *, out: torch.Tensor, alloc_func=torch.empty) -> torch.Tensor:
         return self.selections[phase].impl.forward(att_state, layer_inputs, out=out, alloc_func=alloc_func)

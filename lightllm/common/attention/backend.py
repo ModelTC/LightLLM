@@ -1,17 +1,16 @@
-"""Attention backend interfaces: the backend, its step builder and its impl.
+"""Attention backends and the inputs to build and forward.
 
 Each type is named for how long it lives:
 
 - LayerConfig: one layer's static attention configuration, fixed when the model loads. An
-  AttentionImpl is created once per layer config.
+  AttentionBackend instance holds this config.
 - AttentionMetadata: request layout and KV cache indices for one forward step.
 - AttState: the attention state shared by compatible layers in one microbatch. Backends that
   prepare page tables, recurrent indices or wrappers keep them on their state.
 - LayerInputs: one layer call's tensors.
 
-A model creates its step builders through AttentionBackend.create_step_builder, passing a
-StepBuilderContext with the resources and capacities they need. Layers whose backends and
-step_builder_key match share one step builder and prepare their attention state once per step.
+A model passes AttentionBuildResources to create_build_context on first use. Layers whose
+backend class and build_context_key match share a context and one state per microbatch.
 
 Attention states are built every step, including CUDA graph replay steps. The caller writes the KV cache
 before attention and passes the attention state explicitly rather than through a global forward context.
@@ -19,6 +18,7 @@ before attention and passes the attention state explicitly rather than through a
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any, Callable, Generic, Optional, Protocol, TypeVar
 
 import torch
@@ -104,11 +104,8 @@ class AttentionMetadata:
 
 
 @dataclass(frozen=True)
-class StepBuilderContext:
-    """The resources and capacities a model gives the step builders of its layers.
-
-    It holds no model object: everything a step builder needs from the model is a field here.
-    """
+class AttentionBuildResources:
+    """Model-wide capacities and workspace access used to initialize a backend's storage."""
 
     # CUDA device index of the step's tensors.
     device: int
@@ -133,36 +130,15 @@ class StepBuilderContext:
     diverse_decode: bool = False
 
 
-class AttentionStepBuilder(ABC, Generic[AttState]):
-    """Build an implementation's attention state for one step of one layer group.
-
-    build() runs once per step, including CUDA graph capture and replay steps, before the first
-    layer and outside capture. All layers of the group share its result. For a CUDA graph step,
-    any state derived from the batch must be written into storage the step builder keeps for
-    that (microbatch, batch size), so that a replay sees the values of the step being replayed.
-    Eager steps may use fresh storage.
-
-    A replay reruns the kernels captured with the capture step's attention state, so only tensor
-    contents change between replays. Attention state fields read on the host, such as launch sizes or
-    kernel configs, stay as captured: a replay step's own attention state is not used by the graph,
-    and such fields must be valid for every step the graph may replay.
-    """
-
-    @abstractmethod
-    def build(self, batch: AttentionMetadata) -> AttState:
-        pass
-
-
-class PrefillStateBuilder(AttentionStepBuilder[AttentionMetadata]):
-    def build(self, batch: AttentionMetadata) -> AttentionMetadata:
-        return batch
-
-
-class AttentionImpl(ABC, Generic[LayerConfig, AttState, LayerInputs]):
-    """Run attention for every layer that shares one layer config."""
+class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
+    """Prepare shared state once per step and run attention with each layer's operands."""
 
     def __init__(self, layer_config: LayerConfig) -> None:
         self.layer_config = layer_config
+
+    @cached_property
+    def state_key(self) -> tuple:
+        return type(self), self.build_context_key(self.layer_config)
 
     @abstractmethod
     def forward(
@@ -175,41 +151,29 @@ class AttentionImpl(ABC, Generic[LayerConfig, AttState, LayerInputs]):
     ) -> torch.Tensor:
         """Fill and return out itself; concrete impls define tensor layouts."""
 
-
-class AttentionBackend(ABC):
-    """Describe one attention implementation for one family and phase by naming its step builder and impl.
-
-    Models reach implementations through lightllm.common.basemodel.attention_runtime, which chooses
-    them per layer config (lightllm.common.attention.selector) and owns their step builders.
-    """
-
     @staticmethod
     @abstractmethod
     def get_name() -> str:
         pass
 
-    @staticmethod
-    @abstractmethod
-    def get_step_builder_cls() -> type[AttentionStepBuilder]:
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def get_impl_cls() -> type[AttentionImpl]:
-        pass
-
     @classmethod
-    def create_step_builder(cls, layer_config: Any, ctx: StepBuilderContext) -> AttentionStepBuilder:
-        """Create the step builder for layers with this layer config.
+    @abstractmethod
+    def build(cls, metadata: AttentionMetadata, context: Any) -> AttState:
+        """Prepare state once per compatible set of layers before capture or replay.
 
-        Every layer sharing the step builder has an equal step_builder_key(layer_config), so the
-        builder may depend only on the fields that key covers.
+        Replay reads captured addresses and launch parameters. Keep graph storage for each
+        (microbatch, batch size), update its contents in place and size launches for graph capacity.
         """
-        raise NotImplementedError(f"{cls.get_name()} does not create its step builder from a layer config yet")
+        pass
 
     @classmethod
-    def step_builder_key(cls, layer_config: Any) -> Any:
-        """Return the part of layer_config the step builder depends on; None when it depends on none."""
+    def create_build_context(cls, layer_config: LayerConfig, ctx: AttentionBuildResources) -> Any:
+        """Optionally create backend-owned storage shared across steps with the same build_context_key."""
+        return None
+
+    @classmethod
+    def build_context_key(cls, layer_config: Any) -> Any:
+        """Return the layer fields that affect build, or None for configuration-independent builds."""
         return None
 
     @classmethod

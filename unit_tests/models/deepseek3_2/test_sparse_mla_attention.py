@@ -38,7 +38,7 @@ MODEL = SimpleNamespace(graph_max_len_in_batch=MAX_LEN, mtp_manager=None)
 
 
 def layer_attention(heads, kv_cache_format):
-    """A DeepSeek V3.2 layer's attention, as Deepseek3_2TransformerLayerInfer.init_attention creates it."""
+    """Attention matching a DeepSeek V3.2 layer's sparse MLA spec."""
     config = SparseMLALayerConfig(
         num_heads=heads,
         kv_lora_rank=RANK,

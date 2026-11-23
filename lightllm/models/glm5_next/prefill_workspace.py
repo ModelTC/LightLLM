@@ -14,6 +14,16 @@ from lightllm.common.basemodel.attention_runtime import get_gpu_workspace_buffer
 KV_GATHER_CHUNK_SIZE = 2097152
 
 
+def prepare_sparse_prefill_workspaces(model) -> None:
+    if model.args.llm_kv_type == "fp8kv_dsa" and model.att_state_manager.get_full_attention_states(
+        model.att_state_role
+    ):
+        regions = reserve_fp8_sparse_prefill_workspaces(model)
+        for layer in model.layers_infer:
+            if not layer.is_linear_attention_layer:
+                layer.fp8_sparse_prefill_workspaces = regions
+
+
 def reserve_fp8_sparse_prefill_workspaces(model) -> list[dict[str, torch.Tensor]]:
     """Reserve one workspace region per prefill microbatch for the FA3 sparse MLA kernel."""
     regions = 1 + int(model.args.enable_prefill_microbatch_overlap)

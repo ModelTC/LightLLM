@@ -7,6 +7,7 @@ from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 
 from lightllm.common.basemodel import TransformerLayerInferTpl
+from lightllm.common.basemodel.attention_runtime import AttentionSpec
 from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
 from lightllm.common.attention.backends.sparse_mla import (
     SparseMLADecodeLayerInputs,
@@ -76,9 +77,10 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 tp_world_size=self.tp_world_size_,
             )
 
-    def init_attention(self, model, select_impls) -> None:
+    def attention_spec(self, model) -> AttentionSpec:
         if self.is_linear_attention_layer:
-            return self._init_kda_attention(model, select_impls)
+            config = self._kda_config(model)
+            return AttentionSpec(config, config)
         # NoPE sparse MLA: absorbed queries attend to the indexer's selected latent slots, which it
         # restricts to visible keys.
         config = SparseMLALayerConfig(
@@ -92,9 +94,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             kpool=self.network_config_["index_kpool"],
             causal=False,
         )
-        if config.kv_cache_format == "fp8_group64_e8m0":
-            self.fp8_sparse_prefill_workspaces = model.fp8_sparse_prefill_workspaces
-        self.prefill_impl, self.decode_impl = select_impls(config, config, implementation="flashmla_sparse")
+        return AttentionSpec(config, config, implementation="flashmla_sparse")
 
     def _att_norm(self, input, infer_state, layer_weight):
         return layer_weight.att_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
@@ -256,7 +256,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             ),
         )
         return self.prefill_impl.forward(
-            infer_state.att_states[self.prefill_impl],
+            infer_state.att_states[self.prefill_impl.state_key],
             inputs,
             out=torch.empty((q.shape[0], q.shape[1], self.kv_lora_rank), dtype=q.dtype, device=q.device),
         )
@@ -341,7 +341,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             topk_mem_indices=topk_mem_indices,
         )
         return self.decode_impl.forward(
-            infer_state.att_states[self.decode_impl],
+            infer_state.att_states[self.decode_impl.state_key],
             inputs,
             out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device),
         )
@@ -376,12 +376,12 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         raw_decay_gate, raw_output_gate = layer_weight.project_kda_fg_b(decay_gate_hidden, output_gate_hidden)
         return qkv, raw_decay_gate, beta_logits, raw_output_gate
 
-    def _init_kda_attention(self, model, select_impls) -> None:
+    def _kda_config(self, model) -> KDALayerConfig:
         linear = self.network_config_["linear_attn_config"]
         assert linear["num_heads"] % self.tp_world_size_ == 0
         args = model.args
         prefill_backends = args.llm_prefill_att_backend
-        layer_config = KDALayerConfig(
+        return KDALayerConfig(
             num_heads=self.tp_linear_num_heads,
             head_dim=self.linear_head_dim,
             conv_kernel_size=linear["short_conv_kernel_size"],
@@ -393,9 +393,6 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             # The second --llm_prefill_att_backend value chooses FlashKDA for prefill.
             prefill_kernel=prefill_backends[1] if len(prefill_backends) > 1 else "auto",
         )
-        # Replay state takes decode history through KDALayerInputs.replay_state.
-        self.linear_replay = layer_config.replay
-        self.prefill_impl, self.decode_impl = select_impls(layer_config, layer_config)
 
     def _kda_layer_inputs(self, mixed_qkv, raw_gate, raw_beta, infer_state, layer_weight) -> KDALayerInputs:
         """Gather the layer's KDA operands, parameters and recurrent state views."""
@@ -412,7 +409,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             dt_bias=layer_weight.linear_dt_bias.weight,
             conv_states=conv_states,
             ssm_states=ssm_states,
-            replay_state=state if self.linear_replay else None,
+            replay_state=state if self.decode_impl.layer_config.replay else None,
             layer_num=self.layer_num_,
         )
 
@@ -420,7 +417,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         x = inputs.mixed_qkv
         impl = self.prefill_impl if prefill else self.decode_impl
         return impl.forward(
-            infer_state.att_states[impl],
+            infer_state.att_states[impl.state_key],
             inputs,
             out=self.alloc_tensor(
                 (x.shape[0], self.tp_linear_num_heads, self.linear_head_dim), dtype=x.dtype, device=x.device
@@ -477,7 +474,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         _output = tensor_to_no_ref_tensor(output)
 
         def kda_prefill_func(new_infer_state):
-            # The replayed step's own attention state, built by its init_att_state().
+            # The replayed step's own attention state, built by model.prepare_attention().
             inputs = self._kda_layer_inputs(_mixed_qkv, _raw_decay_gate, _beta_logits, new_infer_state, layer_weight)
             tmp_output = self._kda_attention(inputs, new_infer_state, prefill=True)
             assert tmp_output.shape == _output.shape

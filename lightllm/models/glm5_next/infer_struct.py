@@ -33,8 +33,7 @@ class Glm5NextInferStateInfo(InferStateInfo):
         super().__init__()
         self.nsa_step: Optional[Glm5NsaStep] = None
 
-    def init_att_state(self, model):
-        # Built with the step's attention attention state, after the model has set every request field.
-        if model.attention_step_groups is not None:
+    def init_some_extra_state(self, model):
+        super().init_some_extra_state(model)
+        if model.attention_build_contexts is not None:
             self.nsa_step = build_glm5_nsa_step(self)
-        super().init_att_state(model)

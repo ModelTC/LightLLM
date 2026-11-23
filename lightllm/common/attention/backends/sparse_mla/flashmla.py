@@ -8,9 +8,7 @@ import torch
 from lightllm.common.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
-    AttentionImpl,
-    AttentionStepBuilder,
-    StepBuilderContext,
+    AttentionBuildResources,
     TensorAllocator,
 )
 from . import SparseMLADecodeLayerInputs, SparseMLALayerConfig, SparseMLAPrefillLayerInputs
@@ -38,40 +36,18 @@ class FlashMLASparseDecodeAttState:
     direct_decode_bound: Optional[int] = None
 
 
-class FlashMLASparsePrefillStepBuilder(AttentionStepBuilder[FlashMLASparsePrefillAttState]):
-    def build(self, batch: AttentionMetadata) -> FlashMLASparsePrefillAttState:
-        return FlashMLASparsePrefillAttState(mem_index=batch.mem_index, has_cached_prefix=batch.max_ready_cache_len > 0)
-
-
-class FlashMLASparseDecodeStepBuilder(AttentionStepBuilder[FlashMLASparseDecodeAttState]):
+class FlashMLASparseDecodeBuildContext:
     def __init__(self, *, direct_decode_bound: Optional[int] = None) -> None:
         self.direct_decode_bound = direct_decode_bound
         self._cuda_graph_sched_meta: dict[tuple[int, int], object] = {}
-
-    def build(self, batch: AttentionMetadata) -> FlashMLASparseDecodeAttState:
-        """A CUDA graph step keeps the captured scheduler metadata per (microbatch, batch size)."""
-        import flash_mla
-
-        if batch.uses_cuda_graph:
-            key = (batch.microbatch_index, batch.batch_size)
-            if key not in self._cuda_graph_sched_meta:
-                self._cuda_graph_sched_meta[key] = flash_mla.get_mla_metadata()[0]
-            sched_meta = self._cuda_graph_sched_meta[key]
-        else:
-            sched_meta = flash_mla.get_mla_metadata()[0]
-        return FlashMLASparseDecodeAttState(
-            sched_meta=sched_meta,
-            uses_cuda_graph=batch.uses_cuda_graph,
-            direct_decode_bound=self.direct_decode_bound,
-        )
 
 
 def _check_inputs(layer_config: SparseMLALayerConfig, q: torch.Tensor) -> None:
     assert q.shape[1] == layer_config.num_heads and q.dtype == layer_config.dtype, "q does not match the layer_config"
 
 
-class FlashMLASparsePrefillImpl(
-    AttentionImpl[SparseMLALayerConfig, FlashMLASparsePrefillAttState, SparseMLAPrefillLayerInputs]
+class FlashMLASparsePrefillBackend(
+    AttentionBackend[SparseMLALayerConfig, FlashMLASparsePrefillAttState, SparseMLAPrefillLayerInputs]
 ):
     def __init__(self, layer_config: SparseMLALayerConfig) -> None:
         super().__init__(layer_config)
@@ -130,9 +106,19 @@ class FlashMLASparsePrefillImpl(
         out.copy_(result[:, :heads])
         return out
 
+    @staticmethod
+    def get_name() -> str:
+        return "flashmla_sparse_mla_prefill"
 
-class FlashMLASparseDecodeImpl(
-    AttentionImpl[SparseMLALayerConfig, FlashMLASparseDecodeAttState, SparseMLADecodeLayerInputs]
+    @classmethod
+    def build(cls, metadata: AttentionMetadata, context: None = None) -> FlashMLASparsePrefillAttState:
+        return FlashMLASparsePrefillAttState(
+            mem_index=metadata.mem_index, has_cached_prefix=metadata.max_ready_cache_len > 0
+        )
+
+
+class FlashMLASparseDecodeBackend(
+    AttentionBackend[SparseMLALayerConfig, FlashMLASparseDecodeAttState, SparseMLADecodeLayerInputs]
 ):
     def __init__(self, layer_config: SparseMLALayerConfig) -> None:
         super().__init__(layer_config)
@@ -199,48 +185,40 @@ class FlashMLASparseDecodeImpl(
         out.copy_(result[:, 0, :heads])
         return out
 
-
-class FlashMLASparsePrefillBackend(AttentionBackend):
-    @staticmethod
-    def get_name() -> str:
-        return "flashmla_sparse_mla_prefill"
-
-    @staticmethod
-    def get_step_builder_cls() -> type[FlashMLASparsePrefillStepBuilder]:
-        return FlashMLASparsePrefillStepBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[FlashMLASparsePrefillImpl]:
-        return FlashMLASparsePrefillImpl
-
-    @classmethod
-    def create_step_builder(
-        cls, layer_config: SparseMLALayerConfig, ctx: StepBuilderContext
-    ) -> FlashMLASparsePrefillStepBuilder:
-        return FlashMLASparsePrefillStepBuilder()
-
-
-class FlashMLASparseDecodeBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "flashmla_sparse_mla_decode"
 
-    @staticmethod
-    def get_step_builder_cls() -> type[FlashMLASparseDecodeStepBuilder]:
-        return FlashMLASparseDecodeStepBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[FlashMLASparseDecodeImpl]:
-        return FlashMLASparseDecodeImpl
+    build_context_type = FlashMLASparseDecodeBuildContext
 
     @classmethod
-    def create_step_builder(
-        cls, layer_config: SparseMLALayerConfig, ctx: StepBuilderContext
-    ) -> FlashMLASparseDecodeStepBuilder:
-        return FlashMLASparseDecodeStepBuilder(direct_decode_bound=_direct_decode_bound(layer_config))
+    def build(
+        cls, metadata: AttentionMetadata, context: FlashMLASparseDecodeBuildContext
+    ) -> FlashMLASparseDecodeAttState:
+        """A CUDA graph step keeps the captured scheduler metadata per (microbatch, metadata size)."""
+        import flash_mla
+
+        if metadata.uses_cuda_graph:
+            key = (metadata.microbatch_index, metadata.batch_size)
+            if key not in context._cuda_graph_sched_meta:
+                context._cuda_graph_sched_meta[key] = flash_mla.get_mla_metadata()[0]
+            sched_meta = context._cuda_graph_sched_meta[key]
+        else:
+            sched_meta = flash_mla.get_mla_metadata()[0]
+        return FlashMLASparseDecodeAttState(
+            sched_meta=sched_meta,
+            uses_cuda_graph=metadata.uses_cuda_graph,
+            direct_decode_bound=context.direct_decode_bound,
+        )
 
     @classmethod
-    def step_builder_key(cls, layer_config: SparseMLALayerConfig) -> Optional[int]:
+    def create_build_context(
+        cls, layer_config: SparseMLALayerConfig, ctx: AttentionBuildResources
+    ) -> FlashMLASparseDecodeBuildContext:
+        return FlashMLASparseDecodeBuildContext(direct_decode_bound=_direct_decode_bound(layer_config))
+
+    @classmethod
+    def build_context_key(cls, layer_config: SparseMLALayerConfig) -> Optional[int]:
         return _direct_decode_bound(layer_config)
 
 

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparseDecodeBackend
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
 from lightllm.common.basemodel.attention_runtime import build_attention_metadata
 from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -29,13 +30,12 @@ SLOTS, TOPK_WIDTH, SCALE = 8192, 2176, 0.0625
 def make_backend():
     """A GLM-5 FP8 layer group's decode step builder, with the model fields build_attention_metadata reads."""
     pytest.importorskip("flash_mla")
-    from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparseDecodeBackend
     from unit_tests.models.glm5_next.test_fp8_kv import _layer_config
 
     config = _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), SCALE)
     return SimpleNamespace(
         model=SimpleNamespace(graph_max_len_in_batch=SLOTS, mtp_manager=None),
-        decode_step_builder=FlashMLASparseDecodeBackend.create_step_builder(config, None),
+        decode_step_builder=FlashMLASparseDecodeBackend.create_build_context(config, None),
     )
 
 
@@ -65,10 +65,12 @@ def make_infer(lengths, *, capture=False, replay=False, microbatch=0):
 
 
 def init_decode_state(backend, infer):
-    """The step's attention: its attention state, built as InferStateInfo.init_att_state builds them."""
+    """Prepare the attention state of one decode microbatch."""
     from unit_tests.models.glm5_next.test_fp8_kv import _decode
 
-    att_state = backend.decode_step_builder.build(build_attention_metadata(infer, backend.model))
+    att_state = FlashMLASparseDecodeBackend.build(
+        build_attention_metadata(infer, backend.model), backend.decode_step_builder
+    )
     return SimpleNamespace(att_state=att_state, decode_att=lambda q, kv, params: _decode(att_state, q, kv, params))
 
 
