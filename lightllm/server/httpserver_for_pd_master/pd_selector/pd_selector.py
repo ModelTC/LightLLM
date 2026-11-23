@@ -112,7 +112,7 @@ class AdaptiveLoadSelector(PDSelector):
 
 
 class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
-    """Cache-aware prefill 选点：按连续 prompt 块匹配前缀并平衡负载。"""
+    """Cache-aware prefill 选点：按抽稀后的 prompt 前缀匹配 + 负载均衡。"""
 
     def __init__(self, pd_manager):
         from .prompt_cache_tree_client import create_prompt_cache_tree_client
@@ -170,11 +170,9 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
         if self.shared_cache is not None:
             self.shared_cache.publish_hint(prompt, p_node)
             return
-        from .prompt_cache_tree import hash_prompt_blocks
-
         sample_stride = self.policy.config.sample_stride
         await self.policy.prompt_cache_tree.insert_sampled(
-            hash_prompt_blocks(prompt, sample_stride), p_node.connection_key, sample_stride, p_node.node_id
+            prompt[::sample_stride], p_node.connection_key, sample_stride
         )
 
     async def run_metadata_sync(self) -> None:

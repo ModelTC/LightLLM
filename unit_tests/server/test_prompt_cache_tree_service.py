@@ -27,13 +27,11 @@ from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree_clie
 from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree_server import PromptCacheTreeState
 from lightllm.utils.net_utils import get_abstract_unix_socket_address
 
-from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree import hash_prompt_blocks
-
 SAMPLE_STRIDE = CacheAwareConfig().sample_stride
 
 
 def _key(prompt):
-    return hash_prompt_blocks(prompt, SAMPLE_STRIDE)
+    return prompt[::SAMPLE_STRIDE]
 
 
 def _remote_tree(ipc_name):
@@ -82,7 +80,7 @@ def test_remote_client_uses_symmetric_sampled_operations(monkeypatch):
 
     asyncio.run(run())
     tree._prefix_match_sampled.assert_called_once_with(_key(prompt), len(prompt), SAMPLE_STRIDE)
-    tree._insert_sampled.assert_called_once_with(_key(prompt), "prefill", SAMPLE_STRIDE, None)
+    tree._insert_sampled.assert_called_once_with(_key(prompt), "prefill", SAMPLE_STRIDE)
 
 
 def test_cancelled_tree_operation_waits_for_the_client_lock_and_still_executes(monkeypatch):
@@ -102,7 +100,7 @@ def test_cancelled_tree_operation_waits_for_the_client_lock_and_still_executes(m
             await task
 
     asyncio.run(run())
-    tree._insert_sampled.assert_called_once_with("key", "prefill", SAMPLE_STRIDE, None)
+    tree._insert_sampled.assert_called_once_with("key", "prefill", SAMPLE_STRIDE)
 
 
 def test_tree_rpc_failure_terminates_the_worker(monkeypatch):

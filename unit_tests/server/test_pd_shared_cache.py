@@ -11,14 +11,13 @@ from fastapi import FastAPI
 from lightllm.server.config_server.cache_metadata import CacheMetadataRelay, relays, router
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.httpserver_for_pd_master.pd_selector.pd_selector import LoadBalancedCacheAwareSelector
-from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree import hash_prompt_blocks
 from lightllm.server.pd_io_struct import PD_Client_Obj
 
 pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
 
 
 def _prefix_match(tree, prompt):
-    return tree.prefix_match_sampled(hash_prompt_blocks(prompt, tree.sample_stride), len(prompt), tree.sample_stride)
+    return tree.prefix_match_sampled(prompt[:: tree.sample_stride], len(prompt), tree.sample_stride)
 
 
 async def _estimated(selector, worker, prompt):
@@ -199,7 +198,7 @@ def test_worker_restart_at_same_address_invalidates_hint_but_connection_change_d
     peer = _connect(CacheMetadataRelay(), state)
     del peer
     prompt = "x" * 1025
-    event = {**_hint(key=hash_prompt_blocks("x" * 1025, 2048)), "seq": 1}
+    event = {**_hint(key="xxx"), "seq": 1}
     state.apply(event)
     worker = selector.prefill_nodes[0]
     worker.connection_id = "new-master-connection"
@@ -216,7 +215,7 @@ def test_dp_ranks_are_distinct_cache_targets():
     state = selector.shared_cache
     relay = CacheMetadataRelay()
     peer = _connect(relay, state)
-    relay.publish(peer, _hint(key=hash_prompt_blocks("x" * 1025, 2048), worker=worker.connection_key))
+    relay.publish(peer, _hint(key="xxx", worker=worker.connection_key))
     _drain(peer, state)
     assert asyncio.run(_estimated(selector, worker, "x" * 1025)).estimated_cache_hit_rate == 1
     worker.dp_index = 4
@@ -228,11 +227,11 @@ def test_reconnect_replays_missing_events_without_refreshing_old_hint_age():
     selector = _selector()
     state = selector.shared_cache
     peer = _connect(relay, state)
-    relay.publish(peer, _hint(key=hash_prompt_blocks("x" * 1025, 2048), observed_at=time.time() - 120))
+    relay.publish(peer, _hint(key="xxx", observed_at=time.time() - 120))
     _drain(peer, state)
     relay.unsubscribe(peer)
     publisher, _ = relay.subscribe("other", 2, None, 0)
-    relay.publish(publisher, _hint(key=hash_prompt_blocks("y" * 1025, 2048), seq=2))
+    relay.publish(publisher, _hint(key="yyy", seq=2))
     _connect(relay, state)
     assert state.cursor == 2
     result = _prefix_match(selector.shared_cache.tree, "x" * 1025)
@@ -246,7 +245,7 @@ def test_duplicate_hint_does_not_change_order_owner_age_or_lru():
     selector = _selector()
     state = selector.shared_cache
     peer = _connect(relay, state)
-    hint = _hint(key=hash_prompt_blocks("x" * 1025, 2048))
+    hint = _hint(key="xxx")
     relay.publish(peer, hint)
     _drain(peer, state)
     tree = selector.shared_cache.tree
@@ -265,7 +264,7 @@ def test_unrecoverable_gap_or_relay_restart_clears_old_tree_and_queued_hints(res
     selector = _selector()
     state = selector.shared_cache
     peer = _connect(relay, state)
-    relay.publish(peer, _hint(key=hash_prompt_blocks("x" * 1025, 2048)))
+    relay.publish(peer, _hint(key="xxx"))
     _drain(peer, state)
     relay.unsubscribe(peer)
     asyncio.run(selector.insert_prompt_cache("unsent" * 200, selector.prefill_nodes[0]))
@@ -274,7 +273,7 @@ def test_unrecoverable_gap_or_relay_restart_clears_old_tree_and_queued_hints(res
         relay = CacheMetadataRelay(max_log_bytes=500)
     publisher, _ = relay.subscribe("other", 2, None, 0)
     for seq in range(2, 8):
-        relay.publish(publisher, _hint(key=hash_prompt_blocks("y" * 1025, 2048), seq=seq))
+        relay.publish(publisher, _hint(key="yyy", seq=seq))
     _connect(relay, state)
     assert state.outgoing.empty()
     assert state.cursor == relay.sequence
@@ -286,9 +285,9 @@ def test_future_timestamp_is_not_eligible_for_fresh_cache_priority():
     selector = _selector()
     state = selector.shared_cache
     _connect(CacheMetadataRelay(), state)
-    state.apply({**_hint(key=hash_prompt_blocks("x" * 1025, 2048), observed_at=time.time() + 100), "seq": 1})
+    state.apply({**_hint(key="xxx", observed_at=time.time() + 100), "seq": 1})
     result = asyncio.run(_estimated(selector, selector.prefill_nodes[0], "x" * 1025))
-    assert result.estimated_cache_hit_rate == 0
+    assert result.estimated_cache_hit_rate == 1
     assert result.cache_last_insert_time is None
 
 

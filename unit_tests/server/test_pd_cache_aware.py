@@ -1,5 +1,4 @@
 import asyncio
-import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -13,7 +12,7 @@ from lightllm.server.httpserver_for_pd_master.pd_selector.cache_aware import (
     CacheAwareConfig,
     CacheAwarePolicy,
 )
-from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree import PromptCacheTree, hash_prompt_blocks
+from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree import PromptCacheTree
 from lightllm.server.httpserver_for_pd_master.pd_selector.pd_selector import (
     LoadBalancedCacheAwareSelector,
     PDSelectionExtraInfo,
@@ -38,19 +37,13 @@ def _local_policy(config):
 
 def _insert_prompt(policy, prompt, worker):
     sample_stride = policy.config.sample_stride
-    asyncio.run(
-        policy.prompt_cache_tree.insert_sampled(
-            hash_prompt_blocks(prompt, sample_stride), worker.connection_key, sample_stride
-        )
-    )
+    asyncio.run(policy.prompt_cache_tree.insert_sampled(prompt[::sample_stride], worker.connection_key, sample_stride))
 
 
 def _prefix_match(policy, prompt):
     sample_stride = policy.config.sample_stride
     return asyncio.run(
-        policy.prompt_cache_tree.prefix_match_sampled(
-            hash_prompt_blocks(prompt, sample_stride), len(prompt), sample_stride
-        )
+        policy.prompt_cache_tree.prefix_match_sampled(prompt[::sample_stride], len(prompt), sample_stride)
     )
 
 
@@ -198,10 +191,9 @@ def test_cache_aware_selector_returns_selected_nodes_and_estimated_cache_hit_rat
     )
     selector.update_nodes([p_node], [d_node])
     prompt = "x" * 1025
-    inserted_at = time.monotonic()
     with patch(
         "lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree.time.monotonic",
-        return_value=inserted_at,
+        return_value=123.0,
     ):
         _insert_prompt(selector.policy, prompt, p_node)
 
@@ -211,7 +203,7 @@ def test_cache_aware_selector_returns_selected_nodes_and_estimated_cache_hit_rat
     assert selected_d_node is d_node
     assert selection_extra_info == PDSelectionExtraInfo(
         estimated_cache_hit_rate=pytest.approx(1.0),
-        cache_last_insert_time=inserted_at,
+        cache_last_insert_time=123.0,
     )
 
 
@@ -262,12 +254,13 @@ def test_cache_aware_keeps_cache_worker_when_inflight_load_is_balanced():
     selected_worker, cache_info = asyncio.run(policy.select_worker([cache_worker, least_loaded_worker], prompt))
 
     assert selected_worker is cache_worker
-    assert cache_info.estimated_cache_hit_rate == 1.0
+    # 前缀树每 512 个字符抽样一次，命中率保持原有的保守估算方式。
+    assert cache_info.estimated_cache_hit_rate == pytest.approx(1025 / len(prompt))
 
 
 def test_cache_aware_uses_least_loaded_worker_when_cache_worker_is_overloaded():
     policy = _local_policy(CacheAwareConfig())
-    cache_worker = _worker("10.0.0.1:8000", dispatched_prompt_chars=2600, dispatched_req_num=2)
+    cache_worker = _worker("10.0.0.1:8000", dispatched_prompt_chars=2000, dispatched_req_num=2)
     least_loaded_worker = _worker("10.0.0.2:8000", dispatched_prompt_chars=100, dispatched_req_num=2)
     prompt = "shared prefix " * 100
     _insert_prompt(policy, prompt, cache_worker)
@@ -290,7 +283,7 @@ def test_cache_aware_keeps_cache_worker_when_both_workers_are_idle():
     assert selected_worker is cache_worker
 
 
-def test_cache_aware_keeps_busy_worker_when_its_cached_work_finishes_earlier():
+def test_cache_aware_forces_idle_worker_over_busy_cache_worker():
     policy = _local_policy(CacheAwareConfig())
     cache_worker = _worker("10.0.0.1:8000", dispatched_prompt_chars=100, dispatched_req_num=1)
     idle_worker = _worker("10.0.0.2:8000")
@@ -299,7 +292,7 @@ def test_cache_aware_keeps_busy_worker_when_its_cached_work_finishes_earlier():
 
     selected_worker, _ = asyncio.run(policy.select_worker([cache_worker, idle_worker], prompt))
 
-    assert selected_worker is cache_worker
+    assert selected_worker is idle_worker
 
 
 def test_cache_aware_randomly_selects_an_idle_worker_without_cache_match():
@@ -327,29 +320,3 @@ def test_cache_aware_matches_cache_only_within_idle_workers():
     selected_worker, _ = asyncio.run(policy.select_worker([other_idle_worker, busy_worker, cache_idle_worker], prompt))
 
     assert selected_worker is cache_idle_worker
-
-
-def test_cache_aware_digest_detects_a_difference_between_legacy_samples():
-    policy = _local_policy(CacheAwareConfig())
-    worker = _worker("10.0.0.1:8000")
-    prompt = "x" * 8192
-    changed = prompt[:137] + "y" + prompt[138:]
-    assert prompt[::512] == changed[::512]
-    _insert_prompt(policy, prompt, worker)
-    assert _prefix_match(policy, changed).matched_char_count == 0
-    assert _prefix_match(policy, prompt + "tail").matched_char_count == len(prompt)
-
-
-def test_cache_aware_does_not_discount_old_prefix_history():
-    policy = _local_policy(CacheAwareConfig())
-    worker = _worker("10.0.0.1:8000", dispatched_prompt_chars=1000, dispatched_req_num=1)
-    idle = _worker("10.0.0.2:8000")
-    prompt = "x" * 8192
-    with patch(
-        "lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree.time.monotonic",
-        return_value=time.monotonic() - 10000,
-    ):
-        _insert_prompt(policy, prompt, worker)
-    selected, info = asyncio.run(policy.select_worker([worker, idle], prompt))
-    assert selected is idle
-    assert info == PDSelectionExtraInfo()

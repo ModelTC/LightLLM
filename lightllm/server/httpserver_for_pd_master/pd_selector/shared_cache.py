@@ -10,8 +10,6 @@ import websockets
 
 from lightllm.utils.log_utils import init_logger
 
-from .prompt_cache_tree import hash_prompt_blocks
-
 
 logger = init_logger(__name__)
 
@@ -30,7 +28,7 @@ class SharedCacheState:
         self.master_id = args.pd_node_id
         self.namespace = hashlib.sha256(
             json.dumps(
-                [args.model_dir, args.model_name, "contiguous_block_digest_v1", selector.policy.config.sample_stride]
+                [args.model_dir, args.model_name, "sampled_chars_v1", selector.policy.config.sample_stride]
             ).encode()
         ).hexdigest()
         self.enabled_for_single_worker = not args.disable_pd_cache_high_priority
@@ -50,19 +48,19 @@ class SharedCacheState:
     def publish_hint(self, prompt, worker):
         if not self.enabled() or not self.ready:
             return
-        # Skip metadata generation under backpressure.
-        if self.outgoing.full():
-            self.dropped_hints += 1
-            return
         self.local_sequence += 1
         message = {
             "kind": "hint",
             "id": self.local_sequence,
-            "key": hash_prompt_blocks(prompt, self.selector.policy.config.sample_stride),
+            "key": prompt[:: self.selector.policy.config.sample_stride],
             "worker": worker.connection_key,
             "node_id": worker.node_id,
             "observed_at": time.time(),
         }
+        # A lost hint only reduces affinity. Never wait for a slow relay in the request path.
+        if len(message["key"].encode("utf-8")) > 64 * 1024 or self.outgoing.full():
+            self.dropped_hints += 1
+            return
         self.outgoing.put_nowait(message)
 
     def apply(self, message):
@@ -83,8 +81,8 @@ class SharedCacheState:
                 return
             assert message["seq"] == self.cursor + 1, "Cache metadata replay gap"
             age = time.time() - message["observed_at"]
-            # Convert the sender timestamp to a local monotonic age. Future
-            # observations are ineligible for cache-aware routing.
+            # Cross-host monotonic clocks cannot be compared. A future wall-clock
+            # observation is retained for affinity, but is ineligible for freshness priority.
             inserted_at = time.monotonic() - age if age >= 0 else None
             self.tree.insert_key(message["key"], message["worker"], inserted_at, message["node_id"])
             self.cursor = message["seq"]
@@ -176,7 +174,7 @@ class SharedCacheState:
                             except asyncio.TimeoutError:
                                 continue
                             payload = json.dumps(hint, ensure_ascii=False)
-                            # JSON escaping can expand an otherwise small cache hint.
+                            # JSON escaping can expand an otherwise small sampled key.
                             if len(payload.encode("utf-8")) > 64 * 1024:
                                 self.dropped_hints += 1
                                 continue

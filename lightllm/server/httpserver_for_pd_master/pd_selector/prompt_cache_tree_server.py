@@ -34,16 +34,13 @@ class PromptCacheTreeState(rpyc.Service):
                 result.matched_char_count,
                 result.input_char_count,
                 result.last_insert_time,
-                result.prefill_node_epoch,
             )
 
     @rpyc.exposed
-    def insert_sampled(self, key, prefill_node, sample_stride, prefill_node_epoch=None) -> None:
-        key, prefill_node, sample_stride, prefill_node_epoch = obtain(
-            (key, prefill_node, sample_stride, prefill_node_epoch)
-        )
+    def insert_sampled(self, key, prefill_node, sample_stride) -> None:
+        key, prefill_node, sample_stride = obtain((key, prefill_node, sample_stride))
         with self.lock:
-            self.prompt_cache_tree.insert_sampled(key, prefill_node, sample_stride, prefill_node_epoch)
+            self.prompt_cache_tree.insert_sampled(key, prefill_node, sample_stride)
 
 
 def start_prompt_cache_tree_server(args, pipe_writer):
