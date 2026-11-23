@@ -9,10 +9,10 @@ import torch.nn.functional as F
 from frozendict import frozendict
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend
-from lightllm.common.basemodel.attention_runtime import build_attention_metadata
+from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, build_attention_metadata
 from lightllm.common.attention.kernels.gqa.bf16.decode import (
     gqa_flash_decoding as decode_module,
     gqa_flash_decoding_stage1 as stage1_module,
@@ -129,18 +129,15 @@ def test_rebuild_preserves_layout_and_bounds_indices(monkeypatch, num_tokens):
 @pytest.mark.parametrize("q_heads", [2, 8])
 def test_state_retains_actual_length_before_graph_capture(monkeypatch, q_heads):
     infer_state = InferStateInfo()
-    infer_state.is_cuda_graph_capture = True
+    infer_state.graph_mode = GraphMode.CAPTURE
     infer_state.batch_size, infer_state.max_kv_seq_len, infer_state.total_token_num = 2, 8193, 2 * 8193
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.empty(2, 32768, dtype=torch.int32))
     infer_state.b_req_idx = torch.arange(2, dtype=torch.int32)
     infer_state.b_seq_len = torch.full((2,), 8193, dtype=torch.int32)
-    model = type("Model", (), {})()
-    model.is_mtp_draft_model = False
-    model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _: 0)
-    model.graph_max_len_in_batch = 32768
+    step_config = AttentionStepConfig(cuda_graph_max_kv_seq_len=32768)
     layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=2, head_dim=64, dtype=torch.float32)
     builder = TritonGQADecodeBackend.create_build_context(layer_config, None)
-    att_state = TritonGQADecodeBackend.build(build_attention_metadata(infer_state, model), builder)
+    att_state = TritonGQADecodeBackend.build(build_attention_metadata(infer_state, step_config), builder)
     # Graph capture raises max_kv_seq_len only after the attention state are built.
     infer_state.max_kv_seq_len = 32768
     calls = []

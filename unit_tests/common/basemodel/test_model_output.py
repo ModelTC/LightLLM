@@ -6,7 +6,7 @@ import pytest
 from lightllm.common.basemodel import basemodel
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
-from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 
 
 def test_decode_unpad_slices_spec_output_with_logits():
@@ -111,28 +111,21 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
 
         model._create_padded_decode_model_input = pad_once
 
-        graph_flags_at_att_init = []
+        created_modes = []
         executions = []
 
-        def create_infer_state(model_input):
-            infer_state = SimpleNamespace(
+        def create_infer_state(model_input, microbatch_index=0, graph_mode=GraphMode.EAGER):
+            # The step's attention state is built with the state, so it must know how the step runs.
+            created_modes.append(graph_mode)
+            return SimpleNamespace(
                 b_req_idx=model_input.b_req_idx,
                 b_seq_len=model_input.b_seq_len,
                 mem_index=torch.empty((model_input.batch_size,), dtype=torch.int32),
-                init_some_extra_state=lambda _: None,
-                is_cuda_graph_capture=False,
-                is_cuda_graph_replay=False,
+                graph_mode=graph_mode,
             )
-            return infer_state
-
-        def prepare_attention(state):
-            graph_flags_at_att_init.append((state.is_cuda_graph_capture, state.is_cuda_graph_replay))
-            return {}
-
-        model.prepare_attention = prepare_attention
 
         def execute(mode, infer_state):
-            executions.append((mode, infer_state.is_cuda_graph_capture, infer_state.is_cuda_graph_replay))
+            executions.append((mode, infer_state.graph_mode))
             return ModelOutput(logits=torch.ones((infer_state.b_req_idx.shape[0], 4)))
 
         model._create_inferstate = create_infer_state
@@ -150,13 +143,12 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
 
         output = model._decode(_create_empty_decode_input())
 
-        expected_replay = graph_batch_size is not None and not need_capture
         expected_mode = "eager"
         if graph_batch_size is not None:
             expected_mode = "capture" if need_capture else "replay"
         assert pad_batch_sizes == [expected_batch_size]
-        assert graph_flags_at_att_init == [(need_capture, expected_replay)]
-        assert executions == [(expected_mode, need_capture, expected_replay)]
+        assert created_modes == [GraphMode(expected_mode)]
+        assert executions == [(expected_mode, GraphMode(expected_mode))]
         assert output.logits.shape == (0, 4)
 
 
@@ -180,16 +172,7 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
     initializations = []
     executions = []
 
-    def graph_flags(state):
-        return state.is_cuda_graph_capture, state.is_cuda_graph_replay
-
-    def prepare_attention(infer_state):
-        assert not (infer_state.is_cuda_graph_capture and infer_state.is_cuda_graph_replay)
-        decode_wrapper = None if infer_state.is_cuda_graph_replay else object()
-        initializations.append((infer_state.microbatch_index, graph_flags(infer_state), decode_wrapper is not None))
-        return {"group": SimpleNamespace(decode_wrapper=decode_wrapper)}
-
-    def create_state(model_input, microbatch_index=0):
+    def create_state(model_input, microbatch_index=0, graph_mode=GraphMode.EAGER):
         state = InferStateInfo()
         state.is_prefill = False
         state.input_ids = model_input.input_ids
@@ -198,7 +181,11 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
         state.b_req_idx = model_input.b_req_idx
         state.b_seq_len = model_input.b_seq_len
         state.microbatch_index = microbatch_index
-        state.init_some_extra_state = lambda _: None
+        state.graph_mode = graph_mode
+        # A backend whose replay reuses graph-owned wrappers prepares none for replay steps.
+        decode_wrapper = None if graph_mode is GraphMode.REPLAY else object()
+        initializations.append((microbatch_index, graph_mode, decode_wrapper is not None))
+        state.att_states = {"group": SimpleNamespace(decode_wrapper=decode_wrapper)}
         return state
 
     def outputs(state, state1):
@@ -208,22 +195,21 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
         # Eager and capture execute attention using these newly prepared states.
         assert state.att_states["group"].decode_wrapper is not None
         assert infer_state1.att_states["group"].decode_wrapper is not None
-        executions.append(("forward", graph_flags(state), graph_flags(infer_state1)))
+        executions.append(("forward", state.graph_mode, infer_state1.graph_mode))
         return outputs(state, infer_state1)
 
     def capture(func, state, infer_state1):
-        executions.append(("capture", graph_flags(state), graph_flags(infer_state1)))
+        executions.append(("capture", state.graph_mode, infer_state1.graph_mode))
         return func(state, infer_state1)
 
     def replay(state, infer_state1):
         # Replay uses graph-owned wrappers, so temporary states need none.
         assert state.att_states["group"].decode_wrapper is None
         assert infer_state1.att_states["group"].decode_wrapper is None
-        executions.append(("replay", graph_flags(state), graph_flags(infer_state1)))
+        executions.append(("replay", state.graph_mode, infer_state1.graph_mode))
         return outputs(state, infer_state1)
 
     model._create_inferstate = create_state
-    model.prepare_attention = prepare_attention
     model._overlap_tpsp_token_forward = forward
     model.graph = None
     if graph_mode is not None:
@@ -246,10 +232,10 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
 
     result = model._microbatch_overlap_decode_cuda(*inputs)
 
-    expected_flags = {"eager": (False, False), "capture": (True, False), "replay": (False, True)}[expected_mode]
-    assert initializations == [(index, expected_flags, expected_mode != "replay") for index in (0, 1)]
+    expected_graph_mode = GraphMode(expected_mode)
+    assert initializations == [(index, expected_graph_mode, expected_mode != "replay") for index in (0, 1)]
     expected_execution = {"eager": ["forward"], "capture": ["capture", "forward"], "replay": ["replay"]}[expected_mode]
-    assert executions == [(mode, expected_flags, expected_flags) for mode in expected_execution]
+    assert executions == [(mode, expected_graph_mode, expected_graph_mode) for mode in expected_execution]
     for output, model_input in zip(result, inputs):
         torch.testing.assert_close(output.logits, torch.stack((model_input.b_req_idx, model_input.b_seq_len), dim=1))
 
@@ -267,26 +253,21 @@ def test_mtp_decode_preserves_groups_and_real_rows(overlap, dynamic, graph_mode,
     model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88)
     seen_sizes = []
 
-    def create_state(model_input, microbatch_index=0):
+    def create_state(model_input, microbatch_index=0, graph_mode=GraphMode.EAGER):
+        if not dynamic:
+            assert model_input.batch_size % 3 == 0
+        assert model_input.batch_size % 8 == 0
+        seen_sizes.append(model_input.batch_size)
         return SimpleNamespace(
             batch_size=model_input.batch_size,
             b_req_idx=model_input.b_req_idx,
             b_seq_len=model_input.b_seq_len,
-            init_some_extra_state=lambda _: None,
         )
-
-    def prepare_attention(state):
-        if not dynamic:
-            assert state.batch_size % 3 == 0
-        assert state.batch_size % 8 == 0
-        seen_sizes.append(state.batch_size)
-        return {}
 
     def forward(state):
         return ModelOutput(logits=torch.stack((state.b_req_idx, state.b_seq_len), dim=1))
 
     model._create_inferstate = create_state
-    model.prepare_attention = prepare_attention
     model._token_forward = forward
     model._overlap_tpsp_token_forward = lambda state, infer_state1: (forward(state), forward(infer_state1))
     model.graph = None

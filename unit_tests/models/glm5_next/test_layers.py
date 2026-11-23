@@ -494,6 +494,8 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
 
     # NoPE state initialization must not require a model-owned RoPE cache.
     for model in (main, *drafts):
+        # The runtime is not initialized, so the step builds no attention metadata.
+        model.attention_runtime = SimpleNamespace(has_attention=False)
         state = model.infer_state_class()
         state.is_prefill = True
         state.input_ids = torch.zeros(3, device="cuda", dtype=torch.int64)

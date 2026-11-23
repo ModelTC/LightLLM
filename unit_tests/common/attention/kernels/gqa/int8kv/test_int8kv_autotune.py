@@ -146,7 +146,7 @@ def test_decode_passes_saved_length_to_stage1(monkeypatch):
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"])
     infer_state.is_prefill = False
     att_state = TritonQuantGQADecodeBackend.build(
-        build_attention_metadata(infer_state, SimpleNamespace()), TritonQuantGQADecodeBuildContext()
+        build_attention_metadata(infer_state), TritonQuantGQADecodeBuildContext()
     )
     infer_state.max_kv_seq_len = 32768
     calls = []

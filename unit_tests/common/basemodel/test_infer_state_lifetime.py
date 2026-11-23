@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.cuda_graph import CudaGraph
-from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.attention_runtime import AttentionRuntime, AttentionStepConfig, _StateBuilder
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
@@ -30,18 +30,27 @@ def no_cycle_gc():
             gc.enable()
 
 
+def _runtime(builders: dict) -> AttentionRuntime:
+    """A runtime with the given state builders per phase, without binding layers."""
+    runtime = AttentionRuntime.__new__(AttentionRuntime)
+    runtime.step_config = AttentionStepConfig()
+    runtime.state_builders = {"prefill": {}, "decode": {}, **builders}
+    return runtime
+
+
 def _create_state(is_prefill):
     owner = InferStateInfo()
     owner.is_prefill = is_prefill
     owner.position_ids = torch.arange(4)
     owner.b_req_idx = owner.position_ids
     owner.req_manager = SimpleNamespace(req_to_token_indexs=None)
-    model = TpPartBaseModel.__new__(TpPartBaseModel)
-    backend = SimpleNamespace(build=lambda metadata, context: _AttState(metadata.b_req_idx))
+    backend = SimpleNamespace(
+        create_build_context=lambda layer_config, resources: None,
+        build=lambda metadata, context: _AttState(metadata.b_req_idx),
+    )
     phase = "prefill" if is_prefill else "decode"
-    model.attention_build_contexts = {phase: {"group": SimpleNamespace(backend=backend, context=None)}}
-    model.req_to_mtp_state_index = None
-    owner.att_states = model.prepare_attention(owner)
+    runtime = _runtime({phase: {"group": _StateBuilder(backend, layer_config=None, resources=None)}})
+    owner.att_states = runtime.prepare(owner)
     return owner
 
 
@@ -65,8 +74,7 @@ def test_att_state_do_not_keep_their_infer_state_alive(no_cycle_gc, is_prefill):
 def test_infer_state_without_attention_builds_no_att_state():
     owner = InferStateInfo()
     owner.is_prefill = False
-    model = TpPartBaseModel.__new__(TpPartBaseModel)
-    owner.att_states = model.prepare_attention(owner)
+    owner.att_states = _runtime({}).prepare(owner)
     assert owner.att_states == {}
 
 

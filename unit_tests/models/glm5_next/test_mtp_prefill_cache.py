@@ -89,7 +89,8 @@ def test_forward_uses_common_prefill(monkeypatch, tokens, mode):
     model.att_state_manager = object()
     model.hidden_collector_prototype = FinalHiddenCollector()
     model.return_all_prompt_logics = False
-    model.attention_build_contexts = None
+    # The step's layers only write the cache, so the runtime builds no attention state.
+    model.attention_runtime = SimpleNamespace(has_attention=False, prepare=lambda infer_state: {})
     model._select_mem_indexes = lambda model_input: torch.zeros_like(model_input.input_ids)
     batch = int(tokens > 0)
     model_input = ModelInput(

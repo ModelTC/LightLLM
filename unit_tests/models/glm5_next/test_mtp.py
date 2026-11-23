@@ -3,6 +3,7 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, KDAState
+from lightllm.common.basemodel.attention_runtime import AttentionStepConfig
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention.kernels.gdn.third_party_fla.ops.kda_decode import (
     fused_recurrent_kda,
@@ -204,11 +205,9 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
             expected_ssm[req * width + token] = state[0]
             row += 1
     # Decode rows group by the model's speculative depth.
-    model = SimpleNamespace(
-        is_mtp_draft_model=False, mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: mtp_step)
-    )
+    step_config = AttentionStepConfig(decode_rows_per_request=mtp_step + 1, dynamic_decode_rows=dynamic)
     layer_config = kda_layer_config(heads=heads, dim=dim, replay=mode == "replay", mtp_step=mtp_step)
-    backend = KDAAttention(layer_config, model, dynamic_layout=dynamic)
+    backend = KDAAttention(layer_config, step_config)
     resources = AttentionStateManager(request_capacity=4)
     config = ConvSSMStateConfig(
         logical_layer_ids=(0,),

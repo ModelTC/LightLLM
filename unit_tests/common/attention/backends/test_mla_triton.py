@@ -6,14 +6,14 @@ import torch
 from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLADecodeLayerInputs
 from lightllm.common.attention.backends.mla import MLAPrefillLayerConfig, MLAPrefillLayerInputs
 from lightllm.common.attention.backends.mla.triton import TritonMLADecodeBackend, TritonMLAPrefillBackend
-from lightllm.common.basemodel.attention_runtime import build_attention_metadata
-from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, build_attention_metadata
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
-# The model fields build_attention_metadata reads.
-MODEL = SimpleNamespace(is_mtp_draft_model=False, graph_max_len_in_batch=192)
+# The model's step config: graph steps cover 192 kv tokens.
+STEP_CONFIG = AttentionStepConfig(cuda_graph_max_kv_seq_len=192)
 DECODE_SCALE = 576**-0.5
 
 
@@ -37,7 +37,7 @@ def decode(att_state, q_nope, q_rope, kv):
 
 def _decode_state(lengths, *, capture=False, replay=False):
     state = InferStateInfo()
-    state.is_cuda_graph_capture, state.is_cuda_graph_replay = capture, replay
+    state.graph_mode = GraphMode.CAPTURE if capture else GraphMode.REPLAY if replay else GraphMode.EAGER
     state.batch_size, state.total_token_num = len(lengths), sum(lengths)
     state.b_req_idx = torch.arange(len(lengths), device="cuda", dtype=torch.int32)
     state.b_seq_len = torch.tensor(lengths, device="cuda", dtype=torch.int32)
@@ -75,7 +75,7 @@ def test_cached_prefill(nope_dim, v_dim):
         dtype=q.dtype,
     )
     att_state = TritonMLAPrefillBackend.build(
-        build_attention_metadata(state, MODEL), TritonMLAPrefillBackend.create_build_context(layer_config, None)
+        build_attention_metadata(state, STEP_CONFIG), TritonMLAPrefillBackend.create_build_context(layer_config, None)
     )
     actual = TritonMLAPrefillBackend(layer_config).forward(
         att_state,
@@ -97,7 +97,7 @@ def test_decode_plans_once_per_step_independent_of_query_layout(decode_builder):
     slots = torch.randperm(768, device="cuda", dtype=torch.int32).view(2, 384)
     state = _decode_state(lengths)
     state.req_manager = SimpleNamespace(req_to_token_indexs=slots)
-    att_state = TritonMLADecodeBackend.build(build_attention_metadata(state, MODEL), decode_builder)
+    att_state = TritonMLADecodeBackend.build(build_attention_metadata(state, STEP_CONFIG), decode_builder)
     kv = torch.randn((768, 1, 576), dtype=torch.bfloat16, device="cuda")
     scale = DECODE_SCALE
     # Layers may present the absorbed query with different strides; both reuse the step's args.
@@ -115,7 +115,7 @@ def test_decode_replay_rebuilds_captured_schedule(decode_builder):
     req_manager = SimpleNamespace(req_to_token_indexs=slots)
     state = _decode_state((7, 5), capture=True)
     state.req_manager = req_manager
-    att_state = TritonMLADecodeBackend.build(build_attention_metadata(state, MODEL), decode_builder)
+    att_state = TritonMLADecodeBackend.build(build_attention_metadata(state, STEP_CONFIG), decode_builder)
     captured_schedule = att_state.schedule
     kv = torch.randn((384, 1, 576), dtype=torch.bfloat16, device="cuda")
     # The model produces the absorbed query by transposing the head-major BMM output.
@@ -135,7 +135,9 @@ def test_decode_replay_rebuilds_captured_schedule(decode_builder):
     for lengths in [(7, 5), (150, 83)]:
         replay_state = _decode_state(lengths, replay=True)
         replay_state.req_manager = req_manager
-        replay_att_state = TritonMLADecodeBackend.build(build_attention_metadata(replay_state, MODEL), decode_builder)
+        replay_att_state = TritonMLADecodeBackend.build(
+            build_attention_metadata(replay_state, STEP_CONFIG), decode_builder
+        )
         # Building the replay step's args rewrites the schedule the graph captured instead of making a new one.
         assert replay_att_state.schedule is captured_schedule
         state.copy_for_cuda_graph(replay_state)

@@ -5,6 +5,7 @@ import torch
 
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
+from lightllm.common.basemodel.infer_struct import GraphMode
 
 
 @pytest.mark.parametrize("capture", [False, True], ids=["eager", "capture"])
@@ -18,7 +19,7 @@ def test_pre_layer_decode_uses_current_graph_flag(monkeypatch: pytest.MonkeyPatc
     layer = layer_class.__new__(layer_class)
     layer.hc_mult = 4
     state = DeepseekV4InferStateInfo()
-    state.is_cuda_graph_capture = capture
+    state.graph_mode = GraphMode.CAPTURE if capture else GraphMode.EAGER
     hidden = torch.ones((1, 8))
     state.mtp_draft_input_hiddens = hidden
     monkeypatch.setattr(pre_layer_infer.LlamaMultimodalPreLayerInfer, "token_forward", lambda *args: hidden)

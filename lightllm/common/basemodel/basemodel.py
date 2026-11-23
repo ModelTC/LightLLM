@@ -12,7 +12,7 @@ from typing import final, List, Optional, TYPE_CHECKING
 from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
-from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
@@ -43,7 +43,7 @@ from lightllm.utils.torch_memory_saver_utils import (
     TorchMemorySaverWrapper,
     MemoryTag,
 )
-from .attention_runtime import AttentionBinder, build_attention_metadata, recurrent_mtp_state_index
+from .attention_runtime import AttentionRuntime
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -72,10 +72,6 @@ class TpPartBaseModel:
     infer_state_class = InferStateInfo
     is_hybrid_att_model = False
 
-    # Its layers' attention, created when the runtime starts; None for a model without attention states.
-    attention_build_contexts = None
-    requires_cpu_cache_sync = False
-
     def __init__(self, kvargs):
         self.args = get_env_start_args()
         self.run_mode = kvargs["run_mode"]
@@ -96,6 +92,9 @@ class TpPartBaseModel:
         self.graph_max_batch_size *= self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
 
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
+        # When graph covers the configured request length, it must also cover MTP's internal token margin.
+        if self.args.mtp_mode is not None and self.graph_max_len_in_batch >= self.args.max_req_total_len:
+            self.graph_max_len_in_batch = max(self.graph_max_len_in_batch, self.max_seq_length)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
         self.quant_type = kvargs.get("quant_type", "none")
         self.quant_cfg_path = kvargs.get("quant_cfg", None)
@@ -328,37 +327,27 @@ class TpPartBaseModel:
         return
 
     def _init_attention(self):
-        """Create each layer's Attention, so unsupported layer configs fail before warmup."""
-        self.attention_build_contexts = None
-        self.requires_cpu_cache_sync = False
+        """Create the model's AttentionRuntime and bind each layer's implementations.
+
+        Runs after KV allocation and before warmup, so unsupported layer configs fail at load time.
+        """
+        self.attention_runtime = runtime = AttentionRuntime(self)
         role = self.att_state_role
         manager = self.att_state_manager
         if not (manager.get_full_attention_states(role) or manager.get_bounded_attention_states(role)):
-            # FFN-only models need no attention.
+            # FFN-only models have no attention to bind.
             return
-        attention = AttentionBinder(self)
-        self.req_to_mtp_state_index = recurrent_mtp_state_index(self)
         for layer in self.layers_infer:
-            spec = layer.attention_spec(self)
-            layer.prefill_impl, layer.decode_impl = attention.bind(spec)
-        self.attention_build_contexts = attention.contexts
-        for phase, contexts in self.attention_build_contexts.items():
-            backends = [entry.backend for entry in contexts.values()]
+            layer.prefill_impl, layer.decode_impl = runtime.bind(layer.attention_spec(self))
+        for phase in runtime.state_builders:
             logger.info(
-                f"{self.att_state_role} {phase} attention backends: {[backend.get_name() for backend in backends]}"
+                f"{role} {phase} attention backends: {[backend.get_name() for backend in runtime.backends(phase)]}"
             )
-            self.requires_cpu_cache_sync |= any(backend.requires_cpu_cache_sync() for backend in backends)
 
-    def prepare_attention(self, infer_state: InferStateInfo) -> dict:
-        """Build one state per compatible set of layers for this microbatch."""
-        if self.attention_build_contexts is None:
-            return {}
-        phase = "prefill" if infer_state.is_prefill else "decode"
-        contexts = self.attention_build_contexts[phase]
-        if not contexts:
-            return {}
-        metadata = build_attention_metadata(infer_state, self, req_to_mtp_state_index=self.req_to_mtp_state_index)
-        return {key: entry.backend.build(metadata, entry.context) for key, entry in contexts.items()}
+    @property
+    def requires_cpu_cache_sync(self) -> bool:
+        """Whether some attention kernel of this model must not overlap CPU cache copies on the GPU."""
+        return self.attention_runtime.requires_cpu_cache_sync()
 
     def _align_decode_batch_size(self, batch_size: int) -> int:
         alignment = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
@@ -367,10 +356,6 @@ class TpPartBaseModel:
         return triton.cdiv(batch_size, alignment) * alignment
 
     def _init_cudagraph(self):
-        # When graph covers the configured request length, it must also cover MTP's internal token margin.
-        if self.args.mtp_mode is not None and self.graph_max_len_in_batch >= self.args.max_req_total_len:
-            self.graph_max_len_in_batch = max(self.graph_max_len_in_batch, self.max_seq_length)
-
         decode_tokens_per_request = self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
         cuda_graph_grow_step_size = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
         self.graph = (
@@ -436,8 +421,20 @@ class TpPartBaseModel:
             b_seq_len=model_input.b_seq_len,
         )
 
-    def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
+    def _create_inferstate(
+        self,
+        model_input: ModelInput,
+        microbatch_index: int = 0,
+        graph_mode: GraphMode = GraphMode.EAGER,
+        build_attention: bool = True,
+    ) -> InferStateInfo:
+        """Create the step's InferStateInfo with its index tensors and attention states.
+
+        graph_mode says how the step runs, since backends prepare graph capture, replay and eager
+        steps differently. build_attention=False is for steps whose layers only write the KV cache.
+        """
         infer_state = self.infer_state_class()
+        infer_state.graph_mode = graph_mode
         infer_state.hidden_collector = self.hidden_collector_prototype.new_instance()
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
@@ -474,6 +471,10 @@ class TpPartBaseModel:
 
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
+
+        infer_state.init_some_extra_state(self)
+        if build_attention:
+            infer_state.att_states = self.attention_runtime.prepare(infer_state)
         return infer_state
 
     def _create_padded_decode_model_input(self, model_input: ModelInput, new_batch_size: int):
@@ -639,8 +640,6 @@ class TpPartBaseModel:
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
 
-        infer_state.init_some_extra_state(self)
-        infer_state.att_states = self.prepare_attention(infer_state)
         model_output = self._context_forward(infer_state=infer_state)
 
         model_output = self._create_unpad_prefill_model_output(
@@ -682,25 +681,18 @@ class TpPartBaseModel:
             batch_size=infer_batch_size,
             max_len_in_batch=infer_max_kv_seq_len,
         )
-        need_capture = False
+        graph_mode = GraphMode.EAGER
         if use_cuda_graph:
             infer_batch_size = self.graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
-            need_capture = self.graph.need_capture(infer_batch_size)
+            graph_mode = GraphMode.CAPTURE if self.graph.need_capture(infer_batch_size) else GraphMode.REPLAY
 
         model_input = self._create_padded_decode_model_input(model_input=model_input, new_batch_size=infer_batch_size)
-        infer_state = self._create_inferstate(model_input)
-        # attention backend 会根据执行方式准备 capture、replay 或 eager 状态，
-        # 因此必须在 prepare_attention 之前完成赋值。
-        infer_state.is_cuda_graph_capture = need_capture
-        infer_state.is_cuda_graph_replay = use_cuda_graph and not need_capture
-        infer_state.init_some_extra_state(self)
-        infer_state.att_states = self.prepare_attention(infer_state)
+        infer_state = self._create_inferstate(model_input, graph_mode=graph_mode)
 
-        if use_cuda_graph:
-            if need_capture:
-                model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
-            else:
-                model_output: ModelOutput = self.graph.replay(infer_state)
+        if graph_mode is GraphMode.CAPTURE:
+            model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
+        elif graph_mode is GraphMode.REPLAY:
+            model_output: ModelOutput = self.graph.replay(infer_state)
         else:
             model_output = self._token_forward(infer_state)
 
@@ -794,7 +786,7 @@ class TpPartBaseModel:
         del post_output
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
-        if infer_state.is_cuda_graph_capture:
+        if infer_state.graph_mode is GraphMode.CAPTURE:
             model_output.to_no_ref_tensor()
 
         return model_output
@@ -839,12 +831,7 @@ class TpPartBaseModel:
         )
 
         infer_state0 = self._create_inferstate(model_input0, 0)
-        infer_state0.init_some_extra_state(self)
-        infer_state0.att_states = self.prepare_attention(infer_state0)
-
         infer_state1 = self._create_inferstate(model_input1, 1)
-        infer_state1.init_some_extra_state(self)
-        infer_state1.att_states = self.prepare_attention(infer_state1)
 
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
@@ -902,17 +889,9 @@ class TpPartBaseModel:
             need_capture = self.graph.need_capture(infer_batch_size)
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
-            infer_state0 = self._create_inferstate(padded_model_input0, 0)
-            infer_state0.is_cuda_graph_capture = need_capture
-            infer_state0.is_cuda_graph_replay = not need_capture
-            infer_state0.init_some_extra_state(self)
-            infer_state0.att_states = self.prepare_attention(infer_state0)
-
-            infer_state1 = self._create_inferstate(padded_model_input1, 1)
-            infer_state1.is_cuda_graph_capture = need_capture
-            infer_state1.is_cuda_graph_replay = not need_capture
-            infer_state1.init_some_extra_state(self)
-            infer_state1.att_states = self.prepare_attention(infer_state1)
+            graph_mode = GraphMode.CAPTURE if need_capture else GraphMode.REPLAY
+            infer_state0 = self._create_inferstate(padded_model_input0, 0, graph_mode=graph_mode)
+            infer_state1 = self._create_inferstate(padded_model_input1, 1, graph_mode=graph_mode)
 
             if need_capture:
                 model_output0, model_output1 = self.graph.capture_decode(
@@ -932,12 +911,7 @@ class TpPartBaseModel:
             model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(model_input0, 0)
-            infer_state0.init_some_extra_state(self)
-            infer_state0.att_states = self.prepare_attention(infer_state0)
-
             infer_state1 = self._create_inferstate(model_input1, 1)
-            infer_state1.init_some_extra_state(self)
-            infer_state1.att_states = self.prepare_attention(infer_state1)
 
             model_output0, model_output1 = self._overlap_tpsp_token_forward(infer_state0, infer_state1=infer_state1)
             model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
@@ -1042,7 +1016,7 @@ class TpPartBaseModel:
         model_output1 = self._create_model_output(post_output1, infer_state1)
         del post_output, post_output1
 
-        if infer_state.is_cuda_graph_capture:
+        if infer_state.graph_mode is GraphMode.CAPTURE:
             model_output.to_no_ref_tensor()
             model_output1.to_no_ref_tensor()
 

@@ -12,8 +12,8 @@ import torch
 
 from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparseDecodeBackend
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
-from lightllm.common.basemodel.attention_runtime import build_attention_metadata
-from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, build_attention_metadata
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 
 pytestmark = [
@@ -28,13 +28,13 @@ SLOTS, TOPK_WIDTH, SCALE = 8192, 2176, 0.0625
 
 
 def make_backend():
-    """A GLM-5 FP8 layer group's decode step builder, with the model fields build_attention_metadata reads."""
+    """A GLM-5 FP8 layer group's decode step builder, with the model's step config."""
     pytest.importorskip("flash_mla")
     from unit_tests.models.glm5_next.test_fp8_kv import _layer_config
 
     config = _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), SCALE)
     return SimpleNamespace(
-        model=SimpleNamespace(graph_max_len_in_batch=SLOTS, mtp_manager=None),
+        step_config=AttentionStepConfig(cuda_graph_max_kv_seq_len=SLOTS),
         decode_step_builder=FlashMLASparseDecodeBackend.create_build_context(config, None),
     )
 
@@ -52,7 +52,7 @@ def make_infer(lengths, *, capture=False, replay=False, microbatch=0):
     infer.max_kv_seq_len, infer.total_token_num = max(lengths), sum(lengths)
     infer.max_q_seq_len = 1
     infer.req_manager = SimpleNamespace(req_to_token_indexs=None, HOLD_REQUEST_ID=len(lengths) + 1)
-    infer.is_cuda_graph_capture, infer.is_cuda_graph_replay = capture, replay
+    infer.graph_mode = GraphMode.CAPTURE if capture else GraphMode.REPLAY if replay else GraphMode.EAGER
     infer.microbatch_index = microbatch
     (
         infer.b_q_seq_len,
@@ -69,7 +69,7 @@ def init_decode_state(backend, infer):
     from unit_tests.models.glm5_next.test_fp8_kv import _decode
 
     att_state = FlashMLASparseDecodeBackend.build(
-        build_attention_metadata(infer, backend.model), backend.decode_step_builder
+        build_attention_metadata(infer, backend.step_config), backend.decode_step_builder
     )
     return SimpleNamespace(att_state=att_state, decode_att=lambda q, kv, params: _decode(att_state, q, kv, params))
 

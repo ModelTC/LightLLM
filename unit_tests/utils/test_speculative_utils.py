@@ -111,11 +111,6 @@ def test_model_selects_causality(monkeypatch, mtp_mode, is_draft_model, expected
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_triton_mtp_decode_step_builds_group_markers():
-    model = SimpleNamespace(
-        is_mtp_draft_model=False,
-        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 2),
-        req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
-    )
     infer_state = InferStateInfo()
     infer_state.is_prefill = False
     infer_state.batch_size = 4
@@ -125,7 +120,9 @@ def test_triton_mtp_decode_step_builds_group_markers():
     infer_state.req_manager = SimpleNamespace(
         req_to_token_indexs=torch.zeros(8, 8, dtype=torch.int32), HOLD_REQUEST_ID=-1
     )
-    batch = attention_groups_module.build_attention_metadata(infer_state, model, lambda: False)
+    # Fixed-layout speculative decode: three rows per request.
+    step_config = attention_groups_module.AttentionStepConfig(decode_rows_per_request=3)
+    batch = attention_groups_module.build_attention_metadata(infer_state, step_config)
     att_state = TritonGQADecodeBackend.build(batch, TritonGQADecodeBuildContext())
 
     assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]

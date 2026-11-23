@@ -249,7 +249,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         _o = tensor_to_no_ref_tensor(o)
 
         def gdn_prefill_func(new_infer_state: "Qwen3NextInferStateInfo"):
-            # 通过 new_infer_state.att_states 读取 model.prepare_attention() 为本步构造的
+            # 通过 new_infer_state.att_states 读取 model._create_inferstate() 为本步构造的
             # attention state（含 padding 请求的 buffer idx），而不是 capture 时的 attention state。
             inputs = self._gdn_layer_inputs(_mixed_qkvzba, new_infer_state, layer_weight)
             tmp_o = self._gdn_attention(inputs, new_infer_state, prefill=True)
