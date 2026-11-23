@@ -55,10 +55,12 @@ profile 的 ``wheel`` 和 ``requirements`` 可以是本地文件或 HTTPS URL，
 
 .. code-block:: console
 
-    $ uv build
+    $ uv build --sdist
+    $ uv build --wheel
     $ uv pip install dist/lightllm-1.2.0-py3-none-any.whl
 
-``uv build`` 还会从源码包构建 wheel，以验证源码包的完整性。
+用 ``uv build --wheel`` 直接从源码目录构建 wheel。uv 解包源码包时会拒绝
+算子配置中带冒号的路径。
 包含本次修改的版本发布后，用户即可使用 ``uv pip install lightllm==<发布版本>``。
 已有的旧版 PyPI 包不一定包含这个命令入口和依赖声明。
 

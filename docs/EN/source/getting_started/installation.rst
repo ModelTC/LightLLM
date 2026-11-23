@@ -39,13 +39,15 @@ To deliver an installable artifact:
 
 .. code-block:: console
 
-    $ uv build
+    $ uv build --sdist
+    $ uv build --wheel
     $ uv pip install dist/lightllm-1.2.0-py3-none-any.whl
 
-``uv build`` builds the wheel from the source distribution as well. After a
-release containing these changes is published, users can install its version
-with ``uv pip install lightllm==<release-version>``. Older PyPI releases do not
-necessarily contain this CLI or dependency metadata.
+Build the wheel directly from the checkout with ``uv build --wheel``. uv's
+source archive extractor rejects colons in the bundled kernel configuration
+paths. After a release containing these changes is published, users can install
+its version with ``uv pip install lightllm==<release-version>``. Older PyPI
+releases do not necessarily contain this CLI or dependency metadata.
 
 The base installation includes PyTorch/Triton kernels and the SGLang kernels
 required by Qwen3.5 linear attention. Optional FlashInfer, standalone FlashMLA,
