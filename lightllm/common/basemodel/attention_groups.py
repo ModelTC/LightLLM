@@ -166,7 +166,8 @@ def step_builder_context(model: "TpPartBaseModel") -> StepBuilderContext:
 @dataclass
 class _Group:
     name: str
-    backends: dict[str, type[AttentionBackend]]
+    # None for a phase in which the group's layers do not attend.
+    backends: dict[str, Optional[type[AttentionBackend]]]
     # The layer config of the group's first layer per phase; its step_builder_key fields are the group's.
     layer_configs: dict[str, Any]
     step_builders: dict[str, AttentionStepBuilder] = field(default_factory=dict)
@@ -196,11 +197,15 @@ class AttentionGroups:
             logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
 
     def _requested(self, phase: str) -> str:
+        if self.model.att_implementation is not None:
+            return self.model.att_implementation
         # The first value of --llm_{prefill,decode}_att_backend selects full-attention families.
         args = self.model.args
         return (args.llm_prefill_att_backend if phase == "prefill" else args.llm_decode_att_backend)[0]
 
-    def _select(self, phase: str, layer_config: Any) -> selector.Selection:
+    def _select(self, phase: str, layer_config: Any) -> Optional[selector.Selection]:
+        if layer_config is None:
+            return None
         key = (phase, layer_config)
         selection = self._selections.get(key)
         if selection is None:
@@ -216,34 +221,42 @@ class AttentionGroups:
         return selection
 
     def create_attention(self, prefill_config: Any, decode_config: Any) -> Attention:
-        """Choose and construct the layer's impls and add it to the group of its step builders."""
+        """Choose and construct the layer's impls and add it to the group of its step builders.
+
+        A None layer config means the layer does not attend in that phase.
+        """
         configs = {"prefill": prefill_config, "decode": decode_config}
         selections = {phase: self._select(phase, config) for phase, config in configs.items()}
-        backends = {phase: selection.backend for phase, selection in selections.items()}
-        key = tuple((backends[phase], backends[phase].step_builder_key(configs[phase])) for phase in selector.PHASES)
+        backends = {phase: None if sel is None else sel.backend for phase, sel in selections.items()}
+        key = tuple(
+            (backends[phase], None if backends[phase] is None else backends[phase].step_builder_key(configs[phase]))
+            for phase in selector.PHASES
+        )
         group = self._groups.get(key)
         if group is None:
-            name = f"{backends['prefill'].get_name()}+{backends['decode'].get_name()}"
+            name = "+".join("-" if backend is None else backend.get_name() for backend in backends.values())
             same_name = sum(existing.name.split("#")[0] == name for existing in self._groups.values())
             group = self._groups[key] = _Group(
                 name=f"{name}#{same_name}" if same_name else name, backends=backends, layer_configs=configs
             )
-        return Attention(group.name, selections["prefill"].impl, selections["decode"].impl)
+        impls = {phase: None if sel is None else sel.impl for phase, sel in selections.items()}
+        return Attention(group.name, impls["prefill"], impls["decode"])
 
     @property
-    def groups(self) -> dict[str, dict[str, type[AttentionBackend]]]:
-        """Each group's name and its backend per phase."""
+    def groups(self) -> dict[str, dict[str, Optional[type[AttentionBackend]]]]:
+        """Each group's name and its backend per phase (None where its layers do not attend)."""
         return {group.name: dict(group.backends) for group in self._groups.values()}
 
     @property
     def requires_cpu_cache_sync(self) -> bool:
         backends = (backend for group in self._groups.values() for backend in group.backends.values())
-        return any(backend.requires_cpu_cache_sync() for backend in backends)
+        return any(backend.requires_cpu_cache_sync() for backend in backends if backend is not None)
 
     def build_step_args(self, infer_state: "InferStateInfo") -> dict[str, Any]:
-        """Build every group's step args for this step, from one AttentionBatch."""
-        if not self._groups:
-            return {}
+        """Build, from one AttentionBatch, the step args of every group whose layers attend in this step's phase."""
         phase = "prefill" if infer_state.is_prefill else "decode"
+        groups = [group for group in self._groups.values() if group.backends[phase] is not None]
+        if not groups:
+            return {}
         batch = build_attention_batch(infer_state, self.model)
-        return {group.name: group.step_builder(phase, self.ctx).build(batch) for group in self._groups.values()}
+        return {group.name: group.step_builder(phase, self.ctx).build(batch) for group in groups}

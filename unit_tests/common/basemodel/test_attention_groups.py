@@ -40,6 +40,7 @@ def fake_model(**args):
         tp_world_size_=1,
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
+        att_implementation=None,
     )
 
 
@@ -171,6 +172,32 @@ def test_step_builders_are_created_per_group_and_phase_on_first_build(fake_famil
     assert sorted(created) == [("fake_decode", 1), ("fake_decode", 2), ("fake_prefill", 1), ("fake_prefill", 2)]
     assert {args.backend for args in decode.att_step_args.values()} == {"fake_decode"}
     assert groups.requires_cpu_cache_sync
+
+
+def test_decode_only_layers_build_no_prefill_step_args(fake_family):
+    groups = fake_family
+    attn = groups.create_attention(None, FakeConfig(key=1))
+    assert attn.group == "-+fake_decode" and attn.prefill_impl is None
+    assert groups.groups == {attn.group: {"prefill": None, "decode": FakeDecode}}
+
+    prefill = step(prefill=True)
+    prefill.att_groups = groups
+    prefill.init_att_state()
+    assert prefill.att_step_args == {} and created == []
+    with pytest.raises(RuntimeError, match="do not attend in prefill"):
+        attn.prefill(None, None, out=torch.empty(1))
+
+    decode = step(prefill=False)
+    decode.att_groups = groups
+    decode.init_att_state()
+    assert set(decode.att_step_args) == {attn.group} and created == [("fake_decode", 1)]
+
+
+def test_model_implementation_overrides_the_command_line():
+    model = fake_model(llm_prefill_att_backend=["fa3"], llm_decode_att_backend=["flashinfer"])
+    model.att_implementation = "triton"
+    attn = AttentionGroups(model).create_attention(gqa(has_alibi=True, num_kv_heads=8), gqa(num_kv_heads=8))
+    assert attn.group == "triton_gqa_prefill+triton_gqa_decode"
 
 
 def test_models_without_layers_build_no_step_args(fake_family):
