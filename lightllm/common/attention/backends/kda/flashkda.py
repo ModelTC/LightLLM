@@ -12,6 +12,19 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+def import_flash_kda_fwd() -> Callable:
+    """Import FlashKDA's fwd; the ImportError says how to install it."""
+    try:
+        from flash_kda import fwd
+    except (ImportError, OSError) as exc:
+        raise ImportError(
+            "The flashkda prefill backend requires FlashKDA. Install it with "
+            "`pip install --no-build-isolation git+https://github.com/MoonshotAI/FlashKDA.git` "
+            "and build it for the current GPU and PyTorch/CUDA versions."
+        ) from exc
+    return fwd
+
+
 def load_flash_kda_fwd(requested: str, *, dtype: torch.dtype, ssm_dtype: torch.dtype) -> Optional[Callable]:
     """Return FlashKDA's fwd for the requested prefill provider, or None to use Triton.
 
@@ -31,16 +44,12 @@ def load_flash_kda_fwd(requested: str, *, dtype: torch.dtype, ssm_dtype: torch.d
     ):
         return None
     try:
-        from flash_kda import fwd
-    except (ImportError, OSError) as exc:
+        fwd = import_flash_kda_fwd()
+    except ImportError as exc:
         if requested == "auto":
-            logger.info("KDA prefill uses Triton because FlashKDA could not be loaded: %s", exc)
+            logger.info("KDA prefill uses Triton because FlashKDA could not be loaded: %s", exc.__cause__)
             return None
-        raise ImportError(
-            "The flashkda prefill backend requires FlashKDA. Install it with "
-            "`pip install --no-build-isolation git+https://github.com/MoonshotAI/FlashKDA.git` "
-            "and build it for the current GPU and PyTorch/CUDA versions."
-        ) from exc
+        raise
     logger.info(
         "KDA prefill attention backend: %s.", "automatic FlashKDA/Triton" if requested == "auto" else "flashkda"
     )

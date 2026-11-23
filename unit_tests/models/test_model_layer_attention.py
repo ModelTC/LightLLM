@@ -80,7 +80,7 @@ def test_starcoder_layers_run_multi_query_attention_without_alibi(runtime_start_
     from lightllm.models.starcoder.layer_infer.transformer_layer_infer import StarcoderTransformerLayerInfer
     from lightllm.models.starcoder.model import StarcoderTpPartModel
 
-    assert StarcoderTpPartModel.uses_attention_groups and StarcoderTpPartModel.att_implementation is None
+    assert StarcoderTpPartModel.att_implementation is None
     layer = StarcoderTransformerLayerInfer(0, {"num_attention_heads": H, "n_embed": H * D, "layer_norm_epsilon": 1e-5})
     layer.init_attention(make_model(FakeState(1)))
     assert layer_configs(layer) == (config(num_kv_heads=1),) * 2

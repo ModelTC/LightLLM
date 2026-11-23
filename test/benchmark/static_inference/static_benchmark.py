@@ -1231,10 +1231,9 @@ def init_deferred_cudagraph(args: SimpleNamespace, cases: Sequence[BenchmarkCase
             flush=True,
         )
     model.disable_cudagraph = False
-    # Attention backends may size persistent graph buffers during construction.
-    # Rebuild them after replacing the temporary profile-time batch limit.
-    model._init_att_backend()
-    model._init_att_backend1()
+    # Attention step builders size persistent graph buffers from the model's capacities.
+    # Recreate the model's attention after replacing the temporary profile-time batch limit.
+    model._init_attention()
     torch.cuda.empty_cache()
     model._init_cudagraph()
 
@@ -1309,8 +1308,7 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
                 batch_size *= draft.mtp_manager.get_decode_tokens_per_request(True)
                 draft.graph_max_batch_size = draft._align_decode_batch_size(batch_size)
                 draft.disable_cudagraph = False
-                draft._init_att_backend()
-                draft._init_att_backend1()
+                draft._init_attention()
                 draft._init_cudagraph()
         token_source = TokenSource(args)
         executor = StaticBenchmarkExecutor(args, model, draft_models, token_source)

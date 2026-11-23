@@ -178,9 +178,8 @@ class AttentionImpl(ABC, Generic[LayerConfig, StepArgs, LayerInputs]):
 class AttentionBackend(ABC):
     """Describe one attention implementation for one family and phase by naming its step builder and impl.
 
-    Not to be confused with lightllm.common.basemodel.attention.base_att.BaseAttBackend, the
-    model-facing adapter that builds batches, layer configs and layer inputs and calls step
-    builders and impls for models not yet using lightllm.common.basemodel.attention_groups.
+    Models reach implementations through lightllm.common.basemodel.attention_groups, which chooses
+    them per layer config (lightllm.common.attention.selector) and owns their step builders.
     """
 
     @staticmethod

@@ -1,6 +1,5 @@
 import dataclasses
 import json
-import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -14,7 +13,7 @@ from lightllm.common.attention.backends.gqa.flashinfer import (
     FlashInferGQADecodeBackend,
     FlashInferGQAPrefillBackend,
 )
-from lightllm.common.basemodel.attention.base_att import AttControl, BaseAttBackend
+from unit_tests.common.attention.backends.groups_runner import GroupsRunner
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 
@@ -180,59 +179,51 @@ def test_impls_reject_unsupported_specs(fields):
 
 
 @pytest.mark.parametrize("phase", ["prefill", "decode"])
-@pytest.mark.parametrize("causal,att_control", [(False, AttControl()), (True, AttControl(use_att_sink=True))])
-def test_adapter_rejects_attention_flashinfer_cannot_run(phase, causal, att_control):
-    # The adapter must forward causality and sinks into the layer config so the impl rejects them.
-    from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferDecodeAttState, FlashInferPrefillAttState
+@pytest.mark.parametrize("fields", [{"causal": False}, {"has_sinks": True}])
+def test_layers_flashinfer_cannot_run_are_rejected_when_selected(phase, fields):
+    from lightllm.common.attention import selector
 
-    backend = SimpleNamespace(
-        kv_quant=None,
-        uses_causal_attention=lambda: causal,
-        get_attention_impl=lambda backend_cls, layer_config: backend_cls.get_impl_cls()(layer_config),
-    )
-    owner = InferStateInfo()
-    state_cls = FlashInferPrefillAttState if phase == "prefill" else FlashInferDecodeAttState
-    state = state_cls(backend=backend, _infer_state_weak_ref=weakref.ref(owner))
-    state.causal = backend.uses_causal_attention()
-    q = torch.empty(2, 8, 64, device="cuda", dtype=torch.bfloat16)
-    k = v = torch.empty(16, 2, 64, device="cuda", dtype=torch.bfloat16)
-    run = state.prefill_att if phase == "prefill" else state.decode_att
-    with pytest.raises(NotImplementedError, match="FlashInfer GQA"):
-        run(q=q, k=k, v=v, att_control=att_control)
+    layer_config = GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16, **fields)
+    with pytest.raises(ValueError, match="FlashInfer GQA"):
+        selector.select(layer_config, phase, "flashinfer")
 
 
-# ---- adapter through LightLLM's CudaGraph ----
+# ---- a layer group through LightLLM's CudaGraph ----
 
 
 @pytest.fixture
 def start_args(monkeypatch):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
-    def configure(overlap: bool) -> None:
+    def configure(overlap: bool) -> dict:
         args = {f.name: getattr(StartArgs(), f.name) for f in dataclasses.fields(StartArgs)}
         args.update(enable_decode_microbatch_overlap=overlap, enable_torch_memory_saver=False)
         monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(args))
         get_env_start_args.cache_clear()
+        return args
 
     yield configure
     get_env_start_args.cache_clear()
 
 
 class _Model:
-    """Hashable stub: BaseAttBackend keys its per-model singleton by the model object."""
+    """The model fields AttentionGroups reads; its layers run FlashInfer."""
 
-    def __init__(self, page_size: int, dtype: torch.dtype) -> None:
-        self.args = SimpleNamespace(page_size=page_size, flashinfer_workspace_size=64)
-        self.config = {"num_attention_heads": 8, "num_key_value_heads": 2, "hidden_size": 512}
+    def __init__(self, args, page_size: int) -> None:
+        backends = {"llm_prefill_att_backend": ["flashinfer"], "llm_decode_att_backend": ["flashinfer"]}
+        self.args = SimpleNamespace(
+            **{**args, **backends, "page_size": page_size, "flashinfer_workspace_size": 64, "running_max_req_size": 2}
+        )
         self.max_seq_length = self.graph_max_len_in_batch = 512
         self.graph_max_batch_size = 2
-        self.data_type = dtype
+        self.tp_world_size_ = 1
         self.is_mtp_draft_model = False
+        self.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _: 0)
 
 
 class _Microbatch:
-    def __init__(self, backend, page_size, dtype, seed):
-        self.backend = backend
+    def __init__(self, runner, page_size, dtype, seed):
+        self.runner = runner
         self.token_map = paged_token_map(2, page_size, seed)
         generator = torch.Generator(device="cuda").manual_seed(seed)
         kv = torch.randn(1024, 4, 64, device="cuda", dtype=dtype, generator=generator)
@@ -249,12 +240,11 @@ class _Microbatch:
         state.b_seq_len = torch.tensor(lengths, device="cuda", dtype=torch.int32)
         state.max_kv_seq_len, state.total_token_num = max(lengths), sum(lengths)
         state.req_manager = SimpleNamespace(req_to_token_indexs=self.token_map)
-        state.decode_att_state = self.backend.create_att_decode_state(infer_state=state)
-        state.init_att_state()
+        self.runner.step(state)
         return state
 
     def forward(self, state):
-        return state.decode_att_state.decode_att(q=self.q, k=self.k, v=self.v)
+        return self.runner.run_gqa(state, self.q, self.k, self.v)
 
     def check(self, actual, lengths):
         expected = reference(self.q, self.k, self.v, self.token_map, [1, 0], lengths, [x - 1 for x in lengths])
@@ -263,33 +253,26 @@ class _Microbatch:
 
 @pytest.mark.parametrize("overlap", [False, True])
 @pytest.mark.parametrize("page_size", [1, 16])
-def test_adapter_replays_through_cuda_graph(start_args, overlap, page_size):
-    from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferAttBackend
+def test_layer_group_replays_through_cuda_graph(start_args, overlap, page_size):
     from lightllm.common.basemodel.cuda_graph import CudaGraph
 
-    start_args(overlap=overlap)
-    model = _Model(page_size, torch.bfloat16)
-    backend = FlashInferAttBackend(model=model)
-    try:
-        graph = CudaGraph(2, 2, 2, max_batch_size=2, max_len_in_batch=512)
-        mbs = [_Microbatch(backend, page_size, torch.bfloat16, seed) for seed in (2, 3)]
-        if overlap:
-            graph.capture_decode(
-                lambda s0, s1: (mbs[0].forward(s0), mbs[1].forward(s1)),
-                mbs[0].state((33, 17), 0, capture=True),
-                mbs[1].state((5, 40), 1, capture=True),
-            )
-            # Microbatches replay with different lengths, so a shared wrapper or buffer would mix them up.
-            for lengths0, lengths1 in [((129, 65), (2, 300)), ((300, 257), (64, 1))]:
-                out0, out1 = graph.replay(
-                    mbs[0].state(lengths0, 0, replay=True), mbs[1].state(lengths1, 1, replay=True)
-                )
-                mbs[0].check(out0, lengths0)
-                mbs[1].check(out1, lengths1)
-        else:
-            mb = mbs[0]
-            graph.capture_decode(mb.forward, mb.state((33, 17), 0, capture=True))
-            for lengths in [(129, 65), (300, 257), (1, 2)]:
-                mb.check(graph.replay(mb.state(lengths, 0, replay=True)), lengths)
-    finally:
-        BaseAttBackend._instances.pop((FlashInferAttBackend, model), None)
+    config = GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16)
+    runner = GroupsRunner(_Model(start_args(overlap=overlap), page_size), config, config)
+    graph = CudaGraph(2, 2, 2, max_batch_size=2, max_len_in_batch=512)
+    mbs = [_Microbatch(runner, page_size, torch.bfloat16, seed) for seed in (2, 3)]
+    if overlap:
+        graph.capture_decode(
+            lambda s0, s1: (mbs[0].forward(s0), mbs[1].forward(s1)),
+            mbs[0].state((33, 17), 0, capture=True),
+            mbs[1].state((5, 40), 1, capture=True),
+        )
+        # Microbatches replay with different lengths, so a shared wrapper or buffer would mix them up.
+        for lengths0, lengths1 in [((129, 65), (2, 300)), ((300, 257), (64, 1))]:
+            out0, out1 = graph.replay(mbs[0].state(lengths0, 0, replay=True), mbs[1].state(lengths1, 1, replay=True))
+            mbs[0].check(out0, lengths0)
+            mbs[1].check(out1, lengths1)
+    else:
+        mb = mbs[0]
+        graph.capture_decode(mb.forward, mb.state((33, 17), 0, capture=True))
+        for lengths in [(129, 65), (300, 257), (1, 2)]:
+            mb.check(graph.replay(mb.state(lengths, 0, replay=True)), lengths)

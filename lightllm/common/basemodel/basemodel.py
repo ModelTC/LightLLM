@@ -43,8 +43,6 @@ from lightllm.utils.torch_memory_saver_utils import (
     TorchMemorySaverWrapper,
     MemoryTag,
 )
-from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
-from .attention import BaseAttBackend
 from .attention_groups import AttentionGroups
 
 if TYPE_CHECKING:
@@ -74,11 +72,8 @@ class TpPartBaseModel:
     infer_state_class = InferStateInfo
     is_hybrid_att_model = False
 
-    # Whether its layers run full attention through AttentionGroups, created when the runtime starts.
-    # Models still on the adapters in lightllm.common.basemodel.attention keep False until migrated;
-    # their prefill_att_backend/decode_att_backend slots are then unused.
-    uses_attention_groups = False
-    att_groups: AttentionGroups = None
+    # Its layers' attention, created when the runtime starts; None for a model without attention states.
+    att_groups: Optional[AttentionGroups] = None
     # The attention implementation (lightllm.common.attention.selector) its full-attention layers use,
     # overriding the first value of --llm_prefill_att_backend/--llm_decode_att_backend; None follows them.
     att_implementation: Optional[str] = None
@@ -196,23 +191,10 @@ class TpPartBaseModel:
         self.req_manager.bind_hold_page(self.att_state_manager.full_att_allocator.hold_token_indices)
         self._check_mem_size()
         self._init_attention()
-        self._init_att_backend()
-        self._init_att_backend1()
         self._init_hidden_collector()
-        role = self.att_state_role
         if self.att_groups is not None:
             for name in self.att_groups.groups:
-                logger.info(f"{role} attention group (prefill+decode): {name}")
-        if self.prefill_att_backend is not None:
-            logger.info(
-                f"{role} prefill/decode attention: {type(self.prefill_att_backend).__name__} / "
-                f"{type(self.decode_att_backend).__name__}"
-            )
-        if self.prefill_att_backend1 is not None:
-            logger.info(
-                f"{role} prefill/decode attention1: {type(self.prefill_att_backend1).__name__} / "
-                f"{type(self.decode_att_backend1).__name__}"
-            )
+                logger.info(f"{self.att_state_role} attention group (prefill+decode): {name}")
 
         self._autotune_warmup()
         self._init_padded_req()
@@ -359,30 +341,12 @@ class TpPartBaseModel:
         self.att_groups = None
         role = self.att_state_role
         manager = self.att_state_manager
-        if not self.uses_attention_groups or not (
-            manager.get_full_attention_states(role) or manager.get_bounded_attention_states(role)
-        ):
+        if not (manager.get_full_attention_states(role) or manager.get_bounded_attention_states(role)):
             # FFN-only models need no attention.
             return
         self.att_groups = AttentionGroups(self)
         for layer in self.layers_infer:
             layer.init_attention(self)
-
-    def _init_att_backend(self):
-        role = self.att_state_role
-        if self.uses_attention_groups or not self.att_state_manager.get_full_attention_states(role):
-            # Models on AttentionGroups, FFN-only and linear-only models need no full-attention adapter.
-            self.prefill_att_backend = self.decode_att_backend = None
-            return
-        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(index=0)(model=self)
-        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0)(model=self)
-        return
-
-    def _init_att_backend1(self):
-        # self.prefill_att_backend1 是给后续有模型支持不同层用不同的att模块时，保留的扩展。
-        self.prefill_att_backend1: BaseAttBackend = None
-        self.decode_att_backend1: BaseAttBackend = None
-        return
 
     def _align_decode_batch_size(self, batch_size: int) -> int:
         alignment = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
@@ -499,28 +463,6 @@ class TpPartBaseModel:
 
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
-
-        if infer_state.is_prefill:
-            infer_state.prefill_att_state = (
-                self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
-                if self.prefill_att_backend is not None
-                else None
-            )
-            if self.prefill_att_backend1 is not None:
-                infer_state.prefill_att_state1 = self.prefill_att_backend1.create_att_prefill_state(
-                    infer_state=infer_state
-                )
-        else:
-            infer_state.decode_att_state = (
-                self.decode_att_backend.create_att_decode_state(infer_state=infer_state)
-                if self.decode_att_backend is not None
-                else None
-            )
-            if self.decode_att_backend1 is not None:
-                infer_state.decode_att_state1 = self.decode_att_backend1.create_att_decode_state(
-                    infer_state=infer_state
-                )
-
         return infer_state
 
     def _create_padded_decode_model_input(self, model_input: ModelInput, new_batch_size: int):

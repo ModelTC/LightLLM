@@ -1,4 +1,3 @@
-import weakref
 import collections
 import inspect
 import json
@@ -12,10 +11,10 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from lightllm.common.attention.backends.gqa import GQAKVScales
 from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeStepBuilder
-from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.triton import int8kv as state_module
-from lightllm.common.basemodel.attention.triton.int8kv import Int8kvTritonDecodeAttState
+from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeBackend
+from lightllm.common.basemodel.attention_groups import build_attention_batch
 from lightllm.common.attention.kernels.gqa.int8kv import (
     int8kv_flash_decoding_stage1 as stage1_module,
     int8kv_flash_decoding as decode_module,
@@ -31,7 +30,6 @@ from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len
 @pytest.fixture(autouse=True)
 def autotune_environment(monkeypatch):
     torch.manual_seed(42)
-    monkeypatch.setattr(state_module, "enable_diverse_mode_gqa_decode_fast_kernel", lambda: False)
     monkeypatch.delenv("LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN", raising=False)
     monkeypatch.setattr(Autotuner, "_autotune_warmup_kernel_type", None)
     monkeypatch.setattr(stage1_module, "get_triton_autotune_level", lambda: AutotuneLevel.ADAPTIVE_AUTOTUNE)
@@ -147,24 +145,27 @@ def test_decode_passes_saved_length_to_stage1(monkeypatch):
     infer_state.b_seq_len = inputs["B_seq_len"]
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"])
     infer_state.is_prefill = False
-    backend = SimpleNamespace(
-        model=SimpleNamespace(),
-        kv_quant="int8_group",
-        decode_step_builder=TritonQuantGQADecodeStepBuilder(),
-        get_attention_impl=lambda backend_cls, layer_config: backend_cls.get_impl_cls()(layer_config),
-        uses_causal_attention=lambda: True,
-    )
-    state = Int8kvTritonDecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer_state))
-    state.init_state()
-    state.infer_state.max_kv_seq_len = 32768
+    step_args = TritonQuantGQADecodeStepBuilder().build(build_attention_batch(infer_state, SimpleNamespace()))
+    infer_state.max_kv_seq_len = 32768
     calls = []
     monkeypatch.setattr(decode_module, "flash_decode_stage1", lambda **kwargs: calls.append(kwargs))
     monkeypatch.setattr(decode_module, "flash_decode_stage2", lambda **kwargs: None)
-    state.decode_att(
-        inputs["q"],
-        inputs["k"],
-        inputs["v"],
-        AttControl(kv_scales=GQAKVScales(k_scale=inputs["k_scale"], v_scale=inputs["v_scale"])),
+    q, k, v = inputs["q"], inputs["k"], inputs["v"]
+    kv_scales = GQAKVScales(k_scale=inputs["k_scale"], v_scale=inputs["v_scale"])
+    layer_config = GQALayerConfig(
+        num_heads=q.shape[1],
+        num_kv_heads=k.shape[1],
+        head_dim=q.shape[2],
+        dtype=q.dtype,
+        kv_quant="int8_group",
+        kv_quant_group_size=q.shape[2] // kv_scales.k_scale.shape[-1],
+    )
+    layer_inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
+    impl = TritonQuantGQADecodeBackend.get_impl_cls()(layer_config)
+    impl.forward(
+        step_args,
+        layer_inputs,
+        out=torch.empty_like(q),
         alloc_func=lambda shape, dtype, device: torch.empty(shape, dtype=dtype),
     )
     assert calls[0]["max_len_in_batch"] == 8193

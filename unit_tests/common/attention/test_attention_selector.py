@@ -182,3 +182,28 @@ def test_flashkda_names_the_kda_backends_of_the_state_kind(monkeypatch, name, re
     assert selector.select(config, "prefill", name).backend.get_name() == expected
     with pytest.raises(ValueError, match="not available"):
         selector.select(config, "decode", "flashkda")
+
+
+def test_importing_the_selector_loads_no_implementation(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    script = """
+import sys
+import lightllm.common.attention.selector
+impls = [name for name in sys.modules if name.startswith("lightllm.common.attention.backends.")
+         and name.rsplit(".", 1)[-1] not in ("backends", "gqa", "mla", "sparse_mla", "gdn", "kda")]
+assert not impls, impls
+"""
+    result = subprocess.run([sys.executable, "-c", script], cwd=root, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_a_named_implementation_loads_only_its_backends(monkeypatch):
+    loaded = []
+    real_load = selector._load
+    monkeypatch.setattr(selector, "_load", lambda path: loaded.append(path) or real_load(path))
+    selector.select(gqa(), "decode", "fa3")
+    assert loaded == ["lightllm.common.attention.backends.gqa.fa3:FA3GQADecodeBackend"]

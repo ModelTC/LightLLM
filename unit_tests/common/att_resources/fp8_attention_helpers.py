@@ -1,43 +1,65 @@
-"""Build FP8 GQA adapter states whose only replaced parts are the external FA3/FlashInfer kernels."""
+"""Run FP8 GQA attention whose only replaced parts are the external FA3/FlashInfer kernels."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeStepArgs, FA3GQAPrefillStepArgs
+from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+from lightllm.common.attention.backends.gqa.fa3 import (
+    FA3GQADecodeBackend,
+    FA3GQADecodeStepArgs,
+    FA3GQAPrefillBackend,
+    FA3GQAPrefillStepArgs,
+)
 from lightllm.common.attention.backends.gqa.flashinfer import (
     FlashInferGQABuilderConfig,
+    FlashInferGQADecodeBackend,
     FlashInferGQADecodeStepArgs,
+    FlashInferGQAPrefillBackend,
     FlashInferGQAPrefillStepArgs,
 )
+from lightllm.common.basemodel.attention_groups import gqa_kv_quant_fields
 
 
-def fp8_attention_state(
+class FP8Attention:
+    """One phase of FP8 GQA attention over given step args; call run(q, k, v, kv_scales, alloc_func)."""
+
+    def __init__(self, backend, kv_type: str, step_args) -> None:
+        self.backend, self.kv_type, self.step_args = backend, kv_type, step_args
+
+    def run(self, *, q, k, v, kv_scales, alloc_func=torch.empty):
+        # The layer config a layer creates from its cache scales when the model loads.
+        layer_config = GQALayerConfig(
+            num_heads=q.shape[1],
+            num_kv_heads=k.shape[1],
+            head_dim=q.shape[2],
+            dtype=q.dtype,
+            **gqa_kv_quant_fields(self.kv_type, kv_scales, q.shape[2]),
+        )
+        impl = self.backend.get_impl_cls()(layer_config)
+        inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
+        out = alloc_func(q.shape, dtype=q.dtype, device=q.device)
+        return impl.forward(self.step_args, inputs, out=out, alloc_func=alloc_func)
+
+
+def fp8_attention(
     monkeypatch: pytest.MonkeyPatch,
     *,
     kind: str,
     prefill: bool,
-    infer,
     observed: dict,
     heads: int,
     head_dim: int,
     requests: int,
 ):
-    """Return an adapter attention state for kind 'static_head' (FA3) or 'static_tensor' (FlashInfer).
+    """Return FP8Attention for kind 'static_head' (FA3) or 'static_tensor' (FlashInfer).
 
     The kernel records its keyword arguments in observed (plus 'q_scales' for the static q quantizer)
     and copies q to out. requests is the number of attention requests the step args describe.
     """
     import lightllm.utils.sgl_utils as sgl_utils
-    from lightllm.common.basemodel.attention.fa3 import fp as fa3_fp
-    from lightllm.common.basemodel.attention.fa3.fp8 import Fp8Fa3AttBackend
-    from lightllm.common.basemodel.attention.flashinfer import fp as fi_fp
-    from lightllm.common.basemodel.attention.flashinfer.fp8 import Fp8FlashInferAttBackend
     from lightllm.common.basemodel.triton_kernel.quantization import q_per_head_fp8_quant
-
-    def ref():
-        return infer
 
     if kind == "static_head":
 
@@ -51,10 +73,8 @@ def fp8_attention_state(
 
         monkeypatch.setattr(q_per_head_fp8_quant, "q_per_head_static_fp8_quant", quantize)
         monkeypatch.setattr(sgl_utils, "flash_attn_with_kvcache", attend)
-        state_cls = fa3_fp.Fa3PrefillAttState if prefill else fa3_fp.Fa3DecodeAttState
-        state = state_cls(backend=None, _infer_state_weak_ref=ref)
         step_args_cls, extra = (FA3GQAPrefillStepArgs, {}) if prefill else (FA3GQADecodeStepArgs, {"max_seqlen_k": 1})
-        state.step_args = step_args_cls(
+        step_args = step_args_cls(
             page_table=None,
             cache_seqlens=torch.ones(requests, dtype=torch.int32),
             cu_seqlens_q=torch.arange(requests + 1, dtype=torch.int32),
@@ -63,21 +83,15 @@ def fp8_attention_state(
             page_size=1,
             **extra,
         )
-        kv_quant = Fp8Fa3AttBackend.kv_quant
+        return FP8Attention(FA3GQAPrefillBackend if prefill else FA3GQADecodeBackend, "fp8kv_sph", step_args)
     else:
 
         def run(q, paged_kv_cache, k_scale, v_scale, out):
             observed.update(k_scale=k_scale, v_scale=v_scale)
             out.copy_(q)
 
-        state_cls = fi_fp.FlashInferPrefillAttState if prefill else fi_fp.FlashInferDecodeAttState
-        state = state_cls(backend=None, _infer_state_weak_ref=ref)
         config = FlashInferGQABuilderConfig(heads, heads, head_dim, 1, torch.bfloat16, torch.float8_e4m3fn)
         step_args_cls = FlashInferGQAPrefillStepArgs if prefill else FlashInferGQADecodeStepArgs
-        state.step_args = step_args_cls(wrapper=SimpleNamespace(run=run), config=config)
-        kv_quant = Fp8FlashInferAttBackend.kv_quant
-    state.causal = True
-    state.backend = SimpleNamespace(
-        kv_quant=kv_quant, get_attention_impl=lambda backend_cls, layer_config: backend_cls.get_impl_cls()(layer_config)
-    )
-    return state
+        step_args = step_args_cls(wrapper=SimpleNamespace(run=run), config=config)
+        backend = FlashInferGQAPrefillBackend if prefill else FlashInferGQADecodeBackend
+        return FP8Attention(backend, "fp8kv_spt", step_args)

@@ -487,14 +487,14 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
     for step, draft in enumerate(drafts):
         draft.prepare_attention_states()
         assert draft.att_state_manager is main.att_state_manager
-        draft._init_att_backend1()
         state = getattr(draft.att_state_manager, f"draft{step}_mla_packed_bf16_state")
         assert state is not main.att_state_manager.main_mla_packed_bf16_state
         assert not hasattr(draft, "full_att_state")
         assert state.storage is None
         assert state.config.logical_layer_groups == ((4 + step,),)
         assert state.state_name == f"draft{step}_mla_packed_bf16_state"
-        assert draft.prefill_att_backend1 is None and draft.decode_att_backend1 is None
+        # The native draft has no KDA layers, so it keeps no KDA state.
+        assert not hasattr(draft.att_state_manager, f"draft{step}_kda_conv_bf16_ssm_fp32_state")
         assert getattr(draft.att_state_manager, f"draft{step}_compressor_indexer_w4_s4_bf16_state").buffer.is_cuda
 
     # NoPE state initialization must not require a model-owned RoPE cache.

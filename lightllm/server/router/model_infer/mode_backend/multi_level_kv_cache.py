@@ -50,18 +50,6 @@ class MultiLevelKvCacheModule(object):
         if model.att_groups is not None and model.att_groups.requires_cpu_cache_sync:
             logger.info("MultiLevelKvCacheModule: an attention group requires synchronous CPU cache IO.")
             return True
-        att_backends = [
-            model.prefill_att_backend,
-            model.decode_att_backend,
-            model.prefill_att_backend1,
-            model.decode_att_backend1,
-        ]
-        for att_backend in att_backends:
-            if att_backend is not None and att_backend.requires_cpu_cache_sync:
-                logger.info(
-                    "MultiLevelKvCacheModule: %s requires synchronous CPU cache IO.", type(att_backend).__name__
-                )
-                return True
         logger.info("MultiLevelKvCacheModule: CPU cache load waits on a recorded event.")
         return False
 

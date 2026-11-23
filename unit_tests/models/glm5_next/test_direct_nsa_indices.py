@@ -4,13 +4,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
-from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.infer_struct import build_glm5_nsa_step
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
-from lightllm.common.basemodel.attention.nsa import fp8_glm5_next
+from lightllm.models.glm5_next import prefill_workspace
+from unit_tests.models.glm5_next.test_fp8_kv import _Fp8SparseAttention
 from lightllm.models.glm5_next.triton_kernel.kpool import expand_topk, prefill_nsa_params
 
 
@@ -92,29 +90,13 @@ def test_topk_direct_request_lookup_preserves_mtp_hold_and_strided_tables(dense)
     check(actual)
 
 
-@pytest.mark.parametrize("fp8", [False, True])
-def test_decode_aliases_infer_state_without_ragged_allocation(monkeypatch, fp8):
+def test_decode_aliases_infer_state_without_ragged_allocation(monkeypatch):
     import lightllm.common.basemodel.triton_kernel.gen_nsa_ks_ke as legacy
 
     def forbidden(*args, **kwargs):
         raise AssertionError("GLM must not generate or copy a full ragged index")
 
     monkeypatch.setattr(legacy, "gen_nsa_ks_ke", forbidden)
-    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", str(torch.cuda.current_device()))
-    model = type(
-        "Model",
-        (),
-        {
-            "config": {"index_kpool": 4, "index_topk": 2048},
-            "batch_max_tokens": 4,
-            "max_req_num": 1,
-            "max_seq_length": 32,
-            "att_state_role": "decode_test",
-            "args": SimpleNamespace(enable_prefill_microbatch_overlap=False, run_mode="decode"),
-        },
-    )()
-    backend = (Fp8Glm5NextSparseAttBackend if fp8 else Glm5NextSparseAttBackend)(model)
-    assert not hasattr(backend, "ragged_mem_buffers")
     infer = InferStateInfo()
     infer.is_prefill = False
     infer.b_req_idx = tensor([2, 2, 0, 3, 3])
@@ -139,7 +121,7 @@ def test_decode_aliases_infer_state_without_ragged_allocation(monkeypatch, fp8):
     ],
 )
 def test_fp8_prefill_reads_request_table_without_ragged_buffer(monkeypatch, queries, heads, total_kv, chunk_size):
-    monkeypatch.setattr(fp8_glm5_next, "KV_GATHER_CHUNK_SIZE", chunk_size)
+    monkeypatch.setattr(prefill_workspace, "KV_GATHER_CHUNK_SIZE", chunk_size)
 
     torch.manual_seed(1685)
     batch = min(queries, 2)
@@ -196,26 +178,21 @@ def test_fp8_prefill_reads_request_table_without_ragged_buffer(monkeypatch, quer
             "att_state_role": "indices_test",
             "config": {"index_topk": 2048, "index_kpool": 4},
             "args": SimpleNamespace(enable_prefill_microbatch_overlap=False, run_mode="normal"),
+            "mtp_manager": None,
         },
     )()
-    backend = Fp8Glm5NextSparseAttBackend(model)
+    backend = _Fp8SparseAttention(model)
     state = backend.create_att_prefill_state(infer)
-    state.init_state()
-    assert not hasattr(state, "ragged_mem_index") and not hasattr(backend, "ragged_mem_buffers")
-    control = AttControl(
-        nsa_prefill=True,
-        nsa_prefill_dict={
-            "topk_indices": topk,
-            "topk_mem_indices": topk_mem,
-            "prefill_cache_kv": prefill_kv,
-            "q_kv_start_loc": build_glm5_nsa_step(infer).q_kv_start_loc,
-            "softmax_scale": 512 ** -0.5,
-            "kv_lora_rank": 512,
-        },
-    )
+    control = {
+        "topk_indices": topk,
+        "topk_mem_indices": topk_mem,
+        "prefill_cache_kv": prefill_kv,
+        "q_kv_start_loc": build_glm5_nsa_step(infer).q_kv_start_loc,
+        "softmax_scale": 512 ** -0.5,
+    }
 
     def run():
-        return state.prefill_att(q, packed[..., :584], None, control)
+        return state.prefill_att(q, packed[..., :584], control)
 
     def check(output):
         scales = packed[..., 576:583].view(torch.float8_e8m0fnu).float().reshape(-1, 7, 1)

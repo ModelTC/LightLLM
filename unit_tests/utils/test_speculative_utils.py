@@ -1,4 +1,3 @@
-import weakref
 import json
 from importlib import import_module
 from types import SimpleNamespace
@@ -9,14 +8,9 @@ import torch
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention_groups as attention_groups_module
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
-from lightllm.common.basemodel.attention.base_att import BaseAttBackend
 from lightllm.common.attention.backend import AttentionBatch
-from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeStepBuilder, FA3GQAPrefillStepBuilder
-from lightllm.common.basemodel.attention.fa3.fp import Fa3DecodeAttState, Fa3PrefillAttState
-from lightllm.common.basemodel.attention.fa3.mla import MlaFa3DecodeAttState, MlaFa3PrefillAttState
+from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeStepBuilder
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeStepBuilder
-from lightllm.common.attention.backends.mla.fa3 import FA3MLAPrefillStepBuilder
-from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 from lightllm.utils import envs_utils
@@ -72,7 +66,7 @@ def test_qwen3_eagle_uses_layers_checkpoint_prefix():
         ("eagle3", False, 7, False, False),
     ],
 )
-def test_attention_backend_selects_dynamic_spec_layout(
+def test_model_selects_dynamic_spec_layout(
     monkeypatch,
     mtp_mode,
     is_draft_model,
@@ -85,14 +79,11 @@ def test_attention_backend_selects_dynamic_spec_layout(
         "get_env_start_args",
         lambda: SimpleNamespace(mtp_mode=mtp_mode, mtp_dynamic_verify=dynamic_spec),
     )
-    backend = SimpleNamespace(
-        model=SimpleNamespace(
-            is_mtp_draft_model=is_draft_model,
-            mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
-        )
+    model = SimpleNamespace(
+        is_mtp_draft_model=is_draft_model, mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step)
     )
 
-    assert BaseAttBackend.uses_dynamic_spec_verify_layout(backend) is expected
+    assert attention_groups_module.uses_dynamic_spec_verify_layout(model) is expected
 
 
 @pytest.mark.parametrize(
@@ -107,84 +98,19 @@ def test_attention_backend_selects_dynamic_spec_layout(
         ("vanilla_with_att", True, True),
     ],
 )
-def test_attention_backend_selects_causality(monkeypatch, mtp_mode, is_draft_model, expected):
+def test_model_selects_causality(monkeypatch, mtp_mode, is_draft_model, expected):
     monkeypatch.setattr(
         attention_groups_module,
         "get_env_start_args",
         lambda: SimpleNamespace(mtp_mode=mtp_mode),
     )
-    backend = SimpleNamespace(model=SimpleNamespace(is_mtp_draft_model=is_draft_model))
+    model = SimpleNamespace(is_mtp_draft_model=is_draft_model)
 
-    assert BaseAttBackend.uses_causal_attention(backend) is expected
-
-
-@pytest.mark.parametrize("state_class", [Fa3PrefillAttState, MlaFa3PrefillAttState])
-def test_fa3_prefill_state_owns_causality(monkeypatch, state_class):
-    # GQA prefill builds its page table in FA3GQAPrefillStepBuilder, which imports the kernel lazily.
-    monkeypatch.setattr(
-        import_module("lightllm.common.basemodel.triton_kernel.fa3_utils"), "page_table_copy", lambda **kwargs: None
-    )
-    infer_state = InferStateInfo()
-    infer_state.b1_cu_q_seq_len = torch.tensor([0, 1, 2], dtype=torch.int32)
-    infer_state.b1_cu_kv_seq_len = torch.tensor([0, 3, 7], dtype=torch.int32)
-    infer_state.b_req_idx = torch.tensor([0, 1], dtype=torch.int32)
-    infer_state.batch_size = 2
-    infer_state.max_kv_seq_len = 4
-    infer_state.input_ids = torch.empty(2, dtype=torch.int64)
-    infer_state.b_seq_len = torch.tensor([3, 4], dtype=torch.int32)
-    infer_state.is_prefill = True
-    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(8, dtype=torch.int32).reshape(2, 4))
-    state = state_class(
-        backend=SimpleNamespace(
-            uses_causal_attention=lambda: False,
-            page_size=1,
-            infer_page_size=1,
-            prefill_step_builder=FA3GQAPrefillStepBuilder(page_size=1),
-            mla_prefill_step_builder=FA3MLAPrefillStepBuilder(),
-            model=SimpleNamespace(),
-        ),
-        _infer_state_weak_ref=weakref.ref(infer_state),
-    )
-
-    state.init_state()
-
-    assert state.causal is False
-
-
-@pytest.mark.parametrize("state_class", [Fa3DecodeAttState, MlaFa3DecodeAttState])
-def test_fa3_decode_state_owns_causality(state_class):
-    infer_state = InferStateInfo()
-    infer_state.b1_cu_q_seq_len = torch.tensor([0, 1, 2], dtype=torch.int32)
-    infer_state.b1_cu_kv_seq_len = torch.tensor([0, 3, 7], dtype=torch.int32)
-    infer_state.b_req_idx = torch.tensor([0, 1], dtype=torch.int32)
-    infer_state.b_seq_len = torch.tensor([3, 4], dtype=torch.int32)
-    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.zeros((2, 4), dtype=torch.int32))
-    model = SimpleNamespace(
-        is_mtp_draft_model=False,
-        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
-    )
-    step_args = SimpleNamespace(
-        cu_seqlens_q=None, cu_seqlens_k=None, page_table=None, cache_seqlens=None, max_seqlen_q=1, max_seqlen_k=4
-    )
-    state = state_class(
-        backend=SimpleNamespace(
-            model=model,
-            uses_causal_attention=lambda: False,
-            uses_dynamic_spec_verify_layout=lambda: False,
-            # GQA decode builds its page table in FA3GQADecodeStepBuilder.
-            decode_step_builder=SimpleNamespace(build=lambda batch: step_args),
-        ),
-        _infer_state_weak_ref=weakref.ref(infer_state),
-    )
-    state._init_page_table = lambda _: None
-
-    state.init_state()
-
-    assert state.causal is False
+    assert attention_groups_module.attention_is_causal(model) is expected
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_triton_mtp_decode_state_builds_group_markers():
+def test_triton_mtp_decode_step_builds_group_markers():
     model = SimpleNamespace(
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 2),
@@ -199,19 +125,10 @@ def test_triton_mtp_decode_state_builds_group_markers():
     infer_state.req_manager = SimpleNamespace(
         req_to_token_indexs=torch.zeros(8, 8, dtype=torch.int32), HOLD_REQUEST_ID=-1
     )
-    state = TritonDecodeAttState(
-        backend=SimpleNamespace(
-            model=model,
-            uses_causal_attention=lambda: True,
-            uses_dynamic_spec_verify_layout=lambda: False,
-            decode_step_builder=TritonGQADecodeStepBuilder(),
-        ),
-        _infer_state_weak_ref=weakref.ref(infer_state),
-    )
+    batch = attention_groups_module.build_attention_batch(infer_state, model, lambda: False)
+    step_args = TritonGQADecodeStepBuilder().build(batch)
 
-    state.init_state()
-
-    assert state.step_args.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
+    assert step_args.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

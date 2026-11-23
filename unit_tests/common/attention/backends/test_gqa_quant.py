@@ -235,29 +235,12 @@ def test_flashinfer_fp8_per_tensor_matches_dequantized_reference(prefill):
     )
 
 
-@cuda
 @pytest.mark.parametrize("prefill", [True, False])
-def test_quant_adapter_forwards_causality(prefill):
+def test_quant_triton_rejects_non_causal_layers(prefill):
     # A non-causal (block-draft) layer must be rejected, not run causally over the int8 cache.
-    import weakref
-    from types import SimpleNamespace
-
-    from lightllm.common.basemodel.attention.base_att import AttControl
-    from lightllm.common.basemodel.attention.triton.int8kv import QuantTritonDecodeAttState, QuantTritonPrefillAttState
-    from lightllm.common.basemodel.infer_struct import InferStateInfo
-
-    k, v, scales, _, _ = group_cache(8)
-    backend = SimpleNamespace(
-        kv_quant="int8_group",
-        get_attention_impl=lambda backend_cls, layer_config: backend_cls.get_impl_cls()(layer_config),
-    )
-    owner = InferStateInfo()
-    state_cls = QuantTritonPrefillAttState if prefill else QuantTritonDecodeAttState
-    state = state_cls(backend=backend, _infer_state_weak_ref=weakref.ref(owner))
-    state.causal = False
-    run = state.prefill_att if prefill else state.decode_att
+    backend = TritonQuantGQAPrefillBackend if prefill else TritonQuantGQADecodeBackend
     with pytest.raises(NotImplementedError, match="causal"):
-        run(q=queries(prefill), k=k, v=v, att_control=AttControl(kv_scales=scales))
+        backend.get_impl_cls()(config(kv_quant="int8_group", kv_quant_group_size=8, causal=False))
 
 
 @cuda

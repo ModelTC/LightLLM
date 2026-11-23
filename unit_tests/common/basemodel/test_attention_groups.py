@@ -461,7 +461,7 @@ def test_unsupported_layer_configs_fail_when_the_model_loads(runtime_start_args)
         llama_layer().init_attention(model)
 
 
-def test_models_on_attention_groups_skip_the_full_attention_adapters():
+def test_models_with_attention_states_create_their_layers_attention():
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
     class Layer:
@@ -481,14 +481,8 @@ def test_models_on_attention_groups_skip_the_full_attention_adapters():
     )
 
     model._init_attention()
-    assert model.att_groups is None and model.layers_infer[0].models == []
-
-    model.uses_attention_groups = True
-    model._init_attention()
-    model._init_att_backend()
     assert isinstance(model.att_groups, AttentionGroups)
     assert all(layer.models == [model] for layer in model.layers_infer)
-    assert model.prefill_att_backend is None and model.decode_att_backend is None
 
     # A draft without attention states (FFN-only) creates no groups.
     states.clear()

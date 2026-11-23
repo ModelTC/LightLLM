@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 
 class Glm5NextTpPartModel(TpPartBaseModel):
     is_hybrid_att_model = True
-    uses_attention_groups = True
     # Sparse MLA runs FlashMLA and FA3 whatever --llm_*_att_backend names for full attention.
     att_implementation = "flashmla_sparse"
     pre_and_post_weight_class = Glm5NextPreAndPostLayerWeight
