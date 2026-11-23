@@ -305,6 +305,7 @@ def test_pd_master_first_token_dedup_preserves_terminal_status(terminal_status, 
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
         manager.args = SimpleNamespace(pd_node_id=1)
         manager.req_id_to_out_inf = {}
+        manager.active_req_ids = {80}
         p_node = _pd_node("prefill")
         d_node = _pd_node("decode")
         sampling_params = SamplingParams()
@@ -349,6 +350,7 @@ def test_pd_master_first_token_dedup_preserves_terminal_status(terminal_status, 
             sampling_params,
             MultimodalParams(),
             SimpleNamespace(is_disconnected=AsyncMock(return_value=False)),
+            origin_request_id=80,
         )
         try:
             first = await asyncio.wait_for(anext(stream), timeout=1)
@@ -402,6 +404,7 @@ def test_pd_master_request_rejection_becomes_server_busy_error():
 def test_pd_master_generate_error_wakes_resource_wait(event_name):
     async def run():
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.active_req_ids = {80}
         req_status = ReqStatus(123, MagicMock(), MagicMock(), MagicMock(), MagicMock())
         request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
         wait_task = asyncio.create_task(
@@ -410,6 +413,7 @@ def test_pd_master_generate_error_wakes_resource_wait(event_name):
                 request,
                 timeout=60,
                 group_request_id=123,
+                origin_request_id=80,
                 stage="test",
             )
         )

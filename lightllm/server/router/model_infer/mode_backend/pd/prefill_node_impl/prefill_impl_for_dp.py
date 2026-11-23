@@ -30,6 +30,31 @@ class PDDPChunkedForPrefillNode(DPChunkedPrefillBackend):
             self, req_obj=req_obj, next_token_id=next_token_id, next_token_prob=next_token_prob, output_len=output_len
         )
 
+    def _normal_prefill_chuncked_handle_func(
+        self, req_obj: InferReq, next_token_id: int, next_token_prob: float, output_len: int
+    ) -> None:
+        return PDChunkedPrefillForPrefillNode._normal_prefill_chuncked_handle_func(
+            self,
+            req_obj=req_obj,
+            next_token_id=next_token_id,
+            next_token_prob=next_token_prob,
+            output_len=output_len,
+        )
+
+    def _pf_prefill_chuncked_handle_func(
+        self, req_obj: InferReq, next_token_id: int, next_token_prob: float, output_len: int
+    ) -> None:
+        return PDChunkedPrefillForPrefillNode._pf_prefill_chuncked_handle_func(
+            self,
+            req_obj=req_obj,
+            next_token_id=next_token_id,
+            next_token_prob=next_token_prob,
+            output_len=output_len,
+        )
+
+    def _on_pf_decode_kv_ready(self, req_id: int) -> None:
+        return PDChunkedPrefillForPrefillNode._on_pf_decode_kv_ready(self, req_id=req_id)
+
     def _create_pd_trans_task(
         self, req_obj: InferReq, kv_start_index: int, kv_end_index: int, page_kind: str = "kv"
     ) -> PDChunckedTransTask:

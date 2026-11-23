@@ -50,6 +50,12 @@ def get_env_start_args():
     return start_args
 
 
+def enable_thinking_budget() -> bool:
+    """Whether thinking budgets are enabled with a configured reasoning parser."""
+    args = get_env_start_args()
+    return not args.disable_thinking_budget and bool(args.reasoning_parser)
+
+
 @lru_cache(maxsize=None)
 def get_model_infer_recursion_limit() -> int:
     return int(os.getenv("LIGHTLLM_MODEL_INFER_RECURSION_LIMIT", "4000"))

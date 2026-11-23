@@ -293,8 +293,8 @@ class Req(ctypes.Structure):
             shm.close()
 
     def get_compiled_grammar(self) -> Optional[bytes]:
-        # 无约束请求跳过读取，避免请求槽复用时误读旧请求留下的语法。
-        if not self.sample_params.constraint_out_params.has_constraint():
+        # 无语法约束的请求（包括仅有思考预算）跳过读取，避免误读旧请求留下的语法。
+        if not self.sample_params.constraint_out_params.has_grammar_constraint():
             return None
         # 只连接写入侧已发布的内存块，读取整个块即可取得完整编译结果。
         shm = create_or_link_shm(f"shm_grammar_{self.index_in_shm_mem}", -1, force_mode="link")

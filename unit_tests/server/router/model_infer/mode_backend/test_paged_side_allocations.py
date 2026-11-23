@@ -58,7 +58,7 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
         req, req.cur_kv_len + alloc_token_num, None, req.args.page_size
     )
 
-    backend._decode_node_gen_trans_tasks(req)
+    backend._normal_decode_node_gen_trans_tasks(req)
 
     assert alloc_sizes == [8]
     assert req.cur_kv_len == 10
@@ -79,13 +79,17 @@ def test_pd_decode_rejects_unaligned_transfer_page_size():
     req = SimpleNamespace(cur_kv_len=4, shm_req=SimpleNamespace(input_len=10))
 
     with pytest.raises(AssertionError, match="pd_kv_page_size must be divisible by page_size"):
-        backend._decode_node_gen_trans_tasks(req)
+        backend._normal_decode_node_gen_trans_tasks(req)
 
 
 def test_pd_prefill_rejects_unaligned_transfer_page_size():
     backend = prefill_impl.PDChunkedPrefillForPrefillNode.__new__(prefill_impl.PDChunkedPrefillForPrefillNode)
     backend.args = SimpleNamespace(pd_kv_page_size=3, page_size=4)
-    req = SimpleNamespace(cur_kv_len=4, shm_req=SimpleNamespace(input_len=10))
+    req = SimpleNamespace(
+        cur_kv_len=4,
+        shm_req=SimpleNamespace(input_len=10),
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(pd_prefill_first=False)),
+    )
 
     with pytest.raises(AssertionError, match="pd_kv_page_size must be divisible by page_size"):
         backend._prefill_chuncked_handle_func(

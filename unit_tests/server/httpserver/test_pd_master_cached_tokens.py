@@ -32,6 +32,7 @@ def _make_manager(monkeypatch):
         enable_return_routed_experts=False,
         select_p_d_node_strategy="cache_aware",
         pd_master_mode="elastic",
+        pd_prefill_first=False,
     )
     mgr.enable_pd_node_self_request_limit = True
     mgr.pd_node_resource_wait_timeout_seconds = -1
@@ -106,7 +107,8 @@ def _collect(
 ):
     segment_iter = iter(segments)
 
-    async def fake_wait(p_node, d_node, start_time, prompt_ids, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt_ids, sp, multimodal_params, request, origin_request_id):
+        assert origin_request_id in mgr.active_req_ids
         mgr.segment_inputs.append(
             pickle.loads(pickle.dumps((prompt_ids, sp.constraint_out_params.pd_previous_output_len)))
         )
@@ -171,7 +173,7 @@ def test_pd_token_id_stop_matches_across_capacity_segments(monkeypatch, mode, hi
         params.init(None, stop_sequences=[stop_ids], stop_str_match_mode=mode, max_new_tokens=6)
         segments = []
 
-        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal, request):
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal, request, origin_request_id):
             index = len(segments)
             segments.append(sp.group_request_id)
             req = InferReq.__new__(InferReq)
@@ -236,8 +238,9 @@ def test_dynamic_split_keeps_first_segment_hit(monkeypatch):
 @pytest.mark.parametrize("add_special_tokens", [False, True])
 @pytest.mark.parametrize("prompt,expected_lengths", [("P", (0, 1)), ("PP", (0, 0))])
 @pytest.mark.parametrize("constraint_enabled", [False, True])
+@pytest.mark.parametrize("budget", [None, -1, 0, 3])
 def test_continuation_uses_reencoded_length_difference(
-    monkeypatch, add_special_tokens, prompt, expected_lengths, constraint_enabled
+    monkeypatch, add_special_tokens, prompt, expected_lengths, constraint_enabled, budget
 ):
     from tokenizers import Tokenizer, models, processors
     from unittest.mock import Mock, call
@@ -255,6 +258,8 @@ def test_continuation_uses_reencoded_length_difference(
         max_new_tokens=4,
         add_special_tokens=add_special_tokens,
         regular_constraint=".*" if constraint_enabled else "",
+        thinking_token_budget=budget,
+        guided_reasoning_end=[5] if budget is not None else [],
     )
     _collect(
         manager,
@@ -268,16 +273,128 @@ def test_continuation_uses_reencoded_length_difference(
         first_token_text="x",
         prompt=prompt,
     )
-    # 约束输出按拼接文本的编码长度差重放；普通请求跳过后续编码。
+    # 有限预算和 grammar 共用文本续跑；无约束请求跳过后续编码。
+    needs_replay = constraint_enabled or (budget is not None and budget >= 0)
     assert manager.segment_inputs == [
         (prompt, 0),
-        (prompt + "x", expected_lengths[0] if constraint_enabled else 0),
-        (prompt + "xx", expected_lengths[1] if constraint_enabled else 0),
+        (prompt + "x", expected_lengths[0] if needs_replay else 0),
+        (prompt + "xx", expected_lengths[1] if needs_replay else 0),
     ]
-    expected_encoded_prompts = (prompt, prompt + "x", prompt + "xx") if constraint_enabled else (prompt,)
+    expected_encoded_prompts = (prompt, prompt + "x", prompt + "xx") if needs_replay else (prompt,)
     assert manager.tokenizer.encode.call_args_list == [
         call(text, None, add_special_tokens=add_special_tokens) for text in expected_encoded_prompts
     ]
+
+
+@pytest.mark.parametrize("choice_count", [1, 3])
+def test_budget_counts_initial_prompt_once_across_choices_and_busy_retries(monkeypatch, choice_count):
+    from unittest.mock import Mock
+
+    from lightllm.utils.error_utils import ServerBusyError
+
+    manager = _make_manager(monkeypatch)
+    del manager.tokens
+    manager.tokenizer.encode = Mock(return_value=[1, 2])
+    params = SamplingParams()
+    params.init(None, n=choice_count, best_of=choice_count, thinking_token_budget=3, guided_reasoning_end=[5])
+    attempts = {}
+
+    async def attempt(prompt, sampling_params, multimodal, request, start_time, req_id, input_token_num):
+        assert prompt == "prompt"
+        assert input_token_num == 2
+        assert sampling_params.constraint_out_params.thinking_token_budget == 3
+        attempts[req_id] = attempts.get(req_id, 0) + 1
+        if attempts[req_id] == 1:
+            raise ServerBusyError("busy")
+        yield req_id, "answer", {"id": 10}, FinishStatus(FinishStatus.FINISHED_STOP)
+
+    manager._generate_one_attempt = attempt
+
+    async def run():
+        return [
+            result
+            async for result in manager._generate_choices(
+                "prompt",
+                params,
+                SimpleNamespace(images=[], audios=[], verify_and_preload=AsyncMock()),
+                SimpleNamespace(is_disconnected=AsyncMock(return_value=False)),
+            )
+        ]
+
+    assert len(asyncio.run(run())) == choice_count
+    assert len(attempts) == choice_count
+    assert all(count == 2 for count in attempts.values())
+    manager.tokenizer.encode.assert_called_once_with("prompt", None, add_special_tokens=params.add_special_tokens)
+
+
+@pytest.mark.parametrize("prefill_first", [False, True])
+@pytest.mark.parametrize("grammar", [False, True])
+def test_multimodal_budget_continuation_replays_partial_end_and_answer(monkeypatch, compiler, prefill_first, grammar):
+    from unittest.mock import MagicMock, Mock
+
+    from lightllm.models.gemma4.tokenizer import Gemma4Tokenizer
+
+    manager = _make_manager(monkeypatch)
+    del manager.tokens
+    manager.args.pd_prefill_first = prefill_first
+    manager.args.max_image_token_count = 10
+    manager.first_time_costs = MagicMock()
+    manager.per_token_costs = MagicMock()
+    tokenizer = Mock(side_effect=lambda text, **kwargs: SimpleNamespace(input_ids=list(text.encode())))
+    tokenizer.bos_token_id = None
+    manager.tokenizer = Gemma4Tokenizer(tokenizer, {"image_token_id": ord("I"), "vision_soft_tokens_per_image": 3})
+    multimodal = SimpleNamespace(
+        images=[SimpleNamespace(token_id=1000, token_num=3)], audios=[], verify_and_preload=AsyncMock()
+    )
+    params = SamplingParams()
+    params.init(None, max_new_tokens=8, thinking_token_budget=2, guided_reasoning_end=list(b"]>"))
+    if grammar:
+        params.constraint_out_params.regular_constraint.initialize("a")
+    payload = asyncio.run(compiler.compile("regex", "a")) if grammar else None
+    segments = iter(("xy]", ">", "a"))
+    restored_states = []
+
+    async def raw_stream(*, prompt, sampling_params, multimodal_params, **kwargs):
+        # Both PD modes must leave multimodal encoding on the existing string path.
+        assert isinstance(prompt, str)
+        assert multimodal_params is multimodal
+        assert sampling_params.constraint_out_params.thinking_token_budget == 2
+        prompt_ids = manager.tokenizer.encode(prompt, multimodal_params)
+        assert prompt_ids[2:5] == [1000, 1001, 1002]
+        req = SimpleNamespace(
+            input_len=len(prompt_ids),
+            shm_prompt_ids=SimpleNamespace(arr=prompt_ids),
+            get_compiled_grammar=lambda: payload,
+        )
+        state = compiler.output_constraint_state_factory.create_state(req, SimpleNamespace(shm_param=sampling_params))
+        restored_states.append(
+            (sampling_params.constraint_out_params.pd_previous_output_len, state.in_reasoning, state.reasoning_tokens)
+        )
+        text = next(segments)
+        metadata = {"prompt_tokens": len(prompt_ids)}
+        for char in text:
+            state.commit(ord(char))
+            assert state.error is None
+            finish = FinishStatus(FinishStatus.FINISHED_STOP) if char == "a" else FinishStatus()
+            yield sampling_params.group_request_id, char, {**metadata, "id": ord(char)}, finish
+        if text != "a":
+            yield (
+                sampling_params.group_request_id,
+                "",
+                {**metadata, "id": None},
+                FinishStatus(FinishStatus.FINISHED_PD_DECODE_CAPACITY),
+            )
+
+    method = "fetch_prefill_first_stream" if prefill_first else "fetch_pd_stream"
+    monkeypatch.setattr(manager, method, raw_stream)
+
+    async def run():
+        request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
+        return [item async for item in manager.generate("PI", params, multimodal, request)]
+
+    results = asyncio.run(run())
+    assert "".join(item[1] for item in results) == "xy]>a"
+    assert restored_states == [(0, True, 0), (3, True, 3), (4, False, 4)]
 
 
 def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatch):
@@ -336,7 +453,7 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch):
         _initial_reasoning_state=1,
     )
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, origin_request_id):
         assert sp.stop_str_match_mode.get_mode() == (StopStrMatchMode.ALL_TEXT)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
         yield sp.group_request_id, "reasonENDextra", metadata, FinishStatus(FinishStatus.FINISHED_LENGTH)
@@ -361,7 +478,6 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch):
 
 @pytest.mark.parametrize("in_reasoning", [False, True])
 def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
-
     manager = _make_manager(monkeypatch)
     manager.args.reasoning_parser = "qwen3"
     manager.tokenizer = SimpleNamespace(
@@ -379,7 +495,7 @@ def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
     )
     segment_modes = []
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, origin_request_id):
         segment_modes.append(sp._initial_reasoning_state)
         assert sp.stop_str_match_mode.get_mode() == StopStrMatchMode.CONTENT_ONLY
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
@@ -488,7 +604,7 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
     )
     segments = []
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, origin_request_id):
         segments.append(prompt)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segments) == 1:
@@ -578,7 +694,7 @@ def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch
 
         manager.stop_request = stop_and_notify
 
-        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request, origin_request_id):
             segments.append(prompt)
             metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
             try:
@@ -626,7 +742,7 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, 
     request = SimpleNamespace(headers={"X-Request-Id": "summary-test"}, is_disconnected=lambda: asyncio.sleep(0, False))
     caplog.set_level("INFO", logger="lightllm.server.httpserver_for_pd_master.manager")
 
-    async def raw_stream(*_args):
+    async def raw_stream(p_node, d_node, prompt, sampling_params, multimodal_params, request, origin_request_id):
         if exit_mode == "empty":
             return
         metadata = {
@@ -641,7 +757,7 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, 
     manager.fetch_pd_stream = raw_stream
 
     async def run():
-        generator = manager._wait_to_token_package(None, None, time.time(), "prompt", params, None, request)
+        generator = manager._wait_to_token_package(None, None, time.time(), "prompt", params, None, request, 80)
         if exit_mode == "close":
             await generator.__anext__()
             await generator.aclose()
@@ -688,7 +804,7 @@ def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_sta
     request = SimpleNamespace(headers={}, is_disconnected=lambda: asyncio.sleep(0, False))
     caplog.set_level("INFO", logger="lightllm.server.httpserver_for_pd_master.manager")
 
-    async def raw_stream(_p_node, _d_node, _prompt, sampling_params, *_args):
+    async def raw_stream(p_node, d_node, prompt, sampling_params, multimodal_params, request, origin_request_id):
         metadata = {"id": 1, "prompt_tokens": 10, "prompt_cache_len": 3}
         yield sampling_params.group_request_id, "first", dict(metadata), FinishStatus()
         yield sampling_params.group_request_id, "late", dict(metadata), FinishStatus(late_status)
@@ -733,7 +849,7 @@ def test_application_pd_stop_leaves_sibling_choice_running(monkeypatch):
 
         manager.remove_req = remove_req
 
-        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request, origin_request_id):
             index = len(segments)
             segments.append(sp.group_request_id)
             metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}

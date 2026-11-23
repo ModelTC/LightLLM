@@ -49,8 +49,10 @@ class PDDecodeNode(ChunkedPrefillBackend):
 
         for req_obj in uninit_reqs:
             req_obj: InferReq = req_obj  # for easy typing
-            # 构建 chuncked trans task
-            self._decode_node_gen_trans_tasks(req_obj=req_obj)
+            if req_obj.sampling_param.shm_param.pd_prefill_first:
+                self._pf_decode_node_gen_trans_tasks(req_obj=req_obj)
+            else:
+                self._normal_decode_node_gen_trans_tasks(req_obj=req_obj)
 
         return
 
@@ -108,7 +110,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
             ans_list.append(req_obj)
         return ans_list
 
-    def _decode_node_gen_trans_tasks(self, req_obj: InferReq):
+    def _normal_decode_node_gen_trans_tasks(self, req_obj: InferReq):
         """
         decode node 生成所有的传输任务对象。
         """
@@ -169,6 +171,65 @@ class PDDecodeNode(ChunkedPrefillBackend):
                 kv_start_index=req_obj.cur_kv_len,
                 kv_end_index=req_obj.cur_kv_len,
                 group=group,
+            )
+
+        if self.is_master_in_dp:
+            self.info_queue.put(group)
+        return
+
+    def _pf_decode_node_gen_trans_tasks(self, req_obj: InferReq) -> None:
+        """PD 分离的 Prefill 先推理模式里，decode 为未命中区间建真实传输页。
+
+        老路径在缺口只剩一个 token 时改走 0 长度任务。这里始终把 `[ready_kv_len, input_len)` 建成页，
+        满匹配也包含最后一个 token。
+        """
+        from ..helper import iter_kv_spans
+
+        input_len = req_obj.shm_req.input_len
+        ready_kv_len = req_obj.cur_kv_len
+        assert input_len - ready_kv_len >= 1, (
+            f"prefill-first decode expect at least one token to receive, "
+            f"request_id={req_obj.req_id} ready_kv_len={ready_kv_len} input_len={input_len}"
+        )
+
+        page_size = self.args.pd_kv_page_size
+        assert page_size % self.args.page_size == 0, "pd_kv_page_size must be divisible by page_size"
+
+        req_obj.pd_trans_kv_start_index = ready_kv_len
+        assert req_obj.hold_kv_len == req_obj.cur_kv_len, (
+            f"prefill-first decode hold_kv_len {req_obj.hold_kv_len} != cur_kv_len {req_obj.cur_kv_len}, "
+            f"request_id={req_obj.req_id}"
+        )
+        need_mem_size = req_obj.kv_cache_alloc_need(input_len)
+        mem_indexes = req_obj.alloc_kv_mem(need_mem_size)
+        assert mem_indexes is not None, f"prefill-first decode failed to allocate kv, request_id={req_obj.req_id}"
+        mem_indexes = mem_indexes[: input_len - ready_kv_len]
+
+        group = PDChunckedTransTaskGroup()
+        for span_start, span_end in iter_kv_spans(start=ready_kv_len, end=input_len, page_size=page_size):
+            page_mem_indexes = mem_indexes[span_start - ready_kv_len : span_end - ready_kv_len]
+            self._create_pd_trans_task(
+                req_obj=req_obj,
+                mem_indexes=page_mem_indexes.tolist(),
+                kv_start_index=span_start,
+                kv_end_index=span_end,
+                group=group,
+            )
+
+        req_obj.cur_kv_len += len(mem_indexes)
+        assert req_obj.cur_kv_len == input_len, (
+            f"prefill-first decode kv len {req_obj.cur_kv_len} != input_len {input_len}, "
+            f"request_id={req_obj.req_id}"
+        )
+
+        if g_infer_context.is_hybrid_att_model:
+            self._create_pd_trans_task(
+                req_obj=req_obj,
+                mem_indexes=[],
+                kv_start_index=input_len,
+                kv_end_index=input_len,
+                group=group,
+                page_kind="att_state",
             )
 
         if self.is_master_in_dp:

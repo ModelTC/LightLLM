@@ -2,12 +2,9 @@ import torch.multiprocessing as mp
 from typing import List
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
-from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
-
-logger = init_logger(__name__)
 
 
 class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
@@ -63,15 +60,47 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                         continue
                 else:
                     ans_list.append(req_obj)
-        return ans_list
+
+        # 上面先按老路径收齐可以结束的请求。挂着 pd_wait_decode_kv_info_ready 表示还在等
+        # decode 端点，这里再把它们留在推理进程里。没挂这个属性的请求不需要等。
+        # 已经 abort 的不再拦，留在名单里走后面的结束路径释放 KV。
+        ready_list: List[InferReq] = []
+        for req_obj in ans_list:
+            prefill_finished = req_obj.shm_req.input_len <= req_obj.cur_kv_len
+            waiting_decode_kv_info = (
+                prefill_finished
+                and req_obj.sampling_param.shm_param.pd_prefill_first
+                and hasattr(req_obj, "pd_wait_decode_kv_info_ready")
+            )
+            if waiting_decode_kv_info and not req_obj.infer_aborted:
+                continue
+            ready_list.append(req_obj)
+        return ready_list
 
     def _prefill_chuncked_handle_func(
         self, req_obj: InferReq, next_token_id: int, next_token_prob: float, output_len: int
     ):
-        """
-        在每一步chuncked prefill 后，尝试生成chuncked 传输任务，发个 kv_move_manager 进行处理。
-        """
+        """在每一步 chuncked prefill 后，按模式选择传输处理。"""
+        if req_obj.sampling_param.shm_param.pd_prefill_first:
+            self._pf_prefill_chuncked_handle_func(
+                req_obj=req_obj,
+                next_token_id=next_token_id,
+                next_token_prob=next_token_prob,
+                output_len=output_len,
+            )
+            return
+        self._normal_prefill_chuncked_handle_func(
+            req_obj=req_obj,
+            next_token_id=next_token_id,
+            next_token_prob=next_token_prob,
+            output_len=output_len,
+        )
+        return
 
+    def _normal_prefill_chuncked_handle_func(
+        self, req_obj: InferReq, next_token_id: int, next_token_prob: float, output_len: int
+    ) -> None:
+        """老路径边算边传，把已经算完的页交给 kv move。"""
         assert req_obj.cur_kv_len <= req_obj.shm_req.input_len
         input_len = req_obj.shm_req.input_len
         page_size = self.args.pd_kv_page_size
@@ -109,6 +138,40 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         if self.is_master_in_dp:
             for trans_task in trans_task_list:
                 self.info_queue.put(trans_task)
+        return
+
+    def _pf_prefill_chuncked_handle_func(
+        self, req_obj: InferReq, next_token_id: int, next_token_prob: float, output_len: int
+    ) -> None:
+        """PD 分离的 Prefill 先推理模式的请求不算边传。算完后把建传输任务的闭包挂到等待属性上。"""
+        prefill_finished = req_obj.cur_kv_len == req_obj.shm_req.input_len
+        if not prefill_finished or output_len < 1:
+            return
+        if hasattr(req_obj, "pd_wait_decode_kv_info_ready"):
+            return
+
+        def wait_decode_kv_info_ready(backend, req_obj: InferReq) -> None:
+            from ..helper import submit_prefill_first_tasks_if_ready
+
+            submit_prefill_first_tasks_if_ready(
+                backend=backend,
+                req_obj=req_obj,
+                next_token_id=next_token_id,
+                next_token_logprob=next_token_prob,
+            )
+            return
+
+        req_obj.pd_wait_decode_kv_info_ready = wait_decode_kv_info_ready
+        return
+
+    def _on_pf_decode_kv_ready(self, req_id: int) -> None:
+        """Router 通知 decode KV 已就绪。调用等待闭包建传输任务，然后去掉这个属性。"""
+        req_obj: InferReq = g_infer_context.requests_mapping.get(req_id)
+        if req_obj is None or not hasattr(req_obj, "pd_wait_decode_kv_info_ready"):
+            return
+        if not req_obj.infer_aborted:
+            req_obj.pd_wait_decode_kv_info_ready(backend=self, req_obj=req_obj)
+        delattr(req_obj, "pd_wait_decode_kv_info_ready")
         return
 
     def _create_pd_trans_task(
