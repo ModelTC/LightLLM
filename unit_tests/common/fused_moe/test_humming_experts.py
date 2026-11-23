@@ -3,6 +3,8 @@ from collections import defaultdict
 
 import pytest
 import torch
+from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.utils.config_utils import auto_set_ep_moe_backend
 
 from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_kernels import ep_aligned_expert_offsets
 from lightllm.common.quantization import Quantcfg
@@ -10,6 +12,8 @@ from lightllm.common.quantization.humming import (
     HUMMING_FP4_QUANT_METHOD,
     HUMMING_FP8_QUANT_METHOD,
     HummingExpertGemm,
+    HummingFP4MoEQuantizationMethod,
+    HummingFP8MoEQuantizationMethod,
     _humming_grouped_decode_gemm,
 )
 from lightllm.common.quantization.quantize_method import WeightPack
@@ -31,6 +35,44 @@ def test_humming_checkpoint_selection(bits, method):
     assert quant_cfg.get_quant_type(0, "fused_moe") == method
     assert quant_cfg.get_quant_type(0, "wq_a") == "fp8w8a8-b32-humming"
     assert quant_cfg.get_quant_type(0, "wq_b") == "fp8w8a8-b32-triton"
+
+
+@pytest.mark.parametrize(
+    "sm90,enable_ep_moe,backend,expert_dtype,expected",
+    [
+        (True, True, "auto", None, "deepep_v2_humming"),
+        (True, True, "auto", "mxfp4", "deepep_v2_humming"),
+        (True, True, "auto", "fp8", "auto"),
+        (False, True, "auto", None, "auto"),
+        (True, False, "auto", None, "auto"),
+        (True, True, "deepep_v2", None, "deepep_v2"),
+    ],
+)
+def test_native_mxfp4_hopper_backend_selection(
+    tmp_path, monkeypatch, sm90, enable_ep_moe, backend, expert_dtype, expected
+):
+    config = {
+        "model_type": "deepseek_v41",
+        "text_config": {"num_hidden_layers": 40},
+        "quantization_config": {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [32, 32],
+            "scale_fmt": "ue8m0",
+            "expert_dtype": "fp4",
+        },
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    monkeypatch.setattr("lightllm.utils.device_utils.is_sm90_gpu", lambda: sm90)
+    args = StartArgs(
+        model_dir=str(tmp_path), enable_ep_moe=enable_ep_moe, ep_moe_backend=backend, expert_dtype=expert_dtype
+    )
+    auto_set_ep_moe_backend(args)
+    assert args.ep_moe_backend == expected
+    if expected == "deepep_v2_humming":
+        config.update(n_layer=40, expert_dtype="fp4")
+        quant = Quantcfg(config, expert_dtype=args.expert_dtype, enable_ep_moe=True, ep_moe_backend=args.ep_moe_backend)
+        assert quant.get_quant_type(0, "fused_moe") == HUMMING_FP4_QUANT_METHOD
 
 
 @pytest.mark.parametrize("bits", [8, 4])
@@ -58,8 +100,15 @@ def test_humming_experts_tune_then_replay_deepep_offsets(bits, tmp_path, monkeyp
         fp4 = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6], device=device)
         dense_weight = fp4[torch.stack((weight & 15, weight >> 4), dim=-1).flatten(-2).long()]
     dense_weight *= torch.exp2(weight_scale.float() - 127).repeat_interleave(32, dim=-1)
-    pack = WeightPack(weight=weight, weight_scale=weight_scale)
-    weight_ptr = weight.data_ptr()
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", str(torch.cuda.current_device()))
+    method = HummingFP8MoEQuantizationMethod() if bits == 8 else HummingFP4MoEQuantizationMethod()
+    pack, _ = method.create_moe_weight([n], k, torch.bfloat16, torch.cuda.current_device(), experts)
+    # Native V4.1 serializes two FP4 values in signed int8 storage.
+    method.load_weight(weight if bits == 8 else weight.view(torch.int8), pack)
+    method.load_weight_scale(weight_scale.view(torch.float8_e8m0fnu), pack)
+    assert all(pack.load_ok)
+    assert pack.weight.numel() == experts * n * k // (1 if bits == 8 else 2)
+    weight_ptr = pack.weight.data_ptr()
     locks = torch.zeros(
         torch.cuda.get_device_properties(device).multi_processor_count * 8, device=device, dtype=torch.int32
     )

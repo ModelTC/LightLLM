@@ -27,6 +27,24 @@ def auto_set_page_size(args) -> None:
         args.page_size = 256
 
 
+def auto_set_ep_moe_backend(args) -> None:
+    """Select the Hopper W4A8 backend for native V4.1 MXFP4 checkpoints."""
+    if not args.enable_ep_moe or args.ep_moe_backend != "auto":
+        return
+    from .device_utils import is_sm90_gpu
+
+    if not is_sm90_gpu():
+        return
+    config = get_config_json(args.model_dir)
+    if config.get("model_type") != "deepseek_v41":
+        return
+    quant_config = config.get("quantization_config") or {}
+    expert_dtype = args.expert_dtype or config.get("expert_dtype") or quant_config.get("expert_dtype")
+    if expert_dtype in ("fp4", "mxfp4") and quant_config.get("scale_fmt") == "ue8m0":
+        args.ep_moe_backend = "deepep_v2_humming"
+        logger.info("select deepep_v2_humming for native DeepSeek-V4.1 MXFP4 experts on SM90")
+
+
 def auto_set_cpu_cache_token_page_size(args, is_hybrid_model: bool) -> None:
     """Align CPU cache pages with the model's checkpoint boundaries."""
     if not args.enable_cpu_cache:

@@ -34,6 +34,7 @@ from lightllm.utils.config_utils import (
     auto_set_cpu_cache_token_page_size,
     auto_set_fused_shared_experts,
     auto_set_response_parsers,
+    auto_set_ep_moe_backend,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 from lightllm.utils.device_utils import is_sm100_gpu, is_sm90_gpu
@@ -188,6 +189,7 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
+    auto_set_ep_moe_backend(args)
     if args.ep_moe_backend == "triton":
         assert args.enable_ep_moe, "--ep_moe_backend triton requires --enable_ep_moe"
         assert args.run_mode == "prefill", "--ep_moe_backend triton only supports --run_mode prefill"
