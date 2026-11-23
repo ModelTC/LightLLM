@@ -14,7 +14,6 @@ if TYPE_CHECKING:
 
 
 class BloomTpPartModel(TpPartBaseModel):
-    uses_attention_groups = True
     # ALiBi attention runs only on Triton.
     att_implementation = "triton"
 

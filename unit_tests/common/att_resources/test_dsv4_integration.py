@@ -77,10 +77,7 @@ def cache(monkeypatch):
         att_state_role="main",
         args=SimpleNamespace(run_mode="normal", enable_prefill_microbatch_overlap=True),
     )
-    from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DeepseekV4FlashMlaFp8SparseAttBackend
-
-    backend = DeepseekV4FlashMlaFp8SparseAttBackend(model=model)
-    yield manager, window, backend
+    yield manager, window, model
     torch.cuda.synchronize()
     get_env_start_args.cache_clear()
 
@@ -102,11 +99,11 @@ def read_packed_rows(buffer, slots, page_tokens):
 
 
 def test_infer_state_reads_owned_state_views(cache):
-    manager, window, backend = cache
+    manager, window, model = cache
     infer = make_infer(manager, window)
     assert infer.swa_state is window
     infer.is_prefill = False
-    infer.dsv4_layer_compress_ratios = dict(enumerate(backend.model.config["compress_ratios"]))
+    infer.dsv4_layer_compress_ratios = dict(enumerate(model.config["compress_ratios"]))
     for layer in range(3):
         swa, compressed = infer.get_att_kv(layer)
         assert swa.shape[1] == 74880
@@ -185,7 +182,7 @@ def test_long_prefill_keeps_swa_prefix_and_runtime_tail(cache):
     from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
     from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
 
-    manager, window, backend = cache
+    manager, window, model = cache
     reference = torch.zeros((17, 74880), dtype=torch.uint8, device="cuda")
     kv = torch.randn((2048, 512), dtype=torch.bfloat16, device="cuda")
     weight, angles = torch.randn(512, dtype=torch.bfloat16, device="cuda"), torch.randn((2048, 32), device="cuda")
@@ -200,9 +197,9 @@ def test_long_prefill_keeps_swa_prefix_and_runtime_tail(cache):
         infer.b_ready_cache_len, infer.b_seq_len = (
             torch.tensor([value], dtype=torch.int32, device="cuda") for value in (start, end)
         )
-        prefill = prepare_swa_prefill_workspace(infer, backend.model)
+        prefill = prepare_swa_prefill_workspace(infer, model)
         infer.swa_prefill_workspace = prefill
-        infer.dsv4_layer_compress_ratios = dict(enumerate(backend.model.config["compress_ratios"]))
+        infer.dsv4_layer_compress_ratios = dict(enumerate(model.config["compress_ratios"]))
         indices = torch.empty((positions.numel(), 128), dtype=torch.int32, device="cuda")
         lengths, writes, runtime = (torch.empty_like(positions) for _ in range(3))
         build_swa_indices(
@@ -235,9 +232,9 @@ def test_models_prepare_owned_states_in_one_manager(cache, draft_kind):
     from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
     from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
 
-    _, _, backend = cache
+    _, _, model = cache
     config = dict(
-        backend.model.config,
+        model.config,
         compress_ratios=[4, 128, 0, 0, 0],
         dspark_target_layer_ids=[0, 1],
         dspark_block_size=4,

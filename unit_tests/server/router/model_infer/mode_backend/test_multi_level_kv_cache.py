@@ -494,14 +494,20 @@ def test_async_load_notifies_every_rank_before_deref(monkeypatch):
 
 
 def test_fa3_cpu_cache_sync_defaults_off():
-    from lightllm.common.basemodel.attention.base_att import BaseAttBackend
-    from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
-    from lightllm.common.basemodel.attention.fa3.fp8 import Fp8Fa3AttBackend
-    from lightllm.common.basemodel.attention.fa3.mla import MlaFa3AttBackend
-    from lightllm.common.basemodel.attention.fa3.neo import NeoFa3AttBackend
+    from lightllm.common.attention.backend import AttentionBackend
+    from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
+    from lightllm.common.attention.backends.mla.fa3 import FA3MLADecodeBackend, FA3MLAPrefillBackend
 
-    assert BaseAttBackend.requires_cpu_cache_sync is False
-    assert all(
-        backend.requires_cpu_cache_sync is False
-        for backend in (Fa3AttBackend, Fp8Fa3AttBackend, MlaFa3AttBackend, NeoFa3AttBackend)
+    assert AttentionBackend.requires_cpu_cache_sync() is False
+    assert not any(
+        backend.requires_cpu_cache_sync()
+        for backend in (FA3GQAPrefillBackend, FA3GQADecodeBackend, FA3MLAPrefillBackend, FA3MLADecodeBackend)
     )
+
+
+@pytest.mark.parametrize("requires_sync", [None, False, True])
+def test_cpu_cache_io_waits_on_compute_when_an_attention_group_requires_it(requires_sync):
+    groups = None if requires_sync is None else SimpleNamespace(requires_cpu_cache_sync=requires_sync)
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.backend = SimpleNamespace(model=SimpleNamespace(att_groups=groups))
+    assert MultiLevelKvCacheModule.need_sync_compute_stream.__wrapped__(module) is bool(requires_sync)

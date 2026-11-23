@@ -8,10 +8,11 @@ import torch
 from lightllm.common.attention.backend import AttentionBatch
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
-from lightllm.common.basemodel.attention.base_att import AttControl, BaseAttBackend
+from lightllm.common.basemodel.attention_groups import uses_dynamic_spec_verify_layout
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
+from unit_tests.common.attention.backends.groups_runner import GroupsRunner
 
 
 pytestmark = pytest.mark.skipif(
@@ -370,11 +371,18 @@ def start_args(monkeypatch):
     get_env_start_args.cache_clear()
 
 
+def gqa_config(**fields) -> GQALayerConfig:
+    return GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16, **fields)
+
+
 class _Model:
-    """Hashable stub: BaseAttBackend keys its per-model singleton by the model object."""
+    """The model fields AttentionGroups reads; its layers run FA3."""
 
     def __init__(self, args, page_size: int, rows_per_request: int) -> None:
-        self.args = SimpleNamespace(**{**args, "page_size": page_size, "running_max_req_size": 4, "mtp_step": 1})
+        backends = {"llm_prefill_att_backend": ["fa3"], "llm_decode_att_backend": ["fa3"]}
+        self.args = SimpleNamespace(
+            **{**args, **backends, "page_size": page_size, "running_max_req_size": 4, "mtp_step": 1}
+        )
         self.graph_max_batch_size = 4
         self.max_seq_length = self.graph_max_len_in_batch = 512
         self.tp_world_size_ = 1
@@ -382,7 +390,7 @@ class _Model:
         self.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _: rows_per_request - 1)
 
 
-def _decode_state(backend, token_map, req_ids, lengths, microbatch_index=0, *, capture=False, replay=False):
+def _decode_state(runner, token_map, req_ids, lengths, microbatch_index=0, *, capture=False, replay=False):
     s = InferStateInfo()
     s.is_prefill = False
     s.is_cuda_graph_capture, s.is_cuda_graph_replay = capture, replay
@@ -394,14 +402,13 @@ def _decode_state(backend, token_map, req_ids, lengths, microbatch_index=0, *, c
     s.b1_cu_q_seq_len = torch.arange(len(lengths) + 1, device="cuda", dtype=torch.int32)
     s.b1_cu_kv_seq_len = torch.tensor([0, *lengths], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
     s.req_manager = SimpleNamespace(req_to_token_indexs=token_map, HOLD_REQUEST_ID=PAD)
-    s.decode_att_state = backend.create_att_decode_state(infer_state=s)
-    s.init_att_state()
+    runner.step(s)
     return s
 
 
 class _Microbatch:
-    def __init__(self, backend, page_size, req_ids, seed):
-        self.backend, self.req_ids = backend, req_ids
+    def __init__(self, runner, page_size, req_ids, seed):
+        self.runner, self.req_ids = runner, req_ids
         self.token_map = paged_token_map(8, page_size, seed)
         _, self.k, self.v = make_cache(2, torch.bfloat16, seed)
         generator = torch.Generator(device="cuda").manual_seed(seed)
@@ -409,11 +416,11 @@ class _Microbatch:
 
     def state(self, lengths, microbatch_index, *, capture=False, replay=False):
         return _decode_state(
-            self.backend, self.token_map, self.req_ids, lengths, microbatch_index, capture=capture, replay=replay
+            self.runner, self.token_map, self.req_ids, lengths, microbatch_index, capture=capture, replay=replay
         )
 
     def forward(self, state):
-        return state.decode_att_state.decode_att(q=self.q, k=self.k, v=self.v)
+        return self.runner.run_gqa(state, self.q, self.k, self.v)
 
     def check(self, actual, lengths):
         expected = reference(self.q, self.k, self.v, self.token_map, decode_rows(self.req_ids, lengths, True))
@@ -423,39 +430,33 @@ class _Microbatch:
 @pytest.mark.parametrize(
     "overlap,rows_per_request", [(False, 1), (True, 1), (False, 2)], ids=["normal", "overlap", "fixed_mtp"]
 )
-def test_adapter_replays_through_cuda_graph(start_args, overlap, rows_per_request):
-    from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
+def test_layer_group_replays_through_cuda_graph(start_args, overlap, rows_per_request):
     from lightllm.common.basemodel.cuda_graph import CudaGraph
 
     args = start_args(overlap=overlap)
-    model = _Model(args, 16, rows_per_request)
-    backend = Fa3AttBackend(model=model)
-    try:
-        graph = CudaGraph(4, 4, 4, max_batch_size=4, max_len_in_batch=512)
-        if rows_per_request == 2:
-            req_ids, steps = [2, 2, 0, 0], [(33, 34, 9, 10), (299, 300, 63, 64), (1, 2, 511, 512)]
-        else:
-            req_ids, steps = [2, 0, 1, 3], [(34, 10, 260, 3), (300, 512, 2, 77), (1, 1, 1, 1)]
-        mbs = [_Microbatch(backend, 16, req_ids, seed) for seed in (5, 6)]
-        if overlap:
-            graph.capture_decode(
-                lambda s0, s1: (mbs[0].forward(s0), mbs[1].forward(s1)),
-                mbs[0].state(steps[0], 0, capture=True),
-                mbs[1].state(steps[1], 1, capture=True),
-            )
-            for lengths0, lengths1 in [(steps[1], steps[2]), (steps[2], steps[0])]:
-                out0, out1 = graph.replay(
-                    mbs[0].state(lengths0, 0, replay=True), mbs[1].state(lengths1, 1, replay=True)
-                )
-                mbs[0].check(out0, lengths0)
-                mbs[1].check(out1, lengths1)
-        else:
-            mb = mbs[0]
-            graph.capture_decode(mb.forward, mb.state(steps[0], 0, capture=True))
-            for lengths in steps[1:] + steps[:1]:
-                mb.check(graph.replay(mb.state(lengths, 0, replay=True)), lengths)
-    finally:
-        BaseAttBackend._instances.pop((Fa3AttBackend, model), None)
+    config = gqa_config()
+    runner = GroupsRunner(_Model(args, 16, rows_per_request), config, config)
+    graph = CudaGraph(4, 4, 4, max_batch_size=4, max_len_in_batch=512)
+    if rows_per_request == 2:
+        req_ids, steps = [2, 2, 0, 0], [(33, 34, 9, 10), (299, 300, 63, 64), (1, 2, 511, 512)]
+    else:
+        req_ids, steps = [2, 0, 1, 3], [(34, 10, 260, 3), (300, 512, 2, 77), (1, 1, 1, 1)]
+    mbs = [_Microbatch(runner, 16, req_ids, seed) for seed in (5, 6)]
+    if overlap:
+        graph.capture_decode(
+            lambda s0, s1: (mbs[0].forward(s0), mbs[1].forward(s1)),
+            mbs[0].state(steps[0], 0, capture=True),
+            mbs[1].state(steps[1], 1, capture=True),
+        )
+        for lengths0, lengths1 in [(steps[1], steps[2]), (steps[2], steps[0])]:
+            out0, out1 = graph.replay(mbs[0].state(lengths0, 0, replay=True), mbs[1].state(lengths1, 1, replay=True))
+            mbs[0].check(out0, lengths0)
+            mbs[1].check(out1, lengths1)
+    else:
+        mb = mbs[0]
+        graph.capture_decode(mb.forward, mb.state(steps[0], 0, capture=True))
+        for lengths in steps[1:] + steps[:1]:
+            mb.check(graph.replay(mb.state(lengths, 0, replay=True)), lengths)
 
 
 # Dynamic verify steps of 6 rows and up to 3 rows per request: (b_req_idx, b_seq_len). After the captured
@@ -469,37 +470,32 @@ DYNAMIC_STEPS = [
 
 
 @pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8_per_head"])
-def test_adapter_replays_dynamic_verify_layout_through_cuda_graph(start_args, fp8):
-    from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
-    from lightllm.common.basemodel.attention.fa3.fp8 import Fp8Fa3AttBackend
+def test_layer_group_replays_dynamic_verify_layout_through_cuda_graph(start_args, fp8):
     from lightllm.common.basemodel.cuda_graph import CudaGraph
 
     args = start_args(overlap=False, mtp_dynamic_verify=True)
-    backend_cls = Fp8Fa3AttBackend if fp8 else Fa3AttBackend
     model = _Model(args, 16, rows_per_request=3)
-    backend = backend_cls(model=model)
-    try:
-        assert backend.uses_dynamic_spec_verify_layout()
-        token_map = paged_token_map(8, 16, seed=7)
-        generator = torch.Generator(device="cuda").manual_seed(9)
-        q = torch.randn(6, 8, 64, device="cuda", generator=generator).bfloat16()
-        if fp8:
-            k, v, k_ref, v_ref, k_scale, v_scale = make_fp8_cache(2, seed=8)
-            att_control, tol = AttControl(kv_scales=GQAKVScales(k_scale=k_scale, v_scale=v_scale)), FP8_TOL
-        else:
-            _, k, v = make_cache(2, torch.bfloat16, seed=8)
-            k_ref, v_ref, att_control, tol = k, v, AttControl(), 0.02
+    config = gqa_config(kv_quant="fp8_per_head") if fp8 else gqa_config()
+    runner = GroupsRunner(model, config, config)
+    assert uses_dynamic_spec_verify_layout(model)
+    token_map = paged_token_map(8, 16, seed=7)
+    generator = torch.Generator(device="cuda").manual_seed(9)
+    q = torch.randn(6, 8, 64, device="cuda", generator=generator).bfloat16()
+    if fp8:
+        k, v, k_ref, v_ref, k_scale, v_scale = make_fp8_cache(2, seed=8)
+        kv_scales, tol = GQAKVScales(k_scale=k_scale, v_scale=v_scale), FP8_TOL
+    else:
+        _, k, v = make_cache(2, torch.bfloat16, seed=8)
+        k_ref, v_ref, kv_scales, tol = k, v, None, 0.02
 
-        def forward(state):
-            return state.decode_att_state.decode_att(q=q, k=k, v=v, att_control=att_control)
+    def forward(state):
+        return runner.run_gqa(state, q, k, v, kv_scales=kv_scales)
 
-        graph = CudaGraph(6, 6, 6, max_batch_size=6, max_len_in_batch=512)
-        graph.capture_decode(forward, _decode_state(backend, token_map, *DYNAMIC_STEPS[0], capture=True))
-        for req_ids, lengths in DYNAMIC_STEPS[1:]:
-            out = graph.replay(_decode_state(backend, token_map, req_ids, lengths, replay=True))
-            q_ref = fp8_round_q(q, 2, decode_groups(req_ids, 3, True)) if fp8 else q
-            expected = reference(q_ref, k_ref, v_ref, token_map, decode_rows(req_ids, lengths, True))
-            keep = [i for i, r in enumerate(req_ids) if r != PAD]
-            torch.testing.assert_close(out[keep].float(), expected[keep], atol=tol, rtol=tol)
-    finally:
-        BaseAttBackend._instances.pop((backend_cls, model), None)
+    graph = CudaGraph(6, 6, 6, max_batch_size=6, max_len_in_batch=512)
+    graph.capture_decode(forward, _decode_state(runner, token_map, *DYNAMIC_STEPS[0], capture=True))
+    for req_ids, lengths in DYNAMIC_STEPS[1:]:
+        out = graph.replay(_decode_state(runner, token_map, req_ids, lengths, replay=True))
+        q_ref = fp8_round_q(q, 2, decode_groups(req_ids, 3, True)) if fp8 else q
+        expected = reference(q_ref, k_ref, v_ref, token_map, decode_rows(req_ids, lengths, True))
+        keep = [i for i, r in enumerate(req_ids) if r != PAD]
+        torch.testing.assert_close(out[keep].float(), expected[keep], atol=tol, rtol=tol)

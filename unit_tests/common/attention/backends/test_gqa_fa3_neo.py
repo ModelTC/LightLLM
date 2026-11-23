@@ -1,3 +1,5 @@
+"""FA3 GQA prefill over Neo's image spans, with the flash_attn_interface build that supports them."""
+
 import importlib.util
 import sys
 from types import ModuleType, SimpleNamespace
@@ -6,11 +8,9 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.attention.backends.gqa.fa3 import FA3GQAPrefillStepBuilder
-from lightllm.common.attention.backends.gqa import GQALayerConfig
-from lightllm.common.attention.backends.gqa.fa3 import FA3GQAPrefillBackend
-from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.common.basemodel.attention.fa3 import neo
+from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+from lightllm.common.attention.backends.gqa.fa3 import FA3GQAPrefillBackend, FA3GQAPrefillStepBuilder
+from lightllm.common.basemodel.attention_groups import build_attention_batch
 from lightllm.utils import neo_fa3_utils, sgl_utils
 
 
@@ -87,16 +87,10 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
     infer_state.b1_cu_kv_seq_len = indices([0, 2 * page_size, 4 * page_size - 1]).long()
     infer_state.b_image_token_end = image_ends
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token_indexs)
-    backend = SimpleNamespace(
-        uses_causal_attention=lambda: True,
-        infer_page_size=page_size,
-        kv_quant=None,
-        prefill_step_builder=FA3GQAPrefillStepBuilder(page_size=page_size),
-        get_attention_impl=lambda backend_cls, layer_config: backend_cls.get_impl_cls()(layer_config),
-        model=SimpleNamespace(),
+    infer_state.is_prefill = True
+    step_args = FA3GQAPrefillStepBuilder(page_size=page_size).build(
+        build_attention_batch(infer_state, SimpleNamespace())
     )
-    state = neo.NeoFa3AttBackend.create_att_prefill_state(backend, infer_state)
-    state.init_state()
 
     q = torch.randn(3, 2, 16, device="cuda", dtype=torch.bfloat16)
     k = torch.randn(4 * page_size, 1, 16, device="cuda", dtype=torch.bfloat16)
@@ -121,7 +115,12 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
 
     monkeypatch.setattr(neo_fa3_utils, "HAS_FLASH_ATTN_INTERFACE", True)
     monkeypatch.setattr(neo_fa3_utils, "flash_attn_with_kvcache_neo", neo_attention)
-    torch.testing.assert_close(state.prefill_att(q, k, v, AttControl(image_spans=True)), output, rtol=0, atol=0)
+    layer_config = GQALayerConfig(
+        num_heads=2, num_kv_heads=1, head_dim=16, dtype=torch.bfloat16, bidirectional_image_spans=True
+    )
+    impl = FA3GQAPrefillBackend.get_impl_cls()(layer_config)
+    actual = impl.forward(step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=torch.empty_like(q))
+    torch.testing.assert_close(actual, output, rtol=0, atol=0)
 
 
 def test_prefill_missing_extension_reports_install_instructions(monkeypatch):

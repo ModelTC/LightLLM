@@ -16,8 +16,6 @@ if TYPE_CHECKING:
 
 
 class StarcoderTpPartModel(TpPartBaseModel):
-    uses_attention_groups = True
-
     # weight class
     pre_and_post_weight_class = StarcoderPreAndPostLayerWeight
     transformer_weight_class = StarcoderTransformerLayerWeight

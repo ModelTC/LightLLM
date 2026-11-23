@@ -8,8 +8,7 @@ import torch
 from lightllm.common.attention.backend import AttentionBatch, TensorAllocator
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQAPrefillBackend
-from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend, TritonDecodeAttState, TritonPrefillAttState
+from lightllm.common.basemodel.attention_groups import build_attention_batch
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
@@ -123,7 +122,7 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
 
 
 @pytest.mark.parametrize("q_heads,kv_heads", [(4, 4), (8, 2)])
-def test_adapter_graph(q_heads, kv_heads, allocator):
+def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
     torch.manual_seed(43)
     owner = InferStateInfo()
     owner.batch_size = 2
@@ -132,24 +131,27 @@ def test_adapter_graph(q_heads, kv_heads, allocator):
     owner.max_kv_seq_len = 33
     token_map = torch.randperm(2 * 512, device="cuda", dtype=torch.int32).view(2, 512)
     owner.req_manager = SimpleNamespace(req_to_token_indexs=token_map)
-    model = type("Model", (), {})()
-    model.is_mtp_draft_model = False
-    model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _: 0)
-    model.graph_max_len_in_batch = 512
-    backend = TritonAttBackend(model)
-    state = backend.create_att_decode_state(owner)
-    # As in the serving decode path, the capture flag is set before init_state and capture
-    # raises max_kv_seq_len to the graph capacity only afterwards.
+    model = SimpleNamespace(
+        is_mtp_draft_model=False,
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
+        graph_max_len_in_batch=512,
+    )
+    layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16)
+    impl = TritonGQADecodeBackend.get_impl_cls()(layer_config)
+    # As in the serving decode path, the capture flag is set before the step args are built and
+    # capture raises max_kv_seq_len to the graph capacity only afterwards.
     owner.is_cuda_graph_capture = True
-    state.init_state()
-    owner.decode_att_state = state
+    step_args = TritonGQADecodeBackend.create_step_builder(layer_config, None).build(
+        build_attention_batch(owner, model)
+    )
     owner.max_kv_seq_len = 512
     q = torch.randn(2, q_heads, 64, device="cuda", dtype=torch.bfloat16)
     kv = torch.randn(1024, 2 * kv_heads, 64, device="cuda", dtype=q.dtype)
     k, v = kv[:, :kv_heads], kv[:, kv_heads:]
 
     def forward() -> torch.Tensor:
-        return state.decode_att(q=q, k=k, v=v, att_control=AttControl(), alloc_func=allocator)
+        out = allocator(q.shape, dtype=q.dtype, device=q.device)
+        return impl.forward(step_args, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out, alloc_func=allocator)
 
     forward()
     torch.cuda.synchronize()
@@ -163,13 +165,11 @@ def test_adapter_graph(q_heads, kv_heads, allocator):
         expected = reference(q, k, v, token_map, owner.b_req_idx, owner.b_seq_len, [x - 1 for x in lengths], (-1, -1))
         torch.testing.assert_close(actual.float(), expected, atol=0.02, rtol=0.02)
     # The step args keep the capture step's actual length as the config hint and the capacity as the bound.
-    assert (state.step_args.max_kv_seq_len, state.step_args.kv_seq_len_bound) == (33, 512)
+    assert (step_args.max_kv_seq_len, step_args.kv_seq_len_bound) == (33, 512)
+    # Step args do not keep the step's InferStateInfo alive.
     owner_ref = weakref.ref(owner)
     del owner
     assert owner_ref() is None
-    with pytest.raises(ReferenceError):
-        _ = state.infer_state
-    del backend._instances[(type(backend), model)]
 
 
 def test_list_sliding_window_matches_tuple():
@@ -247,25 +247,14 @@ def test_spec_rejects_causal_window_that_looks_right():
 
 
 @pytest.mark.parametrize("phase", ["prefill", "decode"])
-@pytest.mark.parametrize("causal,att_control", [(False, AttControl()), (True, AttControl(use_att_sink=True))])
-def test_adapter_rejects_attention_triton_cannot_run(phase, causal, att_control):
-    # The adapter must forward causality and sinks into the layer config so the impl rejects them,
-    # rather than silently running causal attention without sinks.
-    model = SimpleNamespace(is_mtp_draft_model=False, mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0))
-    backend = SimpleNamespace(
-        model=model,
-        uses_causal_attention=lambda: causal,
-        get_attention_impl=lambda backend_cls, layer_config: backend_cls.get_impl_cls()(layer_config),
-    )
-    owner = InferStateInfo()
-    state_cls = TritonPrefillAttState if phase == "prefill" else TritonDecodeAttState
-    state = state_cls(backend=backend, _infer_state_weak_ref=weakref.ref(owner))
-    state.causal = backend.uses_causal_attention()
-    q = torch.empty(2, 8, 64, device="cuda", dtype=torch.bfloat16)
-    k = v = torch.empty(16, 2, 64, device="cuda", dtype=torch.bfloat16)
-    run = state.prefill_att if phase == "prefill" else state.decode_att
-    with pytest.raises(NotImplementedError, match="causal attention without sinks"):
-        run(q=q, k=k, v=v, att_control=att_control)
+@pytest.mark.parametrize("fields", [{"causal": False}, {"has_sinks": True}])
+def test_layers_triton_cannot_run_are_rejected_when_selected(phase, fields):
+    # Rather than silently running causal attention without sinks.
+    from lightllm.common.attention import selector
+
+    layer_config = GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16, **fields)
+    with pytest.raises(ValueError, match="causal attention without sinks"):
+        selector.select(layer_config, phase, "triton")
 
 
 # The shared-group kernel has no window, so windowed layers must take the per-row kernel.

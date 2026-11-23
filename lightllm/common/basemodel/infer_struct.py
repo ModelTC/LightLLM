@@ -11,7 +11,6 @@ from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
-from .attention import BasePrefillAttState, BaseDecodeAttState
 from .attention_groups import AttentionGroups
 
 
@@ -22,16 +21,9 @@ class InferStateInfo:
 
     def __init__(self):
         # 模型的 attention 分组；init_att_state 为每组构造一次本步的 step args，以组名为键。
+        # step args 不持有 InferStateInfo，因此不会形成引用环。
         self.att_groups: Optional[AttentionGroups] = None
         self.att_step_args: dict = {}
-
-        # 尚未迁移到 AttentionGroups 的模型使用的 att 状态对象
-        self.prefill_att_state: BasePrefillAttState = None
-        self.decode_att_state: BaseDecodeAttState = None
-
-        # 保留的扩展, 支持线性att与标准att混合使用时使用
-        self.prefill_att_state1: BasePrefillAttState = None
-        self.decode_att_state1: BaseDecodeAttState = None
 
         self.input_ids: torch.Tensor = None
         self.batch_size: int = None
@@ -139,47 +131,12 @@ class InferStateInfo:
             self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
     def init_att_state(self):
+        """Build this step's attention step args, once per group, after every request field is set.
+
+        CUDA graph replay steps build them too: step builders rewrite the tensors the graph captured.
+        """
         if self.att_groups is not None:
             self.att_step_args = self.att_groups.build_step_args(self)
-        if self.is_prefill:
-            if self.prefill_att_state is not None:
-                self.prefill_att_state.init_state()
-            if self.prefill_att_state1 is not None:
-                self.prefill_att_state1.init_state()
-        else:
-            if self.decode_att_state is not None:
-                self.decode_att_state.init_state()
-            if self.decode_att_state1 is not None:
-                self.decode_att_state1.init_state()
-        self.check_att_states()
-
-    def check_att_states(self) -> None:
-        """检查 attention state，防止其强引用 InferStateInfo 而形成循环引用。
-
-        InferStateInfo 已经通过下列四个属性强引用主、辅 attention state。
-        如果 attention state 再把 infer_state 存到普通属性中，就会形成
-        infer_state -> attention state -> infer_state 的强引用闭环。
-        即使一次推理结束、外部引用全部释放，引用计数也无法立即回收这两个对象，
-        必须等待 Python 的循环 GC。循环 GC 主要由 Python 对象分配和阈值驱动，
-        不能保证在 GPU 显存紧张时及时运行。
-
-        这些对象还持有本次推理的 Tensor。对象延迟回收会使相关 Tensor 的显存
-        继续被占用，无法及时交还给 PyTorch 分配器复用；多次推理累积后可能抬高
-        显存峰值，甚至触发 OOM。集中进行循环 GC 还可能造成推理延迟抖动。
-        因此，即使循环最终能够被 GC 回收，也不能依赖它管理推理临时状态的生命周期。
-
-        InferStateInfo 的生命周期应由推理调用方或 CUDA Graph 缓存负责：
-        调用方使用期间、图仍需回放期间保留强引用，结束使用后即可释放。
-        attention state 只通过 _infer_state_weak_ref 和 infer_state 属性访问它，
-        不应额外延长其生命周期。这里在 attention state 初始化完成后统一检查，
-        尽早发现新后端或后续修改误存的 InferStateInfo 强引用。
-
-        注意：检查仅扫描非空 attention state 的第一层实例属性，不递归检查容器或
-        回调闭包；实现后端时也应避免通过这些位置间接保存 infer_state 的强引用。
-        """
-        for state in (self.prefill_att_state, self.prefill_att_state1, self.decode_att_state, self.decode_att_state1):
-            if state is not None:
-                state.check_no_infer_state()
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
         for attr_name, attr_value in vars(new_infer_state).items():
@@ -187,11 +144,6 @@ class InferStateInfo:
                 attr_ = getattr(self, attr_name, None)
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
                     attr_.copy_(attr_value, non_blocking=True)
-
-        if self.decode_att_state is not None:
-            self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
-        if self.decode_att_state1 is not None:
-            self.decode_att_state1.copy_for_decode_cuda_graph(new_infer_state.decode_att_state1)
         return
 
     def call_overlap_hook(self):

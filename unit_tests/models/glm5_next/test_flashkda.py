@@ -5,14 +5,11 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.common.basemodel.attention.linear import flashkda
-from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
-from lightllm.common.basemodel.attention.linear.replay_kda import ReplayKDALinearAttBackend
+from lightllm.common.attention.backends.kda import KDALayerConfig
 from lightllm.common.attention.kernels.gdn.third_party_fla.ops.kda import chunk_kda_with_fused_gate
 from lightllm.common.attention.kernels.kda.kda_prefill import kda_prefill
 from lightllm.common.attention.kernels.kda.kda_state_io import gather_kda_state, scatter_kda_state
-from unit_tests.models.glm5_next.kda_test_utils import kda_params, prefill_batch, prepare_prefill_infer
+from unit_tests.models.glm5_next.kda_test_utils import KDAAttention, kda_params, prefill_batch, prepare_prefill_infer
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
 
@@ -33,6 +30,32 @@ def make_model(backend="flashkda"):
     return model
 
 
+def layer_config(model) -> KDALayerConfig:
+    """The layer config a GLM-5 KDA layer of model creates from the server arguments."""
+    from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
+
+    linear = model.config["linear_attn_config"]
+    layer = SimpleNamespace(
+        network_config_=model.config,
+        tp_world_size_=model.tp_world_size_,
+        tp_linear_num_heads=linear["num_heads"] // model.tp_world_size_,
+        linear_head_dim=linear["head_dim"],
+    )
+    configs = []
+    model.att_groups = SimpleNamespace(create_attention=lambda prefill, decode: configs.append(prefill))
+    Glm5NextTransformerLayerInfer._init_kda_attention(layer, model)
+    return configs[0]
+
+
+def kda_attention(model) -> KDAAttention:
+    return KDAAttention(layer_config(model))
+
+
+def flash_kda_fwd(model):
+    """The FlashKDA kernel the KDA prefill step builder of model's layers loads, or None for Triton."""
+    return kda_attention(model).flash_kda_fwd
+
+
 @pytest.fixture
 def flash_module(monkeypatch):
     module = ModuleType("flash_kda")
@@ -43,11 +66,13 @@ def flash_module(monkeypatch):
     return module
 
 
-@pytest.mark.parametrize("backend_cls", [KDALinearAttBackend, ReplayKDALinearAttBackend])
-def test_flashkda_selected_for_native_and_replay(flash_module, backend_cls):
-    backend = backend_cls(model=make_model())
-    assert backend.flash_kda_fwd is flash_module.fwd
-    assert backend.tp_num_heads == 2
+@pytest.mark.parametrize("mode", ["native", "replay"])
+def test_flashkda_selected_for_native_and_replay(flash_module, mode):
+    model = make_model()
+    model.args.ssm_state_mode = mode
+    attention = kda_attention(model)
+    assert attention.flash_kda_fwd is flash_module.fwd
+    assert attention.layer_config.num_heads == 2 and attention.layer_config.replay == (mode == "replay")
 
 
 @pytest.mark.parametrize("backends", [["auto"], ["auto", "auto"], ["auto", "triton"]])
@@ -55,13 +80,13 @@ def test_fp32_auto_and_explicit_triton_do_not_import_flashkda(monkeypatch, flash
     monkeypatch.setitem(sys.modules, "flash_kda", None)
     model = make_model()
     model.args.llm_prefill_att_backend = backends
-    assert flashkda.get_flash_kda_fwd(model) is None
+    assert flash_kda_fwd(model) is None
 
 
 def test_missing_explicit_flashkda_reports_install_command(monkeypatch, flash_module):
     monkeypatch.setitem(sys.modules, "flash_kda", None)
-    with pytest.raises(ImportError, match="pip install --no-build-isolation"):
-        flashkda.get_flash_kda_fwd(make_model())
+    with pytest.raises(NotImplementedError, match="pip install --no-build-isolation"):
+        flash_kda_fwd(make_model())
 
 
 @pytest.mark.parametrize("unsupported", ["dtype", "state_dtype", "cpu", "sm80", "sm110"])
@@ -76,14 +101,14 @@ def test_auto_skips_unsupported_flashkda_configuration(monkeypatch, flash_module
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     else:
         monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (8, 0) if unsupported == "sm80" else (11, 0))
-    assert flashkda.get_flash_kda_fwd(model) is None
+    assert flash_kda_fwd(model) is None
 
 
 def test_missing_optional_flashkda_falls_back(monkeypatch, flash_module):
     model = make_model("auto")
     model.args.linear_att_ssm_data_type = "bfloat16"
     monkeypatch.setitem(sys.modules, "flash_kda", None)
-    assert flashkda.get_flash_kda_fwd(model) is None
+    assert flash_kda_fwd(model) is None
 
 
 @pytest.mark.parametrize("requested", ["auto", "flashkda"])
@@ -99,18 +124,19 @@ def test_extension_load_failure_is_reported_or_falls_back(monkeypatch, flash_mod
     model = make_model(requested)
     model.args.linear_att_ssm_data_type = "bfloat16"
     if requested == "auto":
-        assert flashkda.get_flash_kda_fwd(model) is None
+        assert flash_kda_fwd(model) is None
     else:
-        with pytest.raises(ImportError, match="PyTorch/CUDA") as exc:
-            flashkda.get_flash_kda_fwd(model)
-        assert isinstance(exc.value.__cause__, OSError)
+        with pytest.raises(NotImplementedError, match="PyTorch/CUDA") as exc:
+            flash_kda_fwd(model)
+        assert isinstance(exc.value.__cause__.__cause__, OSError)
 
 
-@pytest.mark.parametrize("backend_cls", [KDALinearAttBackend, ReplayKDALinearAttBackend])
-def test_prefill_metadata_is_rebuilt_for_each_forward(flash_module, backend_cls):
+@pytest.mark.parametrize("mode", ["native", "replay"])
+def test_prefill_metadata_is_rebuilt_for_each_forward(flash_module, mode):
     model = make_model("auto")
     model.args.linear_att_ssm_data_type = "bfloat16"
-    backend = backend_cls(model=model)
+    model.args.ssm_state_mode = mode
+    backend = kda_attention(model)
     infer = type("Infer", (), {})()
     infer.b_req_idx = torch.tensor([3, 1], dtype=torch.int32)
     infer.b1_cu_q_seq_len = torch.tensor([0, 65, 68], dtype=torch.int32)
@@ -134,32 +160,32 @@ def test_prefill_metadata_is_rebuilt_for_each_forward(flash_module, backend_cls)
     "heads,length,uses_flash",
     [(8, 2048, True), (8, 2049, False), (16, 8192, True), (64, 8192, True), (64, 8193, False)],
 )
-@pytest.mark.parametrize("backend_cls", [KDALinearAttBackend, ReplayKDALinearAttBackend])
-def test_automatic_dispatch_accounts_for_heads_and_length(flash_module, heads, length, uses_flash, backend_cls):
+@pytest.mark.parametrize("mode", ["native", "replay"])
+def test_automatic_dispatch_accounts_for_heads_and_length(flash_module, heads, length, uses_flash, mode):
     model = make_model("auto")
     model.args.linear_att_ssm_data_type = "bfloat16"
+    model.args.ssm_state_mode = mode
     model.config["linear_attn_config"]["num_heads"] = 64
     model.tp_world_size_ = 64 // heads
-    backend = backend_cls(model=model)
-    step_args = backend.prefill_step_builder.build(prefill_batch(length))
+    step_args = kda_attention(model).step_builders["prefill"].build(prefill_batch(length))
     assert (step_args.flash_kda_fwd is flash_module.fwd) == uses_flash
 
 
 def test_explicit_flashkda_overrides_performance_policy(flash_module):
-    backend = KDALinearAttBackend(model=make_model())
-    assert backend.prefill_step_builder.build(prefill_batch(32768)).flash_kda_fwd is flash_module.fwd
+    step_builder = kda_attention(make_model()).step_builders["prefill"]
+    assert step_builder.build(prefill_batch(32768)).flash_kda_fwd is flash_module.fwd
 
 
 def test_fp8_sparse_kv_does_not_change_kda_selection(flash_module):
     model = make_model("auto")
     model.args.linear_att_ssm_data_type = "bfloat16"
     model.args.llm_kv_type = "fp8kv_dsa"
-    assert flashkda.get_flash_kda_fwd(model) is flash_module.fwd
+    assert flash_kda_fwd(model) is flash_module.fwd
 
 
 def test_invalid_kda_backend_is_rejected():
-    with pytest.raises(ValueError, match="Unsupported KDA prefill backend"):
-        flashkda.get_flash_kda_fwd(make_model("flashqla"))
+    with pytest.raises(ValueError, match="prefill_kernel must be one of"):
+        layer_config(make_model("flashqla"))
 
 
 def test_cli_accepts_flashkda_prefill():
@@ -388,16 +414,20 @@ def test_flashkda_weak_decay_matches_fp64(cuda_flashkda, state_dtype, lengths, l
         assert error.abs().max() < 2 * torch.finfo(torch.bfloat16).eps * reference.abs().max()
 
 
-@pytest.mark.parametrize("backend_cls", [KDALinearAttBackend, ReplayKDALinearAttBackend])
+@pytest.mark.parametrize("mode", ["native", "replay"])
 @pytest.mark.parametrize(
     "state_dtype,requested", [(torch.float32, "flashkda"), (torch.bfloat16, "flashkda"), (torch.bfloat16, "auto")]
 )
-def test_flashkda_backend_continues_cached_prefill(cuda_flashkda, backend_cls, state_dtype, requested):
+def test_flashkda_backend_continues_cached_prefill(cuda_flashkda, mode, state_dtype, requested):
     model = make_model(requested)
     model.args.linear_att_ssm_data_type = "float32" if state_dtype == torch.float32 else "bfloat16"
-    backend = backend_cls(model=model)
-    triton_backend = backend_cls(model=make_model("triton"))
-    heads, dim, channels = backend.tp_num_heads, backend.head_dim, backend.tp_hidden_size * 3
+    model.args.ssm_state_mode = mode
+    backend = kda_attention(model)
+    triton_model = make_model("triton")
+    triton_model.args.ssm_state_mode = mode
+    triton_backend = kda_attention(triton_model)
+    config = backend.layer_config
+    heads, dim, channels = config.num_heads, config.head_dim, config.num_heads * config.head_dim * 3
     opts = dict(device="cuda", dtype=torch.bfloat16)
     weight = torch.randn(channels, 4, **opts) * 0.125
     layer_weight = SimpleNamespace(
@@ -413,7 +443,9 @@ def test_flashkda_backend_continues_cached_prefill(cuda_flashkda, backend_cls, s
     def create_att(att_backend, conv_states, ssm_states):
         infer = type("InferState", (), {})()
         state = SimpleNamespace(get_layer_view=lambda **kwargs: (conv_states, ssm_states))
-        infer.att_state_manager = SimpleNamespace(get_state=lambda **kwargs: state)
+        infer.att_state_manager = SimpleNamespace(
+            get_state=lambda **kwargs: state, get_bounded_attention_states=lambda role: [state]
+        )
         infer.att_state_role = "main"
         infer.b_req_idx = torch.tensor([3, 1], device="cuda", dtype=torch.int32)
         infer.b_ready_cache_len = torch.tensor([0, 7], device="cuda", dtype=torch.int32)
@@ -438,12 +470,8 @@ def test_flashkda_backend_continues_cached_prefill(cuda_flashkda, backend_cls, s
         reference_params = kda_params(
             conv_ref, ssm_ref, layer_weight, mixed_qkv.clone(), inputs["raw_g"], inputs["raw_beta"]
         )
-        expected = att_ref.prefill_att(
-            None, None, None, att_control=AttControl(linear_att_prefill=True, linear_att_prefill_dict=reference_params)
-        )
-        actual = att.prefill_att(
-            None, None, None, att_control=AttControl(linear_att_prefill=True, linear_att_prefill_dict=params)
-        )
+        expected = att_ref.run(reference_params)
+        actual = att.run(params)
         assert isinstance(actual, torch.Tensor)
         torch.testing.assert_close(actual.float(), expected.float(), atol=4e-3, rtol=3e-2)
         # An empty request clears its conv history (the kernel window; speculative columns follow it).

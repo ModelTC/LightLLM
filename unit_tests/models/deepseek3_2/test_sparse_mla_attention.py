@@ -1,6 +1,6 @@
-"""DeepSeek V3.2 sparse MLA through the model-facing adapters, against a torch reference.
+"""DeepSeek V3.2 sparse MLA layers' attention, against a torch reference.
 
-The bf16 adapter runs FA3 decode with rotary channels; the FP8 adapter runs FlashMLA over DeepSeek's packed
+A bf16 cache runs FA3 decode with rotary channels; the FP8 cache runs FlashMLA over DeepSeek's packed
 "fp8_ds_mla" rows (512 FP8 latent channels, four fp32 scales per 128 channels and 64 bf16 rotary channels).
 CUDA graph steps rebuild their step args on replay, so a replay with new lengths and indices must match eager.
 """
@@ -10,10 +10,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.attention.backends.sparse_mla import (
+    SparseMLADecodeLayerInputs,
+    SparseMLALayerConfig,
+    SparseMLAPrefillLayerInputs,
+)
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_prefill_params
+from unit_tests.common.attention.backends.groups_runner import LayerAttention
 
 pytestmark = [
     pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required"),
@@ -28,20 +33,22 @@ RANK, ROPE, TOPK, SCALE = 512, 64, 2048, 1 / 24
 SLOTS, MAX_LEN = 16384, 4096
 
 
-class _Model(SimpleNamespace):
-    # Attention backends are cached per model object.
-    __hash__ = object.__hash__
-    __eq__ = object.__eq__
+# What build_attention_batch reads from the model.
+MODEL = SimpleNamespace(graph_max_len_in_batch=MAX_LEN, mtp_manager=None)
 
 
-def make_model():
-    return _Model(
-        config={"index_topk": TOPK},
-        graph_max_batch_size=8,
-        graph_max_len_in_batch=MAX_LEN,
-        max_seq_length=MAX_LEN,
-        mtp_manager=None,
+def layer_attention(heads, kv_cache_format):
+    """A DeepSeek V3.2 layer's attention, as Deepseek3_2TransformerLayerInfer.init_attention creates it."""
+    config = SparseMLALayerConfig(
+        num_heads=heads,
+        kv_lora_rank=RANK,
+        qk_rope_head_dim=ROPE,
+        softmax_scale=SCALE,
+        dtype=torch.bfloat16,
+        kv_cache_format=kv_cache_format,
+        topk=TOPK,
     )
+    return LayerAttention(config, config, "flashmla_sparse")
 
 
 def gen(seed):
@@ -74,10 +81,8 @@ def make_infer(req_to_token, lengths, *, capture=False, replay=False, microbatch
     return infer
 
 
-def decode_state(backend, infer):
-    infer.decode_att_state = backend.create_att_decode_state(infer)
-    infer.decode_att_state.init_state()
-    return infer.decode_att_state
+def decode_step_args(attention, infer):
+    return attention.step_args(infer, MODEL)
 
 
 def select(req_to_token, lengths, out, seed):
@@ -132,7 +137,7 @@ def capture(run):
     return graph, output
 
 
-def check_decode_and_graph(backend, cache, reference_cache, heads):
+def check_decode_and_graph(attention, cache, reference_cache, heads):
     """Eager decode matches the reference; a graph captured for one step replays another step correctly."""
     req_to_token = token_map(4)
     # Every row selects at least as many keys on replay, so stale captured lengths would read valid but too few
@@ -141,40 +146,32 @@ def check_decode_and_graph(backend, cache, reference_cache, heads):
     indices = select(req_to_token, first, torch.empty((4, TOPK), device="cuda", dtype=torch.int32), seed=10)
     q_nope = torch.randn(4, heads, RANK, device="cuda", dtype=torch.bfloat16, generator=gen(1)) * 0.5
     q_rope = torch.randn(4, heads, ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(2)) * 0.5
-    control = AttControl(
-        nsa_decode=True,
-        nsa_decode_dict={
-            "topk_mem_indices": indices,
-            "softmax_scale": SCALE,
-            "kv_lora_rank": RANK,
-            "qk_rope_head_dim": ROPE,
-        },
-    )
+    inputs = SparseMLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=cache, topk_mem_indices=indices)
 
-    def run(state):
-        return state.decode_att((q_nope, q_rope), cache, None, control)
+    def run(step_args):
+        return attention.run("decode", step_args, inputs, out=torch.empty_like(q_nope))
 
     def reference():
         q = torch.cat((q_nope, q_rope), dim=-1)
         return torch.stack([attend(q[row], reference_cache[ids[ids >= 0].long()]) for row, ids in enumerate(indices)])
 
     def eager(lengths):
-        return run(decode_state(backend, make_infer(req_to_token, lengths))).clone()
+        return run(decode_step_args(attention, make_infer(req_to_token, lengths))).clone()
 
     first_eager = eager(first)
     torch.testing.assert_close(first_eager.float(), reference(), atol=0.02, rtol=0.02)
 
     graph_infer = make_infer(req_to_token, first, capture=True)
-    graph_state = decode_state(backend, graph_infer)
-    graph, graph_out = capture(lambda: run(graph_state))
+    graph_step_args = decode_step_args(attention, graph_infer)
+    graph, graph_out = capture(lambda: run(graph_step_args))
     graph.replay()
     assert torch.equal(graph_out, first_eager)
 
-    # Serving replay: the replay step builds its own state, then its request tensors are copied into the graph's.
+    # Serving replay: the replay step builds its own step args, then its request tensors are copied into the graph's.
     select(req_to_token, second, indices, seed=20)
     q_nope.normal_(generator=gen(3)).mul_(0.5)
     replay_infer = make_infer(req_to_token, second, replay=True)
-    decode_state(backend, replay_infer)
+    decode_step_args(attention, replay_infer)
     graph_infer.copy_for_cuda_graph(replay_infer)
     graph.replay()
     replayed = graph_out.clone()
@@ -184,22 +181,22 @@ def check_decode_and_graph(backend, cache, reference_cache, heads):
 
 def test_bf16_fa3_decode_with_rope_matches_reference_and_cuda_graph_replay():
     pytest.importorskip("sgl_kernel.flash_attn")
-    from lightllm.common.basemodel.attention.nsa.flashmla_sparse import NsaFlashMlaSparseAttBackend
+    attention = layer_attention(16, "bf16")
+    assert attention.backend_name("decode") == "fa3_sparse_mla_decode"
 
     kv = torch.randn(SLOTS, 1, RANK + ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(0)) * 0.5
-    check_decode_and_graph(NsaFlashMlaSparseAttBackend(model=make_model()), kv, kv[:, 0].float(), heads=16)
+    check_decode_and_graph(attention, kv, kv[:, 0].float(), heads=16)
 
 
 def test_fp8_ds_mla_flashmla_decode_matches_reference_and_cuda_graph_replay():
     pytest.importorskip("flash_mla")
-    from lightllm.common.basemodel.attention.nsa.fp8_flashmla_sparse import NsaFlashMlaFp8SparseAttBackend
+    # FlashMLA's sparse FP8 decode runs 64-head tiles.
+    attention = layer_attention(64, "fp8_ds_mla")
+    assert attention.backend_name("decode") == "flashmla_sparse_mla_decode"
 
     kv = torch.randn(SLOTS, 1, RANK + ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(0)) * 0.5
     packed = write_fp8_ds_mla(kv)
-    # FlashMLA's sparse FP8 decode runs 64-head tiles.
-    check_decode_and_graph(
-        NsaFlashMlaFp8SparseAttBackend(model=make_model()), packed, dequantize_fp8_ds_mla(packed), heads=64
-    )
+    check_decode_and_graph(attention, packed, dequantize_fp8_ds_mla(packed), heads=64)
 
 
 @pytest.mark.parametrize(
@@ -210,7 +207,6 @@ def test_fp8_ds_mla_flashmla_decode_matches_reference_and_cuda_graph_replay():
 def test_fp8_ds_mla_flashmla_prefill_matches_reference(ready, ends):
     """Cached history is read from the packed FP8 cache; the step's own keys come from current_kv in bf16."""
     pytest.importorskip("flash_mla")
-    from lightllm.common.basemodel.attention.nsa.fp8_flashmla_sparse import NsaFlashMlaFp8SparseAttBackend
 
     heads = 64
     req_to_token = token_map(len(ends), seed=5)
@@ -260,19 +256,15 @@ def test_fp8_ds_mla_flashmla_prefill_matches_reference(ready, ends):
             row += 1
         step_offset += end - start
 
-    backend = NsaFlashMlaFp8SparseAttBackend(model=make_model())
-    infer.prefill_att_state = backend.create_att_prefill_state(infer)
-    infer.prefill_att_state.init_state()
-    control = AttControl(
-        nsa_prefill=True,
-        nsa_prefill_dict={
-            "topk_mem_indices": topk_mem_indices,
-            "topk_indices": topk_indices,
-            "prefill_cache_kv": current_kv,
-            "softmax_scale": SCALE,
-            "kv_lora_rank": RANK,
-        },
+    attention = layer_attention(heads, "fp8_ds_mla")
+    inputs = SparseMLAPrefillLayerInputs(
+        q=q,
+        kv_cache=packed,
+        topk_mem_indices=topk_mem_indices,
+        topk_indices=topk_indices,
+        current_kv=current_kv,
     )
-    out = infer.prefill_att_state.prefill_att(q, packed, None, control)
+    out = torch.empty((rows, heads, RANK), device="cuda", dtype=q.dtype)
+    out = attention.run("prefill", attention.step_args(infer, MODEL), inputs, out=out)
     assert out.shape == (rows, heads, RANK)
     torch.testing.assert_close(out.float(), torch.stack(expected), atol=0.02, rtol=0.02)

@@ -1,6 +1,6 @@
 """GLM-5 FP8 sparse decode through the serving path: InferStateInfo -> build_attention_batch -> step builder.
 
-Unlike test_fp8_kv.py, the step args here come from Glm5NextSparseDecodeState.init_state, so these tests cover how
+Unlike test_fp8_kv.py, the step args here come from the layer group's step builder, so these tests cover how
 the builder marks CUDA graph steps (which picks the direct Triton decode for small graph workloads) and keeps
 FlashMLA's scheduler metadata per (microbatch, batch size) for replays.
 """
@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention_groups import build_attention_batch
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 
@@ -26,27 +26,17 @@ pytestmark = [
 SLOTS, TOPK_WIDTH, SCALE = 8192, 2176, 0.0625
 
 
-class _Model(SimpleNamespace):
-    # Attention backends are cached per model object.
-    __hash__ = object.__hash__
-    __eq__ = object.__eq__
-
-
 def make_backend():
+    """A GLM-5 FP8 layer group's decode step builder, with the model fields build_attention_batch reads."""
     pytest.importorskip("flash_mla")
-    from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+    from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparseDecodeBackend
+    from unit_tests.models.glm5_next.test_fp8_kv import _layer_config
 
-    model = _Model(
-        config={"index_topk": 2048, "index_kpool": 4},
-        args=SimpleNamespace(enable_prefill_microbatch_overlap=False, run_mode="normal"),
-        batch_max_tokens=16,
-        max_req_num=2,
-        max_seq_length=4096,
-        graph_max_len_in_batch=SLOTS,
-        att_state_role="fp8_decode_step_builder_test",
-        mtp_manager=None,
+    config = _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), SCALE)
+    return SimpleNamespace(
+        model=SimpleNamespace(graph_max_len_in_batch=SLOTS, mtp_manager=None),
+        decode_step_builder=FlashMLASparseDecodeBackend.create_step_builder(config, None),
     )
-    return Fp8Glm5NextSparseAttBackend(model=model)
 
 
 def gen(seed):
@@ -75,9 +65,11 @@ def make_infer(lengths, *, capture=False, replay=False, microbatch=0):
 
 
 def init_decode_state(backend, infer):
-    infer.decode_att_state = backend.create_att_decode_state(infer)
-    infer.decode_att_state.init_state()
-    return infer.decode_att_state
+    """The step's attention: its step args, built as InferStateInfo.init_att_state builds them."""
+    from unit_tests.models.glm5_next.test_fp8_kv import _decode
+
+    step_args = backend.decode_step_builder.build(build_attention_batch(infer, backend.model))
+    return SimpleNamespace(step_args=step_args, decode_att=lambda q, kv, params: _decode(step_args, q, kv, params))
 
 
 def select(lengths, out, seed):
@@ -142,12 +134,10 @@ def test_fp8_decode_graph_replays_steps_built_by_the_step_builder(monkeypatch, b
     second = [5000, 2050, 33, 3][:batch]
     indices = select(first, torch.empty((batch, TOPK_WIDTH), device="cuda", dtype=torch.int32), seed=10)
     q = torch.randn(batch, heads, 512, device="cuda", dtype=torch.bfloat16, generator=gen(1))
-    control = AttControl(
-        nsa_decode=True, nsa_decode_dict={"topk_mem_indices": indices, "softmax_scale": SCALE, "kv_lora_rank": 512}
-    )
+    control = {"topk_mem_indices": indices, "softmax_scale": SCALE, "kv_lora_rank": 512}
 
     def run(state):
-        return state.decode_att((q, q[..., :0]), packed[..., :584], None, control)
+        return state.decode_att((q, q[..., :0]), packed[..., :584], control)
 
     def eager(lengths):
         state = init_decode_state(backend, make_infer(lengths))

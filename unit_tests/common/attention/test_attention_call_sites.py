@@ -1,4 +1,4 @@
-"""Model and adapter code reaches attention kernels only through lightllm.common.attention.backends."""
+"""Model code reaches attention kernels only through lightllm.common.attention.backends."""
 
 import ast
 import pathlib
@@ -8,12 +8,12 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 
-# Code that runs attention for a model: layer infers, infer states and the model-side adapters.
+# Code that runs attention for a model: layer infers, infer states, models and their attention groups.
 CALLER_GLOBS = (
     "lightllm/models/*/layer_infer/**/*.py",
     "lightllm/models/*/infer_struct.py",
     "lightllm/models/*/model.py",
-    "lightllm/common/basemodel/attention/**/*.py",
+    "lightllm/common/basemodel/attention_groups.py",
     "lightllm/common/basemodel/layer_infer/**/*.py",
 )
 
@@ -62,7 +62,8 @@ def test_caller_globs_find_the_attention_callers():
         "lightllm/models/llama/layer_infer/transformer_layer_infer.py",
         "lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py",
         "lightllm/models/qwen3next/layer_infer/transformer_layer_infer.py",
-        "lightllm/common/basemodel/attention/triton/fp.py",
+        "lightllm/common/basemodel/attention_groups.py",
+        "lightllm/common/basemodel/layer_infer/gqa_attention.py",
     ):
         assert expected in found
 
@@ -84,7 +85,7 @@ def test_kernel_module_pattern(module, is_kernel):
     assert bool(ATTENTION_KERNEL_MODULES.match(module)) == is_kernel
 
 
-def test_models_and_adapters_do_not_import_attention_kernels():
+def test_models_do_not_import_attention_kernels():
     offenders = [
         f"{path.relative_to(ROOT)}:{lineno} imports {module}"
         for path in caller_files()
@@ -105,7 +106,7 @@ MODEL_SIDE_MODULES = re.compile(r"^lightllm\.(models|common\.basemodel)(\.|$)(?!
         ("lightllm.models.llama.model", True),
         ("lightllm.common.basemodel", True),
         ("lightllm.common.basemodel.infer_struct", True),
-        ("lightllm.common.basemodel.attention.base_att", True),
+        ("lightllm.common.basemodel.attention_groups", True),
         ("lightllm.common.basemodel.triton_kernel.fa3_utils", False),
         ("lightllm.common.attention.backend", False),
     ],

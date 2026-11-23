@@ -249,9 +249,7 @@ def _write_packed_rows(buffer, layer_index, slots, packed):
     layer[pages, scale_offsets[:, None] + torch.arange(scale_bytes, device=slots.device)] = packed[:, data_bytes:]
 
 
-def _test_backend(requests, token_capacity=8192):
-    from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DeepseekV4FlashMlaFp8SparseAttBackend
-
+def _test_model(requests, token_capacity=8192):
     model = type("TestModel", (), {})()
     model.req_manager = requests
     model.att_state_manager = requests.memory.manager
@@ -280,13 +278,13 @@ def _test_backend(requests, token_capacity=8192):
         mtp_mode=None,
         mtp_step=0,
     )
-    return DeepseekV4FlashMlaFp8SparseAttBackend(model)
+    return model
 
 
 def _prepare_prefill(requests, req_ids, starts, ends, microbatch_index=0):
     req_ids, starts, ends = (value.to(device="cuda", dtype=torch.int32) for value in (req_ids, starts, ends))
-    if not hasattr(requests, "_test_backend"):
-        requests._test_backend = _test_backend(requests)
+    if not hasattr(requests, "_test_model"):
+        requests._test_model = _test_model(requests)
         requests._test_prefill_states = {}
     state = prepare_swa_prefill_workspace(
         SimpleNamespace(
@@ -300,7 +298,7 @@ def _prepare_prefill(requests, req_ids, starts, ends, microbatch_index=0):
             b_seq_len=ends,
             microbatch_index=microbatch_index,
         ),
-        requests._test_backend.model,
+        requests._test_model,
     )
     requests._test_prefill_states.update((req, state) for req in req_ids.tolist())
     if not hasattr(requests, "_test_prefill_ends"):
@@ -528,7 +526,7 @@ def test_prefill_checkpoint_reads_precede_window_retention(cache):
     _write_swa(requests, 2, req, positions, packed.flip(0))
     _finish_prefill(requests, [req])
     # Reuse the scratch: only fixed request windows and CPU snapshots remain.
-    reserve_swa_prefill_workspace(requests._test_backend.model)[0].zero_()
+    reserve_swa_prefill_workspace(requests._test_model)[0].zero_()
     requests.save_state(_checkpoint_req(req, 2048), index, states)
     saved_swa = states.get_state_cache(index)[0]
     torch.testing.assert_close(saved_swa[0].cuda(), packed[-requests.sliding_window :], rtol=0, atol=0)
@@ -947,7 +945,9 @@ def test_swa_index_cuda_graph_reads_updated_private_pages(cache):
     indirect=["cache"],
 )
 def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, dspark):
-    from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
+    from lightllm.common.attention.backends.sparse_mla import SWASparseMLALayerConfig, SWASparseMLALayerInputs
+    from lightllm.common.attention.backends.sparse_mla.flashmla_swa import FlashMLASWADecodeBackend
+    from lightllm.models.deepseek_v4.config import create_attention_config
     from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
     from lightllm.models.deepseek_v4.triton_kernel.build_dspark_swa_indices import build_dspark_swa_indices
 
@@ -991,44 +991,41 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
         else:
             build_swa_indices(req_idx, query_positions, requests, indices, lengths, write_slots)
 
-    backend = attention.DeepseekV4FlashMlaFp8SparseAttBackend(
-        type(
-            "Model",
-            (),
-            {
-                "config": dict(
-                    num_attention_heads=64,
-                    compress_ratios=[0, 0, 0],
-                    head_dim=512,
-                    qk_rope_head_dim=64,
-                    index_head_dim=128,
-                    sliding_window=128,
-                ),
-                "layers_infer": [SimpleNamespace(layer_num_=2)],
-                "tp_rank_": 0,
-                "tp_world_size_": 1,
-                "req_manager": requests,
-            },
-        )()
+    # Layer 2's sliding-window attention, as DeepseekV4TransformerLayerInfer runs it.
+    model_config = dict(
+        num_attention_heads=64,
+        compress_ratios=[0, 0, 0],
+        head_dim=512,
+        qk_rope_head_dim=64,
+        index_head_dim=128,
+        sliding_window=128,
     )
-    state_info = SimpleNamespace(mem_manager=manager)
-    state = backend.create_att_decode_state(state_info)
-    state.init_state()
-    params = dict(
-        compress_ratio=0,
-        head_dim_v=512,
-        softmax_scale=512 ** -0.5,
-        swa_indices=indices.unsqueeze(1),
-        swa_lengths=lengths,
-        attn_sink=torch.zeros(64, device="cuda"),
+    swa_view = create_attention_config(model_config=model_config, model_logical_layer_ids=(2,)).create_swa_config()
+    layer_config = SWASparseMLALayerConfig(
+        num_heads=64, head_dim_v=512, softmax_scale=512 ** -0.5, dtype=torch.bfloat16, has_attn_sink=True
     )
-    control = attention.AttControl(nsa_decode=True, nsa_decode_dict=params)
+    impl = FlashMLASWADecodeBackend.get_impl_cls()(layer_config)
+    builder = FlashMLASWADecodeBackend.create_step_builder(layer_config, None)
+    attn_sink = torch.zeros(64, device="cuda")
+
+    def decode(step_args, packed_kv, swa_indices, swa_lengths):
+        inputs = SWASparseMLALayerInputs(
+            q=q,
+            swa_cache=swa_view.get_attention_view(packed_kv=packed_kv[0]),
+            swa_indices=swa_indices,
+            swa_lengths=swa_lengths,
+            attn_sink=attn_sink,
+        )
+        out = torch.empty((q.shape[0], 64, 512), dtype=q.dtype, device=q.device)
+        return impl.forward(step_args, inputs, out=out)
+
+    step_args = builder.build()
     q = torch.randn((token_num, 64, 512), dtype=torch.bfloat16, device="cuda") * 0.1
     packed_kv = requests.get_att_input_params(2)
 
     def forward():
         build()
-        return state.decode_att(q, packed_kv, None, att_control=control)
+        return decode(step_args, packed_kv, indices.unsqueeze(1), lengths)
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -1039,8 +1036,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     with torch.cuda.graph(graph, stream=stream):
         actual = forward()
 
-    reference_state = backend.create_att_decode_state(state_info)
-    reference_state.init_state()
+    reference_step_args = builder.build()
     reference_kv = DeepseekV4InferStateInfo.get_att_kv(
         SimpleNamespace(
             req_manager=requests,
@@ -1085,10 +1081,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
             reference_indices, (0, width - reference_indices.shape[1]), value=-1
         )
         reference_indices = reference_indices.to(torch.int32)
-        reference_params = dict(params, swa_indices=reference_indices.unsqueeze(1), swa_lengths=reference_lengths)
-        expected = reference_state.decode_att(
-            q, reference_kv, None, att_control=attention.AttControl(nsa_decode=True, nsa_decode_dict=reference_params)
-        )
+        expected = decode(reference_step_args, reference_kv, reference_indices.unsqueeze(1), reference_lengths)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0, msg=f"SWA mismatch at position {start}")
         torch.testing.assert_close(write_slots, _swa_slots(requests, destination, logical_positions).to(torch.int32))
         # Accept one position; speculative future rows stay dirty until the next write.
@@ -1347,8 +1340,7 @@ def test_forward_indices_are_isolated_and_graph_inputs_refresh(cache, is_prefill
     manager, requests = cache
     first, first_slots = _reserve(manager, requests, 512)
     second, second_slots = _reserve(manager, requests, 512)
-    backend = _test_backend(requests)
-    model = backend.model
+    model = _test_model(requests)
     model.layers_infer = [layer for layer in model.layers_infer if layer.layer_num_ in owned_layer_ids]
     has_c128_layer = 1 in owned_layer_ids
     model.graph = SimpleNamespace(can_run=lambda *args: True, graph_max_len_in_batch=16384)
@@ -1372,9 +1364,6 @@ def test_forward_indices_are_isolated_and_graph_inputs_refresh(cache, is_prefill
         state.b_seq_len = torch.tensor(lengths, dtype=torch.int32, device="cuda")
         if is_prefill:
             state.b_ready_cache_len = state.b_seq_len - 1
-            state.prefill_att_state = backend.create_att_prefill_state(state)
-        else:
-            state.decode_att_state = backend.create_att_decode_state(state)
         state.init_some_extra_state(model)
         return state
 
@@ -1424,7 +1413,6 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
     import lightllm.models.deepseek_v4_dspark.infer_struct as dspark_state
     from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
     from lightllm.models.deepseek_v4_dspark.infer_struct import DeepseekV4DSparkInferStateInfo
-    from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DeepseekV4FlashMlaFp8SparseAttBackend
 
     manager, requests = cache
     req_idx, slots = _reserve(manager, requests, 512)
@@ -1460,7 +1448,6 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
         att_state_role="main",
         layers_infer=[SimpleNamespace(layer_num_=i) for i in range(3)],
     )
-    backend = DeepseekV4FlashMlaFp8SparseAttBackend(model)
     model.block_size = 3
     model.dsv4_workspace = DeepseekV4Workspace(model)
     rope = torch.zeros((512, 32), device="cuda")
@@ -1480,9 +1467,7 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
         state.b_req_idx = torch.tensor([req_idx], dtype=torch.int32, device="cuda")
         state.b_seq_len = torch.tensor([260], dtype=torch.int32, device="cuda")
         state.b_ready_cache_len = torch.tensor([257], dtype=torch.int32, device="cuda")
-        state.prefill_att_state = backend.create_att_prefill_state(state)
     else:
-        state.decode_att_state = backend.create_att_decode_state(state)
         state.b_req_idx = torch.full((3,), req_idx, dtype=torch.int32, device="cuda")
         state.b_seq_len = torch.arange(258, 261, dtype=torch.int32, device="cuda")
         if mode == "commit":
@@ -1888,8 +1873,7 @@ def test_image_metadata_and_embeddings_preserve_canonical_cache(cache, prefix_le
     ready = spans[0][1] if cached_first_image else 0
     manager, requests = cache
     req_idx, slots = _reserve(manager, requests, len(input_ids))
-    backend = _test_backend(requests, token_capacity=128)
-    model = backend.model
+    model = _test_model(requests, token_capacity=128)
     model.has_vision = True
     model.config["vision_max_n_token"] = 384
     model.dsv4_workspace = None
@@ -1909,7 +1893,6 @@ def test_image_metadata_and_embeddings_preserve_canonical_cache(cache, prefix_le
     state.b_ready_cache_len = torch.tensor([ready], dtype=torch.int32, device="cuda")
     state.max_kv_seq_len = len(input_ids)
     state.multimodal_params = [params.to_dict()]
-    state.prefill_att_state = backend.create_att_prefill_state(state)
     state.init_some_extra_state(model)
     assert state.dsv4_image_left.cpu().tolist() == expected_left[ready:]
     assert state.dsv4_image_right.cpu().tolist() == expected_right[ready:]
@@ -1945,8 +1928,7 @@ def test_prefill_metadata_does_not_read_cuda_scalars(cache, padding_tokens):
     from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 
     manager, requests = cache
-    backend = _test_backend(requests)
-    model = backend.model
+    model = _test_model(requests)
     model.has_vision = False
     rope = torch.zeros((8, 32), device="cuda")
     model._cos_cached_sliding = model._sin_cached_sliding = rope
@@ -1971,7 +1953,6 @@ def test_prefill_metadata_does_not_read_cuda_scalars(cache, padding_tokens):
     infer_state.b_seq_len = torch.tensor(lengths, dtype=torch.int32, device="cuda")
     infer_state.b_ready_cache_len = torch.zeros_like(infer_state.b_seq_len)
     infer_state.max_kv_seq_len = max(lengths)
-    infer_state.prefill_att_state = backend.create_att_prefill_state(infer_state)
     infer_state.init_some_extra_state(model)
 
     previous_debug_mode = torch.cuda.get_sync_debug_mode()
@@ -2024,9 +2005,9 @@ def test_full_batch_unaligned_prefill_workspace_is_bounded_and_private(cache, mt
     first = (ready - requests.sliding_window + 1) // page_token_num * page_token_num
     end = ready + chunk_tokens
     required = request_count * ((end + page_token_num - 1) // page_token_num * page_token_num - first)
-    requests._test_backend = _test_backend(requests, request_count * chunk_tokens)
+    requests._test_model = _test_model(requests, request_count * chunk_tokens)
     requests._test_prefill_states = {}
-    workspace, capacity = reserve_swa_prefill_workspace(requests._test_backend.model)
+    workspace, capacity = reserve_swa_prefill_workspace(requests._test_model)
     assert capacity >= required
     assert workspace.untyped_storage().data_ptr() != requests.req_to_swa.untyped_storage().data_ptr()
     workspace[:, capacity : 2 * capacity].fill_(173)

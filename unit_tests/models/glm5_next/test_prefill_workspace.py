@@ -4,7 +4,9 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.attention.nsa import fp8_glm5_next
+from lightllm.common.basemodel import attention_groups
+from lightllm.common.attention.backends.sparse_mla import SparseMLALayerConfig
+from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLAPrefillBackend
 from lightllm.models.glm5_next import prefill_workspace
 from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 from lightllm.models.glm5_next_mtp import model as glm5_next_mtp_model
@@ -31,14 +33,11 @@ def test_prefill_workspace_is_reserved_once_and_reused_at_runtime(monkeypatch, o
         config={"index_topk": 2048, "index_kpool": 4},
         att_state_role=f"workspace_test_{run_mode}_{overlap}",
     )
-    backend_class = fp8_glm5_next.Fp8Glm5NextSparseAttBackend
-    reserved = backend_class.allocate_prefill_workspaces(model)
+    reserved = prefill_workspace.reserve_fp8_sparse_prefill_workspaces(model)
     pointers = [{key: value.data_ptr() for key, value in buffers.items()} for buffers in reserved]
-    backend = object.__new__(backend_class)
-    backend.__init__(model)
-    assert [
-        {key: value.data_ptr() for key, value in buffers.items()} for buffers in backend._prefill_workspaces
-    ] == pointers
+    # Reserving again, as a second model role sharing the name would, returns the same storage.
+    again = prefill_workspace.reserve_fp8_sparse_prefill_workspaces(model)
+    assert [{key: value.data_ptr() for key, value in buffers.items()} for buffers in again] == pointers
     assert len(reserved) == 1 + int(overlap)
     capacity = 8 if run_mode == "decode" else 34
     assert reserved[0]["gathered_kv"].shape == (capacity, 1, 512)
@@ -47,17 +46,38 @@ def test_prefill_workspace_is_reserved_once_and_reused_at_runtime(monkeypatch, o
     def forbidden(*args, **kwargs):
         raise AssertionError("Runtime must reuse the workspace reserved before KV capacity planning")
 
-    monkeypatch.setattr(backend, "allocate_prefill_workspaces", forbidden)
-    monkeypatch.setattr(backend, "get_gpu_workspace_buffer", forbidden)
+    model.attention_prefill_workspaces = reserved
+    monkeypatch.setattr(prefill_workspace, "reserve_fp8_sparse_prefill_workspaces", forbidden)
+    monkeypatch.setattr(attention_groups, "get_gpu_workspace_buffer", forbidden)
+    config = SparseMLALayerConfig(
+        num_heads=8,
+        kv_lora_rank=512,
+        qk_rope_head_dim=0,
+        softmax_scale=0.1,
+        dtype=torch.bfloat16,
+        kv_cache_format="fp8_group64_e8m0",
+    )
+    ctx = attention_groups.StepBuilderContext(
+        device=0,
+        page_size=1,
+        max_seq_len=13,
+        max_cuda_graph_batch_size=1,
+        max_decode_rows=1,
+        microbatch_count=1,
+        workspace_bytes=0,
+        get_workspace=forbidden,
+        prefill_workspace=model.attention_prefill_workspaces.__getitem__,
+    )
+    builder = FA3SparseMLAPrefillBackend.create_step_builder(config, ctx)
     for slot in range(1 + int(overlap)):
         # Each step's prefill step args carry the scratch reserved for its microbatch.
-        views = backend.prefill_step_builder.workspace(slot)
+        views = builder.workspace(slot)
         assert {key: value.data_ptr() for key, value in views.items()} == pointers[slot]
         torch.testing.assert_close(views["cu_seqlens_q"], torch.arange(9, dtype=torch.int32, device="cuda"))
 
 
 def test_prefill_microbatches_use_independent_scratch_during_graph_replay(monkeypatch):
-    monkeypatch.setattr(fp8_glm5_next, "KV_GATHER_CHUNK_SIZE", 7)
+    monkeypatch.setattr(prefill_workspace, "KV_GATHER_CHUNK_SIZE", 7)
     backend = _make_workspace_backend(8, overlap=True)
     first = _PrefillCase([15], [3], 8, backend=backend)
     second = _PrefillCase([17], [3], 8, backend=backend)
@@ -72,7 +92,7 @@ def test_prefill_microbatches_use_independent_scratch_during_graph_replay(monkey
     def forbidden(*args, **kwargs):
         raise AssertionError("Attention must not allocate a new prefill workspace")
 
-    monkeypatch.setattr(backend, "allocate_prefill_workspaces", forbidden)
+    monkeypatch.setattr(prefill_workspace, "reserve_fp8_sparse_prefill_workspaces", forbidden)
     first_graph, first_output = _capture_cuda_graph(first.run)
     second_graph, second_output = _capture_cuda_graph(second.run)
     first_stream, second_stream = torch.cuda.Stream(), torch.cuda.Stream()

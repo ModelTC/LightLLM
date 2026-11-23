@@ -277,11 +277,6 @@ def get_diverse_max_batch_shared_group_size() -> int:
 
 
 @lru_cache(maxsize=None)
-def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
-    return get_env_start_args().diverse_mode and "int8kv" == get_env_start_args().llm_kv_type
-
-
-@lru_cache(maxsize=None)
 def enable_triton_mtp_kernel() -> bool:
     """
     启用 Triton MTP 解码专用 kernel

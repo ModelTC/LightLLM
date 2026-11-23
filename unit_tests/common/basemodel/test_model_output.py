@@ -1,11 +1,9 @@
 from types import SimpleNamespace
-import weakref
 
 import torch
 import pytest
 
 from lightllm.common.basemodel import basemodel
-from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferDecodeAttState
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
 from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -182,21 +180,16 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
     def graph_flags(state):
         return state.is_cuda_graph_capture, state.is_cuda_graph_replay
 
-    class DecodeState(FlashInferDecodeAttState):
-        # Stands in for the wrapper a FlashInfer decode step builder plans.
-        decode_wrapper = None
+    class AttentionGroups:
+        """Stands in for a group whose step builder plans a decode wrapper, as FlashInfer's does."""
 
-        def init_state(self):
-            infer_state = self.infer_state
-            # Replace the external GPU wrapper allocation while preserving the
-            # production decision and InferStateInfo's initialization entry point.
-            # Graph-owned state serves replays, so only eager and capture steps create a wrapper.
+        def build_step_args(self, infer_state):
+            # Graph-owned wrappers serve replays, so only eager and capture steps create one; the
+            # entry point is still InferStateInfo.init_att_state.
             assert not (infer_state.is_cuda_graph_capture and infer_state.is_cuda_graph_replay)
-            if not infer_state.is_cuda_graph_replay:
-                self.decode_wrapper = object()
-            initializations.append(
-                (infer_state.microbatch_index, graph_flags(infer_state), self.decode_wrapper is not None)
-            )
+            decode_wrapper = None if infer_state.is_cuda_graph_replay else object()
+            initializations.append((infer_state.microbatch_index, graph_flags(infer_state), decode_wrapper is not None))
+            return {"group": SimpleNamespace(decode_wrapper=decode_wrapper)}
 
     def create_state(model_input, microbatch_index=0):
         state = InferStateInfo()
@@ -207,7 +200,7 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
         state.b_req_idx = model_input.b_req_idx
         state.b_seq_len = model_input.b_seq_len
         state.microbatch_index = microbatch_index
-        state.decode_att_state = DecodeState(_infer_state_weak_ref=weakref.ref(state))
+        state.att_groups = AttentionGroups()
         state.init_some_extra_state = lambda _: None
         return state
 
@@ -216,8 +209,8 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
 
     def forward(state, infer_state1):
         # Eager and capture execute attention using these newly prepared states.
-        assert state.decode_att_state.decode_wrapper is not None
-        assert infer_state1.decode_att_state.decode_wrapper is not None
+        assert state.att_step_args["group"].decode_wrapper is not None
+        assert infer_state1.att_step_args["group"].decode_wrapper is not None
         executions.append(("forward", graph_flags(state), graph_flags(infer_state1)))
         return outputs(state, infer_state1)
 
@@ -227,8 +220,8 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
 
     def replay(state, infer_state1):
         # Replay uses graph-owned wrappers, so temporary states need none.
-        assert state.decode_att_state.decode_wrapper is None
-        assert infer_state1.decode_att_state.decode_wrapper is None
+        assert state.att_step_args["group"].decode_wrapper is None
+        assert infer_state1.att_step_args["group"].decode_wrapper is None
         executions.append(("replay", graph_flags(state), graph_flags(infer_state1)))
         return outputs(state, infer_state1)
 

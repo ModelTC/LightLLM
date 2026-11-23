@@ -263,10 +263,12 @@ def _check_state(layer_config: KDALayerConfig, *, replay: bool) -> None:
 def _check_prefill_kernel(layer_config: KDALayerConfig) -> None:
     # A requested FlashKDA must load when the model loads, not on the first prefill step.
     if layer_config.prefill_kernel == "flashkda":
+        from .flashkda import import_flash_kda_fwd
+
         try:
-            import flash_kda  # noqa: F401
-        except Exception as e:
-            raise NotImplementedError(f"the flashkda prefill kernel cannot be loaded: {e!r}") from e
+            import_flash_kda_fwd()
+        except ImportError as e:
+            raise NotImplementedError(str(e)) from e
 
 
 def _create_prefill_step_builder(layer_config: KDALayerConfig) -> KDAPrefillStepBuilder:

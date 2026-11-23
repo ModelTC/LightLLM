@@ -17,8 +17,7 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.allocators import FullAttKVAllocator
-from lightllm.common.basemodel.attention.base_att import AttControl
-from unit_tests.common.att_resources.fp8_attention_helpers import fp8_attention_state
+from unit_tests.common.att_resources.fp8_attention_helpers import fp8_attention
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from unit_tests.common.att_resources.test_capacity import definition
 
@@ -83,11 +82,10 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
     infer.batch_size, infer.max_q_seq_len = 2, 1
     infer.b_seq_len = torch.ones(2, dtype=torch.int32, device="cpu")
     observed = {}
-    att = fp8_attention_state(
+    att = fp8_attention(
         monkeypatch,
         kind=kind,
         prefill=prefill,
-        infer=infer,
         observed=observed,
         heads=selected.config.head_num,
         head_dim=selected.config.head_dim,
@@ -99,22 +97,8 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
     def allocate(shape: Sequence[int], dtype: torch.dtype, device: str | torch.device | int):
         return torch.empty(shape, dtype=dtype, device="cpu")
 
-    if prefill:
-        att.prefill_att(
-            q=q,
-            k=k,
-            v=v,
-            att_control=AttControl(logical_layer_id=8, kv_scales=selected.get_layer_kv_scales(8)),
-            alloc_func=allocate,
-        )
-    else:
-        att.decode_att(
-            q=q,
-            k=k,
-            v=v,
-            att_control=AttControl(logical_layer_id=8, kv_scales=selected.get_layer_kv_scales(8)),
-            alloc_func=allocate,
-        )
+    # Logical layer 8 reads its role's calibration through the State.
+    att.run(q=q, k=k, v=v, kv_scales=selected.get_layer_kv_scales(8), alloc_func=allocate)
     if kind == "static_head":
         heads = selected.config.head_num
         torch.testing.assert_close(observed["q_scales"], selected.q_scales[1])

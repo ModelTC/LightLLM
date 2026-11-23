@@ -6,7 +6,6 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
-from lightllm.common.basemodel.attention.base_att import AttControl
 
 
 @pytest.mark.parametrize("kv_type", ["None", "int4kv", "int8kv", "fp8kv_spt", "fp8kv_sph"])
@@ -60,7 +59,7 @@ def test_gqa_layouts_coexist_and_match_across_tp_and_registration_order(kv_type,
 
 @pytest.mark.parametrize("prefill", [False, True])
 def test_fa3_reads_descale_for_each_head_layout(prefill, monkeypatch):
-    from unit_tests.common.att_resources.fp8_attention_helpers import fp8_attention_state
+    from unit_tests.common.att_resources.fp8_attention_helpers import fp8_attention
 
     manager = AttentionStateManager(request_capacity=2)
     for layer, heads in enumerate((2, 4)):
@@ -88,19 +87,16 @@ def test_fa3_reads_descale_for_each_head_layout(prefill, monkeypatch):
         layer = state.config.logical_layer_groups[0][0]
         q = k = v = torch.zeros((2, heads, state.config.head_dim), dtype=torch.bfloat16)
         observed.clear()
-        att = fp8_attention_state(
+        att = fp8_attention(
             monkeypatch,
             kind="static_head",
             prefill=prefill,
-            infer=infer,
             observed=observed,
             heads=heads,
             head_dim=state.config.head_dim,
             requests=batch_size,
         )
-        run = att.prefill_att if prefill else att.decode_att
-        kv_scales = state.get_layer_kv_scales(layer)
-        run(q=q, k=k, v=v, att_control=AttControl(logical_layer_id=layer, kv_scales=kv_scales))
+        att.run(q=q, k=k, v=v, kv_scales=state.get_layer_kv_scales(layer))
         row = state.scales[0]
         k_descale = observed["k_descale"]
         v_descale = observed["v_descale"]

@@ -1,19 +1,19 @@
-import weakref
-import inspect
+"""GDN step builders and impls, how GDN layers choose them, and the FlashQLA validator."""
+
 import sys
 from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
 
+from lightllm.common.attention import selector
+from lightllm.common.attention.backends.gdn import GDNLayerConfig
+from lightllm.common.attention.backends.gdn.triton import GDNDecodeStepBuilder, TritonGDNPrefillImpl
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
+from lightllm.common.basemodel import attention_groups
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-import lightllm.common.basemodel.attention.linear.gdn as gdn
-import lightllm.common.basemodel.attention.create_linear_utils as linear_create_utils
 import lightllm.common.attention.kernels.gdn.third_party_fla.ops.chunk as fla_chunk
-from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
-from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.server.api_cli import make_argument_parser
 import lightllm.utils.backend_validator as backend_validator
@@ -151,104 +151,84 @@ def test_decode_step_builder_groups_dynamic_speculative_rows(monkeypatch):
 
 
 @pytest.mark.parametrize("role", ["main", "draft0"])
-def test_decode_state_reads_acceptance_index_of_its_role(role: str):
-    from lightllm.common.attention.backends.gdn.triton import GDNDecodeStepBuilder
-
+def test_decode_reads_the_acceptance_index_of_its_role(role: str):
     b_req_idx = torch.tensor([2, 2, 2, 4, 4, 4], dtype=torch.int32)
     req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
-    state, _ = _create_decode_state(
-        draft_step=2,
-        dynamic_layout=False,
-        b_req_idx=b_req_idx,
-        req_to_mtp_state_index=req_to_mtp_state_index,
-        role=role,
+    model, infer_state = _speculative_decode(
+        draft_step=2, b_req_idx=b_req_idx, req_to_mtp_state_index=req_to_mtp_state_index, role=role
     )
-    state.backend.decode_step_builder = GDNDecodeStepBuilder(replay=False)
+    index = attention_groups.recurrent_mtp_state_index(model)
+    assert index is req_to_mtp_state_index
+    batch = attention_groups.build_attention_batch(infer_state, model, lambda: False, req_to_mtp_state_index=index)
+    step_args = GDNDecodeStepBuilder(replay=False).build(batch)
 
-    state.init_state()
-
-    torch.testing.assert_close(state.step_args.num_accepted_tokens, torch.tensor([2, 3], dtype=torch.int32))
-
-
-def test_triton_backend_supplies_the_in_tree_chunk_kernel():
-    kernel = TritonLinearAttBackend.prefill_backend.get_impl_cls().chunk_gated_delta_rule()
-    assert kernel is fla_chunk.chunk_gated_delta_rule
+    torch.testing.assert_close(step_args.num_accepted_tokens, torch.tensor([2, 3], dtype=torch.int32))
 
 
-@pytest.fixture
-def auto_linear_backend_args(monkeypatch):
-    monkeypatch.setattr(
-        linear_create_utils,
-        "get_env_start_args",
-        lambda: SimpleNamespace(
-            llm_prefill_att_backend=["fa3"],
-            llm_decode_att_backend=["flashinfer"],
-            ssm_state_mode="native",
-        ),
-    )
+def test_triton_prefill_uses_the_in_tree_chunk_kernel():
+    assert TritonGDNPrefillImpl.chunk_gated_delta_rule() is fla_chunk.chunk_gated_delta_rule
 
 
-def test_missing_linear_backend_arg_uses_auto_selection(monkeypatch, auto_linear_backend_args):
+def gdn_config(**fields) -> GDNLayerConfig:
+    return GDNLayerConfig(2, 4, 64, 64, 4, "silu", torch.bfloat16, **fields)
+
+
+def test_auto_selection_validates_flashqla(monkeypatch):
     validate_calls = []
     flashqla = ModuleType("flash_qla")
     flashqla.chunk_gated_delta_rule = lambda **kwargs: ("flashqla", kwargs)
     monkeypatch.setitem(sys.modules, "flash_qla", flashqla)
-    monkeypatch.setattr(
-        linear_create_utils,
-        "validate",
-        lambda name: validate_calls.append(name) or True,
+
+    selection = selector.select(
+        gdn_config(), "prefill", "auto", validate=lambda name: validate_calls.append(name) or True
     )
 
-    backend_class = linear_create_utils.get_gdn_linear_prefill_att_backend_class(index=1)
-
-    assert backend_class is FlashQlaLinearAttBackend
-    assert backend_class.prefill_backend.get_impl_cls().chunk_gated_delta_rule()(q="q")[0] == "flashqla"
+    assert selection.backend.get_name() == "flashqla_gdn_prefill"
+    assert selection.impl.chunk_gated_delta_rule()(q="q")[0] == "flashqla"
     assert validate_calls == ["flashqla"]
 
 
-def test_replay_mode_selects_standalone_gdn_backends(monkeypatch):
-    monkeypatch.setattr(
-        linear_create_utils,
-        "get_env_start_args",
-        lambda: SimpleNamespace(
-            llm_prefill_att_backend=["fa3", "flashqla"],
-            llm_decode_att_backend=["flashinfer", "triton"],
-            ssm_state_mode="replay",
+def test_auto_selection_falls_back_to_triton_when_flashqla_fails_validation(monkeypatch):
+    monkeypatch.setitem(sys.modules, "flash_qla", SimpleNamespace(chunk_gated_delta_rule=None))
+    selection = selector.select(gdn_config(), "prefill", "auto", validate=lambda name: False)
+    assert selection.backend.get_name() == "triton_gdn_prefill"
+
+
+@pytest.mark.parametrize("replay, decode", [(False, "triton_gdn_decode"), (True, "replay_gdn_decode")])
+def test_replay_state_selects_replay_decode(monkeypatch, replay, decode):
+    monkeypatch.setitem(sys.modules, "flash_qla", SimpleNamespace(chunk_gated_delta_rule=None))
+    config = gdn_config(replay=replay)
+    assert selector.select(config, "prefill", "flashqla").backend.get_name() == "flashqla_gdn_prefill"
+    assert selector.select(config, "decode", "triton").backend.get_name() == decode
+
+
+def _groups(prefill_backends, decode_backends):
+    model = SimpleNamespace(
+        args=SimpleNamespace(
+            llm_prefill_att_backend=prefill_backends,
+            llm_decode_att_backend=decode_backends,
+            mtp_step=0,
+            enable_ep_moe=False,
+            page_size=1,
+            running_max_req_size=1,
+            enable_tpsp_mix_mode=False,
+            enable_decode_microbatch_overlap=False,
         ),
+        att_implementation=None,
+        max_seq_length=8,
+        graph_max_batch_size=1,
+        tp_world_size_=1,
     )
-    from lightllm.common.attention.backends.gdn.replay import ReplayGDNDecodeBackend
-    from lightllm.common.basemodel.attention.linear.replay_gdn import (
-        ReplayGDNFlashQlaAttBackend,
-        ReplayGDNTritonAttBackend,
-    )
-
-    prefill_backend = linear_create_utils.get_gdn_linear_prefill_att_backend_class(index=1)
-    decode_backend = linear_create_utils.get_gdn_linear_decode_att_backend_class(index=1)
-
-    assert prefill_backend is ReplayGDNFlashQlaAttBackend
-    assert decode_backend is ReplayGDNTritonAttBackend
-    # Replay backends share the GDN adapter, with one SSM slot per request and replay decode.
-    assert prefill_backend.replay and decode_backend.replay
-    assert decode_backend.decode_backend is ReplayGDNDecodeBackend
+    return attention_groups.AttentionGroups(model)
 
 
-def test_kda_entry_selects_native_or_replay(monkeypatch):
-    from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
-    from lightllm.common.basemodel.attention.linear.replay_kda import ReplayKDALinearAttBackend
-
-    monkeypatch.setattr(
-        linear_create_utils,
-        "get_env_start_args",
-        lambda: SimpleNamespace(ssm_state_mode="native"),
-    )
-    assert linear_create_utils.get_kda_linear_att_backend_class() is KDALinearAttBackend
-
-    monkeypatch.setattr(
-        linear_create_utils,
-        "get_env_start_args",
-        lambda: SimpleNamespace(ssm_state_mode="replay"),
-    )
-    assert linear_create_utils.get_kda_linear_att_backend_class() is ReplayKDALinearAttBackend
+def test_linear_layers_read_the_second_backend_value(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
+    groups = _groups(["fa3", "triton"], ["flashinfer", "triton"])
+    assert groups._requested("prefill", gdn_config()) == groups._requested("decode", gdn_config()) == "triton"
+    # A missing second value selects automatically.
+    groups = _groups(["fa3"], ["flashinfer"])
+    assert groups._requested("prefill", gdn_config()) == groups._requested("decode", gdn_config()) == "auto"
 
 
 def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
@@ -313,29 +293,6 @@ def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
     assert kernel_calls[0]["initial_state"].dtype == torch.float32
 
 
-def test_explicit_linear_backend_arg_skips_auto_selection(monkeypatch):
-    monkeypatch.setattr(
-        linear_create_utils,
-        "get_env_start_args",
-        lambda: SimpleNamespace(
-            llm_prefill_att_backend=["fa3", "triton"],
-            llm_decode_att_backend=["flashinfer", "triton"],
-            ssm_state_mode="native",
-        ),
-    )
-    monkeypatch.setattr(
-        linear_create_utils,
-        "validate",
-        lambda *args: pytest.fail("an explicit linear backend must not be auto-validated"),
-    )
-
-    prefill_backend_class = linear_create_utils.get_gdn_linear_prefill_att_backend_class(index=1)
-    decode_backend_class = linear_create_utils.get_gdn_linear_decode_att_backend_class(index=1)
-
-    assert prefill_backend_class is TritonLinearAttBackend
-    assert decode_backend_class is TritonLinearAttBackend
-
-
 def test_cli_accepts_linear_backend_at_index_one():
     args = make_argument_parser().parse_args(
         [
@@ -352,117 +309,40 @@ def test_cli_accepts_linear_backend_at_index_one():
     assert args.llm_decode_att_backend == ["flashinfer", "triton"]
 
 
-@pytest.mark.parametrize(
-    "get_backend_class",
-    [
-        linear_create_utils.get_gdn_linear_prefill_att_backend_class,
-        linear_create_utils.get_gdn_linear_decode_att_backend_class,
-    ],
-)
-def test_linear_backend_rejects_non_linear_index(auto_linear_backend_args, get_backend_class):
-    with pytest.raises(AssertionError, match="index must be 1"):
-        get_backend_class(index=0)
-
-
-def test_missing_linear_decode_backend_arg_defaults_to_triton(auto_linear_backend_args):
-    backend_class = linear_create_utils.get_gdn_linear_decode_att_backend_class(index=1)
-
-    assert backend_class is TritonLinearAttBackend
-
-
-def test_gdn_decode_backend_uses_priority_list(monkeypatch, auto_linear_backend_args):
-    validate_calls = []
-    monkeypatch.setattr(
-        linear_create_utils,
-        "gdn_decode_backends",
-        {"optimized": FlashQlaLinearAttBackend, "triton": TritonLinearAttBackend},
-    )
-    monkeypatch.setattr(
-        linear_create_utils,
-        "validate",
-        lambda name: validate_calls.append(name) or True,
-    )
-
-    backend_class = linear_create_utils.get_gdn_linear_decode_att_backend_class(
-        index=1, priority_list=("optimized", "triton")
-    )
-
-    assert backend_class is FlashQlaLinearAttBackend
-    assert validate_calls == ["optimized"]
-
-
-def test_gdn_prefill_backend_falls_back_when_flashqla_validation_fails(monkeypatch, auto_linear_backend_args):
-    monkeypatch.setattr(linear_create_utils, "validate", lambda *args: False)
-
-    backend_class = linear_create_utils.get_gdn_linear_prefill_att_backend_class(index=1)
-
-    assert backend_class is TritonLinearAttBackend
-
-
-def test_gdn_prefill_backend_tries_candidates_in_order(monkeypatch, auto_linear_backend_args):
-    validate_calls = []
-    monkeypatch.setattr(
-        linear_create_utils,
-        "gdn_prefill_backends",
-        {"flashqla2": TritonLinearAttBackend, "flashqla3": FlashQlaLinearAttBackend},
-    )
-    monkeypatch.setattr(
-        linear_create_utils,
-        "validate",
-        lambda name, *args: validate_calls.append(name) or name == "flashqla3",
-    )
-
-    backend_class = linear_create_utils.get_gdn_linear_prefill_att_backend_class(
-        index=1, priority_list=("flashqla2", "flashqla3")
-    )
-
-    assert backend_class is FlashQlaLinearAttBackend
-    assert validate_calls == ["flashqla2", "flashqla3"]
-
-
-def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_state_index=None, role="main"):
+def _speculative_decode(*, draft_step, b_req_idx, req_to_mtp_state_index, role="main"):
+    """A model of role whose GDN state keeps req_to_mtp_state_index, and a decode step of b_req_idx rows."""
     model = SimpleNamespace(
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
+        att_state_role=role,
     )
     infer_state = InferStateInfo()
     infer_state.batch_size = b_req_idx.shape[0]
     infer_state.b_req_idx = b_req_idx
     infer_state.b_mtp_index = torch.zeros_like(b_req_idx)
     infer_state.req_manager = SimpleNamespace(
-        HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1,
+        HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1, req_to_token_indexs=torch.zeros((8, 4), dtype=torch.int32)
     )
-    infer_state.att_state_role = role
-    if req_to_mtp_state_index is not None:
-        request_capacity = req_to_mtp_state_index.numel()
-        resources = AttentionStateManager(request_capacity=request_capacity)
-        config = ConvSSMStateConfig(
-            logical_layer_ids=(3,),
-            global_k_heads=1,
-            global_v_heads=1,
-            key_dim=2,
-            value_dim=2,
-            conv_width=2,
-            conv_dtype=torch.float32,
-            ssm_dtype=torch.float32,
+    request_capacity = req_to_mtp_state_index.numel()
+    resources = AttentionStateManager(request_capacity=request_capacity)
+    config = ConvSSMStateConfig(
+        logical_layer_ids=(3,),
+        global_k_heads=1,
+        global_v_heads=1,
+        key_dim=2,
+        value_dim=2,
+        conv_width=2,
+        conv_dtype=torch.float32,
+        ssm_dtype=torch.float32,
+    )
+    for model_role in ("main", "draft0"):
+        linear = GDNState(config, request_capacity=request_capacity, mtp_step=draft_step, device="meta")
+        linear.mtp_state_index = (
+            req_to_mtp_state_index if model_role == role else torch.zeros_like(req_to_mtp_state_index)
         )
-        for model_role in ("main", "draft0"):
-            linear = GDNState(config, request_capacity=request_capacity, mtp_step=draft_step, device="meta")
-            linear.mtp_state_index = (
-                req_to_mtp_state_index if model_role == role else torch.zeros_like(req_to_mtp_state_index)
-            )
-            resources.register_state(model_role, linear)
-        resources.finish_state_registration()
-        infer_state.att_state_manager = resources
+        resources.register_state(model_role, linear)
+    resources.finish_state_registration()
+    model.att_state_manager = resources
     infer_state.is_prefill = False
     infer_state.b_seq_len = torch.ones_like(b_req_idx)
-    infer_state.req_manager.req_to_token_indexs = torch.zeros((8, 4), dtype=torch.int32)
-    state = gdn.LinearAttDecodeAttState(
-        backend=SimpleNamespace(
-            model=model,
-            replay=False,
-            uses_dynamic_spec_verify_layout=lambda: dynamic_layout,
-        ),
-        _infer_state_weak_ref=weakref.ref(infer_state),
-    )
-    return state, infer_state
+    return model, infer_state

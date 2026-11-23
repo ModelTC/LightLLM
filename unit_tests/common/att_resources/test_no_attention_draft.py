@@ -42,12 +42,12 @@ def draft_model(mode: str):
 
 @pytest.mark.parametrize("mode", ["vanilla_no_att", "eagle_no_att"])
 @pytest.mark.parametrize("prefill", [False, True])
-def test_ffn_only_draft_has_no_state_or_attention_backend(monkeypatch: pytest.MonkeyPatch, mode: str, prefill: bool):
+def test_ffn_only_draft_has_no_state_or_attention(monkeypatch: pytest.MonkeyPatch, mode: str, prefill: bool):
     draft, resources = draft_model(mode)
     draft.prepare_attention_states()
     resources.finish_state_registration()
-    draft._init_att_backend()
-    draft._init_att_backend1()
+    draft._init_attention()
+    assert draft.att_groups is None
     assert draft.att_state_manager is resources
     assert not hasattr(draft, "full_att_state")
     assert not resources.get_full_attention_states("draft0")
@@ -64,9 +64,10 @@ def test_ffn_only_draft_has_no_state_or_attention_backend(monkeypatch: pytest.Mo
     assert not hasattr(state, "full_att_state")
     assert state.att_state_manager is resources
     assert state.is_draft_model
-    assert state.prefill_att_state is None and state.decode_att_state is None
+    assert state.att_groups is None
     assert state.req_manager is draft.req_manager
     state.init_att_state()
+    assert state.att_step_args == {}
     if not prefill:
         state.copy_for_cuda_graph(draft._create_inferstate(model_input))
 
