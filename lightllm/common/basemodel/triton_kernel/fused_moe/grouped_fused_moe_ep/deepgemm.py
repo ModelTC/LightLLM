@@ -1,5 +1,6 @@
 import torch
 import triton
+from contextlib import contextmanager
 from typing import List, Optional, Tuple
 
 from lightllm.utils.log_utils import init_logger
@@ -36,6 +37,26 @@ except Exception:
 
 
 # ==================== Prefill / Decode 公共接口 ====================
+
+
+@contextmanager
+def use_full_deepgemm_sms(device: torch.device, *, enabled: bool = True):
+    """Scope the worker's DeepGEMM launch budget to a serial compute stage."""
+    if not enabled or not (hasattr(deep_gemm, "get_num_sms") and hasattr(deep_gemm, "set_num_sms")):
+        yield
+        return
+
+    previous = deep_gemm.get_num_sms()
+    full = torch.cuda.get_device_properties(device).multi_processor_count
+    if previous == full:
+        yield
+        return
+
+    deep_gemm.set_num_sms(full)
+    try:
+        yield
+    finally:
+        deep_gemm.set_num_sms(previous)
 
 
 def get_mk_alignment_for_contiguous_layout() -> int:
