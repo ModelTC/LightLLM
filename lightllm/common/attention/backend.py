@@ -9,13 +9,17 @@ Each type is named for how long it lives:
   group. Its AttentionStepBuilder builds them from the batch before the first layer.
 - LayerInputs: one layer call's tensors.
 
+A model creates its step builders through AttentionBackend.create_step_builder, passing a
+StepBuilderContext with the resources and capacities they need. Layers whose backends and
+step_builder_key match share one step builder, so its step args are built once per step.
+
 Step args are built every step, including CUDA graph replay steps. The caller writes the KV cache
 before attention and passes the step args explicitly rather than through a global forward context.
 """
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Generic, Optional, Protocol, TypeVar
+from typing import Any, Callable, Generic, Optional, Protocol, TypeVar
 
 import torch
 
@@ -99,6 +103,36 @@ class AttentionBatch:
         return self.cuda_graph_max_kv_seq_len is not None
 
 
+@dataclass(frozen=True)
+class StepBuilderContext:
+    """The resources and capacities a model gives the step builders of its layers.
+
+    It holds no model object: everything a step builder needs from the model is a field here.
+    """
+
+    # CUDA device index of the step's tensors.
+    device: int
+    # Cache slots per page of the KV cache; slot s lies on page s // page_size.
+    page_size: int
+    # The longest request in tokens, including any speculative-decoding headroom.
+    max_seq_len: int
+    # Decode rows of the largest CUDA graph step.
+    max_cuda_graph_batch_size: int
+    # Decode rows any step may have (running requests times rows per request, padded as the
+    # model pads its batches); at least max_cuda_graph_batch_size.
+    max_decode_rows: int
+    # Concurrent steps of microbatch overlap; AttentionBatch.microbatch_index is below it.
+    microbatch_count: int
+    # Size of the scratch workspace that implementations needing one share by name.
+    workspace_bytes: int
+    # get_workspace(name, numel, dtype) returns process-wide storage on device, the same
+    # tensor for the same arguments, so builders of one implementation share it.
+    get_workspace: Callable[[str, int, torch.dtype], torch.Tensor]
+    # Decode batches carry the shared-prefix groups of diverse sampling
+    # (AttentionBatch.b_shared_seq_len and b_shared_radix_node_id).
+    diverse_decode: bool = False
+
+
 class AttentionStepBuilder(ABC, Generic[StepArgs]):
     """Build an implementation's step args for one step of one layer group.
 
@@ -142,7 +176,7 @@ class AttentionBackend(ABC):
 
     Not to be confused with lightllm.common.basemodel.attention.base_att.BaseAttBackend, the
     model-facing adapter that builds batches, layer configs and layer inputs and calls step
-    builders and impls.
+    builders and impls for models not yet using lightllm.common.basemodel.attention_groups.
     """
 
     @staticmethod
@@ -159,3 +193,22 @@ class AttentionBackend(ABC):
     @abstractmethod
     def get_impl_cls() -> type[AttentionImpl]:
         pass
+
+    @classmethod
+    def create_step_builder(cls, layer_config: Any, ctx: StepBuilderContext) -> AttentionStepBuilder:
+        """Create the step builder for layers with this layer config.
+
+        Every layer sharing the step builder has an equal step_builder_key(layer_config), so the
+        builder may depend only on the fields that key covers.
+        """
+        raise NotImplementedError(f"{cls.get_name()} does not create its step builder from a layer config yet")
+
+    @classmethod
+    def step_builder_key(cls, layer_config: Any) -> Any:
+        """Return the part of layer_config the step builder depends on; None when it depends on none."""
+        return None
+
+    @classmethod
+    def requires_cpu_cache_sync(cls) -> bool:
+        """Whether its kernels must not overlap CPU cache copies on the GPU."""
+        return False

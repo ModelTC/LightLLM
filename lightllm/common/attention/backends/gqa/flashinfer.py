@@ -9,8 +9,10 @@ from lightllm.common.attention.backend import (
     AttentionBatch,
     AttentionImpl,
     AttentionStepBuilder,
+    StepBuilderContext,
     TensorAllocator,
 )
+from ..flashinfer_env import set_flashinfer_envs
 from . import GQALayerConfig, GQALayerInputs
 
 if TYPE_CHECKING:
@@ -301,6 +303,33 @@ class FlashInferGQADecodeImpl(AttentionImpl[GQALayerConfig, FlashInferGQADecodeS
         return _run(self.layer_config, step_args.wrapper, step_args.config, layer_inputs, out)
 
 
+def flashinfer_builder_config(layer_config: GQALayerConfig, ctx: StepBuilderContext) -> FlashInferGQABuilderConfig:
+    """The wrapper configuration for layers with this layer config."""
+    fp8 = layer_config.kv_quant == "fp8_per_tensor"
+    return FlashInferGQABuilderConfig(
+        num_heads=layer_config.num_heads,
+        num_kv_heads=layer_config.num_kv_heads,
+        head_dim=layer_config.head_dim,
+        # TODO: use the cache's page size once FP8 FlashInfer supports multi-token pages.
+        page_size=1 if fp8 else ctx.page_size,
+        q_dtype=layer_config.dtype,
+        kv_dtype=torch.float8_e4m3fn if fp8 else layer_config.dtype,
+    )
+
+
+def _workspace(ctx: StepBuilderContext) -> Callable[[], torch.Tensor]:
+    if ctx.workspace_bytes <= 0:
+        raise ValueError("the FlashInfer workspace size (--flashinfer_workspace_size) must be positive")
+    # Allocated on first use, so prefill-only and decode-only nodes create it only when needed.
+    return lambda: ctx.get_workspace("flashinfer_fp", ctx.workspace_bytes, torch.int8)
+
+
+def _builder_key(layer_config: GQALayerConfig):
+    # The wrappers are planned for these fields.
+    c = layer_config
+    return (c.num_heads, c.num_kv_heads, c.head_dim, c.dtype, c.kv_quant)
+
+
 class FlashInferGQAPrefillBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
@@ -313,6 +342,19 @@ class FlashInferGQAPrefillBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[FlashInferGQAPrefillImpl]:
         return FlashInferGQAPrefillImpl
+
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: GQALayerConfig, ctx: StepBuilderContext
+    ) -> FlashInferGQAPrefillStepBuilder:
+        set_flashinfer_envs()
+        return FlashInferGQAPrefillStepBuilder(
+            flashinfer_builder_config(layer_config, ctx), workspace=_workspace(ctx), max_seq_len=ctx.max_seq_len
+        )
+
+    @classmethod
+    def step_builder_key(cls, layer_config: GQALayerConfig):
+        return _builder_key(layer_config)
 
 
 class FlashInferGQADecodeBackend(AttentionBackend):
@@ -327,3 +369,20 @@ class FlashInferGQADecodeBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[FlashInferGQADecodeImpl]:
         return FlashInferGQADecodeImpl
+
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: GQALayerConfig, ctx: StepBuilderContext
+    ) -> FlashInferGQADecodeStepBuilder:
+        set_flashinfer_envs()
+        return FlashInferGQADecodeStepBuilder(
+            flashinfer_builder_config(layer_config, ctx),
+            workspace=_workspace(ctx),
+            max_seq_len=ctx.max_seq_len,
+            max_batch_size=ctx.max_cuda_graph_batch_size,
+            device=ctx.device,
+        )
+
+    @classmethod
+    def step_builder_key(cls, layer_config: GQALayerConfig):
+        return _builder_key(layer_config)
