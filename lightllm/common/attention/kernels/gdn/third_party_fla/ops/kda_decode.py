@@ -81,6 +81,7 @@ def fused_recurrent_kda(
     inplace_final_state=True,
     cu_seqlens=None,
     num_accepted_tokens=None,
+    out=None,
 ):
     assert inplace_final_state
     batch, _, heads, dim = q.shape
@@ -95,7 +96,12 @@ def fused_recurrent_kda(
         token_axis = 1
     else:
         assert q.shape[1] == 1 and ssm_state_indices.ndim == 1
-    out = torch.empty_like(v, memory_format=torch.contiguous_format)
+    if out is None:
+        out = torch.empty_like(v, memory_format=torch.contiguous_format)
+    else:
+        assert (
+            out.shape == v.shape and out.dtype == v.dtype and out.is_contiguous()
+        ), "out must be contiguous, shaped like v"
     _kda_decode[(triton.cdiv(dim, 32), batch * heads)](
         q,
         k,

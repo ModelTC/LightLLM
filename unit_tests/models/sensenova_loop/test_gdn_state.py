@@ -83,9 +83,11 @@ def test_gdn_decode_keeps_logical_layer_state(
             conv[1].add_(1)
             return mixed
 
-        def recurrent(*, initial_state, v, **kwargs):
+        def recurrent(*, initial_state, v, out, **kwargs):
+            # Like the kernels, write the output into the caller's out.
             initial_state[mtp_step + 1 : 2 * (mtp_step + 1)].add_(1)
-            return v, None
+            out.copy_(v)
+            return out, None
 
         monkeypatch.setattr(
             "lightllm.common.attention.kernels.gdn.gdn_decode_pack.conv_pack_gdn_decode_inputs", conv_pack

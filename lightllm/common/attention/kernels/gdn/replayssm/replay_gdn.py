@@ -130,10 +130,12 @@ def replay(
     reqs: torch.Tensor,
     cu_seqlens: torch.Tensor,
     run_config: dict[str, int] | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """执行一层 GDN replay decode。Kernel 接收这一层的 SSM 和 history；state 提供共用的 cursor 与配置。
 
     q、k、v 是 [tokens, heads, dim]。cu_seqlens 与 reqs 逐行对齐，长度是请求数加一。宽度为 1 时它是 0, 1, 2, ...。
+    out 给出时结果写入其中，须为与 v 同形同 dtype 的连续张量。
     """
 
     assert not state.kda, "GDN replay step does not use the KDA gate"
@@ -142,7 +144,12 @@ def replay(
         run_config = {"BV": 32, "num_warps": 1, "num_stages": 3}
     hv, kd, vd = state.ssm_state.shape[-3:]
     assert state.num_key_heads in (q.shape[-2], hv)
-    out = torch.empty_like(v)
+    if out is None:
+        out = torch.empty_like(v)
+    else:
+        assert (
+            out.shape == v.shape and out.dtype == v.dtype and out.is_contiguous()
+        ), "out must be contiguous, shaped like v"
     bv = run_config["BV"]
     # mtp_step == 0 时 verify_width 为 1。compute_mode=precompute 仍然投影；BV < 16 才退回逐 token。
     precompute_projections = state.compute_mode == "precompute" and bv >= 16

@@ -981,6 +981,11 @@ def test_fp8_sparse_direct_decode_strided_inputs_and_packed_row_padding(monkeypa
     def expected():
         return _torch_sparse_attention(q, _dequantize_kv_cache(packed), indices[:, 0])
 
+    # Writing into the caller's out gives the same output.
+    out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
+    assert fp8_sparse_direct_decode(q, packed, indices, 0.0625, out=out) is out
+    assert torch.equal(out, run())
+
     if (num_heads, batch) in ((1, 3), (7, 5)):
         infer = _make_infer_state(graph_mode=GraphMode.CAPTURE)
         state = _Fp8DecodeState(infer, bound=2051)

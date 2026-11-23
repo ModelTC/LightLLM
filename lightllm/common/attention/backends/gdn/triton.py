@@ -267,7 +267,7 @@ class TritonGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState,
             )
 
             query, key, value, a, b = _pack_decode_inputs(cfg, inputs, att_state.conv_idx)
-            core, _ = fused_recurrent_gated_delta_rule(
+            fused_recurrent_gated_delta_rule(
                 q=query,
                 k=key,
                 v=value,
@@ -279,6 +279,7 @@ class TritonGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState,
                 dt_bias=inputs.dt_bias,
                 a_raw=a,
                 b_raw=b,
+                out=out.view(value.shape),
             )
         else:
             from lightllm.common.attention.kernels.gdn.mtp_fused_recurrent import mtp_fused_recurrent_gated_delta_rule
@@ -288,10 +289,11 @@ class TritonGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState,
             rows = query.shape[0]
             # num_accepted_tokens >= 1 is guaranteed upstream: cache restore sets 1 and MTP decode
             # only writes values in [1, draft_step + 1].
-            core, _ = mtp_fused_recurrent_gated_delta_rule(
+            values = value.view(1, rows, cfg.num_v_heads, cfg.head_v_dim)
+            mtp_fused_recurrent_gated_delta_rule(
                 q=query.view(1, rows, cfg.num_k_heads, cfg.head_k_dim),
                 k=key.view(1, rows, cfg.num_k_heads, cfg.head_k_dim),
-                v=value.view(1, rows, cfg.num_v_heads, cfg.head_v_dim),
+                v=values,
                 initial_state=inputs.ssm_states,
                 cu_seqlens=att_state.cu_seqlens.to(torch.long),
                 ssm_state_indices=att_state.ssm_idx,
@@ -301,8 +303,8 @@ class TritonGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState,
                 dt_bias=inputs.dt_bias,
                 a_raw=inputs.a,
                 b_raw=inputs.b,
+                out=out.view(values.shape),
             )
-        out.copy_(core.view(out.shape))
         return out
 
     @staticmethod

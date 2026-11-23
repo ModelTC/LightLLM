@@ -269,6 +269,7 @@ def mtp_fused_recurrent_gated_delta_rule(
     a_raw: torch.Tensor,
     b_raw: torch.Tensor,
     run_config: Optional[dict] = None,
+    out: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused recurrent gated delta rule with fused gating (GDN layer).
 
@@ -290,6 +291,7 @@ def mtp_fused_recurrent_gated_delta_rule(
         a_raw: ``[T, HV]`` raw alpha.
         b_raw: ``[T, HV]`` raw beta.
         run_config: Optional ``BV``, ``num_warps`` and ``num_stages`` configuration.
+        out: Optional contiguous ``[1, T, HV, V]`` tensor of q's dtype to write ``o`` into.
 
     Returns:
         ``(o, final_state)`` where ``o`` is ``[1, T, HV, V]`` and
@@ -318,7 +320,13 @@ def mtp_fused_recurrent_gated_delta_rule(
     num_stages = run_config["num_stages"]
     NV = triton.cdiv(V, BV)
 
-    o = q.new_empty(v.shape)
+    if out is None:
+        o = q.new_empty(v.shape)
+    else:
+        assert (
+            out.shape == v.shape and out.dtype == q.dtype and out.is_contiguous()
+        ), "out must be contiguous, shaped like v"
+        o = out
     final_state = initial_state
 
     stride_init_state_token = initial_state.stride(0)
