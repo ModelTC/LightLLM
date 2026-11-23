@@ -66,7 +66,7 @@ class FA3SparseMLADecodeBackend(
         kv, rank, rope = layer_inputs.kv_cache, layer_config.kv_lora_rank, layer_config.qk_rope_head_dim
         if rope == 0:
             # NoPE: only_qv attends with the latent query and cache alone.
-            result = flash_attn_with_kvcache(
+            flash_attn_with_kvcache(
                 q=None,
                 qv=layer_inputs.q_nope,
                 k_cache=None,
@@ -79,8 +79,8 @@ class FA3SparseMLADecodeBackend(
                 softmax_scale=layer_config.softmax_scale,
                 causal=att_state.causal,
                 only_qv=True,
+                out=out,
             )
-            out.copy_(result)
             return out
         flash_attn_with_kvcache(
             q=layer_inputs.q_rope,
@@ -198,6 +198,8 @@ class FA3SparseMLAPrefillBackend(
         has_history = total_token_num > q_token_num
         if not has_history and prefill_cache_kv.stride(-1) != 1:
             prefill_cache_kv = prefill_cache_kv.contiguous()
+        # One chunk writes out directly; several merge their outputs in FP32 first.
+        single_chunk = gather_chunk_size >= total_token_num
         output = softmax_lse = None
         for chunk_start in range(0, total_token_num, gather_chunk_size):
             chunk_token_num = min(gather_chunk_size, total_token_num - chunk_start)
@@ -252,6 +254,7 @@ class FA3SparseMLAPrefillBackend(
                 only_qv=True,
                 num_splits=1,
                 return_softmax_lse=True,
+                out=out if single_chunk else None,
             )
             if chunk_start == 0:
                 output, softmax_lse = chunk_output, chunk_softmax_lse
@@ -270,7 +273,8 @@ class FA3SparseMLAPrefillBackend(
                     BLOCK_HEADS=4,
                 )
             del chunk_output, chunk_softmax_lse
-        out.copy_(output)
+        if not single_chunk:
+            out.copy_(output)
         return out
 
     @staticmethod

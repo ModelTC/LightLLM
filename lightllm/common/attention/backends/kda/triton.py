@@ -71,7 +71,7 @@ def _conv_states(cfg: KDALayerConfig, inputs: KDALayerInputs):
 def _prefill(cfg: KDALayerConfig, att_state: KDAPrefillAttState, inputs: KDALayerInputs, q, k, v, qk_normalized, out):
     from lightllm.common.attention.kernels.kda.kda_prefill import kda_prefill
 
-    output = kda_prefill(
+    kda_prefill(
         q=q,
         k=k,
         v=v,
@@ -85,8 +85,8 @@ def _prefill(cfg: KDALayerConfig, att_state: KDAPrefillAttState, inputs: KDALaye
         cu_seqlens=att_state.cu_seqlens,
         lower_bound=cfg.lower_bound,
         flash_kda_fwd=att_state.flash_kda_fwd,
+        out=out.view(v.shape),
     )
-    out.copy_(output.view(out.shape))
     return out
 
 
@@ -224,7 +224,7 @@ class TritonKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState,
         hidden = cfg.num_heads * cfg.head_dim
         q, k, v = _conv_update(inputs, att_state).split(hidden, dim=-1)
         shape = (1, -1) if att_state.draft_step > 0 else (-1, 1)
-        output, _ = fused_recurrent_kda(
+        fused_recurrent_kda(
             q=q.view(*shape, cfg.num_heads, cfg.head_dim),
             k=k.view(*shape, cfg.num_heads, cfg.head_dim),
             v=v.view(*shape, cfg.num_heads, cfg.head_dim),
@@ -238,8 +238,8 @@ class TritonKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState,
             ssm_state_indices=att_state.ssm_idx,
             cu_seqlens=att_state.cu_seqlens,
             num_accepted_tokens=att_state.num_accepted_tokens,
+            out=out.view(*shape, cfg.num_heads, cfg.head_dim),
         )
-        out.copy_(output.view(out.shape))
         return out
 
     @staticmethod
@@ -278,7 +278,7 @@ class ReplayKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState,
         q, k, v = (x.view(-1, cfg.num_heads, cfg.head_dim) for x in _conv_update(inputs, att_state).split(hidden, -1))
         state = inputs.replay_state
         layer = state.storage_layer(inputs.layer_num)
-        output = replay(
+        replay(
             state_ssm=state.ssm_state[layer],
             state_keys=state.keys[layer],
             state_deltas=state.deltas[layer],
@@ -300,8 +300,8 @@ class ReplayKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState,
             state_verify_width=state.verify_width,
             state_compute_mode=state.compute_mode,
             state_gate_lower_bound=state.gate_lower_bound,
+            out=out.view(v.shape),
         )
-        out.copy_(output.view(out.shape))
         state.finish_decode_token(inputs.layer_num, att_state.conv_idx, att_state.cu_seqlens)
         return out
 

@@ -148,6 +148,7 @@ impl.forward(att_state, layer_inputs, *, out, alloc_func=torch.empty) -> out
 ```
 
 - 填充并返回调用方提供的 `out`；`out` 不得与输入或 attention state 别名。
+- kernel 直接写入 `out`。只有 kernel 无法写入时才另行计算再拷贝：第三方 kernel 没有 `out` 参数（fla/FlashQLA 的 GDN chunk prefill、KDA chunk prefill、sgl 的 bf16 FlashMLA sparse prefill、Neo FA3），FlashMLA 需要把 head 补齐到 64，或多个 chunk 先以 FP32 合并。
 - 临时缓冲只通过 `alloc_func(shape, dtype=, device=)` 分配，impl 不保留任何缓冲；调用方的分配器负责复用和 graph 生命周期。
 - CUDA graph 重放时，已捕获的 kernel 读取捕获时的张量地址，builder 在重放前更新这些地址上的内容。
 - 线性注意力（GDN、KDA）的 impl 原地更新调用方提供的 conv/SSM 状态视图，每步每层恰好执行一次。replay 状态（保存逐 token 历史以便提交被接受的前缀）由 replay decode impl 在 `forward` 末尾通过 `LayerInputs.replay_state` 调用 `finish_decode_token`，游标只在状态的最后一个逻辑层推进。backend 层只依赖该调用协议，不导入 `attention_state` 包。

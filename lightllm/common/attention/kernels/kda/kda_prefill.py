@@ -21,9 +21,18 @@ def kda_prefill(
     lower_bound,
     qk_normalized,
     flash_kda_fwd=None,
+    out=None,
 ):
+    """Return the output [1, tokens, heads, dim], written into out when given (contiguous, shaped like v).
+
+    FlashKDA writes out in place; the chunk kernel allocates its own output, which is copied into out.
+    """
+    if out is not None:
+        assert (
+            out.shape == v.shape and out.dtype == v.dtype and out.is_contiguous()
+        ), "out must be contiguous, shaped like v"
     if q.shape[1] == 0:
-        return torch.empty_like(v, memory_format=torch.contiguous_format)
+        return torch.empty_like(v, memory_format=torch.contiguous_format) if out is None else out
     if flash_kda_fwd is None:
         output, final_state = chunk_kda_with_fused_gate(
             q=q,
@@ -41,11 +50,15 @@ def kda_prefill(
             lower_bound=lower_bound,
         )
         ssm_states[state_indices] = final_state.to(ssm_states.dtype, copy=False)
-        return output
+        if out is None:
+            return output
+        out.copy_(output)
+        return out
 
     assert not qk_normalized, "FlashKDA requires raw Q/K because it applies L2 normalization internally"
-    output = torch.empty_like(v, memory_format=torch.contiguous_format)
     assert cu_seqlens.dtype == torch.int64
+    if out is None:
+        out = torch.empty_like(v, memory_format=torch.contiguous_format)
     state = gather_kda_state(ssm_states, state_indices)
     final_state = torch.empty_like(state)
     flash_kda_fwd(
@@ -56,7 +69,7 @@ def kda_prefill(
         # FlashKDA needs contiguous inputs; layers pass beta as a column slice of their fused projection.
         beta=raw_beta.contiguous(),
         scale=q.shape[-1] ** -0.5,
-        out=output,
+        out=out,
         A_log=A_log.reshape(-1).float(),
         dt_bias=g_bias.reshape(q.shape[2], q.shape[3]).float(),
         lower_bound=lower_bound,
@@ -65,4 +78,4 @@ def kda_prefill(
         cu_seqlens=cu_seqlens,
     )
     scatter_kda_state(final_state, ssm_states, state_indices, cu_seqlens)
-    return output
+    return out

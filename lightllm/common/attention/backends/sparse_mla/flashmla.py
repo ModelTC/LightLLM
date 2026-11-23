@@ -99,11 +99,13 @@ class FlashMLASparsePrefillBackend(
                 )
         if indices.ndim == 2:
             indices = indices.unsqueeze(1)
-        result, _, _ = flash_mla_sparse_fwd(
-            q=q, kv=kv, indices=indices, sm_scale=layer_config.softmax_scale, d_v=layer_config.kv_lora_rank
-        )
-        # FlashMLA allocates its own output.
-        out.copy_(result[:, :heads])
+        kwargs = dict(q=q, kv=kv, indices=indices, sm_scale=layer_config.softmax_scale, d_v=layer_config.kv_lora_rank)
+        if layer_config.kv_cache_format == "bf16":
+            # The sgl_kernel build allocates its own output, over the padded heads.
+            result, _, _ = flash_mla_sparse_fwd(**kwargs)
+            out.copy_(result[:, :heads])
+        else:
+            flash_mla_sparse_fwd(**kwargs, out=out)
         return out
 
     @staticmethod
@@ -157,8 +159,8 @@ class FlashMLASparseDecodeBackend(
                 att_state.direct_decode_bound,
                 is_cuda_graph_capture=att_state.uses_cuda_graph,
             ):
-                out.copy_(
-                    fp8_group64_decode.fp8_sparse_direct_decode(q_nope, packed, indices, layer_config.softmax_scale)
+                fp8_group64_decode.fp8_sparse_direct_decode(
+                    q_nope, packed, indices, layer_config.softmax_scale, out=out
                 )
                 return out
             q = pad_query_heads(q_nope, is_cuda_graph_capture=att_state.uses_cuda_graph)
@@ -169,6 +171,8 @@ class FlashMLASparseDecodeBackend(
             size=(packed.shape[0], 1, 1, packed.shape[-1]),
             stride=(packed.stride(0), packed.shape[-1], packed.shape[-1], packed.stride(-1)),
         )
+        # FlashMLA writes out in place unless it needs heads padded to its 64-head tile.
+        padded = q.shape[2] != heads
         result, _ = flash_mla.flash_mla_with_kvcache(
             q=q,
             k_cache=kv,
@@ -180,9 +184,10 @@ class FlashMLASparseDecodeBackend(
             causal=False,
             is_fp8_kvcache=True,
             indices=indices,
+            out=None if padded else out.unsqueeze(1),
         )
-        # FlashMLA allocates its own output.
-        out.copy_(result[:, 0, :heads])
+        if padded:
+            out.copy_(result[:, 0, :heads])
         return out
 
     @staticmethod

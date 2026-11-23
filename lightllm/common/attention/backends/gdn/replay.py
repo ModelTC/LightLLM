@@ -44,7 +44,7 @@ class ReplayGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState,
             value = value.view(-1, cfg.num_v_heads, cfg.head_v_dim)
             a, b = inputs.a, inputs.b
         state = inputs.replay_state
-        core = replay(
+        replay(
             state,
             state.storage_layer(inputs.layer_num),
             query,
@@ -56,8 +56,8 @@ class ReplayGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState,
             inputs.dt_bias,
             att_state.conv_idx,
             att_state.cu_seqlens,
+            out=out.view(value.shape),
         )
-        out.copy_(core.view(out.shape))
         state.finish_decode_token(inputs.layer_num, att_state.conv_idx, att_state.cu_seqlens)
         return out
 

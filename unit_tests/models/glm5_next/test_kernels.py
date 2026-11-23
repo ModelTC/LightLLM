@@ -85,6 +85,14 @@ def test_kda_chunk_and_decode_match_recurrence(tokens):
         torch.testing.assert_close(out[0, 0].float(), expected[0, i], atol=2e-3, rtol=1e-2)
     torch.testing.assert_close(states[2], state, atol=2e-5, rtol=2e-4)
     assert torch.equal(states[[0, 1, 3]], unchanged)
+    # Writing into the caller's out gives the same output and state.
+    step = (q[:, :1], k[:, :1], v[:, :1], gate[:, :1].reshape(1, 1, -1), beta[:, :1], a, bias.flatten())
+    index = torch.tensor([2], device="cuda", dtype=torch.int32)
+    own_states, out_states = states.clone(), states.clone()
+    own, _ = fused_recurrent_kda(*step, own_states, index)
+    out = torch.empty_like(v[:, :1])
+    assert fused_recurrent_kda(*step, out_states, index, out=out)[0] is out
+    assert torch.equal(out, own) and torch.equal(out_states, own_states)
 
 
 @pytest.mark.parametrize("seq_lens", [(65,), (3, 65, 129)])
