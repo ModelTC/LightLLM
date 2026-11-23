@@ -19,7 +19,7 @@ from lightllm.common.attention.backends.gqa.flashinfer import (
     FlashInferGQAPrefillBackend,
     FlashInferGQAPrefillAttState,
 )
-from lightllm.common.basemodel.attention_runtime import gqa_kv_quant_fields
+from lightllm.common.basemodel.layer_infer.gqa_attention import gqa_kv_quant_fields
 
 
 class FP8Attention:

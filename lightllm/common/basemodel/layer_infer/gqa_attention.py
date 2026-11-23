@@ -2,10 +2,37 @@ from typing import Any, Optional
 
 import torch
 
-from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backend import AttentionBackend
 from lightllm.common.attention_state.full_att import FullAttentionState
-from lightllm.common.basemodel.attention_runtime import AttentionSpec, attention_is_causal, gqa_kv_quant_fields
+from lightllm.common.basemodel.attention_runtime import AttentionSpec, attention_is_causal
+
+# --llm_kv_type -> GQALayerConfig.kv_quant
+_GQA_KV_QUANT = {
+    "None": None,
+    "int8kv": "int8_group",
+    "int4kv": "int4_group",
+    "fp8kv_sph": "fp8_per_head",
+    "fp8kv_spt": "fp8_per_tensor",
+}
+
+
+def gqa_kv_quant_fields(llm_kv_type: str, kv_scales: Optional[GQAKVScales], head_dim: int) -> dict[str, Any]:
+    """GQALayerConfig's kv_quant, kv_quant_group_size and has_q_scale for a layer's cache.
+
+    kv_scales is the layer's FullAttentionState.get_layer_kv_scales(), None for an unquantized cache.
+    """
+    if llm_kv_type not in _GQA_KV_QUANT:
+        raise ValueError(f"--llm_kv_type {llm_kv_type!r} has no GQA KV cache layout; choose from {list(_GQA_KV_QUANT)}")
+    kv_quant = _GQA_KV_QUANT[llm_kv_type]
+    if (kv_quant is None) != (kv_scales is None):
+        raise ValueError(f"--llm_kv_type {llm_kv_type!r} does not match the cache's scales")
+    grouped = kv_quant in ("int8_group", "int4_group")
+    return dict(
+        kv_quant=kv_quant,
+        kv_quant_group_size=head_dim // kv_scales.k_scale.shape[-1] if grouped else None,
+        has_q_scale=kv_quant == "fp8_per_head" and kv_scales.q_scale is not None,
+    )
 
 
 class GQAAttentionLayerMixin:

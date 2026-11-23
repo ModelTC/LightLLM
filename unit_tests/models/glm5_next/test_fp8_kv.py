@@ -271,7 +271,7 @@ class _PrefillCase:
     ],
 )
 def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_type, expected):
-    from lightllm.common.basemodel.attention_runtime import AttentionRuntime, step_builder_context
+    from lightllm.common.basemodel.attention_runtime import AttentionRuntime, attention_build_resources
     from lightllm.models.glm5_next.model import Glm5NextTpPartModel
     from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 
@@ -291,12 +291,15 @@ def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_t
         mtp_step=0,
         page_size=1,
         running_max_req_size=2,
+        flashinfer_workspace_size=512,
+        diverse_mode=False,
     )
     model.config = {"index_topk": 2048, "index_kpool": 4}
     model.data_type = torch.bfloat16
     model.graph_max_batch_size = 4
     model.graph_max_len_in_batch = model.max_seq_length = 128
     model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda is_draft: 0)
+    model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: ())
     model.max_req_num = 2
     model.batch_max_tokens = 4
     model.mtp_previous_draft_models = []
@@ -315,7 +318,7 @@ def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_t
     for phase, impl, name in zip(("prefill", "decode"), (layer.prefill_impl, layer.decode_impl), expected):
         (backend,) = attention.backends(phase)
         assert backend.get_name() == name
-        backend.create_build_context(impl.layer_config, step_builder_context(model))
+        backend.create_build_context(impl.layer_config, attention_build_resources(model))
 
 
 def _dequantize_kv_cache(packed_kv):

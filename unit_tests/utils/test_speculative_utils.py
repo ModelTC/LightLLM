@@ -80,10 +80,14 @@ def test_model_selects_dynamic_spec_layout(
         lambda: SimpleNamespace(mtp_mode=mtp_mode, mtp_dynamic_verify=dynamic_spec),
     )
     model = SimpleNamespace(
-        is_mtp_draft_model=is_draft_model, mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step)
+        is_mtp_draft_model=is_draft_model,
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
+        att_state_role="main",
+        att_state_manager=SimpleNamespace(get_bounded_attention_states=lambda role: ()),
+        graph_max_len_in_batch=1024,
     )
 
-    assert attention_groups_module.uses_dynamic_spec_verify_layout(model) is expected
+    assert attention_groups_module.attention_step_config(model).dynamic_decode_rows is expected
 
 
 @pytest.mark.parametrize(
