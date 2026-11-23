@@ -5,6 +5,7 @@ from .base_impl import FuseMoeBaseImpl
 from ..expert_parallel_state import ExpertParallelState
 from lightllm.distributed import dist_group_manager
 from lightllm.common.quantization.humming import HUMMING_QUANT_METHODS
+from lightllm.common.quantization.deepgemm import MXFP8_MOE_QUANT_METHOD
 from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
@@ -82,6 +83,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 topk_weights,
                 self.n_routed_experts,
                 32 if self.quant_method.method_name in GROUP32_EP_METHODS else 128,
+                mxfp8_deepgemm=self.quant_method.method_name == MXFP8_MOE_QUANT_METHOD,
             )
             return recv_x, masked_m, topk_idx, topk_weights, handle, lambda: None
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()

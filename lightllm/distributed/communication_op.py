@@ -268,8 +268,13 @@ class DistributeGroupManager:
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"
         from lightllm.common.quantization.humming import HUMMING_QUANT_METHODS
         from lightllm.common.quantization.w8a8 import FP8_MOE_B32_QUANT_METHOD
+        from lightllm.common.quantization.deepgemm import MXFP8_MOE_QUANT_METHOD
 
-        v2_methods = HUMMING_QUANT_METHODS if use_humming else {FP8_MOE_QUANT_METHOD, FP8_MOE_B32_QUANT_METHOD}
+        v2_methods = (
+            HUMMING_QUANT_METHODS
+            if use_humming
+            else {FP8_MOE_QUANT_METHOD, FP8_MOE_B32_QUANT_METHOD, MXFP8_MOE_QUANT_METHOD}
+        )
         if self.ep_decode_use_v2 and (not expert_quant_method_names or expert_quant_method_names - v2_methods):
             raise ValueError(f"--ep_moe_backend {args.ep_moe_backend} requires one of {sorted(v2_methods)}")
 

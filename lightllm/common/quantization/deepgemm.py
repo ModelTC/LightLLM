@@ -258,6 +258,28 @@ class DeepGEMMFP8w8a8B32QuantizationMethod(DeepGEMMFP8w8a8B128QuantizationMethod
             super().load_weight_scale(weight_scale.float(), weight_pack)
 
 
+MXFP8_MOE_QUANT_METHOD = "mxfp8-moe-deepgemm"
+
+
+@QUANTMETHODS.register(MXFP8_MOE_QUANT_METHOD, platform="cuda")
+class MXFP8DeepGEMMQuantizationMethod(DeepGEMMFP8w8a8B32QuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        self.weight_scale_suffix = "weight_scale"
+
+    @property
+    def method_name(self):
+        return MXFP8_MOE_QUANT_METHOD
+
+    def load_weight_scale(self, weight_scale, weight_pack):
+        n, k = weight_pack.weight.shape
+        if weight_scale.shape != (n, k // 32) or weight_scale.dtype not in (torch.uint8, torch.float8_e8m0fnu):
+            raise ValueError("MXFP8 experts expect a [N, K/32] UE8M0 weight scale")
+        scale = weight_scale.view(torch.float8_e8m0fnu).to(device=weight_pack.weight.device, dtype=torch.float32)
+        packed = deep_gemm.transform_sf_into_required_layout(scale, n, k, (1, 1, 32), is_sfa=False)
+        QuantizationMethod.load_weight_scale(self, packed, weight_pack)
+
+
 @QUANTMETHODS.register("fp4fp8-b32-deepgemm", platform="cuda")
 class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):

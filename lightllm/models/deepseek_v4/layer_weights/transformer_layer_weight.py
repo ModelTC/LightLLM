@@ -94,6 +94,8 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         # Match the official BF16 wo_a computation; FP8 checkpoint weights are dequantized on load.
         # A single local group uses GEMM; multiple groups use batched GEMM.
         self.o_proj_use_mm = (self.o_groups // self.tp_world_size_) == 1
+        if self.network_config_.get("quantization_config", {}).get("quant_method") == "mxfp8":
+            self._pending_wo_a = {}
         if self.o_proj_use_mm:
             self.wo_a_ = ROWMMWeight(
                 in_dim=per_group_in,
@@ -293,6 +295,21 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
 
     # ------------------------------------------------------------------ loading
     def load_hf_weights(self, weights):
+        quant_config = self.network_config_.get("quantization_config", {})
+        mxfp8 = quant_config.get("quant_method") == "mxfp8"
+        woa = f"{self.prefix}.attn.wo_a.weight"
+        if mxfp8:
+            woa_scale = woa + "_scale"
+            present = [name for name in (woa, woa_scale) if name in weights]
+            if len(present) == 1 and (present[0] == woa_scale or weights[woa].dtype == torch.float8_e4m3fn):
+                # Some DSpark shards store the projection and its scale separately.
+                with self.lock:
+                    name = present[0]
+                    self._pending_wo_a[name] = weights.pop(name)
+                    if len(self._pending_wo_a) == 2:
+                        weights.update(self._pending_wo_a)
+                        self._pending_wo_a.clear()
+
         matrix_weights = (
             weight for weight in self.__dict__.values() if isinstance(weight, (MMWeightTpl, BMMWeightTpl))
         )
@@ -300,7 +317,8 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             weights,
             matrix_weights,
             self.data_type_,
-            self.network_config_.get("quantization_config", {}).get("weight_block_size", [128, 128])[0],
+            quant_config.get("weight_block_size", [128, 128])[0],
+            mxfp8=mxfp8,
         )
 
         # MXFP4 loads expert .scale unchanged; FP8 expert kernels expect their own suffix.
@@ -314,7 +332,6 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
                     del weights[scale_name]
         # Batched GEMM loads [groups, in, o_lora]; single-group GEMM keeps [groups*o_lora, in].
         if not self.o_proj_use_mm:
-            woa = f"{self.prefix}.attn.wo_a.weight"
             if woa in weights and weights[woa].dim() == 2:
                 w = weights[woa]
                 per_group_in = self.n_heads * self.head_dim // self.o_groups

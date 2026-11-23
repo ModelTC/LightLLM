@@ -561,6 +561,70 @@ class FP8w8a8B32TritonQuantizationMethod(FP8w8a8B128TritonQuantizationMethod):
 
 
 FP8_MOE_B32_QUANT_METHOD = "fp8w8a8-moe-1x32-triton"
+MXFP8_LINEAR_QUANT_METHOD = "mxfp8-flashinfer"
+
+
+@QUANTMETHODS.register(MXFP8_LINEAR_QUANT_METHOD, platform="cuda")
+class MXFP8FlashInferQuantizationMethod(BaseQuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        from flashinfer import block_scale_interleave, mm_mxfp8, mxfp8_quantize
+
+        self.block_size = 32
+        self.has_weight_scale = True
+        self.weight_scale_suffix = "weight_scale"
+        self._interleave = block_scale_interleave
+        self._mm = mm_mxfp8
+        self._quantize = mxfp8_quantize
+
+    @property
+    def method_name(self):
+        return MXFP8_LINEAR_QUANT_METHOD
+
+    def _create_weight(self, out_dims, in_dim, dtype, device_id, num_experts=1):
+        # The fused row projections must start on FlashInfer's 128-row scale tiles.
+        if in_dim % 32 or any(n % 128 for n in out_dims[:-1]):
+            raise ValueError(f"MXFP8 FlashInfer requires tile-aligned projections, got {out_dims} x {in_dim}")
+        scale_rows = [(n + 127) // 128 * 128 for n in out_dims]
+        device = torch.device("cuda", device_id)
+        pack = WeightPack(
+            weight=torch.empty((sum(out_dims), in_dim), dtype=torch.float8_e4m3fn, device=device),
+            weight_scale=torch.empty((sum(scale_rows), (in_dim + 127) // 128 * 4), dtype=torch.uint8, device=device),
+        )
+        return pack, self._split_weight_pack(pack, out_dims, 0, scale_rows, 0)
+
+    def load_weight_scale(self, weight_scale, weight_pack):
+        n, k = weight_pack.weight.shape
+        if weight_scale.shape != (n, k // 32) or weight_scale.dtype not in (torch.uint8, torch.float8_e8m0fnu):
+            raise ValueError("MXFP8 linear expects a [N, K/32] UE8M0 weight scale")
+        scale = weight_scale.view(torch.uint8).to(weight_pack.weight.device).contiguous()
+        super().load_weight_scale(self._interleave(scale).reshape_as(weight_pack.weight_scale), weight_pack)
+
+    def quantize(self, weight, output):
+        quant, scale = self._quantize(weight.to(output.weight.device).contiguous(), is_sf_swizzled_layout=True)
+        output.weight.copy_(quant)
+        output.weight_scale.copy_(scale.reshape_as(output.weight_scale))
+
+    def apply(self, input_tensor, weight_pack, out=None, workspace=None, use_custom_tensor_mananger=True, bias=None):
+        quant, scale = self._quantize(input_tensor.contiguous(), is_sf_swizzled_layout=True)
+        if out is None and use_custom_tensor_mananger:
+            out = self.cache_manager.empty(
+                (input_tensor.shape[0], weight_pack.weight.shape[0]),
+                dtype=input_tensor.dtype,
+                device=input_tensor.device,
+            )
+        out = self._mm(
+            quant,
+            weight_pack.weight.T,
+            scale.view(-1),
+            weight_pack.weight_scale.view(-1),
+            out=out,
+            out_dtype=input_tensor.dtype,
+            backend="cute-dsl",
+        )
+        if bias is not None:
+            out.add_(bias)
+        return out
 
 
 @QUANTMETHODS.register(FP8_MOE_B32_QUANT_METHOD, platform="cuda")

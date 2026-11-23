@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from lightllm.distributed import dist_group_manager
 from lightllm.common.quantization.humming import HUMMING_QUANT_METHODS
 from lightllm.common.quantization.w8a8 import FP8_MOE_B32_QUANT_METHOD
+from lightllm.common.quantization.deepgemm import MXFP8_MOE_QUANT_METHOD
 from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_gemm_kernel import expanded_grouped_fp8_gemm
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
@@ -41,7 +42,7 @@ from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
 from lightllm.utils.tensor_buffer_manager import TensorBufferManager
 
 logger = init_logger(__name__)
-GROUP32_EP_METHODS = HUMMING_QUANT_METHODS | {FP8_MOE_B32_QUANT_METHOD}
+GROUP32_EP_METHODS = HUMMING_QUANT_METHODS | {FP8_MOE_B32_QUANT_METHOD, MXFP8_MOE_QUANT_METHOD}
 SUPPORTED_EP_EXPERT_DTYPES = GROUP32_EP_METHODS | {"fp8w8a8-b128-deepgemm", "fp4fp8-b32-deepgemm"}
 
 
@@ -59,7 +60,9 @@ def get_ep_num_sms() -> int:
     return getattr(dist_group_manager, "ep_num_sms", None) or 0
 
 
-def deepep_v2_decode_dispatch(hidden_states, topk_idx, topk_weights, num_experts, block_size_k=128):
+def deepep_v2_decode_dispatch(
+    hidden_states, topk_idx, topk_weights, num_experts, block_size_k=128, mxfp8_deepgemm=False
+):
     buffer = dist_group_manager.ep_buffer
     # DP ranks may have different local batch sizes. This collective capacity
     # must be identical on every rank, including CUDA graph replays.
@@ -73,7 +76,7 @@ def deepep_v2_decode_dispatch(hidden_states, topk_idx, topk_weights, num_experts
         topk_weights=topk_weights,
         num_experts=num_experts,
         num_max_tokens_per_rank=capacity,
-        expert_alignment=32 if group32 else deep_gemm.get_mk_alignment_for_contiguous_layout(),
+        expert_alignment=32 if group32 and not mxfp8_deepgemm else deep_gemm.get_mk_alignment_for_contiguous_layout(),
         do_expand=True,
         do_zero_padding=True,
         use_tma_aligned_col_major_sf=True,
@@ -150,9 +153,10 @@ def masked_group_gemm(
     row_shape = recv_x[0].shape[:-1]
     use_psum_layout = len(row_shape) == 1
     group32 = block_size_k == 32
+    mxfp8_deepgemm = group32 and w1_scale.dtype == torch.int32
     if group32:
         assert use_psum_layout, "1x32 expert GEMM requires DeepEP V2 expanded rows"
-        expert_alignment = 32
+        expert_alignment = deep_gemm.get_mk_alignment_for_contiguous_layout() if mxfp8_deepgemm else 32
     else:
         expert_alignment = deep_gemm.get_mk_alignment_for_contiguous_layout() if use_psum_layout else None
     padded_m = row_shape[-1]
@@ -174,6 +178,8 @@ def masked_group_gemm(
         offsets = ep_aligned_expert_offsets(masked_m, expert_alignment, padded_m)
         valid_rows = expected_m * w1.shape[0]
         humming_gemms[0](*recv_x, gemm_out_a, offsets, valid_rows, expert_alignment=expert_alignment)
+    elif mxfp8_deepgemm:
+        deepgemm_grouped_fp8_fp4_nt_contiguous(recv_x, (w1, w1_scale), gemm_out_a, masked_m, use_psum_layout=True)
     elif group32:
         expanded_grouped_fp8_gemm(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expert_alignment, expected_m=expected_m)
     elif use_psum_layout:
@@ -198,6 +204,10 @@ def masked_group_gemm(
     gemm_out_b = alloc_tensor_func(recv_x[0].shape, device=recv_x[0].device, dtype=dtype)
     if humming_gemms is not None:
         humming_gemms[1](qsilu_out, qsilu_out_scale, gemm_out_b, offsets, valid_rows, expert_alignment=expert_alignment)
+    elif mxfp8_deepgemm:
+        deepgemm_grouped_fp8_fp4_nt_contiguous(
+            (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, use_psum_layout=True
+        )
     elif group32:
         expanded_grouped_fp8_gemm(
             (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expert_alignment, expected_m=expected_m
@@ -525,7 +535,12 @@ def fused_experts_impl(
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         if dist_group_manager.ep_decode_use_v2:
             recv_x, masked_m, handle = deepep_v2_decode_dispatch(
-                hidden_states, topk_idx, topk_weights, num_experts, block_size_k
+                hidden_states,
+                topk_idx,
+                topk_weights,
+                num_experts,
+                block_size_k,
+                mxfp8_deepgemm=block_size_k == 32 and w1_scale.dtype == torch.int32,
             )
             world_size = dist_group_manager.ep_buffer.num_ranks
         else:
@@ -742,6 +757,8 @@ def chunked_expanded_moe_forward(
     all_tokens, intermediate_twice = sum(num_recv_tokens_per_expert_list), w1.shape[1]
     intermediate_size, hidden_size = intermediate_twice // 2, w2.shape[1]
     group32 = block_size_k == 32
+    mxfp8_deepgemm = group32 and w1_scale.dtype == torch.int32
+    use_group32_layout = group32 and not mxfp8_deepgemm
     fused_activation = alpha is None and (group32 or is_sm90_gpu())
     is_autotune_warmup = Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL)
     if all_tokens == 0:
@@ -757,7 +774,7 @@ def chunked_expanded_moe_forward(
 
     assert all_tokens == recv_x[0].shape[0] and all_tokens % alignment == 0
     assert workspace.dtype == torch.uint8 and workspace.ndim == 1 and workspace.is_contiguous()
-    if group32:
+    if use_group32_layout:
         if expert_ends is None:
             counts = num_unaligned_recv_tokens_per_expert
             padded_counts = (counts + alignment - 1) // alignment * alignment
@@ -817,13 +834,19 @@ def chunked_expanded_moe_forward(
             gemm_out_a = workspace_manager.alloc((chunk_rows, intermediate_twice), hidden_dtype)
             input_scale = recv_x[1][chunk_start:chunk_end]
             # Humming and Blackwell's FP32-to-UE8M0 packer use the chunk's own column pitch.
-            if input_scale.stride(1) != chunk_rows and (humming_gemms is not None or (not group32 and is_sm100_gpu())):
+            if input_scale.stride(1) != chunk_rows and (
+                humming_gemms is not None or mxfp8_deepgemm or (not group32 and is_sm100_gpu())
+            ):
                 input_scale = tma_align_input_scale(input_scale)
             chunk_input = (recv_x[0][chunk_start:chunk_end], input_scale)
             if humming_gemms is not None:
                 offsets = ep_aligned_expert_offsets(expert_ends, alignment, chunk_rows, chunk_start)
                 humming_gemms[0](
                     *chunk_input, gemm_out_a, offsets, chunk_rows, prefill_rows_per_expert=humming_schedule[0]
+                )
+            elif mxfp8_deepgemm:
+                deepgemm_grouped_fp8_fp4_nt_contiguous(
+                    chunk_input, (w1, w1_scale), gemm_out_a, m_indices[chunk_start:chunk_end]
                 )
             elif group32:
                 expanded_grouped_fp8_gemm(chunk_input, (w1, w1_scale), gemm_out_a, expert_ends, alignment, chunk_start)
@@ -871,6 +894,10 @@ def chunked_expanded_moe_forward(
                     offsets,
                     chunk_rows,
                     prefill_rows_per_expert=humming_schedule[1],
+                )
+            elif mxfp8_deepgemm:
+                deepgemm_grouped_fp8_fp4_nt_contiguous(
+                    (qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices[chunk_start:chunk_end]
                 )
             elif group32:
                 expanded_grouped_fp8_gemm(
@@ -991,6 +1018,13 @@ def deepgemm_grouped_fp8_fp4_nt_contiguous(
     use_psum_layout: bool = False,
 ):
     if HAS_DEEPGEMM and hasattr(deep_gemm, "m_grouped_fp8_fp4_gemm_nt_contiguous"):
+        if use_psum_layout:
+            # DeepEP produces MN-major scales. The PSUM kernel's implicit FP32
+            # packing requires row-major scales, so pack the received layout directly.
+            activation, scale = input_tuple
+            m, k = activation.shape
+            scale = deep_gemm.transform_sf_into_required_layout(scale, m, k, (1, 1, 32), is_sfa=True)
+            input_tuple = (activation, scale)
         return deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
             input_tuple,
             w_tuple,

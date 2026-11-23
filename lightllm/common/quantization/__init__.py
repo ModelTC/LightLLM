@@ -56,6 +56,10 @@ class Quantcfg:
 
     def _get_expert_quant_type(self, expert_dtype):
         quant_config = self.hf_quantization_config or {}
+        if quant_config.get("quant_method") == "mxfp8":
+            if expert_dtype != "fp8":
+                raise ValueError("MXFP8 checkpoints require expert_dtype=fp8")
+            return MXFP8_MOE_QUANT_METHOD
         expert_block_size = quant_config.get("expert_weight_block_size")
         if expert_block_size == [1, 32]:
             if expert_dtype != "fp8" or quant_config.get("scale_fmt") != "ue8m0":
@@ -141,6 +145,13 @@ class Quantcfg:
             ):
                 for layer_num in range(self.layer_num):
                     self.quant_cfg[layer_num].setdefault("wq_a", "fp8w8a8-b32-humming")
+        elif self.hf_quantization_method == "mxfp8":
+            block_size = self.hf_quantization_config.get("weight_block_size")
+            scale_fmt = self.hf_quantization_config.get("scale_fmt")
+            if not is_sm100_gpu() or block_size != [1, 32] or scale_fmt != "ue8m0":
+                raise ValueError("MXFP8 requires Blackwell with weight_block_size [1, 32] and UE8M0 scales")
+            self.quant_type = MXFP8_LINEAR_QUANT_METHOD
+            self._mapping_expert_quant_method()
         elif self.hf_quantization_method == "awq":
             self.quant_type = "awq"
             if is_awq_marlin_compatible(self.hf_quantization_config):

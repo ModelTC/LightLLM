@@ -112,7 +112,10 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, alph
     torch.testing.assert_close(actual, expected, atol=0.05, rtol=0.02)
 
 
-def test_group32_prefill_activation_across_workspace_chunks():
+@pytest.mark.parametrize("use_deepgemm", [False, True])
+def test_group32_prefill_activation_across_workspace_chunks(use_deepgemm):
+    if use_deepgemm and not ep.is_sm100_gpu():
+        pytest.skip("native MXFP8 grouped GEMM requires Blackwell")
     dim, alignment = 128, 128
     counts = [3, 0, 2]
     active = [0, 1, 2, alignment, alignment + 1]
@@ -125,6 +128,15 @@ def test_group32_prefill_activation_across_workspace_chunks():
     w1 = torch.cat([eye, 2 * eye]).repeat(len(counts), 1, 1).to(fp8)
     w2 = eye.repeat(len(counts), 1, 1).to(fp8)
     unit_scales = torch.full((len(counts), 2 * dim, dim // 32), 127, dtype=torch.uint8, device="cuda")
+    w1_scale, w2_scale = unit_scales, unit_scales[:, :dim].contiguous()
+    if use_deepgemm:
+        w1_scale, w2_scale = (
+            ep.deep_gemm.transform_sf_into_required_layout(
+                scale.view(torch.float8_e8m0fnu).float(), scale.shape[1], dim, (1, 1, 32), len(counts), False
+            )
+            for scale in (w1_scale, w2_scale)
+        )
+    recv_scale = torch.ones((dim // 32, len(recv)), device="cuda").T
     metadata = torch.zeros((len(active), 3), device="cuda", dtype=torch.int32)
     metadata[:, 2] = torch.tensor(active, device="cuda")
     # The cached gather reservation rounds up to 1024 rows. The remainder fits exactly one 128-row chunk.
@@ -133,13 +145,13 @@ def test_group32_prefill_activation_across_workspace_chunks():
     actual = ep.chunked_expanded_moe_forward(
         [alignment, 0, alignment],
         torch.tensor(counts, dtype=torch.int32, device="cuda"),
-        (recv, torch.ones((dim // 32, len(recv)), device="cuda").T),
+        (recv, recv_scale),
         torch.ones(len(recv), device="cuda"),
         metadata,
         w1,
-        unit_scales,
+        w1_scale,
         w2,
-        unit_scales[:, :dim].contiguous(),
+        w2_scale,
         32,
         workspace,
         torch.bfloat16,
@@ -152,3 +164,33 @@ def test_group32_prefill_activation_across_workspace_chunks():
     expected = (q.float() * s.repeat_interleave(32, 1)).bfloat16()
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
     assert metadata[:, 2].tolist() == list(range(len(active)))
+
+    if use_deepgemm:
+        expert_ends = torch.tensor([3, alignment, alignment + 2], device="cuda", dtype=torch.int32)
+        decode = ep.masked_group_gemm(
+            (recv, recv_scale),
+            expert_ends,
+            torch.bfloat16,
+            w1,
+            w1_scale,
+            w2,
+            w2_scale,
+            expected_m=3,
+            block_size_k=32,
+            limit=10.0,
+        )
+        # Decode uses the existing masked activation, which quantizes the
+        # product directly instead of rounding it through a BF16 buffer.
+        dq, ds = torch.empty_like(q), torch.empty_like(s)
+        ep.silu_and_mul_masked_post_quant_fwd(
+            gate_up,
+            dq,
+            ds,
+            32,
+            torch.tensor([len(active)], device="cuda", dtype=torch.int32),
+            limit=10.0,
+            expert_alignment=alignment,
+            use_ue8m0_scales=True,
+        )
+        expected_decode = (dq.float() * ds.repeat_interleave(32, 1)).bfloat16()
+        torch.testing.assert_close(decode[active], expected_decode, atol=0, rtol=0)
