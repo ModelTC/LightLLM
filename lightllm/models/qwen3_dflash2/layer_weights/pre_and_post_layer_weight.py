@@ -7,6 +7,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
 )
 from lightllm.common.quantization import Quantcfg
+from lightllm.utils.draft_features import get_target_feature_sources
 
 
 class Qwen3DFlash2PreAndPostLayerWeight(PreAndPostLayerWeight):
@@ -18,7 +19,7 @@ class Qwen3DFlash2PreAndPostLayerWeight(PreAndPostLayerWeight):
 
         hidden_size = network_config["hidden_size"]
         vocab_size = network_config["vocab_size"]
-        target_layer_num = len(network_config["target_layer_ids"])
+        target_layer_num = len(get_target_feature_sources(network_config))
         selector_rank = int(network_config["selector_rank"])
 
         # Published DFlash2 checkpoints share these two large weights with the

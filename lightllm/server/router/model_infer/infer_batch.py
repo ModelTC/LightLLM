@@ -389,6 +389,8 @@ class InferenceContext:
 
                 assert req.paused is True
                 req.paused = False
+                if getattr(req, "spec_acceptance_metrics", None) is not None:
+                    req.spec_acceptance_metrics.mark_bootstrap()
                 if is_master_in_dp:
                     req.shm_req.is_paused = False
                     logger.debug(f"infer recover paused req id {req.req_id}")
@@ -580,6 +582,11 @@ class InferReq:
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
         self.mtp_step: int = get_env_start_args().mtp_step
+        self.spec_acceptance_metrics = None
+        if getattr(get_env_start_args(), "enable_spec_acceptance_metrics", False):
+            from lightllm.server.router.model_infer.mtp_speculative.acceptance_metrics import SpecAcceptanceMetrics
+
+            self.spec_acceptance_metrics = SpecAcceptanceMetrics()
 
         if g_infer_context.is_hybrid_att_model:
             self.get_chuncked_input_token_len = self.get_chuncked_input_token_len_for_hybrid_att

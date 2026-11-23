@@ -155,6 +155,10 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
                 "input_usage": input_usage,
             }
             ret["token"]["logprobs"] = metadata["logprobs"]
+            if finish_status.is_finished() and "spec_acceptance_metrics" in metadata:
+                ret["spec_acceptance_metrics"] = metadata["spec_acceptance_metrics"]
+                for name in ("mtp_accepted_token_num", "mtp_verify_token_num", "mtp_verify_step_num"):
+                    ret["token"][name] = metadata[name]
             if "prompt_logprobs" in metadata:
                 ret["prompt_logprobs"] = metadata["prompt_logprobs"]
                 ret["prompt_token_ids"] = metadata.get("prompt_token_ids")

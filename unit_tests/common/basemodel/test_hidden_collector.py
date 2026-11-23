@@ -21,6 +21,79 @@ class _IdentityPreInfer:
         return input
 
 
+def _postnorm_collector(monkeypatch):
+    monkeypatch.setattr(
+        hidden_collector_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(mtp_draft_model_dir=["/models/draft"]),
+    )
+    monkeypatch.setattr(
+        hidden_collector_module.PretrainedConfig,
+        "get_config_dict",
+        lambda _: ({"target_layer_ids": [0], "target_feature_sources": [0, "final_postnorm"]}, {}),
+    )
+    calls = []
+    weight = object()
+
+    def norm(hidden, infer_state, layer_weight):
+        assert layer_weight is weight
+        calls.append(hidden)
+        return hidden * 3
+
+    model = SimpleNamespace(
+        layers_num=2,
+        pre_infer=_IdentityPreInfer(),
+        post_infer=SimpleNamespace(_norm=norm),
+        pre_post_weight=weight,
+    )
+    return LayerHiddenCollector(model), calls
+
+
+def test_final_postnorm_feature_is_normalized_once_and_appended(monkeypatch):
+    prototype, calls = _postnorm_collector(monkeypatch)
+    first, second = prototype.new_instance(), prototype.new_instance()
+    state = SimpleNamespace(need_dp_prefill_balance=False)
+    for collector, value in [(first, 1.0), (second, 5.0)]:
+        intermediate = torch.full((2, 3), value)
+        final = torch.full((2, 3), value + 1)
+        collector.add(0, intermediate)
+        collector.add_final_hidden(final)
+        output = collector.finish_output(state).spec_hidden
+        torch.testing.assert_close(output, torch.cat([intermediate, final * 3], dim=-1))
+        assert collector.final_hidden is None
+        assert not collector.layer_hiddens
+    assert len(calls) == 2
+    assert prototype.final_hidden is None
+
+
+def test_missing_final_feature_fails_instead_of_silently_changing_projection(monkeypatch):
+    collector, _ = _postnorm_collector(monkeypatch)
+    collector.add(0, torch.ones(2, 3))
+    with pytest.raises(RuntimeError, match="final_postnorm"):
+        collector.finish_output(SimpleNamespace(need_dp_prefill_balance=False))
+
+
+def test_final_feature_graph_restore_keeps_request_state_independent(monkeypatch):
+    graph, _ = _postnorm_collector(monkeypatch)
+    graph.add(0, torch.ones(2, 3))
+    graph.add_final_hidden(torch.full((2, 3), 2.0))
+    request = graph.new_instance()
+    request.restore_graph_state(graph)
+    assert request.final_hidden is graph.final_hidden
+    request.finish_output(SimpleNamespace(need_dp_prefill_balance=False))
+    assert request.final_hidden is None
+    assert graph.final_hidden is not None
+    assert len(graph.layer_hiddens) == 1
+
+
+def test_final_feature_graph_ownership_accounts_for_all_saved_tensors(monkeypatch):
+    collector, _ = _postnorm_collector(monkeypatch)
+    collector.add(0, torch.ones(2, 3))
+    collector.add_final_hidden(torch.ones(2, 3))
+    monkeypatch.setattr(hidden_collector_module, "tensor_to_no_ref_tensor", torch.clone)
+    assert collector.release_graph_tensor_ownership() == (2, 48)
+
+
 def _mock_target_layer_ids(monkeypatch, layer_ids):
     monkeypatch.setattr(
         hidden_collector_module,

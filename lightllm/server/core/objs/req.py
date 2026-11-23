@@ -390,7 +390,8 @@ class Req(ctypes.Structure):
         """
         # 阶段 1：判断本请求是否需要 final token metadata。
         need_prompt_logprobs = self.sample_params.prompt_logprobs >= 0
-        if not (need_prompt_logprobs or enable_return_routed_experts):
+        need_spec_metrics = getattr(get_env_start_args(), "enable_spec_acceptance_metrics", False)
+        if not (need_prompt_logprobs or enable_return_routed_experts or need_spec_metrics):
             return
 
         # 阶段 2：等待 Infer 写完 metadata 并释放。
@@ -415,6 +416,16 @@ class Req(ctypes.Structure):
             metadata["prompt_token_ids"] = meta["prompt_token_ids"]
         if meta.get("routed_experts") is not None:
             metadata["routed_experts"] = meta["routed_experts"]
+        if need_spec_metrics and meta.get("spec_acceptance_metrics") is not None:
+            metadata["spec_acceptance_metrics"] = meta["spec_acceptance_metrics"]
+            final_counters = meta["spec_acceptance_metrics"].get("native_final_counters")
+            if final_counters is not None:
+                # HTTP metadata can precede the last overlapping verification.
+                # Use the histogram snapshot and retain the earlier counters.
+                snapshot = {name: metadata.get(name) for name in final_counters}
+                if snapshot != final_counters:
+                    metadata["spec_acceptance_metrics"]["http_counter_snapshot"] = snapshot
+                metadata.update(final_counters)
         return
 
     def get_prompt_ids(self):

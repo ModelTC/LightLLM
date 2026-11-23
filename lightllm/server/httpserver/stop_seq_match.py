@@ -189,6 +189,7 @@ class StopTokenIdsMatchBuffer:
         return (
             httpserver_manager.args.enable_rl
             or httpserver_manager.args.enable_return_routed_experts
+            or getattr(httpserver_manager.args, "enable_spec_acceptance_metrics", False)
             or sampling_params.prompt_logprobs >= 0
         )
 

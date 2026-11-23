@@ -10,6 +10,7 @@ from transformers.configuration_utils import PretrainedConfig
 from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+from lightllm.utils.draft_features import get_target_feature_sources
 
 
 class HiddenCollector(ABC):
@@ -181,22 +182,30 @@ class LayerHiddenCollector(HiddenCollector):
     def __init__(self, model) -> None:
         self.model = model
         self.layer_num = model.layers_num
+        self.include_final_postnorm = False
+        self.final_hidden: Optional[torch.Tensor] = None
         self.layer_ids = self._load_layer_ids()
         self.layer_hiddens: List[torch.Tensor] = []
 
     def new_instance(self) -> HiddenCollector:
         collector = copy.copy(self)
         collector.layer_hiddens = []
+        collector.final_hidden = None
         return collector
 
     def restore_graph_state(self, graph_collector: HiddenCollector) -> None:
         assert isinstance(graph_collector, LayerHiddenCollector)
         self.layer_hiddens = graph_collector.layer_hiddens.copy()
+        self.final_hidden = graph_collector.final_hidden
 
     def release_graph_tensor_ownership(self) -> tuple[int, int]:
         tensor_count = len(self.layer_hiddens)
         total_nbytes = sum(hidden.numel() * hidden.element_size() for hidden in self.layer_hiddens)
         self.layer_hiddens = [tensor_to_no_ref_tensor(hidden) for hidden in self.layer_hiddens]
+        if self.final_hidden is not None:
+            tensor_count += 1
+            total_nbytes += self.final_hidden.numel() * self.final_hidden.element_size()
+            self.final_hidden = tensor_to_no_ref_tensor(self.final_hidden)
         return tensor_count, total_nbytes
 
     def _load_layer_ids(self) -> frozenset[int]:
@@ -207,12 +216,19 @@ class LayerHiddenCollector(HiddenCollector):
         if layer_ids is None:
             layer_ids = draft_config.get("dflash_config", {}).get("target_layer_ids")
         assert layer_ids is not None, f"target_layer_ids is required in draft config: {draft_model_dirs[0]}"
+        sources = get_target_feature_sources(draft_config)
+        self.include_final_postnorm = sources[-1] == "final_postnorm"
 
         resolved_layer_ids = frozenset(int(layer_id) for layer_id in layer_ids)
         assert resolved_layer_ids and all(
             0 <= layer_id < self.layer_num for layer_id in resolved_layer_ids
         ), f"invalid target_layer_ids={resolved_layer_ids} for target layer_num={self.layer_num}"
         return resolved_layer_ids
+
+    def add_final_hidden(self, final_hidden: torch.Tensor) -> None:
+        if self.include_final_postnorm:
+            # Defer final normalization until feature assembly in finish_output.
+            self.final_hidden = final_hidden
 
     def add(self, layer_index: int, hidden: torch.Tensor) -> None:
         if layer_index not in self.layer_ids:
@@ -235,4 +251,13 @@ class LayerHiddenCollector(HiddenCollector):
         hidden = self.model.pre_infer._tpsp_allgather(input=local_hidden, infer_state=infer_state)
         if infer_state.need_dp_prefill_balance:
             hidden = infer_state._all_to_all_unbalance_get(data=hidden)
+        if self.include_final_postnorm:
+            final_hidden = self.final_hidden
+            self.final_hidden = None
+            if final_hidden is None:
+                raise RuntimeError("draft requires final_postnorm but target did not publish its final hidden")
+            final_hidden = self.model.post_infer._norm(final_hidden, infer_state, self.model.pre_post_weight)
+            if hidden.shape[:-1] != final_hidden.shape[:-1]:
+                raise ValueError("intermediate and final target features have different token layouts")
+            hidden = torch.cat([hidden, final_hidden], dim=-1)
         return ModelMtpOutputCollector(spec_hidden=hidden.contiguous())

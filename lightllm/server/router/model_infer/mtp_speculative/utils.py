@@ -113,6 +113,9 @@ def record_request_mtp_metrics(
         if verify_token_num > 0:
             req.update_mtp_verify_token_num(verify_token_num=verify_token_num)
             req.update_mtp_verify_step_num(verify_step_num=1)
+            metrics = getattr(req, "spec_acceptance_metrics", None)
+            if metrics is not None:
+                metrics.record(accept_length=accept_len, verify_width=verify_token_num, output_end=req.cur_output_len)
 
 
 __all__ = [

@@ -755,9 +755,14 @@ def _validate_pd_features(args: StartArgs):
         # the built-in Hypercorn defaults consistently.
         raise ValueError("--hypercorn_config is not supported in PD mode")
     if args.run_mode in ("pd_master", "prefill", "decode") and (
-        args.enable_rl or args.enable_return_routed_experts or args.enable_prompt_logprobs
+        args.enable_rl
+        or args.enable_return_routed_experts
+        or args.enable_prompt_logprobs
+        or args.enable_spec_acceptance_metrics
     ):
-        raise ValueError("PD mode does not support RL, routed experts or prompt logprobs")
+        raise ValueError(
+            "PD mode does not support RL, routed experts, prompt logprobs or speculative acceptance metrics"
+        )
 
 
 def _auto_set_prefill_queue_strategy(args: StartArgs) -> None:

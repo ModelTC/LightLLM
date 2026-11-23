@@ -212,4 +212,16 @@ class FinalTokenMetadataExt:
             prompt_top_token_ids=prompt_top_token_ids,
             prompt_top_logprobs=prompt_top_logprobs,
             routed_experts=routed_experts,
+            spec_acceptance_metrics=(
+                req.spec_acceptance_metrics.export(
+                    native_final_counters={
+                        name: int(getattr(req.shm_req, name))
+                        for name in ("mtp_accepted_token_num", "mtp_verify_token_num", "mtp_verify_step_num")
+                    },
+                    visible_output_tokens=int(req.shm_req.shm_cur_output_len),
+                    inferred_output_tokens=int(req.cur_output_len),
+                )
+                if getattr(req, "spec_acceptance_metrics", None) is not None
+                else None
+            ),
         )
