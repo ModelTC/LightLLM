@@ -42,6 +42,9 @@ class InferStateInfo:
         self.b_shared_radix_node_id: torch.Tensor = None  # raw decode radix-node ids.
 
         self.b_mtp_index: torch.Tensor = None
+        # 图像 span 内双向注意力（Gemma4、Neo）：每个 query token 所在 span 的结束和起始位置。
+        self.b_image_token_end: Optional[torch.Tensor] = None
+        self.b_image_token_start: Optional[torch.Tensor] = None
         # MRoPE position offset propagated from ModelInput.
         self.b_position_delta: torch.Tensor = None
 

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import torch
 
 from lightllm.common.attention.backend import AttentionMetadata
-from lightllm.common.basemodel.infer_struct import GraphMode
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
 def kda_params(conv_states, ssm_states, layer_weight, mixed_qkv, raw_gate, raw_beta, *, state=None, layer_num=0):
@@ -25,20 +25,14 @@ def kda_params(conv_states, ssm_states, layer_weight, mixed_qkv, raw_gate, raw_b
 
 
 def prepare_prefill_infer(infer, device="cuda"):
-    """Fill the request fields a prefill step builder reads but a test stub does not set."""
+    """Give a test stub the InferStateInfo defaults of the fields it does not set, as a prefill step."""
+    for name, value in vars(InferStateInfo()).items():
+        if not hasattr(infer, name):
+            setattr(infer, name, value)
     infer.is_prefill = True
-    infer.graph_mode = getattr(infer, "graph_mode", GraphMode.EAGER)
     infer.batch_size = infer.b_req_idx.shape[0]
-    infer.b_seq_len = getattr(infer, "b_seq_len", None)
-    infer.max_kv_seq_len = getattr(infer, "max_kv_seq_len", None)
-    infer.total_token_num = getattr(infer, "total_token_num", None)
-    infer.b1_cu_kv_seq_len = getattr(infer, "b1_cu_kv_seq_len", None)
-    infer.b_q_start_loc = getattr(infer, "b_q_start_loc", None)
-    infer.b_ready_cache_len = getattr(infer, "b_ready_cache_len", None)
-    infer.max_cache_len = getattr(infer, "max_cache_len", 0)
-    infer.mem_index = getattr(infer, "mem_index", None)
-    infer.microbatch_index = getattr(infer, "microbatch_index", 0)
-    infer.req_manager = getattr(infer, "req_manager", SimpleNamespace(req_to_token_indexs=None))
+    if infer.req_manager is None:
+        infer.req_manager = SimpleNamespace(req_to_token_indexs=None)
     return infer
 
 

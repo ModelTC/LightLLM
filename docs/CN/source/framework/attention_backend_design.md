@@ -54,7 +54,7 @@ GQA 层共用 `lightllm/common/basemodel/layer_infer/gqa_attention.py` 中的 `G
 
 运行时创建时从模型读取一次全部静态信息，之后不再持有模型：
 
-- `step_builder_context(model)` 把模型的资源与容量写入 `AttentionBuildResources`，供 backend 创建构建上下文（第 3 节）。
+- `attention_build_resources(model)` 把模型的资源与容量写入 `AttentionBuildResources`，供 backend 创建构建上下文（第 3 节）。
 - `attention_step_config(model)` 生成冻结的 `AttentionStepConfig`：decode 每请求行数、是否为 dynamic verify 布局、线性注意力的投机状态索引和 CUDA graph 的 KV 长度容量。`build_attention_metadata(infer_state, step_config)` 只读这两者，每步不再查询模型或启动参数。
 - 因此 graph 容量必须在 `_init_attention` 之前确定：`graph_max_len_in_batch` 的 MTP 余量调整在模型构造函数中完成，而不是在 `_init_cudagraph` 中。
 
@@ -111,7 +111,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 - KV cache 由模型层在 attention 之前写入，不由 impl 写入。
 - attention state 显式传参，不经过全局 forward context；microbatch overlap 的两个并发步各自持有 attention state。
-- workspace 在进程内按 (设备, 名称, 大小, dtype) 共享（`get_gpu_workspace_buffer`）。
+- workspace 在进程内按 (设备, 名称, 大小, dtype) 共享（`lightllm/utils/workspace_utils.py` 的 `get_gpu_workspace_buffer`）。
 
 ## 4. 接口契约
 
@@ -235,8 +235,8 @@ lightllm/common/attention/          # 不知道模型的存在
 │       └── <impl>.py               # AttState、BuildContext、Backend
 └── kernels/<family>/               # Triton kernel 与封装
 lightllm/common/basemodel/
-├── attention_runtime.py            # AttentionRuntime、AttentionStepConfig、build_attention_metadata、step_builder_context
-├── layer_infer/gqa_attention.py    # GQA 层的 attention_spec 与调用
+├── attention_runtime.py            # AttentionRuntime、AttentionStepConfig、build_attention_metadata、attention_build_resources
+├── layer_infer/gqa_attention.py    # GQA 层的 attention_spec 与调用、--llm_kv_type 到 kv_quant 的映射
 ├── basemodel.py                    # _init_attention、_create_inferstate
 └── infer_struct.py                 # GraphMode、当前 microbatch 的 att_states
 ```

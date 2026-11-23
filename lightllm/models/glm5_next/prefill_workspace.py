@@ -8,7 +8,7 @@ to sparse prefill layers through their model.
 import torch
 import triton
 
-from lightllm.common.basemodel.attention_runtime import get_gpu_workspace_buffer
+from lightllm.utils.workspace_utils import get_gpu_workspace_buffer
 
 # Cap each microbatch's BF16 KV workspace at 2 GiB (2097152 × 512 × 2 bytes).
 KV_GATHER_CHUNK_SIZE = 2097152

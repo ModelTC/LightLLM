@@ -8,7 +8,6 @@ import torch
 from lightllm.common.attention.backend import AttentionMetadata
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
-from lightllm.common.basemodel.attention_runtime import uses_dynamic_spec_verify_layout
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
@@ -474,7 +473,7 @@ def test_layer_group_replays_dynamic_verify_layout_through_cuda_graph(start_args
     model = _Model(args, 16, rows_per_request=3)
     config = gqa_config(kv_quant="fp8_per_head") if fp8 else gqa_config()
     runner = GroupsRunner(model, config, config)
-    assert uses_dynamic_spec_verify_layout(model)
+    assert model.attention_runtime.step_config.dynamic_decode_rows
     token_map = paged_token_map(8, 16, seed=7)
     generator = torch.Generator(device="cuda").manual_seed(9)
     q = torch.randn(6, 8, 64, device="cuda", generator=generator).bfloat16()

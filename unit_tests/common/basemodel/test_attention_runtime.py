@@ -14,10 +14,10 @@ from lightllm.common.basemodel.attention_runtime import (
     AttentionRuntime,
     AttentionSpec,
     AttentionStepConfig,
+    attention_build_resources,
     build_attention_metadata,
-    gqa_kv_quant_fields,
-    step_builder_context,
 )
+from lightllm.common.basemodel.layer_infer.gqa_attention import gqa_kv_quant_fields
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
@@ -54,6 +54,8 @@ def fake_model(**args):
         tp_world_size_=1,
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
+        att_state_role="main",
+        att_state_manager=SimpleNamespace(get_bounded_attention_states=lambda role: ()),
     )
 
 
@@ -127,7 +129,7 @@ def test_sparse_mla_step_builders_follow_the_layer_selection():
     from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend
     from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparseDecodeBackend
 
-    ctx = step_builder_context(fake_model())
+    ctx = attention_build_resources(fake_model())
 
     def config(**fields):
         fields = {"num_heads": 64, "kv_lora_rank": 512, "qk_rope_head_dim": 0, "softmax_scale": 0.1, **fields}
@@ -175,7 +177,7 @@ def test_kda_prefill_step_builders_follow_the_layer_config(monkeypatch, replay, 
         prefill_kernel=prefill_kernel,
     )
     backend = kda_triton.ReplayKDAPrefillBackend if replay else kda_triton.TritonKDAPrefillBackend
-    builder = backend.create_build_context(config, step_builder_context(fake_model()))
+    builder = backend.create_build_context(config, attention_build_resources(fake_model()))
     assert builder.ssm_slots_per_request == (1 if replay else 3)
     assert requests == [(prefill_kernel, {"dtype": torch.bfloat16, "ssm_dtype": torch.bfloat16})]
     assert builder.flash_kda_fwd == "fwd" and builder.max_flash_len == flash_len
@@ -373,7 +375,7 @@ def test_kv_quant_fields_reject_mismatched_caches():
 def test_step_builder_context_covers_speculative_and_padded_decode_rows():
     model = fake_model(mtp_step=2, enable_tpsp_mix_mode=True, enable_decode_microbatch_overlap=True, diverse_mode=True)
     model.tp_world_size_ = 4
-    ctx = step_builder_context(model)
+    ctx = attention_build_resources(model)
     # 8 running requests x 3 rows, padded to a multiple of the TP size.
     assert ctx.max_decode_rows == 24
     assert ctx.max_cuda_graph_batch_size == 4
@@ -381,7 +383,7 @@ def test_step_builder_context_covers_speculative_and_padded_decode_rows():
     assert ctx.workspace_bytes == 64 * 1024 * 1024
     assert ctx.diverse_decode
     model.graph_max_batch_size = 64
-    assert step_builder_context(model).max_decode_rows == 64
+    assert attention_build_resources(model).max_decode_rows == 64
 
 
 def test_fa3_page_tables_allocate_lazily_per_microbatch_and_check_capacity(monkeypatch):
@@ -392,7 +394,7 @@ def test_fa3_page_tables_allocate_lazily_per_microbatch_and_check_capacity(monke
         return torch.zeros(numel, dtype=dtype)
 
     model = fake_model(enable_decode_microbatch_overlap=True)
-    ctx = step_builder_context(model)
+    ctx = attention_build_resources(model)
     ctx = type(ctx)(**{**vars(ctx), "get_workspace": get_workspace})
     tables = FA3PageTables(ctx, page_size=16)
     assert requests == []

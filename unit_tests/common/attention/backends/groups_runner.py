@@ -1,6 +1,7 @@
 """Run one layer's attention the way a model does: model initialization chooses the implementation and builds
 the attention state of the layer's group from each step's InferStateInfo."""
 
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import torch
@@ -15,10 +16,16 @@ from lightllm.common.basemodel.attention_runtime import (
 
 
 class GroupsRunner:
-    """model needs what model initialization reads (args, capacities, mtp_manager, is_mtp_draft_model)."""
+    """model needs what model initialization reads (args, capacities, mtp_manager, is_mtp_draft_model).
+
+    A model without att_state_manager is given one with no recurrent state.
+    """
 
     def __init__(self, model, prefill_config: Any, decode_config: Any) -> None:
         self.model = model
+        if not hasattr(model, "att_state_manager"):
+            model.att_state_role = "main"
+            model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: ())
         model.attention_runtime = AttentionRuntime(model)
         self.prefill_impl, self.decode_impl = model.attention_runtime.bind(AttentionSpec(prefill_config, decode_config))
 

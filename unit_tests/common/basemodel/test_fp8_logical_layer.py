@@ -119,6 +119,8 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
         running_max_req_size=1,
         enable_tpsp_mix_mode=False,
         enable_decode_microbatch_overlap=False,
+        flashinfer_workspace_size=512,
+        diverse_mode=False,
     )
     model = SimpleNamespace(
         args=args,

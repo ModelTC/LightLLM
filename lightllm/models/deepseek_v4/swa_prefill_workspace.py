@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import torch
 import triton
 
-from lightllm.common.basemodel.attention_runtime import get_gpu_workspace_buffer
+from lightllm.utils.workspace_utils import get_gpu_workspace_buffer
 
 
 @dataclass
