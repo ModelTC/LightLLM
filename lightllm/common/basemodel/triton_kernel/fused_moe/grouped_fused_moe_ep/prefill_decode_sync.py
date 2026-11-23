@@ -16,7 +16,6 @@ from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
     get_env_start_args,
     get_env_use_ue8m0_scales,
-    get_model_init_status,
 )
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 
@@ -25,6 +24,7 @@ from .deepgemm import (
     chunked_expanded_moe_forward,
     decode_masked_group_gemm,
     get_mk_alignment_for_contiguous_layout,
+    use_full_deepgemm_sms,
 )
 from .fp4_mega import mega_moe_impl, use_sm100_mega_moe
 
@@ -109,6 +109,12 @@ def fused_experts_impl(
     # qaunt hidden_states
     assert use_fp8_w8a8 and use_fp8_all2all, "use_fp8_w8a8 and use_fp8_all2all must be True"
     assert block_size_k == 128, "block_size_k must be 128"
+    # With serialized forward submissions and no microbatch overlap, routed GEMMs run
+    # after the dispatch wait and before combine, which can overlap the shared expert.
+    use_full_sms = False
+    if previous_event is None and enable_env_vars("LIGHTLLM_EP_SERIAL_GEMM_FULL_SMS"):
+        args = get_env_start_args()
+        use_full_sms = not (args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap)
     # TODO: 共享专家目前整段只和 combine 重叠。可以拆开：dispatch 期间算 up，
     # combine 期间算 down，把两段通信的空闲都盖住。
 
@@ -154,35 +160,23 @@ def fused_experts_impl(
 
         all_tokens = sum(handle.num_recv_tokens_per_expert_list)
         if all_tokens > 0:
-            allow_full_sms = False
-            if (
-                previous_event is None
-                and enable_env_vars("LIGHTLLM_GLM53_PREFILL_EXPERT_FULL_SMS")
-                and get_model_init_status()
-            ):
-                args = get_env_start_args()
-                allow_full_sms = (
-                    args.run_mode == "prefill"
-                    and not args.enable_prefill_microbatch_overlap
-                    and not args.enable_prefill_cudagraph
+            with use_full_deepgemm_sms(hidden_states.device, enabled=use_full_sms):
+                gather_out = chunked_expanded_moe_forward(
+                    num_recv_tokens_per_expert_list=handle.num_recv_tokens_per_expert_list,
+                    num_unaligned_recv_tokens_per_expert=handle.num_unaligned_recv_tokens_per_expert,
+                    recv_x=recv_x,
+                    recv_topk_weights=recv_topk_weights,
+                    recv_src_metadata=handle.recv_src_metadata,
+                    w1=w1,
+                    w1_scale=w1_scale,
+                    w2=w2,
+                    w2_scale=w2_scale,
+                    block_size_k=block_size_k,
+                    hidden_dtype=hidden_states.dtype,
+                    alpha=alpha,
+                    limit=limit,
+                    clamp_up_add_one=clamp_up_add_one,
                 )
-            gather_out = chunked_expanded_moe_forward(
-                num_recv_tokens_per_expert_list=handle.num_recv_tokens_per_expert_list,
-                num_unaligned_recv_tokens_per_expert=handle.num_unaligned_recv_tokens_per_expert,
-                recv_x=recv_x,
-                recv_topk_weights=recv_topk_weights,
-                recv_src_metadata=handle.recv_src_metadata,
-                w1=w1,
-                w1_scale=w1_scale,
-                w2=w2,
-                w2_scale=w2_scale,
-                block_size_k=block_size_k,
-                hidden_dtype=hidden_states.dtype,
-                alpha=alpha,
-                limit=limit,
-                clamp_up_add_one=clamp_up_add_one,
-                allow_full_sms=allow_full_sms,
-            )
         else:
             gather_out = torch.empty(
                 (handle.recv_src_metadata.shape[0], w2.shape[1]),
@@ -244,20 +238,21 @@ def fused_experts_impl(
     del qinput_tensor, input_scale
 
     expected_m = triton.cdiv(hidden_states.shape[0] * buffer.num_ranks * topk_idx.shape[1], num_experts)
-    expert_output = decode_masked_group_gemm(
-        recv_x=recv_x,
-        expert_token_psum=ep_handle.psum_num_recv_tokens_per_expert,
-        expert_alignment=ep_handle.expert_alignment,
-        dtype=hidden_states.dtype,
-        w1=w1,
-        w1_scale=w1_scale,
-        w2=w2,
-        w2_scale=w2_scale,
-        expected_m=expected_m,
-        alpha=alpha,
-        limit=limit,
-        clamp_up_add_one=clamp_up_add_one,
-    )
+    with use_full_deepgemm_sms(hidden_states.device, enabled=use_full_sms):
+        expert_output = decode_masked_group_gemm(
+            recv_x=recv_x,
+            expert_token_psum=ep_handle.psum_num_recv_tokens_per_expert,
+            expert_alignment=ep_handle.expert_alignment,
+            dtype=hidden_states.dtype,
+            w1=w1,
+            w1_scale=w1_scale,
+            w2=w2,
+            w2_scale=w2_scale,
+            expected_m=expected_m,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
+        )
     # 阶段 1：把按 expert 展开的输出归约回去重接收 token 布局。
     dense_output, compact_metadata = ep_reduce_decode_output(
         expert_output=expert_output,
