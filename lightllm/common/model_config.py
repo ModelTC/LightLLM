@@ -1,4 +1,4 @@
-"""模型启动与 CPU cache 共用的配置展开及字段别名处理。"""
+"""Shared model configuration normalization."""
 
 from lightllm.common.build_utils import repair_config
 

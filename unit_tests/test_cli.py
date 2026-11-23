@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -6,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 
 from lightllm.cli import main
+from lightllm.cli_defaults import resolve_tp
 from lightllm.server.api_cli import add_cli_args
 from lightllm.server.core.objs.start_args_type import StartArgs
 
@@ -73,6 +75,24 @@ def test_explicit_tp_skips_automatic_tp(launch, monkeypatch):
 
     assert launch.call_args.args[0].tp == 1
     resolver.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "config,gpu_count,weight_gib,expected",
+    [
+        ({"text_config": {"num_attention_heads": 32, "num_key_value_heads": 8}}, 4, 60, 4),
+        ({"num_attention_heads": 40, "num_key_value_heads": 8}, 8, 110, 8),
+        ({"num_attention_heads": 32, "num_key_value_heads": 8}, 5, 140, 4),
+        ({}, 4, 60, 1),
+    ],
+)
+def test_auto_tp_respects_model_heads(tmp_path, monkeypatch, config, gpu_count, weight_gib, expected):
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    with (tmp_path / "model.safetensors").open("wb") as weights:
+        weights.truncate(weight_gib * 1024 ** 3)
+    monkeypatch.setattr("lightllm.cli_defaults._gpu_memories_mib", lambda: [40 * 1024] * gpu_count)
+
+    assert resolve_tp(str(tmp_path)) == expected
 
 
 @pytest.mark.parametrize(

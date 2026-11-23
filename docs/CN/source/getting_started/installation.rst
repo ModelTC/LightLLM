@@ -110,7 +110,8 @@ CPU 打包检查不能替代 GPU 模型回归。
 FlashInfer、独立 FlashMLA、DeepGEMM、DeepEP、
 NIXL、LightMem 及 vLLM 量化算子仍需要额外安装兼容的构建产物；
 AWQ 和部分 FP8 模型也依赖这些额外算子。请参照对应模型或部署指南，
-现有 Docker 构建包含更多此类扩展。根目录 ``requirements.txt`` 仍用于旧的镜像/开发环境，
+现有 Docker 构建包含更多此类扩展。根目录 ``requirements.txt`` 用于镜像和开发环境。
+Docker 在该环境中编译扩展，最后使用镜像专用的依赖声明安装 LightLLM，保留已安装的版本。
 原生安装以安装包内的依赖声明为准。
 
 MUSA 等厂商运行环境需要使用对应的 PyTorch 和 Triton 构建。

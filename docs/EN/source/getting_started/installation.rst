@@ -56,6 +56,8 @@ require their own compatible builds. In particular, AWQ and some FP8 models
 need these additional kernels. Follow the corresponding model/deployment guide;
 the existing Docker build includes more of these extensions. ``requirements.txt``
 remains the legacy image/development environment, not the native package manifest.
+The Docker build uses that environment to compile extensions, then installs LightLLM
+with Docker-specific dependency metadata and keeps the installed versions.
 
 Vendor runtimes such as MUSA must use their vendor PyTorch and Triton builds.
 After preparing that environment with its platform guide, install this checkout

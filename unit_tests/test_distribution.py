@@ -8,18 +8,22 @@ from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 
 
-@pytest.mark.skipif(not os.environ.get("LIGHTLLM_TEST_WHEEL"), reason="requires a built wheel")
-def test_wheel_contains_runtime_modules_and_kernel_configs():
+@pytest.mark.parametrize("wheel_variable", ["LIGHTLLM_TEST_WHEEL", "LIGHTLLM_TEST_DOCKER_WHEEL"])
+def test_wheel_contains_runtime_modules_and_kernel_configs(wheel_variable):
+    wheel_path = os.environ.get(wheel_variable)
+    if not wheel_path:
+        pytest.skip(f"set {wheel_variable} to a built wheel")
     root = Path(__file__).resolve().parents[1]
-    with ZipFile(os.environ["LIGHTLLM_TEST_WHEEL"]) as wheel:
+    with ZipFile(wheel_path) as wheel:
         metadata_path = next(name for name in wheel.namelist() if name.endswith(".dist-info/METADATA"))
         metadata = Parser().parsestr(wheel.read(metadata_path).decode())
         assert metadata["Version"] == (root / "VERSION").read_text().strip()
-        nightly = ".dev" in metadata["Version"]
-        requirements_file = root / "requirements" / ("nightly.txt" if nightly else "runtime.txt")
+        docker_build = wheel_variable == "LIGHTLLM_TEST_DOCKER_WHEEL"
+        nightly = ".dev" in metadata["Version"] and not docker_build
+        requirements_file = "docker.txt" if docker_build else "nightly.txt" if nightly else "runtime.txt"
         expected = {
             str(Requirement(line))
-            for line in requirements_file.read_text().splitlines()
+            for line in (root / "requirements" / requirements_file).read_text().splitlines()
             if line and not line.startswith("#")
         }
         assert {str(Requirement(line)) for line in metadata.get_all("Requires-Dist")} == expected

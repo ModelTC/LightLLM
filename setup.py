@@ -1,9 +1,12 @@
-from setuptools import setup, find_namespace_packages
+import os
 from pathlib import Path
 
+from setuptools import setup, find_namespace_packages
+
 version = (Path(__file__).parent / "VERSION").read_text().strip()
-nightly = ".dev" in version
-requirements_file = "nightly.txt" if nightly else "runtime.txt"
+docker_build = os.environ.get("LIGHTLLM_DOCKER_BUILD") == "1"
+nightly = ".dev" in version and not docker_build
+requirements_file = "docker.txt" if docker_build else "nightly.txt" if nightly else "runtime.txt"
 runtime_requirements = [
     line.strip()
     for line in (Path(__file__).parent / "requirements" / requirements_file).read_text().splitlines()

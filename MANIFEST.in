@@ -1,3 +1,4 @@
+include requirements/docker.txt
 include requirements/runtime.txt
 include requirements/nightly.txt
 include VERSION

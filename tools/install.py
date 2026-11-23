@@ -117,7 +117,7 @@ def _resolve_reference(reference: str, base: str) -> str:
         return reference
     if base.startswith(("http://", "https://")):
         return urllib.parse.urljoin(base.rsplit("/", 1)[0] + "/", reference)
-    base_path = Path(urllib.parse.urlparse(base).path).parent
+    base_path = Path(urllib.request.url2pathname(urllib.parse.urlparse(base).path)).parent
     return str((base_path / reference).resolve())
 
 

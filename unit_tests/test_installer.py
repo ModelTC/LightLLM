@@ -21,7 +21,14 @@ def test_select_profile_uses_highest_compatible_minimum_driver():
 
 
 def test_manifest_resolves_relative_artifacts(tmp_path):
-    manifest_path = tmp_path / "manifest.json"
+    artifact_dir = tmp_path / "用户下载 space"
+    artifact_dir.mkdir()
+    wheel_path = artifact_dir / "dist" / "a.whl"
+    wheel_path.parent.mkdir()
+    wheel_path.touch()
+    requirements_path = artifact_dir / "req.txt"
+    requirements_path.touch()
+    manifest_path = artifact_dir / "manifest.json"
     manifest_path.write_text(
         json.dumps(
             {"profiles": [{"name": "test", "min_driver": "570.0", "wheel": "dist/a.whl", "requirements": "req.txt"}]}
@@ -29,5 +36,5 @@ def test_manifest_resolves_relative_artifacts(tmp_path):
     )
     manifest, source = installer._read_manifest(str(manifest_path))
     profile = installer.load_profiles(manifest, source)[0]
-    assert profile.wheel == str(tmp_path / "dist/a.whl")
-    assert profile.requirements == str(tmp_path / "req.txt")
+    assert Path(profile.wheel).samefile(wheel_path)
+    assert Path(profile.requirements).samefile(requirements_path)

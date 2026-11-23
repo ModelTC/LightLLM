@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Optional
+
+from lightllm.common.model_config import normalize_model_config
 
 
 def _gpu_memories_mib() -> list[int]:
@@ -65,12 +66,13 @@ def _model_weight_bytes(model_dir: str) -> Optional[int]:
     return sum(sizes) or None
 
 
-def _attention_heads(model_dir: str) -> Optional[int]:
+def _attention_heads(model_dir: str) -> Optional[tuple[int, int]]:
     try:
-        config = json.loads((Path(model_dir) / "config.json").read_text())
-        heads = config.get("num_attention_heads")
-        return int(heads) if heads else None
-    except (OSError, ValueError, TypeError):
+        config = normalize_model_config(json.loads((Path(model_dir) / "config.json").read_text()))
+        heads = int(config["num_attention_heads"])
+        kv_heads = int(config.get("num_key_value_heads", heads))
+        return (heads, kv_heads) if heads > 0 and kv_heads > 0 else None
+    except (OSError, ValueError, TypeError, AttributeError):
         return None
 
 
@@ -88,15 +90,20 @@ def resolve_tp(model_dir: str) -> int:
     if not weight_bytes:
         return 1
 
-    heads = _attention_heads(model_dir)
+    attention_heads = _attention_heads(model_dir)
+    if attention_heads is None:
+        return 1
+    heads, kv_heads = attention_heads
     usable_per_gpu = min(memories) * 1024 * 1024 * 0.75
     # Runtime allocations and allocator fragmentation are not represented by
     # weight files. The factor is intentionally conservative for a zero-config
     # launcher; users can override it with --tp and --mem_fraction.
     required_bytes = weight_bytes * 1.20
+    largest_valid_tp = 1
     for tp in range(1, len(memories) + 1):
-        if heads and heads % tp:
+        if heads % tp or kv_heads % tp:
             continue
+        largest_valid_tp = tp
         if required_bytes / tp <= usable_per_gpu:
             return tp
-    return len(memories)
+    return largest_valid_tp
