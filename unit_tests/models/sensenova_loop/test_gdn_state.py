@@ -43,7 +43,7 @@ def test_gdn_decode_keeps_logical_layer_state(
     layers = tuple(i for i, kind in enumerate(kinds) if kind == "linear_attention")
     args = StartArgs(mtp_step=mtp_step, linear_att_ssm_data_type="float32")
     monkeypatch.setattr("lightllm.common.basemodel.attention.linear.gdn.get_env_start_args", lambda: args)
-    monkeypatch.setattr("lightllm.common.basemodel.attention.base_att.get_env_start_args", lambda: args)
+    monkeypatch.setattr("lightllm.common.basemodel.attention_groups.get_env_start_args", lambda: args)
     backend = object.__new__(TritonLinearAttBackend)
     backend.__init__(
         SimpleNamespace(

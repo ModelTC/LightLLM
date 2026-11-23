@@ -1,4 +1,4 @@
-from lightllm.common.basemodel.attention import base_att
+from lightllm.common.basemodel import attention_groups
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend
 from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferAttBackend
 from lightllm.common.basemodel.attention.flashinfer.fp8 import Fp8FlashInferAttBackend
@@ -14,9 +14,9 @@ def test_workspace_is_shared_by_backend_family_and_device(monkeypatch):
         allocations.append((workspace, size, dtype, device))
         return workspace
 
-    monkeypatch.setattr(base_att, "get_current_device_id", lambda: current_device_id)
-    monkeypatch.setattr(base_att.torch, "empty", fake_empty)
-    monkeypatch.setattr(BaseAttBackend, "_workspace_buffers", {})
+    monkeypatch.setattr(attention_groups, "get_current_device_id", lambda: current_device_id)
+    monkeypatch.setattr(attention_groups.torch, "empty", fake_empty)
+    monkeypatch.setattr(attention_groups, "_workspace_buffers", {})
 
     def get_workspace(backend_cls):
         return backend_cls.get_gpu_workspace_buffer(
@@ -43,13 +43,13 @@ def test_workspace_is_shared_by_backend_family_and_device(monkeypatch):
 
 
 def test_workspace_key_includes_size_and_dtype(monkeypatch):
-    monkeypatch.setattr(base_att, "get_current_device_id", lambda: 0)
-    monkeypatch.setattr(base_att.torch, "empty", lambda *args, **kwargs: object())
-    monkeypatch.setattr(BaseAttBackend, "_workspace_buffers", {})
+    monkeypatch.setattr(attention_groups, "get_current_device_id", lambda: 0)
+    monkeypatch.setattr(attention_groups.torch, "empty", lambda *args, **kwargs: object())
+    monkeypatch.setattr(attention_groups, "_workspace_buffers", {})
 
     small_workspace = BaseAttBackend.get_gpu_workspace_buffer("shared", 1024)
     large_workspace = BaseAttBackend.get_gpu_workspace_buffer("shared", 2048)
-    fp16_workspace = BaseAttBackend.get_gpu_workspace_buffer("shared", 1024, dtype=base_att.torch.float16)
+    fp16_workspace = BaseAttBackend.get_gpu_workspace_buffer("shared", 1024, dtype=attention_groups.torch.float16)
 
     assert BaseAttBackend.get_gpu_workspace_buffer("shared", 1024) is small_workspace
     assert large_workspace is not small_workspace

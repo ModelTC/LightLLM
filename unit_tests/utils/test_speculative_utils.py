@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-import lightllm.common.basemodel.attention.base_att as base_att_module
+import lightllm.common.basemodel.attention_groups as attention_groups_module
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend
 from lightllm.common.attention.backend import AttentionBatch
@@ -81,7 +81,7 @@ def test_attention_backend_selects_dynamic_spec_layout(
     expected,
 ):
     monkeypatch.setattr(
-        base_att_module,
+        attention_groups_module,
         "get_env_start_args",
         lambda: SimpleNamespace(mtp_mode=mtp_mode, mtp_dynamic_verify=dynamic_spec),
     )
@@ -109,7 +109,7 @@ def test_attention_backend_selects_dynamic_spec_layout(
 )
 def test_attention_backend_selects_causality(monkeypatch, mtp_mode, is_draft_model, expected):
     monkeypatch.setattr(
-        base_att_module,
+        attention_groups_module,
         "get_env_start_args",
         lambda: SimpleNamespace(mtp_mode=mtp_mode),
     )

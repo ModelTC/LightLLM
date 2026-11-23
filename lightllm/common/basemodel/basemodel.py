@@ -45,6 +45,7 @@ from lightllm.utils.torch_memory_saver_utils import (
 )
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
 from .attention import BaseAttBackend
+from .attention_groups import AttentionGroups
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -72,6 +73,12 @@ class TpPartBaseModel:
     # infer state class
     infer_state_class = InferStateInfo
     is_hybrid_att_model = False
+
+    # Whether its layers run full attention through AttentionGroups, created when the runtime starts.
+    # Models still on the adapters in lightllm.common.basemodel.attention keep False until migrated;
+    # their prefill_att_backend/decode_att_backend slots are then unused.
+    uses_attention_groups = False
+    att_groups: AttentionGroups = None
 
     def __init__(self, kvargs):
         self.args = get_env_start_args()
@@ -182,14 +189,21 @@ class TpPartBaseModel:
         """Initialize this model's backends, warmup and graphs after shared allocation."""
         self.req_manager.bind_hold_page(self.att_state_manager.full_att_allocator.hold_token_indices)
         self._check_mem_size()
+        self._init_attention()
         self._init_att_backend()
         self._init_att_backend1()
         self._init_hidden_collector()
         role = self.att_state_role
-        logger.info(
-            f"{role} prefill/decode attention: {type(self.prefill_att_backend).__name__} / "
-            f"{type(self.decode_att_backend).__name__}"
-        )
+        if self.att_groups is not None:
+            for name, backends in self.att_groups.groups.items():
+                logger.info(
+                    f"{role} attention group {name}: {backends['prefill'].get_name()} / {backends['decode'].get_name()}"
+                )
+        if self.prefill_att_backend is not None:
+            logger.info(
+                f"{role} prefill/decode attention: {type(self.prefill_att_backend).__name__} / "
+                f"{type(self.decode_att_backend).__name__}"
+            )
         if self.prefill_att_backend1 is not None:
             logger.info(
                 f"{role} prefill/decode attention1: {type(self.prefill_att_backend1).__name__} / "
@@ -336,10 +350,20 @@ class TpPartBaseModel:
         self.vocab_size = self.config["vocab_size"]
         return
 
+    def _init_attention(self):
+        """Create each layer's Attention, so unsupported layer configs fail before warmup."""
+        self.att_groups = None
+        if not self.uses_attention_groups or not self.att_state_manager.get_full_attention_states(self.att_state_role):
+            # FFN-only and linear-only models need no full attention.
+            return
+        self.att_groups = AttentionGroups(self)
+        for layer in self.layers_infer:
+            layer.init_attention(self)
+
     def _init_att_backend(self):
         role = self.att_state_role
-        if not self.att_state_manager.get_full_attention_states(role):
-            # FFN-only and linear-only models do not need a full-attention backend.
+        if self.uses_attention_groups or not self.att_state_manager.get_full_attention_states(role):
+            # Models on AttentionGroups, FFN-only and linear-only models need no full-attention adapter.
             self.prefill_att_backend = self.decode_att_backend = None
             return
         self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(index=0)(model=self)
@@ -459,6 +483,7 @@ class TpPartBaseModel:
 
         infer_state.req_manager = self.req_manager
         infer_state.att_state_manager = self.att_state_manager
+        infer_state.att_groups = self.att_groups
 
         infer_state.mem_index = self._select_mem_indexes(model_input)
         infer_state.microbatch_index = microbatch_index

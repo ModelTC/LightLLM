@@ -12,6 +12,7 @@ from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
 from .attention import BasePrefillAttState, BaseDecodeAttState
+from .attention_groups import AttentionGroups
 
 
 class InferStateInfo:
@@ -20,7 +21,11 @@ class InferStateInfo:
     """
 
     def __init__(self):
-        # prefill 和 decode 使用的 att 状态对象
+        # 模型的 attention 分组；init_att_state 为每组构造一次本步的 step args，以组名为键。
+        self.att_groups: Optional[AttentionGroups] = None
+        self.att_step_args: dict = {}
+
+        # 尚未迁移到 AttentionGroups 的模型使用的 att 状态对象
         self.prefill_att_state: BasePrefillAttState = None
         self.decode_att_state: BaseDecodeAttState = None
 
@@ -134,6 +139,8 @@ class InferStateInfo:
             self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
     def init_att_state(self):
+        if self.att_groups is not None:
+            self.att_step_args = self.att_groups.build_step_args(self)
         if self.is_prefill:
             if self.prefill_att_state is not None:
                 self.prefill_att_state.init_state()
