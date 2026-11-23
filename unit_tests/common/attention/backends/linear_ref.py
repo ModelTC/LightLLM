@@ -227,9 +227,8 @@ def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_impl, 
         tensors = family.make_inputs(batch.batch_size)
         step = builder.build(batch)
         out = family.alloc_out(batch.batch_size)
+        # A replay decode impl advances the replay cursors itself after the last layer.
         decode_impl.forward(step, family.layer_inputs(_clones(tensors), conv, ssm, state if replay else None), out=out)
-        if replay:
-            state.finish_decode_token(0, step.conv_idx, step.cu_seqlens)
         start = 0
         for i, (ref, n) in enumerate(zip(refs, step_lengths)):
             expected = ref.run(family.token_fn, *family.token_args(tensors, start, start + n))

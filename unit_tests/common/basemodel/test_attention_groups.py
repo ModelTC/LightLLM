@@ -27,6 +27,8 @@ def start_args(**overrides):
         enable_decode_microbatch_overlap=False,
         diverse_mode=False,
         llm_kv_type="None",
+        ssm_state_mode="native",
+        linear_att_ssm_data_type="float32",
     )
     return SimpleNamespace(**{**args, **overrides})
 
@@ -139,6 +141,34 @@ def test_model_implementation_applies_only_to_full_attention():
         patch.setattr(selector, "arg_index", lambda layer_config: 1 if layer_config is linear else 0)
         assert groups._requested("prefill", linear) == "flashqla"
         assert groups._requested("decode", linear) == "auto"
+
+
+@pytest.mark.parametrize("replay", [False, True])
+@pytest.mark.parametrize("prefill_kernel, flash_len", [("triton", None), ("flashkda", None), ("auto", 2048)])
+def test_kda_prefill_step_builders_follow_the_layer_config(monkeypatch, replay, prefill_kernel, flash_len):
+    from lightllm.common.attention.backends.kda import KDALayerConfig
+    from lightllm.common.attention.backends.kda import triton as kda_triton
+
+    requests = []
+    monkeypatch.setattr(
+        kda_triton, "load_flash_kda_fwd", lambda requested, **kwargs: requests.append((requested, kwargs)) or "fwd"
+    )
+    config = KDALayerConfig(
+        4,
+        128,
+        4,
+        -5.0,
+        torch.bfloat16,
+        state_mtp_step=2,
+        replay=replay,
+        ssm_dtype=torch.bfloat16,
+        prefill_kernel=prefill_kernel,
+    )
+    backend = kda_triton.ReplayKDAPrefillBackend if replay else kda_triton.TritonKDAPrefillBackend
+    builder = backend.create_step_builder(config, step_builder_context(fake_model()))
+    assert builder.ssm_slots_per_request == (1 if replay else 3)
+    assert requests == [(prefill_kernel, {"dtype": torch.bfloat16, "ssm_dtype": torch.bfloat16})]
+    assert builder.flash_kda_fwd == "fwd" and builder.max_flash_len == flash_len
 
 
 class Built(SimpleNamespace):
@@ -385,7 +415,9 @@ def model_with_state(state, **args):
     model = fake_model(**args)
     model.data_type = torch.bfloat16
     model.att_state_role = "draft0"
-    model.att_state_manager = SimpleNamespace(get_state=lambda **query: state)
+    model.att_state_manager = SimpleNamespace(
+        get_state=lambda **query: state, get_bounded_attention_states=lambda role: ()
+    )
     model.att_groups = AttentionGroups(model)
     return model
 
@@ -444,7 +476,9 @@ def test_models_on_attention_groups_skip_the_full_attention_adapters():
     model.is_mtp_draft_model = False
     model.layers_infer = [Layer(), Layer()]
     states = [object()]
-    model.att_state_manager = SimpleNamespace(get_full_attention_states=lambda role: tuple(states))
+    model.att_state_manager = SimpleNamespace(
+        get_full_attention_states=lambda role: tuple(states), get_bounded_attention_states=lambda role: ()
+    )
 
     model._init_attention()
     assert model.att_groups is None and model.layers_infer[0].models == []
@@ -456,22 +490,58 @@ def test_models_on_attention_groups_skip_the_full_attention_adapters():
     assert all(layer.models == [model] for layer in model.layers_infer)
     assert model.prefill_att_backend is None and model.decode_att_backend is None
 
-    # A draft without full-attention states (e.g. linear-only) creates no groups.
+    # A draft without attention states (FFN-only) creates no groups.
     states.clear()
     model._init_attention()
     assert model.att_groups is None
 
 
-def test_qwen3next_linear_layers_create_no_full_attention(runtime_start_args):
+@pytest.mark.parametrize("ssm_state_mode, decode", [("native", "triton_gdn_decode"), ("replay", "replay_gdn_decode")])
+def test_qwen3next_layers_split_into_full_and_linear_attention_groups(runtime_start_args, ssm_state_mode, decode):
+    from lightllm.common.attention.backends.gdn import GDNLayerConfig
     from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerInfer
 
-    layer = Qwen3NextTransformerLayerInfer.__new__(Qwen3NextTransformerLayerInfer)
-    layer.is_linear_attention_layer = True
-    layer.init_attention(model=None)
-    assert layer.attn is None
-
-    full = llama_layer()
-    full.__class__ = Qwen3NextTransformerLayerInfer
-    full.is_linear_attention_layer = False
-    full.init_attention(model_with_state(FakeState()))
+    net = {
+        "rms_norm_eps": 1e-6,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 2,
+        "hidden_size": 512,
+        "full_attention_interval": 2,
+        "linear_num_key_heads": 2,
+        "linear_num_value_heads": 4,
+        "linear_key_head_dim": 64,
+        "linear_value_head_dim": 64,
+        "linear_conv_kernel_dim": 4,
+        "hidden_act": "silu",
+    }
+    # Linear attention follows the second value of the backend arguments.
+    model = model_with_state(
+        FakeState(), llm_prefill_att_backend=["triton", "triton"], mtp_step=1, ssm_state_mode=ssm_state_mode
+    )
+    linear, full = (Qwen3NextTransformerLayerInfer(i, net) for i in range(2))
+    linear.init_attention(model)
+    full.init_attention(model)
+    expected = GDNLayerConfig(
+        2, 4, 64, 64, 4, "silu", torch.bfloat16, state_mtp_step=1, replay=ssm_state_mode == "replay"
+    )
+    assert linear.attn.prefill_impl.layer_config == linear.attn.decode_impl.layer_config == expected
+    assert linear.linear_replay == (ssm_state_mode == "replay")
     assert full.attn.group == "triton_gqa_prefill+triton_gqa_decode"
+    assert linear.attn.group == f"triton_gdn_prefill+{decode}"
+
+
+def test_speculative_decode_batches_carry_the_recurrent_state_index():
+    index = torch.arange(8, dtype=torch.int32)
+    recurrent = SimpleNamespace(mtp_state_index=index)
+    model = fake_model(mtp_step=1)
+    model.att_state_role = "main"
+    model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: (object(), recurrent))
+    assert attention_groups.recurrent_mtp_state_index(model) is index
+    state = step(prefill=False)
+    for rows, expected in ((1, None), (2, index)):
+        model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _, rows=rows: rows - 1)
+        batch = attention_groups.build_attention_batch(state, model, lambda: False, req_to_mtp_state_index=index)
+        assert batch.req_to_mtp_state_index is expected
+    model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: (recurrent, recurrent))
+    with pytest.raises(ValueError, match="at most one recurrent state"):
+        attention_groups.recurrent_mtp_state_index(model)

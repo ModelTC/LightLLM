@@ -77,6 +77,7 @@ class KDALinearAttBackend(BaseAttBackend):
             lower_bound=self.lower_bound,
             dtype=params["mixed_qkv"].dtype,
             state_mtp_step=self.mtp_step,
+            replay=self.replay,
         )
         layer_inputs = KDALayerInputs(
             mixed_qkv=params["mixed_qkv"],
@@ -143,11 +144,8 @@ class KDADecodeAttState(BaseDecodeAttState):
     def decode_att(self, q, k, v, att_control: AttControl = AttControl(), alloc_func=torch.empty):
         assert att_control.linear_att_decode
         params = att_control.linear_att_decode_dict
-        out = _run(self.backend, self.backend.decode_backend, self.step_args, params, alloc_func)
-        if self.backend.replay:
-            # Every layer read the cursors of the step's start; the state advances them after the last layer.
-            params["state"].finish_decode_token(params["layer_num"], self.step_args.conv_idx, self.step_args.cu_seqlens)
-        return out
+        # Replay decode impls advance the replay cursors after the last layer.
+        return _run(self.backend, self.backend.decode_backend, self.step_args, params, alloc_func)
 
 
 def _recurrent_state(att_state):

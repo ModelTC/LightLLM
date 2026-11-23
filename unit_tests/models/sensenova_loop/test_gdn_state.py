@@ -3,10 +3,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.attention import selector
+from lightllm.common.attention.backends.gdn import GDNLayerConfig
+from lightllm.common.attention.layer import Attention
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
+from lightllm.common.basemodel.attention_groups import build_attention_batch
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerInfer
 from lightllm.models.sensenova_loop.config import get_loop_layer_indices, get_loop_layer_types
@@ -41,19 +43,14 @@ def test_gdn_decode_keeps_logical_layer_state(
     indices = get_loop_layer_indices(settings, 32)
     kinds = get_loop_layer_types(settings, config)
     layers = tuple(i for i, kind in enumerate(kinds) if kind == "linear_attention")
-    args = StartArgs(mtp_step=mtp_step, linear_att_ssm_data_type="float32")
-    monkeypatch.setattr("lightllm.common.basemodel.attention.linear.gdn.get_env_start_args", lambda: args)
-    monkeypatch.setattr("lightllm.common.basemodel.attention_groups.get_env_start_args", lambda: args)
-    backend = object.__new__(TritonLinearAttBackend)
-    backend.__init__(
-        SimpleNamespace(
-            config=config,
-            tp_world_size_=1,
-            is_mtp_draft_model=False,
-            mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: mtp_step),
-        )
+    model = SimpleNamespace(
+        is_mtp_draft_model=False, mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: mtp_step)
     )
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    # The GDN layers' attention: Triton prefill and decode over native state.
+    layer_config = GDNLayerConfig(1, 2, 32, 32, 4, "silu", dtype, state_mtp_step=mtp_step)
+    prefill_selection = selector.select(layer_config, "prefill", "triton")
+    decode_selection = selector.select(layer_config, "decode", "triton")
     layout = ConvSSMStateConfig(layers, 1, 2, 32, 32, 3, dtype, torch.float32)
     resource = GDNState(layout, request_capacity=3, mtp_step=mtp_step, device=device)
     resources = AttentionStateManager(request_capacity=3)
@@ -120,44 +117,36 @@ def test_gdn_decode_keeps_logical_layer_state(
         32,
         32,
     )
+    layer.attn = Attention("gdn", prefill_selection.impl, decode_selection.impl)
+    layer.linear_replay = False
+    layer.alloc_tensor = lambda shape, dtype=None, device=None, **_: torch.empty(shape, dtype=dtype, device=device)
     mixed_dim = 2 * 32 + 2 * 64 + 2 * 2
+
+    def build_step_args(backend):
+        # The step args the layers' group builds for this step.
+        batch = build_attention_batch(infer, model, lambda: False, req_to_mtp_state_index=resource.mtp_state_index)
+        infer.att_step_args = {"gdn": backend.create_step_builder(layer_config, None).build(batch)}
+
     if device == "cuda":
         infer.b1_cu_q_seq_len = torch.tensor([0, 5], device=device, dtype=torch.int32)
         infer.b_ready_cache_len = torch.zeros(1, device=device, dtype=torch.int32)
-        prefill = backend.create_att_prefill_state(infer)
-        prefill.init_state()
-        prefill.prefill_att(
-            None,
-            None,
-            None,
-            AttControl(
-                linear_att_prefill=True,
-                linear_att_prefill_dict=layer._gdn_att_dict(
-                    torch.randn(5, mixed_dim, device=device, dtype=dtype), infer, weight
-                ),
-            ),
-        )
+        infer.is_prefill = True
+        build_step_args(prefill_selection.backend)
+        inputs = layer._gdn_layer_inputs(torch.randn(5, mixed_dim, device=device, dtype=dtype), infer, weight)
+        layer._gdn_attention(inputs, infer, prefill=True)
 
     infer.batch_size = mtp_step + 1
     infer.b_req_idx = infer.b_req_idx.repeat(infer.batch_size)
     infer.is_prefill = False
     infer.b_seq_len = torch.ones_like(infer.b_req_idx)
-    decode = backend.create_att_decode_state(infer)
     untouched = [i for i in range(len(layers)) if i != storage_layer]
     for _ in range(2):
         before_conv, before_ssm = resource.conv_state.clone(), resource.ssm_state.clone()
-        decode.init_state()
-        output = decode.decode_att(
-            None,
-            None,
-            None,
-            AttControl(
-                linear_att_decode=True,
-                linear_att_decode_dict=layer._gdn_att_dict(
-                    torch.randn(infer.batch_size, mixed_dim, device=device, dtype=dtype), infer, weight
-                ),
-            ),
+        build_step_args(decode_selection.backend)
+        inputs = layer._gdn_layer_inputs(
+            torch.randn(infer.batch_size, mixed_dim, device=device, dtype=dtype), infer, weight
         )
+        output = layer._gdn_attention(inputs, infer, prefill=False)
         assert torch.isfinite(output).all()
         assert not torch.equal(resource.conv_state[storage_layer], before_conv[storage_layer])
         assert not torch.equal(resource.ssm_state[storage_layer], before_ssm[storage_layer])

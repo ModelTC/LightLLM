@@ -66,17 +66,38 @@ def attention_is_causal(model: "TpPartBaseModel") -> bool:
     return not model.is_mtp_draft_model or get_env_start_args().mtp_mode not in ("dspark", "dflash", "dflash2")
 
 
+def recurrent_mtp_state_index(model: "TpPartBaseModel") -> Optional[torch.Tensor]:
+    """The role's recurrent (GDN or KDA) state's slot of each request's last accepted speculative row.
+
+    None when the role has no recurrent state.
+    """
+    manager = getattr(model, "att_state_manager", None)
+    if manager is None:
+        return None
+    states = [
+        state
+        for state in manager.get_bounded_attention_states(model.att_state_role)
+        if getattr(state, "mtp_state_index", None) is not None
+    ]
+    if len(states) > 1:
+        raise ValueError(f"expected at most one recurrent state for {model.att_state_role}, got {len(states)}")
+    return states[0].mtp_state_index if states else None
+
+
 def build_attention_batch(
     infer_state: "InferStateInfo",
     model: "TpPartBaseModel",
     uses_dynamic_layout: Optional[Callable[[], bool]] = None,
+    req_to_mtp_state_index: Optional[torch.Tensor] = None,
 ) -> AttentionBatch:
     """Describe one step's requests for attention step builders, from its InferStateInfo.
 
     CUDA graph capture and replay steps carry the model's graph kv length capacity, so step builders
     can size and configure captured work for every length a replay may see. Decode steps of
-    speculative decoding describe how query rows group into requests. Fields the step does not
-    set are None. uses_dynamic_layout overrides uses_dynamic_spec_verify_layout(model).
+    speculative decoding describe how query rows group into requests and, given
+    req_to_mtp_state_index (recurrent_mtp_state_index), where each request's accepted recurrent
+    state lies. Fields the step does not set are None. uses_dynamic_layout overrides
+    uses_dynamic_spec_verify_layout(model).
     """
     if uses_dynamic_layout is None:
         uses_dynamic_layout = lambda: uses_dynamic_spec_verify_layout(model)  # noqa: E731
@@ -99,6 +120,7 @@ def build_attention_batch(
         max_q_seq_len=infer_state.max_q_seq_len if infer_state.max_q_seq_len is not None else 1,
         decode_rows_per_request=decode_rows_per_request,
         dynamic_decode_rows=dynamic_decode_rows,
+        req_to_mtp_state_index=req_to_mtp_state_index if decode_rows_per_request > 1 else None,
         pad_req_idx=getattr(infer_state.req_manager, "HOLD_REQUEST_ID", None),
         b_shared_seq_len=getattr(infer_state, "b_shared_seq_len", None),
         b_mtp_index=getattr(infer_state, "b_mtp_index", None),
@@ -195,6 +217,8 @@ class AttentionGroups:
         self.ctx = step_builder_context(model)
         self._selections: dict[tuple[str, Any], selector.Selection] = {}
         self._groups: dict[tuple, _Group] = {}
+        # Speculative decode rows of recurrent layers resume from the request's last accepted row.
+        self._req_to_mtp_state_index = recurrent_mtp_state_index(model)
         if model.args.enable_ep_moe:
             logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
 
@@ -262,5 +286,5 @@ class AttentionGroups:
         groups = [group for group in self._groups.values() if group.backends[phase] is not None]
         if not groups:
             return {}
-        batch = build_attention_batch(infer_state, self.model)
+        batch = build_attention_batch(infer_state, self.model, req_to_mtp_state_index=self._req_to_mtp_state_index)
         return {group.name: group.step_builder(phase, self.ctx).build(batch) for group in groups}

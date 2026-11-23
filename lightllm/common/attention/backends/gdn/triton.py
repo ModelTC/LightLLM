@@ -10,6 +10,7 @@ from lightllm.common.attention.backend import (
     AttentionBatch,
     AttentionImpl,
     AttentionStepBuilder,
+    StepBuilderContext,
     TensorAllocator,
 )
 from .. import keep_for_cuda_graph
@@ -132,6 +133,15 @@ def _prefill_state_views(layer_config: GDNLayerConfig, layer_inputs: GDNLayerInp
 class TritonGDNPrefillImpl(AttentionImpl[GDNLayerConfig, GDNPrefillStepArgs, GDNLayerInputs]):
     """Chunked prefill with the in-tree FLA kernel; subclasses swap chunk_gated_delta_rule."""
 
+    def __init__(self, layer_config: GDNLayerConfig) -> None:
+        super().__init__(layer_config)
+        # Resolve the chunk kernel now, so a missing or broken optional library is rejected when the
+        # model loads (auto-selection then moves on) rather than failing a step.
+        try:
+            self.chunk_gated_delta_rule()
+        except Exception as e:
+            raise NotImplementedError(f"{type(self).__name__} cannot load its chunk kernel: {e!r}") from e
+
     @staticmethod
     def chunk_gated_delta_rule():
         from lightllm.common.attention.kernels.gdn.third_party_fla.ops.chunk import chunk_gated_delta_rule
@@ -222,6 +232,11 @@ def _mtp_conv(cfg: GDNLayerConfig, inputs: GDNLayerInputs, step_args: GDNDecodeS
 
 
 class TritonGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeStepArgs, GDNLayerInputs]):
+    def __init__(self, layer_config: GDNLayerConfig) -> None:
+        super().__init__(layer_config)
+        if layer_config.replay:
+            raise NotImplementedError("Triton GDN decode updates native SSM states; replay state needs replay decode")
+
     def forward(
         self,
         step_args: GDNDecodeStepArgs,
@@ -290,6 +305,14 @@ class TritonGDNPrefillBackend(AttentionBackend):
     def get_impl_cls() -> type[TritonGDNPrefillImpl]:
         return TritonGDNPrefillImpl
 
+    @classmethod
+    def create_step_builder(cls, layer_config: GDNLayerConfig, ctx: StepBuilderContext) -> GDNPrefillStepBuilder:
+        return create_gdn_prefill_step_builder(layer_config)
+
+    @classmethod
+    def step_builder_key(cls, layer_config: GDNLayerConfig):
+        return (layer_config.replay, layer_config.state_mtp_step)
+
 
 class TritonGDNDecodeBackend(AttentionBackend):
     @staticmethod
@@ -303,3 +326,16 @@ class TritonGDNDecodeBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[TritonGDNDecodeImpl]:
         return TritonGDNDecodeImpl
+
+    @classmethod
+    def create_step_builder(cls, layer_config: GDNLayerConfig, ctx: StepBuilderContext) -> GDNDecodeStepBuilder:
+        return GDNDecodeStepBuilder(replay=layer_config.replay)
+
+    @classmethod
+    def step_builder_key(cls, layer_config: GDNLayerConfig):
+        return layer_config.replay
+
+
+def create_gdn_prefill_step_builder(layer_config) -> GDNPrefillStepBuilder:
+    """The prefill step builder of GDN or KDA layers: native state keeps state_mtp_step + 1 SSM slots per request."""
+    return GDNPrefillStepBuilder(ssm_slots_per_request=1 if layer_config.replay else layer_config.state_mtp_step + 1)

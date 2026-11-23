@@ -28,11 +28,18 @@ pytestmark = pytest.mark.skipif(not _flash_kda_usable(), reason="FlashKDA on SM9
 
 
 def _model(requested):
+    from lightllm.common.attention import selector
+    from lightllm.common.attention.layer import Attention
+
     model = type("Model", (), {})()
     model.args = StartArgs(llm_prefill_att_backend=["auto", requested], linear_att_ssm_data_type="bfloat16")
-    model.config = {"linear_attn_config": {"num_heads": H, "head_dim": D, "short_conv_kernel_size": 4}}
     model.data_type = torch.bfloat16
-    model.tp_world_size_ = 1
+
+    def create_attention(prefill_config, decode_config):
+        model.prefill = selector.select(prefill_config, "prefill", requested)
+        return Attention("kda", model.prefill.impl, selector.select(decode_config, "decode", "triton").impl)
+
+    model.att_groups = SimpleNamespace(create_attention=create_attention)
     return model
 
 
@@ -82,7 +89,7 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0):
     from lightllm.common.attention_state import AttentionStateManager
     from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig
     from lightllm.common.attention_state.bounded_att.kda.create_kda_state import create_kda_state
-    from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
+    from lightllm.common.basemodel.attention_groups import build_attention_batch
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from unit_tests.models.glm5_next.kda_test_utils import prepare_prefill_infer
 
@@ -104,10 +111,13 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0):
     infer.max_q_seq_len = max(lengths)
     infer.req_manager = SimpleNamespace(req_to_token_indexs=None)
     prepare_prefill_infer(infer)
-    backend = KDALinearAttBackend(model=_model(requested))
-    infer.prefill_att_state1 = backend.create_att_prefill_state(infer)
-    infer.prefill_att_state1.init_state()
-    assert (infer.prefill_att_state1.step_args.flash_kda_fwd is not None) == (requested == "flashkda")
+    model = _model(requested)
+    layer.init_attention(model)
+    # The step args the layer's group builds for this step.
+    builder = model.prefill.backend.create_step_builder(layer.attn.prefill_impl.layer_config, None)
+    step_args = builder.build(build_attention_batch(infer, model))
+    infer.att_step_args = {layer.attn.group: step_args}
+    assert (step_args.flash_kda_fwd is not None) == (requested == "flashkda")
     output = layer.context_attention_forward(hidden, infer, layer_weight)
     return output, ssm
 

@@ -2,8 +2,9 @@
 
 Implementations are named as on the command line (--llm_prefill_att_backend /
 --llm_decode_att_backend): "triton", "fa3", "flashinfer" for GQA and MLA, "flashmla_sparse" for
-sparse MLA. One name can cover several backends of a family, such as the plain and quantized-KV
-Triton GQA backends; the first whose impl accepts the layer config is used.
+sparse MLA, and, in the second value, "triton", "flashqla" or "flashkda" for linear attention. One
+name can cover several backends of a family, such as the plain and quantized-KV Triton GQA backends;
+the first whose impl accepts the layer config is used.
 """
 
 from dataclasses import dataclass, field
@@ -15,6 +16,8 @@ from .backend import AttentionBackend, AttentionImpl
 from .backends.gqa import GQALayerConfig
 from .backends.mla import MLADecodeLayerConfig, MLAPrefillLayerConfig
 from .backends.sparse_mla import SparseMLALayerConfig, SWASparseMLALayerConfig
+from .backends.gdn import GDNLayerConfig
+from .backends.kda import KDALayerConfig
 
 logger = init_logger(__name__)
 
@@ -38,11 +41,15 @@ class Family:
     # The value of --llm_{prefill,decode}_att_backend that names its implementation:
     # 0 for full-attention families, 1 for linear-attention families.
     arg_index: int = 0
+    # Names "auto" takes without validating the library.
+    unvalidated: tuple[str, ...] = ()
 
 
 _GQA = "lightllm.common.attention.backends.gqa"
 _MLA = "lightllm.common.attention.backends.mla"
 _SPARSE = "lightllm.common.attention.backends.sparse_mla"
+_GDN = "lightllm.common.attention.backends.gdn"
+_KDA = "lightllm.common.attention.backends.kda"
 # Sparse MLA has one name: each phase runs FlashMLA where it supports the cache format and FA3
 # elsewhere, and auto-selection validates FlashMLA's sparse kernels.
 _SPARSE_PRIORITY = {"prefill": ("flashmla_sparse",), "decode": ("flashmla_sparse",)}
@@ -109,6 +116,33 @@ _REGISTRY: dict[type, Family] = {
             "decode": {"flashmla_sparse": (f"{_SPARSE}.flashmla_swa:FlashMLASWADecodeBackend",)},
         },
         priority=_SPARSE_PRIORITY,
+    ),
+    # Linear attention: native or replay state, chosen by the layer config's replay.
+    GDNLayerConfig: Family(
+        {
+            "prefill": {
+                "flashqla": (f"{_GDN}.flashqla:FlashQLAGDNPrefillBackend",),
+                "triton": (f"{_GDN}.triton:TritonGDNPrefillBackend",),
+            },
+            "decode": {"triton": (f"{_GDN}.triton:TritonGDNDecodeBackend", f"{_GDN}.replay:ReplayGDNDecodeBackend")},
+        },
+        priority={"prefill": ("flashqla", "triton"), "decode": ("triton",)},
+        arg_index=1,
+        unvalidated=("triton",),
+    ),
+    # FlashKDA is a fast path of the KDA prefill implementations, chosen by the layer config's
+    # prefill_kernel; "flashkda" therefore names the same backends as "triton".
+    KDALayerConfig: Family(
+        {
+            "prefill": {
+                name: (f"{_KDA}.triton:TritonKDAPrefillBackend", f"{_KDA}.triton:ReplayKDAPrefillBackend")
+                for name in ("triton", "flashkda")
+            },
+            "decode": {"triton": (f"{_KDA}.triton:TritonKDADecodeBackend", f"{_KDA}.triton:ReplayKDADecodeBackend")},
+        },
+        priority={"prefill": ("triton",), "decode": ("triton",)},
+        arg_index=1,
+        unvalidated=("triton",),
     ),
 }
 
@@ -212,7 +246,7 @@ def select(
             continue
         selection, _ = _construct(name, layer_config, phase)
         # Validate only libraries that could run the layer, since validation starts a subprocess.
-        if selection is not None and validate(name):
+        if selection is not None and (name in _family(layer_config).unvalidated or validate(name)):
             logger.info(f"Auto-selected {name} for {phase} attention (validated)")
             return selection
     selection, reasons = _construct("triton", layer_config, phase)

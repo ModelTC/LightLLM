@@ -357,8 +357,12 @@ class TpPartBaseModel:
     def _init_attention(self):
         """Create each layer's Attention, so unsupported layer configs fail before warmup."""
         self.att_groups = None
-        if not self.uses_attention_groups or not self.att_state_manager.get_full_attention_states(self.att_state_role):
-            # FFN-only and linear-only models need no full attention.
+        role = self.att_state_role
+        manager = self.att_state_manager
+        if not self.uses_attention_groups or not (
+            manager.get_full_attention_states(role) or manager.get_bounded_attention_states(role)
+        ):
+            # FFN-only models need no attention.
             return
         self.att_groups = AttentionGroups(self)
         for layer in self.layers_infer:

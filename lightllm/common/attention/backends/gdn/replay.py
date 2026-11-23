@@ -4,12 +4,17 @@ with one SSM slot per request."""
 
 import torch
 
-from lightllm.common.attention.backend import AttentionBackend, AttentionImpl, TensorAllocator
+from lightllm.common.attention.backend import AttentionBackend, AttentionImpl, StepBuilderContext, TensorAllocator
 from . import GDNLayerConfig, GDNLayerInputs
 from .triton import GDNDecodeStepArgs, GDNDecodeStepBuilder, _mtp_conv, _pack_decode_inputs, _split_qkv
 
 
 class ReplayGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeStepArgs, GDNLayerInputs]):
+    def __init__(self, layer_config: GDNLayerConfig) -> None:
+        super().__init__(layer_config)
+        if not layer_config.replay:
+            raise NotImplementedError("replay GDN decode needs replay state")
+
     def forward(
         self,
         step_args: GDNDecodeStepArgs,
@@ -20,7 +25,7 @@ class ReplayGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeStepArgs, GDNLa
     ) -> torch.Tensor:
         """Fill and return out [rows, num_v_heads, head_v_dim]; update the conv state and append history.
 
-        The caller advances the replay cursors after the step's last layer.
+        Every layer reads the cursors of the step's start; the last layer's call advances them.
         """
         from lightllm.common.attention.kernels.gdn.replayssm.replay_gdn import replay
 
@@ -52,6 +57,7 @@ class ReplayGDNDecodeImpl(AttentionImpl[GDNLayerConfig, GDNDecodeStepArgs, GDNLa
             step_args.cu_seqlens,
         )
         out.copy_(core.view(out.shape))
+        state.finish_decode_token(inputs.layer_num, step_args.conv_idx, step_args.cu_seqlens)
         return out
 
 
@@ -67,3 +73,11 @@ class ReplayGDNDecodeBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[ReplayGDNDecodeImpl]:
         return ReplayGDNDecodeImpl
+
+    @classmethod
+    def create_step_builder(cls, layer_config: GDNLayerConfig, ctx: StepBuilderContext) -> GDNDecodeStepBuilder:
+        return GDNDecodeStepBuilder(replay=True)
+
+    @classmethod
+    def step_builder_key(cls, layer_config: GDNLayerConfig):
+        return True

@@ -21,7 +21,9 @@ class GDNLayerConfig:
     Queries and keys have num_k_heads heads of head_k_dim; values have num_v_heads (a multiple of
     num_k_heads) heads of head_v_dim. conv_kernel_dim is the conv width and activation its activation.
     state_mtp_step is the speculative depth the state layout reserves: conv states keep that many extra
-    trailing columns, and native SSM states keep state_mtp_step + 1 slots per request.
+    trailing columns, and native SSM states keep state_mtp_step + 1 slots per request. replay=True
+    selects replay state: one SSM slot per request, and decode appends history to
+    GDNLayerInputs.replay_state instead of updating SSM states.
     """
 
     num_k_heads: int
@@ -32,6 +34,7 @@ class GDNLayerConfig:
     activation: str
     dtype: torch.dtype
     state_mtp_step: int = 0
+    replay: bool = False
 
     def __post_init__(self) -> None:
         require_positive(self, "num_k_heads", "num_v_heads", "head_k_dim", "head_v_dim", "conv_kernel_dim")

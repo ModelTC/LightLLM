@@ -1,6 +1,8 @@
 """KDA backends at the step-builder/impl level against a sequential fp32 reference: native and replay
 prefill (Triton or FlashKDA), then native and replay decode with and without speculative rows."""
 
+import dataclasses
+
 from functools import partial
 
 import pytest
@@ -101,6 +103,7 @@ PREFILL_KERNELS = [
 def test_kda_prefill_then_speculative_decode_matches_reference(prefill, replay, mtp_step, dynamic):
     torch.manual_seed(13)
     family = KDAFamily(mtp_step)
+    family.config = dataclasses.replace(family.config, replay=replay)
     prefill_cls = ReplayKDAPrefillImpl if replay else TritonKDAPrefillImpl
     decode_cls = ReplayKDADecodeImpl if replay else TritonKDADecodeImpl
     run_prefill_then_decode(
