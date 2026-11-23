@@ -30,17 +30,16 @@ class AtomicShmLock:
     # acquire_sleep1ms 和 release 是某些特定场景下主动使用进行锁获取的操作函数
     def acquire_sleep1ms(self):
         start_time = time.monotonic()
-        is_first = True
+        retry_delay = 0.00005
+        warned = False
         with atomics.atomicview(buffer=self.shm.buf, atype=atomics.INT) as a:
             while not a.cmpxchg_weak(0, 1):
-                # 减少日志数量
-                if is_first:
-                    is_first = False
-                    logger.warning("acquire_sleep1ms wait for 1ms")
-                if time.monotonic() - start_time > 0.010:
+                if not warned and time.monotonic() - start_time > 0.010:
                     logger.warning("acquire_sleep1ms wait more than 10ms")
-                time.sleep(0.001)
-                pass
+                    warned = True
+                # Long contention still backs off to the original 1ms interval.
+                time.sleep(retry_delay)
+                retry_delay = min(0.001, retry_delay * 2)
 
     def release(self):
         with atomics.atomicview(buffer=self.shm.buf, atype=atomics.INT) as a:

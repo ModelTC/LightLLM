@@ -122,19 +122,27 @@ def test_disk_publication_waits_for_other_owner_and_preserves_prefix_order():
 
 def test_store_allocations_do_not_overwrite_another_loading_owner():
     obj = object.__new__(CpuKvCacheClient)
-    obj.page_items = NS(linked_items=[])
-    obj.page_hash_dict = {1: 10, 2: 20}
+    loading = NS(ref_count=1, is_data_ready=lambda: False)
+    ready = NS(ref_count=0, is_data_ready=lambda: True, del_self_from_list=Mock())
+    reserved = NS(ref_count=1, is_data_ready=lambda: False)
+    obj.page_items = NS(linked_items=[loading, ready, reserved])
+    obj.page_hash_dict = {1: 0, 2: 1}
 
-    def allocate(page_items, hash_key, disk_offload_enable):
-        page = obj.page_hash_dict.setdefault(hash_key, hash_key * 10)
-        return page, hash_key == 2
+    def reserve(hash_key, disk_offload_enable):
+        if hash_key != 3:
+            return None
+        obj.page_hash_dict[hash_key] = 2
+        return 2
 
-    obj.allocate_one_page = allocate
+    obj._reserve_unmapped_page = reserve
     assert obj.allocate_pages([1, 2, 3, 3], False, return_ownership=True) == (
-        [10, 20, 30, 30],
+        [0, 1, 2, 2],
         [False, False, True, False],
     )
-    assert obj.allocate_pages([1, 2, 3], False) == ([10, 20, 30], [False, True, False])
+    assert obj.allocate_pages([1, 2, 3], False) == ([0, 1, 2], [False, True, False])
+    assert obj.allocate_pages([4, 1], False, return_ownership=True) == ([-1, -1], [False, False])
+    assert [loading.ref_count, ready.ref_count, reserved.ref_count] == [3, 2, 3]
+    ready.del_self_from_list.assert_called_once()
 
 
 @pytest.mark.parametrize(

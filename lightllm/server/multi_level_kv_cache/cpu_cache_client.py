@@ -65,8 +65,7 @@ class CpuKvCacheClient(object):
                 self._registration_executor = None
             logger.info(f"CPU KV registration remaining startup wait: {time.monotonic() - started:.3f}s")
 
-    def get_one_empty_page(self, hash_key: int, disk_offload_enable: bool) -> Optional[int]:
-        assert self.page_hash_dict.get(hash_key) is None
+    def _reserve_unmapped_page(self, hash_key: int, disk_offload_enable: bool) -> Optional[int]:
         head = self.page_items.head
         tail = self.page_items.tail
         cur_page: _CpuPageStatus = head.get_next_item()
@@ -88,26 +87,6 @@ class CpuKvCacheClient(object):
         else:
             return None
 
-    def allocate_one_page(
-        self, page_items: List[_LinkedListItem], hash_key: int, disk_offload_enable: bool
-    ) -> Tuple[Optional[int], bool]:
-        page_index = self.page_hash_dict.get(hash_key)
-        if page_index is not None:
-            page_item: _CpuPageStatus = page_items[page_index]
-            page_item.ref_count += 1
-            if page_item.ref_count == 1:
-                page_item.del_self_from_list()
-            if page_item.is_data_ready():
-                return page_index, True
-            else:
-                return page_index, False
-        else:
-            page_index = self.get_one_empty_page(hash_key=hash_key, disk_offload_enable=disk_offload_enable)
-            if page_index is not None:
-                return page_index, False
-            else:
-                return None, False
-
     def allocate_pages(
         self, hash_keys: List[int], disk_offload_enable: bool, *, return_ownership: bool = False
     ) -> Tuple[List[int], List[bool]]:
@@ -120,17 +99,20 @@ class CpuKvCacheClient(object):
         ready_list = []
         page_items = self.page_items.linked_items
         for hash_key in hash_keys:
-            is_owner = return_ownership and self.page_hash_dict.get(hash_key) is None
-            page_index, ready = self.allocate_one_page(
-                page_items=page_items, hash_key=hash_key, disk_offload_enable=disk_offload_enable
-            )
-            if page_index is not None:
+            page_index = self.page_hash_dict.get(hash_key)
+            if page_index is None:
+                page_index = self._reserve_unmapped_page(hash_key, disk_offload_enable)
+                if page_index is None:
+                    break
                 page_list.append(page_index)
-                ready_list.append(is_owner if return_ownership else ready)
+                ready_list.append(return_ownership)
             else:
-                page_list.append(-1)
-                ready_list.append(False)
-                break
+                page_item: _CpuPageStatus = page_items[page_index]
+                page_item.ref_count += 1
+                if page_item.ref_count == 1:
+                    page_item.del_self_from_list()
+                page_list.append(page_index)
+                ready_list.append(not return_ownership and page_item.is_data_ready())
 
         left_num = len(hash_keys) - len(page_list)
         page_list.extend([-1 for _ in range(left_num)])
