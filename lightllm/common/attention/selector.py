@@ -6,13 +6,14 @@ family, such as the plain and quantized-KV Triton GQA backends; the first whose 
 layer config is used.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any, Callable, Optional, Sequence
 
 from lightllm.utils.log_utils import init_logger
 from .backend import AttentionBackend, AttentionImpl
 from .backends.gqa import GQALayerConfig
+from .backends.mla import MLADecodeLayerConfig, MLAPrefillLayerConfig
 
 logger = init_logger(__name__)
 
@@ -24,22 +25,62 @@ DEFAULT_PRIORITY = {
     "decode": ("flashinfer", "fa3", "triton"),
 }
 
-_GQA = "lightllm.common.attention.backends.gqa"
 
-# layer config type -> phase -> implementation name -> backends ("module:Class"), tried in order.
-_REGISTRY: dict[type, dict[str, dict[str, tuple[str, ...]]]] = {
-    GQALayerConfig: {
-        "prefill": {
-            "triton": (f"{_GQA}.triton:TritonGQAPrefillBackend", f"{_GQA}.triton_quant:TritonQuantGQAPrefillBackend"),
-            "fa3": (f"{_GQA}.fa3:FA3GQAPrefillBackend",),
-            "flashinfer": (f"{_GQA}.flashinfer:FlashInferGQAPrefillBackend",),
-        },
-        "decode": {
-            "triton": (f"{_GQA}.triton:TritonGQADecodeBackend", f"{_GQA}.triton_quant:TritonQuantGQADecodeBackend"),
-            "fa3": (f"{_GQA}.fa3:FA3GQADecodeBackend",),
-            "flashinfer": (f"{_GQA}.flashinfer:FlashInferGQADecodeBackend",),
-        },
-    },
+@dataclass(frozen=True)
+class Family:
+    """The implementations registered for one layer config type."""
+
+    # phase -> implementation name -> backends ("module:Class"), tried in order.
+    backends: dict[str, dict[str, tuple[str, ...]]]
+    # phase -> auto-selection order, best first.
+    priority: dict[str, tuple[str, ...]] = field(default_factory=lambda: dict(DEFAULT_PRIORITY))
+    # The value of --llm_{prefill,decode}_att_backend that names its implementation:
+    # 0 for full-attention families, 1 for linear-attention families.
+    arg_index: int = 0
+
+
+_GQA = "lightllm.common.attention.backends.gqa"
+_MLA = "lightllm.common.attention.backends.mla"
+
+_REGISTRY: dict[type, Family] = {
+    GQALayerConfig: Family(
+        {
+            "prefill": {
+                "triton": (
+                    f"{_GQA}.triton:TritonGQAPrefillBackend",
+                    f"{_GQA}.triton_quant:TritonQuantGQAPrefillBackend",
+                ),
+                "fa3": (f"{_GQA}.fa3:FA3GQAPrefillBackend",),
+                "flashinfer": (f"{_GQA}.flashinfer:FlashInferGQAPrefillBackend",),
+            },
+            "decode": {
+                "triton": (
+                    f"{_GQA}.triton:TritonGQADecodeBackend",
+                    f"{_GQA}.triton_quant:TritonQuantGQADecodeBackend",
+                ),
+                "fa3": (f"{_GQA}.fa3:FA3GQADecodeBackend",),
+                "flashinfer": (f"{_GQA}.flashinfer:FlashInferGQADecodeBackend",),
+            },
+        }
+    ),
+    MLAPrefillLayerConfig: Family(
+        {
+            "prefill": {
+                "triton": (f"{_MLA}.triton:TritonMLAPrefillBackend",),
+                "fa3": (f"{_MLA}.fa3:FA3MLAPrefillBackend",),
+                "flashinfer": (f"{_MLA}.flashinfer:FlashInferMLAPrefillBackend",),
+            }
+        }
+    ),
+    MLADecodeLayerConfig: Family(
+        {
+            "decode": {
+                "triton": (f"{_MLA}.triton:TritonMLADecodeBackend",),
+                "fa3": (f"{_MLA}.fa3:FA3MLADecodeBackend",),
+                "flashinfer": (f"{_MLA}.flashinfer:FlashInferMLADecodeBackend",),
+            }
+        }
+    ),
 }
 
 
@@ -54,22 +95,45 @@ def _load(path: str) -> type[AttentionBackend]:
     return getattr(import_module(module_name), class_name)
 
 
-def _family(layer_config: Any) -> dict[str, dict[str, tuple[str, ...]]]:
+def _family(layer_config: Any) -> Family:
     family = _REGISTRY.get(type(layer_config))
     if family is None:
         raise NotImplementedError(f"no attention implementations are registered for {type(layer_config).__name__}")
     return family
 
 
+def _phase_backends(layer_config: Any, phase: str) -> dict[str, tuple[str, ...]]:
+    backends = _family(layer_config).backends.get(phase)
+    if backends is None:
+        raise ValueError(f"{type(layer_config).__name__} has no {phase} attention implementations")
+    return backends
+
+
 def implementation_names(layer_config: Any, phase: str) -> tuple[str, ...]:
     """Names of the implementations registered for layer_config's family in this phase."""
-    return tuple(_family(layer_config)[phase])
+    return tuple(_phase_backends(layer_config, phase))
+
+
+def arg_index(layer_config: Any) -> int:
+    """Which value of --llm_{prefill,decode}_att_backend names the implementation of layer_config's family."""
+    return _family(layer_config).arg_index
+
+
+def auto_priority(layer_config: Any, phase: str, mtp_step: int = 0) -> tuple[str, ...]:
+    """The order in which "auto" tries the implementations of layer_config's family in this phase.
+
+    With MTP, decode tries FA3 first, which makes better use of Tensor Cores.
+    """
+    priority = _family(layer_config).priority[phase]
+    if phase == "decode" and mtp_step > 0 and "fa3" in priority:
+        priority = ("fa3",) + tuple(name for name in priority if name != "fa3")
+    return priority
 
 
 def _construct(name: str, layer_config: Any, phase: str) -> tuple[Optional[Selection], list[str]]:
     """Return the first backend under name whose impl accepts layer_config, and why the others did not."""
     reasons = []
-    for path in _family(layer_config)[phase].get(name, ()):
+    for path in _phase_backends(layer_config, phase).get(name, ()):
         backend = _load(path)
         try:
             return Selection(backend, backend.get_impl_cls()(layer_config)), reasons
@@ -97,8 +161,8 @@ def select(
 
     requested is an implementation name or "auto". A named implementation that does not accept
     the layer config raises ValueError. "auto" takes the first name in priority (default
-    DEFAULT_PRIORITY[phase]) outside excluded whose impl accepts the layer config and whose
-    library passes validate(name); if none does, it falls back to Triton without validation.
+    auto_priority(layer_config, phase)) outside excluded whose impl accepts the layer config and
+    whose library passes validate(name); if none does, it falls back to Triton without validation.
     """
     if phase not in PHASES:
         raise ValueError(f"phase must be one of {PHASES}, got {phase!r}")
@@ -113,7 +177,7 @@ def select(
             raise ValueError(f"{phase} attention {requested!r} does not support {layer_config}: {'; '.join(reasons)}")
         return selection
 
-    priority = DEFAULT_PRIORITY[phase] if priority is None else tuple(priority)
+    priority = auto_priority(layer_config, phase) if priority is None else tuple(priority)
     for name in priority:
         if name in excluded or name not in names:
             continue
@@ -127,11 +191,3 @@ def select(
         raise ValueError(f"no {phase} attention implementation supports {layer_config}: {'; '.join(reasons)}")
     logger.warning(f"No validated {phase} attention implementation supports the layer; falling back to triton")
     return selection
-
-
-def decode_priority(mtp_step: int) -> tuple[str, ...]:
-    """Auto-selection order for decode: with MTP, FA3 makes better use of Tensor Cores and goes first."""
-    priority = DEFAULT_PRIORITY["decode"]
-    if mtp_step <= 0:
-        return priority
-    return ("fa3",) + tuple(name for name in priority if name != "fa3")

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
@@ -8,6 +8,7 @@ from lightllm.common.attention.backend import (
     AttentionImpl,
     AttentionStepBuilder,
     AttentionBatch,
+    StepBuilderContext,
     TensorAllocator,
 )
 from . import MLADecodeLayerInputs, MLADecodeLayerConfig, MLAPrefillLayerInputs, MLAPrefillLayerConfig
@@ -252,6 +253,12 @@ class TritonMLAPrefillBackend(AttentionBackend):
     def get_impl_cls() -> type[TritonMLAPrefillImpl]:
         return TritonMLAPrefillImpl
 
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: MLAPrefillLayerConfig, ctx: StepBuilderContext
+    ) -> TritonMLAPrefillStepBuilder:
+        return TritonMLAPrefillStepBuilder()
+
 
 class TritonMLADecodeBackend(AttentionBackend):
     @staticmethod
@@ -265,3 +272,23 @@ class TritonMLADecodeBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[TritonMLADecodeImpl]:
         return TritonMLADecodeImpl
+
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: MLADecodeLayerConfig, ctx: StepBuilderContext
+    ) -> TritonMLADecodeStepBuilder:
+        return TritonMLADecodeStepBuilder(**cls.step_builder_key(layer_config)._asdict())
+
+    @classmethod
+    def step_builder_key(cls, layer_config: MLADecodeLayerConfig) -> "_TritonMLADecodeKey":
+        # The split schedule's kernel config depends on these.
+        return _TritonMLADecodeKey(
+            layer_config.num_heads, layer_config.kv_lora_rank, layer_config.qk_rope_head_dim, layer_config.dtype
+        )
+
+
+class _TritonMLADecodeKey(NamedTuple):
+    num_heads: int
+    kv_lora_rank: int
+    qk_rope_head_dim: int
+    dtype: torch.dtype

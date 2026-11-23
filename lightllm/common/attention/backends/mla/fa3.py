@@ -9,9 +9,10 @@ from lightllm.common.attention.backend import (
     AttentionBatch,
     AttentionImpl,
     AttentionStepBuilder,
+    StepBuilderContext,
     TensorAllocator,
 )
-from ..gqa.fa3 import FA3GQADecodeStepArgs, FA3GQADecodeStepBuilder
+from ..gqa.fa3 import FA3GQADecodeStepArgs, FA3GQADecodeStepBuilder, FA3PageTables, fa3_requires_cpu_cache_sync
 from . import MLADecodeLayerConfig, MLADecodeLayerInputs, MLAPrefillLayerConfig, MLAPrefillLayerInputs
 
 
@@ -122,6 +123,16 @@ class FA3MLAPrefillBackend(AttentionBackend):
     def get_impl_cls() -> type[FA3MLAPrefillImpl]:
         return FA3MLAPrefillImpl
 
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: MLAPrefillLayerConfig, ctx: StepBuilderContext
+    ) -> FA3MLAPrefillStepBuilder:
+        return FA3MLAPrefillStepBuilder()
+
+    @classmethod
+    def requires_cpu_cache_sync(cls) -> bool:
+        return fa3_requires_cpu_cache_sync()
+
 
 class FA3MLADecodeBackend(AttentionBackend):
     @staticmethod
@@ -135,3 +146,14 @@ class FA3MLADecodeBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[FA3MLADecodeImpl]:
         return FA3MLADecodeImpl
+
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: MLADecodeLayerConfig, ctx: StepBuilderContext
+    ) -> FA3GQADecodeStepBuilder:
+        # The latent cache is paged like an unquantized GQA cache.
+        return FA3GQADecodeStepBuilder(page_size=ctx.page_size, page_table_view=FA3PageTables(ctx, ctx.page_size).view)
+
+    @classmethod
+    def requires_cpu_cache_sync(cls) -> bool:
+        return fa3_requires_cpu_cache_sync()

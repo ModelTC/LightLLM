@@ -174,3 +174,44 @@ def test_dflash_decode_needs_an_implementation_of_non_causal_attention(monkeypat
     layer = Qwen3DFlashTransformerLayerInfer(0, net)
     with pytest.raises(ValueError, match="does not support"):
         layer.init_attention(make_model(FakeState(2), backend="triton", draft=True))
+
+
+@pytest.mark.parametrize("rope_scaling", [None, {"type": "yarn", "factor": 40, "mscale_all_dim": 1.0}])
+def test_deepseek2_layers_attend_over_expanded_keys_in_prefill_and_the_latent_cache_in_decode(
+    runtime_start_args, rope_scaling
+):
+    from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLAPrefillLayerConfig
+    from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
+    from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
+
+    net = dict(
+        num_attention_heads=16,
+        num_key_value_heads=16,
+        hidden_size=1024,
+        rms_norm_eps=1e-6,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        q_lora_rank=None,
+        kv_lora_rank=512,
+        n_routed_experts=None,
+        first_k_dense_replace=0,
+        n_shared_experts=None,
+        num_experts_per_tok=1,
+        norm_topk_prob=True,
+        n_group=1,
+        topk_group=1,
+        rope_scaling=rope_scaling,
+    )
+    scale = 192 ** -0.5 * (get_deepseek_mscale(40, 1.0) ** 2 if rope_scaling else 1.0)
+    model = make_model(None, backend="flashinfer")
+    layers = [Deepseek2TransformerLayerInfer(i, net) for i in range(2)]
+    for layer in layers:
+        layer.init_attention(model)
+    common = dict(num_heads=16, qk_rope_head_dim=64, softmax_scale=scale, dtype=torch.bfloat16)
+    assert layer_configs(layers[0]) == (
+        MLAPrefillLayerConfig(qk_nope_head_dim=128, v_head_dim=128, **common),
+        MLADecodeLayerConfig(kv_lora_rank=512, **common),
+    )
+    # FlashInfer plans with the layers' softmax scale, which they all share.
+    assert layers[0].attn.group == layers[1].attn.group == "flashinfer_mla_prefill+flashinfer_mla_decode"

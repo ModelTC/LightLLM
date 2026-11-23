@@ -439,7 +439,7 @@ class FA3PageTables:
         return self._buffers[microbatch_index][: rows * max_pages].view(rows, max_pages)
 
 
-def _requires_cpu_cache_sync() -> bool:
+def fa3_requires_cpu_cache_sync() -> bool:
     # 设为 1 / TRUE / ON 时，FA3 与 CPU cache 搬运在 GPU 上互相等待。
     return enable_env_vars("LIGHTLLM_FA3_CPU_CACHE_SYNC")
 
@@ -467,7 +467,7 @@ class FA3GQAPrefillBackend(AttentionBackend):
 
     @classmethod
     def requires_cpu_cache_sync(cls) -> bool:
-        return _requires_cpu_cache_sync()
+        return fa3_requires_cpu_cache_sync()
 
 
 class FA3GQADecodeBackend(AttentionBackend):
@@ -494,4 +494,4 @@ class FA3GQADecodeBackend(AttentionBackend):
 
     @classmethod
     def requires_cpu_cache_sync(cls) -> bool:
-        return _requires_cpu_cache_sync()
+        return fa3_requires_cpu_cache_sync()

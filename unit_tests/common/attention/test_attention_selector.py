@@ -72,7 +72,9 @@ def test_auto_skips_unsupported_configs_and_failed_validation():
 
 def test_auto_honours_priority_and_exclusions():
     _, validate = recorder()
-    selection = selector.select(gqa(), "decode", "auto", priority=selector.decode_priority(1), validate=validate)
+    selection = selector.select(
+        gqa(), "decode", "auto", priority=selector.auto_priority(gqa(), "decode", 1), validate=validate
+    )
     assert selection.backend.get_name() == "fa3_gqa_decode"
     selection = selector.select(gqa(), "decode", "auto", excluded=("flashinfer",), validate=validate)
     assert selection.backend.get_name() == "fa3_gqa_decode"
@@ -89,10 +91,24 @@ def test_auto_falls_back_to_triton_without_validation():
 
 
 def test_decode_priority_puts_fa3_first_with_mtp():
-    assert selector.decode_priority(0) == ("flashinfer", "fa3", "triton")
-    assert selector.decode_priority(2) == ("fa3", "flashinfer", "triton")
+    assert selector.auto_priority(gqa(), "decode", 0) == ("flashinfer", "fa3", "triton")
+    assert selector.auto_priority(gqa(), "decode", 2) == ("fa3", "flashinfer", "triton")
+    assert selector.auto_priority(gqa(), "prefill", 2) == ("fa3", "flashinfer", "triton")
 
 
 def test_unregistered_layer_config_type_is_rejected():
     with pytest.raises(NotImplementedError, match="no attention implementations"):
         selector.select(object(), "prefill", "auto")
+
+
+def test_mla_phases_have_their_own_layer_config_types():
+    from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLAPrefillLayerConfig
+
+    common = dict(num_heads=16, qk_rope_head_dim=64, softmax_scale=0.1, dtype=torch.bfloat16)
+    prefill = MLAPrefillLayerConfig(qk_nope_head_dim=128, v_head_dim=128, **common)
+    decode = MLADecodeLayerConfig(kv_lora_rank=512, **common)
+    assert selector.select(prefill, "prefill", "flashinfer").backend.get_name() == "flashinfer_mla_prefill"
+    assert selector.select(decode, "decode", "fa3").backend.get_name() == "fa3_mla_decode"
+    assert selector.auto_priority(decode, "decode", 1) == ("fa3", "flashinfer", "triton")
+    with pytest.raises(ValueError, match="no decode attention implementations"):
+        selector.select(prefill, "decode", "triton")

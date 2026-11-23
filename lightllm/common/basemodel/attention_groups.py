@@ -196,12 +196,15 @@ class AttentionGroups:
         if model.args.enable_ep_moe:
             logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
 
-    def _requested(self, phase: str) -> str:
+    def _requested(self, phase: str, layer_config: Any) -> str:
         if self.model.att_implementation is not None:
             return self.model.att_implementation
-        # The first value of --llm_{prefill,decode}_att_backend selects full-attention families.
+        # The first value of --llm_{prefill,decode}_att_backend names full-attention implementations,
+        # the second linear-attention ones; a missing value is "auto".
         args = self.model.args
-        return (args.llm_prefill_att_backend if phase == "prefill" else args.llm_decode_att_backend)[0]
+        values = args.llm_prefill_att_backend if phase == "prefill" else args.llm_decode_att_backend
+        index = selector.arg_index(layer_config)
+        return values[index] if index < len(values) else "auto"
 
     def _select(self, phase: str, layer_config: Any) -> Optional[selector.Selection]:
         if layer_config is None:
@@ -210,12 +213,11 @@ class AttentionGroups:
         selection = self._selections.get(key)
         if selection is None:
             args = self.model.args
-            priority = selector.decode_priority(args.mtp_step) if phase == "decode" else None
             selection = self._selections[key] = selector.select(
                 layer_config,
                 phase,
-                self._requested(phase),
-                priority=priority,
+                self._requested(phase, layer_config),
+                priority=selector.auto_priority(layer_config, phase, args.mtp_step),
                 excluded=("flashinfer",) if args.enable_ep_moe else (),
             )
         return selection
