@@ -183,9 +183,7 @@ class EngramEmbeddingWeight(BaseWeightTpl):
             # The HF loader has populated both regions before pinning their contiguous mapping.
             runtime = torch.cuda.cudart()
             address = self.weight.data_ptr()
-            error = runtime.cudaHostRegister(address, self.weight.nbytes + self.scale.nbytes, 3)
-            if error != 0:
-                raise RuntimeError(f"Registering {self.prefix} host table failed: {error}")
+            torch.cuda.check_error(runtime.cudaHostRegister(address, self.weight.nbytes + self.scale.nbytes, 3))
             self._host_registration = weakref.finalize(self, runtime.cudaHostUnregister, address)
             self.device_weight = get_accelerator_view_from_cpu_tensor(self.weight)
             self.device_scale = get_accelerator_view_from_cpu_tensor(self.scale)

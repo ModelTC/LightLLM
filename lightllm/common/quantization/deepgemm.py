@@ -270,13 +270,13 @@ class MXFP4MoEQuantizationMethod(QuantizationMethod):
         padded_dims = [(n + 127) // 128 * 128 for n in out_dims]
         padded_k = (in_dim + 127) // 128 * 128
         padded_n = sum(padded_dims)
-        weight = torch.zeros((num_experts, padded_n, padded_k // 2), dtype=torch.int8)
-        scales = torch.ones((num_experts, padded_n, padded_k // 32), dtype=torch.float32).to(torch.float8_e8m0fnu)
-        pack = WeightPack(weight=weight, weight_scale=scales)
-        # Reserve runtime bytes before KV-cache profiling; repacking determines the final views.
         device = f"cuda:{device_id}"
-        pack.marlin_weight = torch.empty_like(weight.view(torch.int32), device=device)
-        pack.marlin_weight_scale = torch.empty_like(scales, device=device)
+        pack = WeightPack(
+            weight=torch.zeros((num_experts, padded_n, padded_k // 2), dtype=torch.int8, device=device),
+            weight_scale=torch.ones(
+                (num_experts, padded_n, padded_k // self.block_size), dtype=torch.float8_e8m0fnu, device=device
+            ),
+        )
         children = self._split_weight_pack(
             pack,
             weight_out_dims=padded_dims,
@@ -300,23 +300,19 @@ class MXFP4MoEQuantizationMethod(QuantizationMethod):
         from types import SimpleNamespace
         from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import prepare_moe_mxfp4_layer_for_marlin
 
-        device = moe_weight.w13.marlin_weight.device
         w13, w2 = moe_weight.w13, moe_weight.w2
         packed = prepare_moe_mxfp4_layer_for_marlin(
             SimpleNamespace(params_dtype=moe_weight.data_type_),
-            w13.weight.view(torch.uint8).to(device),
-            w2.weight.view(torch.uint8).to(device),
-            w13.weight_scale.to(device),
-            w2.weight_scale.to(device),
+            w13.weight.view(torch.uint8),
+            w2.weight.view(torch.uint8),
+            w13.weight_scale,
+            w2.weight_scale,
             None,
             None,
         )
+        # Keep the storage allocated in the model's weight region when changing its layout.
         for pack, weight, scale in ((w13, packed[0], packed[2]), (w2, packed[1], packed[3])):
-            pack.weight = pack.marlin_weight.view_as(weight)
-            pack.weight_scale = pack.marlin_weight_scale.view_as(scale)
-            pack.weight.copy_(weight)
-            pack.weight_scale.copy_(scale)
-            pack.marlin_weight = pack.marlin_weight_scale = None
-        # Drop the CPU staging views held by the loader after the final repack.
+            pack.weight = pack.weight.view(weight.dtype).view_as(weight).copy_(weight)
+            pack.weight_scale = pack.weight_scale.view(scale.dtype).view_as(scale).copy_(scale)
         moe_weight.w1_list = moe_weight.w2_list = moe_weight.w3_list = []
         moe_weight.w1 = moe_weight.w3 = None
