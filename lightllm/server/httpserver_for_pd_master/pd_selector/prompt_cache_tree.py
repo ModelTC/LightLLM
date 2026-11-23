@@ -2,10 +2,19 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from hashlib import blake2b
 from threading import Lock, RLock
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 from sortedcontainers import SortedDict
+
+
+def hash_prompt_blocks(prompt: str, block_chars: int) -> tuple[str, ...]:
+    """Hash each complete or partial block as one trie edge."""
+    return tuple(
+        blake2b(prompt[start : start + block_chars].encode("utf-8"), digest_size=8).hexdigest()
+        for start in range(0, len(prompt), block_chars)
+    )
 
 
 @dataclass(slots=True)
@@ -15,7 +24,7 @@ class PromptCacheMatchResult:
     # 匹配终点关联的 prefill 连接标识（connection_key），可区分同一服务的不同 DP 连接；
     # 匹配停在 root 时为 None。该标识记录历史处理位置，不保证 KV cache 仍然驻留。
     prefill_node: Optional[str]
-    # 匹配到的原始 prompt 字符数：从 text[0] 到最后一个命中采样点（含）的连续前缀长度。
+    # 匹配到的原始 prompt 字符数：用于路由的连续前缀长度。
     matched_char_count: int
     # 输入 prompt 的原始字符数 len(text)。
     input_char_count: int
@@ -26,7 +35,7 @@ class PromptCacheMatchResult:
 
 @dataclass(slots=True)
 class _PromptCacheNode:
-    """单字符边的 trie 节点：parent --edge_char--> self。"""
+    """单 key 元素边的 trie 节点：parent --edge_char--> self。"""
 
     children: Dict[str, "_PromptCacheNode"] = field(default_factory=dict)
     parent: Optional["_PromptCacheNode"] = None
@@ -41,7 +50,7 @@ class PromptCacheTree:
     """
     用于 cache-aware 选点的 prompt 前缀缓存树。
 
-    调用方先按 sample_stride 将 prompt 抽稀成 key，树再按单字符建树/匹配。
+    调用方按字符块生成 key，树按 key 元素建树和匹配。
     整棵树节点数有上限；超限时按 LRU 从叶节点批量删除。
     """
 
@@ -72,14 +81,16 @@ class PromptCacheTree:
         self._lock = RLock()
         self._time_mark_lock = Lock()
 
-    def insert_sampled(self, key: str, prefill_node: str, sample_stride: int) -> None:
-        """将抽稀后的 prompt key 写入树，并关联到 prefill_node。
+    def insert_sampled(
+        self, key: Sequence[str], prefill_node: str, sample_stride: int, prefill_node_epoch: Optional[int] = None
+    ) -> None:
+        """将生成的 prompt key 写入树，并关联到 prefill_node。
 
         路径上的节点会更新 last_prefill_node 与 LRU 时间戳；写入后若超
         max_node_count 会立即按 LRU 驱逐一批叶节点。
 
         Args:
-            key: 已按 sample_stride 抽稀的 prompt key。
+            key: 已按 sample_stride 生成的 prompt key。
             prefill_node: 处理该 prompt 的 prefill 连接标识（connection_key），不可为 None。
             sample_stride: 调用方生成 key 时使用的抽样步长，必须与树配置一致。
 
@@ -89,7 +100,7 @@ class PromptCacheTree:
         assert (
             sample_stride == self.sample_stride
         ), f"sample_stride mismatch: tree={self.sample_stride}, input={sample_stride}"
-        self.insert_key(key, prefill_node, time.monotonic())
+        self.insert_key(key, prefill_node, time.monotonic(), prefill_node_epoch)
 
     def clear(self) -> None:
         """Discard historical hints when the relay can no longer replay a gap."""
@@ -99,7 +110,11 @@ class PromptCacheTree:
             self._leaf_lru.clear()
 
     def insert_key(
-        self, key: str, prefill_node: str, last_insert_time: Optional[float], prefill_node_epoch: Optional[int] = None
+        self,
+        key: Sequence[str],
+        prefill_node: str,
+        last_insert_time: Optional[float],
+        prefill_node_epoch: Optional[int] = None,
     ) -> None:
         """Insert a sampled relay hint without refreshing its age or worker incarnation."""
         if prefill_node is None:
@@ -144,11 +159,13 @@ class PromptCacheTree:
             child = None
             self._evict_if_needed()
 
-    def prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
-        """匹配已经按 sample_stride 抽稀的 prompt key。
+    def prefix_match_sampled(
+        self, key: Sequence[str], input_char_count: int, sample_stride: int
+    ) -> PromptCacheMatchResult:
+        """匹配已经按 sample_stride 生成的 prompt key。
 
         Args:
-            key: 已按 sample_stride 抽稀的 prompt key。
+            key: 已按 sample_stride 生成的 prompt key。
             input_char_count: 原始 prompt 的字符数。
             sample_stride: 调用方生成 key 时使用的抽样步长，必须与树配置一致。
 
@@ -163,9 +180,7 @@ class PromptCacheTree:
             sample_stride == self.sample_stride
         ), f"sample_stride mismatch: tree={self.sample_stride}, input={sample_stride}"
         with self._lock:
-            # 逐字符沿树向下查找。循环中的 matched 表示已经连续匹配的采样
-            # 字符数；遇到第一个不存在的子节点后立即停止，当前 node 就是
-            # 最长匹配前缀的终点。整个过程不消耗 Python 递归调用栈。
+            # 单个摘要对应整块字符。遇到第一个缺失的边就停止。
             node = self.root
             matched = 0
             for ch in key:
@@ -179,10 +194,11 @@ class PromptCacheTree:
                 prefill_node = None
             else:
                 prefill_node = node.last_prefill_node
-            if matched <= 0:
-                matched_char_count = 0
-            else:
-                matched_char_count = min((matched - 1) * sample_stride + 1, input_char_count)
+            # Raw string keys retain the legacy sampling count for existing trie callers.
+            matched_chars = matched * sample_stride
+            if isinstance(key, str) and matched:
+                matched_chars = (matched - 1) * sample_stride + 1
+            matched_char_count = min(matched_chars, input_char_count)
             return PromptCacheMatchResult(
                 prefill_node=prefill_node,
                 matched_char_count=matched_char_count,

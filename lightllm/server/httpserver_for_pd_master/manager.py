@@ -351,7 +351,9 @@ class HttpServerManagerForPDMaster:
                     logger.error(f"{origin_request_id}: No p_node or d_node found")
                     raise Exception(f"{origin_request_id}: No p_node or d_node found")
 
-                pending_prefill_load_chars = len(prompt)
+                pending_prefill_load_chars = max(
+                    1, len(prompt) - round(len(prompt) * selection_extra_info.estimated_cache_hit_rate)
+                )
                 await self.pd_node_stats.add_dispatched_info(p_node=p_node, chars=pending_prefill_load_chars, req_num=1)
 
             cache_age_seconds = None

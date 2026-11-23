@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+
+from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree import hash_prompt_blocks
 import numpy as np
 
 from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, SamplingParams
@@ -110,9 +112,9 @@ def _make_manager(monkeypatch):
         mgr.recorded_cache_hit_rates.append(hit_rate)
         original_record_hit_rate(hit_rate)
 
-    async def insert_cache(prompt_key, connection_key, sample_stride):
+    async def insert_cache(prompt_key, connection_key, sample_stride, prefill_node_epoch):
         mgr.inserted_prompt_caches.append((prompt_key, connection_key))
-        await original_insert_cache(prompt_key, connection_key, sample_stride)
+        await original_insert_cache(prompt_key, connection_key, sample_stride, prefill_node_epoch)
 
     mgr.pd_manager.selector.record_prompt_cache_hit_rate = record_hit_rate
     prompt_cache_tree.insert_sampled = insert_cache
@@ -244,7 +246,7 @@ def test_single_block_prefill_hit_persists_past_decode_zeros(monkeypatch):
     assert cached and all(c == 30 for c in cached), cached
     assert mgr.recorded_cache_hit_rates == [pytest.approx(0.3)]
     assert len(mgr.inserted_prompt_caches) == 1
-    assert mgr.inserted_prompt_caches[0][0] == "h"
+    assert mgr.inserted_prompt_caches[0][0] == hash_prompt_blocks("hello", 2048)
 
 
 @pytest.mark.parametrize("mode", [StopStrMatchMode.ALL_TEXT, StopStrMatchMode.CONTENT_ONLY])
@@ -311,7 +313,7 @@ def test_dynamic_split_keeps_first_segment_hit(monkeypatch):
     assert cached == [50, 50, 50, 50], cached
     assert mgr.recorded_cache_hit_rates == [pytest.approx(0.5)]
     assert len(mgr.inserted_prompt_caches) == 1
-    assert mgr.inserted_prompt_caches[0][0] == "h"
+    assert mgr.inserted_prompt_caches[0][0] == hash_prompt_blocks("hello", 2048)
     # 无约束请求不需要计算语法状态重放长度。
     assert mgr.segment_inputs == [
         ("hello", 0),
@@ -538,7 +540,7 @@ def test_completed_prefill_inserts_cache_when_first_output_is_decode(monkeypatch
     )
     assert cached == [30, 30, 30]
     assert len(mgr.inserted_prompt_caches) == 1
-    assert mgr.inserted_prompt_caches[0][0] == "h"
+    assert mgr.inserted_prompt_caches[0][0] == hash_prompt_blocks("hello", 2048)
 
 
 @pytest.mark.parametrize("include", [False, True])

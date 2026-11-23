@@ -2,6 +2,7 @@
 
 import asyncio
 import random
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
@@ -28,6 +29,7 @@ from lightllm.server.httpserver_for_pd_master.pd_selector.pd_selector import (
 )
 from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree import (
     PromptCacheMatchResult,
+    hash_prompt_blocks,
 )
 from lightllm.server.httpserver_for_pd_master.pd_selector.pd_node_stats_server import (
     PDNodeStatsState,
@@ -40,6 +42,7 @@ from lightllm.utils.error_utils import ServerBusyError
 
 
 PROMPT = "x" * 2048
+FRESH_TIME = time.monotonic()
 COUNTER_METHODS = ("add_dispatched_info", "sub_dispatched_info")
 
 
@@ -78,7 +81,7 @@ def _match(node=None, *, matched=1500):
         prefill_node=None if node is None else node.connection_key,
         matched_char_count=0 if node is None else matched,
         input_char_count=len(PROMPT),
-        last_insert_time=None if node is None else 123.0,
+        last_insert_time=None if node is None else FRESH_TIME,
     )
 
 
@@ -130,7 +133,7 @@ def test_shared_tree_is_used_for_selection_and_cache_metadata(monkeypatch, busy)
 
     assert p_node is cached
     assert d_node is decode
-    assert extra == PDSelectionExtraInfo(1500 / len(PROMPT), 123.0)
+    assert extra == PDSelectionExtraInfo(1500 / len(PROMPT), FRESH_TIME)
 
 
 def test_cache_metadata_comes_from_the_selection_query(monkeypatch):
@@ -143,9 +146,9 @@ def test_cache_metadata_comes_from_the_selection_query(monkeypatch):
     selected, _, extra = asyncio.run(selector.select_p_d_node(PROMPT, None, None))
 
     assert selected is cached
-    assert extra == PDSelectionExtraInfo(1500 / len(PROMPT), 123.0)
+    assert extra == PDSelectionExtraInfo(1500 / len(PROMPT), FRESH_TIME)
     selector.policy.prompt_cache_tree.prefix_match_sampled.assert_awaited_once_with(
-        PROMPT[:: selector.policy.config.sample_stride],
+        hash_prompt_blocks(PROMPT, selector.policy.config.sample_stride),
         len(PROMPT),
         selector.policy.config.sample_stride,
     )
@@ -165,7 +168,7 @@ def test_cache_hint_survives_endpoint_reconnect_or_process_restart(monkeypatch, 
 
     assert original.connection_key == current.connection_key
     assert selected is current
-    assert extra == PDSelectionExtraInfo(1500 / len(PROMPT), 123.0)
+    assert extra == PDSelectionExtraInfo(1500 / len(PROMPT), FRESH_TIME)
 
 
 @pytest.mark.parametrize("match_kind", ["miss", "remote_worker"])
@@ -176,7 +179,7 @@ def test_shared_match_never_falls_back_to_local_tree_or_remote_candidates(monkey
     selector.update_nodes([busy, available], [_node(200, "d:8000", mode="decode")])
     asyncio.run(
         selector.policy.prompt_cache_tree.insert_sampled(
-            PROMPT[:: selector.policy.config.sample_stride],
+            hash_prompt_blocks(PROMPT, selector.policy.config.sample_stride),
             busy.connection_key,
             selector.policy.config.sample_stride,
         )
@@ -197,7 +200,7 @@ def test_default_cache_selection_uses_connection_keys():
     selector.update_nodes([other, cached], [_node(200, "d:8000", mode="decode")])
     asyncio.run(
         selector.policy.prompt_cache_tree.insert_sampled(
-            PROMPT[:: selector.policy.config.sample_stride],
+            hash_prompt_blocks(PROMPT, selector.policy.config.sample_stride),
             cached.connection_key,
             selector.policy.config.sample_stride,
         )
@@ -210,7 +213,7 @@ def test_default_cache_selection_uses_connection_keys():
     assert (
         asyncio.run(
             selector.policy.prompt_cache_tree.prefix_match_sampled(
-                PROMPT[:: selector.policy.config.sample_stride],
+                hash_prompt_blocks(PROMPT, selector.policy.config.sample_stride),
                 len(PROMPT),
                 selector.policy.config.sample_stride,
             )
@@ -281,7 +284,7 @@ def test_only_cache_aware_policy_queries_prefix_data_and_all_policies_choose_loc
     if strategy == "cache_aware":
         assert manager.pd_manager.selector.policy.prompt_cache_tree.prefix_match_sampled.await_count == 1
         manager.pd_manager.selector.policy.prompt_cache_tree.prefix_match_sampled.assert_awaited_with(
-            PROMPT[:: manager.pd_manager.selector.policy.config.sample_stride],
+            hash_prompt_blocks(PROMPT, manager.pd_manager.selector.policy.config.sample_stride),
             len(PROMPT),
             manager.pd_manager.selector.policy.config.sample_stride,
         )
@@ -299,7 +302,7 @@ def test_manager_uses_shared_node_load_and_local_balancing_threshold_for_selecti
 
     async def update_dispatched_info(p_nodes):
         assert p_nodes == [cached, available]
-        cached.dispatched_prompt_chars, cached.dispatched_req_num = 500, 1
+        cached.dispatched_prompt_chars, cached.dispatched_req_num = 1900, 1
         available.dispatched_prompt_chars, available.dispatched_req_num = 100, 1
 
     manager.pd_manager.selector.pd_node_stats.update_dispatched_info.side_effect = update_dispatched_info
@@ -347,10 +350,10 @@ def test_query_completion_uses_current_connections_without_overwriting_their_loa
             new_p.dispatched_prompt_chars,
             new_p.dispatched_req_num,
         ) == replacement_load
-        assert extra == PDSelectionExtraInfo(1500 / len(PROMPT), 123.0)
+        assert extra == PDSelectionExtraInfo(1500 / len(PROMPT), FRESH_TIME)
         assert manager.pd_manager.selector.policy.prompt_cache_tree.prefix_match_sampled.await_count == 1
         manager.pd_manager.selector.policy.prompt_cache_tree.prefix_match_sampled.assert_awaited_with(
-            PROMPT[:: manager.pd_manager.selector.policy.config.sample_stride],
+            hash_prompt_blocks(PROMPT, manager.pd_manager.selector.policy.config.sample_stride),
             len(PROMPT),
             manager.pd_manager.selector.policy.config.sample_stride,
         )
@@ -472,7 +475,7 @@ def test_backend_tree_queries_preserve_cache_hint_for_restarted_endpoint(monkeyp
         _set_nodes(manager, [other, cached], decode)
         selector = manager.pd_manager.selector
         await selector.policy.prompt_cache_tree.insert_sampled(
-            PROMPT[:: selector.policy.config.sample_stride],
+            hash_prompt_blocks(PROMPT, selector.policy.config.sample_stride),
             cached.connection_key,
             selector.policy.config.sample_stride,
         )
@@ -687,7 +690,7 @@ def test_segment_counters_clear_at_first_token_and_restart_for_continuation(back
         if needs_prefill:
             sample_stride = manager.pd_manager.selector.policy.config.sample_stride
             selector.policy.prompt_cache_tree.insert_sampled.assert_awaited_once_with(
-                "prompt"[::sample_stride], prefill.connection_key, sample_stride
+                hash_prompt_blocks("prompt", sample_stride), prefill.connection_key, sample_stride, prefill.node_id
             )
         else:
             selector.policy.prompt_cache_tree.insert_sampled.assert_not_awaited()

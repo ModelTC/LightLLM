@@ -9,10 +9,9 @@ PD Master 的 cache-aware prefill 选点策略。
 实现要点：
   - 用前缀树（见 PromptCacheTree）记录「成功进入推理的 prompt -> 处理它的 worker」；
   - 树中的 prefill_node 对应 worker.connection_key，可区分同一服务的不同 DP 连接；
-  - prompt 会按 sample_stride 抽稀后再插入/匹配，降低树的深度与内存；
+  - prompt 按连续字符块生成摘要后再插入/匹配，降低树的深度与内存；
   - 根据推理侧返回的平均 prompt cache 命中率，动态调整 cache 亲和与负载均衡的权重；
-  - 优先使用 dispatched_req_num 为 0 的空闲节点，避免 GPU 闲置；
-  - 所有节点都忙时，用 worker.dispatched_prompt_chars 做负载均衡。
+  - 比较在途工作量加本次预计未缓存字符量，选择 Prefill worker。
 
 选点流程见 CacheAwarePolicy.select_worker。
 """
@@ -20,14 +19,16 @@ PD Master 的 cache-aware prefill 选点策略。
 from __future__ import annotations
 
 import random
+import time
 from dataclasses import dataclass
 from typing import List, Optional
 
 from lightllm.server.pd_io_struct import PD_Client_Obj
+from lightllm.utils.envs_utils import get_pd_cache_high_priority_max_age_seconds
 from lightllm.utils.log_utils import init_logger
 
 from .pd_selector import PDSelectionExtraInfo
-from .prompt_cache_tree import PromptCacheMatchResult
+from .prompt_cache_tree import PromptCacheMatchResult, hash_prompt_blocks
 
 
 logger = init_logger(__name__)
@@ -52,8 +53,8 @@ class CacheAwareConfig:
     max_node_count: int = 1_000_000
     # 每次 LRU 驱逐的叶节点数量。
     evict_node_batch: int = 10_000
-    # 每隔 sample_stride 个字符抽 1 个作为前缀树 key，降低匹配开销与内存。
-    sample_stride: int = 512
+    # 一个 trie 边对应一个连续字符块。
+    sample_stride: int = 2048
 
 
 class BalanceRelThresholdController:
@@ -113,26 +114,7 @@ class CacheAwarePolicy:
     async def select_worker(
         self, workers: List[PD_Client_Obj], request_text: str, loads=None
     ) -> tuple[Optional[PD_Client_Obj], PDSelectionExtraInfo]:
-        """
-        为一次请求选择 prefill worker。
-
-        Args:
-            workers: 当前可用的 prefill worker 列表。
-            request_text: 原始 prompt 文本，长度必须大于 1。
-
-        Raises:
-            ValueError: request_text 长度不大于 1 时抛出。
-
-        决策顺序：
-          1) workers 为空 -> 返回 None；
-          2) 对 request_text 做前缀匹配，计算
-             match_rate = matched_char_count / input_char_count；
-          3) match_rate > cache_threshold 且命中 prefill_node 仍在线 -> 得到 cache 命中节点；
-          4) 存在 dispatched_req_num 为 0 的空闲节点 -> 强制从空闲节点中选择；
-             多个节点空闲时优先选择 cache 命中节点；
-          5) cache 命中节点负载未严重高于最空闲节点 -> 选择 cache 命中节点；
-          6) 未命中或负载严重失衡 -> 选择最空闲节点；
-        """
+        """Use recent prefix history to estimate new prefill work on each worker."""
         if not workers:
             return None, PDSelectionExtraInfo()
         if len(request_text) <= 1:
@@ -144,19 +126,13 @@ class CacheAwarePolicy:
             }
         cache_worker, cache_match = await self._get_cache_worker(workers, request_text)
 
-        # ---- 1. 空闲优先：避免有可用 GPU 闲置 ----
-        if cache_worker is not None and loads[cache_worker.connection_key][0] == 0:
-            idle_worker = cache_worker
-        else:
-            idle_worker = self._select_idle_worker(workers, loads)
-        if idle_worker is not None:
-            selected_worker = idle_worker
-        else:
-            # ---- 2. 所有节点都忙时，在 cache 亲和与负载均衡之间权衡 ----
-            selected_worker = self._select_worker_by_cache_and_load(workers, cache_worker, len(request_text), loads)
+        cached_chars = cache_match.matched_char_count if cache_worker is not None else 0
+        selected_worker = self._select_worker_by_cache_and_load(
+            workers, cache_worker, len(request_text), cached_chars, loads
+        )
 
         selection_extra_info = PDSelectionExtraInfo()
-        if self._matches_worker(cache_match, selected_worker) and cache_match.input_char_count != 0:
+        if selected_worker is cache_worker:
             selection_extra_info = PDSelectionExtraInfo(
                 estimated_cache_hit_rate=cache_match.matched_char_count / cache_match.input_char_count,
                 cache_last_insert_time=cache_match.last_insert_time,
@@ -179,7 +155,7 @@ class CacheAwarePolicy:
     ) -> tuple[Optional[PD_Client_Obj], PromptCacheMatchResult]:
         """在指定候选节点中返回达到匹配阈值的 cache 节点。"""
         result = await self.prompt_cache_tree.prefix_match_sampled(
-            request_text[:: self.config.sample_stride],
+            hash_prompt_blocks(request_text, self.config.sample_stride),
             len(request_text),
             self.config.sample_stride,
         )
@@ -192,7 +168,13 @@ class CacheAwarePolicy:
             f"prefill_node={result.prefill_node}"
         )
 
-        if match_rate <= self.config.cache_threshold or result.prefill_node is None:
+        max_age = get_pd_cache_high_priority_max_age_seconds()
+        if (
+            match_rate <= self.config.cache_threshold
+            or result.prefill_node is None
+            or result.last_insert_time is None
+            or not 0 <= time.monotonic() - result.last_insert_time <= max_age
+        ):
             return None, result
 
         for worker in workers:
@@ -219,15 +201,18 @@ class CacheAwarePolicy:
         workers: List[PD_Client_Obj],
         cache_worker: Optional[PD_Client_Obj],
         request_load: int,
+        cached_chars: int,
         loads,
     ) -> PD_Client_Obj:
-        """所有节点都忙时，在 cache 亲和与 prompt 负载之间选择节点。"""
-        least_loaded_worker = min(workers, key=lambda worker: loads[worker.connection_key][1])
+        """Compare predicted work while preserving the existing affinity threshold."""
+        least_loaded_worker = self._select_idle_worker(workers, loads) or min(
+            workers, key=lambda worker: (loads[worker.connection_key][1], loads[worker.connection_key][0])
+        )
         least_projected_load = loads[least_loaded_worker.connection_key][1] + request_load
         cache_projected_load = None
         cache_worker_is_overloaded = False
         if cache_worker is not None:
-            cache_projected_load = loads[cache_worker.connection_key][1] + request_load
+            cache_projected_load = loads[cache_worker.connection_key][1] + max(1, request_load - cached_chars)
             cache_worker_is_overloaded = cache_projected_load > least_projected_load * self.config.balance_rel_threshold
 
         if cache_worker is None or cache_worker_is_overloaded:

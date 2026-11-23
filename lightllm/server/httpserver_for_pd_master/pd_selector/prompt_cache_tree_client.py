@@ -4,6 +4,7 @@ import asyncio
 import os
 import signal
 import threading
+from typing import Optional, Sequence
 
 from rpyc.utils.classic import obtain
 from rpyc.utils.factory import unix_connect
@@ -28,11 +29,15 @@ class LocalPromptCacheTreeClient:
             evict_node_batch=config.evict_node_batch,
         )
 
-    async def prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
+    async def prefix_match_sampled(
+        self, key: Sequence[str], input_char_count: int, sample_stride: int
+    ) -> PromptCacheMatchResult:
         return self.prompt_cache_tree.prefix_match_sampled(key, input_char_count, sample_stride)
 
-    async def insert_sampled(self, key: str, prefill_node: str, sample_stride: int) -> None:
-        self.prompt_cache_tree.insert_sampled(key, prefill_node, sample_stride)
+    async def insert_sampled(
+        self, key: Sequence[str], prefill_node: str, sample_stride: int, prefill_node_epoch: Optional[int] = None
+    ) -> None:
+        self.prompt_cache_tree.insert_sampled(key, prefill_node, sample_stride, prefill_node_epoch)
 
 
 class RemotePromptCacheTreeClient:
@@ -50,7 +55,9 @@ class RemotePromptCacheTreeClient:
             },
         )
 
-    async def prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
+    async def prefix_match_sampled(
+        self, key: Sequence[str], input_char_count: int, sample_stride: int
+    ) -> PromptCacheMatchResult:
         return await self._run_rpc(
             self._prefix_match_sampled,
             key,
@@ -58,12 +65,15 @@ class RemotePromptCacheTreeClient:
             sample_stride,
         )
 
-    async def insert_sampled(self, key: str, prefill_node: str, sample_stride: int) -> None:
+    async def insert_sampled(
+        self, key: Sequence[str], prefill_node: str, sample_stride: int, prefill_node_epoch: Optional[int] = None
+    ) -> None:
         await self._run_rpc(
             self._insert_sampled,
             key,
             prefill_node,
             sample_stride,
+            prefill_node_epoch,
         )
 
     async def _run_rpc(self, operation, *args):
@@ -82,20 +92,25 @@ class RemotePromptCacheTreeClient:
             os.kill(os.getpid(), signal.SIGTERM)
             raise
 
-    def _prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
+    def _prefix_match_sampled(
+        self, key: Sequence[str], input_char_count: int, sample_stride: int
+    ) -> PromptCacheMatchResult:
         with self.lock:
             result = obtain(self.connection.root.prefix_match_sampled(key, input_char_count, sample_stride))
-        prefill_node, matched_char_count, input_char_count, last_insert_time = result
+        prefill_node, matched_char_count, input_char_count, last_insert_time, prefill_node_epoch = result
         return PromptCacheMatchResult(
             prefill_node=prefill_node,
             matched_char_count=matched_char_count,
             input_char_count=input_char_count,
             last_insert_time=last_insert_time,
+            prefill_node_epoch=prefill_node_epoch,
         )
 
-    def _insert_sampled(self, key: str, prefill_node: str, sample_stride: int) -> None:
+    def _insert_sampled(
+        self, key: Sequence[str], prefill_node: str, sample_stride: int, prefill_node_epoch: Optional[int] = None
+    ) -> None:
         with self.lock:
-            obtain(self.connection.root.insert_sampled(key, prefill_node, sample_stride))
+            obtain(self.connection.root.insert_sampled(key, prefill_node, sample_stride, prefill_node_epoch))
 
 
 def create_prompt_cache_tree_client(config):
