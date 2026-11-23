@@ -142,8 +142,6 @@ class EngramEmbeddingWeight(BaseWeightTpl):
         self._create_weight()
 
     def _create_weight(self):
-        from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
-
         weight_bytes = self.part_rows * self.dim
         scale_bytes = self.part_rows * (self.dim // 32)
         logger.info(
@@ -163,19 +161,9 @@ class EngramEmbeddingWeight(BaseWeightTpl):
             self._load_lock = nullcontext()
         self._host_mapping.madvise(mmap.MADV_HUGEPAGE)
         storage = torch.frombuffer(self._host_mapping, dtype=torch.uint8, count=table_bytes)
-        # Prefault the exact-sized mapping before registration; the pinned allocator rounds
-        # each 23.6 GiB table up to 32 GiB, increasing the host-registration footprint.
-        # Read faults are safe when another DP rank has already started populating the table.
-        np.frombuffer(self._host_mapping, dtype=np.uint8)[:: mmap.PAGESIZE].sum()
-        runtime = torch.cuda.cudart()
-        error = runtime.cudaHostRegister(storage.data_ptr(), storage.numel(), 3)
-        if error != 0:
-            raise RuntimeError(f"Registering {self.prefix} host table failed: {error}")
-        self._host_registration = weakref.finalize(self, runtime.cudaHostUnregister, storage.data_ptr())
         self.weight = storage[:weight_bytes].view(torch.float8_e4m3fn).view(self.part_rows, self.dim)
         self.scale = storage[weight_bytes:].view(torch.float8_e8m0fnu).view(self.part_rows, self.dim // 32)
-        self.device_weight = get_accelerator_view_from_cpu_tensor(self.weight)
-        self.device_scale = get_accelerator_view_from_cpu_tensor(self.scale)
+        self._host_registration = None
 
     def load_hf_weights(self, weights):
         for i, (suffix, target) in enumerate((("weight", self.weight), ("scale", self.scale))):
@@ -187,7 +175,21 @@ class EngramEmbeddingWeight(BaseWeightTpl):
                         self.loaded[i] = True
 
     def verify_load(self):
-        return all(self.loaded)
+        if not all(self.loaded):
+            return False
+        if self._host_registration is None:
+            from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+            # The HF loader has populated both regions before pinning their contiguous mapping.
+            runtime = torch.cuda.cudart()
+            address = self.weight.data_ptr()
+            error = runtime.cudaHostRegister(address, self.weight.nbytes + self.scale.nbytes, 3)
+            if error != 0:
+                raise RuntimeError(f"Registering {self.prefix} host table failed: {error}")
+            self._host_registration = weakref.finalize(self, runtime.cudaHostUnregister, address)
+            self.device_weight = get_accelerator_view_from_cpu_tensor(self.weight)
+            self.device_scale = get_accelerator_view_from_cpu_tensor(self.scale)
+        return True
 
     def lookup(self, indices, group):
         indices = indices.contiguous()

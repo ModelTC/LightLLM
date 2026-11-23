@@ -62,8 +62,11 @@ def test_engram_host_embedding_uses_fp8_scales_and_zeroes_other_tp_rows(monkeypa
     embedding = EngramEmbeddingWeight("layers.1.engram.embed", rows=8, dim=64)
     raw = torch.randn(8, 64).to(torch.float8_e4m3fn)
     scale = torch.exp2(torch.randint(-4, 0, (8, 2)).float()).to(torch.float8_e8m0fnu)
-    embedding.load_hf_weights({embedding.prefix + ".weight": raw, embedding.prefix + ".scale": scale})
+    embedding.load_hf_weights({embedding.prefix + ".scale": scale})
+    assert not embedding.verify_load()
+    embedding.load_hf_weights({embedding.prefix + ".weight": raw})
     assert embedding.verify_load()
+    assert embedding.verify_load()  # Rechecking a loaded weight keeps its existing CUDA mapping.
     # Inspect this rank's contribution before the normal TP sum.
     embedding.tp_world_size_ = 1
     ids = torch.tensor([[0, 3, 4, 7]], dtype=torch.int64, device="cuda")
