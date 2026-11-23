@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
 import triton
@@ -9,9 +9,11 @@ from lightllm.common.attention.backend import (
     AttentionBatch,
     AttentionImpl,
     AttentionStepBuilder,
+    StepBuilderContext,
     TensorAllocator,
 )
 from .. import keep_for_cuda_graph
+from ..flashinfer_env import set_flashinfer_envs
 from . import MLADecodeLayerConfig, MLADecodeLayerInputs, MLAPrefillLayerConfig, MLAPrefillLayerInputs
 
 if TYPE_CHECKING:
@@ -25,15 +27,17 @@ class FlashInferMLABuilderConfig:
 
     FlashInfer fixes head counts, dimensions, softmax_scale and dtypes when it plans a step, so a
     step builder serves the layers whose layer configs match these values. Page index p addresses
-    cache slots [p * page_size, (p + 1) * page_size).
+    cache slots [p * page_size, (p + 1) * page_size). Prefill uses qk_nope_head_dim and v_head_dim,
+    decode kv_lora_rank and page_size; a step builder created for one phase leaves the other
+    phase's fields None.
     """
 
     num_heads: int
-    qk_nope_head_dim: int
+    qk_nope_head_dim: Optional[int]
     qk_rope_head_dim: int
-    v_head_dim: int
-    kv_lora_rank: int
-    page_size: int
+    v_head_dim: Optional[int]
+    kv_lora_rank: Optional[int]
+    page_size: Optional[int]
     dtype: torch.dtype
     softmax_scale: float
 
@@ -262,6 +266,28 @@ class FlashInferMLAPrefillBackend(AttentionBackend):
     def get_impl_cls() -> type[FlashInferMLAPrefillImpl]:
         return FlashInferMLAPrefillImpl
 
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: MLAPrefillLayerConfig, ctx: StepBuilderContext
+    ) -> FlashInferMLAPrefillStepBuilder:
+        set_flashinfer_envs()
+        config = FlashInferMLABuilderConfig(
+            num_heads=layer_config.num_heads,
+            qk_nope_head_dim=layer_config.qk_nope_head_dim,
+            qk_rope_head_dim=layer_config.qk_rope_head_dim,
+            v_head_dim=layer_config.v_head_dim,
+            kv_lora_rank=None,
+            page_size=None,
+            dtype=layer_config.dtype,
+            softmax_scale=layer_config.softmax_scale,
+        )
+        return FlashInferMLAPrefillStepBuilder(config, workspace=_workspace(ctx))
+
+    @classmethod
+    def step_builder_key(cls, layer_config: MLAPrefillLayerConfig):
+        # FlashInfer plans with every field but causal, which the impl requires.
+        return layer_config
+
 
 class FlashInferMLADecodeBackend(AttentionBackend):
     @staticmethod
@@ -275,3 +301,40 @@ class FlashInferMLADecodeBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[FlashInferMLADecodeImpl]:
         return FlashInferMLADecodeImpl
+
+    @classmethod
+    def create_step_builder(
+        cls, layer_config: MLADecodeLayerConfig, ctx: StepBuilderContext
+    ) -> FlashInferMLADecodeStepBuilder:
+        set_flashinfer_envs()
+        config = FlashInferMLABuilderConfig(
+            num_heads=layer_config.num_heads,
+            qk_nope_head_dim=None,
+            qk_rope_head_dim=layer_config.qk_rope_head_dim,
+            v_head_dim=None,
+            kv_lora_rank=layer_config.kv_lora_rank,
+            page_size=ctx.page_size,
+            dtype=layer_config.dtype,
+            softmax_scale=layer_config.softmax_scale,
+        )
+        return FlashInferMLADecodeStepBuilder(
+            config,
+            workspace=_workspace(ctx),
+            max_seq_len=ctx.max_seq_len,
+            max_batch_size=ctx.max_cuda_graph_batch_size,
+            device=ctx.device,
+        )
+
+    @classmethod
+    def step_builder_key(cls, layer_config: MLADecodeLayerConfig):
+        # FlashInfer plans with every field but causal, which the impl requires.
+        return layer_config
+
+
+# FlashInfer MLA's workspace has a fixed size, separate from the GQA one (--flashinfer_workspace_size).
+_WORKSPACE_BYTES = 256 * 1024 * 1024
+
+
+def _workspace(ctx: StepBuilderContext) -> Callable[[], torch.Tensor]:
+    # Allocated on first use, so prefill-only and decode-only nodes create it only when needed.
+    return lambda: ctx.get_workspace("flashinfer_mla", _WORKSPACE_BYTES, torch.int8)

@@ -69,6 +69,26 @@ def test_flashinfer_layers_with_different_head_dims_form_separate_groups():
     assert large.group.endswith("#1")
 
 
+@pytest.mark.parametrize("backend, groups", [("flashinfer", 2), ("fa3", 1), ("triton", 1)])
+def test_mla_layers_group_by_what_their_step_builders_plan_with(backend, groups):
+    from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLAPrefillLayerConfig
+
+    def mla(scale):
+        common = dict(num_heads=16, qk_rope_head_dim=64, softmax_scale=scale, dtype=torch.bfloat16)
+        return (
+            MLAPrefillLayerConfig(qk_nope_head_dim=128, v_head_dim=128, **common),
+            MLADecodeLayerConfig(kv_lora_rank=512, **common),
+        )
+
+    att_groups = AttentionGroups(fake_model(llm_prefill_att_backend=[backend], llm_decode_att_backend=[backend]))
+    names = {att_groups.create_attention(*mla(scale)).group for scale in (0.1, 0.1, 0.2)}
+    assert len(names) == groups
+    for group in att_groups._groups.values():
+        for phase, backend_cls in group.backends.items():
+            builder = group.step_builder(phase, att_groups.ctx)
+            assert isinstance(builder, backend_cls.get_step_builder_cls())
+
+
 class Built(SimpleNamespace):
     pass
 
@@ -132,8 +152,8 @@ FakeDecode = fake_backend("fake_decode", sync=True)
 @pytest.fixture
 def fake_family(monkeypatch):
     created.clear()
-    family = {"prefill": {"fake": (f"{__name__}:FakePrefill",)}, "decode": {"fake": (f"{__name__}:FakeDecode",)}}
-    monkeypatch.setitem(selector._REGISTRY, FakeConfig, family)
+    backends = {"prefill": {"fake": (f"{__name__}:FakePrefill",)}, "decode": {"fake": (f"{__name__}:FakeDecode",)}}
+    monkeypatch.setitem(selector._REGISTRY, FakeConfig, selector.Family(backends))
     return AttentionGroups(fake_model(llm_prefill_att_backend=["fake"], llm_decode_att_backend=["fake"]))
 
 
