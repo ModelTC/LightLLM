@@ -131,6 +131,10 @@ class StepBuilderContext:
     # Decode batches carry the shared-prefix groups of diverse sampling
     # (AttentionBatch.b_shared_seq_len and b_shared_radix_node_id).
     diverse_decode: bool = False
+    # prefill_workspace(microbatch_index) returns scratch the model reserved before it sized the
+    # KV cache, for implementations whose prefill needs a fixed workspace (FA3 sparse MLA over
+    # GLM-5's FP8 cache); None when the model reserved none.
+    prefill_workspace: Optional[Callable[[int], Any]] = None
 
 
 class AttentionStepBuilder(ABC, Generic[StepArgs]):

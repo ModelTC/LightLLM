@@ -10,8 +10,17 @@ import torch
 
 flash_mla = pytest.importorskip("flash_mla")
 
-from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
+from lightllm.common.attention.backends.sparse_mla import SWASparseMLALayerConfig
+from lightllm.common.attention.backends.sparse_mla.flashmla_swa import (
+    FlashMLASWADecodeBackend,
+    FlashMLASWAPrefillBackend,
+)
+from lightllm.common.attention.layer import Attention
+from lightllm.common.basemodel import attention_groups
 from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
+from lightllm.models.deepseek_v4 import swa_prefill_workspace
+from lightllm.models.deepseek_v4.config import create_attention_config
+from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
 from lightllm.models.deepseek_v4.swa_prefill_workspace import reserve_swa_prefill_workspace
 
 
@@ -25,7 +34,7 @@ def _tp_env(monkeypatch):
     gc.collect()
 
 
-def test_backend_import_without_vllm():
+def test_sparse_attention_imports_without_vllm():
     script = """
 import importlib.abc
 import sys
@@ -36,12 +45,11 @@ class BlockVllm(importlib.abc.MetaPathFinder):
             raise ModuleNotFoundError('vllm deliberately unavailable')
 
 sys.meta_path.insert(0, BlockVllm())
-from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
 from lightllm.common.attention.backends.sparse_mla import flashmla_swa
 import flash_mla
 assert not any(name == 'vllm' or name.startswith('vllm.') for name in sys.modules)
 """
-    root = Path(__file__).resolve().parents[4]
+    root = Path(__file__).resolve().parents[3]
     env = dict(os.environ, PYTHONPATH=str(root))
     result = subprocess.run([sys.executable, "-c", script], cwd=root, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -49,7 +57,6 @@ assert not any(name == 'vllm' or name.startswith('vllm.') for name in sys.module
 
 @pytest.mark.parametrize("run_mode", ["normal", "prefill", "decode"])
 def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.MonkeyPatch, run_mode: str) -> None:
-    backend_class = attention.DeepseekV4FlashMlaFp8SparseAttBackend
     model = SimpleNamespace(
         args=SimpleNamespace(run_mode=run_mode, enable_prefill_microbatch_overlap=False),
         config=dict(
@@ -67,9 +74,9 @@ def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.Monke
         att_state_role="main",
     )
     monkeypatch.setattr(
-        backend_class.__mro__[1],
+        swa_prefill_workspace,
         "get_gpu_workspace_buffer",
-        staticmethod(lambda key_name, workspace_size, dtype: torch.empty(workspace_size, dtype=dtype)),
+        lambda key_name, workspace_size, dtype: torch.empty(workspace_size, dtype=dtype),
     )
     workspace, capacity = reserve_swa_prefill_workspace(model)
     # D 节点仍执行 HOLD 请求的单 token prefill，但无需保留普通请求的长 prefill 临时区。
@@ -96,16 +103,37 @@ def _pool(page_size, pages):
 
 
 def _case(heads, ratio):
+    """A DSV4 layer whose attention reads the returned caches, with the indexer's selection in params."""
     torch.manual_seed(6014)
     tokens = 5
-    model = type("TestModel", (), {})()
-    model.config = {"num_attention_heads": heads, "compress_ratios": [0, 4, 128]}
-    model.config.update(head_dim=512, qk_rope_head_dim=64, index_head_dim=128, sliding_window=128)
-    model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(3)]
-    model.tp_rank_ = 0
-    model.tp_world_size_ = 1
-    backend = attention.DeepseekV4FlashMlaFp8SparseAttBackend(model=model)
-    q = torch.randn((tokens, backend.padded_q_head_num, 512), dtype=torch.bfloat16, device="cuda") * 0.1
+    model_config = {"num_attention_heads": heads, "compress_ratios": [0, 4, 128]}
+    model_config.update(head_dim=512, qk_rope_head_dim=64, index_head_dim=128, sliding_window=128)
+    config = create_attention_config(model_config=model_config, model_logical_layer_ids=(0, 1, 2))
+    padded_heads = ((heads + 63) // 64) * 64
+    layer = DeepseekV4TransformerLayerInfer.__new__(DeepseekV4TransformerLayerInfer)
+    layer.layer_num_ = 0
+    layer.tp_q_head_num_ = heads
+    layer.flashmla_q_head_num_ = padded_heads
+    layer.head_dim_ = layer.v_head_dim = 512
+    layer.compress_ratio = ratio
+    layer.softmax_scale = 512 ** -0.5
+    layer.alloc_tensor = lambda shape, dtype=None, device=None, **_: torch.empty(shape, dtype=dtype, device=device)
+    layer.swa_cache_config = config.create_swa_config()
+    layer.compressed_cache_config = config.create_compressed_config(compress_ratio=ratio) if ratio else None
+    layer_config = SWASparseMLALayerConfig(
+        num_heads=padded_heads,
+        head_dim_v=512,
+        softmax_scale=layer.softmax_scale,
+        dtype=torch.bfloat16,
+        compress_ratio=ratio,
+        has_attn_sink=True,
+    )
+    layer.attn = Attention(
+        "dsv4",
+        FlashMLASWAPrefillBackend.get_impl_cls()(layer_config),
+        FlashMLASWADecodeBackend.get_impl_cls()(layer_config),
+    )
+    q = torch.randn((tokens, padded_heads, 512), dtype=torch.bfloat16, device="cuda") * 0.1
     q[:, heads:] = 0
     pool, decoded = _pool(128, 2)
     extra, extra_decoded = _pool(64 if ratio == 4 else 2, 3) if ratio else (None, None)
@@ -120,18 +148,35 @@ def _case(heads, ratio):
     )
     attn_sink.load_hf_weights({"attn_sink": torch.linspace(-0.5, 0.5, heads, dtype=torch.float32)})
     params = dict(
-        compress_ratio=ratio,
-        head_dim_v=512,
-        softmax_scale=512 ** -0.5,
+        softmax_scale=layer.softmax_scale,
         swa_indices=indices,
         swa_lengths=lengths,
         attn_sink=attn_sink.weight,
         extra_indices=extra_indices,
         extra_lengths=lengths.clone() if ratio else None,
     )
-    # The attention backend receives all cache inputs through k, without a memory manager.
-    state_info = SimpleNamespace()
-    return backend, state_info, q, (pool, extra), decoded, extra_decoded, params
+    layer_weight = SimpleNamespace(attn_sink_=attn_sink)
+    layer._compress_and_index = lambda q_lora, x, infer_state, layer_weight: infer_state.attn_params
+    return SimpleNamespace(
+        layer=layer,
+        layer_config=layer_config,
+        layer_weight=layer_weight,
+        q=q,
+        packed_kv=(pool, extra),
+        decoded=decoded,
+        extra_decoded=extra_decoded,
+        params=params,
+    )
+
+
+def _infer_state(case, phase, *, params=None, infer_state=None):
+    """An infer state whose step args are freshly built for case's layer in phase, as each step builds them."""
+    backend = FlashMLASWAPrefillBackend if phase == "prefill" else FlashMLASWADecodeBackend
+    infer_state = SimpleNamespace() if infer_state is None else infer_state
+    infer_state.attn_params = case.params if params is None else params
+    infer_state.get_att_kv = lambda logical_layer_id: case.packed_kv
+    infer_state.att_step_args = {"dsv4": backend.create_step_builder(case.layer_config, None).build(None)}
+    return infer_state
 
 
 def _reference(q, decoded, extra_decoded, params, heads):
@@ -155,15 +200,16 @@ def _reference(q, decoded, extra_decoded, params, heads):
 @pytest.mark.parametrize("ratio", [0, 4, 128])
 @pytest.mark.parametrize("provide_out", [False, True])
 def test_prefill_matches_reference_and_preserves_out(monkeypatch, heads, ratio, provide_out):
-    backend, state_info, q, pool, decoded, extra_decoded, params = _case(heads, ratio)
-    state = backend.create_att_prefill_state(state_info)
-    state.init_state()
+    case = _case(heads, ratio)
+    q, params = case.q, case.params
     allocations = []
 
     def alloc_output(shape, **kwargs):
         buffer = torch.empty(shape, **kwargs)
         allocations.append(buffer)
         return buffer
+
+    case.layer.alloc_tensor = alloc_output
 
     kernel = flash_mla.flash_mla_with_kvcache
 
@@ -173,22 +219,19 @@ def test_prefill_matches_reference_and_preserves_out(monkeypatch, heads, ratio, 
 
     monkeypatch.setattr(flash_mla, "flash_mla_with_kvcache", flashmla_with_out)
     out = torch.full_like(q, float("nan")) if provide_out else None
-    actual = state.prefill_att(
-        q,
-        pool,
-        None,
-        att_control=attention.AttControl(nsa_prefill=True, nsa_prefill_dict=params),
-        alloc_func=alloc_output,
-        out=out,
+    actual = case.layer._context_attention_kernel(
+        q, None, None, _infer_state(case, "prefill"), case.layer_weight, out=out
     )
-    assert params["attn_sink"].shape == (backend.padded_q_head_num,)
+    assert params["attn_sink"].shape == (case.layer.flashmla_q_head_num_,)
     assert torch.count_nonzero(params["attn_sink"][heads:]) == 0
     assert len(allocations) == (0 if provide_out else 1)
     output_buffer = out if provide_out else allocations[0]
     assert actual.data_ptr() == output_buffer.data_ptr()
     assert actual.stride() == output_buffer.stride()
     assert actual.shape == (q.shape[0], heads, 512)
-    torch.testing.assert_close(actual, _reference(q, decoded, extra_decoded, params, heads), rtol=0.02, atol=5e-4)
+    torch.testing.assert_close(
+        actual, _reference(q, case.decoded, case.extra_decoded, params, heads), rtol=0.02, atol=5e-4
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -205,28 +248,25 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
     runner = cuda_graph_module.CudaGraph(1, 2, 1, max_batch_size=5, max_len_in_batch=16384)
     cases = []
     for _ in range(2 if overlap else 1):
-        backend, state_info, q, packed_kv, decoded, extra_decoded, params = _case(heads, ratio)
+        case = _case(heads, ratio)
+        q, params = case.q, case.params
         indices = torch.arange(128, dtype=torch.int32, device=q.device)
         params["swa_indices"].copy_(indices)
         params["swa_lengths"].fill_(1)
         if ratio:
             page_size = 64 if ratio == 4 else 2
-            extra, extra_decoded = _pool(page_size, 128 // page_size)
-            packed_kv = (packed_kv[0], extra)
+            extra, case.extra_decoded = _pool(page_size, 128 // page_size)
+            case.packed_kv = (case.packed_kv[0], extra)
             params["extra_indices"].copy_(indices)
             params["extra_lengths"].fill_(1)
+        state_info = _infer_state(case, "decode")
         state_info.input_ids = torch.zeros(q.shape[0], dtype=torch.int64, device=q.device)
-        state_info.q = q
-        state_info.packed_kv = packed_kv
-        state_info.att_control = attention.AttControl(nsa_decode=True, nsa_decode_dict=params)
-        state_info.decode_att_state = backend.create_att_decode_state(state_info)
-        state_info.decode_att_state1 = None
-        state_info.decode_att_state.init_state()
-        cases.append((state_info, decoded, extra_decoded, params))
+        state_info.case = case
+        cases.append((state_info, case.decoded, case.extra_decoded, params))
 
     def decode_func(*states):
         outputs = tuple(
-            state.decode_att_state.decode_att(state.q, state.packed_kv, None, att_control=state.att_control)
+            state.case.layer._token_attention_kernel(state.case.q, None, None, state, state.case.layer_weight)
             for state in states
         )
         return outputs if overlap else outputs[0]
@@ -235,16 +275,16 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
     outputs = runner.capture_decode(decode_func, *(case[0] for case in cases))
     outputs = outputs if overlap else (outputs,)
     for state_info, _, _, _ in cases:
-        state = state_info.decode_att_state
-        eager_meta = state.step_args.sched_meta_by_ratio[ratio]
-        capture_meta = state.step_args.capture_sched_meta_by_ratio[ratio]
+        step_args = state_info.att_step_args["dsv4"]
+        eager_meta = step_args.sched_meta_by_ratio[ratio]
+        capture_meta = step_args.capture_sched_meta_by_ratio[ratio]
         assert eager_meta.tile_scheduler_metadata.data_ptr() != capture_meta.tile_scheduler_metadata.data_ptr()
 
     # Reuse the same graph as lengths grow, shrink, and vary within the batch.
     for lengths in ([128] * 5, [64] * 5, [1] * 5, [1, 64, 65, 127, 128]):
         for index, (state_info, _, _, params) in enumerate(cases):
-            state_info.q.mul_(1.25 + index * 0.1)
-            new_lengths = torch.tensor(lengths, dtype=torch.int32, device=state_info.q.device)
+            state_info.case.q.mul_(1.25 + index * 0.1)
+            new_lengths = torch.tensor(lengths, dtype=torch.int32, device=state_info.case.q.device)
             if index:
                 new_lengths = new_lengths.flip(0)
             params["swa_lengths"].copy_(new_lengths)
@@ -253,28 +293,32 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
         runner.graph[5][0].replay()
 
         for actual, (state_info, decoded, extra_decoded, params) in zip(outputs, cases):
-            assert actual.shape == (state_info.q.shape[0], heads, 512)
-            assert actual.stride(0) == backend.padded_q_head_num * 512
+            q = state_info.case.q
+            assert actual.shape == (q.shape[0], heads, 512)
+            assert actual.stride(0) == state_info.case.layer.flashmla_q_head_num_ * 512
             torch.testing.assert_close(
-                actual, _reference(state_info.q, decoded, extra_decoded, params, heads), rtol=0.02, atol=5e-4
+                actual, _reference(q, decoded, extra_decoded, params, heads), rtol=0.02, atol=5e-4
             )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("heads", [16, 64])
 def test_prefill_out_supports_strided_scratch_buffer(heads):
-    backend, state_info, q, pool, decoded, extra_decoded, params = _case(heads, 4)
-    storage = torch.full((q.shape[0], backend.padded_q_head_num, 1024), float("nan"), dtype=q.dtype, device=q.device)
+    case = _case(heads, 4)
+    q = case.q
+    storage = torch.full(
+        (q.shape[0], case.layer.flashmla_q_head_num_, 1024), float("nan"), dtype=q.dtype, device=q.device
+    )
     out = storage[..., :512]
-    state = backend.create_att_prefill_state(state_info)
-    state.init_state()
-    actual = state.prefill_att(
-        q, pool, None, out=out, att_control=attention.AttControl(nsa_prefill=True, nsa_prefill_dict=params)
+    actual = case.layer._context_attention_kernel(
+        q, None, None, _infer_state(case, "prefill"), case.layer_weight, out=out
     )
     assert actual.data_ptr() == out.data_ptr()
     assert actual.stride() == out.stride()
     assert storage[..., 512:].isnan().all()
-    torch.testing.assert_close(actual, _reference(q, decoded, extra_decoded, params, heads), rtol=0.02, atol=5e-4)
+    torch.testing.assert_close(
+        actual, _reference(q, case.decoded, case.extra_decoded, case.params, heads), rtol=0.02, atol=5e-4
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -294,38 +338,28 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
     )
     monkeypatch.setattr(cuda_graph_module, "get_env_start_args", lambda: args)
     runner = cuda_graph_module.PrefillCudaGraph(decode_cuda_graph=None, tp_world_size=1)
-    backend, _, q, packed_kv, decoded, extra_decoded, params = _case(heads, ratio)
+    case = _case(heads, ratio)
+    layer, layer_weight, q, params = case.layer, case.layer_weight, case.q, case.params
+    decoded, extra_decoded = case.decoded, case.extra_decoded
     indices = torch.arange(128, dtype=torch.int32, device=q.device)
     params["swa_indices"].copy_(indices)
     if ratio:
         page_size = 64 if ratio == 4 else 2
         extra, extra_decoded = _pool(page_size, 128 // page_size)
-        packed_kv = (packed_kv[0], extra)
+        case.packed_kv = (case.packed_kv[0], extra)
         params["extra_indices"].copy_(indices)
-
-    monkeypatch.setattr(DeepseekV4InferStateInfo, "get_att_kv", lambda infer_state, logical_layer_id: packed_kv)
 
     def new_request(length):
         infer_state = DeepseekV4InferStateInfo()
         infer_state.input_ids = torch.zeros(q.shape[0], dtype=torch.int64, device=q.device)
         infer_state.hidden_collector = NoopHiddenCollector()
-        infer_state.attn_params = dict(params, swa_lengths=torch.full_like(params["swa_lengths"], length))
+        attn_params = dict(params, swa_lengths=torch.full_like(params["swa_lengths"], length))
         if ratio:
-            infer_state.attn_params["extra_lengths"] = torch.full_like(params["extra_lengths"], length)
-        infer_state.prefill_att_state = backend.create_att_prefill_state(infer_state)
-        infer_state.prefill_att_state.init_state()
-        return infer_state
+            attn_params["extra_lengths"] = torch.full_like(params["extra_lengths"], length)
+        return _infer_state(case, "prefill", params=attn_params, infer_state=infer_state)
 
     allocations = []
     callback_states = []
-    layer = DeepseekV4TransformerLayerInfer.__new__(DeepseekV4TransformerLayerInfer)
-    layer.tp_q_head_num_ = heads
-    layer.head_dim_ = 512
-    layer.v_head_dim = 512
-    layer.compress_ratio = ratio
-    layer.softmax_scale = params["softmax_scale"]
-    layer.layer_num_ = 0
-    layer_weight = SimpleNamespace(attn_sink_=SimpleNamespace(weight=params["attn_sink"]))
 
     def alloc_output(shape, **kwargs):
         buffer = torch.empty(shape, **kwargs)
@@ -347,7 +381,7 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         att_out = layer._context_attention_wrapper_run(graph_q, inputs[1], inputs[2], infer_state, layer_weight)
         assert att_out.shape == (q.shape[0], heads, 512)
         assert att_out.data_ptr() == allocations[-1].data_ptr()
-        assert att_out.stride(0) == backend.padded_q_head_num * 512
+        assert att_out.stride(0) == layer.flashmla_q_head_num_ * 512
         # A graph segment after attention must read the output filled by the CPU callback.
         return [att_out + 0.125]
 
@@ -361,11 +395,11 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         atol=5e-4,
     )
     assert len(infer_state.prefill_cuda_graph_exe_list) == 3
-    previous_meta = infer_state.prefill_att_state.step_args.sched_meta_by_ratio[ratio]
+    previous_meta = infer_state.att_step_args["dsv4"].sched_meta_by_ratio[ratio]
     for length in (128, 64, 1, 64):
         q.mul_(1.25)
         infer_state = new_request(length)
-        current_meta = infer_state.prefill_att_state.step_args.sched_meta_by_ratio[ratio]
+        current_meta = infer_state.att_step_args["dsv4"].sched_meta_by_ratio[ratio]
         assert current_meta.tile_scheduler_metadata is None
         actual = runner.replay([q, q_lora, x], infer_state)[0]
         assert callback_states[-1] is infer_state

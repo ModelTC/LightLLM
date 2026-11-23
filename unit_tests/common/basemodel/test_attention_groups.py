@@ -89,6 +89,58 @@ def test_mla_layers_group_by_what_their_step_builders_plan_with(backend, groups)
             assert isinstance(builder, backend_cls.get_step_builder_cls())
 
 
+def test_sparse_mla_step_builders_follow_the_layer_selection():
+    from lightllm.common.attention.backends.sparse_mla import SparseMLALayerConfig
+    from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend
+    from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparseDecodeBackend
+
+    ctx = step_builder_context(fake_model())
+
+    def config(**fields):
+        fields = {"num_heads": 64, "kv_lora_rank": 512, "qk_rope_head_dim": 0, "softmax_scale": 0.1, **fields}
+        return SparseMLALayerConfig(dtype=torch.bfloat16, **fields)
+
+    builder = FA3SparseMLADecodeBackend.create_step_builder(config(topk=2048, kpool=4, causal=False), ctx)
+    assert (builder.topk, builder.kpool, builder.causal) == (2048, 4, False)
+    with pytest.raises(ValueError, match="topk"):
+        FA3SparseMLADecodeBackend.create_step_builder(config(), ctx)
+    # 2048 pooled entries plus at most three kpool remainder entries bound the direct decode window.
+    fp8 = dict(kv_cache_format="fp8_group64_e8m0", topk=2048)
+    assert FlashMLASparseDecodeBackend.create_step_builder(config(kpool=4, **fp8), ctx).direct_decode_bound == 2051
+    assert FlashMLASparseDecodeBackend.create_step_builder(config(kpool=1, **fp8), ctx).direct_decode_bound is None
+
+
+def test_fa3_sparse_prefill_reads_the_workspace_the_model_reserved():
+    from lightllm.common.attention.backends.sparse_mla import SparseMLALayerConfig
+    from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLAPrefillBackend
+
+    config = SparseMLALayerConfig(
+        num_heads=64,
+        kv_lora_rank=512,
+        qk_rope_head_dim=0,
+        softmax_scale=0.1,
+        dtype=torch.bfloat16,
+        kv_cache_format="fp8_group64_e8m0",
+    )
+    model = fake_model()
+    with pytest.raises(ValueError, match="prefill workspace"):
+        FA3SparseMLAPrefillBackend.create_step_builder(config, step_builder_context(model))
+    model.attention_prefill_workspaces = [{"region": 0}, {"region": 1}]
+    builder = FA3SparseMLAPrefillBackend.create_step_builder(config, step_builder_context(model))
+    assert builder.workspace(1) == {"region": 1}
+
+
+def test_model_implementation_applies_only_to_full_attention():
+    groups = AttentionGroups(fake_model(llm_prefill_att_backend=["fa3", "flashqla"]))
+    groups.model.att_implementation = "flashmla_sparse"
+    assert groups._requested("prefill", gqa()) == "flashmla_sparse"
+    linear = SimpleNamespace()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(selector, "arg_index", lambda layer_config: 1 if layer_config is linear else 0)
+        assert groups._requested("prefill", linear) == "flashqla"
+        assert groups._requested("decode", linear) == "auto"
+
+
 class Built(SimpleNamespace):
     pass
 

@@ -215,3 +215,27 @@ def test_deepseek2_layers_attend_over_expanded_keys_in_prefill_and_the_latent_ca
     )
     # FlashInfer plans with the layers' softmax scale, which they all share.
     assert layers[0].attn.group == layers[1].attn.group == "flashinfer_mla_prefill+flashinfer_mla_decode"
+
+
+@pytest.mark.parametrize("kv_type, kv_cache_format", [("None", "bf16"), ("fp8kv_dsa", "fp8_ds_mla")])
+def test_deepseek_v32_layers_attend_to_the_indexer_selection(runtime_start_args, kv_type, kv_cache_format):
+    from lightllm.common.attention.backends.sparse_mla import SparseMLALayerConfig
+    from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
+
+    layer = Deepseek3_2TransformerLayerInfer.__new__(Deepseek3_2TransformerLayerInfer)
+    layer.tp_q_head_num_, layer.kv_lora_rank, layer.qk_rope_head_dim = 64, 512, 64
+    layer.softmax_scale, layer.index_topk = 0.1, 2048
+    # Sparse MLA has one implementation name; auto-selection would validate it.
+    model = make_model(None, backend="flashmla_sparse")
+    model.args.llm_kv_type = kv_type
+    layer.init_attention(model)
+    expected = SparseMLALayerConfig(
+        num_heads=64,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        softmax_scale=0.1,
+        dtype=torch.bfloat16,
+        kv_cache_format=kv_cache_format,
+        topk=2048,
+    )
+    assert layer_configs(layer) == (expected, expected)

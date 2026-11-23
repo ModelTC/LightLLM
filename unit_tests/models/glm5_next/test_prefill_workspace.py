@@ -5,7 +5,9 @@ import torch
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.nsa import fp8_glm5_next
+from lightllm.models.glm5_next import prefill_workspace
 from lightllm.models.glm5_next.model import Glm5NextTpPartModel
+from lightllm.models.glm5_next_mtp import model as glm5_next_mtp_model
 from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 from unit_tests.models.glm5_next.test_fp8_kv import _PrefillCase, _make_workspace_backend, _capture_cuda_graph
 
@@ -105,11 +107,17 @@ def test_glm_reserves_prefill_workspace_during_resource_preparation(monkeypatch,
         assert self is model
         calls.append("prepare_states")
 
-    def reserve(cls, prepared_model):
+    workspaces = [{"gathered_kv": object()}]
+
+    def reserve(prepared_model):
         assert prepared_model is model
         calls.append("reserve_workspace")
+        return workspaces
 
     monkeypatch.setattr(TpPartBaseModel, "prepare_attention_states", prepare)
-    monkeypatch.setattr(fp8_glm5_next.Fp8Glm5NextSparseAttBackend, "allocate_prefill_workspaces", classmethod(reserve))
+    monkeypatch.setattr(prefill_workspace, "reserve_fp8_sparse_prefill_workspaces", reserve)
+    monkeypatch.setattr(glm5_next_mtp_model, "reserve_fp8_sparse_prefill_workspaces", reserve)
     model.prepare_attention_states()
     assert calls == (["prepare_states", "reserve_workspace"] if kv_type == "fp8kv_dsa" else ["prepare_states"])
+    # The step builders reach the reserved scratch through the model.
+    assert model.attention_prefill_workspaces is (workspaces if kv_type == "fp8kv_dsa" else None)

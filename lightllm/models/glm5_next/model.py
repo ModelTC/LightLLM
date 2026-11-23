@@ -7,7 +7,6 @@ import torch
 import triton
 
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
@@ -26,6 +25,9 @@ if TYPE_CHECKING:
 
 class Glm5NextTpPartModel(TpPartBaseModel):
     is_hybrid_att_model = True
+    uses_attention_groups = True
+    # Sparse MLA runs FlashMLA and FA3 whatever --llm_*_att_backend names for full attention.
+    att_implementation = "flashmla_sparse"
     pre_and_post_weight_class = Glm5NextPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight
     pre_layer_infer_class = Glm5NextPreLayerInfer
@@ -162,10 +164,10 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         if self.args.llm_kv_type == "fp8kv_dsa" and self.att_state_manager.get_full_attention_states(
             self.att_state_role
         ):
-            from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+            from lightllm.models.glm5_next.prefill_workspace import reserve_fp8_sparse_prefill_workspaces
 
             # Reserve fixed scratch space before the shared KV capacity is profiled.
-            Fp8Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
+            self.attention_prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(self)
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json")) as f:
@@ -194,17 +196,6 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.kv_lora_rank = self.config["kv_lora_rank"]
         self.v_head_dim = self.config.get("v_head_dim", self.qk_nope_head_dim)
         self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
-
-    def _init_att_backend(self):
-        from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import (
-            Fp8Glm5NextSparseAttBackend,
-        )
-
-        backend_class = (
-            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
-        )
-        self.prefill_att_backend = backend_class(model=self)
-        self.decode_att_backend = self.prefill_att_backend
 
     def _init_att_backend1(self):
         from lightllm.common.basemodel.attention.create_linear_utils import (

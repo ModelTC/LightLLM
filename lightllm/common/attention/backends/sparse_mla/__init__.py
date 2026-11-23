@@ -23,6 +23,11 @@ class SparseMLALayerConfig:
     "fp8_ds_mla" (DeepSeek V3.2's packed FP8 rows with fp32 scales per 128 channels and a bf16
     rotary part) or "fp8_group64_e8m0" (GLM-5's packed NoPE rows with E8M0 scales per 64 channels
     followed by indexer fields).
+
+    topk is the indexer's selection width, the number of cache slots a query reads at most; None
+    when the layer's implementations do not need it. An indexer that scores pools of kpool keys
+    selects whole pools within the top-k width plus the newest, partial pool. causal=False lets each
+    query see all of its selected keys, as GLM-5's indexer already restricts them to visible keys.
     """
 
     num_heads: int
@@ -31,9 +36,14 @@ class SparseMLALayerConfig:
     softmax_scale: float
     dtype: torch.dtype
     kv_cache_format: str = "bf16"
+    topk: Optional[int] = None
+    kpool: int = 1
+    causal: bool = True
 
     def __post_init__(self) -> None:
-        require_positive(self, "num_heads", "kv_lora_rank")
+        require_positive(self, "num_heads", "kv_lora_rank", "kpool")
+        if self.topk is not None:
+            require_positive(self, "topk")
         if self.qk_rope_head_dim < 0:
             raise ValueError(f"qk_rope_head_dim must be >= 0, got {self.qk_rope_head_dim}")
         if self.kv_cache_format not in KV_CACHE_FORMATS:

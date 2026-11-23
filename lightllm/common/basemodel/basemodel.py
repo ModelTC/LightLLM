@@ -79,9 +79,12 @@ class TpPartBaseModel:
     # their prefill_att_backend/decode_att_backend slots are then unused.
     uses_attention_groups = False
     att_groups: AttentionGroups = None
-    # The attention implementation (lightllm.common.attention.selector) all its layers use, overriding
-    # --llm_prefill_att_backend/--llm_decode_att_backend; None follows them.
+    # The attention implementation (lightllm.common.attention.selector) its full-attention layers use,
+    # overriding the first value of --llm_prefill_att_backend/--llm_decode_att_backend; None follows them.
     att_implementation: Optional[str] = None
+    # Scratch per prefill microbatch that the model reserves before it sizes the KV cache, for
+    # attention implementations that need it (StepBuilderContext.prefill_workspace); None if none.
+    attention_prefill_workspaces: Optional[list] = None
 
     def __init__(self, kvargs):
         self.args = get_env_start_args()
