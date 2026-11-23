@@ -19,7 +19,12 @@ class SlotPool(StateCacheManager):
 def _module(big_tokens=2048):
     module = object.__new__(transfer.DPKVSharedMoudle)
     module.backend = NS(
-        args=NS(linear_att_hash_page_size=256, linear_att_page_block_num=big_tokens // 256, max_req_total_len=8192),
+        args=NS(
+            page_size=256,
+            linear_att_hash_page_size=256,
+            linear_att_page_block_num=big_tokens // 256,
+            max_req_total_len=8192,
+        ),
         node_gloo_group=object(),
         model=NS(mem_manager=NS(big_page_buffers=SlotPool(8))),
         small_page_buffers=SlotPool(8),
@@ -29,7 +34,7 @@ def _module(big_tokens=2048):
 
 
 @pytest.mark.parametrize("start,end,expected_ids", [(0, 2048, [3]), (1792, 2304, [3, 5]), (2048, 2304, [5])])
-def test_source_exchanges_integer_ids_and_no_checkpoint_payload(monkeypatch, start, end, expected_ids):
+def test_source_exchanges_page_starts_and_checkpoint_ids(monkeypatch, start, end, expected_ids):
     module = _module()
     node = NS(small_page_buffer_idx=5)
     module.backend.radix_cache = NS(
@@ -41,11 +46,9 @@ def test_source_exchanges_integer_ids_and_no_checkpoint_payload(monkeypatch, sta
     monkeypatch.setattr(transfer.dist, "get_global_rank", lambda group, rank: rank)
     monkeypatch.setattr(transfer.dist, "send", lambda tensor, dst, group: sent.append(tensor.clone()))
     module._transfer_dsv4_source_data([], {7: NS(node=node, matched_len=end)}, [[(1, 7, start, end)], []])
-    assert len(sent) == 2
-    assert all(tensor.dtype == torch.int64 for tensor in sent)
-    assert torch.equal(sent[0], torch.arange(start, end))
-    assert sent[1].tolist() == expected_ids
-    assert sent[1].numel() * sent[1].element_size() == len(expected_ids) * 8
+    assert len(sent) == 1
+    assert sent[0].dtype == torch.int64
+    assert sent[0].tolist() == list(range(start, end, 256)) + expected_ids
 
 
 @pytest.mark.parametrize("terminal", [False, True])
@@ -64,10 +67,10 @@ def test_destination_adopts_both_checkpoint_kinds_when_shared_pools_are_full(mon
     task = transfer.TransTask(
         req=req, mem_indexes=torch.arange(512), max_kv_len_dp_rank=1, max_kv_len_mem_manager_index=1
     )
-    payloads = iter([torch.arange(1792, 2304), torch.tensor([3, 5])])
+    packet = torch.tensor([4096, 1024, 3, 5])
     monkeypatch.setattr(transfer.dist, "get_rank", lambda group: 0)
     monkeypatch.setattr(transfer.dist, "get_global_rank", lambda group, rank: rank)
-    monkeypatch.setattr(transfer.dist, "recv", lambda tensor, src, group: tensor.copy_(next(payloads)))
+    monkeypatch.setattr(transfer.dist, "recv", lambda tensor, src, group: tensor.copy_(packet))
     original_to = torch.Tensor.to
 
     def cpu_indexes(tensor, *args, **kwargs):
@@ -83,6 +86,7 @@ def test_destination_adopts_both_checkpoint_kinds_when_shared_pools_are_full(mon
     assert req.tail_small_page_buffer_id == (5 if terminal else None)
     assert big.refs[3] == small.refs[5] == 2
     assert task.max_kv_len_mem_indexes.dtype == torch.int32
+    assert task.max_kv_len_mem_indexes.tolist() == list(range(4096, 4352)) + list(range(1024, 1280))
     big.free_state_cache([3])
     small.free_state_cache([5])
     assert big.refs[3] == small.refs[5] == 1

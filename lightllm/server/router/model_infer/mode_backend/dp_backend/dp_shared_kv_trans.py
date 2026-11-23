@@ -275,8 +275,10 @@ class DPKVSharedMoudle:
         return tasks, transfer_plan
 
     def _transfer_dsv4_source_data(self, trans_tasks, matches, transfer_plan):
-        """Exchange slot indexes and shared checkpoint IDs; checkpoint bytes stay node-local."""
+        """Exchange physical page starts and shared checkpoint IDs."""
         args = self.backend.args
+        page_size = args.page_size
+        page_offsets = torch.arange(page_size, dtype=torch.int32, device="cpu")
         big_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
         big_enabled = big_tokens <= args.max_req_total_len
         group = self.backend.node_gloo_group
@@ -293,28 +295,33 @@ class DPKVSharedMoudle:
                     list(range((start // big_tokens + 1) * big_tokens, end + 1, big_tokens)) if big_enabled else []
                 )
                 needs_small = end % big_tokens != 0 or not big_enabled
+                # Radix checkpoints and destination prefixes end on allocator-page
+                # boundaries. Slots within each physical page are contiguous.
+                assert start % page_size == 0 and end % page_size == 0
+                page_count = (end - start) // page_size
                 if rank == source:
                     match = matches[req_id]
                     assert match.matched_len == end
-                    indexes = (
-                        cache.get_mem_index_value_by_node(match.node, start, end).to(dtype=torch.int64).contiguous()
-                    )
+                    page_starts = cache.get_mem_index_value_by_node(match.node, start, end)[::page_size]
                     big_ids = cache.get_big_page_ids_by_node(match.node)
                     ids = [big_ids[length // big_tokens - 1] for length in big_lengths]
                     if needs_small:
                         assert match.node.small_page_buffer_idx is not None
                         ids.append(match.node.small_page_buffer_idx)
                     peer = dist.get_global_rank(group, destination)
-                    dist.send(indexes, dst=peer, group=group)
-                    dist.send(torch.tensor(ids, dtype=torch.int64), dst=peer, group=group)
+                    packet = torch.cat((page_starts, torch.tensor(ids, dtype=torch.int64, device="cpu")))
+                    dist.send(packet, dst=peer, group=group)
                 else:
                     task = local_by_id[req_id]
                     peer = dist.get_global_rank(group, source)
-                    indexes = torch.empty(end - start, dtype=torch.int64)
-                    ids = torch.empty(len(big_lengths) + int(needs_small), dtype=torch.int64)
-                    dist.recv(indexes, src=peer, group=group)
-                    dist.recv(ids, src=peer, group=group)
-                    task.max_kv_len_mem_indexes = indexes.to(device="cuda", dtype=torch.int32)
+                    packet = torch.empty(
+                        page_count + len(big_lengths) + int(needs_small), dtype=torch.int64, device="cpu"
+                    )
+                    dist.recv(packet, src=peer, group=group)
+                    page_starts = packet[:page_count].to(dtype=torch.int32)
+                    ids = packet[page_count:]
+                    indexes = (page_starts[:, None] + page_offsets).flatten()
+                    task.max_kv_len_mem_indexes = indexes.to(device="cuda")
                     big_ids = ids[: len(big_lengths)].tolist()
                     big_buffers.retain_state_cache(big_ids)
                     task.req.hybrid_len_to_big_page_id.update(zip(big_lengths, big_ids))
