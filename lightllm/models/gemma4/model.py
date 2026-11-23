@@ -25,6 +25,9 @@ if TYPE_CHECKING:
 
 
 class Gemma4TpPartModel(LlamaTpPartModel):
+    # Still on the attention adapters until its sliding-window and image-span layers migrate to AttentionGroups.
+    uses_attention_groups = False
+
     pre_and_post_weight_class = Gemma4PreAndPostLayerWeight
     transformer_weight_class = Gemma4TransformerLayerWeight
 

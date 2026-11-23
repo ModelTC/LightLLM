@@ -67,6 +67,9 @@ class DeepseekV4LayerHiddenCollector(LayerHiddenCollector):
 
 
 class DeepseekV4TpPartModel(LlamaTpPartModel):
+    # Still on the attention adapters until its sparse attention layers migrate to AttentionGroups.
+    uses_attention_groups = False
+
     is_hybrid_att_model = True
     has_vision = False
 

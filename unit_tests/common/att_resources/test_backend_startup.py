@@ -202,6 +202,8 @@ def test_backend_allocates_all_roles_before_warmup(
         model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
         if index:
             model.main_model, model.mtp_previous_draft_models = models[0], models[1:].copy()
+        # The layers are stand-ins, so skip creating their Attention; backend selection is stubbed too.
+        model._init_attention = lambda: None
         model._init_att_backend = lambda model=model: mark_backends(model)
         model._init_att_backend1 = lambda: None
         model._init_hidden_collector = lambda: None

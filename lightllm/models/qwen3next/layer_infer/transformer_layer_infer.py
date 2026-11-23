@@ -258,6 +258,11 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         z = z[:, : self.tp_linear_num_v_heads * self.linear_head_v_dim]
         return o, z.view(-1, self.tp_linear_num_v_heads, self.linear_head_v_dim)
 
+    def init_attention(self, model) -> None:
+        # Linear layers run GDN through the model's attention1 adapters.
+        if not self.is_linear_attention_layer:
+            super().init_attention(model)
+
     def context_attention_forward(
         self,
         input_embdings,

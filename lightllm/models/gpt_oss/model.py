@@ -10,6 +10,9 @@ logger = init_logger(__name__)
 
 
 class GptOssTpPartModel(LlamaTpPartModel):
+    # Still on the attention adapters until its attention-sink layers migrate to AttentionGroups.
+    uses_attention_groups = False
+
     # weight class
     transformer_weight_class = GptOssTransformerLayerWeight
 

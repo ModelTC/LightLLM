@@ -1,5 +1,10 @@
+from typing import Optional
+
+from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+from lightllm.common.attention.layer import Attention
 from lightllm.common.attention_state.full_att import FullAttentionState
 from lightllm.common.basemodel.attention import AttControl
+from lightllm.common.basemodel.attention_groups import attention_is_causal, gqa_kv_quant_fields
 import torch
 import triton
 import torch.distributed as dist
@@ -20,6 +25,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
 
     # Whether prefill attends bidirectionally inside image spans (InferStateInfo.b_image_token_end).
     prefill_image_spans = False
+    # Set by init_attention for models with uses_attention_groups; None keeps the model's adapters.
+    attn: Optional[Attention] = None
 
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
@@ -42,6 +49,39 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self._ffn_norm = partial(LlamaTransformerLayerInfer._ffn_norm, self)
         return
 
+    def _full_att_state(self, att_state_manager, att_state_role: str) -> FullAttentionState:
+        return att_state_manager.get_state(
+            model_role=att_state_role,
+            state_type_filter="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
+
+    def init_attention(self, model) -> None:
+        state = self._full_att_state(model.att_state_manager, model.att_state_role)
+        k, _ = state.get_layer_view(logical_layer_id=self.layer_num_)
+        kv_scales = state.get_layer_kv_scales(self.layer_num_)
+        config = dict(
+            num_heads=self.tp_q_head_num_,
+            num_kv_heads=k.shape[1],
+            head_dim=self.head_dim_,
+            dtype=model.data_type,
+            causal=attention_is_causal(model),
+            **gqa_kv_quant_fields(model.args.llm_kv_type, kv_scales, self.head_dim_),
+        )
+        self.attn = model.att_groups.create_attention(
+            GQALayerConfig(**config, bidirectional_image_spans=self.prefill_image_spans), GQALayerConfig(**config)
+        )
+
+    def _gqa_layer_inputs(self, q: torch.Tensor, state: FullAttentionState) -> GQALayerInputs:
+        k, v = state.get_layer_view(logical_layer_id=self.layer_num_)
+        return GQALayerInputs(
+            q=q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            k_cache=k,
+            v_cache=v,
+            kv_scales=state.get_layer_kv_scales(self.layer_num_),
+        )
+
     def _context_attention_kernel(
         self,
         q: torch.Tensor,
@@ -49,12 +89,16 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ) -> torch.Tensor:
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
+        state = self._full_att_state(infer_state.att_state_manager, infer_state.att_state_role)
+        if self.attn is not None:
+            inputs = self._gqa_layer_inputs(q, state)
+            o_tensor = self.attn.prefill(
+                infer_state.att_step_args[self.attn.group],
+                inputs,
+                out=self.alloc_tensor(inputs.q.shape, dtype=inputs.q.dtype, device=inputs.q.device),
+                alloc_func=self.alloc_tensor,
+            )
+            return o_tensor.view(q.shape)
         _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         o_tensor = infer_state.prefill_att_state.prefill_att(
@@ -77,12 +121,16 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ) -> torch.Tensor:
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
+        state = self._full_att_state(infer_state.att_state_manager, infer_state.att_state_role)
+        if self.attn is not None:
+            inputs = self._gqa_layer_inputs(q, state)
+            o_tensor = self.attn.decode(
+                infer_state.att_step_args[self.attn.group],
+                inputs,
+                out=self.alloc_tensor(inputs.q.shape, dtype=inputs.q.dtype, device=inputs.q.device),
+                alloc_func=self.alloc_tensor,
+            )
+            return o_tensor.view(q.shape)
         _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         o_tensor = infer_state.decode_att_state.decode_att(
