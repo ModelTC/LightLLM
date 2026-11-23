@@ -1,5 +1,6 @@
 """Shared-expert overlap on the EP prefill and decode paths."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 import pytest
 import torch
@@ -62,7 +63,7 @@ def test_ep_ffn_passes_the_shared_expert_callback(monkeypatch):
     assert torch.all(result == 5)
 
 
-def test_decode_runs_shared_expert_between_combine_send_and_recv(monkeypatch):
+def test_decode_runs_shared_expert_between_combine_send_and_recv(monkeypatch, runtime_start_args):
     events = []
     hidden, topk_weights, topk_idx, w1, w2 = _moe_inputs()
     import deep_ep
@@ -72,6 +73,7 @@ def test_decode_runs_shared_expert_between_combine_send_and_recv(monkeypatch):
     monkeypatch.setattr(sync, "get_mk_alignment_for_contiguous_layout", lambda: 128)
     monkeypatch.setattr(sync, "get_deepep_num_max_dispatch_tokens_per_rank_decode", lambda: 16)
     monkeypatch.setattr(sync, "get_ep_num_sms", lambda overlap_with_compute: 8)
+    monkeypatch.setattr(sync, "use_full_deepgemm_sms", lambda *args, **kwargs: nullcontext())
 
     def dispatch(*args, **kwargs):
         events.append("dispatch")
@@ -121,7 +123,7 @@ def test_decode_runs_shared_expert_between_combine_send_and_recv(monkeypatch):
     assert torch.all(result == 5)
 
 
-def test_prefill_overlaps_shared_expert_with_combine(monkeypatch):
+def test_prefill_overlaps_shared_expert_with_combine(monkeypatch, runtime_start_args):
     events = []
     hidden, topk_weights, topk_idx, w1, w2 = _moe_inputs()
     import deep_ep
@@ -131,6 +133,7 @@ def test_prefill_overlaps_shared_expert_with_combine(monkeypatch):
     monkeypatch.setattr(sync, "per_token_group_quant_fp8", lambda *args, **kwargs: (hidden, hidden))
     monkeypatch.setattr(sync, "get_mk_alignment_for_contiguous_layout", lambda: 128)
     monkeypatch.setattr(sync, "get_ep_num_sms", lambda overlap_with_compute: 8)
+    monkeypatch.setattr(sync, "use_full_deepgemm_sms", lambda *args, **kwargs: nullcontext())
 
     def dispatch(*args, **kwargs):
         events.append("dispatch")

@@ -11,7 +11,6 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_ke
     ep_reduce_decode_output,
 )
 from lightllm.utils.envs_utils import (
-    enable_env_vars,
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
     get_env_start_args,
@@ -111,10 +110,10 @@ def fused_experts_impl(
     assert block_size_k == 128, "block_size_k must be 128"
     # With serialized forward submissions and no microbatch overlap, routed GEMMs run
     # after the dispatch wait and before combine, which can overlap the shared expert.
-    use_full_sms = False
-    if previous_event is None and enable_env_vars("LIGHTLLM_EP_SERIAL_GEMM_FULL_SMS"):
-        args = get_env_start_args()
-        use_full_sms = not (args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap)
+    args = get_env_start_args()
+    use_full_sms = previous_event is None and not (
+        args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap
+    )
     # TODO: 共享专家目前整段只和 combine 重叠。可以拆开：dispatch 期间算 up，
     # combine 期间算 down，把两段通信的空闲都盖住。
 
