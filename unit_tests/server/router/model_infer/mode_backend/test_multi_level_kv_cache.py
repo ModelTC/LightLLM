@@ -128,7 +128,14 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
 
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
     module.args = SimpleNamespace(cpu_cache_token_page_size=64, linear_att_hash_page_size=64)
-    module.backend = SimpleNamespace(radix_cache=object())
+    module.backend = SimpleNamespace(
+        radix_cache=object(),
+        model=SimpleNamespace(
+            att_state_manager=SimpleNamespace(
+                get_cpu_cache_operator=lambda: SimpleNamespace(need_stores_bounded_state=False),
+            )
+        ),
+    )
     module.offload_tasks = deque()
     module.need_sync_compute_stream = lambda: False
     offload_calls = []
@@ -247,6 +254,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
 
     resources = SimpleNamespace(
         get_cpu_cache_operator=lambda: SimpleNamespace(
+            need_stores_bounded_state=False,
             get_page_layouts=lambda: {},
             read_req=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: loaded_indexes.extend(
                 token_indices.tolist()
@@ -337,9 +345,17 @@ def test_standard_load_releases_unloaded_pages_immediately(monkeypatch):
     ]
     monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_can_alloc_token_num", lambda: 128)
 
+    def continue_request(req):
+        assert req.cpu_cache_load_task_status.is_finished()
+        assert req.cpu_cache_load_finished_callback is None
+        assert events[:4] == ["lock", ("deref", [4]), ("deref", [7]), "unlock"]
+        events.append("callback")
+
+    for req in reqs:
+        req.cpu_cache_load_finished_callback = continue_request
     module.load_cpu_cache_to_reqs(reqs)
 
-    assert events == ["lock", ("deref", [4]), ("deref", [7]), "unlock"]
+    assert events == ["lock", ("deref", [4]), ("deref", [7]), "unlock", "callback", "callback"]
     assert not getattr(module, "load_tasks", None)
     assert all(req.cpu_cache_load_task_status.is_finished() for req in reqs)
 
@@ -365,6 +381,7 @@ def _load_module(monkeypatch, *, sync, master=True, world=1):
             ),
             att_state_manager=SimpleNamespace(
                 get_cpu_cache_operator=lambda: SimpleNamespace(
+                    need_stores_bounded_state=False,
                     get_page_layouts=lambda: {},
                     read_req=lambda **kwargs: events.append("copy"),
                 ),
@@ -388,7 +405,7 @@ def _load_module(monkeypatch, *, sync, master=True, world=1):
         mm_input_spans=[],
         sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
         shm_req=SimpleNamespace(
-            input_len=256,
+            input_len=257,
             disk_prompt_cache_len=0,
             cpu_prompt_cache_len=0,
             shm_cur_kv_len=0,
@@ -410,6 +427,15 @@ def _load_module(monkeypatch, *, sync, master=True, world=1):
 
 def test_async_load_defers_deref_until_the_event_is_notified(monkeypatch):
     module, req, events = _load_module(monkeypatch, sync=False)
+
+    def continue_request(loaded_req):
+        assert loaded_req is req
+        assert req.cpu_cache_load_task_status.is_finished()
+        assert req.cpu_cache_load_finished_callback is None
+        assert events[-3:] == ["lock", ("deref", [3, 4]), "unlock"]
+        events.append("callback")
+
+    req.cpu_cache_load_finished_callback = continue_request
     current = torch.cuda.current_stream()
     overlap = torch.cuda.Stream()
     waited_by_load = []
@@ -435,9 +461,12 @@ def test_async_load_defers_deref_until_the_event_is_notified(monkeypatch):
     assert events == ["copy"] and len(recorded) == 1 and len(module.load_tasks) == 1
     module.update_cpu_cache_load_task_states()
     assert "deref" not in [item[0] for item in events if isinstance(item, tuple)]
+    assert req.cpu_cache_load_finished_callback is continue_request
     recorded[0].ready = True
     module.update_cpu_cache_load_task_states()
-    assert events[-3:] == ["lock", ("deref", [3, 4]), "unlock"] and not module.load_tasks
+    assert events[-4:] == ["lock", ("deref", [3, 4]), "unlock", "callback"] and not module.load_tasks
+    module.update_cpu_cache_load_task_states()
+    assert events.count("callback") == 1
 
 
 def test_synchronous_backend_waits_overlap_for_the_load_stream(monkeypatch):
@@ -459,9 +488,11 @@ def test_synchronous_backend_waits_overlap_for_the_load_stream(monkeypatch):
     assert events[-3:] == ["lock", ("deref", [3, 4]), "unlock"] and not module.load_tasks
 
 
-def test_async_load_notifies_every_rank_before_deref(monkeypatch):
-    module, req, events = _load_module(monkeypatch, sync=False, world=2)
+@pytest.mark.parametrize("master", [True, False])
+def test_async_load_notifies_every_rank_before_deref(monkeypatch, master):
+    module, req, events = _load_module(monkeypatch, sync=False, world=2, master=master)
     collectives = []
+    req.cpu_cache_load_finished_callback = lambda loaded_req: events.append("callback")
 
     class Event:
         def __init__(self):
@@ -471,6 +502,7 @@ def test_async_load_notifies_every_rank_before_deref(monkeypatch):
             return None
 
         def query(self):
+            assert master, "slave must use the master's completion notification"
             return self.ready
 
     monkeypatch.setattr(multi_level_kv_cache_impl.torch.cuda, "Event", Event)
@@ -479,18 +511,21 @@ def test_async_load_notifies_every_rank_before_deref(monkeypatch):
         "all_reduce",
         lambda tensor, group: collectives.append(("all_reduce", group)),
     )
-    monkeypatch.setattr(
-        multi_level_kv_cache_impl.dist,
-        "broadcast_object_list",
-        lambda data, group, group_src: collectives.append(("broadcast", data[0], group)),
-    )
+
+    def broadcast(data, group, group_src):
+        data[0] = 1
+        collectives.append(("broadcast", data[0], group))
+
+    monkeypatch.setattr(multi_level_kv_cache_impl.dist, "broadcast_object_list", broadcast)
     module.load_cpu_cache_to_reqs([req])
     assert collectives == [("all_reduce", module.init_sync_group)] and not any(
         isinstance(item, tuple) and item[0] == "deref" for item in events
     )
     module.update_cpu_cache_load_task_states()
     assert collectives[1][0] == "broadcast" and collectives[1][1] == 1
-    assert ("deref", [3, 4]) in events
+    assert (("deref", [3, 4]) in events) == master
+    assert events[-1] == "callback"
+    assert req.cpu_cache_load_finished_callback is None
 
 
 def test_fa3_cpu_cache_sync_defaults_off():

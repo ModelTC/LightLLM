@@ -359,6 +359,7 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
             ),
             att_state_manager=SimpleNamespace(
                 get_cpu_cache_operator=lambda: SimpleNamespace(
+                    need_stores_bounded_state=hybrid,
                     get_page_layouts=lambda: {},
                     read_req=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: loaded.append(
                         req.hold_kv_len
@@ -400,5 +401,12 @@ def test_cpu_offload_requires_tail_state(monkeypatch, state_slot, expected):
     monkeypatch.setattr(common.g_infer_context, "is_hybrid_att_model", True)
     module = common.MultiLevelKvCacheModule.__new__(common.MultiLevelKvCacheModule)
     module.args = SimpleNamespace(cpu_cache_token_page_size=512, disable_linear_att_small_page_cpu_cache=False)
+    module.backend = SimpleNamespace(
+        model=SimpleNamespace(
+            att_state_manager=SimpleNamespace(
+                get_cpu_cache_operator=lambda: SimpleNamespace(need_stores_bounded_state=True),
+            )
+        )
+    )
     req = SimpleNamespace(tail_small_page_buffer_id=state_slot)
     assert module._handle_hybrid_att_last_page(req, 2, [512, 960]) == expected

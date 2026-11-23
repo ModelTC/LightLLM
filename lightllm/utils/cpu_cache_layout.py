@@ -56,7 +56,7 @@ def build_cpu_cache_layouts() -> Mapping[str, StateTransferLayout]:
 
     # 阶段三：确认混合模型的页边界一致，由管理器聚合 CPU 联合页布局。
     manager.finish_state_registration()
-    if manager.get_bounded_attention_states():
+    if manager.get_cpu_cache_operator().need_stores_bounded_state:
         assert (
             args.cpu_cache_token_page_size == args.linear_att_hash_page_size * args.linear_att_page_block_num
         ), "hybrid CPU pages must match the large state-page token boundary"

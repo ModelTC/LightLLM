@@ -1,5 +1,6 @@
 import torch.multiprocessing as mp
 from lightllm.server.pd_io_struct import PDChunckedTransTask, PDChunckedTransTaskGroup, PDAbortReq
+from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
@@ -32,29 +33,41 @@ class PDDecodeNode(ChunkedPrefillBackend):
 
         uninit_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=True)
         # 匹配radix cache，并更新一些资源的管理。
-        self._post_init_reqs(uninit_reqs=uninit_reqs)
-
-        # pd nixl 的 decode 节点模式下当前不支持 cpu cache, 未来可能会支持。
-        assert not self.args.enable_cpu_cache
-
         req_ids = [e[0] for e in reqs]
+        if self.args.enable_cpu_cache:
+            # 先完成 CPU 前缀恢复，再续接原有 PD 初始化；miss / 跳过加载也会立即回调。
+            for req_obj in uninit_reqs:
+                req_obj.cpu_cache_load_finished_callback = self._init_pd_receive_tasks
+            self._load_cpu_cache_to_reqs(req_ids)
+        else:
+            for req_obj in uninit_reqs:
+                self._init_pd_receive_tasks(req_obj)
+
         return req_ids
 
-    def _post_init_reqs(self, uninit_reqs: List[InferReq]):
-        """
-        检查请求的 kv len 将可能有问题的请求立即结束掉
-        """
-        if len(uninit_reqs) == 0:
+    def _init_pd_receive_tasks(self, req_obj: InferReq):
+        """前缀恢复完成后，为该请求建立 PD 接收任务，包括完全命中时的握手。"""
+        # 异步加载期间请求可能已被取消或结束，不再提交接收任务。
+        if req_obj.infer_aborted or req_obj.filter_mark:
+            return
+        if req_obj.finish_status.is_finished():
             return
 
-        for req_obj in uninit_reqs:
-            req_obj: InferReq = req_obj  # for easy typing
-            if req_obj.sampling_param.shm_param.pd_prefill_first:
-                self._pf_decode_node_gen_trans_tasks(req_obj=req_obj)
-            else:
-                self._normal_decode_node_gen_trans_tasks(req_obj=req_obj)
+        prefill_first = req_obj.sampling_param.shm_param.pd_prefill_first
+        needs_receive = prefill_first or req_obj.cur_kv_len < req_obj.shm_req.input_len - 1
+        # H2D 可能跨调度轮次。提交前重新检查容量，不能依赖入队时的预算。
+        if needs_receive and req_obj.kv_cache_alloc_need(req_obj.shm_req.input_len) > (
+            g_infer_context.get_can_alloc_token_num()
+        ):
+            req_obj.finished_by_pd_decode_capacity = True
+            req_obj.filter_mark = True
+            logger.info(f"force early finish for PD decode req_id={req_obj.req_id} before KV receive: capacity")
+            return
 
-        return
+        if prefill_first:
+            self._pf_decode_node_gen_trans_tasks(req_obj=req_obj)
+        else:
+            self._normal_decode_node_gen_trans_tasks(req_obj=req_obj)
 
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
         """
@@ -62,10 +75,11 @@ class PDDecodeNode(ChunkedPrefillBackend):
         主要用于在 nixl pd 分离模式下, 由子类继承重载, prefill 和 decode 节点过滤 kv 传输错误，或者 kv
         传输没有完成的请求。
         """
+        # 先确认 CPU load/offload 已完成，再处理 PD 状态，包括取消和资源回收。
+        # DP 后端通过显式转调复用此方法，因此直接调用共同基类。
+        ready_reqs = ModeBackend._filter_not_ready_reqs(self, req_ids)
         ans_list: List[InferReq] = []
-        for request_id in req_ids:
-            req_obj: InferReq = g_infer_context.requests_mapping[request_id]
-
+        for req_obj in ready_reqs:
             # D 节点的请求未结束时会反复进入该过滤逻辑，最多发送 6 次
             # PDAbortReq，既提高 abort 消息被传输层处理的概率，也避免持续重复发送。
             pd_abort_req_send_count = getattr(req_obj, "pd_abort_req_send_count", 0)

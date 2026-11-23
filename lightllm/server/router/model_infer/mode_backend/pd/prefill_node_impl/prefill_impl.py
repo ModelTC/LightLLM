@@ -4,6 +4,7 @@ from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 
 
@@ -25,10 +26,11 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         主要用于在 nixl pd 分离模式下, 由子类继承重载, prefill 和 decode 节点过滤 kv 传输错误，或者 kv
         传输没有完成的请求。
         """
+        # 先确认 CPU load/offload 已完成，再处理 PD 状态，包括取消和资源回收。
+        # DP 后端通过显式转调复用此方法，因此直接调用共同基类。
+        ready_reqs = ModeBackend._filter_not_ready_reqs(self, req_ids)
         ans_list: List[InferReq] = []
-        for request_id in req_ids:
-            req_obj: InferReq = g_infer_context.requests_mapping[request_id]
-
+        for req_obj in ready_reqs:
             # P 节点的推理请求收到 abort 后，主动通知 KV 传输层停止该请求
             # 尚未完成的传输任务，避免只能等待 D 节点上报错误或传输超时。
             pd_abort_req_send_count = getattr(req_obj, "pd_abort_req_send_count", 0)
@@ -40,12 +42,6 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
             ):
                 self.info_queue.put(PDAbortReq(request_id=req_obj.req_id, device_id=req_obj.pd_trans_device_id))
                 req_obj.pd_abort_req_send_count = pd_abort_req_send_count + 1
-
-            # CPU cache 还在搬运时，cur_kv_len 已经记成命中长度，但 KV 还不能读。
-            if self.args.enable_cpu_cache and (
-                req_obj.cpu_cache_load_task_status.is_running() or req_obj.cpu_cache_offload_task_status.is_running()
-            ):
-                continue
 
             prefill_finished = req_obj.shm_req.input_len <= req_obj.cur_kv_len
             if prefill_finished:

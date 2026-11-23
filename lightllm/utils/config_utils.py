@@ -2,7 +2,7 @@ import json
 import os
 from typing import Any, Dict, Optional, List
 from functools import lru_cache
-from .envs_utils import get_env_start_args
+from .envs_utils import get_env_start_args, cpu_cache_need_store_bounded_state
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -34,11 +34,15 @@ def auto_set_cpu_cache_token_page_size(args, is_hybrid_model: bool) -> None:
     if not args.enable_cpu_cache:
         return
 
-    if is_hybrid_model:
+    if is_hybrid_model and cpu_cache_need_store_bounded_state(args):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
     elif args.cpu_cache_token_page_size is None:
-        args.cpu_cache_token_page_size = 256
+        args.cpu_cache_token_page_size = (
+            (256 + args.page_size - 1) // args.page_size * args.page_size
+            if not cpu_cache_need_store_bounded_state(args)
+            else 256
+        )
 
 
 def get_running_max_req_size_per_dp(args) -> int:

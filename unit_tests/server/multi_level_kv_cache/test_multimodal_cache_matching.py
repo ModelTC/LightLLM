@@ -98,6 +98,7 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
             ),
             att_state_manager=SimpleNamespace(
                 get_cpu_cache_operator=lambda: SimpleNamespace(
+                    need_stores_bounded_state=False,
                     get_page_layouts=lambda: {},
                     read_req=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: copied_pages.extend(
                         cpu_page_indices

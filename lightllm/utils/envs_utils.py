@@ -50,6 +50,11 @@ def get_env_start_args():
     return start_args
 
 
+def cpu_cache_need_store_bounded_state(args) -> bool:
+    """是否允许 CPU cache 保存 bounded 快照；Decode 只缓存 full-att KV。"""
+    return args.run_mode != "decode"
+
+
 def enable_thinking_budget() -> bool:
     """Whether thinking budgets are enabled with a configured reasoning parser."""
     args = get_env_start_args()

@@ -569,6 +569,8 @@ class InferReq:
         # 在开启 enable_cpu_cache 的情况下，请求命中 CPU cache 时把 KV 拉回 GPU，
         # 请求结束后再把 KV 卸载回 CPU cache。两个标志分别标记 load 和 offload 任务状态。
         self.cpu_cache_load_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
+        # CPU load 完成后的一次性续接；未发起拷贝时也会调用，执行前先清空绑定。
+        self.cpu_cache_load_finished_callback: Optional[Callable[["InferReq"], None]] = None
         self.cpu_cache_offload_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
         # 元组记录请求完成后的缓存放置路径，其内容和顺序由缓存放置控制器保证合法。
         # 初始值为 GPU，可直接兼容 pause 等尚未经过控制器分配的提前释放路径。

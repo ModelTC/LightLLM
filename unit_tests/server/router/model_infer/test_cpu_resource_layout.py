@@ -77,6 +77,7 @@ def make_runtime(
     model_cls: type[TpPartBaseModel],
     tp: int,
     mtp_layers: int = 0,
+    run_mode: str = "normal",
 ):
     hybrid = kind.startswith("qwen") or kind == "glm"
     config = {
@@ -102,6 +103,7 @@ def make_runtime(
     }
     (tmp_path / "config.json").write_text(json.dumps(config))
     args = StartArgs(
+        run_mode=run_mode,
         model_dir=str(tmp_path),
         tp=tp,
         dp=1,
@@ -199,6 +201,7 @@ def make_runtime(
 
 @pytest.mark.parametrize("kind,encoding,model_cls", CASES)
 @pytest.mark.parametrize("tp", [1, 4])
+@pytest.mark.parametrize("run_mode", ["normal", "decode"])
 def test_cpu_service_describes_main_and_draft_as_distinct_resources(
     runtime: None,
     monkeypatch: pytest.MonkeyPatch,
@@ -207,6 +210,7 @@ def test_cpu_service_describes_main_and_draft_as_distinct_resources(
     encoding: str,
     model_cls: type[TpPartBaseModel],
     tp: int,
+    run_mode: str,
 ):
     meta, managers = make_runtime(
         monkeypatch=monkeypatch,
@@ -216,6 +220,7 @@ def test_cpu_service_describes_main_and_draft_as_distinct_resources(
         model_cls=model_cls,
         tp=tp,
         mtp_layers=2,
+        run_mode=run_mode,
     )
     for resources in managers:
         (main,) = resources.get_full_attention_states("main")
@@ -233,6 +238,7 @@ def test_cpu_service_describes_main_and_draft_as_distinct_resources(
 
 @pytest.mark.parametrize("kind,encoding,model_cls", CASES)
 @pytest.mark.parametrize("tp", [1, 4])
+@pytest.mark.parametrize("run_mode", ["normal", "decode"])
 def test_cpu_service_layout_and_roundtrip_all_encodings(
     runtime: None,
     monkeypatch: pytest.MonkeyPatch,
@@ -242,6 +248,7 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
     encoding: str,
     model_cls: type[TpPartBaseModel],
     tp: int,
+    run_mode: str,
 ):
     meta, managers = make_runtime(
         monkeypatch=monkeypatch,
@@ -250,6 +257,7 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
         encoding=encoding,
         model_cls=model_cls,
         tp=tp,
+        run_mode=run_mode,
     )
     # No byte-size formulas duplicated in the test: check the service's actual
     # meta-device descriptors against every real model's layout.
@@ -267,7 +275,7 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
             if "token" in field.axes:
                 field.tensor.fill_(7)
         kwargs = {}
-        if resources.bounded_att_big_page_allocator is not None:
+        if resources.get_cpu_cache_operator().need_stores_bounded_state:
             linear = main_linear_state(resources)
             linear.conv_state.fill_(3)
             linear.ssm_state.fill_(5)
@@ -300,7 +308,7 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
         for storage_buffer in full_state_test_buffers(full).values():
             storage_buffer[:, 8:16].zero_()
         kwargs = {}
-        if resources.bounded_att_big_page_allocator is not None:
+        if resources.get_cpu_cache_operator().need_stores_bounded_state:
             slot = resources.bounded_att_big_page_allocator.alloc(1)[0]
             kwargs = dict(
                 big_page_slot_ids=[slot],
@@ -319,7 +327,7 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
             layouts=resources.get_cpu_cache_operator().get_page_layouts(),
             **kwargs,
         )
-        if resources.bounded_att_big_page_allocator is not None:
+        if resources.get_cpu_cache_operator().need_stores_bounded_state:
             assert (main_linear_state(resources).conv_state[:, 1] == 3).all()
             assert (main_linear_state(resources).ssm_state[:, 1] == 5).all()
         for name, field in full_state_test_fields(full, full_state_test_buffers(full)).items():
