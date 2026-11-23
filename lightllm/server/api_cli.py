@@ -404,7 +404,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--prefill_queue_strategy",
-        choices=("auto", "default", "promote_shortest", "hrrn"),
+        choices=("auto", "default", "promote_shortest", "hrrn", "hrrn_resume"),
         default="auto",
         help="""Order ready requests before resource allocation.
         Decode requests are identified first, remain in arrival order, and are not reordered by these policies.
@@ -414,7 +414,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         promote_shortest: keep negative-priority requests first in arrival order, then move one
         shortest non-negative-priority prefill request to the front of the normal requests.
         hrrn: order normal prefill requests by token-based highest response ratio next to favor
-        short requests while aging long-waiting requests; negative-priority requests remain first.""",
+        short requests while aging long-waiting requests; negative-priority requests remain first.
+        hrrn_resume: use HRRN with a periodic priority opportunity for an overdue PD prefill continuation.""",
     )
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
     vocab_topk_choices = [2, 8, 16, 32, 64, 128, 256, 512]

@@ -111,7 +111,7 @@ class StartArgs:
     disable_chunked_mm_input: bool = field(default=False)
     # "auto" resolves to hrrn for Prefill nodes and default otherwise.
     prefill_queue_strategy: str = field(
-        default="auto", metadata={"choices": ["auto", "default", "promote_shortest", "hrrn"]}
+        default="auto", metadata={"choices": ["auto", "default", "promote_shortest", "hrrn", "hrrn_resume"]}
     )
     diverse_mode: bool = field(default=False)
     target_vocab_topk_sampling: Optional[int] = field(

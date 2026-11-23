@@ -81,3 +81,37 @@ class HRRNPrefillStrategy(PrefillQueueStrategy):
         normal_reqs.sort(key=hrrn_key)
         high_priority_reqs.extend(normal_reqs)
         return high_priority_reqs
+
+
+class HRRNResumePrefillStrategy(HRRNPrefillStrategy):
+    """Give one overdue PD continuation its original chunk budget ahead of normal HRRN work."""
+
+    def __init__(self, backend):
+        super().__init__(backend)
+        self.next_resume_priority_tokens = 0
+
+    def reorder_prefill(self, prefill_reqs: List["InferReq"]) -> List["InferReq"]:
+        ordered = super().reorder_prefill(prefill_reqs)
+        processed = self.backend.processed_prefill_tokens
+        if processed < self.next_resume_priority_tokens:
+            return ordered
+
+        first_normal = next((index for index, req in enumerate(ordered) if infer_priority(req) >= 0), len(ordered))
+        oldest = min(
+            (
+                (req.pd_last_page_processed_tokens, req.req_id, index)
+                for index, req in enumerate(ordered)
+                if index >= first_normal
+                and req.pd_last_page_processed_tokens is not None
+                and 0 < req.cur_kv_len < req.shm_req.input_len
+            ),
+            default=None,
+        )
+        if oldest is not None:
+            last_page_tokens, _, index = oldest
+            # Measure the gap and the reservation interval in local token work.
+            interval = 4 * self.backend.batch_max_tokens
+            if processed - last_page_tokens >= interval:
+                ordered.insert(first_normal, ordered.pop(index))
+                self.next_resume_priority_tokens = processed + interval
+        return ordered

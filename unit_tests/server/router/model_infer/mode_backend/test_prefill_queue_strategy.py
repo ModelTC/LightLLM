@@ -388,6 +388,35 @@ def test_hrrn_keeps_internal_high_priority_requests_first():
     ]
 
 
+def test_hrrn_resume_promotes_one_published_continuation_per_token_interval():
+    high = req(1, 1024, priority=-1)
+    short = req(2, 512)
+    cached = req(3, 65536, kv_len=8192)
+    older = req(4, 131072, kv_len=8192)
+    newer = req(5, 131072, kv_len=8192)
+    older.pd_last_page_processed_tokens = 0
+    newer.pd_last_page_processed_tokens = 1024
+
+    policy = strategy("hrrn_resume")
+    policy.backend.args.chunked_prefill_size = 8192
+    policy.backend.batch_max_tokens = 8192
+    requests = [short, cached, newer, high, older]
+    policy.reorder(requests, no_decode=True)
+
+    policy.backend.processed_prefill_tokens = 4 * 8192 - 1
+    assert policy.reorder(requests, no_decode=True)[:2] == [high, short]
+    policy.backend.processed_prefill_tokens += 1025
+    assert policy.reorder(requests, no_decode=True)[:3] == [high, older, short]
+
+    # The other continuation is overdue but the next priority opportunity
+    # opens only after the rank advances another four batches' worth of tokens.
+    older.pd_last_page_processed_tokens = policy.backend.processed_prefill_tokens + 8192
+    policy.backend.processed_prefill_tokens += 4 * 8192 - 1
+    assert policy.reorder(requests, no_decode=True)[:2] == [high, short]
+    policy.backend.processed_prefill_tokens += 1
+    assert policy.reorder(requests, no_decode=True)[:3] == [high, newer, short]
+
+
 @pytest.mark.parametrize("name", PREFILL_QUEUE_STRATEGIES)
 def test_decode_requests_stay_left_and_are_not_reordered(name):
     decode_normal = req(1, 5, kv_len=4, priority=0)
@@ -432,7 +461,7 @@ def test_cli_default_and_invalid_strategy():
     parser = make_argument_parser()
     assert parser.parse_args([]).prefill_queue_strategy == "auto"
     assert parser.parse_args(["--prefill_queue_strategy", "auto"]).prefill_queue_strategy == "auto"
-    assert set(PREFILL_QUEUE_STRATEGIES) == {"default", "promote_shortest", "hrrn"}
+    assert set(PREFILL_QUEUE_STRATEGIES) == {"default", "promote_shortest", "hrrn", "hrrn_resume"}
     for name in ("unknown", "none"):
         with pytest.raises(SystemExit):
             parser.parse_args(["--prefill_queue_strategy", name])

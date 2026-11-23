@@ -9,7 +9,7 @@ from lightllm.server.core.objs.start_args_type import StartArgs
     "run_mode, automatic_strategy",
     [("normal", "default"), ("prefill", "hrrn"), ("decode", "default"), ("visual_only", "default")],
 )
-@pytest.mark.parametrize("configured_strategy", [None, "auto", "default", "promote_shortest", "hrrn"])
+@pytest.mark.parametrize("configured_strategy", [None, "auto", "default", "promote_shortest", "hrrn", "hrrn_resume"])
 def test_auto_set_prefill_queue_strategy(run_mode, automatic_strategy, configured_strategy):
     cli_args = ["--run_mode", run_mode]
     if configured_strategy is not None:
