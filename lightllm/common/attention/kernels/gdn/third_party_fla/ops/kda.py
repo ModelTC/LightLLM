@@ -25,7 +25,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .block_pointer import make_block_ptr, load_block, store_block
+from .block_pointer import make_block_ptr, load_block, load_block_zero_padded, store_block
 
 from lightllm.common.triton_utils.autotuner import autotune
 
@@ -942,7 +942,7 @@ def kda_gate_cumsum_fwd_kernel(
         order=(1, 0),
     )
 
-    b_g = load_block(p_g, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+    b_g = load_block_zero_padded(p_g, boundary_check=(0, 1)).to(tl.float32)
     if HAS_BIAS:
         head_dim_indices = head_dim_start + tl.arange(0, head_block_size)
         b_bias = tl.load(
