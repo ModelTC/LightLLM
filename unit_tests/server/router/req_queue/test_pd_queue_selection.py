@@ -160,11 +160,14 @@ def test_cache_aware_prefill_respects_rank_request_slots(
     ]
 
 
+@pytest.mark.parametrize("cold_length", [8, 20])
 @pytest.mark.parametrize(
     "strategy,blocked_priority,expect_bypass",
     [("hrrn_resume", False, True), ("hrrn_resume", True, False), ("default", False, False)],
 )
-def test_pd_prefill_bypasses_a_blocked_head_once_for_a_host_hit(strategy, blocked_priority, expect_bypass):
+def test_pd_prefill_bypasses_a_blocked_head_once_for_a_single_chunk(
+    strategy, blocked_priority, expect_bypass, cold_length
+):
     queue = PDPrefillQueue.__new__(PDPrefillQueue)
     queue.dp_index = 0
     queue.dp_size_in_node = 1
@@ -190,16 +193,18 @@ def test_pd_prefill_bypasses_a_blocked_head_once_for_a_host_hit(strategy, blocke
     running = Batch(1, [req("running", 50)], dp_size_in_node=1)
     small = req("small", 10, high_priority=blocked_priority)
     blocked = req("blocked", 70, high_priority=blocked_priority)
-    cold = req("cold", 20)
+    cold = req("cold", cold_length)
     too_large = req("too_large", 45, host=40)
     warm = req("warm", 20, host=16)
     another_warm = req("another_warm", 20, host=16)
     queue.waiting_req_list = [small, blocked, cold, too_large, warm, another_warm]
 
     batch = queue.generate_new_batch(running)
-    assert batch.reqs == ([small, warm] if expect_bypass else [small])
-    assert queue.waiting_req_list == (
-        [blocked, cold, too_large, another_warm] if expect_bypass else [blocked, cold, too_large, warm, another_warm]
-    )
+    selected = cold if cold_length == 8 else warm
+    assert batch.reqs == ([small, selected] if expect_bypass else [small])
+    expected_waiting = [blocked, cold, too_large, warm, another_warm]
+    if expect_bypass:
+        expected_waiting.remove(selected)
+    assert queue.waiting_req_list == expected_waiting
     assert queue.generate_new_batch(running) is None
     assert queue.generate_new_batch(None).reqs[0] is blocked

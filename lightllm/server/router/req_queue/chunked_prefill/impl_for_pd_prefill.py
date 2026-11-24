@@ -9,7 +9,7 @@ logger = init_logger(__name__)
 
 
 class PDPrefillQueue(BaseQueue):
-    _CACHE_LOOKAHEAD = 8
+    _ADMISSION_LOOKAHEAD = 8
 
     def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
         super().__init__(args, router, dp_index, dp_size_in_node)
@@ -88,12 +88,12 @@ class PDPrefillQueue(BaseQueue):
         ):
             blocked = waiting_queue[first_waiting]
             if not blocked.sample_params.high_priority_request and blocked.request_id != self._bypassed_request_id:
-                # Each blocked head can yield once to a nearby host hit that fits in one chunk.
-                search_end = min(first_waiting + 1 + self._CACHE_LOOKAHEAD, len(waiting_queue))
+                # Each blocked head can yield once to a request with at most one chunk of prefill work.
+                search_end = min(first_waiting + 1 + self._ADMISSION_LOOKAHEAD, len(waiting_queue))
                 for index in range(first_waiting + 1, search_end):
                     req = waiting_queue[index]
                     host_len = req.get_host_cache_match_len()
-                    if host_len == 0 or req.input_len - host_len > self.args.chunked_prefill_size:
+                    if req.input_len - host_len > self.args.chunked_prefill_size:
                         continue
                     ok_insert, _, _ = self._can_add_new_req(req, estimated_peak_token_num, batch_req_num)
                     if ok_insert:
