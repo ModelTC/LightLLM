@@ -59,11 +59,11 @@
 <body>
 <main>
   <header>
-    <div class="eyebrow">LIGHTLLM / 架构设计 / 已实现，同机服务验收通过</div>
+    <div class="eyebrow">LIGHTLLM / 架构设计 / 已实现，功能与性能按场景验收</div>
     <h1>PD Decode 节点 CPU Cache 设计</h1>
     <p><strong>用 D 的本机 CPU 缓存复用 prompt KV，减少跨节点传输，沿用现有 PD 协议。</strong></p>
     <p>核心边界：混合注意力跳过 P 前，KV 与对应运行态必须全部就绪；仅有 CPU KV 命中不够。支持普通多 DP，与 <code>--enable_dp_prompt_cache_fetch</code> 的组合首版互斥。</p>
-    <p class="meta">基线：main · 0c0b0683a · 2026-11-23 UTC<br>本轮代码审查后，784 项相关回归测试通过；223 个不同场景定义，在 8 组同机跨 GPU 服务配置下共 602 项有效结果通过。含两种 PD、P/D CPU 联合启用、完整注意力、DP=2 / TP=2 + CUDA Graph。物理双机网络与性能仍单独验收。</p>
+    <p class="meta">初轮基线：main · 0c0b0683a · 2026-11-23 UTC<br>初轮 223 种定义、602 项有效结果和 784 项回归通过。后续深度复核对照 origin/main · 8863b3f3f：408 种定义，跨配置 766 条结果，718 条严格 token 检查通过、48 条失败；另有 735 项相关回归通过。22 组性能实测表明收益依赖命中路径；MTP 并发逐 token 差异仍未定位。两轮测试分别记录，不合并计数。</p>
   </header>
   <nav aria-label="文档目录">
     <a href="#overview">整体流程</a><a href="#decision">方案与范围</a><a href="#ranges">跳过 P 的条件</a><a href="#lifecycle">异步控制</a><a href="#hybrid">缓存内容</a><a href="#compatibility">兼容与 DP shared</a><a href="#failures">异常回收</a><a href="#validation">验收</a><a href="#evidence">基线问题</a><a href="#changes">代码改动</a><a href="#sources">代码依据</a>
@@ -287,7 +287,7 @@
         <tr><td>prompt logprobs / diverse</td><td>保持现有跳过、主请求匹配 / 写回及各角色功能校验，不扩大已有能力。</td></tr>
         <tr><td>多模态</td><td>D 不重新编码，使用 P 提供的 prompt token IDs 构建 CPU 缓存哈希；当前两种 PD Master 均向 D 传递空多模态参数。加载层仅根据已有的 <code>mm_input_spans</code> 裁剪恢复终点，空 spans 不触发裁剪；尚无“多模态信息不足时自动跳过 CPU 恢复”的判断，多模态组合仍需单独验证。</td></tr>
         <tr><td>磁盘</td><td>沿用原目录规则：未配置时使用含服务名的临时目录，显式配置时直接使用指定目录。不新增 Decode 专用名称或子目录。</td></tr>
-        <tr><td>load 阈值</td><td>保留 <code>need_token_num≥128</code>、<code>input_len≥256</code> 和容量判断；它们是性能策略。沿用原统计口径；跳过加载仍计数、GPU / disk 重叠计数的问题已留 TODO，另行修复。</td></tr>
+        <tr><td>load 阈值</td><td>Decode 默认 <code>need_token_num≥2048</code>，可用 <code>LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS</code> 设置正整数阈值，Normal / Prefill 固定 128。变量在启动 D 前设置，修改后重启；比较的是扣除 GPU 前缀后的新增 token 数。<code>input_len≥256</code> 和容量判断不变。沿用原统计口径；跳过加载仍计数、GPU / disk 重叠计数的问题已留 TODO，另行修复。</td></tr>
         <tr><td>匹配超时</td><td>现有 <code>0.5s</code> 仅检查入队等待，不覆盖处理中的 READY 轮询。保留服务架构，验收等待中取消 / 异常；若发现无界等待再修该生命周期。</td></tr>
       </tbody>
     </table></div>
@@ -376,18 +376,60 @@
     </table></div>
 
     <div class="callout">
-      <strong>本次验证范围</strong>
+      <strong>初轮验证范围（不代表后续深度复核全部通过）</strong>
       <p>已验证 D 的实际 CPU 写回、清空 GPU 数据后恢复、main/draft KV 一致、bounded 运行态不被修改，以及整页回退和页面引用归还。补充了单 DP / 多 DP 的任务交接、取消、容量不足、失败回收与启动互斥测试；Normal/P 联合页及 TP 分片布局继续回归。</p>
       <p>本轮 Hybrid 普通 PD 与 Prefill-first 各 222/222；P/D 同时开启 CPU cache 的两种模式各 27/27；完整注意力的两种模式、DP=2 + Graph、TP=2 + Graph 各 26/26，共 602 项有效结果通过。P 侧在 GPU 前缀淘汰后从 CPU 恢复 1024 token，D 同时复用 768 token，输出与独立基线一致；P/D CPU 引用均归零。</p>
       <p>首次 6 项测试预期错误均保留原始记录，修正后定向重跑 18/18 通过；未将首次失败改写为首次通过。测试启动器在启动失败时遗留子进程的问题已修复并进行故障清理验证。详见<a href="../../../../test.md">本轮审查、完整场景索引与结果</a>，其中包含各配置的原始服务测试证据链接。</p>
-      <p>本轮是真实权重、独立 P/D/基线服务、同机跨 GPU NCCL 的功能验证；跨物理主机、NIXL、MTP 真服务、disk 真落盘、量化 KV 真服务、adaptive 切换、微批 overlap 和性能仍需单独验收。相应单测结果不能替代服务验收。历史 HTTP 错误回归曾在未修改基线复现流式 400 的异常组包装问题，未纳入本次修复。</p>
+      <p>初轮是真实权重、独立 P/D/基线服务、同机跨 GPU NCCL 的功能验证，没有用其耗时作性能结论。后续已补充 MTP 真服务及下述性能对照；跨物理主机、NIXL、disk 真落盘、量化 KV 真服务、adaptive 切换和微批 overlap 仍需单独验收。相应单测结果不能替代服务验收。历史 HTTP 错误回归曾在未修改基线复现流式 400 的异常组包装问题，未纳入本次修复。</p>
     </div>
+    <h3>深度复核：精度差异的含义与 TODO</h3>
+    <p>后续在固定贪心采样下执行了 408 种场景定义，跨 Hybrid、完整注意力、Prefill-first、MTP 和 DP2 共得到 766 条记录，其中 718 条严格通过、48 条失败。48 条里有 45 条是三种 PD 输出一致但与 Normal 不同，其余 3 条分别涉及 Hybrid 批量/串行差异、完整注意力的完整命中路径和 MTP 并发。原始失败保留，不因后续解释而改写为通过。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>现象</th><th>确认到的范围</th><th>处理</th></tr></thead>
+      <tbody>
+        <tr><td>P 首 token 漏计 repetition/frequency/presence 输出计数</td><td>已确认的原有采样语义问题。冷请求由 P 产生首 token，完整命中可能由 D 产生，计数历史因此不同；原版也存在。隔离补齐计数后，8 个强惩罚案例的冷/热路径均与 Normal 一致。</td><td>按当前约定列为低优先级 TODO，仅在 <code>base_backend.py</code> 接收首 token 处标记，本轮不修改采样逻辑。未测整体任务准确率，不能由这 8 个定向案例推算全局精度损失。</td></tr>
+        <tr><td>完整命中时部分 token 不同</td><td>9 条冷/热控制中，新增 CPU 路径与原版 GPU 完整命中路径均逐 token 一致；无缓存路径与它们仍可能不同。该差异可由原有执行路径复现，未确认新增 CPU KV 损坏。</td><td>区分 KV 内容正确性、采样历史和执行路径数值差异；保留严格失败，不把答案相同但格式不同等同于逐 token 通过。</td></tr>
+        <tr><td>MTP 并发 8、混合输入长度存在差异</td><td>初轮关闭功能版本与 origin 不同；新服务复测首个冷轮改为开启版本与 origin 不同，后续还出现 Normal 批量/串行差异，另两轮全部一致。冷轮开启版本的差异输出，在下一轮无 CPU cache 的 Normal 中复现，token 和 logprob 均完全相同；差异不局限于新 CPU 路径。批处理数值敏感是推测，尚未锁定根因。</td><td>保留为待定位的一致性问题；需固定实际批次并获取第一处差异 logits / MTP 验证信息。不能据此认定整体任务准确率下降，也不能宣布严格精度通过。</td></tr>
+      </tbody>
+    </table></div>
+    <p>这里的“精度检查”是逐 token 一致性和 logprob 对照，不是任务准确率或困惑度评估。现有证据确认了采样计数缺陷与输出不一致，但没有确认本 PR 新增 CPU KV 存储/恢复精度损坏。详见 <a href="../../../../artifacts/pd_decode_cpu_cache_deep_review_20261123/review_report.html">完整复核报告</a>、<a href="../../../../artifacts/pd_decode_cpu_cache_deep_review_20261123/hybrid_mtp_batch_probe/results.json">MTP 四轮复测</a>；原始数据位于本地 artifacts，仓库未跟踪这些文件。</p>
     <h3>性能评估</h3>
     <p>通常节省 <code>L-G</code> 个网络 KV token，但要单算零长度分支、页开销和 hybrid 运行态；整页 CPU 复制也可能覆盖部分 GPU 共享前缀。</p>
-    <pre><code>采用条件：CPU 匹配等待 + H2D + 调度延迟 &lt; 可省下的 PD 网络 / 页处理时间
+    <pre><code>采用条件：额外匹配 / 控制面等待 + H2D + 调度延迟
+          &lt; 可省下的 PD 传输 / 页处理时间 + 确实能够省下的 P 计算时间
 记录：实际新增复用 token、H2D / D2H 字节与耗时、P→D 字节与任务数、
       PD 等待、TTFT、TPOT、吞吐、引用和显存余量。</code></pre>
-    <p>D 的 CPU 命中减少的是 P→D 传输；P 能否少算取决于 P 自己的缓存，不能把传输缺口直接当成 P 的计算范围。CPU 命中未必降低 TTFT，Prefill-first 也不会自动省掉 P 的计算。先验证正确性和回收，再按实测调整阈值。</p>
+    <p>普通 PD 中，完整注意力若在 D 恢复到 <code>N−1</code>，握手后可以直接跳过 P，此时确实省下 P 计算；其余路径 P 的计算量取决于 P 自己的缓存，不能把 D 的传输缺口当成 P 的计算范围。Hybrid 的 D CPU 页只有 KV，必须保留运行态恢复；Prefill-first 的 P 已先完成计算，也不会自动省掉 P 的计算。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>同机 H200 实测场景</th><th>当前开 / 当前关 / origin 的 TTFT</th><th>解释边界</th></tr></thead>
+      <tbody>
+        <tr><td>Hybrid 热前缀 4098 输入、16 输出，Graph 关闭</td><td>110.5 / 88.4 / 89.5 ms</td><td>P 的 GPU 已命中 4096，D 新增 CPU 4096、GPU 0。仍需 P 与运行态传输；相对 origin TTFT 增加 23.4%。</td></tr>
+        <tr><td>Hybrid 同类热前缀，Graph 开启并交换 GPU 映射</td><td>122.5 / 80.1 / 81.1 ms</td><td>相对 origin 增加 51.1%。这是另一配置的观测，不能据两组差值认定 Graph 导致 H2D 变慢。</td></tr>
+        <tr><td>完整注意力、GPU 自然淘汰、CPU 覆盖 N−1（4097 输入、4 输出）</td><td>145.6 / 230.1 / 231.8 ms</td><td>三个 arm 均启用 GPU cache，只有 CPU arm 可跳 P；TTFT 降低 37.2%。GPU KV 8192，四前缀工作集约 16.4k，CPU 4GiB。仅证明该短输出条件下的收益。</td></tr>
+        <tr><td>同一淘汰配置，CPU 部分命中（4098 输入、4 输出）</td><td>255.4 / 234.7 / 241.6 ms</td><td>仍需 P，TTFT 点估计增加 5.7%，置信区间跨越无差异值；冷请求接近 origin。</td></tr>
+      </tbody>
+    </table></div>
+    <p>以上来自当前开/关 CPU 与固定 origin/main <code>8863b3f3f</code> 的配对测试。22 个有效组、1053 个测量请求，随机轮换 arm 顺序，每组先丢弃两轮预热；另一个完整命中组未通过 token 门禁，未纳入性能结论。没有跨物理主机或生产饱和吞吐数据。</p>
+    <h3>变慢原因：已确认路径与待测分项</h3>
+    <ol>
+      <li><strong>CPU 恢复位于普通 PD 的串行关键路径。</strong>D 在 <code>load_cpu_cache_to_reqs()</code> 完成后才通过回调提交接收任务；<code>pd_normal_master.py</code> 等待 upkv 后才把 Decode 信息发给 P，P 的 HTTP 请求在此之前尚未进入本地推理。因此对仍需 P 的路径，CPU 匹配、加载和完成轮询先于 P 计算，而不是与它重叠。</li>
+      <li><strong>冷热请求都会增加控制面开销。</strong>D 的 HTTP 请求先进入多级缓存进程及其线程池，再发 Router；<code>MultiLevelKVCacheManager.task_loop()</code> 空闲时 sleep 5ms，接收和完成转发均可能遇到轮询相位等待；共享页匹配、加/减引用也有锁和对象开销。不能把 5ms 当作整条额外路径的准确耗时或上限。</li>
+      <li><strong>token 阈值没有自动估算实际收益。</strong>上述实测使用新增 KV≥128、输入≥256 且容量足够的门槛。Decode 现可通过 <code>LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS</code> 手动调整新增 KV 阈值，默认改为 2048，其他角色固定 128；这尚未比较本机 CPU→GPU 与 P→D 的有效速度、页任务开销，也没有区分能否省掉 P。Hybrid 热组 P 已有 4096-token 前缀，只需补末尾少量 token 与运行态，CPU 命中未节省这些工作；4096 token 的本模型 full-att KV 约为 48MiB，还需先从主存恢复。本机 GPU 两两拓扑为 NV18，原本的同机 GPU→GPU 传输成本可能较低，不能直接沿用跨机网络的收益预期。</li>
+      <li><strong>主要观测是首 token 固定开销，并非已证明 decode 算力大幅降低。</strong>Hybrid Graph 关闭热组开/关的 TPOT 为 20.005 / 20.025ms；Graph 开启组为 5.983 / 5.704ms。短输出的请求级 TPS 容易被更长 TTFT 拉低。D2H、逐请求索引上传、事件和页元数据也可能影响下一请求和资源释放，但尚未分项剖析其贡献。</li>
+    </ol>
+    <p>这些测试使用 Triton 异步 CPU IO，日志确认等待 recorded event，不是 FA3 的强制计算流同步路径。CPU-only 匹配只返回 ready 页，因此代码中为磁盘等页面保留的 10ms ready 轮询不能直接算作此次热请求慢因。GPU0–3 与 GPU4–7 分别靠近 NUMA0/1，CPU 页实际归属和绑核尚未测量；交换 GPU 不能消除主存位置这个变量。当前没有阶段级 CUDA event/控制面耗时数据，不能把测得的额外 22–42ms 全部归因于 H2D 或某个 sleep。</p>
+    <h3>优化方案（待实现与验证）</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>顺序</th><th>方案与入口</th><th>验收与边界</th></tr></thead>
+      <tbody>
+        <tr><td>1：补可观测性</td><td>在 HTTP→匹配→Router、匹配队列/锁、实际 H2D 提交与 CUDA 完成、完成事件被调度观察、握手、P 计算及传输、首 token 处记录分段时间；区分实际复制字节与逻辑命中。异步采样记录 CUDA event，不在热路径全局 synchronize。</td><td>同机/跨机、冷/热/部分/全命中、Graph、不同并发分别报告 p50/p95；先定位固定控制面与字节相关开销，避免凭总 TTFT 调 kernel。</td></tr>
+        <tr><td>2：减少匹配转发等待</td><td>将多级缓存进程的 5ms 空轮询改为带工作线程完成通知的事件驱动 poll，合批发送完成队列；空 hash / 不可缓存请求增加不匹配快路径。GPU 已覆盖或 miss 时直接归还引用并回调，将 load stream 的创建和 wait 延后至确实需要拷贝。socket 仍由所属线程操作，不简单在 worker 跨线程发送。</td><td>冷请求不需要 H2D，也应降低额外延迟；已匹配页的引用必须归还，保留取消、超时和队列背压。CPU-only 已只返回 ready 页，不需误删磁盘等待。</td></tr>
+        <tr><td>3：按收益决定加载</td><td>在 <code>load_cpu_cache_to_reqs()</code> 分支用实际新增字节、PD 页任务数、历史有效 H2D/PD 耗时估算净收益，取代仅靠手动 token 阈值；普通 PD 的完整注意力 N−1 可加入“免 P”收益，Hybrid 与 Prefill-first 不加入。净收益不足时不加载，立即归还 CPU 引用并续接原 PD 路径。</td><td>优先消除同机部分命中负收益，保留 GPU 淘汰后的完整命中收益。D 当前没有 P 的精确命中/排队信息，不能假装已知 P 计算节省量；先用保守估计和历史分组数据，再考虑元数据扩展。</td></tr>
+        <tr><td>4：减少搬运与写回固定开销</td><td>评估共享 page-index Tensor、请求合批与连续区域拷贝；避免所有页已 ready 时仍准备多余索引/事件。记录 CPU 页 NUMA 归属，评估与 D GPU 对齐的绑核和内存首次触页。结合放置策略评估低复用 cold 写回，避免无收益的 D2H 和回收等待。</td><td>跨 State/TP 的布局和副本完成协议保持一致；不能因部分页已 ready 而错位，也不能提前释放 GPU token。GPU 前缀与 CPU 页重叠只能在增加正确偏移/掩码后省略，不能直接裁短索引列表。</td></tr>
+        <tr><td>5：P 与 D 准备重叠</td><td>对必须执行 P 的负载先评估已有 Prefill-first 模式；若普通 PD 仍需重叠，再设计提前 P 计算、延后传输的协议与资源预算。</td><td>这属于协议级方案，不能在 CPU KV 未就绪时提前报告 ready_kv_len 或握手；需重做取消、容量与运行态恢复验收。Prefill-first 的首 token 来自 P，性能口径需单独比较。</td></tr>
+      </tbody>
+    </table></div>
+    <p>后续仅增加 Decode 专用的加载阈值环境变量，采样计数仍保留 TODO，上述自动收益估算与其他性能方案尚未实现。已有功能开关仍按工作负载选择；在阶段数据和收益门槛落地前，不承诺所有命中都能降低延迟。</p>
   </section>
 
   <section id="evidence">

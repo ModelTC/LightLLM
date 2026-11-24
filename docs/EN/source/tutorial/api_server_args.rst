@@ -658,8 +658,14 @@ Performance Optimization Parameters
     (small page size is ``linear_att_hash_page_size``) becomes dominant.
     Under high load, limited small-page capacity plus internal LRU eviction can reduce cache hit rate.
 
-    When ``--enable_cpu_cache`` is enabled, CPU cache page size is forced to
-    ``linear_att_page_block_num * linear_att_hash_page_size`` to satisfy internal reuse constraints.
+    For hybrid models in the Normal / Prefill roles, enabling ``--enable_cpu_cache`` stores
+    full-attention KV together with bounded-attention state checkpoints. CPU page size is forced to
+    ``linear_att_page_block_num * linear_att_hash_page_size`` to align with those checkpoints.
+    PD Decode CPU pages store full-attention KV without linear-attention state checkpoints.
+    Their size is configured independently with ``--cpu_cache_token_page_size`` and must be divisible
+    by ``--page_size``. If unspecified, it defaults to at least 256, rounded up to a multiple of ``--page_size``.
+    A hybrid CPU KV hit cannot replace runtime state recovery at the same position;
+    a complete CPU hit alone must still preserve the recovery path through P.
 
 .. option:: --linear_att_cache_size
 

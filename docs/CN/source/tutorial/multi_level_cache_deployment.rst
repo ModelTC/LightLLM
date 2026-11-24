@@ -117,6 +117,7 @@ CPU 缓存参数
 
 - ``--cache_placement_strategy adaptive``: **缓存放置策略**，默认使用自适应分层；如需保持原有的 GPU + CPU 逐层备份行为，设置为 ``legacy``
 - ``LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO=0.8``: **GPU 容量估算比例**，adaptive 默认使用物理 GPU token 容量的 ``0.8`` 进行放置估算，合法范围为 ``(0, 1]``
+- ``LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS=2048``: **Decode CPU 加载阈值**，仅在 ``run_mode=decode`` 时生效，默认 ``2048``，须为正整数。比较的是 CPU 匹配长度减去已有 GPU 前缀后的新增 token 数；达到阈值才考虑加载。Normal / Prefill 固定使用 ``128``，不读取该变量。输入长度至少 256 和剩余 GPU 容量检查仍然生效。可在启动 D 前设置，例如 ``LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS=1024``；修改后需重启服务。该变量用于手动调优，不会自动估算传输收益。
 
 **性能优化建议:**
 

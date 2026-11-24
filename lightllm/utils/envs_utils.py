@@ -306,6 +306,17 @@ def get_disk_cache_prompt_limit_length():
     return int(os.getenv("LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH", 2048))
 
 
+@lru_cache(maxsize=None)
+def get_cpu_cache_min_load_tokens(run_mode: str) -> int:
+    """Decode 默认加载阈值为 2048，可通过环境变量调整；其他角色固定使用 128。"""
+    if run_mode != "decode":
+        return 128
+    threshold = int(os.getenv("LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS", "2048"))
+    if threshold <= 0:
+        raise ValueError("LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS must be a positive integer")
+    return threshold
+
+
 def get_cache_placement_gpu_capacity_ratio() -> float:
     ratio = float(os.getenv("LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO", 0.8))
     assert 0 < ratio <= 1

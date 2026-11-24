@@ -12,6 +12,7 @@ from lightllm.server.multi_level_kv_cache import (
 from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as multi_level_kv_cache_impl
 from lightllm.server.router.model_infer.infer_batch import InferenceContext
+from lightllm.utils.envs_utils import get_cpu_cache_min_load_tokens
 
 
 def test_running_cpu_cache_tasks_are_not_ready(monkeypatch):
@@ -276,7 +277,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     )
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
     module.load_tasks = deque()
-    module.args = SimpleNamespace(page_size=4, cpu_cache_token_page_size=132)
+    module.args = SimpleNamespace(run_mode="normal", page_size=4, cpu_cache_token_page_size=132)
     module.backend = backend
     module.init_sync_group = object()
     module.need_sync_compute_stream = lambda: False
@@ -318,6 +319,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
 
 def test_standard_load_releases_unloaded_pages_immediately(monkeypatch):
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.args = SimpleNamespace(run_mode="normal")
     module.backend = SimpleNamespace(is_master_in_dp=True, dp_world_size=1)
     module.init_sync_group = object()
     module.need_sync_compute_stream = lambda: False
@@ -368,7 +370,7 @@ def _load_module(monkeypatch, *, sync, master=True, world=1):
         return torch.arange(req.cur_kv_len, end, dtype=torch.int32)
 
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
-    module.args = SimpleNamespace(page_size=4, cpu_cache_token_page_size=128)
+    module.args = SimpleNamespace(run_mode="normal", page_size=4, cpu_cache_token_page_size=128)
     module.backend = SimpleNamespace(
         is_master_in_dp=master,
         dp_world_size=world,
@@ -423,6 +425,65 @@ def _load_module(monkeypatch, *, sync, master=True, world=1):
     monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: events.append("barrier"))
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
     return module, req, events
+
+
+@pytest.mark.parametrize(
+    "run_mode,configured,gpu_prefix,expected_load",
+    [
+        ("decode", None, 0, False),
+        ("decode", "256", 0, True),
+        ("decode", "257", 0, False),
+        ("decode", "512", 0, False),
+        ("decode", "256", 128, False),
+        ("decode", "128", 128, True),
+        ("decode", "64", 192, True),
+        ("decode", "65", 192, False),
+        ("normal", "64", 192, False),
+        ("normal", "512", 128, True),
+        ("prefill", "512", 128, True),
+        ("normal", "invalid", 0, True),
+        ("prefill", "0", 0, True),
+    ],
+)
+def test_cpu_load_threshold_is_configurable_only_on_decode(
+    monkeypatch, run_mode, configured, gpu_prefix, expected_load
+):
+    module, req, events = _load_module(monkeypatch, sync=False)
+    module.args.run_mode = run_mode
+    req.cur_kv_len = req.hold_kv_len = gpu_prefix
+    if configured is None:
+        monkeypatch.delenv("LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS", raising=False)
+    else:
+        monkeypatch.setenv("LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS", configured)
+    get_cpu_cache_min_load_tokens.cache_clear()
+    callbacks = []
+    req.cpu_cache_load_finished_callback = callbacks.append
+    try:
+        module.load_cpu_cache_to_reqs([req])
+        assert ("copy" in events) == expected_load
+        assert req.cur_kv_len == (256 if expected_load else gpu_prefix)
+        if expected_load:
+            assert req.cpu_cache_load_task_status.is_running()
+            assert callbacks == []
+            assert not any(isinstance(event, tuple) and event[0] == "deref" for event in events)
+        else:
+            assert req.cpu_cache_load_task_status.is_finished()
+            assert callbacks == [req]
+            assert ("deref", [3, 4]) in events
+            assert not module.load_tasks
+    finally:
+        get_cpu_cache_min_load_tokens.cache_clear()
+
+
+@pytest.mark.parametrize("configured", ["0", "-1", "invalid"])
+def test_decode_cpu_load_threshold_rejects_invalid_values(monkeypatch, configured):
+    monkeypatch.setenv("LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS", configured)
+    get_cpu_cache_min_load_tokens.cache_clear()
+    try:
+        with pytest.raises(ValueError):
+            get_cpu_cache_min_load_tokens("decode")
+    finally:
+        get_cpu_cache_min_load_tokens.cache_clear()
 
 
 def test_async_load_defers_deref_until_the_event_is_notified(monkeypatch):

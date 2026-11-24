@@ -7,7 +7,7 @@ from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache import CacheTier
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_cpu_cache_min_load_tokens
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -126,7 +126,8 @@ class MultiLevelKvCacheModule(object):
 
             need_token_num = match_tokens - req.cur_kv_len
             # 命中够长、请求够长、剩余显存放得下，才进行复制，不然代价过高。
-            if need_token_num >= 128 and req.shm_req.input_len >= 256 and need_token_num <= idle_token_num:
+            min_load_tokens = get_cpu_cache_min_load_tokens(self.args.run_mode)
+            if need_token_num >= min_load_tokens and req.shm_req.input_len >= 256 and need_token_num <= idle_token_num:
                 assert req.cur_kv_len % self.args.page_size == 0
                 assert match_tokens % self.args.page_size == 0
                 assert req.hold_kv_len == req.cur_kv_len

@@ -606,6 +606,9 @@ class ModeBackend:
                                     self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids
                                 )
                                 req_to_next_token_ids[req.req_idx, 0:1].fill_(obj.first_gen_token_id)
+                                # TODO: 低优先级，补齐 P 首 token 的 repetition/frequency/presence 输出计数。
+                                # 历史路径漏计该 token，可能与 D 本地产生首 token 的完整命中路径采样不一致；
+                                # 本次仅记录，保持现有采样行为，后续单独处理。
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
                                     next_token_id=obj.first_gen_token_id,
                                     next_token_logprob=obj.first_gen_token_logprob,
