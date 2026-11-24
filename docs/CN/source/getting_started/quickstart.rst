@@ -52,8 +52,9 @@
 
 .. note::
     将模型路径替换为本机实际目录。``lightllm serve --help`` 显示常用参数，
-    ``--help-all`` 显示完整参数。例如，
-    ``lightllm serve ~/models/Qwen3-8B --tp 2 --port 8080`` 使用两张 GPU。
+    ``--help-all`` 显示完整参数。
+    张量并行度默认为 ``1``。使用两张 GPU 时，运行
+    ``lightllm serve ~/models/Qwen3-8B --tp 2 --port 8080``。
     原有的 ``python -m lightllm.server.api_server --model_dir ...`` 命令仍然可用。
 
 3. 测试模型服务

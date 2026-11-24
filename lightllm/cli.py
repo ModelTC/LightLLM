@@ -2,7 +2,6 @@ import argparse
 import sys
 
 from lightllm.server.api_cli import add_cli_args
-from lightllm.cli_defaults import resolve_tp
 
 
 def main(argv=None):
@@ -43,12 +42,6 @@ def main(argv=None):
         values["model_dir"] = model
     if not values["model_dir"] and values["run_mode"] not in ("pd_master", "config_server"):
         serve.error("a model path is required: lightllm serve /models/my-model")
-
-    # Keep the old parser and all explicit launch flags compatible, while the
-    # short positional form gets a useful multi-GPU default.
-    has_explicit_tp = any(arg == "--tp" or arg.startswith("--tp=") for arg in argv)
-    if values["model_dir"] and not has_explicit_tp and values["run_mode"] == "normal":
-        values["tp"] = resolve_tp(values["model_dir"])
 
     from lightllm.server.api_server import launch_server
     from lightllm.server.core.objs.start_args_type import StartArgs
