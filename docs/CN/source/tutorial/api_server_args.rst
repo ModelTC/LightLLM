@@ -600,7 +600,8 @@ PD 分离模式参数
     ``linear_att_page_block_num * linear_att_hash_page_size``，以对齐状态 checkpoint。
     PD Decode 的 CPU 页只保存 full-attention KV，不保存 linear-attention 状态快照，
     因此页大小由 ``--cpu_cache_token_page_size`` 独立配置，须为 ``--page_size`` 的整数倍；
-    未指定时取不小于 256、按 ``--page_size`` 向上对齐的值。
+    未指定时从 4096 tokens 按 ``--page_size`` 向上对齐。较大的页减少长前缀的逐页哈希和元数据处理，
+    未达到完整 CPU 页的请求沿用原有 PD 流程。
     Hybrid 的 CPU KV 命中不能替代同位置运行态恢复；仅 CPU 完整命中时仍需保留 P 的恢复路径。
 
 .. option:: --linear_att_cache_size

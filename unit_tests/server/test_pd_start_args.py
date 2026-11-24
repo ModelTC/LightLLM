@@ -25,7 +25,7 @@ def test_decode_cpu_cache_rejects_only_effective_dp_fetch(role, dp, cpu_cache):
 
 
 @pytest.mark.parametrize("hybrid", [False, True])
-@pytest.mark.parametrize("page_size,explicit,expected", [(1, None, 256), (384, None, 384), (4, 512, 512)])
+@pytest.mark.parametrize("page_size,explicit,expected", [(1, None, 4096), (384, None, 4224), (4, 512, 512)])
 def test_decode_cpu_pages_are_independent_of_hybrid_checkpoint_pages(hybrid, page_size, explicit, expected):
     from lightllm.utils.config_utils import auto_set_cpu_cache_token_page_size
 

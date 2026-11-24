@@ -663,7 +663,9 @@ Performance Optimization Parameters
     ``linear_att_page_block_num * linear_att_hash_page_size`` to align with those checkpoints.
     PD Decode CPU pages store full-attention KV without linear-attention state checkpoints.
     Their size is configured independently with ``--cpu_cache_token_page_size`` and must be divisible
-    by ``--page_size``. If unspecified, it defaults to at least 256, rounded up to a multiple of ``--page_size``.
+    by ``--page_size``. If unspecified, 4096 tokens is rounded up to a multiple of ``--page_size``.
+    Larger pages reduce per-page hashing and metadata work for long prefixes. Requests shorter than
+    one full CPU page use the existing PD path.
     A hybrid CPU KV hit cannot replace runtime state recovery at the same position;
     a complete CPU hit alone must still preserve the recovery path through P.
 
