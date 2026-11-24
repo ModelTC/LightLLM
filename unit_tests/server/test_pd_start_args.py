@@ -64,6 +64,36 @@ def test_decode_cpu_cache_metadata_rejects_empty_pages_without_changing_flags(mo
         kv_cache_utils.calcu_cpu_cache_meta.cache_clear()
 
 
+@pytest.mark.parametrize("storage_gib", [2, 3.125])
+def test_decode_cpu_cache_budget_must_fit_one_page(monkeypatch, storage_gib):
+    from lightllm.utils import kv_cache_utils
+
+    args = StartArgs(
+        run_mode="decode",
+        enable_cpu_cache=True,
+        cpu_cache_storage_size=storage_gib,
+        cpu_cache_token_page_size=4096,
+    )
+    page_bytes = 40 * 40 * 128 * 4096 * 2 * 2  # 40-layer BF16 MHA
+    monkeypatch.setattr(kv_cache_utils, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(
+        "lightllm.utils.cpu_cache_layout.build_cpu_cache_layouts",
+        lambda: {"kv": SimpleNamespace(byte_end=page_bytes)},
+    )
+    kv_cache_utils.calcu_cpu_cache_meta.cache_clear()
+    try:
+        if storage_gib == 2:
+            with pytest.raises(ValueError, match=r"--cpu_cache_storage_size=2 GiB") as exc:
+                kv_cache_utils.calcu_cpu_cache_meta()
+            assert "4096 tokens" in str(exc.value)
+            assert "3.125 GiB" in str(exc.value)
+            assert "--cpu_cache_token_page_size aligned to --page_size" in str(exc.value)
+        else:
+            assert kv_cache_utils.calcu_cpu_cache_meta().size_bytes == page_bytes
+    finally:
+        kv_cache_utils.calcu_cpu_cache_meta.cache_clear()
+
+
 @pytest.mark.parametrize("config_owned", [False, True])
 @pytest.mark.parametrize("rank", [0, 1])
 def test_startup_checks_only_locally_owned_rendezvous_ports(
