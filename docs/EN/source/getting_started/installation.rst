@@ -105,37 +105,10 @@ Stable and nightly builds
 Both channels install ``lightllm`` and use the same ``lightllm serve`` command.
 Stable builds come from ``vX.Y.Z`` tags matching ``VERSION``. Daily main-branch
 builds and manual ``nightly`` builds use the next patch's development version,
-such as ``1.2.1.dev1234``, where ``1234`` is the CI run number. Stable builds read
-``requirements/runtime.txt``; nightly builds use the fully frozen environment in
-``requirements/nightly.txt``.
-
-``requirements/nightly.in`` orders packages by priority: Torch, Triton and CUDA
-first, followed by model loading and inference kernels, then serving, protocol
-adapters and auxiliary libraries. The updater selects the newest installable
-version, including nightly and RC releases, and freezes each selection before
-resolving the next package. Lower-priority packages may downgrade to preserve
-earlier selections; an unsatisfiable step fails the build. Uninstalled optional
-extensions do not constrain the base environment.
-
-Compatible dependency metadata does not guarantee binary compatibility. Builds
-also import the native operators. An ABI failure rejects the candidate and
-requires a kernel wheel rebuilt against the new Torch; ignoring dependencies
-or downgrading the higher-priority core does not count as success.
-Maintainers can supply rebuilt kernel wheels through ``UV_FIND_LINKS`` before
-updating the dependencies. Keep the initially selected core snapshot during a
-build: after rebuilding kernels, use ``UV_CONSTRAINT`` with those core pins or
-wheel URLs to resume resolution. Versions uploaded during the build belong to
-the next snapshot. Such nightly bundles must include those wheels and
-can be installed with ``uv pip install dist/*.whl`` after extraction. Delivering
-the LightLLM wheel alone requires its native dependencies to be available on
-the corresponding nightly index first.
-
-Maintainers can run ``python tools/update_nightly.py`` with uv and packaging
-installed; nightly CI runs it automatically. This profile currently targets
-Linux x86_64 and CPython 3.12, using PyPI and the official PyTorch CUDA 13.4
-nightly index. The package embeds Torch, Triton and torchvision wheel URLs with
-SHA256 hashes, so installation does not require extra index configuration.
-Validate each new combination with GPU model and API regressions before delivery.
+such as ``1.2.1.dev1234``, where ``1234`` is the CI run number. Nightly builds
+package the latest LightLLM code with the same ``requirements/runtime.txt`` as
+stable builds. Upgrade the pinned PyTorch, Triton and SGLang kernels together
+and validate the new combination on a GPU.
 
 The ``Native package`` workflow currently uploads wheels, source distributions
 and installed-version records as GitHub Actions artifacts. It does not yet
@@ -147,10 +120,6 @@ released version, for example:
 
     $ uv pip install lightllm==1.2.0
     $ uv pip install lightllm==1.2.1.dev1234
-
-Dependency downgrades are allowed during updates. Wheel installation follows the
-frozen dependency set rather than resolving a new combination at deployment time.
-CPU package checks do not replace GPU model regressions.
 
 .. _build_from_docker:
 

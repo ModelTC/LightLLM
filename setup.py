@@ -5,8 +5,7 @@ from setuptools import setup, find_namespace_packages
 
 version = (Path(__file__).parent / "VERSION").read_text().strip()
 docker_build = os.environ.get("LIGHTLLM_DOCKER_BUILD") == "1"
-nightly = ".dev" in version and not docker_build
-requirements_file = "docker.txt" if docker_build else "nightly.txt" if nightly else "runtime.txt"
+requirements_file = "docker.txt" if docker_build else "runtime.txt"
 runtime_requirements = [
     line.strip()
     for line in (Path(__file__).parent / "requirements" / requirements_file).read_text().splitlines()
@@ -35,7 +34,7 @@ setup(
         "Programming Language :: Python :: 3",
         "Operating System :: POSIX :: Linux",
     ],
-    python_requires=">=3.12,<3.13" if nightly else ">=3.10,<3.14",
+    python_requires=">=3.10,<3.14",
     install_requires=runtime_requirements,
     entry_points={"console_scripts": ["lightllm=lightllm.cli:main"]},
     package_data=package_data,

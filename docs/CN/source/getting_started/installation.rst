@@ -70,29 +70,9 @@ profile 的 ``wheel`` 和 ``requirements`` 可以是本地文件或 HTTPS URL，
 两个通道都安装 ``lightllm``，并使用相同的 ``lightllm serve`` 入口。
 稳定版由与 ``VERSION`` 一致的 ``vX.Y.Z`` 标签构建；主分支的每日构建和手动
 ``nightly`` 构建使用下一补丁版本的开发版本号，例如 ``1.2.1.dev1234``，
-其中 ``1234`` 是 CI 构建编号。稳定版读取 ``requirements/runtime.txt``；nightly
-读取 ``requirements/nightly.txt`` 中完整冻结的运行环境。
-
-nightly 按 ``requirements/nightly.in`` 的顺序优先选择最新可安装版本，包含上游
-nightly 和 RC：Torch、Triton、CUDA 优先，其次是模型加载和推理算子，
-然后是服务框架、协议适配与辅助库。每选定一个包就固定其版本；后面的包发生冲突时，
-只选择与前面兼容的最高版本，无解则构建失败。可选且未安装的扩展不限制主环境。
-因此 SGLang kernel 可以为新 Torch 降级，LiteLLM 可以为新模型加载依赖降级。
-版本声明兼容不代表二进制兼容。构建还必须检查原生算子导入；若旧 wheel 与新 Torch
-存在 ABI 冲突，则该候选构建失败，需要提供按新 Torch 重编译的算子 wheel，
-不能通过忽略依赖或继续降低高优先级核心库来冒充成功。
-维护者可通过 ``UV_FIND_LINKS`` 提供项目重编译的内核 wheel，再执行依赖更新。
-同一构建保持最初选定的核心快照；原生内核重建后，可用 ``UV_CONSTRAINT`` 指向
-这些核心包的固定版本或 wheel URL，再继续解析。构建期间新上传的版本留给下一轮。
-这类 nightly 必须同时交付内核 wheel，用户解压完整产物后执行
-``uv pip install dist/*.whl``；单独交付 LightLLM wheel 前，必须先让其原生依赖
-在对应的 nightly 索引中可用。
-
-维护者执行 ``python tools/update_nightly.py`` 更新完整依赖清单，CI 的 nightly
-构建会自动执行这一步（需要 uv 和 packaging）。当前 nightly 目标为
-Linux x86_64、CPython 3.12，使用 PyTorch 官方 CUDA 13.4 nightly 索引和 PyPI。
-Torch、Triton、torchvision 的 wheel URL 和 SHA256 写入包依赖，安装时无需手动配置额外索引。
-新组合通过 GPU 模型和接口回归后才能作为已验证版本交付。
+其中 ``1234`` 是 CI 构建编号。nightly 打包最新的 LightLLM 代码，与稳定版共用
+``requirements/runtime.txt``。升级时同步更新固定版本的 PyTorch、Triton 和
+SGLang kernels，并在 GPU 上验证新组合。
 
 ``Native package`` 工作流目前生成 wheel、源码包和完整安装版本记录，
 保存为 GitHub Actions artifacts，尚未自动上传 PyPI 或 nightly 索引。
@@ -102,9 +82,6 @@ Torch、Triton、torchvision 的 wheel URL 和 SHA256 写入包依赖，安装�
 
     $ uv pip install lightllm==1.2.0
     $ uv pip install lightllm==1.2.1.dev1234
-
-更新时允许依赖降级；用户安装 wheel 时按包内冻结版本安装，不再现场选择新的依赖组合。
-CPU 打包检查不能替代 GPU 模型回归。
 
 基础安装包含 PyTorch/Triton 算子及 Qwen3.5 线性注意力所需的 SGLang kernel。
 FlashInfer、独立 FlashMLA、DeepGEMM、DeepEP、

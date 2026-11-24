@@ -19,15 +19,14 @@ def test_wheel_contains_runtime_modules_and_kernel_configs(wheel_variable):
         metadata = Parser().parsestr(wheel.read(metadata_path).decode())
         assert metadata["Version"] == (root / "VERSION").read_text().strip()
         docker_build = wheel_variable == "LIGHTLLM_TEST_DOCKER_WHEEL"
-        nightly = ".dev" in metadata["Version"] and not docker_build
-        requirements_file = "docker.txt" if docker_build else "nightly.txt" if nightly else "runtime.txt"
+        requirements_file = "docker.txt" if docker_build else "runtime.txt"
         expected = {
             str(Requirement(line))
             for line in (root / "requirements" / requirements_file).read_text().splitlines()
             if line and not line.startswith("#")
         }
         assert {str(Requirement(line)) for line in metadata.get_all("Requires-Dist")} == expected
-        assert SpecifierSet(metadata["Requires-Python"]) == SpecifierSet(">=3.12,<3.13" if nightly else ">=3.10,<3.14")
+        assert SpecifierSet(metadata["Requires-Python"]) == SpecifierSet(">=3.10,<3.14")
         for path in (root / "lightllm").rglob("*"):
             if path.is_file() and path.suffix in (".py", ".json"):
                 name = path.relative_to(root).as_posix()

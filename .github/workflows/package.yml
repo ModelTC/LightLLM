@@ -11,8 +11,6 @@ on:
       - "docker/Dockerfile"
       - "requirements/**"
       - "tools/install.py"
-      - "tools/update_nightly.py"
-      - "unit_tests/test_nightly_resolution.py"
       - "unit_tests/test_cli.py"
       - "unit_tests/test_distribution.py"
       - "unit_tests/test_installer.py"
@@ -60,26 +58,20 @@ jobs:
           print(f"Building lightllm {version}")
           PY
       - name: Install packaging tools
-        run: |
-          python -m pip install uv==0.13.5 packaging
-      - name: Resolve nightly dependencies in priority order
-        if: github.event_name == 'schedule' || inputs.channel == 'nightly'
-        run: python tools/update_nightly.py
+        run: python -m pip install uv==0.13.5
       - name: Build sdist and wheel
         run: |
           uv build --sdist
           uv build --wheel
           LIGHTLLM_DOCKER_BUILD=1 uv build --wheel --out-dir "$RUNNER_TEMP/docker-wheel"
       - name: Include installer manifest in the release artifact
-        env:
-          BUILD_CHANNEL: ${{ inputs.channel }}
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
 
           version = Path("VERSION").read_text().strip()
-          requirements = "lightllm-nightly.txt" if ".dev" in version else "lightllm-runtime.txt"
+          requirements = "lightllm-runtime.txt"
           manifest = {
               "schema": 1,
               "profiles": [{
@@ -92,9 +84,7 @@ jobs:
           }
           Path("dist/installer-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
           Path("dist/lightllm-install.py").write_bytes(Path("tools/install.py").read_bytes())
-          Path(f"dist/{requirements}").write_bytes(
-              (Path("requirements") / ("nightly.txt" if ".dev" in version else "runtime.txt")).read_bytes()
-          )
+          Path(f"dist/{requirements}").write_bytes(Path("requirements/runtime.txt").read_bytes())
           PY
       - name: Install wheel and check dependencies
         run: |
@@ -102,7 +92,6 @@ jobs:
           uv pip install dist/*.whl pytest
           uv pip check
           uv pip freeze > dist/installed-py${{ matrix.python-version }}.txt
-          if [[ "$(cat VERSION)" == *".dev"* ]]; then cp requirements/nightly.json dist/; fi
       - name: Check native ABI when CUDA is available
         run: |
           .venv/bin/python - <<'PY'
@@ -127,7 +116,6 @@ jobs:
             "$GITHUB_WORKSPACE/unit_tests/test_cli.py" \
             "$GITHUB_WORKSPACE/unit_tests/test_distribution.py" \
             "$GITHUB_WORKSPACE/unit_tests/test_installer.py" \
-            "$GITHUB_WORKSPACE/unit_tests/test_nightly_resolution.py" \
             "$GITHUB_WORKSPACE/unit_tests/common/test_autotuner.py" \
             "$GITHUB_WORKSPACE/test/test_api/test_anthropic_extra_body.py"
       - uses: actions/upload-artifact@v4
