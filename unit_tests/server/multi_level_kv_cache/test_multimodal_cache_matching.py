@@ -82,7 +82,7 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
 
     module = common.MultiLevelKvCacheModule.__new__(common.MultiLevelKvCacheModule)
     module.load_tasks = deque()
-    module.args = SimpleNamespace(page_size=1, cpu_cache_token_page_size=256)
+    module.args = SimpleNamespace(run_mode="normal", page_size=1, cpu_cache_token_page_size=256)
     module.cpu_cache_client = client
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False

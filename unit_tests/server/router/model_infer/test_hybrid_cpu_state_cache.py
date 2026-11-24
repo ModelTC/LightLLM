@@ -47,6 +47,8 @@ def test_decode_cpu_pages_restore_main_and_draft_kv_without_bounded_snapshots(
     args = get_env_start_args()
     args.run_mode = "decode"
     args.enable_cpu_cache = True
+    # Exercise the actual KV copy with the fixture's small CPU pages.
+    monkeypatch.setattr(common, "get_cpu_cache_min_load_tokens", lambda _: args.cpu_cache_token_page_size)
     monkeypatch.setattr("lightllm.server.core.objs.req.is_hybrid_att_model", lambda _: True)
     draft = GQAFullAttentionState(dataclasses.replace(full.config, logical_layer_groups=((3,),)), page_size=4)
     draft.allocate_storage(384)

@@ -348,7 +348,7 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
 
     module = common.MultiLevelKvCacheModule.__new__(common.MultiLevelKvCacheModule)
     module.load_tasks = deque()
-    module.args = SimpleNamespace(page_size=256, cpu_cache_token_page_size=256)
+    module.args = SimpleNamespace(run_mode="normal", page_size=256, cpu_cache_token_page_size=256)
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
         dp_world_size=1,

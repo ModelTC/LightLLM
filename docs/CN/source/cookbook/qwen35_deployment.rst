@@ -84,7 +84,7 @@ Qwen3.5 使用混合注意力架构，在涉及线性注意力缓存复用时，
 - 当 ``linear_att_page_block_num * linear_att_hash_page_size > max_req_total_len`` 时，radix cache 的块级匹配能力会近似关闭，更多依赖请求级小块匹配（小块大小为 ``linear_att_hash_page_size``）。
 - 在高负载下，小块数量不足叠加内部 LRU 淘汰，可能导致命中率下降。此时可调大 ``--linear_att_cache_size`` 提升命中率，但会增加内存占用。
 - Normal / Prefill 开启 ``--enable_cpu_cache`` 时，CPU 页同时保存 full-attention KV 和 linear-attention 状态快照，页大小强制为 ``linear_att_page_block_num * linear_att_hash_page_size``，以对齐 checkpoint。
-- PD Decode 的 CPU 页只保存 full-attention KV，不含 linear-attention 状态快照。其页大小由 ``--cpu_cache_token_page_size`` 独立设置，须为 ``--page_size`` 的整数倍。未指定时从 4096 tokens 按 ``--page_size`` 向上对齐。
+- PD Decode 的 CPU 页只保存 full-attention KV，不含 linear-attention 状态快照。其页大小由 ``--cpu_cache_token_page_size`` 独立设置，须为 ``--page_size`` 的整数倍。未指定时从 2048 tokens 按 ``--page_size`` 向上对齐。
 - Decode 的 CPU KV 命中不能代替同位置的 linear-attention 运行态；仅 CPU 完整命中不能跳过 P。当前在 ``N-1`` 恰好命中时退掉末页，保留 P 恢复运行态的路径。
 - Decode CPU cache 主要减少 P→D 的 KV 传输，不保证减少 P 计算或降低首 token 延迟。普通 PD 要等 D 恢复 CPU KV 并完成握手后 P 才继续；在同机高速互联、P 已有热前缀的负载中，新增匹配和 H2D 等待可能使请求变慢。应对比开启/关闭时的实际新增命中、TTFT 和吞吐后再选择配置。
 

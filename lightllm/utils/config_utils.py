@@ -39,7 +39,7 @@ def auto_set_cpu_cache_token_page_size(args, is_hybrid_model: bool) -> None:
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
     elif args.cpu_cache_token_page_size is None:
         if args.run_mode == "decode":
-            default_page_size = 4096
+            default_page_size = 2048
             args.cpu_cache_token_page_size = (default_page_size + args.page_size - 1) // args.page_size * args.page_size
         else:
             args.cpu_cache_token_page_size = 256

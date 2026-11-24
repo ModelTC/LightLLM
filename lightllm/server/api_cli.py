@@ -947,7 +947,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--cpu_cache_token_page_size",
         type=int,
         default=None,
-        help="""The token page size of cpu cache. Decode defaults to 4096 rounded up to a multiple of --page_size.
+        help="""The token page size of cpu cache. Decode defaults to 2048 rounded up to a multiple of --page_size.
         Normal/Prefill non-hybrid models default to 256. Normal/Prefill hybrid models use
         linear_att_hash_page_size * linear_att_page_block_num; Decode KV-only pages are independent.""",
     )
