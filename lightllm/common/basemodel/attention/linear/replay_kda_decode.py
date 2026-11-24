@@ -37,7 +37,7 @@ def get_static_key(
     """区分头维度、状态精度、history 容量、gate 下界和投影模式。"""
     _, hv, kd, vd = state_ssm.shape
     return {
-        "v": 1,
+        "v": 2,
         "shape": str((q.shape[-2], hv, state_keys.shape[-3], kd, vd, state_verify_width)),
         "dtype": str((q.dtype, state_ssm.dtype)),
         "capacity": state_keys.shape[-2],
