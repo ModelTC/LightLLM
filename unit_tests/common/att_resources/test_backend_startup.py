@@ -69,7 +69,7 @@ def test_backend_allocates_all_roles_before_warmup(
         monkeypatch.setenv("LIGHTLLM_" + key, "0")
     monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", "1")
     config = dict(
-        model_type="qwen3_5_text",
+        model_type="qwen3_next" if main_linear else "llama",
         architectures=["Qwen3NextForCausalLM"],
         num_hidden_layers=4,
         n_layer=4,
@@ -86,6 +86,7 @@ def test_backend_allocates_all_roles_before_warmup(
     )
     draft_config = dict(
         config,
+        model_type="qwen3_5_text",
         num_hidden_layers=2 if draft_full else 1,
         n_layer=2 if draft_full else 1,
         num_key_value_heads=1,
@@ -227,36 +228,35 @@ def test_backend_allocates_all_roles_before_warmup(
     monkeypatch.setattr("lightllm.utils.envs_utils.set_model_init_status", ready.append)
     assert all(not hasattr(item, "att_state_manager") for item in models)
 
-    class RuntimeReady(Exception):
-        """Stop after model readiness, before unrelated queue and thread setup."""
+    class RadixCacheSelected(Exception):
+        """Stop after Hybrid validation, before allocating the radix cache."""
 
     if via_backend:
         backend = ModeBackend.__new__(ModeBackend)
         backend.init_rank_infos = lambda: None
+        backend.rank_in_node = 0
         backend.init_mtp_draft_model = lambda _: backend.draft_models.extend(models[1:])
         monkeypatch.setattr(base_backend, "init_distributed_env", lambda _: None)
         monkeypatch.setattr(base_backend.dist_group_manager, "create_groups", lambda **_: None)
         monkeypatch.setattr(base_backend, "TokenLoad", lambda *_: None)
         monkeypatch.setattr(base_backend, "get_model", lambda *_: (models[0], False))
 
-        def mark_ready(value: bool):
-            ready.append(value)
-            raise RuntimeReady
+        def stop_at_radix_cache(**_):
+            raise RadixCacheSelected
 
-        monkeypatch.setattr("lightllm.utils.envs_utils.set_model_init_status", mark_ready)
+        monkeypatch.setattr(base_backend, "HybridAttPagedRadixCache", stop_at_radix_cache)
 
     def start_runtime():
         if via_backend:
-            with pytest.raises(RuntimeReady):
-                backend.init_model(
-                    dict(
-                        args=args,
-                        world_size=1,
-                        load_way="HF",
-                        weight_dir=str(tmp_path),
-                        max_total_token_num=None,
-                    )
+            backend.init_model(
+                dict(
+                    args=args,
+                    world_size=1,
+                    load_way="HF",
+                    weight_dir=str(tmp_path),
+                    max_total_token_num=None,
                 )
+            )
         else:
             assert all(
                 getattr(item, "att_state_manager", None) is None for item in models
@@ -283,7 +283,20 @@ def test_backend_allocates_all_roles_before_warmup(
                 assert all(not getattr(other, "backends_bound", False) for other in models[index + 1 :])
                 assert warmed == padded == captured == prefill_captured == {id(other) for other in models[: index + 1]}
 
-    start_runtime()
+    if via_backend and not main_linear:
+        # Draft-only bounded state selects the Hybrid inference path, but the
+        # dense main model config would leave request-side Hybrid hashes empty.
+        with pytest.raises(AssertionError, match="Hybrid attention mismatch"):
+            start_runtime()
+        assert warmed == {id(model) for model in models}
+        assert ready == [True]
+        return
+    if via_backend:
+        with pytest.raises(RadixCacheSelected):
+            start_runtime()
+        assert backend.is_hybrid_att_model
+    else:
+        start_runtime()
     assert request_allocations == [(2, 32)]
     assert manager_creations == [models[0].max_req_num + 1]
     assert captured == {id(model) for model in models}

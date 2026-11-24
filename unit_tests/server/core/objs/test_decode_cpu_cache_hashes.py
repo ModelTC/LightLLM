@@ -9,6 +9,30 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
 
 
+@pytest.mark.parametrize("input_len,expected_cpu_pages", [(4097, []), (4098, [4096]), (8193, [4096])])
+def test_qwen3_next_decode_cpu_pages_preserve_gdn_restore(
+    monkeypatch, tmp_path, local_req_memory, input_len, expected_cpu_pages
+):
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_next"}))
+    args = StartArgs(
+        model_dir=str(tmp_path),
+        run_mode="decode",
+        enable_cpu_cache=True,
+        cpu_cache_token_page_size=4096,
+        linear_att_hash_page_size=128,
+    )
+    monkeypatch.setattr("lightllm.server.core.objs.req.get_env_start_args", lambda: args)
+    params = SamplingParams()
+    params.init(tokenizer=None, max_new_tokens=1)
+    tokens = list(range(input_len))
+    req = local_req_memory()
+    req.init(1, tokens, params, None)
+
+    assert req.token_hash_page_len_list.get_all() == expected_cpu_pages
+    assert req.token_hash_list.get_all() == compute_token_list_hash(tokens, 4096)[: len(expected_cpu_pages)]
+    assert req.hybrid_token_hash_list.get_all() == compute_token_list_hash(tokens, 128)
+
+
 @pytest.mark.parametrize("role", ["normal", "prefill", "decode"])
 def test_hybrid_decode_cpu_hashes_use_complete_kv_pages_independently_of_radix(monkeypatch, local_req_memory, role):
     args = StartArgs(

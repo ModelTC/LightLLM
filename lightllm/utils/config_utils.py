@@ -463,6 +463,7 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
         model_type = model_cfg["model_type"]
         return model_type in [
+            "qwen3_next",
             "qwen3_5",
             "sensenova_loop",
             "qwen3_5_moe",
