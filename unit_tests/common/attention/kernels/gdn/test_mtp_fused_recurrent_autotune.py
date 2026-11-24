@@ -372,3 +372,10 @@ def test_first_decode_loads_history_without_advancing_state_twice(monkeypatch, t
     assert not kernel.warmuped_configs_set
     torch.testing.assert_close(output.float(), output_ref, atol=2e-3, rtol=2e-2)
     torch.testing.assert_close(state, state_ref, atol=2e-3, rtol=2e-2)
+
+
+def test_rebuild_leaves_the_callers_out_to_the_final_run():
+    inputs = make_inputs()
+    inputs["out"] = torch.empty_like(inputs["v"])
+    # The benchmark writes the kernel's own scratch output.
+    assert rebuild(inputs).get("out") is None

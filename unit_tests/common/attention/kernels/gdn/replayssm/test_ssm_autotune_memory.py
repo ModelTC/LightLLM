@@ -1,3 +1,5 @@
+import collections
+
 import pytest
 import torch
 
@@ -68,3 +70,81 @@ def test_rebuild_failure_leaves_serving_state_unchanged(monkeypatch, tmp_path, w
 
     tuning.replay(ssm_backend, 0, q, q, q, gates, gates, a_log, bias, reqs, cu, run_config=config)
     torch.cuda.synchronize()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_tuning_with_the_callers_out_benchmarks_scratch(monkeypatch, tmp_path):
+    """Backends pass out; tuning a missing config must accept it and leave it to the final run."""
+    from lightllm.common.triton_utils import autotuner as autotuner_module
+    from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
+
+    width, tokens = 1, 3
+    config = {"BV": 32, "num_warps": 1, "num_stages": 3}
+    q = torch.randn((tokens, 2, 32), dtype=torch.bfloat16, device="cuda")
+    gates = torch.randn((tokens, 2), dtype=torch.bfloat16, device="cuda")
+    a_log = torch.zeros(2, device="cuda")
+    cu = torch.arange(tokens + 1, device="cuda", dtype=torch.int32)
+    reqs = torch.arange(tokens, device="cuda", dtype=torch.int32)
+
+    def backend():
+        state = torch.zeros((2, 4, 2, 32, 32), dtype=torch.bfloat16, device="cuda")
+        return ReplaySSMExecutor(state, 8, width, num_key_heads=2)
+
+    expected = tuning.replay(backend(), 0, q, q, q, gates, gates, a_log, a_log, reqs, cu, run_config=config)
+
+    tuner = tuning.replay
+    writes = []
+    rebuild = tuner.rebuild_input_func
+
+    def tracking_rebuild(*args, **kwargs):
+        args, kwargs = rebuild(*args, **kwargs)
+        writes.append(kwargs.get("out"))
+        return args, kwargs
+
+    monkeypatch.setattr(tuner, "rebuild_input_func", tracking_rebuild)
+    monkeypatch.setattr(tuner, "configs_gen_func", lambda: [config])
+    monkeypatch.setattr(tuner, "_cache_dir", str(tmp_path), raising=False)
+    monkeypatch.setattr(tuner, "cached_configs", {})
+    monkeypatch.setattr(tuner, "fast_match_configs", collections.defaultdict(dict))
+    monkeypatch.setattr(autotuner_module, "get_triton_autotune_level", lambda: 1)
+    out = torch.full_like(q, float("nan"))
+    with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
+        result = tuning.replay(backend(), 0, q, q, q, gates, gates, a_log, a_log, reqs, cu, out=out)
+    # The benchmark wrote its own scratch output; the final run wrote the caller's out.
+    assert writes == [None]
+    assert result is out and torch.equal(out, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_kda_rebuild_accepts_the_callers_out():
+    from lightllm.common.attention.kernels.kda import replay_kda
+
+    slots, heads, dim, capacity, tokens = 3, 2, 32, 8, 2
+    device = "cuda"
+    q = torch.randn((tokens, heads, dim), dtype=torch.bfloat16, device=device)
+    _, kwargs = replay_kda.rebuild_inputs(
+        state_ssm=torch.zeros((slots, heads, dim, dim), dtype=torch.float32, device=device),
+        state_keys=torch.zeros((slots, heads, capacity, dim), dtype=torch.bfloat16, device=device),
+        state_deltas=torch.zeros((slots, heads, capacity, dim), dtype=torch.bfloat16, device=device),
+        state_gates=torch.zeros((slots, heads, capacity, dim), dtype=torch.bfloat16, device=device),
+        state_raw_keys=torch.zeros((slots, heads, capacity, dim), dtype=torch.bfloat16, device=device),
+        state_raw_values=torch.zeros((slots, heads, capacity, dim), dtype=torch.bfloat16, device=device),
+        state_betas=torch.zeros((slots, heads, capacity), dtype=torch.bfloat16, device=device),
+        state_cursors=torch.zeros(slots, dtype=torch.int32, device=device),
+        state_tile_sync_mark=torch.zeros((slots, heads), dtype=torch.int32, device=device),
+        q=q,
+        k=q,
+        v=q,
+        a=torch.zeros((tokens, heads * dim), dtype=torch.bfloat16, device=device),
+        b=torch.zeros((tokens, heads), dtype=torch.bfloat16, device=device),
+        a_log=torch.zeros(heads, device=device),
+        bias=torch.zeros(heads * dim, device=device),
+        reqs=torch.arange(tokens, dtype=torch.int32, device=device),
+        cu_seqlens=torch.arange(tokens + 1, dtype=torch.int32, device=device),
+        state_verify_width=1,
+        state_compute_mode="fp32",
+        state_gate_lower_bound=-5.0,
+        out=torch.empty_like(q),
+    )
+    # The benchmark gets its own scratch output, allocated by the kernel.
+    assert "out" not in kwargs

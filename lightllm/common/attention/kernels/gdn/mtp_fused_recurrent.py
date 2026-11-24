@@ -219,6 +219,8 @@ def rebuild_inputs(
     ssm_state_write_indices = ssm_state_indices.to(dtype=ssm_state_write_indices.dtype)
     num_accepted_tokens = torch.ones_like(num_accepted_tokens)
 
+    # 调优写 kernel 自己分配的 scratch 输出，不写调用方的 out。
+    kwargs.pop("out", None)
     # 直接复用 initial_state，不新建或 clone 状态池，避免服务显存紧张时因额外分配触发 OOM。
     # benchmark 会原地覆盖池内前 num_tokens 个槽且不恢复；只能在启动阶段使用，
     # 此时这些槽中不能有需要保留的请求状态。这里只重建分组和索引，不初始化状态数值。

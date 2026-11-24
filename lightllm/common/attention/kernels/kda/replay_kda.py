@@ -87,9 +87,10 @@ def rebuild_inputs(
     state_compute_mode: str,
     state_gate_lower_bound: float,
     run_config: dict[str, int] | None = None,
+    out: torch.Tensor | None = None,
 ) -> tuple[tuple, dict[str, object]]:
-    """为一层 scratch 和同形状激活分配调优输入。不复制服务状态池。"""
-    del state_cursors, reqs, run_config
+    """为一层 scratch 和同形状激活分配调优输入。不复制服务状态池，也不写调用方的 out。"""
+    del state_cursors, reqs, run_config, out
     tokens, run_count = get_run_key(q=q, cu_seqlens=cu_seqlens)
     # 一行一个 token 时请求数就是 token 数。打包窗口再用 verify_width 折成请求数。
     batch = run_count if tokens == run_count else min(run_count, triton.cdiv(tokens, state_verify_width))

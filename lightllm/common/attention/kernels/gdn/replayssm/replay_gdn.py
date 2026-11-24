@@ -51,9 +51,9 @@ def _check_replay_inputs(q, k, v, reqs, cu_seqlens) -> None:
     assert cu_seqlens.numel() == reqs.numel() + 1, "cu_seqlens must cover every request"
 
 
-def rebuild_inputs(state, linear_layer_idx, q, k, v, a, b, a_log, bias, reqs, cu_seqlens, run_config=None):
-    """为一层 scratch 和同形状激活分配调优输入。不复制服务状态池。"""
-    del linear_layer_idx, reqs, run_config
+def rebuild_inputs(state, linear_layer_idx, q, k, v, a, b, a_log, bias, reqs, cu_seqlens, run_config=None, out=None):
+    """为一层 scratch 和同形状激活分配调优输入。不复制服务状态池，也不写调用方的 out。"""
+    del linear_layer_idx, reqs, run_config, out
     tokens, run_count = get_run_key(q, cu_seqlens)
     # 一行一个 token 时请求数就是 token 数。打包窗口再用 verify_width 折成请求数。
     batch = run_count if tokens == run_count else min(run_count, triton.cdiv(tokens, state.verify_width))
