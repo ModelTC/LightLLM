@@ -20,10 +20,8 @@ def create_fuse_moe_impl(
     状态与使用它们的 kernel 保持在同一个实现对象中。
     """
     if enable_ep_moe:
-        if quant_method.method_name == "mxfp4w4a16-b32-marlin":
-            raise ValueError("MXFP4 Marlin supports tensor-parallel MoE only")
         impl_cls = FuseMoeDeepGEMM
-    elif quant_method.method_name in ("awq_marlin", "mxfp4w4a16-b32-marlin"):
+    elif quant_method.method_name == "awq_marlin":
         impl_cls = FuseMoeMarlin
     else:
         impl_cls = FuseMoeTriton

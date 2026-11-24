@@ -52,7 +52,7 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         self.num_fused_shared_experts = 0
         if args.enable_fused_shared_experts and not args.enable_ep_moe:
             moe_quant = self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe")
-            if moe_quant.method_name not in ("fp4fp8-b32-deepgemm", "mxfp4w4a16-b32-marlin"):
+            if moe_quant.method_name != "fp4fp8-b32-deepgemm":
                 self.num_fused_shared_experts = int(cfg.get("n_shared_experts", 1))
 
     def _init_weight(self):
