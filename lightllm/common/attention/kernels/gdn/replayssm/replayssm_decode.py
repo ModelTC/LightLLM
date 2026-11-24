@@ -140,9 +140,7 @@ def _decode_replay(
         _arrive_value_tiles(SyncMark, seq, hv, HV, KH, NV)
 
     if PRECOMPUTE_PROJECTIONS:
-        # Match the KDA checkpoint's storage precision. Keep FP32 checkpoints
-        # on TF32x3, and accumulate BF16 projections in FP32.
-        projection_dtype: tl.constexpr = tl.bfloat16 if KDA and State.dtype.element_ty == tl.bfloat16 else tl.float32
+        projection_dtype: tl.constexpr = tl.float32
         projection_precision: tl.constexpr = "tf32x3"
         qk, projections, tt, tokens, valid, h = _project_qk(
             Q,

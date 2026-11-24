@@ -418,6 +418,28 @@ def test_bf16_commit_rounds_before_the_next_token():
     torch.testing.assert_close(ssm_backends[0].ssm_state, ssm_backends[1].ssm_state, atol=0, rtol=0)
 
 
+def test_kda_bf16_checkpoint_cancellation():
+    dim = 128
+    state = torch.zeros((1, 2, 1, dim, dim), device="cuda", dtype=torch.bfloat16)
+    state[..., 0, :] = 32
+    backend = ReplaySSMExecutor(state.clone(), 8, 3, torch.bfloat16, kda=True, compute_mode="precompute")
+    query = torch.zeros((3, 1, dim), device="cuda", dtype=torch.bfloat16)
+    query[..., :2] = torch.tensor([1, 2], device="cuda")
+    key = torch.zeros_like(query)
+    key[..., 0] = 1
+    value = torch.zeros_like(query)
+    gate = torch.full((3, dim), -20, device="cuda", dtype=torch.bfloat16)
+    beta = torch.full((3, 1), 20, device="cuda", dtype=torch.bfloat16)
+    alog = torch.zeros(1, device="cuda")
+    bias = torch.zeros(dim, device="cuda")
+    reqs = torch.tensor([0], device="cuda", dtype=torch.int32)
+    cu = torch.tensor([0, 3], device="cuda", dtype=torch.int32)
+    config = {"BV": 32, "num_warps": 2, "num_stages": 1}
+    output = replay_layer(backend, 0, query, key, value, gate, beta, alog, bias, reqs, cu, run_config=config)
+    expected, _ = reference(query[0], key[0], value[0], gate[0], beta[0], alog, bias, state[0, 0].float(), kda=True)
+    torch.testing.assert_close(output[0].float(), expected, atol=2e-6, rtol=0)
+
+
 def test_large_bf16_state_precompute_matches_inline():
     # 输出投影用 tf32x3。重建缓存的 k/d 在 bf16 激活下是 fp16，输出允许一个 fp16 单位。
     # 折回 SSM 仍从原始 k/v 在 fp32 中计算，两条路径的 checkpoint 必须一致。
