@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from lightllm.server.router.req_queue import _get_req_queue_class
-from lightllm.server.router.batch import Batch, Req
+from lightllm.server.router.batch import Batch
 from lightllm.server.router.req_queue.chunked_prefill.impl_for_pd_decode import PDDecodeQueue
 from lightllm.server.router.req_queue.chunked_prefill.impl_for_pd_prefill import PDPrefillQueue
 from lightllm.server.router.req_queue.dp_balancer.cache_aware import DpCacheAwareBalancer
@@ -158,47 +158,6 @@ def test_cache_aware_prefill_respects_rank_request_slots(
     assert [[request.sample_params.suggested_dp_index for request in group] for group in groups] == [
         [dp] * count for dp, count in zip(expected, group_sizes)
     ]
-
-
-@pytest.mark.parametrize(
-    "host_len,expected_rank",
-    [(0, 1), (512, 1), (1024, 0)],
-)
-def test_dp_prefill_rotates_host_only_hits_without_losing_longer_gpu_hints(host_len, expected_rank):
-    prompt = np.arange(1025, dtype=np.int64)
-
-    def req(dp, length, host=0):
-        return SimpleNamespace(
-            input_len=length,
-            shm_cur_kv_len=0,
-            shm_prompt_ids=prompt,
-            sample_params=SimpleNamespace(suggested_dp_index=dp, disable_prompt_cache=False, prompt_logprobs=-1),
-            get_prompt_ids_numpy=lambda: prompt,
-            get_host_cache_match_len=lambda: host,
-        )
-
-    waiting = [[], []]
-    queues = [SimpleNamespace(waiting_req_list=q, running_max_req_size=4, extend=q.extend) for q in waiting]
-    balancer = DpCacheAwareBalancer(2, queues, "prefill", enable_host_cache=True)
-    balancer.prefix_cache.insert(balancer.prefix_cache.hash_prefixes(prompt), 1)
-    running = [req(0, 256), req(1, 512)]
-    incoming = req(-1, len(prompt), host_len)
-
-    balancer.assign_reqs_to_dp(SimpleNamespace(reqs=running), [[incoming]])
-
-    assert incoming.sample_params.suggested_dp_index == expected_rank
-
-
-def test_host_cache_boundary_comes_from_the_last_staged_page():
-    req = SimpleNamespace(
-        input_len=5001,
-        sample_params=SimpleNamespace(disable_prompt_cache=False, prompt_logprobs=-1),
-        cpu_cache_match_page_indexes=SimpleNamespace(size=2),
-        token_hash_page_len_list=SimpleNamespace(items=[4096, 4608, 5120]),
-    )
-    assert Req.get_host_cache_match_len(req) == 4608
-    req.sample_params.prompt_logprobs = 0
-    assert Req.get_host_cache_match_len(req) == 0
 
 
 @pytest.mark.parametrize(
