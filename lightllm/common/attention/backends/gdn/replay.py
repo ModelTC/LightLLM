@@ -72,8 +72,8 @@ class ReplayGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState,
         return context.prepare(metadata)
 
     @classmethod
-    def create_build_context(cls, layer_config: GDNLayerConfig, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:
-        return GDNDecodeBuildContext(replay=True)
+    def create_build_context(cls, build_key: bool, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:
+        return GDNDecodeBuildContext(replay=build_key)
 
     @classmethod
     def build_context_key(cls, layer_config: GDNLayerConfig):

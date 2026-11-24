@@ -342,7 +342,5 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
         )
 
     @classmethod
-    def create_build_context(
-        cls, layer_config: GQALayerConfig, ctx: AttentionBuildResources
-    ) -> TritonGQADecodeBuildContext:
+    def create_build_context(cls, build_key: None, ctx: AttentionBuildResources) -> TritonGQADecodeBuildContext:
         return TritonGQADecodeBuildContext()

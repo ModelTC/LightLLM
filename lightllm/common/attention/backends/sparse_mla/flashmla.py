@@ -218,9 +218,9 @@ class FlashMLASparseDecodeBackend(
 
     @classmethod
     def create_build_context(
-        cls, layer_config: SparseMLALayerConfig, ctx: AttentionBuildResources
+        cls, build_key: Optional[int], ctx: AttentionBuildResources
     ) -> FlashMLASparseDecodeBuildContext:
-        return FlashMLASparseDecodeBuildContext(direct_decode_bound=_direct_decode_bound(layer_config))
+        return FlashMLASparseDecodeBuildContext(direct_decode_bound=build_key)
 
     @classmethod
     def build_context_key(cls, layer_config: SparseMLALayerConfig) -> Optional[int]:

@@ -171,8 +171,8 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
         pass
 
     @classmethod
-    def create_build_context(cls, layer_config: LayerConfig, ctx: AttentionBuildResources) -> Any:
-        """Optionally create backend-owned storage shared across steps with the same build_context_key."""
+    def create_build_context(cls, build_key: Any, ctx: AttentionBuildResources) -> Any:
+        """Create shared storage using the exact key returned by build_context_key and model-wide resources."""
         return None
 
     @classmethod

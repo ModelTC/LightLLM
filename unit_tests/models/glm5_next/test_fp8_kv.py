@@ -131,8 +131,9 @@ class _Fp8SparseAttention:
         self._prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(model)
         ctx = SimpleNamespace()
         config = _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), 1.0)
-        self.prefill_step_builder = FA3SparseMLAPrefillBackend.create_build_context(config, ctx)
-        self.decode_step_builder = FlashMLASparseDecodeBackend.create_build_context(config, ctx)
+        self.prefill_step_builder = FA3SparseMLAPrefillBackend.create_build_context(None, ctx)
+        build_key = FlashMLASparseDecodeBackend.build_context_key(config)
+        self.decode_step_builder = FlashMLASparseDecodeBackend.create_build_context(build_key, ctx)
 
     def create_att_prefill_state(self, infer):
         batch = build_attention_metadata(infer, self.step_config)
@@ -318,7 +319,7 @@ def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_t
     for phase, impl, name in zip(("prefill", "decode"), (layer.prefill_impl, layer.decode_impl), expected):
         (backend,) = attention.backends(phase)
         assert backend.get_name() == name
-        backend.create_build_context(impl.layer_config, attention_build_resources(model))
+        backend.create_build_context(impl.state_key[1], attention_build_resources(model))
 
 
 def _dequantize_kv_cache(packed_kv):
@@ -754,7 +755,8 @@ def test_fp8_sparse_direct_decode_factory_bound_guard():
         config = dataclasses.replace(
             _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), 0.0625), topk=index_topk, kpool=index_kpool
         )
-        return FlashMLASparseDecodeBackend.create_build_context(config, None).direct_decode_bound
+        build_key = FlashMLASparseDecodeBackend.build_context_key(config)
+        return FlashMLASparseDecodeBackend.create_build_context(build_key, None).direct_decode_bound
 
     assert bound(index_topk=2048, index_kpool=4) == 2051
     assert bound(index_topk=2048, index_kpool=8) is None
@@ -869,7 +871,8 @@ def test_fp8_sparse_direct_decode_general_graph_factory_entry(monkeypatch, num_h
         indices[3, 64:128] = indices[3, :64]  # duplicates
     assert torch.equal(indices[:, 2051:], torch.full_like(indices[:, 2051:], -1))
     control = {"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
-    bound = FlashMLASparseDecodeBackend.create_build_context(_layer_config(q, 0.0625), None)
+    build_key = FlashMLASparseDecodeBackend.build_context_key(_layer_config(q, 0.0625))
+    bound = FlashMLASparseDecodeBackend.create_build_context(build_key, None)
     assert bound.direct_decode_bound == 2051
     infer_state = _make_infer_state(graph_mode=GraphMode.EAGER)
     state = _Fp8DecodeState(infer_state, sched_meta=flash_mla.get_mla_metadata()[0], bound=2051)

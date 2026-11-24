@@ -19,8 +19,8 @@ class FlashQLAGDNPrefillBackend(TritonGDNPrefillBackend):
     build_context_type = GDNPrefillBuildContext
 
     @classmethod
-    def create_build_context(cls, layer_config: GDNLayerConfig, ctx: AttentionBuildResources) -> GDNPrefillBuildContext:
-        return create_gdn_prefill_step_builder(layer_config)
+    def create_build_context(cls, build_key: tuple[bool, int], ctx: AttentionBuildResources) -> GDNPrefillBuildContext:
+        return create_gdn_prefill_step_builder(*build_key)
 
     @classmethod
     def build_context_key(cls, layer_config: GDNLayerConfig):

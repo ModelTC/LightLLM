@@ -173,7 +173,7 @@ def _infer_state(case, phase, *, params=None, infer_state=None):
     infer_state.get_att_kv = lambda logical_layer_id: case.packed_kv
     impl = case.layer.prefill_impl if phase == "prefill" else case.layer.decode_impl
     infer_state.att_states = {
-        impl.state_key: backend.build(None, backend.create_build_context(case.layer_config, None))
+        impl.state_key: backend.build(None, backend.create_build_context(impl.state_key[1], None))
     }
     return infer_state
 

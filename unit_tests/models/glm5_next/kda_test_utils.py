@@ -98,7 +98,7 @@ class KDAAttention:
         }
         self.impls = {phase: backend(layer_config) for phase, backend in backends.items()}
         self.step_builders = {
-            phase: backend.create_build_context(layer_config, None) for phase, backend in backends.items()
+            phase: impl.create_build_context(impl.state_key[1], None) for phase, impl in self.impls.items()
         }
         self.flash_kda_fwd = self.step_builders["prefill"].flash_kda_fwd
 

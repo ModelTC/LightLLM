@@ -1005,7 +1005,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
         num_heads=64, head_dim_v=512, softmax_scale=512**-0.5, dtype=torch.bfloat16, has_attn_sink=True
     )
     impl = FlashMLASWADecodeBackend(layer_config)
-    builder = FlashMLASWADecodeBackend.create_build_context(layer_config, None)
+    builder = FlashMLASWADecodeBackend.create_build_context(impl.state_key[1], None)
     attn_sink = torch.zeros(64, device="cuda")
 
     def decode(att_state, packed_kv, swa_indices, swa_lengths):

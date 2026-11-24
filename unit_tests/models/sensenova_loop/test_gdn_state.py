@@ -126,7 +126,7 @@ def test_gdn_decode_keeps_logical_layer_state(
         )
         batch = build_attention_metadata(infer, step_config)
         impl = layer.prefill_impl if infer.is_prefill else layer.decode_impl
-        infer.att_states = {impl.state_key: backend.build(batch, backend.create_build_context(layer_config, None))}
+        infer.att_states = {impl.state_key: backend.build(batch, backend.create_build_context(impl.state_key[1], None))}
 
     if device == "cuda":
         infer.b1_cu_q_seq_len = torch.tensor([0, 5], device=device, dtype=torch.int32)

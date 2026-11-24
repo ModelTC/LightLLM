@@ -231,9 +231,9 @@ class TritonMLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, TritonMLADec
 
     @classmethod
     def create_build_context(
-        cls, layer_config: MLADecodeLayerConfig, ctx: AttentionBuildResources
+        cls, build_key: "_TritonMLADecodeKey", ctx: AttentionBuildResources
     ) -> TritonMLADecodeBuildContext:
-        return TritonMLADecodeBuildContext(**cls.build_context_key(layer_config)._asdict())
+        return TritonMLADecodeBuildContext(**build_key._asdict())
 
     @classmethod
     def build_context_key(cls, layer_config: MLADecodeLayerConfig) -> "_TritonMLADecodeKey":

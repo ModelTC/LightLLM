@@ -140,7 +140,7 @@ def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
     # capture raises max_kv_seq_len to the graph capacity only afterwards.
     owner.graph_mode = GraphMode.CAPTURE
     att_state = TritonGQADecodeBackend.build(
-        build_attention_metadata(owner, step_config), TritonGQADecodeBackend.create_build_context(layer_config, None)
+        build_attention_metadata(owner, step_config), impl.create_build_context(impl.state_key[1], None)
     )
     owner.max_kv_seq_len = 512
     q = torch.randn(2, q_heads, 64, device="cuda", dtype=torch.bfloat16)

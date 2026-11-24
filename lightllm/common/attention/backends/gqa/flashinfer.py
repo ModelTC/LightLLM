@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
 import torch
 import triton
@@ -239,11 +239,11 @@ class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQA
 
     @classmethod
     def create_build_context(
-        cls, layer_config: GQALayerConfig, ctx: AttentionBuildResources
+        cls, build_key: "_BuilderKey", ctx: AttentionBuildResources
     ) -> FlashInferGQAPrefillBuildContext:
         set_flashinfer_envs()
         return FlashInferGQAPrefillBuildContext(
-            flashinfer_builder_config(layer_config, ctx), workspace=_workspace(ctx), max_seq_len=ctx.max_seq_len
+            flashinfer_builder_config(build_key, ctx), workspace=_workspace(ctx), max_seq_len=ctx.max_seq_len
         )
 
     @classmethod
@@ -333,11 +333,11 @@ class FlashInferGQADecodeBackend(AttentionBackend[GQALayerConfig, FlashInferGQAD
 
     @classmethod
     def create_build_context(
-        cls, layer_config: GQALayerConfig, ctx: AttentionBuildResources
+        cls, build_key: "_BuilderKey", ctx: AttentionBuildResources
     ) -> FlashInferGQADecodeBuildContext:
         set_flashinfer_envs()
         return FlashInferGQADecodeBuildContext(
-            flashinfer_builder_config(layer_config, ctx),
+            flashinfer_builder_config(build_key, ctx),
             workspace=_workspace(ctx),
             max_seq_len=ctx.max_seq_len,
             max_batch_size=ctx.max_cuda_graph_batch_size,
@@ -349,17 +349,25 @@ class FlashInferGQADecodeBackend(AttentionBackend[GQALayerConfig, FlashInferGQAD
         return _builder_key(layer_config)
 
 
-def flashinfer_builder_config(layer_config: GQALayerConfig, ctx: AttentionBuildResources) -> FlashInferGQABuilderConfig:
+class _BuilderKey(NamedTuple):
+    num_heads: int
+    num_kv_heads: int
+    head_dim: int
+    dtype: torch.dtype
+    kv_quant: Optional[str]
+
+
+def flashinfer_builder_config(build_key: _BuilderKey, ctx: AttentionBuildResources) -> FlashInferGQABuilderConfig:
     """The wrapper configuration for layers with this layer config."""
-    fp8 = layer_config.kv_quant == "fp8_per_tensor"
+    fp8 = build_key.kv_quant == "fp8_per_tensor"
     return FlashInferGQABuilderConfig(
-        num_heads=layer_config.num_heads,
-        num_kv_heads=layer_config.num_kv_heads,
-        head_dim=layer_config.head_dim,
+        num_heads=build_key.num_heads,
+        num_kv_heads=build_key.num_kv_heads,
+        head_dim=build_key.head_dim,
         # TODO: use the cache's page size once FP8 FlashInfer supports multi-token pages.
         page_size=1 if fp8 else ctx.page_size,
-        q_dtype=layer_config.dtype,
-        kv_dtype=torch.float8_e4m3fn if fp8 else layer_config.dtype,
+        q_dtype=build_key.dtype,
+        kv_dtype=torch.float8_e4m3fn if fp8 else build_key.dtype,
     )
 
 
@@ -373,4 +381,4 @@ def _workspace(ctx: AttentionBuildResources) -> Callable[[], torch.Tensor]:
 def _builder_key(layer_config: GQALayerConfig):
     # The wrappers are planned for these fields.
     c = layer_config
-    return (c.num_heads, c.num_kv_heads, c.head_dim, c.dtype, c.kv_quant)
+    return _BuilderKey(c.num_heads, c.num_kv_heads, c.head_dim, c.dtype, c.kv_quant)

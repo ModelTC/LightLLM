@@ -154,18 +154,18 @@ class FlashInferMLAPrefillBackend(
 
     @classmethod
     def create_build_context(
-        cls, layer_config: MLAPrefillLayerConfig, ctx: AttentionBuildResources
+        cls, build_key: MLAPrefillLayerConfig, ctx: AttentionBuildResources
     ) -> FlashInferMLAPrefillBuildContext:
         set_flashinfer_envs()
         config = FlashInferMLABuilderConfig(
-            num_heads=layer_config.num_heads,
-            qk_nope_head_dim=layer_config.qk_nope_head_dim,
-            qk_rope_head_dim=layer_config.qk_rope_head_dim,
-            v_head_dim=layer_config.v_head_dim,
+            num_heads=build_key.num_heads,
+            qk_nope_head_dim=build_key.qk_nope_head_dim,
+            qk_rope_head_dim=build_key.qk_rope_head_dim,
+            v_head_dim=build_key.v_head_dim,
             kv_lora_rank=None,
             page_size=None,
-            dtype=layer_config.dtype,
-            softmax_scale=layer_config.softmax_scale,
+            dtype=build_key.dtype,
+            softmax_scale=build_key.softmax_scale,
         )
         return FlashInferMLAPrefillBuildContext(config, workspace=_workspace(ctx))
 
@@ -296,18 +296,18 @@ class FlashInferMLADecodeBackend(
 
     @classmethod
     def create_build_context(
-        cls, layer_config: MLADecodeLayerConfig, ctx: AttentionBuildResources
+        cls, build_key: MLADecodeLayerConfig, ctx: AttentionBuildResources
     ) -> FlashInferMLADecodeBuildContext:
         set_flashinfer_envs()
         config = FlashInferMLABuilderConfig(
-            num_heads=layer_config.num_heads,
+            num_heads=build_key.num_heads,
             qk_nope_head_dim=None,
-            qk_rope_head_dim=layer_config.qk_rope_head_dim,
+            qk_rope_head_dim=build_key.qk_rope_head_dim,
             v_head_dim=None,
-            kv_lora_rank=layer_config.kv_lora_rank,
+            kv_lora_rank=build_key.kv_lora_rank,
             page_size=ctx.page_size,
-            dtype=layer_config.dtype,
-            softmax_scale=layer_config.softmax_scale,
+            dtype=build_key.dtype,
+            softmax_scale=build_key.softmax_scale,
         )
         return FlashInferMLADecodeBuildContext(
             config,
