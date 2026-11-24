@@ -26,7 +26,7 @@ def decode_config(scale=DECODE_SCALE):
 @pytest.fixture
 def decode_builder():
     # One decode step builder serves the step's MLA layers.
-    return TritonMLADecodeBackend.create_build_context(decode_config(), None)
+    return TritonMLADecodeBackend.create_build_context(TritonMLADecodeBackend.build_context_key(decode_config()), None)
 
 
 def decode(att_state, q_nope, q_rope, kv):
@@ -74,9 +74,7 @@ def test_cached_prefill(nope_dim, v_dim):
         softmax_scale=scale,
         dtype=q.dtype,
     )
-    att_state = TritonMLAPrefillBackend.build(
-        build_attention_metadata(state, STEP_CONFIG), TritonMLAPrefillBackend.create_build_context(layer_config, None)
-    )
+    att_state = TritonMLAPrefillBackend.build(build_attention_metadata(state, STEP_CONFIG), None)
     actual = TritonMLAPrefillBackend(layer_config).forward(
         att_state,
         MLAPrefillLayerInputs(q=q, k_nope=k_nope, k_rope=k_rope, v=v),

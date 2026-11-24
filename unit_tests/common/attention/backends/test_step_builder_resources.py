@@ -17,6 +17,7 @@ from lightllm.common.attention.backends.mla.flashinfer import FlashInferMLADecod
 from lightllm.common.basemodel import attention_runtime
 from lightllm.utils import workspace_utils
 from lightllm.common.basemodel.attention_runtime import attention_build_resources
+from unit_tests.common.attention.backends.groups_runner import build_context
 
 
 def context(monkeypatch, **overrides):
@@ -57,15 +58,15 @@ def test_flashinfer_gqa_builders_share_one_workspace_and_mla_has_its_own(monkeyp
     # The context's workspaces come from the process-wide store, keyed by the current device.
     monkeypatch.setattr(workspace_utils, "get_current_device_id", lambda: current_device_id)
 
-    fp = FlashInferGQAPrefillBackend.create_build_context(gqa(), ctx).workspace()
-    fp8 = FlashInferGQAPrefillBackend.create_build_context(gqa(kv_quant="fp8_per_tensor"), ctx).workspace()
+    fp = build_context(FlashInferGQAPrefillBackend, gqa(), ctx).workspace()
+    fp8 = build_context(FlashInferGQAPrefillBackend, gqa(kv_quant="fp8_per_tensor"), ctx).workspace()
     mla_config = MLAPrefillLayerConfig(qk_nope_head_dim=128, v_head_dim=128, **MLA_COMMON)
-    mla = FlashInferMLAPrefillBackend.create_build_context(mla_config, ctx).workspace()
+    mla = build_context(FlashInferMLAPrefillBackend, mla_config, ctx).workspace()
 
     assert fp8 is fp and mla is not fp
     assert [allocation[1] for allocation in allocations] == [512 * 1024 * 1024, 256 * 1024 * 1024]
     current_device_id = 1
-    assert FlashInferGQAPrefillBackend.create_build_context(gqa(), ctx).workspace() is not fp
+    assert build_context(FlashInferGQAPrefillBackend, gqa(), ctx).workspace() is not fp
     assert allocations[-1][3] == 1
 
 
@@ -84,21 +85,21 @@ def test_workspace_key_includes_size_and_dtype(monkeypatch):
 @pytest.mark.parametrize("backend", [FA3GQAPrefillBackend, FA3GQADecodeBackend])
 def test_fa3_gqa_pages_like_the_cache_except_fp8_which_uses_single_token_pages(monkeypatch, backend):
     ctx = context(monkeypatch)
-    assert backend.create_build_context(gqa(), ctx).page_size == 16
+    assert build_context(backend, gqa(), ctx).page_size == 16
     with patch.object(gqa_fa3.logger, "warning") as warning:
-        assert backend.create_build_context(gqa(kv_quant="fp8_per_head"), ctx).page_size == 1
+        assert build_context(backend, gqa(kv_quant="fp8_per_head"), ctx).page_size == 1
     warning.assert_called_once()
 
 
 def test_flashinfer_pages_like_the_cache_except_fp8_which_uses_single_token_pages(monkeypatch):
     ctx = context(monkeypatch)
-    assert FlashInferGQADecodeBackend.create_build_context(gqa(), ctx).config.page_size == 16
-    fp8 = FlashInferGQADecodeBackend.create_build_context(gqa(kv_quant="fp8_per_tensor"), ctx)
+    assert build_context(FlashInferGQADecodeBackend, gqa(), ctx).config.page_size == 16
+    fp8 = build_context(FlashInferGQADecodeBackend, gqa(kv_quant="fp8_per_tensor"), ctx)
     assert fp8.config.page_size == 1
 
 
 def test_mla_decode_pages_like_the_cache(monkeypatch):
     ctx = context(monkeypatch)
     config = MLADecodeLayerConfig(kv_lora_rank=512, **MLA_COMMON)
-    assert FA3MLADecodeBackend.create_build_context(config, ctx).page_size == 16
-    assert FlashInferMLADecodeBackend.create_build_context(config, ctx).config.page_size == 16
+    assert build_context(FA3MLADecodeBackend, config, ctx).page_size == 16
+    assert build_context(FlashInferMLADecodeBackend, config, ctx).config.page_size == 16

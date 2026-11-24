@@ -35,7 +35,9 @@ def make_backend():
     config = _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), SCALE)
     return SimpleNamespace(
         step_config=AttentionStepConfig(cuda_graph_max_kv_seq_len=SLOTS),
-        decode_step_builder=FlashMLASparseDecodeBackend.create_build_context(config, None),
+        decode_step_builder=FlashMLASparseDecodeBackend.create_build_context(
+            FlashMLASparseDecodeBackend.build_context_key(config), None
+        ),
     )
 
 

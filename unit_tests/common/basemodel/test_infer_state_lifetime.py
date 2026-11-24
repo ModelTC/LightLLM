@@ -45,11 +45,11 @@ def _create_state(is_prefill):
     owner.b_req_idx = owner.position_ids
     owner.req_manager = SimpleNamespace(req_to_token_indexs=None)
     backend = SimpleNamespace(
-        create_build_context=lambda layer_config, resources: None,
+        create_build_context=lambda build_key, resources: None,
         build=lambda metadata, context: _AttState(metadata.b_req_idx),
     )
     phase = "prefill" if is_prefill else "decode"
-    runtime = _runtime({phase: {"group": _StateBuilder(backend, layer_config=None, resources=None)}})
+    runtime = _runtime({phase: {"group": _StateBuilder(backend, build_key=None, resources=None)}})
     owner.att_states = runtime.prepare(owner)
     return owner
 

@@ -130,11 +130,11 @@ class FA3SparseMLADecodeBackend(
 
     @classmethod
     def create_build_context(
-        cls, layer_config: SparseMLALayerConfig, ctx: AttentionBuildResources
+        cls, build_key: "_FA3DecodeKey", ctx: AttentionBuildResources
     ) -> FA3SparseMLADecodeBuildContext:
-        if layer_config.topk is None:
+        if build_key.topk is None:
             raise ValueError("FA3 sparse MLA decode needs the layer config's topk")
-        return FA3SparseMLADecodeBuildContext(**cls.build_context_key(layer_config)._asdict())
+        return FA3SparseMLADecodeBuildContext(**build_key._asdict())
 
     @classmethod
     def build_context_key(cls, layer_config: SparseMLALayerConfig) -> "_FA3DecodeKey":

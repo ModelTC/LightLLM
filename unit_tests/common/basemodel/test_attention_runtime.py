@@ -20,6 +20,7 @@ from lightllm.common.basemodel.attention_runtime import (
 from lightllm.common.basemodel.layer_infer.gqa_attention import gqa_kv_quant_fields
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from unit_tests.common.attention.backends.groups_runner import build_context
 
 
 def start_args(**overrides):
@@ -135,14 +136,14 @@ def test_sparse_mla_step_builders_follow_the_layer_selection():
         fields = {"num_heads": 64, "kv_lora_rank": 512, "qk_rope_head_dim": 0, "softmax_scale": 0.1, **fields}
         return SparseMLALayerConfig(dtype=torch.bfloat16, **fields)
 
-    builder = FA3SparseMLADecodeBackend.create_build_context(config(topk=2048, kpool=4, causal=False), ctx)
+    builder = build_context(FA3SparseMLADecodeBackend, config(topk=2048, kpool=4, causal=False), ctx)
     assert (builder.topk, builder.kpool, builder.causal) == (2048, 4, False)
     with pytest.raises(ValueError, match="topk"):
-        FA3SparseMLADecodeBackend.create_build_context(config(), ctx)
+        build_context(FA3SparseMLADecodeBackend, config(), ctx)
     # 2048 pooled entries plus at most three kpool remainder entries bound the direct decode window.
     fp8 = dict(kv_cache_format="fp8_group64_e8m0", topk=2048)
-    assert FlashMLASparseDecodeBackend.create_build_context(config(kpool=4, **fp8), ctx).direct_decode_bound == 2051
-    assert FlashMLASparseDecodeBackend.create_build_context(config(kpool=1, **fp8), ctx).direct_decode_bound is None
+    assert build_context(FlashMLASparseDecodeBackend, config(kpool=4, **fp8), ctx).direct_decode_bound == 2051
+    assert build_context(FlashMLASparseDecodeBackend, config(kpool=1, **fp8), ctx).direct_decode_bound is None
 
 
 def test_layer_family_selects_its_command_line_argument():
@@ -177,7 +178,7 @@ def test_kda_prefill_step_builders_follow_the_layer_config(monkeypatch, replay, 
         prefill_kernel=prefill_kernel,
     )
     backend = kda_triton.ReplayKDAPrefillBackend if replay else kda_triton.TritonKDAPrefillBackend
-    builder = backend.create_build_context(config, attention_build_resources(fake_model()))
+    builder = build_context(backend, config, attention_build_resources(fake_model()))
     assert builder.ssm_slots_per_request == (1 if replay else 3)
     assert requests == [(prefill_kernel, {"dtype": torch.bfloat16, "ssm_dtype": torch.bfloat16})]
     assert builder.flash_kda_fwd == "fwd" and builder.max_flash_len == flash_len
@@ -193,8 +194,8 @@ class FakeConfig(SimpleNamespace):
 
 
 class FakeBuilder:
-    def __init__(self, backend, layer_config):
-        self.backend, self.layer_config, self.batches = backend, layer_config, []
+    def __init__(self, backend):
+        self.backend, self.batches = backend, []
 
     def build(self, batch):
         self.batches.append(batch)
@@ -222,9 +223,9 @@ def fake_backend(name, *, sync=False):
             return context.build(metadata)
 
         @classmethod
-        def create_build_context(cls, layer_config, ctx):
-            created.append((name, layer_config.key))
-            return FakeBuilder(name, layer_config)
+        def create_build_context(cls, build_key, ctx):
+            created.append((name, build_key))
+            return FakeBuilder(name)
 
         @classmethod
         def build_context_key(cls, layer_config):
@@ -280,6 +281,7 @@ def test_step_builders_are_created_per_group_and_phase_on_first_build(fake_famil
     decode = step(prefill=False)
     decode.att_states = groups.attention_runtime.prepare(decode)
     first_args = decode.att_states[first_decode.state_key]
+    assert first_decode is not second_decode
     assert first_args is decode.att_states[second_decode.state_key]
     overlap = step(prefill=False, batch_size=3)
     overlap.microbatch_index = 1

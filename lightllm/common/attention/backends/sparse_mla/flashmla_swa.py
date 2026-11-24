@@ -95,11 +95,9 @@ class FlashMLASWAPrefillBackend(
         )
 
     @classmethod
-    def create_build_context(
-        cls, layer_config: SWASparseMLALayerConfig, ctx: AttentionBuildResources
-    ) -> FlashMLASWABuildContext:
+    def create_build_context(cls, build_key: int, ctx: AttentionBuildResources) -> FlashMLASWABuildContext:
         # Layers with one compress ratio share the scheduler metadata of their kernel calls.
-        return FlashMLASWABuildContext(compress_ratios=(layer_config.compress_ratio,), for_cuda_graph_capture=False)
+        return FlashMLASWABuildContext(compress_ratios=(build_key,), for_cuda_graph_capture=False)
 
     @classmethod
     def build_context_key(cls, layer_config: SWASparseMLALayerConfig) -> int:
@@ -112,7 +110,5 @@ class FlashMLASWADecodeBackend(FlashMLASWAPrefillBackend):
         return "flashmla_swa_sparse_mla_decode"
 
     @classmethod
-    def create_build_context(
-        cls, layer_config: SWASparseMLALayerConfig, ctx: AttentionBuildResources
-    ) -> FlashMLASWABuildContext:
-        return FlashMLASWABuildContext(compress_ratios=(layer_config.compress_ratio,), for_cuda_graph_capture=True)
+    def create_build_context(cls, build_key: int, ctx: AttentionBuildResources) -> FlashMLASWABuildContext:
+        return FlashMLASWABuildContext(compress_ratios=(build_key,), for_cuda_graph_capture=True)

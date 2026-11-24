@@ -136,7 +136,7 @@ def test_state_retains_actual_length_before_graph_capture(monkeypatch, q_heads):
     infer_state.b_seq_len = torch.full((2,), 8193, dtype=torch.int32)
     step_config = AttentionStepConfig(cuda_graph_max_kv_seq_len=32768)
     layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=2, head_dim=64, dtype=torch.float32)
-    builder = TritonGQADecodeBackend.create_build_context(layer_config, None)
+    builder = TritonGQADecodeBackend.create_build_context(TritonGQADecodeBackend.build_context_key(layer_config), None)
     att_state = TritonGQADecodeBackend.build(build_attention_metadata(infer_state, step_config), builder)
     # Graph capture raises max_kv_seq_len only after the attention state are built.
     infer_state.max_kv_seq_len = 32768

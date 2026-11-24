@@ -81,7 +81,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 每个已注册的 `AttentionBackend` 同时提供准备本步状态的类方法和计算本层输出的实例方法。
 
 - `build_context_key(layer_config)` 声明哪些配置会改变本步准备工作。运行时用 `(backend 类, build_context_key)` 作为 `state_key`，prefill 和 decode 各有自己的状态表。
-- `create_build_context(layer_config, resources)` 在首次执行该阶段时创建上下文，保存固定参数、可复用缓冲区和第三方 wrapper。
+- `create_build_context(build_key, resources)` 在首次执行该阶段时创建上下文。`build_key` 就是分组时 `build_context_key(layer_config)` 的返回值。上下文所需的逐层参数必须包含在这个键中，模型级资源由 `resources` 提供。
 - `build(metadata, context)` 为当前 microbatch 生成一份 `AttState`。所有持有同一 `state_key` 的层直接使用它。
 - `forward(att_state, layer_inputs, ...)` 使用实例持有的 `layer_config`，结合当前层的张量计算输出。
 - `requires_cpu_cache_sync()` 声明 CPU cache 搬运是否需要与该 backend 的计算同步。

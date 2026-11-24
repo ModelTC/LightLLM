@@ -127,9 +127,7 @@ class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAtt
         return context.prepare(metadata)
 
     @classmethod
-    def create_build_context(
-        cls, layer_config: MLADecodeLayerConfig, ctx: AttentionBuildResources
-    ) -> FA3GQADecodeBuildContext:
+    def create_build_context(cls, build_key: None, ctx: AttentionBuildResources) -> FA3GQADecodeBuildContext:
         # The latent cache is paged like an unquantized GQA cache.
         return FA3GQADecodeBuildContext(page_size=ctx.page_size, page_table_view=FA3PageTables(ctx, ctx.page_size).view)
 

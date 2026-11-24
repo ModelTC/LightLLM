@@ -15,6 +15,10 @@ from lightllm.common.basemodel.attention_runtime import (
 )
 
 
+def build_context(backend, layer_config, resources):
+    return backend.create_build_context(backend.build_context_key(layer_config), resources)
+
+
 class GroupsRunner:
     """model needs what model initialization reads (args, capacities, mtp_manager, is_mtp_draft_model).
 
@@ -59,7 +63,7 @@ class LayerAttention:
         configs = {"prefill": prefill_config, "decode": decode_config}
         self.selections = {phase: selector.select(config, phase, name) for phase, config in configs.items()}
         self.builders = {
-            phase: selection.backend.create_build_context(configs[phase], ctx)
+            phase: selection.backend.create_build_context(selection.impl.state_key[1], ctx)
             for phase, selection in self.selections.items()
         }
 

@@ -340,10 +340,8 @@ class FA3GQAPrefillBackend(AttentionBackend[GQALayerConfig, FA3GQAPrefillAttStat
         )
 
     @classmethod
-    def create_build_context(
-        cls, layer_config: GQALayerConfig, ctx: AttentionBuildResources
-    ) -> FA3GQAPrefillBuildContext:
-        return FA3GQAPrefillBuildContext(page_size=fa3_page_size(layer_config, ctx))
+    def create_build_context(cls, build_key: Optional[str], ctx: AttentionBuildResources) -> FA3GQAPrefillBuildContext:
+        return FA3GQAPrefillBuildContext(page_size=fa3_page_size(build_key, ctx))
 
     @classmethod
     def build_context_key(cls, layer_config: GQALayerConfig):
@@ -429,10 +427,8 @@ class FA3GQADecodeBackend(AttentionBackend[GQALayerConfig, FA3GQADecodeAttState,
         return context.prepare(metadata)
 
     @classmethod
-    def create_build_context(
-        cls, layer_config: GQALayerConfig, ctx: AttentionBuildResources
-    ) -> FA3GQADecodeBuildContext:
-        page_size = fa3_page_size(layer_config, ctx)
+    def create_build_context(cls, build_key: Optional[str], ctx: AttentionBuildResources) -> FA3GQADecodeBuildContext:
+        page_size = fa3_page_size(build_key, ctx)
         return FA3GQADecodeBuildContext(page_size=page_size, page_table_view=FA3PageTables(ctx, page_size).view)
 
     @classmethod
@@ -444,9 +440,9 @@ class FA3GQADecodeBackend(AttentionBackend[GQALayerConfig, FA3GQADecodeAttState,
         return fa3_requires_cpu_cache_sync()
 
 
-def fa3_page_size(layer_config: GQALayerConfig, ctx: AttentionBuildResources) -> int:
+def fa3_page_size(kv_quant: Optional[str], ctx: AttentionBuildResources) -> int:
     """The page size FA3 runs with for this layer config: the cache's, except 1 for an FP8 cache."""
-    if layer_config.kv_quant is None:
+    if kv_quant is None:
         return ctx.page_size
     # TODO: use the cache's page size once FP8 FA3 supports multi-token pages.
     logger.warning(f"FP8 FA3 temporarily uses page size 1 with model page_size={ctx.page_size}")

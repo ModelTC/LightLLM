@@ -184,12 +184,12 @@ class _StateBuilder:
     """
 
     backend: type[AttentionBackend]
-    layer_config: Any
+    build_key: Any
     resources: AttentionBuildResources
 
     @cached_property
     def context(self) -> Any:
-        return self.backend.create_build_context(self.layer_config, self.resources)
+        return self.backend.create_build_context(self.build_key, self.resources)
 
     def build(self, metadata: AttentionMetadata) -> Any:
         return self.backend.build(metadata, self.context)
@@ -238,8 +238,10 @@ class AttentionRuntime:
                 excluded=("flashinfer",) if self.args.enable_ep_moe else (),
             )
             builders = self.state_builders[phase]
-            if selection.impl.state_key not in builders:
-                builders[selection.impl.state_key] = _StateBuilder(selection.backend, layer_config, self.resources)
+            state_key = selection.impl.state_key
+            if state_key not in builders:
+                backend, build_key = state_key
+                builders[state_key] = _StateBuilder(backend, build_key, self.resources)
             self._impls[key] = selection.impl
         return self._impls[key]
 

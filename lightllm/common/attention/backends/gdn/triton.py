@@ -200,8 +200,8 @@ class TritonGDNPrefillBackend(AttentionBackend[GDNLayerConfig, GDNPrefillAttStat
         return context.prepare(metadata)
 
     @classmethod
-    def create_build_context(cls, layer_config: GDNLayerConfig, ctx: AttentionBuildResources) -> GDNPrefillBuildContext:
-        return create_gdn_prefill_step_builder(layer_config)
+    def create_build_context(cls, build_key: tuple[bool, int], ctx: AttentionBuildResources) -> GDNPrefillBuildContext:
+        return create_gdn_prefill_step_builder(*build_key)
 
     @classmethod
     def build_context_key(cls, layer_config: GDNLayerConfig):
@@ -318,14 +318,14 @@ class TritonGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState,
         return context.prepare(metadata)
 
     @classmethod
-    def create_build_context(cls, layer_config: GDNLayerConfig, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:
-        return GDNDecodeBuildContext(replay=layer_config.replay)
+    def create_build_context(cls, build_key: bool, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:
+        return GDNDecodeBuildContext(replay=build_key)
 
     @classmethod
     def build_context_key(cls, layer_config: GDNLayerConfig):
         return layer_config.replay
 
 
-def create_gdn_prefill_step_builder(layer_config) -> GDNPrefillBuildContext:
+def create_gdn_prefill_step_builder(replay: bool, state_mtp_step: int) -> GDNPrefillBuildContext:
     """The prefill step builder of GDN or KDA layers: native state keeps state_mtp_step + 1 SSM slots per request."""
-    return GDNPrefillBuildContext(ssm_slots_per_request=1 if layer_config.replay else layer_config.state_mtp_step + 1)
+    return GDNPrefillBuildContext(ssm_slots_per_request=1 if replay else state_mtp_step + 1)

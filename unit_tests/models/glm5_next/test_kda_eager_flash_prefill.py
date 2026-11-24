@@ -111,7 +111,7 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0):
     layer.prefill_impl = prefill.impl
     layer.decode_impl = selector.select(spec.decode, "decode", "triton").impl
     # The attention state the layer's group builds for this step.
-    builder = prefill.backend.create_build_context(spec.prefill, None)
+    builder = prefill.backend.create_build_context(prefill.impl.state_key[1], None)
     att_state = prefill.backend.build(build_attention_metadata(infer), builder)
     infer.att_states = {layer.prefill_impl.state_key: att_state}
     assert (att_state.flash_kda_fwd is not None) == (requested == "flashkda")

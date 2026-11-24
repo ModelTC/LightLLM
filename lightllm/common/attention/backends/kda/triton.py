@@ -2,7 +2,7 @@
 replay recurrent state. Decode rows group into requests with the GDN decode step builder."""
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 import torch
 
@@ -126,8 +126,8 @@ class TritonKDAPrefillBackend(AttentionBackend[KDALayerConfig, KDAPrefillAttStat
         return context.prepare(metadata)
 
     @classmethod
-    def create_build_context(cls, layer_config: KDALayerConfig, ctx: AttentionBuildResources) -> KDAPrefillBuildContext:
-        return _create_prefill_step_builder(layer_config)
+    def create_build_context(cls, build_key: "_PrefillKey", ctx: AttentionBuildResources) -> KDAPrefillBuildContext:
+        return _create_prefill_step_builder(build_key)
 
     @classmethod
     def build_context_key(cls, layer_config: KDALayerConfig):
@@ -187,8 +187,8 @@ class ReplayKDAPrefillBackend(AttentionBackend[KDALayerConfig, KDAPrefillAttStat
         return context.prepare(metadata)
 
     @classmethod
-    def create_build_context(cls, layer_config: KDALayerConfig, ctx: AttentionBuildResources) -> KDAPrefillBuildContext:
-        return _create_prefill_step_builder(layer_config)
+    def create_build_context(cls, build_key: "_PrefillKey", ctx: AttentionBuildResources) -> KDAPrefillBuildContext:
+        return _create_prefill_step_builder(build_key)
 
     @classmethod
     def build_context_key(cls, layer_config: KDALayerConfig):
@@ -253,8 +253,8 @@ class TritonKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState,
         return context.prepare(metadata)
 
     @classmethod
-    def create_build_context(cls, layer_config: KDALayerConfig, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:
-        return GDNDecodeBuildContext(replay=layer_config.replay)
+    def create_build_context(cls, build_key: bool, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:
+        return GDNDecodeBuildContext(replay=build_key)
 
     @classmethod
     def build_context_key(cls, layer_config: KDALayerConfig):
@@ -316,8 +316,8 @@ class ReplayKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState,
         return context.prepare(metadata)
 
     @classmethod
-    def create_build_context(cls, layer_config: KDALayerConfig, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:
-        return GDNDecodeBuildContext(replay=layer_config.replay)
+    def create_build_context(cls, build_key: bool, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:
+        return GDNDecodeBuildContext(replay=build_key)
 
     @classmethod
     def build_context_key(cls, layer_config: KDALayerConfig):
@@ -341,23 +341,30 @@ def _check_prefill_kernel(layer_config: KDALayerConfig) -> None:
             raise NotImplementedError(str(e)) from e
 
 
-def _create_prefill_step_builder(layer_config: KDALayerConfig) -> KDAPrefillBuildContext:
-    flash_kda_fwd = load_flash_kda_fwd(
-        layer_config.prefill_kernel, dtype=layer_config.dtype, ssm_dtype=layer_config.ssm_dtype
-    )
+class _PrefillKey(NamedTuple):
+    replay: bool
+    state_mtp_step: int
+    prefill_kernel: str
+    num_heads: int
+    dtype: torch.dtype
+    ssm_dtype: torch.dtype
+
+
+def _create_prefill_step_builder(build_key: _PrefillKey) -> KDAPrefillBuildContext:
+    flash_kda_fwd = load_flash_kda_fwd(build_key.prefill_kernel, dtype=build_key.dtype, ssm_dtype=build_key.ssm_dtype)
     # Automatic selection keeps FlashKDA to the step lengths it was validated on.
     max_flash_len = None
-    if layer_config.prefill_kernel == "auto":
-        max_flash_len = 2048 if layer_config.num_heads < 16 else 8192
+    if build_key.prefill_kernel == "auto":
+        max_flash_len = 2048 if build_key.num_heads < 16 else 8192
     return KDAPrefillBuildContext(
-        ssm_slots_per_request=1 if layer_config.replay else layer_config.state_mtp_step + 1,
+        ssm_slots_per_request=1 if build_key.replay else build_key.state_mtp_step + 1,
         flash_kda_fwd=flash_kda_fwd,
         max_flash_len=max_flash_len,
     )
 
 
-def _prefill_build_context_key(layer_config: KDALayerConfig):
-    return (
+def _prefill_build_context_key(layer_config: KDALayerConfig) -> _PrefillKey:
+    return _PrefillKey(
         layer_config.replay,
         layer_config.state_mtp_step,
         layer_config.prefill_kernel,

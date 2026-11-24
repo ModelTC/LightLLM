@@ -260,11 +260,9 @@ class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQ
         )
 
     @classmethod
-    def create_build_context(
-        cls, layer_config: GQALayerConfig, ctx: AttentionBuildResources
-    ) -> TritonQuantGQADecodeBuildContext:
+    def create_build_context(cls, build_key: str, ctx: AttentionBuildResources) -> TritonQuantGQADecodeBuildContext:
         # Only the int8 decode kernel has a diverse-sampling variant.
-        return TritonQuantGQADecodeBuildContext(diverse=ctx.diverse_decode and layer_config.kv_quant == "int8_group")
+        return TritonQuantGQADecodeBuildContext(diverse=ctx.diverse_decode and build_key == "int8_group")
 
     @classmethod
     def build_context_key(cls, layer_config: GQALayerConfig):
