@@ -43,10 +43,9 @@ lightllm serve /models/my-model
 
 For CUDA 12.8 on Linux x86_64, download the `+cu128` wheel from the Native
 package CI artifact and run `uv pip install <wheel-path>`. The bundled installer
-selects a CUDA profile by NVIDIA driver version and accepts `--profile cuda128`.
+requires `--profile cuda128` to select CUDA 12.8.
 
-For a published release artifact, the driver-aware installer selects the
-highest compatible wheel profile before installing dependencies:
+On drivers 580.0 and newer, the bundled installer selects CUDA 13 by default:
 
 ```bash
 python lightllm-install.py

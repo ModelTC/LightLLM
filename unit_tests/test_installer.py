@@ -15,11 +15,22 @@ _SPEC.loader.exec_module(installer)
 def test_select_profile_uses_highest_compatible_minimum_driver():
     manifest, source = installer._read_manifest(str(Path(__file__).parents[1] / "installer/manifest.json"))
     profiles = installer.load_profiles(manifest, source)
-    assert installer.select_profile(profiles, installer.Version.parse("570.124.06")).name == "cuda128"
+    with pytest.raises(installer.InstallerError, match="--profile cuda128"):
+        installer.select_profile(profiles, installer.Version.parse("570.124.06"))
+    assert installer.select_profile(profiles, installer.Version.parse("570.124.06"), "cuda128").name == "cuda128"
+    with pytest.raises(installer.InstallerError, match="does not support driver"):
+        installer.select_profile(profiles, installer.Version.parse("570.86.10"), "cuda128")
     assert installer.select_profile(profiles, installer.Version.parse("580.65.01")).name == "cuda13"
     assert installer.select_profile(profiles, installer.Version.parse("580.65.01"), "cuda128").name == "cuda128"
     with pytest.raises(installer.InstallerError, match="no compatible wheel profile"):
         installer.select_profile(profiles, installer.Version.parse("570.86.10"))
+
+
+def test_standalone_installer_requires_manifest(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(installer, "__file__", str(tmp_path / "download" / "lightllm-install.py"))
+    monkeypatch.delenv("LIGHTLLM_INSTALL_MANIFEST", raising=False)
+    assert installer.main([]) == 2
+    assert "Pass --manifest" in capsys.readouterr().err
 
 
 def test_installer_resolves_profile_and_wheel_together(monkeypatch, tmp_path):

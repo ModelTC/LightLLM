@@ -64,7 +64,8 @@ Download and extract the ``Native package`` CI artifact. Install the
 The wheel pins PyTorch 2.11.0 and torchvision 0.26.0 for CUDA 12.8,
 Triton 3.6.0, the SGLang 0.4.5 CUDA 12.9 kernel wheel and CuPy for CUDA 12.
 The bundled ``lightllm-install.py`` selects ``cuda13`` on drivers 580.0 and
-newer and ``cuda128`` on older drivers from 570.124.06. On newer drivers, run
+newer. CUDA 12.8 requires explicit selection on all eligible drivers (570.124.06
+or newer). GPU generation was verified on driver 580.95.05. Run
 ``python lightllm-install.py --profile cuda128 --venv .venv-cu128`` to select
 CUDA 12.8 explicitly. To build that wheel from source, run
 ``LIGHTLLM_CUDA_PROFILE=cuda128 uv build --wheel``.

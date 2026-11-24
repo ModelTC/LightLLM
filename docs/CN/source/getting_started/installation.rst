@@ -38,7 +38,7 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
 
 解压 ``Native package`` CI 产物后，安装器用 ``nvidia-smi`` 检测 NVIDIA 驱动，
 并用 ``uv`` 安装对应的 LightLLM wheel。驱动从 580.0 起默认选择 ``cuda13``，
-较低版本从 570.124.06 起选择 ``cuda128``。
+驱动版本达到 570.124.06 即可显式选择 ``cuda128``。该配置已在 580.95.05 驱动上验证模型生成。
 
 .. code-block:: console
 
@@ -46,7 +46,7 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
     $ source .venv/bin/activate
     $ lightllm serve /models/my-model
 
-可以使用 ``--dry-run`` 只查看选择结果和安装命令。在较新的驱动上需要使用 CUDA 12.8 时，
+可以使用 ``--dry-run`` 只查看选择结果和安装命令。需要使用 CUDA 12.8 时，
 运行 ``python lightllm-install.py --profile cuda128 --venv .venv-cu128``。
 安装器从 manifest 读取 wheel 和依赖文件的位置，支持本地路径和 HTTPS URL。
 

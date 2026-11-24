@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_MANIFEST_URL = "https://raw.githubusercontent.com/sufubao/LightLLM/main/installer/manifest.json"
 DRIVER_RE = re.compile(r"(?:Driver Version|driver_version)\s*[:=,]?\s*([0-9]+(?:\.[0-9]+)+)", re.I)
 
 
@@ -59,6 +58,7 @@ class Profile:
     wheel: str
     requirements: str
     python: str | None = None
+    explicit_only: bool = False
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -136,6 +136,7 @@ def load_profiles(manifest: dict[str, Any], source: str) -> list[Profile]:
                     wheel=_resolve_reference(str(entry["wheel"]), source),
                     requirements=_resolve_reference(str(entry["requirements"]), source),
                     python=str(entry["python"]) if entry.get("python") else None,
+                    explicit_only=entry.get("explicit_only", False),
                 )
             )
         except (KeyError, TypeError) as exc:
@@ -171,7 +172,11 @@ def select_profile(profiles: list[Profile], driver: Version, forced: str | None 
         raise InstallerError(
             f"driver {'.'.join(map(str, driver.parts))} has no compatible wheel profile. Available: {supported}"
         )
-    return max(compatible, key=lambda profile: profile.minimum_driver)
+    automatic = [profile for profile in compatible if not profile.explicit_only]
+    if not automatic:
+        options = " or ".join(f"--profile {profile.name}" for profile in compatible)
+        raise InstallerError(f"no automatic profile for this driver. To opt in explicitly, pass {options}")
+    return max(automatic, key=lambda profile: profile.minimum_driver)
 
 
 def _target_python(venv: Path, requested: str | None) -> str:
@@ -202,12 +207,12 @@ def install(profile: Profile, venv: Path, python: str | None, dry_run: bool = Fa
     return commands
 
 
-def _default_manifest() -> str:
+def _default_manifest() -> str | None:
     artifact = Path(__file__).resolve().with_name("installer-manifest.json")
     if artifact.is_file():
         return str(artifact)
     local = Path(__file__).resolve().parents[1] / "installer" / "manifest.json"
-    return str(local) if local.is_file() else os.environ.get("LIGHTLLM_INSTALL_MANIFEST", DEFAULT_MANIFEST_URL)
+    return str(local) if local.is_file() else os.environ.get("LIGHTLLM_INSTALL_MANIFEST")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -220,6 +225,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if not args.manifest:
+            raise InstallerError("no bundled manifest found. Pass --manifest with a release manifest path or URL")
         hardware = detect_hardware()
         manifest, source = _read_manifest(args.manifest)
         profiles = load_profiles(manifest, source)
