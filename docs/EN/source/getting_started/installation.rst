@@ -49,6 +49,26 @@ paths. After a release containing these changes is published, users can install
 its version with ``uv pip install lightllm==<release-version>``. Older PyPI
 releases do not necessarily contain this CLI or dependency metadata.
 
+CUDA 12.8 on Linux x86_64
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Download and extract the ``Native package`` CI artifact. Install the
+``+cu128`` wheel into a fresh environment:
+
+.. code-block:: console
+
+    $ uv venv --python 3.12
+    $ source .venv/bin/activate
+    $ uv pip install ./lightllm-1.2.0+cu128-py3-none-any.whl
+
+The wheel pins PyTorch 2.11.0 and torchvision 0.26.0 for CUDA 12.8,
+Triton 3.6.0, the SGLang 0.4.5 CUDA 12.9 kernel wheel and CuPy for CUDA 12.
+The bundled ``lightllm-install.py`` selects ``cuda13`` on drivers 580.0 and
+newer and ``cuda128`` on older drivers from 570.124.06. On newer drivers, run
+``python lightllm-install.py --profile cuda128 --venv .venv-cu128`` to select
+CUDA 12.8 explicitly. To build that wheel from source, run
+``LIGHTLLM_CUDA_PROFILE=cuda128 uv build --wheel``.
+
 The base installation includes PyTorch/Triton kernels and the SGLang kernels
 required by Qwen3.5 linear attention. Optional FlashInfer, standalone FlashMLA,
 DeepGEMM, DeepEP, NIXL, LightMem and vLLM quantization kernels still
@@ -67,7 +87,8 @@ dependency set targets NVIDIA CUDA, and is not a universal hardware resolver.
 Native dependency versions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``requirements/runtime.txt`` defines the native installation dependencies. Core versions are pinned:
+``requirements/runtime.txt`` defines the shared native dependencies.
+``requirements/cuda13.txt`` pins the default CUDA 13 runtime:
 
 .. list-table::
    :header-rows: 1
@@ -106,7 +127,7 @@ Both channels install ``lightllm`` and use the same ``lightllm serve`` command.
 Stable builds come from ``vX.Y.Z`` tags matching ``VERSION``. Daily main-branch
 builds and manual ``nightly`` builds use the next patch's development version,
 such as ``1.2.1.dev1234``, where ``1234`` is the CI run number. Nightly builds
-package the latest LightLLM code with the same ``requirements/runtime.txt`` as
+package the latest LightLLM code with the same CUDA 13 and CUDA 12.8 profiles as
 stable builds. Upgrade the pinned PyTorch, Triton and SGLang kernels together
 and validate the new combination on a GPU.
 

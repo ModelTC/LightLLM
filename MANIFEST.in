@@ -1,5 +1,7 @@
 include requirements/docker.txt
 include requirements/runtime.txt
+include requirements/cuda13.txt
+include requirements/cuda128.txt
 include VERSION
 include installer/manifest.json
 include tools/install.py

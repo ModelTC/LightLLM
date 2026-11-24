@@ -6,7 +6,14 @@
       "min_driver": "580.0",
       "python": "3.12",
       "wheel": "../dist/lightllm-1.2.0-py3-none-any.whl",
-      "requirements": "../requirements/runtime.txt"
+      "requirements": "../requirements/cuda13.txt"
+    },
+    {
+      "name": "cuda128",
+      "min_driver": "570.124.06",
+      "python": "3.12",
+      "wheel": "../dist/lightllm-1.2.0+cu128-py3-none-any.whl",
+      "requirements": "../requirements/cuda128.txt"
     }
   ]
 }

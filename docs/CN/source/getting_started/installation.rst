@@ -36,20 +36,29 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
 驱动感知安装器
 ~~~~~~~~~~~~~~~~
 
-交付 wheel、依赖锁文件和 ``installer-manifest.json`` 后，用户不需要手工判断
-CUDA 版本。安装器先执行 ``nvidia-smi``，再按驱动版本选择 manifest 中最高兼容的
-profile，并使用 ``uv`` 创建环境、安装对应依赖和 LightLLM wheel：
+解压 ``Native package`` CI 产物后，安装器用 ``nvidia-smi`` 检测 NVIDIA 驱动，
+并用 ``uv`` 安装对应的 LightLLM wheel。驱动从 580.0 起默认选择 ``cuda13``，
+较低版本从 570.124.06 起选择 ``cuda128``。
 
 .. code-block:: console
 
     $ python lightllm-install.py
+    $ source .venv/bin/activate
     $ lightllm serve /models/my-model
 
-可以使用 ``--dry-run`` 只查看选择结果和安装命令，使用 ``--profile cuda128``
-显式选择 profile。安装器不会升级 NVIDIA 驱动；如果 manifest 中没有当前驱动可用
-的 wheel，会直接报告可用 profile，并建议改用对应 Docker 镜像或补充 wheel profile。
-profile 的 ``wheel`` 和 ``requirements`` 可以是本地文件或 HTTPS URL，发布新的 CUDA
-组合不需要修改安装器代码。
+可以使用 ``--dry-run`` 只查看选择结果和安装命令。在较新的驱动上需要使用 CUDA 12.8 时，
+运行 ``python lightllm-install.py --profile cuda128 --venv .venv-cu128``。
+安装器从 manifest 读取 wheel 和依赖文件的位置，支持本地路径和 HTTPS URL。
+
+在 Linux x86_64 上，也可在新的 Python 虚拟环境中直接安装 ``+cu128`` wheel：
+
+.. code-block:: console
+
+    $ uv pip install ./lightllm-1.2.0+cu128-py3-none-any.whl
+
+CUDA 12.8 wheel 固定使用 PyTorch 2.11.0、torchvision 0.26.0 的 CUDA 12.8 构建，
+以及 Triton 3.6.0、SGLang 0.4.5 的 CUDA 12.9 内核和 CUDA 12 版 CuPy。
+从源码构建时运行 ``LIGHTLLM_CUDA_PROFILE=cuda128 uv build --wheel``。
 
 交付安装包：
 
@@ -71,7 +80,7 @@ profile 的 ``wheel`` 和 ``requirements`` 可以是本地文件或 HTTPS URL，
 稳定版由与 ``VERSION`` 一致的 ``vX.Y.Z`` 标签构建；主分支的每日构建和手动
 ``nightly`` 构建使用下一补丁版本的开发版本号，例如 ``1.2.1.dev1234``，
 其中 ``1234`` 是 CI 构建编号。nightly 打包最新的 LightLLM 代码，与稳定版共用
-``requirements/runtime.txt``。升级时同步更新固定版本的 PyTorch、Triton 和
+CUDA 13 和 CUDA 12.8 两套依赖配置。升级时同步更新固定版本的 PyTorch、Triton 和
 SGLang kernels，并在 GPU 上验证新组合。
 
 ``Native package`` 工作流目前生成 wheel、源码包和完整安装版本记录，
@@ -98,7 +107,8 @@ MUSA 等厂商运行环境需要使用对应的 PyTorch 和 Triton 构建。
 原生依赖版本
 ~~~~~~~~~~~~
 
-``requirements/runtime.txt`` 是原生安装的依赖来源。核心版本固定为：
+``requirements/runtime.txt`` 定义共用依赖。``requirements/cuda13.txt``
+固定默认 CUDA 13 运行环境的核心版本：
 
 .. list-table::
    :header-rows: 1

@@ -3,8 +3,8 @@
 
 The release manifest is intentionally separate from this installer. A release
 can therefore publish CUDA profiles without requiring a new installer release.
-The manifest entries use local paths or URLs for both the LightLLM wheel and a
-fully pinned dependency file.
+The manifest entries use local paths or URLs for the LightLLM wheel and its
+CUDA profile requirements.
 """
 
 from __future__ import annotations
@@ -194,12 +194,7 @@ def install(profile: Profile, venv: Path, python: str | None, dry_run: bool = Fa
         commands.append([uv, "venv", "--python", profile.python or sys.executable, str(venv)])
     elif not venv.exists():
         commands.append([uv, "venv", "--python", python, str(venv)])
-    commands.extend(
-        [
-            [uv, "pip", "install", "--python", target_python, "-r", profile.requirements],
-            [uv, "pip", "install", "--python", target_python, "--no-deps", profile.wheel],
-        ]
-    )
+    commands.append([uv, "pip", "install", "--python", target_python, "-r", profile.requirements, profile.wheel])
     if dry_run:
         return commands
     for command in commands:

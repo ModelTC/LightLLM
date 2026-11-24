@@ -41,16 +41,18 @@ uv pip install .
 lightllm serve /models/my-model
 ```
 
+For CUDA 12.8 on Linux x86_64, download the `+cu128` wheel from the Native
+package CI artifact and run `uv pip install <wheel-path>`. The bundled installer
+selects a CUDA profile by NVIDIA driver version and accepts `--profile cuda128`.
+
 For a published release artifact, the driver-aware installer selects the
 highest compatible wheel profile before installing dependencies:
 
 ```bash
 python lightllm-install.py
+source .venv/bin/activate
 lightllm serve /models/my-model
 ```
-
-The installer reads `installer-manifest.json`. CUDA 12.8 or vendor-specific
-profiles can be added to that manifest without changing the installer.
 
 Use `lightllm serve --help` for common options, or `--help-all` for every server
 option. Tensor parallelism defaults to `1`. Pass `--tp 2` to use two GPUs.

@@ -9,6 +9,7 @@ on:
       - "MANIFEST.in"
       - "VERSION"
       - "docker/Dockerfile"
+      - "installer/manifest.json"
       - "requirements/**"
       - "tools/install.py"
       - "unit_tests/test_cli.py"
@@ -63,6 +64,7 @@ jobs:
         run: |
           uv build --sdist
           uv build --wheel
+          LIGHTLLM_CUDA_PROFILE=cuda128 uv build --wheel
           LIGHTLLM_DOCKER_BUILD=1 uv build --wheel --out-dir "$RUNNER_TEMP/docker-wheel"
       - name: Include installer manifest in the release artifact
         run: |
@@ -71,42 +73,49 @@ jobs:
           from pathlib import Path
 
           version = Path("VERSION").read_text().strip()
-          requirements = "lightllm-runtime.txt"
-          manifest = {
-              "schema": 1,
-              "profiles": [{
-                  "name": "cuda13",
-                  "min_driver": "580.0",
-                  "python": "3.12",
-                  "wheel": f"lightllm-{version}-py3-none-any.whl",
-                  "requirements": requirements,
-              }],
-          }
-          Path("dist/installer-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-          Path("dist/lightllm-install.py").write_bytes(Path("tools/install.py").read_bytes())
-          Path(f"dist/{requirements}").write_bytes(Path("requirements/runtime.txt").read_bytes())
+          manifest_path = Path("installer/manifest.json")
+          manifest = json.loads(manifest_path.read_text())
+          dist = Path("dist")
+          for profile in manifest["profiles"]:
+              suffix = "+cu128" if profile["name"] == "cuda128" else ""
+              profile["wheel"] = f"lightllm-{version}{suffix}-py3-none-any.whl"
+              assert (dist / profile["wheel"]).is_file(), profile["wheel"]
+              requirements = manifest_path.parent / profile["requirements"]
+              profile["requirements"] = requirements.name
+              (dist / requirements.name).write_bytes(requirements.read_bytes())
+          (dist / "installer-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          (dist / "lightllm-install.py").write_bytes(Path("tools/install.py").read_bytes())
           PY
       - name: Install wheel and check dependencies
         run: |
           uv venv
-          uv pip install dist/*.whl pytest
+          uv pip install "dist/lightllm-$(cat VERSION)-py3-none-any.whl" pytest
           uv pip check
           uv pip freeze > dist/installed-py${{ matrix.python-version }}.txt
+          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/cuda128"
+          uv pip install --python "$RUNNER_TEMP/cuda128/bin/python" dist/*+cu128-*.whl
+          uv pip check --python "$RUNNER_TEMP/cuda128/bin/python"
+          uv pip freeze --python "$RUNNER_TEMP/cuda128/bin/python" > dist/installed-cu128-py${{ matrix.python-version }}.txt
       - name: Check native ABI when CUDA is available
         run: |
-          .venv/bin/python - <<'PY'
+          for python in .venv/bin/python "$RUNNER_TEMP/cuda128/bin/python"; do
+            "$python" - <<'PY'
           import torch
           if torch.cuda.is_available():
               from sgl_kernel import causal_conv1d_fwd, causal_conv1d_update
           else:
               print("Native ABI and model validation require a GPU runner; this artifact is not GPU-validated.")
           PY
+          done
       - name: Verify the installed package outside the checkout
         run: |
-          export LIGHTLLM_TEST_WHEEL="$(realpath dist/lightllm-*.whl)"
+          export LIGHTLLM_TEST_WHEEL="$(realpath "dist/lightllm-$(cat VERSION)-py3-none-any.whl")"
+          export LIGHTLLM_TEST_CUDA128_WHEEL="$(realpath dist/*+cu128-*.whl)"
           export LIGHTLLM_TEST_DOCKER_WHEEL="$(realpath "$RUNNER_TEMP"/docker-wheel/lightllm-*.whl)"
           export PATH="$GITHUB_WORKSPACE/.venv/bin:$PATH"
           cd "$RUNNER_TEMP"
+          cuda128/bin/lightllm serve --help
+          cuda128/bin/python -c 'import cupy; import torch; import lightllm.server.api_start; assert torch.version.cuda == "12.8"'
           lightllm --help
           lightllm serve --help
           lightllm serve --help-all
