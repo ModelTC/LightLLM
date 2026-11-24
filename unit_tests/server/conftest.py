@@ -4,6 +4,24 @@ import pytest
 
 
 @pytest.fixture
+def local_req_memory(monkeypatch):
+    """仅替换 Req 的共享数组分配，保留真实初始化与哈希逻辑。"""
+    from types import SimpleNamespace
+    import numpy as np
+    from lightllm.server.core.objs.req import Req
+
+    monkeypatch.setattr(Req, "create_logprobs_shm_array", lambda self: None)
+    monkeypatch.setattr(
+        Req,
+        "create_prompt_ids_shm_array",
+        lambda self: setattr(
+            self, "shm_prompt_ids", SimpleNamespace(arr=np.zeros(self.alloc_shm_numpy_len, dtype=np.int64))
+        ),
+    )
+    return Req
+
+
+@pytest.fixture
 def single_http_worker_start_args(monkeypatch):
     from lightllm.server.core.objs.start_args_type import StartArgs
     from lightllm.utils.envs_utils import get_env_start_args

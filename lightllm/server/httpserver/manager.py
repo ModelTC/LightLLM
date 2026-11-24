@@ -801,6 +801,13 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         if self.pd_mode.is_D():
             # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了
+            if self.args.enable_cpu_cache:
+                self.send_to_multi_level_kv_cache.send_pyobj(
+                    group_req_objs.to_group_req_index(),
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                )
+                return
+
             self.send_to_router.send_pyobj(
                 group_req_objs.to_group_req_index(),
                 protocol=pickle.HIGHEST_PROTOCOL,
@@ -858,6 +865,20 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 req_status.out_token_info_list = []
 
             for sub_req_id, out_str, metadata, finish_status in token_batch:
+                if (
+                    self.pd_mode.is_D()
+                    and finish_status.is_finished_pd_decode_capacity()
+                    and metadata.get("count_output_tokens") == 1
+                ):
+                    # D 命中 CPU cache 后先等待异步 H2D，再为未命中的 KV 分配空间并提交 PD 接收任务。
+                    # 等待期间其他请求可能消耗容量，导致 H2D 完成后无法补齐 KV，在提交接收任务前就结束。
+                    # 清理流程通过 mark_simulated_finished 追加一个模拟 EOS：此前真实输出为 0，
+                    # 所以 count_output_tokens 为 1；这里也覆盖其他首 token 前的容量失败。
+                    # 未提交接收任务就不会上报 KV 握手，Master 可能仍在等待 up_status_event；
+                    # 普通终态 token 只唤醒输出事件，会让 Master 一直等到握手超时。
+                    # 转为 ServerBusyError 后，经 PD_UPLOAD_SERVER_BUSY 通知 Master 设置错误并唤醒握手等待。
+                    # 已有真实输出时，模拟 EOS 的计数至少为 2，仍走原来的容量不足分段续跑流程。
+                    raise ServerBusyError("PD decode node is busy: insufficient KV capacity before the first token")
                 # pd master 节点需要这个做统计信息， 所以放在元数据中返回给 pd master 节点
                 metadata["prompt_tokens"] = prompt_tokens
 

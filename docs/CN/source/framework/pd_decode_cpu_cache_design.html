@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PD Decode 节点 CPU Cache 设计</title>
+  <style>
+    :root { --ink:#172936; --muted:#526571; --bg:#f4f7f8; --line:#d7e1e6; --blue:#245cb2; --teal:#087f74; --amber:#9a5c09; --red:#a43535; }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.8 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+    main { max-width:1180px; margin:auto; padding:42px 28px 80px; }
+    header { padding:30px; background:#142d42; color:white; border-radius:18px; }
+    h1 { margin:8px 0 16px; font-size:clamp(26px,4vw,40px); line-height:1.3; }
+    header p { margin:10px 0; max-width:950px; }
+    .eyebrow { color:#abd7ef; font-size:13px; letter-spacing:.08em; }
+    .meta { font-size:13px; color:#c6d7e2; }
+    h2 { margin:48px 0 15px; font-size:25px; line-height:1.4; scroll-margin-top:20px; }
+    h3 { margin:26px 0 10px; font-size:19px; }
+    p { margin:10px 0; }
+    a { color:var(--blue); text-underline-offset:3px; }
+    nav { display:flex; flex-wrap:wrap; gap:8px 20px; padding:20px 2px; font-size:14px; }
+    .card,.figure,.table-wrap,details { background:white; border:1px solid var(--line); border-radius:12px; }
+    .card { padding:20px 24px; margin:16px 0; }
+    .callout { border-left:5px solid var(--teal); }
+    .caution { border-left:5px solid #c47a16; background:#fffcf5; }
+    .small,.caption { color:var(--muted); font-size:14px; }
+    .caption { padding:12px 18px 16px; margin:0; }
+    .figure { overflow-x:auto; margin:20px 0; padding:12px 8px 0; }
+    svg { display:block; width:100%; min-width:760px; height:auto; }
+    svg text { font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif; fill:var(--ink); }
+    svg .title { font-size:19px; font-weight:650; }
+    svg .label { font-size:16px; }
+    svg .minor { font-size:14px; fill:var(--muted); }
+    svg .edge { fill:none; stroke:#617887; stroke-width:2; }
+    svg .life { stroke:#c7d4dd; stroke-dasharray:6 6; }
+    .table-wrap { overflow-x:auto; margin:14px 0; }
+    table { width:100%; border-collapse:collapse; font-size:14px; }
+    th,td { padding:13px 16px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); }
+    th { background:#eaf0f4; font-weight:650; white-space:nowrap; }
+    tr:last-child td { border-bottom:none; }
+    .recommend td { background:#eef9f5; }
+    code { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:.88em; overflow-wrap:anywhere; }
+    p code,li code,td code { background:#edf2f5; padding:2px 4px; border-radius:4px; }
+    pre { padding:20px; margin:15px 0; background:#132b3b; color:#e4eff6; border-radius:10px; overflow-x:auto; line-height:1.6; }
+    pre code { font-size:13px; overflow-wrap:normal; }
+    ul,ol { padding-left:25px; }
+    li { margin:7px 0; }
+    details { margin:16px 0; padding:15px 20px; }
+    summary { cursor:pointer; font-weight:650; }
+    .tag { display:inline-block; padding:1px 9px; border-radius:20px; background:#e6f4ee; color:#086454; font-size:12px; }
+    .source-list { columns:2; column-gap:40px; font-size:13px; }
+    .source-list li { break-inside:avoid; margin-bottom:14px; }
+    footer { border-top:1px solid var(--line); padding-top:18px; margin-top:40px; font-size:13px; color:var(--muted); }
+    @media(max-width:700px) { main { padding:18px 14px 50px; } header { padding:23px; } .source-list { columns:1; } th,td { padding:10px; } }
+    @media print { body { background:white; font-size:11pt; } main { max-width:none; padding:0; } header { background:white; color:#172936; border:1px solid #999; } header .meta,header .eyebrow { color:#526571; } nav { display:none; } h2 { break-after:avoid; } .figure,tr { break-inside:avoid; } svg { min-width:0; } pre { white-space:pre-wrap; } details { display:block; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">LIGHTLLM / 架构设计 / 已实现，功能与性能按场景验收</div>
+    <h1>PD Decode 节点 CPU Cache 设计</h1>
+    <p><strong>用 D 的本机 CPU 缓存复用 prompt KV，减少跨节点传输，沿用现有 PD 协议。</strong></p>
+    <p>核心边界：混合注意力跳过 P 前，KV 与对应运行态必须全部就绪；仅有 CPU KV 命中不够。支持普通多 DP，与 <code>--enable_dp_prompt_cache_fetch</code> 的组合首版互斥。</p>
+    <p class="meta">初轮基线：main · 0c0b0683a · 2026-11-23 UTC<br>初轮 223 种定义、602 项有效结果和 784 项回归通过。后续深度复核对照 origin/main · 8863b3f3f：408 种定义，跨配置 766 条结果，718 条严格 token 检查通过、48 条失败；另有 735 项相关回归通过。22 组性能实测表明收益依赖命中路径；MTP 并发逐 token 差异仍未定位。两轮测试分别记录，不合并计数。</p>
+  </header>
+  <nav aria-label="文档目录">
+    <a href="#overview">整体流程</a><a href="#decision">方案与范围</a><a href="#ranges">跳过 P 的条件</a><a href="#lifecycle">异步控制</a><a href="#hybrid">缓存内容</a><a href="#compatibility">兼容与 DP shared</a><a href="#failures">异常回收</a><a href="#validation">验收</a><a href="#evidence">基线问题</a><a href="#changes">代码改动</a><a href="#sources">代码依据</a>
+  </nav>
+
+  <section id="overview">
+    <h2>1. 整体流程</h2>
+    <p>P 是 Prefill 节点，负责完成 prompt 计算；D 是 Decode 节点，负责后续生成。本方案让 D 先复用本机缓存，减少 P→D 的 KV 传输。</p>
+    <p>请求初始化时先构建哈希和页长度列表，再统一处理 Decode hybrid 的完全命中边界。外部匹配服务直接查询这些页面，之后再查询 GPU 已有前缀；CPU 命中更长且值得采用时，将新增部分搬回 GPU。恢复完成或确定无需加载后，通过一次性回调续接 PD 接收任务初始化。生成结束时，按现有策略写回 CPU，供后续请求复用。</p>
+    <div class="figure">
+      <svg viewBox="0 0 1120 650" role="img" aria-labelledby="flow-title flow-desc" xmlns="http://www.w3.org/2000/svg">
+        <title id="flow-title">Decode 请求从匹配 CPU cache 到接收缺失 KV，再写回缓存的流程</title>
+        <desc id="flow-desc">请求先初始化哈希和页长度，Decode hybrid 在 N−1 边界统一退页，再交给 CPU 匹配服务查询；之后在 GPU 匹配已有前缀。CPU 命中更长且值得恢复时异步搬回 GPU，期间不生成 PD 接收任务。完成后只为剩余部分创建接收任务并上报 Master。接收完成后执行 decode，结束时按缓存放置策略写回，写回完成才释放资源。</desc>
+        <defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10Z" fill="#617887"/></marker></defs>
+        <rect x="35" y="30" width="235" height="90" rx="12" fill="#edf3fc" stroke="#7e9fd3"/>
+        <text x="152" y="66" text-anchor="middle" class="title">① 请求进入 Decode</text>
+        <text x="152" y="96" text-anchor="middle" class="label">初始化退页，再匹配 CPU</text>
+        <path class="edge" d="M270 75 H320" marker-end="url(#flow-arrow)"/>
+        <rect x="320" y="30" width="260" height="90" rx="12" fill="#edf3fc" stroke="#7e9fd3"/>
+        <text x="450" y="66" text-anchor="middle" class="title">② GPU 再查本地前缀</text>
+        <text x="450" y="96" text-anchor="middle" class="label">决定 CPU 是否能多补一段</text>
+        <path class="edge" d="M580 75 H640" marker-end="url(#flow-arrow)"/>
+        <path d="M790 20 L940 85 L790 150 L640 85Z" fill="#fff7e9" stroke="#c99d56"/>
+        <text x="790" y="80" text-anchor="middle" class="title">值得从 CPU 恢复？</text>
+        <text x="790" y="108" text-anchor="middle" class="minor">命中更长、容量足够</text>
+        <path class="edge" d="M790 150 V190" marker-end="url(#flow-arrow)"/>
+        <text x="805" y="178" class="label">是</text>
+        <rect x="650" y="190" width="280" height="100" rx="12" fill="#eaf8f2" stroke="#55a58c"/>
+        <text x="790" y="227" text-anchor="middle" class="title">③ 异步搬回 GPU</text>
+        <text x="790" y="257" text-anchor="middle" class="label">等拷贝完成，其他请求继续运行</text>
+        <text x="790" y="279" text-anchor="middle" class="minor">完成后清空回调，再续接 PD 初始化</text>
+        <path class="edge" d="M940 85 H1030 V350 H930" marker-end="url(#flow-arrow)"/>
+        <text x="1042" y="225" class="label">否</text>
+        <path class="edge" d="M790 290 V310" marker-end="url(#flow-arrow)"/>
+        <rect x="650" y="310" width="280" height="90" rx="12" fill="#edf3fc" stroke="#7e9fd3"/>
+        <text x="790" y="345" text-anchor="middle" class="title">④ 为缺口建接收任务</text>
+        <text x="790" y="375" text-anchor="middle" class="label">入等待表后，才通知 Master</text>
+        <path class="edge" d="M650 355 H580" marker-end="url(#flow-arrow)"/>
+        <rect x="320" y="310" width="260" height="90" rx="12" fill="#fff7e9" stroke="#c99d56"/>
+        <text x="450" y="345" text-anchor="middle" class="title">⑤ Prefill 补齐缺失内容</text>
+        <text x="450" y="375" text-anchor="middle" class="label">hybrid 另接收末尾运行态</text>
+        <path class="edge" d="M320 355 H270" marker-end="url(#flow-arrow)"/>
+        <rect x="35" y="310" width="235" height="90" rx="12" fill="#eaf8f2" stroke="#55a58c"/>
+        <text x="152" y="345" text-anchor="middle" class="title">⑥ 接收完成，开始生成</text>
+        <text x="152" y="375" text-anchor="middle" class="label">每个 token 的 KV 仍在 GPU</text>
+        <path class="edge" d="M152 400 V490 H320" marker-end="url(#flow-arrow)"/>
+        <text x="170" y="477" class="minor">请求结束</text>
+        <rect x="320" y="445" width="260" height="100" rx="12" fill="#eaf8f2" stroke="#55a58c"/>
+        <text x="450" y="482" text-anchor="middle" class="title">⑦ 按策略写回 CPU cache</text>
+        <text x="450" y="512" text-anchor="middle" class="label">只写有效 prompt 页，等待完成</text>
+        <text x="450" y="534" text-anchor="middle" class="minor">策略选 GPU-only 时跳过写回</text>
+        <path class="edge" d="M580 495 H650" marker-end="url(#flow-arrow)"/>
+        <rect x="650" y="445" width="280" height="100" rx="12" fill="#edf3fc" stroke="#7e9fd3"/>
+        <text x="790" y="482" text-anchor="middle" class="title">⑧ 发布缓存页并释放资源</text>
+        <text x="790" y="512" text-anchor="middle" class="label">CPU 页可供下一条请求复用</text>
+        <text x="790" y="534" text-anchor="middle" class="minor">GPU 页与请求槽只释放一次</text>
+        <text x="35" y="610" class="minor">蓝色：调度与资源管理　　绿色：本机缓存搬运 / 执行　　橙色：选择或跨节点补齐</text>
+      </svg>
+      <p class="caption">图 1 · 图中展示需要 P 补齐的主路径；本地已就绪时的接续方式见第 3 节。取消与失败见<a href="#failures">异常回收</a>。</p>
+    </div>
+    <p>请求有两条接续路径：<strong>本地已具备计算条件，由 D 计算最后一个 prompt token；否则由 P 补齐数据并提供首 token，D 接着生成。</strong>具体条件见<a href="#ranges">第 3 节</a>。</p>
+  </section>
+
+  <section id="decision">
+    <h2>2. 方案与范围</h2>
+    <p>复用现有 CPU 缓存服务、异步搬运和放置策略，补齐 D 的请求接入与就绪控制。继续使用 <code>--enable_cpu_cache</code>；P 是否启用 CPU 缓存可独立配置，PD 通信协议不变。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>本文用词</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>KV</td><td>full-att 层按 token 保存的历史数据。</td></tr>
+        <tr><td>运行态 / checkpoint</td><td>混合注意力中的线性注意力、卷积等状态；checkpoint 是它在某个前缀位置的可恢复快照。</td></tr>
+        <tr><td>命中 / 就绪</td><td>命中表示找到可复用数据；就绪表示所需数据已恢复完成，可以被计算使用。</td></tr>
+      </tbody>
+    </table></div>
+    <div class="card callout">
+      <strong>方案保留三条边界</strong>
+      <ul>
+        <li>CPU 恢复完成后，才发布 PD 接收任务。</li>
+        <li>D 的混合注意力 CPU 缓存只保存 KV；运行态通过本地完整缓存或 P 的末尾状态获得，不能省略。</li>
+        <li>支持普通多 DP；D CPU cache 与生效的 DP shared 前缀拉取互斥。</li>
+      </ul>
+    </div>
+    <p>缓存对象是跨请求复用的 prompt KV，不包含 decode 输出。命中仍需占用 GPU 显存，因此不会扩大活跃请求可用的上下文容量。</p>
+    <details><summary>选择依据</summary>
+      <p>只删除断言或只增加写回都没有读复用；同步等待会阻塞其他请求。异步恢复可复用现有机制，KV-only 则避免新增中间 checkpoint 的传输和槽位管理，代价是 CPU 命中不能独立满足混合注意力的完整恢复条件。</p>
+    </details>
+  </section>
+
+  <section id="ranges">
+    <h2>3. 何时可以跳过 P</h2>
+    <p>设 <code>N</code> 为 prompt 长度。当前普通 PD 会保留最后一个 prompt token：本地具备前 N−1 个 token 的完整计算条件时，由 D 计算最后一个 token 并产生首 token；否则需要 P 参与。</p>
+    <div class="card callout">
+      <strong>混合注意力的完整条件：前 N−1 个 token 的 KV 与同一位置的所有所需运行态，均已恢复完成。</strong>
+      <p>KV 命中长度不能代替运行态。比如 prompt 有 513 个 token，CPU 只有前 512 个 token 的 KV，没有对应运行态；此时直接让 D 计算第 513 个 token，可能使用初始或旧状态而产生错误结果。</p>
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>场景</th><th>P 是否参与</th><th>接续方式</th></tr></thead>
+      <tbody>
+        <tr><td>普通 PD，完整注意力模型的前 N−1 个 token KV 已就绪</td><td>可跳过</td><td>保留零长度握手，由 D 计算最后一个 prompt token，产生首 token。</td></tr>
+        <tr><td>普通 PD，混合注意力的 KV 与 N−1 位置运行态都已就绪</td><td>可跳过</td><td>沿用本地完整缓存恢复路径，由 D 产生首 token。</td></tr>
+        <tr><td>普通 PD，混合注意力仅从 CPU 命中 KV，或只有部分前缀</td><td>必须参与</td><td>P 补齐缺失 KV，并提供处理完 N 个 prompt token 后的运行态和首 token；D 从后续 token 继续。</td></tr>
+        <tr><td>Prefill-first，首 token 后仍需 D 继续生成，包括 KV 命中至 N−1</td><td>仍然参与</td><td>D 至少接收一个真实 KV token；混合注意力另收 N 位置运行态，首 token 放在最后任务中。</td></tr>
+      </tbody>
+    </table></div>
+    <p>Prefill-first 若在 P 生成首 token 后就已结束，例如只请求 1 个输出 token，Master 不会选择 D，也不会触发 D 的 CPU 加载或写回。预热 D 缓存的测试必须让请求实际经过 D。</p>
+    <h3>用完整页回退保留现有协议</h3>
+    <p>现有普通 PD 在收到 N−1 命中时就会停止 P 的生成，Master 也不再等待 P 首 token。因此，<strong>Decode hybrid 请求在初始化末尾检查：末页结束位置加 1 恰好等于 N 时，同步缩短 CPU 哈希列表与页长度列表，退掉最后一整页</strong>，让 P 继续参与。构建过程不嵌入退页规则；匹配服务和推理搬运层直接使用初始化结果。</p>
+    <p>“所有缓存块命中”不一定是 PD 完全匹配，还要比较实际覆盖位置。例如 CPU 页长 256：N=513 时候选到 512，需退到 256；N=514 时同样候选到 512，但还缺尾部，保留两页即可。普通 PD 和 Prefill-first 统一采用该规则；Prefill-first 仅在这一边界少复用一页，仍按原协议接收尾部 KV 和运行态。完整注意力模型不回退。</p>
+    <p>回退不能靠加载后少报长度，也不能把完整页截成不支持的碎页。两个 CPU 列表同步缩短后，匹配和写回都不再使用末页；仍沿用小命中跳过搬运等原有策略。GPU radix 哈希保持完整，已有 KV 与同长度运行态的本地完整命中不回退。N=1 时没有 CPU 页，无需裁剪。</p>
+    <h3>实际采用多少前缀</h3>
+    <p><code>G</code> 是 GPU 命中长度，<code>H</code> 是 CPU 候选长度。先按上述规则选择候选，再检查容量和恢复条件；<code>L</code> 是最终采用且已就绪的前缀长度。未采用 CPU 时沿用 G，新增复用量为 L−G，不能把 GPU 与 CPU 命中相加。</p>
+    <div class="figure">
+      <svg viewBox="0 0 1120 255" role="img" aria-labelledby="range-title range-desc" xmlns="http://www.w3.org/2000/svg">
+        <title id="range-title">8192 token 的 prompt 由 GPU、CPU 和 Prefill 三段组成</title>
+        <desc id="range-desc">GPU 已有前 2048 token，CPU 命中到 6144 token，因此只从 CPU 恢复 4096 token，Prefill 传剩余 2048 token。CPU 原始匹配的 6144 token 包含 GPU 已有的 2048 token，不能重复相加。</desc>
+        <text x="40" y="34" class="title">例：N = 8192，G = 2048，H = 6144，实际采用 CPU 命中</text>
+        <rect x="40" y="68" width="260" height="68" rx="5" fill="#e4edfc" stroke="#7e9fd3"/>
+        <rect x="300" y="68" width="520" height="68" fill="#e1f5ed" stroke="#55a58c"/>
+        <rect x="820" y="68" width="260" height="68" rx="5" fill="#fff1d9" stroke="#c99d56"/>
+        <text x="170" y="96" text-anchor="middle" class="label">GPU 已有</text>
+        <text x="170" y="122" text-anchor="middle" class="label">2048 token</text>
+        <text x="560" y="96" text-anchor="middle" class="label">CPU → GPU 只补新增部分</text>
+        <text x="560" y="122" text-anchor="middle" class="label">4096 token</text>
+        <text x="950" y="96" text-anchor="middle" class="label">Prefill → Decode</text>
+        <text x="950" y="122" text-anchor="middle" class="label">2048 token</text>
+        <text x="40" y="166" class="minor">0</text><text x="300" y="166" text-anchor="middle" class="minor">G = 2048</text>
+        <text x="820" y="166" text-anchor="middle" class="minor">L = H = 6144</text><text x="1080" y="166" text-anchor="end" class="minor">N = 8192</text>
+        <text x="40" y="212" class="label">逻辑上恢复 [G, L)，网络只补 [L, N)；CPU 物理复制可能因整页覆盖而包含部分 GPU 共享前缀。</text>
+      </svg>
+      <p class="caption">图 2 · CPU 命中长度是“从开头累计到哪里”，并不是额外命中多少。统计新增 CPU 命中时应扣除 GPU 命中。</p>
+    </div>
+    <p class="small">CPU 页长与 PD 页长可不同，但分别满足模型和布局对齐。短请求或无可用完整页时沿用原路径；CPU 哈希仍保留最后一个 token 不匹配。</p>
+  </section>
+
+  <section id="lifecycle">
+    <h2>4. 请求如何异步推进</h2>
+    <p>搬运期间请求留在等待状态，推理循环继续处理其他请求。下面是需要 P 补齐时的时序。</p>
+    <div class="figure">
+      <svg viewBox="0 0 1120 845" role="img" aria-labelledby="seq-title seq-desc" xmlns="http://www.w3.org/2000/svg">
+        <title id="seq-title">CPU 恢复与 PD 握手的时序</title>
+        <desc id="seq-desc">CPU 匹配服务先交付带页面引用的请求。Decode 推理进程发起 CPU 到 GPU 复制，轮询期间继续调度其他请求。确认所有相关 rank 的 load 完成后创建接收任务，传输进程先放入等待表再向 Master 报告可用前缀。Prefill 根据此前缀补齐数据；Decode 传输进程本地复制完成才回报成功，之后推理进程才能执行请求。</desc>
+        <defs><marker id="seq-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10Z" fill="#617887"/></marker></defs>
+        <rect x="25" y="20" width="180" height="50" rx="9" fill="#eaf8f2" stroke="#55a58c"/>
+        <rect x="285" y="20" width="220" height="50" rx="9" fill="#edf3fc" stroke="#7e9fd3"/>
+        <rect x="605" y="20" width="200" height="50" rx="9" fill="#edf3fc" stroke="#7e9fd3"/>
+        <rect x="905" y="20" width="190" height="50" rx="9" fill="#fff7e9" stroke="#c99d56"/>
+        <text x="115" y="52" text-anchor="middle" class="title">CPU 匹配服务</text>
+        <text x="395" y="52" text-anchor="middle" class="title">D 推理进程</text>
+        <text x="705" y="52" text-anchor="middle" class="title">D 传输进程</text>
+        <text x="1000" y="52" text-anchor="middle" class="title">Master / Prefill</text>
+        <path class="life" d="M115 70 V810 M395 70 V810 M705 70 V810 M1000 70 V810"/>
+        <path class="edge" d="M115 125 H390" marker-end="url(#seq-arrow)"/>
+        <text x="250" y="110" text-anchor="middle" class="label">匹配页 + 持有页引用</text>
+        <rect x="290" y="160" width="210" height="105" rx="9" fill="#eaf8f2" stroke="#55a58c"/>
+        <text x="395" y="192" text-anchor="middle" class="title">提交 H2D 恢复</text>
+        <text x="395" y="222" text-anchor="middle" class="label">load = RUNNING</text>
+        <text x="395" y="248" text-anchor="middle" class="minor">尚未创建 PD 接收任务</text>
+        <rect x="520" y="180" width="270" height="65" rx="8" fill="#f1f5f8"/>
+        <text x="655" y="207" text-anchor="middle" class="label">等待 CUDA 完成事件</text>
+        <text x="655" y="232" text-anchor="middle" class="minor">推理循环继续处理其他请求</text>
+        <rect x="290" y="295" width="210" height="75" rx="9" fill="#eaf8f2" stroke="#55a58c"/>
+        <text x="395" y="325" text-anchor="middle" class="title">load 完成并释放页引用</text>
+        <text x="395" y="352" text-anchor="middle" class="label">清空一次性回调，再调用</text>
+        <path class="edge" d="M395 420 H700" marker-end="url(#seq-arrow)"/>
+        <text x="550" y="405" text-anchor="middle" class="label">提交缺失区间的接收任务组</text>
+        <rect x="595" y="445" width="220" height="55" rx="9" fill="#edf3fc" stroke="#7e9fd3"/>
+        <text x="705" y="480" text-anchor="middle" class="label">先放入本地等待表</text>
+        <path class="edge" d="M705 535 H995" marker-end="url(#seq-arrow)"/>
+        <text x="850" y="520" text-anchor="middle" class="label">再上报 ready_kv_len = L</text>
+        <path class="edge" d="M1000 595 H710" marker-end="url(#seq-arrow)"/>
+        <text x="850" y="580" text-anchor="middle" class="label">P 只补尾部 KV / 运行态</text>
+        <rect x="595" y="625" width="220" height="55" rx="9" fill="#fff7e9" stroke="#c99d56"/>
+        <text x="705" y="660" text-anchor="middle" class="label">D 本地接收和复制均完成</text>
+        <path class="edge" d="M705 715 H400" marker-end="url(#seq-arrow)"/>
+        <text x="550" y="700" text-anchor="middle" class="label">回报成功，推进 PD 完成计数</text>
+        <rect x="290" y="755" width="210" height="55" rx="9" fill="#eaf8f2" stroke="#55a58c"/>
+        <text x="395" y="790" text-anchor="middle" class="title">全部就绪，允许计算</text>
+      </svg>
+      <p class="caption">图 3 · 先确认 CPU 恢复完成，再发布接收任务；收到 P 的 KV 和所需运行态后才计算。本地完整命中的普通 PD 沿用零长度握手。</p>
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>阶段</th><th>进入下一阶段的条件</th></tr></thead>
+      <tbody>
+        <tr><td>CPU 恢复</td><td>所选 KV 已搬回 GPU，且副本内各 TP rank 对完成状态达成一致；标记 load 完成并归还 CPU 页引用，再清空、执行一次性回调，创建 PD 接收任务。未命中或跳过加载也在归还引用后立即续接。</td></tr>
+        <tr><td>PD 接收</td><td>本地接收和复制全部成功，本路径所需运行态已恢复；随后允许计算。失败或取消进入回收流程。</td></tr>
+        <tr><td>生成结束 / CPU 写回</td><td>按放置策略决定是否写回；写回完成后发布可复用页，再释放 GPU 和请求资源。</td></tr>
+      </tbody>
+    </table></div>
+    <p><strong>任务未创建时，完成计数相等也不能放行。</strong>CPU load 仍在进行时，公共就绪检查先拦住请求；load 完成推进中执行一次性回调，然后才进行 PD 就绪检查，因此无需额外的“任务已提交”标志。P / D 都先调用公共检查，再处理 PD 取消与完成状态；搬运中不重复提交或提前释放资源。取消且未提交的请求只做终态清理。</p>
+    <p>状态检查只限制“跳过 P”和“开始计算”。CPU 前缀没有对应运行态时，仍需创建 PD 接收任务，接收 P 提供的末尾状态，不能等待一个不会产生的中间 checkpoint。</p>
+    <h3>多卡与显存</h3>
+    <p>复用现有完成事件、组内同步及主 rank 归还 CPU 引用的机制；同一 DP 副本内各 TP rank 对前缀、提交时机和任务数保持一致，不增加跨 DP 前缀交换屏障。</p>
+    <p>CPU 命中不减少最终显存预算。恢复后重新检查尾部容量，不足时在整组发布前安全终止；不发布半组任务，也不盲目重试已发布任务。</p>
+  </section>
+
+  <section id="hybrid">
+    <h2>5. 缓存保存什么</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>角色</th><th>CPU 缓存内容</th><th>恢复后的用途</th></tr></thead>
+      <tbody>
+        <tr><td>Normal / Prefill</td><td>保持现有 KV + 所需运行态快照。</td><td>恢复到对应前缀后继续 prefill。</td></tr>
+        <tr><td>Decode</td><td>只保存 full-att KV，不建立中间运行态快照。</td><td>减少 P→D 的 KV 传输；是否能本地接续按第 3 节判断。</td></tr>
+      </tbody>
+    </table></div>
+    <p>P 参与时会完成 prompt 计算，因此 D 可以接收 P 的末尾运行态，而不必恢复 CPU 前缀终点的中间状态。这就是“不新增中间 checkpoint 传输”的适用前提。</p>
+    <p>运行态快照绑定确定的前缀位置：N 位置不能代替 N−1 或其他位置，main / draft 的全部所需状态都须一致。CPU KV 命中不生成 GPU radix checkpoint；保留 D 禁用大页、无合法快照不插入 radix 的规则，不能借用末尾状态伪造中间快照。</p>
+    <p>无可缓存 KV 时，开启 CPU cache 会由现有 CPU 元数据初始化的非空页校验报错，不额外提前构建布局，也不自动关闭缓存。量化字段、压缩索引等仍由现有布局完整处理。</p>
+    <details><summary>如果希望 CPU 完整命中后也能跳过 P</summary>
+      <p>需要让 CPU 缓存同时保存并恢复对应前缀的运行态。这会改变缓存内容和状态生命周期，不属于当前 KV-only 方案；不能只放开“完全匹配”分支。</p>
+    </details>
+  </section>
+
+  <section id="compatibility">
+    <h2>6. 兼容边界与 DP shared</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>维度</th><th>规则</th></tr></thead>
+      <tbody>
+        <tr><td>P / D 配置</td><td>P 可不开 CPU cache；P/D 的 CPU 页长可不同，也不必等于 PD 页长。原有模型、TP 分片和传输兼容要求保留。</td></tr>
+        <tr><td>TP / 普通 DP / 传输</td><td>保留普通多 DP、副本内 TP 和既有 overlap、NIXL / NCCL 支持范围；验证接收端完成语义。</td></tr>
+        <tr><td>放置策略</td><td>legacy 可写 GPU+CPU；adaptive 可能选 GPU-only。验收需实际选中 CPU，不能仅凭没有写回判断失效。</td></tr>
+        <tr><td>prompt logprobs / diverse</td><td>保持现有跳过、主请求匹配 / 写回及各角色功能校验，不扩大已有能力。</td></tr>
+        <tr><td>多模态</td><td>D 不重新编码，使用 P 提供的 prompt token IDs 构建 CPU 缓存哈希；当前两种 PD Master 均向 D 传递空多模态参数。加载层仅根据已有的 <code>mm_input_spans</code> 裁剪恢复终点，空 spans 不触发裁剪；尚无“多模态信息不足时自动跳过 CPU 恢复”的判断，多模态组合仍需单独验证。</td></tr>
+        <tr><td>磁盘</td><td>沿用原目录规则：未配置时使用含服务名的临时目录，显式配置时直接使用指定目录。不新增 Decode 专用名称或子目录。</td></tr>
+        <tr><td>load 阈值</td><td>Decode 默认 <code>need_token_num≥2048</code>，可用 <code>LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS</code> 设置正整数阈值，Normal / Prefill 固定 128。变量在启动 D 前设置，修改后重启；比较的是扣除 GPU 前缀后的新增 token 数。<code>input_len≥256</code> 和容量判断不变。沿用原统计口径；跳过加载仍计数、GPU / disk 重叠计数的问题已留 TODO，另行修复。</td></tr>
+        <tr><td>匹配超时</td><td>现有 <code>0.5s</code> 仅检查入队等待，不覆盖处理中的 READY 轮询。保留服务架构，验收等待中取消 / 异常；若发现无界等待再修该生命周期。</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3 id="dp-shared">6.1 不支持与 DP shared 同时启用</h3>
+    <p><strong>DP shared 特指 <code>--enable_dp_prompt_cache_fetch</code> 的跨 GPU 前缀拉取。</strong>关闭它仍可保留普通多 DP 和实例内共享 CPU cache；各副本只处理自己的请求。</p>
+    <div class="figure">
+      <svg viewBox="0 0 1120 425" role="img" aria-labelledby="dp-title dp-desc" xmlns="http://www.w3.org/2000/svg">
+        <title id="dp-title">保留实例内共享 CPU cache，关闭跨 DP 的 GPU 前缀拉取</title>
+        <desc id="dp-desc">顶部是本实例的 CPU cache READY 页池。DP 0 和 DP 1 分别按自己的请求从该池恢复 KV，并等待各自副本内的完成事件，然后接收 Prefill 的缺失页和运行态。两副本之间不交换 GPU 前缀或临时请求。本图不表示它们必须同步推进。</desc>
+        <defs><marker id="dp-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10Z" fill="#617887"/></marker></defs>
+        <rect x="350" y="25" width="420" height="95" rx="12" fill="#eaf8f2" stroke="#55a58c"/>
+        <text x="560" y="62" text-anchor="middle" class="title">本实例 CPU cache：共享 READY 页</text>
+        <text x="560" y="94" text-anchor="middle" class="label">按现有模型、分片和页布局复用</text>
+        <path class="edge" d="M420 120 V155 H270 V200" marker-end="url(#dp-arrow)"/>
+        <path class="edge" d="M700 120 V155 H850 V200" marker-end="url(#dp-arrow)"/>
+        <rect x="75" y="200" width="390" height="120" rx="12" fill="#edf3fc" stroke="#7e9fd3"/>
+        <rect x="655" y="200" width="390" height="120" rx="12" fill="#edf3fc" stroke="#7e9fd3"/>
+        <text x="270" y="236" text-anchor="middle" class="title">DP 0：只负责自己的请求</text>
+        <text x="270" y="270" text-anchor="middle" class="label">GPU 本地命中 → CPU 补齐前缀</text>
+        <text x="270" y="299" text-anchor="middle" class="label">恢复完成后，创建 PD 接收任务</text>
+        <text x="850" y="236" text-anchor="middle" class="title">DP 1：只负责自己的请求</text>
+        <text x="850" y="270" text-anchor="middle" class="label">GPU 本地命中 → CPU 补齐前缀</text>
+        <text x="850" y="299" text-anchor="middle" class="label">恢复完成后，创建 PD 接收任务</text>
+        <text x="560" y="367" text-anchor="middle" class="title">跨 DP 的 GPU 前缀拉取：首版关闭</text>
+        <text x="560" y="400" text-anchor="middle" class="minor">各自接收 Prefill 补齐的尾部 KV / 运行态，再执行 decode；不增加跨副本前缀交换屏障。</text>
+      </svg>
+      <p class="caption">图 4 · 各 DP 副本独立恢复自己的请求，共享实例内 CPU 缓存；不进行跨 GPU 的前缀拉取。</p>
+    </div>
+
+    <div class="table-wrap"><table>
+      <thead><tr><th>若支持组合</th><th>必须补齐的契约</th></tr></thead>
+      <tbody>
+        <tr><td>批次与屏障</td><td>普通 DP shared 按全批次行号建立临时请求，D 只初始化归属请求。须统一集合和行号，保证节点 collective 次序一致，不能按各副本 load 完成条件进入屏障。</td></tr>
+        <tr><td>数据就绪</td><td>计划恢复的长度不代表数据已可读取。跨 DP 消费前，必须确认 CPU 搬运和 PD 本地复制完成。</td></tr>
+        <tr><td>运行态一致性</td><td>跨 DP 复制会涉及运行态，KV-only 前缀却没有对应快照；需要保证 KV 与状态处于同一位置，或另设计仅复制 KV 的路径。</td></tr>
+        <tr><td>源请求保活</td><td>临时源对象须等复制完成再释放，覆盖取消；CPU 匹配引用只能由唯一消费者 load / deref，非归属 DP 不写终态。</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3>6.2 组合规则</h3>
+
+    <ul>
+      <li>D + CPU cache + fetch 关闭：允许单 / 多 DP 与副本内 TP。</li>
+      <li>D + CPU cache + fetch 开启且 <code>dp&gt;1</code>：两种 PD 模式都报错；每节点仅一个 DP 的拓扑也不额外豁免。</li>
+      <li><code>dp≤1</code>：在资源分配前归一化关闭无效 fetch；D 不开 CPU cache 或其他角色不新增该限制。D fetch 的入口旁路另记问题，不视作已验证功能。</li>
+    </ul>
+    <p>代价：无法直接命中只在其他 DP GPU 上、尚未写回 CPU 的前缀。共享 CPU 页可用于后续复用，但不保证与 GPU fetch 有相同命中率和时延。</p>
+  </section>
+
+  <section id="failures">
+    <h2>7. 异常与资源回收</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>情况</th><th>处理规则</th></tr></thead>
+      <tbody>
+        <tr><td>CPU 未命中、不比 GPU 长或不值得恢复</td><td>跳过复制，沿用 GPU 前缀；标记本次恢复完成，由主 rank 归还匹配页引用。</td></tr>
+        <tr><td>Router 排队期间取消</td><td>尚未交给 Infer，由队列归还并清空匹配页引用。</td></tr>
+        <tr><td>CPU→GPU 搬运期间取消</td><td>保持请求和页面存活，等搬运完成再归还 CPU 引用；不创建 PD 任务，随后释放 GPU 资源。</td></tr>
+        <tr><td>显存不足</td><td>复制未提交时可放弃 CPU 恢复；尾部仍放不下，则在整组 PD 任务发布前终止。首 token 前通过已有 ServerBusy 通道唤醒仍在等握手的 Master，避免只发送结束 token 后一直等待；已产生输出的容量不足继续沿用原分段续跑。</td></tr>
+        <tr><td>CPU 复制 / CUDA 出错</td><td>沿用进程失败与服务清理，不吞掉异常当作未命中，也不复用部分写入的数据。请求级恢复需单独设计回滚。</td></tr>
+        <tr><td>PD 取消、超时或失败</td><td>保留有限次数的 abort 通知，等全部任务落定；有效长度回退到可信 GPU 共享前缀，持有容量按原值统一回收，失败尾部不进入缓存。</td></tr>
+        <tr><td>生成已结束，写回仍在进行</td><td>不再计算或重复写回；完成后由主 rank 发布可复用页、归还引用，再释放 GPU 页和请求槽。</td></tr>
+        <tr><td>CPU 页不足</td><td>只写回已分配的连续前缀，遇到分配失败就截断；一页也没有则跳过写回并退出。已有可复用页继续去重。</td></tr>
+      </tbody>
+    </table></div>
+    <p><strong>匹配引用在 Router→Infer 时转交，不能两边重复归还。</strong>Infer 统一管理已消费引用；不能因为共享列表非空就再次释放。若清空列表，须先让同副本所有 TP rank 读取同一快照，再由主 rank 清空。</p>
+    <p>保留现有计算流依赖、CUDA 事件和接收端复制完成检查，不增加全局设备同步。P 发送完成不能替代 D 本地完成。</p>
+  </section>
+
+  <section id="validation">
+    <h2>8. 验收</h2>
+    <p><strong>必须跑通：写回 CPU → 淘汰 GPU 前缀 → 重发相同请求 → 实际从 CPU 恢复。</strong>仅成功启动或看到候选页数不算通过。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>验证组</th><th>场景与通过条件</th></tr></thead>
+      <tbody>
+        <tr><td>接入 / 门禁</td><td>开关关闭、miss、CPU 比 GPU 短、load 状态变化、重复调度、offload 在途。load 前 0 次提交、完成后恰好 1 次；0==0 不放行，不重复写回或早释放。</td></tr>
+        <tr><td>普通 PD</td><td>覆盖 N=1、部分命中、N−1 命中。重点验证 hybrid：仅 CPU KV 满匹配、运行态缺失 / 过时 / 在途时不能跳 P；本地 KV 与同长度状态都恢复完成才允许跳 P。保留零长度握手、完整页回退，首 token 无重复 / 缺失 / 死锁。</td></tr>
+        <tr><td>Prefill-first</td><td>两类模型的 miss、部分命中、N-1 命中；始终接收至少一个真实 token，首 token 仍挂最后任务，第二个 token 正确衔接。</td></tr>
+        <tr><td>页 / State</td><td>CPU≠PD 页长、GPU 命中非 CPU 页边界、分页预留、hybrid 大页关闭、main/draft、量化 / packed、无可缓存 full-att KV 时的非空页校验。meta / 模型布局一致，数据往返正确，无 D bounded 槽位或快照断言。</td></tr>
+        <tr><td>并发 / 多卡</td><td>TP&gt;1、多 DP 且 fetch=False、晚完成 rank、交错请求、overlap、已有传输后端。副本内任务一致，无新增跨 DP 屏障，未就绪请求不阻塞其他请求。</td></tr>
+        <tr><td>互斥校验</td><td>覆盖角色、两个开关、dp=1 / dp&gt;1、两种 PD 模式。用不存在的模型目录验证冲突早于资源初始化；允许组合可继续启动，不误伤其他角色。</td></tr>
+        <tr><td>回收</td><td>排队 / load 中取消、建任务前容量不足、PD 部分失败、offload 中终态、CPU 页满。CPU 引用、GPU 页、状态槽和请求槽正确归还，失败尾部不可命中。</td></tr>
+        <tr><td>端到端</td><td>固定模型和采样，淘汰 GPU 前缀后重发；两种 PD 模式下 CPU 新增复用&gt;0、P→D KV 减少，生成与关闭缓存时在测试容差内一致。</td></tr>
+        <tr><td>回归</td><td>Normal/P CPU cache 与 hybrid 联合页、GPU-only / adaptive、prompt logprobs、diverse、多模态、原 DP shared；保留既有校验和安全回退。启用 disk 时沿用原读写及目录规则。</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="callout">
+      <strong>初轮验证范围（不代表后续深度复核全部通过）</strong>
+      <p>已验证 D 的实际 CPU 写回、清空 GPU 数据后恢复、main/draft KV 一致、bounded 运行态不被修改，以及整页回退和页面引用归还。补充了单 DP / 多 DP 的任务交接、取消、容量不足、失败回收与启动互斥测试；Normal/P 联合页及 TP 分片布局继续回归。</p>
+      <p>本轮 Hybrid 普通 PD 与 Prefill-first 各 222/222；P/D 同时开启 CPU cache 的两种模式各 27/27；完整注意力的两种模式、DP=2 + Graph、TP=2 + Graph 各 26/26，共 602 项有效结果通过。P 侧在 GPU 前缀淘汰后从 CPU 恢复 1024 token，D 同时复用 768 token，输出与独立基线一致；P/D CPU 引用均归零。</p>
+      <p>首次 6 项测试预期错误均保留原始记录，修正后定向重跑 18/18 通过；未将首次失败改写为首次通过。测试启动器在启动失败时遗留子进程的问题已修复并进行故障清理验证。详见<a href="../../../../test.md">本轮审查、完整场景索引与结果</a>，其中包含各配置的原始服务测试证据链接。</p>
+      <p>初轮是真实权重、独立 P/D/基线服务、同机跨 GPU NCCL 的功能验证，没有用其耗时作性能结论。后续已补充 MTP 真服务及下述性能对照；跨物理主机、NIXL、disk 真落盘、量化 KV 真服务、adaptive 切换和微批 overlap 仍需单独验收。相应单测结果不能替代服务验收。历史 HTTP 错误回归曾在未修改基线复现流式 400 的异常组包装问题，未纳入本次修复。</p>
+    </div>
+    <h3>深度复核：精度差异的含义与 TODO</h3>
+    <p>后续在固定贪心采样下执行了 408 种场景定义，跨 Hybrid、完整注意力、Prefill-first、MTP 和 DP2 共得到 766 条记录，其中 718 条严格通过、48 条失败。48 条里有 45 条是三种 PD 输出一致但与 Normal 不同，其余 3 条分别涉及 Hybrid 批量/串行差异、完整注意力的完整命中路径和 MTP 并发。原始失败保留，不因后续解释而改写为通过。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>现象</th><th>确认到的范围</th><th>处理</th></tr></thead>
+      <tbody>
+        <tr><td>P 首 token 漏计 repetition/frequency/presence 输出计数</td><td>已确认的原有采样语义问题。冷请求由 P 产生首 token，完整命中可能由 D 产生，计数历史因此不同；原版也存在。隔离补齐计数后，8 个强惩罚案例的冷/热路径均与 Normal 一致。</td><td>按当前约定列为低优先级 TODO，仅在 <code>base_backend.py</code> 接收首 token 处标记，本轮不修改采样逻辑。未测整体任务准确率，不能由这 8 个定向案例推算全局精度损失。</td></tr>
+        <tr><td>完整命中时部分 token 不同</td><td>9 条冷/热控制中，新增 CPU 路径与原版 GPU 完整命中路径均逐 token 一致；无缓存路径与它们仍可能不同。该差异可由原有执行路径复现，未确认新增 CPU KV 损坏。</td><td>区分 KV 内容正确性、采样历史和执行路径数值差异；保留严格失败，不把答案相同但格式不同等同于逐 token 通过。</td></tr>
+        <tr><td>MTP 并发 8、混合输入长度存在差异</td><td>初轮关闭功能版本与 origin 不同；新服务复测首个冷轮改为开启版本与 origin 不同，后续还出现 Normal 批量/串行差异，另两轮全部一致。冷轮开启版本的差异输出，在下一轮无 CPU cache 的 Normal 中复现，token 和 logprob 均完全相同；差异不局限于新 CPU 路径。批处理数值敏感是推测，尚未锁定根因。</td><td>保留为待定位的一致性问题；需固定实际批次并获取第一处差异 logits / MTP 验证信息。不能据此认定整体任务准确率下降，也不能宣布严格精度通过。</td></tr>
+      </tbody>
+    </table></div>
+    <p>这里的“精度检查”是逐 token 一致性和 logprob 对照，不是任务准确率或困惑度评估。现有证据确认了采样计数缺陷与输出不一致，但没有确认本 PR 新增 CPU KV 存储/恢复精度损坏。详见 <a href="../../../../artifacts/pd_decode_cpu_cache_deep_review_20261123/review_report.html">完整复核报告</a>、<a href="../../../../artifacts/pd_decode_cpu_cache_deep_review_20261123/hybrid_mtp_batch_probe/results.json">MTP 四轮复测</a>；原始数据位于本地 artifacts，仓库未跟踪这些文件。</p>
+    <h3>性能评估</h3>
+    <p>通常节省 <code>L-G</code> 个网络 KV token，但要单算零长度分支、页开销和 hybrid 运行态；整页 CPU 复制也可能覆盖部分 GPU 共享前缀。</p>
+    <pre><code>采用条件：额外匹配 / 控制面等待 + H2D + 调度延迟
+          &lt; 可省下的 PD 传输 / 页处理时间 + 确实能够省下的 P 计算时间
+记录：实际新增复用 token、H2D / D2H 字节与耗时、P→D 字节与任务数、
+      PD 等待、TTFT、TPOT、吞吐、引用和显存余量。</code></pre>
+    <p>普通 PD 中，完整注意力若在 D 恢复到 <code>N−1</code>，握手后可以直接跳过 P，此时确实省下 P 计算；其余路径 P 的计算量取决于 P 自己的缓存，不能把 D 的传输缺口当成 P 的计算范围。Hybrid 的 D CPU 页只有 KV，必须保留运行态恢复；Prefill-first 的 P 已先完成计算，也不会自动省掉 P 的计算。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>同机 H200 实测场景</th><th>当前开 / 当前关 / origin 的 TTFT</th><th>解释边界</th></tr></thead>
+      <tbody>
+        <tr><td>Hybrid 热前缀 4098 输入、16 输出，Graph 关闭</td><td>110.5 / 88.4 / 89.5 ms</td><td>P 的 GPU 已命中 4096，D 新增 CPU 4096、GPU 0。仍需 P 与运行态传输；相对 origin TTFT 增加 23.4%。</td></tr>
+        <tr><td>Hybrid 同类热前缀，Graph 开启并交换 GPU 映射</td><td>122.5 / 80.1 / 81.1 ms</td><td>相对 origin 增加 51.1%。这是另一配置的观测，不能据两组差值认定 Graph 导致 H2D 变慢。</td></tr>
+        <tr><td>完整注意力、GPU 自然淘汰、CPU 覆盖 N−1（4097 输入、4 输出）</td><td>145.6 / 230.1 / 231.8 ms</td><td>三个 arm 均启用 GPU cache，只有 CPU arm 可跳 P；TTFT 降低 37.2%。GPU KV 8192，四前缀工作集约 16.4k，CPU 4GiB。仅证明该短输出条件下的收益。</td></tr>
+        <tr><td>同一淘汰配置，CPU 部分命中（4098 输入、4 输出）</td><td>255.4 / 234.7 / 241.6 ms</td><td>仍需 P，TTFT 点估计增加 5.7%，置信区间跨越无差异值；冷请求接近 origin。</td></tr>
+      </tbody>
+    </table></div>
+    <p>以上来自当前开/关 CPU 与固定 origin/main <code>8863b3f3f</code> 的配对测试。22 个有效组、1053 个测量请求，随机轮换 arm 顺序，每组先丢弃两轮预热；另一个完整命中组未通过 token 门禁，未纳入性能结论。没有跨物理主机或生产饱和吞吐数据。</p>
+    <h3>变慢原因：已确认路径与待测分项</h3>
+    <ol>
+      <li><strong>CPU 恢复位于普通 PD 的串行关键路径。</strong>D 在 <code>load_cpu_cache_to_reqs()</code> 完成后才通过回调提交接收任务；<code>pd_normal_master.py</code> 等待 upkv 后才把 Decode 信息发给 P，P 的 HTTP 请求在此之前尚未进入本地推理。因此对仍需 P 的路径，CPU 匹配、加载和完成轮询先于 P 计算，而不是与它重叠。</li>
+      <li><strong>冷热请求都会增加控制面开销。</strong>D 的 HTTP 请求先进入多级缓存进程及其线程池，再发 Router；<code>MultiLevelKVCacheManager.task_loop()</code> 空闲时 sleep 5ms，接收和完成转发均可能遇到轮询相位等待；共享页匹配、加/减引用也有锁和对象开销。不能把 5ms 当作整条额外路径的准确耗时或上限。</li>
+      <li><strong>token 阈值没有自动估算实际收益。</strong>上述实测使用新增 KV≥128、输入≥256 且容量足够的门槛。Decode 现可通过 <code>LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS</code> 手动调整新增 KV 阈值，默认改为 2048，其他角色固定 128；这尚未比较本机 CPU→GPU 与 P→D 的有效速度、页任务开销，也没有区分能否省掉 P。Hybrid 热组 P 已有 4096-token 前缀，只需补末尾少量 token 与运行态，CPU 命中未节省这些工作；4096 token 的本模型 full-att KV 约为 48MiB，还需先从主存恢复。本机 GPU 两两拓扑为 NV18，原本的同机 GPU→GPU 传输成本可能较低，不能直接沿用跨机网络的收益预期。</li>
+      <li><strong>主要观测是首 token 固定开销，并非已证明 decode 算力大幅降低。</strong>Hybrid Graph 关闭热组开/关的 TPOT 为 20.005 / 20.025ms；Graph 开启组为 5.983 / 5.704ms。短输出的请求级 TPS 容易被更长 TTFT 拉低。D2H、逐请求索引上传、事件和页元数据也可能影响下一请求和资源释放，但尚未分项剖析其贡献。</li>
+    </ol>
+    <p>这些测试使用 Triton 异步 CPU IO，日志确认等待 recorded event，不是 FA3 的强制计算流同步路径。CPU-only 匹配只返回 ready 页，因此代码中为磁盘等页面保留的 10ms ready 轮询不能直接算作此次热请求慢因。GPU0–3 与 GPU4–7 分别靠近 NUMA0/1，CPU 页实际归属和绑核尚未测量；交换 GPU 不能消除主存位置这个变量。当前没有阶段级 CUDA event/控制面耗时数据，不能把测得的额外 22–42ms 全部归因于 H2D 或某个 sleep。</p>
+    <h3>优化方案（待实现与验证）</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>顺序</th><th>方案与入口</th><th>验收与边界</th></tr></thead>
+      <tbody>
+        <tr><td>1：补可观测性</td><td>在 HTTP→匹配→Router、匹配队列/锁、实际 H2D 提交与 CUDA 完成、完成事件被调度观察、握手、P 计算及传输、首 token 处记录分段时间；区分实际复制字节与逻辑命中。异步采样记录 CUDA event，不在热路径全局 synchronize。</td><td>同机/跨机、冷/热/部分/全命中、Graph、不同并发分别报告 p50/p95；先定位固定控制面与字节相关开销，避免凭总 TTFT 调 kernel。</td></tr>
+        <tr><td>2：减少匹配转发等待</td><td>将多级缓存进程的 5ms 空轮询改为带工作线程完成通知的事件驱动 poll，合批发送完成队列；空 hash / 不可缓存请求增加不匹配快路径。GPU 已覆盖或 miss 时直接归还引用并回调，将 load stream 的创建和 wait 延后至确实需要拷贝。socket 仍由所属线程操作，不简单在 worker 跨线程发送。</td><td>冷请求不需要 H2D，也应降低额外延迟；已匹配页的引用必须归还，保留取消、超时和队列背压。CPU-only 已只返回 ready 页，不需误删磁盘等待。</td></tr>
+        <tr><td>3：按收益决定加载</td><td>在 <code>load_cpu_cache_to_reqs()</code> 分支用实际新增字节、PD 页任务数、历史有效 H2D/PD 耗时估算净收益，取代仅靠手动 token 阈值；普通 PD 的完整注意力 N−1 可加入“免 P”收益，Hybrid 与 Prefill-first 不加入。净收益不足时不加载，立即归还 CPU 引用并续接原 PD 路径。</td><td>优先消除同机部分命中负收益，保留 GPU 淘汰后的完整命中收益。D 当前没有 P 的精确命中/排队信息，不能假装已知 P 计算节省量；先用保守估计和历史分组数据，再考虑元数据扩展。</td></tr>
+        <tr><td>4：减少搬运与写回固定开销</td><td>评估共享 page-index Tensor、请求合批与连续区域拷贝；避免所有页已 ready 时仍准备多余索引/事件。记录 CPU 页 NUMA 归属，评估与 D GPU 对齐的绑核和内存首次触页。结合放置策略评估低复用 cold 写回，避免无收益的 D2H 和回收等待。</td><td>跨 State/TP 的布局和副本完成协议保持一致；不能因部分页已 ready 而错位，也不能提前释放 GPU token。GPU 前缀与 CPU 页重叠只能在增加正确偏移/掩码后省略，不能直接裁短索引列表。</td></tr>
+        <tr><td>5：P 与 D 准备重叠</td><td>对必须执行 P 的负载先评估已有 Prefill-first 模式；若普通 PD 仍需重叠，再设计提前 P 计算、延后传输的协议与资源预算。</td><td>这属于协议级方案，不能在 CPU KV 未就绪时提前报告 ready_kv_len 或握手；需重做取消、容量与运行态恢复验收。Prefill-first 的首 token 来自 P，性能口径需单独比较。</td></tr>
+      </tbody>
+    </table></div>
+    <p>后续仅增加 Decode 专用的加载阈值环境变量，采样计数仍保留 TODO，上述自动收益估算与其他性能方案尚未实现。已有功能开关仍按工作负载选择；在阶段数据和收益门槛落地前，不承诺所有命中都能降低延迟。</p>
+  </section>
+
+  <section id="evidence">
+    <h2>9. 基线问题与接入点</h2>
+    <p>本节记录改动前的代码问题；下文的源码行号以文首基线为准。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>现状与影响</th><th>代码依据</th></tr></thead>
+      <tbody>
+        <tr><td>D 直接送 Router，未经过 CPU 匹配，<code>cpu_cache_match_page_indexes</code> 无有效命中。</td><td><a href="#src-http"><code>transfer_to_next_module():757</code></a></td></tr>
+        <tr><td>D 覆盖初始化和就绪过滤，未接父类 load 与 CPU 门禁；禁止断言位于建 PD 任务之后。</td><td><a href="#src-decode"><code>PDDecodeNode:25–59</code></a>、<a href="#src-base"><code>ModeBackend:619</code></a></td></tr>
+        <tr><td>CPU load 先更新 <code>cur_kv_len</code> 再异步复制，逻辑长度不能作为就绪依据。</td><td><a href="#src-cache"><code>load_cpu_cache_to_reqs():81</code>、<code>read_req_from_cpu():171</code></a></td></tr>
+        <tr><td>公共调度已有完成轮询、<code>set_req_cache_way()</code> 放置策略和写回，可直接复用。</td><td><a href="#src-base"><code>_get_classed_reqs():689 / 841</code></a></td></tr>
+        <tr><td>D 用 <code>linear_att_page_block_num=10000000</code> 关闭 hybrid 大页；沿用 CPU 页公式会产生巨大页，并且仍缺中间快照。</td><td><a href="#src-start"><code>api_start.py:348</code></a>、<a href="#src-config"><code>config_utils.py:32</code></a></td></tr>
+        <tr><td>D 的 DP 类绕过普通 DP shared 请求拉取，但开关仍触发公共资源初始化；配置可接受不等于功能已接通。</td><td><a href="#src-dp-decode"><code>PDDPForDecodeNode._init_reqs():21</code></a></td></tr>
+      </tbody>
+    </table></div>
+    <p>保留传输侧现有顺序：<a href="#src-trans"><code>dispatch_task_loop()</code></a> 先把任务放入等待表，再上报 <code>PDUpKVStatus</code>。</p>
+    <p>当前 <code>PDDPForDecodeNode._init_reqs()</code> 直接调用 PD 初始化，绕过普通 DP 的 <code>fill_reqs_info → build_shared_kv_trans_tasks → kv_trans</code>；开关仍影响 DP IPC、共享模块、bounded 页池和请求容量。这是已确认的入口旁路，尚未复现两项功能同时运行的数据错误。</p>
+    <p><code>DPChunkedPrefillBackend</code> 已有“DP fetch → 释放临时请求 → 本 DP CPU load”顺序，本次不改变 Normal / P；也不能靠把 D 改调用该后端的初始化就认为组合已支持。</p>
+  </section>
+
+  <section id="changes">
+    <h2>10. 修改范围</h2>
+    <p>改动集中在请求入口、D 的生命周期，以及 CPU 缓存的内容和页规格；复用现有匹配服务、缓存放置策略、搬运与回收机制。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>模块</th><th>改动目标</th></tr></thead>
+      <tbody>
+        <tr><td>请求入口与启动校验</td><td>D 请求先匹配 CPU 缓存；在模型访问、共享页分配和子进程启动前，明确拒绝 D CPU cache 与生效的 DP shared 组合。保留 dp≤1 的既有归一化。</td></tr>
+        <tr><td>D 后端及多 DP 适配</td><td>初始化时绑定 CPU load 完成的一次性回调，恢复后续接原有 PD 初始化；未命中或跳过加载时立即续接。就绪过滤只等待 CPU 搬运和 PD 传输，不再负责创建任务。通过 Decode hybrid 的 CPU 退页、GPU radix 的既有恢复约束，以及 CPU / PD 完成门禁，保证开始计算时 KV 与对应运行态就绪；未新增独立的运行态前缀位置检查。处理取消和容量不足，多 DP 仍只处理归属请求。</td></tr>
+        <tr><td>请求初始化与匹配</td><td>先完成 CPU 哈希和页长度初始化，再对 Decode hybrid 的 N−1 边界统一退页。匹配和写回共用裁剪后的列表，GPU radix 哈希保持完整；匹配服务不再识别 PD 规则。</td></tr>
+        <tr><td>CPU 缓存读写</td><td>统一采用 KV-only 策略；直接加载外部匹配结果，写回只取有效 prompt 页。保留原命中统计，本次不合入通用统计修复。</td></tr>
+        <tr><td>布局、页长与哈希</td><td>服务元数据与实际模型使用相同布局，覆盖 main/draft。D CPU 页默认从 2048 tokens 按模型页向上对齐，与 hybrid 大页解耦。GPU radix 和 CPU 分别保留所需哈希。</td></tr>
+        <tr><td>资源与能力边界</td><td>load 完成状态和 CPU 页引用处理后，先清空回调再执行，避免重复提交；已取消或结束的请求不再建接收任务。不新增网络或共享内存字段。不改变模型的 hybrid 类型；D CPU 读写不申请中间状态槽位。无可缓存 KV 时沿用 CPU 元数据的非空页校验报错；保留真实显存预算、量化字段完整性和失败尾部回收。</td></tr>
+        <tr><td>配套说明与可选磁盘</td><td>更新参数帮助；磁盘目录规则保持原实现，Normal / P 的联合缓存与原有校验保留。</td></tr>
+      </tbody>
+    </table></div>
+    <p>职责按阶段划分：CPU 内容策略决定页面存什么，并明确提供是否保存运行态快照的信息；外部匹配服务决定哪些页可复用；推理层按页面内容分配恢复资源、执行异步搬运；单 DP / 多 DP 共用接收生命周期。传输协议和资源分配仍复用原有机制。</p>
+    <details id="init-changes"><summary>实施检查点</summary>
+      <ul>
+        <li>前缀有效长度与物理持有容量分开管理；等待加载后重新检查尾部容量。</li>
+        <li>D 的 DP 适配需覆盖新增公共逻辑；不能改走跨 DP 临时请求的初始化路径。</li>
+        <li>完整注意力验证零长度握手；hybrid 验证仅 CPU KV 命中时不能跳过 P，两者分别验收。</li>
+      </ul>
+    </details>
+    <details id="hybrid-changes"><summary>Hybrid 实现的必要条件</summary>
+      <ul>
+        <li>布局生成、读回和写出统一选择参与缓存的 State，服务与 GPU 的页大小、偏移必须一致。</li>
+        <li>GPU radix 的 hybrid 哈希与 CPU 完整页哈希分开；保留 D 现有大页关闭语义。</li>
+        <li>KV-only 不建立中间运行态快照，不改写模型类型，也不将末尾运行态伪装成中间 checkpoint。</li>
+      </ul>
+    </details>
+    <details>
+      <summary>可复用的现有测试入口</summary>
+      <ul>
+        <li><code>unit_tests/server/router/model_infer/mode_backend/test_pd_prefill_abort.py</code>：覆盖 P/D 及各自 DP 后端，CPU load/offload 未完成时先拦住请求，完成后再处理取消和 PD 状态。</li>
+        <li><code>unit_tests/server/router/model_infer/mode_backend/test_pd_page_io.py</code>、<code>test_pd_token_indices.py</code>、<code>test_pd_dynamic_split.py</code>：页搬运、索引与 D 容量释放回归。</li>
+        <li><code>unit_tests/server/router/model_infer/test_hybrid_cpu_state_cache.py</code>：保留 Normal / P 快照约束，补 D KV-only 往返、仅 KV 满匹配不跳 P，以及本地完整状态命中用例。</li>
+        <li><code>unit_tests/server/multi_level_kv_cache/test_decode_cache_matching.py</code>：检查各角色、两种 PD 模式、整页边界及部分命中；被排除的页不得进入 CPU / disk 查询或持有引用。</li>
+        <li><code>unit_tests/server/test_pd_start_args.py</code>：D 页长解耦、显式页配置、CLI 语义、DP shared 三项组合的早期校验与 <code>dp=1</code> 原有归一化。</li>
+        <li><code>unit_tests/server/router/model_infer/mode_backend/test_dp_big_pages.py</code>、<code>test_paged_side_allocations.py</code>：Normal / P 的 DP shared 仍沿用当前前缀、状态和资源所有权契约，不受 D 的互斥校验影响。</li>
+        <li><code>unit_tests/server/test_pd_prefill_first_scenarios.py</code>、<code>test_pd_prefill_first_spans.py</code>、<code>test_pd_modes_boundary_service.py</code>：两种 PD 协议及首 token 边界。</li>
+      </ul>
+      <p>相关单测包含真实 CUDA 数据往返与 TP 分片布局检查；另已完成同机跨 GPU 的真实 P/D 服务验证，跨物理主机验证仍单独验收。新增生命周期用例见 <code>test_pd_decode_cpu_cache.py</code>。</p>
+    </details>
+  </section>
+
+  <section id="sources">
+    <h2>11. 基线代码依据</h2>
+    <p class="small">以下链接指向仓库相对路径；显示行号以分析基线为准。浏览器可打开源文件，但本地文件浏览器不一定支持跳转至特定行。</p>
+    <details><summary>查看源文件与行号</summary>
+    <ol class="source-list">
+      <li id="src-http"><a href="../../../../lightllm/server/httpserver/manager.py">server/httpserver/manager.py</a><br>105：CPU cache socket；454：普通 PD 满前缀停止 P；757：请求分流。</li>
+      <li id="src-decode"><a href="../../../../lightllm/server/router/model_infer/mode_backend/pd/decode_node_impl/decode_impl.py">PD Decode 后端</a><br>25：初始化；38：禁止断言；59：就绪过滤；113 / 180：两种模式的接收任务。</li>
+      <li id="src-base"><a href="../../../../lightllm/server/router/model_infer/mode_backend/base_backend.py">公共 ModeBackend</a><br>588：PD 回包更新；619：父类初始化；689：调度分类；841：缓存放置与写回。</li>
+      <li id="src-cache"><a href="../../../../lightllm/server/router/model_infer/mode_backend/multi_level_kv_cache.py">推理侧 MultiLevelKvCacheModule</a><br>81：load；163：完成推进；171：实际恢复；281：写出；414：offload 完成；467 起：load helper。</li>
+      <li id="src-start"><a href="../../../../lightllm/server/api_start.py">服务启动</a><br>93 起：D 关闭视觉 / 音频；348：关闭 hybrid 大页；473：启动 CPU 缓存服务。</li>
+      <li id="src-config"><a href="../../../../lightllm/utils/config_utils.py">配置工具</a><br>32：CPU 页长与 hybrid checkpoint 页长的绑定。</li>
+      <li><a href="../../../../lightllm/server/core/objs/req.py">共享请求对象</a><br>215 起：CPU 哈希初始化；243：hybrid CPU 页列表；265：普通 CPU token 哈希。</li>
+      <li><a href="../../../../lightllm/common/attention_state/cpu_cache_operator.py">CPU Cache Operator</a><br>31：布局；64：写入 KV 与快照；128：读回并恢复 bounded 运行态。</li>
+      <li><a href="../../../../lightllm/utils/cpu_cache_layout.py">CPU 服务 meta 布局</a><br>14：按 main/draft 配置创建 State；59 起：hybrid 页边界校验。</li>
+      <li><a href="../../../../lightllm/server/multi_level_kv_cache/manager.py">CPU / Disk 匹配服务</a><br>141：匹配和路由；207 起：等待页面 READY。</li>
+      <li id="src-trans"><a href="../../../../lightllm/server/router/model_infer/mode_backend/pd/decode_node_impl/decode_trans_process.py">Decode 传输进程</a><br>220：先入等待表再上报；402：本地接收与复制；448：成功事件确认。</li>
+      <li><a href="../../../../lightllm/server/router/model_infer/mode_backend/pd/prefill_node_impl/prefill_impl.py">Prefill 后端</a> 与 <a href="../../../../lightllm/server/router/model_infer/mode_backend/pd/helper.py">Prefill-first helper</a><br>普通模式末尾的 att_state 与首 token；Prefill-first 必须保留尾部 KV 的任务语义。</li>
+      <li><a href="../../../../lightllm/server/httpserver_for_pd_master/pd_normal_master.py">普通 PD Master</a><br>119：根据 ready_kv_len 决定是否等 P 首 token；73 起：D 收到的是 prompt IDs 和空多模态对象。</li>
+      <li><a href="../../../../lightllm/server/router/model_infer/infer_batch.py">推理请求生命周期</a><br>214 起：hybrid radix 插入 / 回收；406：checkpoint 保存；553 起：PD 计数和 CPU 任务状态。</li>
+      <li><a href="../../../../lightllm/server/router/req_queue/base_queue.py">排队请求释放</a> 与 <a href="../../../../lightllm/server/router/req_queue/chunked_prefill/impl_for_pd_decode.py">PDDecodeQueue</a><br>匹配页 abort 回收；D 的 prompt 与输出显存预算。</li>
+      <li><a href="../../../../lightllm/server/multi_level_kv_cache/cache_placement_controller.py">缓存放置控制器</a> 与 <a href="../../../../lightllm/server/multi_level_kv_cache/disk_cache_worker.py">磁盘缓存 Worker</a><br>legacy / adaptive 放置；默认服务独立目录与显式目录的兼容边界。</li>
+      <li id="src-dp-decode"><a href="../../../../lightllm/server/router/model_infer/mode_backend/pd/decode_node_impl/decode_impl_for_dp.py">D 的 DP 适配后端</a> 与 <a href="../../../../lightllm/server/router/model_infer/model_rpc.py">后端选择</a><br>D 的 DP 类第 21 行初始化直接转发至 PD；RPC 第 70 行起为多 DP Decode 选择该类。</li>
+      <li><a href="../../../../lightllm/server/router/model_infer/mode_backend/dp_backend/impl.py">普通 DP 后端</a> 与 <a href="../../../../lightllm/server/router/model_infer/mode_backend/dp_backend/dp_shared_kv_trans.py">DP shared 前缀复制</a><br>90：DP 初始化入口；共享模块按同批请求发布长度、索引和大页 ID，再经节点屏障复制和释放。</li>
+      <li><a href="../../../../lightllm/common/attention_state/dp_shared_operator.py">DP Shared Operator</a> 与 <a href="../../../../lightllm/server/router/model_infer/shared_att_resources_utils.py">PD / DP IPC 导出</a><br>DP 复制覆盖 token、checkpoint 页和请求运行态；PD / DP 导出用途已经分离，不能把所有共享存储误认为 DP fetch。</li>
+      <li><a href="../../../../lightllm/server/api_start.py">启动组合校验与归一化</a><br>47：启动早期调用功能校验；394：dp ≤ 1 自动关闭 fetch；750：现有 _validate_pd_features，适合加入 D 的精确组合限制。</li>
+    </ol>
+    </details>
+  </section>
+  <footer>单文件离线 HTML，内嵌样式和 4 幅带文字说明的 SVG；无外部脚本、字体或 CDN 依赖，可打印。</footer>
+</main>
+</body>
+</html>

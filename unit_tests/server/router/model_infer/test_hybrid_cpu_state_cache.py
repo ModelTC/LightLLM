@@ -2,7 +2,9 @@ from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
 from unit_tests.common.req_token_index_test_utils import attach_req_token_index
 import dataclasses
 import json
+import time
 from collections import deque
+from queue import Queue
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +19,8 @@ from lightllm.common.attention_state.full_att import (
 from lightllm.common.req_manager import ReqManager
 from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.server.multi_level_kv_cache import CacheTier
+from lightllm.server.multi_level_kv_cache.manager import MultiLevelKVCacheManager
+from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -29,6 +33,142 @@ pytestmark = [
     pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
     pytest.mark.usefixtures("kv_allocator_environment"),
 ]
+
+
+@pytest.mark.parametrize("prefill_first", [False, True])
+@pytest.mark.parametrize("gpu_prefix", [0, 128])
+def test_decode_cpu_pages_restore_main_and_draft_kv_without_bounded_snapshots(
+    monkeypatch, linear_cache, cpu_cache_factory, local_req_memory, prefill_first, gpu_prefix
+):
+    from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as common
+    from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_impl import PDDecodeNode
+
+    full, original_resources, requests, config = linear_cache
+    args = get_env_start_args()
+    args.run_mode = "decode"
+    args.enable_cpu_cache = True
+    # Exercise the actual KV copy with the fixture's small CPU pages.
+    monkeypatch.setattr(common, "get_cpu_cache_min_load_tokens", lambda _: args.cpu_cache_token_page_size)
+    monkeypatch.setattr("lightllm.server.core.objs.req.is_hybrid_att_model", lambda _: True)
+    draft = GQAFullAttentionState(dataclasses.replace(full.config, logical_layer_groups=((3,),)), page_size=4)
+    draft.allocate_storage(384)
+    resources = build_hybrid_resources(
+        config=config,
+        request_capacity=3,
+        mtp_step=0,
+        full_state=full,
+        draft_full_state=draft,
+        full_allocator=original_resources.full_att_allocator,
+        big_page_capacity=5,
+        small_page_capacity=2,
+    )
+    monkeypatch.setattr(g_infer_context, "att_state_manager", resources)
+    operator = resources.get_cpu_cache_operator()
+    assert set(operator.get_page_layouts()) == {full.state_name, draft.state_name}
+    assert not operator.need_stores_bounded_state
+    bounded = resources.get_bounded_attention_states()[0]
+    bounded.conv_state.normal_()
+    bounded.ssm_state.normal_()
+    runtime = [bounded.conv_state.clone(), bounded.ssm_state.clone()]
+
+    def reject_snapshots(*args, **kwargs):
+        pytest.fail("Decode CPU cache must not allocate or restore bounded snapshots")
+
+    monkeypatch.setattr(resources.bounded_att_big_page_allocator, "alloc", reject_snapshots)
+    monkeypatch.setattr(resources, "restore_bounded_att_runtime_from_pages", reject_snapshots)
+    expected = []
+    for state in (full, draft):
+        state.k_storage.normal_()
+        state.v_storage.normal_()
+        expected.append((state.k_storage[:, :256].clone(), state.v_storage[:, :256].clone()))
+    client = cpu_cache_factory(CpuKVCacheMeta(2, operator.get_page_bytes()))
+    # 较长源请求可写出两页；目标请求恰到 N-1，在初始化末尾退成一页。
+    source_shm_req = local_req_memory()
+    source_shm_req.init(1, list(range(258)), {"max_new_tokens": 1}, None)
+    req = SimpleNamespace(
+        req_idx=0,
+        cur_kv_len=256,
+        hold_kv_len=256,
+        shared_kv_node=None,
+        cache_tiers=(CacheTier.CPU,),
+        cpu_cache_offload_task_status=InferReq._CpuCacheTaskStatus.NOT_STARTED,
+        mm_input_spans=[],
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1, pd_prefill_first=prefill_first)),
+        shm_req=source_shm_req,
+    )
+    attach_req_token_index(req, requests, torch.arange(256, dtype=torch.int32))
+    backend = PDDecodeNode.__new__(PDDecodeNode)
+    backend.is_master_in_dp = True
+    backend.dp_world_size = 1
+    backend.model = SimpleNamespace(att_state_manager=resources)
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.args, module.backend, module.cpu_cache_client = args, backend, client
+    module.load_tasks = deque()
+    module.gloo_group = None
+    module.need_sync_compute_stream = lambda: False
+    monkeypatch.setattr(common.dist, "broadcast_object_list", lambda *args, **kwargs: None)
+    task = module.write_req_to_cpu(req)
+    task.sync_event.synchronize()
+    original_pages = task.page_indexes.tolist()
+    assert len(original_pages) == 2
+    client.update_pages_status_to_ready(original_pages, deref=True)
+    req.shm_req = local_req_memory()
+    req.shm_req.init(1, list(range(257)), {"max_new_tokens": 1}, None)
+    req.shm_req.sample_params.pd_prefill_first = prefill_first
+    matcher = MultiLevelKVCacheManager.__new__(MultiLevelKVCacheManager)
+    matcher.args = SimpleNamespace(diverse_mode=False)
+    matcher.only_cpu_cache_enable = True
+    matcher.cpu_cache_time_out = 1
+    matcher.cpu_cache_client = client
+    matcher.shm_req_manager = SimpleNamespace(
+        get_req_obj_by_index=lambda _: req.shm_req, put_back_req_obj=lambda _: None
+    )
+    matcher.send_to_router_queue = Queue()
+    matcher._handle_group_req_multi_cache_match(GroupReqIndexes(1, None, [0], time.time()), time.time())
+    assert req.shm_req.cpu_cache_match_page_indexes.get_all() == original_pages[:1]
+
+    req.cur_kv_len = req.hold_kv_len = gpu_prefix
+    req.token_index.reset()
+    for state, (k, v) in zip((full, draft), expected):
+        state.k_storage.zero_()
+        state.v_storage.zero_()
+        state.k_storage[:, :gpu_prefix].copy_(k[:, :gpu_prefix])
+        state.v_storage[:, :gpu_prefix].copy_(v[:, :gpu_prefix])
+    prefix_indices = resources.full_att_allocator.alloc(gpu_prefix)
+    req.token_index.append_token_indexes(prefix_indices)
+    monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 384 - gpu_prefix)
+    continued = []
+
+    def continue_request(loaded_req):
+        assert loaded_req is req
+        assert req.cpu_cache_load_task_status.is_finished()
+        assert req.cpu_cache_load_finished_callback is None
+        assert all(client.page_items.linked_items[page].ref_count == 0 for page in original_pages)
+        indices = req.token_index.get_gpu_token_indexes(0, 128)
+        for state, (k, v) in zip((full, draft), expected):
+            torch.testing.assert_close(state.k_storage[:, indices], k[:, :128])
+            torch.testing.assert_close(state.v_storage[:, indices], v[:, :128])
+        continued.append(req.cur_kv_len)
+
+    req.cpu_cache_load_finished_callback = continue_request
+    module.load_cpu_cache_to_reqs([req])
+    assert continued == ([] if gpu_prefix == 0 else [128])
+    torch.cuda.synchronize()
+    module.update_cpu_cache_load_task_states()
+    assert continued == [128]
+    selected = 128
+    assert req.cur_kv_len == req.hold_kv_len == selected
+    indices = req.token_index.get_gpu_token_indexes(0, selected)
+    for state, (k, v) in zip((full, draft), expected):
+        torch.testing.assert_close(state.k_storage[:, indices], k[:, :selected])
+        torch.testing.assert_close(state.v_storage[:, indices], v[:, :selected])
+    torch.testing.assert_close(bounded.conv_state, runtime[0])
+    torch.testing.assert_close(bounded.ssm_state, runtime[1])
+    assert req.shm_req.cpu_prompt_cache_len == (128 if gpu_prefix == 0 else 0)
+    assert req.shm_req.disk_prompt_cache_len == 0
+    assert req.cpu_cache_load_task_status.is_finished()
+    assert not module.load_tasks
+    assert all(client.page_items.linked_items[page].ref_count == 0 for page in original_pages)
 
 
 @pytest.fixture(params=[False, True], ids=["default_chunks", "whole_mm_blocks"])

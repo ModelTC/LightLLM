@@ -7,7 +7,7 @@ from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache import CacheTier
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_cpu_cache_min_load_tokens
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -113,6 +113,8 @@ class MultiLevelKvCacheModule(object):
                 matched_page_num = bisect.bisect_right(page_len_list, cache_len, hi=matched_page_num)
             match_tokens = page_len_list[matched_page_num - 1] if matched_page_num else 0
 
+            # TODO: 单独修复命中统计：只计实际提交加载的新增区间，并扣除磁盘命中与 GPU 前缀的重叠，
+            # 避免跳过加载仍计数或 GPU / disk 重复计数；本次 Decode CPU cache 保留原统计口径。
             # 更新命中的 cpu kv cache 长度, 减去radix cache和disk cache的部分.
             if is_master_in_dp:
                 req.shm_req.disk_prompt_cache_len = max(
@@ -124,7 +126,8 @@ class MultiLevelKvCacheModule(object):
 
             need_token_num = match_tokens - req.cur_kv_len
             # 命中够长、请求够长、剩余显存放得下，才进行复制，不然代价过高。
-            if need_token_num >= 128 and req.shm_req.input_len >= 256 and need_token_num <= idle_token_num:
+            min_load_tokens = get_cpu_cache_min_load_tokens(self.args.run_mode)
+            if need_token_num >= min_load_tokens and req.shm_req.input_len >= 256 and need_token_num <= idle_token_num:
                 assert req.cur_kv_len % self.args.page_size == 0
                 assert match_tokens % self.args.page_size == 0
                 assert req.hold_kv_len == req.cur_kv_len
@@ -167,6 +170,7 @@ class MultiLevelKvCacheModule(object):
         for task in finished_tasks:
             task.req_obj.cpu_cache_load_task_status = InferReq._CpuCacheTaskStatus.FINISHED
         helper.deref_pages_on_master([task.pages for task in finished_tasks])
+        helper.run_load_finished_callbacks([task.req_obj for task in finished_tasks])
 
     def read_req_from_cpu(
         self,
@@ -195,7 +199,7 @@ class MultiLevelKvCacheModule(object):
 
         # 阶段二：只为完整 bounded 页分配普通大页，碎页 LOAD 槽位由资源层管理。
         big_page_slot_ids = None
-        if self.backend.is_hybrid_att_model:
+        if cpu_cache_operator.need_stores_bounded_state:
             page_tokens = self.args.cpu_cache_token_page_size
             complete_page_lengths = [length for length in page_lengths if length % page_tokens == 0]
             assert len(complete_page_lengths) == len(page_lengths) - int(
@@ -212,7 +216,7 @@ class MultiLevelKvCacheModule(object):
             token_indices=token_indices,
             layouts=cpu_cache_operator.get_page_layouts(),
             big_page_slot_ids=big_page_slot_ids,
-            req_idx=req.req_idx if self.backend.is_hybrid_att_model else None,
+            req_idx=req.req_idx,
             state_token_len=page_lengths[-1],
         )
         if big_page_slot_ids is not None:
@@ -243,7 +247,7 @@ class MultiLevelKvCacheModule(object):
                 continue
 
             # 过滤不适合进行 kv 卸载到 cpu cache 的请求。
-            if g_infer_context.is_hybrid_att_model:
+            if self.backend.model.att_state_manager.get_cpu_cache_operator().need_stores_bounded_state:
                 offload_limit_size = self.args.linear_att_hash_page_size
             else:
                 offload_limit_size = self.args.cpu_cache_token_page_size
@@ -347,8 +351,9 @@ class MultiLevelKvCacheModule(object):
 
             # 阶段二：只查找实际分配的 CPU 页所需快照；完整大页必须存在，不做缺失回退。
             resources = self.backend.model.att_state_manager
+            cpu_cache_operator = resources.get_cpu_cache_operator()
             big_page_slot_ids, small_page_slot_ids = None, None
-            if self.backend.is_hybrid_att_model:
+            if cpu_cache_operator.need_stores_bounded_state:
                 page_tokens = self.args.cpu_cache_token_page_size
                 radix_cache = g_infer_context.radix_cache
                 shared_slots = (
@@ -366,11 +371,11 @@ class MultiLevelKvCacheModule(object):
                 if includes_tail_page and page_len_list[-1] % page_tokens != 0:
                     small_page_slot_ids.append(req.tail_small_page_buffer_id)
             # 整批提交并保留 token/page 对齐，由资源层跳过 ready 页。
-            resources.get_cpu_cache_operator().write_req(
+            cpu_cache_operator.write_req(
                 token_indices=token_indexes,
                 cpu_page_buffers=self.cpu_cache_client.cpu_kv_cache_tensor,
                 cpu_page_indices=page_list,
-                layouts=resources.get_cpu_cache_operator().get_page_layouts(),
+                layouts=cpu_cache_operator.get_page_layouts(),
                 cpu_page_ready_flags=ready_list,
                 big_page_slot_ids=big_page_slot_ids,
                 small_page_slot_ids=small_page_slot_ids,
@@ -394,7 +399,7 @@ class MultiLevelKvCacheModule(object):
         return trans_task
 
     def _handle_hybrid_att_last_page(self, req: InferReq, move_block_size: int, page_len_list: List[int]) -> int:
-        if not g_infer_context.is_hybrid_att_model:
+        if not self.backend.model.att_state_manager.get_cpu_cache_operator().need_stores_bounded_state:
             return move_block_size
 
         if move_block_size == 0:
@@ -477,6 +482,16 @@ class LoadTaskHelper:
         for req, _pages in direct_releases:
             req.cpu_cache_load_task_status = InferReq._CpuCacheTaskStatus.FINISHED
         self.deref_pages_on_master([pages for _req, pages in direct_releases if pages])
+        self.run_load_finished_callbacks([req for req, _pages in direct_releases])
+
+    def run_load_finished_callbacks(self, reqs: List[InferReq]) -> None:
+        """完成状态和页引用处理后，在推理进程内续接请求；不在 CUDA 线程中执行。"""
+        for req in reqs:
+            callback = getattr(req, "cpu_cache_load_finished_callback", None)
+            if callback is not None:
+                # 先清除再调用，后续调度或回调异常都不会重复触发。
+                req.cpu_cache_load_finished_callback = None
+                callback(req)
 
     def pop_finished_load_tasks(self) -> List[LoadTask]:
         if not self.module.load_tasks:

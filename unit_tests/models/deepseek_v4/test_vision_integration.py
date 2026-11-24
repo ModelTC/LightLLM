@@ -295,6 +295,7 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
             ),
             att_state_manager=SimpleNamespace(
                 get_cpu_cache_operator=lambda: SimpleNamespace(
+                    need_stores_bounded_state=False,
                     get_page_layouts=lambda: {},
                     read_req=lambda **kwargs: loaded.append(req.cur_kv_len + kwargs["token_indices"].numel()),
                 ),

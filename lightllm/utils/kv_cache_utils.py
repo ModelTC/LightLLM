@@ -64,7 +64,18 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
         page_bytes=page_bytes,
     )
 
-    cpu_cache_page_num = int((args.cpu_cache_storage_size * 1024 * 1024 * 1024) / (cpu_cache_meta.page_bytes))
+    bytes_per_gib = 1024 ** 3
+    cpu_cache_page_num = int(args.cpu_cache_storage_size * bytes_per_gib / cpu_cache_meta.page_bytes)
+    if cpu_cache_page_num < 1:
+        message = (
+            f"CPU cache capacity is too small: --cpu_cache_storage_size={args.cpu_cache_storage_size:g} GiB, "
+            f"but one page ({args.cpu_cache_token_page_size} tokens) requires "
+            f"{page_bytes / bytes_per_gib:.6g} GiB ({page_bytes} bytes). "
+            "Increase --cpu_cache_storage_size to fit at least one page."
+        )
+        if args.run_mode == "decode":
+            message += " On Decode, you can also set a smaller --cpu_cache_token_page_size aligned to --page_size."
+        raise ValueError(message)
     cpu_cache_meta.page_num = cpu_cache_page_num
 
     logger.info(f"cpu kv cache page num: {cpu_cache_meta.page_num}")

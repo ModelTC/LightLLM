@@ -5,6 +5,7 @@ import threading
 import torch.distributed as dist
 from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
+from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_draft_model_class, get_model
@@ -180,7 +181,13 @@ class ModeBackend:
         torch.cuda.empty_cache()
         set_model_init_status(True)
         set_random_seed(2147483647)
+        # 请求侧按模型配置生成 Hybrid 哈希，必须与推理侧选择的缓存路径一致。
         self.is_hybrid_att_model = bool(self.model.att_state_manager.get_bounded_attention_states())
+        configured_hybrid = is_hybrid_att_model(self.args.model_dir)
+        assert self.is_hybrid_att_model == configured_hybrid, (
+            f"Hybrid attention mismatch for {self.args.model_dir}: "
+            f"config={configured_hybrid}, registered bounded attention states={self.is_hybrid_att_model}"
+        )
 
         if not self.use_dynamic_prompt_cache:
             self.radix_cache = None
@@ -606,6 +613,9 @@ class ModeBackend:
                                     self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids
                                 )
                                 req_to_next_token_ids[req.req_idx, 0:1].fill_(obj.first_gen_token_id)
+                                # TODO: 低优先级，补齐 P 首 token 的 repetition/frequency/presence 输出计数。
+                                # 历史路径漏计该 token，可能与 D 本地产生首 token 的完整命中路径采样不一致；
+                                # 本次仅记录，保持现有采样行为，后续单独处理。
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
                                     next_token_id=obj.first_gen_token_id,
                                     next_token_logprob=obj.first_gen_token_logprob,

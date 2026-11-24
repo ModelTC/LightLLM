@@ -117,6 +117,7 @@ CPU Cache Parameters
 
 - ``--cache_placement_strategy adaptive``: **Cache placement strategy**. Adaptive tier placement is the default; use ``legacy`` to retain the previous GPU + CPU cascading-copy behavior
 - ``LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO=0.8``: Ratio of physical GPU token capacity used by adaptive placement estimation. The default is ``0.8`` and the valid range is ``(0, 1]``
+- ``LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS=2048``: Minimum additional CPU-cached tokens required to consider loading in ``run_mode=decode``. The default is ``2048`` and the value must be a positive integer. The comparison subtracts the existing GPU prefix from the matched CPU prefix. Normal / Prefill always use ``128`` and ignore this variable. The minimum input length of 256 and available GPU capacity checks still apply. Set it before starting D, for example ``LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS=1024``, and restart the service after changing it. This is a manual tuning threshold, not an automatic transfer-benefit estimate.
 
 **Performance Optimization Suggestions:**
 

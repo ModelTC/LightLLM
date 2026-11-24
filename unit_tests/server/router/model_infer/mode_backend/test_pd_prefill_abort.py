@@ -8,9 +8,13 @@ import pytest
 from lightllm.server.pd_io_struct import PDAbortReq
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_impl
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_impl import PDDecodeNode
+from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_impl_for_dp import PDDPForDecodeNode
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl import prefill_impl, prefill_trans_process
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl.prefill_impl import (
     PDChunkedPrefillForPrefillNode,
+)
+from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl.prefill_impl_for_dp import (
+    PDDPChunkedForPrefillNode,
 )
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl.prefill_kv_move_manager import (
     PrefillKVMoveManager,
@@ -102,6 +106,7 @@ def test_decode_infer_sends_abort_at_most_six_times(monkeypatch):
     monkeypatch.setattr(decode_impl.g_infer_context, "requests_mapping", {request_id: req})
 
     backend = PDDecodeNode.__new__(PDDecodeNode)
+    backend.args = SimpleNamespace(enable_cpu_cache=False)
     backend.is_master_in_dp = True
     backend.info_queue = queue.Queue()
 
@@ -114,32 +119,47 @@ def test_decode_infer_sends_abort_at_most_six_times(monkeypatch):
     assert req.pd_abort_req_send_count == 6
 
 
-def test_prefill_filter_skips_request_while_cpu_cache_load_is_running(monkeypatch):
+@pytest.mark.parametrize(
+    "backend_class", [PDChunkedPrefillForPrefillNode, PDDPChunkedForPrefillNode, PDDecodeNode, PDDPForDecodeNode]
+)
+@pytest.mark.parametrize("running_task", ["load", "offload"])
+@pytest.mark.parametrize("aborted", [False, True])
+def test_pd_filter_waits_for_cpu_io_before_notifying_abort(monkeypatch, backend_class, running_task, aborted):
     from lightllm.server.router.model_infer.infer_batch import InferReq
 
     request_id = 123
     status = InferReq._CpuCacheTaskStatus
     req = SimpleNamespace(
         req_id=request_id,
-        infer_aborted=False,
-        pd_task_num=0,
+        infer_aborted=aborted,
+        pd_task_num=1 if aborted else 0,
         pd_task_failed_num=0,
         pd_task_success_num=0,
+        pd_trans_device_id=1,
         cur_kv_len=8192,
         shm_req=SimpleNamespace(input_len=8192),
-        cpu_cache_load_task_status=status.RUNNING,
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(pd_prefill_first=False)),
+        cpu_cache_load_task_status=status.FINISHED,
         cpu_cache_offload_task_status=status.NOT_STARTED,
     )
+    setattr(req, f"cpu_cache_{running_task}_task_status", status.RUNNING)
     monkeypatch.setattr(prefill_impl.g_infer_context, "requests_mapping", {request_id: req})
 
-    backend = PDChunkedPrefillForPrefillNode.__new__(PDChunkedPrefillForPrefillNode)
+    backend = backend_class.__new__(backend_class)
     backend.is_master_in_dp = True
     backend.args = SimpleNamespace(enable_cpu_cache=True)
     backend.info_queue = queue.Queue()
 
-    assert backend._filter_not_ready_reqs([request_id]) == []
+    for _ in range(3):
+        assert backend._filter_not_ready_reqs([request_id]) == []
+        assert backend.info_queue.empty()
+    assert not hasattr(req, "pd_abort_req_send_count")
 
-    req.cpu_cache_load_task_status = status.FINISHED
+    setattr(req, f"cpu_cache_{running_task}_task_status", status.FINISHED)
+    if aborted:
+        assert backend._filter_not_ready_reqs([request_id]) == []
+        assert backend.info_queue.get_nowait() == PDAbortReq(request_id=request_id, device_id=1)
+        req.pd_task_success_num = req.pd_task_num
     assert backend._filter_not_ready_reqs([request_id]) == [req]
 
 
