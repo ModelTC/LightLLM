@@ -113,7 +113,7 @@ def reference(q, k, v, token_map, *, prefill):
         keys = k[slots].float().repeat_interleave(HEADS // KV_HEADS, dim=1)
         values = v[slots].float().repeat_interleave(HEADS // KV_HEADS, dim=1)
         for pos in range(ready, length):
-            scores = torch.einsum("hd,khd->hk", q[row].float(), keys[: pos + 1]) * DIM**-0.5
+            scores = torch.einsum("hd,khd->hk", q[row].float(), keys[: pos + 1]) * DIM ** -0.5
             out.append(torch.einsum("hk,khd->hd", scores.softmax(-1), values[: pos + 1]))
             row += 1
     return torch.stack(out)

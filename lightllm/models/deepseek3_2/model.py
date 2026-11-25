@@ -13,7 +13,6 @@ if TYPE_CHECKING:
 
 
 class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
-
     # weight class
     transformer_weight_class = Deepseek3_2TransformerLayerWeight
 
@@ -33,12 +32,13 @@ class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
     ) -> list["FullAttentionState"]:
         """DeepSeek V3.2 使用包含 indexer 字段的 packed MLA，编码由 MLA 创建入口选择。"""
         from lightllm.common.attention_state.full_att import PackedMLALogicalConfig, create_packed_mla_state
-        from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
         logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
         if not logical_layer_groups:
             return []
+        if args.llm_kv_type not in ("None", "fp8kv_dsa"):
+            raise ValueError(f"{cls.__name__} requires --llm_kv_type None or fp8kv_dsa, got {args.llm_kv_type!r}")
         state = create_packed_mla_state(
             config=PackedMLALogicalConfig(
                 logical_layer_groups=logical_layer_groups,

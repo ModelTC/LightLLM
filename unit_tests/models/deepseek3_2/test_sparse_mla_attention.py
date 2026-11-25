@@ -189,6 +189,44 @@ def test_bf16_fa3_decode_with_rope_matches_reference_and_cuda_graph_replay():
     check_decode_and_graph(attention, kv, kv[:, 0].float(), heads=16)
 
 
+@pytest.mark.parametrize(
+    "heads, strided, legacy", [(64, False, False), (8, False, False), (64, True, False), (64, False, True)]
+)
+def test_bf16_flashmla_prefill_output_and_peak(heads, strided, legacy, monkeypatch, record_property):
+    from lightllm.common.attention.backends.sparse_mla import flashmla
+
+    if legacy:
+        monkeypatch.setattr(flashmla, "_bf16_prefill_out_kernel", lambda: None)
+    elif heads == 64 and not strided and flashmla._bf16_prefill_out_kernel() is None:
+        pytest.skip("FlashMLA with out support is required")
+    rows = 512
+    query = torch.randn(rows, heads, RANK + ROPE, dtype=torch.bfloat16, device="cuda", generator=gen(21))
+    cache = torch.randn(32, 1, RANK + ROPE, dtype=query.dtype, device="cuda", generator=gen(22))
+    slots = torch.arange(rows, device="cuda", dtype=torch.int32) % cache.shape[0]
+    indices = torch.full((rows, TOPK), -1, device="cuda", dtype=torch.int32)
+    indices[:, 0] = slots
+    storage = torch.full((rows, heads + int(strided), RANK), torch.nan, dtype=query.dtype, device="cuda")
+    out = storage[:, :heads]
+    config = SparseMLALayerConfig(heads, RANK, ROPE, SCALE, query.dtype, topk=TOPK)
+    impl = flashmla.FlashMLASparsePrefillBackend(config)
+    state = flashmla.FlashMLASparsePrefillAttState(None, False)
+    inputs = SparseMLAPrefillLayerInputs(q=query, kv_cache=cache, topk_mem_indices=indices)
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    before = torch.cuda.memory_allocated()
+    assert impl.forward(state, inputs, out=out) is out
+    torch.cuda.synchronize()
+    scratch = torch.cuda.max_memory_allocated() - before
+    record_property("peak_bytes_including_output", scratch + out.numel() * out.element_size())
+    if heads == 64 and not strided and not legacy:
+        assert scratch < out.numel() * out.element_size()
+    else:
+        assert scratch < rows * 64 * RANK * query.element_size()
+    torch.testing.assert_close(out, cache[slots.long(), :, :RANK].expand_as(out))
+    if strided:
+        assert storage[:, -1].isnan().all()
+
+
 def test_fp8_ds_mla_flashmla_decode_matches_reference_and_cuda_graph_replay():
     pytest.importorskip("flash_mla")
     # FlashMLA's sparse FP8 decode runs 64-head tiles.

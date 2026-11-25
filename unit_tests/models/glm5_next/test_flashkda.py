@@ -389,7 +389,7 @@ def fp64_reference(inputs, lengths):
             state *= gate[0, token, :, :, None]
             delta = beta[0, token, :, None] * (v[0, token] - (state * k[0, token, :, :, None]).sum(-2))
             state += k[0, token, :, :, None] * delta[:, None, :]
-            output[0, token] = (state * q[0, token, :, :, None]).sum(-2) * dim**-0.5
+            output[0, token] = (state * q[0, token, :, :, None]).sum(-2) * dim ** -0.5
         final[seq] = state
         start += length
     return output, final

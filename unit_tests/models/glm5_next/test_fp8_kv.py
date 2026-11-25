@@ -460,7 +460,7 @@ def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chun
     monkeypatch.setattr(prefill_workspace, "KV_GATHER_CHUNK_SIZE", chunk_size)
     torch.manual_seed(53)
     prefix = 4 if cached else 0
-    case = _PrefillCase([prefix + 3] * 2, [3, 3], num_heads, width=128, capacity=64, softmax_scale=512**-0.5)
+    case = _PrefillCase([prefix + 3] * 2, [3, 3], num_heads, width=128, capacity=64, softmax_scale=512 ** -0.5)
     case.q = torch.randn(num_heads, 6, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
     case.topk_indices[0].fill_(-1)
     case.topk_indices[1, :2] = prefix
@@ -498,7 +498,7 @@ def test_fp8_uncached_prefill_reuses_current_kv(monkeypatch, num_heads, chunk_si
 
 
 @pytest.mark.parametrize("num_heads", [8, 16, 64, 128])
-@pytest.mark.parametrize("softmax_scale", [0.0625, 512**-0.5])
+@pytest.mark.parametrize("softmax_scale", [0.0625, 512 ** -0.5])
 def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softmax_scale):
     monkeypatch.setattr(prefill_workspace, "KV_GATHER_CHUNK_SIZE", 129)
     torch.manual_seed(53)
@@ -1038,7 +1038,7 @@ def test_fp8_sparse_direct_decode_offsets_beyond_int32(strided_input):
     storage_size = (batch - 1) * stride + shape[-1]
     required_bytes = storage_size * torch.empty((), dtype=dtype).element_size()
     torch.cuda.empty_cache()
-    if torch.cuda.mem_get_info()[0] < required_bytes + 512 * 1024**2:
+    if torch.cuda.mem_get_info()[0] < required_bytes + 512 * 1024 ** 2:
         pytest.skip("Large-stride regression requires sufficient free GPU memory")
     # Allocate address space without initializing the gaps between logical rows.
     storage = torch.empty(storage_size, device="cuda", dtype=dtype)

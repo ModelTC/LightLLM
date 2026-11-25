@@ -39,8 +39,8 @@ def _layer_weight():
     def w(*shape, scale):
         return (torch.randn(*shape, device="cuda") * scale).bfloat16()
 
-    projection = w(HIDDEN, 3 * H * D + H + D + D, scale=HIDDEN**-0.5)
-    decay, output_gate = w(D, H * D, scale=D**-0.5), w(D, H * D, scale=D**-0.5)
+    projection = w(HIDDEN, 3 * H * D + H + D + D, scale=HIDDEN ** -0.5)
+    decay, output_gate = w(D, H * D, scale=D ** -0.5), w(D, H * D, scale=D ** -0.5)
     conv, out = w(3 * H * D, 4, scale=0.3), w(H * D, HIDDEN, scale=(H * D) ** -0.5)
     return SimpleNamespace(
         linear_qkvbfg_a_proj=SimpleNamespace(mm=lambda x: x @ projection),

@@ -58,6 +58,8 @@ def cache(monkeypatch, tmp_path, request):
                 "model_dir": str(tmp_path),
                 "penalty_counter_mode": "cpu_counter",
                 "output_constraint_mode": "none",
+                "disable_thinking_budget": False,
+                "reasoning_parser": None,
                 "mtp_step": mtp_step,
                 "mtp_dynamic_verify": False,
                 "enable_ep_moe": False,
@@ -1002,7 +1004,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     )
     swa_view = create_attention_config(model_config=model_config, model_logical_layer_ids=(2,)).create_swa_config()
     layer_config = SWASparseMLALayerConfig(
-        num_heads=64, head_dim_v=512, softmax_scale=512**-0.5, dtype=torch.bfloat16, has_attn_sink=True
+        num_heads=64, head_dim_v=512, softmax_scale=512 ** -0.5, dtype=torch.bfloat16, has_attn_sink=True
     )
     impl = FlashMLASWADecodeBackend(layer_config)
     builder = FlashMLASWADecodeBackend.create_build_context(impl.state_key[1], None)
@@ -1614,6 +1616,7 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
     module = common.MultiLevelKvCacheModule.__new__(common.MultiLevelKvCacheModule)
     module.args = SimpleNamespace(
+        run_mode="normal",
         page_size=manager.page_size,
         cpu_cache_token_page_size=page_tokens,
         linear_att_hash_page_size=256,
@@ -1859,7 +1862,7 @@ def test_image_metadata_and_embeddings_preserve_canonical_cache(cache, prefix_le
         SimpleNamespace(convert_tokens_to_ids=lambda token: 99), "/unused", {"vision_n_layers": 1}
     )
     params = MultimodalParams(images=[{"type": "url", "data": "unused"} for _ in range(3)])
-    token_base, canonical_length = 2**62, 13
+    token_base, canonical_length = 2 ** 62, 13
     for image in params.images:
         image.token_id, image.token_num, image.start_index_in_embed_cache = token_base, canonical_length, 0
     input_ids = tokenizer.encode([7] * prefix_len + [99, 99, 8, 99, 8], params)

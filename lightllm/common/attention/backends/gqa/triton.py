@@ -49,6 +49,8 @@ class TritonGQADecodeBuildContext:
 
 
 def _check_supported(layer_config: GQALayerConfig) -> None:
+    if layer_config.head_dim not in (16, 32, 64, 128, 256, 512):
+        raise NotImplementedError(f"Triton GQA does not support head_dim={layer_config.head_dim}")
     # The Triton GQA kernels compute 1/sqrt(head_dim) themselves and only look left of the query.
     if not layer_config.has_default_scale:
         raise NotImplementedError(
@@ -206,6 +208,8 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
         if layer_config.bidirectional_image_spans:
             raise NotImplementedError("bidirectional image spans apply to prefill only")
         self.is_mha = layer_config.num_heads == layer_config.num_kv_heads
+        if self.is_mha and layer_config.head_dim == 512:
+            raise NotImplementedError("Triton MHA decode does not support head_dim=512")
         if self.is_mha and layer_config.sliding_window != (-1, -1):
             raise NotImplementedError("sliding_window is not supported by the MHA decode kernel")
 
@@ -250,8 +254,11 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
                 alloc_tensor_func=alloc_func,
             )
             return out
-        # The shared-group kernel has no sliding window; windowed layers decode each row on its own.
-        if att_state.b_mark_shared_group is not None and self.layer_config.sliding_window == (-1, -1):
+        if (
+            att_state.b_mark_shared_group is not None
+            and self.layer_config.sliding_window == (-1, -1)
+            and self.layer_config.head_dim <= 256
+        ):
             from lightllm.common.attention.kernels.gqa.bf16.decode.mtp_diverse import (
                 token_decode_attention_mtp_diverse_single_token,
             )

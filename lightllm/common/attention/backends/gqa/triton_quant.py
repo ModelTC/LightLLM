@@ -62,9 +62,13 @@ class TritonQuantGQADecodeBuildContext:
         self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
 
 
-def _check_supported(layer_config: GQALayerConfig) -> None:
+def _check_supported(layer_config: GQALayerConfig, head_dims: tuple[int, ...]) -> None:
     if layer_config.kv_quant not in _KINDS:
         raise NotImplementedError(f"Triton quantized GQA supports kv_quant {_KINDS}, got {layer_config.kv_quant!r}")
+    if layer_config.head_dim not in head_dims:
+        raise NotImplementedError(
+            f"Triton quantized GQA supports head dimensions {head_dims}, got {layer_config.head_dim}"
+        )
     if not (
         layer_config.causal
         and layer_config.sliding_window == (-1, -1)
@@ -94,7 +98,7 @@ def _cache_operands(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs):
 class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantGQAPrefillAttState, GQALayerInputs]):
     def __init__(self, layer_config: GQALayerConfig) -> None:
         super().__init__(layer_config)
-        _check_supported(layer_config)
+        _check_supported(layer_config, (64, 128, 256))
 
     def forward(
         self,
@@ -172,7 +176,7 @@ class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantG
 class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQADecodeAttState, GQALayerInputs]):
     def __init__(self, layer_config: GQALayerConfig) -> None:
         super().__init__(layer_config)
-        _check_supported(layer_config)
+        _check_supported(layer_config, (16, 32, 64, 128, 256))
 
     def forward(
         self,
