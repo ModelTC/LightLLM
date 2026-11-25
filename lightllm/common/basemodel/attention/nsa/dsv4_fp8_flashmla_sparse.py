@@ -18,9 +18,8 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
 
     def __init__(self, model):
         super().__init__(model=model)
-        from lightllm.models.deepseek_v4.config import create_attention_config
 
-        config = create_attention_config(
+        config = model.attention_config_class.from_model_config(
             model_config=model.config,
             model_logical_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),
             tp_rank=model.tp_rank_,
@@ -39,9 +38,8 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
     @classmethod
     def get_swa_prefill_workspace(cls, model):
         """由 backend 复用计算临时区；模型在 KV 容量评估前调用，以计入实际显存占用。"""
-        from lightllm.models.deepseek_v4.config import create_attention_config
 
-        config = create_attention_config(
+        config = model.attention_config_class.from_model_config(
             model_config=model.config,
             model_logical_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),
             tp_rank=model.tp_rank_,

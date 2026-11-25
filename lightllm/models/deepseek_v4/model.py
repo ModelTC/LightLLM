@@ -26,6 +26,7 @@ from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import (
 )
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
 from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post
+from .config import DSV4AttentionConfig
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 from lightllm.models.llama.yarn_rotary_utils import (
@@ -76,6 +77,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     post_layer_infer_class = DeepseekV4PostLayerInfer
     transformer_layer_infer_class = DeepseekV4TransformerLayerInfer
 
+    attention_config_class = DSV4AttentionConfig
     infer_state_class = DeepseekV4InferStateInfo
 
     def _verify_params(self):
@@ -107,10 +109,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         from lightllm.common.attention_state.full_att.compressed_att.create_compressed_att_state import (
             create_compressed_att_state,
         )
-        from .config import create_attention_config
 
         assert args.llm_kv_type in ("None", "fp8kv_dsa"), f"unsupported V4 KV encoding: {args.llm_kv_type}"
-        config = create_attention_config(
+        config = cls.attention_config_class.from_model_config(
             model_config=model_config,
             model_logical_layer_ids=model_logical_layer_ids,
             tp_rank=tp_rank,
@@ -140,13 +141,11 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     ) -> list[BoundedAttentionState]:
         """创建本模型的 SWA/compressor 请求运行态，大小页容量由管理器后续确定。"""
         from lightllm.common.attention_state.bounded_att import (
-            WindowCompressorStateConfig,
             create_window_compressor_state,
             create_sliding_window_state,
         )
-        from .config import create_attention_config
 
-        config = create_attention_config(
+        config = cls.attention_config_class.from_model_config(
             model_config=model_config,
             model_logical_layer_ids=model_logical_layer_ids,
             tp_rank=tp_rank,
@@ -160,37 +159,12 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
                 device=device,
             )
         ]
-        # V4.1 的 C2 只在 KV 源层保留未闭合的 token 对；V4 的 C4/C128 各层独立。
-        for ratio, window_size in ((2, 2), (4, 8), (128, 128)):
-            layers = tuple(
-                layer
-                for layer, compress_ratio in zip(model_logical_layer_ids, config.compress_ratios)
-                if compress_ratio == ratio and (not config.kv_source_layer_ids or layer in config.kv_source_layer_ids)
-            )
-            if not layers:
-                continue
-            targets = (
-                (("kv", config.head_dim), ("indexer", config.indexer_head_dim))
-                if ratio == 4
-                else (("kv", config.head_dim),)
-            )
-            for target, head_dim in targets:
-                states.append(
-                    create_window_compressor_state(
-                        config=WindowCompressorStateConfig(
-                            logical_layer_ids=layers,
-                            window_size=window_size,
-                            compress_stride=ratio,
-                            candidate_dim=head_dim * (2 if window_size > ratio else 1),
-                            target=target,
-                            tp_rank=tp_rank,
-                            tp_world_size=tp_world_size,
-                        ),
-                        request_capacity=request_capacity,
-                        mtp_step=args.mtp_step,
-                        device=device,
-                    )
+        for compressor in config.compressor_configs():
+            states.append(
+                create_window_compressor_state(
+                    config=compressor, request_capacity=request_capacity, mtp_step=args.mtp_step, device=device
                 )
+            )
         return states
 
     def prepare_attention_states(self) -> None:

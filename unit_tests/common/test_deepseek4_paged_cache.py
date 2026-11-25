@@ -5,6 +5,8 @@ import numpy as np
 import pytest
 import torch
 
+from lightllm.models.deepseek_v4.config import DSV4AttentionConfig
+
 from unit_tests.common.dsv4_test_utils import DeepseekV4MemoryManager, DeepseekV4CacheConfig, DeepseekV4ReqManager
 from unit_tests.common.req_token_index_test_utils import attach_req_token_index
 from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
@@ -249,6 +251,7 @@ def _test_backend(requests, token_capacity=8192):
     from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DeepseekV4FlashMlaFp8SparseAttBackend
 
     model = type("TestModel", (), {})()
+    model.attention_config_class = DSV4AttentionConfig
     model.req_manager = requests
     model.att_state_manager = requests.memory.manager
     model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(requests.cache_config.layer_num)]
@@ -992,6 +995,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
             "Model",
             (),
             {
+                "attention_config_class": DSV4AttentionConfig,
                 "config": dict(
                     num_attention_heads=64,
                     compress_ratios=[0, 0, 0],
@@ -1436,6 +1440,7 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
     )
     model = type("TestModel", (), {})()
     vars(model).update(
+        attention_config_class=DSV4AttentionConfig,
         config=config,
         batch_max_tokens=3,
         max_req_num=requests.max_request_num,

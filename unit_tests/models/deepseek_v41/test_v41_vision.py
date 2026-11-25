@@ -10,7 +10,8 @@ from PIL import Image
 from safetensors.torch import save_file
 
 from lightllm.models.deepseek_v4 import deepseek_v4_visual as visual
-from lightllm.models.deepseek_v4 import image_processor
+from lightllm.models.deepseek_v4.image_processor import load_image
+from lightllm.models.deepseek_v41 import image_processor
 from lightllm.models.deepseek_v41.deepseek_v41_visual import DeepseekV41VisionModel
 from lightllm.models.deepseek_v41.tokenizer import DeepSeekV41Tokenizer
 from lightllm.utils.config_utils import get_config_json, has_vision_module
@@ -63,7 +64,6 @@ def reference():
 )
 def test_image_preprocessing_and_layout_match_checkpoint(reference, width, height):
     args = SimpleNamespace(
-        vision_row_major=True,
         vision_patch_size=14,
         vision_downsample_ratio=3,
         vision_max_n_token=1024,
@@ -75,17 +75,18 @@ def test_image_preprocessing_and_layout_match_checkpoint(reference, width, heigh
     raw = io.BytesIO()
     image.save(raw, format="PNG")
     expected = reference.load_image({"data": raw.getvalue()}, args)
-    actual = image_processor.load_image(image, args)
+    actual = load_image(image, args, image_processor.get_image_grid)
     assert actual[1:] == expected[1:]
     torch.testing.assert_close(actual[0], expected[0], atol=0, rtol=0)
     n_h, n_w = actual[-2:]
-    types, perm = image_processor.build_canonical_image_block(n_h, n_w, row_major=True)
-    type_map = torch.tensor(
-        [image_processor.IMAGE_START, image_processor.IMAGE, image_processor.IMAGE_NEW_LINE, image_processor.IMAGE_END]
-    )
-    assert torch.equal(types, type_map[reference.image_token_types(n_h, n_w)])
-    assert torch.equal(perm, torch.arange(n_h * n_w))
-    grid = image_processor.get_image_grid(height, width, 14, 3, 1024, 295936, None, row_major=True)
+    # Give every patch a distinct ID so the reference checks both sentinel placement and patch order.
+    patches = torch.arange(n_h * n_w)[:, None]
+    block = DeepseekV41VisionModel.build_image_block(patches, n_h, n_w, torch.tensor([[-1], [-2], [-3]]))
+    types = reference.image_token_types(n_h, n_w)
+    expected = torch.tensor([-1, 0, -2, -3])[types]
+    expected[types == 1] = patches.flatten()
+    assert torch.equal(block.flatten(), expected)
+    grid = image_processor.get_image_grid(height, width, 14, 3, 1024, 295936, None)
     assert grid[-1] == types.numel() <= 1024
 
 
@@ -133,7 +134,7 @@ def test_visual_weight_loading_and_encode_without_image_padding(config, tmp_path
     image.save(raw, format="PNG")
     monkeypatch.setattr(visual, "read_shm", lambda _: raw.getvalue())
     embeds, uuids, spans = loaded.encode([SimpleNamespace(uuid=1)])
-    patches, n_h, n_w, _, _ = image_processor.load_image(image, loaded.config)
+    patches, n_h, n_w, _, _ = load_image(image, loaded.config, loaded.get_image_grid)
     with torch.inference_mode():
         rows = loaded.aligner(loaded.vision(patches, n_h, n_w), n_h, n_w).view(n_h, n_w, -1)
     expected = torch.cat(

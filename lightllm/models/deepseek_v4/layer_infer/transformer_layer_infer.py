@@ -68,6 +68,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         self.flashmla_q_head_num_ = self.tp_q_head_num_
         self.tp_groups = self.o_groups // self.tp_world_size_
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
+        self._init_compress_and_index()
+
+    def _init_compress_and_index(self):
         self.compressor = CompressorInfer(
             layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
         )

@@ -5,7 +5,7 @@ from lightllm.models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
 
 class DeepSeekV41Tokenizer(DeepSeekV4Tokenizer):
     supports_content_blocks = True
-    row_major_images = True
+    image_token_alignment = 1
 
     def __init__(self, tokenizer, model_dir, model_config):
         self.vision_config = model_config.get("vision_config") or {}
@@ -23,7 +23,7 @@ class DeepSeekV41Tokenizer(DeepSeekV4Tokenizer):
         return super().apply_chat_template(*args, **kwargs)
 
     def get_image_token_length(self, img):
-        from lightllm.models.deepseek_v4.image_processor import get_image_grid
+        from .image_processor import get_image_grid
 
         cfg = self.vision_config
         _, _, _, _, token_num = get_image_grid(
@@ -34,7 +34,6 @@ class DeepSeekV41Tokenizer(DeepSeekV4Tokenizer):
             cfg["max_image_tokens"],
             cfg["min_pixels"],
             cfg.get("max_wh_ratio"),
-            row_major=True,
         )
         return token_num
 

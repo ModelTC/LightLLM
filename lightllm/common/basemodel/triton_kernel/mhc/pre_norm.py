@@ -417,7 +417,8 @@ def hc_pre_norm(
     hc_eps: float,
     sinkhorn_iters: int,
     post_multiplier: float = 2.0,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    previous_pre: torch.Tensor = None,
+) -> tuple[torch.Tensor, ...]:
     """将 mHC pre-mixing 与紧随其后的子层 RMSNorm 融合。
 
     T = tokens，S = streams，H = 单条 stream 的 hidden size，M = 2 * S + S * S。
@@ -434,6 +435,7 @@ def hc_pre_norm(
         hc_eps: pre sigmoid 后的偏移量及 Sinkhorn 的稳定项。
         sinkhorn_iters: Sinkhorn 迭代次数。
         post_multiplier: post sigmoid 的乘数，默认 2.0。
+        previous_pre: 若传入，用上一子层的系数混合，并在第四个返回值中提供当前系数。
 
     Returns:
         (layer_input, residual_mix, post_mix)：分别为 bf16 [T, H]、fp32 [T, S, S]、fp32 [T, S]。
@@ -467,6 +469,7 @@ def hc_pre_norm(
         hc_eps,
         sinkhorn_iters,
         post_multiplier,
+        previous_pre=previous_pre,
     )
 
 
@@ -528,28 +531,3 @@ def hc_post_pre_norm(
             post_multiplier,
         )
     return layer_input, updated, next_residual_mix, next_post_mix
-
-
-def hc_pre_norm_shifted(x, previous_pre, fn, scale, base, norm_weight, rms_eps, norm_eps, hc_eps, sinkhorn_iters):
-    """V4.1: mix with the previous sublayer's coefficients and publish our own."""
-    if LIGHTLLM_DISABLE_DEEPGEMM_MHC:
-        xf = x.float()
-        projection = (xf @ fn.T).unsqueeze(0)
-        sqrsum = xf.square().sum(-1).unsqueeze(0)
-    else:
-        projection, sqrsum = _hc_prenorm_projection(x, fn)
-    return _finish_pre_norm(
-        x,
-        projection,
-        sqrsum,
-        scale,
-        base,
-        norm_weight,
-        previous_pre.shape[1],
-        rms_eps,
-        norm_eps,
-        hc_eps,
-        sinkhorn_iters,
-        2.0,
-        previous_pre=previous_pre,
-    )

@@ -211,6 +211,11 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             )
             self.dsv4_c4_lengths = torch.empty_like(self.position_ids, dtype=torch.int32)
 
+    def _indexer_valid_lengths(self, ratio):
+        valid = ((self.position_ids + 1) // ratio).to(torch.int32)
+        torch.clamp(valid, min=1, max=self.dsv4_c4_indices.shape[1], out=self.dsv4_c4_lengths)
+        return valid
+
     def get_indexer_metadata(self, logical_layer_id, capacity):
         """Share paged scorer inputs between successive layers with the same compression ratio."""
         config = self.get_compressed_kv_state(logical_layer_id).config
@@ -220,12 +225,8 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         import deep_gemm
         from .triton_kernel.build_c4_indexer_page_table import build_c4_indexer_page_table
 
-        valid_len = ((self.position_ids + 1) // ratio).to(torch.int32)
-        if ratio != 4:
-            valid_len.masked_fill_(self.dsv4_sparse_req_idx == self.req_manager.HOLD_REQUEST_ID, 0)
+        valid_len = self._indexer_valid_lengths(ratio)
         ctx_lens = valid_len.clamp_min(1).view(-1, 1)
-        if ratio == 4:
-            torch.clamp(valid_len, min=1, max=self.dsv4_c4_indices.shape[1], out=self.dsv4_c4_lengths)
         page_table = build_c4_indexer_page_table(
             self.dsv4_sparse_req_idx,
             valid_len,

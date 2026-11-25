@@ -12,7 +12,7 @@ class DeepSeekV4Tokenizer:
     # so advertise thinking support explicitly for tokenizer_supports_force_thinking().
     supports_thinking = True
     supports_content_blocks = False
-    row_major_images = False
+    image_token_alignment = 4
 
     def __init__(self, tokenizer, model_dir, model_config=None):
         self.tokenizer = tokenizer
@@ -74,7 +74,7 @@ class DeepSeekV4Tokenizer:
 
             image = images[image_index]
             image.start_idx = len(input_ids)
-            cache_skip = 0 if self.row_major_images else image.start_idx % 4
+            cache_skip = image.start_idx % self.image_token_alignment
             input_ids.extend(range(image.token_id + cache_skip, image.token_id + image.token_num))
             image_index += 1
 

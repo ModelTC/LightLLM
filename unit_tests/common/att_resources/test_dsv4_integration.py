@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.models.deepseek_v4.config import DSV4AttentionConfig
+
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
@@ -67,6 +69,7 @@ def cache(monkeypatch):
         __hash__ = object.__hash__
 
     model = TestModel(
+        attention_config_class=DSV4AttentionConfig,
         config=config,
         tp_rank_=0,
         tp_world_size_=1,

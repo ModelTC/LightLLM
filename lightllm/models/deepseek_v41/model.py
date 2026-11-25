@@ -1,6 +1,8 @@
 from transformers import PreTrainedTokenizerFast
 
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+from .config import DSV41AttentionConfig
+from lightllm.models.deepseek_v4.layer_weights.pre_and_post_layer_weight import DeepseekV4EmbeddingAndHeadWeight
 from .engram import EngramHasher
 from .infer_struct import DeepseekV41InferStateInfo
 from .layer_infer.post_layer_infer import DeepseekV41PostLayerInfer
@@ -9,6 +11,9 @@ from .layer_weights.transformer_layer_weight import DeepseekV41TransformerLayerW
 
 
 class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
+    attention_config_class = DSV41AttentionConfig
+    # The last FFN supplies the head mixing coefficients.
+    pre_and_post_weight_class = DeepseekV4EmbeddingAndHeadWeight
     transformer_weight_class = DeepseekV41TransformerLayerWeight
     transformer_layer_infer_class = DeepseekV41TransformerLayerInfer
     post_layer_infer_class = DeepseekV41PostLayerInfer

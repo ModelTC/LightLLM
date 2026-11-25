@@ -1,5 +1,4 @@
 import torch
-import triton
 import deep_gemm
 
 from lightllm.common.basemodel import BaseLayerInfer
@@ -28,12 +27,6 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         self.tp_world_size_ = tp_world_size
         self.freqs_cis = None
         self.indexer_weight_scale = self.index_head_dim ** -0.5 * self.index_n_heads ** -0.5
-        self.is_v41 = network_config.get("model_type") == "deepseek_v41"
-        if self.is_v41:
-            self.eps = network_config["rms_norm_eps"]
-            self.is_index_source = layer_idx in network_config["index_source_layer_ids"]
-            self.candidate_source = network_config["candidate_source_layer_id"]
-            self.candidate_topk_blocks = network_config["candidate_topk_blocks"]
         # C4 layers compress and cache their own indexer keys.
         self.indexer_compressor = (
             CompressorInfer(layer_idx, network_config, tp_world_size, is_in_indexer=True)
@@ -51,22 +44,6 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         use_custom_tensor_manager=True,
         c4_aux_workspace=None,
     ):
-        if self.is_v41:
-            from ..triton_kernel.destindex_copy_indexer_k import destindex_copy_indexer_k
-
-            # V4.1 derives the indexer key from the normalized global KV latent.
-            key = layer_weight.idx_k_norm_(layer_weight.idx_wk_.mm(x), eps=self.eps)
-            destindex_copy_indexer_k(
-                key,
-                infer_state.mem_index,
-                infer_state.position_ids,
-                infer_state.get_compressed_kv_view(self.layer_idx_).indexer_k,
-                infer_state.get_compressed_kv_state(self.layer_idx_).config.block_token_size // self.compress_ratio,
-                compress_ratio=self.compress_ratio,
-                freqs_cis=self.freqs_cis,
-                round_scale_to_power_of_two=True,
-            )
-            return
         if self.compress_ratio != 4:
             return
         # Only group-end rows in this dense bf16 scratch are valid indexer keys.
@@ -112,13 +89,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         c4_aux_workspace=None,
     ):
         extra_indices = extra_lengths = None
-        if self.is_v41:
-            if self.is_index_source:
-                query, weights = self._indexer_q_weight(x, q_lora, infer_state, layer_weight)
-                infer_state.v41_sparse_selection = self._v41_indices(infer_state, query, weights)
-            if self.compress_ratio:
-                extra_indices, extra_lengths = infer_state.v41_sparse_selection
-        elif self.compress_ratio == 4:
+        if self.compress_ratio == 4:
             idx_q_fp8, weights = self._indexer_q_weight(
                 x,
                 q_lora,
@@ -156,8 +127,6 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         idx_q_out = raw_w_out = None
         if c4_aux_workspace is not None:
             idx_q_out, raw_w_out = c4_aux_workspace.indexer_q_inputs(token_num)
-        elif self.is_v41:
-            raw_w_out = self.alloc_tensor((token_num, self.index_n_heads), dtype=torch.float32, device=x.device)
         idx_q = layer_weight.idx_wq_b_.mm(
             q_lora, out=idx_q_out, use_custom_tensor_mananger=use_custom_tensor_manager
         ).view(token_num, self.index_n_heads, self.index_head_dim)
@@ -178,8 +147,6 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             infer_state.position_ids,
             q_fp8=idx_q_fp8_out,
             weights_out=weights_out,
-            apply_hadamard=not self.is_v41,
-            round_scale_to_power_of_two=self.is_v41,
         )  # fp8 [T,H,d]; weights [T,H,1] with q-scale + weight_scale folded
         return idx_q_fp8, weights.squeeze(-1)
 
@@ -240,45 +207,3 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             )
             del logits  # Release this chunk before allocating the next one.
         return top_slots.unsqueeze(1), infer_state.dsv4_c4_lengths
-
-    def _v41_indices(self, infer_state, query, weights):
-        from lightllm.models.deepseek_v41.triton_kernel.attention import select_indexer_topk
-
-        ratio = self.compress_ratio
-        config = infer_state.get_compressed_kv_state(self.layer_idx_).config
-        page_size = config.block_token_size // ratio
-        packed = infer_state.get_compressed_kv_view(self.layer_idx_).indexer_k
-        cache = packed.view(packed.shape[0], page_size, 1, self.index_head_dim + 4)
-        capacity = triton.cdiv(max(1, infer_state.max_kv_seq_len // ratio), page_size) * page_size
-        meta = infer_state.get_indexer_metadata(self.layer_idx_, capacity)
-        slots = self.alloc_tensor((query.shape[0], self.index_topk), dtype=torch.int32, device=query.device)
-        lengths = torch.empty_like(meta.valid_lengths)
-        if self.layer_idx_ == self.candidate_source:
-            infer_state.candidate_block_mask = torch.empty(
-                (query.shape[0], capacity // 8), dtype=torch.bool, device=query.device
-            )
-        for chunk, scheduler in enumerate(meta.schedulers):
-            start = chunk * meta.rows_per_chunk
-            end = min(start + meta.rows_per_chunk, query.shape[0])
-            logits = deep_gemm.fp8_paged_mqa_logits(
-                query[start:end].unsqueeze(1),
-                cache,
-                weights[start:end],
-                meta.context_lengths[start:end],
-                meta.row_page_table[start:end],
-                scheduler,
-                capacity,
-                False,
-            )[:, :capacity]
-            candidates = infer_state.candidate_block_mask
-            select_indexer_topk(
-                logits,
-                meta.valid_lengths[start:end],
-                meta.row_page_table[start:end],
-                slots[start:end],
-                lengths[start:end],
-                page_size,
-                candidates[start:end] if self.layer_idx_ >= self.candidate_source else None,
-                self.candidate_topk_blocks if self.layer_idx_ == self.candidate_source else None,
-            )
-        return slots.unsqueeze(1), lengths

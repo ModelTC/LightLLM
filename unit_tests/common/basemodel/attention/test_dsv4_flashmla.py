@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.models.deepseek_v4.config import DSV4AttentionConfig
+
 pytest.importorskip("flash_mla")
 
 from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
@@ -49,6 +51,7 @@ assert not any(name == 'vllm' or name.startswith('vllm.') for name in sys.module
 def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.MonkeyPatch, run_mode: str) -> None:
     backend_class = attention.DeepseekV4FlashMlaFp8SparseAttBackend
     model = SimpleNamespace(
+        attention_config_class=DSV4AttentionConfig,
         args=SimpleNamespace(run_mode=run_mode, enable_prefill_microbatch_overlap=False),
         config=dict(
             compress_ratios=[0, 4, 128],
@@ -97,6 +100,7 @@ def _case(heads, ratio):
     torch.manual_seed(6014)
     tokens = 5
     model = type("TestModel", (), {})()
+    model.attention_config_class = DSV4AttentionConfig
     model.config = {"num_attention_heads": heads, "compress_ratios": [0, 4, 128]}
     model.config.update(head_dim=512, qk_rope_head_dim=64, index_head_dim=128, sliding_window=128)
     model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(3)]

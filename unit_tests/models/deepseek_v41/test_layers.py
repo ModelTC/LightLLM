@@ -44,7 +44,9 @@ def test_shifted_mhc_uses_previous_pre_and_returns_new_coefficients(monkeypatch)
     scale, base = torch.randn(3, device="cuda"), torch.randn(24, device="cuda")
     norm = torch.randn(h, dtype=torch.bfloat16, device="cuda")
     previous = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device="cuda").expand(t, -1).contiguous()
-    actual, _, _, new_pre = pre_norm.hc_pre_norm_shifted(x, previous, fn, scale, base, norm, 1e-20, 1e-20, 1e-6, 20)
+    actual, _, _, new_pre = pre_norm.hc_pre_norm(
+        x, fn, scale, base, norm, 4, 1e-20, 1e-20, 1e-6, 20, previous_pre=previous
+    )
     selected = x.view(t, 4, h)[:, 0].float()
     expected = (selected * torch.rsqrt(selected.square().mean(-1, keepdim=True) + 1e-20) * norm).bfloat16()
     projection = x.float() @ fn.T * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-20)

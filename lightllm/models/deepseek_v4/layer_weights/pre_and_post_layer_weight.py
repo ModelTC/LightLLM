@@ -8,13 +8,12 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
 )
 
 
-class DeepseekV4PreAndPostLayerWeight(PreAndPostLayerWeight):
+class DeepseekV4EmbeddingAndHeadWeight(PreAndPostLayerWeight):
     def __init__(self, data_type, network_config):
         super().__init__(data_type, network_config)
 
         hidden = network_config["hidden_size"]
         vocab = network_config["vocab_size"]
-        hc_mult = network_config["hc_mult"]
 
         # embeddings / lm_head / final norm (bf16, vocab tensor-parallel). V4 has no `model.` prefix
         # and does not tie embeddings (tie_word_embeddings=false).
@@ -26,8 +25,12 @@ class DeepseekV4PreAndPostLayerWeight(PreAndPostLayerWeight):
         )
         self.final_norm_weight_ = RMSNormWeight(dim=hidden, weight_name="norm.weight", data_type=self.data_type_)
 
-        if network_config.get("model_type") == "deepseek_v41":
-            return  # The V4.1 head mixes streams using the last FFN's coefficients.
+
+class DeepseekV4PreAndPostLayerWeight(DeepseekV4EmbeddingAndHeadWeight):
+    def __init__(self, data_type, network_config):
+        super().__init__(data_type, network_config)
+        hidden = network_config["hidden_size"]
+        hc_mult = network_config["hc_mult"]
 
         # final hyper-connection head (collapses the hc_mult residual streams before the lm_head)
         self.hc_head_fn_ = ParameterWeight(

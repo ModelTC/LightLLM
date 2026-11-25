@@ -1,8 +1,8 @@
 import torch
 
-from lightllm.common.basemodel.triton_kernel.mhc.pre_norm import hc_pre_norm_shifted
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
-from lightllm.common.basemodel.triton_kernel.mhc import hc_post
+from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_pre_norm
+from .indexer import DeepseekV41IndexInfer
 from ..engram import engram_forward
 from ..infer_struct import DeepseekV41InferStateInfo
 from ..layer_weights.transformer_layer_weight import DeepseekV41TransformerLayerWeight
@@ -25,6 +25,9 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
             else None
         )
 
+    def _init_compress_and_index(self):
+        self.index_infer = DeepseekV41IndexInfer(self.layer_num_, self.network_config_)
+
     def _hc_attn_in(self, input_embdings, infer_state, layer_weight):
         if isinstance(input_embdings, tuple):
             streams, pre_mix = input_embdings
@@ -42,33 +45,35 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
                 infer_state.dist_group,
                 token_mask=infer_state.input_ids < self.vocab_size if self.has_vision else None,
             ).flatten(1)
-        x, res_mix, post_mix, attn_pre = hc_pre_norm_shifted(
+        x, res_mix, post_mix, attn_pre = hc_pre_norm(
             streams,
-            pre_mix,
             layer_weight.hc_attn_fn_.weight,
             layer_weight.hc_attn_scale_.weight,
             layer_weight.hc_attn_base_.weight,
             layer_weight.attn_norm_.weight,
+            self.hc_mult,
             self.eps_,
             self.eps_,
             self.hc_eps,
             self.sinkhorn_iters,
+            previous_pre=pre_mix,
         )
         return x, streams, res_mix, post_mix, attn_pre
 
     def _hc_ffn_in(self, x, residual, res_mix, post_mix, attn_pre, layer_weight):
         streams = hc_post(x, residual, res_mix, post_mix, streams=self.hc_mult)
-        x, res_mix, post_mix, ffn_pre = hc_pre_norm_shifted(
+        x, res_mix, post_mix, ffn_pre = hc_pre_norm(
             streams,
-            attn_pre,
             layer_weight.hc_ffn_fn_.weight,
             layer_weight.hc_ffn_scale_.weight,
             layer_weight.hc_ffn_base_.weight,
             layer_weight.ffn_norm_.weight,
+            self.hc_mult,
             self.eps_,
             self.eps_,
             self.hc_eps,
             self.sinkhorn_iters,
+            previous_pre=attn_pre,
         )
         return x, streams, res_mix, post_mix, ffn_pre
 
@@ -123,9 +128,7 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
             latent = projected
         latent = layer_weight.compressor_norm_(latent, eps=self.eps_)
         # Main KV and indexer K share the normalized latent, with separate projections and RoPE.
-        self.index_infer.write_indexer_k(
-            latent, infer_state, layer_weight, self.cos_compress_table, self.sin_compress_table
-        )
+        self.index_infer.write_indexer_k(latent, infer_state, layer_weight)
         destindex_copy_kv_dsv41(
             latent,
             self.freqs_cis,

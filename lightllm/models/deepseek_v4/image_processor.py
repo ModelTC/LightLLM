@@ -12,37 +12,21 @@ IMAGE_START, IMAGE_PAD, IMAGE, IMAGE_NEW_LINE, IMAGE_END = range(5)
 COMPRESS_PAD_TO = 4
 
 
-def grid_tokens(best_height, best_width, patch_size, downsample_ratio, row_major=False):
-    """LLM token count for V4 N-layout or V4.1 row-major images, excluding leading padding."""
+def grid_tokens(best_height, best_width, patch_size, downsample_ratio):
+    """Number of LLM tokens occupied by an N-layout image block without compressor padding."""
     n_llm_h = math.ceil((best_height // patch_size) / downsample_ratio)
     n_llm_w = math.ceil((best_width // patch_size) / downsample_ratio)
     num_tokens = n_llm_h * (n_llm_w + 1) + 2
-    if row_major:
-        return n_llm_h, n_llm_w, num_tokens
     if n_llm_h % 2 == 1:
         num_tokens += n_llm_w + 1
     num_tokens += (n_llm_h + 1) // 2 * (n_llm_w + 1) % 2 * 2
     return n_llm_h, n_llm_w, num_tokens
 
 
-def solve_resize_ratio(height, width, patch_size, downsample_ratio, max_n_token, row_major=False):
+def solve_resize_ratio(height, width, patch_size, downsample_ratio, max_n_token):
     ratio = height / width
     max_w_float = math.sqrt((max_n_token - 2) / ratio + 0.25) - 0.5
     max_h_float = max_w_float * ratio
-    if row_major:
-        cell = patch_size * downsample_ratio
-        if max_w_float < 1.0:
-            best_height, best_width = (max_n_token - 2) // 2 * cell, cell
-        elif max_h_float < 1.0:
-            best_height, best_width = cell, (max_n_token - 3) * cell
-        else:
-            beta = min(math.floor(max_w_float) * cell / width, math.floor(max_h_float) * cell / height)
-            best_height = math.floor(height * beta / patch_size) * patch_size
-            best_width = math.floor(width * beta / patch_size) * patch_size
-        n_llm_h, n_llm_w, num_tokens = grid_tokens(
-            best_height, best_width, patch_size, downsample_ratio, row_major=True
-        )
-        return n_llm_h, n_llm_w, best_height, best_width, num_tokens
     if max_w_float < 1.0:
         max_w = 1
         max_h = (max_n_token - 2) // (max_w + 1)
@@ -71,17 +55,26 @@ def solve_resize_ratio(height, width, patch_size, downsample_ratio, max_n_token,
     return n_llm_h, n_llm_w, best_height, best_width, num_tokens
 
 
-def safe_resize(height, width, best_height, best_width, patch_size, downsample_ratio, max_n_token, row_major=False):
-    if not row_major:
-        max_n_token -= COMPRESS_PAD_TO - 1
-    n_llm_h, n_llm_w, num_tokens = grid_tokens(best_height, best_width, patch_size, downsample_ratio, row_major)
+def safe_resize(height, width, best_height, best_width, patch_size, downsample_ratio, max_n_token):
+    max_n_token -= COMPRESS_PAD_TO - 1
+    n_llm_h, n_llm_w, num_tokens = grid_tokens(best_height, best_width, patch_size, downsample_ratio)
     budget = max_n_token
     while num_tokens > max_n_token:
         n_llm_h, n_llm_w, best_height, best_width, num_tokens = solve_resize_ratio(
-            height, width, patch_size, downsample_ratio, budget, row_major
+            height, width, patch_size, downsample_ratio, budget
         )
         budget -= 1
     return n_llm_h, n_llm_w, best_height, best_width
+
+
+def get_image_size(height, width, min_pixels, max_wh_ratio):
+    if max_wh_ratio is not None and width > height * max_wh_ratio:
+        width = height * max_wh_ratio
+    if 0 < width * height < min_pixels:
+        ratio = (min_pixels / (width * height)) ** 0.5
+        width = int(width * ratio)
+        height = int(height * ratio)
+    return height, width
 
 
 def get_image_grid(
@@ -92,16 +85,9 @@ def get_image_grid(
     max_n_token: int,
     min_pixels: int,
     max_wh_ratio: Optional[float],
-    row_major: bool = False,
 ) -> Tuple[int, int, int, int, int]:
     """Resolve ViT/LLM grids and the position-independent canonical block length."""
-    if max_wh_ratio is not None and width > height * max_wh_ratio:
-        width = height * max_wh_ratio
-    if 0 < width * height < min_pixels:
-        ratio = (min_pixels / (width * height)) ** 0.5
-        width = int(width * ratio)
-        height = int(height * ratio)
-
+    height, width = get_image_size(height, width, min_pixels, max_wh_ratio)
     best_width = math.ceil(width / patch_size) * patch_size
     best_height = math.ceil(height / patch_size) * patch_size
     n_llm_h, n_llm_w, best_height, best_width = safe_resize(
@@ -112,19 +98,18 @@ def get_image_grid(
         patch_size,
         downsample_ratio,
         max_n_token,
-        row_major,
     )
     n_vit_h = best_height // patch_size
     n_vit_w = best_width // patch_size
-    _, _, core_token_num = grid_tokens(best_height, best_width, patch_size, downsample_ratio, row_major)
-    canonical_token_num = core_token_num if row_major else COMPRESS_PAD_TO - 1 + core_token_num
+    _, _, core_token_num = grid_tokens(best_height, best_width, patch_size, downsample_ratio)
+    canonical_token_num = COMPRESS_PAD_TO - 1 + core_token_num
     return n_vit_h, n_vit_w, n_llm_h, n_llm_w, canonical_token_num
 
 
-def load_image(image: Image.Image, args):
+def load_image(image: Image.Image, args, image_grid=get_image_grid):
     """Transform one image into BF16 ViT patches using the checkpoint preprocessing contract."""
     image = image.convert("RGB")
-    n_vit_h, n_vit_w, n_llm_h, n_llm_w, _ = get_image_grid(
+    n_vit_h, n_vit_w, n_llm_h, n_llm_w, _ = image_grid(
         image.height,
         image.width,
         args.vision_patch_size,
@@ -132,7 +117,6 @@ def load_image(image: Image.Image, args):
         args.vision_max_n_token,
         args.vision_min_pixels,
         args.vision_max_wh_ratio,
-        row_major=getattr(args, "vision_row_major", False),
     )
     best_height = n_vit_h * args.vision_patch_size
     best_width = n_vit_w * args.vision_patch_size
@@ -180,9 +164,6 @@ def build_image_block(n_llm_h: int, n_llm_w: int, start_pos: int):
     return types, perm
 
 
-def build_canonical_image_block(n_llm_h: int, n_llm_w: int, row_major=False):
-    """Build a cacheable image block; V4 includes three leading alignment pads."""
-    if row_major:
-        types = [IMAGE_START] + ([IMAGE] * n_llm_w + [IMAGE_NEW_LINE]) * n_llm_h + [IMAGE_END]
-        return torch.tensor(types, dtype=torch.int64), torch.arange(n_llm_h * n_llm_w)
+def build_canonical_image_block(n_llm_h: int, n_llm_w: int):
+    """Build the cacheable image block with its maximum three compressor-alignment pads."""
     return build_image_block(n_llm_h, n_llm_w, start_pos=0)

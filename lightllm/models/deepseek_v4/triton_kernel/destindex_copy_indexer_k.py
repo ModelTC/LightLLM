@@ -75,7 +75,7 @@ def destindex_copy_indexer_k(
 
     indexer_k: [T, head_dim] BF16; indexer_k_buffer: [page, bytes] uint8.
     Each page contains FP8 data followed by FP32 scales.
-    V4.1 passes freqs_cis to apply RoPE before quantization.
+    Passing freqs_cis applies RoPE before quantization.
     """
     token_num = mem_index.shape[0]
     if token_num == 0:
