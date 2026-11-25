@@ -106,7 +106,16 @@ def get_image_grid(
     return n_vit_h, n_vit_w, n_llm_h, n_llm_w, canonical_token_num
 
 
-def load_image(image: Image.Image, args, image_grid=get_image_grid):
+def _normalize_rgb(pixels: torch.Tensor) -> torch.Tensor:
+    return ((pixels / 255 - 0.5) / 0.5).to(torch.bfloat16)
+
+
+def rgb_normalization_table() -> torch.Tensor:
+    # The kernel copies BF16 bit patterns produced by the CPU reference.
+    return _normalize_rgb(torch.arange(256, dtype=torch.float32, device="cpu")).view(torch.int16)
+
+
+def load_image(image: Image.Image, args, image_grid=get_image_grid, *, rgb_lookup=None):
     """Transform one image into BF16 ViT patches using the checkpoint preprocessing contract."""
     image = image.convert("RGB")
     n_vit_h, n_vit_w, n_llm_h, n_llm_w, _ = image_grid(
@@ -125,9 +134,18 @@ def load_image(image: Image.Image, args, image_grid=get_image_grid):
     else:
         image = ImageOps.pad(image, (best_width, best_height), color=(127, 127, 127))
 
-    x = torch.from_numpy(np.asarray(image, dtype=np.float32)).permute(2, 0, 1) / 255
-    x = ((x - 0.5) / 0.5).to(torch.bfloat16)
     patch_size = args.vision_patch_size
+    if rgb_lookup is not None:
+        from lightllm.models.deepseek_v4.triton_kernel.image_patches import pack_rgb_patches
+
+        # NumPy can advise huge pages for large allocations. Stage writable RGB bytes directly.
+        rgb_bytes = bytearray(image.tobytes())
+        pixels = torch.frombuffer(rgb_bytes, dtype=torch.uint8)
+        pixels = pixels.to(device=rgb_lookup.device, non_blocking=True)
+        patches = pack_rgb_patches(pixels, rgb_lookup, n_vit_w, patch_size)
+        return patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w
+
+    x = _normalize_rgb(torch.from_numpy(np.asarray(image, dtype=np.float32)).permute(2, 0, 1))
     patches = (
         x.reshape(3, n_vit_h, patch_size, n_vit_w, patch_size)
         .permute(1, 3, 0, 2, 4)

@@ -18,6 +18,7 @@ from lightllm.models.deepseek_v4.image_processor import (
     build_canonical_image_block,
     get_image_grid,
     load_image,
+    rgb_normalization_table,
 )
 from lightllm.server.embed_cache.utils import get_shm_name_data, read_shm
 from lightllm.server.multimodal_params import ImageItem
@@ -170,6 +171,7 @@ class DeepseekV4VisionModel(nn.Module):
 
     def __init__(self, kvargs, **config):
         super().__init__()
+        self.register_buffer("_rgb_lookup", rgb_normalization_table(), persistent=False)
         self.config = SimpleNamespace(**config)
         self.vision = self.vit_class(self.config)
         self.aligner = Aligner(self.config)
@@ -214,7 +216,12 @@ class DeepseekV4VisionModel(nn.Module):
             uuids.append(image_item.uuid)
             image_data = read_shm(get_shm_name_data(image_item.uuid))
             with Image.open(BytesIO(image_data)) as image:
-                patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w = load_image(image, self.config, self.get_image_grid)
+                patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w = load_image(
+                    image,
+                    self.config,
+                    self.get_image_grid,
+                    rgb_lookup=self._rgb_lookup if self._rgb_lookup.is_cuda else None,
+                )
 
             patches = patches.to(device=self.image_start.device, non_blocking=True)
             row_major_embeds = self.aligner(
