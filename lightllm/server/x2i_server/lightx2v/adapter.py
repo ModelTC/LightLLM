@@ -174,6 +174,11 @@ class LightX2VServer:
                     await self.result_socket.send_pyobj(X2IResponse(request_id=param.request_id, images=None))
 
     async def _process(self, param: X2IParams):
+        # check cancle first
+        if self.x2i_http_request_state.is_cancel(param.request_id):
+            logger.info(f"req:{param.request_id}/{param.session_id} canceled before generate.")
+            return []
+
         is_t2i = param.past_kvcache_img.is_empty()
 
         self.pipe.runner.set_inference_params(

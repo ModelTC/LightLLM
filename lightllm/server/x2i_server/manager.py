@@ -19,7 +19,7 @@ from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICacheRelease, X2IHttpRequestState
 from lightllm.utils.dist_utils import set_current_device_id
-from lightllm.utils.start_utils import start_submodule_processes
+from lightllm.utils.start_utils import process_manager
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.envs_utils import get_env_start_args
 
@@ -127,7 +127,7 @@ class X2IManager:
                 for _ in range(x2v_world_size)
             ]
 
-            start_submodule_processes(funcs, args, envs)
+            process_manager.start_submodule_processes(funcs, args, envs)
 
     async def t2i_generate(self, past_kv_cache, past_kv_cache_text, param: X2IParams):
         assert self.use_naive_x2i, "t2i is not supported for non naive x2i"
