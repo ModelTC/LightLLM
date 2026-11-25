@@ -73,25 +73,27 @@ def test_missing_final_feature_fails_instead_of_silently_changing_projection(mon
         collector.finish_output(SimpleNamespace(need_dp_prefill_balance=False))
 
 
-def test_final_feature_graph_restore_keeps_request_state_independent(monkeypatch):
+def test_final_postnorm_feature_is_added_after_graph_state_restore(monkeypatch):
     graph, _ = _postnorm_collector(monkeypatch)
-    graph.add(0, torch.ones(2, 3))
-    graph.add_final_hidden(torch.full((2, 3), 2.0))
-    request = graph.new_instance()
-    request.restore_graph_state(graph)
-    assert request.final_hidden is graph.final_hidden
-    request.finish_output(SimpleNamespace(need_dp_prefill_balance=False))
-    assert request.final_hidden is None
-    assert graph.final_hidden is not None
-    assert len(graph.layer_hiddens) == 1
-
-
-def test_final_feature_graph_ownership_accounts_for_all_saved_tensors(monkeypatch):
-    collector, _ = _postnorm_collector(monkeypatch)
-    collector.add(0, torch.ones(2, 3))
-    collector.add_final_hidden(torch.ones(2, 3))
+    layer_hidden = torch.ones(2, 3)
+    graph.add(0, layer_hidden)
     monkeypatch.setattr(hidden_collector_module, "tensor_to_no_ref_tensor", torch.clone)
-    assert collector.release_graph_tensor_ownership() == (2, 48)
+    assert graph.release_graph_tensor_ownership() == (1, layer_hidden.numel() * layer_hidden.element_size())
+
+    infer_state = SimpleNamespace(need_dp_prefill_balance=False)
+    for value in (2.0, 4.0):
+        request = graph.new_instance()
+        request.restore_graph_state(graph)
+        final_hidden = torch.full_like(layer_hidden, value)
+        request.add_final_hidden(final_hidden)
+        output = request.finish_output(infer_state).spec_hidden
+
+        torch.testing.assert_close(output, torch.cat([layer_hidden, final_hidden * 3], dim=-1))
+        assert request.final_hidden is None
+        assert not request.layer_hiddens
+
+    assert graph.final_hidden is None
+    assert len(graph.layer_hiddens) == 1
 
 
 def _mock_target_layer_ids(monkeypatch, layer_ids):

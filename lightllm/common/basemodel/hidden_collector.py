@@ -196,16 +196,11 @@ class LayerHiddenCollector(HiddenCollector):
     def restore_graph_state(self, graph_collector: HiddenCollector) -> None:
         assert isinstance(graph_collector, LayerHiddenCollector)
         self.layer_hiddens = graph_collector.layer_hiddens.copy()
-        self.final_hidden = graph_collector.final_hidden
 
     def release_graph_tensor_ownership(self) -> tuple[int, int]:
         tensor_count = len(self.layer_hiddens)
         total_nbytes = sum(hidden.numel() * hidden.element_size() for hidden in self.layer_hiddens)
         self.layer_hiddens = [tensor_to_no_ref_tensor(hidden) for hidden in self.layer_hiddens]
-        if self.final_hidden is not None:
-            tensor_count += 1
-            total_nbytes += self.final_hidden.numel() * self.final_hidden.element_size()
-            self.final_hidden = tensor_to_no_ref_tensor(self.final_hidden)
         return tensor_count, total_nbytes
 
     def _load_layer_ids(self) -> frozenset[int]:
@@ -227,7 +222,7 @@ class LayerHiddenCollector(HiddenCollector):
 
     def add_final_hidden(self, final_hidden: torch.Tensor) -> None:
         if self.include_final_postnorm:
-            # Defer final normalization until feature assembly in finish_output.
+            # Prefill supplies this on the request collector after graph capture or replay.
             self.final_hidden = final_hidden
 
     def add(self, layer_index: int, hidden: torch.Tensor) -> None:
