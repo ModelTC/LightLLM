@@ -1,5 +1,6 @@
 import torch
 
+from lightllm.common.basemodel.attention_runtime import AttentionSpec
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_forward
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -17,7 +18,8 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
     Only decode attends; its attention is non-causal, which only FA3 supports so far.
     """
 
-    attends_in_prefill = False
+    def attention_spec(self, model) -> AttentionSpec:
+        return AttentionSpec(prefill=None, decode=self._gqa_config(model))
 
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)

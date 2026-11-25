@@ -1,8 +1,10 @@
+from dataclasses import replace
 from lightllm.common.attention_state.full_att import FullAttentionState
 import math
 import torch
 import torch.nn as nn
 
+from lightllm.common.basemodel.attention_runtime import AttentionSpec
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
@@ -21,8 +23,6 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     read. See Gemma4TpPartModel.create_full_att_states for context.
     """
 
-    att_implementation = "triton"
-
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.eps_ = network_config.get("rms_norm_eps", 1e-6)
@@ -34,8 +34,6 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         layer_type = network_config["layer_types"][layer_num]
         self.is_sliding = layer_type == "sliding_attention"
-        # Sliding layers' prefill also attends bidirectionally inside image spans (SWA + image bidi in one pass).
-        self.prefill_image_spans = self.is_sliding
 
         # Some E-series checkpoints leave num_global_key_value_heads = null;
         # HF treats that as "fall back to num_key_value_heads".
@@ -176,10 +174,11 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     # ----- Attention kernels (sliding window + per-layer KV reshape) ---
 
-    def _gqa_layer_config_fields(self):
-        if self.is_sliding and self.sliding_window_ > 0:
-            return dict(sliding_window=(self.sliding_window_ - 1, 0))
-        return {}
+    def attention_spec(self, model) -> AttentionSpec:
+        window = (self.sliding_window_ - 1, 0) if self.is_sliding and self.sliding_window_ > 0 else (-1, -1)
+        decode = self._gqa_config(model, sliding_window=window)
+        prefill = replace(decode, bidirectional_image_spans=self.is_sliding)
+        return AttentionSpec(prefill=prefill, decode=decode, implementation="triton")
 
     def _gqa_kv_cache(self, state: FullAttentionState):
         # 直接用当前逻辑层号访问；共享层由 State 的 logical_layer_groups 映射到生产层的物理 KV。

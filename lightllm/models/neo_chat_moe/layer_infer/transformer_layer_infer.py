@@ -1,7 +1,9 @@
 import os
 import torch
+from dataclasses import replace
 from functools import partial
 from typing import Tuple
+from lightllm.common.basemodel.attention_runtime import AttentionSpec
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
 from lightllm.models.qwen3_moe.layer_infer.transformer_layer_infer import Qwen3MOETransformerLayerInfer
@@ -15,8 +17,9 @@ logger = init_logger(__name__)
 
 
 class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
-    # Neo attends bidirectionally inside image spans during prefill.
-    prefill_image_spans = True
+    def attention_spec(self, model) -> AttentionSpec:
+        decode = self._gqa_config(model)
+        return AttentionSpec(prefill=replace(decode, bidirectional_image_spans=True), decode=decode)
 
     def __init__(self, data_type, network_config):
         super().__init__(data_type, network_config)

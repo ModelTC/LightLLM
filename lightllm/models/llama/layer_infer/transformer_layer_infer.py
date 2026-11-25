@@ -7,15 +7,20 @@ from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.common.basemodel.layer_infer.gqa_attention import GQAAttentionLayerMixin
+from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs, gqa_kv_quant_fields
+from lightllm.common.attention_state.full_att import FullAttentionState
+from lightllm.common.basemodel.attention_runtime import AttentionSpec, attention_is_causal
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 
-class LlamaTransformerLayerInfer(GQAAttentionLayerMixin, TransformerLayerInferTpl):
+class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     """ """
+
+    prefill_impl = None
+    decode_impl = None
 
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
@@ -32,6 +37,64 @@ class LlamaTransformerLayerInfer(GQAAttentionLayerMixin, TransformerLayerInferTp
     def _bind_func(self):
         self._bind_norm()
         return
+
+    def _gqa_kv_cache(self, state):
+        return state.get_layer_view(logical_layer_id=self.layer_num_)
+
+    def _gqa_cache_state(self, manager, model_role):
+        return manager.get_state(
+            model_role=model_role,
+            state_type_filter="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
+
+    def _gqa_config(self, model, **fields):
+        state = self._gqa_cache_state(model.att_state_manager, model.att_state_role)
+        keys, _ = self._gqa_kv_cache(state)
+        scales = state.get_layer_kv_scales(self.layer_num_)
+        return GQALayerConfig(
+            num_heads=self.tp_q_head_num_,
+            num_kv_heads=keys.shape[1],
+            head_dim=self.head_dim_,
+            dtype=model.data_type,
+            causal=attention_is_causal(model),
+            **gqa_kv_quant_fields(model.args.llm_kv_type, scales, self.head_dim_),
+            **fields,
+        )
+
+    def attention_spec(self, model) -> AttentionSpec:
+        config = self._gqa_config(model)
+        return AttentionSpec(prefill=config, decode=config)
+
+    def _gqa_sinks(self, layer_weight):
+        return None
+
+    def _gqa_attention(self, impl, q, infer_state, layer_weight):
+        state = self._gqa_cache_state(infer_state.att_state_manager, infer_state.att_state_role)
+        keys, values = self._gqa_kv_cache(state)
+        config = impl.layer_config
+        query = q.view(-1, config.num_heads, config.head_dim)
+        inputs = GQALayerInputs(
+            q=query,
+            k_cache=keys,
+            v_cache=values,
+            kv_scales=state.get_layer_kv_scales(self.layer_num_),
+            sinks=self._gqa_sinks(layer_weight),
+        )
+        output = impl.forward(
+            infer_state.att_states[impl.state_key],
+            inputs,
+            out=self.alloc_tensor(query.shape, dtype=query.dtype, device=query.device),
+            alloc_func=self.alloc_tensor,
+        )
+        return output.view(q.shape)
+
+    def _context_attention_kernel(self, q, kv, infer_state, layer_weight, out=None) -> torch.Tensor:
+        return self._gqa_attention(self.prefill_impl, q, infer_state, layer_weight)
+
+    def _token_attention_kernel(self, q, infer_state, layer_weight, out=None) -> torch.Tensor:
+        return self._gqa_attention(self.decode_impl, q, infer_state, layer_weight)
 
     def _bind_norm(self):
         self._att_norm = partial(LlamaTransformerLayerInfer._att_norm, self)

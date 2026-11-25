@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 
@@ -128,3 +128,27 @@ class GQALayerInputs:
     sinks: Optional[torch.Tensor] = None
     kv_scales: Optional[GQAKVScales] = None
     alibi_slopes: Optional[torch.Tensor] = None
+
+
+_GQA_KV_QUANT = {
+    "None": None,
+    "int8kv": "int8_group",
+    "int4kv": "int4_group",
+    "fp8kv_sph": "fp8_per_head",
+    "fp8kv_spt": "fp8_per_tensor",
+}
+
+
+def gqa_kv_quant_fields(llm_kv_type: str, kv_scales: Optional[GQAKVScales], head_dim: int) -> dict[str, Any]:
+    """Translate the configured cache format and layer scales into GQALayerConfig fields."""
+    if llm_kv_type not in _GQA_KV_QUANT:
+        raise ValueError(f"--llm_kv_type {llm_kv_type!r} has no GQA KV cache layout; choose from {list(_GQA_KV_QUANT)}")
+    kv_quant = _GQA_KV_QUANT[llm_kv_type]
+    if (kv_quant is None) != (kv_scales is None):
+        raise ValueError(f"--llm_kv_type {llm_kv_type!r} does not match the cache's scales")
+    grouped = kv_quant in ("int8_group", "int4_group")
+    return dict(
+        kv_quant=kv_quant,
+        kv_quant_group_size=head_dim // kv_scales.k_scale.shape[-1] if grouped else None,
+        has_q_scale=kv_quant == "fp8_per_head" and kv_scales.q_scale is not None,
+    )
