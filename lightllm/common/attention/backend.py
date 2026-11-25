@@ -4,7 +4,7 @@ Each type is named for how long it lives:
 
 - LayerConfig: one layer's static attention configuration, fixed when the model loads. An
   AttentionBackend instance holds this config.
-- AttentionMetadata: request layout and KV cache indices for one forward step.
+- InferStateInfo: request layout and KV cache indices for one forward step.
 - AttState: the attention state shared by compatible layers in one microbatch. Backends that
   prepare page tables, recurrent indices or wrappers keep them on their state.
 - LayerInputs: one layer call's tensors.
@@ -19,10 +19,12 @@ before attention and passes the attention state explicitly rather than through a
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Any, Callable, Generic, Optional, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Generic, Protocol, TypeVar
 
 import torch
 
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 LayerConfig = TypeVar("LayerConfig")
 AttState = TypeVar("AttState")
@@ -45,65 +47,6 @@ class TensorAllocator(Protocol):
 
 
 @dataclass(frozen=True)
-class AttentionMetadata:
-    """Request layout and KV cache indices shared by attention backends for one forward step.
-
-    The caller builds it once per step. Tensors are caller-owned int32/int64 vectors on the
-    attention device. req_to_token_indexs[b_req_idx[i], pos] is the physical cache slot of
-    request i's token at pos. Under CUDA graphs the caller rewrites the captured step's tensors
-    in place before replay, so kernels may read these tensors directly.
-    """
-
-    req_to_token_indexs: torch.Tensor
-    b_req_idx: torch.Tensor
-    # Total tokens per request, including any cached prefix and the current tokens.
-    b_seq_len: torch.Tensor
-    batch_size: int
-    # Actual maximum and sum of b_seq_len for this step.
-    max_kv_seq_len: int
-    total_token_num: int
-    # Cumulative query and kv token offsets per request, [batch_size + 1] each.
-    cu_q_seq_len: Optional[torch.Tensor] = None
-    cu_kv_seq_len: Optional[torch.Tensor] = None
-    # Prefill only: start of each request's new queries in packed q and cached prefix lengths.
-    b_q_start_loc: Optional[torch.Tensor] = None
-    b_ready_cache_len: Optional[torch.Tensor] = None
-    max_q_seq_len: int = 1
-    # Prefill only: the longest cached prefix and the cache slots of the step's new tokens, in q order.
-    max_ready_cache_len: int = 0
-    mem_index: Optional[torch.Tensor] = None
-    # Prefill only, for layers that attend bidirectionally inside image spans: per query token, the
-    # exclusive end of its image span in the request's kv positions, or 0 for a text token, and the
-    # span's start (read only for image tokens; needed with a sliding window).
-    b_image_token_end: Optional[torch.Tensor] = None
-    b_image_token_start: Optional[torch.Tensor] = None
-    # Decode query layout. Normally each request has one query row. Speculative decoding gives
-    # each logical request decode_rows_per_request consecutive rows that share its KV, the last
-    # row seeing the longest prefix. With dynamic_decode_rows the row count varies per request,
-    # and consecutive rows with the same b_req_idx form one request; rows of pad_req_idx are
-    # padding and each forms its own request.
-    decode_rows_per_request: int = 1
-    dynamic_decode_rows: bool = False
-    pad_req_idx: Optional[int] = None
-    # Dynamic speculative rows: each row's draft position within its request. With recurrent
-    # state, req_to_mtp_state_index[slot] is the request's last accepted draft position.
-    b_mtp_index: Optional[torch.Tensor] = None
-    req_to_mtp_state_index: Optional[torch.Tensor] = None
-    # Diverse sampling: rows that share a radix-tree prefix node form a group; b_shared_seq_len[i]
-    # is how many leading tokens row i shares with its group.
-    b_shared_seq_len: Optional[torch.Tensor] = None
-    b_shared_radix_node_id: Optional[torch.Tensor] = None
-    # Graph capacity for kv lengths when this step is captured or replayed; None in eager mode.
-    cuda_graph_max_kv_seq_len: Optional[int] = None
-    # Distinguishes the concurrent steps of microbatch overlap.
-    microbatch_index: int = 0
-
-    @property
-    def uses_cuda_graph(self) -> bool:
-        return self.cuda_graph_max_kv_seq_len is not None
-
-
-@dataclass(frozen=True)
 class AttentionBuildResources:
     """Model-wide capacities and workspace access used to initialize a backend's storage."""
 
@@ -118,7 +61,7 @@ class AttentionBuildResources:
     # Decode rows any step may have (running requests times rows per request, padded as the
     # model pads its batches); at least max_cuda_graph_batch_size.
     max_decode_rows: int
-    # Concurrent steps of microbatch overlap; AttentionMetadata.microbatch_index is below it.
+    # Concurrent steps of microbatch overlap; InferStateInfo.microbatch_index is below it.
     microbatch_count: int
     # Size of the scratch workspace that implementations needing one share by name.
     workspace_bytes: int
@@ -126,7 +69,7 @@ class AttentionBuildResources:
     # tensor for the same arguments, so builders of one implementation share it.
     get_workspace: Callable[[str, int, torch.dtype], torch.Tensor]
     # Decode batches carry the shared-prefix groups of diverse sampling
-    # (AttentionMetadata.b_shared_seq_len and b_shared_radix_node_id).
+    # (InferStateInfo.b_shared_seq_len and b_shared_radix_node_id).
     diverse_decode: bool = False
 
 
@@ -162,7 +105,7 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
 
     @classmethod
     @abstractmethod
-    def build(cls, metadata: AttentionMetadata, context: Any) -> AttState:
+    def build(cls, infer_state: "InferStateInfo", context: Any) -> AttState:
         """Prepare state once per compatible set of layers before capture or replay.
 
         Replay reads captured addresses and launch parameters. Keep graph storage for each

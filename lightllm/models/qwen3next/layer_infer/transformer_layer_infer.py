@@ -10,7 +10,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.common.attention.backends.gdn import GDNLayerConfig, GDNLayerInputs
 from lightllm.common.basemodel.attention_runtime import AttentionSpec
-from typing import Tuple
+from typing import Optional, Tuple
 from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
 from lightllm.distributed import all_reduce
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -72,15 +72,19 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             layer_num=self.layer_num_,
         )
 
-    def _gdn_attention(self, inputs: GDNLayerInputs, infer_state, *, prefill: bool) -> torch.Tensor:
-        z = inputs.z
+    def _gdn_attention(
+        self, inputs: GDNLayerInputs, infer_state, *, prefill: bool, out: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         impl = self.prefill_impl if prefill else self.decode_impl
+        if not prefill and out is None:
+            z = inputs.z
+            out = self.alloc_tensor(
+                (z.shape[0], self.tp_linear_num_v_heads, self.linear_head_v_dim), dtype=z.dtype, device=z.device
+            )
         return impl.forward(
             infer_state.att_states[impl.state_key],
             inputs,
-            out=self.alloc_tensor(
-                (z.shape[0], self.tp_linear_num_v_heads, self.linear_head_v_dim), dtype=z.dtype, device=z.device
-            ),
+            out=out,
             alloc_func=self.alloc_tensor,
         )
 
@@ -252,9 +256,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             # 通过 new_infer_state.att_states 读取 model._create_inferstate() 为本步构造的
             # attention state（含 padding 请求的 buffer idx），而不是 capture 时的 attention state。
             inputs = self._gdn_layer_inputs(_mixed_qkvzba, new_infer_state, layer_weight)
-            tmp_o = self._gdn_attention(inputs, new_infer_state, prefill=True)
-            _o.copy_(tmp_o.view(_o.shape))
-            return
+            self._gdn_attention(inputs, new_infer_state, prefill=True, out=_o)
 
         infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=gdn_prefill_func, after_graph=pre_capture_graph)
         # The gate is a slice of the captured projection, which replays refill.

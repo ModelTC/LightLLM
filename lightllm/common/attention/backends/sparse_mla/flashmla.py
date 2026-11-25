@@ -9,10 +9,10 @@ import torch
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
     AttentionBuildResources,
     TensorAllocator,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from . import SparseMLADecodeLayerInputs, SparseMLALayerConfig, SparseMLAPrefillLayerInputs
 
 
@@ -142,9 +142,9 @@ class FlashMLASparsePrefillBackend(
         return "flashmla_sparse_mla_prefill"
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: None = None) -> FlashMLASparsePrefillAttState:
+    def build(cls, metadata: InferStateInfo, context: None = None) -> FlashMLASparsePrefillAttState:
         return FlashMLASparsePrefillAttState(
-            mem_index=metadata.mem_index, has_cached_prefix=metadata.max_ready_cache_len > 0
+            mem_index=metadata.mem_index, has_cached_prefix=(metadata.max_cache_len or 0) > 0
         )
 
 
@@ -226,9 +226,7 @@ class FlashMLASparseDecodeBackend(
     build_context_type = FlashMLASparseDecodeBuildContext
 
     @classmethod
-    def build(
-        cls, metadata: AttentionMetadata, context: FlashMLASparseDecodeBuildContext
-    ) -> FlashMLASparseDecodeAttState:
+    def build(cls, metadata: InferStateInfo, context: FlashMLASparseDecodeBuildContext) -> FlashMLASparseDecodeAttState:
         """A CUDA graph step keeps the captured scheduler metadata per (microbatch, metadata size)."""
         import flash_mla
 

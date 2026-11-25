@@ -4,7 +4,7 @@ import torch
 if not torch.cuda.is_available():
     pytest.skip("requires CUDA", allow_module_level=True)
 
-from lightllm.common.attention.backend import AttentionMetadata
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.gqa.triton_quant import (
     TritonQuantGQADecodeBackend,
     TritonQuantGQADecodeBuildContext,
@@ -34,7 +34,7 @@ def test_build_diverse_shared_group_markers(monkeypatch, node_ids, expected_mark
 
 def _batch(shared_len, node_ids, *, graph_capacity=None, microbatch_index=0):
     rows = len(shared_len)
-    return AttentionMetadata(
+    return make_infer_state(
         req_to_token_indexs=torch.zeros(rows, 8, dtype=torch.int32, device="cuda"),
         b_req_idx=torch.arange(rows, dtype=torch.int32, device="cuda"),
         b_seq_len=torch.full((rows,), 8, dtype=torch.int32, device="cuda"),

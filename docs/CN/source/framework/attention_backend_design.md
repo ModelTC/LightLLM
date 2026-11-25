@@ -19,7 +19,7 @@
 flowchart TD
     Layer[模型层 layer infer] -->|attention_spec| Runtime[model.attention_runtime]
     Runtime -->|bind：绑定 prefill_impl 和 decode_impl| Layer
-    Infer[model._create_inferstate] -->|prepare：build_attention_metadata| Batch[AttentionMetadata]
+    Infer[model._create_inferstate] -->|prepare| Batch[InferStateInfo]
     Batch --> Runtime
     Runtime -->|每个 state_key 一次 backend.build| AttState[infer_state.att_states]
     Layer -->|写 KV cache / 解析逐层数据| State[AttentionStateManager]
@@ -49,13 +49,13 @@ GQA 层共用 `lightllm/common/basemodel/layer_infer/gqa_attention.py` 中的 `G
 `_init_attention` 为每个模型创建 `model.attention_runtime`（`AttentionRuntime`），纯 FFN 模型也不例外，只是不绑定任何层、`has_attention` 为假。它负责从绑定到每步构建的全部过程：
 
 - `bind(spec)` 为每个阶段独立选择实现，然后将两个 impl 赋给层。阶段、layer config 和请求的 backend 都相同的层复用 impl。某阶段的 layer config 为 `None` 时，该阶段返回 `None`，例如 DFlash 草稿层只在 decode 计算。每个阶段的每个新 `state_key` 登记一个 `_StateBuilder`，它在首次 build 时才创建构建上下文、分配该阶段的资源。
-- `prepare(infer_state)` 每步构造一个 `AttentionMetadata`，对本阶段的每个 `_StateBuilder` 调用一次 `backend.build`，返回 `{state_key: att_state}`；没有 builder 的阶段返回空字典。
+- `prepare(infer_state)` 将当前 `InferStateInfo` 传给本阶段的每个 `_StateBuilder`，各调用一次 `backend.build`，返回 `{state_key: att_state}`。没有 builder 的阶段返回空字典。
 - `model.requires_cpu_cache_sync`：是否有实现不能与 CPU cache 搬运在 GPU 上并行。
 
 运行时创建时从模型读取一次全部静态信息，之后不再持有模型：
 
 - `attention_build_resources(model)` 把模型的资源与容量写入 `AttentionBuildResources`，供 backend 创建构建上下文（第 3 节）。
-- `attention_step_config(model)` 生成冻结的 `AttentionStepConfig`：decode 每请求行数、是否为 dynamic verify 布局、线性注意力的投机状态索引和 CUDA graph 的 KV 长度容量。`build_attention_metadata(infer_state, step_config)` 只读这两者，每步不再查询模型或启动参数。
+- `attention_step_config(model)` 生成冻结的 `AttentionStepConfig`，记录 decode 每请求行数、是否为 dynamic verify 布局、线性注意力的投机状态索引和 CUDA graph 的 KV 长度容量。`configure_attention_step` 根据当前阶段和 graph 模式把适用值写入 `InferStateInfo`。
 - 因此 graph 容量必须在 `_init_attention` 之前确定：`graph_max_len_in_batch` 的 MTP 余量调整在模型构造函数中完成，而不是在 `_init_cudagraph` 中。
 
 层的因果性（`attention_is_causal`）在绑定时写入 layer config。
@@ -94,7 +94,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 ## 3. 类型及其生命周期
 
-每步的主流程是 `AttentionMetadata → backend.build → att_state → backend.forward`。模型为这一步提供请求长度和 KV 索引，各后端按需把它们转换成 kernel 的参数。简单的 prefill 可以原样返回 `AttentionMetadata`。
+每步的主流程是 `InferStateInfo → backend.build → att_state → backend.forward`。模型为这一步提供请求长度和 KV 索引，各后端只在 `att_state` 中保留 kernel 所需的参数。
 
 模型的 `AttentionBuildResources` 只用于初始化。需要跨步保存页表、wrapper 或 CUDA graph 缓冲区的后端自行定义存储类型，兼容的层共享该对象；其余后端直接使用 `None`。
 
@@ -103,8 +103,8 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 | `*LayerConfig` | 模型加载时确定 | 一层的静态配置：head 数、维度、dtype、scale、因果性、滑窗、sinks、KV 量化方式等。frozen dataclass，可哈希，构造时校验字段。 |
 | `AttentionBackend` | 模型加载时创建 | 每层持有各阶段的 impl，相同阶段与 layer config 的层共用同一实例。 |
 | `AttentionBuildResources` | 每个模型对象一份 | 模型提供给构建上下文的资源与容量，不含模型对象：设备、page size、最大序列长度、CUDA graph 最大 batch size、decode 行数上限（含 MTP 和 TPSP 对齐）、microbatch 数、共享 workspace 的大小与按名称共享的分配函数、decode batch 是否带 diverse 分组，以及模型预留的 prefill workspace。 |
-| `AttentionMetadata` | 每步一次 | 与实现无关的本步请求描述：请求张量、累积偏移、prefill 的 cached prefix、投机解码的行布局、CUDA graph 容量和 microbatch 编号。 |
-| `att_state` | 属于当前 microbatch，兼容的层共用 | 层通过 `infer_state.att_states[impl.state_key]` 取出状态。Triton GQA、Triton MLA 和 FA3 稀疏 MLA 的 prefill 直接使用 `AttentionMetadata`。需要准备页表、索引或 wrapper 的后端使用具体的状态类型。 |
+| `InferStateInfo` | 每步一次 | 保存请求张量、累积偏移、prefill 的 cached prefix、投机解码的行布局、CUDA graph 容量和 microbatch 编号。 |
+| `att_state` | 属于当前 microbatch，兼容的层共用 | 层通过 `infer_state.att_states[impl.state_key]` 取出状态。各后端的状态只持有所需字段或预先准备的页表、索引和 wrapper。 |
 | `*LayerInputs` | 每次层调用 | 本层的张量：q、KV cache 视图、量化 scale、状态视图、稀疏索引等。 |
 
 其他约定：
@@ -122,9 +122,9 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 - impl 只持有静态配置，相同 layer config 的所有层共用一个实例。
 - 模型层必须把模型要求的全部层属性（因果性、sinks、滑窗、量化方式等）写入 layer config，让 impl 拒绝无法执行的配置，而不是静默按默认行为计算。
 
-### 4.2 AttentionMetadata
+### 4.2 InferStateInfo
 
-- 由 `build_attention_metadata(infer_state, step_config)` 每步从 `InferStateInfo` 和模型的 `AttentionStepConfig` 构造一次，字段均为调用方持有的设备张量或主机整数。
+- builder 直接读取模型为当前 microbatch 准备的 `InferStateInfo`。
 - `req_to_token_indexs[b_req_idx[i], pos]` 是请求 i 第 pos 个 token 的物理 cache 槽位。
 - decode 默认每个请求一行。投机解码时，固定布局下每个请求有 `decode_rows_per_request` 个连续行；dynamic verify 布局下行数可变，相同 `b_req_idx` 的连续行属于同一请求，`pad_req_idx` 的行是 padding，各自独立。
 - 线性注意力的投机解码行从请求最后一个被接受的行恢复状态；`req_to_mtp_state_index` 在运行时创建时从本角色的 recurrent 状态取得，存于 `AttentionStepConfig`，decode 行数大于 1 时写入 batch。
@@ -132,7 +132,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 ### 4.3 AttentionBackend.build
 
-`backend.build(metadata, context)` 对每个上下文每步执行一次，包括 CUDA graph 的捕获步和 replay 步，在第一层之前、捕获之外运行。约束：
+`backend.build(infer_state, context)` 对每个上下文每步执行一次，包括 CUDA graph 的捕获步和 replay 步，在第一层之前、捕获之外运行。约束：
 
 1. **graph 步的派生状态按 `(microbatch_index, batch_size)` 保存并原地改写。** 使用 `keep_for_cuda_graph(store, key, value)`：第一次保存副本，之后 `copy_` 到同一地址。graph 捕获时读取的是这个地址；replay 步新建的张量 graph 看不到。microbatch overlap 的两个微批是不同的 graph，不能共享存储。
 2. **主机侧字段在 replay 时保持捕获时的值，且必须对每次 replay 有效。** 网格大小、scratch 大小和 kernel 配置被固化在 graph 中，graph 步应按容量而不是捕获步的实际长度确定。只用于选择 kernel 配置、kernel 自己在 GPU 上读取实际长度的字段称为 hint，可以取本步实际值，必须在 docstring 中注明。例如 Triton GQA decode 的 `kv_seq_len_bound` 是界，`max_kv_seq_len` 是 hint。
@@ -148,7 +148,7 @@ impl.forward(att_state, layer_inputs, *, out, alloc_func=torch.empty) -> out
 ```
 
 - 填充并返回调用方提供的 `out`；`out` 不得与输入或 attention state 别名。
-- kernel 直接写入 `out`。BF16 FlashMLA sparse prefill 的 head 已对齐且 `out` 连续时可直接写入。需要补齐 head、目标不连续或只有旧版 kernel 时，按 query 分块计算并复制到 `out`，限制临时显存。其他需要拷贝的情况包括 GDN、KDA chunk prefill 和 Neo FA3 的 kernel 自行分配输出，以及多个 chunk 先以 FP32 合并。
+- kernel 尽可能直接写入 `out`。GDN 和 KDA prefill 在 eager 模式下可传 `out=None` 使用 kernel 返回的输出。Graph replay 时，KDA 直接写入捕获的地址，GDN chunk kernel 的结果只复制一次到捕获的地址。BF16 FlashMLA sparse prefill 的 head 已对齐且 `out` 连续时可直接写入。需要补齐 head、目标不连续或只有旧版 kernel 时，按 query 分块计算并复制到 `out`，限制临时显存。其他需要拷贝的情况包括 Neo FA3 的 kernel 自行分配输出，以及多个 chunk 先以 FP32 合并。
 - 临时缓冲只通过 `alloc_func(shape, dtype=, device=)` 分配，impl 不保留任何缓冲；调用方的分配器负责复用和 graph 生命周期。
 - CUDA graph 重放时，已捕获的 kernel 读取捕获时的张量地址，builder 在重放前更新这些地址上的内容。
 - 线性注意力（GDN、KDA）的 impl 原地更新调用方提供的 conv/SSM 状态视图，每步每层恰好执行一次。replay 状态（保存逐 token 历史以便提交被接受的前缀）由 replay decode impl 在 `forward` 末尾通过 `LayerInputs.replay_state` 调用 `finish_decode_token`，游标只在状态的最后一个逻辑层推进。backend 层只依赖该调用协议，不导入 `attention_state` 包。
@@ -227,7 +227,7 @@ sequenceDiagram
 
 ```text
 lightllm/common/attention/          # 不知道模型的存在
-├── backend.py                      # 公共接口和类型：AttentionBackend、AttentionMetadata、AttentionBuildResources
+├── backend.py                      # 公共接口和类型：AttentionBackend、AttentionBuildResources
 ├── selector.py                     # (LayerConfig, 阶段, 名称) → AttentionBackend 与 impl
 ├── backends/
 │   ├── __init__.py                 # keep_for_cuda_graph、require_positive
@@ -236,7 +236,7 @@ lightllm/common/attention/          # 不知道模型的存在
 │       └── <impl>.py               # AttState、BuildContext、Backend
 └── kernels/<family>/               # Triton kernel 与封装
 lightllm/common/basemodel/
-├── attention_runtime.py            # AttentionRuntime、AttentionStepConfig、build_attention_metadata、attention_build_resources
+├── attention_runtime.py            # AttentionRuntime、AttentionStepConfig、configure_attention_step、attention_build_resources
 ├── layer_infer/gqa_attention.py    # GQA 层的 attention_spec 与调用、--llm_kv_type 到 kv_quant 的映射
 ├── basemodel.py                    # _init_attention、_create_inferstate
 └── infer_struct.py                 # GraphMode、当前 microbatch 的 att_states
@@ -262,7 +262,7 @@ lightllm/common/basemodel/
 
 ## 12. 非目标
 
-- `AttentionMetadata` 目前与 `InferStateInfo` 字段一一对应；CUDA graph 仍依赖 `InferStateInfo.copy_for_cuda_graph` 刷新请求张量。
+- CUDA graph 依赖 `InferStateInfo.copy_for_cuda_graph` 刷新请求张量。
 - KV cache 写入仍由模型层完成。
 
 
@@ -270,6 +270,4 @@ lightllm/common/basemodel/
 
 ## TODOs
 
-1. AtentionBacth 改回原来的命名
-2. 子类的AttentionMetadata只保存私有的属性
-3. 推理接口
+1. 推理接口

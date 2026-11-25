@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.utils.envs_utils import get_env_start_args
 
 H, D, HIDDEN, LAYER = 2, 128, 256, 0
 
@@ -24,7 +25,7 @@ def _flash_kda_usable():
     return torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)
 
 
-pytestmark = pytest.mark.skipif(not _flash_kda_usable(), reason="FlashKDA on SM90 required")
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
 def _model(requested):
@@ -53,8 +54,18 @@ def _layer_weight():
     )
 
 
-def _layer(monkeypatch):
-    monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(asdict(StartArgs())))
+@pytest.fixture(autouse=True)
+def start_args_env(monkeypatch):
+    with monkeypatch.context() as env:
+        env.setenv("LIGHTLLM_START_ARGS", json.dumps(asdict(StartArgs())))
+        get_env_start_args.cache_clear()
+        try:
+            yield
+        finally:
+            get_env_start_args.cache_clear()
+
+
+def _layer():
     from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 
     config = dict(
@@ -77,11 +88,11 @@ def _layer(monkeypatch):
     return layer
 
 
-def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0):
+def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False):
     from lightllm.common.attention_state import AttentionStateManager
     from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig
     from lightllm.common.attention_state.bounded_att.kda.create_kda_state import create_kda_state
-    from lightllm.common.basemodel.attention_runtime import build_attention_metadata
+    from lightllm.common.basemodel.attention_runtime import configure_attention_step
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from unit_tests.models.glm5_next.kda_test_utils import prepare_prefill_infer
 
@@ -112,16 +123,55 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0):
     layer.decode_impl = selector.select(spec.decode, "decode", "triton").impl
     # The attention state the layer's group builds for this step.
     builder = prefill.backend.create_build_context(prefill.impl.state_key[1], None)
-    att_state = prefill.backend.build(build_attention_metadata(infer), builder)
+    att_state = prefill.backend.build(configure_attention_step(infer), builder)
     infer.att_states = {layer.prefill_impl.state_key: att_state}
     assert (att_state.flash_kda_fwd is not None) == (requested == "flashkda")
-    output = layer.context_attention_forward(hidden, infer, layer_weight)
+    if graph:
+        capture = InferStateInfo()
+        capture.mem_pool = torch.cuda.graph_pool_handle()
+        capture.prefill_cuda_graph_create_graph_obj()
+        capture.prefill_cuda_graph_get_current_capture_graph().__enter__()
+        mixed, gate, beta, output_gate = layer._kda_projections(hidden, infer, layer_weight)
+        fixed = layer._kda_prefill_cuda_graph_wrapper(mixed, gate, beta, capture, layer_weight)
+        output = layer._kda_post(fixed, output_gate, infer, layer_weight)
+        capture.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
+        forward = layer.prefill_impl.forward
+
+        def check_destination(att_state, inputs, *, out, alloc_func):
+            assert out.data_ptr() == fixed.data_ptr()
+            return forward(att_state, inputs, out=out, alloc_func=alloc_func)
+
+        layer.prefill_impl.forward = check_destination
+        capture.prefill_replay(infer)
+    else:
+        output = layer.context_attention_forward(hidden, infer, layer_weight)
     return output, ssm
 
 
-def test_eager_flashkda_prefill_matches_triton(monkeypatch):
+@pytest.mark.parametrize(
+    "kernel",
+    [
+        "triton",
+        pytest.param("flashkda", marks=pytest.mark.skipif(not _flash_kda_usable(), reason="FlashKDA on SM90 required")),
+    ],
+)
+def test_prefill_graph_writes_captured_output_and_matches_eager(kernel):
     torch.manual_seed(5)
-    layer = _layer(monkeypatch)
+    layer = _layer()
+    weight = _layer_weight()
+    hidden = torch.randn(16, HIDDEN, device="cuda").bfloat16()
+    conv = torch.zeros(4, 3 * H * D, 3, device="cuda", dtype=torch.bfloat16)
+    ssm = torch.zeros(4, H, D, D, device="cuda", dtype=torch.bfloat16)
+    expected, expected_ssm = _prefill(layer, kernel, hidden, weight, conv, ssm)
+    actual, actual_ssm = _prefill(layer, kernel, hidden, weight, conv, ssm, graph=True)
+    assert torch.equal(actual, expected)
+    assert torch.equal(actual_ssm, expected_ssm)
+
+
+@pytest.mark.skipif(not _flash_kda_usable(), reason="FlashKDA on SM90 required")
+def test_eager_flashkda_prefill_matches_triton():
+    torch.manual_seed(5)
+    layer = _layer()
     layer_weight = _layer_weight()
     hidden = torch.randn(16, HIDDEN, device="cuda").bfloat16()
     conv0 = (torch.randn(4, 3 * H * D, 3, device="cuda") * 0.5).bfloat16()

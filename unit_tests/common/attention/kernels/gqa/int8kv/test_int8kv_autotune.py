@@ -14,7 +14,7 @@ from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADe
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeBackend
-from lightllm.common.basemodel.attention_runtime import build_attention_metadata
+from lightllm.common.basemodel.attention_runtime import configure_attention_step
 from lightllm.common.attention.kernels.gqa.int8kv import (
     int8kv_flash_decoding_stage1 as stage1_module,
     int8kv_flash_decoding as decode_module,
@@ -146,7 +146,7 @@ def test_decode_passes_saved_length_to_stage1(monkeypatch):
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"])
     infer_state.is_prefill = False
     att_state = TritonQuantGQADecodeBackend.build(
-        build_attention_metadata(infer_state), TritonQuantGQADecodeBuildContext()
+        configure_attention_step(infer_state), TritonQuantGQADecodeBuildContext()
     )
     infer_state.max_kv_seq_len = 32768
     calls = []

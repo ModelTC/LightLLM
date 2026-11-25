@@ -1,4 +1,4 @@
-"""GLM-5 FP8 sparse decode through the serving path: InferStateInfo -> build_attention_metadata -> step builder.
+"""GLM-5 FP8 sparse decode through the serving path: InferStateInfo -> step builder.
 
 Unlike test_fp8_kv.py, the attention state here come from the layer group's step builder, so these tests cover how
 the builder marks CUDA graph steps (which picks the direct Triton decode for small graph workloads) and keeps
@@ -12,7 +12,7 @@ import torch
 
 from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparseDecodeBackend
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, build_attention_metadata
+from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, configure_attention_step
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 
@@ -71,7 +71,7 @@ def init_decode_state(backend, infer):
     from unit_tests.models.glm5_next.test_fp8_kv import _decode
 
     att_state = FlashMLASparseDecodeBackend.build(
-        build_attention_metadata(infer, backend.step_config), backend.decode_step_builder
+        configure_attention_step(infer, backend.step_config), backend.decode_step_builder
     )
     return SimpleNamespace(att_state=att_state, decode_att=lambda q, kv, params: _decode(att_state, q, kv, params))
 

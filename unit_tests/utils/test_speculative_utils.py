@@ -8,7 +8,7 @@ import torch
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention_runtime as attention_groups_module
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
-from lightllm.common.attention.backend import AttentionMetadata
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBuildContext
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQADecodeBuildContext
 from lightllm.models import get_draft_model_class
@@ -126,7 +126,7 @@ def test_triton_mtp_decode_step_builds_group_markers():
     )
     # Fixed-layout speculative decode: three rows per request.
     step_config = attention_groups_module.AttentionStepConfig(decode_rows_per_request=3)
-    batch = attention_groups_module.build_attention_metadata(infer_state, step_config)
+    batch = attention_groups_module.configure_attention_step(infer_state, step_config)
     att_state = TritonGQADecodeBackend.build(batch, TritonGQADecodeBuildContext())
 
     assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
@@ -135,7 +135,7 @@ def test_triton_mtp_decode_step_builds_group_markers():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_fa3_gqa_decode_step_builder_groups_dynamic_rows():
     # FA3 GQA and MLA decode share this step builder.
-    batch = AttentionMetadata(
+    batch = make_infer_state(
         req_to_token_indexs=torch.zeros((8, 4), dtype=torch.int32, device="cuda"),
         b_req_idx=torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda"),
         b_seq_len=torch.tensor([3, 4, 2, 2], dtype=torch.int32, device="cuda"),

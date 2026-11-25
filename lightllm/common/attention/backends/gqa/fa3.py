@@ -6,10 +6,10 @@ import triton
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
     AttentionBuildResources,
     TensorAllocator,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.utils.envs_utils import enable_env_vars
 from lightllm.utils.log_utils import init_logger
 from .. import keep_for_cuda_graph
@@ -33,7 +33,7 @@ class FA3GQAPrefillAttState:
     cu_seqlens_k: torch.Tensor
     max_seqlen_q: int
     page_size: int
-    # Per query token: exclusive end of its image span, 0 for text (see AttentionMetadata).
+    # Per query token: exclusive end of its image span, 0 for text.
     b_image_token_end: Optional[torch.Tensor] = None
 
 
@@ -68,7 +68,7 @@ class FA3GQADecodeBuildContext:
         self.page_table_view = page_table_view
         self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
 
-    def prepare(self, batch: AttentionMetadata) -> FA3GQADecodeAttState:
+    def prepare(self, batch: InferStateInfo) -> FA3GQADecodeAttState:
         """Group query rows into attention requests and fill their page-table rows.
 
         A CUDA graph step uses a page table as wide as the graph capacity and keeps every
@@ -103,7 +103,7 @@ class FA3GQADecodeBuildContext:
         )
 
     @staticmethod
-    def _group_rows(batch: AttentionMetadata):
+    def _group_rows(batch: InferStateInfo):
         """Return int32 query/kv offsets, kv lengths and request slots per attention request."""
         from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 
@@ -131,7 +131,7 @@ class FA3GQADecodeBuildContext:
             att_req_idx = batch.b_req_idx[rows - 1 :: rows]
             cache_seqlens = kv_lens.contiguous()
         else:
-            return batch.cu_q_seq_len.int(), batch.cu_kv_seq_len.int(), batch.b_seq_len, batch.b_req_idx
+            return batch.b1_cu_q_seq_len.int(), batch.b1_cu_kv_seq_len.int(), batch.b_seq_len, batch.b_req_idx
         cu_seqlens_q, cu_seqlens_k = gen_cumsum_pad0_tensor(q_lens, kv_lens)
         return cu_seqlens_q.int(), cu_seqlens_k.int(), cache_seqlens, att_req_idx
 
@@ -314,7 +314,7 @@ class FA3GQAPrefillBackend(AttentionBackend[GQALayerConfig, FA3GQAPrefillAttStat
     build_context_type = FA3GQAPrefillBuildContext
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: FA3GQAPrefillBuildContext) -> FA3GQAPrefillAttState:
+    def build(cls, metadata: InferStateInfo, context: FA3GQAPrefillBuildContext) -> FA3GQAPrefillAttState:
         """Build a fresh page table for the step's requests."""
         from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 
@@ -332,8 +332,8 @@ class FA3GQAPrefillBackend(AttentionBackend[GQALayerConfig, FA3GQAPrefillAttStat
         return FA3GQAPrefillAttState(
             page_table=page_table,
             cache_seqlens=metadata.b_seq_len,
-            cu_seqlens_q=metadata.cu_q_seq_len.int(),
-            cu_seqlens_k=metadata.cu_kv_seq_len.int(),
+            cu_seqlens_q=metadata.b1_cu_q_seq_len.int(),
+            cu_seqlens_k=metadata.b1_cu_kv_seq_len.int(),
             max_seqlen_q=metadata.max_q_seq_len,
             page_size=context.page_size,
             b_image_token_end=metadata.b_image_token_end,
@@ -423,7 +423,7 @@ class FA3GQADecodeBackend(AttentionBackend[GQALayerConfig, FA3GQADecodeAttState,
     build_context_type = FA3GQADecodeBuildContext
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: FA3GQADecodeBuildContext) -> FA3GQADecodeAttState:
+    def build(cls, metadata: InferStateInfo, context: FA3GQADecodeBuildContext) -> FA3GQADecodeAttState:
         return context.prepare(metadata)
 
     @classmethod

@@ -17,7 +17,7 @@ from lightllm.common.attention.backends.sparse_mla import (
     SparseMLAPrefillLayerInputs,
 )
 from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLAPrefillBackend
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, build_attention_metadata
+from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, configure_attention_step
 from lightllm.models.glm5_next.infer_struct import build_glm5_nsa_step
 from lightllm.common.attention.kernels.sparse_mla.fp8_group64_decode import (
     can_use_fp8_sparse_direct_decode,
@@ -136,7 +136,7 @@ class _Fp8SparseAttention:
         self.decode_step_builder = FlashMLASparseDecodeBackend.create_build_context(build_key, ctx)
 
     def create_att_prefill_state(self, infer):
-        batch = build_attention_metadata(infer, self.step_config)
+        batch = configure_attention_step(infer, self.step_config)
         return _Fp8PrefillState(
             FA3SparseMLAPrefillBackend.build(batch, self.prefill_step_builder),
             self._prefill_workspaces[batch.microbatch_index],
@@ -144,7 +144,7 @@ class _Fp8SparseAttention:
 
     def create_att_decode_state(self, infer):
         att_state = FlashMLASparseDecodeBackend.build(
-            build_attention_metadata(infer, self.step_config), self.decode_step_builder
+            configure_attention_step(infer, self.step_config), self.decode_step_builder
         )
         return SimpleNamespace(decode_att=lambda q, kv, params: _decode(att_state, q, kv, params))
 

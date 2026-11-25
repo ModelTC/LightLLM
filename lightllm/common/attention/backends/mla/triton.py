@@ -5,17 +5,26 @@ import torch
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
     AttentionBuildResources,
     TensorAllocator,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from . import MLADecodeLayerInputs, MLADecodeLayerConfig, MLAPrefillLayerInputs, MLAPrefillLayerConfig
 
 if TYPE_CHECKING:
     from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding import MLADecodeSchedule
 
 
-class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, AttentionMetadata, MLAPrefillLayerInputs]):
+@dataclass(frozen=True)
+class TritonMLAPrefillAttState:
+    b_q_start_loc: torch.Tensor
+    cu_kv_seq_len: torch.Tensor
+    b_seq_len: torch.Tensor
+    b_ready_cache_len: torch.Tensor
+    max_q_seq_len: int
+
+
+class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, TritonMLAPrefillAttState, MLAPrefillLayerInputs]):
     def __init__(self, layer_config: MLAPrefillLayerConfig) -> None:
         super().__init__(layer_config)
         # 256-dim queries (GLM-4 MoE Lite: 192 nope + 64 rope) run the contiguous-KV GQA prefill kernel
@@ -26,7 +35,7 @@ class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, AttentionM
 
     def forward(
         self,
-        att_state: AttentionMetadata,
+        att_state: TritonMLAPrefillAttState,
         layer_inputs: MLAPrefillLayerInputs,
         *,
         out: torch.Tensor,
@@ -96,8 +105,14 @@ class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, AttentionM
         return "triton_mla_prefill"
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: None = None) -> AttentionMetadata:
-        return metadata
+    def build(cls, infer_state: InferStateInfo, context: None = None) -> TritonMLAPrefillAttState:
+        return TritonMLAPrefillAttState(
+            b_q_start_loc=infer_state.b_q_start_loc,
+            cu_kv_seq_len=infer_state.b1_cu_kv_seq_len,
+            b_seq_len=infer_state.b_seq_len,
+            b_ready_cache_len=infer_state.b_ready_cache_len,
+            max_q_seq_len=infer_state.max_q_seq_len,
+        )
 
 
 @dataclass(frozen=True)
@@ -198,7 +213,7 @@ class TritonMLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, TritonMLADec
     build_context_type = TritonMLADecodeBuildContext
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: TritonMLADecodeBuildContext) -> TritonMLADecodeAttState:
+    def build(cls, metadata: InferStateInfo, context: TritonMLADecodeBuildContext) -> TritonMLADecodeAttState:
         """Compute the split schedule from the current b_seq_len, shared by every layer of the step.
 
         A CUDA graph step reuses one schedule per (microbatch, metadata size) and rewrites it in

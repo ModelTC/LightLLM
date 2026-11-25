@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import torch
 
-from lightllm.common.attention.backend import AttentionMetadata
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
@@ -38,14 +38,15 @@ def prepare_prefill_infer(infer, device="cuda"):
 
 def prefill_batch(max_q_seq_len, device="cpu"):
     b_req_idx = torch.zeros(1, dtype=torch.int32, device=device)
-    return AttentionMetadata(
+    return make_infer_state(
+        is_prefill=True,
         req_to_token_indexs=None,
         b_req_idx=b_req_idx,
         b_seq_len=b_req_idx,
         batch_size=1,
         max_kv_seq_len=max_q_seq_len,
         total_token_num=max_q_seq_len,
-        cu_q_seq_len=torch.tensor([0, max_q_seq_len], dtype=torch.int32, device=device),
+        b1_cu_q_seq_len=torch.tensor([0, max_q_seq_len], dtype=torch.int32, device=device),
         b_ready_cache_len=b_req_idx,
         max_q_seq_len=max_q_seq_len,
     )
@@ -117,14 +118,14 @@ class KDAStep:
         self.att_state = None
 
     def init_state(self):
-        from lightllm.common.basemodel.attention_runtime import build_attention_metadata, recurrent_mtp_state_index
+        from lightllm.common.basemodel.attention_runtime import configure_attention_step, recurrent_mtp_state_index
 
         infer, attention = self.infer, self.attention
         index = None
         if getattr(infer, "att_state_manager", None) is not None:
             role = SimpleNamespace(att_state_manager=infer.att_state_manager, att_state_role=infer.att_state_role)
             index = recurrent_mtp_state_index(role)
-        batch = build_attention_metadata(infer, replace(attention.step_config, req_to_mtp_state_index=index))
+        batch = configure_attention_step(infer, replace(attention.step_config, req_to_mtp_state_index=index))
         self.att_state = attention.step_builders[self.phase].prepare(batch)
 
     def run(self, params, alloc_func=torch.empty):

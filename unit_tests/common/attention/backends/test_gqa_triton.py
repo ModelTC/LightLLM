@@ -5,10 +5,11 @@ from typing import Iterator
 import pytest
 import torch
 
-from lightllm.common.attention.backend import AttentionMetadata, TensorAllocator
+from lightllm.common.attention.backend import TensorAllocator
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQAPrefillBackend
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, build_attention_metadata
+from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, configure_attention_step
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 
 
@@ -51,8 +52,8 @@ def reference(q, k, v, token_map, req_ids, lengths, ready, window):
     return torch.cat(outputs)
 
 
-def make_batch(token_map, req_ids, lengths, **kwargs) -> AttentionMetadata:
-    return AttentionMetadata(
+def make_batch(token_map, req_ids, lengths, **kwargs) -> InferStateInfo:
+    return make_infer_state(
         req_to_token_indexs=token_map,
         b_req_idx=req_ids,
         b_seq_len=lengths,
@@ -140,7 +141,7 @@ def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
     # capture raises max_kv_seq_len to the graph capacity only afterwards.
     owner.graph_mode = GraphMode.CAPTURE
     att_state = TritonGQADecodeBackend.build(
-        build_attention_metadata(owner, step_config), impl.create_build_context(impl.state_key[1], None)
+        configure_attention_step(owner, step_config), impl.create_build_context(impl.state_key[1], None)
     )
     owner.max_kv_seq_len = 512
     q = torch.randn(2, q_heads, 64, device="cuda", dtype=torch.bfloat16)
@@ -271,7 +272,7 @@ def test_speculative_decode_rows_share_request_kv(q_heads, kv_heads, window, hea
     kv = torch.randn(8 * 512, 2 * kv_heads, head_dim, device="cuda", dtype=torch.bfloat16)
     k, v = kv[:, :kv_heads], kv[:, kv_heads:]
     q = torch.randn(6, q_heads, head_dim, device="cuda", dtype=torch.bfloat16)
-    batch = make_batch(token_map, req_ids, lengths, cu_kv_seq_len=None, decode_rows_per_request=2, pad_req_idx=pad)
+    batch = make_batch(token_map, req_ids, lengths, b1_cu_kv_seq_len=None, decode_rows_per_request=2, pad_req_idx=pad)
     att_state = TritonGQADecodeBackend.build(batch, TritonGQADecodeBackend.build_context_type())
     assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 0, 2, 1, 1]
     layer_config = GQALayerConfig(
@@ -354,7 +355,7 @@ def test_alibi_prefill_and_decode_match_reference():
     q = torch.randn(3, heads, 64, device="cuda", dtype=torch.bfloat16)
     cu_kv = torch.tensor([0, *lengths.tolist()], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
     att_state = TritonGQADecodeBackend.build(
-        make_batch(token_map, req_ids, lengths, cu_kv_seq_len=cu_kv), TritonGQADecodeBackend.build_context_type()
+        make_batch(token_map, req_ids, lengths, b1_cu_kv_seq_len=cu_kv), TritonGQADecodeBackend.build_context_type()
     )
     out = torch.empty_like(q)
     TritonGQADecodeBackend(layer_config).forward(

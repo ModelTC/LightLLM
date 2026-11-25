@@ -8,10 +8,10 @@ import torch
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
     AttentionBuildResources,
     TensorAllocator,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from ..gdn.triton import GDNDecodeAttState, GDNDecodeBuildContext
 from . import KDALayerConfig, KDALayerInputs
 from .flashkda import load_flash_kda_fwd
@@ -46,12 +46,12 @@ class KDAPrefillBuildContext:
         self.flash_kda_fwd = flash_kda_fwd
         self.max_flash_len = max_flash_len
 
-    def prepare(self, batch: AttentionMetadata) -> KDAPrefillAttState:
+    def prepare(self, batch: InferStateInfo) -> KDAPrefillAttState:
         req = batch.b_req_idx
         flash = self.flash_kda_fwd
         if flash is not None and self.max_flash_len is not None and batch.max_q_seq_len > self.max_flash_len:
             flash = None
-        cu = batch.cu_q_seq_len
+        cu = batch.b1_cu_q_seq_len
         return KDAPrefillAttState(
             conv_idx=req,
             ssm_idx=req * self.ssm_slots_per_request,
@@ -71,7 +71,7 @@ def _conv_states(cfg: KDALayerConfig, inputs: KDALayerInputs):
 def _prefill(cfg: KDALayerConfig, att_state: KDAPrefillAttState, inputs: KDALayerInputs, q, k, v, qk_normalized, out):
     from lightllm.common.attention.kernels.kda.kda_prefill import kda_prefill
 
-    kda_prefill(
+    result = kda_prefill(
         q=q,
         k=k,
         v=v,
@@ -85,9 +85,9 @@ def _prefill(cfg: KDALayerConfig, att_state: KDAPrefillAttState, inputs: KDALaye
         cu_seqlens=att_state.cu_seqlens,
         lower_bound=cfg.lower_bound,
         flash_kda_fwd=att_state.flash_kda_fwd,
-        out=out.view(v.shape),
+        out=None if out is None else out.view(v.shape),
     )
-    return out
+    return result.squeeze(0) if out is None else out
 
 
 class TritonKDAPrefillBackend(AttentionBackend[KDALayerConfig, KDAPrefillAttState, KDALayerInputs]):
@@ -122,7 +122,7 @@ class TritonKDAPrefillBackend(AttentionBackend[KDALayerConfig, KDAPrefillAttStat
     build_context_type = KDAPrefillBuildContext
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: KDAPrefillBuildContext) -> KDAPrefillAttState:
+    def build(cls, metadata: InferStateInfo, context: KDAPrefillBuildContext) -> KDAPrefillAttState:
         return context.prepare(metadata)
 
     @classmethod
@@ -183,7 +183,7 @@ class ReplayKDAPrefillBackend(AttentionBackend[KDALayerConfig, KDAPrefillAttStat
     build_context_type = KDAPrefillBuildContext
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: KDAPrefillBuildContext) -> KDAPrefillAttState:
+    def build(cls, metadata: InferStateInfo, context: KDAPrefillBuildContext) -> KDAPrefillAttState:
         return context.prepare(metadata)
 
     @classmethod
@@ -249,7 +249,7 @@ class TritonKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState,
     build_context_type = GDNDecodeBuildContext
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
+    def build(cls, metadata: InferStateInfo, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
         return context.prepare(metadata)
 
     @classmethod
@@ -312,7 +312,7 @@ class ReplayKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState,
     build_context_type = GDNDecodeBuildContext
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
+    def build(cls, metadata: InferStateInfo, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
         return context.prepare(metadata)
 
     @classmethod

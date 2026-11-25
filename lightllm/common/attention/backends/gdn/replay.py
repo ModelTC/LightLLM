@@ -4,8 +4,8 @@ with one SSM slot per request."""
 
 import torch
 
-from lightllm.common.attention.backend import AttentionMetadata
 from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from . import GDNLayerConfig, GDNLayerInputs
 from .triton import GDNDecodeAttState, GDNDecodeBuildContext, _mtp_conv, _pack_decode_inputs, _split_qkv
 
@@ -68,7 +68,7 @@ class ReplayGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState,
     build_context_type = GDNDecodeBuildContext
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
+    def build(cls, metadata: InferStateInfo, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
         return context.prepare(metadata)
 
     @classmethod

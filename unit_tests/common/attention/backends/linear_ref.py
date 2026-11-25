@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F
 
-from lightllm.common.attention.backend import AttentionMetadata
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
 
 
 def conv_token(history: torch.Tensor, x: torch.Tensor, weight: torch.Tensor):
@@ -108,7 +108,7 @@ def decode_batch(reqs, lengths, width, hold, req_to_mtp_state_index, *, dynamic,
         pad = width * len(reqs) - len(rows)
         rows, mtp_index = rows + [hold] * pad, mtp_index + [0] * pad
     b_req_idx = torch.tensor(rows, dtype=torch.int32, device="cuda")
-    return AttentionMetadata(
+    return make_infer_state(
         req_to_token_indexs=None,
         b_req_idx=b_req_idx,
         b_seq_len=torch.full_like(b_req_idx, 64),
@@ -129,17 +129,18 @@ def prefill_batch(reqs, lengths, ready):
     b_req_idx = torch.tensor(reqs, dtype=torch.int32, device="cuda")
     lens = torch.tensor(lengths, dtype=torch.int32, device="cuda")
     ready = torch.tensor(ready, dtype=torch.int32, device="cuda")
-    return AttentionMetadata(
+    return make_infer_state(
+        is_prefill=True,
         req_to_token_indexs=None,
         b_req_idx=b_req_idx,
         b_seq_len=ready + lens,
         batch_size=len(reqs),
         max_kv_seq_len=int((ready + lens).max()),
         total_token_num=int((ready + lens).sum()),
-        cu_q_seq_len=F.pad(lens.cumsum(0, dtype=torch.int32), (1, 0)),
+        b1_cu_q_seq_len=F.pad(lens.cumsum(0, dtype=torch.int32), (1, 0)),
         b_ready_cache_len=ready,
         max_q_seq_len=max(lengths),
-        max_ready_cache_len=int(ready.max()),
+        max_cache_len=int(ready.max()),
     )
 
 

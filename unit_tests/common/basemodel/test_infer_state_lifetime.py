@@ -10,6 +10,9 @@ import torch
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.attention_runtime import AttentionRuntime, AttentionStepConfig, _StateBuilder
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.attention.backends.gqa.triton import TritonGQAPrefillBackend
+from lightllm.common.attention.backends.mla.triton import TritonMLAPrefillBackend
+from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLAPrefillBackend
 
 
 class _AttState:
@@ -76,6 +79,29 @@ def test_infer_state_without_attention_builds_no_att_state():
     owner.is_prefill = False
     owner.att_states = _runtime({}).prepare(owner)
     assert owner.att_states == {}
+
+
+@pytest.mark.parametrize(
+    ("backend", "field"),
+    [
+        (TritonGQAPrefillBackend, "b_req_idx"),
+        (TritonMLAPrefillBackend, "b_seq_len"),
+        (FA3SparseMLAPrefillBackend, "b_req_idx"),
+    ],
+)
+def test_prefill_backend_state_outlives_step(no_cycle_gc, backend, field):
+    owner = InferStateInfo()
+    owner.is_prefill = True
+    owner.req_manager = SimpleNamespace(req_to_token_indexs=None)
+    tensor = torch.arange(4)
+    setattr(owner, field, tensor)
+    runtime = _runtime({"prefill": {"group": _StateBuilder(backend, build_key=None, resources=None)}})
+    owner.att_states = runtime.prepare(owner)
+    att_state = owner.att_states["group"]
+    owner_ref = weakref.ref(owner)
+    del owner
+    assert owner_ref() is None
+    assert getattr(att_state, field) is tensor
 
 
 def test_decode_graph_replay_preserves_capture_buffers_and_owner_lifetime(no_cycle_gc):

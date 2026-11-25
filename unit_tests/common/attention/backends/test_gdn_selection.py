@@ -20,7 +20,8 @@ import lightllm.utils.backend_validator as backend_validator
 
 
 @pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float32])
-def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
+@pytest.mark.parametrize("use_out", [False, True])
+def test_prefill_output_storage_and_final_state_dtype(monkeypatch, cache_dtype, use_out):
     from lightllm.common.attention.backends.gdn import GDNLayerConfig, GDNLayerInputs
     from lightllm.common.attention.backends.gdn.triton import GDNPrefillAttState, TritonGDNPrefillBackend
     from lightllm.common.attention.kernels.gdn import causal_conv1d, fused_gdn_gating
@@ -59,18 +60,20 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
     att_state = GDNPrefillAttState(
         conv_idx=index, ssm_idx=index, cu_seqlens=torch.tensor([0, 1], dtype=torch.int32), has_initial_state=index > 0
     )
-    out = torch.empty((1, 1, 2), dtype=cache_dtype)
+    out = torch.full((1, 1, 2), float("nan"), dtype=cache_dtype) if use_out else None
 
-    TritonGDNPrefillBackend(layer_config).forward(att_state, layer_inputs, out=out)
+    result = TritonGDNPrefillBackend(layer_config).forward(att_state, layer_inputs, out=out)
 
+    assert result.data_ptr() == (out if use_out else core).data_ptr()
+    assert torch.equal(result, core.squeeze(0))
     assert ssm_states.dtype == cache_dtype
     assert torch.equal(ssm_states, final_state.to(cache_dtype))
 
 
 def _decode_batch(b_req_idx, *, rows=1, dynamic=False, req_to_mtp_state_index=None, hold=-1):
-    from lightllm.common.attention.backend import AttentionMetadata
+    from unit_tests.common.attention.backends.step_fixture import make_infer_state
 
-    return AttentionMetadata(
+    return make_infer_state(
         req_to_token_indexs=torch.zeros((8, 4), dtype=torch.int32),
         b_req_idx=b_req_idx,
         b_seq_len=torch.ones_like(b_req_idx),
@@ -160,7 +163,7 @@ def test_decode_reads_the_acceptance_index_of_its_role(monkeypatch, role: str):
     )
     step_config = attention_runtime.attention_step_config(model)
     assert step_config.req_to_mtp_state_index is req_to_mtp_state_index
-    batch = attention_runtime.build_attention_metadata(infer_state, step_config)
+    batch = attention_runtime.configure_attention_step(infer_state, step_config)
     att_state = GDNDecodeBuildContext(replay=False).prepare(batch)
 
     torch.testing.assert_close(att_state.num_accepted_tokens, torch.tensor([2, 3], dtype=torch.int32))

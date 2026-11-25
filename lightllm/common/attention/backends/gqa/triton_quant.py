@@ -7,10 +7,10 @@ import torch
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
     AttentionBuildResources,
     TensorAllocator,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from .. import keep_for_cuda_graph
 from . import GQALayerConfig, GQALayerInputs
 
@@ -19,7 +19,7 @@ _KINDS = ("int8_group", "int4_group")
 
 @dataclass(frozen=True)
 class TritonQuantGQAPrefillAttState:
-    """Attention state for packed prefill queries; request tensors follow AttentionMetadata.
+    """Attention state for packed prefill queries with request tensors from InferStateInfo.
 
     Prefill dequantizes every request's KV into contiguous scratch first: request i's tokens land at
     b_kv_start_loc[i] of a [total_token_num, num_kv_heads, head_dim] buffer. max_kv_seq_len bounds
@@ -155,7 +155,7 @@ class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantG
         return "triton_quant_gqa_prefill"
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: None = None) -> TritonQuantGQAPrefillAttState:
+    def build(cls, metadata: InferStateInfo, context: None = None) -> TritonQuantGQAPrefillAttState:
         assert (
             metadata.b_q_start_loc is not None and metadata.b_ready_cache_len is not None
         ), "prefill metadata fields required"
@@ -233,9 +233,7 @@ class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQ
     build_context_type = TritonQuantGQADecodeBuildContext
 
     @classmethod
-    def build(
-        cls, metadata: AttentionMetadata, context: TritonQuantGQADecodeBuildContext
-    ) -> TritonQuantGQADecodeAttState:
+    def build(cls, metadata: InferStateInfo, context: TritonQuantGQADecodeBuildContext) -> TritonQuantGQADecodeAttState:
         """A CUDA graph step bounds lengths by the graph capacity and keeps the group tensors per
         (microbatch, metadata size), rewriting them in place on replay."""
         bound = metadata.cuda_graph_max_kv_seq_len if metadata.uses_cuda_graph else metadata.max_kv_seq_len

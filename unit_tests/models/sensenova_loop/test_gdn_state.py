@@ -7,7 +7,7 @@ from lightllm.common.attention import selector
 from lightllm.common.attention.backends.gdn import GDNLayerConfig
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, build_attention_metadata
+from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, configure_attention_step
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerInfer
 from lightllm.models.sensenova_loop.config import get_loop_layer_indices, get_loop_layer_types
@@ -124,7 +124,7 @@ def test_gdn_decode_keeps_logical_layer_state(
         step_config = AttentionStepConfig(
             decode_rows_per_request=mtp_step + 1, req_to_mtp_state_index=resource.mtp_state_index
         )
-        batch = build_attention_metadata(infer, step_config)
+        batch = configure_attention_step(infer, step_config)
         impl = layer.prefill_impl if infer.is_prefill else layer.decode_impl
         infer.att_states = {impl.state_key: backend.build(batch, backend.create_build_context(impl.state_key[1], None))}
 

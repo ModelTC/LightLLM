@@ -6,10 +6,10 @@ import torch
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
     AttentionBuildResources,
     TensorAllocator,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from ..gqa.fa3 import FA3GQADecodeAttState, FA3GQADecodeBuildContext, FA3PageTables, fa3_requires_cpu_cache_sync
 from . import MLADecodeLayerConfig, MLADecodeLayerInputs, MLAPrefillLayerConfig, MLAPrefillLayerInputs
 
@@ -65,13 +65,13 @@ class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefill
         return "fa3_mla_prefill"
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: None = None) -> FA3MLAPrefillAttState:
+    def build(cls, metadata: InferStateInfo, context: None = None) -> FA3MLAPrefillAttState:
         assert (
-            metadata.cu_q_seq_len is not None and metadata.cu_kv_seq_len is not None
+            metadata.b1_cu_q_seq_len is not None and metadata.b1_cu_kv_seq_len is not None
         ), "prefill metadata fields required"
         return FA3MLAPrefillAttState(
-            cu_seqlens_q=metadata.cu_q_seq_len.int(),
-            cu_seqlens_k=metadata.cu_kv_seq_len.int(),
+            cu_seqlens_q=metadata.b1_cu_q_seq_len.int(),
+            cu_seqlens_k=metadata.b1_cu_kv_seq_len.int(),
             max_seqlen_q=metadata.max_q_seq_len,
             max_seqlen_k=metadata.max_kv_seq_len,
         )
@@ -123,7 +123,7 @@ class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAtt
     build_context_type = FA3GQADecodeBuildContext
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: FA3GQADecodeBuildContext) -> FA3GQADecodeAttState:
+    def build(cls, metadata: InferStateInfo, context: FA3GQADecodeBuildContext) -> FA3GQADecodeAttState:
         return context.prepare(metadata)
 
     @classmethod

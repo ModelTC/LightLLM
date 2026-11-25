@@ -12,7 +12,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, build_attention_metadata
+from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, configure_attention_step
 from lightllm.common.attention.kernels.gqa.bf16.decode import (
     gqa_flash_decoding as decode_module,
     gqa_flash_decoding_stage1 as stage1_module,
@@ -137,7 +137,7 @@ def test_state_retains_actual_length_before_graph_capture(monkeypatch, q_heads):
     step_config = AttentionStepConfig(cuda_graph_max_kv_seq_len=32768)
     layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=2, head_dim=64, dtype=torch.float32)
     builder = TritonGQADecodeBackend.create_build_context(TritonGQADecodeBackend.build_context_key(layer_config), None)
-    att_state = TritonGQADecodeBackend.build(build_attention_metadata(infer_state, step_config), builder)
+    att_state = TritonGQADecodeBackend.build(configure_attention_step(infer_state, step_config), builder)
     # Graph capture raises max_kv_seq_len only after the attention state are built.
     infer_state.max_kv_seq_len = 32768
     calls = []

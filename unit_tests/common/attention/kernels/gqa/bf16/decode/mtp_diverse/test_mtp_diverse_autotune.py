@@ -13,7 +13,7 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel import cuda_graph as graph_module
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQADecodeBuildContext
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, build_attention_metadata
+from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, configure_attention_step
 from lightllm.common.basemodel.triton_kernel import mtp_utils
 from lightllm.common.attention.kernels.gqa.bf16.decode.mtp_diverse import (
     mtp_diverse_attn as decode_module,
@@ -146,7 +146,7 @@ def test_decode_passes_saved_length_and_selected_block_n(monkeypatch):
     monkeypatch.setattr(mtp_utils, "build_mtp_shared_group_markers", lambda *a, **kw: inputs["b_mark_shared_group"])
     # Fixed-layout speculative decode: three rows per request.
     att_state = TritonGQADecodeBackend.build(
-        build_attention_metadata(infer_state, AttentionStepConfig(decode_rows_per_request=3)),
+        configure_attention_step(infer_state, AttentionStepConfig(decode_rows_per_request=3)),
         TritonGQADecodeBuildContext(),
     )
     infer_state.max_kv_seq_len = 32768

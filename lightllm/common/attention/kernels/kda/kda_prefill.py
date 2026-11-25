@@ -25,7 +25,7 @@ def kda_prefill(
 ):
     """Return the output [1, tokens, heads, dim], written into out when given (contiguous, shaped like v).
 
-    FlashKDA writes out in place; the chunk kernel allocates its own output, which is copied into out.
+    Both kernels write directly to out when supplied.
     """
     if out is not None:
         assert (
@@ -48,12 +48,10 @@ def kda_prefill(
             cu_seqlens=cu_seqlens,
             safe_gate=True,
             lower_bound=lower_bound,
+            out=out,
         )
         ssm_states[state_indices] = final_state.to(ssm_states.dtype, copy=False)
-        if out is None:
-            return output
-        out.copy_(output)
-        return out
+        return output
 
     assert not qk_normalized, "FlashKDA requires raw Q/K because it applies L2 normalization internally"
     assert cu_seqlens.dtype == torch.int64

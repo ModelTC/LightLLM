@@ -11,10 +11,10 @@ import torch
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
     AttentionBuildResources,
     TensorAllocator,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from .. import keep_for_cuda_graph
 from . import SparseMLADecodeLayerInputs, SparseMLALayerConfig, SparseMLAPrefillLayerInputs
 
@@ -105,7 +105,7 @@ class FA3SparseMLADecodeBackend(
     build_context_type = FA3SparseMLADecodeBuildContext
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: FA3SparseMLADecodeBuildContext) -> FA3SparseMLADecodeAttState:
+    def build(cls, metadata: InferStateInfo, context: FA3SparseMLADecodeBuildContext) -> FA3SparseMLADecodeAttState:
         """A CUDA graph step keeps the length tensors per (microbatch, metadata size), rewritten in place."""
         device, lengths, kpool = metadata.b_seq_len.device, metadata.b_seq_len, context.kpool
         topk = torch.full((metadata.batch_size,), context.topk, dtype=lengths.dtype, device=device)
@@ -122,7 +122,7 @@ class FA3SparseMLADecodeBackend(
             cu_seqlens_k = keep_for_cuda_graph(store, (*key, "cu_seqlens_k"), cu_seqlens_k)
         return FA3SparseMLADecodeAttState(
             cache_seqlens=cache_seqlens,
-            cu_seqlens_q=metadata.cu_q_seq_len,
+            cu_seqlens_q=metadata.b1_cu_q_seq_len,
             cu_seqlens_k=cu_seqlens_k,
             max_seqlen_q=metadata.max_q_seq_len,
             causal=context.causal,
@@ -147,8 +147,17 @@ class _FA3DecodeKey(NamedTuple):
     causal: bool
 
 
+@dataclass(frozen=True)
+class FA3SparseMLAPrefillAttState:
+    req_to_token_indexs: torch.Tensor
+    b_req_idx: torch.Tensor
+    total_token_num: int
+    cu_kv_seq_len: torch.Tensor
+    cu_q_seq_len: torch.Tensor
+
+
 class FA3SparseMLAPrefillBackend(
-    AttentionBackend[SparseMLALayerConfig, AttentionMetadata, SparseMLAPrefillLayerInputs]
+    AttentionBackend[SparseMLALayerConfig, FA3SparseMLAPrefillAttState, SparseMLAPrefillLayerInputs]
 ):
     def __init__(self, layer_config: SparseMLALayerConfig) -> None:
         super().__init__(layer_config)
@@ -158,7 +167,7 @@ class FA3SparseMLAPrefillBackend(
     @torch.no_grad()
     def forward(
         self,
-        att_state: AttentionMetadata,
+        att_state: FA3SparseMLAPrefillAttState,
         layer_inputs: SparseMLAPrefillLayerInputs,
         *,
         out: torch.Tensor,
@@ -282,5 +291,11 @@ class FA3SparseMLAPrefillBackend(
         return "fa3_sparse_mla_prefill"
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: None = None) -> AttentionMetadata:
-        return metadata
+    def build(cls, infer_state: InferStateInfo, context: None = None) -> FA3SparseMLAPrefillAttState:
+        return FA3SparseMLAPrefillAttState(
+            req_to_token_indexs=infer_state.req_to_token_indexs,
+            b_req_idx=infer_state.b_req_idx,
+            total_token_num=infer_state.total_token_num,
+            cu_kv_seq_len=infer_state.b1_cu_kv_seq_len,
+            cu_q_seq_len=infer_state.b1_cu_q_seq_len,
+        )

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.attention.backend import AttentionMetadata
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
@@ -58,15 +58,15 @@ def make_batch(token_map, req_ids, lengths, query_lengths=None, **kwargs):
     query_lengths = query_lengths or [1] * len(lengths)
     cu_q = torch.tensor([0, *query_lengths], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
     cu_kv = torch.tensor([0, *lengths], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
-    return AttentionMetadata(
+    return make_infer_state(
         req_to_token_indexs=token_map,
         b_req_idx=torch.tensor(req_ids, device="cuda", dtype=torch.int32),
         b_seq_len=torch.tensor(lengths, device="cuda", dtype=torch.int32),
         batch_size=len(lengths),
         max_kv_seq_len=max(lengths),
         total_token_num=sum(lengths),
-        cu_q_seq_len=cu_q,
-        cu_kv_seq_len=cu_kv,
+        b1_cu_q_seq_len=cu_q,
+        b1_cu_kv_seq_len=cu_kv,
         max_q_seq_len=max(query_lengths),
         pad_req_idx=PAD,
         **kwargs,
