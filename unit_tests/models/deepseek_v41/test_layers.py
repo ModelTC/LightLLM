@@ -329,3 +329,28 @@ def test_engram_fused_hash_matches_torch_for_ragged_inputs_and_graph(monkeypatch
     graph.replay()
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
     torch.testing.assert_close(hasher.history, expected_history, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("rows", [0, 1, 385])
+def test_gather_rope_tables(rows):
+    from lightllm.models.deepseek_v4.triton_kernel.norm_rope import gather_rope_tables
+
+    sliding = torch.randn((512, 32), dtype=torch.complex64, device="cuda")
+    compress = torch.randn_like(sliding)
+    tables = (sliding.real, sliding.imag, compress.real.contiguous(), compress.imag)
+    positions = torch.arange(rows * 2, dtype=torch.int32, device="cuda").remainder_(512)[::2]
+
+    def check(outputs):
+        for output, table in zip(outputs, tables):
+            assert output.is_contiguous()
+            torch.testing.assert_close(output, table.index_select(0, positions), atol=0, rtol=0)
+
+    check(gather_rope_tables(positions, tables))
+    if rows:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = gather_rope_tables(positions, tables)
+        positions.add_(3).remainder_(512)
+        graph.replay()
+        check(captured)
