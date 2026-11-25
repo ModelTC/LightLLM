@@ -46,10 +46,10 @@ GQA 层在 `attention_spec()` 中声明 prefill 和 decode 的配置。Gemma4 �
 
 主模型和每个 MTP 草稿模型在各自的 `_init_attention` 中初始化层，因为各模型的 CUDA graph 上限和缓存布局不同。
 
-`_init_attention` 为每个模型创建 `model.attention_runtime`（`AttentionRuntime`），纯 FFN 模型也不例外，只是不绑定任何层、`has_attention` 为假。它负责从绑定到每步构建的全部过程：
+`_init_attention` 为每个模型创建 `model.attention_runtime`（`AttentionRuntime`），纯 FFN 模型也不例外，只是不绑定任何层、`has_attention` 为假。绑定前用层的 `attention_phases` 检查 `AttentionSpec` 是否覆盖实际运行阶段。普通层需要两个阶段，DFlash 层只需要 decode。
 
-- `bind(spec)` 为每个阶段独立选择实现，然后将两个 impl 赋给层。阶段、layer config 和请求的 backend 都相同的层复用 impl。某阶段的 layer config 为 `None` 时，该阶段返回 `None`，例如 DFlash 草稿层只在 decode 计算。每个阶段的每个新 `state_key` 登记一个 `_StateBuilder`，它在首次 build 时才创建构建上下文、分配该阶段的资源。
-- `prepare(infer_state)` 将当前 `InferStateInfo` 传给本阶段的每个 `_StateBuilder`，各调用一次 `backend.build`，返回 `{state_key: att_state}`。没有 builder 的阶段返回空字典。
+- `bind(spec)` 为每个阶段独立选择实现，然后将两个 impl 赋给层。阶段、layer config 和请求的 backend 都相同的层复用 impl。某阶段的 layer config 为 `None` 时，该阶段返回 `None`，例如 DFlash 草稿层只在 decode 计算。每个阶段的每个 `state_key` 由第一个绑定的 impl 负责准备状态。
+- `prepare(infer_state)` 在每个 microbatch 对本阶段各组的代表实例调用一次 `impl.prepare`，返回 `{state_key: att_state}`。没有状态组的阶段返回空字典。
 - `model.requires_cpu_cache_sync`：是否有实现不能与 CPU cache 搬运在 GPU 上并行。
 
 运行时创建时从模型读取一次全部静态信息，之后不再持有模型：
@@ -78,10 +78,10 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 ### 2.4 Backend 层
 
-每个已注册的 `AttentionBackend` 同时提供准备本步状态的类方法和计算本层输出的实例方法。
+`AttentionBackend` 实例提供准备本步状态的 `prepare` 和计算本层输出的 `forward`。
 
 - `build_context_key(layer_config)` 声明哪些配置会改变本步准备工作。运行时用 `(backend 类, build_context_key)` 作为 `state_key`，prefill 和 decode 各有自己的状态表。
-- `create_build_context(build_key, resources)` 在首次执行该阶段时创建上下文。`build_key` 就是分组时 `build_context_key(layer_config)` 的返回值。上下文所需的逐层参数必须包含在这个键中，模型级资源由 `resources` 提供。
+- `prepare(infer_state, resources)` 首次调用时用 `create_build_context(build_key, resources)` 创建该组的上下文，并在后续步骤复用。`build_key` 就是分组时 `build_context_key(layer_config)` 的返回值。上下文所需的逐层参数必须包含在这个键中，模型级资源由 `resources` 提供。
 - `build(metadata, context)` 为当前 microbatch 生成一份 `AttState`。所有持有同一 `state_key` 的层直接使用它。
 - `forward(att_state, layer_inputs, ...)` 使用实例持有的 `layer_config`，结合当前层的张量计算输出。
 - `requires_cpu_cache_sync()` 声明 CPU cache 搬运是否需要与该 backend 的计算同步。
@@ -94,7 +94,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 ## 3. 类型及其生命周期
 
-每步的主流程是 `InferStateInfo → backend.build → att_state → backend.forward`。模型为这一步提供请求长度和 KV 索引，各后端只在 `att_state` 中保留 kernel 所需的参数。
+每步的主流程是 `InferStateInfo → impl.prepare → att_state → impl.forward`。模型为这一步提供请求长度和 KV 索引，各后端只在 `att_state` 中保留 kernel 所需的参数。
 
 模型的 `AttentionBuildResources` 只用于初始化。需要跨步保存页表、wrapper 或 CUDA graph 缓冲区的后端自行定义存储类型，兼容的层共享该对象；其余后端直接使用 `None`。
 
@@ -161,7 +161,7 @@ impl.forward(att_state, layer_inputs, *, out, alloc_func=torch.empty) -> out
 - `auto` 按优先级依次尝试：impl 能以该 layer config 构造（不抛出 `NotImplementedError`），且第三方库通过 `validate()`。先构造再验证，因为验证要启动子进程。都不满足时退回 Triton（不验证）。例如 Neo 的图像 span 不被 FlashInfer 支持，会被自动跳过。
 - 显式指定的实现不存在或不支持该配置时，在模型加载时抛出 `ValueError`，并列出各 backend 拒绝的原因。
 - EP MoE 排除 FlashInfer；有 MTP 时 decode 优先 FA3。
-- 层可以用 `AttentionSpec.implementation` 指定实现。Bloom 和 Gemma4 的 GQA 层指定 `triton`。GLM-5 和 MTP 草稿模型只在稀疏 MLA 分支指定 `flashmla_sparse`，KDA 分支使用命令行的第二个值。
+- 层可以用 `AttentionSpec.prefill_implementation` 和 `decode_implementation` 分别指定实现。Bloom 和 Gemma4 的 GQA 层在两个阶段都指定 `triton`。GLM-5 和 MTP 草稿模型只在稀疏 MLA 分支指定 `flashmla_sparse`，KDA 分支使用命令行的第二个值。
 
 ## 6. 分组与时序
 
@@ -186,7 +186,7 @@ main 与 MTP draft 模型不共用组的 attention state。
 
 1. 构造各层。
 2. `prepare_attention_states` 与 KV 容量 profiling。GLM-5 及其 MTP 草稿模型在这一步按 prefill microbatch 预留 FP8 KV 反量化 workspace。稀疏注意力层将当前 microbatch 的 workspace 作为 `SparseMLAPrefillLayerInputs.fp8_workspace` 传给 FA3。
-3. `init_runtime` 中的 `_init_attention` 创建 `AttentionRuntime`，读取每层的 `attention_spec`，绑定两个阶段的 impl 并登记 `_StateBuilder`，随后执行 warmup 和 CUDA graph 捕获。
+3. `init_runtime` 中的 `_init_attention` 创建 `AttentionRuntime`，读取每层的 `attention_spec`，绑定两个阶段的 impl 并登记各状态组的代表实例，随后执行 warmup 和 CUDA graph 捕获。
 
 layer config 在 KV 分配之后确定，因为 KV head 数、量化 KV 的 group size 和是否有静态 q scale 都来自该层的 attention state。
 

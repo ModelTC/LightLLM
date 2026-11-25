@@ -9,8 +9,8 @@ Each type is named for how long it lives:
   prepare page tables, recurrent indices or wrappers keep them on their state.
 - LayerInputs: one layer call's tensors.
 
-A model passes AttentionBuildResources to create_build_context on first use. Layers whose
-backend class and build_context_key match share a context and one state per microbatch.
+In each phase, one backend instance prepares state for the layers whose backend class and
+build_context_key match. That instance initializes the group's build context on first use.
 
 Attention states are built every step, including CUDA graph replay steps. The caller writes the KV cache
 before attention and passes the attention state explicitly rather than through a global forward context.
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 LayerConfig = TypeVar("LayerConfig")
 AttState = TypeVar("AttState")
 LayerInputs = TypeVar("LayerInputs")
+_UNINITIALIZED = object()
 
 
 class TensorAllocator(Protocol):
@@ -78,10 +79,17 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
 
     def __init__(self, layer_config: LayerConfig) -> None:
         self.layer_config = layer_config
+        self._build_context: Any = _UNINITIALIZED
 
     @cached_property
     def state_key(self) -> tuple:
         return type(self), self.build_context_key(self.layer_config)
+
+    def prepare(self, infer_state: "InferStateInfo", resources: AttentionBuildResources) -> AttState:
+        """Prepare this phase's shared state for one microbatch."""
+        if self._build_context is _UNINITIALIZED:
+            self._build_context = self.create_build_context(self.state_key[1], resources)
+        return self.build(infer_state, self._build_context)
 
     @abstractmethod
     def forward(

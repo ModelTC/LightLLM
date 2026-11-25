@@ -94,7 +94,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             kpool=self.network_config_["index_kpool"],
             causal=False,
         )
-        return AttentionSpec(config, config, implementation="flashmla_sparse")
+        return AttentionSpec(
+            config, config, prefill_implementation="flashmla_sparse", decode_implementation="flashmla_sparse"
+        )
 
     def _att_norm(self, input, infer_state, layer_weight):
         return layer_weight.att_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)

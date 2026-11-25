@@ -8,10 +8,13 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.cuda_graph import CudaGraph
-from lightllm.common.basemodel.attention_runtime import AttentionRuntime, AttentionStepConfig, _StateBuilder
+from lightllm.common.basemodel.attention_runtime import AttentionRuntime, AttentionStepConfig
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.attention.backends.gqa import GQALayerConfig
 from lightllm.common.attention.backends.gqa.triton import TritonGQAPrefillBackend
+from lightllm.common.attention.backends.mla import MLAPrefillLayerConfig
 from lightllm.common.attention.backends.mla.triton import TritonMLAPrefillBackend
+from lightllm.common.attention.backends.sparse_mla import SparseMLALayerConfig
 from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLAPrefillBackend
 
 
@@ -33,11 +36,12 @@ def no_cycle_gc():
             gc.enable()
 
 
-def _runtime(builders: dict) -> AttentionRuntime:
-    """A runtime with the given state builders per phase, without binding layers."""
+def _runtime(groups: dict) -> AttentionRuntime:
+    """A runtime with the given state groups per phase, without binding layers."""
     runtime = AttentionRuntime.__new__(AttentionRuntime)
     runtime.step_config = AttentionStepConfig()
-    runtime.state_builders = {"prefill": {}, "decode": {}, **builders}
+    runtime.resources = None
+    runtime.state_groups = {"prefill": {}, "decode": {}, **groups}
     return runtime
 
 
@@ -47,12 +51,9 @@ def _create_state(is_prefill):
     owner.position_ids = torch.arange(4)
     owner.b_req_idx = owner.position_ids
     owner.req_manager = SimpleNamespace(req_to_token_indexs=None)
-    backend = SimpleNamespace(
-        create_build_context=lambda build_key, resources: None,
-        build=lambda metadata, context: _AttState(metadata.b_req_idx),
-    )
+    backend = SimpleNamespace(prepare=lambda metadata, resources: _AttState(metadata.b_req_idx))
     phase = "prefill" if is_prefill else "decode"
-    runtime = _runtime({phase: {"group": _StateBuilder(backend, build_key=None, resources=None)}})
+    runtime = _runtime({phase: {"group": backend}})
     owner.att_states = runtime.prepare(owner)
     return owner
 
@@ -82,22 +83,27 @@ def test_infer_state_without_attention_builds_no_att_state():
 
 
 @pytest.mark.parametrize(
-    ("backend", "field"),
+    ("backend", "config", "field"),
     [
-        (TritonGQAPrefillBackend, "b_req_idx"),
-        (TritonMLAPrefillBackend, "b_seq_len"),
-        (FA3SparseMLAPrefillBackend, "b_req_idx"),
+        (TritonGQAPrefillBackend, GQALayerConfig(8, 2, 64, torch.bfloat16), "b_req_idx"),
+        (TritonMLAPrefillBackend, MLAPrefillLayerConfig(8, 128, 64, 128, 0.125, torch.bfloat16), "b_seq_len"),
+        (
+            FA3SparseMLAPrefillBackend,
+            SparseMLALayerConfig(8, 512, 0, 0.125, torch.bfloat16, kv_cache_format="fp8_group64_e8m0"),
+            "b_req_idx",
+        ),
     ],
 )
-def test_prefill_backend_state_outlives_step(no_cycle_gc, backend, field):
+def test_prefill_backend_state_outlives_step(no_cycle_gc, backend, config, field):
     owner = InferStateInfo()
     owner.is_prefill = True
     owner.req_manager = SimpleNamespace(req_to_token_indexs=None)
     tensor = torch.arange(4)
     setattr(owner, field, tensor)
-    runtime = _runtime({"prefill": {"group": _StateBuilder(backend, build_key=None, resources=None)}})
+    impl = backend(config)
+    runtime = _runtime({"prefill": {impl.state_key: impl}})
     owner.att_states = runtime.prepare(owner)
-    att_state = owner.att_states["group"]
+    att_state = owner.att_states[impl.state_key]
     owner_ref = weakref.ref(owner)
     del owner
     assert owner_ref() is None

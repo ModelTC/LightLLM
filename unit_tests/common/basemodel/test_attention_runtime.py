@@ -73,7 +73,7 @@ def gqa(**fields) -> GQALayerConfig:
     return GQALayerConfig(**{"num_heads": 8, "num_kv_heads": 2, "head_dim": 64, "dtype": torch.bfloat16, **fields})
 
 
-def test_triton_layers_share_one_group_across_layer_configs():
+def test_triton_layers_share_one_group_across_layer_configs(monkeypatch):
     # Gemma4-like: layers differ in head_dim and window, but Triton's step builders ignore the layer config.
     groups = setup_model(fake_model())
     sliding = groups.attention_runtime.bind(AttentionSpec(gqa(sliding_window=(511, 0)), gqa(sliding_window=(511, 0))))
@@ -81,8 +81,21 @@ def test_triton_layers_share_one_group_across_layer_configs():
     full = groups.attention_runtime.bind(full_spec)
     again = groups.attention_runtime.bind(full_spec)
     assert full == again
-    assert sliding[0] is not full[0]
-    assert all(len(backends(groups, phase)) == 1 for phase in selector.PHASES)
+    prepared_by = []
+    prepare = AttentionBackend.prepare
+
+    def record_prepare(self, infer_state, resources):
+        prepared_by.append(self)
+        return prepare(self, infer_state, resources)
+
+    monkeypatch.setattr(AttentionBackend, "prepare", record_prepare)
+    for is_prefill, representative, other in zip((True, False), sliding, full):
+        assert representative is not other
+        state = step(is_prefill)
+        state.att_states = groups.attention_runtime.prepare(state)
+        assert list(state.att_states) == [representative.state_key]
+        assert state.att_states[representative.state_key] is state.att_states[other.state_key]
+    assert prepared_by == list(sliding)
 
 
 @pytest.mark.parametrize("prefill", [True, False])
@@ -313,10 +326,18 @@ def test_layer_override_is_independent_for_identical_configs():
     model = fake_model(llm_prefill_att_backend=["fa3"], llm_decode_att_backend=["fa3"])
     groups = setup_model(model)
     config = gqa()
-    pinned = groups.attention_runtime.bind(AttentionSpec(config, config, implementation="triton"))
+    pinned = groups.attention_runtime.bind(
+        AttentionSpec(config, config, prefill_implementation="triton", decode_implementation="triton")
+    )
     default = groups.attention_runtime.bind(AttentionSpec(config, config))
-    assert groups.attention_runtime.bind(AttentionSpec(config, config, implementation="fa3")) == default
-    assert groups.attention_runtime.bind(AttentionSpec(config, config, implementation="triton")) == pinned
+    assert groups.attention_runtime.bind(AttentionSpec(config, config, prefill_implementation="triton")) == (
+        pinned[0],
+        default[1],
+    )
+    assert groups.attention_runtime.bind(AttentionSpec(config, config, decode_implementation="triton")) == (
+        default[0],
+        pinned[1],
+    )
     for phase in selector.PHASES:
         assert [backend.get_name() for backend in backends(groups, phase)] == [
             f"triton_gqa_{phase}",
@@ -460,7 +481,7 @@ def test_only_prefill_attends_inside_image_spans(runtime_start_args):
     model = model_with_state(FakeState())
     assert layer.attention_spec(model) == AttentionSpec(gqa(bidirectional_image_spans=True), gqa())
     assert layer.prefill_impl is layer.decode_impl is None
-    assert not any(model.attention_runtime.state_builders.values())
+    assert not model.attention_runtime.has_attention
 
 
 def test_block_draft_layers_are_not_causal(monkeypatch):
@@ -488,6 +509,8 @@ def test_models_with_attention_states_create_their_layers_attention():
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
     class Layer:
+        attention_phases = ("decode",)
+
         def __init__(self):
             self.models = []
 
@@ -514,6 +537,23 @@ def test_models_with_attention_states_create_their_layers_attention():
     # A draft without attention states (FFN-only) binds no layers and builds no attention state.
     states.clear()
     model._init_attention()
+    assert not model.attention_runtime.has_attention
+
+
+@pytest.mark.parametrize(
+    "required,spec,error",
+    [
+        (("prefill", "decode"), AttentionSpec(None, gqa()), "missing prefill"),
+        (("prefill", "decode"), AttentionSpec(gqa(), None), "missing decode"),
+        (("decode",), AttentionSpec(gqa(), gqa()), "unexpected prefill"),
+    ],
+)
+def test_model_rejects_phase_config_that_disagrees_with_layer_execution(required, spec, error):
+    model = model_with_state(FakeState())
+    model.att_state_manager.get_full_attention_states = lambda role: (object(),)
+    model.layers_infer = [SimpleNamespace(layer_num_=7, attention_phases=required, attention_spec=lambda model: spec)]
+    with pytest.raises(ValueError, match=f"draft0 layer 7: {error} attention configuration"):
+        TpPartBaseModel._init_attention(model)
     assert not model.attention_runtime.has_attention
 
 
