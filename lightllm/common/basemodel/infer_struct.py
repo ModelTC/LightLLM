@@ -1,3 +1,4 @@
+import enum
 import torch
 import triton
 import collections
@@ -12,6 +13,14 @@ from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
 from .attention import BasePrefillAttState, BaseDecodeAttState
+
+
+class GraphMode(enum.Enum):
+    """How a decode step runs: eagerly, capturing a CUDA graph, or replaying one."""
+
+    EAGER = "eager"
+    CAPTURE = "capture"
+    REPLAY = "replay"
 
 
 class InferStateInfo:
@@ -59,8 +68,7 @@ class InferStateInfo:
         # 仅在 prefill 阶段且需要返回 prompt logprobs 时才会被填充。
         self.prompt_logics: Optional[torch.Tensor] = None
         self.multimodal_params: dict = None
-        self.is_cuda_graph_capture: bool = False  # 标记是否用于 decode CUDA Graph 捕获
-        self.is_cuda_graph_replay: bool = False  # 标记是否为 decode CUDA Graph 回放准备输入
+        self.graph_mode: GraphMode = GraphMode.EAGER
         self.dist_group: CustomProcessGroup = None
 
         # 在microbatch overlap的运行模式下，用于标记当前 microbatch 的 index 序号

@@ -1,3 +1,4 @@
+from lightllm.common.basemodel.infer_struct import GraphMode
 from lightllm.common.basemodel.triton_kernel.mhc import hc_expand
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
@@ -24,6 +25,6 @@ class DeepseekV4PreLayerInfer(LlamaMultimodalPreLayerInfer):
     def token_forward(self, input_ids, infer_state: DeepseekV4InferStateInfo, layer_weight):
         input_embdings = super().token_forward(input_ids, infer_state, layer_weight)
         # 捕获时保留 graph 输入引用；普通 decode 及时释放未使用的 draft 特征。
-        if not infer_state.is_cuda_graph_capture:
+        if infer_state.graph_mode is not GraphMode.CAPTURE:
             infer_state.mtp_draft_input_hiddens = None
         return hc_expand(input_embdings, self.hc_mult)
