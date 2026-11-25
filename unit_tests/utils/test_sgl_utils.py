@@ -8,7 +8,7 @@ import torch
 from frozendict import frozendict
 
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, configure_attention_step
+from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
 from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils import sgl_utils

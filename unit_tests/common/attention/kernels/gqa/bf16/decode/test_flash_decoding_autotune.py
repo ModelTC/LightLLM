@@ -12,7 +12,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, configure_attention_step
+from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
 from lightllm.common.attention.kernels.gqa.bf16.decode import (
     gqa_flash_decoding as decode_module,
     gqa_flash_decoding_stage1 as stage1_module,

@@ -9,7 +9,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs, gqa_kv_quant_fields
 from lightllm.common.attention_state.full_att import FullAttentionState
-from lightllm.common.basemodel.attention_runtime import AttentionSpec, attention_is_causal
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig, attention_is_causal
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 from lightllm.utils.log_utils import init_logger
 
@@ -63,9 +63,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             **fields,
         )
 
-    def attention_spec(self, model) -> AttentionSpec:
+    def attention_config(self, model) -> LayerAttentionConfig:
         config = self._gqa_config(model)
-        return AttentionSpec(prefill=config, decode=config)
+        return LayerAttentionConfig(prefill=config, decode=config)
 
     def _gqa_sinks(self, layer_weight):
         return None

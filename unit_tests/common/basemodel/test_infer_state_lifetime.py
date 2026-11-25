@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.cuda_graph import CudaGraph
-from lightllm.common.basemodel.attention_runtime import AttentionRuntime, AttentionStepConfig
+from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager, AttentionStepConfig
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention.backends.gqa import GQALayerConfig
 from lightllm.common.attention.backends.gqa.triton import TritonGQAPrefillBackend
@@ -36,9 +36,9 @@ def no_cycle_gc():
             gc.enable()
 
 
-def _runtime(groups: dict) -> AttentionRuntime:
+def _runtime(groups: dict) -> AttentionBackendManager:
     """A runtime with the given state groups per phase, without binding layers."""
-    runtime = AttentionRuntime.__new__(AttentionRuntime)
+    runtime = AttentionBackendManager.__new__(AttentionBackendManager)
     runtime.step_config = AttentionStepConfig()
     runtime.resources = None
     runtime.state_groups = {"prefill": {}, "decode": {}, **groups}

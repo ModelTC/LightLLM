@@ -50,7 +50,7 @@ def test_ffn_only_draft_has_no_state_or_attention(monkeypatch: pytest.MonkeyPatc
     draft.max_seq_length, draft.graph_max_batch_size, draft.graph_max_len_in_batch = 64, 1, 64
     draft.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda is_draft: 0)
     draft._init_attention()
-    assert not draft.attention_runtime.has_attention
+    assert not draft.attention_backend_manager.has_attention
     assert draft.att_state_manager is resources
     assert not hasattr(draft, "full_att_state")
     assert not resources.get_full_attention_states("draft0")

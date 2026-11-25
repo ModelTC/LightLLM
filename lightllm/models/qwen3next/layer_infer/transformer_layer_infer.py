@@ -9,7 +9,7 @@ from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.common.attention.backends.gdn import GDNLayerConfig, GDNLayerInputs
-from lightllm.common.basemodel.attention_runtime import AttentionSpec
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 from typing import Optional, Tuple
 from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
 from lightllm.distributed import all_reduce
@@ -264,9 +264,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         z = z[:, : self.tp_linear_num_v_heads * self.linear_head_v_dim]
         return o, z.view(-1, self.tp_linear_num_v_heads, self.linear_head_v_dim)
 
-    def attention_spec(self, model) -> AttentionSpec:
+    def attention_config(self, model) -> LayerAttentionConfig:
         if not self.is_linear_attention_layer:
-            return super().attention_spec(model)
+            return super().attention_config(model)
         config, tp_world_size = self.network_config_, self.tp_world_size_
         layer_config = GDNLayerConfig(
             num_k_heads=config["linear_num_key_heads"] // tp_world_size,
@@ -279,7 +279,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             state_mtp_step=model.args.mtp_step,
             replay=model.args.ssm_state_mode == "replay",
         )
-        return AttentionSpec(layer_config, layer_config)
+        return LayerAttentionConfig(layer_config, layer_config)
 
     def context_attention_forward(
         self,

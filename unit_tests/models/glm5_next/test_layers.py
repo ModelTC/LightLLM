@@ -188,7 +188,7 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
         data_type=torch.bfloat16,
         args=SimpleNamespace(llm_kv_type="None"),
     )
-    spec = layer.attention_spec(model)
+    spec = layer.attention_config(model)
     prefill = selector.select(spec.prefill, "prefill", spec.prefill_implementation)
     decode = selector.select(spec.decode, "decode", spec.decode_implementation)
     assert (prefill.backend, decode.backend) == (FlashMLASparsePrefillBackend, FA3SparseMLADecodeBackend)
@@ -495,7 +495,7 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
     # NoPE state initialization must not require a model-owned RoPE cache.
     for model in (main, *drafts):
         # The runtime is not initialized, so the step builds no attention metadata.
-        model.attention_runtime = SimpleNamespace(has_attention=False)
+        model.attention_backend_manager = SimpleNamespace(has_attention=False)
         state = model.infer_state_class()
         state.is_prefill = True
         state.input_ids = torch.zeros(3, device="cuda", dtype=torch.int64)

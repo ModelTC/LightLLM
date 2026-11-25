@@ -1,4 +1,4 @@
-from lightllm.common.basemodel.attention_runtime import AttentionSpec
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 from lightllm.models.bloom.layer_infer.transformer_layer_infer import BloomTransformerLayerInfer
 
 
@@ -11,9 +11,9 @@ class StarcoderTransformerLayerInfer(BloomTransformerLayerInfer):
         self.tp_v_head_num_ = 1
         return
 
-    def attention_spec(self, model) -> AttentionSpec:
+    def attention_config(self, model) -> LayerAttentionConfig:
         config = self._gqa_config(model)
-        return AttentionSpec(prefill=config, decode=config)
+        return LayerAttentionConfig(prefill=config, decode=config)
 
     def _gqa_alibi_slopes(self, layer_weight):
         return None

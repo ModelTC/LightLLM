@@ -11,7 +11,7 @@ from lightllm.common.attention.backends.gdn import GDNLayerConfig
 from lightllm.common.attention.backends.gdn.triton import GDNDecodeBuildContext, TritonGDNPrefillBackend
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel import attention_runtime
+from lightllm.common.basemodel import attention_backend_manager
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.attention.kernels.gdn.third_party_fla.ops.chunk as fla_chunk
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
@@ -155,15 +155,17 @@ def test_decode_step_builder_groups_dynamic_speculative_rows(monkeypatch):
 
 @pytest.mark.parametrize("role", ["main", "draft0"])
 def test_decode_reads_the_acceptance_index_of_its_role(monkeypatch, role: str):
-    monkeypatch.setattr(attention_runtime, "get_env_start_args", lambda: SimpleNamespace(mtp_dynamic_verify=False))
+    monkeypatch.setattr(
+        attention_backend_manager, "get_env_start_args", lambda: SimpleNamespace(mtp_dynamic_verify=False)
+    )
     b_req_idx = torch.tensor([2, 2, 2, 4, 4, 4], dtype=torch.int32)
     req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
     model, infer_state = _speculative_decode(
         draft_step=2, b_req_idx=b_req_idx, req_to_mtp_state_index=req_to_mtp_state_index, role=role
     )
-    step_config = attention_runtime.attention_step_config(model)
+    step_config = attention_backend_manager.attention_step_config(model)
     assert step_config.req_to_mtp_state_index is req_to_mtp_state_index
-    batch = attention_runtime.configure_attention_step(infer_state, step_config)
+    batch = attention_backend_manager.configure_attention_step(infer_state, step_config)
     att_state = GDNDecodeBuildContext(replay=False).prepare(batch)
 
     torch.testing.assert_close(att_state.num_accepted_tokens, torch.tensor([2, 3], dtype=torch.int32))
@@ -209,9 +211,9 @@ def test_replay_state_selects_replay_decode(monkeypatch, replay, decode):
 def test_linear_layers_read_the_second_backend_value():
     args = SimpleNamespace(llm_prefill_att_backend=["fa3", "triton"], llm_decode_att_backend=["flashinfer", "triton"])
     for phase in ("prefill", "decode"):
-        assert attention_runtime.requested_backend(args, phase, gdn_config()) == "triton"
+        assert attention_backend_manager.requested_backend(args, phase, gdn_config()) == "triton"
     args.llm_prefill_att_backend = ["fa3"]
-    assert attention_runtime.requested_backend(args, "prefill", gdn_config()) == "auto"
+    assert attention_backend_manager.requested_backend(args, "prefill", gdn_config()) == "auto"
 
 
 def test_flashqla_validation_loads_linear_cache_config(monkeypatch):

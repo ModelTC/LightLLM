@@ -1,6 +1,6 @@
 import torch
 
-from lightllm.common.basemodel.attention_runtime import AttentionSpec
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_forward
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -20,8 +20,8 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
 
     attention_phases = ("decode",)
 
-    def attention_spec(self, model) -> AttentionSpec:
-        return AttentionSpec(prefill=None, decode=self._gqa_config(model))
+    def attention_config(self, model) -> LayerAttentionConfig:
+        return LayerAttentionConfig(prefill=None, decode=self._gqa_config(model))
 
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)

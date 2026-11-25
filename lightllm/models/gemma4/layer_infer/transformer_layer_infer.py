@@ -4,7 +4,7 @@ import math
 import torch
 import torch.nn as nn
 
-from lightllm.common.basemodel.attention_runtime import AttentionSpec
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
@@ -174,11 +174,11 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     # ----- Attention kernels (sliding window + per-layer KV reshape) ---
 
-    def attention_spec(self, model) -> AttentionSpec:
+    def attention_config(self, model) -> LayerAttentionConfig:
         window = (self.sliding_window_ - 1, 0) if self.is_sliding and self.sliding_window_ > 0 else (-1, -1)
         decode = self._gqa_config(model, sliding_window=window)
         prefill = replace(decode, bidirectional_image_spans=self.is_sliding)
-        return AttentionSpec(
+        return LayerAttentionConfig(
             prefill=prefill, decode=decode, prefill_implementation="triton", decode_implementation="triton"
         )
 

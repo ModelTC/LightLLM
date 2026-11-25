@@ -3,7 +3,7 @@ from typing import Tuple
 from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs, gqa_kv_quant_fields
 from lightllm.common.attention_state.full_att import FullAttentionState
-from lightllm.common.basemodel.attention_runtime import AttentionSpec, attention_is_causal
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig, attention_is_causal
 from lightllm.models.bloom.layer_weights.transformer_layer_weight import BloomTransformerLayerWeight
 from lightllm.common.basemodel import InferStateInfo
 
@@ -47,9 +47,9 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
             **gqa_kv_quant_fields(model.args.llm_kv_type, scales, self.head_dim_),
         )
 
-    def attention_spec(self, model) -> AttentionSpec:
+    def attention_config(self, model) -> LayerAttentionConfig:
         config = self._gqa_config(model, has_alibi=True)
-        return AttentionSpec(
+        return LayerAttentionConfig(
             prefill=config, decode=config, prefill_implementation="triton", decode_implementation="triton"
         )
 

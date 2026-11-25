@@ -1,7 +1,7 @@
 import torch
 import triton
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.common.basemodel.attention_runtime import AttentionSpec
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 from lightllm.common.attention.backends.sparse_mla import SWASparseMLALayerConfig, SWASparseMLALayerInputs
 from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_post_pre_norm, hc_pre_norm
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_sm100_mega_moe
@@ -522,7 +522,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         out = self.decode_impl.forward(infer_state.att_states[self.decode_impl.state_key], inputs, out=out)
         return out[:, : self.tp_q_head_num_]
 
-    def attention_spec(self, model) -> AttentionSpec:
+    def attention_config(self, model) -> LayerAttentionConfig:
         config = SWASparseMLALayerConfig(
             num_heads=self.flashmla_q_head_num_,
             head_dim_v=self.v_head_dim,
@@ -531,7 +531,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             compress_ratio=self.compress_ratio,
             has_attn_sink=True,
         )
-        return AttentionSpec(config, config)
+        return LayerAttentionConfig(config, config)
 
     def _sparse_layer_inputs(self, q, meta, infer_state: DeepseekV4InferStateInfo, layer_weight):
         """FlashMLA views of the layer's packed caches, with the indexer's selection and the layer's sink."""

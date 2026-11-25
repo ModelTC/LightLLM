@@ -3,7 +3,7 @@ import torch
 from dataclasses import replace
 from functools import partial
 from typing import Tuple
-from lightllm.common.basemodel.attention_runtime import AttentionSpec
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
 from lightllm.models.qwen3.layer_infer.transformer_layer_infer import Qwen3TransformerLayerInfer
@@ -17,9 +17,9 @@ logger = init_logger(__name__)
 
 
 class NeoChatTransformerLayerInfer(Qwen3TransformerLayerInfer):
-    def attention_spec(self, model) -> AttentionSpec:
+    def attention_config(self, model) -> LayerAttentionConfig:
         decode = self._gqa_config(model)
-        return AttentionSpec(prefill=replace(decode, bidirectional_image_spans=True), decode=decode)
+        return LayerAttentionConfig(prefill=replace(decode, bidirectional_image_spans=True), decode=decode)
 
     def __init__(self, data_type, network_config):
         super().__init__(data_type, network_config)

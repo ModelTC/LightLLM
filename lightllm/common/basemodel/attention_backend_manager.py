@@ -1,12 +1,11 @@
-"""A model's attention runtime: bind each layer's implementations at load time, build each step's states.
+"""Bind each layer's attention implementations at load time and prepare shared states each step.
 
 In order of lifetime:
 
-- Binding: a layer describes its attention as an AttentionSpec; AttentionRuntime.bind selects
-  the prefill and decode implementations.
+- Binding: AttentionBackendManager.bind selects prefill and decode implementations from a LayerAttentionConfig.
 - Model facts, read once when the runtime is created: AttentionBuildResources for the backends'
   build contexts, and AttentionStepConfig for describing steps.
-- Per step: AttentionRuntime.prepare builds one attention state per state_key from InferStateInfo.
+- Per step: AttentionBackendManager.prepare builds one attention state per state_key from InferStateInfo.
 """
 
 from __future__ import annotations
@@ -35,8 +34,8 @@ logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
-class AttentionSpec:
-    """A layer's attention, as returned by its attention_spec(model)."""
+class LayerAttentionConfig:
+    """A layer's prefill and decode configuration, as returned by attention_config(model)."""
 
     # The layer configs of each phase; None for a phase the layer does not attend in.
     prefill: Any
@@ -145,7 +144,7 @@ def configure_attention_step(
     return infer_state
 
 
-class AttentionRuntime:
+class AttentionBackendManager:
     """A model's attention: binds each layer's implementations at load time and builds each step's states.
 
     bind() selects a layer's prefill and decode implementations and registers one representative per
@@ -167,11 +166,11 @@ class AttentionRuntime:
         if self.args.enable_ep_moe:
             logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
 
-    def bind(self, spec: AttentionSpec) -> tuple[Optional[AttentionBackend], Optional[AttentionBackend]]:
+    def bind(self, config: LayerAttentionConfig) -> tuple[Optional[AttentionBackend], Optional[AttentionBackend]]:
         """The layer's prefill and decode implementations."""
         return (
-            self._select("prefill", spec.prefill, spec.prefill_implementation),
-            self._select("decode", spec.decode, spec.decode_implementation),
+            self._select("prefill", config.prefill, config.prefill_implementation),
+            self._select("decode", config.decode, config.decode_implementation),
         )
 
     def _select(self, phase: str, layer_config: Any, implementation: Optional[str]) -> Optional[AttentionBackend]:

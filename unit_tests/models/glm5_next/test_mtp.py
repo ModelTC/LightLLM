@@ -3,7 +3,7 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, KDAState
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig
+from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention.kernels.gdn.third_party_fla.ops.kda_decode import (
     fused_recurrent_kda,

@@ -12,7 +12,7 @@ import torch
 
 from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparseDecodeBackend
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, configure_attention_step
+from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 

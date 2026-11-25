@@ -1,5 +1,5 @@
 import torch
-from lightllm.common.basemodel.attention_runtime import AttentionSpec
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 from lightllm.models.gpt_oss.layer_weights.transformer_layer_weight import GptOssTransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.utils.log_utils import init_logger
@@ -58,11 +58,11 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
         hidden_states = hidden_states.view(num_tokens, hidden_dim)
         return self._tpsp_reduce(input=hidden_states, infer_state=infer_state)
 
-    def attention_spec(self, model) -> AttentionSpec:
+    def attention_config(self, model) -> LayerAttentionConfig:
         is_sliding = self.network_config_["layer_types"][self.layer_num_] == "sliding_attention"
         window = (self.sliding_window - 1, 0) if is_sliding else (-1, -1)
         config = self._gqa_config(model, has_sinks=True, sliding_window=window)
-        return AttentionSpec(prefill=config, decode=config)
+        return LayerAttentionConfig(prefill=config, decode=config)
 
     def _gqa_sinks(self, layer_weight: GptOssTransformerLayerWeight):
         return layer_weight.attn_sinks.weight

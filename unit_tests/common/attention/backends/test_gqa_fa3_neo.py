@@ -10,7 +10,7 @@ import torch
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQAPrefillBackend, FA3GQAPrefillBuildContext
-from lightllm.common.basemodel.attention_runtime import configure_attention_step
+from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
 from lightllm.utils import neo_fa3_utils, sgl_utils
 
 

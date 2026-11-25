@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from lightllm.common.attention.backends.gqa import GQALayerConfig
-from lightllm.common.basemodel import attention_runtime
+from lightllm.common.basemodel import attention_backend_manager
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 H, D = 8, 64
@@ -140,7 +140,7 @@ def test_gemma4_sliding_and_full_layers_share_one_triton_group(runtime_start_arg
     window = dict(num_heads=4, head_dim=256, sliding_window=(47, 0))
     assert layer_configs(sliding) == (config(**window, bidirectional_image_spans=True), config(**window))
     assert layer_configs(full) == (config(num_heads=4, num_kv_heads=1, head_dim=512),) * 2
-    assert all(len(model.attention_runtime.backends(phase)) == 1 for phase in ("prefill", "decode"))
+    assert all(len(model.attention_backend_manager.backends(phase)) == 1 for phase in ("prefill", "decode"))
 
 
 def test_gpt_oss_layers_have_sinks_and_sliding_layers_a_window(runtime_start_args, monkeypatch):
@@ -180,7 +180,7 @@ def test_neo_layers_attend_inside_image_spans_in_prefill_only(runtime_start_args
 def test_dflash_layers_attend_only_in_decode_and_not_causally(monkeypatch, sliding_window, expected):
     from lightllm.models.qwen3_dflash2.layer_infer.transformer_layer_infer import Qwen3DFlash2TransformerLayerInfer
 
-    monkeypatch.setattr(attention_runtime, "get_env_start_args", lambda: SimpleNamespace(mtp_mode="dflash2"))
+    monkeypatch.setattr(attention_backend_manager, "get_env_start_args", lambda: SimpleNamespace(mtp_mode="dflash2"))
     net = dict(
         num_attention_heads=H,
         num_key_value_heads=2,
@@ -201,7 +201,7 @@ def test_dflash_layers_attend_only_in_decode_and_not_causally(monkeypatch, slidi
 def test_dflash_decode_needs_an_implementation_of_non_causal_attention(monkeypatch):
     from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
 
-    monkeypatch.setattr(attention_runtime, "get_env_start_args", lambda: SimpleNamespace(mtp_mode="dflash"))
+    monkeypatch.setattr(attention_backend_manager, "get_env_start_args", lambda: SimpleNamespace(mtp_mode="dflash"))
     net = dict(num_attention_heads=H, num_key_value_heads=2, hidden_size=H * D, head_dim=D, rms_norm_eps=1e-6)
     layer = Qwen3DFlashTransformerLayerInfer(0, net)
     with pytest.raises(ValueError, match="does not support"):
@@ -283,7 +283,7 @@ def test_glm5_sparse_spec_describes_the_cache_without_a_workspace(kv_type, expec
     layer.tp_q_head_num_, layer.kv_lora_rank, layer.softmax_scale = 64, 512, 0.0625
     layer.network_config_ = {"index_topk": 2048, "index_kpool": 4}
     model = SimpleNamespace(args=SimpleNamespace(llm_kv_type=kv_type), data_type=torch.bfloat16)
-    spec = layer.attention_spec(model)
+    spec = layer.attention_config(model)
     assert spec.prefill == spec.decode
     assert spec.prefill.kv_cache_format == expected_format
     assert spec.prefill_implementation == spec.decode_implementation == "flashmla_sparse"

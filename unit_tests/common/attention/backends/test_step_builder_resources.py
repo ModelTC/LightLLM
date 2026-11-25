@@ -14,14 +14,14 @@ from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQADecod
 from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLAPrefillLayerConfig
 from lightllm.common.attention.backends.mla.fa3 import FA3MLADecodeBackend
 from lightllm.common.attention.backends.mla.flashinfer import FlashInferMLADecodeBackend, FlashInferMLAPrefillBackend
-from lightllm.common.basemodel import attention_runtime
+from lightllm.common.basemodel import attention_backend_manager
 from lightllm.utils import workspace_utils
-from lightllm.common.basemodel.attention_runtime import attention_build_resources
+from lightllm.common.basemodel.attention_backend_manager import attention_build_resources
 from unit_tests.common.attention.backends.groups_runner import build_context
 
 
 def context(monkeypatch, **overrides):
-    monkeypatch.setattr(attention_runtime, "get_current_device_id", lambda: 0)
+    monkeypatch.setattr(attention_backend_manager, "get_current_device_id", lambda: 0)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
     args = dict(
         mtp_step=0,
