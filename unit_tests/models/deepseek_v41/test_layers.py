@@ -258,3 +258,74 @@ def test_q_rope_in_place_matches_separate_output(heads, padded):
     graph.replay()
     torch.testing.assert_close(active, expected, rtol=0, atol=0)
     torch.testing.assert_close(storage[:, heads:], original[:, heads:], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("tokens", [0, 1, 6, 17, 513])
+@pytest.mark.parametrize("heads", [2, 8])
+@pytest.mark.parametrize("vision", [False, True])
+def test_engram_fused_hash_matches_torch_for_ragged_inputs_and_graph(monkeypatch, tokens, heads, vision):
+    from lightllm.models.deepseek_v41 import engram
+
+    config = dict(
+        vision_n_layers=int(vision),
+        engram_compressed_vocab_size=64,
+        engram_pad_token_id=2,
+        engram_max_ngram_size=4,
+        engram_layer_ids=[1, 14],
+        engram_vocab_size=101,
+        engram_n_heads=heads,
+    )
+    monkeypatch.setattr(engram, "build_compressed_token_map", lambda _: (list(range(64)), 64))
+    length = tokens + 132
+    table = torch.randperm(3 * length, device="cuda").int().view(3, length)
+    hasher = engram.EngramHasher(config, None, table.numel())
+    hasher.history.random_(64)
+    hasher.history[table[:, 126].long()] = -1 if vision else 0
+    row = torch.arange(tokens, device="cuda")
+    req = (row % 3).int()
+    position = (row // 3 + torch.tensor([0, 127, 130], device="cuda")[req.long()]).int()
+    ids = torch.randint(64, (tokens,), device="cuda")
+    if vision:
+        ids[::5] = 1000
+    state = SimpleNamespace(
+        input_ids=ids,
+        position_ids=position,
+        dsv4_sparse_req_idx=req,
+        mem_index=table[req.long(), position.long()],
+        req_manager=SimpleNamespace(req_to_token_indexs=table),
+    )
+    before = hasher.history.clone()
+
+    def reference():
+        hasher.history[state.mem_index.long()] = hasher._map_token_ids(ids)
+        positions, reqs = position.long(), req.long()
+        blocked = torch.zeros_like(positions, dtype=torch.bool)
+        previous_tokens = []
+        for shift in range(hasher.order):
+            slot = table[reqs, (positions - shift).clamp_min(0)].long()
+            source = hasher.history[slot]
+            blocked |= (positions < shift) | (source == -1)
+            previous_tokens.append(torch.where(blocked, hasher.pad, source))
+        products = torch.stack(previous_tokens, -1)[:, None, :] * hasher.multipliers[None, :, :]
+        rolling, hashes = products[..., 0], []
+        for shift in range(1, hasher.order):
+            rolling = torch.bitwise_xor(rolling, products[..., shift])
+            hashes.append(rolling[..., None] % hasher.primes[:, (shift - 1) * heads : shift * heads])
+        return torch.cat(hashes, -1) + hasher.offsets
+
+    expected = reference()
+    expected_history = hasher.history.clone()
+    hasher.history.copy_(before)
+    torch.testing.assert_close(hasher(state), expected, atol=0, rtol=0)
+    torch.testing.assert_close(hasher.history, expected_history, atol=0, rtol=0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = hasher(state)
+    ids.random_(64)
+    hasher.history.copy_(before)
+    expected = reference()
+    expected_history = hasher.history.clone()
+    hasher.history.copy_(before)
+    graph.replay()
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    torch.testing.assert_close(hasher.history, expected_history, atol=0, rtol=0)
