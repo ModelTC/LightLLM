@@ -16,7 +16,7 @@ import dataclasses
 import pytest
 import torch
 
-from lightllm.common.attention.backend import AttentionMetadata
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
@@ -47,8 +47,8 @@ def make_batch(token_map, step, layout, *, capacity, microbatch, extra):
         batch_size=len(lengths),
         max_kv_seq_len=max(lengths),
         total_token_num=sum(lengths),
-        cu_q_seq_len=cu_q,
-        cu_kv_seq_len=cu_kv,
+        b1_cu_q_seq_len=cu_q,
+        b1_cu_kv_seq_len=cu_kv,
         pad_req_idx=PAD,
         cuda_graph_max_kv_seq_len=capacity,
         microbatch_index=microbatch,
@@ -59,7 +59,7 @@ def make_batch(token_map, step, layout, *, capacity, microbatch, extra):
         fields.update(decode_rows_per_request=2)
     elif layout == "dynamic_rows":
         fields.update(decode_rows_per_request=3, dynamic_decode_rows=True, b_mtp_index=as_tensor(mtp_index))
-    return AttentionMetadata(**{**fields, **extra(step)})
+    return make_infer_state(**{**fields, **extra(step)})
 
 
 def diverse_groups(step):
@@ -203,7 +203,11 @@ def leaves(value, path=()):
 
 
 def batch_storage(batch):
-    return {t.untyped_storage().data_ptr() for _, t in leaves(batch) if isinstance(t, torch.Tensor)}
+    return {
+        tensor.untyped_storage().data_ptr()
+        for tensor in (*vars(batch).values(), batch.req_to_token_indexs)
+        if isinstance(tensor, torch.Tensor)
+    }
 
 
 def owned_tensors(att_state, *batches):

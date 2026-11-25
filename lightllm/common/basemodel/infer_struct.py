@@ -68,6 +68,10 @@ class InferStateInfo:
         self.multimodal_params: dict = None
         # 本步的执行方式：eager、捕获 decode CUDA Graph，或为回放准备输入。
         self.graph_mode: GraphMode = GraphMode.EAGER
+        self.cuda_graph_max_kv_seq_len: Optional[int] = None
+        self.decode_rows_per_request: int = 1
+        self.dynamic_decode_rows: bool = False
+        self.req_to_mtp_state_index: Optional[torch.Tensor] = None
         self.dist_group: CustomProcessGroup = None
 
         # 在microbatch overlap的运行模式下，用于标记当前 microbatch 的 index 序号
@@ -116,6 +120,18 @@ class InferStateInfo:
         self.dp_output_split_sizes: List[List[int]] = None
         self.dp_input_split_sizes: List[List[int]] = None
 
+    @property
+    def uses_cuda_graph(self) -> bool:
+        return self.graph_mode is not GraphMode.EAGER
+
+    @property
+    def req_to_token_indexs(self) -> torch.Tensor:
+        return self.req_manager.req_to_token_indexs
+
+    @property
+    def pad_req_idx(self) -> Optional[int]:
+        return getattr(self.req_manager, "HOLD_REQUEST_ID", None)
+
     def init_some_extra_state(self, model):
         if self.is_prefill:
             (
@@ -142,6 +158,8 @@ class InferStateInfo:
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
         for attr_name, attr_value in vars(new_infer_state).items():
+            if attr_name == "req_to_mtp_state_index":
+                continue
             if isinstance(attr_value, torch.Tensor):
                 attr_ = getattr(self, attr_name, None)
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():

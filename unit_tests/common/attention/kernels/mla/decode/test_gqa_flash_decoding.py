@@ -5,7 +5,7 @@ import numpy as np
 import torch.nn.functional as F
 import flashinfer
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.attention.backend import AttentionMetadata
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.mla import MLADecodeLayerInputs, MLADecodeLayerConfig
 from lightllm.common.attention.backends.mla.triton import TritonMLADecodeBackend
 
@@ -54,7 +54,7 @@ def test_gqa_flash_decoding(batch, seqlen, heads, nope_head, rope_head):
     )
     # Every request has N_CTX tokens, so the eager tuning length (the average) is N_CTX.
     att_state = TritonMLADecodeBackend.build(
-        AttentionMetadata(
+        make_infer_state(
             req_to_token_indexs=req_to_token_indexs,
             b_req_idx=b_req_idx,
             b_seq_len=b_seq_len,

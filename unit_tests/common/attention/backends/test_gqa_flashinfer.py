@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from lightllm.common.attention.backend import AttentionMetadata
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.flashinfer import (
     FlashInferGQABuilderConfig,
@@ -44,14 +44,14 @@ def make_batch(token_map, req_ids, lengths, query_lengths=None, *, graph_capacit
     lengths_t = torch.tensor(lengths, device="cuda", dtype=torch.int32)
     query_lengths = query_lengths or [1] * len(lengths)
     cu_q = torch.tensor([0, *query_lengths], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
-    return AttentionMetadata(
+    return make_infer_state(
         req_to_token_indexs=token_map,
         b_req_idx=torch.tensor(req_ids, device="cuda", dtype=torch.int32),
         b_seq_len=lengths_t,
         batch_size=len(lengths),
         max_kv_seq_len=max(lengths),
         total_token_num=sum(lengths),
-        cu_q_seq_len=cu_q,
+        b1_cu_q_seq_len=cu_q,
         max_q_seq_len=max(query_lengths),
         cuda_graph_max_kv_seq_len=graph_capacity,
         microbatch_index=microbatch_index,

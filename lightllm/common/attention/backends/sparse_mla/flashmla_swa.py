@@ -7,10 +7,10 @@ import torch
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
     AttentionBuildResources,
     TensorAllocator,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from . import SWASparseMLALayerConfig, SWASparseMLALayerInputs
 
 
@@ -82,7 +82,7 @@ class FlashMLASWAPrefillBackend(
     build_context_type = FlashMLASWABuildContext
 
     @classmethod
-    def build(cls, metadata: Optional[AttentionMetadata], context: FlashMLASWABuildContext) -> FlashMLASWAAttState:
+    def build(cls, metadata: Optional[InferStateInfo], context: FlashMLASWABuildContext) -> FlashMLASWAAttState:
         """The metadata is planned on the GPU at the first kernel call, so it does not depend on metadata."""
         import flash_mla
 

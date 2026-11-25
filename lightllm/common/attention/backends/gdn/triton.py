@@ -7,10 +7,10 @@ import torch
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
     AttentionBuildResources,
     TensorAllocator,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from .. import keep_for_cuda_graph
 from . import GDNLayerConfig, GDNLayerInputs
 
@@ -49,12 +49,12 @@ class GDNPrefillBuildContext:
         """Native state keeps state_mtp_step + 1 SSM slots per request; replay state keeps one."""
         self.ssm_slots_per_request = ssm_slots_per_request
 
-    def prepare(self, batch: AttentionMetadata) -> GDNPrefillAttState:
+    def prepare(self, batch: InferStateInfo) -> GDNPrefillAttState:
         req = batch.b_req_idx
         return GDNPrefillAttState(
             conv_idx=req,
             ssm_idx=req * self.ssm_slots_per_request if self.ssm_slots_per_request != 1 else req,
-            cu_seqlens=batch.cu_q_seq_len,
+            cu_seqlens=batch.b1_cu_q_seq_len,
             has_initial_state=batch.b_ready_cache_len > 0,
         )
 
@@ -65,7 +65,7 @@ class GDNDecodeBuildContext:
         self.replay = replay
         self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
 
-    def prepare(self, batch: AttentionMetadata) -> GDNDecodeAttState:
+    def prepare(self, batch: InferStateInfo) -> GDNDecodeAttState:
         """A CUDA graph step keeps derived tensors per (microbatch, batch size), rewritten in place."""
         from lightllm.common.attention.kernels.gdn.mtp_state_params import build_dynamic_mtp_linear_att_state_params
 
@@ -151,10 +151,10 @@ class TritonGDNPrefillBackend(AttentionBackend[GDNLayerConfig, GDNPrefillAttStat
         att_state: GDNPrefillAttState,
         layer_inputs: GDNLayerInputs,
         *,
-        out: torch.Tensor,
+        out: Optional[torch.Tensor],
         alloc_func: TensorAllocator = torch.empty,
     ) -> torch.Tensor:
-        """Fill and return out [tokens, num_v_heads, head_v_dim]; update the conv and SSM states in place."""
+        """Return the chunk output, copying into out if supplied, and update the conv and SSM states in place."""
         from lightllm.common.attention.kernels.gdn.causal_conv1d import causal_conv1d_fn
         from lightllm.common.attention.kernels.gdn.fused_gdn_gating import fused_gdn_gating
 
@@ -186,7 +186,10 @@ class TritonGDNPrefillBackend(AttentionBackend[GDNLayerConfig, GDNPrefillAttStat
         )
         # The chunk kernel accumulates in float32; index_put does not convert dtypes implicitly.
         ssm_states[att_state.ssm_idx] = last_state.to(ssm_states.dtype, copy=False)
-        out.copy_(core.view(out.shape))
+        output = core.view(tokens, cfg.num_v_heads, cfg.head_v_dim)
+        if out is None:
+            return output
+        out.copy_(output)
         return out
 
     @staticmethod
@@ -196,7 +199,7 @@ class TritonGDNPrefillBackend(AttentionBackend[GDNLayerConfig, GDNPrefillAttStat
     build_context_type = GDNPrefillBuildContext
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: GDNPrefillBuildContext) -> GDNPrefillAttState:
+    def build(cls, metadata: InferStateInfo, context: GDNPrefillBuildContext) -> GDNPrefillAttState:
         return context.prepare(metadata)
 
     @classmethod
@@ -314,7 +317,7 @@ class TritonGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState,
     build_context_type = GDNDecodeBuildContext
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
+    def build(cls, metadata: InferStateInfo, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
         return context.prepare(metadata)
 
     @classmethod

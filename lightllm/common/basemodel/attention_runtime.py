@@ -6,8 +6,7 @@ In order of lifetime:
   the prefill and decode implementations.
 - Model facts, read once when the runtime is created: AttentionBuildResources for the backends'
   build contexts, and AttentionStepConfig for describing steps.
-- Per step: build_attention_metadata describes one InferStateInfo to the backends, and
-  AttentionRuntime.prepare builds one attention state per state_key.
+- Per step: AttentionRuntime.prepare builds one attention state per state_key from InferStateInfo.
 """
 
 from __future__ import annotations
@@ -20,8 +19,7 @@ import torch
 import triton
 
 from lightllm.common.attention import selector
-from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, AttentionMetadata
-from lightllm.common.basemodel.infer_struct import GraphMode
+from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
@@ -130,46 +128,21 @@ def attention_step_config(model: TpPartBaseModel) -> AttentionStepConfig:
 # Per step
 
 
-def build_attention_metadata(
+def configure_attention_step(
     infer_state: InferStateInfo, step_config: AttentionStepConfig = AttentionStepConfig()
-) -> AttentionMetadata:
-    """Describe one step's requests to the backends.
-
-    CUDA graph capture and replay steps carry the graph kv length capacity, so backends can size
-    captured work for every length a replay may see. Speculative decode steps describe how query
-    rows group into requests and where each request's accepted recurrent state lies.
-    """
-    uses_cuda_graph = infer_state.graph_mode is not GraphMode.EAGER
-    if uses_cuda_graph and step_config.cuda_graph_max_kv_seq_len is None:
+) -> InferStateInfo:
+    """Set model-dependent attention inputs on the existing step."""
+    if infer_state.uses_cuda_graph and step_config.cuda_graph_max_kv_seq_len is None:
         raise ValueError(f"a {infer_state.graph_mode.value} step needs the CUDA graph kv length capacity")
     decode = not infer_state.is_prefill
     rows = step_config.decode_rows_per_request if decode else 1
-    return AttentionMetadata(
-        req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
-        b_req_idx=infer_state.b_req_idx,
-        b_seq_len=infer_state.b_seq_len,
-        batch_size=infer_state.batch_size,
-        max_kv_seq_len=infer_state.max_kv_seq_len,
-        total_token_num=infer_state.total_token_num,
-        cu_q_seq_len=infer_state.b1_cu_q_seq_len,
-        cu_kv_seq_len=infer_state.b1_cu_kv_seq_len,
-        b_q_start_loc=infer_state.b_q_start_loc,
-        b_ready_cache_len=infer_state.b_ready_cache_len,
-        max_q_seq_len=infer_state.max_q_seq_len if infer_state.max_q_seq_len is not None else 1,
-        max_ready_cache_len=infer_state.max_cache_len or 0,
-        mem_index=infer_state.mem_index,
-        b_image_token_end=infer_state.b_image_token_end,
-        b_image_token_start=infer_state.b_image_token_start,
-        decode_rows_per_request=rows,
-        dynamic_decode_rows=decode and step_config.dynamic_decode_rows,
-        pad_req_idx=getattr(infer_state.req_manager, "HOLD_REQUEST_ID", None),
-        b_mtp_index=infer_state.b_mtp_index,
-        req_to_mtp_state_index=step_config.req_to_mtp_state_index if rows > 1 else None,
-        b_shared_seq_len=infer_state.b_shared_seq_len,
-        b_shared_radix_node_id=infer_state.b_shared_radix_node_id,
-        cuda_graph_max_kv_seq_len=step_config.cuda_graph_max_kv_seq_len if uses_cuda_graph else None,
-        microbatch_index=infer_state.microbatch_index,
+    infer_state.decode_rows_per_request = rows
+    infer_state.dynamic_decode_rows = decode and step_config.dynamic_decode_rows
+    infer_state.req_to_mtp_state_index = step_config.req_to_mtp_state_index if rows > 1 else None
+    infer_state.cuda_graph_max_kv_seq_len = (
+        step_config.cuda_graph_max_kv_seq_len if infer_state.uses_cuda_graph else None
     )
+    return infer_state
 
 
 # Runtime
@@ -191,8 +164,8 @@ class _StateBuilder:
     def context(self) -> Any:
         return self.backend.create_build_context(self.build_key, self.resources)
 
-    def build(self, metadata: AttentionMetadata) -> Any:
-        return self.backend.build(metadata, self.context)
+    def build(self, infer_state: InferStateInfo) -> Any:
+        return self.backend.build(infer_state, self.context)
 
 
 class AttentionRuntime:
@@ -261,5 +234,5 @@ class AttentionRuntime:
         builders = self.state_builders["prefill" if infer_state.is_prefill else "decode"]
         if not builders:
             return {}
-        metadata = build_attention_metadata(infer_state, self.step_config)
-        return {key: builder.build(metadata) for key, builder in builders.items()}
+        configure_attention_step(infer_state, self.step_config)
+        return {key: builder.build(infer_state) for key, builder in builders.items()}

@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from lightllm.common.attention.backend import AttentionMetadata
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -12,14 +12,14 @@ TOPK = 2048
 
 def make_batch(lengths, *, capacity=None, microbatch=0):
     cu = torch.arange(len(lengths) + 1, device=DEVICE, dtype=torch.int32)
-    return AttentionMetadata(
+    return make_infer_state(
         req_to_token_indexs=torch.zeros((len(lengths), 1), device=DEVICE, dtype=torch.int32),
         b_req_idx=torch.arange(len(lengths), device=DEVICE, dtype=torch.int32),
         b_seq_len=torch.tensor(lengths, device=DEVICE, dtype=torch.int32),
         batch_size=len(lengths),
         max_kv_seq_len=max(lengths),
         total_token_num=sum(lengths),
-        cu_q_seq_len=cu,
+        b1_cu_q_seq_len=cu,
         max_q_seq_len=1,
         cuda_graph_max_kv_seq_len=capacity,
         microbatch_index=microbatch,

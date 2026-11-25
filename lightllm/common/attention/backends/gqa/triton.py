@@ -5,10 +5,10 @@ import torch
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
     AttentionBuildResources,
     TensorAllocator,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from .. import keep_for_cuda_graph
 from . import GQALayerConfig, GQALayerInputs
 
@@ -17,7 +17,7 @@ from . import GQALayerConfig, GQALayerInputs
 class TritonGQADecodeAttState:
     """Attention state for one query per request, in b_req_idx order.
 
-    Index tensors follow AttentionMetadata's layout/device contract.
+    Index tensors follow InferStateInfo's layout and device.
     b_seq_len gives actual positive lengths, including the current token;
     all addressed token-map entries must identify populated cache slots.
 
@@ -90,7 +90,19 @@ def _check_inputs(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs) ->
     assert (layer_inputs.alibi_slopes is not None) == layer_config.has_alibi, "alibi_slopes must match has_alibi"
 
 
-class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, AttentionMetadata, GQALayerInputs]):
+@dataclass(frozen=True)
+class TritonGQAPrefillAttState:
+    b_req_idx: torch.Tensor
+    b_q_start_loc: torch.Tensor
+    b_seq_len: torch.Tensor
+    b_ready_cache_len: torch.Tensor
+    max_q_seq_len: int
+    req_to_token_indexs: torch.Tensor
+    b_image_token_end: Optional[torch.Tensor]
+    b_image_token_start: Optional[torch.Tensor]
+
+
+class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillAttState, GQALayerInputs]):
     def __init__(self, layer_config: GQALayerConfig) -> None:
         """Head dimensions 16, 32, 64, 128, 256 and 512 are supported, with softmax_scale 1/sqrt(head_dim)."""
         super().__init__(layer_config)
@@ -98,7 +110,7 @@ class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, AttentionMetadata
 
     def forward(
         self,
-        att_state: AttentionMetadata,
+        att_state: TritonGQAPrefillAttState,
         layer_inputs: GQALayerInputs,
         *,
         out: torch.Tensor,
@@ -192,8 +204,17 @@ class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, AttentionMetadata
         return "triton_gqa_prefill"
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: None = None) -> AttentionMetadata:
-        return metadata
+    def build(cls, infer_state: InferStateInfo, context: None = None) -> TritonGQAPrefillAttState:
+        return TritonGQAPrefillAttState(
+            b_req_idx=infer_state.b_req_idx,
+            b_q_start_loc=infer_state.b_q_start_loc,
+            b_seq_len=infer_state.b_seq_len,
+            b_ready_cache_len=infer_state.b_ready_cache_len,
+            max_q_seq_len=infer_state.max_q_seq_len,
+            req_to_token_indexs=infer_state.req_to_token_indexs,
+            b_image_token_end=infer_state.b_image_token_end,
+            b_image_token_start=infer_state.b_image_token_start,
+        )
 
 
 class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAttState, GQALayerInputs]):
@@ -319,7 +340,7 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
     build_context_type = TritonGQADecodeBuildContext
 
     @classmethod
-    def build(cls, metadata: AttentionMetadata, context: TritonGQADecodeBuildContext) -> TritonGQADecodeAttState:
+    def build(cls, metadata: InferStateInfo, context: TritonGQADecodeBuildContext) -> TritonGQADecodeAttState:
         """Kernels read the request tensors directly; a CUDA graph step bounds lengths by the graph
         capacity and keeps the speculative-decode groups per (microbatch, metadata size)."""
         if metadata.uses_cuda_graph:
@@ -344,7 +365,7 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
             kv_seq_len_bound=bound,
             max_kv_seq_len=metadata.max_kv_seq_len,
             total_token_bound=total_bound,
-            b_kv_start_loc=None if metadata.cu_kv_seq_len is None else metadata.cu_kv_seq_len[:-1],
+            b_kv_start_loc=None if metadata.b1_cu_kv_seq_len is None else metadata.b1_cu_kv_seq_len[:-1],
             b_mark_shared_group=markers,
         )
 

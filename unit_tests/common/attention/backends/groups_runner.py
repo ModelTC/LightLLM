@@ -11,7 +11,7 @@ from lightllm.common.basemodel.attention_runtime import (
     AttentionRuntime,
     AttentionSpec,
     AttentionStepConfig,
-    build_attention_metadata,
+    configure_attention_step,
 )
 
 
@@ -73,7 +73,7 @@ class LayerAttention:
     def att_state(self, infer_state, step_config: Optional[AttentionStepConfig] = None) -> Any:
         """Prepare the backend state for this microbatch."""
         phase = "prefill" if infer_state.is_prefill else "decode"
-        batch = build_attention_metadata(infer_state, step_config or AttentionStepConfig())
+        batch = configure_attention_step(infer_state, step_config or AttentionStepConfig())
         return self.selections[phase].backend.build(batch, self.builders[phase])
 
     def run(self, phase: str, att_state, layer_inputs, *, out: torch.Tensor, alloc_func=torch.empty) -> torch.Tensor:

@@ -50,10 +50,12 @@ def test_kda_chunk_and_decode_match_recurrence(tokens):
         out, state = _reference_kda(q[0, i], k[0, i], v[0, i], gate[0, i], beta[0, i], a, bias, state)
         expected.append(out)
     expected = torch.stack(expected).unsqueeze(0)
+    values = v.clone()
+    destination = torch.empty_like(values) if tokens > 64 else None
     actual, final = chunk_kda_with_fused_gate(
         q=q,
         k=k,
-        v=v.clone(),
+        v=values,
         raw_g=gate,
         beta=beta.float().sigmoid(),
         A_log=a,
@@ -63,7 +65,11 @@ def test_kda_chunk_and_decode_match_recurrence(tokens):
         use_qk_l2norm_in_kernel=True,
         cu_seqlens=torch.tensor([0, tokens], dtype=torch.int32, device="cuda"),
         safe_gate=True,
+        out=destination,
     )
+    assert actual is (values if destination is None else destination)
+    if destination is not None:
+        assert torch.equal(values, v)
     torch.testing.assert_close(actual.float(), expected, atol=4e-3, rtol=3e-2)
     torch.testing.assert_close(final[0], state, atol=8e-3, rtol=3e-2)
     # Reuse a nonzero request slot; the neighboring requests must stay intact.

@@ -1,7 +1,8 @@
 """GDN backends at the step-builder/impl level against a sequential fp32 reference, and the decode step
 builder's CUDA graph storage."""
 
-import dataclasses
+from copy import copy
+from dataclasses import replace
 from functools import partial
 
 import pytest
@@ -15,6 +16,7 @@ from lightllm.common.attention.backends.gdn.triton import (
     TritonGDNDecodeBackend,
     TritonGDNPrefillBackend,
 )
+from lightllm.common.basemodel.infer_struct import GraphMode
 from unit_tests.common.attention.backends.linear_ref import (
     CAPACITY,
     HOLD,
@@ -103,7 +105,7 @@ def test_gdn_prefill_then_speculative_decode_matches_reference(prefill, replay, 
     torch.manual_seed(11)
     # FlashQLA's chunk kernel supports only 128-dim key heads, as in Qwen3-Next.
     family = GDNFamily(mtp_step, GDNShape(dk=128, dv=128) if prefill == "flashqla" else None)
-    family.config = dataclasses.replace(family.config, replay=replay)
+    family.config = replace(family.config, replay=replay)
     if prefill == "flashqla":
         from lightllm.common.attention.backends.gdn.flashqla import FlashQLAGDNPrefillBackend as prefill_cls
     else:
@@ -150,7 +152,10 @@ def test_decode_step_builder_rewrites_graph_storage_in_place_per_microbatch(repl
     # A replay of the same graph: same microbatch and batch size, different requests and acceptance.
     batch = _graph_batch([1, 3, 2], [2, 0, 1], dynamic=dynamic, microbatch_index=0, lengths=[2, 3, 1])
     replayed = builder.prepare(batch)
-    eager = GDNDecodeBuildContext(replay=replay).prepare(dataclasses.replace(batch, cuda_graph_max_kv_seq_len=None))
+    eager_batch = copy(batch)
+    eager_batch.graph_mode = GraphMode.EAGER
+    eager_batch.cuda_graph_max_kv_seq_len = None
+    eager = GDNDecodeBuildContext(replay=replay).prepare(eager_batch)
     for name in FIELDS:
         kept = getattr(replayed, name)
         assert kept.data_ptr() == ptrs[name], f"{name} moved between graph steps"

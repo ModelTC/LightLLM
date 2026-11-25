@@ -10,7 +10,7 @@ import torch
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQAPrefillBackend, FA3GQAPrefillBuildContext
-from lightllm.common.basemodel.attention_runtime import build_attention_metadata
+from lightllm.common.basemodel.attention_runtime import configure_attention_step
 from lightllm.utils import neo_fa3_utils, sgl_utils
 
 
@@ -89,7 +89,7 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token_indexs)
     infer_state.is_prefill = True
     att_state = FA3GQAPrefillBackend.build(
-        build_attention_metadata(infer_state), FA3GQAPrefillBuildContext(page_size=page_size)
+        configure_attention_step(infer_state), FA3GQAPrefillBuildContext(page_size=page_size)
     )
 
     q = torch.randn(3, 2, 16, device="cuda", dtype=torch.bfloat16)

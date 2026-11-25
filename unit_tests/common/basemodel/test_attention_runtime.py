@@ -15,7 +15,7 @@ from lightllm.common.basemodel.attention_runtime import (
     AttentionSpec,
     AttentionStepConfig,
     attention_build_resources,
-    build_attention_metadata,
+    configure_attention_step,
 )
 from lightllm.common.basemodel.layer_infer.gqa_attention import gqa_kv_quant_fields
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
@@ -561,11 +561,9 @@ def test_speculative_decode_batches_carry_the_recurrent_state_index(monkeypatch)
         model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _, rows=rows: rows - 1)
         config = attention_runtime.attention_step_config(model)
         assert config.decode_rows_per_request == rows and config.req_to_mtp_state_index is index
-        assert (
-            attention_runtime.build_attention_metadata(step(prefill=False), config).req_to_mtp_state_index is expected
-        )
+        assert configure_attention_step(step(prefill=False), config).req_to_mtp_state_index is expected
         # Prefill rows are never speculative.
-        assert attention_runtime.build_attention_metadata(step(prefill=True), config).req_to_mtp_state_index is None
+        assert configure_attention_step(step(prefill=True), config).req_to_mtp_state_index is None
     model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: (recurrent, recurrent))
     with pytest.raises(ValueError, match="at most one recurrent state"):
         attention_runtime.recurrent_mtp_state_index(model)
@@ -584,7 +582,7 @@ def test_step_config_is_read_from_the_model_once(monkeypatch, dynamic):
     )
     # Steps read nothing more from the model.
     model.mtp_manager = model.graph_max_len_in_batch = None
-    metadata = build_attention_metadata(step(prefill=False), runtime.step_config)
+    metadata = configure_attention_step(step(prefill=False), runtime.step_config)
     assert (metadata.decode_rows_per_request, metadata.dynamic_decode_rows) == (3, dynamic)
 
 
@@ -592,9 +590,10 @@ def test_step_config_is_read_from_the_model_once(monkeypatch, dynamic):
 def test_only_cuda_graph_steps_carry_the_graph_kv_capacity(graph_mode):
     state = step(prefill=False)
     state.graph_mode = graph_mode
-    metadata = build_attention_metadata(state, AttentionStepConfig(cuda_graph_max_kv_seq_len=512))
+    metadata = configure_attention_step(state, AttentionStepConfig(cuda_graph_max_kv_seq_len=512))
+    assert metadata is state
     assert metadata.cuda_graph_max_kv_seq_len == (None if graph_mode is GraphMode.EAGER else 512)
     assert metadata.uses_cuda_graph == (graph_mode is not GraphMode.EAGER)
     if graph_mode is not GraphMode.EAGER:
         with pytest.raises(ValueError, match="kv length capacity"):
-            build_attention_metadata(state, AttentionStepConfig())
+            configure_attention_step(state, AttentionStepConfig())

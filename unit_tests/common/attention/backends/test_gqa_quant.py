@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from lightllm.common.attention.backend import AttentionMetadata
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
 from lightllm.common.attention.backends.gqa.flashinfer import (
@@ -90,15 +90,16 @@ def make_batch(token_map, *, prefill):
     lengths = torch.tensor(LENGTHS, device="cuda", dtype=torch.int32)
     q_lens = [n - r for n, r in zip(LENGTHS, READY)] if prefill else [1] * len(LENGTHS)
     cu_q = torch.tensor([0, *q_lens], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
-    return AttentionMetadata(
+    return make_infer_state(
+        is_prefill=prefill,
         req_to_token_indexs=token_map,
         b_req_idx=torch.tensor(REQ_IDS, device="cuda", dtype=torch.int32),
         b_seq_len=lengths,
         batch_size=len(LENGTHS),
         max_kv_seq_len=max(LENGTHS),
         total_token_num=sum(LENGTHS),
-        cu_q_seq_len=cu_q,
-        cu_kv_seq_len=torch.tensor([0, *LENGTHS], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32),
+        b1_cu_q_seq_len=cu_q,
+        b1_cu_kv_seq_len=torch.tensor([0, *LENGTHS], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32),
         b_q_start_loc=cu_q[:-1],
         b_ready_cache_len=torch.tensor(READY if prefill else [n - 1 for n in LENGTHS], device="cuda").int(),
         max_q_seq_len=max(q_lens),

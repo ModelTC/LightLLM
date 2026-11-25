@@ -6,10 +6,10 @@ import triton
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
     AttentionBuildResources,
     TensorAllocator,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from .. import keep_for_cuda_graph
 from ..flashinfer_env import set_flashinfer_envs
 from . import MLADecodeLayerConfig, MLADecodeLayerInputs, MLAPrefillLayerConfig, MLAPrefillLayerInputs
@@ -131,17 +131,15 @@ class FlashInferMLAPrefillBackend(
     build_context_type = FlashInferMLAPrefillBuildContext
 
     @classmethod
-    def build(
-        cls, metadata: AttentionMetadata, context: FlashInferMLAPrefillBuildContext
-    ) -> FlashInferMLAPrefillAttState:
+    def build(cls, metadata: InferStateInfo, context: FlashInferMLAPrefillBuildContext) -> FlashInferMLAPrefillAttState:
         """Plan a fresh wrapper for the step's query and kv offsets."""
         import flashinfer
 
         config = context.config
         wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(context.workspace(), "NHD")
         wrapper.plan(
-            qo_indptr=metadata.cu_q_seq_len.int(),
-            kv_indptr=metadata.cu_kv_seq_len.int(),
+            qo_indptr=metadata.b1_cu_q_seq_len.int(),
+            kv_indptr=metadata.b1_cu_kv_seq_len.int(),
             num_qo_heads=config.num_heads,
             num_kv_heads=config.num_heads,
             head_dim_qk=config.qk_nope_head_dim + config.qk_rope_head_dim,
@@ -214,9 +212,7 @@ class FlashInferMLADecodeBackend(
     build_context_type = FlashInferMLADecodeBuildContext
 
     @classmethod
-    def build(
-        cls, metadata: AttentionMetadata, context: FlashInferMLADecodeBuildContext
-    ) -> FlashInferMLADecodeAttState:
+    def build(cls, metadata: InferStateInfo, context: FlashInferMLADecodeBuildContext) -> FlashInferMLADecodeAttState:
         """Plan the step's wrapper; every query row is its own request.
 
         A CUDA graph step keeps one wrapper and its index buffers per (microbatch, metadata size).

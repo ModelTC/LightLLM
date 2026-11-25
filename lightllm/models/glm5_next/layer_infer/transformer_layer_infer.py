@@ -413,15 +413,17 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             layer_num=self.layer_num_,
         )
 
-    def _kda_attention(self, inputs: KDALayerInputs, infer_state, *, prefill: bool) -> torch.Tensor:
+    def _kda_attention(self, inputs: KDALayerInputs, infer_state, *, prefill: bool, out=None) -> torch.Tensor:
         x = inputs.mixed_qkv
         impl = self.prefill_impl if prefill else self.decode_impl
+        if not prefill and out is None:
+            out = self.alloc_tensor(
+                (x.shape[0], self.tp_linear_num_heads, self.linear_head_dim), dtype=x.dtype, device=x.device
+            )
         return impl.forward(
             infer_state.att_states[impl.state_key],
             inputs,
-            out=self.alloc_tensor(
-                (x.shape[0], self.tp_linear_num_heads, self.linear_head_dim), dtype=x.dtype, device=x.device
-            ),
+            out=out,
             alloc_func=self.alloc_tensor,
         )
 
@@ -476,9 +478,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         def kda_prefill_func(new_infer_state):
             # The replayed step's own attention state, built by model._create_inferstate().
             inputs = self._kda_layer_inputs(_mixed_qkv, _raw_decay_gate, _beta_logits, new_infer_state, layer_weight)
-            tmp_output = self._kda_attention(inputs, new_infer_state, prefill=True)
-            assert tmp_output.shape == _output.shape
-            _output.copy_(tmp_output)
+            self._kda_attention(inputs, new_infer_state, prefill=True, out=_output)
 
         infer_state.prefill_cuda_graph_add_cpu_runnning_func(
             func=kda_prefill_func,

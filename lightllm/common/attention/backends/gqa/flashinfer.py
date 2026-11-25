@@ -6,10 +6,10 @@ import triton
 
 from lightllm.common.attention.backend import (
     AttentionBackend,
-    AttentionMetadata,
     AttentionBuildResources,
     TensorAllocator,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from ..flashinfer_env import set_flashinfer_envs
 from . import GQALayerConfig, GQALayerInputs
 
@@ -49,7 +49,7 @@ class FlashInferGQADecodeAttState:
     config: FlashInferGQABuilderConfig
 
 
-def _page_metadata(batch: AttentionMetadata, page_size: int, kv_indices: torch.Tensor):
+def _page_metadata(batch: InferStateInfo, page_size: int, kv_indices: torch.Tensor):
     """Return per-request page offsets and last-page lengths, writing page ids into kv_indices."""
     from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
     from lightllm.common.basemodel.triton_kernel.repack_kv_index import repack_kv_index
@@ -100,7 +100,7 @@ class FlashInferGQADecodeBuildContext:
         ]
         self._cuda_graph_wrappers: dict[tuple[int, int], tuple] = {}
 
-    def _fast_replan(self, wrapper, kv_starts, kv_indices, kv_last_page_len, batch: AttentionMetadata) -> None:
+    def _fast_replan(self, wrapper, kv_starts, kv_indices, kv_last_page_len, batch: InferStateInfo) -> None:
         from flashinfer.decode import fast_decode_plan
 
         config = self.config
@@ -201,14 +201,12 @@ class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQA
     build_context_type = FlashInferGQAPrefillBuildContext
 
     @classmethod
-    def build(
-        cls, metadata: AttentionMetadata, context: FlashInferGQAPrefillBuildContext
-    ) -> FlashInferGQAPrefillAttState:
+    def build(cls, metadata: InferStateInfo, context: FlashInferGQAPrefillBuildContext) -> FlashInferGQAPrefillAttState:
         """Build and plan a prefill wrapper for the step's packed queries and paged cache."""
         import flashinfer
 
         config = context.config
-        q_starts = metadata.cu_q_seq_len.int()
+        q_starts = metadata.b1_cu_q_seq_len.int()
         kv_indices = torch.empty(
             metadata.batch_size * context.max_pages_per_request, dtype=torch.int32, device=metadata.b_seq_len.device
         )
@@ -274,9 +272,7 @@ class FlashInferGQADecodeBackend(AttentionBackend[GQALayerConfig, FlashInferGQAD
     build_context_type = FlashInferGQADecodeBuildContext
 
     @classmethod
-    def build(
-        cls, metadata: AttentionMetadata, context: FlashInferGQADecodeBuildContext
-    ) -> FlashInferGQADecodeAttState:
+    def build(cls, metadata: InferStateInfo, context: FlashInferGQADecodeBuildContext) -> FlashInferGQADecodeAttState:
         """Build the attention state, planning FlashInfer's decode wrapper for this step.
 
         Each metadata row is planned as its own request, so speculative decode rows need no

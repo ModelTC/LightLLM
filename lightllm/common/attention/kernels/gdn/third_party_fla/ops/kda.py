@@ -1084,6 +1084,7 @@ def _chunk_kda_fwd_with_cumulative_g(
     cu_seqlens: torch.Tensor,
     chunk_indices: torch.Tensor | None = None,
     chunk_size: int = FLA_CHUNK_SIZE,
+    out: torch.Tensor | None = None,
 ):
     """Compute KDA state updates and outputs from gate prefix sums.
 
@@ -1101,7 +1102,7 @@ def _chunk_kda_fwd_with_cumulative_g(
         3. Once h and v_new are saved, compute all chunk outputs in parallel using these tensors.
 
     h: [1, chunk_num, head_num, head_dim, value_head_dim]; v_new: [1, total_tokens, head_num, value_head_dim].
-    The output kernel writes into v, overwriting its original values. The returned o shares v's memory.
+    The output kernel writes into out, or reuses v when out is omitted.
     """
     # 1. Build Akk and Aqk for all chunks: [1, total_tokens, head_num, chunk_size], where chunk_size is the chunk size.
     # Akk weights earlier writes in each token's value correction; Aqk weights writes in the chunk output.
@@ -1154,14 +1155,13 @@ def _chunk_kda_fwd_with_cumulative_g(
     del w, u, kg
     # 5. Read each chunk's saved h=S_in and v_new=E to compute outputs in parallel:
     # O=scale*(Q*exp2(G))@S_in + Aqk@E combines the input state and the writes inside the chunk.
-    # Passing o=v overwrites the original values, which are no longer needed at this stage.
     o = chunk_gla_fwd_o_gk(
         q=q,
         v=v_new,
         g=g,
         Aqk=Aqk,
         h=h,
-        o=v,
+        o=v if out is None else out,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -1228,6 +1228,7 @@ def chunk_kda_with_fused_gate_fwd(
     chunk_indices: torch.Tensor | None = None,
     safe_gate: bool = False,
     lower_bound: float = -5.0,
+    out: torch.Tensor | None = None,
 ):
     """Activate packed raw gates and build G in one kernel before the shared KDA path.
 
@@ -1264,6 +1265,7 @@ def chunk_kda_with_fused_gate_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_size=chunk_size,
+        out=out,
     )
 
 
@@ -1320,6 +1322,7 @@ def chunk_kda_with_fused_gate(
     chunk_indices: torch.Tensor | None = None,
     safe_gate: bool = False,
     lower_bound: float = -5.0,
+    out: torch.Tensor | None = None,
     **kwargs,
 ):
     """KDA prefill with 64-token chunks and fused gate activation.
@@ -1383,7 +1386,7 @@ def chunk_kda_with_fused_gate(
            Start from initial_state, or zeros if None. Different requests, heads, and
            blocks of value channels can run in parallel.
         6. chunk_gla_fwd_o_gk: compute O from h and E using the output equation above.
-           Outputs overwrite the contiguous v buffer passed to the output kernel.
+           Outputs go to out if supplied, otherwise they overwrite the contiguous v buffer.
 
         Stages 1-4 and 6 process chunks in parallel; only stage 5 passes state between chunks.
 
@@ -1394,6 +1397,8 @@ def chunk_kda_with_fused_gate(
     """
     assert q.ndim == 4 and q.shape[0] == 1, "KDA prefill expects packed q shaped [1, total_tokens, head_num, head_dim]"
     assert cu_seqlens is not None, "cu_seqlens is required for packed KDA prefill"
+    if out is not None:
+        assert out.shape == v.shape and out.dtype == v.dtype and out.device == v.device and out.is_contiguous()
     if scale is None:
         head_dim = k.shape[-1]
         scale = head_dim ** -0.5
@@ -1417,5 +1422,6 @@ def chunk_kda_with_fused_gate(
         chunk_indices=chunk_indices,
         safe_gate=safe_gate,
         lower_bound=lower_bound,
+        out=out,
     )
     return o, final_state

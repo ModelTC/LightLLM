@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from lightllm.common.attention.backend import AttentionMetadata
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.mla import (
     MLADecodeLayerConfig,
     MLADecodeLayerInputs,
@@ -58,15 +58,15 @@ def paged_token_map(requests, page_size, max_len, seed=0):
 def make_batch(token_map, req_ids, lengths, *, prefill=False, ready=None, rows=1, capacity=None, microbatch=0):
     q_lens = [n - r for n, r in zip(lengths, ready)] if prefill else [1] * len(lengths)
     cu = lambda xs: torch.tensor([0, *xs], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)  # noqa: E731
-    return AttentionMetadata(
+    return make_infer_state(
         req_to_token_indexs=token_map,
         b_req_idx=torch.tensor(req_ids, device="cuda", dtype=torch.int32),
         b_seq_len=torch.tensor(lengths, device="cuda", dtype=torch.int32),
         batch_size=len(lengths),
         max_kv_seq_len=max(lengths),
         total_token_num=sum(lengths),
-        cu_q_seq_len=cu(q_lens),
-        cu_kv_seq_len=cu(lengths),
+        b1_cu_q_seq_len=cu(q_lens),
+        b1_cu_kv_seq_len=cu(lengths),
         b_q_start_loc=cu(q_lens)[:-1],
         b_ready_cache_len=torch.tensor(ready or [n - 1 for n in lengths], device="cuda", dtype=torch.int32),
         max_q_seq_len=max(q_lens),
