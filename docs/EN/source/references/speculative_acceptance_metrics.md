@@ -38,3 +38,8 @@ Final counters and histograms use the same snapshot at request release. If
 HTTP metadata was assembled before an overlapping verification completed,
 `http_counter_snapshot` preserves the earlier counters for comparison. The
 final response uses the counters from the release-time snapshot.
+
+When an application stop ends the response before the backend finishes,
+`visible_output_tokens` and `committed` are clipped at the stop packet's token
+count. `backend_visible_output_tokens` retains the backend's original length.
+Verification histograms and native counters still describe all verified work.

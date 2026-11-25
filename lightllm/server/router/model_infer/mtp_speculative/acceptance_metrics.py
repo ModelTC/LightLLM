@@ -1,6 +1,9 @@
 """Collect speculative acceptance statistics for each request."""
 
 
+from lightllm.utils.spec_acceptance_metrics import summarize_committed_output
+
+
 class SpecAcceptanceMetrics:
     def __init__(self):
         self.bootstrap = {}
@@ -59,17 +62,6 @@ class SpecAcceptanceMetrics:
         if visible_output_tokens is not None:
             result["visible_output_tokens"] = visible_output_tokens
             result["inferred_output_tokens"] = inferred_output_tokens
-            committed = dict(proposal_rounds=0, output_tokens=0, accepted_draft_tokens=0, unused_proposal_rounds=0)
-            for bootstrap, width, length, start in self.output_ranges:
-                if bootstrap:
-                    continue
-                visible = max(0, min(length, visible_output_tokens - start + 1))
-                if visible:
-                    committed["proposal_rounds"] += 1
-                    committed["output_tokens"] += visible
-                    committed["accepted_draft_tokens"] += min(length - 1, visible)
-                else:
-                    committed["unused_proposal_rounds"] += 1
-            result["committed"] = committed
+            result["committed"] = summarize_committed_output(self.output_ranges, visible_output_tokens)
             result["verification_output_ranges"] = [list(row) for row in self.output_ranges]
         return result

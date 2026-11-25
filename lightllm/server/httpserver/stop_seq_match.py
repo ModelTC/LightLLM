@@ -7,10 +7,28 @@ from typing import TYPE_CHECKING, AsyncGenerator
 from lightllm.server.core.objs import FinishStatus, SamplingParams
 
 from lightllm.server.reasoning_parser import ReasoningParser
+from lightllm.utils.spec_acceptance_metrics import trim_spec_acceptance_metrics
 
 if TYPE_CHECKING:
     from lightllm.server.httpserver.manager import HttpServerManager
     from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
+
+
+def _merge_stop_metrics(stop_metadata, final_metadata):
+    metadata = dict(stop_metadata)
+    for name in (
+        "spec_acceptance_metrics",
+        "mtp_accepted_token_num",
+        "mtp_verify_token_num",
+        "mtp_verify_step_num",
+    ):
+        if name in final_metadata:
+            metadata[name] = final_metadata[name]
+    if metadata.get("spec_acceptance_metrics") is not None and "count_output_tokens" in stop_metadata:
+        metadata["spec_acceptance_metrics"] = trim_spec_acceptance_metrics(
+            metadata["spec_acceptance_metrics"], stop_metadata["count_output_tokens"]
+        )
+    return metadata
 
 
 class ReasoningStateMachine:
@@ -102,7 +120,8 @@ class StopTokenIdsMatchBuffer:
     WAIT_LAST_PACK | 后端已结束             | True                  | STOPPED        | 原样输出后端结束状态和最终 metadata
 
     错误或没有 token ID 的输出不更新匹配历史；正常结束 token 先匹配再结束，错误状态优先保留。
-    需要最终 metadata 时，命中 stop 保留后端结束状态；后端未结束才进入 WAIT_LAST_PACK。
+    既有最终 metadata 模式保留后端结束状态；仅启用接受统计时保留应用 stop，
+    等待最终统计期间丢弃迟到文本。
     """
 
     class State(Enum):
@@ -117,6 +136,13 @@ class StopTokenIdsMatchBuffer:
     ):
         self._httpserver_manager = httpserver_manager
         self._needs_final_metadata = StopTokenIdsMatchBuffer.needs_final_metadata(httpserver_manager, sampling_params)
+        self._preserve_application_stop = (
+            self._needs_final_metadata
+            and not StopTokenIdsMatchBuffer.needs_final_metadata(
+                httpserver_manager, sampling_params, include_spec_metrics=False
+            )
+        )
+        self._pending_stop_output = None
         self.state = self.State.MATCHING
         self._stop_token_ids_list = sampling_params.stop_sequences.to_token_ids_list()
         self._tail_stop_token_ids: set[int] = {ids[-1] for ids in self._stop_token_ids_list}
@@ -145,13 +171,20 @@ class StopTokenIdsMatchBuffer:
 
         match matched, finish_status.is_finished():
             case True, backend_finished:
-                if self._needs_final_metadata:
+                if self._preserve_application_stop:
+                    output_finish = FinishStatus(FinishStatus.FINISHED_STOP)
+                    self.state = self.State.STOPPED if backend_finished else self.State.WAIT_LAST_PACK
+                elif self._needs_final_metadata:
                     output_finish = finish_status
                     self.state = self.State.STOPPED if backend_finished else self.State.WAIT_LAST_PACK
                 else:
                     output_finish = FinishStatus(FinishStatus.FINISHED_STOP)
                     self.state = self.State.STOPPED
-                self.ready_token_list.append((sub_req_id, request_output, metadata, output_finish))
+                output = (sub_req_id, request_output, metadata, output_finish)
+                if self._preserve_application_stop and not backend_finished:
+                    self._pending_stop_output = output
+                else:
+                    self.ready_token_list.append(output)
                 if not backend_finished:
                     await self._httpserver_manager.stop_request(sub_req_id)
             case False, True:
@@ -165,7 +198,15 @@ class StopTokenIdsMatchBuffer:
         return
 
     async def _handle_wait_last_pack(self, sub_req_id, request_output, metadata, finish_status):
-        """命中 stop 后原样放行后续包，直到后端结束并携带最终 metadata。"""
+        """等待最终 metadata；普通统计请求丢弃 stop 后的文本并保留 stop 状态。"""
+        if self._pending_stop_output is not None:
+            if finish_status.is_finished():
+                req_id, text, stop_metadata, stop_finish = self._pending_stop_output
+                stop_metadata = _merge_stop_metrics(stop_metadata, metadata)
+                self.ready_token_list.append((req_id, text, stop_metadata, stop_finish))
+                self._pending_stop_output = None
+                self.state = self.State.STOPPED
+            return
         self.ready_token_list.append((sub_req_id, request_output, metadata, finish_status))
         if finish_status.is_finished():
             self.state = self.State.STOPPED
@@ -185,11 +226,11 @@ class StopTokenIdsMatchBuffer:
         return False
 
     @staticmethod
-    def needs_final_metadata(httpserver_manager, sampling_params):
+    def needs_final_metadata(httpserver_manager, sampling_params, include_spec_metrics=True):
         return (
             httpserver_manager.args.enable_rl
             or httpserver_manager.args.enable_return_routed_experts
-            or getattr(httpserver_manager.args, "enable_spec_acceptance_metrics", False)
+            or (include_spec_metrics and getattr(httpserver_manager.args, "enable_spec_acceptance_metrics", False))
             or sampling_params.prompt_logprobs >= 0
         )
 
@@ -228,7 +269,8 @@ class StopStrMatchBuffer:
     未结束时，只暂存可能组成 stop 的尾部；遇到思维链或模拟 token 时释放缓冲并重置匹配历史。
     本缓冲只处理字符串；token ID stop 在内层 StopTokenIdsMatchBuffer 和推理层中独立匹配。
     输入和 ready_token_list 均使用生成器的四元组结构，文本截断为空时也保留原始 metadata。
-    需要最终 metadata 时，命中包只截断文本，保留后端结束状态；后端未结束才进入 WAIT_LAST_PACK。
+    既有最终 metadata 模式保留后端结束状态；仅启用接受统计时保留应用 stop，
+    等待最终统计期间丢弃迟到文本。
     """
 
     class State(Enum):
@@ -245,6 +287,13 @@ class StopStrMatchBuffer:
     ):
         self._httpserver_manager = httpserver_manager
         self._needs_final_metadata = StopTokenIdsMatchBuffer.needs_final_metadata(httpserver_manager, sampling_params)
+        self._preserve_application_stop = (
+            self._needs_final_metadata
+            and not StopTokenIdsMatchBuffer.needs_final_metadata(
+                httpserver_manager, sampling_params, include_spec_metrics=False
+            )
+        )
+        self._pending_stop_output = None
         self.state = self.State.SCANNING
         stop_strings = sampling_params.stop_sequences.to_stop_str_list()
         # 长度降序的字面量分支：同一位置优先最长 stop，partial=True 同时识别待补全的尾部。
@@ -291,7 +340,12 @@ class StopStrMatchBuffer:
         matched = self._match_and_release_token(sub_req_id, request_output, metadata, output_finish)
         match matched, finish_status.is_finished():
             case True, backend_finished:
-                if self._needs_final_metadata:
+                if self._preserve_application_stop:
+                    output_finish.status = FinishStatus.FINISHED_STOP
+                    self.state = self.State.STOPPED if backend_finished else self.State.WAIT_LAST_PACK
+                    if not backend_finished:
+                        self._pending_stop_output = self.ready_token_list.pop()
+                elif self._needs_final_metadata:
                     self.state = self.State.STOPPED if backend_finished else self.State.WAIT_LAST_PACK
                 else:
                     output_finish.status = FinishStatus.FINISHED_STOP
@@ -312,7 +366,12 @@ class StopStrMatchBuffer:
         matched = self._match_and_release_token(sub_req_id, request_output, metadata, output_finish)
         match matched, finish_status.is_finished():
             case True, backend_finished:
-                if self._needs_final_metadata:
+                if self._preserve_application_stop:
+                    output_finish.status = FinishStatus.FINISHED_STOP
+                    self.state = self.State.STOPPED if backend_finished else self.State.WAIT_LAST_PACK
+                    if not backend_finished:
+                        self._pending_stop_output = self.ready_token_list.pop()
+                elif self._needs_final_metadata:
                     self.state = self.State.STOPPED if backend_finished else self.State.WAIT_LAST_PACK
                 else:
                     output_finish.status = FinishStatus.FINISHED_STOP
@@ -331,7 +390,15 @@ class StopStrMatchBuffer:
         return
 
     async def _handle_wait_last_pack(self, sub_req_id, request_output, metadata, finish_status):
-        """命中 stop 后原样放行后续包，直到后端结束并携带最终 metadata。"""
+        """等待最终 metadata；普通统计请求丢弃 stop 后的文本并保留 stop 状态。"""
+        if self._pending_stop_output is not None:
+            if finish_status.is_finished():
+                req_id, text, stop_metadata, stop_finish = self._pending_stop_output
+                stop_metadata = _merge_stop_metrics(stop_metadata, metadata)
+                self.ready_token_list.append((req_id, text, stop_metadata, stop_finish))
+                self._pending_stop_output = None
+                self.state = self.State.STOPPED
+            return
         self.ready_token_list.append((sub_req_id, request_output, metadata, finish_status))
         if finish_status.is_finished():
             self.state = self.State.STOPPED

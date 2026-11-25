@@ -880,6 +880,11 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         if req_num > 0:
             verify_event.synchronize()
+            verify_ok_reqs0 = [req for req, accepted in zip(run_reqs0, accepted_index_cpu0.tolist()) if accepted]
+            verify_ok_reqs1 = [req for req, accepted in zip(run_reqs1, accepted_index_cpu1.tolist()) if accepted]
+            verify_ok_reqs = verify_ok_reqs0 + verify_ok_reqs1
+            update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
+
             mtp_utils.record_request_mtp_metrics(
                 backend=self,
                 decode_reqs=decode_reqs0,
@@ -892,10 +897,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 accept_lengths_cpu=mtp_accept_len_cpu1,
                 verify_run_reqs=run_reqs1,
             )
-            verify_ok_reqs0 = [req for req, accepted in zip(run_reqs0, accepted_index_cpu0.tolist()) if accepted]
-            verify_ok_reqs1 = [req for req, accepted in zip(run_reqs1, accepted_index_cpu1.tolist()) if accepted]
-            verify_ok_reqs = verify_ok_reqs0 + verify_ok_reqs1
-            update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
