@@ -4,37 +4,55 @@ import torch
 import triton
 import triton.language as tl
 from triton.language.extra import libdevice
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_num_warps
 
 
 @triton.jit
-def _pool_pairs(
+def _pool_and_norm_pairs(
     KV,
     SCORE,
     REQ,
     POS,
     STATE,
     OUT,
+    NORM,
+    EPS,
     D: tl.constexpr,
     STATE_STRIDE: tl.constexpr,
     KV_STRIDE: tl.constexpr,
     SCORE_STRIDE: tl.constexpr,
+    SKIP_OPEN_GROUPS: tl.constexpr,
 ):
     row = tl.program_id(0)
     cols = tl.arange(0, D)
-    req = tl.load(REQ + row)
     pos = tl.load(POS + row)
-    previous_req = tl.load(REQ + row - 1, row > 0, -1)
-    in_batch = (row > 0) & (previous_req == req)
+    pair_end = pos % 2 == 1
+    if SKIP_OPEN_GROUPS:
+        if not pair_end:
+            # The dense latent still feeds the indexer projection. Match the
+            # signed zero produced by the normal RMSNorm weight multiply.
+            weight = tl.load(NORM + cols).to(tl.float32)
+            tl.store(OUT + row * D + cols, 0.0 * weight)
+            return
+    req = tl.load(REQ + row)
+    previous_req = tl.load(REQ + row - 1, pair_end & (row > 0), -1)
+    in_batch = pair_end & (row > 0) & (previous_req == req)
     previous_kv = tl.load(KV + (row - 1) * KV_STRIDE + cols, in_batch, 0.0)
     previous_score = tl.load(SCORE + (row - 1) * SCORE_STRIDE + cols, in_batch, 0.0)
     previous_state = STATE + req * STATE_STRIDE
-    previous_kv += tl.load(previous_state + cols, ~in_batch & (pos % 2 == 1), 0.0)
-    previous_score += tl.load(previous_state + D + cols, ~in_batch & (pos % 2 == 1), 0.0)
-    current_kv = tl.load(KV + row * KV_STRIDE + cols)
-    current_score = tl.load(SCORE + row * SCORE_STRIDE + cols)
+    from_state = pair_end & ~in_batch
+    previous_kv += tl.load(previous_state + cols, from_state, 0.0)
+    previous_score += tl.load(previous_state + D + cols, from_state, 0.0)
+    current_kv = tl.load(KV + row * KV_STRIDE + cols, pair_end, 0.0)
+    current_score = tl.load(SCORE + row * SCORE_STRIDE + cols, pair_end, 0.0)
     gate = tl.sigmoid(current_score - previous_score)
     pooled = previous_kv + (current_kv - previous_kv) * gate
-    tl.store(OUT + row * D + cols, tl.where((pos + 1) % 2 == 0, pooled, 0.0))
+    # Match the BF16 intermediate and separately rounded FP32 squares of RMSNorm.
+    pooled = pooled.to(tl.bfloat16).to(tl.float32)
+    variance = tl.sum(libdevice.mul_rn(pooled, pooled), axis=0) / D
+    rstd = 1 / tl.sqrt(variance + EPS)
+    weight = tl.load(NORM + cols).to(tl.float32)
+    tl.store(OUT + row * D + cols, (pooled * rstd) * weight)
 
 
 @triton.jit
@@ -63,19 +81,23 @@ def _commit_pair_state(
     tl.store(dest + D + cols, tl.load(SCORE + row * SCORE_STRIDE + cols), commit)
 
 
-def pool_pairs(kv, score, req, positions, state, hold_request):
+def pool_and_norm_pairs(kv, score, req, positions, state, hold_request, norm_weight, eps):
     out = torch.empty_like(kv, dtype=torch.bfloat16)
-    _pool_pairs[(kv.shape[0],)](
+    _pool_and_norm_pairs[(kv.shape[0],)](
         kv,
         score,
         req,
         positions,
         state,
         out,
+        norm_weight,
+        eps,
         kv.shape[1],
         state.stride(0),
         kv.stride(0),
         score.stride(0),
+        SKIP_OPEN_GROUPS=kv.shape[0] >= 1024,
+        num_warps=rmsnorm_num_warps,
     )
     # Commit after scoring so current rows cannot overwrite another query's previous-step history.
     _commit_pair_state[(kv.shape[0],)](

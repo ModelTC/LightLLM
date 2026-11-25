@@ -1,9 +1,10 @@
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from lightllm.models.deepseek_v41.triton_kernel.attention import pool_pairs, select_indexer_topk
+from lightllm.models.deepseek_v41.triton_kernel.attention import pool_and_norm_pairs, select_indexer_topk
 
 
 @pytest.mark.parametrize("split", [1, 3, 5])
@@ -11,14 +12,16 @@ def test_c2_carries_partial_groups_across_chunk_boundaries(split):
     kv, scores = torch.randn(7, 1024, device="cuda").split(512, -1)
     positions = torch.arange(7, dtype=torch.int32, device="cuda")
     req = torch.zeros(7, dtype=torch.int32, device="cuda")
-    state = torch.zeros(2, 2, 2, 512, device="cuda")
-    first = pool_pairs(kv[:split], scores[:split], req[:split], positions[:split], state, 1)
-    second = pool_pairs(kv[split:], scores[split:], req[split:], positions[split:], state, 1)
+    state = torch.zeros(2, 4, 2, 512, device="cuda")
+    weight = torch.rand(512, dtype=torch.bfloat16, device="cuda")
+    eps = 1e-6
+    first = pool_and_norm_pairs(kv[:split], scores[:split], req[:split], positions[:split], state, 1, weight, eps)
+    second = pool_and_norm_pairs(kv[split:], scores[split:], req[split:], positions[split:], state, 1, weight, eps)
     output = torch.cat((first, second))
     assert output[::2].count_nonzero() == 0
     actual = output[1::2]
     expected = (kv[:6].view(3, 2, 512) * scores[:6].view(3, 2, 512).softmax(1)).sum(1).bfloat16()
-    torch.testing.assert_close(actual, expected, atol=0.015625, rtol=0.008)
+    torch.testing.assert_close(actual, rmsnorm_forward(expected, weight, eps), atol=0.015625, rtol=0.008)
     torch.testing.assert_close(state[0, 0, 0], kv[-1])
     torch.testing.assert_close(state[0, 0, 1], scores[-1])
 
@@ -26,13 +29,17 @@ def test_c2_carries_partial_groups_across_chunk_boundaries(split):
 def test_c2_does_not_cross_request_boundaries_or_commit_hold():
     kv = torch.randn(4, 512, device="cuda")
     scores = torch.randn_like(kv)
-    state = torch.randn(3, 2, 2, 512, device="cuda")
+    state = torch.randn(3, 4, 2, 512, device="cuda")
     previous = state.clone()
     req = torch.tensor([0, 0, 1, 2], dtype=torch.int32, device="cuda")
     pos = torch.tensor([0, 1, 1, 0], dtype=torch.int32, device="cuda")
-    out = pool_pairs(kv, scores, req, pos, state, 2)
+    weight = torch.rand(512, dtype=torch.bfloat16, device="cuda")
+    eps = 1e-6
+    out = pool_and_norm_pairs(kv, scores, req, pos, state, 2, weight, eps)
     expected = previous[1, 0, 0] + (kv[2] - previous[1, 0, 0]) * torch.sigmoid(scores[2] - previous[1, 0, 1])
-    torch.testing.assert_close(out[2], expected.bfloat16(), atol=0.015625, rtol=0.008)
+    torch.testing.assert_close(
+        out[2], rmsnorm_forward(expected.bfloat16()[None], weight, eps)[0], atol=0.015625, rtol=0.008
+    )
     torch.testing.assert_close(state[2], previous[2])
 
 

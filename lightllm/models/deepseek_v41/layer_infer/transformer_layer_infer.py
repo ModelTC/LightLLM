@@ -7,7 +7,7 @@ from ..engram import engram_forward
 from ..infer_struct import DeepseekV41InferStateInfo
 from ..layer_weights.transformer_layer_weight import DeepseekV41TransformerLayerWeight
 from ..triton_kernel.attention import (
-    pool_pairs,
+    pool_and_norm_pairs,
     destindex_copy_kv_dsv41,
 )
 
@@ -135,17 +135,18 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
         layer_weight.compressor_wkv_gate_.mm(x, out=projected)
         if ratio == 2:
             kv, score = projected.split(self.head_dim_, -1)
-            latent = pool_pairs(
+            latent = pool_and_norm_pairs(
                 kv,
                 score,
                 infer_state.dsv4_sparse_req_idx,
                 infer_state.position_ids,
                 infer_state.get_compressor_state(self.layer_num_).get_layer_view(self.layer_num_),
                 infer_state.req_manager.HOLD_REQUEST_ID,
+                layer_weight.compressor_norm_.weight,
+                self.eps_,
             )
         else:
-            latent = projected
-        latent = layer_weight.compressor_norm_(latent, eps=self.eps_)
+            latent = layer_weight.compressor_norm_(projected, eps=self.eps_)
         # Main KV and indexer K share the normalized latent, with separate projections and RoPE.
         self.index_infer.write_indexer_k(latent, infer_state, layer_weight)
         destindex_copy_kv_dsv41(
