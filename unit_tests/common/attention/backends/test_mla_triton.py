@@ -14,7 +14,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 
 # The model's step config: graph steps cover 192 kv tokens.
 STEP_CONFIG = AttentionStepConfig(cuda_graph_max_kv_seq_len=192)
-DECODE_SCALE = 576**-0.5
+DECODE_SCALE = 576 ** -0.5
 
 
 def decode_config(scale=DECODE_SCALE):

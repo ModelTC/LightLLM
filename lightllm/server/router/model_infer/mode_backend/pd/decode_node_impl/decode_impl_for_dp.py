@@ -21,8 +21,8 @@ class PDDPForDecodeNode(DPChunkedPrefillBackend):
     def _init_reqs(self, reqs: List[Tuple]):
         return PDDecodeNode._init_reqs(self, reqs=reqs)
 
-    def _post_init_reqs(self, uninit_reqs: List[InferReq]):
-        return PDDecodeNode._post_init_reqs(self, uninit_reqs=uninit_reqs)
+    def _init_pd_receive_tasks(self, req_obj: InferReq):
+        return PDDecodeNode._init_pd_receive_tasks(self, req_obj=req_obj)
 
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
         return PDDecodeNode._filter_not_ready_reqs(self, req_ids=req_ids)

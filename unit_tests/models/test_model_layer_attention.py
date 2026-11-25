@@ -209,7 +209,7 @@ def test_deepseek2_layers_attend_over_expanded_keys_in_prefill_and_the_latent_ca
         topk_group=1,
         rope_scaling=rope_scaling,
     )
-    scale = 192**-0.5 * (get_deepseek_mscale(40, 1.0) ** 2 if rope_scaling else 1.0)
+    scale = 192 ** -0.5 * (get_deepseek_mscale(40, 1.0) ** 2 if rope_scaling else 1.0)
     model = make_model(None, backend="flashinfer")
     layers = [Deepseek2TransformerLayerInfer(i, net) for i in range(2)]
     bind_layers(model, *layers)

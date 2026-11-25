@@ -115,7 +115,7 @@ def _case(heads, ratio):
     layer.flashmla_q_head_num_ = padded_heads
     layer.head_dim_ = layer.v_head_dim = 512
     layer.compress_ratio = ratio
-    layer.softmax_scale = 512**-0.5
+    layer.softmax_scale = 512 ** -0.5
     layer.alloc_tensor = lambda shape, dtype=None, device=None, **_: torch.empty(shape, dtype=dtype, device=device)
     layer.swa_cache_config = config.create_swa_config()
     layer.compressed_cache_config = config.create_compressed_config(compress_ratio=ratio) if ratio else None

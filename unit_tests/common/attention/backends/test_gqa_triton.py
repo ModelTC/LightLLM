@@ -258,21 +258,24 @@ def test_layers_triton_cannot_run_are_rejected_when_selected(phase, fields):
 
 
 # The shared-group kernel has no window, so windowed layers must take the per-row kernel.
-@pytest.mark.parametrize("q_heads,kv_heads,window", [(8, 8, (-1, -1)), (8, 2, (-1, -1)), (8, 2, (15, 0))])
-def test_speculative_decode_rows_share_request_kv(q_heads, kv_heads, window):
+@pytest.mark.parametrize(
+    "q_heads,kv_heads,window,head_dim",
+    [(8, 8, (-1, -1), 64), (8, 2, (-1, -1), 64), (8, 2, (15, 0), 64), (8, 2, (-1, -1), 512)],
+)
+def test_speculative_decode_rows_share_request_kv(q_heads, kv_heads, window, head_dim):
     # Two rows per request; the last row of each sees the longest prefix. PAD rows are padding.
     pad = 7
     token_map = torch.randperm(8 * 512, device="cuda", dtype=torch.int32).view(8, 512)
     req_ids = torch.tensor([2, 2, 0, 0, pad, pad], device="cuda", dtype=torch.int32)
     lengths = torch.tensor([40, 41, 299, 300, 1, 1], device="cuda", dtype=torch.int32)
-    kv = torch.randn(8 * 512, 2 * kv_heads, 64, device="cuda", dtype=torch.bfloat16)
+    kv = torch.randn(8 * 512, 2 * kv_heads, head_dim, device="cuda", dtype=torch.bfloat16)
     k, v = kv[:, :kv_heads], kv[:, kv_heads:]
-    q = torch.randn(6, q_heads, 64, device="cuda", dtype=torch.bfloat16)
+    q = torch.randn(6, q_heads, head_dim, device="cuda", dtype=torch.bfloat16)
     batch = make_batch(token_map, req_ids, lengths, cu_kv_seq_len=None, decode_rows_per_request=2, pad_req_idx=pad)
     att_state = TritonGQADecodeBackend.build(batch, TritonGQADecodeBackend.build_context_type())
     assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 0, 2, 1, 1]
     layer_config = GQALayerConfig(
-        num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16, sliding_window=window
+        num_heads=q_heads, num_kv_heads=kv_heads, head_dim=head_dim, dtype=torch.bfloat16, sliding_window=window
     )
     out = torch.empty_like(q)
     TritonGQADecodeBackend(layer_config).forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out)
@@ -306,7 +309,7 @@ def alibi_reference(q, k, v, token_map, req_ids, lengths, ready, slopes):
     for req_id, length, cached in zip(req_ids.tolist(), lengths.tolist(), ready):
         count = length - cached
         indices = token_map[req_id, :length].long()
-        scores = torch.einsum("qhd,khd->hqk", q[offset : offset + count].float(), k[indices].float()) * 64**-0.5
+        scores = torch.einsum("qhd,khd->hqk", q[offset : offset + count].float(), k[indices].float()) * 64 ** -0.5
         query_pos = torch.arange(cached, length, device=q.device)[:, None]
         key_pos = torch.arange(length, device=q.device)[None, :]
         scores = scores + slopes.float()[:, None, None] * (key_pos - query_pos)[None]
@@ -457,7 +460,7 @@ def test_bidirectional_image_spans_prefill_matches_reference(window, head_dim, s
             mask &= key_pos >= query_pos - window[0]
         # Image queries also see their whole span.
         mask |= (key_pos >= image_start[row : row + count, None]) & (key_pos < image_end[row : row + count, None])
-        scores = torch.einsum("qhd,khd->hqk", q[row : row + count].float(), keys) * head_dim**-0.5
+        scores = torch.einsum("qhd,khd->hqk", q[row : row + count].float(), keys) * head_dim ** -0.5
         scores.masked_fill_(~mask[None], float("-inf"))
         expected.append(torch.einsum("hqk,khd->qhd", scores.softmax(-1), values))
         row += count

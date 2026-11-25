@@ -50,6 +50,11 @@ def get_env_start_args():
     return start_args
 
 
+def cpu_cache_need_store_bounded_state(args) -> bool:
+    """是否允许 CPU cache 保存 bounded 快照；Decode 只缓存 full-att KV。"""
+    return args.run_mode != "decode"
+
+
 def enable_thinking_budget() -> bool:
     """Whether thinking budgets are enabled with a configured reasoning parser."""
     args = get_env_start_args()
@@ -294,6 +299,17 @@ def enable_triton_mtp_kernel() -> bool:
 @lru_cache(maxsize=None)
 def get_disk_cache_prompt_limit_length():
     return int(os.getenv("LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH", 2048))
+
+
+@lru_cache(maxsize=None)
+def get_cpu_cache_min_load_tokens(run_mode: str) -> int:
+    """Decode 默认加载阈值为 2048，可通过环境变量调整；其他角色固定使用 128。"""
+    if run_mode != "decode":
+        return 128
+    threshold = int(os.getenv("LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS", "2048"))
+    if threshold <= 0:
+        raise ValueError("LIGHTLLM_DECODE_CPU_CACHE_MIN_LOAD_TOKENS must be a positive integer")
+    return threshold
 
 
 def get_cache_placement_gpu_capacity_ratio() -> float:

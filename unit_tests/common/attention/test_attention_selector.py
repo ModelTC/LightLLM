@@ -50,6 +50,36 @@ def test_one_name_covers_the_quantized_triton_backend():
     assert selector.select(config, "decode", "triton").backend.get_name() == "triton_quant_gqa_decode"
 
 
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_triton_rejects_unsupported_head_dim_during_selection(phase):
+    config = gqa(head_dim=96)
+    with pytest.raises(ValueError, match="head_dim=96"):
+        selector.select(config, phase, "triton")
+    validated, validate = recorder()
+    selected = selector.select(config, phase, "auto", priority=("triton", "fa3"), validate=validate)
+    assert selected.backend.get_name() == f"fa3_gqa_{phase}"
+    assert validated == ["fa3"]
+
+
+def test_triton_512_head_dim_depends_on_decode_kernel():
+    mha = gqa(head_dim=512, num_kv_heads=8)
+    assert selector.select(mha, "prefill", "triton").backend.get_name() == "triton_gqa_prefill"
+    with pytest.raises(ValueError, match="MHA decode does not support head_dim=512"):
+        selector.select(mha, "decode", "triton")
+    assert selector.select(gqa(head_dim=512), "decode", "triton").backend.get_name() == "triton_gqa_decode"
+
+
+@pytest.mark.parametrize("kind", ["int4_group", "int8_group"])
+def test_quantized_triton_checks_the_head_dims_of_each_kernel(kind):
+    small = gqa(head_dim=32, kv_quant=kind, kv_quant_group_size=8)
+    assert selector.select(small, "decode", "triton").backend.get_name() == "triton_quant_gqa_decode"
+    with pytest.raises(ValueError, match="head dimensions"):
+        selector.select(small, "prefill", "triton")
+    for phase in ("prefill", "decode"):
+        with pytest.raises(ValueError, match="head dimensions"):
+            selector.select(gqa(head_dim=96, kv_quant=kind, kv_quant_group_size=8), phase, "triton")
+
+
 def test_auto_follows_priority_and_validates_only_implementations_that_accept_the_config():
     validated, validate = recorder()
     assert selector.select(gqa(), "prefill", "auto", validate=validate).backend.get_name() == "fa3_gqa_prefill"

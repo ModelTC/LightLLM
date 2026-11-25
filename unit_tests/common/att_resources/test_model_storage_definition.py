@@ -17,6 +17,8 @@ import pytest
 import torch
 
 from lightllm.models.bloom.model import BloomTpPartModel
+from lightllm.models.deepseek2.model import Deepseek2TpPartModel
+from lightllm.models.deepseek3_2.model import Deepseek3_2TpPartModel
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen2.model import Qwen2TpPartModel
 from lightllm.models.starcoder.model import StarcoderTpPartModel
@@ -56,6 +58,24 @@ def args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     get_env_start_args.cache_clear()
     yield value
     get_env_start_args.cache_clear()
+
+
+@pytest.mark.parametrize("model", [Deepseek2TpPartModel, Deepseek3_2TpPartModel])
+@pytest.mark.parametrize("kv_type", ["None", "fp8kv_dsa", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt"])
+def test_deepseek_mla_kv_type_is_resolved_before_allocation(model, kv_type):
+    args = StartArgs(llm_kv_type=kv_type, page_size=1, data_type="bfloat16")
+    config = dict(num_attention_heads=64, num_hidden_layers=1, hidden_size=8192, kv_lora_rank=512, qk_rope_head_dim=64)
+    allowed = (
+        {"None": "mla_bf16"}
+        if model is Deepseek2TpPartModel
+        else {"None": "mla_packed_bf16", "fp8kv_dsa": "mla_packed_fp8_group128"}
+    )
+    if kv_type in allowed:
+        (state,) = model.create_full_att_states(config, args, model_logical_layer_ids=(0,))
+        assert state.get_state_type() == allowed[kv_type]
+    else:
+        with pytest.raises(ValueError, match=f"--llm_kv_type .*{kv_type}"):
+            model.create_full_att_states(config, args, model_logical_layer_ids=(0,))
 
 
 CASES = [

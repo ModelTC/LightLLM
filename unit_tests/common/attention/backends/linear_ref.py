@@ -58,7 +58,7 @@ def gdn_token(shape: GDNShape, params, history, state, x, a, b):
     y, history = conv_token(history, x, params["conv_weight"])
     q, k, v = y.split([shape.hk * shape.dk, shape.hk * shape.dk, shape.hv * shape.dv])
     group = shape.hv // shape.hk
-    q = (l2norm(q.view(shape.hk, shape.dk)) * shape.dk**-0.5).repeat_interleave(group, 0)
+    q = (l2norm(q.view(shape.hk, shape.dk)) * shape.dk ** -0.5).repeat_interleave(group, 0)
     k = l2norm(k.view(shape.hk, shape.dk)).repeat_interleave(group, 0)
     v = v.view(shape.hv, shape.dv)
     g = -params["A_log"].float().exp() * F.softplus(a.float() + params["dt_bias"].float())
@@ -69,7 +69,7 @@ def gdn_token(shape: GDNShape, params, history, state, x, a, b):
 def kda_token(shape: KDAShape, params, history, state, x, gate, beta):
     y, history = conv_token(history, x, params["conv_weight"])
     q, k, v = (part.view(shape.h, shape.d) for part in y.split(shape.h * shape.d))
-    q, k = l2norm(q) * shape.d**-0.5, l2norm(k)
+    q, k = l2norm(q) * shape.d ** -0.5, l2norm(k)
     amplitude = params["A_log"].float().exp()[:, None]
     gate = gate.float().view(shape.h, shape.d) + params["dt_bias"].float().view(shape.h, shape.d)
     decay = torch.exp(shape.lower_bound * torch.sigmoid(amplitude * gate))

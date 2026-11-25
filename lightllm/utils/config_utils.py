@@ -2,7 +2,7 @@ import json
 import os
 from typing import Any, Dict, Optional, List
 from functools import lru_cache
-from .envs_utils import get_env_start_args
+from .envs_utils import get_env_start_args, cpu_cache_need_store_bounded_state
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -30,15 +30,19 @@ def auto_set_page_size(args) -> None:
 
 
 def auto_set_cpu_cache_token_page_size(args, is_hybrid_model: bool) -> None:
-    """Align CPU cache pages with the model's checkpoint boundaries."""
+    """Select CPU cache page sizes for Decode KV or model checkpoints."""
     if not args.enable_cpu_cache:
         return
 
-    if is_hybrid_model:
+    if is_hybrid_model and cpu_cache_need_store_bounded_state(args):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
     elif args.cpu_cache_token_page_size is None:
-        args.cpu_cache_token_page_size = 256
+        if args.run_mode == "decode":
+            default_page_size = 2048
+            args.cpu_cache_token_page_size = (default_page_size + args.page_size - 1) // args.page_size * args.page_size
+        else:
+            args.cpu_cache_token_page_size = 256
 
 
 def get_running_max_req_size_per_dp(args) -> int:
@@ -459,6 +463,7 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
         model_type = model_cfg["model_type"]
         return model_type in [
+            "qwen3_next",
             "qwen3_5",
             "sensenova_loop",
             "qwen3_5_moe",

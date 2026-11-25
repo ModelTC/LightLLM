@@ -933,8 +933,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--enable_cpu_cache",
         action="store_true",
         help="""enable cpu cache to store kv cache. prefer to use hugepages for better performance.
-        For linear attention cache reuse constraints, cpu cache token page size will be forced to
-        linear_att_page_block_num * linear_att_hash_page_size when cpu cache is enabled.""",
+        Normal/Prefill hybrid pages include KV and bounded state checkpoints.
+        PD Decode pages store full-attention KV only; hybrid requests still need matching runtime state.
+        Decode CPU cache cannot be combined with --enable_dp_prompt_cache_fetch when dp > 1.""",
     )
     parser.add_argument(
         "--cpu_cache_storage_size",
@@ -946,9 +947,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--cpu_cache_token_page_size",
         type=int,
         default=None,
-        help="""The token page size of cpu cache. Non-hybrid models default to 256.
-        Hybrid models use linear_att_hash_page_size * linear_att_page_block_num;
-        configure --linear_att_page_block_num to set their checkpoint interval.""",
+        help="""The token page size of cpu cache. Decode defaults to 2048 rounded up to a multiple of --page_size.
+        Normal/Prefill non-hybrid models default to 256. Normal/Prefill hybrid models use
+        linear_att_hash_page_size * linear_att_page_block_num; Decode KV-only pages are independent.""",
     )
     parser.add_argument(
         "--cache_placement_strategy",
@@ -987,7 +988,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--enable_dp_prompt_cache_fetch",
         action="store_true",
         default=False,
-        help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
+        help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.
+        Not supported together with Decode CPU cache when dp > 1.""",
     )
     parser.add_argument(
         "--linear_att_hash_page_size",

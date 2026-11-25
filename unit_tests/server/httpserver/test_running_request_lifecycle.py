@@ -11,6 +11,22 @@ from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken, ServerBusyError
 
 
+@pytest.mark.parametrize("role", [NodeRole.NORMAL, NodeRole.P, NodeRole.D])
+@pytest.mark.parametrize("cpu_cache", [False, True])
+def test_http_routes_cpu_cache_matching_before_router(role, cpu_cache):
+    manager = HttpServerManager.__new__(HttpServerManager)
+    manager.args = SimpleNamespace(disable_vision=True, disable_audio=True, enable_cpu_cache=cpu_cache)
+    manager.pd_mode = role
+    manager.send_to_multi_level_kv_cache = MagicMock()
+    manager.send_to_router = MagicMock()
+    group = SimpleNamespace(to_group_req_index=lambda: [17])
+    asyncio.run(manager.transfer_to_next_module(group))
+    selected = manager.send_to_multi_level_kv_cache if cpu_cache else manager.send_to_router
+    selected.send_pyobj.assert_called_once_with([17], protocol=pickle.HIGHEST_PROTOCOL)
+    other = manager.send_to_router if cpu_cache else manager.send_to_multi_level_kv_cache
+    other.send_pyobj.assert_not_called()
+
+
 class _ValueMark:
     def __init__(self, value=0):
         self.value = value
@@ -57,6 +73,7 @@ def _make_manager(mode: NodeRole):
 
 def _sampling_params():
     sampling_params = SamplingParams()
+    sampling_params.constraint_out_params.thinking_token_budget = -1
     sampling_params.group_request_id = 123
     sampling_params.n = 1
     sampling_params.max_new_tokens = 1
@@ -627,5 +644,34 @@ def test_wait_to_token_package_releases_lock_while_consumer_is_suspended():
         await asyncio.wait_for(produce(), timeout=1)
         rest = [item async for item in output_generator]
         assert [first[1]] + [item[1] for item in rest] == ["a", "b", "c"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "mode,count,busy", [(NodeRole.D, 1, True), (NodeRole.D, 2, False), (NodeRole.NORMAL, 1, False)]
+)
+def test_decode_capacity_failure_before_first_token_uses_busy_channel(mode, count, busy):
+    async def run():
+        manager = _make_manager(mode)
+        manager.first_time_costs = MagicMock()
+        manager.latest_success_infer_time_mark = _ValueMark()
+        req_status = _req_status([SimpleNamespace(infer_start_time=1.0)])
+        req_status.out_token_info_list.append(
+            (123, "", {"count_output_tokens": count}, FinishStatus(FinishStatus.FINISHED_PD_DECODE_CAPACITY))
+        )
+        req_status.event.set()
+        params = _sampling_params()
+        params.best_of = 1
+        output = manager._wait_to_token_package(0, [1, 2, 3], 123, params, req_status, None)
+        try:
+            if busy:
+                with pytest.raises(ServerBusyError, match="before the first token"):
+                    await output.__anext__()
+            else:
+                token = await output.__anext__()
+                assert token[3].is_finished_pd_decode_capacity()
+        finally:
+            await output.aclose()
 
     asyncio.run(run())

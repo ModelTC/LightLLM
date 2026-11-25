@@ -1,6 +1,8 @@
 """FlashMLA sparse MLA: prefill over bf16 or packed FP8 caches and decode over packed FP8 caches."""
 
 from dataclasses import dataclass
+from functools import lru_cache
+from inspect import signature
 from typing import Optional
 
 import torch
@@ -46,6 +48,43 @@ def _check_inputs(layer_config: SparseMLALayerConfig, q: torch.Tensor) -> None:
     assert q.shape[1] == layer_config.num_heads and q.dtype == layer_config.dtype, "q does not match the layer_config"
 
 
+@lru_cache(maxsize=1)
+def _bf16_prefill_out_kernel():
+    try:
+        from flash_mla import flash_mla_sparse_fwd
+    except ImportError:
+        return None
+    return flash_mla_sparse_fwd if "out" in signature(flash_mla_sparse_fwd).parameters else None
+
+
+def _bf16_prefill(q, kv, indices, softmax_scale, out):
+    """Use the caller's output directly or bound the legacy kernel's temporary storage to 128 query rows."""
+    if q.shape[0] == 0:
+        return out
+    heads = q.shape[1]
+    padded_heads = -(-heads // 64) * 64
+    if heads == padded_heads and out.is_contiguous():
+        kernel = _bf16_prefill_out_kernel()
+        if kernel is not None:
+            kernel(q=q, kv=kv, indices=indices, sm_scale=softmax_scale, d_v=out.shape[2], out=out)
+            return out
+
+    from sgl_kernel.flash_mla import flash_mla_sparse_fwd
+
+    chunk_size = 128
+    for start in range(0, q.shape[0], chunk_size):
+        rows = slice(start, start + chunk_size)
+        query_chunk = q[rows]
+        if heads != padded_heads:
+            query_chunk = torch.nn.functional.pad(query_chunk, (0, 0, 0, padded_heads - heads))
+        result = flash_mla_sparse_fwd(
+            q=query_chunk, kv=kv, indices=indices[rows], sm_scale=softmax_scale, d_v=out.shape[2]
+        )[0]
+        out[rows].copy_(result[:, :heads])
+        del result
+    return out
+
+
 class FlashMLASparsePrefillBackend(
     AttentionBackend[SparseMLALayerConfig, FlashMLASparsePrefillAttState, SparseMLAPrefillLayerInputs]
 ):
@@ -69,43 +108,33 @@ class FlashMLASparsePrefillBackend(
         """
         layer_config, q = self.layer_config, layer_inputs.q
         _check_inputs(layer_config, q)
-        heads = q.shape[1]
         if layer_config.kv_cache_format == "bf16":
-            from sgl_kernel.flash_mla import flash_mla_sparse_fwd
-
             kv, indices = layer_inputs.kv_cache, layer_inputs.topk_mem_indices
-            # FlashMLA uses 64-head tiles; pad other head counts with zero queries.
-            padded_heads = -(-heads // 64) * 64
-            if padded_heads != heads:
-                padded = q.new_zeros((q.shape[0], padded_heads, q.shape[2]))
-                padded[:, :heads] = q
-                q = padded
-        else:
-            from flash_mla import flash_mla_sparse_fwd
+            if indices.ndim == 2:
+                indices = indices.unsqueeze(1)
+            return _bf16_prefill(q, kv, indices, layer_config.softmax_scale, out)
 
-            assert layer_inputs.current_kv is not None and layer_inputs.topk_indices is not None
-            kv, indices = layer_inputs.current_kv, layer_inputs.topk_indices
-            if att_state.has_cached_prefix:
-                from lightllm.common.basemodel.triton_kernel.kv_copy.prefill_compact_kv_flashmla_fp8 import (
-                    get_prefill_kv_cache_and_remap_indices_triton,
-                )
+        from flash_mla import flash_mla_sparse_fwd
 
-                kv, indices = get_prefill_kv_cache_and_remap_indices_triton(
-                    packed_kv=layer_inputs.kv_cache,
-                    topk_mem_indices=layer_inputs.topk_mem_indices,
-                    prefill_mem_index=att_state.mem_index,
-                    prefill_cache_kv=layer_inputs.current_kv,
-                    prefill_dtype=layer_inputs.current_kv.dtype,
-                )
+        assert layer_inputs.current_kv is not None and layer_inputs.topk_indices is not None
+        kv, indices = layer_inputs.current_kv, layer_inputs.topk_indices
+        if att_state.has_cached_prefix:
+            from lightllm.common.basemodel.triton_kernel.kv_copy.prefill_compact_kv_flashmla_fp8 import (
+                get_prefill_kv_cache_and_remap_indices_triton,
+            )
+
+            kv, indices = get_prefill_kv_cache_and_remap_indices_triton(
+                packed_kv=layer_inputs.kv_cache,
+                topk_mem_indices=layer_inputs.topk_mem_indices,
+                prefill_mem_index=att_state.mem_index,
+                prefill_cache_kv=layer_inputs.current_kv,
+                prefill_dtype=layer_inputs.current_kv.dtype,
+            )
         if indices.ndim == 2:
             indices = indices.unsqueeze(1)
-        kwargs = dict(q=q, kv=kv, indices=indices, sm_scale=layer_config.softmax_scale, d_v=layer_config.kv_lora_rank)
-        if layer_config.kv_cache_format == "bf16":
-            # The sgl_kernel build allocates its own output, over the padded heads.
-            result, _, _ = flash_mla_sparse_fwd(**kwargs)
-            out.copy_(result[:, :heads])
-        else:
-            flash_mla_sparse_fwd(**kwargs, out=out)
+        flash_mla_sparse_fwd(
+            q=q, kv=kv, indices=indices, sm_scale=layer_config.softmax_scale, d_v=layer_config.kv_lora_rank, out=out
+        )
         return out
 
     @staticmethod

@@ -18,7 +18,7 @@ def make_projection(layer, heads: int, inner: int, cols: int, dtype: torch.dtype
     if inner == 256:
         layer.kv_lora_rank = cols
         layer.layer_num_ = 0
-        layer.softmax_scale = inner**-0.5
+        layer.softmax_scale = inner ** -0.5
         layer.indexer = SimpleNamespace(_get_indices=lambda **kwargs: (None, None))
         # Attention returns the projected query it receives.
         layer.prefill_impl = Mock()

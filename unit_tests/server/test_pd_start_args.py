@@ -1,10 +1,97 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from lightllm.server.api_start import _launch_subprocesses
 from lightllm.server.core.objs.start_args_type import StartArgs
+
+
+@pytest.mark.parametrize("role", ["normal", "prefill", "decode"])
+@pytest.mark.parametrize("dp", [1, 2])
+@pytest.mark.parametrize("cpu_cache", [False, True])
+def test_decode_cpu_cache_rejects_only_effective_dp_fetch(role, dp, cpu_cache):
+    from lightllm.server.api_start import _validate_pd_features
+
+    args = StartArgs(run_mode=role, dp=dp, enable_cpu_cache=cpu_cache, enable_dp_prompt_cache_fetch=True)
+    if role == "decode" and dp > 1 and cpu_cache:
+        with pytest.raises(ValueError, match="enable_dp_prompt_cache_fetch"):
+            _validate_pd_features(args)
+    else:
+        _validate_pd_features(args)
+    args.enable_dp_prompt_cache_fetch = False
+    _validate_pd_features(args)
+
+
+@pytest.mark.parametrize("hybrid", [False, True])
+@pytest.mark.parametrize("page_size,explicit,expected", [(1, None, 2048), (384, None, 2304), (4, 512, 512)])
+def test_decode_cpu_pages_are_independent_of_hybrid_checkpoint_pages(hybrid, page_size, explicit, expected):
+    from lightllm.utils.config_utils import auto_set_cpu_cache_token_page_size
+
+    args = StartArgs(
+        run_mode="decode",
+        enable_cpu_cache=True,
+        page_size=page_size,
+        cpu_cache_token_page_size=explicit,
+        linear_att_page_block_num=10000000,
+    )
+    auto_set_cpu_cache_token_page_size(args, hybrid)
+    assert args.cpu_cache_token_page_size == expected
+    assert args.linear_att_page_block_num == 10000000
+
+
+@pytest.mark.parametrize("has_layout", [False, True])
+def test_decode_cpu_cache_metadata_rejects_empty_pages_without_changing_flags(monkeypatch, has_layout):
+    from lightllm.utils import kv_cache_utils
+
+    args = StartArgs(run_mode="decode", enable_cpu_cache=True, enable_disk_cache=True)
+    monkeypatch.setattr(kv_cache_utils, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(
+        "lightllm.utils.cpu_cache_layout.build_cpu_cache_layouts",
+        lambda: {"kv": SimpleNamespace(byte_end=16)} if has_layout else {},
+    )
+    kv_cache_utils.calcu_cpu_cache_meta.cache_clear()
+    try:
+        if has_layout:
+            meta = kv_cache_utils.calcu_cpu_cache_meta()
+            assert meta.page_bytes == 16 and meta.page_num > 0
+        else:
+            with pytest.raises(ValueError, match="positive page size"):
+                kv_cache_utils.calcu_cpu_cache_meta()
+        assert args.enable_cpu_cache and args.enable_disk_cache
+    finally:
+        kv_cache_utils.calcu_cpu_cache_meta.cache_clear()
+
+
+@pytest.mark.parametrize("storage_gib", [2, 3.125])
+def test_decode_cpu_cache_budget_must_fit_one_page(monkeypatch, storage_gib):
+    from lightllm.utils import kv_cache_utils
+
+    args = StartArgs(
+        run_mode="decode",
+        enable_cpu_cache=True,
+        cpu_cache_storage_size=storage_gib,
+        cpu_cache_token_page_size=4096,
+    )
+    page_bytes = 40 * 40 * 128 * 4096 * 2 * 2  # 40-layer BF16 MHA
+    monkeypatch.setattr(kv_cache_utils, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(
+        "lightllm.utils.cpu_cache_layout.build_cpu_cache_layouts",
+        lambda: {"kv": SimpleNamespace(byte_end=page_bytes)},
+    )
+    kv_cache_utils.calcu_cpu_cache_meta.cache_clear()
+    try:
+        if storage_gib == 2:
+            with pytest.raises(ValueError, match=r"--cpu_cache_storage_size=2 GiB") as exc:
+                kv_cache_utils.calcu_cpu_cache_meta()
+            assert "4096 tokens" in str(exc.value)
+            assert "3.125 GiB" in str(exc.value)
+            assert "--cpu_cache_token_page_size aligned to --page_size" in str(exc.value)
+        else:
+            assert kv_cache_utils.calcu_cpu_cache_meta().size_bytes == page_bytes
+    finally:
+        kv_cache_utils.calcu_cpu_cache_meta.cache_clear()
 
 
 @pytest.mark.parametrize("config_owned", [False, True])

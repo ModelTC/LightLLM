@@ -75,6 +75,8 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
         if not logical_layer_groups:
             return []
+        if args.llm_kv_type != "None":
+            raise ValueError(f"{cls.__name__} requires --llm_kv_type None for dense MLA, got {args.llm_kv_type!r}")
         state = create_mla_state(
             config=MLAConfig(
                 logical_layer_groups=logical_layer_groups,

@@ -9,7 +9,7 @@ from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
 from .token_chunck_hash_list import TokenHashList, CpuCachePageList, TokenPageLenList
 from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, cpu_cache_need_store_bounded_state
 from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from typing import Any, Dict, List, Optional, Union
@@ -213,26 +213,31 @@ class Req(ctypes.Structure):
         self.post_init()
 
         args = get_env_start_args()
-        if is_hybrid_att_model(args.model_dir):
+        is_hybrid = is_hybrid_att_model(args.model_dir)
+        if is_hybrid:
             self._fill_hybrid_token_hash()
-            if args.enable_cpu_cache:
+        if args.enable_cpu_cache:
+            if is_hybrid and cpu_cache_need_store_bounded_state(args):
                 cpu_cache_hash_list, cpu_cache_page_len_list = self._calcu_hybrid_cpu_cache_page_len_list()
                 self.token_hash_list = TokenHashList()
                 self.token_hash_list.clear()
                 self.token_hash_list.fill(cpu_cache_hash_list)
-                self.token_hash_page_len_list = TokenPageLenList()
-                self.token_hash_page_len_list.clear()
-                self.token_hash_page_len_list.fill(cpu_cache_page_len_list)
-                self.cpu_cache_match_page_indexes = CpuCachePageList()
-        else:
-            if args.enable_cpu_cache:
+            else:
                 self._fill_input_token_hash()
                 page_num = self.token_hash_list.size
                 cpu_cache_page_len_list = [args.cpu_cache_token_page_size * (i + 1) for i in range(page_num)]
-                self.token_hash_page_len_list = TokenPageLenList()
-                self.token_hash_page_len_list.clear()
-                self.token_hash_page_len_list.fill(cpu_cache_page_len_list)
-                self.cpu_cache_match_page_indexes = CpuCachePageList()
+            self.token_hash_page_len_list = TokenPageLenList()
+            self.token_hash_page_len_list.clear()
+            self.token_hash_page_len_list.fill(cpu_cache_page_len_list)
+            self.cpu_cache_match_page_indexes = CpuCachePageList()
+
+        # 完成初始化后再统一退页：D 的 hybrid CPU 页只有 KV，不能凭 N-1 命中跳过 P 的运行态恢复。
+        # 两个列表同步缩短，后续匹配和写回直接使用该范围；GPU radix 的 hybrid 哈希保持不变。
+        if args.enable_cpu_cache and args.run_mode == "decode" and is_hybrid:
+            page_num = self.token_hash_page_len_list.size
+            if page_num > 0 and self.token_hash_page_len_list.items[page_num - 1] + 1 == self.input_len:
+                self.token_hash_page_len_list.size -= 1
+                self.token_hash_list.size -= 1
 
         return
 

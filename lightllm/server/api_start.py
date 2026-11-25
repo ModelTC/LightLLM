@@ -748,6 +748,8 @@ def config_server_start(args):
 
 
 def _validate_pd_features(args: StartArgs):
+    if args.run_mode == "decode" and args.enable_cpu_cache and args.enable_dp_prompt_cache_fetch and args.dp > 1:
+        raise ValueError("Decode CPU cache does not support --enable_dp_prompt_cache_fetch with dp > 1")
     if args.run_mode in ("pd_master", "prefill", "decode") and args.hypercorn_config is not None:
         # All PD roles share one WebSocket control-plane contract. A custom
         # Hypercorn config could change message limits on one role and break
