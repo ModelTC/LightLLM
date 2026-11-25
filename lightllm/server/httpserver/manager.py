@@ -11,6 +11,7 @@ import copy
 import hashlib
 import datetime
 import pickle
+import logging
 from array import array
 from frozendict import frozendict
 
@@ -40,6 +41,7 @@ from lightllm.utils.log_utils import (
     log_request_summary,
     log_debug_event,
     get_http_request_id,
+    should_log_request,
 )
 from lightllm.server.metrics.manager import MetricClient
 from .rl_controller import HttpRlController
@@ -156,11 +158,15 @@ class HttpServerManager(HttpRlManagerHelper, object):
         return
 
     def _log_stage_timing(self, group_request_id: int, start_time: float, stage: str, **kwargs):
-        if self.args.detail_log:
-            cost_ms = (time.time() - start_time) * 1000.0
-            extras = " ".join(f"{k}:{v}" for k, v in kwargs.items())
-            suffix = f" {extras}" if extras else ""
-            logger.debug(f"lightllm_req_id:{group_request_id} stage:{stage} elapsed_ms:{cost_ms:.3f}{suffix}")
+        if logger.isEnabledFor(logging.DEBUG) and should_log_request(group_request_id):
+            log_debug_event(
+                logger,
+                "request.stage",
+                request_id=group_request_id,
+                stage=stage,
+                elapsed_ms=round((time.time() - start_time) * 1000, 3),
+                **kwargs,
+            )
         return
 
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
@@ -687,7 +693,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     add_special_tokens=sampling_params.add_special_tokens,
                 )
 
-            if self.args.detail_log:
+            if logger.isEnabledFor(logging.DEBUG) and should_log_request(sampling_params.group_request_id):
                 log_debug_event(
                     logger,
                     "request.encoded",

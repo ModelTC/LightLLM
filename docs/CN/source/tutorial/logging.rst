@@ -15,7 +15,6 @@ JSON 保留带日期/时区的毫秒时间、主机、PID、完整模块/组件�
 
 HTTP access 默认关闭；成功请求完成摘要默认采样 1%，失败摘要不采样。
 请求正文、采样参数、token ID 和张量不会因为开启请求摘要而输出。
-现有 ``--detail_log`` 保留为显式内容诊断开关，其 DEBUG 输出仍需要对应模块启用 DEBUG。
 
 普通启动不需要额外指定日志参数：
 
@@ -34,13 +33,13 @@ P/D 节点仍需指定模型和拓扑参数，同样不需要重复指定日志�
 
 .. code-block:: bash
 
-   python -m lightllm.server.api_server --model_dir /path/to/model --log-config '{"format":"json","request_sample_rate":1}'
+   python -m lightllm.server.api_server --model_dir /path/to/model --log_config '{"format":"json","request_sample_rate":1}'
 
 需要复用配置时，也可以指定 JSON 文件：
 
 .. code-block:: bash
 
-   python -m lightllm.server.api_server --model_dir /path/to/model --log-config test/logging.json
+   python -m lightllm.server.api_server --model_dir /path/to/model --log_config test/logging.json
 
 示例文件 ``test/logging.json`` 开启 JSON 输出并记录每个成功请求的摘要：
 
@@ -51,13 +50,12 @@ P/D 节点仍需指定模型和拓扑参数，同样不需要重复指定日志�
      "request_sample_rate": 1
    }
 
-``--log-config`` 也可写为 ``--log_config``，支持内联 JSON 对象和 JSON 文件，只需填写要修改的项。
+``--log_config`` 支持内联 JSON 对象和 JSON 文件，只需填写要修改的项。
 两种写法共用校验逻辑，均优先于对应环境变量；未填写的项继承环境变量，最后使用默认值。
 相对路径以启动器的工作目录为基准。未知字段、错误类型和非法值会在启动 worker 前报错。
 
 启动器将解析后的配置写入环境变量，使 spawn 和 HTTP 子进程使用同一配置；
-子进程无需读取配置文件。本 PR 早期版本的独立日志参数统一替换为 ``--log-config``，
-已有 ``LIGHTLLM_LOG_*`` 环境变量继续支持。
+子进程无需读取配置文件。已有 ``LIGHTLLM_LOG_*`` 环境变量继续支持。
 
 .. list-table::
    :header-rows: 1
@@ -168,6 +166,8 @@ JSON 每行一个对象，额外字段可用于检索；异常 traceback 位于 
 
 默认级别仍为 INFO，详细运行诊断现在使用 DEBUG。需要原有详细输出时显式设置 DEBUG，推荐只打开相关模块。
 成功请求完成摘要默认采样 1%；HTTP access 按需显式开启。
+将 ``lightllm.server.httpserver.manager`` 设为 DEBUG 可查看按请求采样的阶段耗时和编码长度。
+将 ``lightllm.server.router.model_infer.mode_backend.pd`` 设为 DEBUG 可查看按窗口汇总的 PD KV 传输统计。
 设置日志目录后统一写入 ``process.<PID>.log``，不再额外创建 ``default.log``；
 轮转备份为 ``process.<PID>.log.1`` 等。fork 子进程会切换到自己的 PID 文件。
 备份数限制每个 PID 的文件数量，不会自动删除历史 PID 文件；部署系统需要配置目录保留周期。

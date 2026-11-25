@@ -173,7 +173,7 @@ def test_config_overrides_environment_and_inherits_unspecified_values(tmp_path):
         import os
         from lightllm.server.api_cli import add_cli_args
         from lightllm.utils.log_utils import configure_logging_from_args, init_logger
-        argv = ["--log-config", {str(path)!r}, "--run_mode", "prefill"]
+        argv = ["--log_config", {str(path)!r}, "--run_mode", "prefill"]
         args = add_cli_args(argparse.ArgumentParser()).parse_args(argv)
         configure_logging_from_args(args)
         assert os.environ["LIGHTLLM_LOG_LEVEL"] == "debug"
@@ -653,18 +653,15 @@ def test_python_warnings_survive_error_service_level_and_reconfiguration():
     assert output.count("after-reconfigure") == 1
 
 
-def test_legacy_pd_detail_flag_explains_bounded_debug_replacement():
-    output = _run_logging(
-        """
-        import argparse
-        from lightllm.server.api_cli import add_cli_args
-        from lightllm.utils.log_utils import configure_logging_from_args
-        args = add_cli_args(argparse.ArgumentParser()).parse_args(["--pd_detail_log"])
-        configure_logging_from_args(args)
-        """
-    )
-    assert output.count("--pd_detail_log is deprecated") == 1
-    assert "bounded summaries" in output
+@pytest.mark.parametrize("option", ["--pd_detail_log", "--detail_log", "--log-config"])
+def test_removed_logging_options_are_rejected(option):
+    import argparse
+    from lightllm.server.api_cli import add_cli_args
+
+    parser = add_cli_args(argparse.ArgumentParser())
+    with pytest.raises(SystemExit) as error:
+        parser.parse_args([option])
+    assert error.value.code == 2
 
 
 @pytest.mark.parametrize("level, expected", [("warn", 30), ("fatal", 50), ("notset", 0)])
@@ -754,9 +751,8 @@ def test_failure_summary_level_and_sampling(monkeypatch, caplog, status, level, 
     assert record.reason == "bounded reason"
 
 
-@pytest.mark.parametrize("separator", ["-", "_"])
 @pytest.mark.parametrize("inline", [False, True])
-def test_logging_config_survives_start_args_and_overrides_environment(tmp_path, separator, inline):
+def test_logging_config_survives_start_args_and_overrides_environment(tmp_path, inline):
     config = {
         "level": "debug",
         "format": "json",
@@ -781,7 +777,7 @@ def test_logging_config_survives_start_args_and_overrides_environment(tmp_path, 
         from lightllm.server.api_cli import add_cli_args
         from lightllm.server.core.objs.start_args_type import StartArgs
         from lightllm.utils import log_utils
-        argv = ["--log" + {separator!r} + "config", {value!r}]
+        argv = ["--log_config", {value!r}]
         args = StartArgs(**vars(add_cli_args(argparse.ArgumentParser()).parse_args(argv)))
         log_utils.configure_logging_from_args(args)
         config = json.loads({json.dumps(config)!r})
@@ -814,7 +810,7 @@ def test_logging_cli_has_one_config_option_and_needs_no_flags():
         parser = add_cli_args(argparse.ArgumentParser())
         options = {option for action in parser._actions for option in action.option_strings
                    if option.startswith(("--log", "--enable-http-access", "--enable_http_access"))}
-        assert options == {"--log-config", "--log_config"}
+        assert options == {"--log_config"}
         args = StartArgs(**vars(parser.parse_args([])))
         assert args.log_config is None
         log_utils.configure_logging_from_args(args)
@@ -898,14 +894,14 @@ def test_unreadable_or_malformed_logging_config_fails_before_setup(tmp_path, con
     path = tmp_path / "logging.json"
     if contents is not None:
         path.write_text(contents)
-    with pytest.raises(ValueError, match="Cannot load --log-config"):
+    with pytest.raises(ValueError, match="Cannot load --log_config"):
         log_utils.configure_logging_from_args(StartArgs(log_config=str(path)))
 
 
 def test_malformed_inline_logging_config_does_not_echo_contents():
     from lightllm.server.core.objs.start_args_type import StartArgs
 
-    with pytest.raises(ValueError, match="Cannot load --log-config inline JSON") as error:
+    with pytest.raises(ValueError, match="Cannot load --log_config inline JSON") as error:
         log_utils.configure_logging_from_args(StartArgs(log_config='{"dir": "private-value"'))
     assert "private-value" not in str(error.value)
 

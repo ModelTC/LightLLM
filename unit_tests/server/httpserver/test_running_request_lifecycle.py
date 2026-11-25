@@ -38,6 +38,25 @@ class _ValueMark:
         self.value = value
 
 
+def test_request_stage_logging_uses_debug_and_request_sampling(monkeypatch, caplog):
+    import logging
+    from lightllm.server.httpserver import manager as manager_module
+    from lightllm.utils import log_utils
+
+    logger = manager_module.logger
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(log_utils, "_request_sample_rate", 0)
+    manager = HttpServerManager.__new__(HttpServerManager)
+    with caplog.at_level(logging.DEBUG, logger=logger.name):
+        manager._log_stage_timing(1, 0, "encode_done")
+        assert not caplog.records
+        monkeypatch.setattr(log_utils, "_request_sample_rate", 1)
+        manager._log_stage_timing(1, 0, "encode_done")
+    assert [record.event for record in caplog.records] == ["request.stage"]
+    assert caplog.records[0].request_id == 1
+    assert caplog.records[0].stage == "encode_done"
+
+
 def _make_manager(mode: NodeRole):
     manager = HttpServerManager.__new__(HttpServerManager)
     manager.args = SimpleNamespace(

@@ -311,7 +311,7 @@ def _load_log_config(value):
                 config = json.load(stream)
     except (OSError, ValueError) as error:
         source = "inline JSON" if inline else repr(value)
-        raise ValueError(f"Cannot load --log-config {source}: {error}") from error
+        raise ValueError(f"Cannot load --log_config {source}: {error}") from error
     types = {
         "level": str,
         "format": str,
@@ -326,35 +326,35 @@ def _load_log_config(value):
         "backup_count": int,
     }
     if not isinstance(config, dict):
-        raise ValueError("--log-config must contain a JSON object")
+        raise ValueError("--log_config must contain a JSON object")
     unknown = config.keys() - types.keys()
     if unknown:
-        raise ValueError(f"Unknown --log-config fields: {', '.join(sorted(unknown))}")
+        raise ValueError(f"Unknown --log_config fields: {', '.join(sorted(unknown))}")
     settings = {}
     for key, value in config.items():
         expected = types[key]
         if not isinstance(value, expected) or (isinstance(value, bool) and expected is not bool):
-            raise ValueError(f"Invalid type for --log-config field {key}")
+            raise ValueError(f"Invalid type for --log_config field {key}")
         if key in {"level", "http_level"}:
             _level(value)
         elif key == "format" and value.lower() not in {"text", "json"}:
-            raise ValueError("--log-config format must be text or json")
+            raise ValueError("--log_config format must be text or json")
         elif key == "module_levels":
             if any(not name.startswith("lightllm.") or not isinstance(level, str) for name, level in value.items()):
-                raise ValueError("--log-config module_levels must map lightllm.* logger names to levels")
+                raise ValueError("--log_config module_levels must map lightllm.* logger names to levels")
             for level in value.values():
                 _level(level)
             value = json.dumps(value)
         elif key == "http_exclude_paths":
             if any(not isinstance(path, str) or not path.startswith("/") or "," in path for path in value):
-                raise ValueError("--log-config http_exclude_paths must be a list of paths without commas")
+                raise ValueError("--log_config http_exclude_paths must be a list of paths without commas")
             value = ",".join(value)
         elif key == "http_access":
             value = "1" if value else "0"
         elif key in {"request_sample_rate", "stats_interval", "max_bytes", "backup_count"}:
             valid = 0 <= value <= 1 if key == "request_sample_rate" else value > 0
             if not math.isfinite(value) or not valid:
-                raise ValueError(f"Invalid value for --log-config field {key}")
+                raise ValueError(f"Invalid value for --log_config field {key}")
         settings[f"LIGHTLLM_LOG_{key.upper()}"] = str(value)
     return settings
 
@@ -364,11 +364,6 @@ def configure_logging_from_args(args):
     config = getattr(args, "log_config", None)
     if config is not None:
         os.environ.update(_load_log_config(config))
-    if getattr(args, "pd_detail_log", False):
-        logging.getLogger(__name__).warning(
-            "--pd_detail_log is deprecated; set module_levels in --log-config to enable DEBUG "
-            "for PD transfer modules. Transfer diagnostics now use bounded summaries."
-        )
     _level(os.getenv("LIGHTLLM_LOG_HTTP_LEVEL", "WARNING"))
     os.environ["LIGHTLLM_LOG_NODE_RANK"] = str(args.node_rank)
     os.environ["LIGHTLLM_LOG_TP_SIZE"] = str(max(1, getattr(args, "tp", 1) // getattr(args, "dp", 1)))

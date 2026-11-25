@@ -29,13 +29,13 @@ Customize logging with one parameter, using inline JSON:
 
 .. code-block:: bash
 
-   python -m lightllm.server.api_server --model_dir /path/to/model --log-config '{"format":"json","request_sample_rate":1}'
+   python -m lightllm.server.api_server --model_dir /path/to/model --log_config '{"format":"json","request_sample_rate":1}'
 
 Or use a JSON file for a reusable configuration:
 
 .. code-block:: bash
 
-   python -m lightllm.server.api_server --model_dir /path/to/model --log-config test/logging.json
+   python -m lightllm.server.api_server --model_dir /path/to/model --log_config test/logging.json
 
 The example file ``test/logging.json`` enables JSON output and records every successful
 request summary:
@@ -47,7 +47,7 @@ request summary:
      "request_sample_rate": 1
    }
 
-``--log-config`` (also spelled ``--log_config``) accepts a JSON object inline or
+``--log_config`` accepts a JSON object inline or
 from a file. Only include settings you want to change. Both forms use the same
 validation and override the corresponding environment variables; omitted fields inherit
 the environment, then defaults. Paths are relative
@@ -56,8 +56,7 @@ fail startup before workers are launched.
 
 The launcher propagates resolved settings through environment variables to spawned
 workers and the HTTP subprocess. Child processes do not need to read a configuration file.
-The individual logging switches from earlier revisions of this PR are replaced by
-``--log-config``; existing ``LIGHTLLM_LOG_*`` environment settings remain supported.
+Existing ``LIGHTLLM_LOG_*`` environment settings remain supported.
 
 .. list-table::
    :header-rows: 1
@@ -109,8 +108,9 @@ To enable DEBUG only for scheduling, set ``module_levels`` in the same file:
 
 Sampling is deterministic by request ID and does not alter application RNG state.
 Request summaries never enable prompt, output text, sampling parameter, or tensor dumps.
-The existing explicit ``--detail_log`` diagnostic option remains available; its DEBUG
-messages also require enabling DEBUG for the relevant module.
+Set ``lightllm.server.httpserver.manager`` to DEBUG to see sampled request stage
+timings and encoding lengths. For bounded PD KV transfer summaries, set
+``lightllm.server.router.model_infer.mode_backend.pd`` to DEBUG.
 
 Categories and severity
 -----------------------

@@ -5,7 +5,6 @@ import json
 def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.formatter_class = argparse.RawTextHelpFormatter
     parser.add_argument(
-        "--log-config",
         "--log_config",
         metavar="JSON_OR_PATH",
         default=None,
@@ -354,19 +353,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--trust_remote_code",
         action="store_true",
         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.",
-    )
-    parser.add_argument(
-        "--detail_log",
-        action="store_true",
-        help="enable sampled request metadata at DEBUG; HTTP prompt text and token IDs are omitted.",
-    )
-    parser.add_argument(
-        "--pd_detail_log",
-        action="store_true",
-        help=(
-            "Deprecated: use module DEBUG logging for bounded PD KV transfer summaries. "
-            "Request-level debug logs and warning/error logs do not require this flag."
-        ),
     )
     parser.add_argument(
         "--disable_shm_warning",
