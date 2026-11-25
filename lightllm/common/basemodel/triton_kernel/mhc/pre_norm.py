@@ -186,7 +186,7 @@ def _compute_prenorm_splits(tokens: int, flattened_hidden: int, device: torch.de
     return max(1, min(sms // max(grid_size, 1), k_blocks // 4))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["TOKENS"])
 def _hc_post_prenorm_kernel(
     layer_output,
     residual,
@@ -196,7 +196,7 @@ def _hc_post_prenorm_kernel(
     updated_residual,
     gemm_partial,
     sqrsum_partial,
-    TOKENS: tl.constexpr,
+    TOKENS,
     HIDDEN: tl.constexpr,
     SPLIT_H: tl.constexpr,
     BLOCK_H: tl.constexpr,
@@ -472,7 +472,7 @@ def hc_pre_norm(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["TOKENS"])
 def _hc_shifted_weights_kernel(
     GP,
     SP,
@@ -481,7 +481,7 @@ def _hc_shifted_weights_kernel(
     POST,
     MIX,
     PRE,
-    TOKENS: tl.constexpr,
+    TOKENS,
     HIDDEN: tl.constexpr,
     N_SPLITS: tl.constexpr,
     BLOCK_SPLITS: tl.constexpr,
