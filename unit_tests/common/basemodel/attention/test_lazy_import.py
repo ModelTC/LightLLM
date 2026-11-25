@@ -77,7 +77,7 @@ class TestLazyAttentionImports(unittest.TestCase):
             },
             "lightllm.utils.envs_utils": {"get_env_start_args": lambda: self.args},
             "lightllm.utils.backend_validator": {"validate": self.validate},
-            "lightllm.utils.log_utils": {"init_logger": lambda name: Mock(), "log_info_on_leader": Mock()},
+            "lightllm.utils.log_utils": {"init_logger": lambda name: Mock()},
         }
         for name, attributes in dependencies.items():
             module = ModuleType(name)

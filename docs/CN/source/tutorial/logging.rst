@@ -128,8 +128,8 @@ Python warnings 通过统一日志输出；原生库 stdout/stderr 和 Hypercorn
 
 JSON 每行一个对象，额外字段可用于检索；异常 traceback 位于 ``exception`` 字段。
 文本模式给多行消息和 traceback 的每一行补齐前缀。
-各进程共享的模型配置、后端选择和 CUDA graph 初始化信息，在 TP 组代表 rank 上使用 INFO，
-其他 rank 使用 DEBUG。各 worker 的 WARNING/ERROR 不应用这种过滤。
+权重加载、模型预热和 attention 后端摘要由每个 TP 组的 rank 0 以 INFO 输出，其他 rank 使用 DEBUG。
+CUDA Graph 捕获过程和量化选择使用 DEBUG。各 worker 直接记录自己的 WARNING/ERROR。
 节点硬件、实际容量和 worker 故障仍需保留发生位置。
 
 写日志的规则

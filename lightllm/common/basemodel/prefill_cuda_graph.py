@@ -5,7 +5,7 @@ import bisect
 import triton
 from typing import List, Tuple
 from typing import Optional
-from lightllm.utils.log_utils import init_logger, log_info_on_leader
+from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.distributed import dist_group_manager
@@ -54,7 +54,7 @@ class PrefillCudaGraph:
             graph_handle_token_nums.sort()
 
         self.graph_handle_token_nums = graph_handle_token_nums
-        log_info_on_leader(logger, f"prefill cuda graph graph_handle_token_nums: {self.graph_handle_token_nums}")
+        logger.debug("prefill cuda graph graph_handle_token_nums: %s", self.graph_handle_token_nums)
 
     def can_run(self, handle_token_num: int):
         return handle_token_num <= self.max_handle_token_num
@@ -91,8 +91,7 @@ class PrefillCudaGraph:
 
         graph_hidden_collector = infer_state.hidden_collector
         hidden_tensor_count, hidden_tensor_nbytes = graph_hidden_collector.release_graph_tensor_ownership()
-        log_info_on_leader(
-            logger,
+        logger.debug(
             f"Prefill CUDA Graph hidden collector 已完成 capture 状态托管："
             f"handle_token_num={handle_token_num}, "
             f"collector={graph_hidden_collector.__class__.__name__}, "
@@ -184,9 +183,7 @@ class PrefillCudaGraph:
 
     @torch.no_grad()
     def warmup(self, model):
-        log_info_on_leader(
-            logger, "Begin capture prefill cudagraph, remove the --enable_prefill_cudagraph to disable it."
-        )
+        logger.debug("Begin capture prefill cudagraph, remove the --enable_prefill_cudagraph to disable it.")
         # for typing easy
         from .basemodel import TpPartBaseModel
 
@@ -194,7 +191,7 @@ class PrefillCudaGraph:
 
         # prefill cuda graph init
         for handle_token_num in self.graph_handle_token_nums[::-1]:
-            log_info_on_leader(logger, f"Capture prefill cudagraph, handle_token_num: {handle_token_num}")
+            logger.debug("Capture prefill cudagraph, handle_token_num: %s", handle_token_num)
             total_token_num = handle_token_num
             input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int64, device="cuda")
             b_req_idx = torch.tensor([model.req_manager.HOLD_REQUEST_ID], dtype=torch.int32, device="cuda")
@@ -237,17 +234,14 @@ class PrefillCudaGraph:
                     del locals()[var_name]
             torch.cuda.empty_cache()
 
-        log_info_on_leader(
-            logger,
+        logger.debug(
             f"Capture repfill cudagraph success, token_num <={self.max_handle_token_num} "
             f"will infer with cudagraph.",
         )
 
     @torch.no_grad()
     def warmup_overlap(self, model):
-        log_info_on_leader(
-            logger, "Begin capture prefill overlap cudagraph, remove the --enable_prefill_cudagraph to disable it."
-        )
+        logger.debug("Begin capture prefill overlap cudagraph, remove the --enable_prefill_cudagraph to disable it.")
         # for typing easy
         from .basemodel import TpPartBaseModel
 
@@ -307,8 +301,7 @@ class PrefillCudaGraph:
                     del locals()[var_name]
             torch.cuda.empty_cache()
 
-        log_info_on_leader(
-            logger,
+        logger.debug(
             f"Capture overlap cudagraph success, handle_token_num <={self.max_handle_token_num} "
             f" will infer with cudagraph.",
         )

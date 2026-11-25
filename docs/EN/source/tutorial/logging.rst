@@ -144,8 +144,9 @@ cancellation and idempotent cleanup belong at DEBUG. ``logger.exception`` emits 
 with a traceback, not a separate severity. Record a failure's traceback at its handling
 boundary, avoiding adjacent error/exception messages and repeated stack traces on rethrow.
 
-Shared model, backend and CUDA graph configuration is INFO on the TP group's leader
-and DEBUG on peers. Never apply this filtering to worker-specific warnings/errors.
+Weight loading, model warmup and selected attention backends are INFO on the TP group's
+leader and DEBUG on peers. CUDA graph capture details and quantization selection are DEBUG.
+Worker-specific warnings and errors are emitted by the worker that encounters them.
 New events should use stable English messages and an ``event`` field, plus applicable
 request/batch/transfer IDs. Guard expensive DEBUG arguments with ``isEnabledFor``;
 parameterized formatting alone does not defer argument evaluation. Startup summaries

@@ -26,8 +26,7 @@ def test_weight_loading_events_and_progress(monkeypatch, caplog, rank, progress)
     monkeypatch.setattr(module, "tqdm", bar)
     logger = logging.getLogger("weight-regression")
     monkeypatch.setattr(module, "logger", logger)
-    monkeypatch.setattr(log_utils, "_context", {"tp_rank": rank})
-    monkeypatch.setattr(log_utils, "_context_pid", log_utils.os.getpid())
+    monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", str(rank))
     ticks = iter([10, 12.125])
     monkeypatch.setattr(module.time, "monotonic", lambda: next(ticks))
     with caplog.at_level(logging.DEBUG, logger=logger.name):
@@ -224,10 +223,12 @@ def test_router_opens_launcher_readiness_key(monkeypatch, dp, nnodes, local_dp):
 
 
 @pytest.mark.parametrize("progress", [False, True])
-def test_model_warmup_progress_and_rank_events(monkeypatch, caplog, progress):
+@pytest.mark.parametrize("rank", [0, 1])
+def test_model_warmup_progress_and_rank_events(monkeypatch, caplog, progress, rank):
     from lightllm.common.basemodel import basemodel as module
 
     model = module.TpPartBaseModel.__new__(module.TpPartBaseModel)
+    model.tp_rank_ = rank
     model.batch_max_tokens = 4
     model.layers_num = 8
     model.config = {}
@@ -242,8 +243,6 @@ def test_model_warmup_progress_and_rank_events(monkeypatch, caplog, progress):
     monkeypatch.setattr(module.torch.cuda, "empty_cache", Mock())
     monkeypatch.setattr(module.Autotuner, "start_autotune_warmup", Mock())
     monkeypatch.setattr(module.Autotuner, "end_autotune_warmup", Mock())
-    monkeypatch.setattr(log_utils, "_context", {"tp_rank": 0})
-    monkeypatch.setattr(log_utils, "_context_pid", log_utils.os.getpid())
     with caplog.at_level(logging.DEBUG, logger=logger.name):
         model._autotune_warmup()
     assert bar.call_args.args[0] == [4, 1]
@@ -251,6 +250,7 @@ def test_model_warmup_progress_and_rank_events(monkeypatch, caplog, progress):
     assert [c.kwargs for c in barrier.call_args_list] == [{"device_ids": [3]}] * 2
     records = [r for r in caplog.records if r.name == logger.name]
     assert [r.event for r in records] == ["model.warmup_started", "model.warmup_completed"]
+    assert [r.levelno for r in records] == [logging.INFO if rank == 0 else logging.DEBUG] * 2
     assert records[-1].duration_s >= 0
     assert model.layers_num == 8
 

@@ -282,22 +282,6 @@ def test_periodic_stats_flapping_never_bypasses_interval(monkeypatch):
     assert all(right - left >= 10 for left, right in zip(emitted, emitted[1:]))
 
 
-def test_peer_configuration_is_debug_but_peer_errors_are_preserved():
-    output = _run_logging(
-        """
-        from lightllm.utils.log_utils import init_logger, set_log_context, log_info_on_leader
-        logger = init_logger("lightllm.test")
-        set_log_context(tp_rank=0)
-        log_info_on_leader(logger, "shared-config")
-        set_log_context(tp_rank=1)
-        log_info_on_leader(logger, "shared-config")
-        logger.error("peer-failure")
-    """
-    )
-    assert output.count("shared-config") == 1
-    assert output.count("peer-failure") == 1
-
-
 @pytest.mark.parametrize("method", ["fork", "spawn"])
 def test_process_files_and_context_are_isolated(tmp_path, method):
     script = tmp_path / "logging_worker.py"

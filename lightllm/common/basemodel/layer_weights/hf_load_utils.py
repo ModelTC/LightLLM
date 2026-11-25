@@ -2,7 +2,8 @@ import torch
 import os
 import gc
 import time
-from lightllm.utils.log_utils import init_logger, log_info_on_leader, progress_enabled
+import logging
+from lightllm.utils.log_utils import init_logger, progress_enabled
 
 logger = init_logger(__name__)
 from safetensors import safe_open
@@ -66,8 +67,9 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
     )  # noqa
     worker = int(os.environ.get("LOADWORKER", 1))
     started = time.monotonic()
-    log_info_on_leader(
-        logger,
+    level = logging.INFO if os.getenv("LIGHTLLM_CURRENT_RANK_IN_DP", "0") == "0" else logging.DEBUG
+    logger.log(
+        level,
         "event=model.weights_loading shards=%s workers=%s",
         len(candidate_files),
         worker,
@@ -82,8 +84,8 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
             pass
 
     duration_s = round(time.monotonic() - started, 3)
-    log_info_on_leader(
-        logger,
+    logger.log(
+        level,
         "event=model.weights_loaded shards=%s duration_s=%.3f",
         len(candidate_files),
         duration_s,

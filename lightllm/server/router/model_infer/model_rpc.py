@@ -26,7 +26,7 @@ from lightllm.server.router.model_infer.mode_backend import (
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.router.model_infer.mode_backend.rl_backend_ops import RlBackendOps
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.utils.log_utils import init_logger, set_log_context, log_info_on_leader
+from lightllm.utils.log_utils import init_logger, set_log_context
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name, get_model_infer_recursion_limit
@@ -82,8 +82,7 @@ class ModelRpcServer(rpyc.Service):
         else:
             self.backend = ChunkedPrefillBackend()
 
-        log_info_on_leader(
-            logger,
+        logger.debug(
             "event=engine.backend_selected backend=%s",
             self.backend.__class__.__name__,
             extra={"event": "engine.backend_selected", "backend": self.backend.__class__.__name__},

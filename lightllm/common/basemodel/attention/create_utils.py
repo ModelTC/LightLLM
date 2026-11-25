@@ -1,7 +1,7 @@
 """Attention backend selection utilities."""
 
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.log_utils import init_logger, log_info_on_leader
+from lightllm.utils.log_utils import init_logger
 from lightllm.utils.backend_validator import validate
 from .base_att import BaseAttBackend
 from .import_utils import load_backend_class
@@ -164,9 +164,7 @@ def get_neo_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "tr
 
         if not HAS_FLASH_ATTN_INTERFACE:
             backend_map = {"None": {"triton": neo_data_type_to_backend["None"]["triton"]}}
-            log_info_on_leader(
-                logger, "event=backend.fallback family=neo requested=auto skipped=fa3 reason=extension_unavailable"
-            )
+            logger.debug("event=backend.fallback family=neo requested=auto skipped=fa3 reason=extension_unavailable")
     if backend_str != "auto":
         return load_backend_class(backend_map[llm_dtype][backend_str])
     return _auto_select_backend(llm_dtype, kv_type_to_backend=backend_map, priority_list=priority_list)

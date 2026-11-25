@@ -6,7 +6,7 @@ import bisect
 import math
 import triton
 from typing import Optional
-from lightllm.utils.log_utils import init_logger, log_info_on_leader
+from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
@@ -251,7 +251,7 @@ class CudaGraph:
 
     @torch.no_grad()
     def warmup(self, model):
-        log_info_on_leader(logger, "Begin capture cudagraph, use the --disable_cudagraph to disable it.")
+        logger.debug("Begin capture cudagraph, use the --disable_cudagraph to disable it.")
         # for typing easy
         from .basemodel import TpPartBaseModel
 
@@ -300,15 +300,14 @@ class CudaGraph:
                     del locals()[var_name]
             torch.cuda.empty_cache()
 
-        log_info_on_leader(
-            logger,
+        logger.debug(
             f"Capture cudagraph success, batch_size <={self.max_batch_size} "
             f"and max_len_in_batch <= {self.graph_max_len_in_batch} will infer with cudagraph.",
         )
 
     @torch.no_grad()
     def warmup_overlap(self, model):
-        log_info_on_leader(logger, "Begin capture overlap cudagraph, use the --disable_cudagraph to disable it.")
+        logger.debug("Begin capture overlap cudagraph, use the --disable_cudagraph to disable it.")
         # for typing easy
         from .basemodel import TpPartBaseModel
 
@@ -366,8 +365,7 @@ class CudaGraph:
                     del locals()[var_name]
             torch.cuda.empty_cache()
 
-        log_info_on_leader(
-            logger,
+        logger.debug(
             f"Capture overlap cudagraph success, batch_size <={self.max_batch_size} "
             f"and max_len_in_batch <= {self.graph_max_len_in_batch} will infer with cudagraph.",
         )

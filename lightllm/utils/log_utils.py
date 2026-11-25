@@ -704,18 +704,6 @@ def log_repeated_exception(logger, event, **fields):
     )
 
 
-def log_info_on_leader(logger, message, *args, **kwargs):
-    """Shared TP configuration is INFO on the group's leader, DEBUG on peers.
-
-    This helper must never be used to suppress worker-specific warnings/errors.
-    Unknown ranks (launcher and non-inference processes) retain INFO output.
-    """
-    context = _context if _context_pid == os.getpid() else {}
-    method = logger.info if context.get("tp_rank", 0) == 0 else logger.debug
-    kwargs.setdefault("stacklevel", 2)
-    method(message, *args, **kwargs)
-
-
 class PeriodicStatsLogger:
     """Rate-limit all snapshots and confirm idle for a full reporting interval."""
 

@@ -131,14 +131,10 @@ def test_prefill_missing_extension_reports_install_instructions(monkeypatch):
 
 
 @pytest.mark.parametrize("selection", ["triton", "auto", "fa3"])
-@pytest.mark.parametrize("rank", [0, 1])
-def test_neo_selection_only_explains_missing_extension_when_requested(monkeypatch, selection, rank):
+def test_neo_selection_only_explains_missing_extension_when_requested(monkeypatch, selection):
     from lightllm.common.basemodel.attention import create_utils
     from lightllm.common.basemodel.attention.triton.neo import NeoTritonAttBackend
-    from lightllm.utils import log_utils
 
-    monkeypatch.setattr(log_utils, "_context", {"tp_rank": rank})
-    monkeypatch.setattr(log_utils, "_context_pid", log_utils.os.getpid())
     monkeypatch.setattr(neo, "HAS_FLASH_ATTN_INTERFACE", False)
     monkeypatch.setattr(
         create_utils,
@@ -167,9 +163,9 @@ def test_neo_selection_only_explains_missing_extension_when_requested(monkeypatc
         assert create_utils.get_neo_prefill_att_backend_class() is NeoTritonAttBackend
         if selection == "auto":
             automatic.assert_called_once()
-            assert logger.info.call_count == int(rank == 0)
-            assert logger.debug.call_count == int(rank != 0)
-            assert "backend.fallback" in (logger.info.call_args or logger.debug.call_args).args[0]
+            logger.info.assert_not_called()
+            logger.debug.assert_called_once()
+            assert "backend.fallback" in logger.debug.call_args.args[0]
         else:
             assert not logger.mock_calls
             automatic.assert_not_called()

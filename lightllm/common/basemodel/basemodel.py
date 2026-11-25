@@ -6,6 +6,7 @@ import time
 import copy
 import math
 import json
+import logging
 import torch
 import torch.nn.functional as F
 import triton
@@ -25,7 +26,7 @@ from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
-from lightllm.utils.log_utils import init_logger, log_info_on_leader, progress_enabled
+from lightllm.utils.log_utils import init_logger, progress_enabled
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 from lightllm.utils.envs_utils import (
     get_env_start_args,
@@ -193,8 +194,8 @@ class TpPartBaseModel:
             "linear_prefill": self.prefill_att_backend1.__class__.__name__ if self.prefill_att_backend1 else None,
             "linear_decode": self.decode_att_backend1.__class__.__name__ if self.decode_att_backend1 else None,
         }
-        log_info_on_leader(
-            logger,
+        logger.log(
+            logging.INFO if self.tp_rank_ == 0 else logging.DEBUG,
             "event=backend.selected %s",
             " ".join(f"{k}={v}" for k, v in backends.items() if v is not None),
             extra={"event": "backend.selected", **backends},
@@ -239,9 +240,7 @@ class TpPartBaseModel:
 
     def _init_quant(self):
         self.quant_cfg = Quantcfg(self.config, self.quant_type, self.quant_cfg_path, self.expert_dtype)
-        log_info_on_leader(
-            logger, f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}"
-        )
+        logger.debug("Initial quantization method: %s", self.quant_cfg.quant_type)
 
     def _init_weights(self, start_layer_index=0):
         self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, network_config=self.config)
@@ -1075,7 +1074,7 @@ class TpPartBaseModel:
     def _check_max_len_infer(self):
         disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
         if disable_check_max_len_infer:
-            log_info_on_leader(logger, "disable_check_max_len_infer is true")
+            logger.debug("disable_check_max_len_infer is true")
             return
 
         # 做一次 同步
@@ -1160,8 +1159,9 @@ class TpPartBaseModel:
         layer_num_bak = self.layers_num
         self.layers_num = self.autotune_layers()
         started = time.monotonic()
-        log_info_on_leader(
-            logger, "event=model.warmup_started shapes=%s", len(warmup_lengths), extra={"event": "model.warmup_started"}
+        level = logging.INFO if self.tp_rank_ == 0 else logging.DEBUG
+        logger.log(
+            level, "event=model.warmup_started shapes=%s", len(warmup_lengths), extra={"event": "model.warmup_started"}
         )
         for input_len in tqdm(warmup_lengths, desc="warming up", disable=not progress_enabled()):
             try:
@@ -1221,8 +1221,8 @@ class TpPartBaseModel:
         torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
         Autotuner.end_autotune_warmup()
         duration_s = round(time.monotonic() - started, 3)
-        log_info_on_leader(
-            logger,
+        logger.log(
+            level,
             "event=model.warmup_completed duration_s=%.3f",
             duration_s,
             extra={"event": "model.warmup_completed", "duration_s": duration_s},
