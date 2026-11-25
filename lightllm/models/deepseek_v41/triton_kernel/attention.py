@@ -3,6 +3,7 @@
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 
 @triton.jit
@@ -149,25 +150,90 @@ def destindex_copy_kv_dsv41(kv, freqs, full_slots, positions, cache, ratio, page
     )
 
 
+@triton.jit
+def _prepare_indexer_logits(LOGITS, LENGTHS, MASK, SCORES, STRIDE, WIDTH, BLOCKS: tl.constexpr):
+    row = tl.program_id(0)
+    blocks = tl.program_id(1) * BLOCKS + tl.arange(0, BLOCKS)
+    cols = blocks[:, None] * 8 + tl.arange(0, 8)[None, :]
+    length = tl.load(LENGTHS + row)
+    valid = cols < length
+    if MASK is not None:
+        keep = tl.load(MASK + row * (WIDTH // 8) + blocks, blocks < WIDTH // 8, False)
+        valid &= keep[:, None]
+    values = tl.load(LOGITS + row * STRIDE + cols, valid, -float("inf"))
+    tl.store(LOGITS + row * STRIDE + cols, values, cols < WIDTH)
+    if SCORES is not None:
+        latest = tl.maximum(length - 1, 0) // 8
+        scores = tl.max(values, 1)
+        scores = tl.where(tl.max(libdevice.isnan(values).to(tl.int32), 1) != 0, float("nan"), scores)
+        scores = tl.where(blocks == latest, float("inf"), scores)
+        tl.store(SCORES + row * (WIDTH // 8) + blocks, scores, blocks < WIDTH // 8)
+
+
+@triton.jit
+def _indexer_topk_transform(
+    LOGITS,
+    RAW,
+    PAGES,
+    OUT,
+    VALID_LENGTHS,
+    LENGTHS,
+    STRIDE,
+    PAGE_STRIDE,
+    PAGE_SIZE: tl.constexpr,
+    TOPK: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    col = tl.arange(0, BLOCK)
+    length = tl.load(VALID_LENGTHS + row)
+    index = col
+    if RAW is not None:
+        if length > TOPK:
+            index = tl.load(RAW + row * TOPK + col, col < TOPK, 0).to(tl.int32)
+    valid = (col < TOPK) & (index < length)
+    score = tl.load(LOGITS + row * STRIDE + index, valid, -float("inf"))
+    valid &= tl.abs(score) < float("inf")
+    if RAW is not None:
+        if length > TOPK:
+            index = tl.sort(tl.where(valid, index, 2147483647))
+            valid = index != 2147483647
+    rank = tl.cumsum(valid.to(tl.int32)) - 1
+    count = tl.sum(valid.to(tl.int32))
+    page = tl.load(PAGES + row * PAGE_STRIDE + index // PAGE_SIZE, valid, 0)
+    tl.store(OUT + row * TOPK + col, -1, (col < TOPK) & (col >= count))
+    tl.store(OUT + row * TOPK + rank, page * PAGE_SIZE + index % PAGE_SIZE, valid)
+    tl.store(LENGTHS + row, count)
+
+
 def select_indexer_topk(logits, lengths, pages, slots, selected_lengths, page_size, candidate_mask, candidate_topk):
-    """Keep the latest candidate block, then map finite causal top-k entries to physical slots."""
-    columns = torch.arange(logits.shape[1], device=logits.device)
-    logits.masked_fill_(columns >= lengths[:, None], -torch.inf)
-    if candidate_mask is not None:
-        blocks = logits.unflatten(-1, (-1, 8))
-        if candidate_topk is not None:
-            scores = blocks.amax(-1)
-            recent = ((lengths.long() - 1).clamp_min(0) // 8).unsqueeze(1)
-            scores.scatter_(1, recent, torch.inf)
-            selected = scores.topk(min(candidate_topk, scores.shape[1]), sorted=False).indices
+    """Keep the latest candidate block, then pack finite top-k entries in logical order."""
+    rows, width = logits.shape
+    topk = slots.shape[1]
+    # A candidate budget covering the entire row offers every block to subsequent layers.
+    if candidate_topk is not None and candidate_topk >= width // 8:
+        candidate_mask.fill_(True)
+        candidate_mask = None
+        candidate_topk = None
+    if candidate_mask is not None or width > topk:
+        scores = logits.new_empty((rows, width // 8)) if candidate_topk is not None else None
+        _prepare_indexer_logits[(rows, triton.cdiv(width, 1024))](
+            logits, lengths, candidate_mask if scores is None else None, scores, logits.stride(0), width, 128
+        )
+        if scores is not None:
+            selected = scores.topk(candidate_topk, sorted=False).indices
             candidate_mask.zero_().scatter_(1, selected, True)
-        else:
-            blocks.masked_fill_(~candidate_mask[..., None], -torch.inf)
-    scores, indices = logits.topk(min(slots.shape[1], logits.shape[1]), sorted=False)
-    indices = indices.masked_fill(~scores.isfinite(), logits.shape[1]).sort(-1).values
-    valid = indices < logits.shape[1]
-    indices = indices.masked_fill(~valid, 0)
-    physical = pages.gather(1, indices // page_size) * page_size + indices % page_size
-    slots.fill_(-1)
-    slots[:, : indices.shape[1]] = physical.masked_fill(~valid, -1)
-    selected_lengths.copy_(valid.sum(-1))
+    indices = logits.topk(topk, sorted=False).indices if width > topk else None
+    _indexer_topk_transform[(rows,)](
+        logits,
+        indices,
+        pages,
+        slots,
+        lengths,
+        selected_lengths,
+        logits.stride(0),
+        pages.stride(0),
+        page_size,
+        topk,
+        triton.next_power_of_2(topk),
+    )

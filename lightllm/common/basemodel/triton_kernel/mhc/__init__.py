@@ -42,9 +42,10 @@ GENERAL warmup 阶段搜索配置，之后按 GPU、Triton 版本、hidden 和 t
 from .head import hc_head
 from .post import hc_post
 from .pre_norm import hc_post_pre_norm, hc_pre_norm
-from .streams import hc_contract, hc_expand
+from .streams import hc_combine, hc_contract, hc_expand
 
 __all__ = [
+    "hc_combine",
     "hc_contract",
     "hc_expand",
     "hc_head",

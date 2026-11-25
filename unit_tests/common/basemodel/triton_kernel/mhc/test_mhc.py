@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import triton
 
 from lightllm.common.basemodel.triton_kernel.mhc import (
+    hc_combine,
     hc_contract,
     hc_expand,
     hc_head,
@@ -21,6 +22,47 @@ from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+
+
+@pytest.mark.parametrize("tokens,hidden", [(1, 128), (24, 5120), (384, 5120), (768, 5120)])
+def test_hc_combine_matches_fp32_reduction_in_graph(tokens, hidden):
+    residual = torch.randn(tokens, hidden * 4, device="cuda", dtype=torch.bfloat16)
+    gate_storage = torch.rand(tokens, 8, device="cuda")
+    gates = gate_storage[:, ::2]
+
+    def check(output):
+        expected = (residual.view(tokens, 4, hidden).float() * gates[..., None]).sum(1).to(residual.dtype)
+        torch.testing.assert_close(output, expected, atol=0, rtol=0)
+
+    check(hc_combine(residual, gates))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = hc_combine(residual, gates)
+    residual.normal_()
+    gate_storage.uniform_()
+    graph.replay()
+    check(captured)
+
+
+def test_hc_combine_rounds_fp32_product_before_sum():
+    values = torch.tensor([-0.376953125, -0.453125, 0.734375, -0.1513671875], device="cuda", dtype=torch.bfloat16)
+    gates = torch.tensor(
+        [[0.6933943033218384, 0.21298180520534515, 0.1639794409275055, 0.5925081372261047]],
+        device="cuda",
+        dtype=torch.float32,
+    )
+    residual = values[:, None].expand(4, 5120).reshape(1, -1)
+    expected = (residual.view(1, 4, 5120).float() * gates[..., None]).sum(1).to(residual.dtype)
+    torch.testing.assert_close(hc_combine(residual, gates), expected, atol=0, rtol=0)
+
+
+def test_hc_combine_selects_ragged_prefill_last_rows():
+    residual = torch.randn(129, 4 * 5120, device="cuda", dtype=torch.bfloat16)
+    gates = torch.rand(129, 4, device="cuda")
+    offsets = torch.tensor([0, 0, 2, 12, 127, 129], device="cuda", dtype=torch.int32)
+    expected = hc_combine(residual, gates)[offsets[1:] - 1]
+    actual = hc_combine(residual, gates, cu_q_lens=offsets)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 def _hc_pre_reference(x, fn, scale, base, streams, rms_eps, hc_eps, sinkhorn_iters, post_multiplier=2.0):

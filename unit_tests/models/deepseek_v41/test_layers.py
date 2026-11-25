@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -78,19 +80,43 @@ def test_engram_host_embedding_uses_fp8_scales_and_zeroes_other_tp_rows(monkeypa
     assert actual[2:].count_nonzero() == 0
 
 
+def _torch_indexer_topk(logits, lengths, pages, slots, selected_lengths, page_size, candidate_mask, candidate_topk):
+    """Keep the latest candidate block, then map finite causal top-k entries to physical slots."""
+    columns = torch.arange(logits.shape[1], device=logits.device)
+    logits.masked_fill_(columns >= lengths[:, None], -torch.inf)
+    if candidate_mask is not None:
+        blocks = logits.unflatten(-1, (-1, 8))
+        if candidate_topk is not None:
+            scores = blocks.amax(-1)
+            recent = ((lengths.long() - 1).clamp_min(0) // 8).unsqueeze(1)
+            scores.scatter_(1, recent, torch.inf)
+            selected = scores.topk(min(candidate_topk, scores.shape[1]), sorted=False).indices
+            candidate_mask.zero_().scatter_(1, selected, True)
+        else:
+            blocks.masked_fill_(~candidate_mask[..., None], -torch.inf)
+    scores, indices = logits.topk(min(slots.shape[1], logits.shape[1]), sorted=False)
+    indices = indices.masked_fill(~scores.isfinite(), logits.shape[1]).sort(-1).values
+    valid = indices < logits.shape[1]
+    indices = indices.masked_fill(~valid, 0)
+    physical = pages.gather(1, indices // page_size) * page_size + indices % page_size
+    slots.fill_(-1)
+    slots[:, : indices.shape[1]] = physical.masked_fill(~valid, -1)
+    selected_lengths.copy_(valid.sum(-1))
+
+
 def test_reindex_restricts_to_candidates_and_always_keeps_latest_block():
-    logits = torch.arange(1, 33, dtype=torch.float32).reshape(1, -1)
+    logits = torch.arange(1, 33, device="cuda", dtype=torch.float32).reshape(1, -1)
     # The middle block has the highest valid score. The last block must still be offered to reindex.
     logits[:, 8:16] += 100
-    pages = torch.tensor([[7, 5, 9, 3]], dtype=torch.int32)
-    valid = torch.tensor([26], dtype=torch.int32)
-    mask = torch.empty((1, 4), dtype=torch.bool)
-    slots = torch.empty((1, 5), dtype=torch.int32)
-    lengths = torch.empty(1, dtype=torch.int32)
+    pages = torch.tensor([[7, 5, 9, 3]], device="cuda", dtype=torch.int32)
+    valid = torch.tensor([26], device="cuda", dtype=torch.int32)
+    mask = torch.empty((1, 4), device="cuda", dtype=torch.bool)
+    slots = torch.empty((1, 5), device="cuda", dtype=torch.int32)
+    lengths = torch.empty(1, device="cuda", dtype=torch.int32)
     select_indexer_topk(logits, valid, pages, slots, lengths, 8, mask, 2)
     assert mask.tolist() == [[False, True, False, True]]
     assert slots.tolist() == [[43, 44, 45, 46, 47]]
-    deeper_scores = torch.arange(32, 0, -1, dtype=torch.float32).view(1, -1)
+    deeper_scores = torch.arange(32, 0, -1, device="cuda", dtype=torch.float32).view(1, -1)
     select_indexer_topk(deeper_scores, valid, pages, slots, lengths, 8, mask, None)
     assert slots.tolist() == [[40, 41, 42, 43, 44]]
     assert lengths.item() == 5
@@ -121,3 +147,114 @@ def test_indexer_query_and_cached_key_use_the_same_fp8_scale(round_scale):
     expected = (vectors.float() / expected_scale).to(torch.float8_e4m3fn).view(torch.uint8)
     assert torch.equal(query.view(1, 128).view(torch.uint8), expected)
     assert torch.equal(cache[:, :128], expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("dim", [16, 5120])
+@pytest.mark.parametrize("masked", [False, True])
+def test_engram_gate_matches_reference_and_cuda_graph(dtype, dim, masked):
+    from lightllm.models.deepseek_v41.engram import engram_forward
+
+    tokens, mult = 7, 4
+    # Both producers may expose row slices; no contiguous copies are needed.
+    streams = torch.randn(tokens * 2, mult, dim, device="cuda", dtype=dtype)[::2]
+    kv = torch.randn(tokens * 2, (mult + 1) * dim, device="cuda", dtype=dtype)[::2]
+    streams[0].zero_()
+    kv[0, : mult * dim].zero_()
+    weight = SimpleNamespace(
+        engram_embed_=SimpleNamespace(lookup=lambda _, group: None),
+        engram_wkv_=SimpleNamespace(mm=lambda _: kv),
+        engram_q_=SimpleNamespace(weight=torch.randn(mult, dim, device="cuda", dtype=dtype)),
+        engram_k_=SimpleNamespace(weight=torch.randn(mult, dim, device="cuda", dtype=dtype)),
+    )
+    token_mask = torch.arange(tokens, device="cuda") % 2 == 0 if masked else None
+    eps = 1e-20
+
+    def reference():
+        h = streams.float()
+        key = kv[:, : mult * dim].float().reshape(tokens, mult, dim)
+        value = kv[:, mult * dim :].float()
+        dot = (h * key * weight.engram_q_.weight * weight.engram_k_.weight).sum(-1)
+        dot *= torch.rsqrt(h.square().mean(-1) + eps) * torch.rsqrt(key.square().mean(-1) + eps) * dim ** -0.5
+        gate = torch.sigmoid(torch.copysign(dot.abs().clamp_min(1e-6).sqrt(), dot))
+        if token_mask is not None:
+            gate = torch.where(token_mask[:, None], gate, 0)
+        return (h + gate[..., None] * value[:, None, :]).to(dtype)
+
+    def check(actual):
+        torch.testing.assert_close(actual, reference(), atol=0.015625 if dtype == torch.bfloat16 else 2e-6, rtol=1e-5)
+        if masked:
+            torch.testing.assert_close(actual[~token_mask], streams[~token_mask], atol=0, rtol=0)
+
+    check(engram_forward(streams, None, weight, eps, None, token_mask))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = engram_forward(streams, None, weight, eps, None, token_mask)
+    streams.normal_()
+    kv.normal_()
+    graph.replay()
+    check(actual)
+
+
+@pytest.mark.parametrize("topk,width", [(5, 32), (128, 64), (512, 2112)])
+@pytest.mark.parametrize("mode", ["dense", "source", "all_blocks", "reindex"])
+def test_indexer_graph_matches_torch(topk, width, mode):
+    rows, blocks = 5, width // 8
+    # Recreate the row stride of a sliced DeepGEMM logits buffer.
+    logits = torch.empty(rows, width + 32, device="cuda")[:, :width]
+    pages = torch.randperm(rows * blocks, device="cuda", dtype=torch.int32).reshape(rows, blocks)
+    lengths = torch.tensor([0, 1, 9, width - 3, width], device="cuda", dtype=torch.int32)
+    mask = None if mode == "dense" else torch.empty(rows, blocks, dtype=torch.bool, device="cuda")
+    candidate_topk = {"source": 2, "all_blocks": blocks + 1}.get(mode)
+    slots = torch.empty(rows, topk, dtype=torch.int32, device="cuda")
+    counts = torch.empty_like(lengths)
+
+    def run():
+        select_indexer_topk(logits, lengths, pages, slots, counts, 8, mask, candidate_topk)
+
+    logits.normal_()
+    run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    for _ in range(2):
+        # Unique scores make the selected set independent of tie breaking.
+        logits.copy_(torch.randperm(rows * width, device="cuda").reshape(rows, width))
+        logits[:, 2::11] = -torch.inf
+        logits[:, 5] = torch.inf
+        logits[:, 17] = torch.nan
+        lengths.copy_(lengths.roll(1))
+        if mask is not None:
+            mask.random_(2)
+        expected_mask = mask.clone() if mask is not None else None
+        expected_slots, expected_counts = torch.empty_like(slots), torch.empty_like(counts)
+        _torch_indexer_topk(
+            logits.clone(), lengths, pages, expected_slots, expected_counts, 8, expected_mask, candidate_topk
+        )
+        graph.replay()
+        torch.testing.assert_close(slots, expected_slots)
+        torch.testing.assert_close(counts, expected_counts)
+        if mask is not None:
+            torch.testing.assert_close(mask, expected_mask)
+
+
+@pytest.mark.parametrize("heads,padded", [(8, 64), (64, 64)])
+def test_q_rope_in_place_matches_separate_output(heads, padded):
+    from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_q_norm_rope
+
+    tokens = 67
+    storage = torch.randn(tokens, padded, 512, device="cuda", dtype=torch.bfloat16)
+    original = storage.clone()
+    active = storage[:, :heads]
+    expected = torch.empty_like(active)
+    pos = torch.randperm(tokens, device="cuda", dtype=torch.int32)
+    freqs = torch.polar(torch.ones(tokens, 32, device="cuda"), torch.randn(tokens, 32, device="cuda"))
+    fused_q_norm_rope(original[:, :heads], expected, 1e-6, freqs, pos, apply_norm=False)
+    fused_q_norm_rope(active, active, 1e-6, freqs, pos, apply_norm=False)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        fused_q_norm_rope(active, active, 1e-6, freqs, pos, apply_norm=False)
+    storage.copy_(original)
+    graph.replay()
+    torch.testing.assert_close(active, expected, rtol=0, atol=0)
+    torch.testing.assert_close(storage[:, heads:], original[:, heads:], rtol=0, atol=0)

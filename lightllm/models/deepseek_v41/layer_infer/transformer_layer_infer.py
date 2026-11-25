@@ -103,6 +103,25 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
         x = self._ffn(x, infer_state, layer_weight)
         return self._hc_ffn_out(x, residual, res_mix, post_mix, ffn_pre)
 
+    def _project_q(self, qa, infer_state, layer_weight):
+        from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_q_norm_rope
+
+        tokens = qa.shape[0]
+        if self.tp_q_head_num_ == self.flashmla_q_head_num_:
+            q = layer_weight.wq_b_.mm(qa).view(tokens, self.tp_q_head_num_, self.head_dim_)
+            active_heads = q
+        elif layer_weight.wq_b_.quant_method.method_name == "fp8w8a8-b128-deepgemm":
+            # DeepGEMM accepts a row-strided BF16 output. Leave the workspace's padded heads untouched.
+            q = self._alloc_q(tokens, infer_state, qa)
+            active_heads = q[:, : self.tp_q_head_num_, :]
+            layer_weight.wq_b_.mm(qa, out=active_heads.flatten(1))
+        else:
+            return super()._project_q(qa, infer_state, layer_weight)
+        fused_q_norm_rope(
+            active_heads, active_heads, self.eps_, self.freqs_cis, infer_state.position_ids, apply_norm=False
+        )
+        return q
+
     def _compress_and_index(self, q_lora, x, infer_state: DeepseekV41InferStateInfo, layer_weight):
         if self.is_kv_source:
             self._write_global_kv(x, infer_state, layer_weight)

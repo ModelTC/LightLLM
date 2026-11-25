@@ -1,9 +1,11 @@
+from lightllm.common.basemodel.triton_kernel.mhc import hc_combine
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 
 
 class DeepseekV41PostLayerInfer(LlamaPostLayerInfer):
-    def token_forward(self, input_embdings, infer_state, layer_weight):
+    def _slice_get_last_input(self, input_embdings, infer_state):
         streams, pre_mix = input_embdings
-        streams = streams.view(streams.shape[0], pre_mix.shape[1], -1)
-        collapsed = (streams.float() * pre_mix[..., None]).sum(1).to(streams.dtype)
-        return super().token_forward(collapsed, infer_state, layer_weight)
+        if infer_state.is_prefill and not infer_state.return_all_prompt_logics:
+            last_input = hc_combine(streams, pre_mix, cu_q_lens=infer_state.b1_cu_q_seq_len)
+            return last_input, infer_state.batch_size
+        return super()._slice_get_last_input(hc_combine(streams, pre_mix), infer_state)

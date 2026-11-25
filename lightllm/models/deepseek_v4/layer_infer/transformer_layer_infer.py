@@ -382,20 +382,27 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: DeepseekV4InferStateInfo,
         layer_weight: DeepseekV4TransformerLayerWeight,
     ):
-        from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_q_norm_rope
-
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
-        T = input.shape[0]
 
         qkv = layer_weight.wq_a_wkv_.mm(input)
         qa = layer_weight.q_norm_(qkv[:, : -self.head_dim_], eps=self.eps_)
-        q_in = layer_weight.wq_b_.mm(qa).view(T, self.tp_q_head_num_, self.head_dim_)
+        q = self._project_q(qa, infer_state, layer_weight)
+        self._norm_rope_and_cache_kv(qkv[:, -self.head_dim_ :], infer_state, layer_weight)
+        return q, qa, input
 
+    def _alloc_q(self, tokens, infer_state, like):
         if infer_state.is_prefill:
-            q = infer_state.dsv4_workspace.get_flashmla_prefill_q(T)
-        else:
-            q = self.alloc_tensor((T, self.flashmla_q_head_num_, self.head_dim_), dtype=q_in.dtype, device=q_in.device)
-            q[:, self.tp_q_head_num_ :, :].zero_()
+            return infer_state.dsv4_workspace.get_flashmla_prefill_q(tokens)
+        q = self.alloc_tensor((tokens, self.flashmla_q_head_num_, self.head_dim_), dtype=like.dtype, device=like.device)
+        q[:, self.tp_q_head_num_ :, :].zero_()
+        return q
+
+    def _project_q(self, qa, infer_state, layer_weight):
+        from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_q_norm_rope
+
+        tokens = qa.shape[0]
+        q_in = layer_weight.wq_b_.mm(qa).view(tokens, self.tp_q_head_num_, self.head_dim_)
+        q = self._alloc_q(tokens, infer_state, q_in)
         fused_q_norm_rope(
             q_in,
             q[:, : self.tp_q_head_num_, :],
@@ -404,8 +411,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.position_ids,
             apply_norm=self.q_head_norm,
         )
-        self._norm_rope_and_cache_kv(qkv[:, -self.head_dim_ :], infer_state, layer_weight)
-        return q, qa, input
+        return q
 
     def _get_o(self, o, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         # o: [T, tp_q_head_num_, head_dim_] after inverse rope -> grouped low-rank O -> [T, embed_dim_]
