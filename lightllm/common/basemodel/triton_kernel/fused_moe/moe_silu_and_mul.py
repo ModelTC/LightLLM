@@ -8,7 +8,7 @@ from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import _ceil_to_ue8m0, _pack_ue8m0_scales
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["scale_stride_n"])
 def _silu_and_mul_quant_fp8(
     input_ptr,
     quant_ptr,
@@ -16,7 +16,7 @@ def _silu_and_mul_quant_fp8(
     input_stride: tl.constexpr,
     size_n: tl.constexpr,
     groups,
-    scale_stride_n: tl.constexpr,
+    scale_stride_n,
     limit,
     eps: tl.constexpr,
     fp8_max: tl.constexpr,

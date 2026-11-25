@@ -46,14 +46,14 @@ def get_swa_token_indices(req_manager, req_idx, position_ids, *, prefill_state=N
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["BATCH"])
 def _prepare_swa_prefill_workspace_kernel(
     prefill_token_ranges,
     swa_prefill_workspace_offsets,
     b_req_idx,
     b_ready_cache_len,
     b_seq_len,
-    BATCH: tl.constexpr,
+    BATCH,
     SLIDING_WINDOW: tl.constexpr,
     SWA_PAGE_TOKEN_NUM: tl.constexpr,
     HOLD_REQUEST_ID: tl.constexpr,
