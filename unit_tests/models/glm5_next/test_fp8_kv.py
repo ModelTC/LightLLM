@@ -17,7 +17,7 @@ from lightllm.common.attention.backends.sparse_mla import (
     SparseMLAPrefillLayerInputs,
 )
 from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLAPrefillBackend
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, configure_attention_step
+from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
 from lightllm.models.glm5_next.infer_struct import build_glm5_nsa_step
 from lightllm.common.attention.kernels.sparse_mla.fp8_group64_decode import (
     can_use_fp8_sparse_direct_decode,
@@ -272,7 +272,7 @@ class _PrefillCase:
     ],
 )
 def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_type, expected):
-    from lightllm.common.basemodel.attention_runtime import AttentionRuntime, attention_build_resources
+    from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager, attention_build_resources
     from lightllm.models.glm5_next.model import Glm5NextTpPartModel
     from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 
@@ -304,7 +304,7 @@ def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_t
     model.max_req_num = 2
     model.batch_max_tokens = 4
     model.mtp_previous_draft_models = []
-    attention = AttentionRuntime(model)
+    attention = AttentionBackendManager(model)
     layer = SimpleNamespace(
         is_linear_attention_layer=False,
         tp_q_head_num_=64,
@@ -312,7 +312,7 @@ def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_t
         softmax_scale=0.0625,
         network_config_=model.config,
     )
-    spec = model_class.transformer_layer_infer_class.attention_spec(layer, model)
+    spec = model_class.transformer_layer_infer_class.attention_config(layer, model)
     layer.prefill_impl, layer.decode_impl = attention.bind(spec)
     assert layer.decode_impl.layer_config.causal is False
     # The step builders can be created from the layer config and the model's context.
@@ -1170,9 +1170,9 @@ def test_indexer_metadata_is_built_with_the_step_attention(prefill):
     state.input_ids = torch.arange(5 if prefill else 2, device="cuda")
     state.b_ready_cache_len = torch.zeros_like(state.b_seq_len)
     # A model without attention builds no indexer metadata.
-    state.init_some_extra_state(SimpleNamespace(attention_runtime=SimpleNamespace(has_attention=False)))
+    state.init_some_extra_state(SimpleNamespace(attention_backend_manager=SimpleNamespace(has_attention=False)))
     assert state.nsa_step is None
-    state.init_some_extra_state(SimpleNamespace(attention_runtime=SimpleNamespace(has_attention=True)))
+    state.init_some_extra_state(SimpleNamespace(attention_backend_manager=SimpleNamespace(has_attention=True)))
     assert torch.equal(state.nsa_step.q_req_idx, torch.tensor([1, 1, 1, 0, 0] if prefill else [1, 0]).cuda().int())
     if prefill:
         assert state.nsa_step.q_kv_start_loc.tolist() == [0, 0, 0, 3, 3]

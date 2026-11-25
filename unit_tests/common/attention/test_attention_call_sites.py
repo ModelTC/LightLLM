@@ -13,7 +13,7 @@ CALLER_GLOBS = (
     "lightllm/models/*/layer_infer/**/*.py",
     "lightllm/models/*/infer_struct.py",
     "lightllm/models/*/model.py",
-    "lightllm/common/basemodel/attention_runtime.py",
+    "lightllm/common/basemodel/attention_backend_manager.py",
     "lightllm/common/basemodel/layer_infer/**/*.py",
 )
 
@@ -62,7 +62,7 @@ def test_caller_globs_find_the_attention_callers():
         "lightllm/models/llama/layer_infer/transformer_layer_infer.py",
         "lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py",
         "lightllm/models/qwen3next/layer_infer/transformer_layer_infer.py",
-        "lightllm/common/basemodel/attention_runtime.py",
+        "lightllm/common/basemodel/attention_backend_manager.py",
         "lightllm/common/basemodel/layer_infer/gqa_attention.py",
     ):
         assert expected in found
@@ -106,7 +106,7 @@ MODEL_SIDE_MODULES = re.compile(r"^lightllm\.(models|common\.basemodel)(\.|$)(?!
         ("lightllm.models.llama.model", True),
         ("lightllm.common.basemodel", True),
         ("lightllm.common.basemodel.infer_struct", True),
-        ("lightllm.common.basemodel.attention_runtime", True),
+        ("lightllm.common.basemodel.attention_backend_manager", True),
         ("lightllm.common.basemodel.triton_kernel.fa3_utils", False),
         ("lightllm.common.attention.backend", False),
     ],

@@ -9,7 +9,7 @@ from lightllm.common.attention.backends.mla import (
     MLAPrefillLayerConfig,
     MLAPrefillLayerInputs,
 )
-from lightllm.common.basemodel.attention_runtime import AttentionSpec, attention_is_causal
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig, attention_is_causal
 from lightllm.models.deepseek2.triton_kernel.sample_kv import sample_kv
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -87,7 +87,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             state_class=FullAttentionState,
         )
 
-    def attention_spec(self, model) -> AttentionSpec:
+    def attention_config(self, model) -> LayerAttentionConfig:
         # Prefill attends over keys and values expanded from the latent cache; decode over the
         # latent cache with absorbed queries.
         common = dict(
@@ -97,7 +97,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             dtype=model.data_type,
             causal=attention_is_causal(model),
         )
-        return AttentionSpec(
+        return LayerAttentionConfig(
             MLAPrefillLayerConfig(qk_nope_head_dim=self.qk_nope_head_dim, v_head_dim=self.v_head_dim, **common),
             MLADecodeLayerConfig(kv_lora_rank=self.kv_lora_rank, **common),
         )

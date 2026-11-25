@@ -92,7 +92,7 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
     from lightllm.common.attention_state import AttentionStateManager
     from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig
     from lightllm.common.attention_state.bounded_att.kda.create_kda_state import create_kda_state
-    from lightllm.common.basemodel.attention_runtime import configure_attention_step
+    from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from unit_tests.models.glm5_next.kda_test_utils import prepare_prefill_infer
 
@@ -117,7 +117,7 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
     model = _model(requested)
     from lightllm.common.attention import selector
 
-    spec = layer.attention_spec(model)
+    spec = layer.attention_config(model)
     prefill = selector.select(spec.prefill, "prefill", requested)
     layer.prefill_impl = prefill.impl
     layer.decode_impl = selector.select(spec.decode, "decode", "triton").impl

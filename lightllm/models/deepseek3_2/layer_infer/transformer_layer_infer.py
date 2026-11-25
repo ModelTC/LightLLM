@@ -1,5 +1,5 @@
 from lightllm.common.attention_state.full_att import FullAttentionState
-from lightllm.common.basemodel.attention_runtime import AttentionSpec
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 import torch
 from typing import TYPE_CHECKING, Any
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
@@ -33,7 +33,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         )
         return
 
-    def attention_spec(self, model) -> AttentionSpec:
+    def attention_config(self, model) -> LayerAttentionConfig:
         # Absorbed queries attend to the indexer's top-k slots of the latent cache in both phases.
         config = SparseMLALayerConfig(
             num_heads=self.tp_q_head_num_,
@@ -44,7 +44,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             kv_cache_format="fp8_ds_mla" if model.args.llm_kv_type == "fp8kv_dsa" else "bf16",
             topk=self.index_topk,
         )
-        return AttentionSpec(config, config)
+        return LayerAttentionConfig(config, config)
 
     def _get_qkv(
         self,

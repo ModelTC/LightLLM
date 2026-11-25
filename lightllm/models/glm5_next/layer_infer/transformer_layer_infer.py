@@ -7,7 +7,7 @@ from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.common.basemodel.attention_runtime import AttentionSpec
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
 from lightllm.common.attention.backends.sparse_mla import (
     SparseMLADecodeLayerInputs,
@@ -77,10 +77,10 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 tp_world_size=self.tp_world_size_,
             )
 
-    def attention_spec(self, model) -> AttentionSpec:
+    def attention_config(self, model) -> LayerAttentionConfig:
         if self.is_linear_attention_layer:
             config = self._kda_config(model)
-            return AttentionSpec(config, config)
+            return LayerAttentionConfig(config, config)
         # NoPE sparse MLA: absorbed queries attend to the indexer's selected latent slots, which it
         # restricts to visible keys.
         config = SparseMLALayerConfig(
@@ -94,7 +94,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             kpool=self.network_config_["index_kpool"],
             causal=False,
         )
-        return AttentionSpec(
+        return LayerAttentionConfig(
             config, config, prefill_implementation="flashmla_sparse", decode_implementation="flashmla_sparse"
         )
 

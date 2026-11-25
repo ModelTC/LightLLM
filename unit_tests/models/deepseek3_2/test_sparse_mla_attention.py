@@ -15,7 +15,7 @@ from lightllm.common.attention.backends.sparse_mla import (
     SparseMLALayerConfig,
     SparseMLAPrefillLayerInputs,
 )
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig
+from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_prefill_params

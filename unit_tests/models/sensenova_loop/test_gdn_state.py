@@ -7,7 +7,7 @@ from lightllm.common.attention import selector
 from lightllm.common.attention.backends.gdn import GDNLayerConfig
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, configure_attention_step
+from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerInfer
 from lightllm.models.sensenova_loop.config import get_loop_layer_indices, get_loop_layer_types

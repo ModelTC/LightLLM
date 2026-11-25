@@ -14,7 +14,7 @@ from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADe
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeBackend
-from lightllm.common.basemodel.attention_runtime import configure_attention_step
+from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
 from lightllm.common.attention.kernels.gqa.int8kv import (
     int8kv_flash_decoding_stage1 as stage1_module,
     int8kv_flash_decoding as decode_module,

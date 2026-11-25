@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-import lightllm.common.basemodel.attention_runtime as attention_groups_module
+import lightllm.common.basemodel.attention_backend_manager as attention_groups_module
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBuildContext

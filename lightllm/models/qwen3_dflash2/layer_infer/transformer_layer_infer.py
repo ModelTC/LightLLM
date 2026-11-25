@@ -1,5 +1,5 @@
 from lightllm.common.attention_state.full_att import FullAttentionState
-from lightllm.common.basemodel.attention_runtime import AttentionSpec
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
 from lightllm.models.qwen3_dflash2.triton_kernel import grouped_dynamic_conv
 
@@ -13,11 +13,11 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         self.conv_group_size_ = int(network_config["conv_group_size"])
         self.sliding_window_ = int(network_config.get("sliding_window", 0) or 0)
 
-    def attention_spec(self, model) -> AttentionSpec:
+    def attention_config(self, model) -> LayerAttentionConfig:
         # DFlash2 attention is non-causal, so its local window must retain both
         # the visible prefix on the left and the complete draft block on the right.
         window = max(self.sliding_window_, 0) - 1
-        return AttentionSpec(prefill=None, decode=self._gqa_config(model, sliding_window=(window, window)))
+        return LayerAttentionConfig(prefill=None, decode=self._gqa_config(model, sliding_window=(window, window)))
 
     def _gqa_kv_cache(self, state: FullAttentionState):
         k, v = state.get_layer_view(logical_layer_id=self.layer_num_)

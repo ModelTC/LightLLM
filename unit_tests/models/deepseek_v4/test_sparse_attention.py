@@ -15,7 +15,6 @@ from lightllm.common.attention.backends.sparse_mla.flashmla_swa import (
     FlashMLASWADecodeBackend,
     FlashMLASWAPrefillBackend,
 )
-from lightllm.common.basemodel import attention_runtime
 from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
 from lightllm.models.deepseek_v4 import swa_prefill_workspace
 from lightllm.models.deepseek_v4.config import create_attention_config

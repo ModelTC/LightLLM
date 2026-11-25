@@ -473,7 +473,7 @@ def test_layer_group_replays_dynamic_verify_layout_through_cuda_graph(start_args
     model = _Model(args, 16, rows_per_request=3)
     config = gqa_config(kv_quant="fp8_per_head") if fp8 else gqa_config()
     runner = GroupsRunner(model, config, config)
-    assert model.attention_runtime.step_config.dynamic_decode_rows
+    assert model.attention_backend_manager.step_config.dynamic_decode_rows
     token_map = paged_token_map(8, 16, seed=7)
     generator = torch.Generator(device="cuda").manual_seed(9)
     q = torch.randn(6, 8, 64, device="cuda", generator=generator).bfloat16()

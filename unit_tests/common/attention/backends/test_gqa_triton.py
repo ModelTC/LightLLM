@@ -9,7 +9,7 @@ from lightllm.common.attention.backend import TensorAllocator
 from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQAPrefillBackend
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, configure_attention_step
+from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 
 

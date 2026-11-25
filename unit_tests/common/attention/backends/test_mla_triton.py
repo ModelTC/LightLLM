@@ -6,7 +6,7 @@ import torch
 from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLADecodeLayerInputs
 from lightllm.common.attention.backends.mla import MLAPrefillLayerConfig, MLAPrefillLayerInputs
 from lightllm.common.attention.backends.mla.triton import TritonMLADecodeBackend, TritonMLAPrefillBackend
-from lightllm.common.basemodel.attention_runtime import AttentionStepConfig, configure_attention_step
+from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 
 

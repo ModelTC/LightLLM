@@ -43,7 +43,7 @@ from lightllm.utils.torch_memory_saver_utils import (
     TorchMemorySaverWrapper,
     MemoryTag,
 )
-from .attention_runtime import AttentionRuntime
+from .attention_backend_manager import AttentionBackendManager
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -327,34 +327,33 @@ class TpPartBaseModel:
         return
 
     def _init_attention(self):
-        """Create the model's AttentionRuntime and bind each layer's implementations.
+        """Create the model's AttentionBackendManager and bind each layer's implementations.
 
         Runs after KV allocation and before warmup, so unsupported layer configs fail at load time.
         """
-        self.attention_runtime = runtime = AttentionRuntime(self)
+        self.attention_backend_manager = backend_manager = AttentionBackendManager(self)
         role = self.att_state_role
         manager = self.att_state_manager
         if not (manager.get_full_attention_states(role) or manager.get_bounded_attention_states(role)):
             # FFN-only models have no attention to bind.
             return
         for layer in self.layers_infer:
-            spec = layer.attention_spec(self)
-            for phase in runtime.state_groups:
-                enabled = getattr(spec, phase) is not None
+            config = layer.attention_config(self)
+            for phase in backend_manager.state_groups:
+                enabled = getattr(config, phase) is not None
                 required = phase in layer.attention_phases
                 if enabled != required:
                     problem = "missing" if required else "unexpected"
                     raise ValueError(f"{role} layer {layer.layer_num_}: {problem} {phase} attention configuration")
-            layer.prefill_impl, layer.decode_impl = runtime.bind(spec)
-        for phase in runtime.state_groups:
-            logger.info(
-                f"{role} {phase} attention backends: {[backend.get_name() for backend in runtime.backends(phase)]}"
-            )
+            layer.prefill_impl, layer.decode_impl = backend_manager.bind(config)
+        for phase in backend_manager.state_groups:
+            backend_names = [backend.get_name() for backend in backend_manager.backends(phase)]
+            logger.info(f"{role} {phase} attention backends: {backend_names}")
 
     @property
     def requires_cpu_cache_sync(self) -> bool:
         """Whether some attention kernel of this model must not overlap CPU cache copies on the GPU."""
-        return self.attention_runtime.requires_cpu_cache_sync()
+        return self.attention_backend_manager.requires_cpu_cache_sync()
 
     def _align_decode_batch_size(self, batch_size: int) -> int:
         alignment = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
@@ -481,7 +480,7 @@ class TpPartBaseModel:
 
         infer_state.init_some_extra_state(self)
         if build_attention:
-            infer_state.att_states = self.attention_runtime.prepare(infer_state)
+            infer_state.att_states = self.attention_backend_manager.prepare(infer_state)
         return infer_state
 
     def _create_padded_decode_model_input(self, model_input: ModelInput, new_batch_size: int):

@@ -9,10 +9,10 @@ from lightllm.common.attention import selector
 from lightllm.common.attention.backend import AttentionBackend
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig
 from lightllm.common.attention.backends.gqa.fa3 import FA3PageTables
-from lightllm.common.basemodel import attention_runtime
-from lightllm.common.basemodel.attention_runtime import (
-    AttentionRuntime,
-    AttentionSpec,
+from lightllm.common.basemodel import attention_backend_manager
+from lightllm.common.basemodel.attention_backend_manager import (
+    AttentionBackendManager,
+    LayerAttentionConfig,
     AttentionStepConfig,
     attention_build_resources,
     configure_attention_step,
@@ -61,12 +61,12 @@ def fake_model(**args):
 
 
 def setup_model(model):
-    model.attention_runtime = AttentionRuntime(model)
+    model.attention_backend_manager = AttentionBackendManager(model)
     return model
 
 
 def backends(model, phase):
-    return tuple(model.attention_runtime.backends(phase))
+    return tuple(model.attention_backend_manager.backends(phase))
 
 
 def gqa(**fields) -> GQALayerConfig:
@@ -76,10 +76,11 @@ def gqa(**fields) -> GQALayerConfig:
 def test_triton_layers_share_one_group_across_layer_configs(monkeypatch):
     # Gemma4-like: layers differ in head_dim and window, but Triton's step builders ignore the layer config.
     groups = setup_model(fake_model())
-    sliding = groups.attention_runtime.bind(AttentionSpec(gqa(sliding_window=(511, 0)), gqa(sliding_window=(511, 0))))
-    full_spec = AttentionSpec(gqa(head_dim=128), gqa(head_dim=128))
-    full = groups.attention_runtime.bind(full_spec)
-    again = groups.attention_runtime.bind(full_spec)
+    sliding_config = gqa(sliding_window=(511, 0))
+    sliding = groups.attention_backend_manager.bind(LayerAttentionConfig(sliding_config, sliding_config))
+    full_config = LayerAttentionConfig(gqa(head_dim=128), gqa(head_dim=128))
+    full = groups.attention_backend_manager.bind(full_config)
+    again = groups.attention_backend_manager.bind(full_config)
     assert full == again
     prepared_by = []
     prepare = AttentionBackend.prepare
@@ -92,7 +93,7 @@ def test_triton_layers_share_one_group_across_layer_configs(monkeypatch):
     for is_prefill, representative, other in zip((True, False), sliding, full):
         assert representative is not other
         state = step(is_prefill)
-        state.att_states = groups.attention_runtime.prepare(state)
+        state.att_states = groups.attention_backend_manager.prepare(state)
         assert list(state.att_states) == [representative.state_key]
         assert state.att_states[representative.state_key] is state.att_states[other.state_key]
     assert prepared_by == list(sliding)
@@ -101,13 +102,13 @@ def test_triton_layers_share_one_group_across_layer_configs(monkeypatch):
 @pytest.mark.parametrize("prefill", [True, False])
 def test_layer_attention_state_belongs_to_its_microbatch(prefill):
     model = setup_model(fake_model())
-    impls = model.attention_runtime.bind(AttentionSpec(gqa(), gqa()))
+    impls = model.attention_backend_manager.bind(LayerAttentionConfig(gqa(), gqa()))
     impl = impls[0 if prefill else 1]
     first = step(prefill)
-    first.att_states = model.attention_runtime.prepare(first)
+    first.att_states = model.attention_backend_manager.prepare(first)
     second = step(prefill)
     second.microbatch_index = 1
-    second.att_states = model.attention_runtime.prepare(second)
+    second.att_states = model.attention_backend_manager.prepare(second)
     state = first.att_states[impl.state_key]
     assert state is not second.att_states[impl.state_key]
     assert state.b_req_idx is first.b_req_idx
@@ -116,8 +117,8 @@ def test_layer_attention_state_belongs_to_its_microbatch(prefill):
 
 def test_flashinfer_layers_with_different_head_dims_form_separate_groups():
     groups = setup_model(fake_model(llm_prefill_att_backend=["flashinfer"], llm_decode_att_backend=["flashinfer"]))
-    groups.attention_runtime.bind(AttentionSpec(gqa(), gqa()))
-    groups.attention_runtime.bind(AttentionSpec(gqa(head_dim=128), gqa(head_dim=128)))
+    groups.attention_backend_manager.bind(LayerAttentionConfig(gqa(), gqa()))
+    groups.attention_backend_manager.bind(LayerAttentionConfig(gqa(head_dim=128), gqa(head_dim=128)))
     assert all(len(backends(groups, phase)) == 2 for phase in selector.PHASES)
 
 
@@ -134,7 +135,7 @@ def test_mla_layers_group_by_what_their_step_builders_plan_with(backend, groups)
 
     model = setup_model(fake_model(llm_prefill_att_backend=[backend], llm_decode_att_backend=[backend]))
     for scale in (0.1, 0.1, 0.2):
-        model.attention_runtime.bind(AttentionSpec(*mla(scale)))
+        model.attention_backend_manager.bind(LayerAttentionConfig(*mla(scale)))
     assert all(len(backends(model, phase)) == groups for phase in selector.PHASES)
 
 
@@ -161,12 +162,12 @@ def test_sparse_mla_step_builders_follow_the_layer_selection():
 
 def test_layer_family_selects_its_command_line_argument():
     groups = setup_model(fake_model(llm_prefill_att_backend=["fa3", "flashqla"]))
-    assert attention_runtime.requested_backend(groups.args, "prefill", gqa()) == "fa3"
+    assert attention_backend_manager.requested_backend(groups.args, "prefill", gqa()) == "fa3"
     linear = SimpleNamespace()
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(selector, "arg_index", lambda layer_config: 1 if layer_config is linear else 0)
-        assert attention_runtime.requested_backend(groups.args, "prefill", linear) == "flashqla"
-        assert attention_runtime.requested_backend(groups.args, "decode", linear) == "auto"
+        assert attention_backend_manager.requested_backend(groups.args, "prefill", linear) == "flashqla"
+        assert attention_backend_manager.requested_backend(groups.args, "decode", linear) == "auto"
 
 
 @pytest.mark.parametrize("replay", [False, True])
@@ -275,14 +276,16 @@ def step(prefill: bool, batch_size: int = 2) -> InferStateInfo:
 
 def test_step_builders_are_created_per_group_and_phase_on_first_build(fake_family):
     groups = fake_family
-    first_prefill, first_decode = groups.attention_runtime.bind(AttentionSpec(FakeConfig(key=1), FakeConfig(key=1)))
-    second_prefill, second_decode = groups.attention_runtime.bind(
-        AttentionSpec(FakeConfig(key=2), FakeConfig(key=1, other=2))
+    first_prefill, first_decode = groups.attention_backend_manager.bind(
+        LayerAttentionConfig(FakeConfig(key=1), FakeConfig(key=1))
+    )
+    second_prefill, second_decode = groups.attention_backend_manager.bind(
+        LayerAttentionConfig(FakeConfig(key=2), FakeConfig(key=1, other=2))
     )
     assert created == []
 
     prefill = step(prefill=True)
-    prefill.att_states = groups.attention_runtime.prepare(prefill)
+    prefill.att_states = groups.attention_backend_manager.prepare(prefill)
     # A prefill-only node never creates decode builders.
     assert sorted(created) == [("fake_prefill", 1), ("fake_prefill", 2)]
     assert set(prefill.att_states) == {first_prefill.state_key, second_prefill.state_key}
@@ -292,13 +295,13 @@ def test_step_builders_are_created_per_group_and_phase_on_first_build(fake_famil
     assert len(batches) == 1
 
     decode = step(prefill=False)
-    decode.att_states = groups.attention_runtime.prepare(decode)
+    decode.att_states = groups.attention_backend_manager.prepare(decode)
     first_args = decode.att_states[first_decode.state_key]
     assert first_decode is not second_decode
     assert first_args is decode.att_states[second_decode.state_key]
     overlap = step(prefill=False, batch_size=3)
     overlap.microbatch_index = 1
-    overlap.att_states = groups.attention_runtime.prepare(overlap)
+    overlap.att_states = groups.attention_backend_manager.prepare(overlap)
     assert overlap.att_states[first_decode.state_key] is overlap.att_states[second_decode.state_key]
     assert overlap.att_states[first_decode.state_key].batch.microbatch_index == 1
     assert decode.att_states[first_decode.state_key] is first_args
@@ -309,16 +312,16 @@ def test_step_builders_are_created_per_group_and_phase_on_first_build(fake_famil
 
 def test_decode_only_layers_build_no_prefill_att_state(fake_family):
     groups = fake_family
-    prefill_impl, decode_impl = groups.attention_runtime.bind(AttentionSpec(None, FakeConfig(key=1)))
+    prefill_impl, decode_impl = groups.attention_backend_manager.bind(LayerAttentionConfig(None, FakeConfig(key=1)))
     assert prefill_impl is None
     assert backends(groups, "prefill") == () and backends(groups, "decode") == (FakeDecode,)
 
     prefill = step(prefill=True)
-    prefill.att_states = groups.attention_runtime.prepare(prefill)
+    prefill.att_states = groups.attention_backend_manager.prepare(prefill)
     assert prefill.att_states == {} and created == []
 
     decode = step(prefill=False)
-    decode.att_states = groups.attention_runtime.prepare(decode)
+    decode.att_states = groups.attention_backend_manager.prepare(decode)
     assert set(decode.att_states) == {decode_impl.state_key} and created == [("fake_decode", 1)]
 
 
@@ -326,15 +329,19 @@ def test_layer_override_is_independent_for_identical_configs():
     model = fake_model(llm_prefill_att_backend=["fa3"], llm_decode_att_backend=["fa3"])
     groups = setup_model(model)
     config = gqa()
-    pinned = groups.attention_runtime.bind(
-        AttentionSpec(config, config, prefill_implementation="triton", decode_implementation="triton")
+    pinned = groups.attention_backend_manager.bind(
+        LayerAttentionConfig(config, config, prefill_implementation="triton", decode_implementation="triton")
     )
-    default = groups.attention_runtime.bind(AttentionSpec(config, config))
-    assert groups.attention_runtime.bind(AttentionSpec(config, config, prefill_implementation="triton")) == (
+    default = groups.attention_backend_manager.bind(LayerAttentionConfig(config, config))
+    assert groups.attention_backend_manager.bind(
+        LayerAttentionConfig(config, config, prefill_implementation="triton")
+    ) == (
         pinned[0],
         default[1],
     )
-    assert groups.attention_runtime.bind(AttentionSpec(config, config, decode_implementation="triton")) == (
+    assert groups.attention_backend_manager.bind(
+        LayerAttentionConfig(config, config, decode_implementation="triton")
+    ) == (
         default[0],
         pinned[1],
     )
@@ -347,7 +354,7 @@ def test_layer_override_is_independent_for_identical_configs():
 
 def test_models_without_layers_build_no_att_state(fake_family):
     state = step(prefill=True)
-    state.att_states = fake_family.attention_runtime.prepare(state)
+    state.att_states = fake_family.attention_backend_manager.prepare(state)
     assert state.att_states == {}
 
 
@@ -465,7 +472,7 @@ def test_llama_layer_creates_its_attention_from_its_cache(runtime_start_args):
     scales = GQAKVScales(torch.ones(16, 2, 8), torch.ones(16, 2, 8))
     model = model_with_state(FakeState(scales=scales), llm_kv_type="int8kv")
     layer = llama_layer()
-    layer.prefill_impl, layer.decode_impl = model.attention_runtime.bind(layer.attention_spec(model))
+    layer.prefill_impl, layer.decode_impl = model.attention_backend_manager.bind(layer.attention_config(model))
     expected = gqa(kv_quant="int8_group", kv_quant_group_size=8)
     assert layer.prefill_impl.layer_config == layer.decode_impl.layer_config == expected
     assert backends(model, "decode")[0].get_name() == "triton_quant_gqa_decode"
@@ -479,17 +486,17 @@ def test_only_prefill_attends_inside_image_spans(runtime_start_args):
         {"rms_norm_eps": 1e-6, "num_attention_heads": 8, "num_key_value_heads": 2, "hidden_size": 512, "head_dim": 64},
     )
     model = model_with_state(FakeState())
-    assert layer.attention_spec(model) == AttentionSpec(gqa(bidirectional_image_spans=True), gqa())
+    assert layer.attention_config(model) == LayerAttentionConfig(gqa(bidirectional_image_spans=True), gqa())
     assert layer.prefill_impl is layer.decode_impl is None
-    assert not model.attention_runtime.has_attention
+    assert not model.attention_backend_manager.has_attention
 
 
 def test_block_draft_layers_are_not_causal(monkeypatch):
-    monkeypatch.setattr(attention_runtime, "get_env_start_args", lambda: SimpleNamespace(mtp_mode="dflash"))
+    monkeypatch.setattr(attention_backend_manager, "get_env_start_args", lambda: SimpleNamespace(mtp_mode="dflash"))
     model = model_with_state(FakeState(), llm_prefill_att_backend=["fa3"], llm_decode_att_backend=["fa3"])
     model.is_mtp_draft_model = True
     layer = llama_layer()
-    assert layer.attention_spec(model).decode == gqa(causal=False)
+    assert layer.attention_config(model).decode == gqa(causal=False)
 
 
 def test_unsupported_layer_configs_fail_when_the_model_loads(runtime_start_args):
@@ -502,7 +509,7 @@ def test_unsupported_layer_configs_fail_when_the_model_loads(runtime_start_args)
         llm_decode_att_backend=["flashinfer"],
     )
     with pytest.raises(ValueError, match="does not support"):
-        model.attention_runtime.bind(llama_layer().attention_spec(model))
+        model.attention_backend_manager.bind(llama_layer().attention_config(model))
 
 
 def test_models_with_attention_states_create_their_layers_attention():
@@ -514,9 +521,9 @@ def test_models_with_attention_states_create_their_layers_attention():
         def __init__(self):
             self.models = []
 
-        def attention_spec(self, model):
+        def attention_config(self, model):
             self.models.append(model)
-            return AttentionSpec(None, gqa())
+            return LayerAttentionConfig(None, gqa())
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.__dict__.update(vars(fake_model()))
@@ -528,7 +535,7 @@ def test_models_with_attention_states_create_their_layers_attention():
     )
 
     model._init_attention()
-    assert model.attention_runtime.has_attention
+    assert model.attention_backend_manager.has_attention
     assert all(layer.models == [model] for layer in model.layers_infer)
     first, second = model.layers_infer
     assert first.prefill_impl is second.prefill_impl is None
@@ -537,24 +544,24 @@ def test_models_with_attention_states_create_their_layers_attention():
     # A draft without attention states (FFN-only) binds no layers and builds no attention state.
     states.clear()
     model._init_attention()
-    assert not model.attention_runtime.has_attention
+    assert not model.attention_backend_manager.has_attention
 
 
 @pytest.mark.parametrize(
     "required,spec,error",
     [
-        (("prefill", "decode"), AttentionSpec(None, gqa()), "missing prefill"),
-        (("prefill", "decode"), AttentionSpec(gqa(), None), "missing decode"),
-        (("decode",), AttentionSpec(gqa(), gqa()), "unexpected prefill"),
+        (("prefill", "decode"), LayerAttentionConfig(None, gqa()), "missing prefill"),
+        (("prefill", "decode"), LayerAttentionConfig(gqa(), None), "missing decode"),
+        (("decode",), LayerAttentionConfig(gqa(), gqa()), "unexpected prefill"),
     ],
 )
 def test_model_rejects_phase_config_that_disagrees_with_layer_execution(required, spec, error):
     model = model_with_state(FakeState())
     model.att_state_manager.get_full_attention_states = lambda role: (object(),)
-    model.layers_infer = [SimpleNamespace(layer_num_=7, attention_phases=required, attention_spec=lambda model: spec)]
+    model.layers_infer = [SimpleNamespace(layer_num_=7, attention_phases=required, attention_config=lambda model: spec)]
     with pytest.raises(ValueError, match=f"draft0 layer 7: {error} attention configuration"):
         TpPartBaseModel._init_attention(model)
-    assert not model.attention_runtime.has_attention
+    assert not model.attention_backend_manager.has_attention
 
 
 @pytest.mark.parametrize("ssm_state_mode, decode", [("native", "triton_gdn_decode"), ("replay", "replay_gdn_decode")])
@@ -580,8 +587,8 @@ def test_qwen3next_layers_split_into_full_and_linear_attention_groups(runtime_st
         FakeState(), llm_prefill_att_backend=["triton", "triton"], mtp_step=1, ssm_state_mode=ssm_state_mode
     )
     linear, full = (Qwen3NextTransformerLayerInfer(i, net) for i in range(2))
-    linear.prefill_impl, linear.decode_impl = model.attention_runtime.bind(linear.attention_spec(model))
-    full.prefill_impl, full.decode_impl = model.attention_runtime.bind(full.attention_spec(model))
+    linear.prefill_impl, linear.decode_impl = model.attention_backend_manager.bind(linear.attention_config(model))
+    full.prefill_impl, full.decode_impl = model.attention_backend_manager.bind(full.attention_config(model))
     expected = GDNLayerConfig(
         2, 4, 64, 64, 4, "silu", torch.bfloat16, state_mtp_step=1, replay=ssm_state_mode == "replay"
     )
@@ -593,33 +600,37 @@ def test_qwen3next_layers_split_into_full_and_linear_attention_groups(runtime_st
 
 
 def test_speculative_decode_batches_carry_the_recurrent_state_index(monkeypatch):
-    monkeypatch.setattr(attention_runtime, "get_env_start_args", lambda: SimpleNamespace(mtp_dynamic_verify=False))
+    monkeypatch.setattr(
+        attention_backend_manager, "get_env_start_args", lambda: SimpleNamespace(mtp_dynamic_verify=False)
+    )
     index = torch.arange(8, dtype=torch.int32)
     recurrent = SimpleNamespace(mtp_state_index=index)
     model = fake_model(mtp_step=1)
     model.att_state_role = "main"
     model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: (object(), recurrent))
-    assert attention_runtime.recurrent_mtp_state_index(model) is index
+    assert attention_backend_manager.recurrent_mtp_state_index(model) is index
     for rows, expected in ((1, None), (2, index)):
         model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _, rows=rows: rows - 1)
-        config = attention_runtime.attention_step_config(model)
+        config = attention_backend_manager.attention_step_config(model)
         assert config.decode_rows_per_request == rows and config.req_to_mtp_state_index is index
         assert configure_attention_step(step(prefill=False), config).req_to_mtp_state_index is expected
         # Prefill rows are never speculative.
         assert configure_attention_step(step(prefill=True), config).req_to_mtp_state_index is None
     model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: (recurrent, recurrent))
     with pytest.raises(ValueError, match="at most one recurrent state"):
-        attention_runtime.recurrent_mtp_state_index(model)
+        attention_backend_manager.recurrent_mtp_state_index(model)
 
 
 @pytest.mark.parametrize("dynamic", [False, True])
 def test_step_config_is_read_from_the_model_once(monkeypatch, dynamic):
-    monkeypatch.setattr(attention_runtime, "get_env_start_args", lambda: SimpleNamespace(mtp_dynamic_verify=dynamic))
+    monkeypatch.setattr(
+        attention_backend_manager, "get_env_start_args", lambda: SimpleNamespace(mtp_dynamic_verify=dynamic)
+    )
     model = fake_model(mtp_step=2)
     model.att_state_role = "main"
     model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: ())
     model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda is_draft: 2)
-    runtime = AttentionRuntime(model)
+    runtime = AttentionBackendManager(model)
     assert runtime.step_config == AttentionStepConfig(
         decode_rows_per_request=3, dynamic_decode_rows=dynamic, cuda_graph_max_kv_seq_len=1024
     )

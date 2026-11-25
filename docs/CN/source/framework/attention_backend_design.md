@@ -17,11 +17,11 @@
 
 ```mermaid
 flowchart TD
-    Layer[模型层 layer infer] -->|attention_spec| Runtime[model.attention_runtime]
-    Runtime -->|bind：绑定 prefill_impl 和 decode_impl| Layer
+    Layer[模型层 layer infer] -->|attention_config| Manager[model.attention_backend_manager]
+    Manager -->|bind：绑定 prefill_impl 和 decode_impl| Layer
     Infer[model._create_inferstate] -->|prepare| Batch[InferStateInfo]
-    Batch --> Runtime
-    Runtime -->|每个 state_key 一次 backend.build| AttState[infer_state.att_states]
+    Batch --> Manager
+    Manager -->|每个 state_key 一次 impl.prepare| AttState[infer_state.att_states]
     Layer -->|写 KV cache / 解析逐层数据| State[AttentionStateManager]
     AttState -->|按 impl 取本步参数| Layer
     Layer -->|forward| Impl[backend 实例]
@@ -34,19 +34,19 @@ flowchart TD
 
 模型的 layer infer 负责：
 
-- 加载时，`attention_spec(model)` 根据模型配置和本层的 attention state 返回 `AttentionSpec`，描述 prefill 和 decode 各自需要的 layer config，以及可选的指定实现。层的全部静态属性（因果性、softmax scale、滑窗、sinks、ALiBi、图像 span、KV 量化方式、线性注意力的状态模式等）都写入 layer config。
+- 加载时，`attention_config(model)` 根据模型配置和本层的 attention state 返回 `LayerAttentionConfig`，描述 prefill 和 decode 各自需要的 layer config，以及可选的指定实现。层的全部静态属性（因果性、softmax scale、滑窗、sinks、ALiBi、图像 span、KV 量化方式、线性注意力的状态模式等）都写入 layer config。
 - 在调用 attention 之前把本层的 K/V 写入 KV cache。
 - 每次调用时解析 KV 量化 scale（`state.get_layer_kv_scales(layer)`）、线性注意力的 conv/SSM 状态视图、稀疏注意力的 top-k 索引和融合投影，构造族的 `LayerInputs`，用当前 impl 对应的 attention state 直接调用 `forward`。
 
-GQA 层在 `attention_spec()` 中声明 prefill 和 decode 的配置。Gemma4 在滑窗层的 prefill 配置中开启图像区间内双向 attention，DFlash 只声明 decode 配置。执行时，层从 KV 视图和权重组装 `GQALayerInputs`，连同当前步的 attention state 传给后端的 `forward()`。
+GQA 层在 `attention_config()` 中声明 prefill 和 decode 的配置。Gemma4 在滑窗层的 prefill 配置中开启图像区间内双向 attention，DFlash 只声明 decode 配置。执行时，层从 KV 视图和权重组装 `GQALayerInputs`，连同当前步的 attention state 传给后端的 `forward()`。
 
-模型层不直接调用 attention kernel。`unit_tests/common/attention/test_attention_call_sites.py` 检查 layer infer、infer state、model 和 `attention_runtime.py` 不导入 attention kernel 模块（视觉编码器除外，它在单张图像内计算 attention，不使用 KV cache），并检查 `lightllm/common/attention/**` 不导入模型侧代码。
+模型层不直接调用 attention kernel。`unit_tests/common/attention/test_attention_call_sites.py` 检查 layer infer、infer state、model 和 `attention_backend_manager.py` 不导入 attention kernel 模块（视觉编码器除外，它在单张图像内计算 attention，不使用 KV cache），并检查 `lightllm/common/attention/**` 不导入模型侧代码。
 
 ### 2.2 模型初始化与每步参数
 
 主模型和每个 MTP 草稿模型在各自的 `_init_attention` 中初始化层，因为各模型的 CUDA graph 上限和缓存布局不同。
 
-`_init_attention` 为每个模型创建 `model.attention_runtime`（`AttentionRuntime`），纯 FFN 模型也不例外，只是不绑定任何层、`has_attention` 为假。绑定前用层的 `attention_phases` 检查 `AttentionSpec` 是否覆盖实际运行阶段。普通层需要两个阶段，DFlash 层只需要 decode。
+`_init_attention` 为每个模型创建 `model.attention_backend_manager`（`AttentionBackendManager`）。纯 FFN 模型的 manager 没有绑定层，`has_attention` 为假。绑定前用层的 `attention_phases` 检查 `LayerAttentionConfig` 是否覆盖实际运行阶段。普通层需要两个阶段，DFlash 层只需要 decode。
 
 - `bind(spec)` 为每个阶段独立选择实现，然后将两个 impl 赋给层。阶段、layer config 和请求的 backend 都相同的层复用 impl。某阶段的 layer config 为 `None` 时，该阶段返回 `None`，例如 DFlash 草稿层只在 decode 计算。每个阶段的每个 `state_key` 由第一个绑定的 impl 负责准备状态。
 - `prepare(infer_state)` 在每个 microbatch 对本阶段各组的代表实例调用一次 `impl.prepare`，返回 `{state_key: att_state}`。没有状态组的阶段返回空字典。
@@ -60,14 +60,14 @@ GQA 层在 `attention_spec()` 中声明 prefill 和 decode 的配置。Gemma4 �
 
 层的因果性（`attention_is_causal`）在绑定时写入 layer config。
 
-每步只有一个入口：`model._create_inferstate(model_input, microbatch_index, graph_mode=...)` 填充请求字段，调用 `init_some_extra_state` 生成索引张量，再执行 `infer_state.att_states = model.attention_runtime.prepare(infer_state)`，返回完整的状态。`graph_mode`（`GraphMode.EAGER`、`CAPTURE`、`REPLAY`）在创建时传入并保存在 `infer_state.graph_mode` 上，backend 据此准备 eager、捕获和 replay 步。只写 KV cache 的步骤（DSpark 的 KV-only 提交）传 `build_attention=False`。
+每步只有一个入口。`model._create_inferstate(model_input, microbatch_index, graph_mode=...)` 填充请求字段，调用 `init_some_extra_state` 生成索引张量，再执行 `infer_state.att_states = model.attention_backend_manager.prepare(infer_state)`，返回完整的状态。`graph_mode`（`GraphMode.EAGER`、`CAPTURE`、`REPLAY`）在创建时传入并保存在 `infer_state.graph_mode` 上，backend 据此准备 eager、捕获和 replay 步。只写 KV cache 的步骤（DSpark 的 KV-only 提交）传 `build_attention=False`。
 
 ### 2.3 模型层直接调用 impl
 
 ```python
 # 加载时
-spec = layer.attention_spec(model)
-layer.prefill_impl, layer.decode_impl = attention.bind(spec)
+config = layer.attention_config(model)
+layer.prefill_impl, layer.decode_impl = model.attention_backend_manager.bind(config)
 # 每次调用
 o = layer.decode_impl.forward(infer_state.att_states[layer.decode_impl.state_key], GQALayerInputs(...), out=..., alloc_func=...)
 ```
@@ -161,7 +161,7 @@ impl.forward(att_state, layer_inputs, *, out, alloc_func=torch.empty) -> out
 - `auto` 按优先级依次尝试：impl 能以该 layer config 构造（不抛出 `NotImplementedError`），且第三方库通过 `validate()`。先构造再验证，因为验证要启动子进程。都不满足时退回 Triton（不验证）。例如 Neo 的图像 span 不被 FlashInfer 支持，会被自动跳过。
 - 显式指定的实现不存在或不支持该配置时，在模型加载时抛出 `ValueError`，并列出各 backend 拒绝的原因。
 - EP MoE 排除 FlashInfer；有 MTP 时 decode 优先 FA3。
-- 层可以用 `AttentionSpec.prefill_implementation` 和 `decode_implementation` 分别指定实现。Bloom 和 Gemma4 的 GQA 层在两个阶段都指定 `triton`。GLM-5 和 MTP 草稿模型只在稀疏 MLA 分支指定 `flashmla_sparse`，KDA 分支使用命令行的第二个值。
+- 层可以用 `LayerAttentionConfig.prefill_implementation` 和 `decode_implementation` 分别指定实现。Bloom 和 Gemma4 的 GQA 层在两个阶段都指定 `triton`。GLM-5 和 MTP 草稿模型只在稀疏 MLA 分支指定 `flashmla_sparse`，KDA 分支使用命令行的第二个值。
 
 ## 6. 分组与时序
 
@@ -186,11 +186,11 @@ main 与 MTP draft 模型不共用组的 attention state。
 
 1. 构造各层。
 2. `prepare_attention_states` 与 KV 容量 profiling。GLM-5 及其 MTP 草稿模型在这一步按 prefill microbatch 预留 FP8 KV 反量化 workspace。稀疏注意力层将当前 microbatch 的 workspace 作为 `SparseMLAPrefillLayerInputs.fp8_workspace` 传给 FA3。
-3. `init_runtime` 中的 `_init_attention` 创建 `AttentionRuntime`，读取每层的 `attention_spec`，绑定两个阶段的 impl 并登记各状态组的代表实例，随后执行 warmup 和 CUDA graph 捕获。
+3. `init_runtime` 中的 `_init_attention` 创建 `AttentionBackendManager`，调用每层的 `attention_config()`，绑定两个阶段的 impl 并登记各状态组的代表实例，随后执行 warmup 和 CUDA graph 捕获。
 
 layer config 在 KV 分配之后确定，因为 KV head 数、量化 KV 的 group size 和是否有静态 q scale 都来自该层的 attention state。
 
-每步由 `_create_inferstate` 创建完整的状态，其中 `attention_runtime.prepare` 为本阶段的每个 `state_key` 准备一份状态。microbatch overlap 的两个 `InferStateInfo` 各自持有 `att_states`。
+每步由 `_create_inferstate` 创建完整的状态，其中 `attention_backend_manager.prepare` 为本阶段的每个 `state_key` 准备一份状态。microbatch overlap 的两个 `InferStateInfo` 各自持有 `att_states`。
 
 ## 7. CUDA Graph 时序
 
@@ -236,7 +236,7 @@ lightllm/common/attention/          # 不知道模型的存在
 │       └── <impl>.py               # AttState、BuildContext、Backend
 └── kernels/<family>/               # Triton kernel 与封装
 lightllm/common/basemodel/
-├── attention_runtime.py            # AttentionRuntime、AttentionStepConfig、configure_attention_step、attention_build_resources
+├── attention_backend_manager.py    # AttentionBackendManager、AttentionStepConfig、configure_attention_step、attention_build_resources
 ├── basemodel.py                    # _init_attention、_create_inferstate
 └── infer_struct.py                 # GraphMode、当前 microbatch 的 att_states
 ```
@@ -248,14 +248,14 @@ lightllm/common/basemodel/
 1. 若是新算法族，在 `backends/<family>/__init__.py` 定义 layer config（frozen、构造时校验）和 layer inputs，并写清张量布局。
 2. 在 `backends/<family>/<impl>.py` 定义 backend、构建上下文和本步状态。backend 构造时检查配置，类方法 `build` 遵守第 4.3 节的约束，实例方法 `forward` 读取当前层的输入。
 3. 在 `selector.py` 的注册表中登记该实现的名称、backend 和 `auto` 优先级。
-4. 模型层在 `attention_spec` 中返回两个阶段的配置。逐层数据在模型层解析后通过 layer inputs 传入。
+4. 模型层在 `attention_config()` 中返回两个阶段的配置。逐层数据在模型层解析后通过 layer inputs 传入。
 
 ## 11. 测试和评审要求
 
 - impl 与独立的 torch 参考实现对比（量化路径对比反量化后的参考，容差需说明来源），覆盖 cached prefix、各 decode 布局和该实现声明支持的层属性。
 - 不支持的 layer config 在构造时被拒绝；选择器测试覆盖 `auto` 跳过不支持的配置、显式指定不支持时报错。
 - 新的 decode 构建上下文 加入 `unit_tests/common/attention/backends/test_step_builder_graph_contract.py`：同一 `(microbatch, batch size)` 的捕获步与 replay 步保持地址和布局、值等于 eager 构造、主机字段除 hint 外不变、不同 microbatch 不共享存储。
-- 新的 `build_context_key` 加入分组测试（`unit_tests/common/basemodel/test_attention_runtime.py`）：键相同的层共用 attention state，PD 节点只创建所需阶段的上下文。
+- 在 `unit_tests/common/basemodel/test_attention_backend_manager.py` 中验证新的 `build_context_key`。键相同的层共用 attention state，PD 节点只创建所需阶段的上下文。
 - 至少一个测试通过 LightLLM 的 `CudaGraph.capture_decode` / `replay` 在长度变化后 replay。
 - 重构已有路径时，用相同输入与改动前对比各层输出逐位一致；有意改变行为的修复单独提交并附回归测试。
 

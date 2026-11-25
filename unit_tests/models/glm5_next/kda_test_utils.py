@@ -88,7 +88,7 @@ class KDAAttention:
 
     def __init__(self, layer_config, step_config=None):
         from lightllm.common.attention.backends.kda import triton as kda
-        from lightllm.common.basemodel.attention_runtime import AttentionStepConfig
+        from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig
 
         self.layer_config = layer_config
         self.step_config = AttentionStepConfig() if step_config is None else step_config
@@ -118,7 +118,10 @@ class KDAStep:
         self.att_state = None
 
     def init_state(self):
-        from lightllm.common.basemodel.attention_runtime import configure_attention_step, recurrent_mtp_state_index
+        from lightllm.common.basemodel.attention_backend_manager import (
+            configure_attention_step,
+            recurrent_mtp_state_index,
+        )
 
         infer, attention = self.infer, self.attention
         index = None

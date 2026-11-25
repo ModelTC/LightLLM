@@ -7,9 +7,9 @@ from typing import Any, Optional
 import torch
 
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerInputs
-from lightllm.common.basemodel.attention_runtime import (
-    AttentionRuntime,
-    AttentionSpec,
+from lightllm.common.basemodel.attention_backend_manager import (
+    AttentionBackendManager,
+    LayerAttentionConfig,
     AttentionStepConfig,
     configure_attention_step,
 )
@@ -30,11 +30,13 @@ class GroupsRunner:
         if not hasattr(model, "att_state_manager"):
             model.att_state_role = "main"
             model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: ())
-        model.attention_runtime = AttentionRuntime(model)
-        self.prefill_impl, self.decode_impl = model.attention_runtime.bind(AttentionSpec(prefill_config, decode_config))
+        model.attention_backend_manager = AttentionBackendManager(model)
+        self.prefill_impl, self.decode_impl = model.attention_backend_manager.bind(
+            LayerAttentionConfig(prefill_config, decode_config)
+        )
 
     def step(self, infer_state) -> None:
-        infer_state.att_states = self.model.attention_runtime.prepare(infer_state)
+        infer_state.att_states = self.model.attention_backend_manager.prepare(infer_state)
 
     def run_gqa(
         self,
