@@ -9,7 +9,7 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
     def init_some_extra_state(self, model):
         super().init_some_extra_state(model)
         self.v41_sparse_selection = None
-        self.candidate_block_mask = None
+        self.candidate_block_indices = None
         self.engram_hashes = model.engram_hasher(self)
 
     def _indexer_valid_lengths(self, ratio):

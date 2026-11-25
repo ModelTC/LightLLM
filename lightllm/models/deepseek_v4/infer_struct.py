@@ -23,6 +23,7 @@ class PagedIndexerMetadata:
     context_lengths: torch.Tensor
     rows_per_chunk: int
     schedulers: tuple[torch.Tensor, ...]
+    page_rows: torch.Tensor = None
 
 
 class DeepseekV4InferStateInfo(InferStateInfo):
@@ -227,11 +228,15 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         torch.clamp(valid, min=1, max=self.dsv4_c4_indices.shape[1], out=self.dsv4_c4_lengths)
         return valid
 
-    def get_indexer_metadata(self, logical_layer_id, capacity):
+    def get_indexer_metadata(self, logical_layer_id, capacity, *, request_pages=False):
         """Share paged scorer inputs between successive layers with the same compression ratio."""
         config = self.get_compressed_kv_state(logical_layer_id).config
         ratio = config.compress_ratio
-        if self.indexer_metadata is not None and self.indexer_metadata.compress_ratio == ratio:
+        if (
+            self.indexer_metadata is not None
+            and self.indexer_metadata.compress_ratio == ratio
+            and (self.indexer_metadata.page_rows is not None) == request_pages
+        ):
             return self.indexer_metadata
         import deep_gemm
         from .triton_kernel.build_c4_indexer_page_table import build_c4_indexer_page_table
@@ -239,8 +244,8 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         valid_len = self._indexer_valid_lengths(ratio)
         ctx_lens = valid_len.clamp_min(1).view(-1, 1)
         page_table = build_c4_indexer_page_table(
-            self.dsv4_sparse_req_idx,
-            valid_len,
+            self.b_req_idx if request_pages else self.dsv4_sparse_req_idx,
+            self.b_seq_len // ratio if request_pages else valid_len,
             capacity,
             self.req_manager.req_to_token_indexs,
             self.req_manager.HOLD_REQUEST_ID,
@@ -253,9 +258,13 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             aligned_capacity = ((capacity + 255) // 256) * 256
             rows_per_chunk = max(1, C4_PREFILL_LOGITS_BUDGET_BYTES // (aligned_capacity * 4))
         num_sms = deep_gemm.get_num_sms()
-        schedulers = tuple(
-            deep_gemm.get_paged_mqa_logits_metadata(ctx_lens[start : start + rows_per_chunk], page_size, num_sms)
-            for start in range(0, self.position_ids.numel(), rows_per_chunk)
+        schedulers = (
+            ()
+            if request_pages
+            else tuple(
+                deep_gemm.get_paged_mqa_logits_metadata(ctx_lens[start : start + rows_per_chunk], page_size, num_sms)
+                for start in range(0, self.position_ids.numel(), rows_per_chunk)
+            )
         )
         self.indexer_metadata = PagedIndexerMetadata(
             compress_ratio=ratio,
@@ -264,5 +273,6 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             context_lengths=ctx_lens,
             rows_per_chunk=rows_per_chunk,
             schedulers=schedulers,
+            page_rows=self._dsv4_token_to_batch_idx if request_pages else None,
         )
         return self.indexer_metadata
