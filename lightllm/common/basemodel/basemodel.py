@@ -338,8 +338,15 @@ class TpPartBaseModel:
             # FFN-only models have no attention to bind.
             return
         for layer in self.layers_infer:
-            layer.prefill_impl, layer.decode_impl = runtime.bind(layer.attention_spec(self))
-        for phase in runtime.state_builders:
+            spec = layer.attention_spec(self)
+            for phase in runtime.state_groups:
+                enabled = getattr(spec, phase) is not None
+                required = phase in layer.attention_phases
+                if enabled != required:
+                    problem = "missing" if required else "unexpected"
+                    raise ValueError(f"{role} layer {layer.layer_num_}: {problem} {phase} attention configuration")
+            layer.prefill_impl, layer.decode_impl = runtime.bind(spec)
+        for phase in runtime.state_groups:
             logger.info(
                 f"{role} {phase} attention backends: {[backend.get_name() for backend in runtime.backends(phase)]}"
             )

@@ -49,7 +49,9 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
 
     def attention_spec(self, model) -> AttentionSpec:
         config = self._gqa_config(model, has_alibi=True)
-        return AttentionSpec(prefill=config, decode=config, implementation="triton")
+        return AttentionSpec(
+            prefill=config, decode=config, prefill_implementation="triton", decode_implementation="triton"
+        )
 
     def _gqa_alibi_slopes(self, layer_weight: BloomTransformerLayerWeight):
         return layer_weight.tp_alibi

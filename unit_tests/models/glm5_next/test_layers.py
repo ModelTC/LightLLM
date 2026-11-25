@@ -189,8 +189,8 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
         args=SimpleNamespace(llm_kv_type="None"),
     )
     spec = layer.attention_spec(model)
-    prefill = selector.select(spec.prefill, "prefill", spec.implementation)
-    decode = selector.select(spec.decode, "decode", spec.implementation)
+    prefill = selector.select(spec.prefill, "prefill", spec.prefill_implementation)
+    decode = selector.select(spec.decode, "decode", spec.decode_implementation)
     assert (prefill.backend, decode.backend) == (FlashMLASparsePrefillBackend, FA3SparseMLADecodeBackend)
     layer.prefill_impl, layer.decode_impl = prefill.impl, decode.impl
     # The attention state the group's step builders would build for this batch.

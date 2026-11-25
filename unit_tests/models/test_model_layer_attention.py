@@ -286,7 +286,7 @@ def test_glm5_sparse_spec_describes_the_cache_without_a_workspace(kv_type, expec
     spec = layer.attention_spec(model)
     assert spec.prefill == spec.decode
     assert spec.prefill.kv_cache_format == expected_format
-    assert spec.implementation == "flashmla_sparse"
+    assert spec.prefill_implementation == spec.decode_implementation == "flashmla_sparse"
 
 
 @pytest.mark.parametrize("prefill_backends, prefill_kernel", [(["auto"], "auto"), (["fa3", "flashkda"], "flashkda")])

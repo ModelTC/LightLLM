@@ -12,7 +12,6 @@ In order of lifetime:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import cached_property
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -42,8 +41,9 @@ class AttentionSpec:
     # The layer configs of each phase; None for a phase the layer does not attend in.
     prefill: Any
     decode: Any
-    # An implementation name the layer requires, overriding --llm_{prefill,decode}_att_backend.
-    implementation: Optional[str] = None
+    # Required implementation names override the CLI for their respective phases.
+    prefill_implementation: Optional[str] = None
+    decode_implementation: Optional[str] = None
 
 
 def attention_is_causal(model: TpPartBaseModel) -> bool:
@@ -145,36 +145,13 @@ def configure_attention_step(
     return infer_state
 
 
-# Runtime
-
-
-@dataclass
-class _StateBuilder:
-    """Builds, each step, the attention state shared by the layers of one state_key in one phase.
-
-    The backend's build context is created on the first build, so a phase a node never runs
-    (such as decode on a PD prefill node) allocates nothing.
-    """
-
-    backend: type[AttentionBackend]
-    build_key: Any
-    resources: AttentionBuildResources
-
-    @cached_property
-    def context(self) -> Any:
-        return self.backend.create_build_context(self.build_key, self.resources)
-
-    def build(self, infer_state: InferStateInfo) -> Any:
-        return self.backend.build(infer_state, self.context)
-
-
 class AttentionRuntime:
     """A model's attention: binds each layer's implementations at load time and builds each step's states.
 
-    bind() selects a layer's prefill and decode implementations and registers one _StateBuilder per
+    bind() selects a layer's prefill and decode implementations and registers one representative per
     distinct state_key and phase. prepare(infer_state) returns {state_key: att_state} for the step's
     phase; the model stores it as infer_state.att_states, where each layer looks up impl.state_key.
-    A model without attention has a runtime with no builders, whose prepare() returns {}.
+    A model without attention has a runtime with no state groups, whose prepare() returns {}.
 
     Create it once the model's attention states and CUDA graph capacity are final: it keeps what
     the steps need from the model, not the model itself.
@@ -184,7 +161,7 @@ class AttentionRuntime:
         self.args = model.args
         self.resources = attention_build_resources(model)
         self.step_config = attention_step_config(model)
-        self.state_builders: dict[str, dict[tuple, _StateBuilder]] = {phase: {} for phase in selector.PHASES}
+        self.state_groups: dict[str, dict[tuple, AttentionBackend]] = {phase: {} for phase in selector.PHASES}
         # (phase, layer_config, requested name) -> impl, so layers with the same config share an impl.
         self._impls: dict[tuple, AttentionBackend] = {}
         if self.args.enable_ep_moe:
@@ -193,8 +170,8 @@ class AttentionRuntime:
     def bind(self, spec: AttentionSpec) -> tuple[Optional[AttentionBackend], Optional[AttentionBackend]]:
         """The layer's prefill and decode implementations."""
         return (
-            self._select("prefill", spec.prefill, spec.implementation),
-            self._select("decode", spec.decode, spec.implementation),
+            self._select("prefill", spec.prefill, spec.prefill_implementation),
+            self._select("decode", spec.decode, spec.decode_implementation),
         )
 
     def _select(self, phase: str, layer_config: Any, implementation: Optional[str]) -> Optional[AttentionBackend]:
@@ -210,29 +187,25 @@ class AttentionRuntime:
                 priority=selector.auto_priority(layer_config, phase, self.args.mtp_step),
                 excluded=("flashinfer",) if self.args.enable_ep_moe else (),
             )
-            builders = self.state_builders[phase]
-            state_key = selection.impl.state_key
-            if state_key not in builders:
-                backend, build_key = state_key
-                builders[state_key] = _StateBuilder(backend, build_key, self.resources)
+            self.state_groups[phase].setdefault(selection.impl.state_key, selection.impl)
             self._impls[key] = selection.impl
         return self._impls[key]
 
     def backends(self, phase: str) -> list[type[AttentionBackend]]:
         """The backend of each state built in phase, in binding order."""
-        return [builder.backend for builder in self.state_builders[phase].values()]
+        return [type(impl) for impl in self.state_groups[phase].values()]
 
     @property
     def has_attention(self) -> bool:
-        return any(self.state_builders.values())
+        return any(self.state_groups.values())
 
     def requires_cpu_cache_sync(self) -> bool:
         return any(backend.requires_cpu_cache_sync() for phase in selector.PHASES for backend in self.backends(phase))
 
     def prepare(self, infer_state: InferStateInfo) -> dict[tuple, Any]:
         """Build one attention state per state_key of infer_state's phase, for this microbatch."""
-        builders = self.state_builders["prefill" if infer_state.is_prefill else "decode"]
-        if not builders:
+        groups = self.state_groups["prefill" if infer_state.is_prefill else "decode"]
+        if not groups:
             return {}
         configure_attention_step(infer_state, self.step_config)
-        return {key: builder.build(infer_state) for key, builder in builders.items()}
+        return {key: impl.prepare(infer_state, self.resources) for key, impl in groups.items()}
