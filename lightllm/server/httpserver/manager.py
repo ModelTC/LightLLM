@@ -19,7 +19,7 @@ from typing import Literal, Union, List, Tuple, Dict, Optional, AsyncGenerator, 
 from websockets import ClientConnection
 from fastapi import Request
 from ..tokenizer import get_tokenizer
-from ..pd_io_struct import NodeRole, ObjType, PDDecodeNodeInfo, PDTransferStatus
+from ..pd_io_struct import NodeRole, ObjType, PDDecodeAllocationPolicy, PDDecodeNodeInfo, PDTransferStatus
 from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from .req_id_generator_client import ReqIDGenerator
@@ -438,34 +438,26 @@ class HttpServerManager(HttpRlManagerHelper, object):
             )
 
             if pd_upload_websocket is not None and self.pd_mode.is_P():
-                # 在 pd 模式下的 prefill 节点，为了兼容多模态推理流程，需要先上报 encode 好的 prompt ids，
-                # 再等待 pd_master 下发对应请求的 decode 节点信息，然后执行后续流程。
+                # D 使用 P 完成多模态处理后的 prompt IDs；只有 early 模式在本地准入前等待 D。
                 logger.debug(
                     f"pd prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
                 )
                 await pd_upload_websocket.send(
                     pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, array("q", prompt_ids)))
                 )
-                await pd_event.wait()
+                if sampling_params.pd_decode_allocation_policy == PDDecodeAllocationPolicy.EARLY:
+                    await pd_event.wait()
 
-                decode_node_info: PDDecodeNodeInfo = pd_event.decode_node_info
-                sampling_params.pd_kv_trans_params.set(pickle.dumps(decode_node_info))
+                    decode_node_info: PDDecodeNodeInfo = pd_event.decode_node_info
+                    sampling_params.pd_kv_trans_params.set(pickle.dumps(decode_node_info))
 
-                if decode_node_info.ready_kv_len == len(prompt_ids) - 1:
-                    # 如果 decode 节点的 ready_kv_len 和 prefill encode 的 len(prompt ids) -1 相等，说明不需要进行 prefill
-                    # 直接 raise PDPrefillNodeStopGenToken
-                    raise PDPrefillNodeStopGenToken(group_request_id=group_request_id)
+                    if decode_node_info.ready_kv_len == len(prompt_ids) - 1:
+                        # 如果 decode 节点的 ready_kv_len 和 prefill encode 的 len(prompt ids) -1 相等，说明不需要进行 prefill
+                        # 直接 raise PDPrefillNodeStopGenToken
+                        raise PDPrefillNodeStopGenToken(group_request_id=group_request_id)
 
             if self.pd_mode.is_P():
-                # PD Prefill 节点上报 prompt ids 后，需要等待 PD master 从 Decode 节点取得
-                # decode_node_info 和 KV 资源信息。Decode 节点容量已满时，这个等待可能持续较长时间，
-                # 此时 Prefill 节点尚未进入本地推理。如果提前增加运行请求计数，期间又没有 token
-                # 刷新 latest_success_infer_time_mark，/health 会把正常的 Decode 资源等待误判成 Prefill
-                # 推理卡死。因此这里只在 Decode 资源分配完成、且确认确实需要执行 prefill 后登记。
-                #
-                # 这样会缩小 Prefill 节点自身健康检查的覆盖范围：prompt encode、资源上报及 Decode
-                # 资源等待阶段不再计入本地推理健康状态。资源分配异常应由 PD master 侧的运行请求计数、
-                # Decode 节点健康检查和本地 shm_req 等待超时负责监控，不能依赖 Prefill 推理计数判断。
+                # 从 P 本地准入开始计入推理健康检查。early 等待 D 的时间由 master 监控。
                 await self._register_running_request()
                 running_request_registered = True
 

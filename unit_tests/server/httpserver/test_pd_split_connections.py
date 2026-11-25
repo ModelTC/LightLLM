@@ -11,7 +11,7 @@ from lightllm.server.core.objs import FinishStatus, SamplingParams, StartArgs
 from lightllm.server.httpserver import pd_loop
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.httpserver_for_pd_master.manager import PDManager
-from lightllm.server.pd_io_struct import ObjType, PD_Master_Obj
+from lightllm.server.pd_io_struct import ObjType, PD_Master_Obj, PDBindDecodeCmd, PDDecodeNodeInfo
 
 pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
 
@@ -227,6 +227,61 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
             assert load["connection_key"] == f"p:8000/dp{dp_index}"
             assert load["total_token_usage_rate"] == pytest.approx(0.15 if dp_index is None else dp_index / 10)
         assert args.host != "p"  # Registration must not mutate shared startup arguments.
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("cancel_first", [False, True])
+def test_deferred_connection_publishes_one_bind_for_a_live_attempt(monkeypatch, cancel_first):
+    async def run():
+        req_id, master_id = 128, 42
+        params = SamplingParams()
+        params.group_request_id = req_id
+        params.pd_master_node_id.initialize(master_id)
+        req = SimpleNamespace(request_id=req_id, sample_params=params)
+        manager = SimpleNamespace(
+            args=StartArgs(run_mode="prefill"),
+            host_ip="p",
+            transfer_status=None,
+            pd_mode=pd_loop.NodeRole.P,
+            begin_pd_request_registration=MagicMock(),
+            cancel_pd_request_registration=MagicMock(),
+            abort=AsyncMock(),
+            req_id_to_out_inf={req_id: SimpleNamespace(group_req_objs=SimpleNamespace(shm_req_objs=[req]))},
+            send_to_router=AsyncMock(),
+        )
+        d_info = PDDecodeNodeInfo(123, master_id, "d", b"metadata", 8, b"pages", req_id, 16)
+        bind = (ObjType.PD_BIND_DECODE_NODE_INFO, req_id, d_info)
+        messages = [(ObjType.REQ, ("text", params, None))]
+        if cancel_first:
+            messages.append((ObjType.ABORT, req_id))
+        messages.extend([bind, bind])
+        websocket = SimpleNamespace(send=AsyncMock(), transport=SimpleNamespace(get_extra_info=lambda _: MagicMock()))
+
+        async def recv():
+            if messages:
+                return pickle.dumps(messages.pop(0))
+            raise asyncio.CancelledError
+
+        websocket.recv = recv
+        connection = AsyncMock()
+        connection.__aenter__.return_value = websocket
+        monkeypatch.setattr(pd_loop.websockets, "connect", lambda *_args, **_kwargs: connection)
+        monkeypatch.setattr(pd_loop, "get_shm_port_args", lambda: SimpleNamespace(port=8000))
+
+        async def generate(**_kwargs):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(pd_loop, "_pd_process_generate", generate)
+        await asyncio.wait_for(pd_loop._pd_handle_task(manager, PD_Master_Obj(master_id, "master:8000")), 2)
+        if cancel_first:
+            manager.send_to_router.send_pyobj.assert_not_awaited()
+            assert not params.pd_kv_trans_params.get()
+        else:
+            manager.send_to_router.send_pyobj.assert_awaited_once_with(
+                PDBindDecodeCmd(req_id, master_id), protocol=pickle.HIGHEST_PROTOCOL
+            )
+            assert pickle.loads(params.pd_kv_trans_params.get()) == d_info
 
     asyncio.run(run())
 

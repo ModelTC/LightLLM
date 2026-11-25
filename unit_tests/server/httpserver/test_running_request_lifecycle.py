@@ -9,7 +9,7 @@ import pytest
 
 from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, Req, SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager, ReqStatus
-from lightllm.server.pd_io_struct import NodeRole, ObjType
+from lightllm.server.pd_io_struct import NodeRole, ObjType, PDDecodeAllocationPolicy
 from lightllm.utils.error_utils import (
     ClientDisconnected,
     InvalidRequestError,
@@ -405,16 +405,26 @@ def test_prefill_waiting_for_decode_assignment_can_be_cancelled_without_touching
     asyncio.run(run())
 
 
-def test_prefill_is_counted_after_decode_assignment_and_unregistered_on_following_failure():
+@pytest.mark.parametrize(
+    "policy",
+    [PDDecodeAllocationPolicy.EARLY, PDDecodeAllocationPolicy.PREFILL_COMPLETE, PDDecodeAllocationPolicy.LAST_CHUNK],
+)
+def test_prefill_admission_starts_at_configured_stage_and_unregisters_on_failure(policy):
     async def run():
         manager = _make_manager(NodeRole.P)
         websocket = AsyncMock()
         pd_event = asyncio.Event()
-        pd_event.decode_node_info = SimpleNamespace(ready_kv_len=1)
-        pd_event.set()
+        if policy == PDDecodeAllocationPolicy.EARLY:
+            pd_event.decode_node_info = SimpleNamespace(ready_kv_len=1)
+            pd_event.set()
+        params = _sampling_params()
+        params.pd_decode_allocation_policy = policy
 
         with pytest.raises(RuntimeError, match="alloc failed"):
-            await _drain_generate(manager, _sampling_params(), _multimodal_params(), websocket, pd_event)
+            await asyncio.wait_for(
+                _drain_generate(manager, params, _multimodal_params(), websocket, pd_event),
+                timeout=1,
+            )
 
         manager._register_running_request.assert_awaited_once()
         manager._unregister_running_request.assert_awaited_once()

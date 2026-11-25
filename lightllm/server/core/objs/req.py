@@ -106,6 +106,9 @@ class Req(ctypes.Structure):
         ("input_len", ctypes.c_int),
         ("alloc_shm_numpy_len", ctypes.c_int),
         ("shm_infer_released", ctypes.c_bool),  # 推理进程用于标记请求对象已经被推理进程释放，router进程得到信息后亦可释放shm req对象
+        # Private model KV bytes held during PD delivery on one rank of the owning DP group.
+        # A negative value means the request is outside the measured interval.
+        ("pd_delivery_kv_bytes", ctypes.c_int64),
         ("shm_cur_kv_len", ctypes.c_int),  # 推理进程记录自己当前占用kv 显存长度
         ("shm_cur_output_len", ctypes.c_int),  # 推理进程记录自己输出长度的计数
         # candetoken_out_len 推理进程修改这个数据，让detokenization进程知道需要detoken的长度，
@@ -183,6 +186,7 @@ class Req(ctypes.Structure):
         self.finish_status = FinishStatus()
         self.is_aborted = False
         self.shm_infer_released = False
+        self.pd_delivery_kv_bytes = -1
         self.shm_cur_kv_len = 0
         self.shm_cur_output_len = 0
         self.candetoken_out_len = 0

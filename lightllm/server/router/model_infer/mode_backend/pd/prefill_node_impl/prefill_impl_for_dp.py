@@ -21,6 +21,11 @@ class PDDPChunkedForPrefillNode(DPChunkedPrefillBackend):
         PDChunkedPrefillForPrefillNode.init_custom(self)
         return
 
+    _before_pd_prefill = PDChunkedPrefillForPrefillNode._before_pd_prefill
+    _notify_pd_allocation_ready = PDChunkedPrefillForPrefillNode._notify_pd_allocation_ready
+    _bind_pd_decode_node = PDChunkedPrefillForPrefillNode._bind_pd_decode_node
+    _submit_ready_pages = PDChunkedPrefillForPrefillNode._submit_ready_pages
+
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
         return PDChunkedPrefillForPrefillNode._filter_not_ready_reqs(self, req_ids)
 

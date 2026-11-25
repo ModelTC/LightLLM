@@ -772,6 +772,11 @@ def config_server_start(args):
 
 
 def _validate_pd_features(args: StartArgs):
+    if not 0 < args.pd_prefill_ready_timeout < float("inf"):
+        raise ValueError("--pd_prefill_ready_timeout must be positive and finite")
+    if args.pd_decode_allocation_policy != "early" and args.run_mode != "pd_master":
+        if args.run_mode not in ("prefill", "decode") or args.pd_trans_mode != "nixl":
+            raise ValueError("Deferred decode allocation requires NIXL on P/D nodes")
     if args.run_mode in ("pd_master", "prefill", "decode") and (
         args.enable_rl or args.enable_return_routed_experts or args.enable_prompt_logprobs
     ):

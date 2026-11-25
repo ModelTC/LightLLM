@@ -1,4 +1,5 @@
 import os
+import pickle
 
 import numpy as np
 import torch
@@ -25,6 +26,7 @@ from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.core.objs.io_objs import AbortedReqCmd
+from lightllm.server.pd_io_struct import PDDecodeAllocationPolicy, PDBindDecodeCmd
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
@@ -569,6 +571,16 @@ class ModeBackend:
                     if obj.req_id in g_infer_context.requests_mapping:
                         req: InferReq = g_infer_context.requests_mapping[obj.req_id]
                         req.infer_aborted = True
+                elif isinstance(obj, PDBindDecodeCmd):
+                    req = g_infer_context.requests_mapping.get(obj.request_id)
+                    if (
+                        req is not None
+                        and req.dp_rank_in_node == self.dp_rank_in_node
+                        and req.sampling_param.pd_master_node_id == obj.pd_master_node_id
+                        and not req.infer_aborted
+                    ):
+                        info = pickle.loads(req.sampling_param.shm_param.pd_kv_trans_params.get())
+                        self._bind_pd_decode_node(req, info)
                 elif isinstance(obj, ProfilerCmd):
                     if self.profiler is not None:
                         self.profiler.cmd(obj)
@@ -600,18 +612,29 @@ class ModeBackend:
                             if obj.checkpoint_len:
                                 assert obj.checkpoint_len == req.hybrid_cache_len
                                 req.pd_checkpoint_received_len = obj.checkpoint_len
-                            if obj.first_gen_token_id is not None:
+                            token_receipt = obj
+                            policy = req.sampling_param.shm_param.pd_decode_allocation_policy
+                            if policy != PDDecodeAllocationPolicy.EARLY:
+                                if obj.first_gen_token_id is not None:
+                                    req.pd_pending_first_token = obj
+                                # The state/token receipt can arrive before an earlier KV page fails.
+                                if req.pd_task_success_num != req.pd_task_num or req.infer_aborted:
+                                    continue
+                                token_receipt = req.pd_pending_first_token
+                                assert token_receipt is not None
+                                req.pd_pending_first_token = None
+                            if token_receipt.first_gen_token_id is not None:
                                 assert req.cur_output_len == 0
                                 req.cur_output_len += 1
                                 req_to_next_token_ids = (
                                     self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids
                                 )
                                 # to do 这个地方是否需要加流同步
-                                req_to_next_token_ids[req.req_idx, 0:1].fill_(obj.first_gen_token_id)
+                                req_to_next_token_ids[req.req_idx, 0:1].fill_(token_receipt.first_gen_token_id)
                                 torch.cuda.current_stream().synchronize()
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
-                                    next_token_id=obj.first_gen_token_id,
-                                    next_token_logprob=obj.first_gen_token_logprob,
+                                    next_token_id=token_receipt.first_gen_token_id,
+                                    next_token_logprob=token_receipt.first_gen_token_logprob,
                                     next_token_rank=-1,
                                     eos_ids=self.eos_id,
                                     is_master_in_dp=self.is_master_in_dp,

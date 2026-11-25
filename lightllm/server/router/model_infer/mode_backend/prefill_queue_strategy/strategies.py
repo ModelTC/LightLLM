@@ -51,7 +51,7 @@ class HRRNPrefillStrategy(PrefillQueueStrategy):
     负优先级请求仍按原始相对顺序排在最前面。普通请求按
     ``waited_prefill_tokens / uncached_prefill_tokens`` 从大到小排列；等待越久或
     首次参与 HRRN 排序时需要计算的 token 越少，越早获得调度。请求 ID 用作相同比率下的
-    确定性次级排序键。PD Prefill 已发出 KV 页时，还按发页后的等待量和下一段成本排序。
+    确定性次级排序键。PD Prefill 续算还按最近一次进展后的等待量和下一段成本排序。
     """
 
     def reorder_prefill(self, prefill_reqs: List["InferReq"]) -> List["InferReq"]:
@@ -72,12 +72,12 @@ class HRRNPrefillStrategy(PrefillQueueStrategy):
             uncached_prefill_tokens = req.uncached_prefill_tokens
             waited_tokens = max(0, processed_prefill_tokens - req.arrival_processed_prefill_tokens)
             score = waited_tokens / uncached_prefill_tokens
-            last_page_tokens = req.pd_last_page_processed_tokens
-            if last_page_tokens is not None:
+            last_progress_tokens = req.pd_resume_processed_tokens
+            if last_progress_tokens is not None:
                 remaining = req.shm_req.input_len - req.cur_kv_len
                 if remaining > 0:
                     chunk_cost = min(self.backend.args.chunked_prefill_size, remaining)
-                    score = max(score, (processed_prefill_tokens - last_page_tokens) / chunk_cost)
+                    score = max(score, (processed_prefill_tokens - last_progress_tokens) / chunk_cost)
             return (-score, req.req_id)
 
         normal_reqs.sort(key=hrrn_key)
@@ -86,7 +86,7 @@ class HRRNPrefillStrategy(PrefillQueueStrategy):
 
 
 class HRRNResumePrefillStrategy(HRRNPrefillStrategy):
-    """在 HRRN 基础上，周期性将一个过久未发 KV 页的 PD prefill 续算请求移到普通队列头部。
+    """在 HRRN 基础上，周期性将一个过久未推进的 PD prefill 续算请求移到普通队列头部。
 
     只调整排队顺序，不修改 infer_high_priority 或 chunk 大小；实际执行仍受后续预算和容量检查约束。
     """
@@ -107,25 +107,23 @@ class HRRNResumePrefillStrategy(HRRNPrefillStrategy):
 
         # 提权最多到普通队列头部，不能越过 infer_high_priority < 0 的内部高优先级请求。
         first_normal = next((index for index, req in enumerate(ordered) if infer_priority(req) >= 0), len(ordered))
-        # 只考虑发过 KV 页且 prefill 尚未完成的普通请求；仅命中缓存不代表发过页。
-        # pd_last_page_processed_tokens 是最近发布 KV 页任务时的累计 token 数，不是传输完成时间。
-        # 该值越小，距上次发页越久；相同时按请求 ID、队列位置确定顺序。
+        # early 按最近一次发页、deferred 按最近一次实际计算累计等待；仅命中缓存不计为进展。
         oldest = min(
             (
-                (req.pd_last_page_processed_tokens, req.req_id, index)
+                (req.pd_resume_processed_tokens, req.req_id, index)
                 for index, req in enumerate(ordered)
                 if index >= first_normal
-                and req.pd_last_page_processed_tokens is not None
+                and req.pd_resume_processed_tokens is not None
                 and 0 < req.cur_kv_len < req.shm_req.input_len
             ),
             default=None,
         )
         if oldest is not None:
-            last_page_tokens, _, index = oldest
+            last_progress_tokens, _, index = oldest
             # 用四个 batch token 上限的工作量同时限制请求等待门槛和相邻两次提权的间隔。
             # 这不等于固定经过四轮调度：每轮实际提交的 token 数可能不足 batch_max_tokens。
             interval = 4 * self.backend.batch_max_tokens
-            if processed - last_page_tokens >= interval:
+            if processed - last_progress_tokens >= interval:
                 ordered.insert(first_normal, ordered.pop(index))
                 # 本次调整顺序后就进入冷却，不等待请求实际执行；没有合格候选时不更新门槛。
                 self.next_resume_priority_tokens = processed + interval

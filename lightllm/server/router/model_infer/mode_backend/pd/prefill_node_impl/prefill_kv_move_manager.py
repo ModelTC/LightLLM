@@ -1,11 +1,12 @@
 import inspect
 import logging
+import queue
 import setproctitle
 import torch.multiprocessing as mp
 import time
 from typing import List, Dict, Union, Callable
-from lightllm.utils.log_utils import init_logger
-from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
+from lightllm.utils.log_utils import init_logger, log_time_ready
+from lightllm.server.pd_io_struct import PDAbortReq, PDAllocationReady, PDChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..trans_process_obj import KVTransProcess
@@ -52,6 +53,7 @@ def _init_env(args, info_queue: mp.Queue, event: mp.Event):
 
 class PrefillKVMoveManager(BaseKVMoveManager):
     def __init__(self, args: StartArgs, info_queue: mp.Queue, start_trans_process_func: Callable):
+        self.ready_queue = None
         super().__init__(args=args, info_queue=info_queue, start_trans_process_func=start_trans_process_func)
         return
 
@@ -62,8 +64,23 @@ class PrefillKVMoveManager(BaseKVMoveManager):
     def task_dispatcher_loop(self):
         # 获取任务，并分发给相关卡的处理队列
         while True:
-            task: Union[PDChunckedTransTask, PDAbortReq] = self.info_queue.get()
+            task: Union[PDChunckedTransTask, PDAbortReq, PDAllocationReady] = self.info_queue.get()
 
+            if isinstance(task, PDAllocationReady):
+                if self.ready_queue is None:
+                    from ..decode_node_impl.up_status import UpStatusManager
+
+                    self.ready_queue = queue.Queue(maxsize=self.args.running_max_req_size)
+                    UpStatusManager(self.args, self.ready_queue)
+                try:
+                    self.ready_queue.put_nowait(task)
+                except queue.Full:
+                    # The master's existing READY timeout aborts this attempt. A disconnected
+                    # control channel must never block KV WRITE/abort processing for the node.
+                    if log_time_ready("pd_ready_queue_full", 10):
+                        logger.warning("P readiness upload queue is full")
+
+                continue
             if isinstance(task, PDChunckedTransTask):
                 device_id = task.src_device_id
             elif isinstance(task, PDAbortReq):

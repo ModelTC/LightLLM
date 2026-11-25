@@ -114,6 +114,20 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="Prefill only: register a separate PD master connection for each local DP rank",
     )
     parser.add_argument(
+        "--pd_decode_allocation_policy",
+        choices=["early", "prefill_complete", "last_chunk"],
+        default="early",
+        help="On the PD master, submit the decode request after tokenization, after prefill completes, "
+        "or when the final prefill chunk is scheduled, respectively. Set the same policy on "
+        "P/D nodes shared by multiple masters through a config server.",
+    )
+    parser.add_argument(
+        "--pd_prefill_ready_timeout",
+        type=float,
+        default=600.0,
+        help="PD master deadline in seconds for prefill to request deferred decode allocation.",
+    )
+    parser.add_argument(
         "--select_p_d_node_strategy",
         type=str,
         default="cache_aware",

@@ -29,6 +29,13 @@ MONITOR_INFO = {
     "lightllm_request_mtp_avg_token_per_step": "Average number of tokens per step",
     "lightllm_pd_forward_queue_duration": "Time tokens wait on a P/D node before websocket forwarding (s)",
     "lightllm_pd_master_ingress_queue_duration": "Time token packets wait in the PD master ingress queue (s)",
+    "lightllm_pd_master_first_decode_gap_duration": "Master-observed interval from first to second output token (s)",
+    "lightllm_pd_master_d_admission_duration": "Time from decode request dispatch until binding (s)",
+    "lightllm_pd_master_bind_first_token_duration": "Time from forwarding the decode binding to first output (s)",
+    "lightllm_pd_delivery_kv_bytes": (
+        "Private KV bytes held for delivery across local requests, using per-rank model KV size"
+    ),
+    "lightllm_pd_delivery_requests": "Requests holding private KV or a request slot during PD delivery",
     "lightllm_pd_master_request_queue_duration": "Time tokens wait for their PD master request consumer (s)",
     "lightllm_pd_master_http_send_duration": "Maximum ASGI body send duration in the latest sample window (s)",
     "lightllm_pd_master_http_send_bytes": "Largest ASGI body sent in the latest sample window (bytes)",
@@ -104,6 +111,9 @@ class Monitor:
         self.create_histogram("lightllm_request_queue_duration_bucket", self.duration_buckets)
         self.create_histogram("lightllm_pd_forward_queue_duration", self.duration_buckets)
         self.create_histogram("lightllm_pd_master_ingress_queue_duration", self.duration_buckets)
+        self.create_histogram("lightllm_pd_master_first_decode_gap_duration", self.duration_buckets)
+        self.create_histogram("lightllm_pd_master_d_admission_duration", self.duration_buckets)
+        self.create_histogram("lightllm_pd_master_bind_first_token_duration", self.duration_buckets)
         self.create_histogram("lightllm_pd_master_request_queue_duration", self.duration_buckets)
         self.create_histogram("lightllm_pd_master_http_send_duration", self.duration_buckets)
         self.create_histogram("lightllm_batch_inference_duration_bucket", self.duration_buckets, labelnames=["method"])
@@ -113,6 +123,8 @@ class Monitor:
         self.create_gauge("lightllm_pd_master_http_send_bytes")
         self.create_gauge("lightllm_batch_current_size")
         self.create_gauge("lightllm_batch_pause_size")
+        self.create_gauge("lightllm_pd_delivery_kv_bytes")
+        self.create_gauge("lightllm_pd_delivery_requests")
         self.create_gauge("lightllm_batch_current_max_tokens")
         batch_size_buckets = [i + 1 for i in range(0, 128)]
         self.create_histogram("lightllm_batch_next_size", batch_size_buckets)

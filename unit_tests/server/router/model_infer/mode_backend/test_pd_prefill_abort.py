@@ -1,3 +1,4 @@
+import pickle
 import queue
 import threading
 from dataclasses import replace
@@ -6,7 +7,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
+from lightllm.server.pd_io_struct import (
+    PDAbortReq,
+    PDAllocationReady,
+    PDBindDecodeCmd,
+    PDChunckedTransTask,
+    PDDecodeAllocationPolicy,
+)
 from lightllm.server.router.model_infer.mode_backend import base_backend
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_impl
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_impl import PDDecodeNode
@@ -248,6 +255,52 @@ def test_prefill_kv_move_manager_routes_abort_to_target_device():
     assert manager.kv_trans_processes[0].task_in_queue.empty()
 
 
+def test_prefill_ready_uses_master_control_channel():
+    ready = PDAllocationReady(123, 7, float("inf"))
+    manager = PrefillKVMoveManager.__new__(PrefillKVMoveManager)
+    manager.info_queue = _SequenceQueue(ready)
+    manager.ready_queue = queue.SimpleQueue()
+    with pytest.raises(_StopLoop):
+        manager.task_dispatcher_loop()
+    assert manager.ready_queue.get_nowait() == ready
+
+
+def test_disconnected_ready_channel_does_not_stall_transfer_abort():
+    ready = PDAllocationReady(123, 7, float("inf"))
+    abort = PDAbortReq(123, 0)
+    manager = PrefillKVMoveManager.__new__(PrefillKVMoveManager)
+    manager.info_queue = _SequenceQueue(ready, abort)
+    manager.ready_queue = queue.Queue(maxsize=1)
+    manager.ready_queue.put_nowait(ready)
+    target_queue = queue.SimpleQueue()
+    manager.kv_trans_processes = [SimpleNamespace(task_in_queue=target_queue)]
+    with pytest.raises(_StopLoop):
+        manager.task_dispatcher_loop()
+    assert manager.ready_queue.qsize() == 1
+    assert target_queue.get_nowait() is abort
+
+
+def test_bind_reaches_only_live_owner_in_infer_control_loop(monkeypatch):
+    info = SimpleNamespace(request_id=8, pd_master_node_id=7)
+    payload = MagicMock()
+    payload.get.return_value = pickle.dumps(info)
+    params = SimpleNamespace(pd_master_node_id=7, shm_param=SimpleNamespace(pd_kv_trans_params=payload))
+    req = SimpleNamespace(dp_rank_in_node=1, infer_aborted=False, sampling_param=params)
+    aborted = SimpleNamespace(dp_rank_in_node=1, infer_aborted=True, sampling_param=params)
+    other = SimpleNamespace(dp_rank_in_node=0, infer_aborted=False, sampling_param=params)
+    monkeypatch.setattr(base_backend.g_infer_context, "requests_mapping", {8: req, 16: aborted, 24: other})
+    cmds = [PDBindDecodeCmd(i, 7) for i in (8, 16, 24, 32)]
+    cmds.append(PDBindDecodeCmd(8, 6))
+    backend = base_backend.ModeBackend.__new__(base_backend.ModeBackend)
+    backend.dp_rank_in_node = 1
+    backend.shm_reqs_io_buffer = MagicMock()
+    backend.shm_reqs_io_buffer.read_obj.return_value = cmds
+    backend._bind_pd_decode_node = MagicMock()
+    backend._read_reqs_buffer_and_init_reqs()
+    backend._bind_pd_decode_node.assert_called_once_with(req, info)
+    payload.get.assert_called_once_with()
+
+
 def test_prefill_trans_process_handles_abort_without_allocating_page(monkeypatch):
     abort_req = PDAbortReq(request_id=123, device_id=0)
     module = _PrefillTransModule.__new__(_PrefillTransModule)
@@ -451,3 +504,46 @@ def test_pd_receipt_preserves_page_kind_identity():
     for kind in ("kv", "att_state"):
         task = _make_transfer_task(page_kind=kind)
         assert task.createRetObj().get_key() == task.get_key()
+
+
+@pytest.mark.parametrize("failed,aborted", [(False, False), (True, False), (False, True)])
+def test_deferred_decode_exposes_first_token_only_after_every_receipt(monkeypatch, failed, aborted):
+    req = SimpleNamespace(
+        sampling_param=SimpleNamespace(
+            shm_param=SimpleNamespace(pd_decode_allocation_policy=PDDecodeAllocationPolicy.LAST_CHUNK)
+        ),
+        pd_task_num=2,
+        pd_task_finished_keys=set(),
+        pd_task_failed_num=0,
+        pd_task_success_num=0,
+        pd_pending_first_token=None,
+        infer_aborted=False,
+        cur_output_len=0,
+        req_idx=1,
+    )
+    state = _make_transfer_task("att_state").createRetObj()
+    state.first_gen_token_id, state.first_gen_token_logprob = 42, -0.5
+    kv = _make_transfer_task("kv").createRetObj()
+    kv.has_error = failed
+    monkeypatch.setattr(base_backend.g_infer_context, "requests_mapping", {state.request_id: req})
+    monkeypatch.setattr(base_backend.torch.cuda, "current_stream", MagicMock())
+    update_pack = MagicMock()
+    monkeypatch.setattr(base_backend, "InferReqUpdatePack", update_pack)
+    backend = base_backend.ModeBackend.__new__(base_backend.ModeBackend)
+    backend.is_pd_decode_mode, backend.is_master_in_dp = True, True
+    backend.model, backend.logger, backend.eos_id = MagicMock(), MagicMock(), [42]
+    backend.shm_pd_trans_io_buffer = MagicMock()
+    backend.shm_pd_trans_io_buffer.read_obj.side_effect = [[state], [kv, state]]
+    backend._read_pd_trans_io_buffer_and_update_req_status()
+    assert req.cur_output_len == 0
+    update_pack.assert_not_called()
+    req.infer_aborted = aborted
+    backend._read_pd_trans_io_buffer_and_update_req_status()
+    if failed or aborted:
+        assert req.cur_output_len == 0
+        update_pack.assert_not_called()
+    else:
+        assert req.cur_output_len == 1
+        update_pack.return_value.handle.assert_called_once_with(
+            next_token_id=42, next_token_logprob=-0.5, next_token_rank=-1, eos_ids=[42], is_master_in_dp=True
+        )

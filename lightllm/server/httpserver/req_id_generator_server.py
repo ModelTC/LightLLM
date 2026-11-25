@@ -1,5 +1,6 @@
 """Process-owned request ID generator and its RPyC service."""
 
+import secrets
 import threading
 import time
 
@@ -32,8 +33,8 @@ def get_req_id_generator_socket_address() -> bytes:
 class StandaloneReqIDGeneratorState(rpyc.Service):
     """Allocate request IDs from this server's independent ID space."""
 
-    def __init__(self):
-        self.next_id = MAX_BEST_OF
+    def __init__(self, start_id=MAX_BEST_OF):
+        self.next_id = start_id
         self.range_end = 1 << 63
         self.lock = threading.Lock()
 
@@ -130,4 +131,10 @@ def start_req_id_generator_server(args, pipe_writer) -> None:
 def _create_req_id_generator_state(args):
     if args.config_server_host is not None and args.config_server_port is not None:
         return ConfigServerReqIDGeneratorState(args.config_server_host, args.config_server_port)
+    if args.run_mode == "pd_master" and args.pd_decode_allocation_policy != "early":
+        # Late READY and page notifications can outlive a standalone master restart.
+        # Preserve the signed int64, MAX_BEST_OF-aligned ID used by *all* transfer
+        # keys, while keeping the ordinary low-ID sequence for early allocation.
+        start_id = (1 << 61) + secrets.randbelow((1 << 61) // MAX_BEST_OF) * MAX_BEST_OF
+        return StandaloneReqIDGeneratorState(start_id=start_id)
     return StandaloneReqIDGeneratorState()

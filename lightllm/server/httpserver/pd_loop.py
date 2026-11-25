@@ -5,7 +5,6 @@ import ujson as json
 import socket
 import httpx
 import base64
-import weakref
 import os
 import signal
 import sys
@@ -17,6 +16,7 @@ from lightllm.server.pd_io_struct import (
     NodeRole,
     ObjType,
     PD_COMPACT_TOKEN_INFO_LEN,
+    PDBindDecodeCmd,
     build_pd_compact_token_info,
 )
 from lightllm.server.httpserver.async_queue import AsyncQueue
@@ -132,7 +132,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 heartbeat_reporter = _PDHeartbeatReporter(websocket, manager.transfer_status)
                 heartbeat_task = asyncio.create_task(heartbeat_reporter.run())
 
-                group_req_id_to_event: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
+                group_req_id_to_event: Dict[int, asyncio.Event] = {}
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
                 while True:
                     recv_bytes = await websocket.recv()
@@ -167,10 +167,14 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                         generation_tasks[group_req_id] = generation_task
 
                         def remove_generation_task(
-                            task: asyncio.Task, request_id: int = group_req_id, tasks=generation_tasks
+                            task: asyncio.Task,
+                            request_id: int = group_req_id,
+                            tasks=generation_tasks,
+                            events=group_req_id_to_event,
                         ):
                             if tasks.get(request_id) is task:
                                 tasks.pop(request_id, None)
+                                events.pop(request_id, None)
                                 # task 可能在首次运行前被取消，此时协程内的 finally 不会执行。
                                 manager.cancel_pd_request_registration(request_id)
 
@@ -178,11 +182,36 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     elif obj[0] == ObjType.ABORT:
                         group_req_id = obj[1]
                         logger.warning(f"recv cmd aborted req id {group_req_id}")
+                        group_req_id_to_event.pop(group_req_id, None)
                         generation_task = generation_tasks.get(group_req_id)
                         if generation_task is not None and not generation_task.done():
                             generation_task.cancel()
                         await manager.abort(group_req_id)
 
+                    elif obj[0] == ObjType.PD_BIND_DECODE_NODE_INFO:
+                        _, group_req_id, decode_node_info = obj
+                        # The connection owns the generation task until transfer completion.
+                        # Drop a duplicate or late binding after cancellation / disconnect.
+                        if group_req_id_to_event.pop(group_req_id, None) is None:
+                            continue
+                        status = manager.req_id_to_out_inf.get(group_req_id)
+                        if status is None:
+                            continue
+                        (req,) = status.group_req_objs.shm_req_objs  # Master sends each choice as a separate attempt.
+                        try:
+                            assert group_req_id == req.request_id == decode_node_info.request_id
+                            assert req.sample_params.pd_master_node_id.get() == pd_master_obj.node_id
+                            assert decode_node_info.pd_master_node_id == pd_master_obj.node_id
+                            req.sample_params.pd_kv_trans_params.set(pickle.dumps(decode_node_info))
+                            await manager.send_to_router.send_pyobj(
+                                PDBindDecodeCmd(group_req_id, pd_master_obj.node_id), protocol=pickle.HIGHEST_PROTOCOL
+                            )
+                        except Exception as exc:
+                            await websocket.send(
+                                pickle.dumps(
+                                    (ObjType.PD_UPLOAD_GENERATE_ERROR, group_req_id, f"Late bind failed: {exc}")
+                                )
+                            )
                     elif obj[0] == ObjType.PD_REQ_DECODE_NODE_INFO:
                         _, group_req_id, decode_node_info = obj
                         pd_event = group_req_id_to_event.pop(group_req_id, None)

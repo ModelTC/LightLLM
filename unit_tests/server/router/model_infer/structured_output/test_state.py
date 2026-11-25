@@ -8,7 +8,7 @@ import pytest
 import torch
 import xgrammar as xgr
 
-from lightllm.server.core.objs import FinishStatus, SamplingParams
+from lightllm.server.core.objs import FinishStatus, SamplingParams, StartArgs
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
 from lightllm.server.httpserver.grammar import OutputGrammarCompiler
 from unit_tests.server.grammar_helpers import (
@@ -164,7 +164,7 @@ def test_request_admission_loads_shared_artifacts_without_compilation(
         )
         requests.append((req_id, index, SimpleNamespace(to_dict=lambda: {"images": [], "audios": []}), owner_dp_rank))
     monkeypatch.setattr(compiler, "_compile", lambda *args: pytest.fail("Inference must not compile"))
-    monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: SimpleNamespace(diverse_mode=False, mtp_step=0))
+    monkeypatch.setattr(infer_batch, "get_env_start_args", StartArgs)
     context = infer_batch.InferenceContext(
         req_manager=SimpleNamespace(
             alloc=count().__next__,
@@ -296,6 +296,7 @@ def test_pd_first_token_updates_constraint_before_sampling(
     good = make_req(regular_constraint="cd")
     for request in (req, good):
         init_request(compiler, request)
+    req.sampling_param.shm_param.pd_decode_allocation_policy = 0
     req.pd_task_success_num = 0
     req.pd_task_finished_keys = set()
     req.shm_req.shm_prompt_ids.arr.append(0)

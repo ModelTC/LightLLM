@@ -13,6 +13,7 @@ exec /opt/conda/bin/python -u -m "${LIGHTLLM_SERVER_MODULE:-lightllm.server.api_
     --model_dir "$MODEL_DIR" \
     --model_name DeepSeek-V4.1-Flash-FP8 \
     --run_mode prefill \
+    --pd_decode_allocation_policy "$PD_DECODE_ALLOCATION_POLICY" \
     --pd_trans_mode nixl \
     --pd_kv_page_size 2048 \
     --pd_kv_page_num 8 \

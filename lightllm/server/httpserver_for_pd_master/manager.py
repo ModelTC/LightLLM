@@ -15,6 +15,8 @@ from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.core.objs import FinishStatus
 from ..pd_io_struct import (
     PD_Client_Obj,
+    PDAllocationReady,
+    PDDecodeAllocationPolicy,
     PDUpKVStatus,
     ObjType,
     PDDecodeNodeInfo,
@@ -74,6 +76,7 @@ class HttpServerManagerForPDMaster:
         self.latest_success_infer_time = time.time()
         self.running_request_count = 0
         self.next_request_queue_metric_time = 0.0
+        self.next_pd_handshake_metric_time = 0.0
         self._abort_notify_tasks = set()
         # 限流开关只在 PD Master 生效；P/D 节点不读取本地开关或超时配置，只执行 Master 下发的值。
         self.enable_pd_node_self_request_limit = not args.disable_pd_node_self_request_limit
@@ -122,15 +125,16 @@ class HttpServerManagerForPDMaster:
                 await req_status.set_error(f"PD {pd_client.mode} node {pd_client.client_ip_port} disconnected")
         return
 
-    async def update_req_status(self, upkv_status: PDUpKVStatus):
-        try:
-            group_request_id = convert_sub_id_to_group_id(upkv_status.group_request_id)
-            up_status_event = self.req_id_to_out_inf[group_request_id].up_status_event
-            up_status_event.upkv_status = upkv_status
-            up_status_event.set()
-        except:
-            pass
-        return
+    async def update_req_status(self, status: Union[PDUpKVStatus, PDAllocationReady]):
+        group_request_id = convert_sub_id_to_group_id(status.group_request_id)
+        req_status = self.req_id_to_out_inf.get(group_request_id)
+        if req_status is None:
+            return  # A late message for an aborted or finished attempt.
+        if isinstance(status, PDAllocationReady):
+            req_status.allocation_ready_event.set()
+        elif not req_status.up_status_event.is_set():
+            req_status.up_status_event.upkv_status = status
+            req_status.up_status_event.set()
 
     def tokens(self, prompt, multimodal_params, sampling_params: SamplingParams, kwargs=None):
         kwargs = {"add_special_tokens": sampling_params.add_special_tokens, **(kwargs or {})}
@@ -481,6 +485,11 @@ class HttpServerManagerForPDMaster:
                             # Decode，不能仅根据 node_mode 判断 P 是否完成推理。
                             await self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
+                    if (
+                        raw_finish_status.is_error_finished()
+                        and sampling_params.pd_decode_allocation_policy != PDDecodeAllocationPolicy.EARLY
+                    ):
+                        await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
                     yield origin_request_id, request_output, metadata, raw_finish_status
 
                 await self.remove_req(group_request_id=block_group_request_id)
@@ -575,7 +584,7 @@ class HttpServerManagerForPDMaster:
         while True:
             remaining = deadline - time.time()
             if remaining <= 0:
-                raise ServerBusyError()
+                raise ServerBusyError(f"PD request {group_request_id} timed out waiting for {stage} after {timeout}s")
             await raise_if_disconnected()
             try:
                 await asyncio.wait_for(event.wait(), timeout=min(1.0, remaining))
@@ -606,8 +615,13 @@ class HttpServerManagerForPDMaster:
     ):
         group_request_id = sampling_params.group_request_id
         sampling_params.pd_master_node_id.initialize(self.args.pd_node_id)
+        policy = PDDecodeAllocationPolicy[self.args.pd_decode_allocation_policy.upper()]
+        sampling_params.pd_decode_allocation_policy = policy
+        deferred = policy != PDDecodeAllocationPolicy.EARLY
+        if deferred:
+            sampling_params.pd_ready_timeout_seconds = self.args.pd_prefill_ready_timeout
 
-        req_status = ReqStatus(group_request_id, p_node, d_node)
+        req_status = ReqStatus(group_request_id, p_node, d_node, awaiting_deferred_bind=deferred)
         self.req_id_to_out_inf[group_request_id] = req_status
 
         up_status_event = req_status.up_status_event
@@ -633,6 +647,20 @@ class HttpServerManagerForPDMaster:
         prompt_ids = prefill_prompt_ids_event.prompt_ids
         logger.debug(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
+        if deferred:
+            await self._wait_for_event_or_disconnect(
+                req_status.allocation_ready_event,
+                request,
+                timeout=self.args.pd_prefill_ready_timeout,
+                group_request_id=group_request_id,
+                stage="prefill allocation readiness",
+            )
+            req_status.raise_if_error()
+
+        dispatch_time = time.monotonic()
+        sample_handshake = dispatch_time >= self.next_pd_handshake_metric_time
+        if sample_handshake:
+            self.next_pd_handshake_metric_time = dispatch_time + 1.0
         sampling_params.max_new_tokens = old_max_new_tokens
         await d_node.send_control_message(
             pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
@@ -655,18 +683,24 @@ class HttpServerManagerForPDMaster:
         upkv_status: PDUpKVStatus = up_status_event.upkv_status
         pd_kv_trans_params: bytes = upkv_status.pd_kv_trans_params
         decode_node_info: PDDecodeNodeInfo = pickle.loads(pd_kv_trans_params)
-        await p_node.send_control_message(
-            pickle.dumps((ObjType.PD_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
-        )
+        bind_time = time.monotonic()
+        if sample_handshake:
+            self.metric_client.histogram_observe("lightllm_pd_master_d_admission_duration", bind_time - dispatch_time)
+        bind_type = ObjType.PD_BIND_DECODE_NODE_INFO if deferred else ObjType.PD_REQ_DECODE_NODE_INFO
+        await p_node.send_control_message(pickle.dumps((bind_type, group_request_id, decode_node_info)))
+        req_status.awaiting_deferred_bind = False
+        req_status.raise_if_error()
 
         first_token_gen = False
-        needs_prefill_first_token = decode_node_info.ready_kv_len != len(prompt_ids) - 1
+        first_release_time = None
+        needs_prefill_first_token = deferred or decode_node_info.ready_kv_len != len(prompt_ids) - 1
         prompt_cache_len_from_prefill = await self._wait_for_prefill_token_if_needed(
             req_status=req_status,
             request=request,
             group_request_id=group_request_id,
             needs_prefill_first_token=needs_prefill_first_token,
             ready_kv_len=decode_node_info.ready_kv_len,
+            deferred=deferred,
         )
 
         next_disconnect_check = 0.0
@@ -715,6 +749,21 @@ class HttpServerManagerForPDMaster:
 
             for index, token_info in enumerate(ready_token_list):
                 token_info[2]["_pd_stream_batch_end"] = index == len(ready_token_list) - 1
+                if sample_handshake:
+                    output_index = token_info[2].get("count_output_tokens")
+                    finish = token_info[3]
+                    if finish.is_error_finished() or finish.is_finished_pd_decode_capacity():
+                        sample_handshake = False
+                    elif output_index == 1:
+                        first_release_time = time.monotonic()
+                        self.metric_client.histogram_observe(
+                            "lightllm_pd_master_bind_first_token_duration", first_release_time - bind_time
+                        )
+                    elif output_index == 2 and first_release_time is not None:
+                        self.metric_client.histogram_observe(
+                            "lightllm_pd_master_first_decode_gap_duration", time.monotonic() - first_release_time
+                        )
+                        sample_handshake = False
                 yield token_info
 
         return
@@ -726,11 +775,13 @@ class HttpServerManagerForPDMaster:
         group_request_id: int,
         needs_prefill_first_token: bool,
         ready_kv_len: int,
+        deferred: bool,
     ) -> int:
         if not needs_prefill_first_token:
             return ready_kv_len
 
         new_tokens = []
+        prefill_metadata = decode_metadata = None
         while True:
             await req_status.wait_to_ready()
             req_status.raise_if_error()
@@ -743,17 +794,35 @@ class HttpServerManagerForPDMaster:
             if not token_list:
                 continue
 
-            new_tokens.extend(token_list)
-
-            for token in new_tokens:
-                metadata = token[2]
-                if metadata.get("node_mode") == "prefill":
-                    prompt_cache_len = metadata.get("prompt_cache_len", 0)
+            if deferred:
+                # P publishes only after source transfer completion. D echoes P's sampled
+                # token with the real stop/length status; P used a one-token budget.
+                for token in token_list:
+                    metadata = token[2]
+                    if token[3].is_error_finished():
+                        req_status.put_tokens_to_front([token])
+                        return ready_kv_len
+                    if metadata.get("node_mode") == "prefill":
+                        prefill_metadata = metadata
+                    else:
+                        new_tokens.append(token)
+                        if metadata.get("count_output_tokens") == 1:
+                            decode_metadata = metadata
+                if prefill_metadata is not None and decode_metadata is not None:
+                    if "input_usage" in prefill_metadata:
+                        decode_metadata["input_usage"] = prefill_metadata["input_usage"]
                     req_status.put_tokens_to_front(new_tokens)
-                    return prompt_cache_len
-                if token[3].is_finished():
-                    req_status.put_tokens_to_front(new_tokens)
-                    return ready_kv_len
+                    return prefill_metadata.get("prompt_cache_len", 0)
+            else:
+                new_tokens.extend(token_list)
+                for token in token_list:
+                    metadata = token[2]
+                    if metadata.get("node_mode") == "prefill":
+                        req_status.put_tokens_to_front(new_tokens)
+                        return metadata.get("prompt_cache_len", 0)
+                    if token[3].is_finished():
+                        req_status.put_tokens_to_front(new_tokens)
+                        return ready_kv_len
 
     async def _wait_to_token_package(
         self,
@@ -931,7 +1000,13 @@ class HttpServerManagerForPDMaster:
                             group_req_id = convert_sub_id_to_group_id(sub_req_id)
                             req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id)
                             if req_status is not None:
-                                req_status.append_token((sub_req_id, text, metadata, finish_status))
+                                if req_status.awaiting_deferred_bind and finish_status.is_error_finished():
+                                    await req_status.set_error(
+                                        f"PD {metadata.get('node_mode')} finished with "
+                                        f"{finish_status.get_finish_reason()} before decode binding"
+                                    )
+                                else:
+                                    req_status.append_token((sub_req_id, text, metadata, finish_status))
                     elif obj[0] == ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS:
                         _, group_req_id, prompt_ids = obj
                         try:
@@ -972,10 +1047,12 @@ class HttpServerManagerForPDMaster:
 
 
 class ReqStatus:
-    def __init__(self, req_id, p_node, d_node) -> None:
+    def __init__(self, req_id, p_node, d_node, *, awaiting_deferred_bind=False) -> None:
         self.req_id = req_id
+        self.awaiting_deferred_bind = awaiting_deferred_bind
         self.event = asyncio.Event()
         self.up_status_event = asyncio.Event()
+        self.allocation_ready_event = asyncio.Event()
         self.prefill_prompt_ids_event = asyncio.Event()
         self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
         self.oldest_token_time = None
@@ -996,6 +1073,7 @@ class ReqStatus:
         self.is_server_busy = is_server_busy
         self.event.set()
         self.up_status_event.set()
+        self.allocation_ready_event.set()
         self.prefill_prompt_ids_event.set()
 
     def raise_if_error(self):
@@ -1107,6 +1185,18 @@ class PDManager:
 
     def register_pd(self, pd_info_json, websocket):
         pd_client = PD_Client_Obj(**pd_info_json)
+        args = pd_client.start_args
+        deferred = self.args.pd_decode_allocation_policy != "early"
+        node_deferred = args.get("pd_decode_allocation_policy", "early") != "early"
+        # A shared P/D pool must acquire resources in the same order for every master.
+        shared_pool = args.get("config_server_host") is not None and args.get("config_server_port") is not None
+        if (shared_pool or node_deferred) and deferred != node_deferred:
+            raise ValueError("PD master and shared nodes must agree on early or deferred allocation")
+        if deferred:
+            if "pd_decode_allocation_policy" not in args or args["pd_trans_mode"] != "nixl":
+                raise ValueError("Deferred decode allocation requires nodes with late-binding NIXL support")
+            if pd_client.mode == "prefill" and args["dp"] == 1 and args["nnodes"] > 1:
+                raise ValueError("Deferred decode allocation cannot forward bindings across multi-node pure TP")
         client_max_req_total_len = pd_client.start_args["max_req_total_len"]
         if client_max_req_total_len != self.args.max_req_total_len:
             logger.error(

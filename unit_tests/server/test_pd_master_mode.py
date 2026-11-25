@@ -403,6 +403,35 @@ def test_pd_manager_returns_service_unavailable_when_a_node_role_is_empty(prefil
     assert "PD nodes unavailable" in exc_info.value.message
 
 
+@pytest.mark.parametrize(
+    "master_policy,node_policy",
+    [("early", "last_chunk"), ("prefill_complete", "early"), ("prefill_complete", "last_chunk")],
+)
+def test_shared_pd_pool_uses_one_resource_acquisition_order(master_policy, node_policy):
+    args = StartArgs(pd_decode_allocation_policy=master_policy)
+    manager = PDManager(args)
+    info = {
+        "node_id": 1,
+        "client_ip_port": "10.0.0.1:8000",
+        "mode": "prefill",
+        "start_args": vars(
+            StartArgs(
+                config_server_host="10.0.0.2",
+                config_server_port=9000,
+                pd_trans_mode="nixl",
+                pd_decode_allocation_policy=node_policy,
+            )
+        ),
+    }
+    if master_policy == "early" or node_policy == "early":
+        with pytest.raises(ValueError, match="agree on early or deferred"):
+            manager.register_pd(info, websocket=object())
+        assert not manager.prefill_nodes
+    else:
+        manager.register_pd(info, websocket=object())
+        assert len(manager.prefill_nodes) == 1
+
+
 def test_prefill_registration_preserves_existing_inflight_prompt_chars():
     args = StartArgs()
     manager = PDManager(args)
@@ -766,3 +795,25 @@ def test_multiworker_starts_required_services_in_order(monkeypatch):
         ports=ports,
         haproxy_binary="haproxy",
     )
+
+
+@pytest.mark.parametrize("policy", ["prefill_complete", "last_chunk"])
+def test_deferred_allocation_requires_pd_and_nixl(policy):
+    import argparse
+
+    from lightllm.server.api_cli import add_cli_args
+    from lightllm.server.api_start import _validate_pd_features
+
+    parser = add_cli_args(argparse.ArgumentParser())
+    assert parser.parse_args([]).pd_decode_allocation_policy == "early"
+    args = StartArgs(run_mode="pd_master", pd_decode_allocation_policy=policy)
+    _validate_pd_features(args)
+    args.run_mode = "decode"
+    with pytest.raises(ValueError, match="NIXL"):
+        _validate_pd_features(args)
+    args.pd_trans_mode = "nixl"
+    _validate_pd_features(args)
+    args.run_mode = "pd_master"
+    args.pd_prefill_ready_timeout = 0
+    with pytest.raises(ValueError, match="positive and finite"):
+        _validate_pd_features(args)

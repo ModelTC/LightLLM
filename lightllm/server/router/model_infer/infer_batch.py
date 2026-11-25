@@ -550,8 +550,8 @@ class InferSamplingParams:
 class InferReq:
     # P 端调度为当前轮次选定的 chunk 终点，提交 KV 长度后清除。
     prefill_chunk_end: Optional[int] = None
-    # P 发出最近一批 KV 页时的累计 prefill token 数。
-    pd_last_page_processed_tokens: Optional[int] = None
+    # 调度进展：early 使用发页时刻，deferred 使用最近一次实际计算时刻。
+    pd_resume_processed_tokens: Optional[int] = None
 
     class _CpuCacheTaskStatus(enum.Enum):
         NOT_STARTED = 0
@@ -610,6 +610,9 @@ class InferReq:
         self.pd_task_success_num: int = 0
         self.pd_task_failed_num: int = 0
         self.pd_task_finished_keys: set[str] = set()
+        self.pd_pending_first_token = None  # D retains the receipt until every deferred WRITE has completed.
+        self.pd_defer_token_publication = False
+        self.pd_allocation_ready_sent = False
         self.pd_trans_device_id: int = -1
         self.pd_checkpoint_received_len: int = 0
 
@@ -1009,6 +1012,11 @@ class InferReq:
                         return True
         return False
 
+    def mark_pd_delivery_pending(self):
+        shared_len = self.shared_kv_node.node_prefix_total_len if self.shared_kv_node is not None else 0
+        private_len = self.hold_kv_len - shared_len
+        self.shm_req.pd_delivery_kv_bytes = private_len * g_infer_context.req_manager.mem_manager.get_cell_size()
+
     def prefill_need_token_num(self, is_chuncked_prefill: bool) -> Tuple[int, int]:
         """返回 (本轮需要计算的 token 数, 需要额外分配的 KV token 容量)。
 
@@ -1076,13 +1084,14 @@ class InferReqUpdatePack:
         # pd_prefill_chunked_handle_func 主要是为了处理 pd prefill 模式下
         # 分块 prefill 后，形成对应的pd 分块传输处理。
         if pd_prefill_chunked_handle_func is not None:
+            if is_master_in_dp and self.output_len == 1:
+                self.req_obj.mark_pd_delivery_pending()
             pd_prefill_chunked_handle_func(self.req_obj, next_token_id, next_token_logprob, self.output_len)
 
         if self.output_len <= 0:
             return
 
         req_obj = self.req_obj
-        shm_req = req_obj.shm_req
         finish_status = req_obj.finish_status
         req_obj.set_next_gen_token_id(
             next_token_id,
@@ -1118,15 +1127,22 @@ class InferReqUpdatePack:
         if extra_post_req_handle_func is not None:
             extra_post_req_handle_func(req_obj, next_token_id, next_token_logprob)
 
-        if is_master_in_dp:
-            # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
-            # finish_token_index finish_status candetoken_out_len 是
-            # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
-            shm_req.shm_cur_output_len = self.output_len
+        if is_master_in_dp and not (pd_prefill_chunked_handle_func and req_obj.pd_defer_token_publication):
+            self.publish_output()
+        return
 
-            if finish_status.is_finished():
-                shm_req.finish_token_index = shm_req.input_len + self.output_len - 1
-                shm_req.finish_status = req_obj.finish_status
+    def publish_output(self):
+        req_obj = self.req_obj
+        shm_req = req_obj.shm_req
+        finish_status = req_obj.finish_status
+        # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息
+        # finish_token_index finish_status candetoken_out_len 是
+        # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
+        shm_req.shm_cur_output_len = self.output_len
 
-            shm_req.candetoken_out_len = self.output_len
+        if finish_status.is_finished():
+            shm_req.finish_token_index = shm_req.input_len + self.output_len - 1
+            shm_req.finish_status = req_obj.finish_status
+
+        shm_req.candetoken_out_len = self.output_len
         return

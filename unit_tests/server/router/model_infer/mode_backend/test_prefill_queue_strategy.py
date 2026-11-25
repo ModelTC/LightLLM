@@ -338,10 +338,10 @@ def test_hrrn_ages_pd_continuation_since_last_published_page():
     requests = [cached_request, long_request, short_request]
     assert policy.reorder(requests, no_decode=True) == [short_request, long_request, cached_request]
 
-    long_request.pd_last_page_processed_tokens = 991808
+    long_request.pd_resume_processed_tokens = 991808
     assert policy.reorder(requests, no_decode=True) == [long_request, short_request, cached_request]
 
-    long_request.pd_last_page_processed_tokens = 1000000
+    long_request.pd_resume_processed_tokens = 1000000
     assert policy.reorder(requests, no_decode=True) == [short_request, long_request, cached_request]
 
 
@@ -394,8 +394,8 @@ def test_hrrn_resume_promotes_one_published_continuation_per_token_interval():
     cached = req(3, 65536, kv_len=8192)
     older = req(4, 131072, kv_len=8192)
     newer = req(5, 131072, kv_len=8192)
-    older.pd_last_page_processed_tokens = 0
-    newer.pd_last_page_processed_tokens = 1024
+    older.pd_resume_processed_tokens = 0
+    newer.pd_resume_processed_tokens = 1024
 
     policy = strategy("hrrn_resume")
     policy.backend.args.chunked_prefill_size = 8192
@@ -410,7 +410,7 @@ def test_hrrn_resume_promotes_one_published_continuation_per_token_interval():
 
     # The other continuation is overdue but the next priority opportunity
     # opens only after the rank advances another four batches' worth of tokens.
-    older.pd_last_page_processed_tokens = policy.backend.processed_prefill_tokens + 8192
+    older.pd_resume_processed_tokens = policy.backend.processed_prefill_tokens + 8192
     policy.backend.processed_prefill_tokens += 4 * 8192 - 1
     assert policy.reorder(requests, no_decode=True)[:2] == [high, short]
     policy.backend.processed_prefill_tokens += 1

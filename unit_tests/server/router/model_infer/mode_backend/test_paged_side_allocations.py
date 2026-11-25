@@ -49,7 +49,7 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
             (
                 kwargs["kv_start_index"],
                 kwargs["kv_end_index"],
-                kwargs["mem_indexes"],
+                list(kwargs["mem_indexes"]),
                 kwargs.get("page_kind", "kv"),
             )
         )
@@ -81,6 +81,68 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
         expected_tasks.append((10, 10, [], "att_state"))
     assert tasks == expected_tasks
     assert table[0, :12].tolist() == list(range(12))
+
+
+@pytest.mark.parametrize("policy", ["EARLY", "PREFILL_COMPLETE", "LAST_CHUNK"])
+def test_pd_decode_last_token_cache_hit_respects_first_token_owner(monkeypatch, policy):
+    backend = decode_impl.PDDecodeNode.__new__(decode_impl.PDDecodeNode)
+    backend.is_master_in_dp = True
+    backend.is_deepseek_v4 = True
+    backend.args = SimpleNamespace(page_size=256, pd_kv_page_size=2048)
+    backend.dp_rank_in_node = 0
+    backend.node_world_size = 1
+    groups = []
+    backend.info_queue = SimpleNamespace(put=groups.append)
+    table = torch.full((1, 512), -1, dtype=torch.int32)
+    allocated = []
+    backend._alloc_req_kv_mem = lambda req, size: _reserve_into_table(table, req, allocated, [256], size)
+    monkeypatch.setattr(decode_impl.g_infer_context, "is_hybrid_att_model", True)
+    req = _bind_alloc_need(
+        SimpleNamespace(
+            req_id=8,
+            req_idx=0,
+            cur_kv_len=256,
+            hold_kv_len=256,
+            hybrid_cache_len=0,
+            pd_trans_device_id=-1,
+            pd_task_num=0,
+            shm_req=SimpleNamespace(input_len=257),
+            sampling_param=SimpleNamespace(
+                shm_param=SimpleNamespace(pd_decode_allocation_policy=decode_impl.PDDecodeAllocationPolicy[policy]),
+                pd_master_node_id=7,
+            ),
+        ),
+        256,
+    )
+    backend._decode_node_gen_trans_tasks(req)
+    tasks = groups[0].task_list
+    assert tasks[0].start_kv_index == 256
+    if policy == "EARLY":
+        assert allocated == []
+        assert req.cur_kv_len == 256
+        assert len(tasks) == 1 and not tasks[0].need_transfer_page()
+    else:
+        assert allocated == [256]
+        assert req.cur_kv_len == 257 and req.hold_kv_len == 512
+        assert [t.page_kind for t in tasks] == ["kv", "att_state"]
+        assert tasks[0].mem_indexes.tolist() == [256]
+        assert tasks[1].req_idx == req.req_idx
+
+
+@pytest.mark.parametrize("shared_len", [0, 256])
+def test_pd_delivery_bytes_charge_private_reserved_pages(monkeypatch, shared_len):
+    monkeypatch.setattr(
+        decode_impl.g_infer_context,
+        "req_manager",
+        SimpleNamespace(mem_manager=SimpleNamespace(get_cell_size=lambda: 1800)),
+    )
+    req = SimpleNamespace(
+        hold_kv_len=512,
+        shm_req=SimpleNamespace(),
+        shared_kv_node=SimpleNamespace(node_prefix_total_len=shared_len) if shared_len else None,
+    )
+    InferReq.mark_pd_delivery_pending(req)
+    assert req.shm_req.pd_delivery_kv_bytes == (512 - shared_len) * 1800
 
 
 def test_pd_decode_rejects_unaligned_transfer_page_size():
@@ -118,6 +180,7 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
     source_table = torch.arange(32, dtype=torch.int32).reshape(2, 16)
     backend = SimpleNamespace(
         is_hybrid_att_model=False,
+        is_deepseek_v4=False,
         model=SimpleNamespace(mem_manager=SimpleNamespace()),
         dp_world_size=1,
         rank_in_dp=0,

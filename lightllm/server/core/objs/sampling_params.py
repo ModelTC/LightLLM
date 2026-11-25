@@ -5,6 +5,7 @@ from typing import Optional, List, Tuple, Union
 from lightllm.utils.config_utils import get_generation_config_diff_dict
 from lightllm.server.httpserver.req_id_generator_server import MAX_BEST_OF
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.server.pd_io_struct import PDDecodeAllocationPolicy
 from .pd_kv_trans_params import PDKVTransParamObj
 
 _SAMPLING_EPS = 1e-5
@@ -344,6 +345,8 @@ class SamplingParams(ctypes.Structure):
         ("seed", ctypes.c_int64),  # random seed
         # -1 disables prompt logprobs; K >= 0 returns only the top-K prompt tokens.
         ("prompt_logprobs", ctypes.c_int),
+        ("pd_decode_allocation_policy", ctypes.c_int32),  # Internal, set only by PD master.
+        ("pd_ready_timeout_seconds", ctypes.c_double),
     ]
 
     _do_sample: bool = False
@@ -378,6 +381,7 @@ class SamplingParams(ctypes.Structure):
         self.high_priority_request = False
         self.infer_high_priority = 0
         self.pd_node_resource_wait_timeout_seconds = -1
+        self.pd_decode_allocation_policy = PDDecodeAllocationPolicy.EARLY
         self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
 
         self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)

@@ -79,6 +79,8 @@ class ChunkedPrefillBackend(ModeBackend):
                     # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
                     # 防止后续的推理流程读取到显存中可能存在错误的数据。
                     g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
+                    if self.classed_req_no_decode and self.is_master_in_dp:
+                        self._before_pd_prefill(prefill_reqs)
                     self.processed_prefill_tokens += prefill_tokens
                     self.prefill(
                         event_pack=event_pack,

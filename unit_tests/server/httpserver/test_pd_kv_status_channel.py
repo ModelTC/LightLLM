@@ -1,18 +1,21 @@
 """KV status routing through the master owners discovered by P/D nodes."""
 
 import asyncio
+import time
 import pickle
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from lightllm.server.pd_io_struct import PD_Master_Obj, PDUpKVStatus
+import pytest
+
+from lightllm.server.pd_io_struct import PD_Master_Obj, PDAllocationReady, PDUpKVStatus
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import up_status
 
 
 def _manager():
     manager = up_status.UpStatusManager.__new__(up_status.UpStatusManager)
-    manager.args = SimpleNamespace(pd_node_id=20)
+    manager.args = SimpleNamespace(pd_node_id=20, run_mode="prefill", running_max_req_size=32)
     manager.id_to_handle_queue = {}
     return manager
 
@@ -25,10 +28,12 @@ def _websocket(send):
     )
 
 
-def test_status_is_sent_directly_without_control_frames_or_reply(monkeypatch):
+@pytest.mark.parametrize(
+    "status", [PDUpKVStatus(8, 100, b"decode metadata"), PDAllocationReady(8, 100, time.monotonic() + 1000)]
+)
+def test_status_is_sent_directly_without_control_frames_or_reply(monkeypatch, status):
     async def run():
         manager = _manager()
-        status = PDUpKVStatus(8, 100, b"decode metadata")
         manager.id_to_handle_queue[100] = asyncio.Queue()
         manager.id_to_handle_queue[100].put_nowait(status)
         sent = []
@@ -51,6 +56,39 @@ def test_status_is_sent_directly_without_control_frames_or_reply(monkeypatch):
             await asyncio.wait_for(status_sent.wait(), timeout=1)
             assert sent == [status]
             websocket.recv.assert_not_called()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_ready_survives_failed_send_until_reconnect(monkeypatch):
+    async def run():
+        manager = _manager()
+        manager.id_to_handle_queue[100] = asyncio.Queue()
+        ready = PDAllocationReady(16, 100, time.monotonic() + 1000)
+        manager.id_to_handle_queue[100].put_nowait(PDAllocationReady(8, 100, time.monotonic() - 1))
+        manager.id_to_handle_queue[100].put_nowait(ready)
+        delivered = asyncio.Event()
+        attempts = []
+
+        async def send(data):
+            attempts.append(pickle.loads(data))
+            if len(attempts) == 1:
+                raise ConnectionError("disconnected during readiness upload")
+            delivered.set()
+
+        @asynccontextmanager
+        async def connect(uri):
+            yield _websocket(send)
+
+        monkeypatch.setattr(up_status.websockets, "connect", connect)
+        monkeypatch.setattr(up_status.asyncio, "sleep", AsyncMock())
+        task = asyncio.create_task(manager.up_kv_status_task(PD_Master_Obj(100, "master:8100")))
+        try:
+            await asyncio.wait_for(delivered.wait(), timeout=1)
+            assert attempts == [ready, ready]
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -100,6 +138,7 @@ def test_topology_refresh_connects_all_new_workers_and_retires_previous_ids(monk
             assert {await asyncio.wait_for(started.get(), timeout=1) for _ in range(2)} == {200, 201}
             assert retired == {100, 101}
             assert set(manager.id_to_handle_queue) == {200, 201}
+            assert manager.id_to_handle_queue[200].maxsize == manager.args.running_max_req_size
         finally:
             task.cancel()
             for child in children:

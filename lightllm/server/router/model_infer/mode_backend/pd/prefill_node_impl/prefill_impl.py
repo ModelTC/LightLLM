@@ -1,9 +1,16 @@
 import torch.multiprocessing as mp
-import random
+import time
 from typing import List, Tuple, Union
 from numpy import ndarray
-from lightllm.server.router.model_infer.infer_batch import InferReq
-from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
+from lightllm.server.core.objs import FinishStatus
+from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
+from lightllm.server.pd_io_struct import (
+    PDAbortReq,
+    PDAllocationReady,
+    PDChunckedTransTask,
+    PDDecodeAllocationPolicy,
+    PDDecodeNodeInfo,
+)
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -47,20 +54,54 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                 req_obj.pd_abort_req_send_count = pd_abort_req_send_count + 1
 
             prefill_finished = req_obj.shm_req.input_len <= req_obj.cur_kv_len
-            if prefill_finished:
-                # 等待所有传输任务都已经完成。
-                if req_obj.pd_task_num == (req_obj.pd_task_failed_num + req_obj.pd_task_success_num):
-                    ans_list.append(req_obj)
-            else:
-                # 暂停会释放请求的 KV/SWA 页面，必须先等待在途传输任务结束。
-                if req_obj.infer_aborted or req_obj.wait_pause:
-                    if req_obj.pd_task_num == (req_obj.pd_task_failed_num + req_obj.pd_task_success_num):
-                        ans_list.append(req_obj)
-                    else:
+            if prefill_finished or req_obj.infer_aborted or req_obj.wait_pause:
+                # Source pages must stay resident until each submitted task has retired.
+                if req_obj.pd_task_num != req_obj.pd_task_failed_num + req_obj.pd_task_success_num:
+                    continue
+                if prefill_finished and req_obj.pd_defer_token_publication:
+                    if not req_obj.infer_aborted and req_obj.sampling_param.pd_decode_node is None:
                         continue
-                else:
-                    ans_list.append(req_obj)
+                    if req_obj.infer_aborted:
+                        req_obj.finish_status.set_status(FinishStatus.FINISHED_ABORTED)
+                    elif req_obj.pd_task_failed_num:
+                        req_obj.finish_status.set_status(FinishStatus.FINISHED_ERROR)
+                    if self.is_master_in_dp:
+                        InferReqUpdatePack(req_obj, req_obj.cur_output_len).publish_output()
+                    req_obj.pd_defer_token_publication = False
+                if self.is_master_in_dp and prefill_finished:
+                    req_obj.shm_req.pd_delivery_kv_bytes = -1
+            ans_list.append(req_obj)
         return ans_list
+
+    def _notify_pd_allocation_ready(self, req_obj: InferReq):
+        if self.is_master_in_dp and not req_obj.pd_allocation_ready_sent:
+            self.info_queue.put(
+                PDAllocationReady(
+                    req_obj.req_id,
+                    req_obj.sampling_param.pd_master_node_id,
+                    time.monotonic() + req_obj.shm_req.sample_params.pd_ready_timeout_seconds,
+                )
+            )
+            req_obj.pd_allocation_ready_sent = True
+
+    def _before_pd_prefill(self, prefill_reqs: List[InferReq]):
+        for req in prefill_reqs:
+            if req.shm_req.sample_params.pd_decode_allocation_policy == PDDecodeAllocationPolicy.LAST_CHUNK:
+                if req.get_chuncked_input_token_len() == req.shm_req.input_len:
+                    self._notify_pd_allocation_ready(req)
+
+    def _bind_pd_decode_node(self, req_obj: InferReq, info: PDDecodeNodeInfo):
+        if req_obj.sampling_param.pd_decode_node is not None or req_obj.infer_aborted:
+            return
+        req_obj.sampling_param.pd_decode_node = info
+        req_obj.pd_trans_kv_start_index = info.ready_kv_len
+        # Both PD backends serialize the final forward/post-handle and the next
+        # control read. Even LAST_CHUNK retains the completed source by this point.
+        assert req_obj.pd_defer_token_publication and req_obj.cur_kv_len == req_obj.shm_req.input_len
+        index = req_obj.shm_req.input_len
+        token = int(req_obj.shm_req.shm_prompt_ids.arr[index])
+        logprob = float(req_obj.shm_req.shm_logprobs.arr["logprob"][index])
+        self._submit_ready_pages(req_obj, token, logprob, 1)
 
     def _prefill_chuncked_handle_func(
         self, req_obj: InferReq, next_token_id: int, next_token_prob: float, output_len: int
@@ -73,6 +114,20 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         input_len = req_obj.shm_req.input_len
         page_size = self.args.pd_kv_page_size
         assert page_size % self.args.page_size == 0, "pd_kv_page_size must be divisible by page_size"
+        prefill_finished = req_obj.cur_kv_len == input_len
+        policy = req_obj.shm_req.sample_params.pd_decode_allocation_policy
+        if policy != PDDecodeAllocationPolicy.EARLY:
+            req_obj.pd_resume_processed_tokens = None if prefill_finished else self.processed_prefill_tokens
+            if prefill_finished:
+                req_obj.pd_defer_token_publication = True
+                if policy == PDDecodeAllocationPolicy.PREFILL_COMPLETE:
+                    self._notify_pd_allocation_ready(req_obj)
+            return
+        self._submit_ready_pages(req_obj, next_token_id, next_token_prob, output_len)
+
+    def _submit_ready_pages(self, req_obj, next_token_id, next_token_prob, output_len):
+        input_len = req_obj.shm_req.input_len
+        page_size = self.args.pd_kv_page_size
         prefill_finished = req_obj.cur_kv_len == input_len
         start_index = req_obj.pd_trans_kv_start_index
         end_index = req_obj.cur_kv_len
@@ -116,7 +171,8 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         if self.is_master_in_dp:
             for trans_task in trans_task_list:
                 self.info_queue.put(trans_task)
-        req_obj.pd_last_page_processed_tokens = None if prefill_finished else self.processed_prefill_tokens
+        if req_obj.shm_req.sample_params.pd_decode_allocation_policy == PDDecodeAllocationPolicy.EARLY:
+            req_obj.pd_resume_processed_tokens = None if prefill_finished else self.processed_prefill_tokens
         return
 
     def _create_pd_trans_task(

@@ -9,8 +9,8 @@ import setproctitle
 
 from typing import Dict
 from dataclasses import asdict
-from lightllm.server.pd_io_struct import PDUpKVStatus
-from lightllm.utils.log_utils import init_logger
+from lightllm.server.pd_io_struct import PDAllocationReady
+from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.pd_io_struct import PD_Master_Obj
 import torch.multiprocessing as mp
@@ -23,7 +23,7 @@ logger = init_logger(__name__)
 class UpStatusManager:
     def __init__(self, args, task_in_queue: mp.SimpleQueue):
         self.args = args
-        self.task_queue: mp.SimpleQueue[PDUpKVStatus] = task_in_queue
+        self.task_queue = task_in_queue
         self.daemon_thread = threading.Thread(target=self.thread_loop, daemon=True)
         self.daemon_thread.start()
 
@@ -35,7 +35,7 @@ class UpStatusManager:
         self.id_to_handle_task: Dict[int, asyncio.Task] = {}
         self.id_to_handle_queue: Dict[int, asyncio.Queue] = {}
 
-        asyncio.create_task(self.dispatch_task_loop())
+        dispatch_task = None
 
         while True:
             try:
@@ -54,22 +54,50 @@ class UpStatusManager:
 
                     for node_id, pd_master_obj in id_to_pd_master_obj.items():
                         if node_id not in self.id_to_handle_task:
-                            self.id_to_handle_queue[node_id] = asyncio.Queue()
-                            self.id_to_handle_task[node_id] = asyncio.create_task(self.up_kv_status_task(pd_master_obj))
+                            self._connect_worker(pd_master_obj)
 
+                if self.args.run_mode == "prefill":
+                    for pending in self.id_to_handle_queue.values():
+                        for _ in range(pending.qsize()):
+                            status = pending.get_nowait()
+                            if status.expires_at > time.monotonic():
+                                pending.put_nowait(status)
+                if dispatch_task is None:
+                    # A P sender starts lazily on its first READY. Discover its owner before consuming it.
+                    dispatch_task = asyncio.create_task(self.dispatch_task_loop())
                 await asyncio.sleep(30)
 
             except Exception as e:
                 logger.exception(str(e))
                 await asyncio.sleep(10)
 
+    def _connect_worker(self, pd_master_obj: PD_Master_Obj):
+        node_id = pd_master_obj.node_id
+        capacity = self.args.running_max_req_size if self.args.run_mode == "prefill" else 0
+        self.id_to_handle_queue[node_id] = asyncio.Queue(maxsize=capacity)
+        self.id_to_handle_task[node_id] = asyncio.create_task(self.up_kv_status_task(pd_master_obj))
+
     async def dispatch_task_loop(self):
         while True:
             try:
                 loop = asyncio.get_event_loop()
-                upkv_status: PDUpKVStatus = await loop.run_in_executor(None, self.task_queue.get)
-                if upkv_status.pd_master_node_id in self.id_to_handle_queue:
-                    await self.id_to_handle_queue[upkv_status.pd_master_node_id].put(upkv_status)
+                upkv_status = await loop.run_in_executor(None, self.task_queue.get)
+                if isinstance(upkv_status, PDAllocationReady) and upkv_status.expires_at <= time.monotonic():
+                    continue
+                node_id = upkv_status.pd_master_node_id
+                if isinstance(upkv_status, PDAllocationReady) and node_id not in self.id_to_handle_queue:
+                    # The P HTTP worker can register with a new master before our periodic refresh.
+                    from lightllm.server.httpserver.pd_loop import _get_pd_master_objs
+
+                    workers = await _get_pd_master_objs(self.args)
+                    if workers and node_id in workers and node_id not in self.id_to_handle_queue:
+                        self._connect_worker(workers[node_id])
+                if node_id in self.id_to_handle_queue:
+                    try:
+                        self.id_to_handle_queue[node_id].put_nowait(upkv_status)
+                    except asyncio.QueueFull:
+                        if log_time_ready("pd_worker_ready_queue_full", 10):
+                            logger.warning(f"readiness queue full for master {node_id}")
                 else:
                     logger.warning(f"upstatus {upkv_status} no connection to pd_master, drop it")
             except BaseException as e:
@@ -77,6 +105,7 @@ class UpStatusManager:
                 await asyncio.sleep(10)
 
     async def up_kv_status_task(self, pd_master_obj: PD_Master_Obj):
+        pending_status = None
         while True:
             try:
                 uri = f"ws://{pd_master_obj.host_ip_port}/kv_move_status"
@@ -90,10 +119,18 @@ class UpStatusManager:
                         try:
                             if pd_master_obj.node_id in self.id_to_handle_queue:
                                 task_queue = self.id_to_handle_queue[pd_master_obj.node_id]
-                                upkv_status: PDUpKVStatus = await task_queue.get()
-                                await websocket.send(pickle.dumps(upkv_status))
+                                if pending_status is None:
+                                    pending_status = await task_queue.get()
+                                if (
+                                    isinstance(pending_status, PDAllocationReady)
+                                    and pending_status.expires_at <= time.monotonic()
+                                ):
+                                    pending_status = None
+                                    continue
+                                await websocket.send(pickle.dumps(pending_status))
                                 # KV readiness is reported once per request, not once per transfer page.
-                                logger.debug(f"up kv status: {upkv_status}")
+                                logger.debug(f"up kv status: {pending_status}")
+                                pending_status = None
                             else:
                                 await asyncio.sleep(3)
                         except BaseException as e:

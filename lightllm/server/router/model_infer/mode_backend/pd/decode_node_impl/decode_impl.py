@@ -1,6 +1,11 @@
 import random
 import torch.multiprocessing as mp
-from lightllm.server.pd_io_struct import PDChunckedTransTask, PDChunckedTransTaskGroup, PDAbortReq
+from lightllm.server.pd_io_struct import (
+    PDAbortReq,
+    PDChunckedTransTask,
+    PDChunckedTransTaskGroup,
+    PDDecodeAllocationPolicy,
+)
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 from typing import List, Tuple, Union
 from numpy import ndarray
@@ -53,6 +58,8 @@ class PDDecodeNode(ChunkedPrefillBackend):
             req_obj: InferReq = req_obj  # for easy typing
             # 构建 chuncked trans task
             self._decode_node_gen_trans_tasks(req_obj=req_obj)
+            if self.is_master_in_dp:
+                req_obj.mark_pd_delivery_pending()
 
         return
 
@@ -80,6 +87,9 @@ class PDDecodeNode(ChunkedPrefillBackend):
 
             if req_obj.pd_task_num != (req_obj.pd_task_failed_num + req_obj.pd_task_success_num):
                 continue
+
+            if self.is_master_in_dp and req_obj.shm_req.pd_delivery_kv_bytes >= 0:
+                req_obj.shm_req.pd_delivery_kv_bytes = -1
 
             if self.is_deepseek_v4 and (
                 req_obj.pd_task_failed_num > 0 or req_obj.pd_checkpoint_received_len != req_obj.hybrid_cache_len
@@ -138,8 +148,12 @@ class PDDecodeNode(ChunkedPrefillBackend):
         """
         group = PDChunckedTransTaskGroup()
         input_len = req_obj.shm_req.input_len
-        # 当 decode 节点不能匹配足够的kv的时候，才进行真实的 kv 传输。
-        if input_len - req_obj.cur_kv_len > 1:
+        # In deferred mode P owns the first token even on a late L-1 prefix hit.
+        # Receive its final KV and runtime state before continuing that sample on D.
+        if (
+            input_len - req_obj.cur_kv_len > 1
+            or req_obj.sampling_param.shm_param.pd_decode_allocation_policy != PDDecodeAllocationPolicy.EARLY
+        ):
             trans_page_size = self.args.pd_kv_page_size
             assert trans_page_size % self.args.page_size == 0, "pd_kv_page_size must be divisible by page_size"
             req_obj.pd_trans_kv_start_index = req_obj.cur_kv_len

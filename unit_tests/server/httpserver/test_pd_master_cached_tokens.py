@@ -12,7 +12,7 @@ from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, SamplingPa
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
-from lightllm.server.pd_io_struct import PD_Client_Obj
+from lightllm.server.pd_io_struct import ObjType, PD_Client_Obj, PDDecodeAllocationPolicy
 
 pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
 
@@ -367,7 +367,8 @@ def test_continuation_uses_reencoded_length_difference(
     ]
 
 
-def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatch):
+@pytest.mark.parametrize("policy", [PDDecodeAllocationPolicy.EARLY, PDDecodeAllocationPolicy.PREFILL_COMPLETE])
+def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatch, policy):
     mgr = _make_manager(monkeypatch)
     sampling_params = SamplingParams()
     sampling_params.init(None)
@@ -376,6 +377,7 @@ def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatc
     sampling_params.max_new_tokens = 1
 
     async def failed_wait(_p_node, _d_node, _start_time, _prompt_ids, sp, *_args):
+        sp.pd_decode_allocation_policy = policy
         yield (
             sp.group_request_id,
             "",
@@ -408,6 +410,12 @@ def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatc
 
     assert mgr.recorded_cache_hit_rates == [pytest.approx(0.2)]
     assert mgr.inserted_prompt_caches == []
+    for node in [*mgr.pd_manager.prefill_nodes, *mgr.pd_manager.decode_nodes]:
+        if policy == PDDecodeAllocationPolicy.EARLY:
+            node.websocket.send_bytes.assert_not_awaited()
+        else:
+            node.websocket.send_bytes.assert_awaited_once()
+            assert pickle.loads(node.websocket.send_bytes.await_args.args[0]) == (ObjType.ABORT, 2)
 
 
 def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch):

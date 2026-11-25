@@ -1,6 +1,7 @@
 """PD continuation ownership, compact wire pages, and WRITE recovery contracts."""
 
 import copy
+import queue
 import threading
 import uuid
 from dataclasses import replace
@@ -11,7 +12,13 @@ import pytest
 import torch
 
 from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4StateCacheManager
-from lightllm.server.pd_io_struct import PDAgentMetadata, PDChunckedTransTaskGroup
+from lightllm.server.pd_io_struct import (
+    PDAgentMetadata,
+    PDAllocationReady,
+    PDChunckedTransTaskGroup,
+    PDDecodeAllocationPolicy,
+    PDDecodeNodeInfo,
+)
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_impl
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl.prefill_impl import (
     PDChunkedPrefillForPrefillNode,
@@ -56,8 +63,18 @@ def checkpoint_mappings():
     yield mappings
 
 
-@pytest.mark.parametrize("tail", [0, 1, 127, 255, 511])
-def test_pd_checkpoint_survives_final_ring_overwrite(cache, tail, checkpoint_mappings):
+@pytest.mark.parametrize(
+    "tail, late_bind",
+    [
+        (0, False),
+        (1, False),
+        (127, False),
+        (255, False),
+        (511, False),
+        pytest.param(255, True, id="late-bind-long-tail"),
+    ],
+)
+def test_pd_checkpoint_survives_final_ring_overwrite(cache, tail, late_bind, checkpoint_mappings, monkeypatch):
     from lightllm.models.deepseek_v4.triton_kernel.swa_cache import gather_swa_state
 
     manager, requests = cache
@@ -66,7 +83,7 @@ def test_pd_checkpoint_survives_final_ring_overwrite(cache, tail, checkpoint_map
     states = DeepseekV4StateCacheManager(
         2, manager.cache_config, shm_name=f"pd_checkpoint_{uuid.uuid4().hex}", shm_create=True
     )
-    source_id, destination_id = states.alloc_state_cache(2)
+    destination_id, source_id = states.alloc_state_cache(2)
     names = ("req_to_swa", "req_to_c4_state", "req_to_c4_indexer_state", "req_to_c128_state")
     for name in names:
         buffer = getattr(requests, name)
@@ -81,8 +98,50 @@ def test_pd_checkpoint_survives_final_ring_overwrite(cache, tail, checkpoint_map
     manager.pd_checkpoint_metas = {"small": (states.layer_cache.shm.name, states.size, states.buffer.shape[-1])}
     manager.alloc_paged_kv_move_buffer(1, 1024)
     checkpoint_mappings.append((states, manager.att_state_page_helper))
+    source_checkpoint = ("small", source_id)
+    if late_bind:
+        input_len = 1024 + tail
+        assert tail > requests.sliding_window
+        node = PDChunkedPrefillForPrefillNode.__new__(PDChunkedPrefillForPrefillNode)
+        node.args = SimpleNamespace(pd_kv_page_size=1024, page_size=manager.page_size)
+        node.model = SimpleNamespace(req_manager=requests)
+        node.is_deepseek_v4 = node.is_master_in_dp = True
+        node.dp_rank_in_node, node.node_world_size = 0, 1
+        node.info_queue = queue.Queue()
+        monkeypatch.setattr(decode_impl.g_infer_context, "is_hybrid_att_model", True)
+        req = SimpleNamespace(
+            req_id=8,
+            req_idx=source,
+            cur_kv_len=input_len,
+            hybrid_cache_len=1024,
+            tail_small_page_buffer_id=source_id,
+            pd_trans_device_id=-1,
+            pd_task_num=0,
+            infer_aborted=False,
+            pd_allocation_ready_sent=False,
+            sampling_param=SimpleNamespace(pd_master_node_id=1, pd_decode_node=None),
+            shm_req=SimpleNamespace(
+                input_len=input_len,
+                sample_params=SimpleNamespace(
+                    pd_decode_allocation_policy=PDDecodeAllocationPolicy.PREFILL_COMPLETE, pd_ready_timeout_seconds=10
+                ),
+                shm_prompt_ids=SimpleNamespace(arr=[0] * input_len + [42]),
+                shm_logprobs=SimpleNamespace(arr={"logprob": [0.0] * input_len + [-0.25]}),
+            ),
+        )
+        node._prefill_chuncked_handle_func(req, 42, -0.25, 1)
+        assert isinstance(node.info_queue.get_nowait(), PDAllocationReady)
+        assert req.pd_task_num == 0
+        node._bind_pd_decode_node(req, PDDecodeNodeInfo(2, 1, "D", b"D", 4, b"pages", req.req_id, 1024))
+        kv, state = node.info_queue.get_nowait(), node.info_queue.get_nowait()
+        assert (kv.page_kind, kv.start_kv_index, kv.end_kv_index) == ("kv", 1024, input_len)
+        assert kv.mem_indexes.tolist() == src[1024:input_len].tolist()
+        assert node.info_queue.empty()
+        assert (state.page_kind, state.req_idx, state.checkpoint_len) == ("att_state", source, 1024)
+        assert (state.first_gen_token_id, state.first_gen_token_logprob) == (42, -0.25)
+        source_checkpoint = (state.checkpoint_page_kind, state.checkpoint_buffer_id)
     nbytes = manager.write_mem_to_page_kv_move_buffer(
-        [], 0, 0, [manager], 1, "att_state", source, checkpoint=("small", source_id)
+        [], 0, 0, [manager], 1, "att_state", source, checkpoint=source_checkpoint
     )
     runtime_bytes = sum(getattr(requests, name)[:, source].nbytes for name in names)
     assert nbytes == runtime_bytes + checkpoint.numel()
@@ -222,6 +281,7 @@ def test_checkpoint_receipt_is_published_once_after_success(monkeypatch):
         pd_task_failed_num=0,
         pd_task_success_num=0,
         pd_task_finished_keys=set(),
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(pd_decode_allocation_policy=0)),
         hybrid_cache_len=512,
         pd_checkpoint_received_len=0,
     )

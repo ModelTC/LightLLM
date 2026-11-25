@@ -25,6 +25,7 @@ from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClie
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.utils.profiler import ProfilerCmd
+from lightllm.server.pd_io_struct import PDBindDecodeCmd
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
@@ -226,9 +227,16 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
     async def loop_for_fwd(
         self,
     ):
+        next_delivery_sample = 0.0
         counter_count = 0
         while True:
             await self._step()
+            if self.is_pd_run_mode and time.monotonic() >= next_delivery_sample:
+                next_delivery_sample = time.monotonic() + 1
+                reqs = self.running_batch.reqs if self.running_batch is not None else ()
+                pending = [size for req in reqs if (size := req.pd_delivery_kv_bytes) >= 0]
+                self.metric_client.gauge_set("lightllm_pd_delivery_kv_bytes", sum(pending))
+                self.metric_client.gauge_set("lightllm_pd_delivery_requests", len(pending))
             counter_count += 1
             if self.running_batch is not None:
                 if counter_count % 100 == 0:
@@ -428,12 +436,15 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         if not hasattr(self, "recv_max_count"):
             self.recv_max_count = 64
 
+        bindings = []
         try:
             # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
             for _ in range(self.recv_max_count):
-                recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+                recv_req = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                 if isinstance(recv_req, GroupReqIndexes):
                     self._add_req(recv_req)
+                elif isinstance(recv_req, PDBindDecodeCmd):
+                    bindings.append(recv_req)
                 else:
                     raise ValueError(f"Unknown request type: {type(recv_req)}")
 
@@ -443,6 +454,12 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         except zmq.ZMQError:
             # 当队列已经开始清空的时候，将一次接受的数量下调
             self.recv_max_count = 64
+
+        if bindings:
+            while not self.shm_reqs_io_buffer.is_empty():
+                await asyncio.sleep(0.001)
+            self.shm_reqs_io_buffer.write_obj(bindings)
+            self.shm_reqs_io_buffer.set_ready()
 
         if self.args.enable_rl:
             await self.process_rl_ops()

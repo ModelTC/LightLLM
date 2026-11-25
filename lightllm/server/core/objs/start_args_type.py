@@ -225,6 +225,10 @@ class StartArgs:
     mtp_step: int = field(default=0)
     mtp_dynamic_verify: bool = field(default=False)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
+    pd_decode_allocation_policy: str = field(
+        default="early", metadata={"choices": ["early", "prefill_complete", "last_chunk"]}
+    )
+    pd_prefill_ready_timeout: float = field(default=600.0)
     pd_kv_page_num: int = field(default=16)
     pd_kv_page_size: int = field(default=1024)
     pd_node_id: int = field(default=-1)

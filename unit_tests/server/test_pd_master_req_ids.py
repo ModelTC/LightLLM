@@ -27,6 +27,7 @@ from lightllm.server.httpserver.req_id_generator_server import (
 def _args(**overrides):
     values = {
         "run_mode": "normal",
+        "pd_decode_allocation_policy": "early",
         "config_server_host": None,
         "config_server_port": None,
     }
@@ -147,3 +148,20 @@ def test_real_rpc_clients_share_one_sequence():
         server.close()
         thread.join(timeout=5)
         assert not thread.is_alive()
+
+
+def test_deferred_standalone_restart_separates_attempt_ids_from_prior_boot_and_early():
+    args = _args(run_mode="pd_master", pd_decode_allocation_policy="prefill_complete")
+    with patch(
+        "lightllm.server.httpserver.req_id_generator_server.secrets.randbelow",
+        side_effect=[0, (1 << 61) // MAX_BEST_OF - 1],
+    ):
+        first = _create_req_id_generator_state(args)
+        second = _create_req_id_generator_state(args)
+    first_start, first_end = first.allocate_id_range(1024)
+    second_start, second_end = second.allocate_id_range(1024)
+    assert 2 ** 61 <= first_start < first_end < second_start < second_end < 2 ** 63
+    assert first_start == 2 ** 61 and second_start == 2 ** 62 - MAX_BEST_OF
+    assert first_start % MAX_BEST_OF == second_start % MAX_BEST_OF == 0
+    early = _create_req_id_generator_state(_args(run_mode="pd_master"))
+    assert early.allocate_id_range(1)[0] == MAX_BEST_OF

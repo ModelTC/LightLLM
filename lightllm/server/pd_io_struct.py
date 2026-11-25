@@ -36,6 +36,12 @@ class NodeRole(enum.Enum):
         return self.is_P() or self.is_D()
 
 
+class PDDecodeAllocationPolicy(enum.IntEnum):
+    EARLY = 0
+    PREFILL_COMPLETE = 1
+    LAST_CHUNK = 2
+
+
 class ObjType(enum.Enum):
     ABORT = 1
     REQ = 2
@@ -46,6 +52,8 @@ class ObjType(enum.Enum):
     TOKEN_PACKS_COMPACT = 7  # 不含 logprobs 等可选字段的紧凑 token 包。
     PD_UPLOAD_GENERATE_ERROR = 8  # P/D 节点向 pd master 上报本地请求生成异常。
     PD_UPLOAD_SERVER_BUSY = 9  # P/D 节点向 pd master 上报本地服务繁忙。
+
+    PD_BIND_DECODE_NODE_INFO = 10
 
 
 PD_COMPACT_TOKEN_INFO_LEN = 12
@@ -302,6 +310,20 @@ class PDDecodeNodeInfo:
 
     request_id: int
     ready_kv_len: int  # decode 节点上已经准备好的kv长度
+
+
+@dataclass
+class PDAllocationReady:
+    # Master generates a fresh group_request_id for each attempt and continuation.
+    group_request_id: int
+    pd_master_node_id: int
+    expires_at: float  # P-local monotonic deadline; never compared on the master.
+
+
+@dataclass
+class PDBindDecodeCmd:
+    request_id: int
+    pd_master_node_id: int
 
 
 @dataclass

@@ -212,9 +212,6 @@ class MemoryManager:
         pin_mem_indexes.numpy()[:] = mem_indexes
         mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
-        mem_indexes_gpu = torch.tensor(mem_indexes, dtype=torch.int64, device="cpu", pin_memory=True).cuda(
-            non_blocking=True
-        )
         for tp_index in range(dp_world_size):
             page_io(
                 mem_indexes=mem_indexes_gpu,
