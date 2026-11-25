@@ -62,12 +62,10 @@ class VisualManager:
         self.lock = asyncio.Lock()
 
     async def wait_to_model_ready(self):
-
         self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
         self.vit_attn_backend = init_vit_att_backend(index=0)
         for dp_rank_id in range(self.vit_dp):
             for tp_rank_id in range(self.vit_tp):
-
                 rpc_model = await start_model_process()
                 self.model_rpcs[dp_rank_id].append(rpc_model)
 
@@ -180,10 +178,6 @@ class VisualManager:
             while True:
                 recv_req: GroupReqIndexes = await asyncio.to_thread(self.zmq_recv_socket.recv_pyobj)
                 if isinstance(recv_req, GroupReqIndexes):
-                    logger.info(
-                        f"visual recv req id {recv_req.group_req_id} "
-                        f"img count {len(recv_req.multimodal_params.images)}"
-                    )
                     asyncio.create_task(self.handle_group_indexes(group_req_indexes=recv_req))
                 else:
                     assert False, f"Error Req Inf {recv_req}"

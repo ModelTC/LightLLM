@@ -17,67 +17,96 @@ HTTP access 默认关闭；成功请求完成摘要默认采样 1%，失败摘�
 请求正文、采样参数、token ID 和张量不会因为开启请求摘要而输出。
 现有 ``--detail_log`` 保留为显式内容诊断开关，其 DEBUG 输出仍需要对应模块启用 DEBUG。
 
+普通启动不需要额外指定日志参数：
+
+.. code-block:: bash
+
+   python -m lightllm.server.api_server --model_dir /path/to/model
+
+默认配置下，服务日志以 INFO 文本输出到 stdout；引擎活跃时每 10 秒输出统计，
+启用 MTP 后自动输出投机统计，无需另加日志开关。
+P/D 节点仍需指定模型和拓扑参数，同样不需要重复指定日志默认值。
+
 配置
 ----
 
-显式 CLI 参数优先于环境变量；未设置 CLI 时继承环境变量，最后使用默认值。
-CLI 的连字符和下划线形式均可使用，例如 ``--log-level`` 和 ``--log_level``。
-启动器将配置写入环境变量，使 spawn 和 HTTP 子进程使用同一配置。
+自定义日志只需一个参数，可以直接写内联 JSON：
+
+.. code-block:: bash
+
+   python -m lightllm.server.api_server --model_dir /path/to/model --log-config '{"format":"json","request_sample_rate":1}'
+
+需要复用配置时，也可以指定 JSON 文件：
+
+.. code-block:: bash
+
+   python -m lightllm.server.api_server --model_dir /path/to/model --log-config test/logging.json
+
+示例文件 ``test/logging.json`` 开启 JSON 输出并记录每个成功请求的摘要：
+
+.. code-block:: json
+
+   {
+     "format": "json",
+     "request_sample_rate": 1
+   }
+
+``--log-config`` 也可写为 ``--log_config``，支持内联 JSON 对象和 JSON 文件，只需填写要修改的项。
+两种写法共用校验逻辑，均优先于对应环境变量；未填写的项继承环境变量，最后使用默认值。
+相对路径以启动器的工作目录为基准。未知字段、错误类型和非法值会在启动 worker 前报错。
+
+启动器将解析后的配置写入环境变量，使 spawn 和 HTTP 子进程使用同一配置；
+子进程无需读取配置文件。本 PR 早期版本的独立日志参数统一替换为 ``--log-config``，
+已有 ``LIGHTLLM_LOG_*`` 环境变量继续支持。
 
 .. list-table::
    :header-rows: 1
    :widths: 27 38 35
 
-   * - CLI
+   * - JSON 字段
      - 环境变量
      - 默认值 / 含义
-   * - ``--log-level``
+   * - ``level``
      - ``LIGHTLLM_LOG_LEVEL``
      - ``info``；服务日志级别
-   * - ``--log-format``
+   * - ``format``
      - ``LIGHTLLM_LOG_FORMAT``
      - ``text``；也支持 ``json``
-   * - ``--log-module-levels``
+   * - ``module_levels``
      - ``LIGHTLLM_LOG_MODULE_LEVELS``
      - ``{}``；模块前缀到级别的 JSON 映射
-   * - ``--log-request-sample-rate``
+   * - ``request_sample_rate``
      - ``LIGHTLLM_LOG_REQUEST_SAMPLE_RATE``
      - ``0.01``；成功请求采样 1%，0 关闭，1 全量；失败不采样
-   * - ``--log-stats-interval``
+   * - ``stats_interval``
      - ``LIGHTLLM_LOG_STATS_INTERVAL``
      - ``10``；运行摘要间隔，单位为秒，必须大于 0
-   * - ``--log-http-level``
+   * - ``http_level``
      - ``LIGHTLLM_LOG_HTTP_LEVEL``
      - ``warning``；Hypercorn 错误日志级别
-   * - ``--enable-http-access-log``
+   * - ``http_access``
      - ``LIGHTLLM_LOG_HTTP_ACCESS``
-     - ``0``；设为 1 开启 HTTP access 日志
-   * - 无
+     - ``false``；JSON 布尔值，环境变量使用 ``0`` 或 ``1``
+   * - ``http_exclude_paths``
      - ``LIGHTLLM_LOG_HTTP_EXCLUDE_PATHS``
-     - ``/health,/healthz,/readiness,/liveness,/metrics``；应用 access 日志排除的路径及其子路径，逗号分隔；空字符串取消排除
-   * - 无
+     - ``["/health", "/healthz", "/readiness", "/liveness", "/metrics"]``；``[]`` 取消排除，环境变量使用逗号分隔
+   * - ``dir``
      - ``LIGHTLLM_LOG_DIR``
      - 未设置；设置后同时写入按 PID 隔离的日志文件
-   * - 无
+   * - ``max_bytes``
      - ``LIGHTLLM_LOG_MAX_BYTES``
-     - ``104857600``；单文件轮转阈值，单位为字节
-   * - 无
+     - ``104857600``；单文件轮转阈值，正整数，单位为字节
+   * - ``backup_count``
      - ``LIGHTLLM_LOG_BACKUP_COUNT``
-     - ``3``；每进程保留的轮转备份数，必须大于 0
+     - ``3``；每进程保留的轮转备份数，正整数
 
-只排查调度模块，不开启其他模块 DEBUG：
+若只排查调度模块，在同一文件中设置 ``module_levels``：
 
-.. code-block:: bash
+.. code-block:: json
 
-   export LIGHTLLM_LOG_LEVEL=INFO
-   export LIGHTLLM_LOG_MODULE_LEVELS='{"lightllm.server.router":"DEBUG"}'
-
-结构化输出，并抽样记录 1% 的请求完成摘要：
-
-.. code-block:: bash
-
-   export LIGHTLLM_LOG_FORMAT=json
-   export LIGHTLLM_LOG_REQUEST_SAMPLE_RATE=0.01
+   {
+     "module_levels": {"lightllm.server.router": "DEBUG"}
+   }
 
 ``lightllm.requests`` 和 ``lightllm.access`` 在各自开启时使用 INFO，不受全局服务级别提高的影响；
 可通过模块覆盖将它们调为 WARNING 等级以进一步过滤。
@@ -172,7 +201,7 @@ DEBUG 体积约束
 token 数组、grammar 全文或内存描述符。诊断事件最多 16 个字段；字符串最多 256 字符，
 序列仅保留数量与前 8 项，嵌套对象仅保留类型或数量。
 
-KV 成功传输不逐页记录握手和完成。发送/接收进程按 ``--log-stats-interval``
+KV 成功传输不逐页记录握手和完成。发送/接收进程按日志配置中的 ``stats_interval``
 （默认 10 秒）聚合页数、物理传输字节、KV token 数和任务耗时合计，并保留最多 8 个请求 ID 样本。
 首次完成立即输出；之后限频，空闲时补齐最后一个窗口，不输出空窗口。
 ``task_duration_ms_total`` 是各页面任务从创建到完成的耗时之和，不是请求端到端耗时。

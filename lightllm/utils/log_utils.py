@@ -301,25 +301,72 @@ def init_logger(name: str):
     return logger
 
 
+def _load_log_config(value):
+    inline = value.lstrip().startswith(("{", "["))
+    try:
+        if inline:
+            config = json.loads(value)
+        else:
+            with open(value, encoding="utf-8") as stream:
+                config = json.load(stream)
+    except (OSError, ValueError) as error:
+        source = "inline JSON" if inline else repr(value)
+        raise ValueError(f"Cannot load --log-config {source}: {error}") from error
+    types = {
+        "level": str,
+        "format": str,
+        "module_levels": dict,
+        "request_sample_rate": (int, float),
+        "stats_interval": (int, float),
+        "http_level": str,
+        "http_access": bool,
+        "http_exclude_paths": list,
+        "dir": str,
+        "max_bytes": int,
+        "backup_count": int,
+    }
+    if not isinstance(config, dict):
+        raise ValueError("--log-config must contain a JSON object")
+    unknown = config.keys() - types.keys()
+    if unknown:
+        raise ValueError(f"Unknown --log-config fields: {', '.join(sorted(unknown))}")
+    settings = {}
+    for key, value in config.items():
+        expected = types[key]
+        if not isinstance(value, expected) or (isinstance(value, bool) and expected is not bool):
+            raise ValueError(f"Invalid type for --log-config field {key}")
+        if key in {"level", "http_level"}:
+            _level(value)
+        elif key == "format" and value.lower() not in {"text", "json"}:
+            raise ValueError("--log-config format must be text or json")
+        elif key == "module_levels":
+            if any(not name.startswith("lightllm.") or not isinstance(level, str) for name, level in value.items()):
+                raise ValueError("--log-config module_levels must map lightllm.* logger names to levels")
+            for level in value.values():
+                _level(level)
+            value = json.dumps(value)
+        elif key == "http_exclude_paths":
+            if any(not isinstance(path, str) or not path.startswith("/") or "," in path for path in value):
+                raise ValueError("--log-config http_exclude_paths must be a list of paths without commas")
+            value = ",".join(value)
+        elif key == "http_access":
+            value = "1" if value else "0"
+        elif key in {"request_sample_rate", "stats_interval", "max_bytes", "backup_count"}:
+            valid = 0 <= value <= 1 if key == "request_sample_rate" else value > 0
+            if not math.isfinite(value) or not valid:
+                raise ValueError(f"Invalid value for --log-config field {key}")
+        settings[f"LIGHTLLM_LOG_{key.upper()}"] = str(value)
+    return settings
+
+
 def configure_logging_from_args(args):
-    """Explicit CLI values override environment defaults and propagate to workers."""
-    for attr, env in (
-        ("log_level", "LIGHTLLM_LOG_LEVEL"),
-        ("log_format", "LIGHTLLM_LOG_FORMAT"),
-        ("log_module_levels", "LIGHTLLM_LOG_MODULE_LEVELS"),
-        ("log_request_sample_rate", "LIGHTLLM_LOG_REQUEST_SAMPLE_RATE"),
-        ("log_stats_interval", "LIGHTLLM_LOG_STATS_INTERVAL"),
-        ("log_http_level", "LIGHTLLM_LOG_HTTP_LEVEL"),
-    ):
-        value = getattr(args, attr, None)
-        if value is not None:
-            os.environ[env] = str(value)
-    access = getattr(args, "enable_http_access_log", None)
-    if access is not None:
-        os.environ["LIGHTLLM_LOG_HTTP_ACCESS"] = "1" if access else "0"
+    """Resolve logging settings once and propagate them through the environment."""
+    config = getattr(args, "log_config", None)
+    if config is not None:
+        os.environ.update(_load_log_config(config))
     if getattr(args, "pd_detail_log", False):
         logging.getLogger(__name__).warning(
-            "--pd_detail_log is deprecated; use LIGHTLLM_LOG_MODULE_LEVELS to enable DEBUG "
+            "--pd_detail_log is deprecated; set module_levels in --log-config to enable DEBUG "
             "for PD transfer modules. Transfer diagnostics now use bounded summaries."
         )
     _level(os.getenv("LIGHTLLM_LOG_HTTP_LEVEL", "WARNING"))

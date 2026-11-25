@@ -12,63 +12,100 @@ Unknown ranks, hostname, PID and full module names are omitted from default text
 DEBUG, ERROR/CRITICAL and traceback-bearing records retain source file/line.
 JSON retains full date/timezone, host, PID, module/component, topology and source. Each worker initializes its own process context.
 
-Explicit CLI values override environment variables. Unspecified values inherit the
-environment. Both hyphenated and underscored CLI names are accepted. Configuration
-is propagated to spawned workers and the HTTP subprocess through environment variables.
+No logging flags are required for a normal startup:
+
+.. code-block:: bash
+
+   python -m lightllm.server.api_server --model_dir /path/to/model
+
+With the default configuration, service logs use INFO text output on stdout.
+Engine statistics are reported every 10 seconds while active; enabling MTP also
+enables its periodic statistics without another logging option. Successful request
+summaries are sampled at 1%, failures are not sampled, and HTTP access logs are off.
+PD nodes keep their model and topology arguments; they need no additional logging
+flags either.
+
+Customize logging with one parameter, using inline JSON:
+
+.. code-block:: bash
+
+   python -m lightllm.server.api_server --model_dir /path/to/model --log-config '{"format":"json","request_sample_rate":1}'
+
+Or use a JSON file for a reusable configuration:
+
+.. code-block:: bash
+
+   python -m lightllm.server.api_server --model_dir /path/to/model --log-config test/logging.json
+
+The example file ``test/logging.json`` enables JSON output and records every successful
+request summary:
+
+.. code-block:: json
+
+   {
+     "format": "json",
+     "request_sample_rate": 1
+   }
+
+``--log-config`` (also spelled ``--log_config``) accepts a JSON object inline or
+from a file. Only include settings you want to change. Both forms use the same
+validation and override the corresponding environment variables; omitted fields inherit
+the environment, then defaults. Paths are relative
+to the launcher's working directory. Unknown fields, invalid types and invalid values
+fail startup before workers are launched.
+
+The launcher propagates resolved settings through environment variables to spawned
+workers and the HTTP subprocess. Child processes do not need to read a configuration file.
+The individual logging switches from earlier revisions of this PR are replaced by
+``--log-config``; existing ``LIGHTLLM_LOG_*`` environment settings remain supported.
 
 .. list-table::
    :header-rows: 1
 
-   * - CLI
+   * - JSON field
      - Environment variable
      - Default
-   * - ``--log-level``
+   * - ``level``
      - ``LIGHTLLM_LOG_LEVEL``
      - ``info``
-   * - ``--log-format``
+   * - ``format``
      - ``LIGHTLLM_LOG_FORMAT``
      - ``text``; alternatively ``json``
-   * - ``--log-module-levels``
+   * - ``module_levels``
      - ``LIGHTLLM_LOG_MODULE_LEVELS``
      - ``{}``; JSON mapping of module prefixes to levels
-   * - ``--log-request-sample-rate``
+   * - ``request_sample_rate``
      - ``LIGHTLLM_LOG_REQUEST_SAMPLE_RATE``
      - ``0.01``; 1% of successful completions; failures are never sampled
-   * - ``--log-stats-interval``
+   * - ``stats_interval``
      - ``LIGHTLLM_LOG_STATS_INTERVAL``
      - ``10`` seconds; must be positive
-   * - ``--log-http-level``
+   * - ``http_level``
      - ``LIGHTLLM_LOG_HTTP_LEVEL``
      - ``warning``; Hypercorn error logger
-   * - ``--enable-http-access-log``
+   * - ``http_access``
      - ``LIGHTLLM_LOG_HTTP_ACCESS``
-     - ``0``; set to ``1`` to enable
-   * - Environment only
+     - ``false``; a JSON boolean (environment: ``0`` or ``1``)
+   * - ``http_exclude_paths``
      - ``LIGHTLLM_LOG_HTTP_EXCLUDE_PATHS``
-     - ``/health,/healthz,/readiness,/liveness,/metrics``; excludes these application paths and descendants
-   * - Environment only
+     - ``["/health", "/healthz", "/readiness", "/liveness", "/metrics"]``; ``[]`` disables exclusions (environment: comma-separated paths)
+   * - ``dir``
      - ``LIGHTLLM_LOG_DIR``
      - Unset; optional per-PID file output in addition to stdout
-   * - Environment only
+   * - ``max_bytes``
      - ``LIGHTLLM_LOG_MAX_BYTES``
-     - ``104857600``; file rotation threshold
-   * - Environment only
+     - ``104857600``; positive integer file rotation threshold
+   * - ``backup_count``
      - ``LIGHTLLM_LOG_BACKUP_COUNT``
-     - ``3``; positive number of rotation backups per PID
+     - ``3``; positive integer number of rotation backups per PID
 
-Enable DEBUG only for scheduling:
+To enable DEBUG only for scheduling, set ``module_levels`` in the same file:
 
-.. code-block:: bash
+.. code-block:: json
 
-   export LIGHTLLM_LOG_LEVEL=INFO
-   export LIGHTLLM_LOG_MODULE_LEVELS='{"lightllm.server.router":"DEBUG"}'
-
-Use JSON and sample 1% of request completion summaries:
-
-.. code-block:: bash
-
-   export LIGHTLLM_LOG_FORMAT=json
-   export LIGHTLLM_LOG_REQUEST_SAMPLE_RATE=0.01
+   {
+     "module_levels": {"lightllm.server.router": "DEBUG"}
+   }
 
 Sampling is deterministic by request ID and does not alter application RNG state.
 Request summaries never enable prompt, output text, sampling parameter, or tensor dumps.
@@ -154,7 +191,7 @@ Diagnostic events allow at most 16 fields, strings up to 256 characters and sequ
 summarized by count and 8 items; nested objects retain only type/count information.
 
 Successful KV transfers aggregate page counts, physical bytes, KV tokens and summed
-page-task durations per sender/receiver using ``--log-stats-interval`` (default 10 s).
+page-task durations per sender/receiver using ``stats_interval`` in the logging config (default 10 s).
 The first completion logs immediately; subsequent updates are rate limited and the
 final partial window flushes on idle. Empty windows do not log. Request ID samples
 are capped at 8. ``task_duration_ms_total`` sums page-task creation-to-completion

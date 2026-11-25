@@ -164,14 +164,17 @@ def test_invalid_configuration_fails_explicitly(settings):
     assert "ValueError" in result.stderr
 
 
-def test_cli_overrides_environment_and_inherits_unspecified_values():
+def test_config_overrides_environment_and_inherits_unspecified_values(tmp_path):
+    path = tmp_path / "logging.json"
+    path.write_text(json.dumps({"level": "debug"}))
     output = _run_logging(
-        """
+        f"""
         import argparse
         import os
         from lightllm.server.api_cli import add_cli_args
         from lightllm.utils.log_utils import configure_logging_from_args, init_logger
-        args = add_cli_args(argparse.ArgumentParser()).parse_args(["--log-level", "debug", "--run_mode", "prefill"])
+        argv = ["--log-config", {str(path)!r}, "--run_mode", "prefill"]
+        args = add_cli_args(argparse.ArgumentParser()).parse_args(argv)
         configure_logging_from_args(args)
         assert os.environ["LIGHTLLM_LOG_LEVEL"] == "debug"
         assert os.environ["LIGHTLLM_LOG_FORMAT"] == "json"
@@ -752,35 +755,186 @@ def test_failure_summary_level_and_sampling(monkeypatch, caplog, status, level, 
 
 
 @pytest.mark.parametrize("separator", ["-", "_"])
-def test_all_logging_cli_options_survive_start_args_and_override_environment(separator):
+@pytest.mark.parametrize("inline", [False, True])
+def test_logging_config_survives_start_args_and_overrides_environment(tmp_path, separator, inline):
+    config = {
+        "level": "debug",
+        "format": "json",
+        "module_levels": {"lightllm.test": "ERROR"},
+        "request_sample_rate": 0.5,
+        "stats_interval": 2.5,
+        "http_level": "error",
+        "http_access": True,
+        "http_exclude_paths": ["/health", "/metrics"],
+        "dir": str(tmp_path / "logs"),
+        "max_bytes": 1024,
+        "backup_count": 2,
+    }
+    path = tmp_path / "logging config.json"
+    path.write_text(json.dumps(config))
+    value = " \n" + json.dumps(config) if inline else str(path)
     output = _run_logging(
         f"""
         import argparse
+        import json
         import os
         from lightllm.server.api_cli import add_cli_args
         from lightllm.server.core.objs.start_args_type import StartArgs
-        from lightllm.utils.log_utils import configure_logging_from_args
-        flags = [
-            ("log_level", "debug"), ("log_format", "json"),
-            ("log_module_levels", '{{"lightllm.test": "ERROR"}}'),
-            ("log_request_sample_rate", "0.5"), ("log_stats_interval", "2.5"),
-            ("log_http_level", "error"),
-        ]
-        argv = []
-        for name, value in flags:
-            argv.extend(["--" + name.replace("_", {separator!r}), value])
-        argv.append("--" + "enable_http_access_log".replace("_", {separator!r}))
+        from lightllm.utils import log_utils
+        argv = ["--log" + {separator!r} + "config", {value!r}]
         args = StartArgs(**vars(add_cli_args(argparse.ArgumentParser()).parse_args(argv)))
-        configure_logging_from_args(args)
-        for name, value in flags:
-            assert os.environ["LIGHTLLM_" + name.upper()] == value
+        log_utils.configure_logging_from_args(args)
+        config = json.loads({json.dumps(config)!r})
+        for name in ("level", "format", "request_sample_rate", "stats_interval", "http_level",
+                     "dir", "max_bytes", "backup_count"):
+            assert os.environ["LIGHTLLM_LOG_" + name.upper()] == str(config[name])
+        assert json.loads(os.environ["LIGHTLLM_LOG_MODULE_LEVELS"]) == config["module_levels"]
         assert os.environ["LIGHTLLM_LOG_HTTP_ACCESS"] == "1"
+        assert os.environ["LIGHTLLM_LOG_HTTP_EXCLUDE_PATHS"] == "/health,/metrics"
+        assert log_utils._request_sample_rate == 0.5
+        assert log_utils.get_log_stats_interval() == 2.5
         print("configured")
         """,
         LIGHTLLM_LOG_LEVEL="critical",
         LIGHTLLM_LOG_HTTP_ACCESS="0",
     )
     assert output.strip() == "configured"
+
+
+def test_logging_cli_has_one_config_option_and_needs_no_flags():
+    _run_logging(
+        """
+        import argparse
+        import logging
+        import os
+        from lightllm.server.api_cli import add_cli_args
+        from lightllm.server.core.objs.start_args_type import StartArgs
+        from lightllm.utils import log_utils
+        os.environ.pop("LIGHTLLM_LOG_REQUEST_SAMPLE_RATE")
+        parser = add_cli_args(argparse.ArgumentParser())
+        options = {option for action in parser._actions for option in action.option_strings
+                   if option.startswith(("--log", "--enable-http-access", "--enable_http_access"))}
+        assert options == {"--log-config", "--log_config"}
+        args = StartArgs(**vars(parser.parse_args([])))
+        assert args.log_config is None
+        log_utils.configure_logging_from_args(args)
+        assert log_utils._root_logger.level == logging.INFO
+        assert log_utils._request_sample_rate == 0.01
+        assert log_utils.get_log_stats_interval() == 10
+        assert not log_utils.http_access_enabled()
+        assert isinstance(log_utils._root_logger.handlers[0].formatter, log_utils.NewLineFormatter)
+        """
+    )
+
+
+def test_partial_logging_config_inherits_environment_and_disables_access(tmp_path):
+    path = tmp_path / "logging.json"
+    path.write_text(json.dumps({"http_access": False, "http_exclude_paths": []}))
+    _run_logging(
+        f"""
+        import logging
+        import os
+        from lightllm.server.core.objs.start_args_type import StartArgs
+        from lightllm.utils import log_utils
+        log_utils.configure_logging_from_args(StartArgs(log_config={str(path)!r}))
+        assert log_utils._root_logger.level == logging.ERROR
+        assert log_utils.get_log_stats_interval() == 3
+        assert log_utils._request_sample_rate == 0.25
+        assert not log_utils.http_access_enabled()
+        assert os.environ["LIGHTLLM_LOG_HTTP_EXCLUDE_PATHS"] == ""
+        """,
+        LIGHTLLM_LOG_LEVEL="error",
+        LIGHTLLM_LOG_STATS_INTERVAL="3",
+        LIGHTLLM_LOG_REQUEST_SAMPLE_RATE="0.25",
+        LIGHTLLM_LOG_HTTP_ACCESS="1",
+    )
+
+
+@pytest.mark.parametrize(
+    "config,error",
+    [
+        ([], "JSON object"),
+        ({"stats_interva": 5}, "Unknown.*stats_interva"),
+        ({"level": "typo"}, "log level"),
+        ({"format": "xml"}, "format"),
+        ({"module_levels": {"root": "DEBUG"}}, "module_levels"),
+        ({"module_levels": {"lightllm.test": 20}}, "module_levels"),
+        ({"module_levels": {"lightllm.test": "typo"}}, "log level"),
+        ({"request_sample_rate": -0.1}, "request_sample_rate"),
+        ({"request_sample_rate": 1.1}, "request_sample_rate"),
+        ({"request_sample_rate": float("nan")}, "request_sample_rate"),
+        ({"stats_interval": float("inf")}, "stats_interval"),
+        ({"stats_interval": 0}, "stats_interval"),
+        ({"stats_interval": True}, "stats_interval"),
+        ({"stats_interval": "5"}, "stats_interval"),
+        ({"level": None}, "level"),
+        ({"http_level": "typo"}, "log level"),
+        ({"http_access": "false"}, "http_access"),
+        ({"http_exclude_paths": "/health"}, "http_exclude_paths"),
+        ({"http_exclude_paths": [1]}, "http_exclude_paths"),
+        ({"http_exclude_paths": ["/health,/metrics"]}, "http_exclude_paths"),
+        ({"dir": False}, "dir"),
+        ({"max_bytes": 0}, "max_bytes"),
+        ({"backup_count": 1.5}, "backup_count"),
+    ],
+)
+@pytest.mark.parametrize("inline", [False, True])
+def test_invalid_logging_config_does_not_change_environment(tmp_path, config, error, inline):
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    path = tmp_path / "logging.json"
+    path.write_text(json.dumps({"level": "debug", **config} if isinstance(config, dict) else config))
+    value = path.read_text() if inline else str(path)
+    original = dict(os.environ)
+    with pytest.raises(ValueError, match=error):
+        log_utils.configure_logging_from_args(StartArgs(log_config=value))
+    assert dict(os.environ) == original
+
+
+@pytest.mark.parametrize("contents", [None, '{"level":'])
+def test_unreadable_or_malformed_logging_config_fails_before_setup(tmp_path, contents):
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    path = tmp_path / "logging.json"
+    if contents is not None:
+        path.write_text(contents)
+    with pytest.raises(ValueError, match="Cannot load --log-config"):
+        log_utils.configure_logging_from_args(StartArgs(log_config=str(path)))
+
+
+def test_malformed_inline_logging_config_does_not_echo_contents():
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    with pytest.raises(ValueError, match="Cannot load --log-config inline JSON") as error:
+        log_utils.configure_logging_from_args(StartArgs(log_config='{"dir": "private-value"'))
+    assert "private-value" not in str(error.value)
+
+
+@pytest.mark.parametrize("inline", [False, True])
+def test_logging_config_reaches_child_without_reopening_file(tmp_path, inline):
+    path = tmp_path / "logging.json"
+    path.write_text(json.dumps({"level": "debug", "format": "json", "stats_interval": 3}))
+    value = path.read_text() if inline else str(path)
+    child = """
+from lightllm.utils import log_utils
+assert log_utils.get_log_stats_interval() == 3
+log_utils.init_logger("lightllm.child").debug("inherited-config")
+"""
+    output = _run_logging(
+        f"""
+        from pathlib import Path
+        import subprocess
+        import sys
+        from lightllm.server.core.objs.start_args_type import StartArgs
+        from lightllm.utils import log_utils
+        log_utils.configure_logging_from_args(StartArgs(log_config={value!r}))
+        Path({str(path)!r}).unlink()
+        print(subprocess.check_output([sys.executable, "-c", {child!r}], text=True), end="")
+        """
+    )
+    record = json.loads(output)
+    assert record["message"] == "inherited-config"
+    assert record["level"] == "DEBUG"
 
 
 @pytest.mark.parametrize("setting", ["20", "Info,WARNING"])
