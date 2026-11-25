@@ -17,7 +17,7 @@ from lightllm.common.basemodel.attention_runtime import (
     attention_build_resources,
     configure_attention_step,
 )
-from lightllm.common.basemodel.layer_infer.gqa_attention import gqa_kv_quant_fields
+from lightllm.common.attention.backends.gqa import gqa_kv_quant_fields
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from unit_tests.common.attention.backends.groups_runner import build_context
@@ -422,14 +422,12 @@ class FakeState:
         return self.scales
 
 
-def llama_layer(image_spans=False):
+def llama_layer():
     from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 
-    layer = LlamaTransformerLayerInfer(
+    return LlamaTransformerLayerInfer(
         3, {"rms_norm_eps": 1e-6, "num_attention_heads": 8, "num_key_value_heads": 2, "hidden_size": 512}
     )
-    layer.prefill_image_spans = image_spans
-    return layer
 
 
 def model_with_state(state, **args):
@@ -453,7 +451,12 @@ def test_llama_layer_creates_its_attention_from_its_cache(runtime_start_args):
 
 
 def test_only_prefill_attends_inside_image_spans(runtime_start_args):
-    layer = llama_layer(image_spans=True)
+    from lightllm.models.neo_chat.layer_infer.transformer_layer_infer import NeoChatTransformerLayerInfer
+
+    layer = NeoChatTransformerLayerInfer(
+        3,
+        {"rms_norm_eps": 1e-6, "num_attention_heads": 8, "num_key_value_heads": 2, "hidden_size": 512, "head_dim": 64},
+    )
     model = model_with_state(FakeState())
     assert layer.attention_spec(model) == AttentionSpec(gqa(bidirectional_image_spans=True), gqa())
     assert layer.prefill_impl is layer.decode_impl is None

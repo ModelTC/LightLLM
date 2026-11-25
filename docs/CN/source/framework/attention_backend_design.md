@@ -38,7 +38,7 @@ flowchart TD
 - 在调用 attention 之前把本层的 K/V 写入 KV cache。
 - 每次调用时解析 KV 量化 scale（`state.get_layer_kv_scales(layer)`）、线性注意力的 conv/SSM 状态视图、稀疏注意力的 top-k 索引和融合投影，构造族的 `LayerInputs`，用当前 impl 对应的 attention state 直接调用 `forward`。
 
-GQA 层共用 `lightllm/common/basemodel/layer_infer/gqa_attention.py` 中的 `GQAAttentionLayerMixin`，模型通过钩子（`_gqa_layer_config_fields`、`_gqa_layer_weights`、`_gqa_kv_cache`）和属性（`prefill_image_spans`、`attends_in_prefill`）表达自己的差异。
+GQA 层在 `attention_spec()` 中声明 prefill 和 decode 的配置。Gemma4 在滑窗层的 prefill 配置中开启图像区间内双向 attention，DFlash 只声明 decode 配置。执行时，层从 KV 视图和权重组装 `GQALayerInputs`，连同当前步的 attention state 传给后端的 `forward()`。
 
 模型层不直接调用 attention kernel。`unit_tests/common/attention/test_attention_call_sites.py` 检查 layer infer、infer state、model 和 `attention_runtime.py` 不导入 attention kernel 模块（视觉编码器除外，它在单张图像内计算 attention，不使用 KV cache），并检查 `lightllm/common/attention/**` 不导入模型侧代码。
 
@@ -161,7 +161,7 @@ impl.forward(att_state, layer_inputs, *, out, alloc_func=torch.empty) -> out
 - `auto` 按优先级依次尝试：impl 能以该 layer config 构造（不抛出 `NotImplementedError`），且第三方库通过 `validate()`。先构造再验证，因为验证要启动子进程。都不满足时退回 Triton（不验证）。例如 Neo 的图像 span 不被 FlashInfer 支持，会被自动跳过。
 - 显式指定的实现不存在或不支持该配置时，在模型加载时抛出 `ValueError`，并列出各 backend 拒绝的原因。
 - EP MoE 排除 FlashInfer；有 MTP 时 decode 优先 FA3。
-- 层可以用 `AttentionSpec.implementation` 指定实现。Bloom 和 Gemma4 的 GQA 层通过 `att_implementation` 指定 `triton`。GLM-5 和 MTP 草稿模型只在稀疏 MLA 分支指定 `flashmla_sparse`，KDA 分支使用命令行的第二个值。
+- 层可以用 `AttentionSpec.implementation` 指定实现。Bloom 和 Gemma4 的 GQA 层指定 `triton`。GLM-5 和 MTP 草稿模型只在稀疏 MLA 分支指定 `flashmla_sparse`，KDA 分支使用命令行的第二个值。
 
 ## 6. 分组与时序
 
@@ -237,7 +237,6 @@ lightllm/common/attention/          # 不知道模型的存在
 └── kernels/<family>/               # Triton kernel 与封装
 lightllm/common/basemodel/
 ├── attention_runtime.py            # AttentionRuntime、AttentionStepConfig、configure_attention_step、attention_build_resources
-├── layer_infer/gqa_attention.py    # GQA 层的 attention_spec 与调用、--llm_kv_type 到 kv_quant 的映射
 ├── basemodel.py                    # _init_attention、_create_inferstate
 └── infer_struct.py                 # GraphMode、当前 microbatch 的 att_states
 ```

@@ -337,7 +337,7 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
     from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
     from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQAPrefillBackend
     from lightllm.common.basemodel.attention_runtime import configure_attention_step
-    from lightllm.common.basemodel.layer_infer.gqa_attention import gqa_kv_quant_fields
+    from lightllm.common.attention.backends.gqa import gqa_kv_quant_fields
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.common.basemodel.triton_kernel.kv_copy import ppl_int4kv_copy_kv
     from lightllm.common.attention.kernels.gqa.bf16.prefill import context_flashattention_nopad

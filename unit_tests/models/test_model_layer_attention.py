@@ -70,7 +70,32 @@ def layer_configs(layer):
     return prefill, layer.decode_impl.layer_config
 
 
-def test_bloom_layers_run_alibi_on_triton_whatever_the_command_line_asks(runtime_start_args):
+def decode_inputs(monkeypatch, model, layer, weights):
+    impl = layer.decode_impl
+    state = object()
+    captured = []
+
+    def forward(att_state, inputs, *, out, alloc_func):
+        assert att_state is state
+        captured.append(inputs)
+        return out
+
+    monkeypatch.setattr(impl, "forward", forward)
+    monkeypatch.setattr(layer, "alloc_tensor", torch.empty)
+    infer_state = SimpleNamespace(
+        att_state_manager=model.att_state_manager,
+        att_state_role=model.att_state_role,
+        att_states={impl.state_key: state},
+    )
+    query = torch.empty(3, layer.tp_q_head_num_ * layer.head_dim_)
+    result = layer._token_attention_kernel(query, infer_state, weights)
+    assert result.shape == query.shape
+    (inputs,) = captured
+    assert inputs.q.shape == (3, layer.tp_q_head_num_, layer.head_dim_)
+    return inputs
+
+
+def test_bloom_layers_run_alibi_on_triton_whatever_the_command_line_asks(runtime_start_args, monkeypatch):
     from lightllm.models.bloom.layer_infer.transformer_layer_infer import BloomTransformerLayerInfer
 
     layer = BloomTransformerLayerInfer(0, {"num_attention_heads": H, "n_embed": H * D, "layer_norm_epsilon": 1e-5})
@@ -78,10 +103,11 @@ def test_bloom_layers_run_alibi_on_triton_whatever_the_command_line_asks(runtime
     bind_layers(model, layer)
     assert layer_configs(layer) == (config(num_kv_heads=H, has_alibi=True),) * 2
     assert type(layer.decode_impl).__name__ == "TritonGQADecodeBackend"
-    assert layer._gqa_layer_weights(SimpleNamespace(tp_alibi="slopes")) == {"alibi_slopes": "slopes"}
+    slopes = torch.ones(H)
+    assert decode_inputs(monkeypatch, model, layer, SimpleNamespace(tp_alibi=slopes)).alibi_slopes is slopes
 
 
-def test_starcoder_layers_run_multi_query_attention_without_alibi(runtime_start_args):
+def test_starcoder_layers_run_multi_query_attention_without_alibi(runtime_start_args, monkeypatch):
     from lightllm.models.starcoder.layer_infer.transformer_layer_infer import StarcoderTransformerLayerInfer
 
     layer = StarcoderTransformerLayerInfer(0, {"num_attention_heads": H, "n_embed": H * D, "layer_norm_epsilon": 1e-5})
@@ -89,7 +115,7 @@ def test_starcoder_layers_run_multi_query_attention_without_alibi(runtime_start_
     bind_layers(model, layer)
     assert layer_configs(layer) == (config(num_kv_heads=1),) * 2
     assert type(layer.decode_impl).__name__ == "FA3GQADecodeBackend"
-    assert layer._gqa_layer_weights(SimpleNamespace(tp_alibi="slopes")) == {}
+    assert decode_inputs(monkeypatch, model, layer, SimpleNamespace()).alibi_slopes is None
 
 
 def test_gemma4_sliding_and_full_layers_share_one_triton_group(runtime_start_args):
@@ -117,7 +143,7 @@ def test_gemma4_sliding_and_full_layers_share_one_triton_group(runtime_start_arg
     assert all(len(model.attention_runtime.backends(phase)) == 1 for phase in ("prefill", "decode"))
 
 
-def test_gpt_oss_layers_have_sinks_and_sliding_layers_a_window(runtime_start_args):
+def test_gpt_oss_layers_have_sinks_and_sliding_layers_a_window(runtime_start_args, monkeypatch):
     from lightllm.models.gpt_oss.layer_infer.transformer_layer_infer import GptOssTransformerLayerInfer
 
     net = dict(
@@ -135,8 +161,9 @@ def test_gpt_oss_layers_have_sinks_and_sliding_layers_a_window(runtime_start_arg
     bind_layers(model, sliding, full)
     assert layer_configs(sliding) == (config(has_sinks=True, sliding_window=(127, 0)),) * 2
     assert layer_configs(full) == (config(has_sinks=True),) * 2
-    weights = SimpleNamespace(attn_sinks=SimpleNamespace(weight="sinks"))
-    assert full._gqa_layer_weights(weights) == {"sinks": "sinks"}
+    sinks = torch.ones(H)
+    weights = SimpleNamespace(attn_sinks=SimpleNamespace(weight=sinks))
+    assert decode_inputs(monkeypatch, model, full, weights).sinks is sinks
 
 
 def test_neo_layers_attend_inside_image_spans_in_prefill_only(runtime_start_args):
