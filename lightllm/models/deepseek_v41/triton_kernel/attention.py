@@ -408,7 +408,8 @@ def _sort_candidates(INDICES, LENGTHS, TOPK: tl.constexpr, BLOCK: tl.constexpr):
         tl.store(INDICES + row * TOPK + rank, index, valid)
 
 
-@triton.jit
+# Prefill changes the page-table stride as the context grows.
+@triton.jit(do_not_specialize=["PAGE_ROW"])
 def _candidate_indexer_logits(
     Q,
     CACHE,
@@ -422,7 +423,7 @@ def _candidate_indexer_logits(
     Q_HEAD: tl.constexpr,
     CACHE_PAGE: tl.constexpr,
     WEIGHT_ROW: tl.constexpr,
-    PAGE_ROW: tl.constexpr,
+    PAGE_ROW,
     CANDIDATE_ROW: tl.constexpr,
     HEADS: tl.constexpr,
     BLOCK_H: tl.constexpr,
