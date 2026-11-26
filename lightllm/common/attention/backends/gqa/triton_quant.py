@@ -1,13 +1,17 @@
 """Triton GQA over an int8/int4 group-quantized KV cache (GQALayerConfig.kv_quant "int8_group"/"int4_group")."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 from . import GQALayerConfig, GQALayerInputs
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 _KINDS = ("int8_group", "int4_group")
 
@@ -186,8 +190,8 @@ class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQ
             )
             # A one-row group has no cross-request prefix sharing to accelerate.
             b_shared_seq_len = torch.where(b_mark_shared_group == 1, 0, infer_state.b_shared_seq_len)
-            b_mark_shared_group = self._keep_for_graph(infer_state, "mark", b_mark_shared_group)
-            b_shared_seq_len = self._keep_for_graph(infer_state, "shared_len", b_shared_seq_len)
+            b_mark_shared_group = self.keep_for_graph(infer_state, "mark", b_mark_shared_group)
+            b_shared_seq_len = self.keep_for_graph(infer_state, "shared_len", b_shared_seq_len)
 
         return TritonQuantGQADecodeAttState(
             req_to_token_indexs=infer_state.req_to_token_indexs,

@@ -4,17 +4,21 @@ Decode groups the rows of one speculative request into one attention request; FA
 that grouping through build_fa3_decode_state.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import triton
 
 from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.utils.envs_utils import enable_env_vars
 from lightllm.utils.log_utils import init_logger
 from . import GQALayerConfig, GQALayerInputs
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 logger = init_logger(__name__)
 
@@ -93,9 +97,9 @@ def build_fa3_decode_state(backend: AttentionBackend, infer_state: InferStateInf
     )
     return FA3GQADecodeAttState(
         page_table=page_table,
-        cache_seqlens=backend._keep_for_graph(infer_state, "cache_seqlens", cache_seqlens),
-        cu_seqlens_q=backend._keep_for_graph(infer_state, "cu_seqlens_q", cu_seqlens_q),
-        cu_seqlens_k=backend._keep_for_graph(infer_state, "cu_seqlens_k", cu_seqlens_k),
+        cache_seqlens=backend.keep_for_graph(infer_state, "cache_seqlens", cache_seqlens),
+        cu_seqlens_q=backend.keep_for_graph(infer_state, "cu_seqlens_q", cu_seqlens_q),
+        cu_seqlens_k=backend.keep_for_graph(infer_state, "cu_seqlens_k", cu_seqlens_k),
         max_seqlen_q=infer_state.decode_rows_per_request,
         max_seqlen_k=infer_state.max_kv_seq_len,
         page_size=page_size,

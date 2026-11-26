@@ -6,14 +6,18 @@ cursor, instead of updating SSM states every token. Prefill is the regular chunk
 SSM slot per request.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 from . import GDNLayerConfig, GDNLayerInputs, _split_qkv
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
 @dataclass(frozen=True)
@@ -59,7 +63,7 @@ def build_recurrent_decode_state(backend: AttentionBackend, infer_state: InferSt
         cu = None
         if replay:
             cu = torch.arange(req.numel() + 1, dtype=torch.int32, device=req.device)
-            cu = backend._keep_for_graph(infer_state, "cu", cu)
+            cu = backend.keep_for_graph(infer_state, "cu", cu)
         return GDNDecodeAttState(conv_idx=req, ssm_idx=req, cu_seqlens=cu, num_accepted_tokens=None, draft_step=0)
 
     assert infer_state.req_to_mtp_state_index is not None, "speculative GDN decode needs req_to_mtp_state_index"
@@ -78,16 +82,16 @@ def build_recurrent_decode_state(backend: AttentionBackend, infer_state: InferSt
         cu = torch.arange(0, infer_state.batch_size + 1, rows, dtype=torch.int32, device=req.device)
         conv_idx = req.view(-1, rows)[:, 0].contiguous()
         accepted = infer_state.req_to_mtp_state_index[conv_idx] + 1
-    cu = backend._keep_for_graph(infer_state, "cu", cu)
-    conv_idx = backend._keep_for_graph(infer_state, "conv_idx", conv_idx)
-    accepted = backend._keep_for_graph(infer_state, "accepted", accepted)
+    cu = backend.keep_for_graph(infer_state, "cu", cu)
+    conv_idx = backend.keep_for_graph(infer_state, "conv_idx", conv_idx)
+    accepted = backend.keep_for_graph(infer_state, "accepted", accepted)
 
     if replay:
         ssm_idx = conv_idx
     else:
         # Each request owns rows consecutive recurrent-state slots.
         offsets = torch.arange(rows, device=req.device, dtype=req.dtype).view(1, rows)
-        ssm_idx = backend._keep_for_graph(infer_state, "ssm_idx", (conv_idx * rows).view(-1, 1) + offsets)
+        ssm_idx = backend.keep_for_graph(infer_state, "ssm_idx", (conv_idx * rows).view(-1, 1) + offsets)
     return GDNDecodeAttState(
         conv_idx=conv_idx, ssm_idx=ssm_idx, cu_seqlens=cu, num_accepted_tokens=accepted, draft_step=rows - 1
     )

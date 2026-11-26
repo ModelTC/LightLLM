@@ -32,10 +32,31 @@ ATTENTION_KERNEL_MODULES = re.compile(
 ALLOWED_CALLERS = {"lightllm/models/vit/layer_infer/transformer_layer_infer.py"}
 
 
+def _is_type_checking_block(node: ast.AST) -> bool:
+    test = getattr(node, "test", None)
+    return isinstance(node, ast.If) and (
+        (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
+        or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")
+    )
+
+
+def _runtime_nodes(tree: ast.AST):
+    """Walk the tree, skipping `if TYPE_CHECKING:` bodies: annotation-only imports create no runtime dependency."""
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        yield node
+        children = list(ast.iter_child_nodes(node))
+        if _is_type_checking_block(node):
+            children = list(node.orelse)
+        stack.extend(children)
+
+
 def imported_modules(path: pathlib.Path):
+    """Modules path imports at runtime, as (line, module) pairs."""
     tree = ast.parse(path.read_text(), filename=str(path))
     package = ".".join(path.relative_to(ROOT).with_suffix("").parts[:-1])
-    for node in ast.walk(tree):
+    for node in _runtime_nodes(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 yield node.lineno, alias.name
@@ -63,7 +84,7 @@ def test_caller_globs_find_the_attention_callers():
         "lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py",
         "lightllm/models/qwen3next/layer_infer/transformer_layer_infer.py",
         "lightllm/common/basemodel/attention_backend_manager.py",
-        "lightllm/common/basemodel/layer_infer/gqa_attention.py",
+        "lightllm/common/basemodel/layer_infer/template/transformer_layer_infer_template.py",
     ):
         assert expected in found
 
@@ -95,8 +116,9 @@ def test_models_do_not_import_attention_kernels():
     assert not offenders, "call attention through lightllm.common.attention.backends:\n" + "\n".join(offenders)
 
 
-# The backend layer knows nothing about models: models and lightllm.common.basemodel import it, not the
-# reverse. Generic Triton helpers that happen to live under basemodel/triton_kernel are allowed.
+# The backend layer knows nothing about models at runtime: models and lightllm.common.basemodel import it, not
+# the reverse. Annotations may name InferStateInfo under TYPE_CHECKING, the documented input of build. Generic
+# Triton helpers that happen to live under basemodel/triton_kernel are allowed.
 MODEL_SIDE_MODULES = re.compile(r"^lightllm\.(models|common\.basemodel)(\.|$)(?!triton_kernel(\.|$))")
 
 
@@ -125,3 +147,23 @@ def test_backend_layer_does_not_import_model_side_code():
         if MODEL_SIDE_MODULES.match(module)
     ]
     assert not offenders, "lightllm.common.attention must not depend on models:\n" + "\n".join(offenders)
+
+
+def test_type_checking_imports_are_not_runtime_dependencies():
+    source = (
+        "import typing\n"
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from lightllm.common.basemodel.infer_struct import InferStateInfo\n"
+        "if typing.TYPE_CHECKING:\n"
+        "    import lightllm.models.llama.model\n"
+        "else:\n"
+        "    import lightllm.common.basemodel.basemodel\n"
+    )
+    modules = set()
+    for node in _runtime_nodes(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            modules.add(node.module)
+    assert modules == {"typing", "lightllm.common.basemodel.basemodel"}

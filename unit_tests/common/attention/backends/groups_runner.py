@@ -18,7 +18,6 @@ def set_up(backend_cls, layer_config, resources):
     """A backend for layer_config whose storage is set up from resources, as a state group's first prepare does."""
     backend = backend_cls(layer_config)
     backend.setup(resources)
-    backend._is_set_up = True
     return backend
 
 

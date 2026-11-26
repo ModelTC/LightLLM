@@ -1,12 +1,13 @@
 """Triton MLA: prefill over expanded keys and values, decode over the latent cache with a split schedule."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 
 from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 from . import (
     MLADecodeLayerConfig,
     MLADecodeLayerInputs,
@@ -16,6 +17,7 @@ from . import (
 )
 
 if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding import MLADecodeSchedule
 
 

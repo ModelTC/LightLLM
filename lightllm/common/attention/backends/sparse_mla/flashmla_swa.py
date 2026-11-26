@@ -1,13 +1,17 @@
 """FlashMLA sparse attention over a sliding-window cache plus an optional compressed cache (DeepSeek V4)."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
-from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
+from lightllm.common.attention.backend import AttentionBackend, GraphMode, TensorAllocator
 from . import SWASparseMLALayerConfig, SWASparseMLALayerInputs
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
 @dataclass(frozen=True)

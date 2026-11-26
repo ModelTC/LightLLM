@@ -1,5 +1,7 @@
 """FlashInfer MLA: ragged prefill over expanded keys and values, paged decode over the latent cache."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -7,7 +9,6 @@ import torch
 import triton
 
 from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 from .. import set_flashinfer_envs
 from . import (
     MLADecodeLayerConfig,
@@ -18,6 +19,7 @@ from . import (
 )
 
 if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
     from flashinfer.mla import BatchMLAPagedAttentionWrapper
     from flashinfer.prefill import BatchPrefillWithRaggedKVCacheWrapper
 
@@ -147,7 +149,7 @@ class FlashInferMLADecodeBackend(
             kv_indices = torch.empty(page_ids, dtype=torch.int32, device=device)
         q_indptr = torch.arange(infer_state.batch_size + 1, dtype=torch.int32, device=device)
         key = (infer_state.microbatch_index, infer_state.batch_size)
-        kv_starts = self._keep_for_graph(infer_state, "kv_starts", kv_starts)
+        kv_starts = self.keep_for_graph(infer_state, "kv_starts", kv_starts)
         if infer_state.uses_cuda_graph:
             # The row offsets are constant, so the captured tensor needs no rewrite.
             q_indptr = self._graph_tensors.setdefault((*key, "q_indptr"), q_indptr)

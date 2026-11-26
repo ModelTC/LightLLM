@@ -1,16 +1,20 @@
 """KDA implementations: chunked prefill (Triton, or FlashKDA for short steps) and decode over native or
 replay recurrent state. Decode rows group into requests like GDN decode."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
 
 from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 from ..gdn.triton import GDNDecodeAttState, build_recurrent_decode_state
 from . import KDALayerConfig, KDALayerInputs
 from .flashkda import import_flash_kda_fwd, load_flash_kda_fwd
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
 @dataclass(frozen=True)

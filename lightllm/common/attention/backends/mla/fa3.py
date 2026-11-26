@@ -1,11 +1,14 @@
 """FA3 MLA. Decode reuses the FA3 GQA decode state: its row grouping and page table are the same."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from dataclasses import dataclass
 
 import torch
 
 from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 from ..gqa.fa3 import FA3GQADecodeAttState, build_fa3_decode_state, fa3_requires_cpu_cache_sync
 from . import (
     MLADecodeLayerConfig,
@@ -14,6 +17,9 @@ from . import (
     MLAPrefillLayerInputs,
     expand_mla_keys,
 )
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,7 @@
 """FlashInfer GQA over the paged cache, unquantized or with a per-tensor FP8 cache."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Union
 
@@ -7,11 +9,11 @@ import torch
 import triton
 
 from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 from .. import set_flashinfer_envs
 from . import GQALayerConfig, GQALayerInputs
 
 if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
     from flashinfer.decode import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
 

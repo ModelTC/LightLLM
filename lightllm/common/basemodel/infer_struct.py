@@ -1,7 +1,7 @@
-import enum
 import torch
 import triton
 import collections
+from lightllm.common.attention.backend import GraphMode  # noqa: F401 (re-exported for model code)
 from lightllm.common.attention_state.manager import AttentionStateManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
@@ -12,14 +12,6 @@ from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
-
-
-class GraphMode(enum.Enum):
-    """How a step runs: eagerly, captured into a decode CUDA graph, or replaying one."""
-
-    EAGER = "eager"
-    CAPTURE = "capture"
-    REPLAY = "replay"
 
 
 class InferStateInfo:

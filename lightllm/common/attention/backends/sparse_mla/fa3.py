@@ -4,13 +4,19 @@ Decode covers bf16 caches, with or without rotary channels; prefill covers GLM-5
 which it dequantizes chunk by chunk.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from dataclasses import dataclass
 
 import torch
 
 from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 from . import SparseMLADecodeLayerInputs, SparseMLALayerConfig, SparseMLAPrefillLayerInputs
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
 @dataclass(frozen=True)
@@ -218,9 +224,9 @@ class FA3SparseMLADecodeBackend(
         padded[1:].copy_(cache_seqlens, non_blocking=True)
         cu_seqlens_k = padded.cumsum(dim=0, dtype=torch.int32)
         return FA3SparseMLADecodeAttState(
-            cache_seqlens=self._keep_for_graph(infer_state, "cache_seqlens", cache_seqlens),
+            cache_seqlens=self.keep_for_graph(infer_state, "cache_seqlens", cache_seqlens),
             cu_seqlens_q=infer_state.b1_cu_q_seq_len,
-            cu_seqlens_k=self._keep_for_graph(infer_state, "cu_seqlens_k", cu_seqlens_k),
+            cu_seqlens_k=self.keep_for_graph(infer_state, "cu_seqlens_k", cu_seqlens_k),
             max_seqlen_q=infer_state.max_q_seq_len,
         )
 

@@ -17,6 +17,7 @@ Attention states are built every step, including CUDA graph replay steps. The ca
 before attention and passes the attention state explicitly rather than through a global forward context.
 """
 
+import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import cached_property
@@ -30,6 +31,14 @@ if TYPE_CHECKING:
 LayerConfig = TypeVar("LayerConfig")
 AttState = TypeVar("AttState")
 LayerInputs = TypeVar("LayerInputs")
+
+
+class GraphMode(enum.Enum):
+    """How a step runs: eagerly, captured into a decode CUDA graph, or replaying one."""
+
+    EAGER = "eager"
+    CAPTURE = "capture"
+    REPLAY = "replay"
 
 
 class TensorAllocator(Protocol):
@@ -141,7 +150,7 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
         no out parameter, it needs padded heads, or partial results merge at higher precision first.
         """
 
-    def _keep_for_graph(self, infer_state: "InferStateInfo", name: str, value: torch.Tensor) -> torch.Tensor:
+    def keep_for_graph(self, infer_state: "InferStateInfo", name: str, value: torch.Tensor) -> torch.Tensor:
         """Return value, or for a CUDA graph step its copy at a fixed address per (microbatch, batch size).
 
         The first call for a key keeps a clone; later calls copy value into it in place, so tensors a

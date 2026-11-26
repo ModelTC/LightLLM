@@ -4,14 +4,18 @@ Prefill runs the plain, ALiBi or bidirectional image-span kernel; decode runs th
 speculative shared-group kernel.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 from . import GQALayerConfig, GQALayerInputs
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
 @dataclass(frozen=True)
@@ -244,7 +248,7 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
             from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
 
             markers = build_mtp_shared_group_markers(infer_state.b_req_idx, hold_req_id=infer_state.pad_req_idx)
-            markers = self._keep_for_graph(infer_state, "mtp_groups", markers)
+            markers = self.keep_for_graph(infer_state, "mtp_groups", markers)
 
         cu_kv = infer_state.b1_cu_kv_seq_len
         return TritonGQADecodeAttState(

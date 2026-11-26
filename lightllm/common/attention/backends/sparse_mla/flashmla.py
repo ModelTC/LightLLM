@@ -1,15 +1,19 @@
 """FlashMLA sparse MLA: prefill over bf16 or packed FP8 caches and decode over packed FP8 caches."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from functools import lru_cache
 from inspect import signature
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 from . import SparseMLADecodeLayerInputs, SparseMLALayerConfig, SparseMLAPrefillLayerInputs
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
 @dataclass(frozen=True)
