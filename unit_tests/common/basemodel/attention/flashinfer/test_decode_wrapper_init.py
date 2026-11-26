@@ -7,17 +7,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.attention.flashinfer import fp, fp8, mla
-from lightllm.common.basemodel.attention.flashinfer.utils import should_init_decode_wrapper
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-
-
-def test_decode_wrapper_rejects_conflicting_graph_flags():
-    infer_state = InferStateInfo()
-    infer_state.is_cuda_graph_capture = True
-    infer_state.is_cuda_graph_replay = True
-
-    with pytest.raises(ValueError, match="capture=True, replay=True"):
-        should_init_decode_wrapper(infer_state)
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 
 
 @pytest.fixture(
@@ -86,7 +76,7 @@ def decode_init(request, monkeypatch):
     )
 
 
-@pytest.mark.parametrize("mode", ["eager", "capture", "replay"])
+@pytest.mark.parametrize("mode", list(GraphMode), ids=lambda mode: mode.value)
 def test_decode_init_uses_explicit_graph_mode_for_wrapper_creation(decode_init, mode):
     infer_state = InferStateInfo()
     infer_state.input_ids = torch.tensor([1, 2], dtype=torch.int64)
@@ -96,10 +86,7 @@ def test_decode_init_uses_explicit_graph_mode_for_wrapper_creation(decode_init, 
     infer_state.b_req_idx = torch.tensor([2, 3], dtype=torch.int32)
     infer_state.microbatch_index = 0
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.zeros((4, 64), dtype=torch.int32))
-    if mode == "capture":
-        infer_state.is_cuda_graph_capture = True
-    elif mode == "replay":
-        infer_state.is_cuda_graph_replay = True
+    infer_state.graph_mode = mode
 
     decode_init.state._infer_state_weak_ref = weakref.ref(infer_state)
     decode_init.state.init_state()
@@ -121,7 +108,7 @@ def test_decode_init_uses_explicit_graph_mode_for_wrapper_creation(decode_init, 
     else:
         torch.testing.assert_close(decode_init.state.q_indptr, torch.tensor([0, 1, 2], dtype=torch.int32))
 
-    if mode == "replay":
+    if mode is GraphMode.REPLAY:
         assert decode_init.state.decode_wrapper is None
         decode_init.create_wrapper.assert_not_called()
         decode_init.backend.get_gpu_workspace_buffer.assert_not_called()

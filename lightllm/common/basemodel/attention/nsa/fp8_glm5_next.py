@@ -4,6 +4,8 @@ import weakref
 import torch
 import triton
 
+from lightllm.common.basemodel.infer_struct import GraphMode
+
 from .glm5_next import Glm5NextSparsePrefillState, Glm5NextSparseDecodeState
 from ..base_att import BaseAttBackend
 
@@ -212,12 +214,12 @@ class Fp8Glm5NextSparseDecodeState(Glm5NextSparseDecodeState):
             topk_mem_indices,
             nsa_decode_dict["kv_lora_rank"],
             self.decode_topk_bound,
-            is_cuda_graph_capture=self.infer_state.is_cuda_graph_capture,
+            is_cuda_graph_capture=self.infer_state.graph_mode is GraphMode.CAPTURE,
         ):
             return fp8_sparse_decode.fp8_sparse_direct_decode(
                 q_nope, packed_kv, topk_mem_indices, nsa_decode_dict["softmax_scale"]
             )
-        padded_q = pad_query_heads(q_nope, is_cuda_graph_capture=self.infer_state.is_cuda_graph_capture)
+        padded_q = pad_query_heads(q_nope, is_cuda_graph_capture=self.infer_state.graph_mode is GraphMode.CAPTURE)
         kv_cache = torch.as_strided(
             packed_kv,
             size=(packed_kv.shape[0], 1, 1, packed_kv.shape[-1]),
