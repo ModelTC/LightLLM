@@ -24,7 +24,10 @@ def kda_params(conv_states, ssm_states, layer_weight, mixed_qkv, raw_gate, raw_b
 
 
 def prepare_prefill_infer(infer, device="cuda"):
-    """Give a test stub the InferStateInfo defaults of the fields it does not set, as a prefill step."""
+    """Give a test stub the InferStateInfo defaults of the fields it does not set, as a prefill step.
+
+    Properties such as uses_cuda_graph exist only on InferStateInfo itself, so build stubs from InferStateInfo().
+    """
     for name, value in vars(InferStateInfo()).items():
         if not hasattr(infer, name):
             setattr(infer, name, value)

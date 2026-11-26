@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from lightllm.common.attention.backends.kda import KDALayerConfig
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention.kernels.gdn.third_party_fla.ops.kda import chunk_kda_with_fused_gate
 from lightllm.common.attention.kernels.kda.kda_prefill import kda_prefill
 from lightllm.common.attention.kernels.kda.kda_state_io import gather_kda_state, scatter_kda_state
@@ -134,7 +135,7 @@ def test_prefill_metadata_is_rebuilt_for_each_forward(flash_module, mode):
     model.args.linear_att_ssm_data_type = "bfloat16"
     model.args.ssm_state_mode = mode
     backend = kda_attention(model)
-    infer = type("Infer", (), {})()
+    infer = InferStateInfo()
     infer.b_req_idx = torch.tensor([3, 1], dtype=torch.int32)
     infer.b1_cu_q_seq_len = torch.tensor([0, 65, 68], dtype=torch.int32)
     infer.max_q_seq_len = 65
@@ -440,7 +441,7 @@ def test_flashkda_backend_continues_cached_prefill(cuda_flashkda, mode, state_dt
     before = ssm.clone()
 
     def create_att(att_backend, conv_states, ssm_states):
-        infer = type("InferState", (), {})()
+        infer = InferStateInfo()
         state = SimpleNamespace(get_layer_view=lambda **kwargs: (conv_states, ssm_states))
         infer.att_state_manager = SimpleNamespace(
             get_state=lambda **kwargs: state, get_bounded_attention_states=lambda role: [state]
