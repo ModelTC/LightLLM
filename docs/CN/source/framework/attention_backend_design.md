@@ -156,13 +156,13 @@ backend.forward(att_state, layer_inputs, *, out, alloc_func=torch.empty) -> out
 
 ## 5. 选择实现
 
-- 实现名称与命令行一致：`--llm_prefill_att_backend` / `--llm_decode_att_backend` 的第一个值用于全注意力族（`gqa`、`mla`、`sparse_mla`），第二个值用于线性注意力族（`gdn`、`kda`），缺省为 `auto`。
+- 实现名称与命令行一致：`--att_backend FAMILY.PHASE=BACKEND` 按算法族和阶段指定实现，例如 `gqa.prefill=fa3`、`gdn.prefill=flashqla`；算法族名来自注册表中的 `Family.name`（`gqa`、`mla`、`sparse_mla`、`gdn`、`kda`），未指定的项为 `auto`。命令行解析时按注册表校验键和实现名。已弃用的 `--llm_prefill_att_backend` / `--llm_decode_att_backend` 仍可使用：第一个值用于全注意力族，第二个值用于线性注意力族，`--att_backend` 中的项优先。
 - 一个名称可以对应同一族的多个 backend，取第一个能用该 layer config 构造的 backend。例如 `triton` 包括普通与量化 KV 的 Triton GQA；稀疏 MLA 只有一个名称 `flashmla_sparse`，各阶段在 FlashMLA 支持该 cache 格式时使用 FlashMLA，否则使用 FA3；KDA 的 `flashkda` 与 `triton` 对应同一组 backend，由 layer config 的 `prefill_kernel` 决定 prefill 是否使用 FlashKDA。
 - `--llm_kv_type` 决定 layer config 的 `kv_quant`，选择器只在接受该量化方式的实现中挑选。
 - `auto` 按优先级依次尝试：backend 能以该 layer config 构造（不抛出 `NotImplementedError`），且第三方库通过 `validate()`。先构造再验证，因为验证要启动子进程。都不满足时退回 Triton（不验证）。例如 Neo 的图像 span 不被 FlashInfer 支持，会被自动跳过。
 - 显式指定的实现不存在或不支持该配置时，在模型加载时抛出 `ValueError`，并列出各 backend 拒绝的原因。
 - EP MoE 排除 FlashInfer；有 MTP 时 decode 优先 FA3。
-- 层可以用 `LayerAttentionConfig.prefill_backend_name` 和 `decode_backend_name` 分别指定实现。Bloom 和 Gemma4 的 GQA 层在两个阶段都指定 `triton`。GLM-5 和 MTP 草稿模型只在稀疏 MLA 分支指定 `flashmla_sparse`，KDA 分支使用命令行的第二个值。
+- 层可以用 `LayerAttentionConfig.prefill_backend_name` 和 `decode_backend_name` 分别指定实现。Bloom 和 Gemma4 的 GQA 层在两个阶段都指定 `triton`。GLM-5 和 MTP 草稿模型只在稀疏 MLA 分支指定 `flashmla_sparse`，KDA 分支使用命令行的 `kda.prefill` / `kda.decode`。
 
 ## 6. 分组与时序
 

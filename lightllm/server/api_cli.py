@@ -515,18 +515,27 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         only deepseekv3 model supported now.""",
     )
     parser.add_argument(
+        "--att_backend",
+        nargs="+",
+        action=_AttentionBackendOverrides,
+        default={},
+        metavar="FAMILY.PHASE=BACKEND",
+        help="""attention implementation per algorithm family and phase, for example
+                gqa.prefill=fa3 gqa.decode=flashinfer gdn.prefill=flashqla kda.prefill=flashkda.
+                Families: gqa, mla, sparse_mla, gdn, kda; phases: prefill, decode. Entries that are
+                omitted use auto, which picks the best validated implementation for the GPU
+                (full attention prefill: fa3 > flashinfer > triton; decode: flashinfer > fa3 > triton,
+                or fa3 first when mtp_step > 0; GDN prefill: flashqla > triton; KDA auto runs
+                FlashKDA on Hopper with a BF16 state for the step lengths it was validated on).""",
+    )
+    parser.add_argument(
         "--llm_prefill_att_backend",
         type=str,
         nargs="+",
         choices=["auto", "triton", "fa3", "flashinfer", "flashqla", "flashkda"],
         default=["auto"],
-        help="""prefill attention kernel used in llm.
-                auto: automatically select best backend based on GPU and available packages
-                (priority: fa3 > flashinfer > triton)
-                for hybrid linear-attention models, the second value selects the linear-attention backend
-                (GDN priority: flashqla > triton; KDA auto: shape-dependent FlashKDA on Hopper with
-                BF16 state, otherwise Triton; explicit flashkda requires a compatible installation);
-                when omitted, it defaults to auto""",
+        help="""deprecated, use --att_backend. The first value names the full-attention prefill
+                implementation, the second the linear-attention one; --att_backend entries take precedence.""",
     )
     parser.add_argument(
         "--llm_decode_att_backend",
@@ -534,12 +543,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         nargs="+",
         choices=["auto", "triton", "fa3", "flashinfer"],
         default=["auto"],
-        help="""decode attention kernel used in llm.
-                auto: automatically select best backend based on GPU and available packages
-                (priority when mtp_step > 0: fa3 > flashinfer > triton;
-                otherwise: flashinfer > fa3 > triton)
-                for hybrid linear-attention models, the second value selects the linear-attention backend
-                (currently triton only); when omitted, it defaults to auto""",
+        help="""deprecated, use --att_backend. The first value names the full-attention decode
+                implementation, the second the linear-attention one; --att_backend entries take precedence.""",
     )
     parser.add_argument(
         "--flashinfer_workspace_size",
@@ -1093,3 +1098,24 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 def make_argument_parser() -> argparse.ArgumentParser:
     return add_cli_args(argparse.ArgumentParser())
+
+
+class _AttentionBackendOverrides(argparse.Action):
+    """Collect --att_backend FAMILY.PHASE=BACKEND entries into a dict, checked against the attention registry."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from lightllm.common.attention.selector import validate_backend_overrides
+
+        overrides = dict(getattr(namespace, self.dest) or {})
+        for value in values:
+            key, separator, backend = value.partition("=")
+            if not (separator and key and backend):
+                raise argparse.ArgumentError(self, f"expected FAMILY.PHASE=BACKEND, got {value!r}")
+            if key in overrides:
+                raise argparse.ArgumentError(self, f"duplicate attention backend key {key!r}")
+            overrides[key] = backend
+        try:
+            validate_backend_overrides(overrides)
+        except ValueError as error:
+            raise argparse.ArgumentError(self, str(error)) from error
+        setattr(namespace, self.dest, overrides)

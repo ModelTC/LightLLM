@@ -8,6 +8,7 @@ import torch
 
 from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
+from lightllm.common.attention import selector
 from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
 from lightllm.common.attention.backends.sparse_mla import (
     SparseMLADecodeLayerInputs,
@@ -382,7 +383,6 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         linear = self.network_config_["linear_attn_config"]
         assert linear["num_heads"] % self.tp_world_size_ == 0
         args = model.args
-        prefill_backends = args.llm_prefill_att_backend
         return KDALayerConfig(
             num_heads=self.tp_linear_num_heads,
             head_dim=self.linear_head_dim,
@@ -392,8 +392,8 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             state_mtp_step=args.mtp_step,
             replay=args.ssm_state_mode == "replay",
             ssm_dtype=getattr(torch, args.linear_att_ssm_data_type),
-            # The second --llm_prefill_att_backend value chooses FlashKDA for prefill.
-            prefill_kernel=prefill_backends[1] if len(prefill_backends) > 1 else "auto",
+            # The requested KDA prefill implementation (kda.prefill) chooses whether prefill runs FlashKDA.
+            prefill_kernel=selector.requested_backend(args, "prefill", "kda"),
         )
 
     def _kda_layer_inputs(self, mixed_qkv, raw_gate, raw_beta, infer_state, layer_weight) -> KDALayerInputs:

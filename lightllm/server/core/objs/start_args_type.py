@@ -177,6 +177,9 @@ class StartArgs:
     vit_quant_type: Optional[str] = field(default="none")
     vit_quant_cfg: Optional[str] = field(default=None)
     expert_dtype: Optional[str] = field(default=None, metadata={"choices": ["fp8", "fp4"]})
+    # --att_backend: "family.phase" -> implementation name; omitted keys use auto.
+    att_backend: dict[str, str] = field(default_factory=dict)
+    # Deprecated positional forms of att_backend: [full attention, linear attention].
     llm_prefill_att_backend: List[str] = field(
         default_factory=lambda: ["auto"],
         metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashqla", "flashkda"]},

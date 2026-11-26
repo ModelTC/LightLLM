@@ -21,8 +21,7 @@ exec python -m lightllm.server.api_server \
   --mtp_step "${MTP_STEP:-3}" \
   --tp "${TP:-4}" \
   --data_type bfloat16 \
-  --llm_prefill_att_backend fa3 \
-  --llm_decode_att_backend fa3 \
+  --att_backend gqa.prefill=fa3 gqa.decode=fa3 \
   --max_req_total_len 32768 \
   --batch_max_tokens 8192 \
   --running_max_req_size 32 \

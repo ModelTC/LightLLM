@@ -241,12 +241,59 @@ def test_sparse_mla_runs_flashmla_where_it_supports_the_cache_and_fa3_elsewhere(
         selector.select(config, "decode", "fa3")
 
 
+def test_att_backend_names_each_family_and_phase_and_wins_over_the_deprecated_flags():
+    from lightllm.common.attention.backends.gdn import GDNLayerConfig
+
+    gdn = GDNLayerConfig(2, 4, 64, 64, 4, "silu", torch.bfloat16)
+    args = SimpleNamespace(
+        att_backend={"gqa.prefill": "flashinfer", "gdn.prefill": "flashqla"},
+        llm_prefill_att_backend=["fa3", "triton"],
+        llm_decode_att_backend=["fa3"],
+    )
+    assert selector.requested_backend(args, "prefill", gqa()) == "flashinfer"
+    assert selector.requested_backend(args, "prefill", gdn) == "flashqla"
+    # Keys --att_backend leaves out fall back to the deprecated positional flags, then to auto.
+    assert selector.requested_backend(args, "decode", "gqa") == "fa3"
+    assert selector.requested_backend(args, "decode", "gdn") == "auto"
+    assert selector.requested_backend(args, "prefill", "mla") == "fa3"
+
+
+def test_att_backend_choices_come_from_the_registry():
+    choices = selector.backend_choices()
+    assert choices["gqa.decode"] == ("auto", "triton", "fa3", "flashinfer")
+    assert choices["gdn.prefill"] == ("auto", "flashqla", "triton")
+    assert choices["kda.prefill"] == ("auto", "triton", "flashkda")
+    assert choices["sparse_mla.decode"] == ("auto", "flashmla_sparse")
+    assert set(choices) == {
+        f"{family}.{phase}" for family in ("gqa", "mla", "sparse_mla", "gdn", "kda") for phase in selector.PHASES
+    }
+    selector.validate_backend_overrides({"mla.decode": "flashinfer", "kda.prefill": "flashkda"})
+    with pytest.raises(ValueError, match="invalid attention backend 'flashqla' for gqa.prefill"):
+        selector.validate_backend_overrides({"gqa.prefill": "flashqla"})
+    with pytest.raises(ValueError, match="unknown attention backend key 'gqa'"):
+        selector.validate_backend_overrides({"gqa": "fa3"})
+
+
+def test_att_backend_cli_collects_entries_and_rejects_bad_ones():
+    from lightllm.server.api_cli import make_argument_parser
+
+    parser = make_argument_parser()
+    args = parser.parse_args(
+        ["--att_backend", "gqa.prefill=fa3", "gdn.prefill=flashqla", "--att_backend", "kda.prefill=flashkda"]
+    )
+    assert args.att_backend == {"gqa.prefill": "fa3", "gdn.prefill": "flashqla", "kda.prefill": "flashkda"}
+    assert parser.parse_args([]).att_backend == {}
+    for bad in (["gqa.prefill"], ["gqa.prefill=flashqla"], ["gqa.prefill=fa3", "gqa.prefill=triton"]):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--att_backend", *bad])
+
+
 @pytest.mark.parametrize("replay, decode", [(False, "triton_gdn_decode"), (True, "replay_gdn_decode")])
 def test_linear_attention_takes_triton_without_validation_and_follows_the_state_kind(replay, decode):
     from lightllm.common.attention.backends.gdn import GDNLayerConfig
 
     config = GDNLayerConfig(2, 4, 64, 64, 4, "silu", torch.bfloat16, replay=replay)
-    # Linear families read the second value of --llm_{prefill,decode}_att_backend.
+    # Linear families read the second value of the deprecated --llm_{prefill,decode}_att_backend flags.
     args = SimpleNamespace(llm_prefill_att_backend=["fa3", "triton"], llm_decode_att_backend=["fa3"])
     assert selector.requested_backend(args, "prefill", config) == "triton"
     assert selector.requested_backend(args, "decode", config) == "auto"

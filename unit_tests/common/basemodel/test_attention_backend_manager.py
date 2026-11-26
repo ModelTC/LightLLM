@@ -265,7 +265,7 @@ FakeDecode = fake_backend("fake_decode", sync=True)
 def fake_family(monkeypatch):
     created.clear()
     backends = {"prefill": {"fake": (f"{__name__}:FakePrefill",)}, "decode": {"fake": (f"{__name__}:FakeDecode",)}}
-    monkeypatch.setitem(selector._REGISTRY, FakeConfig, selector.Family(backends))
+    monkeypatch.setitem(selector._REGISTRY, FakeConfig, selector.Family("fake", backends))
     return setup_model(fake_model(llm_prefill_att_backend=["fake"], llm_decode_att_backend=["fake"]))
 
 

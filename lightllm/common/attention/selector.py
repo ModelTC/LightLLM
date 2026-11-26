@@ -1,8 +1,8 @@
 """Choose the attention implementation for a layer config and phase.
 
-Implementations are named as on the command line (--llm_prefill_att_backend /
---llm_decode_att_backend): "triton", "fa3", "flashinfer" for GQA and MLA, "flashmla_sparse" for
-sparse MLA, and, in the second value, "triton", "flashqla" or "flashkda" for linear attention. One
+Implementations are named as on the command line, --att_backend FAMILY.PHASE=NAME (for example
+gqa.prefill=fa3 or gdn.prefill=flashqla): "triton", "fa3", "flashinfer" for GQA and MLA,
+"flashmla_sparse" for sparse MLA, and "triton", "flashqla" or "flashkda" for linear attention. One
 name can cover several backends of a family, such as the plain and quantized-KV Triton GQA backends;
 the first whose constructor accepts the layer config is used.
 """
@@ -36,12 +36,15 @@ DEFAULT_PRIORITY = {
 class Family:
     """The implementations registered for one layer config type."""
 
+    # The family's name in --att_backend keys ("gqa" in gqa.prefill=fa3); layer config types of one
+    # algorithm, such as MLA's prefill and decode configs, share it.
+    name: str
     # phase -> implementation name -> backends ("module:Class"), tried in order.
     backends: dict[str, dict[str, tuple[str, ...]]]
     # phase -> auto-selection order, best first.
     priority: dict[str, tuple[str, ...]] = field(default_factory=lambda: dict(DEFAULT_PRIORITY))
-    # The value of --llm_{prefill,decode}_att_backend that names its implementation:
-    # 0 for full-attention families, 1 for linear-attention families.
+    # The value of the deprecated --llm_{prefill,decode}_att_backend flags that names its
+    # implementation: 0 for full-attention families, 1 for linear-attention families.
     arg_index: int = 0
     # Names "auto" takes without validating the library.
     unvalidated: tuple[str, ...] = ()
@@ -58,6 +61,7 @@ _SPARSE_PRIORITY = {"prefill": ("flashmla_sparse",), "decode": ("flashmla_sparse
 
 _REGISTRY: dict[type, Family] = {
     GQALayerConfig: Family(
+        "gqa",
         {
             "prefill": {
                 "triton": (
@@ -75,27 +79,30 @@ _REGISTRY: dict[type, Family] = {
                 "fa3": (f"{_GQA}.fa3:FA3GQADecodeBackend",),
                 "flashinfer": (f"{_GQA}.flashinfer:FlashInferGQADecodeBackend",),
             },
-        }
+        },
     ),
     MLAPrefillLayerConfig: Family(
+        "mla",
         {
             "prefill": {
                 "triton": (f"{_MLA}.triton:TritonMLAPrefillBackend",),
                 "fa3": (f"{_MLA}.fa3:FA3MLAPrefillBackend",),
                 "flashinfer": (f"{_MLA}.flashinfer:FlashInferMLAPrefillBackend",),
             }
-        }
+        },
     ),
     MLADecodeLayerConfig: Family(
+        "mla",
         {
             "decode": {
                 "triton": (f"{_MLA}.triton:TritonMLADecodeBackend",),
                 "fa3": (f"{_MLA}.fa3:FA3MLADecodeBackend",),
                 "flashinfer": (f"{_MLA}.flashinfer:FlashInferMLADecodeBackend",),
             }
-        }
+        },
     ),
     SparseMLALayerConfig: Family(
+        "sparse_mla",
         {
             "prefill": {
                 "flashmla_sparse": (
@@ -113,6 +120,7 @@ _REGISTRY: dict[type, Family] = {
         priority=_SPARSE_PRIORITY,
     ),
     SWASparseMLALayerConfig: Family(
+        "sparse_mla",
         {
             "prefill": {"flashmla_sparse": (f"{_SPARSE}.flashmla_swa:FlashMLASWAPrefillBackend",)},
             "decode": {"flashmla_sparse": (f"{_SPARSE}.flashmla_swa:FlashMLASWADecodeBackend",)},
@@ -121,6 +129,7 @@ _REGISTRY: dict[type, Family] = {
     ),
     # Linear attention: native or replay state, chosen by the layer config's replay.
     GDNLayerConfig: Family(
+        "gdn",
         {
             "prefill": {
                 "flashqla": (f"{_GDN}.flashqla:FlashQLAGDNPrefillBackend",),
@@ -135,6 +144,7 @@ _REGISTRY: dict[type, Family] = {
     # FlashKDA is a fast path of the KDA prefill implementations, chosen by the layer config's
     # prefill_kernel; "flashkda" therefore names the same backends as "triton".
     KDALayerConfig: Family(
+        "kda",
         {
             "prefill": {
                 name: (f"{_KDA}.triton:TritonKDAPrefillBackend", f"{_KDA}.triton:ReplayKDAPrefillBackend")
@@ -149,6 +159,13 @@ _REGISTRY: dict[type, Family] = {
 }
 
 
+def _named_family(name: str) -> Family:
+    for family in _REGISTRY.values():
+        if family.name == name:
+            return family
+    raise ValueError(f"no attention family is named {name!r}")
+
+
 def _family(layer_config: Any) -> Family:
     family = _REGISTRY.get(type(layer_config))
     if family is None:
@@ -156,15 +173,39 @@ def _family(layer_config: Any) -> Family:
     return family
 
 
-def requested_backend(args, phase: str, layer_config: Any) -> str:
-    """The backend name the command line requests for layer_config's family in phase.
+def requested_backend(args, phase: str, family: Any) -> str:
+    """The implementation the command line requests for a family in phase.
 
-    Full-attention families read the first value of --llm_{prefill,decode}_att_backend and
-    linear-attention families the second.
+    family is a family name ("gqa", "kda", ...) or a layer config of the family. --att_backend
+    FAMILY.PHASE=NAME takes precedence; otherwise the deprecated --llm_{prefill,decode}_att_backend
+    flags give full-attention families their first value and linear-attention families their second.
     """
-    index = _family(layer_config).arg_index
-    values = args.llm_prefill_att_backend if phase == "prefill" else args.llm_decode_att_backend
-    return values[index] if index < len(values) else "auto"
+    family = _named_family(family) if isinstance(family, str) else _family(family)
+    override = (getattr(args, "att_backend", None) or {}).get(f"{family.name}.{phase}")
+    if override is not None:
+        return override
+    values = (args.llm_prefill_att_backend if phase == "prefill" else args.llm_decode_att_backend) or ()
+    return values[family.arg_index] if family.arg_index < len(values) else "auto"
+
+
+def backend_choices() -> dict[str, tuple[str, ...]]:
+    """The names --att_backend accepts for each FAMILY.PHASE key, "auto" first."""
+    choices: dict[str, dict[str, None]] = {}
+    for family in _REGISTRY.values():
+        for phase, implementations in family.backends.items():
+            names = choices.setdefault(f"{family.name}.{phase}", {"auto": None})
+            names.update(dict.fromkeys(implementations))
+    return {key: tuple(names) for key, names in sorted(choices.items())}
+
+
+def validate_backend_overrides(overrides: dict[str, str]) -> None:
+    """Reject --att_backend entries whose key or implementation name the registry does not know."""
+    choices = backend_choices()
+    for key, name in overrides.items():
+        if key not in choices:
+            raise ValueError(f"unknown attention backend key {key!r}; choose from {', '.join(choices)}")
+        if name not in choices[key]:
+            raise ValueError(f"invalid attention backend {name!r} for {key}; choose from {', '.join(choices[key])}")
 
 
 def auto_priority(layer_config: Any, phase: str, mtp_step: int = 0) -> tuple[str, ...]:

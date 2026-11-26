@@ -60,7 +60,7 @@ def test_unavailable_neo_interface_provides_source_install_instructions(monkeypa
     assert "cd flash-attention/hopper" in message
     assert "FLASH_ATTENTION_FORCE_BUILD=TRUE" in message
     assert "--no-deps --force-reinstall" in message
-    assert "--llm_prefill_att_backend triton" in message
+    assert "--att_backend gqa.prefill=triton" in message
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")

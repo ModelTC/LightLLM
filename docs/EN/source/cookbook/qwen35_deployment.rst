@@ -55,8 +55,7 @@ Deploy the full multimodal MoE model on 8 GPUs:
         --tp 8 \
         --max_req_total_len 262144 \
         --chunked_prefill_size 8192 \
-        --llm_prefill_att_backend fa3 \
-        --llm_decode_att_backend flashinfer \
+        --att_backend gqa.prefill=fa3 gqa.decode=flashinfer \
         --graph_max_batch_size 128 \
         --reasoning_parser qwen3 \
         --host 0.0.0.0 \
@@ -69,8 +68,7 @@ Deploy the full multimodal MoE model on 8 GPUs:
 - ``--tp 8``: Tensor parallelism across 8 GPUs (required for 397B parameter model)
 - ``--max_req_total_len 262144``: Maximum total request length matching the model's native 262K context
 - ``--chunked_prefill_size 8192``: Chunk size for prefill processing, reduces peak memory usage
-- ``--llm_prefill_att_backend fa3``: Use FlashAttention3 for full-attention prefill; automatically select the linear-attention prefill backend
-- ``--llm_decode_att_backend flashinfer``: Use FlashInfer for full-attention decode; automatically select the linear-attention decode backend
+- ``--att_backend gqa.prefill=fa3 gqa.decode=flashinfer``: Use FlashAttention3 for full-attention prefill and FlashInfer for full-attention decode; the linear-attention (``gdn``) backends are selected automatically
 - ``--graph_max_batch_size 128``: Maximum batch size for CUDA graph optimization (reduce if OOM)
 - ``--reasoning_parser qwen3``: Enable Qwen3 reasoning parser for thinking mode
 
@@ -101,8 +99,7 @@ To skip loading the vision encoder and reduce memory usage:
         --tp 8 \
         --max_req_total_len 262144 \
         --chunked_prefill_size 8192 \
-        --llm_prefill_att_backend fa3 \
-        --llm_decode_att_backend flashinfer \
+        --att_backend gqa.prefill=fa3 gqa.decode=flashinfer \
         --graph_max_batch_size 128 \
         --reasoning_parser qwen3 \
         --disable_vision \
