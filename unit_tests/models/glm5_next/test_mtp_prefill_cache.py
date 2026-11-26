@@ -18,6 +18,7 @@ from lightllm.common.attention_state.full_att.packed_mla.packed_mla_state import
 from lightllm.common.basemodel.batch_objs import ModelInput, PostLayerOutput
 from lightllm.common.basemodel.hidden_collector import FinalHiddenCollector
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.rowmm_weight import ROWMMWeight
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.glm5_next.indexer import Glm5NextNsaInfer
 from lightllm.models.glm5_next_mtp.layer_infer.post_layer_infer import Glm5NextMTPPostLayerInfer
@@ -123,11 +124,22 @@ def test_forward_uses_common_prefill(monkeypatch, tokens, mode):
     layer = Glm5NextMTPTransformerLayerInfer.__new__(Glm5NextMTPTransformerLayerInfer)
     layer.is_linear_attention_layer = layer.use_mhc = False
     layer.layer_num_, layer.num_hidden_layers = 45, 1
+    layer.tp_world_size_ = 1
     layer.embed_dim_ = 2
     layer._att_norm = layer._ffn_norm = lambda hidden, *_: hidden
     layer.context_attention_forward = Mock(side_effect=lambda hidden, *_: torch.zeros_like(hidden))
     layer._ffn = Mock(side_effect=lambda hidden, *_: torch.zeros_like(hidden))
-    layer._project_sparse_qkv_a = lambda hidden, *_: (hidden, None, hidden)
+    kv_pack = object()
+    projection = SimpleNamespace(
+        mm=Mock(),
+        mm_param_list=[object(), kv_pack],
+        quant_method=SimpleNamespace(
+            method_name="fp8w8a8-b128-deepgemm",
+            use_packed_ue8m0=False,
+            apply=Mock(side_effect=lambda hidden, _: hidden),
+        ),
+    )
+    model.trans_layers_weight = [SimpleNamespace(qkv_a_proj_with_mqa_=projection)]
     layer._normalize_sparse_kv = lambda kv, _: kv
     layer.indexer = SimpleNamespace(write_k_pools=Mock())
     writer = Mock()
@@ -148,6 +160,11 @@ def test_forward_uses_common_prefill(monkeypatch, tokens, mode):
     ids, infer, _ = model.pre_infer.context_forward.call_args.args
     assert ids.shape == (max(1, tokens),)
     assert infer.b_req_idx.tolist() == ([0] if tokens else [model.req_manager.HOLD_REQUEST_ID])
+    projection.mm.assert_not_called()
+    projection.quant_method.apply.assert_called_once()
+    projected_input, projected_pack = projection.quant_method.apply.call_args.args
+    assert projected_input.shape == (max(1, tokens), layer.embed_dim_)
+    assert projected_pack is kv_pack
     if mode == "eagle_with_att":
         assert infer.mtp_draft_input_hiddens is None
         writer.assert_called_once()
@@ -165,6 +182,61 @@ def test_forward_uses_common_prefill(monkeypatch, tokens, mode):
         post_forward.assert_not_called()
     allocator.cache_env_in.assert_called_once()
     allocator.cache_env_out.assert_called_once()
+
+
+@pytest.mark.parametrize("method_name,packed", [("fp8w8a8-b128-deepgemm", True), ("fp8w8a8-b128", False)])
+def test_kv_only_uses_fused_projection_for_unsupported_weight_layouts(method_name, packed):
+    layer = Glm5NextMTPTransformerLayerInfer.__new__(Glm5NextMTPTransformerLayerInfer)
+    layer.is_linear_attention_layer = False
+    layer.embed_dim_ = layer.tp_world_size_ = layer.q_lora_rank = layer.kv_lora_rank = 1
+    output = torch.tensor([[3.0, 4.0]])
+    method = SimpleNamespace(method_name=method_name, use_packed_ue8m0=packed, apply=Mock())
+    projection = SimpleNamespace(mm=Mock(return_value=output), quant_method=method)
+    weights = SimpleNamespace(qkv_a_proj_with_mqa_=projection)
+    infer = SimpleNamespace(need_dp_prefill_balance=False)
+
+    _, _, kv = layer._project_sparse_qkv_a(torch.ones(1, 1), infer, weights, kv_only=True)
+
+    projection.mm.assert_called_once()
+    method.apply.assert_not_called()
+    torch.testing.assert_close(kv, output[:, 1:])
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0), reason="Hopper required"
+)
+@pytest.mark.parametrize("tokens", [1, 8192])
+def test_kv_only_matches_fused_deepgemm_projection(monkeypatch, tokens):
+    pytest.importorskip("deep_gemm")
+    from lightllm.common.quantization.deepgemm import DeepGEMMFP8w8a8B128QuantizationMethod
+
+    torch.manual_seed(53)
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "1")
+    layer = Glm5NextMTPTransformerLayerInfer.__new__(Glm5NextMTPTransformerLayerInfer)
+    layer.is_linear_attention_layer = False
+    layer.tp_world_size_ = 1
+    layer.embed_dim_, layer.q_lora_rank, layer.kv_lora_rank = 4096, 1536, 512
+    quant_method = DeepGEMMFP8w8a8B128QuantizationMethod()
+    projection = ROWMMWeight(
+        in_dim=layer.embed_dim_,
+        out_dims=[layer.q_lora_rank, layer.kv_lora_rank],
+        weight_names=["q.weight", "kv.weight"],
+        data_type=torch.bfloat16,
+        quant_method=quant_method,
+        tp_rank=0,
+        tp_world_size=1,
+    )
+    for pack in projection.mm_param_list:
+        quant_method.quantize(torch.randn_like(pack.weight, dtype=torch.bfloat16) * 0.1, pack)
+    weights = SimpleNamespace(qkv_a_proj_with_mqa_=projection)
+    infer = SimpleNamespace(need_dp_prefill_balance=False)
+    hidden = torch.randn(tokens, layer.embed_dim_, device="cuda", dtype=torch.bfloat16)
+
+    _, _, expected = layer._project_sparse_qkv_a(hidden, infer, weights)
+    _, query, actual = layer._project_sparse_qkv_a(hidden, infer, weights, kv_only=True)
+
+    assert query is None
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -196,9 +268,25 @@ def test_cache_only_matches_full_prefill_cache_writes(monkeypatch, kv_type, requ
     def norm(input, eps, **_):
         return rmsnorm_forward(input, None, eps)
 
+    qkv_projection = ROWMMWeight(
+        in_dim=64,
+        out_dims=[64, 512],
+        weight_names=["q.weight", "kv.weight"],
+        data_type=torch.bfloat16,
+        tp_rank=0,
+        tp_world_size=1,
+    )
+    qkv_projection.load_hf_weights(
+        {
+            "q.weight": torch.randn(64, 64, device="cuda", dtype=torch.bfloat16) * 0.1,
+            "kv.weight": torch.randn(512, 64, device="cuda", dtype=torch.bfloat16) * 0.1,
+        }
+    )
+    assert qkv_projection.verify_load()
+    qkv_projection.mm = Mock(wraps=qkv_projection.mm)
     weights = SimpleNamespace(
         att_norm_weight_=norm,
-        qkv_a_proj_with_mqa_=projection(64, 576),
+        qkv_a_proj_with_mqa_=qkv_projection,
         q_a_layernorm_=SimpleNamespace(weight=torch.ones(64, device="cuda", dtype=torch.bfloat16)),
         kv_a_layernorm_=SimpleNamespace(weight=torch.ones(512, device="cuda", dtype=torch.bfloat16)),
         q_b_proj_=projection(64, 512),
@@ -265,10 +353,12 @@ def test_cache_only_matches_full_prefill_cache_writes(monkeypatch, kv_type, requ
     assert not torch.equal(initial[2], expected[2])
     for store, before in zip(stores, initial):
         store.copy_(before)
+    qkv_projection.mm.reset_mock()
     weights.q_b_proj_.mm.reset_mock()
     placeholder = layer.context_forward(hidden, infer, weights)
     assert placeholder.shape == (0, layer.embed_dim_)
     assert placeholder.untyped_storage().nbytes() == 0
+    qkv_projection.mm.assert_not_called()
     weights.q_b_proj_.mm.assert_not_called()
     for actual, reference in zip(stores, expected):
         assert torch.equal(actual, reference)

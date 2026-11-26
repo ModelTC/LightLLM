@@ -7,7 +7,7 @@ class Glm5NextMTPTransformerLayerInfer(Glm5NextTransformerLayerInfer):
             return super().context_forward(input_embeddings, infer_state, layer_weight)
 
         normed = self._att_norm(input_embeddings, infer_state, layer_weight)
-        hidden, _, kv = self._project_sparse_qkv_a(normed, infer_state, layer_weight)
+        hidden, _, kv = self._project_sparse_qkv_a(normed, infer_state, layer_weight, kv_only=True)
         infer_state.mtp_draft_input_hiddens = None
         self._post_cache_kv(self._normalize_sparse_kv(kv, layer_weight), infer_state, layer_weight)
         self.indexer.write_k_pools(hidden, infer_state, infer_state.prefill_att_state, layer_weight)
