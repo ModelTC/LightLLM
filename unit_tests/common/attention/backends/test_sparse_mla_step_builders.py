@@ -1,13 +1,29 @@
 """Sparse MLA step builders: per-step lengths and the storage kept for CUDA graph replays."""
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend
+from lightllm.common.attention.backends.sparse_mla.flashmla_swa import FlashMLASWADecodeBackend
+from lightllm.common.basemodel.infer_struct import GraphMode
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TOPK = 2048
+
+
+def test_flashmla_swa_allocates_separate_metadata_only_for_capture(monkeypatch):
+    monkeypatch.setitem(sys.modules, "flash_mla", SimpleNamespace(get_mla_metadata=lambda: (object(), None)))
+    context = FlashMLASWADecodeBackend.create_build_context(4, None)
+    for mode in (GraphMode.EAGER, GraphMode.CAPTURE, GraphMode.REPLAY):
+        state = FlashMLASWADecodeBackend.build(SimpleNamespace(graph_mode=mode), context)
+        if mode is GraphMode.CAPTURE:
+            assert state.capture_sched_meta_by_ratio[4] is not state.sched_meta_by_ratio[4]
+        else:
+            assert state.capture_sched_meta_by_ratio is None
 
 
 def make_batch(lengths, *, capacity=None, microbatch=0):

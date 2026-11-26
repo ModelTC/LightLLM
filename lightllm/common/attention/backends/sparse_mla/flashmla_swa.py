@@ -10,7 +10,7 @@ from lightllm.common.attention.backend import (
     AttentionBuildResources,
     TensorAllocator,
 )
-from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from . import SWASparseMLALayerConfig, SWASparseMLALayerInputs
 
 
@@ -18,7 +18,7 @@ from . import SWASparseMLALayerConfig, SWASparseMLALayerInputs
 class FlashMLASWAAttState:
     """FlashMLA scheduler metadata per compress ratio, filled on the step's first kernel call per ratio.
 
-    A decode step also carries a second set used while a CUDA graph is captured, so warm-up runs do not
+    A step being captured also carries a second set, so warm-up runs do not
     fill it and its planning kernels are recorded in the graph to run again on every replay.
     """
 
@@ -27,15 +27,11 @@ class FlashMLASWAAttState:
 
 
 class FlashMLASWABuildContext:
-    def __init__(self, *, compress_ratios: tuple, for_cuda_graph_capture: bool) -> None:
-        """compress_ratios lists the model's distinct ratios; for_cuda_graph_capture adds the capture set (decode)."""
+    def __init__(self, *, compress_ratios: tuple) -> None:
         self.compress_ratios = compress_ratios
-        self.for_cuda_graph_capture = for_cuda_graph_capture
 
 
 class _FlashMLASWABackend(AttentionBackend[SWASparseMLALayerConfig, FlashMLASWAAttState, SWASparseMLALayerInputs]):
-    for_cuda_graph_capture: bool
-
     def forward(
         self,
         att_state: FlashMLASWAAttState,
@@ -79,21 +75,22 @@ class _FlashMLASWABackend(AttentionBackend[SWASparseMLALayerConfig, FlashMLASWAA
 
     @classmethod
     def build(cls, metadata: Optional[InferStateInfo], context: FlashMLASWABuildContext) -> FlashMLASWAAttState:
-        """The metadata is planned on the GPU at the first kernel call, so it does not depend on metadata."""
+        """Prepare scheduler objects whose GPU planning runs at the first kernel call."""
         import flash_mla
 
         def new_set():
             return {ratio: flash_mla.get_mla_metadata()[0] for ratio in context.compress_ratios}
 
+        will_capture = metadata is not None and metadata.graph_mode is GraphMode.CAPTURE
         return FlashMLASWAAttState(
             sched_meta_by_ratio=new_set(),
-            capture_sched_meta_by_ratio=new_set() if context.for_cuda_graph_capture else None,
+            capture_sched_meta_by_ratio=new_set() if will_capture else None,
         )
 
     @classmethod
     def create_build_context(cls, build_key: int, ctx: AttentionBuildResources) -> FlashMLASWABuildContext:
         # Layers with one compress ratio share the scheduler metadata of their kernel calls.
-        return FlashMLASWABuildContext(compress_ratios=(build_key,), for_cuda_graph_capture=cls.for_cuda_graph_capture)
+        return FlashMLASWABuildContext(compress_ratios=(build_key,))
 
     @classmethod
     def build_context_key(cls, layer_config: SWASparseMLALayerConfig) -> int:
@@ -101,16 +98,12 @@ class _FlashMLASWABackend(AttentionBackend[SWASparseMLALayerConfig, FlashMLASWAA
 
 
 class FlashMLASWAPrefillBackend(_FlashMLASWABackend):
-    for_cuda_graph_capture = False
-
     @staticmethod
     def get_name() -> str:
         return "flashmla_swa_sparse_mla_prefill"
 
 
 class FlashMLASWADecodeBackend(_FlashMLASWABackend):
-    for_cuda_graph_capture = True
-
     @staticmethod
     def get_name() -> str:
         return "flashmla_swa_sparse_mla_decode"

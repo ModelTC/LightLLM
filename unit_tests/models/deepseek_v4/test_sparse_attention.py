@@ -15,6 +15,7 @@ from lightllm.common.attention.backends.sparse_mla.flashmla_swa import (
     FlashMLASWADecodeBackend,
     FlashMLASWAPrefillBackend,
 )
+from lightllm.common.basemodel.infer_struct import GraphMode
 from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
 from lightllm.models.deepseek_v4 import swa_prefill_workspace
 from lightllm.models.deepseek_v4.config import create_attention_config
@@ -114,7 +115,7 @@ def _case(heads, ratio):
     layer.flashmla_q_head_num_ = padded_heads
     layer.head_dim_ = layer.v_head_dim = 512
     layer.compress_ratio = ratio
-    layer.softmax_scale = 512 ** -0.5
+    layer.softmax_scale = 512**-0.5
     layer.alloc_tensor = lambda shape, dtype=None, device=None, **_: torch.empty(shape, dtype=dtype, device=device)
     layer.swa_cache_config = config.create_swa_config()
     layer.compressed_cache_config = config.create_compressed_config(compress_ratio=ratio) if ratio else None
@@ -164,15 +165,16 @@ def _case(heads, ratio):
     )
 
 
-def _infer_state(case, phase, *, params=None, infer_state=None):
+def _infer_state(case, phase, *, params=None, infer_state=None, graph_mode=GraphMode.EAGER):
     """An infer state whose attention state are freshly built for case's layer in phase, as each step builds them."""
     backend = FlashMLASWAPrefillBackend if phase == "prefill" else FlashMLASWADecodeBackend
     infer_state = SimpleNamespace() if infer_state is None else infer_state
+    infer_state.graph_mode = graph_mode
     infer_state.attn_params = case.params if params is None else params
     infer_state.get_att_kv = lambda logical_layer_id: case.packed_kv
     impl = case.layer.prefill_impl if phase == "prefill" else case.layer.decode_impl
     infer_state.att_states = {
-        impl.state_key: backend.build(None, backend.create_build_context(impl.state_key[1], None))
+        impl.state_key: backend.build(infer_state, backend.create_build_context(impl.state_key[1], None))
     }
     return infer_state
 
@@ -257,7 +259,7 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
             case.packed_kv = (case.packed_kv[0], extra)
             params["extra_indices"].copy_(indices)
             params["extra_lengths"].fill_(1)
-        state_info = _infer_state(case, "decode")
+        state_info = _infer_state(case, "decode", graph_mode=GraphMode.CAPTURE)
         state_info.input_ids = torch.zeros(q.shape[0], dtype=torch.int64, device=q.device)
         state_info.case = case
         cases.append((state_info, case.decoded, case.extra_decoded, params))
