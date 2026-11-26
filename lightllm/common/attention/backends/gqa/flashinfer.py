@@ -66,6 +66,7 @@ def _page_metadata(infer_state: InferStateInfo, page_size: int, kv_indices: torc
 
 class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQAAttState, GQALayerInputs]):
     name = "flashinfer_gqa_prefill"
+    phase = "prefill"
 
     @classmethod
     def _check_supported(cls, layer_config: GQALayerConfig) -> None:
@@ -160,6 +161,7 @@ class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQA
 
 class FlashInferGQADecodeBackend(FlashInferGQAPrefillBackend):
     name = "flashinfer_gqa_decode"
+    phase = "decode"
 
     def setup(self, resources: AttentionBuildResources) -> None:
         """Keep one page-index buffer per microbatch for batches of up to the CUDA graph batch size."""

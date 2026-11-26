@@ -46,6 +46,7 @@ class TritonMLADecodeAttState:
 
 class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, TritonMLAPrefillAttState, MLAPrefillLayerInputs]):
     name = "triton_mla_prefill"
+    phase = "prefill"
 
     @classmethod
     def _check_supported(cls, layer_config: MLAPrefillLayerConfig) -> None:
@@ -124,6 +125,7 @@ class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, TritonMLAP
 
 class TritonMLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, TritonMLADecodeAttState, MLADecodeLayerInputs]):
     name = "triton_mla_decode"
+    phase = "decode"
 
     def __init__(self, layer_config: MLADecodeLayerConfig) -> None:
         super().__init__(layer_config)

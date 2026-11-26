@@ -190,10 +190,10 @@ def _construction_failures(reason: Optional[str]) -> list[str]:
 
 
 def _construct(
-    paths: Sequence[str], layer_config: Any, *, agree: bool = False
+    paths: Sequence[str], layer_config: Any, phase: str, *, agree: bool = False
 ) -> tuple[Optional[AttentionBackend], list[str]]:
     """Return the first backend in paths ("module:Class") whose constructor accepts layer_config, and why
-    the others did not."""
+    the others did not. A backend registered for a phase it does not run in raises TypeError."""
     reasons = []
     for path in paths:
         reason = backend = None
@@ -202,6 +202,8 @@ def _construct(
             module_name, class_name = path.split(":")
             backend_cls = getattr(import_module(module_name), class_name)
             label = backend_cls.name
+            if backend_cls.phase != phase:
+                raise TypeError(f"{label} is a {backend_cls.phase} backend, registered for {phase}")
             backend = backend_cls(layer_config)
         except (NotImplementedError, ImportError, OSError) as error:
             reason = f"{label}: {error}"
@@ -245,7 +247,7 @@ def select(
             raise ValueError(
                 f"{phase} attention {requested!r} is not available for {layer_config}; choose from {tuple(backends)}"
             )
-        backend, reasons = _construct(backends[requested], layer_config)
+        backend, reasons = _construct(backends[requested], layer_config, phase)
         if backend is None:
             raise ValueError(f"{phase} attention {requested!r} does not support {layer_config}: {'; '.join(reasons)}")
         return backend
@@ -255,7 +257,7 @@ def select(
     reasons = []
     fallback = None
     for name in dict.fromkeys([*candidates, "triton"]):
-        backend, failures = _construct(backends.get(name, ()), layer_config, agree=True)
+        backend, failures = _construct(backends.get(name, ()), layer_config, phase, agree=True)
         reasons.extend(failures)
         if backend is None:
             continue

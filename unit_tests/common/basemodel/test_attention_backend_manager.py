@@ -237,6 +237,7 @@ created = []
 def fake_backend(backend_name, *, sync=False):
     class Backend(FakeImpl):
         name = backend_name
+        phase = backend_name.rsplit("_", 1)[1]
 
         def setup(self, resources):
             created.append((backend_name, self.state_key[1]))

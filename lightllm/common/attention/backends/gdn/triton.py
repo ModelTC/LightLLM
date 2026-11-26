@@ -132,6 +132,7 @@ def _mtp_conv(config: GDNLayerConfig, inputs: GDNLayerInputs, att_state: GDNDeco
 
 class TritonGDNPrefillBackend(AttentionBackend[GDNLayerConfig, GDNPrefillAttState, GDNLayerInputs]):
     name = "triton_gdn_prefill"
+    phase = "prefill"
 
     def __init__(self, layer_config: GDNLayerConfig) -> None:
         super().__init__(layer_config)
@@ -214,6 +215,7 @@ class TritonGDNPrefillBackend(AttentionBackend[GDNLayerConfig, GDNPrefillAttStat
 
 class TritonGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState, GDNLayerInputs]):
     name = "triton_gdn_decode"
+    phase = "decode"
     # Which state layout the backend runs over; see GDNLayerConfig.replay.
     replay = False
 
@@ -289,6 +291,7 @@ class TritonGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState,
 
 class ReplayGDNDecodeBackend(TritonGDNDecodeBackend):
     name = "replay_gdn_decode"
+    phase = "decode"
     replay = True
 
     def forward(

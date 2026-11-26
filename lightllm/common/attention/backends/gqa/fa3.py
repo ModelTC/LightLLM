@@ -216,6 +216,7 @@ class FA3GQAPrefillBackend(AttentionBackend[GQALayerConfig, FA3GQAPrefillAttStat
     """
 
     name = "fa3_gqa_prefill"
+    phase = "prefill"
 
     def __init__(self, layer_config: GQALayerConfig) -> None:
         super().__init__(layer_config)
@@ -328,6 +329,7 @@ class FA3GQAPrefillBackend(AttentionBackend[GQALayerConfig, FA3GQAPrefillAttStat
 
 class FA3GQADecodeBackend(FA3GQAPrefillBackend):
     name = "fa3_gqa_decode"
+    phase = "decode"
 
     @classmethod
     def _check_supported(cls, layer_config: GQALayerConfig) -> None:

@@ -80,6 +80,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 `AttentionBackend` 实例提供准备本步状态的 `prepare` 和计算本层输出的 `forward`。
 
+- 类属性 `name` 是实现名，`phase` 是运行阶段（`"prefill"` 或 `"decode"`）。选择器只把 backend 绑定到它声明的阶段，注册表登记到错误阶段时抛出 `TypeError`。
 - `group_key(layer_config)` 声明哪些配置会改变本步准备工作。运行时用 `(backend 类, group_key)` 作为 `state_key`，prefill 和 decode 各有自己的状态表。
 - `prepare(infer_state, resources)` 首次调用时执行 `setup(resources)`，在实例上创建该组跨步复用的存储，随后调用 `build(infer_state)`。`setup` 和 `build` 只能读取 `group_key` 包含的 layer config 字段，模型级资源由 `resources` 提供。
 - `build(infer_state)` 为当前 microbatch 生成一份 `AttState`。所有持有同一 `state_key` 的层直接使用它；`forward` 所需而 `setup` 才知道的值（如 page size）放在 `AttState` 中，因为只有组的代表实例执行过 `setup`。

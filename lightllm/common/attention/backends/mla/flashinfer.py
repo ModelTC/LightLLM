@@ -45,6 +45,7 @@ class FlashInferMLAPrefillBackend(
     """The attention state is a causal ragged-KV wrapper planned over the step's expanded keys and values."""
 
     name = "flashinfer_mla_prefill"
+    phase = "prefill"
 
     @classmethod
     def _check_supported(cls, layer_config: MLAPrefillLayerConfig) -> None:
@@ -96,6 +97,7 @@ class FlashInferMLADecodeBackend(
     AttentionBackend[MLADecodeLayerConfig, FlashInferMLADecodeAttState, MLADecodeLayerInputs]
 ):
     name = "flashinfer_mla_decode"
+    phase = "decode"
 
     @classmethod
     def _check_supported(cls, layer_config: MLADecodeLayerConfig) -> None:

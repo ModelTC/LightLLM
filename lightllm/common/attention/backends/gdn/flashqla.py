@@ -5,6 +5,7 @@ from .triton import TritonGDNPrefillBackend
 
 class FlashQLAGDNPrefillBackend(TritonGDNPrefillBackend):
     name = "flashqla_gdn_prefill"
+    phase = "prefill"
 
     @staticmethod
     def load_chunk_kernel():

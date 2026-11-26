@@ -79,6 +79,7 @@ class TritonKDAPrefillBackend(AttentionBackend[KDALayerConfig, KDAPrefillAttStat
     """Prefill over native state: the fused conv emits q/k/v (L2-normalized unless FlashKDA runs)."""
 
     name = "triton_kda_prefill"
+    phase = "prefill"
     # Which state layout the backend runs over; see KDALayerConfig.replay.
     replay = False
 
@@ -156,6 +157,7 @@ class ReplayKDAPrefillBackend(TritonKDAPrefillBackend):
     """Prefill over replay state, which keeps raw q/k: the fused conv runs only for FlashKDA with width 4."""
 
     name = "replay_kda_prefill"
+    phase = "prefill"
     replay = True
 
     def forward(
@@ -205,6 +207,7 @@ class ReplayKDAPrefillBackend(TritonKDAPrefillBackend):
 
 class TritonKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState, KDALayerInputs]):
     name = "triton_kda_decode"
+    phase = "decode"
     replay = False
 
     @classmethod
@@ -254,6 +257,7 @@ class TritonKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState,
 
 class ReplayKDADecodeBackend(TritonKDADecodeBackend):
     name = "replay_kda_decode"
+    phase = "decode"
     replay = True
 
     def forward(

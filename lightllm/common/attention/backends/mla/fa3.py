@@ -28,6 +28,7 @@ class FA3MLAPrefillAttState:
 
 class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefillAttState, MLAPrefillLayerInputs]):
     name = "fa3_mla_prefill"
+    phase = "prefill"
 
     @classmethod
     def requires_cpu_cache_sync(cls) -> bool:
@@ -74,6 +75,7 @@ class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefill
 
 class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAttState, MLADecodeLayerInputs]):
     name = "fa3_mla_decode"
+    phase = "decode"
 
     @classmethod
     def requires_cpu_cache_sync(cls) -> bool:

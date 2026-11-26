@@ -169,6 +169,29 @@ def test_auto_falls_back_on_every_rank_if_one_cannot_load_flashqla(tmp_path):
     torch.multiprocessing.spawn(_select_with_missing_flashqla, args=((tmp_path / "store").as_uri(),), nprocs=2)
 
 
+def test_every_registered_backend_runs_in_the_phase_it_is_registered_for():
+    from importlib import import_module
+
+    for family in selector._REGISTRY.values():
+        for phase, implementations in family.backends.items():
+            for paths in implementations.values():
+                for path in paths:
+                    module_name, class_name = path.split(":")
+                    try:
+                        backend_cls = getattr(import_module(module_name), class_name)
+                    except ImportError:
+                        continue
+                    assert backend_cls.phase == phase, f"{path} is registered for {phase}"
+
+
+def test_a_backend_registered_for_the_other_phase_is_rejected(monkeypatch):
+    family = selector._REGISTRY[GQALayerConfig]
+    swapped = dataclasses.replace(family, backends={"decode": family.backends["prefill"]})
+    monkeypatch.setitem(selector._REGISTRY, GQALayerConfig, swapped)
+    with pytest.raises(TypeError, match="triton_gqa_prefill is a prefill backend, registered for decode"):
+        selector.select(gqa(), "decode", "triton")
+
+
 def test_unregistered_layer_config_type_is_rejected():
     with pytest.raises(NotImplementedError, match="no attention implementations"):
         selector.select(object(), "prefill", "auto")

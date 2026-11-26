@@ -26,6 +26,7 @@ class FlashMLASWAPrefillBackend(
     AttentionBackend[SWASparseMLALayerConfig, FlashMLASWAAttState, SWASparseMLALayerInputs]
 ):
     name = "flashmla_swa_sparse_mla_prefill"
+    phase = "prefill"
 
     @classmethod
     def group_key(cls, layer_config: SWASparseMLALayerConfig) -> int:
@@ -84,3 +85,4 @@ class FlashMLASWAPrefillBackend(
 
 class FlashMLASWADecodeBackend(FlashMLASWAPrefillBackend):
     name = "flashmla_swa_sparse_mla_decode"
+    phase = "decode"

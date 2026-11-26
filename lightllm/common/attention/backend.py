@@ -79,6 +79,8 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
 
     # The backend's name in logs and selection errors.
     name: ClassVar[str]
+    # The phase the backend runs in, "prefill" or "decode"; the selector binds it only to that phase.
+    phase: ClassVar[str]
 
     def __init__(self, layer_config: LayerConfig) -> None:
         self._check_supported(layer_config)

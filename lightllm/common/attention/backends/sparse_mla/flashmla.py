@@ -81,6 +81,7 @@ class FlashMLASparsePrefillBackend(
     AttentionBackend[SparseMLALayerConfig, FlashMLASparsePrefillAttState, SparseMLAPrefillLayerInputs]
 ):
     name = "flashmla_sparse_mla_prefill"
+    phase = "prefill"
 
     @classmethod
     def _check_supported(cls, layer_config: SparseMLALayerConfig) -> None:
@@ -158,6 +159,7 @@ class FlashMLASparseDecodeBackend(
     CUDA graph steps over the "fp8_group64_e8m0" cache use a direct Triton kernel."""
 
     name = "flashmla_sparse_mla_decode"
+    phase = "decode"
 
     def __init__(self, layer_config: SparseMLALayerConfig) -> None:
         super().__init__(layer_config)

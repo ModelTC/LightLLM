@@ -100,6 +100,7 @@ def _check_inputs(config: GQALayerConfig, layer_inputs: GQALayerInputs) -> None:
 
 class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillAttState, GQALayerInputs]):
     name = "triton_gqa_prefill"
+    phase = "prefill"
 
     @classmethod
     def _check_supported(cls, layer_config: GQALayerConfig) -> None:
@@ -211,6 +212,7 @@ class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillA
 
 class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAttState, GQALayerInputs]):
     name = "triton_gqa_decode"
+    phase = "decode"
 
     @classmethod
     def _check_supported(cls, layer_config: GQALayerConfig) -> None:

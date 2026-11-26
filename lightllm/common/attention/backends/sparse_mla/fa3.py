@@ -40,6 +40,7 @@ class FA3SparseMLAPrefillBackend(
     AttentionBackend[SparseMLALayerConfig, FA3SparseMLAPrefillAttState, SparseMLAPrefillLayerInputs]
 ):
     name = "fa3_sparse_mla_prefill"
+    phase = "prefill"
 
     @classmethod
     def _check_supported(cls, layer_config: SparseMLALayerConfig) -> None:
@@ -188,6 +189,7 @@ class FA3SparseMLADecodeBackend(
     """The layer config's causal is the kernel's mask mode, which does not change one-row decode."""
 
     name = "fa3_sparse_mla_decode"
+    phase = "decode"
 
     @classmethod
     def _check_supported(cls, layer_config: SparseMLALayerConfig) -> None:

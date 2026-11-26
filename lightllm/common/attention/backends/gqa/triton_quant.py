@@ -84,6 +84,7 @@ def _quantized_cache(config: GQALayerConfig, layer_inputs: GQALayerInputs):
 
 class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantGQAPrefillAttState, GQALayerInputs]):
     name = "triton_quant_gqa_prefill"
+    phase = "prefill"
 
     @classmethod
     def _check_supported(cls, layer_config: GQALayerConfig) -> None:
@@ -156,6 +157,7 @@ class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantG
 
 class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQADecodeAttState, GQALayerInputs]):
     name = "triton_quant_gqa_decode"
+    phase = "decode"
     # Whether build prepares the shared-prefix groups of the int8 diverse-sampling kernel; set by setup.
     diverse = False
 
