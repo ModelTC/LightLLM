@@ -40,53 +40,54 @@ class GDNDecodeBuildContext:
         self.replay = replay
         self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
 
-    def prepare(self, infer_state: InferStateInfo) -> GDNDecodeAttState:
-        """A CUDA graph step keeps derived tensors per (microbatch, batch size), rewritten in place."""
-        from lightllm.common.attention.kernels.gdn.mtp_state_params import build_dynamic_mtp_linear_att_state_params
 
-        req, device = infer_state.b_req_idx, infer_state.b_req_idx.device
-        width = infer_state.decode_rows_per_request
-        derived = {}
-        if width == 1:
-            conv_idx = ssm_idx = req
-            accepted = None
-            cu = None
-            if self.replay:
-                derived["cu"] = cu = torch.arange(req.numel() + 1, dtype=torch.int32, device=device)
+def build_gdn_decode_state(infer_state: InferStateInfo, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
+    """A CUDA graph step keeps derived tensors per (microbatch, batch size), rewritten in place."""
+    from lightllm.common.attention.kernels.gdn.mtp_state_params import build_dynamic_mtp_linear_att_state_params
+
+    req, device = infer_state.b_req_idx, infer_state.b_req_idx.device
+    width = infer_state.decode_rows_per_request
+    derived = {}
+    if width == 1:
+        conv_idx = ssm_idx = req
+        accepted = None
+        cu = None
+        if context.replay:
+            derived["cu"] = cu = torch.arange(req.numel() + 1, dtype=torch.int32, device=device)
+    else:
+        assert infer_state.req_to_mtp_state_index is not None, "speculative GDN decode needs req_to_mtp_state_index"
+        if infer_state.dynamic_decode_rows:
+            cu, conv_idx, accepted = build_dynamic_mtp_linear_att_state_params(
+                b_req_idx=req,
+                b_mtp_index=infer_state.b_mtp_index,
+                req_to_mtp_state_index=infer_state.req_to_mtp_state_index,
+                hold_req_id=infer_state.pad_req_idx,
+            )
         else:
-            assert infer_state.req_to_mtp_state_index is not None, "speculative GDN decode needs req_to_mtp_state_index"
-            if infer_state.dynamic_decode_rows:
-                cu, conv_idx, accepted = build_dynamic_mtp_linear_att_state_params(
-                    b_req_idx=req,
-                    b_mtp_index=infer_state.b_mtp_index,
-                    req_to_mtp_state_index=infer_state.req_to_mtp_state_index,
-                    hold_req_id=infer_state.pad_req_idx,
-                )
-            else:
-                assert infer_state.batch_size % width == 0, (
-                    "GDN fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
-                    f"got batch_size={infer_state.batch_size}, draft_step={width - 1}."
-                )
-                cu = torch.arange(0, infer_state.batch_size + 1, width, dtype=torch.int32, device=device)
-                conv_idx = req.view(-1, width)[:, 0].contiguous()
-                accepted = infer_state.req_to_mtp_state_index[conv_idx] + 1
-            if self.replay:
-                ssm_idx = conv_idx
-            else:
-                # Each request owns width consecutive recurrent-state slots.
-                offsets = torch.arange(width, device=device, dtype=req.dtype).view(1, width)
-                ssm_idx = (conv_idx * width).view(-1, 1) + offsets
-            derived.update(cu=cu, conv_idx=conv_idx, accepted=accepted, ssm_idx=ssm_idx)
-        if infer_state.uses_cuda_graph and derived:
-            key, store = (infer_state.microbatch_index, infer_state.batch_size), self._cuda_graph_tensors
-            kept = {name: keep_for_cuda_graph(store, (*key, name), value) for name, value in derived.items()}
-            cu = kept.get("cu", cu)
-            conv_idx = kept.get("conv_idx", conv_idx)
-            accepted = kept.get("accepted", accepted)
-            ssm_idx = kept["conv_idx"] if self.replay and "conv_idx" in kept else kept.get("ssm_idx", ssm_idx)
-        return GDNDecodeAttState(
-            conv_idx=conv_idx, ssm_idx=ssm_idx, cu_seqlens=cu, num_accepted_tokens=accepted, draft_step=width - 1
-        )
+            assert infer_state.batch_size % width == 0, (
+                "GDN fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
+                f"got batch_size={infer_state.batch_size}, draft_step={width - 1}."
+            )
+            cu = torch.arange(0, infer_state.batch_size + 1, width, dtype=torch.int32, device=device)
+            conv_idx = req.view(-1, width)[:, 0].contiguous()
+            accepted = infer_state.req_to_mtp_state_index[conv_idx] + 1
+        if context.replay:
+            ssm_idx = conv_idx
+        else:
+            # Each request owns width consecutive recurrent-state slots.
+            offsets = torch.arange(width, device=device, dtype=req.dtype).view(1, width)
+            ssm_idx = (conv_idx * width).view(-1, 1) + offsets
+        derived.update(cu=cu, conv_idx=conv_idx, accepted=accepted, ssm_idx=ssm_idx)
+    if infer_state.uses_cuda_graph and derived:
+        key, store = (infer_state.microbatch_index, infer_state.batch_size), context._cuda_graph_tensors
+        kept = {name: keep_for_cuda_graph(store, (*key, name), value) for name, value in derived.items()}
+        cu = kept.get("cu", cu)
+        conv_idx = kept.get("conv_idx", conv_idx)
+        accepted = kept.get("accepted", accepted)
+        ssm_idx = kept["conv_idx"] if context.replay and "conv_idx" in kept else kept.get("ssm_idx", ssm_idx)
+    return GDNDecodeAttState(
+        conv_idx=conv_idx, ssm_idx=ssm_idx, cu_seqlens=cu, num_accepted_tokens=accepted, draft_step=width - 1
+    )
 
 
 class TritonGDNPrefillBackend(GDNPrefillBackend):
@@ -208,7 +209,7 @@ class TritonGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState,
 
     @classmethod
     def build(cls, metadata: InferStateInfo, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
-        return context.prepare(metadata)
+        return build_gdn_decode_state(metadata, context)
 
     @classmethod
     def create_build_context(cls, build_key: bool, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:

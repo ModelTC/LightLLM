@@ -15,7 +15,6 @@ from lightllm.common.attention.backends.gdn.triton import (
     TritonGDNDecodeBackend,
     TritonGDNPrefillBackend,
 )
-from lightllm.common.attention.backends.gdn.prefill import GDNPrefillBuildContext
 from lightllm.common.basemodel.infer_struct import GraphMode
 from unit_tests.common.attention.backends.linear_ref import (
     CAPACITY,
@@ -118,7 +117,7 @@ def test_gdn_prefill_then_speculative_decode_matches_reference(prefill, replay, 
         dynamic=dynamic,
         prefill_backend=prefill_cls(family.config),
         decode_backend=decode_cls(family.config),
-        prefill_builder=GDNPrefillBuildContext(ssm_slots_per_request=1 if replay else mtp_step + 1),
+        prefill_builder=1 if replay else mtp_step + 1,
     )
 
 
@@ -144,18 +143,21 @@ FIELDS = ("conv_idx", "ssm_idx", "cu_seqlens", "num_accepted_tokens")
 @pytest.mark.parametrize("replay", [False, True], ids=["native", "replay"])
 @pytest.mark.parametrize("dynamic", [False, True], ids=["fixed", "dynamic"])
 def test_decode_step_builder_rewrites_graph_storage_in_place_per_microbatch(replay, dynamic):
+    backend_cls = ReplayGDNDecodeBackend if replay else TritonGDNDecodeBackend
     builder = GDNDecodeBuildContext(replay=replay)
-    first = builder.prepare(_graph_batch([2, 0, 3], [1, 2, 0], dynamic=dynamic, microbatch_index=0, lengths=[3, 1, 2]))
+    first = backend_cls.build(
+        _graph_batch([2, 0, 3], [1, 2, 0], dynamic=dynamic, microbatch_index=0, lengths=[3, 1, 2]), builder
+    )
     captured = {name: getattr(first, name) for name in FIELDS}
     ptrs = {name: t.data_ptr() for name, t in captured.items()}
 
     # A replay of the same graph: same microbatch and batch size, different requests and acceptance.
     batch = _graph_batch([1, 3, 2], [2, 0, 1], dynamic=dynamic, microbatch_index=0, lengths=[2, 3, 1])
-    replayed = builder.prepare(batch)
+    replayed = backend_cls.build(batch, builder)
     eager_batch = copy(batch)
     eager_batch.graph_mode = GraphMode.EAGER
     eager_batch.cuda_graph_max_kv_seq_len = None
-    eager = GDNDecodeBuildContext(replay=replay).prepare(eager_batch)
+    eager = backend_cls.build(eager_batch, GDNDecodeBuildContext(replay=replay))
     for name in FIELDS:
         kept = getattr(replayed, name)
         assert kept.data_ptr() == ptrs[name], f"{name} moved between graph steps"
@@ -165,7 +167,9 @@ def test_decode_step_builder_rewrites_graph_storage_in_place_per_microbatch(repl
 
     # The other microbatch of an overlapped step has its own storage, and building it leaves microbatch 0 alone.
     before = {name: getattr(replayed, name).clone() for name in FIELDS}
-    other = builder.prepare(_graph_batch([0, 2, 3], [0, 0, 2], dynamic=dynamic, microbatch_index=1, lengths=[1, 2, 3]))
+    other = backend_cls.build(
+        _graph_batch([0, 2, 3], [0, 0, 2], dynamic=dynamic, microbatch_index=1, lengths=[1, 2, 3]), builder
+    )
     for name in FIELDS:
         assert getattr(other, name).data_ptr() != ptrs[name], f"{name} shared across microbatches"
         assert torch.equal(getattr(replayed, name), before[name]), f"{name} of microbatch 0 overwritten"
@@ -174,12 +178,14 @@ def test_decode_step_builder_rewrites_graph_storage_in_place_per_microbatch(repl
 def test_replay_decode_without_speculation_keeps_its_row_offsets():
     builder = GDNDecodeBuildContext(replay=True)
     batch = decode_batch([2, 0, 3], [1, 1, 1], 1, HOLD, None, dynamic=False, graph=True)
-    first = builder.prepare(batch)
-    again = builder.prepare(decode_batch([1, 3, 2], [1, 1, 1], 1, HOLD, None, dynamic=False, graph=True))
+    first = ReplayGDNDecodeBackend.build(batch, builder)
+    again = ReplayGDNDecodeBackend.build(
+        decode_batch([1, 3, 2], [1, 1, 1], 1, HOLD, None, dynamic=False, graph=True), builder
+    )
     assert again.cu_seqlens.data_ptr() == first.cu_seqlens.data_ptr()
     assert torch.equal(again.cu_seqlens, torch.arange(4, dtype=torch.int32, device="cuda"))
     # Native state needs no derived tensors: the graph reads b_req_idx, which the caller rewrites in place.
-    native = GDNDecodeBuildContext(replay=False).prepare(batch)
+    native = TritonGDNDecodeBackend.build(batch, GDNDecodeBuildContext(replay=False))
     assert native.conv_idx is batch.b_req_idx and native.cu_seqlens is None
 
 

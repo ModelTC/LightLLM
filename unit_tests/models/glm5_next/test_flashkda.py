@@ -164,13 +164,15 @@ def test_automatic_dispatch_accounts_for_heads_and_length(flash_module, heads, l
     model.args.ssm_state_mode = mode
     model.config["linear_attn_config"]["num_heads"] = 64
     model.tp_world_size_ = 64 // heads
-    att_state = kda_attention(model).step_builders["prefill"].prepare(prefill_batch(length))
+    attention = kda_attention(model)
+    att_state = attention.backends["prefill"].build(prefill_batch(length), attention.step_builders["prefill"])
     assert (att_state.flash_kda_fwd is flash_module.fwd) == uses_flash
 
 
 def test_explicit_flashkda_overrides_performance_policy(flash_module):
-    step_builder = kda_attention(make_model()).step_builders["prefill"]
-    assert step_builder.prepare(prefill_batch(32768)).flash_kda_fwd is flash_module.fwd
+    attention = kda_attention(make_model())
+    att_state = attention.backends["prefill"].build(prefill_batch(32768), attention.step_builders["prefill"])
+    assert att_state.flash_kda_fwd is flash_module.fwd
 
 
 def test_fp8_sparse_kv_does_not_change_kda_selection(flash_module):

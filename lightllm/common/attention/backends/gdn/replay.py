@@ -7,7 +7,7 @@ import torch
 from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from . import GDNLayerConfig, GDNLayerInputs, _split_qkv
-from .triton import GDNDecodeAttState, GDNDecodeBuildContext, _mtp_conv, _pack_decode_inputs
+from .triton import GDNDecodeAttState, GDNDecodeBuildContext, _mtp_conv, _pack_decode_inputs, build_gdn_decode_state
 
 
 class ReplayGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState, GDNLayerInputs]):
@@ -69,7 +69,7 @@ class ReplayGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState,
 
     @classmethod
     def build(cls, metadata: InferStateInfo, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
-        return context.prepare(metadata)
+        return build_gdn_decode_state(metadata, context)
 
     @classmethod
     def create_build_context(cls, build_key: bool, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:

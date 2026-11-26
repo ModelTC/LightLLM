@@ -9,7 +9,7 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention_backend_manager as attention_groups_module
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from unit_tests.common.attention.backends.step_fixture import make_infer_state
-from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBuildContext
+from lightllm.common.attention.backends.gqa.fa3 import _group_rows
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQADecodeBuildContext
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
@@ -147,7 +147,7 @@ def test_fa3_gqa_decode_step_builder_groups_dynamic_rows():
         pad_req_idx=-1,
     )
 
-    cu_seqlens_q, _, cache_seqlens, att_req_idx = FA3GQADecodeBuildContext._group_rows(batch)
+    cu_seqlens_q, _, cache_seqlens, att_req_idx = _group_rows(batch)
     torch.cuda.synchronize()
 
     assert att_req_idx.cpu().tolist() == [7, -1, -1, -1]

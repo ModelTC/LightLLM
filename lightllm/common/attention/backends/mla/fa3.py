@@ -10,7 +10,13 @@ from lightllm.common.attention.backend import (
     TensorAllocator,
 )
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from ..gqa.fa3 import FA3GQADecodeAttState, FA3GQADecodeBuildContext, FA3PageTables, fa3_requires_cpu_cache_sync
+from ..gqa.fa3 import (
+    FA3GQADecodeAttState,
+    FA3GQADecodeBuildContext,
+    FA3PageTables,
+    build_fa3_decode_state,
+    fa3_requires_cpu_cache_sync,
+)
 from . import MLADecodeLayerConfig, MLADecodeLayerInputs, MLAPrefillLayerConfig, MLAPrefillLayerInputs
 
 
@@ -124,7 +130,7 @@ class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAtt
 
     @classmethod
     def build(cls, metadata: InferStateInfo, context: FA3GQADecodeBuildContext) -> FA3GQADecodeAttState:
-        return context.prepare(metadata)
+        return build_fa3_decode_state(metadata, context)
 
     @classmethod
     def create_build_context(cls, build_key: None, ctx: AttentionBuildResources) -> FA3GQADecodeBuildContext:

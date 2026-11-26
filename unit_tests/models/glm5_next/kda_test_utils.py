@@ -129,7 +129,7 @@ class KDAStep:
             role = SimpleNamespace(att_state_manager=infer.att_state_manager, att_state_role=infer.att_state_role)
             index = recurrent_mtp_state_index(role)
         batch = configure_attention_step(infer, replace(attention.step_config, req_to_mtp_state_index=index))
-        self.att_state = attention.step_builders[self.phase].prepare(batch)
+        self.att_state = attention.backends[self.phase].build(batch, attention.step_builders[self.phase])
 
     def run(self, params, alloc_func=torch.empty):
         """params is kda_params(...); returns [rows, num_heads, head_dim]."""

@@ -68,72 +68,73 @@ class FA3GQADecodeBuildContext:
         self.page_table_view = page_table_view
         self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
 
-    def prepare(self, batch: InferStateInfo) -> FA3GQADecodeAttState:
-        """Group query rows into attention requests and fill their page-table rows.
 
-        A CUDA graph step uses a page table as wide as the graph capacity and keeps every
-        derived tensor at a fixed address per (microbatch, batch size), rewriting them in place
-        on replay steps.
-        """
-        from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
+def build_fa3_decode_state(batch: InferStateInfo, context: FA3GQADecodeBuildContext) -> FA3GQADecodeAttState:
+    """Group query rows into attention requests and fill their page-table rows.
 
-        cu_seqlens_q, cu_seqlens_k, cache_seqlens, att_req_idx = self._group_rows(batch)
-        width = batch.cuda_graph_max_kv_seq_len if batch.uses_cuda_graph else batch.max_kv_seq_len
-        page_table = self.page_table_view(att_req_idx.shape[0], width, batch.microbatch_index)
-        page_table_copy(
-            page_table=page_table[:, : triton.cdiv(batch.max_kv_seq_len, self.page_size)],
-            req_to_token_indexs=batch.req_to_token_indexs,
-            b_req_idx=att_req_idx,
-            page_size=self.page_size,
+    A CUDA graph step uses a page table as wide as the graph capacity and keeps every
+    derived tensor at a fixed address per (microbatch, batch size), rewriting them in place
+    on replay steps.
+    """
+    from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
+
+    cu_seqlens_q, cu_seqlens_k, cache_seqlens, att_req_idx = _group_rows(batch)
+    width = batch.cuda_graph_max_kv_seq_len if batch.uses_cuda_graph else batch.max_kv_seq_len
+    page_table = context.page_table_view(att_req_idx.shape[0], width, batch.microbatch_index)
+    page_table_copy(
+        page_table=page_table[:, : triton.cdiv(batch.max_kv_seq_len, context.page_size)],
+        req_to_token_indexs=batch.req_to_token_indexs,
+        b_req_idx=att_req_idx,
+        page_size=context.page_size,
+    )
+    if batch.uses_cuda_graph:
+        key = (batch.microbatch_index, batch.batch_size)
+        store = context._cuda_graph_tensors
+        cu_seqlens_q = keep_for_cuda_graph(store, (*key, "cu_seqlens_q"), cu_seqlens_q)
+        cu_seqlens_k = keep_for_cuda_graph(store, (*key, "cu_seqlens_k"), cu_seqlens_k)
+        cache_seqlens = keep_for_cuda_graph(store, (*key, "cache_seqlens"), cache_seqlens)
+    return FA3GQADecodeAttState(
+        page_table=page_table,
+        cache_seqlens=cache_seqlens,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=batch.decode_rows_per_request,
+        max_seqlen_k=batch.max_kv_seq_len,
+        page_size=context.page_size,
+    )
+
+
+def _group_rows(batch: InferStateInfo):
+    """Return int32 query/kv offsets, kv lengths and request slots per attention request."""
+    from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
+
+    rows = batch.decode_rows_per_request
+    if batch.dynamic_decode_rows:
+        from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params
+        from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
+
+        markers = build_mtp_shared_group_markers(batch.b_req_idx, hold_req_id=batch.pad_req_idx)
+        q_lens, kv_lens, att_req_idx, cache_seqlens = build_dynamic_spec_fa3_decode_params(
+            b_req_idx=batch.b_req_idx,
+            b_seq_len=batch.b_seq_len,
+            b_mark_mtp_shared_group=markers,
+            att_batch_size=batch.batch_size,
+            hold_req_id=batch.pad_req_idx,
         )
-        if batch.uses_cuda_graph:
-            key = (batch.microbatch_index, batch.batch_size)
-            store = self._cuda_graph_tensors
-            cu_seqlens_q = keep_for_cuda_graph(store, (*key, "cu_seqlens_q"), cu_seqlens_q)
-            cu_seqlens_k = keep_for_cuda_graph(store, (*key, "cu_seqlens_k"), cu_seqlens_k)
-            cache_seqlens = keep_for_cuda_graph(store, (*key, "cache_seqlens"), cache_seqlens)
-        return FA3GQADecodeAttState(
-            page_table=page_table,
-            cache_seqlens=cache_seqlens,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=batch.decode_rows_per_request,
-            max_seqlen_k=batch.max_kv_seq_len,
-            page_size=self.page_size,
+    elif rows > 1:
+        assert batch.batch_size % rows == 0, (
+            "FA3 fixed-layout decode requires batch_size to be divisible by the rows per request, "
+            f"got batch_size={batch.batch_size}, rows={rows}"
         )
-
-    @staticmethod
-    def _group_rows(batch: InferStateInfo):
-        """Return int32 query/kv offsets, kv lengths and request slots per attention request."""
-        from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
-
-        rows = batch.decode_rows_per_request
-        if batch.dynamic_decode_rows:
-            from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params
-            from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
-
-            markers = build_mtp_shared_group_markers(batch.b_req_idx, hold_req_id=batch.pad_req_idx)
-            q_lens, kv_lens, att_req_idx, cache_seqlens = build_dynamic_spec_fa3_decode_params(
-                b_req_idx=batch.b_req_idx,
-                b_seq_len=batch.b_seq_len,
-                b_mark_mtp_shared_group=markers,
-                att_batch_size=batch.batch_size,
-                hold_req_id=batch.pad_req_idx,
-            )
-        elif rows > 1:
-            assert batch.batch_size % rows == 0, (
-                "FA3 fixed-layout decode requires batch_size to be divisible by the rows per request, "
-                f"got batch_size={batch.batch_size}, rows={rows}"
-            )
-            # The last row of each request sees its longest prefix.
-            q_lens = torch.full((batch.batch_size // rows,), rows, dtype=torch.int32, device=batch.b_seq_len.device)
-            kv_lens = batch.b_seq_len[rows - 1 :: rows]
-            att_req_idx = batch.b_req_idx[rows - 1 :: rows]
-            cache_seqlens = kv_lens.contiguous()
-        else:
-            return batch.b1_cu_q_seq_len.int(), batch.b1_cu_kv_seq_len.int(), batch.b_seq_len, batch.b_req_idx
-        cu_seqlens_q, cu_seqlens_k = gen_cumsum_pad0_tensor(q_lens, kv_lens)
-        return cu_seqlens_q.int(), cu_seqlens_k.int(), cache_seqlens, att_req_idx
+        # The last row of each request sees its longest prefix.
+        q_lens = torch.full((batch.batch_size // rows,), rows, dtype=torch.int32, device=batch.b_seq_len.device)
+        kv_lens = batch.b_seq_len[rows - 1 :: rows]
+        att_req_idx = batch.b_req_idx[rows - 1 :: rows]
+        cache_seqlens = kv_lens.contiguous()
+    else:
+        return batch.b1_cu_q_seq_len.int(), batch.b1_cu_kv_seq_len.int(), batch.b_seq_len, batch.b_req_idx
+    cu_seqlens_q, cu_seqlens_k = gen_cumsum_pad0_tensor(q_lens, kv_lens)
+    return cu_seqlens_q.int(), cu_seqlens_k.int(), cache_seqlens, att_req_idx
 
 
 def _check_gqa_config(layer_config: GQALayerConfig) -> None:
@@ -428,7 +429,7 @@ class FA3GQADecodeBackend(AttentionBackend[GQALayerConfig, FA3GQADecodeAttState,
 
     @classmethod
     def build(cls, metadata: InferStateInfo, context: FA3GQADecodeBuildContext) -> FA3GQADecodeAttState:
-        return context.prepare(metadata)
+        return build_fa3_decode_state(metadata, context)
 
     @classmethod
     def create_build_context(cls, build_key: Optional[str], ctx: AttentionBuildResources) -> FA3GQADecodeBuildContext:

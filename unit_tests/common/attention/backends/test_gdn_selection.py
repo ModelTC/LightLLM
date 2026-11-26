@@ -8,7 +8,12 @@ import torch
 
 from lightllm.common.attention import selector
 from lightllm.common.attention.backends.gdn import GDNLayerConfig
-from lightllm.common.attention.backends.gdn.triton import GDNDecodeBuildContext, TritonGDNPrefillBackend
+from lightllm.common.attention.backends.gdn.replay import ReplayGDNDecodeBackend
+from lightllm.common.attention.backends.gdn.triton import (
+    GDNDecodeBuildContext,
+    TritonGDNDecodeBackend,
+    TritonGDNPrefillBackend,
+)
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
 from lightllm.common.basemodel import attention_backend_manager
@@ -92,11 +97,11 @@ def test_decode_step_builder_uses_request_slots_without_speculation():
     from lightllm.common.attention.backends.gdn.triton import GDNDecodeBuildContext
 
     b_req_idx = torch.tensor([2, 4], dtype=torch.int32)
-    att_state = GDNDecodeBuildContext(replay=False).prepare(_decode_batch(b_req_idx))
+    att_state = TritonGDNDecodeBackend.build(_decode_batch(b_req_idx), GDNDecodeBuildContext(replay=False))
 
     assert att_state.conv_idx is b_req_idx and att_state.ssm_idx is b_req_idx
     assert att_state.cu_seqlens is None and att_state.num_accepted_tokens is None
-    replay_args = GDNDecodeBuildContext(replay=True).prepare(_decode_batch(b_req_idx))
+    replay_args = ReplayGDNDecodeBackend.build(_decode_batch(b_req_idx), GDNDecodeBuildContext(replay=True))
     torch.testing.assert_close(replay_args.cu_seqlens, torch.tensor([0, 1, 2], dtype=torch.int32))
 
 
@@ -107,7 +112,7 @@ def test_decode_step_builder_groups_fixed_speculative_rows():
     req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
     batch = _decode_batch(b_req_idx, rows=3, req_to_mtp_state_index=req_to_mtp_state_index)
 
-    att_state = GDNDecodeBuildContext(replay=False).prepare(batch)
+    att_state = TritonGDNDecodeBackend.build(batch, GDNDecodeBuildContext(replay=False))
 
     torch.testing.assert_close(att_state.cu_seqlens, torch.tensor([0, 3, 6], dtype=torch.int32))
     torch.testing.assert_close(att_state.conv_idx, torch.tensor([2, 4], dtype=torch.int32))
@@ -115,7 +120,7 @@ def test_decode_step_builder_groups_fixed_speculative_rows():
     torch.testing.assert_close(att_state.ssm_idx, torch.tensor([[6, 7, 8], [12, 13, 14]], dtype=torch.int32))
     assert att_state.draft_step == 2
     # Replay state keeps one SSM slot per request.
-    replay_args = GDNDecodeBuildContext(replay=True).prepare(batch)
+    replay_args = ReplayGDNDecodeBackend.build(batch, GDNDecodeBuildContext(replay=True))
     torch.testing.assert_close(replay_args.ssm_idx, torch.tensor([2, 4], dtype=torch.int32))
 
 
@@ -137,7 +142,7 @@ def test_decode_step_builder_groups_dynamic_speculative_rows(monkeypatch):
     monkeypatch.setattr(mtp_state_params, "build_dynamic_mtp_linear_att_state_params", build_params)
     batch = _decode_batch(b_req_idx, rows=3, dynamic=True, req_to_mtp_state_index=req_to_mtp_state_index, hold=5)
 
-    att_state = GDNDecodeBuildContext(replay=False).prepare(batch)
+    att_state = TritonGDNDecodeBackend.build(batch, GDNDecodeBuildContext(replay=False))
 
     assert att_state.cu_seqlens is expected_cu_q_seq_len
     assert att_state.conv_idx is expected_conv_buffer_idx
@@ -166,7 +171,7 @@ def test_decode_reads_the_acceptance_index_of_its_role(monkeypatch, role: str):
     step_config = attention_backend_manager.attention_step_config(model)
     assert step_config.req_to_mtp_state_index is req_to_mtp_state_index
     batch = attention_backend_manager.configure_attention_step(infer_state, step_config)
-    att_state = GDNDecodeBuildContext(replay=False).prepare(batch)
+    att_state = TritonGDNDecodeBackend.build(batch, GDNDecodeBuildContext(replay=False))
 
     torch.testing.assert_close(att_state.num_accepted_tokens, torch.tensor([2, 3], dtype=torch.int32))
 

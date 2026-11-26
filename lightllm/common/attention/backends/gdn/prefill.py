@@ -22,21 +22,6 @@ class GDNPrefillAttState:
     has_initial_state: torch.Tensor
 
 
-class GDNPrefillBuildContext:
-    def __init__(self, *, ssm_slots_per_request: int) -> None:
-        """Native state keeps state_mtp_step + 1 SSM slots per request; replay state keeps one."""
-        self.ssm_slots_per_request = ssm_slots_per_request
-
-    def prepare(self, infer_state: InferStateInfo) -> GDNPrefillAttState:
-        req = infer_state.b_req_idx
-        return GDNPrefillAttState(
-            conv_idx=req,
-            ssm_idx=req * self.ssm_slots_per_request if self.ssm_slots_per_request != 1 else req,
-            cu_seqlens=infer_state.b1_cu_q_seq_len,
-            has_initial_state=infer_state.b_ready_cache_len > 0,
-        )
-
-
 class GDNPrefillBackend(AttentionBackend[GDNLayerConfig, GDNPrefillAttState, GDNLayerInputs]):
     def __init__(self, layer_config: GDNLayerConfig) -> None:
         super().__init__(layer_config)
@@ -99,16 +84,20 @@ class GDNPrefillBackend(AttentionBackend[GDNLayerConfig, GDNPrefillAttState, GDN
         out.copy_(output)
         return out
 
-    build_context_type = GDNPrefillBuildContext
+    @classmethod
+    def build(cls, metadata: InferStateInfo, ssm_slots_per_request: int) -> GDNPrefillAttState:
+        req = metadata.b_req_idx
+        return GDNPrefillAttState(
+            conv_idx=req,
+            ssm_idx=req * ssm_slots_per_request if ssm_slots_per_request != 1 else req,
+            cu_seqlens=metadata.b1_cu_q_seq_len,
+            has_initial_state=metadata.b_ready_cache_len > 0,
+        )
 
     @classmethod
-    def build(cls, metadata: InferStateInfo, context: GDNPrefillBuildContext) -> GDNPrefillAttState:
-        return context.prepare(metadata)
-
-    @classmethod
-    def create_build_context(cls, build_key: tuple[bool, int], ctx: AttentionBuildResources) -> GDNPrefillBuildContext:
+    def create_build_context(cls, build_key: tuple[bool, int], ctx: AttentionBuildResources) -> int:
         replay, state_mtp_step = build_key
-        return GDNPrefillBuildContext(ssm_slots_per_request=1 if replay else state_mtp_step + 1)
+        return 1 if replay else state_mtp_step + 1
 
     @classmethod
     def build_context_key(cls, layer_config: GDNLayerConfig):

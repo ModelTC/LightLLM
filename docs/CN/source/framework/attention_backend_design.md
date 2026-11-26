@@ -132,7 +132,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 ### 4.3 AttentionBackend.build
 
-`backend.build(infer_state, context)` 对每个上下文每步执行一次，包括 CUDA graph 的捕获步和 replay 步，在第一层之前、捕获之外运行。约束：
+`backend.build(infer_state, context)` 对每个状态组每步执行一次，包括 CUDA graph 的捕获步和 replay 步，在第一层之前、捕获之外运行。`context` 保存跨步复用的配置或缓冲区，由 `build` 生成本步状态。约束：
 
 1. **graph 步的派生状态按 `(microbatch_index, batch_size)` 保存并原地改写。** 使用 `keep_for_cuda_graph(store, key, value)`：第一次保存副本，之后 `copy_` 到同一地址。graph 捕获时读取的是这个地址；replay 步新建的张量 graph 看不到。microbatch overlap 的两个微批是不同的 graph，不能共享存储。
 2. **主机侧字段在 replay 时保持捕获时的值，且必须对每次 replay 有效。** 网格大小、scratch 大小和 kernel 配置被固化在 graph 中，graph 步应按容量而不是捕获步的实际长度确定。只用于选择 kernel 配置、kernel 自己在 GPU 上读取实际长度的字段称为 hint，可以取本步实际值，必须在 docstring 中注明。例如 Triton GQA decode 的 `kv_seq_len_bound` 是界，`max_kv_seq_len` 是 hint。
