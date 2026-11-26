@@ -1,3 +1,5 @@
+"""FlashInfer MLA: ragged prefill over expanded keys and values, paged decode over the latent cache."""
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -7,7 +9,13 @@ import triton
 from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from .. import set_flashinfer_envs
-from . import MLADecodeLayerConfig, MLADecodeLayerInputs, MLAPrefillLayerConfig, MLAPrefillLayerInputs
+from . import (
+    MLADecodeLayerConfig,
+    MLADecodeLayerInputs,
+    MLAPrefillLayerConfig,
+    MLAPrefillLayerInputs,
+    expand_mla_keys,
+)
 
 if TYPE_CHECKING:
     from flashinfer.mla import BatchMLAPagedAttentionWrapper
@@ -52,6 +60,25 @@ class FlashInferMLAPrefillBackend(
         set_flashinfer_envs()
         self.resources = resources
 
+    def build(self, infer_state: InferStateInfo) -> "BatchPrefillWithRaggedKVCacheWrapper":
+        """Plan a fresh wrapper for the step's query and kv offsets."""
+        import flashinfer
+
+        config = self.layer_config
+        wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(_workspace(self.resources), "NHD")
+        wrapper.plan(
+            qo_indptr=infer_state.b1_cu_q_seq_len.int(),
+            kv_indptr=infer_state.b1_cu_kv_seq_len.int(),
+            num_qo_heads=config.num_heads,
+            num_kv_heads=config.num_heads,
+            head_dim_qk=config.qk_nope_head_dim + config.qk_rope_head_dim,
+            head_dim_vo=config.v_head_dim,
+            q_data_type=config.dtype,
+            causal=True,
+            sm_scale=config.softmax_scale,
+        )
+        return wrapper
+
     def forward(
         self,
         att_state: "BatchPrefillWithRaggedKVCacheWrapper",
@@ -61,33 +88,8 @@ class FlashInferMLAPrefillBackend(
         alloc_func: TensorAllocator = torch.empty,
     ) -> torch.Tensor:
         """Fill and return out [query_tokens, num_heads, v_head_dim]; keys are expanded into alloc_func scratch."""
-        layer_config = self.layer_config
-        q, k_nope = layer_inputs.q, layer_inputs.k_nope
-        nope_dim, heads = layer_config.qk_nope_head_dim, layer_config.num_heads
-        k = alloc_func((k_nope.shape[0], heads, q.shape[-1]), dtype=q.dtype, device=q.device)
-        k[:, :, :nope_dim].copy_(k_nope)
-        k[:, :, nope_dim:].copy_(layer_inputs.k_rope.expand(-1, heads, -1))
-        att_state.run(q, k, layer_inputs.v, out=out)
+        att_state.run(layer_inputs.q, expand_mla_keys(layer_inputs, alloc_func), layer_inputs.v, out=out)
         return out
-
-    def build(self, infer_state: InferStateInfo) -> "BatchPrefillWithRaggedKVCacheWrapper":
-        """Plan a fresh wrapper for the step's query and kv offsets."""
-        import flashinfer
-
-        c = self.layer_config
-        wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(_workspace(self.resources), "NHD")
-        wrapper.plan(
-            qo_indptr=infer_state.b1_cu_q_seq_len.int(),
-            kv_indptr=infer_state.b1_cu_kv_seq_len.int(),
-            num_qo_heads=c.num_heads,
-            num_kv_heads=c.num_heads,
-            head_dim_qk=c.qk_nope_head_dim + c.qk_rope_head_dim,
-            head_dim_vo=c.v_head_dim,
-            q_data_type=c.dtype,
-            causal=True,
-            sm_scale=c.softmax_scale,
-        )
-        return wrapper
 
 
 class FlashInferMLADecodeBackend(
@@ -117,27 +119,6 @@ class FlashInferMLADecodeBackend(
         self._kv_indices = [torch.empty(numel, dtype=torch.int32, device=resources.device) for _ in range(2)]
         self._graph_wrappers: dict[tuple[int, int], "BatchMLAPagedAttentionWrapper"] = {}
 
-    def forward(
-        self,
-        att_state: FlashInferMLADecodeAttState,
-        layer_inputs: MLADecodeLayerInputs,
-        *,
-        out: torch.Tensor,
-        alloc_func: TensorAllocator = torch.empty,
-    ) -> torch.Tensor:
-        """Fill and return out with q_nope's shape; the planned workspace holds the scratch."""
-        layer_config = self.layer_config
-        kv, rank, page_size = layer_inputs.kv_cache, layer_config.kv_lora_rank, att_state.page_size
-        att_state.wrapper.run(
-            layer_inputs.q_nope,
-            layer_inputs.q_rope,
-            kv[:, :, :rank].view(-1, page_size, 1, rank),
-            kv[:, :, rank:].view(-1, page_size, 1, layer_config.qk_rope_head_dim),
-            out=out,
-            return_lse=False,
-        )
-        return out
-
     def build(self, infer_state: InferStateInfo) -> FlashInferMLADecodeAttState:
         """Plan the step's wrapper; every query row is its own request.
 
@@ -150,7 +131,7 @@ class FlashInferMLADecodeBackend(
         from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
         from lightllm.common.basemodel.triton_kernel.repack_kv_index import repack_kv_index
 
-        c, page_size = self.layer_config, self.page_size
+        config, page_size = self.layer_config, self.page_size
         device = infer_state.b_seq_len.device
         # A partial final page still counts as one page.
         b_page_len = (infer_state.b_seq_len + (page_size - 1)) // page_size
@@ -185,7 +166,7 @@ class FlashInferMLADecodeBackend(
                 kv_page_indptr=kv_starts,
                 kv_lens=infer_state.b_seq_len,
                 batch_size=infer_state.batch_size,
-                num_heads=c.num_heads,
+                num_heads=config.num_heads,
                 max_kv_len=infer_state.max_kv_seq_len,
             )
             return FlashInferMLADecodeAttState(wrapper=wrapper, page_size=page_size)
@@ -202,16 +183,37 @@ class FlashInferMLADecodeBackend(
             kv_starts,
             kv_indices,
             infer_state.b_seq_len,
-            c.num_heads,
-            c.kv_lora_rank,
-            c.qk_rope_head_dim,
+            config.num_heads,
+            config.kv_lora_rank,
+            config.qk_rope_head_dim,
             page_size,
             # Each row is its own request, so causality across a request's rows comes from the lengths.
             False,
-            c.softmax_scale,
-            c.dtype,
-            c.dtype,
+            config.softmax_scale,
+            config.dtype,
+            config.dtype,
         )
         if infer_state.uses_cuda_graph:
             self._graph_wrappers[key] = wrapper
         return FlashInferMLADecodeAttState(wrapper=wrapper, page_size=page_size)
+
+    def forward(
+        self,
+        att_state: FlashInferMLADecodeAttState,
+        layer_inputs: MLADecodeLayerInputs,
+        *,
+        out: torch.Tensor,
+        alloc_func: TensorAllocator = torch.empty,
+    ) -> torch.Tensor:
+        """Fill and return out with q_nope's shape; the planned workspace holds the scratch."""
+        config = self.layer_config
+        kv, rank, page_size = layer_inputs.kv_cache, config.kv_lora_rank, att_state.page_size
+        att_state.wrapper.run(
+            layer_inputs.q_nope,
+            layer_inputs.q_rope,
+            kv[:, :, :rank].view(-1, page_size, 1, rank),
+            kv[:, :, rank:].view(-1, page_size, 1, config.qk_rope_head_dim),
+            out=out,
+            return_lse=False,
+        )
+        return out

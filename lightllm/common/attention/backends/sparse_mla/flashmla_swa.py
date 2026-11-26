@@ -32,6 +32,16 @@ class FlashMLASWAPrefillBackend(
         # Layers with one compress ratio share the scheduler metadata of their kernel calls.
         return layer_config.compress_ratio
 
+    def build(self, infer_state: InferStateInfo) -> FlashMLASWAAttState:
+        """Prepare scheduler objects whose GPU planning runs at the first kernel call."""
+        import flash_mla
+
+        will_capture = infer_state.graph_mode is GraphMode.CAPTURE
+        return FlashMLASWAAttState(
+            sched_meta=flash_mla.get_mla_metadata()[0],
+            capture_sched_meta=flash_mla.get_mla_metadata()[0] if will_capture else None,
+        )
+
     def forward(
         self,
         att_state: FlashMLASWAAttState,
@@ -70,16 +80,6 @@ class FlashMLASWAPrefillBackend(
             out=out.unsqueeze(1),
         )
         return out
-
-    def build(self, infer_state: InferStateInfo) -> FlashMLASWAAttState:
-        """Prepare scheduler objects whose GPU planning runs at the first kernel call."""
-        import flash_mla
-
-        will_capture = infer_state.graph_mode is GraphMode.CAPTURE
-        return FlashMLASWAAttState(
-            sched_meta=flash_mla.get_mla_metadata()[0],
-            capture_sched_meta=flash_mla.get_mla_metadata()[0] if will_capture else None,
-        )
 
 
 class FlashMLASWADecodeBackend(FlashMLASWAPrefillBackend):

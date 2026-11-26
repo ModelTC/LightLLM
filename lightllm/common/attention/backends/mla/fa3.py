@@ -7,7 +7,13 @@ import torch
 from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from ..gqa.fa3 import FA3GQADecodeAttState, build_fa3_decode_state, fa3_requires_cpu_cache_sync
-from . import MLADecodeLayerConfig, MLADecodeLayerInputs, MLAPrefillLayerConfig, MLAPrefillLayerInputs
+from . import (
+    MLADecodeLayerConfig,
+    MLADecodeLayerInputs,
+    MLAPrefillLayerConfig,
+    MLAPrefillLayerInputs,
+    expand_mla_keys,
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +33,14 @@ class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefill
     def requires_cpu_cache_sync(cls) -> bool:
         return fa3_requires_cpu_cache_sync()
 
+    def build(self, infer_state: InferStateInfo) -> FA3MLAPrefillAttState:
+        return FA3MLAPrefillAttState(
+            cu_seqlens_q=infer_state.b1_cu_q_seq_len.int(),
+            cu_seqlens_k=infer_state.b1_cu_kv_seq_len.int(),
+            max_seqlen_q=infer_state.max_q_seq_len,
+            max_seqlen_k=infer_state.max_kv_seq_len,
+        )
+
     def forward(
         self,
         att_state: FA3MLAPrefillAttState,
@@ -41,37 +55,21 @@ class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefill
         """
         from lightllm.utils.sgl_utils import flash_attn_varlen_func
 
-        layer_config = self.layer_config
-        q, k_nope = layer_inputs.q, layer_inputs.k_nope
-        nope_dim, heads = layer_config.qk_nope_head_dim, layer_config.num_heads
-        k = alloc_func((k_nope.shape[0], heads, q.shape[-1]), dtype=q.dtype, device=q.device)
-        k[:, :, :nope_dim].copy_(k_nope)
-        k[:, :, nope_dim:].copy_(layer_inputs.k_rope.expand(-1, heads, -1))
+        config = self.layer_config
         flash_attn_varlen_func(
-            q=q,
-            k=k,
+            q=layer_inputs.q,
+            k=expand_mla_keys(layer_inputs, alloc_func),
             v=layer_inputs.v,
             cu_seqlens_q=att_state.cu_seqlens_q,
             cu_seqlens_k=att_state.cu_seqlens_k,
             max_seqlen_q=att_state.max_seqlen_q,
             max_seqlen_k=att_state.max_seqlen_k,
-            softmax_scale=layer_config.softmax_scale,
-            causal=layer_config.causal,
+            softmax_scale=config.softmax_scale,
+            causal=config.causal,
             return_softmax_lse=False,
             out=out,
         )
         return out
-
-    def build(self, infer_state: InferStateInfo) -> FA3MLAPrefillAttState:
-        assert (
-            infer_state.b1_cu_q_seq_len is not None and infer_state.b1_cu_kv_seq_len is not None
-        ), "prefill fields required"
-        return FA3MLAPrefillAttState(
-            cu_seqlens_q=infer_state.b1_cu_q_seq_len.int(),
-            cu_seqlens_k=infer_state.b1_cu_kv_seq_len.int(),
-            max_seqlen_q=infer_state.max_q_seq_len,
-            max_seqlen_k=infer_state.max_kv_seq_len,
-        )
 
 
 class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAttState, MLADecodeLayerInputs]):
@@ -86,6 +84,9 @@ class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAtt
         self.resources = resources
         self.page_size = resources.page_size
 
+    def build(self, infer_state: InferStateInfo) -> FA3GQADecodeAttState:
+        return build_fa3_decode_state(self, infer_state)
+
     def forward(
         self,
         att_state: FA3GQADecodeAttState,
@@ -97,11 +98,11 @@ class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAtt
         """Fill and return out with q_nope's shape. The rotary part is FA3's q/k and the latent part its qv/v."""
         from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 
-        layer_config = self.layer_config
-        kv, rank, page_size = layer_inputs.kv_cache, layer_config.kv_lora_rank, att_state.page_size
+        config = self.layer_config
+        kv, rank, page_size = layer_inputs.kv_cache, config.kv_lora_rank, att_state.page_size
         flash_attn_with_kvcache(
             q=layer_inputs.q_rope,
-            k_cache=kv[:, :, rank:].view(-1, page_size, 1, layer_config.qk_rope_head_dim),
+            k_cache=kv[:, :, rank:].view(-1, page_size, 1, config.qk_rope_head_dim),
             v_cache=kv[:, :, :rank].view(-1, page_size, 1, rank),
             qv=layer_inputs.q_nope,
             page_table=att_state.page_table,
@@ -109,8 +110,8 @@ class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAtt
             cu_seqlens_q=att_state.cu_seqlens_q,
             cu_seqlens_k_new=att_state.cu_seqlens_k,
             max_seqlen_q=att_state.max_seqlen_q,
-            softmax_scale=layer_config.softmax_scale,
-            causal=layer_config.causal,
+            softmax_scale=config.softmax_scale,
+            causal=config.causal,
             window_size=(-1, -1),
             softcap=0.0,
             k_descale=None,
@@ -119,6 +120,3 @@ class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAtt
             out=out,
         )
         return out
-
-    def build(self, infer_state: InferStateInfo) -> FA3GQADecodeAttState:
-        return build_fa3_decode_state(self, infer_state)

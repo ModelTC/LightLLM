@@ -42,6 +42,17 @@ class MLAPrefillLayerInputs:
     v: torch.Tensor
 
 
+def expand_mla_keys(layer_inputs: MLAPrefillLayerInputs, alloc_func) -> torch.Tensor:
+    """Return the keys of a prefill as [kv_tokens, num_heads, qk_nope_head_dim + qk_rope_head_dim]: each
+    head's k_nope followed by the rotary part all heads share, in alloc_func scratch."""
+    q, k_nope = layer_inputs.q, layer_inputs.k_nope
+    tokens, heads, nope_dim = k_nope.shape
+    k = alloc_func((tokens, heads, q.shape[-1]), dtype=q.dtype, device=q.device)
+    k[:, :, :nope_dim].copy_(k_nope)
+    k[:, :, nope_dim:].copy_(layer_inputs.k_rope.expand(-1, heads, -1))
+    return k
+
+
 @dataclass(frozen=True)
 class MLADecodeLayerConfig:
     """Static configuration of MLA decode over the compressed latent cache.
