@@ -450,7 +450,7 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_multimodal_x2i:
         from .x2i_server.manager import start_x2i_process, setup_devices
 
-        process_manager.start_submodule_processes(
+        x2i_manager_process, = process_manager.start_submodule_processes(
             start_funcs=[
                 start_x2i_process,
             ],
@@ -461,6 +461,7 @@ def _launch_subprocesses(args: StartArgs):
                 {"CUDA_VISIBLE_DEVICES": setup_devices(args)},
             ],
         )
+        process_manager.register_process_tree(x2i_manager_process)
 
     if args.enable_cpu_cache:
         from .multi_level_kv_cache.manager import start_multi_level_kv_cache_manager
