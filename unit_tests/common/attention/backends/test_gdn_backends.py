@@ -8,8 +8,8 @@ import pytest
 import torch
 
 from lightllm.common.attention.backends.gdn import GDNLayerConfig, GDNLayerInputs
+from lightllm.common.attention.backends.gdn.flashqla import FlashQLAGDNPrefillBackend
 from lightllm.common.attention.backends.gdn.triton import (
-    FlashQLAGDNPrefillBackend,
     ReplayGDNDecodeBackend,
     TritonGDNDecodeBackend,
     TritonGDNPrefillBackend,

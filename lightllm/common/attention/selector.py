@@ -123,7 +123,7 @@ _REGISTRY: dict[type, Family] = {
     GDNLayerConfig: Family(
         {
             "prefill": {
-                "flashqla": (f"{_GDN}.triton:FlashQLAGDNPrefillBackend",),
+                "flashqla": (f"{_GDN}.flashqla:FlashQLAGDNPrefillBackend",),
                 "triton": (f"{_GDN}.triton:TritonGDNPrefillBackend",),
             },
             "decode": {"triton": (f"{_GDN}.triton:TritonGDNDecodeBackend", f"{_GDN}.triton:ReplayGDNDecodeBackend")},

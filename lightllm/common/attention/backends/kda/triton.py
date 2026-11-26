@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-
 """KDA implementations: chunked prefill (Triton, or FlashKDA for short steps) and decode over native or
 replay recurrent state. Decode rows group into requests like GDN decode."""
 
@@ -10,55 +8,9 @@ import torch
 
 from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.utils.log_utils import init_logger
 from ..gdn.triton import GDNDecodeAttState, build_recurrent_decode_state
 from . import KDALayerConfig, KDALayerInputs
-
-logger = init_logger(__name__)
-
-
-def import_flash_kda_fwd() -> Callable:
-    """Import FlashKDA's fwd; the ImportError says how to install it."""
-    try:
-        from flash_kda import fwd
-    except (ImportError, OSError) as exc:
-        raise ImportError(
-            "The flashkda prefill backend requires FlashKDA. Install it with "
-            "`pip install --no-build-isolation git+https://github.com/MoonshotAI/FlashKDA.git` "
-            "and build it for the current GPU and PyTorch/CUDA versions."
-        ) from exc
-    return fwd
-
-
-def load_flash_kda_fwd(requested: str, *, dtype: torch.dtype, ssm_dtype: torch.dtype) -> Optional[Callable]:
-    """Return FlashKDA's fwd for the requested prefill provider, or None to use Triton.
-
-    requested is "auto", "flashkda" or "triton". "auto" uses FlashKDA only for BF16 models with a
-    BF16 SSM state on SM90 when it loads; "flashkda" raises if it cannot be loaded.
-    """
-    if requested == "triton":
-        return None
-    if requested not in ("auto", "flashkda"):
-        raise ValueError(f"Unsupported KDA prefill backend: {requested}; use auto, triton, or flashkda")
-    if requested == "auto" and (
-        dtype != torch.bfloat16
-        or ssm_dtype != torch.bfloat16
-        or torch.version.hip is not None
-        or not torch.cuda.is_available()
-        or torch.cuda.get_device_capability() != (9, 0)
-    ):
-        return None
-    try:
-        fwd = import_flash_kda_fwd()
-    except ImportError as exc:
-        if requested == "auto":
-            logger.info("KDA prefill uses Triton because FlashKDA could not be loaded: %s", exc.__cause__)
-            return None
-        raise
-    logger.info(
-        "KDA prefill attention backend: %s.", "automatic FlashKDA/Triton" if requested == "auto" else "flashkda"
-    )
-    return fwd
+from .flashkda import import_flash_kda_fwd, load_flash_kda_fwd
 
 
 @dataclass(frozen=True)

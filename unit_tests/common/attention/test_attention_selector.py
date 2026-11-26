@@ -141,7 +141,7 @@ def test_auto_reports_all_rejected_backends():
 
 def _select_with_missing_flashqla(rank, store):
     from lightllm.common.attention.backends.gdn import GDNLayerConfig
-    from lightllm.common.attention.backends.gdn.triton import FlashQLAGDNPrefillBackend
+    from lightllm.common.attention.backends.gdn.flashqla import FlashQLAGDNPrefillBackend
 
     torch.distributed.init_process_group(
         "gloo", init_method=store, rank=rank, world_size=2, timeout=timedelta(seconds=20)

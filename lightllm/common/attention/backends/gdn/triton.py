@@ -1,4 +1,5 @@
-"""GDN implementations: chunked prefill (Triton or FlashQLA) and decode over native or replay recurrent state.
+"""GDN implementations: chunked Triton prefill (flashqla.py subclasses it) and decode over native or replay
+recurrent state.
 
 Replay decode appends rows to a per-layer history that the replay kernel reads from each request's
 cursor, instead of updating SSM states every token. Prefill is the regular chunked prefill with one
@@ -105,16 +106,6 @@ class TritonGDNPrefillBackend(AttentionBackend[GDNLayerConfig, GDNPrefillAttStat
             cu_seqlens=infer_state.b1_cu_q_seq_len,
             has_initial_state=infer_state.b_ready_cache_len > 0,
         )
-
-
-class FlashQLAGDNPrefillBackend(TritonGDNPrefillBackend):
-    name = "flashqla_gdn_prefill"
-
-    @staticmethod
-    def load_chunk_kernel():
-        from flash_qla import chunk_gated_delta_rule
-
-        return chunk_gated_delta_rule
 
 
 @dataclass(frozen=True)
