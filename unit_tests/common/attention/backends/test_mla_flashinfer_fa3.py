@@ -130,13 +130,13 @@ def test_prefill_with_cached_prefix_matches_reference(backend):
         pytest.importorskip("flashinfer")
         workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
         builder = FlashInferMLAPrefillBackend.build_context_type(builder_config(16, 1), workspace=lambda: workspace)
-        impl = FlashInferMLAPrefillBackend(prefill_config())
+        backend = FlashInferMLAPrefillBackend(prefill_config())
     else:
         builder = None
-        impl = FA3MLAPrefillBackend(prefill_config())
+        backend = FA3MLAPrefillBackend(prefill_config())
     inputs = prefill_inputs(lengths, ready)
     out = torch.empty(inputs.q.shape[0], 16, V_DIM, device="cuda", dtype=torch.bfloat16)
-    assert impl.forward(impl.build(batch, builder), inputs, out=out) is out
+    assert backend.forward(backend.build(batch, builder), inputs, out=out) is out
     expected = prefill_reference(inputs.q, inputs.k_nope, inputs.k_rope, inputs.v, lengths, ready)
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
 
@@ -154,18 +154,18 @@ def test_decode_matches_reference(backend, page_size):
         builder = FlashInferMLADecodeBackend.build_context_type(
             builder_config(16, page_size), workspace=lambda: workspace, max_seq_len=512, **GRAPH_BUFFERS
         )
-        impl = FlashInferMLADecodeBackend(decode_config())
+        backend = FlashInferMLADecodeBackend(decode_config())
     else:
         storage = torch.empty(4 * 512, dtype=torch.int32, device="cuda")
         builder = FA3MLADecodeBackend.build_context_type(
             page_size=page_size,
             page_table_view=lambda rows, width, mb: storage[: rows * -(-width // page_size)].view(rows, -1),
         )
-        impl = FA3MLADecodeBackend(decode_config())
+        backend = FA3MLADecodeBackend(decode_config())
     q_nope = torch.randn(4, 16, RANK, device="cuda", dtype=torch.bfloat16, generator=gen(2))
     q_rope = torch.randn(4, 16, ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(3))
     out = torch.empty_like(q_nope)
-    impl.forward(impl.build(batch, builder), MLADecodeLayerInputs(q_nope, q_rope, cache), out=out)
+    backend.forward(backend.build(batch, builder), MLADecodeLayerInputs(q_nope, q_rope, cache), out=out)
     expected = decode_reference(q_nope, q_rope, cache, token_map, req_ids, lengths)
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
 
@@ -192,7 +192,7 @@ def test_flashinfer_decode_graph_replays_refill_the_captured_plan(lengths, num_h
     builder = FlashInferMLADecodeBackend.build_context_type(
         builder_config(num_heads, page_size), workspace=lambda: workspace, max_seq_len=padded, **GRAPH_BUFFERS
     )
-    impl = FlashInferMLADecodeBackend(decode_config(num_heads))
+    backend = FlashInferMLADecodeBackend(decode_config(num_heads))
     req_ids = list(range(batch_size))
 
     def graph_batch(step_lengths):
@@ -202,11 +202,11 @@ def test_flashinfer_decode_graph_replays_refill_the_captured_plan(lengths, num_h
     captured_batch = graph_batch([2] * batch_size)
     att_state = FlashInferMLADecodeBackend.build(captured_batch, builder)
     graph_out = torch.empty_like(q_nope)
-    impl.forward(att_state, inputs, out=graph_out)
+    backend.forward(att_state, inputs, out=graph_out)
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        impl.forward(att_state, inputs, out=graph_out)
+        backend.forward(att_state, inputs, out=graph_out)
 
     eager_workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
     eager_builder = FlashInferMLADecodeBackend.build_context_type(
@@ -218,7 +218,7 @@ def test_flashinfer_decode_graph_replays_refill_the_captured_plan(lengths, num_h
         captured_batch.b_seq_len.copy_(replay_batch.b_seq_len)
         graph.replay()
         expected = torch.empty_like(q_nope)
-        impl.forward(
+        backend.forward(
             FlashInferMLADecodeBackend.build(make_batch(token_map, req_ids, replay_lengths), eager_builder),
             inputs,
             out=expected,

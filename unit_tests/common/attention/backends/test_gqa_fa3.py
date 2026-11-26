@@ -155,8 +155,8 @@ def test_prefill(page_size, causal, window, sinks, cached):
     batch = make_batch(token_map, req_ids, lengths, query_lengths, b_ready_cache_len=torch.tensor(ready).cuda())
     att_state = FA3GQAPrefillBackend.build(batch, FA3GQAPrefillBackend.build_context_type(page_size=page_size))
     out = torch.empty_like(q)
-    impl = FA3GQAPrefillBackend(layer_config)
-    assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sink_logits), out=out) is out
+    backend = FA3GQAPrefillBackend(layer_config)
+    assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sink_logits), out=out) is out
     rows = [(r, pos + 1, n) for r, n, c in zip(req_ids, lengths, ready) for pos in range(c, n)]
     expected = reference(q, k, v, token_map, rows, causal=causal, window=window, sinks=sink_logits)
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
@@ -245,8 +245,8 @@ def test_decode_layouts(layout, sinks, page_size):
     step_builder = FA3GQADecodeBackend.build_context_type(page_size=page_size, page_table_view=_PageTables(page_size))
     att_state = FA3GQADecodeBackend.build(batch, step_builder)
     out = torch.empty_like(q)
-    impl = FA3GQADecodeBackend(layer_config)
-    assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sink_logits), out=out) is out
+    backend = FA3GQADecodeBackend(layer_config)
+    assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sink_logits), out=out) is out
     keep = [i for i, r in enumerate(req_ids) if r != PAD]
     expected = reference(q, k, v, token_map, decode_rows(req_ids, lengths, True), sinks=sink_logits)
     torch.testing.assert_close(out[keep].float(), expected[keep], atol=0.02, rtol=0.02)
@@ -344,7 +344,7 @@ def test_decode_step_builder_keeps_graph_tensors_per_microbatch_and_batch_size()
     assert eager.cache_seqlens.data_ptr() != captured.cache_seqlens.data_ptr()
 
 
-def test_impl_rejects_unsupported_specs():
+def test_backend_rejects_unsupported_specs():
     with pytest.raises(NotImplementedError, match="FA3 GQA"):
         FA3GQADecodeBackend(GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=512, dtype=torch.bfloat16))
 

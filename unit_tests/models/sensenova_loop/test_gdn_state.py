@@ -115,7 +115,7 @@ def test_gdn_decode_keeps_logical_layer_state(
         32,
         32,
     )
-    layer.prefill_impl, layer.decode_impl = prefill_selection.impl, decode_selection.impl
+    layer.prefill_backend, layer.decode_backend = prefill_selection.backend, decode_selection.backend
     layer.alloc_tensor = lambda shape, dtype=None, device=None, **_: torch.empty(shape, dtype=dtype, device=device)
     mixed_dim = 2 * 32 + 2 * 64 + 2 * 2
 
@@ -125,14 +125,14 @@ def test_gdn_decode_keeps_logical_layer_state(
             decode_rows_per_request=mtp_step + 1, req_to_mtp_state_index=resource.mtp_state_index
         )
         batch = configure_attention_step(infer, step_config)
-        impl = layer.prefill_impl if infer.is_prefill else layer.decode_impl
+        impl = layer.prefill_backend if infer.is_prefill else layer.decode_backend
         infer.att_states = {impl.state_key: backend.build(batch, backend.create_build_context(impl.state_key[1], None))}
 
     if device == "cuda":
         infer.b1_cu_q_seq_len = torch.tensor([0, 5], device=device, dtype=torch.int32)
         infer.b_ready_cache_len = torch.zeros(1, device=device, dtype=torch.int32)
         infer.is_prefill = True
-        build_attention_states(prefill_selection.backend)
+        build_attention_states(prefill_selection.backend_cls)
         inputs = layer._gdn_layer_inputs(torch.randn(5, mixed_dim, device=device, dtype=dtype), infer, weight)
         layer._gdn_attention(inputs, infer, prefill=True)
 
@@ -143,7 +143,7 @@ def test_gdn_decode_keeps_logical_layer_state(
     untouched = [i for i in range(len(layers)) if i != storage_layer]
     for _ in range(2):
         before_conv, before_ssm = resource.conv_state.clone(), resource.ssm_state.clone()
-        build_attention_states(decode_selection.backend)
+        build_attention_states(decode_selection.backend_cls)
         inputs = layer._gdn_layer_inputs(
             torch.randn(infer.batch_size, mixed_dim, device=device, dtype=dtype), infer, weight
         )

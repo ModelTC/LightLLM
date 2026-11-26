@@ -102,17 +102,17 @@ def test_triton_layers_share_one_group_across_layer_configs(monkeypatch):
 @pytest.mark.parametrize("prefill", [True, False])
 def test_layer_attention_state_belongs_to_its_microbatch(prefill):
     model = setup_model(fake_model())
-    impls = model.attention_backend_manager.bind(LayerAttentionConfig(gqa(), gqa()))
-    impl = impls[0 if prefill else 1]
+    layer_backends = model.attention_backend_manager.bind(LayerAttentionConfig(gqa(), gqa()))
+    backend = layer_backends[0 if prefill else 1]
     first = step(prefill)
     first.att_states = model.attention_backend_manager.prepare(first)
     second = step(prefill)
     second.microbatch_index = 1
     second.att_states = model.attention_backend_manager.prepare(second)
-    state = first.att_states[impl.state_key]
-    assert state is not second.att_states[impl.state_key]
+    state = first.att_states[backend.state_key]
+    assert state is not second.att_states[backend.state_key]
     assert state.b_req_idx is first.b_req_idx
-    assert second.att_states[impl.state_key].b_req_idx is second.b_req_idx
+    assert second.att_states[backend.state_key].b_req_idx is second.b_req_idx
 
 
 def test_flashinfer_layers_with_different_head_dims_form_separate_groups():
@@ -312,8 +312,10 @@ def test_step_builders_are_created_per_group_and_phase_on_first_build(fake_famil
 
 def test_decode_only_layers_build_no_prefill_att_state(fake_family):
     groups = fake_family
-    prefill_impl, decode_impl = groups.attention_backend_manager.bind(LayerAttentionConfig(None, FakeConfig(key=1)))
-    assert prefill_impl is None
+    prefill_backend, decode_backend = groups.attention_backend_manager.bind(
+        LayerAttentionConfig(None, FakeConfig(key=1))
+    )
+    assert prefill_backend is None
     assert backends(groups, "prefill") == () and backends(groups, "decode") == (FakeDecode,)
 
     prefill = step(prefill=True)
@@ -322,7 +324,7 @@ def test_decode_only_layers_build_no_prefill_att_state(fake_family):
 
     decode = step(prefill=False)
     decode.att_states = groups.attention_backend_manager.prepare(decode)
-    assert set(decode.att_states) == {decode_impl.state_key} and created == [("fake_decode", 1)]
+    assert set(decode.att_states) == {decode_backend.state_key} and created == [("fake_decode", 1)]
 
 
 def test_layer_override_is_independent_for_identical_configs():
@@ -330,17 +332,17 @@ def test_layer_override_is_independent_for_identical_configs():
     groups = setup_model(model)
     config = gqa()
     pinned = groups.attention_backend_manager.bind(
-        LayerAttentionConfig(config, config, prefill_implementation="triton", decode_implementation="triton")
+        LayerAttentionConfig(config, config, prefill_backend_name="triton", decode_backend_name="triton")
     )
     default = groups.attention_backend_manager.bind(LayerAttentionConfig(config, config))
     assert groups.attention_backend_manager.bind(
-        LayerAttentionConfig(config, config, prefill_implementation="triton")
+        LayerAttentionConfig(config, config, prefill_backend_name="triton")
     ) == (
         pinned[0],
         default[1],
     )
     assert groups.attention_backend_manager.bind(
-        LayerAttentionConfig(config, config, decode_implementation="triton")
+        LayerAttentionConfig(config, config, decode_backend_name="triton")
     ) == (
         default[0],
         pinned[1],
@@ -472,9 +474,9 @@ def test_llama_layer_creates_its_attention_from_its_cache(runtime_start_args):
     scales = GQAKVScales(torch.ones(16, 2, 8), torch.ones(16, 2, 8))
     model = model_with_state(FakeState(scales=scales), llm_kv_type="int8kv")
     layer = llama_layer()
-    layer.prefill_impl, layer.decode_impl = model.attention_backend_manager.bind(layer.attention_config(model))
+    layer.prefill_backend, layer.decode_backend = model.attention_backend_manager.bind(layer.attention_config(model))
     expected = gqa(kv_quant="int8_group", kv_quant_group_size=8)
-    assert layer.prefill_impl.layer_config == layer.decode_impl.layer_config == expected
+    assert layer.prefill_backend.layer_config == layer.decode_backend.layer_config == expected
     assert backends(model, "decode")[0].get_name() == "triton_quant_gqa_decode"
 
 
@@ -487,7 +489,7 @@ def test_only_prefill_attends_inside_image_spans(runtime_start_args):
     )
     model = model_with_state(FakeState())
     assert layer.attention_config(model) == LayerAttentionConfig(gqa(bidirectional_image_spans=True), gqa())
-    assert layer.prefill_impl is layer.decode_impl is None
+    assert layer.prefill_backend is layer.decode_backend is None
     assert not model.attention_backend_manager.has_attention
 
 
@@ -538,8 +540,8 @@ def test_models_with_attention_states_create_their_layers_attention():
     assert model.attention_backend_manager.has_attention
     assert all(layer.models == [model] for layer in model.layers_infer)
     first, second = model.layers_infer
-    assert first.prefill_impl is second.prefill_impl is None
-    assert first.decode_impl is second.decode_impl is not None
+    assert first.prefill_backend is second.prefill_backend is None
+    assert first.decode_backend is second.decode_backend is not None
 
     # A draft without attention states (FFN-only) binds no layers and builds no attention state.
     states.clear()
@@ -587,12 +589,12 @@ def test_qwen3next_layers_split_into_full_and_linear_attention_groups(runtime_st
         FakeState(), llm_prefill_att_backend=["triton", "triton"], mtp_step=1, ssm_state_mode=ssm_state_mode
     )
     linear, full = (Qwen3NextTransformerLayerInfer(i, net) for i in range(2))
-    linear.prefill_impl, linear.decode_impl = model.attention_backend_manager.bind(linear.attention_config(model))
-    full.prefill_impl, full.decode_impl = model.attention_backend_manager.bind(full.attention_config(model))
+    linear.prefill_backend, linear.decode_backend = model.attention_backend_manager.bind(linear.attention_config(model))
+    full.prefill_backend, full.decode_backend = model.attention_backend_manager.bind(full.attention_config(model))
     expected = GDNLayerConfig(
         2, 4, 64, 64, 4, "silu", torch.bfloat16, state_mtp_step=1, replay=ssm_state_mode == "replay"
     )
-    assert linear.prefill_impl.layer_config == linear.decode_impl.layer_config == expected
+    assert linear.prefill_backend.layer_config == linear.decode_backend.layer_config == expected
     assert {backend.get_name() for backend in backends(model, "decode")} == {
         "triton_gqa_decode",
         decode,

@@ -502,7 +502,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         if out is None:
             out = self.alloc_tensor((q.shape[0], q.shape[1], self.v_head_dim), dtype=q.dtype, device=q.device)
         inputs = self._sparse_layer_inputs(q, meta, infer_state, layer_weight)
-        out = self.prefill_impl.forward(infer_state.att_states[self.prefill_impl.state_key], inputs, out=out)
+        out = self.prefill_backend.forward(infer_state.att_states[self.prefill_backend.state_key], inputs, out=out)
         return out[:, : self.tp_q_head_num_]
 
     # ------------------------------------------------------------------ attention (decode)
@@ -519,7 +519,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         meta = self._compress_and_index(q_lora, x, infer_state, layer_weight)
         out = torch.empty((q.shape[0], q.shape[1], self.v_head_dim), dtype=q.dtype, device=q.device)
         inputs = self._sparse_layer_inputs(q, meta, infer_state, layer_weight)
-        out = self.decode_impl.forward(infer_state.att_states[self.decode_impl.state_key], inputs, out=out)
+        out = self.decode_backend.forward(infer_state.att_states[self.decode_backend.state_key], inputs, out=out)
         return out[:, : self.tp_q_head_num_]
 
     def attention_config(self, model) -> LayerAttentionConfig:

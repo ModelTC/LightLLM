@@ -85,8 +85,8 @@ def test_prefill_decode(dtype, q_heads, kv_heads, page_size, cached):
     step_builder = FlashInferGQAPrefillBackend.build_context_type(config, workspace=lambda: workspace, max_seq_len=512)
     att_state = FlashInferGQAPrefillBackend.build(make_batch(token_map, req_ids, lengths, query_lengths), step_builder)
     out = torch.empty_like(q)
-    impl = FlashInferGQAPrefillBackend(layer_config)
-    assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
+    backend = FlashInferGQAPrefillBackend(layer_config)
+    assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k, v, token_map, req_ids, lengths, ready), atol=0.02, rtol=0.02
     )
@@ -98,8 +98,8 @@ def test_prefill_decode(dtype, q_heads, kv_heads, page_size, cached):
     att_state = FlashInferGQADecodeBackend.build(make_batch(token_map, req_ids, lengths), step_builder)
     q = torch.randn(3, q_heads, 64, device="cuda", dtype=dtype)
     out = torch.empty_like(q)
-    impl = FlashInferGQADecodeBackend(layer_config)
-    assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
+    backend = FlashInferGQADecodeBackend(layer_config)
+    assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     expected = reference(q, k, v, token_map, req_ids, lengths, [x - 1 for x in lengths])
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
     torch.testing.assert_close(kv, before, atol=0, rtol=0)
@@ -185,7 +185,7 @@ def test_decode_step_builder_keeps_one_graph_wrapper_per_microbatch_and_batch_si
     "fields",
     [dict(sliding_window=(15, 0)), dict(has_sinks=True), dict(causal=False), dict(softmax_scale=1.0)],
 )
-def test_impls_reject_unsupported_specs(fields):
+def test_backends_reject_unsupported_specs(fields):
     layer_config = GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16, **fields)
     for backend in (FlashInferGQAPrefillBackend, FlashInferGQADecodeBackend):
         with pytest.raises(NotImplementedError, match="FlashInfer GQA"):

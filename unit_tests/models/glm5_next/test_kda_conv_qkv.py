@@ -147,7 +147,7 @@ def test_backend_fused_conv_output_and_state(lengths):
         torch.randn(tokens, heads * 128, **opts) * 0.1,
         torch.randn(tokens, heads, **opts),
     )
-    impl = TritonKDAPrefillBackend(KDALayerConfig(heads, 128, 4, -5.0, torch.bfloat16))
+    backend = TritonKDAPrefillBackend(KDALayerConfig(heads, 128, 4, -5.0, torch.bfloat16))
     expected_conv, expected_ssm = conv_states.clone(), ssm_states.clone()
     q, k, v = reference(
         projection[:, :channels],
@@ -175,7 +175,7 @@ def test_backend_fused_conv_output_and_state(lengths):
     )
     expected_ssm[slots] = final_state.to(ssm_states.dtype)
     out = torch.empty(tokens, heads, 128, **opts)
-    actual = impl.forward(att_state, KDALayerInputs(**{k: v for k, v in params.items() if k != "state"}), out=out)
+    actual = backend.forward(att_state, KDALayerInputs(**{k: v for k, v in params.items() if k != "state"}), out=out)
     assert torch.equal(actual.view(torch.uint8), expected.view(actual.shape).view(torch.uint8))
     assert torch.equal(conv_states, expected_conv)
     assert torch.equal(ssm_states, expected_ssm)

@@ -1,7 +1,7 @@
 """Gated DeltaNet (GDN) linear attention: a causal depthwise conv followed by the gated delta rule.
 
 Unlike softmax attention, GDN keeps per-request recurrent state instead of a KV cache: a conv state
-holding the last conv inputs and an SSM state matrix per value head. An impl reads and updates that
+holding the last conv inputs and an SSM state matrix per value head. A backend reads and updates that
 state in place; the caller owns it and supplies each layer's views. A forward must therefore run
 exactly once per step and layer.
 """

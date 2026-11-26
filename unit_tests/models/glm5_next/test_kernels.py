@@ -547,10 +547,10 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
     layer_config = SparseMLALayerConfig(
         num_heads=heads, kv_lora_rank=512, qk_rope_head_dim=0, softmax_scale=0.0625, dtype=torch.bfloat16
     )
-    prefill_impl = FlashMLASparsePrefillBackend(layer_config)
+    prefill_backend = FlashMLASparsePrefillBackend(layer_config)
     prefill_args = FlashMLASparsePrefillAttState(mem_index=None, has_cached_prefix=False)
     prefill_inputs = SparseMLAPrefillLayerInputs(q=q, kv_cache=kv, topk_mem_indices=indexes)
-    decode_impl = FA3SparseMLADecodeBackend(layer_config)
+    decode_backend = FA3SparseMLADecodeBackend(layer_config)
     cu_seqlens_k = torch.nn.functional.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
     decode_args = FA3SparseMLADecodeAttState(
         cache_seqlens=lengths,
@@ -562,10 +562,10 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
     decode_inputs = SparseMLADecodeLayerInputs(q_nope=q, q_rope=q[..., :0], kv_cache=kv, topk_mem_indices=indexes)
 
     def prefill():
-        return prefill_impl.forward(prefill_args, prefill_inputs, out=torch.empty_like(q))
+        return prefill_backend.forward(prefill_args, prefill_inputs, out=torch.empty_like(q))
 
     def decode():
-        return decode_impl.forward(decode_args, decode_inputs, out=torch.empty_like(q))
+        return decode_backend.forward(decode_args, decode_inputs, out=torch.empty_like(q))
 
     torch.testing.assert_close(prefill().float(), expected, atol=0.012, rtol=0.015)
     torch.testing.assert_close(decode().float(), expected, atol=0.012, rtol=0.015)

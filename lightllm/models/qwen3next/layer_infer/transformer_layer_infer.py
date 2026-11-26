@@ -68,21 +68,21 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             dt_bias=layer_weight.linear_dt_bias.weight,
             conv_states=conv_states,
             ssm_states=ssm_states,
-            replay_state=state if self.decode_impl.layer_config.replay else None,
+            replay_state=state if self.decode_backend.layer_config.replay else None,
             layer_num=self.layer_num_,
         )
 
     def _gdn_attention(
         self, inputs: GDNLayerInputs, infer_state, *, prefill: bool, out: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        impl = self.prefill_impl if prefill else self.decode_impl
+        backend = self.prefill_backend if prefill else self.decode_backend
         if not prefill and out is None:
             z = inputs.z
             out = self.alloc_tensor(
                 (z.shape[0], self.tp_linear_num_v_heads, self.linear_head_v_dim), dtype=z.dtype, device=z.device
             )
-        return impl.forward(
-            infer_state.att_states[impl.state_key],
+        return backend.forward(
+            infer_state.att_states[backend.state_key],
             inputs,
             out=out,
             alloc_func=self.alloc_tensor,

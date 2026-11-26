@@ -53,7 +53,7 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     infer.max_q_seq_len = 1
     calls = []
 
-    # 仅替换外部计算内核，保留推理层、公开 attention 接口、impl 及 State 标定查询链路。
+    # 仅替换外部计算内核，保留推理层、公开 attention 接口、backend 及 State 标定查询链路。
     import lightllm.utils.sgl_utils as sgl_utils
     from lightllm.common.basemodel.triton_kernel.quantization import q_per_head_fp8_quant
 
@@ -138,8 +138,9 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     layer.tp_q_head_num_ = layer.tp_k_head_num_ = state.config.head_num
     layer.head_dim_ = state.config.head_dim
     layer.alloc_tensor = lambda shape, dtype, device: torch.empty(shape, dtype=dtype, device="cpu")
-    layer.prefill_impl, layer.decode_impl = AttentionBackendManager(model).bind(layer.attention_config(model))
-    infer.att_states = {(layer.prefill_impl if operation == "prefill" else layer.decode_impl).state_key: att_state}
+    layer.prefill_backend, layer.decode_backend = AttentionBackendManager(model).bind(layer.attention_config(model))
+    backend = layer.prefill_backend if operation == "prefill" else layer.decode_backend
+    infer.att_states = {backend.state_key: att_state}
     q = torch.ones((1, state.config.head_num, state.config.head_dim), dtype=torch.bfloat16)
     if operation == "prefill":
         output = layer._context_attention_kernel(

@@ -64,11 +64,11 @@ def _layer_config(q, softmax_scale):
 def _decode(att_state, q, kv, params):
     """Run a GLM-5 layer's FP8 decode; params holds the indexer's topk_mem_indices and the softmax_scale."""
     q_nope, q_rope = q
-    impl = FlashMLASparseDecodeBackend(_layer_config(q_nope, params["softmax_scale"]))
+    backend = FlashMLASparseDecodeBackend(_layer_config(q_nope, params["softmax_scale"]))
     inputs = SparseMLADecodeLayerInputs(
         q_nope=q_nope, q_rope=q_rope, kv_cache=kv, topk_mem_indices=params["topk_mem_indices"]
     )
-    return impl.forward(att_state, inputs, out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device))
+    return backend.forward(att_state, inputs, out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device))
 
 
 class _Fp8PrefillState:
@@ -80,7 +80,7 @@ class _Fp8PrefillState:
         self.nsa_step = None
 
     def prefill_att(self, q, kv, params):
-        impl = FA3SparseMLAPrefillBackend(_layer_config(q, params["softmax_scale"]))
+        backend = FA3SparseMLAPrefillBackend(_layer_config(q, params["softmax_scale"]))
         inputs = SparseMLAPrefillLayerInputs(
             q=q,
             kv_cache=kv,
@@ -91,7 +91,7 @@ class _Fp8PrefillState:
             fp8_workspace=self.workspace,
         )
         out = torch.empty((q.shape[0], q.shape[1], 512), dtype=q.dtype, device=q.device)
-        return impl.forward(self.att_state, inputs, out=out)
+        return backend.forward(self.att_state, inputs, out=out)
 
 
 class _Fp8DecodeState:
@@ -313,13 +313,13 @@ def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_t
         network_config_=model.config,
     )
     spec = model_class.transformer_layer_infer_class.attention_config(layer, model)
-    layer.prefill_impl, layer.decode_impl = attention.bind(spec)
-    assert layer.decode_impl.layer_config.causal is False
+    layer.prefill_backend, layer.decode_backend = attention.bind(spec)
+    assert layer.decode_backend.layer_config.causal is False
     # The step builders can be created from the layer config and the model's context.
-    for phase, impl, name in zip(("prefill", "decode"), (layer.prefill_impl, layer.decode_impl), expected):
-        (backend,) = attention.backends(phase)
-        assert backend.get_name() == name
-        backend.create_build_context(impl.state_key[1], attention_build_resources(model))
+    for phase, backend, name in zip(("prefill", "decode"), (layer.prefill_backend, layer.decode_backend), expected):
+        (backend_cls,) = attention.backends(phase)
+        assert backend_cls.get_name() == name
+        backend_cls.create_build_context(backend.state_key[1], attention_build_resources(model))
 
 
 def _dequantize_kv_cache(packed_kv):

@@ -81,7 +81,7 @@ def kda_layer_config(
 
 
 class KDAAttention:
-    """A KDA layer's attention outside a model: the impls and step builders its layer group uses.
+    """A KDA layer's attention outside a model: the backends and step builders its layer group uses.
 
     step_config describes the model's decode rows; each step adds the role's recurrent state index.
     """
@@ -93,13 +93,13 @@ class KDAAttention:
         self.layer_config = layer_config
         self.step_config = AttentionStepConfig() if step_config is None else step_config
         replay = layer_config.replay
-        backends = {
+        backend_classes = {
             "prefill": kda.ReplayKDAPrefillBackend if replay else kda.TritonKDAPrefillBackend,
             "decode": kda.ReplayKDADecodeBackend if replay else kda.TritonKDADecodeBackend,
         }
-        self.impls = {phase: backend(layer_config) for phase, backend in backends.items()}
+        self.backends = {phase: backend_cls(layer_config) for phase, backend_cls in backend_classes.items()}
         self.step_builders = {
-            phase: impl.create_build_context(impl.state_key[1], None) for phase, impl in self.impls.items()
+            phase: backend.create_build_context(backend.state_key[1], None) for phase, backend in self.backends.items()
         }
         self.flash_kda_fwd = self.step_builders["prefill"].flash_kda_fwd
 
@@ -150,4 +150,4 @@ class KDAStep:
         )
         x = inputs.mixed_qkv
         out = alloc_func((x.shape[0], config.num_heads, config.head_dim), dtype=x.dtype, device=x.device)
-        return self.attention.impls[self.phase].forward(self.att_state, inputs, out=out, alloc_func=alloc_func)
+        return self.attention.backends[self.phase].forward(self.att_state, inputs, out=out, alloc_func=alloc_func)

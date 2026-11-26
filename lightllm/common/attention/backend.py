@@ -100,7 +100,7 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
         out: torch.Tensor,
         alloc_func: TensorAllocator = torch.empty,
     ) -> torch.Tensor:
-        """Fill and return out itself; concrete impls define tensor layouts.
+        """Fill and return out itself; concrete backends define tensor layouts.
 
         Kernels write into out directly. Compute elsewhere and copy only where a kernel cannot: it has
         no out parameter, it needs padded heads, or partial results merge at higher precision first.

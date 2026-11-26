@@ -116,8 +116,8 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             topk_indices=topk_indices,
             current_kv=kv,
         )
-        return self.prefill_impl.forward(
-            infer_state.att_states[self.prefill_impl.state_key],
+        return self.prefill_backend.forward(
+            infer_state.att_states[self.prefill_backend.state_key],
             inputs,
             out=torch.empty(
                 (q_all.shape[0], q_all.shape[1], self.kv_lora_rank), dtype=q_all.dtype, device=q_all.device
@@ -151,8 +151,8 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             kv_cache=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
             topk_mem_indices=topk_mem_indices,
         )
-        return self.decode_impl.forward(
-            infer_state.att_states[self.decode_impl.state_key],
+        return self.decode_backend.forward(
+            infer_state.att_states[self.decode_backend.state_key],
             inputs,
             out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device),
         )

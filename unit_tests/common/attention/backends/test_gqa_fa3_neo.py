@@ -118,8 +118,8 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
     layer_config = GQALayerConfig(
         num_heads=2, num_kv_heads=1, head_dim=16, dtype=torch.bfloat16, bidirectional_image_spans=True
     )
-    impl = FA3GQAPrefillBackend(layer_config)
-    actual = impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=torch.empty_like(q))
+    backend = FA3GQAPrefillBackend(layer_config)
+    actual = backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=torch.empty_like(q))
     torch.testing.assert_close(actual, output, rtol=0, atol=0)
 
 

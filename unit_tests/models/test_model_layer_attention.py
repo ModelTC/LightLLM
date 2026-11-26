@@ -66,12 +66,12 @@ def config(**fields) -> GQALayerConfig:
 
 
 def layer_configs(layer):
-    prefill = None if layer.prefill_impl is None else layer.prefill_impl.layer_config
-    return prefill, layer.decode_impl.layer_config
+    prefill = None if layer.prefill_backend is None else layer.prefill_backend.layer_config
+    return prefill, layer.decode_backend.layer_config
 
 
 def decode_inputs(monkeypatch, model, layer, weights):
-    impl = layer.decode_impl
+    backend = layer.decode_backend
     state = object()
     captured = []
 
@@ -80,12 +80,12 @@ def decode_inputs(monkeypatch, model, layer, weights):
         captured.append(inputs)
         return out
 
-    monkeypatch.setattr(impl, "forward", forward)
+    monkeypatch.setattr(backend, "forward", forward)
     monkeypatch.setattr(layer, "alloc_tensor", torch.empty)
     infer_state = SimpleNamespace(
         att_state_manager=model.att_state_manager,
         att_state_role=model.att_state_role,
-        att_states={impl.state_key: state},
+        att_states={backend.state_key: state},
     )
     query = torch.empty(3, layer.tp_q_head_num_ * layer.head_dim_)
     result = layer._token_attention_kernel(query, infer_state, weights)
@@ -102,7 +102,7 @@ def test_bloom_layers_run_alibi_on_triton_whatever_the_command_line_asks(runtime
     model = make_model(FakeState(H))
     bind_layers(model, layer)
     assert layer_configs(layer) == (config(num_kv_heads=H, has_alibi=True),) * 2
-    assert type(layer.decode_impl).__name__ == "TritonGQADecodeBackend"
+    assert type(layer.decode_backend).__name__ == "TritonGQADecodeBackend"
     slopes = torch.ones(H)
     assert decode_inputs(monkeypatch, model, layer, SimpleNamespace(tp_alibi=slopes)).alibi_slopes is slopes
 
@@ -114,7 +114,7 @@ def test_starcoder_layers_run_multi_query_attention_without_alibi(runtime_start_
     model = make_model(FakeState(1))
     bind_layers(model, layer)
     assert layer_configs(layer) == (config(num_kv_heads=1),) * 2
-    assert type(layer.decode_impl).__name__ == "FA3GQADecodeBackend"
+    assert type(layer.decode_backend).__name__ == "FA3GQADecodeBackend"
     assert decode_inputs(monkeypatch, model, layer, SimpleNamespace()).alibi_slopes is None
 
 
@@ -195,7 +195,7 @@ def test_dflash_layers_attend_only_in_decode_and_not_causally(monkeypatch, slidi
     model = make_model(FakeState(2), draft=True)
     bind_layers(model, layer)
     assert layer_configs(layer) == (None, config(causal=False, sliding_window=expected))
-    assert type(layer.decode_impl).__name__ == "FA3GQADecodeBackend"
+    assert type(layer.decode_backend).__name__ == "FA3GQADecodeBackend"
 
 
 def test_dflash_decode_needs_an_implementation_of_non_causal_attention(monkeypatch):
@@ -246,8 +246,8 @@ def test_deepseek2_layers_attend_over_expanded_keys_in_prefill_and_the_latent_ca
         MLADecodeLayerConfig(kv_lora_rank=512, **common),
     )
     # FlashInfer plans with the layers' softmax scale, which they all share.
-    assert layers[0].prefill_impl is layers[1].prefill_impl
-    assert layers[0].decode_impl is layers[1].decode_impl
+    assert layers[0].prefill_backend is layers[1].prefill_backend
+    assert layers[0].decode_backend is layers[1].decode_backend
 
 
 @pytest.mark.parametrize("kv_type, kv_cache_format", [("None", "bf16"), ("fp8kv_dsa", "fp8_ds_mla")])
@@ -286,7 +286,7 @@ def test_glm5_sparse_spec_describes_the_cache_without_a_workspace(kv_type, expec
     spec = layer.attention_config(model)
     assert spec.prefill == spec.decode
     assert spec.prefill.kv_cache_format == expected_format
-    assert spec.prefill_implementation == spec.decode_implementation == "flashmla_sparse"
+    assert spec.prefill_backend_name == spec.decode_backend_name == "flashmla_sparse"
 
 
 @pytest.mark.parametrize("prefill_backends, prefill_kernel", [(["auto"], "auto"), (["fa3", "flashkda"], "flashkda")])

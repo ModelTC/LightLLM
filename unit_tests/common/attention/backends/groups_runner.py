@@ -31,7 +31,7 @@ class GroupsRunner:
             model.att_state_role = "main"
             model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: ())
         model.attention_backend_manager = AttentionBackendManager(model)
-        self.prefill_impl, self.decode_impl = model.attention_backend_manager.bind(
+        self.prefill_backend, self.decode_backend = model.attention_backend_manager.bind(
             LayerAttentionConfig(prefill_config, decode_config)
         )
 
@@ -49,14 +49,14 @@ class GroupsRunner:
         alloc_func=torch.empty,
     ) -> torch.Tensor:
         """Run the layer's GQA attention in infer_state's phase with infer_state's attention state."""
-        impl = self.prefill_impl if infer_state.is_prefill else self.decode_impl
+        backend = self.prefill_backend if infer_state.is_prefill else self.decode_backend
         inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
         out = alloc_func(q.shape, dtype=q.dtype, device=q.device)
-        return impl.forward(infer_state.att_states[impl.state_key], inputs, out=out, alloc_func=alloc_func)
+        return backend.forward(infer_state.att_states[backend.state_key], inputs, out=out, alloc_func=alloc_func)
 
 
 class LayerAttention:
-    """One layer's attention outside a model: impls selected by name as a model selects them,
+    """One layer's attention outside a model: backends selected by name as a model selects them,
     and one step builder per phase that builds attention state from an InferStateInfo."""
 
     def __init__(self, prefill_config: Any, decode_config: Any, name: str, ctx=None) -> None:
@@ -65,18 +65,18 @@ class LayerAttention:
         configs = {"prefill": prefill_config, "decode": decode_config}
         self.selections = {phase: selector.select(config, phase, name) for phase, config in configs.items()}
         self.builders = {
-            phase: selection.backend.create_build_context(selection.impl.state_key[1], ctx)
+            phase: selection.backend_cls.create_build_context(selection.backend.state_key[1], ctx)
             for phase, selection in self.selections.items()
         }
 
     def backend_name(self, phase: str) -> str:
-        return self.selections[phase].backend.get_name()
+        return self.selections[phase].backend_cls.get_name()
 
     def att_state(self, infer_state, step_config: Optional[AttentionStepConfig] = None) -> Any:
         """Prepare the backend state for this microbatch."""
         phase = "prefill" if infer_state.is_prefill else "decode"
         batch = configure_attention_step(infer_state, step_config or AttentionStepConfig())
-        return self.selections[phase].backend.build(batch, self.builders[phase])
+        return self.selections[phase].backend_cls.build(batch, self.builders[phase])
 
     def run(self, phase: str, att_state, layer_inputs, *, out: torch.Tensor, alloc_func=torch.empty) -> torch.Tensor:
-        return self.selections[phase].impl.forward(att_state, layer_inputs, out=out, alloc_func=alloc_func)
+        return self.selections[phase].backend.forward(att_state, layer_inputs, out=out, alloc_func=alloc_func)

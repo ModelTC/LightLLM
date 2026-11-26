@@ -11,8 +11,8 @@ from lightllm.common.basemodel import InferStateInfo
 class BloomTransformerLayerInfer(TransformerLayerInferTpl):
     """ """
 
-    prefill_impl = None
-    decode_impl = None
+    prefill_backend = None
+    decode_backend = None
 
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
@@ -50,16 +50,16 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
     def attention_config(self, model) -> LayerAttentionConfig:
         config = self._gqa_config(model, has_alibi=True)
         return LayerAttentionConfig(
-            prefill=config, decode=config, prefill_implementation="triton", decode_implementation="triton"
+            prefill=config, decode=config, prefill_backend_name="triton", decode_backend_name="triton"
         )
 
     def _gqa_alibi_slopes(self, layer_weight: BloomTransformerLayerWeight):
         return layer_weight.tp_alibi
 
-    def _gqa_attention(self, impl, q, infer_state, layer_weight):
+    def _gqa_attention(self, backend, q, infer_state, layer_weight):
         state = self._gqa_cache_state(infer_state.att_state_manager, infer_state.att_state_role)
         keys, values = state.get_layer_view(logical_layer_id=self.layer_num_)
-        config = impl.layer_config
+        config = backend.layer_config
         query = q.view(-1, config.num_heads, config.head_dim)
         inputs = GQALayerInputs(
             q=query,
@@ -68,8 +68,8 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
             kv_scales=state.get_layer_kv_scales(self.layer_num_),
             alibi_slopes=self._gqa_alibi_slopes(layer_weight),
         )
-        output = impl.forward(
-            infer_state.att_states[impl.state_key],
+        output = backend.forward(
+            infer_state.att_states[backend.state_key],
             inputs,
             out=self.alloc_tensor(query.shape, dtype=query.dtype, device=query.device),
             alloc_func=self.alloc_tensor,
@@ -77,10 +77,10 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         return output.view(q.shape)
 
     def _context_attention_kernel(self, q, kv, infer_state, layer_weight, out=None) -> torch.Tensor:
-        return self._gqa_attention(self.prefill_impl, q, infer_state, layer_weight)
+        return self._gqa_attention(self.prefill_backend, q, infer_state, layer_weight)
 
     def _token_attention_kernel(self, q, infer_state, layer_weight, out=None) -> torch.Tensor:
-        return self._gqa_attention(self.decode_impl, q, infer_state, layer_weight)
+        return self._gqa_attention(self.decode_backend, q, infer_state, layer_weight)
 
     def _att_norm(
         self, input: torch.Tensor, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight

@@ -4,7 +4,7 @@ Implementations are named as on the command line (--llm_prefill_att_backend /
 --llm_decode_att_backend): "triton", "fa3", "flashinfer" for GQA and MLA, "flashmla_sparse" for
 sparse MLA, and, in the second value, "triton", "flashqla" or "flashkda" for linear attention. One
 name can cover several backends of a family, such as the plain and quantized-KV Triton GQA backends;
-the first whose impl accepts the layer config is used.
+the first whose constructor accepts the layer config is used.
 """
 
 from dataclasses import dataclass, field
@@ -151,8 +151,8 @@ _REGISTRY: dict[type, Family] = {
 
 @dataclass(frozen=True)
 class Selection:
-    backend: type[AttentionBackend]
-    impl: AttentionBackend
+    backend_cls: type[AttentionBackend]
+    backend: AttentionBackend
 
 
 def _load(path: str) -> type[AttentionBackend]:
@@ -174,7 +174,7 @@ def _phase_backends(layer_config: Any, phase: str) -> dict[str, tuple[str, ...]]
     return backends
 
 
-def implementation_names(layer_config: Any, phase: str) -> tuple[str, ...]:
+def backend_names(layer_config: Any, phase: str) -> tuple[str, ...]:
     """Names of the implementations registered for layer_config's family in this phase."""
     return tuple(_phase_backends(layer_config, phase))
 
@@ -209,15 +209,15 @@ def _construction_failures(reason: Optional[str]) -> list[str]:
 def _construct(
     name: str, layer_config: Any, phase: str, *, agree: bool = False
 ) -> tuple[Optional[Selection], list[str]]:
-    """Return the first backend under name whose impl accepts layer_config, and why the others did not."""
+    """Return the first backend under name whose constructor accepts layer_config, and why the others did not."""
     reasons = []
     for path in _phase_backends(layer_config, phase).get(name, ()):
         reason = None
         label = path
         try:
-            backend = _load(path)
-            label = backend.get_name()
-            selection = Selection(backend, backend(layer_config))
+            backend_cls = _load(path)
+            label = backend_cls.get_name()
+            selection = Selection(backend_cls, backend_cls(layer_config))
         except (NotImplementedError, ImportError, OSError) as error:
             reason = f"{label}: {error}"
         failures = _construction_failures(reason) if agree else ([reason] if reason else [])
@@ -246,12 +246,12 @@ def select(
 
     requested is an implementation name or "auto". A named implementation that does not accept
     the layer config raises ValueError. "auto" takes the first name in priority (default
-    auto_priority(layer_config, phase)) outside excluded whose impl accepts the layer config and
+    auto_priority(layer_config, phase)) outside excluded whose constructor accepts the layer config and
     whose library passes validate(name); if none does, it falls back to Triton without validation.
     """
     if phase not in PHASES:
         raise ValueError(f"phase must be one of {PHASES}, got {phase!r}")
-    names = implementation_names(layer_config, phase)
+    names = backend_names(layer_config, phase)
     if requested != "auto":
         if requested not in names:
             raise ValueError(

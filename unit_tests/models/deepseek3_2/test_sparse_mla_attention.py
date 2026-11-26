@@ -208,13 +208,13 @@ def test_bf16_flashmla_prefill_output_and_peak(heads, strided, legacy, monkeypat
     storage = torch.full((rows, heads + int(strided), RANK), torch.nan, dtype=query.dtype, device="cuda")
     out = storage[:, :heads]
     config = SparseMLALayerConfig(heads, RANK, ROPE, SCALE, query.dtype, topk=TOPK)
-    impl = flashmla.FlashMLASparsePrefillBackend(config)
+    backend = flashmla.FlashMLASparsePrefillBackend(config)
     state = flashmla.FlashMLASparsePrefillAttState(None, False)
     inputs = SparseMLAPrefillLayerInputs(q=query, kv_cache=cache, topk_mem_indices=indices)
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     before = torch.cuda.memory_allocated()
-    assert impl.forward(state, inputs, out=out) is out
+    assert backend.forward(state, inputs, out=out) is out
     torch.cuda.synchronize()
     scratch = torch.cuda.max_memory_allocated() - before
     record_property("peak_bytes_including_output", scratch + out.numel() * out.element_size())

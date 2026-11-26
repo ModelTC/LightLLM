@@ -376,8 +376,8 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
     layer_config = GQALayerConfig(
         num_heads=2, num_kv_heads=1, head_dim=64, dtype=torch.float32, **gqa_kv_quant_fields("int4kv", kv_scales, 64)
     )
-    impl = TritonQuantGQAPrefillBackend(layer_config)
-    builder = TritonQuantGQAPrefillBackend.create_build_context(impl.state_key[1], None)
+    backend = TritonQuantGQAPrefillBackend(layer_config)
+    builder = TritonQuantGQAPrefillBackend.create_build_context(backend.state_key[1], None)
     att_state = TritonQuantGQAPrefillBackend.build(configure_attention_step(owner), builder)
     if device == "cpu":
 
@@ -394,5 +394,5 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
         monkeypatch.setattr(context_flashattention_nopad, "context_attention_fwd_contiguous_kv", attention)
     q = torch.randn(2, 2, 64, device=device)
     inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
-    output = impl.forward(att_state, inputs, out=torch.empty_like(q))
+    output = backend.forward(att_state, inputs, out=torch.empty_like(q))
     torch.testing.assert_close(output, torch.ones_like(q))

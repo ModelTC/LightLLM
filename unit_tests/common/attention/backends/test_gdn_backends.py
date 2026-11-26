@@ -1,4 +1,4 @@
-"""GDN backends at the step-builder/impl level against a sequential fp32 reference, and the decode step
+"""GDN backends at the step-builder/backend level against a sequential fp32 reference, and the decode step
 builder's CUDA graph storage."""
 
 from copy import copy
@@ -116,8 +116,8 @@ def test_gdn_prefill_then_speculative_decode_matches_reference(prefill, replay, 
         replay=replay,
         mtp_step=mtp_step,
         dynamic=dynamic,
-        prefill_impl=prefill_cls(family.config),
-        decode_impl=decode_cls(family.config),
+        prefill_backend=prefill_cls(family.config),
+        decode_backend=decode_cls(family.config),
         prefill_builder=GDNPrefillBuildContext(ssm_slots_per_request=1 if replay else mtp_step + 1),
     )
 

@@ -68,7 +68,7 @@ def test_every_linear_execution_layer_can_split_its_gdn_projection(settings):
             linear_A_log=SimpleNamespace(weight=None),
             linear_dt_bias=SimpleNamespace(weight=None),
         )
-        layer.decode_impl = SimpleNamespace(layer_config=SimpleNamespace(replay=False))
+        layer.decode_backend = SimpleNamespace(layer_config=SimpleNamespace(replay=False))
         inputs = layer._gdn_layer_inputs(mixed, infer_state, weight)
         assert torch.equal(inputs.mixed_qkv, mixed[:, :qkv])
         assert torch.equal(inputs.z.reshape(3, -1), mixed[:, qkv : qkv + value])

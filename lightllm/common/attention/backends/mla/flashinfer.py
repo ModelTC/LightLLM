@@ -169,7 +169,7 @@ class FlashInferMLAPrefillBackend(
 
     @classmethod
     def build_context_key(cls, layer_config: MLAPrefillLayerConfig):
-        # FlashInfer plans with every field but causal, which the impl requires.
+        # FlashInfer plans with every field but causal, which the backend requires.
         return layer_config
 
 
@@ -315,7 +315,7 @@ class FlashInferMLADecodeBackend(
 
     @classmethod
     def build_context_key(cls, layer_config: MLADecodeLayerConfig):
-        # FlashInfer plans with every field but causal, which the impl requires.
+        # FlashInfer plans with every field but causal, which the backend requires.
         return layer_config
 
 

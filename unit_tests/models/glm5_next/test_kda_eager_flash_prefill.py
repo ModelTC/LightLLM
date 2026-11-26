@@ -119,12 +119,12 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
 
     spec = layer.attention_config(model)
     prefill = selector.select(spec.prefill, "prefill", requested)
-    layer.prefill_impl = prefill.impl
-    layer.decode_impl = selector.select(spec.decode, "decode", "triton").impl
+    layer.prefill_backend = prefill.backend
+    layer.decode_backend = selector.select(spec.decode, "decode", "triton").backend
     # The attention state the layer's group builds for this step.
-    builder = prefill.backend.create_build_context(prefill.impl.state_key[1], None)
-    att_state = prefill.backend.build(configure_attention_step(infer), builder)
-    infer.att_states = {layer.prefill_impl.state_key: att_state}
+    builder = prefill.backend_cls.create_build_context(prefill.backend.state_key[1], None)
+    att_state = prefill.backend_cls.build(configure_attention_step(infer), builder)
+    infer.att_states = {layer.prefill_backend.state_key: att_state}
     assert (att_state.flash_kda_fwd is not None) == (requested == "flashkda")
     if graph:
         capture = InferStateInfo()
@@ -135,13 +135,13 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
         fixed = layer._kda_prefill_cuda_graph_wrapper(mixed, gate, beta, capture, layer_weight)
         output = layer._kda_post(fixed, output_gate, infer, layer_weight)
         capture.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
-        forward = layer.prefill_impl.forward
+        forward = layer.prefill_backend.forward
 
         def check_destination(att_state, inputs, *, out, alloc_func):
             assert out.data_ptr() == fixed.data_ptr()
             return forward(att_state, inputs, out=out, alloc_func=alloc_func)
 
-        layer.prefill_impl.forward = check_destination
+        layer.prefill_backend.forward = check_destination
         capture.prefill_replay(infer)
     else:
         output = layer.context_attention_forward(hidden, infer, layer_weight)

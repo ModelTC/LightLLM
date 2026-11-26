@@ -179,7 +179,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         decode = self._gqa_config(model, sliding_window=window)
         prefill = replace(decode, bidirectional_image_spans=self.is_sliding)
         return LayerAttentionConfig(
-            prefill=prefill, decode=decode, prefill_implementation="triton", decode_implementation="triton"
+            prefill=prefill, decode=decode, prefill_backend_name="triton", decode_backend_name="triton"
         )
 
     def _gqa_kv_cache(self, state: FullAttentionState):

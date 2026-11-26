@@ -164,8 +164,8 @@ def test_decode_passes_saved_length_to_stage1(monkeypatch):
         kv_quant_group_size=q.shape[2] // kv_scales.k_scale.shape[-1],
     )
     layer_inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
-    impl = TritonQuantGQADecodeBackend(layer_config)
-    impl.forward(
+    backend = TritonQuantGQADecodeBackend(layer_config)
+    backend.forward(
         att_state,
         layer_inputs,
         out=torch.empty_like(q),

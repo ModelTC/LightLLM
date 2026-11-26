@@ -118,7 +118,7 @@ def test_sparse_layer_passes_each_microbatch_its_reserved_workspace():
         def forward(self, att_state, inputs, *, out):
             return inputs.fp8_workspace
 
-    impl = CapturePrefill()
+    backend = CapturePrefill()
     regions = [{"gathered_kv": torch.empty(1)} for _ in range(2)]
     layer = object.__new__(Glm5NextTransformerLayerInfer)
     layer.is_linear_attention_layer = False
@@ -126,7 +126,7 @@ def test_sparse_layer_passes_each_microbatch_its_reserved_workspace():
     layer.softmax_scale = 1.0
     layer.network_config_ = {"index_topk": 1, "index_kpool": 1}
     layer.fp8_sparse_prefill_workspaces = regions
-    layer.prefill_impl = impl
+    layer.prefill_backend = backend
     query = torch.zeros(1, 1, 1)
     layer.alloc_tensor = torch.empty
     layer.indexer = SimpleNamespace(_get_indices=lambda **kwargs: (None, None))
@@ -135,7 +135,7 @@ def test_sparse_layer_passes_each_microbatch_its_reserved_workspace():
     for slot in (0, 1, 0):
         state = SimpleNamespace(
             microbatch_index=slot,
-            att_states={impl.state_key: None},
+            att_states={backend.state_key: None},
             nsa_step=SimpleNamespace(q_kv_start_loc=None),
             get_topk_indices_params={"hidden_states": query, "q_lora": query},
         )

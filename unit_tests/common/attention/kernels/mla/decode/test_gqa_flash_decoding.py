@@ -67,8 +67,8 @@ def test_gqa_flash_decoding(batch, seqlen, heads, nope_head, rope_head):
     layer_config = MLADecodeLayerConfig(
         num_heads=H, kv_lora_rank=D_HEAD, qk_rope_head_dim=ROPE_HEAD, softmax_scale=sm_scale, dtype=dtype
     )
-    impl = TritonMLADecodeBackend(layer_config)
-    assert impl.forward(att_state, MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv), out=o) is o
+    backend = TritonMLADecodeBackend(layer_config)
+    assert backend.forward(att_state, MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv), out=o) is o
 
     kv_nope = kv[:, :, :D_HEAD]
     kv_rope = kv[:, :, D_HEAD:]

@@ -30,9 +30,9 @@ def decode_builder():
 
 
 def decode(att_state, q_nope, q_rope, kv):
-    impl = TritonMLADecodeBackend(decode_config())
+    backend = TritonMLADecodeBackend(decode_config())
     out = torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
-    return impl.forward(att_state, MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv), out=out)
+    return backend.forward(att_state, MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv), out=out)
 
 
 def _decode_state(lengths, *, capture=False, replay=False):

@@ -29,9 +29,9 @@ class LayerAttentionConfig:
     # The layer configs of each phase; None for a phase the layer does not attend in.
     prefill: Any
     decode: Any
-    # Required implementation names override the CLI for their respective phases.
-    prefill_implementation: Optional[str] = None
-    decode_implementation: Optional[str] = None
+    # Required backend names override the CLI for their respective phases.
+    prefill_backend_name: Optional[str] = None
+    decode_backend_name: Optional[str] = None
 
 
 class AttentionBackendManager:
@@ -48,15 +48,15 @@ class AttentionBackendManager:
         self.resources = attention_build_resources(model)
         self.step_config = attention_step_config(model)
         self.state_groups: dict[str, dict[tuple, AttentionBackend]] = {phase: {} for phase in selector.PHASES}
-        self._impls: dict[tuple, AttentionBackend] = {}
+        self._backends: dict[tuple, AttentionBackend] = {}
         if self.args.enable_ep_moe:
             logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
 
     def bind(self, config: LayerAttentionConfig) -> tuple[Optional[AttentionBackend], Optional[AttentionBackend]]:
-        """Return the layer's prefill and decode implementations."""
+        """Return the layer's prefill and decode backends."""
         return (
-            self._select("prefill", config.prefill, config.prefill_implementation),
-            self._select("decode", config.decode, config.decode_implementation),
+            self._select("prefill", config.prefill, config.prefill_backend_name),
+            self._select("decode", config.decode, config.decode_backend_name),
         )
 
     def prepare(self, infer_state: InferStateInfo) -> dict[tuple, Any]:
@@ -66,11 +66,11 @@ class AttentionBackendManager:
         if not groups:
             return {}
         configure_attention_step(infer_state, self.step_config)
-        return {key: impl.prepare(infer_state, self.resources) for key, impl in groups.items()}
+        return {key: backend.prepare(infer_state, self.resources) for key, backend in groups.items()}
 
     def backends(self, phase: str) -> list[type[AttentionBackend]]:
         """Return the backend class of each state group in binding order."""
-        return [type(impl) for impl in self.state_groups[phase].values()]
+        return [type(backend) for backend in self.state_groups[phase].values()]
 
     @property
     def has_attention(self) -> bool:
@@ -79,12 +79,12 @@ class AttentionBackendManager:
     def requires_cpu_cache_sync(self) -> bool:
         return any(backend.requires_cpu_cache_sync() for phase in selector.PHASES for backend in self.backends(phase))
 
-    def _select(self, phase: str, layer_config: Any, implementation: Optional[str]) -> Optional[AttentionBackend]:
+    def _select(self, phase: str, layer_config: Any, backend_name: Optional[str]) -> Optional[AttentionBackend]:
         if layer_config is None:
             return None
-        requested = implementation or requested_backend(self.args, phase, layer_config)
+        requested = backend_name or requested_backend(self.args, phase, layer_config)
         key = (phase, layer_config, requested)
-        if key not in self._impls:
+        if key not in self._backends:
             selection = selector.select(
                 layer_config,
                 phase,
@@ -92,9 +92,9 @@ class AttentionBackendManager:
                 priority=selector.auto_priority(layer_config, phase, self.args.mtp_step),
                 excluded=("flashinfer",) if self.args.enable_ep_moe else (),
             )
-            self.state_groups[phase].setdefault(selection.impl.state_key, selection.impl)
-            self._impls[key] = selection.impl
-        return self._impls[key]
+            self.state_groups[phase].setdefault(selection.backend.state_key, selection.backend)
+            self._backends[key] = selection.backend
+        return self._backends[key]
 
 
 # Layer configuration and backend selection
@@ -106,7 +106,7 @@ def attention_is_causal(model: TpPartBaseModel) -> bool:
 
 
 def requested_backend(args, phase: str, layer_config: Any) -> str:
-    """The implementation name the command line requests for layer_config's family in phase."""
+    """The backend name the command line requests for layer_config's family in phase."""
     index = selector.arg_index(layer_config)
     values = args.llm_prefill_att_backend if phase == "prefill" else args.llm_decode_att_backend
     return values[index] if index < len(values) else "auto"

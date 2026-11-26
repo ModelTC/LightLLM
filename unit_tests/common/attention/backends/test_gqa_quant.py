@@ -41,7 +41,7 @@ def test_layer_config_rejects_malformed_kv_quant(fields, match):
 
 
 @pytest.mark.parametrize(
-    "backends,supported",
+    "backend_classes,supported",
     [
         ((TritonGQAPrefillBackend, TritonGQADecodeBackend), [None]),
         ((TritonQuantGQAPrefillBackend, TritonQuantGQADecodeBackend), ["int8_group", "int4_group"]),
@@ -49,15 +49,15 @@ def test_layer_config_rejects_malformed_kv_quant(fields, match):
         ((FA3GQAPrefillBackend, FA3GQADecodeBackend), [None, "fp8_per_head"]),
     ],
 )
-def test_impls_accept_exactly_their_kv_quant_kinds(backends, supported):
+def test_backends_accept_exactly_their_kv_quant_kinds(backend_classes, supported):
     for kind in (None, "fp8_per_tensor", "fp8_per_head", "int8_group", "int4_group"):
         layer_config = config(kv_quant=kind, kv_quant_group_size=8 if kind and kind.endswith("group") else None)
-        for backend in backends:
+        for backend_cls in backend_classes:
             if kind in supported:
-                backend(layer_config)
+                backend_cls(layer_config)
             else:
                 with pytest.raises(NotImplementedError):
-                    backend(layer_config)
+                    backend_cls(layer_config)
 
 
 def test_fa3_fp8_rejects_window_and_sinks():
@@ -71,9 +71,9 @@ def test_fa3_fp8_needs_a_bf16_model():
     layer_config = GQALayerConfig(
         num_heads=HEADS, num_kv_heads=KV_HEADS, head_dim=DIM, dtype=torch.float16, kv_quant="fp8_per_head"
     )
-    for backend in (FA3GQAPrefillBackend, FA3GQADecodeBackend):
+    for backend_cls in (FA3GQAPrefillBackend, FA3GQADecodeBackend):
         with pytest.raises(NotImplementedError, match="BF16 model"):
-            backend(layer_config)
+            backend_cls(layer_config)
     FA3GQADecodeBackend(config(kv_quant="fp8_per_head"))
 
 
@@ -156,12 +156,14 @@ def group_cache(bits):
 def test_triton_group_quant_matches_dequantized_reference(bits, prefill):
     k, v, scales, k_ref, v_ref = group_cache(bits)
     token_map = torch.randperm(3 * CAP, device="cuda", dtype=torch.int32, generator=gen(0)).view(3, CAP)
-    backend = TritonQuantGQAPrefillBackend if prefill else TritonQuantGQADecodeBackend
-    att_state = backend.build(make_batch(token_map, prefill=prefill), None if prefill else backend.build_context_type())
-    impl = backend(config(kv_quant=f"int{bits}_group", kv_quant_group_size=8))
+    backend_cls = TritonQuantGQAPrefillBackend if prefill else TritonQuantGQADecodeBackend
+    att_state = backend_cls.build(
+        make_batch(token_map, prefill=prefill), None if prefill else backend_cls.build_context_type()
+    )
+    backend = backend_cls(config(kv_quant=f"int{bits}_group", kv_quant_group_size=8))
     q = queries(prefill)
     out = torch.empty_like(q)
-    assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out) is out
+    assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k_ref, v_ref, token_map, prefill=prefill), atol=0.03, rtol=0.03
     )
@@ -188,20 +190,20 @@ def test_fa3_fp8_per_head_matches_dequantized_reference(static_q, prefill):
     token_map = torch.randperm(3 * CAP, device="cuda", dtype=torch.int32, generator=gen(0)).view(3, CAP)
     batch = make_batch(token_map, prefill=prefill)
     if prefill:
-        backend = FA3GQAPrefillBackend
-        att_state = backend.build(batch, backend.build_context_type(page_size=1))
+        backend_cls = FA3GQAPrefillBackend
+        att_state = backend_cls.build(batch, backend_cls.build_context_type(page_size=1))
     else:
-        backend = FA3GQADecodeBackend
+        backend_cls = FA3GQADecodeBackend
         storage = torch.empty(3 * CAP, dtype=torch.int32, device="cuda")
-        step_builder = backend.build_context_type(
+        step_builder = backend_cls.build_context_type(
             page_size=1, page_table_view=lambda rows, width, mb: storage[: rows * width].view(rows, width)
         )
-        att_state = backend.build(batch, step_builder)
-    impl = backend(config(kv_quant="fp8_per_head", has_q_scale=static_q))
+        att_state = backend_cls.build(batch, step_builder)
+    backend = backend_cls(config(kv_quant="fp8_per_head", has_q_scale=static_q))
     q = queries(prefill)
     out = torch.empty_like(q)
     scales = GQAKVScales(k_scale=k_scale, v_scale=v_scale, q_scale=q_scale)
-    impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
+    backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
     k_ref = k.view(torch.float8_e4m3fn).float() * k_scale[None, :, None]
     v_ref = v.view(torch.float8_e4m3fn).float() * v_scale[None, :, None]
     # q is quantized to FP8 as well, so compare against the full-precision reference loosely.
@@ -217,19 +219,19 @@ def test_flashinfer_fp8_per_tensor_matches_dequantized_reference(prefill):
     builder_config = FlashInferGQABuilderConfig(HEADS, KV_HEADS, DIM, 1, torch.bfloat16, torch.float8_e4m3fn)
     workspace = torch.empty(32 * 1024 * 1024, dtype=torch.uint8, device="cuda")
     if prefill:
-        backend = FlashInferGQAPrefillBackend
-        step_builder = backend.build_context_type(builder_config, workspace=lambda: workspace, max_seq_len=CAP)
+        backend_cls = FlashInferGQAPrefillBackend
+        step_builder = backend_cls.build_context_type(builder_config, workspace=lambda: workspace, max_seq_len=CAP)
     else:
-        backend = FlashInferGQADecodeBackend
-        step_builder = backend.build_context_type(
+        backend_cls = FlashInferGQADecodeBackend
+        step_builder = backend_cls.build_context_type(
             builder_config, workspace=lambda: workspace, max_seq_len=CAP, max_batch_size=3, device=torch.device("cuda")
         )
-    att_state = backend.build(make_batch(token_map, prefill=prefill), step_builder)
-    impl = backend(config(kv_quant="fp8_per_tensor"))
+    att_state = backend_cls.build(make_batch(token_map, prefill=prefill), step_builder)
+    backend = backend_cls(config(kv_quant="fp8_per_tensor"))
     q = queries(prefill)
     out = torch.empty_like(q)
     scales = GQAKVScales(k_scale=0.03, v_scale=0.05)
-    impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
+    backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
     k_ref, v_ref = k.view(torch.float8_e4m3fn).float() * 0.03, v.view(torch.float8_e4m3fn).float() * 0.05
     torch.testing.assert_close(
         out.float(), reference(q, k_ref, v_ref, token_map, prefill=prefill), atol=0.03, rtol=0.03
@@ -239,9 +241,9 @@ def test_flashinfer_fp8_per_tensor_matches_dequantized_reference(prefill):
 @pytest.mark.parametrize("prefill", [True, False])
 def test_quant_triton_rejects_non_causal_layers(prefill):
     # A non-causal (block-draft) layer must be rejected, not run causally over the int8 cache.
-    backend = TritonQuantGQAPrefillBackend if prefill else TritonQuantGQADecodeBackend
+    backend_cls = TritonQuantGQAPrefillBackend if prefill else TritonQuantGQADecodeBackend
     with pytest.raises(NotImplementedError, match="causal"):
-        backend(config(kv_quant="int8_group", kv_quant_group_size=8, causal=False))
+        backend_cls(config(kv_quant="int8_group", kv_quant_group_size=8, causal=False))
 
 
 @cuda
@@ -250,8 +252,10 @@ def test_unquantized_triton_rejects_a_quantized_cache(prefill):
     # Models that always use the unquantized Triton adapter get a clear error with an int8 cache.
     k, v, _, _, _ = group_cache(8)
     token_map = torch.randperm(3 * CAP, device="cuda", dtype=torch.int32, generator=gen(0)).view(3, CAP)
-    backend = TritonGQAPrefillBackend if prefill else TritonGQADecodeBackend
-    att_state = backend.build(make_batch(token_map, prefill=prefill), None if prefill else backend.build_context_type())
+    backend_cls = TritonGQAPrefillBackend if prefill else TritonGQADecodeBackend
+    att_state = backend_cls.build(
+        make_batch(token_map, prefill=prefill), None if prefill else backend_cls.build_context_type()
+    )
     q = queries(prefill)
     with pytest.raises(AssertionError, match="KV cache of q's dtype"):
-        backend(config()).forward(att_state, GQALayerInputs(q, k, v), out=torch.empty_like(q))
+        backend_cls(config()).forward(att_state, GQALayerInputs(q, k, v), out=torch.empty_like(q))

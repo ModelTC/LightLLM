@@ -57,7 +57,7 @@ class GQALayerConfig:
     of its span, as given per step by InferStateInfo.b_image_token_end (and b_image_token_start with a
     sliding window, whose span keys stay visible even outside the window); text queries stay causal.
 
-    Supported dtypes, head dimensions, scales and sliding-window modes are documented on each impl.
+    Supported dtypes, head dimensions, scales and sliding-window modes are documented on each backend.
     """
 
     num_heads: int
@@ -115,7 +115,7 @@ class GQALayerInputs:
     [cache_slots, num_kv_heads, head_dim], stored as the layer config's kv_quant: dtype, FP8 E4M3
     (or its uint8 bytes), int8, or int8 bytes packing two int4 values ([..., head_dim // 2]).
     Each implementation's attention state address their first dimension. The caller owns and populates
-    the cache, including the current queries' KV; impls do not write q or K/V.
+    the cache, including the current queries' KV; backends do not write q or K/V.
 
     sinks is the layer's [num_heads] sink logits in q's dtype when the layer_config has has_sinks, else None.
     kv_scales holds the cache's scales when the layer_config has kv_quant, else None.

@@ -83,7 +83,7 @@ def test_infer_state_without_attention_builds_no_att_state():
 
 
 @pytest.mark.parametrize(
-    ("backend", "config", "field"),
+    ("backend_cls", "config", "field"),
     [
         (TritonGQAPrefillBackend, GQALayerConfig(8, 2, 64, torch.bfloat16), "b_req_idx"),
         (TritonMLAPrefillBackend, MLAPrefillLayerConfig(8, 128, 64, 128, 0.125, torch.bfloat16), "b_seq_len"),
@@ -94,16 +94,16 @@ def test_infer_state_without_attention_builds_no_att_state():
         ),
     ],
 )
-def test_prefill_backend_state_outlives_step(no_cycle_gc, backend, config, field):
+def test_prefill_backend_state_outlives_step(no_cycle_gc, backend_cls, config, field):
     owner = InferStateInfo()
     owner.is_prefill = True
     owner.req_manager = SimpleNamespace(req_to_token_indexs=None)
     tensor = torch.arange(4)
     setattr(owner, field, tensor)
-    impl = backend(config)
-    runtime = _runtime({"prefill": {impl.state_key: impl}})
+    backend = backend_cls(config)
+    runtime = _runtime({"prefill": {backend.state_key: backend}})
     owner.att_states = runtime.prepare(owner)
-    att_state = owner.att_states[impl.state_key]
+    att_state = owner.att_states[backend.state_key]
     owner_ref = weakref.ref(owner)
     del owner
     assert owner_ref() is None

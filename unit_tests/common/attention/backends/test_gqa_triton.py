@@ -93,8 +93,8 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
         ),
     )
     out = torch.empty(q.shape[0], q_heads + 1, 64, device=q.device, dtype=q.dtype)[:, :q_heads]
-    impl = TritonGQAPrefillBackend(layer_config)
-    assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
+    backend = TritonGQAPrefillBackend(layer_config)
+    assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k, v, token_map, req_ids, lengths, ready, window), atol=0.02, rtol=0.02
     )
@@ -112,8 +112,10 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
             make_batch(token_map, req_ids, lengths), TritonGQADecodeBackend.build_context_type()
         )
         out = torch.empty(3, q_heads + 1, 64, device=q.device, dtype=q.dtype)[:, :q_heads]
-        impl = TritonGQADecodeBackend(layer_config)
-        assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out, alloc_func=allocate) is out
+        backend = TritonGQADecodeBackend(layer_config)
+        assert (
+            backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out, alloc_func=allocate) is out
+        )
         torch.testing.assert_close(
             out.float(),
             reference(q, k, v, token_map, req_ids, lengths, (lengths - 1).tolist(), window),
@@ -136,12 +138,12 @@ def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
     owner.req_manager = SimpleNamespace(req_to_token_indexs=token_map)
     step_config = AttentionStepConfig(cuda_graph_max_kv_seq_len=512)
     layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16)
-    impl = TritonGQADecodeBackend(layer_config)
+    backend = TritonGQADecodeBackend(layer_config)
     # As in the serving decode path, the capture flag is set before the attention state are built and
     # capture raises max_kv_seq_len to the graph capacity only afterwards.
     owner.graph_mode = GraphMode.CAPTURE
     att_state = TritonGQADecodeBackend.build(
-        configure_attention_step(owner, step_config), impl.create_build_context(impl.state_key[1], None)
+        configure_attention_step(owner, step_config), backend.create_build_context(backend.state_key[1], None)
     )
     owner.max_kv_seq_len = 512
     q = torch.randn(2, q_heads, 64, device="cuda", dtype=torch.bfloat16)
@@ -150,7 +152,7 @@ def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
 
     def forward() -> torch.Tensor:
         out = allocator(q.shape, dtype=q.dtype, device=q.device)
-        return impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out, alloc_func=allocator)
+        return backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out, alloc_func=allocator)
 
     forward()
     torch.cuda.synchronize()
@@ -185,8 +187,8 @@ def test_list_sliding_window_matches_tuple():
     att_state = TritonGQADecodeBackend.build(
         make_batch(token_map, req_ids, lengths), TritonGQADecodeBackend.build_context_type()
     )
-    impl = TritonGQADecodeBackend(layer_config)
-    out = impl.forward(att_state, GQALayerInputs(q=q, k_cache=kv[:, :4], v_cache=kv[:, 4:]), out=torch.empty_like(q))
+    backend = TritonGQADecodeBackend(layer_config)
+    out = backend.forward(att_state, GQALayerInputs(q=q, k_cache=kv[:, :4], v_cache=kv[:, 4:]), out=torch.empty_like(q))
     expected = reference(q, kv[:, :4], kv[:, 4:], token_map, req_ids, lengths, [4, 8], (-1, -1))
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
 

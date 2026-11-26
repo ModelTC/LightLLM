@@ -183,7 +183,9 @@ def accepted_ssm(state, replay, reqs):
     return folded[0, req_t.long()]
 
 
-def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_impl, decode_impl, prefill_builder, seed=7):
+def run_prefill_then_decode(
+    family, *, replay, mtp_step, dynamic, prefill_backend, decode_backend, prefill_builder, seed=7
+):
     """Prefill fresh and cached requests, then run speculative decode steps with acceptance commits, comparing
     outputs and accepted conv/SSM state against the sequential reference after every step."""
     from lightllm.common.attention.backends.gdn.triton import GDNDecodeBuildContext
@@ -209,9 +211,9 @@ def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_impl, 
     # Prefill.
     rows = sum(lengths)
     tensors = family.make_inputs(rows)
-    step = prefill_impl.build(prefill_batch(REQS, lengths, ready), prefill_builder)
+    step = prefill_backend.build(prefill_batch(REQS, lengths, ready), prefill_builder)
     out = family.alloc_out(rows)
-    prefill_impl.forward(step, family.layer_inputs(_clones(tensors), conv, ssm, state if replay else None), out=out)
+    prefill_backend.forward(step, family.layer_inputs(_clones(tensors), conv, ssm, state if replay else None), out=out)
     start = 0
     for i, (ref, n) in enumerate(zip(refs, lengths)):
         expected = ref.run(family.token_fn, *family.token_args(tensors, start, start + n))
@@ -226,10 +228,12 @@ def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_impl, 
         step_lengths = step_lengths if dynamic else [width] * len(REQS)
         batch = decode_batch(REQS, step_lengths, width, HOLD, state.mtp_state_index, dynamic=dynamic)
         tensors = family.make_inputs(batch.batch_size)
-        step = decode_impl.build(batch, builder)
+        step = decode_backend.build(batch, builder)
         out = family.alloc_out(batch.batch_size)
-        # A replay decode impl advances the replay cursors itself after the last layer.
-        decode_impl.forward(step, family.layer_inputs(_clones(tensors), conv, ssm, state if replay else None), out=out)
+        # A replay decode backend advances the replay cursors itself after the last layer.
+        decode_backend.forward(
+            step, family.layer_inputs(_clones(tensors), conv, ssm, state if replay else None), out=out
+        )
         start = 0
         for i, (ref, n) in enumerate(zip(refs, step_lengths)):
             expected = ref.run(family.token_fn, *family.token_args(tensors, start, start + n))

@@ -1,7 +1,7 @@
 """Kimi Delta Attention (KDA) linear attention: a causal depthwise conv followed by a delta rule with
 per-channel gates (GLM-5-Next's linear layers).
 
-Like GDN, KDA keeps per-request recurrent state (conv and SSM) that impls update in place; the caller
+Like GDN, KDA keeps per-request recurrent state (conv and SSM) that backends update in place; the caller
 owns it and supplies each layer's views, so a forward runs exactly once per step and layer.
 """
 

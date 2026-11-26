@@ -1,4 +1,4 @@
-"""GDN step builders and impls, how GDN layers choose them, and the FlashQLA validator."""
+"""GDN step builders and backends, how GDN layers choose them, and the FlashQLA validator."""
 
 import sys
 from types import ModuleType, SimpleNamespace
@@ -189,23 +189,23 @@ def test_auto_selection_validates_flashqla(monkeypatch):
         gdn_config(), "prefill", "auto", validate=lambda name: validate_calls.append(name) or True
     )
 
-    assert selection.backend.get_name() == "flashqla_gdn_prefill"
-    assert selection.impl.chunk_gated_delta_rule()(q="q")[0] == "flashqla"
+    assert selection.backend_cls.get_name() == "flashqla_gdn_prefill"
+    assert selection.backend.chunk_gated_delta_rule()(q="q")[0] == "flashqla"
     assert validate_calls == ["flashqla"]
 
 
 def test_auto_selection_falls_back_to_triton_when_flashqla_fails_validation(monkeypatch):
     monkeypatch.setitem(sys.modules, "flash_qla", SimpleNamespace(chunk_gated_delta_rule=None))
     selection = selector.select(gdn_config(), "prefill", "auto", validate=lambda name: False)
-    assert selection.backend.get_name() == "triton_gdn_prefill"
+    assert selection.backend_cls.get_name() == "triton_gdn_prefill"
 
 
 @pytest.mark.parametrize("replay, decode", [(False, "triton_gdn_decode"), (True, "replay_gdn_decode")])
 def test_replay_state_selects_replay_decode(monkeypatch, replay, decode):
     monkeypatch.setitem(sys.modules, "flash_qla", SimpleNamespace(chunk_gated_delta_rule=None))
     config = gdn_config(replay=replay)
-    assert selector.select(config, "prefill", "flashqla").backend.get_name() == "flashqla_gdn_prefill"
-    assert selector.select(config, "decode", "triton").backend.get_name() == decode
+    assert selector.select(config, "prefill", "flashqla").backend_cls.get_name() == "flashqla_gdn_prefill"
+    assert selector.select(config, "decode", "triton").backend_cls.get_name() == decode
 
 
 def test_linear_layers_read_the_second_backend_value():

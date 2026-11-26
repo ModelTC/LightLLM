@@ -19,8 +19,8 @@ logger = init_logger(__name__)
 class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     """ """
 
-    prefill_impl = None
-    decode_impl = None
+    prefill_backend = None
+    decode_backend = None
 
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
@@ -70,10 +70,10 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     def _gqa_sinks(self, layer_weight):
         return None
 
-    def _gqa_attention(self, impl, q, infer_state, layer_weight):
+    def _gqa_attention(self, backend, q, infer_state, layer_weight):
         state = self._gqa_cache_state(infer_state.att_state_manager, infer_state.att_state_role)
         keys, values = self._gqa_kv_cache(state)
-        config = impl.layer_config
+        config = backend.layer_config
         query = q.view(-1, config.num_heads, config.head_dim)
         inputs = GQALayerInputs(
             q=query,
@@ -82,8 +82,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             kv_scales=state.get_layer_kv_scales(self.layer_num_),
             sinks=self._gqa_sinks(layer_weight),
         )
-        output = impl.forward(
-            infer_state.att_states[impl.state_key],
+        output = backend.forward(
+            infer_state.att_states[backend.state_key],
             inputs,
             out=self.alloc_tensor(query.shape, dtype=query.dtype, device=query.device),
             alloc_func=self.alloc_tensor,
@@ -91,10 +91,10 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         return output.view(q.shape)
 
     def _context_attention_kernel(self, q, kv, infer_state, layer_weight, out=None) -> torch.Tensor:
-        return self._gqa_attention(self.prefill_impl, q, infer_state, layer_weight)
+        return self._gqa_attention(self.prefill_backend, q, infer_state, layer_weight)
 
     def _token_attention_kernel(self, q, infer_state, layer_weight, out=None) -> torch.Tensor:
-        return self._gqa_attention(self.decode_impl, q, infer_state, layer_weight)
+        return self._gqa_attention(self.decode_backend, q, infer_state, layer_weight)
 
     def _bind_norm(self):
         self._att_norm = partial(LlamaTransformerLayerInfer._att_norm, self)
