@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+from lightllm.common.attention.backends.sparse_mla import SWASparseMLAAttConfig
+from lightllm.common.attention.backends.sparse_mla import selector as sparse_mla_selector
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.deepseek_v4.layer_weights.pre_and_post_layer_weight import (
     DeepseekV4PreAndPostLayerWeight,
@@ -37,6 +39,7 @@ if TYPE_CHECKING:
     from lightllm.server.core.objs.start_args_type import StartArgs
     from lightllm.common.attention_state.full_att.base_state import FullAttentionState
     from lightllm.common.attention_state.bounded_att.base_state import BoundedAttentionState
+    from lightllm.common.attention.base_backend import AttentionBackend
 
 logger = init_logger(__name__)
 
@@ -73,6 +76,70 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     transformer_layer_infer_class = DeepseekV4TransformerLayerInfer
 
     infer_state_class = DeepseekV4InferStateInfo
+
+    @classmethod
+    def create_att_backends(cls, model: "DeepseekV4TpPartModel") -> tuple["AttentionBackend", ...]:
+        args = get_env_start_args()
+        if args.llm_kv_type == "None":
+            args.llm_kv_type = "fp8kv_dsa"
+        # TODO: 支持其他 kv type
+        if args.llm_kv_type != "fp8kv_dsa":
+            raise RuntimeError("DeepSeek-V4 requires llm_kv_type=fp8kv_dsa for packed FlashMLA sparse attention")
+        from lightllm.models.deepseek_v4.config import create_attention_config
+
+        config = create_attention_config(
+            model_config=model.config,
+            model_logical_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),
+            tp_rank=model.tp_rank_,
+            tp_world_size=model.tp_world_size_,
+        )
+        # The layers read their packed caches through these FlashMLA views.
+        model.swa_cache_config = config.create_swa_config()
+        model.compressed_cache_configs = {
+            ratio: config.create_compressed_config(compress_ratio=ratio)
+            for ratio in dict.fromkeys(config.compress_ratios)
+            if ratio
+        }
+        tp_q_head_num = model.config["num_attention_heads"] // model.tp_world_size_
+        # Sparse FlashMLA uses 64-head tiles; TP can leave fewer local Q heads.
+        padded_q_head_num = ((tp_q_head_num + 63) // 64) * 64
+        if not model.is_mtp_draft_model:
+            # Drafts share this buffer after the main model has captured its CUDA graphs.
+            model.dsv4_workspace.init_flashmla_prefill_q(
+                tp_q_head_num=tp_q_head_num,
+                padded_q_head_num=padded_q_head_num,
+                head_dim=model.config["head_dim"],
+                dtype=model.data_type,
+            )
+        for layer_infer in model.layers_infer:
+            layer_infer.flashmla_q_head_num_ = padded_q_head_num
+            layer_infer.swa_cache_config = model.swa_cache_config
+            layer_infer.compressed_cache_config = model.compressed_cache_configs.get(layer_infer.compress_ratio)
+        backends = []
+        for ratio in dict.fromkeys(config.compress_ratios):
+            layers = [layer for layer in model.layers_infer if layer.compress_ratio == ratio]
+            if not layers:
+                continue
+            att_config = SWASparseMLAAttConfig(
+                num_heads=padded_q_head_num,
+                head_dim_v=model.config["head_dim"],
+                softmax_scale=model.config["head_dim"] ** -0.5,
+                dtype=model.data_type,
+                compress_ratio=ratio,
+                has_attn_sink=True,
+            )
+            layer_ids = tuple(layer.layer_num_ for layer in layers)
+            backends.append(
+                sparse_mla_selector.select_swa_sparse_mla_prefill_backend(
+                    att_config=att_config, model=model, logical_layer_ids=layer_ids
+                )
+            )
+            backends.append(
+                sparse_mla_selector.select_swa_sparse_mla_decode_backend(
+                    att_config=att_config, model=model, logical_layer_ids=layer_ids
+                )
+            )
+        return tuple(backends)
 
     def _verify_params(self):
         assert self.load_way == "HF", "only support HF format weights"
@@ -204,45 +271,6 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         # 权重量化按 checkpoint 层号查询；draft 的资源层数仍只描述自身。
         config = dict(self.config, n_layer=len(self.config["compress_ratios"]))
         self.quant_cfg = Quantcfg(config, self.quant_type, self.quant_cfg_path, self.expert_dtype)
-
-    def _init_attention(self):
-        args = get_env_start_args()
-        if args.llm_kv_type == "None":
-            args.llm_kv_type = "fp8kv_dsa"
-        # TODO: 支持其他 kv type
-        if args.llm_kv_type != "fp8kv_dsa":
-            raise RuntimeError("DeepSeek-V4 requires llm_kv_type=fp8kv_dsa for packed FlashMLA sparse attention")
-        from lightllm.models.deepseek_v4.config import create_attention_config
-
-        config = create_attention_config(
-            model_config=self.config,
-            model_logical_layer_ids=tuple(layer.layer_num_ for layer in self.layers_infer),
-            tp_rank=self.tp_rank_,
-            tp_world_size=self.tp_world_size_,
-        )
-        # The layers read their packed caches through these FlashMLA views.
-        self.swa_cache_config = config.create_swa_config()
-        self.compressed_cache_configs = {
-            ratio: config.create_compressed_config(compress_ratio=ratio)
-            for ratio in dict.fromkeys(config.compress_ratios)
-            if ratio
-        }
-        tp_q_head_num = self.config["num_attention_heads"] // self.tp_world_size_
-        # Sparse FlashMLA uses 64-head tiles; TP can leave fewer local Q heads.
-        padded_q_head_num = ((tp_q_head_num + 63) // 64) * 64
-        if not self.is_mtp_draft_model:
-            # Drafts share this buffer after the main model has captured its CUDA graphs.
-            self.dsv4_workspace.init_flashmla_prefill_q(
-                tp_q_head_num=tp_q_head_num,
-                padded_q_head_num=padded_q_head_num,
-                head_dim=self.config["head_dim"],
-                dtype=self.data_type,
-            )
-        for layer_infer in self.layers_infer:
-            layer_infer.flashmla_q_head_num_ = padded_q_head_num
-            layer_infer.swa_cache_config = self.swa_cache_config
-            layer_infer.compressed_cache_config = self.compressed_cache_configs.get(layer_infer.compress_ratio)
-        super()._init_attention()
 
     def _init_custom(self):
         self._init_to_get_rotary()

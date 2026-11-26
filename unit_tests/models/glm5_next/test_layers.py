@@ -13,7 +13,6 @@ from lightllm.common.attention.backends.sparse_mla.flashmla import (
     FlashMLASparsePrefillBackend,
     FlashMLASparsePrefillAttState,
 )
-from lightllm.common.attention import selector
 from lightllm.common.quantization import Quantcfg
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
@@ -21,6 +20,7 @@ from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import get_env_start_args
+from unit_tests.common.attention.backends.groups_runner import register_test_backends
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -100,7 +100,16 @@ def test_kda_projections_need_no_sparse_attention_config(config):
     weight = Glm5NextTransformerLayerWeight(0, torch.bfloat16, config, Quantcfg(config))
     projections = {
         name: random_weight(size, 128)
-        for name, size in {"q": 512, "k": 512, "v": 512, "b": 4, "f_a": 128, "g_a": 128, "f_b": 512, "g_b": 512}.items()
+        for name, size in {
+            "q": 512,
+            "k": 512,
+            "v": 512,
+            "b": 4,
+            "f_a": 128,
+            "g_a": 128,
+            "f_b": 512,
+            "g_b": 512,
+        }.items()
     }
     weight.load_hf_weights(
         {f"model.language_model.layers.0.self_attn.{name}_proj.weight": value for name, value in projections.items()}
@@ -186,14 +195,19 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
 
     model = SimpleNamespace(
         data_type=torch.bfloat16,
-        args=SimpleNamespace(llm_kv_type="None"),
+        config=config,
+        args=StartArgs(),
+        layers_infer=[layer],
+        tp_world_size_=1,
+        is_mtp_draft_model=False,
+        att_state_role="main",
     )
-    spec = layer.attention_config(model)
-    prefill = selector.select(spec.prefill, "prefill", spec.prefill_implementation)
-    decode = selector.select(spec.decode, "decode", spec.decode_implementation)
-    assert (prefill.backend, decode.backend) == (FlashMLASparsePrefillBackend, FA3SparseMLADecodeBackend)
-    layer.prefill_impl, layer.decode_impl = prefill.impl, decode.impl
-    # The attention state the group's step builders would build for this batch.
+    prefill_backend, decode_backend = Glm5NextTpPartModel.create_att_backends(model=model)
+    assert (type(prefill_backend), type(decode_backend)) == (FlashMLASparsePrefillBackend, FA3SparseMLADecodeBackend)
+    state.attention_backend_manager = register_test_backends(
+        state.att_state_role, layer.layer_num_, prefill_backend, decode_backend
+    )
+    # 该组的步构建器为该批次构建的注意力状态。
     prefill_att_state = FlashMLASparsePrefillAttState(mem_index=None, has_cached_prefix=False)
     decode_att_state = FA3SparseMLADecodeAttState(
         cache_seqlens=lengths,
@@ -209,10 +223,10 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
         scores = projected[row].float() @ keys.T * config["qk_nope_head_dim"] ** -0.5
         expected.append(scores.softmax(-1) @ keys)
     expected = torch.stack(expected)
-    state.att_states = {layer.prefill_impl.state_key: prefill_att_state}
+    state.att_states = {prefill_backend: prefill_att_state}
     prefill = layer._context_attention_kernel(q, None, state, weight)
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
-    state.att_states = {layer.decode_impl.state_key: decode_att_state}
+    state.att_states = {decode_backend: decode_att_state}
     decode = layer._token_attention_kernel(q, state, weight)
     for output in (prefill, decode):
         torch.testing.assert_close(output.float(), expected, atol=1e-3, rtol=0.015)
@@ -378,7 +392,7 @@ def test_mtp_pre_layer_applies_main_norm_before_hidden_fusion(config, monkeypatc
         main_norm_weight_=norms[0],
         enorm_weight_=norms[1],
         hnorm_weight_=norms[2],
-        eh_proj_weight_=SimpleNamespace(mm=lambda x: x @ projection),
+        eh_proj_weight_=SimpleNamespace(mm=lambda input_tensor: input_tensor @ projection),
     )
     state = SimpleNamespace(mtp_draft_input_hiddens=hidden.clone())
     monkeypatch.setattr(LlamaMultimodalPreLayerInfer, method, lambda self, ids, state, weight: embeddings.clone())
@@ -494,8 +508,8 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
 
     # NoPE state initialization must not require a model-owned RoPE cache.
     for model in (main, *drafts):
-        # The runtime is not initialized, so the step builds no attention metadata.
-        model.attention_backend_manager = SimpleNamespace(has_attention=False)
+        # 运行时未初始化，因此步骤不构建注意力元数据。
+        model.attention_backend_manager = SimpleNamespace(has_attention=lambda _: False)
         state = model.infer_state_class()
         state.is_prefill = True
         state.input_ids = torch.zeros(3, device="cuda", dtype=torch.int64)

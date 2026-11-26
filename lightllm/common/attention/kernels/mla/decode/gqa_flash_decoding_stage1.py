@@ -4,6 +4,81 @@ import triton.language as tl
 from lightllm.utils.device_utils import calcu_kernel_best_vsm_count
 
 
+@torch.no_grad()
+def flash_decode_stage1_vsm_count(
+    batch_size: int,
+    q_head_num: int,
+    kv_lora_rank: int,
+    q_rope_dim: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    run_config: dict[str, int],
+) -> int:
+    """Return the persistent grid size from stage 1's occupancy, compiling without launching.
+
+    The probe uses canonical contiguous operands, so the result depends only on the layer
+    configuration and run_config, never on a particular layer's tensor strides.
+    """
+    q_nope = torch.empty((batch_size, q_head_num, kv_lora_rank), dtype=dtype, device=device)
+    q_rope = torch.empty((batch_size, q_head_num, q_rope_dim), dtype=dtype, device=device)
+    kv = torch.empty((1, 1, kv_lora_rank + q_rope_dim), dtype=dtype, device=device)
+    seq_meta = torch.empty((batch_size,), dtype=torch.int32, device=device)
+    args, kwargs = _stage1_launch_args(
+        in_block_seq=torch.empty((1,), dtype=torch.int64, device=device),
+        q_nope=q_nope,
+        q_rope=q_rope,
+        kv_nope=kv[:, :, :kv_lora_rank],
+        kv_rope=kv[:, :, kv_lora_rank:],
+        Req_to_tokens=torch.empty((1, 1), dtype=torch.int32, device=device),
+        B_req_idx=seq_meta,
+        B_Seqlen=seq_meta,
+        mid_out=torch.empty((q_head_num, 0, kv_lora_rank), dtype=torch.float32, device=device),
+        mid_out_logsumexp=torch.empty((q_head_num, 0), dtype=torch.float32, device=device),
+        softmax_scale=1.0,
+        num_sm=1,
+        run_config=run_config,
+    )
+    kernel = _fwd_kernel_flash_decode_stage1_padding.warmup(*args, **kwargs, grid=(1,))
+    kernel._init_handles()
+    return calcu_kernel_best_vsm_count(kernel, num_warps=run_config["stage1_num_warps"])
+
+
+@torch.no_grad()
+def flash_decode_stage1(
+    in_block_seq: torch.Tensor,
+    q_nope: torch.Tensor,
+    q_rope: torch.Tensor,
+    kv_nope: torch.Tensor,
+    kv_rope: torch.Tensor,
+    Req_to_tokens: torch.Tensor,
+    B_req_idx: torch.Tensor,
+    B_Seqlen: torch.Tensor,
+    mid_out: torch.Tensor,
+    mid_out_logsumexp: torch.Tensor,
+    softmax_scale: float,
+    num_sm: int,
+    run_config: dict[str, int],
+):
+    """Launch num_sm persistent programs; in_block_seq must have been computed for the same num_sm."""
+    assert num_sm * 4 + B_req_idx.shape[0] <= mid_out.shape[1]
+    args, kwargs = _stage1_launch_args(
+        in_block_seq,
+        q_nope,
+        q_rope,
+        kv_nope,
+        kv_rope,
+        Req_to_tokens,
+        B_req_idx,
+        B_Seqlen,
+        mid_out,
+        mid_out_logsumexp,
+        softmax_scale,
+        num_sm,
+        run_config,
+    )
+    _fwd_kernel_flash_decode_stage1_padding[(num_sm,)](*args, **kwargs)
+
+
 @triton.jit
 def _fwd_kernel_flash_decode_stage1_padding(
     Q_nope,
@@ -207,7 +282,7 @@ def _stage1_launch_args(
     )
     kwargs = dict(
         num_sm=num_sm,
-        head_group_num=triton.cdiv(q_head_num, Q_HEAD_NUM),
+        head_group_num=triton.cdiv(x=q_head_num, y=Q_HEAD_NUM),
         head_num=q_head_num,
         batch_size=B_req_idx.shape[0],
         Q_HEAD_NUM=Q_HEAD_NUM,
@@ -220,78 +295,3 @@ def _stage1_launch_args(
         num_stages=1,
     )
     return args, kwargs
-
-
-@torch.no_grad()
-def flash_decode_stage1_vsm_count(
-    batch_size: int,
-    q_head_num: int,
-    kv_lora_rank: int,
-    q_rope_dim: int,
-    dtype: torch.dtype,
-    device: torch.device,
-    **run_config,
-) -> int:
-    """Return the persistent grid size from stage 1's occupancy, compiling without launching.
-
-    The probe uses canonical contiguous operands, so the result depends only on the layer
-    configuration and run_config, never on a particular layer's tensor strides.
-    """
-    q_nope = torch.empty((batch_size, q_head_num, kv_lora_rank), dtype=dtype, device=device)
-    q_rope = torch.empty((batch_size, q_head_num, q_rope_dim), dtype=dtype, device=device)
-    kv = torch.empty((1, 1, kv_lora_rank + q_rope_dim), dtype=dtype, device=device)
-    seq_meta = torch.empty((batch_size,), dtype=torch.int32, device=device)
-    args, kwargs = _stage1_launch_args(
-        in_block_seq=torch.empty((1,), dtype=torch.int64, device=device),
-        q_nope=q_nope,
-        q_rope=q_rope,
-        kv_nope=kv[:, :, :kv_lora_rank],
-        kv_rope=kv[:, :, kv_lora_rank:],
-        Req_to_tokens=torch.empty((1, 1), dtype=torch.int32, device=device),
-        B_req_idx=seq_meta,
-        B_Seqlen=seq_meta,
-        mid_out=torch.empty((q_head_num, 0, kv_lora_rank), dtype=torch.float32, device=device),
-        mid_out_logsumexp=torch.empty((q_head_num, 0), dtype=torch.float32, device=device),
-        softmax_scale=1.0,
-        num_sm=1,
-        run_config=run_config,
-    )
-    kernel = _fwd_kernel_flash_decode_stage1_padding.warmup(*args, **kwargs, grid=(1,))
-    kernel._init_handles()
-    return calcu_kernel_best_vsm_count(kernel, num_warps=run_config["stage1_num_warps"])
-
-
-@torch.no_grad()
-def flash_decode_stage1(
-    in_block_seq: torch.Tensor,
-    q_nope,
-    q_rope,
-    kv_nope,
-    kv_rope,
-    Req_to_tokens,
-    B_req_idx,
-    B_Seqlen,
-    mid_out,
-    mid_out_logsumexp,
-    softmax_scale,
-    num_sm: int,
-    **run_config,
-):
-    """Launch num_sm persistent programs; in_block_seq must have been computed for the same num_sm."""
-    assert num_sm * 4 + B_req_idx.shape[0] <= mid_out.shape[1]
-    args, kwargs = _stage1_launch_args(
-        in_block_seq,
-        q_nope,
-        q_rope,
-        kv_nope,
-        kv_rope,
-        Req_to_tokens,
-        B_req_idx,
-        B_Seqlen,
-        mid_out,
-        mid_out_logsumexp,
-        softmax_scale,
-        num_sm,
-        run_config,
-    )
-    _fwd_kernel_flash_decode_stage1_padding[(num_sm,)](*args, **kwargs)

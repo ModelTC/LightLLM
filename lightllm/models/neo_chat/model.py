@@ -1,24 +1,20 @@
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from dataclasses import replace
+from lightllm.common.attention.base_backend import AttentionBackend
+from lightllm.common.attention.backends.gqa import selector as gqa_selector
 import os
 import json
 import torch
+from lightllm.common.attention.backends.gqa import GQAAttConfig, get_gqa_kv_quant
 from lightllm.common.build_utils import repair_config
-from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
-from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
-from lightllm.models.qwen3_vl.layer_infer.transformer_layer_infer import Qwen3VLTransformerLayerInfer
-from lightllm.models.qwen3_vl.layer_weights.pre_and_post_layer_weight import Qwen3VLPreAndPostLayerWeight
-from lightllm.models.qwen2_vl.model import QWen2VLTokenizer
 from lightllm.models.qwen3.model import Qwen3TpPartModel
-from lightllm.server.core.objs import SamplingParams
-from lightllm.models.qwen3_moe.model import Qwen3MOEModel
-from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
-from lightllm.models.neo_chat_moe.vision_process import smart_resize
-from lightllm.models.internvl.model import InternvlTokenizer
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.models.neo_chat.layer_infer.transformer_layer_infer import NeoChatTransformerLayerInfer
-from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.neo_chat.layer_weights.transformer_layer_weight import NeoChatTransformerLayerWeight
 from lightllm.models.neo_chat.layer_weights.pre_and_post_layer_weight import NeoChatPreAndPostLayerWeight
-from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
 from lightllm.utils.log_utils import init_logger
 
@@ -27,8 +23,41 @@ logger = init_logger(__name__)
 
 
 class NeoModelBase:
-    def _init_custom(self):
+    @classmethod
+    def create_att_backends(cls, model: "TpPartBaseModel") -> tuple[AttentionBackend, ...]:
+        if not model.layers_infer:
+            return ()
+        config = model.config
+        layer_ids = tuple(layer.layer_num_ for layer in model.layers_infer)
+        head_dim = config.get("head_dim", config["hidden_size"] // config["num_attention_heads"])
+        state = model.att_state_manager.get_state(
+            model_role=model.att_state_role, state_type_filter="gqa", logical_layer_id=layer_ids[0]
+        )
+        kv_quant, group_size, has_q_scale = get_gqa_kv_quant(
+            llm_kv_type=model.args.llm_kv_type,
+            kv_scales=state.get_layer_kv_scales(logical_layer_id=layer_ids[0]),
+            head_dim=head_dim,
+        )
+        att_config = GQAAttConfig(
+            num_heads=config["num_attention_heads"] // model.tp_world_size_,
+            num_kv_heads=max(config["num_key_value_heads"] // model.tp_world_size_, 1),
+            head_dim=head_dim,
+            dtype=model.data_type,
+            causal=not model.is_mtp_draft_model or model.args.mtp_mode not in ("dspark", "dflash", "dflash2"),
+            kv_quant=kv_quant,
+            kv_quant_group_size=group_size,
+            has_q_scale=has_q_scale,
+        )
+        return (
+            gqa_selector.select_gqa_prefill_backend(
+                att_config=replace(att_config, bidirectional_image_spans=True),
+                model=model,
+                logical_layer_ids=layer_ids,
+            ),
+            gqa_selector.select_gqa_decode_backend(att_config=att_config, model=model, logical_layer_ids=layer_ids),
+        )
 
+    def _init_custom(self):
         super()._init_custom()
 
         if "rope_theta_hw" in self.config:

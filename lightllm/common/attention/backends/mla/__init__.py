@@ -2,17 +2,14 @@ from dataclasses import dataclass
 
 import torch
 
-from .. import require_positive
-
 
 @dataclass(frozen=True)
-class MLAPrefillLayerConfig:
-    """Static configuration of MLA prefill over expanded (non-absorbed) keys and values.
+class MLAPrefillAttConfig:
+    """使用展开 K/V（未吸收）的 MLA prefill 静态配置。
 
-    Head counts are per rank. Queries and keys have qk_nope_head_dim + qk_rope_head_dim
-    channels; values and outputs have v_head_dim. Prefill and decode have separate layer configs
-    because they see different projections of the same layer. causal=False lets the queries of
-    one request see all of its keys, as block-drafting models need.
+    注意力头数按 rank 计算。query 和 key 有 qk_nope_head_dim + qk_rope_head_dim 个通道，
+    value 和输出有 v_head_dim 个通道。prefill 和 decode 对同一层使用不同投影，因此层配置
+    各自定义。causal=False 允许同一请求的 query 看到其所有 key，用于块草稿模型。
     """
 
     num_heads: int
@@ -24,16 +21,17 @@ class MLAPrefillLayerConfig:
     causal: bool = True
 
     def __post_init__(self) -> None:
-        require_positive(self, "num_heads", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim")
+        if self.num_heads <= 0 or self.qk_nope_head_dim <= 0 or self.qk_rope_head_dim <= 0 or self.v_head_dim <= 0:
+            raise ValueError("num_heads, qk_nope_head_dim, qk_rope_head_dim and v_head_dim must be positive")
 
 
 @dataclass(frozen=True)
-class MLAPrefillLayerInputs:
-    """Per-layer projected keys/values in request order, including cached prefixes.
+class MLAPrefillAttInputs:
+    """按请求顺序排列的每层投影键值，包括已缓存前缀。
 
-    q is [query_tokens, num_heads, qk_nope_head_dim + qk_rope_head_dim]. k_nope is
-    [kv_tokens, num_heads, qk_nope_head_dim], k_rope is [kv_tokens, 1, qk_rope_head_dim]
-    and v is [kv_tokens, num_heads, v_head_dim].
+    q 是 [query_tokens, num_heads, qk_nope_head_dim + qk_rope_head_dim]。k_nope 是
+    [kv_tokens, num_heads, qk_nope_head_dim]，k_rope 是 [kv_tokens, 1, qk_rope_head_dim]，v 是 [kv_tokens,
+    num_heads, v_head_dim]。
     """
 
     q: torch.Tensor
@@ -43,12 +41,12 @@ class MLAPrefillLayerInputs:
 
 
 @dataclass(frozen=True)
-class MLADecodeLayerConfig:
-    """Static configuration of MLA decode over the compressed latent cache.
+class MLADecodeAttConfig:
+    """读取压缩 latent cache 的 MLA decode 静态配置。
 
-    Head counts are per rank. The absorbed query has kv_lora_rank latent channels plus
-    qk_rope_head_dim rotary channels, matching each cache row. causal applies when speculative
-    decoding gives a request several query rows (see InferStateInfo.decode_rows_per_request).
+    注意力头数按 rank 计算。吸收投影后的 query 有 kv_lora_rank 个 latent 通道和
+    qk_rope_head_dim 个 RoPE 通道，与单行缓存的布局一致。投机解码产生多行 query 时，
+    因果约束由该配置控制，每请求的最大查询行数由后端的运行时配置指定。
     """
 
     num_heads: int
@@ -59,17 +57,18 @@ class MLADecodeLayerConfig:
     causal: bool = True
 
     def __post_init__(self) -> None:
-        require_positive(self, "num_heads", "kv_lora_rank", "qk_rope_head_dim")
+        if self.num_heads <= 0 or self.kv_lora_rank <= 0 or self.qk_rope_head_dim <= 0:
+            raise ValueError("num_heads, kv_lora_rank and qk_rope_head_dim must be positive")
 
 
 @dataclass(frozen=True)
-class MLADecodeLayerInputs:
-    """Absorbed query rows, split into latent and rotary components.
+class MLADecodeAttInputs:
+    """吸收投影后的 query 行，分为 latent 和 RoPE 两部分。
 
-    q_nope is [rows, num_heads, kv_lora_rank] and q_rope is [rows, num_heads,
-    qk_rope_head_dim]. kv_cache is a borrowed [physical_slots, 1, kv_lora_rank +
-    qk_rope_head_dim] cache whose latent prefix supplies both K and V. The cache includes
-    the current token for each request.
+    q_nope 的形状为 [rows, num_heads, kv_lora_rank]，q_rope 的形状为
+    [rows, num_heads, qk_rope_head_dim]。kv_cache 是调用方持有的缓存，形状为
+    [physical_slots, 1, kv_lora_rank + qk_rope_head_dim]。其中的 latent 前缀同时提供 K 和 V。
+    缓存包含各请求的当前 token。
     """
 
     q_nope: torch.Tensor

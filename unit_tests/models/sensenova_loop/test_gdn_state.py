@@ -1,13 +1,15 @@
+from unit_tests.common.attention.backends.step_fixture import make_backend_model
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from lightllm.common.attention import selector
-from lightllm.common.attention.backends.gdn import GDNLayerConfig
+from lightllm.common.attention.backends.gdn.selector import select_gdn_prefill_backend, select_gdn_decode_backend
+from lightllm.common.attention.backends.gdn import GDNAttConfig
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
+from unit_tests.common.attention.backends.groups_runner import register_test_backends
+from unit_tests.common.attention.backends.step_fixture import AttentionStepConfig, configure_attention_step
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerInfer
 from lightllm.models.sensenova_loop.config import get_loop_layer_indices, get_loop_layer_types
@@ -43,10 +45,23 @@ def test_gdn_decode_keeps_logical_layer_state(
     kinds = get_loop_layer_types(settings, config)
     layers = tuple(i for i, kind in enumerate(kinds) if kind == "linear_attention")
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
-    # The GDN layers' attention: Triton prefill and decode over native state.
-    layer_config = GDNLayerConfig(1, 2, 32, 32, 4, "silu", dtype, state_mtp_step=mtp_step)
-    prefill_selection = selector.select(layer_config, "prefill", "triton")
-    decode_selection = selector.select(layer_config, "decode", "triton")
+    # GDN 层的注意力：Triton 在原生状态上执行 prefill 和 decode。
+    att_config = GDNAttConfig(
+        num_k_heads=1,
+        num_v_heads=2,
+        head_k_dim=32,
+        head_v_dim=32,
+        conv_kernel_dim=4,
+        activation="silu",
+        dtype=dtype,
+        state_mtp_step=mtp_step,
+    )
+    prefill_selection = select_gdn_prefill_backend(
+        att_config=att_config, requested="triton", model=make_backend_model(), logical_layer_ids=(0,)
+    )
+    decode_selection = select_gdn_decode_backend(
+        att_config=att_config, requested="triton", model=make_backend_model(), logical_layer_ids=(0,)
+    )
     layout = ConvSSMStateConfig(layers, 1, 2, 32, 32, 3, dtype, torch.float32)
     resource = GDNState(layout, request_capacity=3, mtp_step=mtp_step, device=device)
     resources = AttentionStateManager(request_capacity=3)
@@ -115,24 +130,25 @@ def test_gdn_decode_keeps_logical_layer_state(
         32,
         32,
     )
-    layer.prefill_impl, layer.decode_impl = prefill_selection.impl, decode_selection.impl
+    infer.attention_backend_manager = register_test_backends(
+        infer.att_state_role, logical_layer, prefill_selection, decode_selection
+    )
     layer.alloc_tensor = lambda shape, dtype=None, device=None, **_: torch.empty(shape, dtype=dtype, device=device)
     mixed_dim = 2 * 32 + 2 * 64 + 2 * 2
 
-    def build_attention_states(backend):
-        # The attention state the layers' group builds for this step.
+    def build_attention_states():
+        # 层组为此步骤构建的注意力状态。
         step_config = AttentionStepConfig(
             decode_rows_per_request=mtp_step + 1, req_to_mtp_state_index=resource.mtp_state_index
         )
         batch = configure_attention_step(infer, step_config)
-        impl = layer.prefill_impl if infer.is_prefill else layer.decode_impl
-        infer.att_states = {impl.state_key: backend.build(batch, backend.create_build_context(impl.state_key[1], None))}
+        infer.att_states = infer.attention_backend_manager.create_att_state(infer_state=batch)
 
     if device == "cuda":
         infer.b1_cu_q_seq_len = torch.tensor([0, 5], device=device, dtype=torch.int32)
         infer.b_ready_cache_len = torch.zeros(1, device=device, dtype=torch.int32)
         infer.is_prefill = True
-        build_attention_states(prefill_selection.backend)
+        build_attention_states()
         inputs = layer._gdn_layer_inputs(torch.randn(5, mixed_dim, device=device, dtype=dtype), infer, weight)
         layer._gdn_attention(inputs, infer, prefill=True)
 
@@ -143,7 +159,7 @@ def test_gdn_decode_keeps_logical_layer_state(
     untouched = [i for i in range(len(layers)) if i != storage_layer]
     for _ in range(2):
         before_conv, before_ssm = resource.conv_state.clone(), resource.ssm_state.clone()
-        build_attention_states(decode_selection.backend)
+        build_attention_states()
         inputs = layer._gdn_layer_inputs(
             torch.randn(infer.batch_size, mixed_dim, device=device, dtype=dtype), infer, weight
         )

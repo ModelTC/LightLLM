@@ -1,3 +1,7 @@
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
 import torch
 
 import torch.distributed as dist
@@ -8,8 +12,7 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
-from lightllm.common.attention.backends.gdn import GDNLayerConfig, GDNLayerInputs
-from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
+from lightllm.common.attention.backends.gdn import GDNAttInputs
 from typing import Optional, Tuple
 from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
 from lightllm.distributed import all_reduce
@@ -48,7 +51,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             )
         return
 
-    def _gdn_layer_inputs(self, mixed_qkvzba, infer_state, layer_weight) -> GDNLayerInputs:
+    def _gdn_layer_inputs(self, mixed_qkvzba, infer_state, layer_weight) -> GDNAttInputs:
         """Split the fused projection and gather the layer's parameters and GDN state views."""
         qkv_dim = self.tp_linear_key_dim * 2 + self.tp_linear_num_v_heads * self.linear_head_v_dim
         z_end = qkv_dim + self.tp_linear_num_v_heads * self.linear_head_v_dim
@@ -57,7 +60,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             model_role=infer_state.att_state_role, state_type_filter="gdn", logical_layer_id=self.layer_num_
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=self.layer_num_)
-        return GDNLayerInputs(
+        return GDNAttInputs(
             mixed_qkv=mixed_qkvzba[:, :qkv_dim],
             z=mixed_qkvzba[:, qkv_dim:z_end].view(-1, self.tp_linear_num_v_heads, self.linear_head_v_dim),
             b=mixed_qkvzba[:, z_end:b_end],
@@ -68,22 +71,26 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             dt_bias=layer_weight.linear_dt_bias.weight,
             conv_states=conv_states,
             ssm_states=ssm_states,
-            replay_state=state if self.decode_impl.layer_config.replay else None,
-            layer_num=self.layer_num_,
+            replay_state=state,  # Used by replay decode.
+            logic_layer_index=self.layer_num_,
         )
 
     def _gdn_attention(
-        self, inputs: GDNLayerInputs, infer_state, *, prefill: bool, out: Optional[torch.Tensor] = None
+        self, inputs: GDNAttInputs, infer_state: "InferStateInfo", *, prefill: bool, out: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        impl = self.prefill_impl if prefill else self.decode_impl
+        phase = "prefill" if prefill else "decode"
+        impl = infer_state.attention_backend_manager.get_backend(
+            role=infer_state.att_state_role, phase=phase, logical_layer_id=self.layer_num_
+        )
         if not prefill and out is None:
             z = inputs.z
             out = self.alloc_tensor(
                 (z.shape[0], self.tp_linear_num_v_heads, self.linear_head_v_dim), dtype=z.dtype, device=z.device
             )
-        return impl.forward(
-            infer_state.att_states[impl.state_key],
-            inputs,
+        attention = impl.prefill if prefill else impl.decode
+        return attention(
+            att_state=infer_state.att_states[impl],
+            layer_inputs=inputs,
             out=out,
             alloc_func=self.alloc_tensor,
         )
@@ -263,23 +270,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         z = mixed_qkvzba[:, 2 * self.tp_linear_key_dim + self.tp_linear_num_v_heads * self.linear_head_v_dim :]
         z = z[:, : self.tp_linear_num_v_heads * self.linear_head_v_dim]
         return o, z.view(-1, self.tp_linear_num_v_heads, self.linear_head_v_dim)
-
-    def attention_config(self, model) -> LayerAttentionConfig:
-        if not self.is_linear_attention_layer:
-            return super().attention_config(model)
-        config, tp_world_size = self.network_config_, self.tp_world_size_
-        layer_config = GDNLayerConfig(
-            num_k_heads=config["linear_num_key_heads"] // tp_world_size,
-            num_v_heads=config["linear_num_value_heads"] // tp_world_size,
-            head_k_dim=config["linear_key_head_dim"],
-            head_v_dim=config["linear_value_head_dim"],
-            conv_kernel_dim=config["linear_conv_kernel_dim"],
-            activation=config["hidden_act"],
-            dtype=model.data_type,
-            state_mtp_step=model.args.mtp_step,
-            replay=model.args.ssm_state_mode == "replay",
-        )
-        return LayerAttentionConfig(layer_config, layer_config)
 
     def context_attention_forward(
         self,

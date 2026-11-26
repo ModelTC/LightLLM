@@ -3,7 +3,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.models.deepseek_v4.workspace import DeepseekV4C4PrefillWorkspace, DeepseekV4Workspace
 from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
@@ -15,18 +14,20 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires 
 
 @pytest.mark.parametrize("draft_class", [DeepseekV4MTPModel, DeepseekV4DSparkModel])
 def test_draft_initialization_preserves_captured_prefill_buffer(monkeypatch, draft_class):
-    args = SimpleNamespace(llm_kv_type="fp8kv_dsa")
+    args = SimpleNamespace(
+        llm_kv_type="fp8kv_dsa",
+        att_backend={"swa_sparse_mla.prefill": "flashmla_sparse", "swa_sparse_mla.decode": "flashmla_sparse"},
+    )
     monkeypatch.setattr("lightllm.models.deepseek_v4.model.get_env_start_args", lambda: args)
     cache_config = SimpleNamespace(
         compress_ratios=(0,), create_swa_config=lambda: "swa", create_compressed_config=lambda compress_ratio: None
     )
     monkeypatch.setattr("lightllm.models.deepseek_v4.config.create_attention_config", lambda **kwargs: cache_config)
-    # Only the model's own attention setup is under test; its layers create no Attention here.
-    monkeypatch.setattr(TpPartBaseModel, "_init_attention", lambda model: None)
     main = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
+    main.args = args
     main.batch_max_tokens, main.tp_world_size_, main.tp_rank_, main.data_type = 8, 1, 0, torch.bfloat16
     main.config = {"head_dim": 512, "block_size": 3, "dspark_noise_token_id": 1, "num_attention_heads": 2}
-    main.layers_infer = [SimpleNamespace(layer_num_=0, compress_ratio=0)]
+    main.layers_infer = [SimpleNamespace(layer_num_=0, compress_ratio=0, v_head_dim=512, softmax_scale=0.0625)]
     main.dsv4_workspace = DeepseekV4Workspace(main)
     for name in (
         "_freqs_cis_sliding",
@@ -37,7 +38,8 @@ def test_draft_initialization_preserves_captured_prefill_buffer(monkeypatch, dra
         "_sin_cached_compress",
     ):
         setattr(main, name, torch.ones((1, 32), device="cuda"))
-    main._init_attention()
+    main_backends = main.create_att_backends(model=main)
+    assert all(backend.role == "main" and backend.logical_layer_ids == (0,) for backend in main_backends)
     buffer = main.dsv4_workspace.flashmla_prefill_q
     buffer[:, :2].fill_(2)
     graph = torch.cuda.CUDAGraph()
@@ -45,12 +47,15 @@ def test_draft_initialization_preserves_captured_prefill_buffer(monkeypatch, dra
         result = main.dsv4_workspace.flashmla_prefill_q + 1
 
     draft = draft_class.__new__(draft_class)
+    draft.args = args
+    draft.mtp_previous_draft_models = []
     draft.main_model, draft.config, draft.data_type = main, main.config, main.data_type
     draft.tp_world_size_, draft.tp_rank_ = 1, 0
-    draft.layers_infer = [SimpleNamespace(layer_num_=0, compress_ratio=0)]
+    draft.layers_infer = [SimpleNamespace(layer_num_=1, compress_ratio=0, v_head_dim=512, softmax_scale=0.0625)]
     draft.context_wkv_weight = object()
     draft._init_custom()
-    draft._init_attention()
+    draft_backends = draft.create_att_backends(model=draft)
+    assert all(backend.role == "draft0" and backend.logical_layer_ids == (1,) for backend in draft_backends)
 
     assert draft.dsv4_workspace is main.dsv4_workspace
     assert main.dsv4_workspace.flashmla_prefill_q is buffer

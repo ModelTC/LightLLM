@@ -5,6 +5,7 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_eagle.layer_infer.pre_layer_infer import Qwen3EaglePreLayerInfer
 from lightllm.models.qwen3_eagle.layer_infer.transformer_layer_infer import Qwen3EagleTransformerLayerInfer
@@ -73,7 +74,13 @@ class Qwen3EagleModel(LlamaTpPartModel):
         )
         super()._init_infer_layer(start_layer_index=total_pre_layers_num)
 
-    def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0, **kwargs):
+    def _create_inferstate(
+        self,
+        model_input: ModelInput,
+        microbatch_index: int = 0,
+        graph_mode: GraphMode = GraphMode.EAGER,
+        build_attention: bool = True,
+    ) -> InferStateInfo:
         """在进入模型主体和 CUDA Graph 前统一 EAGLE3 hidden 的宽度。
 
         Target model 收集的多个辅助层 hidden 会沿最后一维拼接，宽度为
@@ -97,7 +104,12 @@ class Qwen3EagleModel(LlamaTpPartModel):
             model_input.mtp_draft_input_hiddens = self.pre_post_weight.fc_weight_.mm(draft_hiddens)
 
         assert model_input.mtp_draft_input_hiddens.shape == (model_input.input_ids.shape[0], hidden_size)
-        return super()._create_inferstate(model_input=model_input, microbatch_index=microbatch_index, **kwargs)
+        return super()._create_inferstate(
+            model_input=model_input,
+            microbatch_index=microbatch_index,
+            graph_mode=graph_mode,
+            build_attention=build_attention,
+        )
 
     # d2t stores per-token offsets: target_id = draft_id + d2t[draft_id].
     @torch.no_grad()

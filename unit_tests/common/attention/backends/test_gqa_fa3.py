@@ -1,3 +1,7 @@
+from typing import Any
+from unit_tests.common.attention.backends.step_fixture import create_att_state
+from lightllm.common.attention.backends.gqa.fa3 import FA3DecodeRuntimeConfig
+from unit_tests.common.attention.backends.groups_runner import run_attention
 import dataclasses
 import json
 from types import SimpleNamespace
@@ -6,7 +10,7 @@ import pytest
 import torch
 
 from unit_tests.common.attention.backends.step_fixture import make_infer_state
-from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
+from lightllm.common.attention.backends.gqa import GQAKVScales, GQAAttConfig, GQAAttInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
@@ -73,16 +77,11 @@ def make_batch(token_map, req_ids, lengths, query_lengths=None, **kwargs):
     )
 
 
-class _PageTables:
-    """Caller-owned page-table storage with the view contract of Fa3AttBackend.get_page_table_view."""
-
-    def __init__(self, page_size: int) -> None:
-        self.page_size = page_size
-        self.storage = [torch.empty(64 * 512, dtype=torch.int32, device="cuda") for _ in range(2)]
-
-    def __call__(self, rows: int, max_kv_len: int, microbatch_index: int) -> torch.Tensor:
-        pages = (max_kv_len + self.page_size - 1) // self.page_size
-        return self.storage[microbatch_index][: rows * pages].view(rows, pages)
+def decode_backend(page_size: Any, config: Any = None):
+    if config is None:
+        config = GQAAttConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16)
+    runtime = FA3DecodeRuntimeConfig(page_size=page_size, max_seq_len=512, max_decode_rows=16, microbatch_count=2)
+    return FA3GQADecodeBackend(att_config=config, runtime_config=runtime)
 
 
 def make_cache(kv_heads, dtype, seed):
@@ -143,7 +142,7 @@ def test_prefill(page_size, causal, window, sinks, cached):
     query_lengths = [n - r for n, r in zip(lengths, ready)]
     q = torch.randn(sum(query_lengths), q_heads, 64, device="cuda", dtype=dtype)
     sink_logits = torch.randn(q_heads, device="cuda", dtype=dtype) if sinks else None
-    layer_config = GQALayerConfig(
+    att_config = GQAAttConfig(
         num_heads=q_heads,
         num_kv_heads=kv_heads,
         head_dim=64,
@@ -153,10 +152,20 @@ def test_prefill(page_size, causal, window, sinks, cached):
         has_sinks=sinks,
     )
     batch = make_batch(token_map, req_ids, lengths, query_lengths, b_ready_cache_len=torch.tensor(ready).cuda())
-    att_state = FA3GQAPrefillBackend.build(batch, FA3GQAPrefillBackend.build_context_type(page_size=page_size))
-    out = torch.empty_like(q)
-    impl = FA3GQAPrefillBackend(layer_config)
-    assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sink_logits), out=out) is out
+    impl = FA3GQAPrefillBackend(
+        att_config=att_config, runtime_config=FA3GQAPrefillBackend.RuntimeConfig(page_size=page_size)
+    )
+    att_state = create_att_state(backend=impl, infer_state=batch)
+    out = torch.empty_like(input=q)
+    assert (
+        run_attention(
+            backend=impl,
+            att_state=att_state,
+            layer_inputs=GQAAttInputs(q=q, k_cache=k, v_cache=v, sinks=sink_logits),
+            out=out,
+        )
+        is out
+    )
     rows = [(r, pos + 1, n) for r, n, c in zip(req_ids, lengths, ready) for pos in range(c, n)]
     expected = reference(q, k, v, token_map, rows, causal=causal, window=window, sinks=sink_logits)
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
@@ -173,7 +182,7 @@ def test_fp8_prefill(static_q):
     generator = torch.Generator(device="cuda").manual_seed(4)
     q = torch.randn(sum(query_lengths), q_heads, 64, device="cuda", generator=generator).bfloat16()
     q_scale = q.float().abs().view(q.shape[0], kv_heads, -1).amax(dim=(0, 2)) / FP8_MAX if static_q else None
-    layer_config = GQALayerConfig(
+    att_config = GQAAttConfig(
         num_heads=q_heads,
         num_kv_heads=kv_heads,
         head_dim=64,
@@ -182,13 +191,13 @@ def test_fp8_prefill(static_q):
         has_q_scale=static_q,
     )
     batch = make_batch(token_map, req_ids, lengths, query_lengths, b_ready_cache_len=torch.tensor(ready).cuda())
-    att_state = FA3GQAPrefillBackend.build(batch, FA3GQAPrefillBackend.build_context_type(page_size=1))
+    att_state = create_att_state(backend=FA3GQAPrefillBackend(att_config=att_config), infer_state=batch)
     out = torch.empty_like(q)
-    layer_inputs = GQALayerInputs(
+    layer_inputs = GQAAttInputs(
         q=q, k_cache=k, v_cache=v, kv_scales=GQAKVScales(k_scale=k_scale, v_scale=v_scale, q_scale=q_scale)
     )
-    assert FA3GQAPrefillBackend(layer_config).forward(att_state, layer_inputs, out=out) is out
-    # Dynamic q scales are per prefill request.
+    assert FA3GQAPrefillBackend(att_config=att_config).prefill(att_state, layer_inputs, out=out) is out
+    # 动态 q 缩放是每个prefill请求的。
     starts = [0, *torch.tensor(query_lengths).cumsum(0).tolist()]
     q_ref = fp8_round_q(q, kv_heads, [list(range(s, e)) for s, e in zip(starts, starts[1:])], q_scale)
     rows = [(r, pos + 1, n) for r, n, c in zip(req_ids, lengths, ready) for pos in range(c, n)]
@@ -238,15 +247,23 @@ def test_decode_layouts(layout, sinks, page_size):
     kv, k, v = make_cache(kv_heads, dtype, seed=3)
     q = torch.randn(len(req_ids), q_heads, 64, device="cuda", dtype=dtype)
     sink_logits = torch.randn(q_heads, device="cuda", dtype=dtype) if sinks else None
-    layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=dtype, has_sinks=sinks)
+    att_config = GQAAttConfig(num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=dtype, has_sinks=sinks)
     batch = make_batch(
         token_map, req_ids, lengths, decode_rows_per_request=rows_per_request, dynamic_decode_rows=dynamic
     )
-    step_builder = FA3GQADecodeBackend.build_context_type(page_size=page_size, page_table_view=_PageTables(page_size))
-    att_state = FA3GQADecodeBackend.build(batch, step_builder)
+    step_builder = decode_backend(page_size=page_size, config=att_config)
+    att_state = create_att_state(backend=step_builder, infer_state=batch)
     out = torch.empty_like(q)
-    impl = FA3GQADecodeBackend(layer_config)
-    assert impl.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sink_logits), out=out) is out
+    impl = step_builder
+    assert (
+        run_attention(
+            backend=impl,
+            att_state=att_state,
+            layer_inputs=GQAAttInputs(q=q, k_cache=k, v_cache=v, sinks=sink_logits),
+            out=out,
+        )
+        is out
+    )
     keep = [i for i, r in enumerate(req_ids) if r != PAD]
     expected = reference(q, k, v, token_map, decode_rows(req_ids, lengths, True), sinks=sink_logits)
     torch.testing.assert_close(out[keep].float(), expected[keep], atol=0.02, rtol=0.02)
@@ -263,17 +280,16 @@ def test_decode_non_causal(layout, window):
     _, k, v = make_cache(kv_heads, dtype, seed=3)
     generator = torch.Generator(device="cuda").manual_seed(4)
     q = torch.randn(len(req_ids), q_heads, 64, device="cuda", dtype=dtype, generator=generator)
-    layer_config = GQALayerConfig(
+    att_config = GQAAttConfig(
         num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=dtype, causal=False, sliding_window=window
     )
     batch = make_batch(
         token_map, req_ids, lengths, decode_rows_per_request=rows_per_request, dynamic_decode_rows=dynamic
     )
-    att_state = FA3GQADecodeBackend.build(
-        batch, FA3GQADecodeBackend.build_context_type(page_size=page_size, page_table_view=_PageTables(page_size))
-    )
-    out = torch.empty_like(q)
-    FA3GQADecodeBackend(layer_config).forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out)
+    impl = decode_backend(page_size=page_size, config=att_config)
+    att_state = create_att_state(backend=impl, infer_state=batch)
+    out = torch.empty_like(input=q)
+    impl.decode(att_state=att_state, layer_inputs=GQAAttInputs(q=q, k_cache=k, v_cache=v), out=out)
     keep = [i for i, r in enumerate(req_ids) if r != PAD]
     expected = reference(q, k, v, token_map, decode_rows(req_ids, lengths, False), causal=False, window=window)
     torch.testing.assert_close(out[keep].float(), expected[keep], atol=0.02, rtol=0.02)
@@ -289,7 +305,7 @@ def test_fp8_decode_layouts(layout, static_q):
     generator = torch.Generator(device="cuda").manual_seed(4)
     q = torch.randn(len(req_ids), q_heads, 64, device="cuda", generator=generator).bfloat16()
     q_scale = q.float().abs().view(q.shape[0], kv_heads, -1).amax(dim=(0, 2)) / FP8_MAX if static_q else None
-    layer_config = GQALayerConfig(
+    att_config = GQAAttConfig(
         num_heads=q_heads,
         num_kv_heads=kv_heads,
         head_dim=64,
@@ -300,56 +316,56 @@ def test_fp8_decode_layouts(layout, static_q):
     batch = make_batch(
         token_map, req_ids, lengths, decode_rows_per_request=rows_per_request, dynamic_decode_rows=dynamic
     )
-    att_state = FA3GQADecodeBackend.build(
-        batch, FA3GQADecodeBackend.build_context_type(page_size=1, page_table_view=_PageTables(1))
-    )
+    att_state = create_att_state(backend=decode_backend(page_size=1, config=att_config), infer_state=batch)
     out = torch.empty_like(q)
-    layer_inputs = GQALayerInputs(
+    layer_inputs = GQAAttInputs(
         q=q, k_cache=k, v_cache=v, kv_scales=GQAKVScales(k_scale=k_scale, v_scale=v_scale, q_scale=q_scale)
     )
-    assert FA3GQADecodeBackend(layer_config).forward(att_state, layer_inputs, out=out) is out
+    assert FA3GQADecodeBackend(att_config=att_config).decode(att_state, layer_inputs, out=out) is out
     q_ref = fp8_round_q(q, kv_heads, decode_groups(req_ids, rows_per_request, dynamic), q_scale)
     keep = [i for i, r in enumerate(req_ids) if r != PAD]
     expected = reference(q_ref, k_ref, v_ref, token_map, decode_rows(req_ids, lengths, True))
     torch.testing.assert_close(out[keep].float(), expected[keep], atol=FP8_TOL, rtol=FP8_TOL)
 
 
-def test_decode_step_builder_keeps_graph_tensors_per_microbatch_and_batch_size():
+def test_decode_replay_updates_derived_lengths_and_shares_fixed_offsets():
     token_map = paged_token_map(8, 16, seed=4)
-    step_builder = FA3GQADecodeBackend.build_context_type(page_size=16, page_table_view=_PageTables(16))
+    step_builder = decode_backend(page_size=16)
     req_ids = [2, 2, 0, 0]
 
-    def build(lengths, microbatch_index=0, graph=True):
-        return FA3GQADecodeBackend.build(
-            make_batch(
-                token_map,
-                req_ids,
-                lengths,
-                decode_rows_per_request=2,
-                cuda_graph_max_kv_seq_len=512 if graph else None,
-                microbatch_index=microbatch_index,
-            ),
-            step_builder,
+    def build(lengths: list[int], microbatch_index: int = 0, graph: bool = True):
+        batch = make_batch(
+            token_map=token_map,
+            req_ids=req_ids,
+            lengths=lengths,
+            decode_rows_per_request=2,
+            cuda_graph_max_kv_seq_len=512 if graph else None,
+            microbatch_index=microbatch_index,
         )
+        return batch, create_att_state(backend=step_builder, infer_state=batch)
 
-    captured = build([33, 34, 9, 10])
-    replayed = build([299, 300, 63, 64])
-    for name in ("cache_seqlens", "cu_seqlens_q", "page_table"):
-        assert getattr(replayed, name).data_ptr() == getattr(captured, name).data_ptr()
-    assert captured.cache_seqlens.tolist() == [300, 64], "a replay rewrites the captured tensors in place"
-    other = build([33, 34, 9, 10], microbatch_index=1)
-    assert other.cache_seqlens.data_ptr() != captured.cache_seqlens.data_ptr()
+    captured_batch, captured = build(lengths=[33, 34, 9, 10])
+    pointer = captured.cache_seqlens.data_ptr()
+    replay_batch, replayed = build(lengths=[299, 300, 63, 64])
+    assert replayed.cache_seqlens.data_ptr() != pointer
+    captured_batch.copy_for_cuda_graph(new_infer_state=replay_batch)
+    assert captured.cache_seqlens.data_ptr() == pointer
+    assert captured.cache_seqlens.tolist() == [300, 64]
+    assert replayed.cu_seqlens_q is captured.cu_seqlens_q
+    assert replayed.page_table.data_ptr() == captured.page_table.data_ptr()
+    _, other = build(lengths=[33, 34, 9, 10], microbatch_index=1)
+    assert other.cache_seqlens.data_ptr() != pointer
     assert other.page_table.data_ptr() != captured.page_table.data_ptr()
-    eager = build([33, 34, 9, 10], graph=False)
-    assert eager.cache_seqlens.data_ptr() != captured.cache_seqlens.data_ptr()
+    _, eager = build(lengths=[33, 34, 9, 10], graph=False)
+    assert eager.cache_seqlens.data_ptr() != pointer
 
 
 def test_impl_rejects_unsupported_specs():
     with pytest.raises(NotImplementedError, match="FA3 GQA"):
-        FA3GQADecodeBackend(GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=512, dtype=torch.bfloat16))
+        FA3GQADecodeBackend(att_config=GQAAttConfig(num_heads=8, num_kv_heads=2, head_dim=512, dtype=torch.bfloat16))
 
 
-# ---- adapter through LightLLM's CudaGraph ----
+# 通过 LightLLM 的 CudaGraph 测试适配器
 
 
 @pytest.fixture
@@ -367,15 +383,29 @@ def start_args(monkeypatch):
     get_env_start_args.cache_clear()
 
 
-def gqa_config(**fields) -> GQALayerConfig:
-    return GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16, **fields)
+def gqa_config(**fields) -> GQAAttConfig:
+    return GQAAttConfig(
+        num_heads=fields.get("num_heads", 8),
+        num_kv_heads=fields.get("num_kv_heads", 2),
+        head_dim=fields.get("head_dim", 64),
+        dtype=fields.get("dtype", torch.bfloat16),
+        sliding_window=fields.get("sliding_window", (-1, -1)),
+        softmax_scale=fields.get("softmax_scale", None),
+        causal=fields.get("causal", True),
+        has_sinks=fields.get("has_sinks", False),
+        kv_quant=fields.get("kv_quant", None),
+        kv_quant_group_size=fields.get("kv_quant_group_size", None),
+        has_q_scale=fields.get("has_q_scale", False),
+        has_alibi=fields.get("has_alibi", False),
+        bidirectional_image_spans=fields.get("bidirectional_image_spans", False),
+    )
 
 
 class _Model:
     """The model fields used during attention initialization; its layers run FA3."""
 
     def __init__(self, args, page_size: int, rows_per_request: int) -> None:
-        backends = {"llm_prefill_att_backend": ["fa3"], "llm_decode_att_backend": ["fa3"]}
+        backends = {"att_backend": {"gqa.prefill": "fa3", "gqa.decode": "fa3"}}
         self.args = SimpleNamespace(
             **{**args, **backends, "page_size": page_size, "running_max_req_size": 4, "mtp_step": 1}
         )
@@ -383,7 +413,7 @@ class _Model:
         self.max_seq_length = self.graph_max_len_in_batch = 512
         self.tp_world_size_ = 1
         self.is_mtp_draft_model = False
-        self.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _: rows_per_request - 1)
+        self.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda is_draft_model: rows_per_request - 1)
 
 
 def _decode_state(runner, token_map, req_ids, lengths, microbatch_index=0, *, capture=False, replay=False):
@@ -473,7 +503,6 @@ def test_layer_group_replays_dynamic_verify_layout_through_cuda_graph(start_args
     model = _Model(args, 16, rows_per_request=3)
     config = gqa_config(kv_quant="fp8_per_head") if fp8 else gqa_config()
     runner = GroupsRunner(model, config, config)
-    assert model.attention_backend_manager.step_config.dynamic_decode_rows
     token_map = paged_token_map(8, 16, seed=7)
     generator = torch.Generator(device="cuda").manual_seed(9)
     q = torch.randn(6, 8, 64, device="cuda", generator=generator).bfloat16()
@@ -488,7 +517,9 @@ def test_layer_group_replays_dynamic_verify_layout_through_cuda_graph(start_args
         return runner.run_gqa(state, q, k, v, kv_scales=kv_scales)
 
     graph = CudaGraph(6, 6, 6, max_batch_size=6, max_len_in_batch=512)
-    graph.capture_decode(forward, _decode_state(runner, token_map, *DYNAMIC_STEPS[0], capture=True))
+    capture = _decode_state(runner, token_map, *DYNAMIC_STEPS[0], capture=True)
+    assert runner.decode_impl.runtime_config.dynamic_decode_rows
+    graph.capture_decode(forward, capture)
     for req_ids, lengths in DYNAMIC_STEPS[1:]:
         out = graph.replay(_decode_state(runner, token_map, req_ids, lengths, replay=True))
         q_ref = fp8_round_q(q, 2, decode_groups(req_ids, 3, True)) if fp8 else q

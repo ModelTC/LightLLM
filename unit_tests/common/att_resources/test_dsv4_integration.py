@@ -1,6 +1,5 @@
 """通过模型工厂和生产 fused kernel 验证 V4 State 接入。"""
 
-from lightllm.models.deepseek_v4.swa_prefill_workspace import prepare_swa_prefill_workspace
 import json
 from types import SimpleNamespace
 
@@ -11,6 +10,8 @@ from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+from lightllm.models.deepseek_v4.swa_prefill_workspace import prepare_swa_prefill_workspace
+from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 from lightllm.utils.envs_utils import get_env_start_args
 
 
@@ -116,9 +117,12 @@ def test_infer_state_reads_owned_state_views(cache):
 def test_real_compressor_continues_after_checkpoint_restore(cache, ratio, layer, is_indexer):
     from lightllm.models.deepseek_v4.layer_infer.compressor import fused_compress
 
-    manager, window, _ = cache
+    manager, window, model = cache
     length, boundary = 1024, 512
     head_dim = 128 if is_indexer else 512
+    workspace = DeepseekV4Workspace(model=model)
+    if ratio == 128:
+        workspace.c128_compress_scratch = torch.empty(size=(1, length, head_dim), dtype=torch.float32, device="cuda")
     scores = torch.randn((length, head_dim * (4 if ratio == 4 else 2)), device="cuda")
     cos = torch.ones((length, 32), device="cuda")
     sin, weight = torch.zeros_like(cos), torch.ones(head_dim, device="cuda")
@@ -126,6 +130,7 @@ def test_real_compressor_continues_after_checkpoint_restore(cache, ratio, layer,
 
     def compress(req_idx, start, end, decode=False):
         infer = make_infer(manager, window)
+        infer.dsv4_workspace = workspace
         positions = torch.arange(start, end, dtype=torch.int32, device="cuda")
         width = end - start
         infer.mem_index, infer.position_ids, infer.is_prefill = slots[req_idx][start:end], positions, not decode

@@ -1,3 +1,5 @@
+from unit_tests.common.attention.backends.step_fixture import create_att_state
+from unit_tests.common.attention.backends.groups_runner import run_attention
 import torch
 import time
 import pytest
@@ -6,7 +8,7 @@ import torch.nn.functional as F
 import flashinfer
 from lightllm.utils.log_utils import init_logger
 from unit_tests.common.attention.backends.step_fixture import make_infer_state
-from lightllm.common.attention.backends.mla import MLADecodeLayerInputs, MLADecodeLayerConfig
+from lightllm.common.attention.backends.mla import MLADecodeAttInputs, MLADecodeAttConfig
 from lightllm.common.attention.backends.mla.triton import TritonMLADecodeBackend
 
 logger = init_logger(__name__)
@@ -49,12 +51,14 @@ def test_gqa_flash_decoding(batch, seqlen, heads, nope_head, rope_head):
     o = torch.zeros((Z, H, D_HEAD), dtype=dtype, device="cuda")
     o1 = torch.zeros((Z, H, D_HEAD), dtype=dtype, device="cuda")
 
-    step_builder = TritonMLADecodeBackend.build_context_type(
-        num_heads=H, kv_lora_rank=D_HEAD, qk_rope_head_dim=ROPE_HEAD, dtype=dtype
+    att_config = MLADecodeAttConfig(
+        num_heads=H, kv_lora_rank=D_HEAD, qk_rope_head_dim=ROPE_HEAD, softmax_scale=sm_scale, dtype=dtype
     )
-    # Every request has N_CTX tokens, so the eager tuning length (the average) is N_CTX.
-    att_state = TritonMLADecodeBackend.build(
-        make_infer_state(
+    impl = TritonMLADecodeBackend(att_config=att_config)
+    # 每个请求都有 N_CTX 个 token，即时执行的调优长度为 N_CTX。
+    att_state = create_att_state(
+        backend=impl,
+        infer_state=make_infer_state(
             req_to_token_indexs=req_to_token_indexs,
             b_req_idx=b_req_idx,
             b_seq_len=b_seq_len,
@@ -62,13 +66,16 @@ def test_gqa_flash_decoding(batch, seqlen, heads, nope_head, rope_head):
             max_kv_seq_len=N_CTX,
             total_token_num=Z * N_CTX,
         ),
-        step_builder,
     )
-    layer_config = MLADecodeLayerConfig(
-        num_heads=H, kv_lora_rank=D_HEAD, qk_rope_head_dim=ROPE_HEAD, softmax_scale=sm_scale, dtype=dtype
+    assert (
+        run_attention(
+            backend=impl,
+            att_state=att_state,
+            layer_inputs=MLADecodeAttInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv),
+            out=o,
+        )
+        is o
     )
-    impl = TritonMLADecodeBackend(layer_config)
-    assert impl.forward(att_state, MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv), out=o) is o
 
     kv_nope = kv[:, :, :D_HEAD]
     kv_rope = kv[:, :, D_HEAD:]

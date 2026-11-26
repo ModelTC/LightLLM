@@ -1,80 +1,121 @@
-"""GDN decode over replay state: instead of updating SSM states every token, rows append to a per-layer
-history that the replay kernel reads from each request's cursor. Prefill is the regular chunked prefill
-with one SSM slot per request."""
+"""GDN 解码重放状态：不再每令牌更新 SSM 状态，而是将行追加到每层的历史记录中，重放内核从每个请求的游标读取这些历史记录。prefill是常规分块prefill，每个请求有一个 SSM 位置。"""
+from collections.abc import Callable
+
+from lightllm.common.basemodel.infer_struct import InferStateInfo
+
+from lightllm.common.attention.base_backend import AttRuntimeConfig, DecodeAttBackend
 
 import torch
 
-from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from . import GDNLayerConfig, GDNLayerInputs
-from .triton import GDNDecodeAttState, GDNDecodeBuildContext, _mtp_conv, _pack_decode_inputs, _split_qkv
+from . import GDNAttConfig, GDNAttInputs
+from .triton import GDNDecodeAttState, TritonGDNDecodeBackend, TritonGDNPrefillBackend
 
 
-class ReplayGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState, GDNLayerInputs]):
-    def __init__(self, layer_config: GDNLayerConfig) -> None:
-        super().__init__(layer_config)
-        if not layer_config.replay:
+class ReplayGDNDecodeBackend(DecodeAttBackend[GDNAttConfig, GDNDecodeAttState, GDNAttInputs]):
+    def __init__(
+        self,
+        att_config: GDNAttConfig,
+        *,
+        role: str = "main",
+        runtime_config: AttRuntimeConfig = AttRuntimeConfig(),
+    ) -> None:
+        super().__init__(att_config=att_config, role=role, runtime_config=runtime_config)
+        if not att_config.replay:
             raise NotImplementedError("replay GDN decode needs replay state")
 
-    def forward(
+    def decode(
         self,
         att_state: GDNDecodeAttState,
-        layer_inputs: GDNLayerInputs,
+        layer_inputs: GDNAttInputs,
         *,
         out: torch.Tensor,
-        alloc_func: TensorAllocator = torch.empty,
+        alloc_func: Callable[..., torch.Tensor] = torch.empty,
     ) -> torch.Tensor:
-        """Fill and return out [rows, num_v_heads, head_v_dim]; update the conv state and append history.
+        """填充并返回 out [行数, num_v_heads, head_v_dim]；更新卷积状态并追加历史记录。
 
-        Every layer reads the cursors of the step's start; the last layer's call advances them.
+        每层读取该步骤开始时的游标；最后一层的调用会推进它们。
         """
         from lightllm.common.attention.kernels.gdn.replayssm.replay_gdn import replay
 
-        cfg, inputs = self.layer_config, layer_inputs
-        assert inputs.replay_state is not None and inputs.layer_num is not None, "replay decode needs replay_state"
-        if att_state.draft_step == 0:
-            query, key, value, a, b = _pack_decode_inputs(cfg, inputs, att_state.conv_idx)
+        cfg, inputs = self.att_config, layer_inputs
+        state = inputs.replay_state
+        logic_layer_index = inputs.logic_layer_index
+        assert (
+            state is not None and logic_layer_index is not None
+        ), "replay decode needs replay_state and logic_layer_index"
+        if self.runtime_config.decode_rows_per_request == 1:
+            query, key, value, a, b = TritonGDNDecodeBackend._pack_decode_inputs(
+                cfg=cfg, inputs=inputs, conv_idx=att_state.conv_idx
+            )
             query = query.view(query.shape[0], cfg.num_k_heads, cfg.head_k_dim)
             key = key.view(key.shape[0], cfg.num_k_heads, cfg.head_k_dim)
             value = value.view(value.shape[0], cfg.num_v_heads, cfg.head_v_dim)
         else:
-            query, key, value = _split_qkv(cfg, _mtp_conv(cfg, inputs, att_state))
+            query, key, value = TritonGDNPrefillBackend._split_qkv(
+                att_config=cfg,
+                mixed_qkv=TritonGDNDecodeBackend._mtp_conv(
+                    cfg=cfg,
+                    inputs=inputs,
+                    att_state=att_state,
+                    draft_step=self.runtime_config.decode_rows_per_request - 1,
+                ),
+            )
             query = query.view(-1, cfg.num_k_heads, cfg.head_k_dim)
             key = key.view(-1, cfg.num_k_heads, cfg.head_k_dim)
             value = value.view(-1, cfg.num_v_heads, cfg.head_v_dim)
             a, b = inputs.a, inputs.b
-        state = inputs.replay_state
         replay(
-            state,
-            state.storage_layer(inputs.layer_num),
-            query,
-            key,
-            value,
-            a,
-            b,
-            inputs.A_log,
-            inputs.dt_bias,
-            att_state.conv_idx,
-            att_state.cu_seqlens,
+            state=state,
+            linear_layer_idx=state.storage_layer(logical_layer_id=logic_layer_index),
+            q=query,
+            k=key,
+            v=value,
+            a=a,
+            b=b,
+            a_log=inputs.A_log,
+            bias=inputs.dt_bias,
+            reqs=att_state.conv_idx,
+            cu_seqlens=att_state.cu_seqlens,
             out=out.view(value.shape),
         )
-        state.finish_decode_token(inputs.layer_num, att_state.conv_idx, att_state.cu_seqlens)
+        state.finish_decode_token(
+            logical_layer_id=logic_layer_index, reqs=att_state.conv_idx, cu_seqlens=att_state.cu_seqlens
+        )
         return out
 
     @staticmethod
     def get_name() -> str:
         return "replay_gdn_decode"
 
-    build_context_type = GDNDecodeBuildContext
+    def create_att_state(self, infer_state: InferStateInfo) -> GDNDecodeAttState:
+        mtp_index = None
+        if self.runtime_config.decode_rows_per_request > 1:
+            state = infer_state.att_state_manager.get_state(
+                model_role=self.role, state_type_filter="gdn", logical_layer_id=self.logical_layer_ids[0]
+            )
+            mtp_index = state.mtp_state_index
+        return ReplayGDNDecodeBackend.prepare_replay_decode_state(
+            infer_state=infer_state, runtime_config=self.runtime_config, req_to_mtp_state_index=mtp_index
+        )
 
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
-        return context.prepare(metadata)
+    @staticmethod
+    def prepare_replay_decode_state(
+        infer_state: InferStateInfo,
+        runtime_config: AttRuntimeConfig,
+        req_to_mtp_state_index: torch.Tensor | None,
+    ) -> GDNDecodeAttState:
+        width = runtime_config.decode_rows_per_request
+        if width > 1:
+            cu, conv_idx, accepted = TritonGDNDecodeBackend.prepare_mtp_decode_rows(
+                infer_state=infer_state, runtime_config=runtime_config, req_to_mtp_state_index=req_to_mtp_state_index
+            )
+            return GDNDecodeAttState(conv_idx=conv_idx, ssm_idx=conv_idx, cu_seqlens=cu, num_accepted_tokens=accepted)
 
-    @classmethod
-    def create_build_context(cls, build_key: bool, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:
-        return GDNDecodeBuildContext(replay=build_key)
-
-    @classmethod
-    def build_context_key(cls, layer_config: GDNLayerConfig):
-        return True
+        req = infer_state.b_req_idx
+        # 重放内核始终读取行偏移，即使每个请求只有一行。
+        offsets = ReplayGDNDecodeBackend.prepare_replay_decode_state.__dict__.setdefault("_query_offsets", {})
+        key = (req.device, req.numel())
+        cu = offsets.get(key)
+        if cu is None:
+            cu = offsets.setdefault(key, torch.arange(end=req.numel() + 1, dtype=torch.int32, device=req.device))
+        return GDNDecodeAttState(conv_idx=req, ssm_idx=req, cu_seqlens=cu, num_accepted_tokens=None)

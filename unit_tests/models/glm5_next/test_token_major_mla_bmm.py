@@ -20,13 +20,14 @@ def make_projection(layer, heads: int, inner: int, cols: int, dtype: torch.dtype
         layer.layer_num_ = 0
         layer.softmax_scale = inner ** -0.5
         layer.indexer = SimpleNamespace(_get_indices=lambda **kwargs: (None, None))
-        # Attention returns the projected query it receives.
-        layer.prefill_impl = Mock()
-        layer.prefill_impl.forward.side_effect = lambda att_state, layer_inputs, **kwargs: layer_inputs.q
+        # 注意力返回它接收到的投影查询。
+        backend = Mock()
+        backend.prefill.side_effect = lambda att_state, layer_inputs, **kwargs: layer_inputs.q
         state = SimpleNamespace(
             att_state_role="main",
             att_state_manager=Mock(),
-            att_states={layer.prefill_impl.state_key: None},
+            attention_backend_manager=Mock(get_backend=Mock(return_value=backend)),
+            att_states={backend: None},
             nsa_step=SimpleNamespace(q_kv_start_loc=None),
         )
         weight = SimpleNamespace(k_b_proj_=projection)

@@ -590,11 +590,12 @@ def test_async_load_notifies_every_rank_before_deref(monkeypatch, master):
 
 
 def test_fa3_cpu_cache_sync_defaults_off():
-    from lightllm.common.attention.backend import AttentionBackend
+    from lightllm.common.attention.base_backend import PrefillAttBackend, DecodeAttBackend
     from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
     from lightllm.common.attention.backends.mla.fa3 import FA3MLADecodeBackend, FA3MLAPrefillBackend
 
-    assert AttentionBackend.requires_cpu_cache_sync() is False
+    assert PrefillAttBackend.requires_cpu_cache_sync() is False
+    assert DecodeAttBackend.requires_cpu_cache_sync() is False
     assert not any(
         backend.requires_cpu_cache_sync()
         for backend in (FA3GQAPrefillBackend, FA3GQADecodeBackend, FA3MLAPrefillBackend, FA3MLADecodeBackend)

@@ -1,6 +1,11 @@
 import torch
 from typing import Optional, TYPE_CHECKING
 import triton
+from lightllm.common.attention.backends.gdn import GDNAttConfig
+from lightllm.common.attention.backends.gqa import selector as gqa_selector
+from lightllm.common.attention.base_backend import AttentionBackend
+from lightllm.common.attention.backends.gqa import GQAAttConfig, get_gqa_kv_quant
+from lightllm.common.attention.backends.gdn import selector as gdn_selector
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
     Qwen3NextTransformerLayerWeight,
@@ -34,6 +39,63 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     # infer state class
     infer_state_class = Qwen3NextInferStateInfo
+
+    @classmethod
+    def create_att_backends(cls, model: "Qwen3NextTpPartModel") -> tuple[AttentionBackend, ...]:
+        linear_layers = [layer for layer in model.layers_infer if layer.is_linear_attention_layer]
+        full_layers = [layer for layer in model.layers_infer if not layer.is_linear_attention_layer]
+        backends = []
+        if linear_layers:
+            config = GDNAttConfig(
+                num_k_heads=model.config["linear_num_key_heads"] // model.tp_world_size_,
+                num_v_heads=model.config["linear_num_value_heads"] // model.tp_world_size_,
+                head_k_dim=model.config["linear_key_head_dim"],
+                head_v_dim=model.config["linear_value_head_dim"],
+                conv_kernel_dim=model.config["linear_conv_kernel_dim"],
+                activation=model.config["hidden_act"],
+                dtype=model.data_type,
+                state_mtp_step=model.args.mtp_step,
+                replay=model.args.ssm_state_mode == "replay",
+            )
+            layer_ids = tuple(layer.layer_num_ for layer in linear_layers)
+            backends.append(
+                gdn_selector.select_gdn_prefill_backend(att_config=config, model=model, logical_layer_ids=layer_ids)
+            )
+            select_decode = (
+                gdn_selector.select_gdn_replay_decode_backend
+                if config.replay
+                else gdn_selector.select_gdn_decode_backend
+            )
+            backends.append(select_decode(att_config=config, model=model, logical_layer_ids=layer_ids))
+        if full_layers:
+            config = model.config
+            layer_ids = tuple(layer.layer_num_ for layer in full_layers)
+            head_dim = config.get("head_dim", config["hidden_size"] // config["num_attention_heads"])
+            state = model.att_state_manager.get_state(
+                model_role=model.att_state_role, state_type_filter="gqa", logical_layer_id=layer_ids[0]
+            )
+            kv_quant, group_size, has_q_scale = get_gqa_kv_quant(
+                llm_kv_type=model.args.llm_kv_type,
+                kv_scales=state.get_layer_kv_scales(logical_layer_id=layer_ids[0]),
+                head_dim=head_dim,
+            )
+            att_config = GQAAttConfig(
+                num_heads=config["num_attention_heads"] // model.tp_world_size_,
+                num_kv_heads=max(config["num_key_value_heads"] // model.tp_world_size_, 1),
+                head_dim=head_dim,
+                dtype=model.data_type,
+                causal=not model.is_mtp_draft_model or model.args.mtp_mode not in ("dspark", "dflash", "dflash2"),
+                kv_quant=kv_quant,
+                kv_quant_group_size=group_size,
+                has_q_scale=has_q_scale,
+            )
+            backends.append(
+                gqa_selector.select_gqa_prefill_backend(att_config=att_config, model=model, logical_layer_ids=layer_ids)
+            )
+            backends.append(
+                gqa_selector.select_gqa_decode_backend(att_config=att_config, model=model, logical_layer_ids=layer_ids)
+            )
+        return tuple(backends)
 
     def __init__(self, kvargs) -> None:
         self._init_triton()

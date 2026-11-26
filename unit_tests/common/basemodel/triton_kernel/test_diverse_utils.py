@@ -1,3 +1,5 @@
+from unit_tests.common.attention.backends.step_fixture import create_att_state
+from lightllm.common.attention.backends.gqa import GQAAttConfig
 import pytest
 import torch
 
@@ -7,7 +9,6 @@ if not torch.cuda.is_available():
 from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.gqa.triton_quant import (
     TritonQuantGQADecodeBackend,
-    TritonQuantGQADecodeBuildContext,
 )
 from lightllm.common.basemodel.triton_kernel import diverse_utils
 
@@ -50,9 +51,14 @@ def _batch(shared_len, node_ids, *, graph_capacity=None, microbatch_index=0):
 
 def test_int8kv_decode_step_builder_rebuilds_diverse_metadata(monkeypatch):
     monkeypatch.setattr(diverse_utils, "get_diverse_max_batch_shared_group_size", lambda: 3)
-    step_builder = TritonQuantGQADecodeBuildContext(diverse=True)
+    step_builder = TritonQuantGQADecodeBackend(
+        att_config=GQAAttConfig(
+            num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16, kv_quant="int8_group", kv_quant_group_size=8
+        ),
+        runtime_config=TritonQuantGQADecodeBackend.RuntimeConfig(diverse_decode=True),
+    )
 
-    att_state = TritonQuantGQADecodeBackend.build(_batch([8, 8, 5, 0], [10, 10, 20, -1]), step_builder)
+    att_state = create_att_state(backend=step_builder, infer_state=_batch([8, 8, 5, 0], [10, 10, 20, -1]))
 
     assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
     assert att_state.b_shared_seq_len.cpu().tolist() == [8, 8, 0, 0]
@@ -60,19 +66,24 @@ def test_int8kv_decode_step_builder_rebuilds_diverse_metadata(monkeypatch):
 
 def test_int8kv_decode_step_builder_keeps_graph_metadata_per_microbatch_and_batch_size(monkeypatch):
     monkeypatch.setattr(diverse_utils, "get_diverse_max_batch_shared_group_size", lambda: 3)
-    step_builder = TritonQuantGQADecodeBuildContext(diverse=True)
-    captured = TritonQuantGQADecodeBackend.build(
-        _batch([8, 8, 5, 0], [10, 10, 20, -1], graph_capacity=64), step_builder
+    step_builder = TritonQuantGQADecodeBackend(
+        att_config=GQAAttConfig(
+            num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16, kv_quant="int8_group", kv_quant_group_size=8
+        ),
+        runtime_config=TritonQuantGQADecodeBackend.RuntimeConfig(diverse_decode=True),
     )
-    replayed = TritonQuantGQADecodeBackend.build(_batch([4, 4, 4, 4], [7, 7, 7, 9], graph_capacity=64), step_builder)
-    # Replays rewrite the captured tensors in place, so the graph reads the new groups.
+    captured = create_att_state(
+        backend=step_builder, infer_state=_batch([8, 8, 5, 0], [10, 10, 20, -1], graph_capacity=64)
+    )
+    replayed = create_att_state(backend=step_builder, infer_state=_batch([4, 4, 4, 4], [7, 7, 7, 9], graph_capacity=64))
+    # 重放会就地重写捕获的张量，因此图会读取新的组。
     assert replayed.b_mark_shared_group is captured.b_mark_shared_group
     assert replayed.b_shared_seq_len is captured.b_shared_seq_len
     assert captured.b_mark_shared_group.cpu().tolist() == [0, 0, 3, 1]
     assert captured.b_shared_seq_len.cpu().tolist() == [4, 4, 4, 0]
-    other = TritonQuantGQADecodeBackend.build(
-        _batch([8, 8, 5, 0], [10, 10, 20, -1], graph_capacity=64, microbatch_index=1), step_builder
+    other = create_att_state(
+        backend=step_builder, infer_state=_batch([8, 8, 5, 0], [10, 10, 20, -1], graph_capacity=64, microbatch_index=1)
     )
     assert other.b_mark_shared_group is not captured.b_mark_shared_group
-    eager = TritonQuantGQADecodeBackend.build(_batch([8, 8, 5, 0], [10, 10, 20, -1]), step_builder)
+    eager = create_att_state(backend=step_builder, infer_state=_batch([8, 8, 5, 0], [10, 10, 20, -1]))
     assert eager.b_mark_shared_group is not captured.b_mark_shared_group

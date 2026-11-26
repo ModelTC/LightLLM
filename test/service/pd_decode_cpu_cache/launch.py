@@ -79,12 +79,11 @@ common = [
     "--linear_att_cache_size",
     "16",
     "--disable_cudagraph",
-    "--llm_prefill_att_backend",
-    "triton",
-    "triton",
-    "--llm_decode_att_backend",
-    "triton",
-    "triton",
+    "--att_backend",
+    "gqa.prefill=triton",
+    "gdn.prefill=triton",
+    "gqa.decode=triton",
+    "gdn.decode=triton",
 ]
 master_args = [
     "--model_dir",

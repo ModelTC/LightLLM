@@ -1,9 +1,11 @@
 """GLM-5 FP8 sparse decode through the serving path: InferStateInfo -> step builder.
 
 Unlike test_fp8_kv.py, the attention state here come from the layer group's step builder, so these tests cover how
-the builder marks CUDA graph steps (which picks the direct Triton decode for small graph workloads) and keeps
-FlashMLA's scheduler metadata per (microbatch, batch size) for replays.
+the builder marks CUDA graph steps (which picks the direct Triton decode for small graph workloads) and lets
+the captured step own FlashMLA scheduler metadata throughout replay.
 """
+from unit_tests.common.attention.backends.step_fixture import create_att_state
+
 
 from types import SimpleNamespace
 
@@ -12,7 +14,7 @@ import torch
 
 from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparseDecodeBackend
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
-from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
+from unit_tests.common.attention.backends.step_fixture import AttentionStepConfig, configure_attention_step
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 
@@ -35,9 +37,7 @@ def make_backend():
     config = _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), SCALE)
     return SimpleNamespace(
         step_config=AttentionStepConfig(cuda_graph_max_kv_seq_len=SLOTS),
-        decode_step_builder=FlashMLASparseDecodeBackend.create_build_context(
-            FlashMLASparseDecodeBackend.build_context_key(config), None
-        ),
+        decode_backend=FlashMLASparseDecodeBackend(att_config=config),
     )
 
 
@@ -70,8 +70,8 @@ def init_decode_state(backend, infer):
     """Prepare the attention state of one decode microbatch."""
     from unit_tests.models.glm5_next.test_fp8_kv import _decode
 
-    att_state = FlashMLASparseDecodeBackend.build(
-        configure_attention_step(infer, backend.step_config), backend.decode_step_builder
+    att_state = create_att_state(
+        backend=backend.decode_backend, infer_state=configure_attention_step(infer, backend.step_config)
     )
     return SimpleNamespace(att_state=att_state, decode_att=lambda q, kv, params: _decode(att_state, q, kv, params))
 
@@ -165,9 +165,11 @@ def test_fp8_decode_graph_replays_steps_built_by_the_step_builder(monkeypatch, b
     q.normal_(generator=gen(2))
     replay_infer = make_infer(second, replay=True)
     replay_state = init_decode_state(backend, replay_infer)
-    # A replay step's state carries the scheduler metadata the graph captured.
-    assert replay_state.att_state.sched_meta is graph_state.att_state.sched_meta
-    graph_infer.copy_for_cuda_graph(replay_infer)
+    # The graph retains its captured scheduler; replay inputs own a fresh one.
+    captured_scheduler = graph_state.att_state.sched_meta
+    assert replay_state.att_state.sched_meta is not captured_scheduler
+    graph_infer.copy_for_cuda_graph(new_infer_state=replay_infer)
+    assert graph_state.att_state.sched_meta is captured_scheduler
     graph.replay()
     replayed = graph_out.clone()
     torch.testing.assert_close(replayed.float(), reference(q, cache, indices), atol=0.012, rtol=0.015)
@@ -175,19 +177,12 @@ def test_fp8_decode_graph_replays_steps_built_by_the_step_builder(monkeypatch, b
         assert torch.equal(replayed, eager(second))
 
 
-def test_fp8_decode_scheduler_metadata_is_kept_per_microbatch_and_batch_size():
+def test_fp8_decode_scheduler_metadata_is_owned_by_each_step():
     backend = make_backend()
-
-    def sched_meta(lengths, **kwargs):
-        return init_decode_state(backend, make_infer(lengths, **kwargs)).att_state.sched_meta
-
-    captured = sched_meta([9, 10], capture=True)
-    assert sched_meta([3000, 1], replay=True) is captured
-    # Microbatch overlap captures one graph per microbatch, and every batch size has its own graph.
-    other_microbatch = sched_meta([9, 10], capture=True, microbatch=1)
-    other_batch_size = sched_meta([9, 10, 11], capture=True)
-    assert len({id(captured), id(other_microbatch), id(other_batch_size)}) == 3
-    assert sched_meta([3000, 1], replay=True, microbatch=1) is other_microbatch
-    # Eager steps plan their own metadata on every step.
-    eager = sched_meta([9, 10])
-    assert eager is not captured and sched_meta([9, 10]) is not eager
+    capture = init_decode_state(backend=backend, infer=make_infer(lengths=[9, 10], capture=True))
+    replay = init_decode_state(backend=backend, infer=make_infer(lengths=[3000, 1], replay=True))
+    other_microbatch = init_decode_state(backend=backend, infer=make_infer(lengths=[9, 10], capture=True, microbatch=1))
+    other_batch_size = init_decode_state(backend=backend, infer=make_infer(lengths=[9, 10, 11], capture=True))
+    eager = init_decode_state(backend=backend, infer=make_infer(lengths=[9, 10]))
+    states = (capture, replay, other_microbatch, other_batch_size, eager)
+    assert len({id(state.att_state.sched_meta) for state in states}) == len(states)

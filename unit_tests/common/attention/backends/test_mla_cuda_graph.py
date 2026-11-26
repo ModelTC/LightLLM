@@ -6,6 +6,8 @@ CudaGraph.replay (copy_for_cuda_graph into the captured state), with and without
 microbatch overlap.
 """
 
+from unit_tests.common.attention.backends.groups_runner import run_attention
+
 import dataclasses
 import json
 from types import SimpleNamespace
@@ -13,9 +15,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLADecodeLayerInputs
-from lightllm.common.attention.backends.mla import MLAPrefillLayerConfig
+from lightllm.common.attention.backends.mla import MLADecodeAttConfig, MLADecodeAttInputs
+from lightllm.common.attention.backends.mla import MLAPrefillAttConfig
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
+from lightllm.common.attention.backends.mla import selector as mla_selector
 from lightllm.utils.envs_utils import get_env_start_args
 from unit_tests.common.attention.backends.groups_runner import GroupsRunner
 
@@ -31,13 +34,13 @@ def start_args(monkeypatch):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     def configure(overlap: bool) -> GroupsRunner:
-        """The MLA layers' group of a model running Triton attention."""
+        """创建使用 Triton attention 的模型 MLA 层组。"""
         args = {f.name: getattr(StartArgs(), f.name) for f in dataclasses.fields(StartArgs)}
         args.update(enable_decode_microbatch_overlap=overlap, enable_torch_memory_saver=False)
         monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(args))
         monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
         get_env_start_args.cache_clear()
-        args.update(llm_prefill_att_backend=["triton"], llm_decode_att_backend=["triton"], running_max_req_size=BATCH)
+        args.update(att_backend={"mla.prefill": "triton", "mla.decode": "triton"}, running_max_req_size=BATCH)
         model = SimpleNamespace(
             args=SimpleNamespace(**args),
             max_seq_length=CAPACITY,
@@ -45,11 +48,28 @@ def start_args(monkeypatch):
             graph_max_batch_size=BATCH,
             tp_world_size_=1,
             is_mtp_draft_model=False,
-            mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
+            mtp_manager=SimpleNamespace(get_decode_draft_step=lambda is_draft_model: 0),
         )
         common = dict(num_heads=HEADS, qk_rope_head_dim=ROPE, softmax_scale=SCALE, dtype=torch.bfloat16)
-        prefill = MLAPrefillLayerConfig(qk_nope_head_dim=128, v_head_dim=128, **common)
-        return GroupsRunner(model, prefill, MLADecodeLayerConfig(kv_lora_rank=LATENT, **common))
+        prefill = MLAPrefillAttConfig(
+            num_heads=common["num_heads"],
+            qk_nope_head_dim=common.get("qk_nope_head_dim", 128),
+            qk_rope_head_dim=common["qk_rope_head_dim"],
+            v_head_dim=common.get("v_head_dim", 128),
+            softmax_scale=common["softmax_scale"],
+            dtype=common["dtype"],
+            causal=common.get("causal", True),
+        )
+        decode = MLADecodeAttConfig(
+            num_heads=HEADS, kv_lora_rank=LATENT, qk_rope_head_dim=ROPE, softmax_scale=SCALE, dtype=torch.bfloat16
+        )
+        return GroupsRunner(
+            model=model,
+            prefill_config=prefill,
+            decode_config=decode,
+            select_prefill=mla_selector.select_mla_prefill_backend,
+            select_decode=mla_selector.select_mla_decode_backend,
+        )
 
     yield configure
     get_env_start_args.cache_clear()
@@ -91,9 +111,9 @@ class _Microbatch:
         impl = self.runner.decode_impl
         outputs = []
         for q_nope in self.q_nope:
-            inputs = MLADecodeLayerInputs(q_nope=q_nope, q_rope=self.q_rope, kv_cache=self.kv)
+            inputs = MLADecodeAttInputs(q_nope=q_nope, q_rope=self.q_rope, kv_cache=self.kv)
             out = torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
-            outputs.append(impl.forward(state.att_states[impl.state_key], inputs, out=out))
+            outputs.append(run_attention(backend=impl, att_state=state.att_states[impl], layer_inputs=inputs, out=out))
         return outputs
 
     def check(self, outputs, lengths) -> None:

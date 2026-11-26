@@ -1,15 +1,13 @@
 import enum
 import torch
-import triton
 import collections
 from lightllm.common.attention_state.manager import AttentionStateManager
+from lightllm.common.attention.attention_backend_manager import AttentionBackendManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
-from typing import Tuple, Any, Optional, List
+from typing import Optional, List
 from .triton_kernel.gen_prefill_params import gen_prefill_params
 from .triton_kernel.gen_decode_params import gen_decode_params
-from .triton_kernel.multimodal_emb import mark_multimodal_obj
-from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
 
@@ -28,7 +26,7 @@ class InferStateInfo:
     """
 
     def __init__(self):
-        # 用 backend.state_key 保存当前 microbatch 跨层共享的参数。
+        # Store the current microbatch's attention state by backend instance.
         # attention state 不持有 InferStateInfo，因此不会形成引用环。
         self.att_states: dict = {}
 
@@ -55,7 +53,8 @@ class InferStateInfo:
         self.is_draft_model: bool = False
 
         self.att_state_manager: AttentionStateManager = None
-        self.att_state_role: str = "main"  # main 或 draft0 .. draft35，区分共享管理器中的 State。
+        self.attention_backend_manager: AttentionBackendManager = None
+        self.att_state_role: str = "main"  # Key for this model in the shared managers (main or draft0 through draft35).
         self.req_manager: ReqManager = None
 
         self.mem_index: torch.Tensor = None
@@ -68,10 +67,6 @@ class InferStateInfo:
         self.multimodal_params: dict = None
         # 本步的执行方式：eager、捕获 decode CUDA Graph，或为回放准备输入。
         self.graph_mode: GraphMode = GraphMode.EAGER
-        self.cuda_graph_max_kv_seq_len: Optional[int] = None
-        self.decode_rows_per_request: int = 1
-        self.dynamic_decode_rows: bool = False
-        self.req_to_mtp_state_index: Optional[torch.Tensor] = None
         self.dist_group: CustomProcessGroup = None
 
         # 在microbatch overlap的运行模式下，用于标记当前 microbatch 的 index 序号
@@ -157,13 +152,29 @@ class InferStateInfo:
             self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
+        copied_tensors = {id(value) for value in vars(self).values() if isinstance(value, torch.Tensor)}
         for attr_name, attr_value in vars(new_infer_state).items():
-            if attr_name == "req_to_mtp_state_index":
-                continue
             if isinstance(attr_value, torch.Tensor):
                 attr_ = getattr(self, attr_name, None)
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
                     attr_.copy_(attr_value, non_blocking=True)
+        # 捕获状态保留图读取的地址。派生张量每步生成，在 replay 前原地更新。
+        # 已由公共输入复制的同一张量不再重复复制，共享只读常量的地址也不会改变。
+        for backend, captured in self.att_states.items():
+            current = new_infer_state.att_states[backend]
+            for name, value in vars(current).items():
+                if isinstance(value, torch.Tensor):
+                    target = getattr(captured, name, None)
+                    if (
+                        target is not None
+                        and id(target) not in copied_tensors
+                        and target.data_ptr() != value.data_ptr()
+                    ):
+                        target.copy_(value, non_blocking=True)
+                        copied_tensors.add(id(target))
+            refresh = getattr(backend, "refresh_cuda_graph_state", None)
+            if refresh is not None:
+                refresh(att_state=captured, infer_state=new_infer_state)
         return
 
     def call_overlap_hook(self):

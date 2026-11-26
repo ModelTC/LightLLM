@@ -1,3 +1,5 @@
+from unit_tests.common.attention.backends.step_fixture import make_backend_model
+
 """DeepSeek V3.2 sparse MLA layers' attention, against a torch reference.
 
 A bf16 cache runs FA3 decode with rotary channels; the FP8 cache runs FlashMLA over DeepSeek's packed
@@ -5,17 +7,23 @@ A bf16 cache runs FA3 decode with rotary channels; the FP8 cache runs FlashMLA o
 CUDA graph steps rebuild their attention state on replay, so a replay with new lengths and indices must match eager.
 """
 
+from unit_tests.common.attention.backends.groups_runner import run_attention
+
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 from lightllm.common.attention.backends.sparse_mla import (
-    SparseMLADecodeLayerInputs,
-    SparseMLALayerConfig,
-    SparseMLAPrefillLayerInputs,
+    SparseMLADecodeAttInputs,
+    SparseMLAAttConfig,
+    SparseMLAPrefillAttInputs,
 )
-from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig
+from lightllm.common.attention.backends.sparse_mla.selector import (
+    select_sparse_mla_decode_backend,
+    select_sparse_mla_prefill_backend,
+)
+from unit_tests.common.attention.backends.step_fixture import AttentionStepConfig
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_prefill_params
@@ -39,8 +47,8 @@ STEP_CONFIG = AttentionStepConfig(cuda_graph_max_kv_seq_len=MAX_LEN)
 
 
 def layer_attention(heads, kv_cache_format):
-    """Attention matching a DeepSeek V3.2 layer's sparse MLA spec."""
-    config = SparseMLALayerConfig(
+    """与 DeepSeek V3.2 层的稀疏 MLA 规范匹配的注意力。"""
+    config = SparseMLAAttConfig(
         num_heads=heads,
         kv_lora_rank=RANK,
         qk_rope_head_dim=ROPE,
@@ -49,7 +57,13 @@ def layer_attention(heads, kv_cache_format):
         kv_cache_format=kv_cache_format,
         topk=TOPK,
     )
-    return LayerAttention(config, config, "flashmla_sparse")
+    return LayerAttention(
+        prefill_config=config,
+        decode_config=config,
+        name="flashmla_sparse",
+        select_prefill=select_sparse_mla_prefill_backend,
+        select_decode=select_sparse_mla_decode_backend,
+    )
 
 
 def gen(seed):
@@ -144,10 +158,12 @@ def check_decode_and_graph(attention, cache, reference_cache, heads):
     # Every row selects at least as many keys on replay, so stale captured lengths would read valid but too few
     # entries and fail the comparison instead of faulting on -1 padding.
     first, second = [100, 3000, 2048, 7], [4096, 2100, 2049, 2000]
-    indices = select(req_to_token, first, torch.empty((4, TOPK), device="cuda", dtype=torch.int32), seed=10)
+    indices = select(
+        req_to_token=req_to_token, lengths=first, out=torch.empty((4, TOPK), device="cuda", dtype=torch.int32), seed=10
+    )
     q_nope = torch.randn(4, heads, RANK, device="cuda", dtype=torch.bfloat16, generator=gen(1)) * 0.5
     q_rope = torch.randn(4, heads, ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(2)) * 0.5
-    inputs = SparseMLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=cache, topk_mem_indices=indices)
+    inputs = SparseMLADecodeAttInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=cache, topk_mem_indices=indices)
 
     def run(att_state):
         return attention.run("decode", att_state, inputs, out=torch.empty_like(q_nope))
@@ -169,7 +185,7 @@ def check_decode_and_graph(attention, cache, reference_cache, heads):
     assert torch.equal(graph_out, first_eager)
 
     # Replay prepares its own state before copying request tensors into the captured buffers.
-    select(req_to_token, second, indices, seed=20)
+    select(req_to_token=req_to_token, lengths=second, out=indices, seed=20)
     q_nope.normal_(generator=gen(3)).mul_(0.5)
     replay_infer = make_infer(req_to_token, second, replay=True)
     decode_att_state(attention, replay_infer)
@@ -196,8 +212,10 @@ def test_bf16_flashmla_prefill_output_and_peak(heads, strided, legacy, monkeypat
     from lightllm.common.attention.backends.sparse_mla import flashmla
 
     if legacy:
-        monkeypatch.setattr(flashmla, "_bf16_prefill_out_kernel", lambda: None)
-    elif heads == 64 and not strided and flashmla._bf16_prefill_out_kernel() is None:
+        monkeypatch.setattr(
+            flashmla.FlashMLASparsePrefillBackend, "_bf16_prefill_out_kernel", staticmethod(lambda: None)
+        )
+    elif heads == 64 and not strided and flashmla.FlashMLASparsePrefillBackend._bf16_prefill_out_kernel() is None:
         pytest.skip("FlashMLA with out support is required")
     rows = 512
     query = torch.randn(rows, heads, RANK + ROPE, dtype=torch.bfloat16, device="cuda", generator=gen(21))
@@ -207,14 +225,16 @@ def test_bf16_flashmla_prefill_output_and_peak(heads, strided, legacy, monkeypat
     indices[:, 0] = slots
     storage = torch.full((rows, heads + int(strided), RANK), torch.nan, dtype=query.dtype, device="cuda")
     out = storage[:, :heads]
-    config = SparseMLALayerConfig(heads, RANK, ROPE, SCALE, query.dtype, topk=TOPK)
+    config = SparseMLAAttConfig(
+        num_heads=heads, kv_lora_rank=RANK, qk_rope_head_dim=ROPE, softmax_scale=SCALE, dtype=query.dtype, topk=TOPK
+    )
     impl = flashmla.FlashMLASparsePrefillBackend(config)
     state = flashmla.FlashMLASparsePrefillAttState(None, False)
-    inputs = SparseMLAPrefillLayerInputs(q=query, kv_cache=cache, topk_mem_indices=indices)
+    inputs = SparseMLAPrefillAttInputs(q=query, kv_cache=cache, topk_mem_indices=indices)
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     before = torch.cuda.memory_allocated()
-    assert impl.forward(state, inputs, out=out) is out
+    assert run_attention(backend=impl, att_state=state, layer_inputs=inputs, out=out) is out
     torch.cuda.synchronize()
     scratch = torch.cuda.max_memory_allocated() - before
     record_property("peak_bytes_including_output", scratch + out.numel() * out.element_size())
@@ -296,7 +316,7 @@ def test_fp8_ds_mla_flashmla_prefill_matches_reference(ready, ends):
         step_offset += end - start
 
     attention = layer_attention(heads, "fp8_ds_mla")
-    inputs = SparseMLAPrefillLayerInputs(
+    inputs = SparseMLAPrefillAttInputs(
         q=q,
         kv_cache=packed,
         topk_mem_indices=topk_mem_indices,

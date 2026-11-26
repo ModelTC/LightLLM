@@ -1,5 +1,8 @@
 from typing import TYPE_CHECKING
 import torch
+from lightllm.common.attention.backends.gqa import selector as gqa_selector
+from lightllm.common.attention.base_backend import AttentionBackend
+from lightllm.common.attention.backends.gqa import GQAAttConfig, get_gqa_kv_quant
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
@@ -7,7 +10,6 @@ from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.mistral.layer_infer.transformer_layer_infer import MistralTransformerLayerInfer
-from lightllm.utils.envs_utils import get_env_start_args
 
 
 if TYPE_CHECKING:
@@ -28,6 +30,36 @@ class MistralTpPartModel(TpPartBaseModel):
 
     # infer state class
     infer_state_class = LlamaInferStateInfo
+
+    @classmethod
+    def create_att_backends(cls, model: "MistralTpPartModel") -> tuple[AttentionBackend, ...]:
+        if not model.layers_infer:
+            return ()
+        config = model.config
+        layer_ids = tuple(layer.layer_num_ for layer in model.layers_infer)
+        head_dim = config.get("head_dim", config["hidden_size"] // config["num_attention_heads"])
+        state = model.att_state_manager.get_state(
+            model_role=model.att_state_role, state_type_filter="gqa", logical_layer_id=layer_ids[0]
+        )
+        kv_quant, group_size, has_q_scale = get_gqa_kv_quant(
+            llm_kv_type=model.args.llm_kv_type,
+            kv_scales=state.get_layer_kv_scales(logical_layer_id=layer_ids[0]),
+            head_dim=head_dim,
+        )
+        att_config = GQAAttConfig(
+            num_heads=config["num_attention_heads"] // model.tp_world_size_,
+            num_kv_heads=max(config["num_key_value_heads"] // model.tp_world_size_, 1),
+            head_dim=head_dim,
+            dtype=model.data_type,
+            causal=not model.is_mtp_draft_model or model.args.mtp_mode not in ("dspark", "dflash", "dflash2"),
+            kv_quant=kv_quant,
+            kv_quant_group_size=group_size,
+            has_q_scale=has_q_scale,
+        )
+        return (
+            gqa_selector.select_gqa_prefill_backend(att_config=att_config, model=model, logical_layer_ids=layer_ids),
+            gqa_selector.select_gqa_decode_backend(att_config=att_config, model=model, logical_layer_ids=layer_ids),
+        )
 
     def __init__(self, kvargs):
         super().__init__(kvargs)

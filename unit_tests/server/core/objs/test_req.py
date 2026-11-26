@@ -13,11 +13,9 @@ def setup_module_env():
         monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: "test_req_service_0")
         monkeypatch.setenv("LIGHTLLM_START_ARGS", "{}")
         set_env_start_args(
-            easydict.EasyDict(
+            args=easydict.EasyDict(
                 {
                     "mtp_step": 0,
-                    "llm_prefill_att_backend": ["None"],
-                    "llm_decode_att_backend": ["None"],
                     "cpu_cache_token_page_size": 256,
                     "enable_cpu_cache": False,
                     "model_dir": "",

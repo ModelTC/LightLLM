@@ -9,16 +9,16 @@ import torch
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeAttState, FA3GQAPrefillAttState
 from lightllm.common.attention.backends.gqa.flashinfer import (
-    FlashInferGQABuilderConfig,
     FlashInferGQADecodeAttState,
     FlashInferGQAPrefillAttState,
 )
-from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
+from lightllm.common.attention.attention_backend_manager import AttentionBackendManager
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state
 from unit_tests.common.att_resources.model_helpers import replace_logical_layer_groups
 from unit_tests.common.att_resources.test_capacity import definition
+from lightllm.models.llama.model import LlamaTpPartModel
 
 
 @pytest.mark.parametrize("backend_name", ["fa3", "flashinfer"])
@@ -57,7 +57,6 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     import lightllm.utils.sgl_utils as sgl_utils
     from lightllm.common.basemodel.triton_kernel.quantization import q_per_head_fp8_quant
 
-    head_num, head_dim = state.config.head_num, state.config.head_dim
     if backend_name == "fa3":
         state.q_scales[0].fill_(3)
         state.q_scales[1].fill_(7)
@@ -76,17 +75,21 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
 
         monkeypatch.setattr(q_per_head_fp8_quant, "q_per_head_static_fp8_quant", quantize)
         monkeypatch.setattr(sgl_utils, "flash_attn_with_kvcache", attend)
-        att_state_cls = FA3GQAPrefillAttState if operation == "prefill" else FA3GQADecodeAttState
-        extra = {} if operation == "prefill" else {"max_seqlen_k": 1}
-        att_state = att_state_cls(
-            page_table=None,
-            cache_seqlens=infer.b_seq_len,
-            cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
-            cu_seqlens_k=None,
-            max_seqlen_q=1,
-            page_size=1,
-            **extra,
-        )
+        cache_seqlens = infer.b_seq_len
+        cu_q = torch.tensor(data=[0, 1], dtype=torch.int32)
+        if operation == "prefill":
+            att_state = FA3GQAPrefillAttState(
+                page_table=None, cache_seqlens=cache_seqlens, cu_seqlens_q=cu_q, cu_seqlens_k=None, max_seqlen_q=1
+            )
+        else:
+            att_state = FA3GQADecodeAttState(
+                page_table=None,
+                cache_seqlens=cache_seqlens,
+                cu_seqlens_q=cu_q,
+                cu_seqlens_k=None,
+                max_seqlen_q=1,
+                max_seqlen_k=1,
+            )
         kv_type = "fp8kv_sph"
     else:
 
@@ -101,17 +104,23 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
             calls.append(operation)
             out.copy_(q)
 
-        config = FlashInferGQABuilderConfig(head_num, head_num, head_dim, 1, torch.bfloat16, torch.float8_e4m3fn)
-        att_state_cls = FlashInferGQAPrefillAttState if operation == "prefill" else FlashInferGQADecodeAttState
-        att_state = att_state_cls(wrapper=SimpleNamespace(run=run), config=config)
+        wrapper = SimpleNamespace(run=run)
+        if operation == "prefill":
+            att_state = FlashInferGQAPrefillAttState(wrapper=wrapper)
+        else:
+            att_state = FlashInferGQADecodeAttState(
+                wrapper=wrapper,
+                kv_starts=torch.arange(end=1 + 1, dtype=torch.int32),
+                kv_indices=torch.arange(end=1, dtype=torch.int32),
+                kv_last_page_len=torch.ones(size=(1,), dtype=torch.int32),
+            )
         kv_type = "fp8kv_spt"
 
     # The layer creates its attention as the model loads it: kv_quant and the static q scale come
     # from the State, and the layer's group then reads the step's attention state.
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     args = SimpleNamespace(
-        llm_prefill_att_backend=[backend_name],
-        llm_decode_att_backend=[backend_name],
+        att_backend={"gqa.prefill": backend_name, "gqa.decode": backend_name},
         llm_kv_type=kv_type,
         mtp_step=0,
         enable_ep_moe=False,
@@ -131,15 +140,28 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
         max_seq_length=8,
         graph_max_batch_size=1,
         graph_max_len_in_batch=8,
-        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda is_draft: 0),
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda is_draft_model: 0),
     )
     layer = LlamaTransformerLayerInfer.__new__(LlamaTransformerLayerInfer)
     layer.layer_num_ = logical_layer_id
     layer.tp_q_head_num_ = layer.tp_k_head_num_ = state.config.head_num
     layer.head_dim_ = state.config.head_dim
     layer.alloc_tensor = lambda shape, dtype, device: torch.empty(shape, dtype=dtype, device="cpu")
-    layer.prefill_impl, layer.decode_impl = AttentionBackendManager(model).bind(layer.attention_config(model))
-    infer.att_states = {(layer.prefill_impl if operation == "prefill" else layer.decode_impl).state_key: att_state}
+    model.config = dict(
+        num_attention_heads=state.config.head_num,
+        num_key_value_heads=state.config.head_num,
+        hidden_size=state.config.head_num * state.config.head_dim,
+        head_dim=state.config.head_dim,
+    )
+    model.tp_world_size_ = 1
+    model.layers_infer = [layer]
+    model.attention_backend_manager = AttentionBackendManager()
+    model.attention_backend_manager.register_backends(
+        role=role, backends=LlamaTpPartModel.create_att_backends(model=model)
+    )
+    infer.attention_backend_manager = model.attention_backend_manager
+    backend = infer.attention_backend_manager.get_backend(role=role, phase=operation, logical_layer_id=logical_layer_id)
+    infer.att_states = {backend: att_state}
     q = torch.ones((1, state.config.head_num, state.config.head_dim), dtype=torch.bfloat16)
     if operation == "prefill":
         output = layer._context_attention_kernel(

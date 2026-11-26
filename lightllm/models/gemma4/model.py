@@ -1,7 +1,11 @@
+from dataclasses import replace
 from typing import TYPE_CHECKING
 import os
 import json
 import torch
+from lightllm.common.attention.base_backend import AttentionBackend
+from lightllm.common.attention.backends.gqa import selector as gqa_selector
+from lightllm.common.attention.backends.gqa import GQAAttConfig, get_gqa_kv_quant
 from lightllm.common.build_utils import repair_config
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.gemma4.infer_struct import Gemma4InferStateInfo
@@ -32,6 +36,60 @@ class Gemma4TpPartModel(LlamaTpPartModel):
     post_layer_infer_class = Gemma4PostLayerInfer
 
     infer_state_class = Gemma4InferStateInfo
+
+    @classmethod
+    def create_att_backends(cls, model: "Gemma4TpPartModel") -> tuple[AttentionBackend, ...]:
+        config = model.config
+        backends = []
+        for sliding in (True, False):
+            layer_ids = tuple(
+                layer.layer_num_
+                for layer in model.layers_infer
+                if (config["layer_types"][layer.layer_num_] == "sliding_attention") == sliding
+            )
+            if not layer_ids:
+                continue
+            global_kv_heads = (
+                config["num_key_value_heads"]
+                if sliding
+                else (config.get("num_global_key_value_heads") or config["num_key_value_heads"])
+            )
+            sliding_window = int(config.get("sliding_window") or 0) if sliding else 0
+            window = (sliding_window - 1, 0) if sliding_window > 0 else (-1, -1)
+            head_dim = config["head_dim"] if sliding else config["global_head_dim"]
+            state = model.att_state_manager.get_state(
+                model_role=model.att_state_role, state_type_filter="gqa", logical_layer_id=layer_ids[0]
+            )
+            kv_quant, group_size, has_q_scale = get_gqa_kv_quant(
+                llm_kv_type=model.args.llm_kv_type,
+                kv_scales=state.get_layer_kv_scales(logical_layer_id=layer_ids[0]),
+                head_dim=head_dim,
+            )
+            att_config = GQAAttConfig(
+                num_heads=config["num_attention_heads"] // model.tp_world_size_,
+                num_kv_heads=max(global_kv_heads // model.tp_world_size_, 1),
+                head_dim=head_dim,
+                dtype=model.data_type,
+                causal=not model.is_mtp_draft_model or model.args.mtp_mode not in ("dspark", "dflash", "dflash2"),
+                kv_quant=kv_quant,
+                kv_quant_group_size=group_size,
+                has_q_scale=has_q_scale,
+                sliding_window=window,
+            )
+            backends.append(
+                gqa_selector.select_gqa_prefill_backend(
+                    att_config=replace(att_config, bidirectional_image_spans=sliding),
+                    requested="triton",
+                    model=model,
+                    logical_layer_ids=layer_ids,
+                )
+            )
+            backends.append(
+                gqa_selector.select_gqa_decode_backend(
+                    att_config=att_config, requested="triton", model=model, logical_layer_ids=layer_ids
+                )
+            )
+        return tuple(backends)
 
     def __init__(self, kvargs):
         # head_dim_ is used by the default _init_to_get_rotary which we

@@ -530,47 +530,30 @@ PD 分离模式参数
 
     推理后端将为解码使用微批次重叠模式
 
-.. option:: --llm_prefill_att_backend
+.. option:: --att_backend
 
-    设置预填充（Prefill）阶段使用的注意力后端。对于 Qwen3.5 等混合线性注意力模型，
-    第一个值用于选择全注意力后端，可选的第二个值用于选择线性注意力后端。
-    如果省略第二个值，则默认按 ``auto`` 处理。
+    按注意力算法族和阶段覆盖后端选择。每项采用 ``算法族.阶段=实现`` 格式，多项用空格分隔：
 
-    全注意力后端可选值：
+    .. code-block:: bash
 
-    * ``auto``: 自动选择最佳后端（默认值），优先级为 fa3 > flashinfer > triton
-    * ``fa3``: 使用 Flash-Attention 3 后端
-    * ``flashinfer``: 使用 FlashInfer 后端
-    * ``triton``: 使用 Triton 后端
+        --att_backend gqa.prefill=fa3 gqa.decode=flashinfer gdn.prefill=flashqla
 
-    Qwen3.5 线性注意力后端可选值：
+    可以重复使用 ``--att_backend`` 分组。重复的键以及不支持的值都会报错。
+    优先使用模型层指定的实现，其次使用对应的覆盖项。省略的项使用 ``auto``，
+    整个参数可省略。
 
-    * ``auto``: 自动选择最佳后端（默认值），优先级为 flashqla > triton
-    * ``flashqla``: 使用 FlashQLA 后端
-    * ``triton``: 使用 Triton 后端
+    各算法族在 ``auto`` 之外支持以下实现：
 
-    示例：``--llm_prefill_att_backend fa3 flashqla``。
+    * ``gqa``、``mla``：两个阶段均支持 ``fa3``、``flashinfer`` 和 ``triton``。
+    * ``sparse_mla``、``swa_sparse_mla``：两个阶段均支持 ``flashmla_sparse``；
+      Sparse MLA 的具体实现由 KV cache 格式决定。
+    * ``gdn``：prefill 支持 ``flashqla`` 和 ``triton``，decode 支持 ``triton``。
+    * ``kda``：prefill 支持 ``flashkda`` 和 ``triton``，decode 支持 ``triton``。
 
-.. option:: --llm_decode_att_backend
+    GQA 和 MLA 的 prefill 默认依次尝试 FA3、FlashInfer 和 Triton。Decode 默认优先尝试
+    FlashInfer，设置 ``--mtp_step`` 大于零时优先尝试 FA3。GDN prefill 默认先试 FlashQLA，
+    再试 Triton。KDA prefill 在硬件、数据类型、长度和依赖均兼容时自动使用 FlashKDA。
 
-    设置解码（Decode）阶段使用的注意力后端。对于 Qwen3.5 等混合线性注意力模型，
-    第一个值用于选择全注意力后端，可选的第二个值用于选择线性注意力后端。
-    如果省略第二个值，则默认按 ``auto`` 处理。
-
-    全注意力后端可选值：
-
-    * ``auto``: 自动选择最佳后端（默认值），优先级为 fa3 > flashinfer > triton
-    * ``fa3``: 使用 Flash-Attention 3 后端
-    * ``flashinfer``: 使用 FlashInfer 后端
-    * ``triton``: 使用 Triton 后端
-
-    Qwen3.5 线性注意力后端可选值：
-
-    * ``auto``: 自动选择最佳后端（默认值，当前选择 triton）
-    * ``triton``: 使用 Triton 后端
-
-    示例：``--llm_decode_att_backend flashinfer triton``。
-    
 .. option:: --llm_kv_type
 
     推理后端使用什么类型的数据存储kv cache, 可选值为 "None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt"

@@ -1,13 +1,15 @@
 """Model layers create their Attention with their own layer properties when the model loads."""
+from typing import Any
 
 from types import SimpleNamespace
+from dataclasses import replace
 
 import pytest
 import torch
 
-from lightllm.common.attention.backends.gqa import GQALayerConfig
-from lightllm.common.basemodel import attention_backend_manager
+from lightllm.common.attention.backends.gqa import GQAAttConfig
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.models.llama.model import LlamaTpPartModel
 
 H, D = 8, 64
 
@@ -23,11 +25,13 @@ class FakeState:
         return None
 
 
-def make_model(state, backend="fa3", draft=False):
+def make_model(
+    state: Any, backend: Any = "fa3", draft: Any = False, *, family: Any = "gqa", model_cls: Any = LlamaTpPartModel
+):
     args = SimpleNamespace(
-        llm_prefill_att_backend=[backend],
-        llm_decode_att_backend=[backend],
+        att_backend={f"{family}.{phase}": backend for phase in ("prefill", "decode")},
         mtp_step=1 if draft else 0,
+        mtp_mode="dflash" if draft else None,
         enable_ep_moe=False,
         page_size=1,
         flashinfer_workspace_size=64,
@@ -39,53 +43,80 @@ def make_model(state, backend="fa3", draft=False):
     )
     model = SimpleNamespace(
         args=args,
+        create_att_backends=model_cls.create_att_backends,
         max_seq_length=1024,
         graph_max_batch_size=4,
         graph_max_len_in_batch=1024,
         tp_world_size_=1,
         is_mtp_draft_model=draft,
-        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 1 if draft else 0),
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda is_draft_model: 1 if draft else 0),
         data_type=torch.bfloat16,
-        att_state_role="main",
+        att_state_role="draft0" if draft else "main",
         att_state_manager=SimpleNamespace(
             get_state=lambda **query: state,
             get_bounded_attention_states=lambda role: (),
             get_full_attention_states=lambda role: (state,),
         ),
     )
+    if draft:
+        model.main_model = SimpleNamespace()
     return model
 
 
-def bind_layers(model, *layers):
+def register_layers(model: Any, layers: tuple[Any, ...]):
     model.layers_infer = layers
+    if not hasattr(model, "config"):
+        model.config = layers[0].network_config_
     TpPartBaseModel._init_attention(model)
 
 
-def config(**fields) -> GQALayerConfig:
-    return GQALayerConfig(**{"num_heads": H, "num_kv_heads": 2, "head_dim": D, "dtype": torch.bfloat16, **fields})
+def config(**fields) -> GQAAttConfig:
+    return GQAAttConfig(
+        num_heads=fields.get("num_heads", H),
+        num_kv_heads=fields.get("num_kv_heads", 2),
+        head_dim=fields.get("head_dim", D),
+        dtype=fields.get("dtype", torch.bfloat16),
+        sliding_window=fields.get("sliding_window", (-1, -1)),
+        softmax_scale=fields.get("softmax_scale", None),
+        causal=fields.get("causal", True),
+        has_sinks=fields.get("has_sinks", False),
+        kv_quant=fields.get("kv_quant", None),
+        kv_quant_group_size=fields.get("kv_quant_group_size", None),
+        has_q_scale=fields.get("has_q_scale", False),
+        has_alibi=fields.get("has_alibi", False),
+        bidirectional_image_spans=fields.get("bidirectional_image_spans", False),
+    )
 
 
-def layer_configs(layer):
-    prefill = None if layer.prefill_impl is None else layer.prefill_impl.layer_config
-    return prefill, layer.decode_impl.layer_config
+def layer_backend(model: Any, layer: Any, phase: Any):
+    return model.attention_backend_manager.get_backend(
+        role=model.att_state_role, phase=phase, logical_layer_id=layer.layer_num_
+    )
+
+
+def layer_configs(model: Any, layer: Any):
+    prefill = layer_backend(model=model, layer=layer, phase="prefill")
+    decode = layer_backend(model=model, layer=layer, phase="decode")
+    return None if prefill is None else prefill.att_config, decode.att_config
 
 
 def decode_inputs(monkeypatch, model, layer, weights):
-    impl = layer.decode_impl
+    impl = layer_backend(model=model, layer=layer, phase="decode")
     state = object()
     captured = []
 
-    def forward(att_state, inputs, *, out, alloc_func):
+    def forward(att_state: Any, layer_inputs: Any, *, out: torch.Tensor, alloc_func: Any):
         assert att_state is state
-        captured.append(inputs)
+        captured.append(layer_inputs)
         return out
 
-    monkeypatch.setattr(impl, "forward", forward)
+    monkeypatch.setattr(impl, "decode", forward)
     monkeypatch.setattr(layer, "alloc_tensor", torch.empty)
     infer_state = SimpleNamespace(
         att_state_manager=model.att_state_manager,
+        attention_backend_manager=model.attention_backend_manager,
         att_state_role=model.att_state_role,
-        att_states={impl.state_key: state},
+        att_states={impl: state},
     )
     query = torch.empty(3, layer.tp_q_head_num_ * layer.head_dim_)
     result = layer._token_attention_kernel(query, infer_state, weights)
@@ -97,29 +128,32 @@ def decode_inputs(monkeypatch, model, layer, weights):
 
 def test_bloom_layers_run_alibi_on_triton_whatever_the_command_line_asks(runtime_start_args, monkeypatch):
     from lightllm.models.bloom.layer_infer.transformer_layer_infer import BloomTransformerLayerInfer
+    from lightllm.models.bloom.model import BloomTpPartModel
 
     layer = BloomTransformerLayerInfer(0, {"num_attention_heads": H, "n_embed": H * D, "layer_norm_epsilon": 1e-5})
-    model = make_model(FakeState(H))
-    bind_layers(model, layer)
-    assert layer_configs(layer) == (config(num_kv_heads=H, has_alibi=True),) * 2
-    assert type(layer.decode_impl).__name__ == "TritonGQADecodeBackend"
+    model = make_model(state=FakeState(H), model_cls=BloomTpPartModel)
+    register_layers(model=model, layers=(layer,))
+    assert layer_configs(model=model, layer=layer) == (config(num_kv_heads=H, has_alibi=True),) * 2
+    assert type(layer_backend(model=model, layer=layer, phase="decode")).__name__ == "TritonGQADecodeBackend"
     slopes = torch.ones(H)
     assert decode_inputs(monkeypatch, model, layer, SimpleNamespace(tp_alibi=slopes)).alibi_slopes is slopes
 
 
 def test_starcoder_layers_run_multi_query_attention_without_alibi(runtime_start_args, monkeypatch):
     from lightllm.models.starcoder.layer_infer.transformer_layer_infer import StarcoderTransformerLayerInfer
+    from lightllm.models.starcoder.model import StarcoderTpPartModel
 
     layer = StarcoderTransformerLayerInfer(0, {"num_attention_heads": H, "n_embed": H * D, "layer_norm_epsilon": 1e-5})
-    model = make_model(FakeState(1))
-    bind_layers(model, layer)
-    assert layer_configs(layer) == (config(num_kv_heads=1),) * 2
-    assert type(layer.decode_impl).__name__ == "FA3GQADecodeBackend"
+    model = make_model(state=FakeState(1), model_cls=StarcoderTpPartModel)
+    register_layers(model=model, layers=(layer,))
+    assert layer_configs(model=model, layer=layer) == (config(num_kv_heads=1),) * 2
+    assert type(layer_backend(model=model, layer=layer, phase="decode")).__name__ == "FA3GQADecodeBackend"
     assert decode_inputs(monkeypatch, model, layer, SimpleNamespace()).alibi_slopes is None
 
 
-def test_gemma4_sliding_and_full_layers_share_one_triton_group(runtime_start_args):
+def test_gemma4_sliding_and_full_layers_keep_separate_backends(runtime_start_args: Any):
     from lightllm.models.gemma4.layer_infer.transformer_layer_infer import Gemma4TransformerLayerInfer
+    from lightllm.models.gemma4.model import Gemma4TpPartModel
 
     net = dict(
         num_attention_heads=4,
@@ -130,21 +164,43 @@ def test_gemma4_sliding_and_full_layers_share_one_triton_group(runtime_start_arg
         num_global_key_value_heads=1,
         rms_norm_eps=1e-6,
         sliding_window=48,
-        num_hidden_layers=2,
-        layer_types=["sliding_attention", "full_attention"],
+        num_hidden_layers=4,
+        layer_types=["sliding_attention", "full_attention", "sliding_attention", "full_attention"],
     )
-    # The cache stores 2 slots of 256 per token: both sliding KV heads, or the single 512-dim full KV head.
-    model = make_model(FakeState(2, 256))
-    sliding, full = (Gemma4TransformerLayerInfer(i, net) for i in range(2))
-    bind_layers(model, sliding, full)
+    # 缓存存储每个 token 的 2 个槽位，每个槽位 256 个：两个滑动 KV 头，或单个 512 维的完整 KV 头。
+    model = make_model(state=FakeState(2, 256), model_cls=Gemma4TpPartModel)
+    sliding, full, next_sliding, next_full = (Gemma4TransformerLayerInfer(i, net) for i in range(4))
+    register_layers(
+        model=model,
+        layers=(
+            sliding,
+            full,
+            next_sliding,
+            next_full,
+        ),
+    )
     window = dict(num_heads=4, head_dim=256, sliding_window=(47, 0))
-    assert layer_configs(sliding) == (config(**window, bidirectional_image_spans=True), config(**window))
-    assert layer_configs(full) == (config(num_heads=4, num_kv_heads=1, head_dim=512),) * 2
-    assert all(len(model.attention_backend_manager.backends(phase)) == 1 for phase in ("prefill", "decode"))
+    assert layer_configs(model=model, layer=sliding) == (
+        config(**window, bidirectional_image_spans=True),
+        config(**window),
+    )
+    assert layer_configs(model=model, layer=full) == (config(num_heads=4, num_kv_heads=1, head_dim=512),) * 2
+    for phase in ("prefill", "decode"):
+        assert layer_backend(model=model, layer=sliding, phase=phase) is layer_backend(
+            model=model, layer=next_sliding, phase=phase
+        )
+        assert layer_backend(model=model, layer=full, phase=phase) is layer_backend(
+            model=model, layer=next_full, phase=phase
+        )
+    assert all(
+        len(model.attention_backend_manager.get_backends(role=model.att_state_role, phase=phase)) == 2
+        for phase in ("prefill", "decode")
+    )
 
 
 def test_gpt_oss_layers_have_sinks_and_sliding_layers_a_window(runtime_start_args, monkeypatch):
     from lightllm.models.gpt_oss.layer_infer.transformer_layer_infer import GptOssTransformerLayerInfer
+    from lightllm.models.gpt_oss.model import GptOssTpPartModel
 
     net = dict(
         num_attention_heads=H,
@@ -156,11 +212,17 @@ def test_gpt_oss_layers_have_sinks_and_sliding_layers_a_window(runtime_start_arg
         sliding_window=128,
         layer_types=["sliding_attention", "full_attention"],
     )
-    model = make_model(FakeState(2))
+    model = make_model(state=FakeState(2), model_cls=GptOssTpPartModel)
     sliding, full = (GptOssTransformerLayerInfer(i, net) for i in range(2))
-    bind_layers(model, sliding, full)
-    assert layer_configs(sliding) == (config(has_sinks=True, sliding_window=(127, 0)),) * 2
-    assert layer_configs(full) == (config(has_sinks=True),) * 2
+    register_layers(
+        model=model,
+        layers=(
+            sliding,
+            full,
+        ),
+    )
+    assert layer_configs(model=model, layer=sliding) == (config(has_sinks=True, sliding_window=(127, 0)),) * 2
+    assert layer_configs(model=model, layer=full) == (config(has_sinks=True),) * 2
     sinks = torch.ones(H)
     weights = SimpleNamespace(attn_sinks=SimpleNamespace(weight=sinks))
     assert decode_inputs(monkeypatch, model, full, weights).sinks is sinks
@@ -168,19 +230,20 @@ def test_gpt_oss_layers_have_sinks_and_sliding_layers_a_window(runtime_start_arg
 
 def test_neo_layers_attend_inside_image_spans_in_prefill_only(runtime_start_args):
     from lightllm.models.neo_chat.layer_infer.transformer_layer_infer import NeoChatTransformerLayerInfer
+    from lightllm.models.neo_chat.model import NeoTpPartModel
 
     net = dict(num_attention_heads=H, num_key_value_heads=2, hidden_size=H * D, head_dim=D, rms_norm_eps=1e-6)
     layer = NeoChatTransformerLayerInfer(0, net)
-    model = make_model(FakeState(2), backend="triton")
-    bind_layers(model, layer)
-    assert layer_configs(layer) == (config(bidirectional_image_spans=True), config())
+    model = make_model(state=FakeState(2), backend="triton", model_cls=NeoTpPartModel)
+    register_layers(model=model, layers=(layer,))
+    assert layer_configs(model=model, layer=layer) == (config(bidirectional_image_spans=True), config())
 
 
 @pytest.mark.parametrize("sliding_window, expected", [(0, (-1, -1)), (40, (39, 39))])
-def test_dflash_layers_attend_only_in_decode_and_not_causally(monkeypatch, sliding_window, expected):
+def test_dflash_layers_attend_only_in_decode_and_not_causally(sliding_window: Any, expected: Any):
     from lightllm.models.qwen3_dflash2.layer_infer.transformer_layer_infer import Qwen3DFlash2TransformerLayerInfer
+    from lightllm.models.qwen3_dflash2.model import Qwen3DFlash2Model
 
-    monkeypatch.setattr(attention_backend_manager, "get_env_start_args", lambda: SimpleNamespace(mtp_mode="dflash2"))
     net = dict(
         num_attention_heads=H,
         num_key_value_heads=2,
@@ -192,29 +255,31 @@ def test_dflash_layers_attend_only_in_decode_and_not_causally(monkeypatch, slidi
         sliding_window=sliding_window,
     )
     layer = Qwen3DFlash2TransformerLayerInfer(0, net)
-    model = make_model(FakeState(2), draft=True)
-    bind_layers(model, layer)
-    assert layer_configs(layer) == (None, config(causal=False, sliding_window=expected))
-    assert type(layer.decode_impl).__name__ == "FA3GQADecodeBackend"
+    model = make_model(state=FakeState(2), draft=True, model_cls=Qwen3DFlash2Model)
+    model.args.mtp_mode = "dflash2"
+    register_layers(model=model, layers=(layer,))
+    assert layer_configs(model=model, layer=layer) == (None, config(causal=False, sliding_window=expected))
+    assert type(layer_backend(model=model, layer=layer, phase="decode")).__name__ == "FA3GQADecodeBackend"
 
 
-def test_dflash_decode_needs_an_implementation_of_non_causal_attention(monkeypatch):
+def test_dflash_decode_needs_an_implementation_of_non_causal_attention():
     from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
+    from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
 
-    monkeypatch.setattr(attention_backend_manager, "get_env_start_args", lambda: SimpleNamespace(mtp_mode="dflash"))
     net = dict(num_attention_heads=H, num_key_value_heads=2, hidden_size=H * D, head_dim=D, rms_norm_eps=1e-6)
     layer = Qwen3DFlashTransformerLayerInfer(0, net)
     with pytest.raises(ValueError, match="does not support"):
-        model = make_model(FakeState(2), backend="triton", draft=True)
-        bind_layers(model, layer)
+        model = make_model(state=FakeState(2), backend="triton", draft=True, model_cls=Qwen3DFlashModel)
+        register_layers(model=model, layers=(layer,))
 
 
 @pytest.mark.parametrize("rope_scaling", [None, {"type": "yarn", "factor": 40, "mscale_all_dim": 1.0}])
 def test_deepseek2_layers_attend_over_expanded_keys_in_prefill_and_the_latent_cache_in_decode(
     runtime_start_args, rope_scaling
 ):
-    from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLAPrefillLayerConfig
+    from lightllm.common.attention.backends.mla import MLADecodeAttConfig, MLAPrefillAttConfig
     from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
+    from lightllm.models.deepseek2.model import Deepseek2TpPartModel
     from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
 
     net = dict(
@@ -237,84 +302,134 @@ def test_deepseek2_layers_attend_over_expanded_keys_in_prefill_and_the_latent_ca
         rope_scaling=rope_scaling,
     )
     scale = 192 ** -0.5 * (get_deepseek_mscale(40, 1.0) ** 2 if rope_scaling else 1.0)
-    model = make_model(None, backend="flashinfer")
+    model = make_model(state=None, backend="flashinfer", family="mla", model_cls=Deepseek2TpPartModel)
     layers = [Deepseek2TransformerLayerInfer(i, net) for i in range(2)]
-    bind_layers(model, *layers)
+    register_layers(model=model, layers=layers)
     common = dict(num_heads=16, qk_rope_head_dim=64, softmax_scale=scale, dtype=torch.bfloat16)
-    assert layer_configs(layers[0]) == (
-        MLAPrefillLayerConfig(qk_nope_head_dim=128, v_head_dim=128, **common),
-        MLADecodeLayerConfig(kv_lora_rank=512, **common),
+    assert layer_configs(model=model, layer=layers[0]) == (
+        MLAPrefillAttConfig(
+            num_heads=common["num_heads"],
+            qk_nope_head_dim=common.get("qk_nope_head_dim", 128),
+            qk_rope_head_dim=common["qk_rope_head_dim"],
+            v_head_dim=common.get("v_head_dim", 128),
+            softmax_scale=common["softmax_scale"],
+            dtype=common["dtype"],
+            causal=common.get("causal", True),
+        ),
+        MLADecodeAttConfig(
+            num_heads=common["num_heads"],
+            kv_lora_rank=common.get("kv_lora_rank", 512),
+            qk_rope_head_dim=common["qk_rope_head_dim"],
+            softmax_scale=common["softmax_scale"],
+            dtype=common["dtype"],
+            causal=common.get("causal", True),
+        ),
     )
-    # FlashInfer plans with the layers' softmax scale, which they all share.
-    assert layers[0].prefill_impl is layers[1].prefill_impl
-    assert layers[0].decode_impl is layers[1].decode_impl
+    # FlashInfer 使用层共有的 softmax 缩放因子进行规划。
+    assert layer_backend(model=model, layer=layers[0], phase="prefill") is layer_backend(
+        model=model, layer=layers[1], phase="prefill"
+    )
+    assert layer_backend(model=model, layer=layers[0], phase="decode") is layer_backend(
+        model=model, layer=layers[1], phase="decode"
+    )
 
 
 @pytest.mark.parametrize("kv_type, kv_cache_format", [("None", "bf16"), ("fp8kv_dsa", "fp8_ds_mla")])
 def test_deepseek_v32_layers_attend_to_the_indexer_selection(runtime_start_args, kv_type, kv_cache_format):
-    from lightllm.common.attention.backends.sparse_mla import SparseMLALayerConfig
+    from lightllm.common.attention.backends.sparse_mla import SparseMLAAttConfig
     from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
+    from lightllm.models.deepseek3_2.model import Deepseek3_2TpPartModel
 
     layer = Deepseek3_2TransformerLayerInfer.__new__(Deepseek3_2TransformerLayerInfer)
-    layer.tp_q_head_num_, layer.kv_lora_rank, layer.qk_rope_head_dim = 64, 512, 64
-    layer.softmax_scale, layer.index_topk = 0.1, 2048
-    # Sparse MLA has one implementation name; auto-selection would validate it.
-    model = make_model(None, backend="flashmla_sparse")
+    layer.layer_num_ = 0
+    layer.network_config_ = dict(
+        num_attention_heads=64, kv_lora_rank=512, qk_nope_head_dim=128, qk_rope_head_dim=64, index_topk=2048
+    )
+    # 稀疏 MLA 只有一个实现名称；自动选择会验证它。
+    model = make_model(state=None, backend="flashmla_sparse", family="sparse_mla", model_cls=Deepseek3_2TpPartModel)
     model.args.llm_kv_type = kv_type
-    bind_layers(model, layer)
-    expected = SparseMLALayerConfig(
+    register_layers(model=model, layers=(layer,))
+    expected = SparseMLAAttConfig(
         num_heads=64,
         kv_lora_rank=512,
         qk_rope_head_dim=64,
-        softmax_scale=0.1,
+        softmax_scale=192 ** -0.5,
         dtype=torch.bfloat16,
         kv_cache_format=kv_cache_format,
         topk=2048,
     )
-    assert layer_configs(layer) == (expected, expected)
+    assert layer_configs(model=model, layer=layer) == (expected, expected)
 
 
 @pytest.mark.parametrize("kv_type, expected_format", [("None", "bf16"), ("fp8kv_dsa", "fp8_group64_e8m0")])
 def test_glm5_sparse_spec_describes_the_cache_without_a_workspace(kv_type, expected_format):
     from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 
+    from lightllm.models.glm5_next.model import Glm5NextTpPartModel
+
     layer = Glm5NextTransformerLayerInfer.__new__(Glm5NextTransformerLayerInfer)
+    layer.layer_num_ = 3
     layer.is_linear_attention_layer = False
-    layer.tp_q_head_num_, layer.kv_lora_rank, layer.softmax_scale = 64, 512, 0.0625
-    layer.network_config_ = {"index_topk": 2048, "index_kpool": 4}
-    model = SimpleNamespace(args=SimpleNamespace(llm_kv_type=kv_type), data_type=torch.bfloat16)
-    spec = layer.attention_config(model)
-    assert spec.prefill == spec.decode
-    assert spec.prefill.kv_cache_format == expected_format
-    assert spec.prefill_implementation == spec.decode_implementation == "flashmla_sparse"
+    model = make_model(state=None, model_cls=Glm5NextTpPartModel)
+    model.args.llm_kv_type = kv_type
+    model.config = dict(num_attention_heads=64, kv_lora_rank=512, qk_nope_head_dim=256, index_topk=2048, index_kpool=4)
+    register_layers(model=model, layers=(layer,))
+    assert all(
+        backend.att_config.kv_cache_format == expected_format
+        for phase in ("prefill", "decode")
+        for backend in model.attention_backend_manager.get_backends(role="main", phase=phase)
+    )
 
 
-@pytest.mark.parametrize("prefill_backends, prefill_kernel", [(["auto"], "auto"), (["fa3", "flashkda"], "flashkda")])
+@pytest.mark.parametrize("prefill_kernel", ["auto", "triton", "flashkda"])
 @pytest.mark.parametrize("ssm_state_mode", ["native", "replay"])
 def test_glm5_kda_layers_follow_the_linear_backend_and_state_mode(
-    runtime_start_args, monkeypatch, prefill_backends, prefill_kernel, ssm_state_mode
+    runtime_start_args: Any, monkeypatch: pytest.MonkeyPatch, prefill_kernel: Any, ssm_state_mode: Any
 ):
-    from lightllm.common.attention.backends.kda import KDALayerConfig
+    from lightllm.common.attention.backends.kda import KDAAttConfig
     from lightllm.common.attention.backends.kda import triton as kda_triton
     from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
+    from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 
-    monkeypatch.setattr(kda_triton, "_check_prefill_kernel", lambda layer_config: None)
+    monkeypatch.setattr(kda_triton.TritonKDAPrefillBackend, "_check_prefill_kernel", lambda att_config: None)
     layer = Glm5NextTransformerLayerInfer.__new__(Glm5NextTransformerLayerInfer)
+    layer.layer_num_ = 0
     layer.is_linear_attention_layer = True
     layer.tp_world_size_, layer.tp_linear_num_heads, layer.linear_head_dim = 1, 4, 128
     layer.network_config_ = {"linear_attn_config": {"num_heads": 4, "head_dim": 128, "short_conv_kernel_size": 4}}
-    model = make_model(None, backend="triton")
-    model.args.llm_prefill_att_backend = prefill_backends
+    sparse = Glm5NextTransformerLayerInfer.__new__(Glm5NextTransformerLayerInfer)
+    sparse.layer_num_ = 1
+    sparse.is_linear_attention_layer = False
+    sparse.tp_q_head_num_, sparse.kv_lora_rank, sparse.softmax_scale = 64, 512, 0.0625
+    sparse.network_config_ = {"index_topk": 2048, "index_kpool": 4}
+    model = make_model(state=None, backend="triton", model_cls=Glm5NextTpPartModel)
+    model.config = dict(
+        num_attention_heads=64,
+        kv_lora_rank=512,
+        qk_nope_head_dim=256,
+        index_topk=2048,
+        index_kpool=4,
+        linear_attn_config=layer.network_config_["linear_attn_config"],
+    )
+    model.args.att_backend["kda.prefill"] = prefill_kernel
     model.args.ssm_state_mode, model.args.linear_att_ssm_data_type = ssm_state_mode, "bfloat16"
-    bind_layers(model, layer)
-    expected = KDALayerConfig(
-        4,
-        128,
-        4,
-        -5.0,
-        torch.bfloat16,
+    register_layers(
+        model=model,
+        layers=(
+            layer,
+            sparse,
+        ),
+    )
+    expected = KDAAttConfig(
+        num_heads=4,
+        head_dim=128,
+        conv_kernel_size=4,
+        lower_bound=-5.0,
+        dtype=torch.bfloat16,
         replay=ssm_state_mode == "replay",
         ssm_dtype=torch.bfloat16,
         prefill_kernel=prefill_kernel,
     )
-    assert layer_configs(layer) == (expected, expected)
+    assert layer_configs(model=model, layer=layer) == (expected, replace(expected, prefill_kernel="triton"))
+    assert layer_backend(model=model, layer=sparse, phase="prefill").get_name() == "flashmla_sparse_mla_prefill"
+    assert layer_backend(model=model, layer=sparse, phase="decode").get_name() == "fa3_sparse_mla_decode"

@@ -1,11 +1,13 @@
 """Run FP8 GQA attention whose only replaced parts are the external FA3/FlashInfer kernels."""
 
+from unit_tests.common.attention.backends.groups_runner import run_attention
+
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+from lightllm.common.attention.backends.gqa import GQAAttConfig, GQAAttInputs
 from lightllm.common.attention.backends.gqa.fa3 import (
     FA3GQADecodeBackend,
     FA3GQADecodeAttState,
@@ -13,13 +15,12 @@ from lightllm.common.attention.backends.gqa.fa3 import (
     FA3GQAPrefillAttState,
 )
 from lightllm.common.attention.backends.gqa.flashinfer import (
-    FlashInferGQABuilderConfig,
     FlashInferGQADecodeBackend,
     FlashInferGQADecodeAttState,
     FlashInferGQAPrefillBackend,
     FlashInferGQAPrefillAttState,
 )
-from lightllm.common.attention.backends.gqa import gqa_kv_quant_fields
+from lightllm.common.attention.backends.gqa import get_gqa_kv_quant
 
 
 class FP8Attention:
@@ -29,18 +30,29 @@ class FP8Attention:
         self.backend, self.kv_type, self.att_state = backend, kv_type, att_state
 
     def run(self, *, q, k, v, kv_scales, alloc_func=torch.empty):
-        # The layer config a layer creates from its cache scales when the model loads.
-        layer_config = GQALayerConfig(
+        # 该层从其缓存中创建的层配置在模型加载时会根据缓存比例进行调整。
+        kv_quant, group_size, has_q_scale = get_gqa_kv_quant(
+            llm_kv_type=self.kv_type, kv_scales=kv_scales, head_dim=q.shape[2]
+        )
+        att_config = GQAAttConfig(
             num_heads=q.shape[1],
             num_kv_heads=k.shape[1],
             head_dim=q.shape[2],
             dtype=q.dtype,
-            **gqa_kv_quant_fields(self.kv_type, kv_scales, q.shape[2]),
+            kv_quant=kv_quant,
+            kv_quant_group_size=group_size,
+            has_q_scale=has_q_scale,
         )
-        impl = self.backend(layer_config)
-        inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
+        if self.backend in (FlashInferGQAPrefillBackend, FlashInferGQADecodeBackend):
+            runtime = self.backend.RuntimeConfig(max_seq_len=k.shape[0])
+            impl = self.backend(att_config=att_config, runtime_config=runtime)
+        else:
+            impl = self.backend(att_config=att_config)
+        inputs = GQAAttInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
         out = alloc_func(q.shape, dtype=q.dtype, device=q.device)
-        return impl.forward(self.att_state, inputs, out=out, alloc_func=alloc_func)
+        return run_attention(
+            backend=impl, att_state=self.att_state, layer_inputs=inputs, out=out, alloc_func=alloc_func
+        )
 
 
 def fp8_attention(
@@ -73,16 +85,21 @@ def fp8_attention(
 
         monkeypatch.setattr(q_per_head_fp8_quant, "q_per_head_static_fp8_quant", quantize)
         monkeypatch.setattr(sgl_utils, "flash_attn_with_kvcache", attend)
-        att_state_cls, extra = (FA3GQAPrefillAttState, {}) if prefill else (FA3GQADecodeAttState, {"max_seqlen_k": 1})
-        att_state = att_state_cls(
-            page_table=None,
-            cache_seqlens=torch.ones(requests, dtype=torch.int32),
-            cu_seqlens_q=torch.arange(requests + 1, dtype=torch.int32),
-            cu_seqlens_k=None,
-            max_seqlen_q=1,
-            page_size=1,
-            **extra,
-        )
+        cache_seqlens = torch.ones(size=(requests,), dtype=torch.int32)
+        cu_q = torch.arange(end=requests + 1, dtype=torch.int32)
+        if prefill:
+            att_state = FA3GQAPrefillAttState(
+                page_table=None, cache_seqlens=cache_seqlens, cu_seqlens_q=cu_q, cu_seqlens_k=None, max_seqlen_q=1
+            )
+        else:
+            att_state = FA3GQADecodeAttState(
+                page_table=None,
+                cache_seqlens=cache_seqlens,
+                cu_seqlens_q=cu_q,
+                cu_seqlens_k=None,
+                max_seqlen_q=1,
+                max_seqlen_k=1,
+            )
         return FP8Attention(FA3GQAPrefillBackend if prefill else FA3GQADecodeBackend, "fp8kv_sph", att_state)
     else:
 
@@ -90,8 +107,15 @@ def fp8_attention(
             observed.update(k_scale=k_scale, v_scale=v_scale)
             out.copy_(q)
 
-        config = FlashInferGQABuilderConfig(heads, heads, head_dim, 1, torch.bfloat16, torch.float8_e4m3fn)
-        att_state_cls = FlashInferGQAPrefillAttState if prefill else FlashInferGQADecodeAttState
-        att_state = att_state_cls(wrapper=SimpleNamespace(run=run), config=config)
+        wrapper = SimpleNamespace(run=run)
+        if prefill:
+            att_state = FlashInferGQAPrefillAttState(wrapper=wrapper)
+        else:
+            att_state = FlashInferGQADecodeAttState(
+                wrapper=wrapper,
+                kv_starts=torch.arange(end=requests + 1, dtype=torch.int32),
+                kv_indices=torch.arange(end=requests, dtype=torch.int32),
+                kv_last_page_len=torch.ones(size=(requests,), dtype=torch.int32),
+            )
         backend = FlashInferGQAPrefillBackend if prefill else FlashInferGQADecodeBackend
         return FP8Attention(backend, "fp8kv_spt", att_state)

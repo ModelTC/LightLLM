@@ -1,3 +1,5 @@
+from typing import Any
+from unit_tests.common.attention.backends.step_fixture import create_att_state
 import json
 from importlib import import_module
 from types import SimpleNamespace
@@ -6,11 +8,12 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-import lightllm.common.basemodel.attention_backend_manager as attention_groups_module
+from lightllm.common.basemodel import basemodel
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from unit_tests.common.attention.backends.step_fixture import make_infer_state
-from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBuildContext
-from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQADecodeBuildContext
+from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend
+from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend
+from lightllm.common.attention.backends.gqa import GQAAttConfig
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 from lightllm.utils import envs_utils
@@ -67,27 +70,17 @@ def test_qwen3_eagle_uses_layers_checkpoint_prefix():
     ],
 )
 def test_model_selects_dynamic_spec_layout(
-    monkeypatch,
-    mtp_mode,
-    is_draft_model,
-    draft_step,
-    dynamic_spec,
-    expected,
+    mtp_mode: Any, is_draft_model: Any, draft_step: Any, dynamic_spec: Any, expected: Any
 ):
-    monkeypatch.setattr(
-        attention_groups_module,
-        "get_env_start_args",
-        lambda: SimpleNamespace(mtp_mode=mtp_mode, mtp_dynamic_verify=dynamic_spec),
-    )
-    model = SimpleNamespace(
-        is_mtp_draft_model=is_draft_model,
-        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
-        att_state_role="main",
-        att_state_manager=SimpleNamespace(get_bounded_attention_states=lambda role: ()),
-        graph_max_len_in_batch=1024,
-    )
+    from lightllm.common.attention.base_backend import AttRuntimeConfig
 
-    assert attention_groups_module.attention_step_config(model).dynamic_decode_rows is expected
+    model = SimpleNamespace(
+        args=SimpleNamespace(mtp_mode=mtp_mode, mtp_dynamic_verify=dynamic_spec),
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda is_draft_model: draft_step),
+        graph_max_len_in_batch=1024,
+        is_mtp_draft_model=is_draft_model,
+    )
+    assert AttRuntimeConfig.from_model(model=model).dynamic_decode_rows is expected
 
 
 @pytest.mark.parametrize(
@@ -102,15 +95,28 @@ def test_model_selects_dynamic_spec_layout(
         ("vanilla_with_att", True, True),
     ],
 )
-def test_model_selects_causality(monkeypatch, mtp_mode, is_draft_model, expected):
-    monkeypatch.setattr(
-        attention_groups_module,
-        "get_env_start_args",
-        lambda: SimpleNamespace(mtp_mode=mtp_mode),
-    )
-    model = SimpleNamespace(is_mtp_draft_model=is_draft_model)
+@pytest.mark.parametrize("prefill", [True, False])
+def test_model_selects_causality(
+    monkeypatch: pytest.MonkeyPatch, mtp_mode: Any, is_draft_model: Any, expected: Any, prefill: Any
+):
+    from lightllm.models.deepseek2 import model as deepseek2_model
 
-    assert attention_groups_module.attention_is_causal(model) is expected
+    monkeypatch.setattr(
+        deepseek2_model.mla_selector, "select_mla_prefill_backend", lambda att_config, **kwargs: att_config
+    )
+    monkeypatch.setattr(
+        deepseek2_model.mla_selector, "select_mla_decode_backend", lambda att_config, **kwargs: att_config
+    )
+    model = SimpleNamespace(
+        config=dict(num_attention_heads=8, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128, kv_lora_rank=512),
+        args=SimpleNamespace(mtp_mode=mtp_mode),
+        is_mtp_draft_model=is_draft_model,
+        data_type=torch.bfloat16,
+        tp_world_size_=1,
+        layers_infer=[SimpleNamespace(layer_num_=0)],
+    )
+    configs = deepseek2_model.Deepseek2TpPartModel.create_att_backends(model=model)
+    assert configs[0 if prefill else 1].causal is expected
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -124,10 +130,14 @@ def test_triton_mtp_decode_step_builds_group_markers():
     infer_state.req_manager = SimpleNamespace(
         req_to_token_indexs=torch.zeros(8, 8, dtype=torch.int32), HOLD_REQUEST_ID=-1
     )
-    # Fixed-layout speculative decode: three rows per request.
-    step_config = attention_groups_module.AttentionStepConfig(decode_rows_per_request=3)
-    batch = attention_groups_module.configure_attention_step(infer_state, step_config)
-    att_state = TritonGQADecodeBackend.build(batch, TritonGQADecodeBuildContext())
+    # 固定布局的投机解码：每个请求三行。
+    from lightllm.common.attention.base_backend import AttRuntimeConfig
+
+    backend = TritonGQADecodeBackend(
+        att_config=GQAAttConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16),
+        runtime_config=AttRuntimeConfig(decode_rows_per_request=3),
+    )
+    att_state = create_att_state(backend=backend, infer_state=infer_state)
 
     assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
 
@@ -147,7 +157,10 @@ def test_fa3_gqa_decode_step_builder_groups_dynamic_rows():
         pad_req_idx=-1,
     )
 
-    cu_seqlens_q, _, cache_seqlens, att_req_idx = FA3GQADecodeBuildContext._group_rows(batch)
+    from lightllm.common.attention.base_backend import AttRuntimeConfig
+
+    runtime = AttRuntimeConfig(decode_rows_per_request=3, dynamic_decode_rows=True)
+    cu_seqlens_q, _, cache_seqlens, att_req_idx = FA3GQADecodeBackend._group_rows(batch=batch, config=runtime)
     torch.cuda.synchronize()
 
     assert att_req_idx.cpu().tolist() == [7, -1, -1, -1]

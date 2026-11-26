@@ -177,13 +177,7 @@ class StartArgs:
     vit_quant_type: Optional[str] = field(default="none")
     vit_quant_cfg: Optional[str] = field(default=None)
     expert_dtype: Optional[str] = field(default=None, metadata={"choices": ["fp8", "fp4"]})
-    llm_prefill_att_backend: List[str] = field(
-        default_factory=lambda: ["auto"],
-        metadata={"choices": ["auto", "triton", "fa3", "flashinfer", "flashqla", "flashkda"]},
-    )
-    llm_decode_att_backend: List[str] = field(
-        default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
-    )
+    att_backend: dict[str, str] = field(default_factory=dict)
     flashinfer_workspace_size: int = field(default=512)
     page_size: int = field(default=1)
     req_token_index_mode: str = field(

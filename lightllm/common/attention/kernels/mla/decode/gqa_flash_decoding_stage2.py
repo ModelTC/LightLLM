@@ -1,7 +1,43 @@
-import os
 import torch
 import triton
 import triton.language as tl
+
+
+@torch.no_grad()
+def flash_decode_stage2(
+    out_block_seq: torch.Tensor,
+    batch_start_index: torch.Tensor,
+    mid_out: torch.Tensor,
+    mid_out_logexpsum: torch.Tensor,
+    B_Seqlen: torch.Tensor,
+    Out: torch.Tensor,
+    run_config: dict[str, int],
+):
+    if run_config:
+        num_warps = run_config["stage2_num_warps"]
+        num_stages = run_config["stage2_num_stages"]
+
+    Lk = mid_out.shape[-1]
+    assert Lk in {16, 32, 64, 128, 256, 512}
+    batch, head_num = batch_start_index.shape[0], mid_out.shape[0]
+    grid = (head_num, batch)
+
+    _fwd_kernel_flash_decode_stage2[grid](
+        out_block_seq,
+        batch_start_index,
+        B_Seqlen,
+        mid_out,
+        mid_out_logexpsum,
+        Out,
+        *mid_out.stride(),
+        *mid_out_logexpsum.stride(),
+        *Out.stride(),
+        BLOCK_DMODEL=Lk,
+        NUM_STAGES=num_stages,
+        num_warps=num_warps,
+        num_stages=1,
+    )
+    return
 
 
 @triton.jit
@@ -51,41 +87,4 @@ def _fwd_kernel_flash_decode_stage2(
         max_logic = new_max_logic
 
     tl.store(Out + cur_batch * stride_obs + cur_head * stride_oh + offs_d, acc / sum_exp)
-    return
-
-
-@torch.no_grad()
-def flash_decode_stage2(
-    out_block_seq: torch.Tensor,
-    batch_start_index: torch.Tensor,
-    mid_out,
-    mid_out_logexpsum,
-    B_Seqlen,
-    Out,
-    **run_config,
-):
-    if run_config:
-        num_warps = run_config["stage2_num_warps"]
-        num_stages = run_config["stage2_num_stages"]
-
-    Lk = mid_out.shape[-1]
-    assert Lk in {16, 32, 64, 128, 256, 512}
-    batch, head_num = batch_start_index.shape[0], mid_out.shape[0]
-    grid = (head_num, batch)
-
-    _fwd_kernel_flash_decode_stage2[grid](
-        out_block_seq,
-        batch_start_index,
-        B_Seqlen,
-        mid_out,
-        mid_out_logexpsum,
-        Out,
-        *mid_out.stride(),
-        *mid_out_logexpsum.stride(),
-        *Out.stride(),
-        BLOCK_DMODEL=Lk,
-        NUM_STAGES=num_stages,
-        num_warps=num_warps,
-        num_stages=1,
-    )
     return

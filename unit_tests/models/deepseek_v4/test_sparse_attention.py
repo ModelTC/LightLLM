@@ -1,3 +1,4 @@
+from unit_tests.common.attention.backends.step_fixture import create_att_state
 import gc
 import os
 from pathlib import Path
@@ -10,7 +11,7 @@ import torch
 
 flash_mla = pytest.importorskip("flash_mla")
 
-from lightllm.common.attention.backends.sparse_mla import SWASparseMLALayerConfig
+from lightllm.common.attention.backends.sparse_mla import SWASparseMLAAttConfig
 from lightllm.common.attention.backends.sparse_mla.flashmla_swa import (
     FlashMLASWADecodeBackend,
     FlashMLASWAPrefillBackend,
@@ -20,6 +21,7 @@ from lightllm.models.deepseek_v4 import swa_prefill_workspace
 from lightllm.models.deepseek_v4.config import create_attention_config
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
 from lightllm.models.deepseek_v4.swa_prefill_workspace import reserve_swa_prefill_workspace
+from unit_tests.common.attention.backends.groups_runner import register_test_backends
 
 
 @pytest.fixture(autouse=True)
@@ -72,9 +74,9 @@ def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.Monke
         att_state_role="main",
     )
     monkeypatch.setattr(
-        swa_prefill_workspace,
-        "get_gpu_workspace_buffer",
-        lambda key_name, workspace_size, dtype: torch.empty(workspace_size, dtype=dtype),
+        swa_prefill_workspace.PrefillAttBackend,
+        "get_workspace",
+        staticmethod(lambda name, role, numel, dtype: torch.empty(size=(numel,), dtype=dtype)),
     )
     workspace, capacity = reserve_swa_prefill_workspace(model)
     # D 节点仍执行 HOLD 请求的单 token prefill，但无需保留普通请求的长 prefill 临时区。
@@ -118,7 +120,7 @@ def _case(heads, ratio):
     layer.alloc_tensor = lambda shape, dtype=None, device=None, **_: torch.empty(shape, dtype=dtype, device=device)
     layer.swa_cache_config = config.create_swa_config()
     layer.compressed_cache_config = config.create_compressed_config(compress_ratio=ratio) if ratio else None
-    layer_config = SWASparseMLALayerConfig(
+    att_config = SWASparseMLAAttConfig(
         num_heads=padded_heads,
         head_dim_v=512,
         softmax_scale=layer.softmax_scale,
@@ -126,8 +128,12 @@ def _case(heads, ratio):
         compress_ratio=ratio,
         has_attn_sink=True,
     )
-    layer.prefill_impl = FlashMLASWAPrefillBackend(layer_config)
-    layer.decode_impl = FlashMLASWADecodeBackend(layer_config)
+    manager = register_test_backends(
+        "main",
+        layer.layer_num_,
+        FlashMLASWAPrefillBackend(att_config=att_config),
+        FlashMLASWADecodeBackend(att_config=att_config),
+    )
     q = torch.randn((tokens, padded_heads, 512), dtype=torch.bfloat16, device="cuda") * 0.1
     q[:, heads:] = 0
     pool, decoded = _pool(128, 2)
@@ -154,7 +160,8 @@ def _case(heads, ratio):
     layer._compress_and_index = lambda q_lora, x, infer_state, layer_weight: infer_state.attn_params
     return SimpleNamespace(
         layer=layer,
-        layer_config=layer_config,
+        attention_backend_manager=manager,
+        att_config=att_config,
         layer_weight=layer_weight,
         q=q,
         packed_kv=(pool, extra),
@@ -165,15 +172,14 @@ def _case(heads, ratio):
 
 
 def _infer_state(case, phase, *, params=None, infer_state=None):
-    """An infer state whose attention state are freshly built for case's layer in phase, as each step builds them."""
-    backend = FlashMLASWAPrefillBackend if phase == "prefill" else FlashMLASWADecodeBackend
+    """一个推理状态，其注意力状态为案例的层在阶段中新鲜构建，因为每个步骤都会构建它们。"""
     infer_state = SimpleNamespace() if infer_state is None else infer_state
     infer_state.attn_params = case.params if params is None else params
     infer_state.get_att_kv = lambda logical_layer_id: case.packed_kv
-    impl = case.layer.prefill_impl if phase == "prefill" else case.layer.decode_impl
-    infer_state.att_states = {
-        impl.state_key: backend.build(None, backend.create_build_context(impl.state_key[1], None))
-    }
+    infer_state.att_state_role = "main"
+    infer_state.attention_backend_manager = case.attention_backend_manager
+    impl = case.attention_backend_manager.get_backend(role="main", phase=phase, logical_layer_id=case.layer.layer_num_)
+    infer_state.att_states = {impl: create_att_state(backend=impl, infer_state=None)}
     return infer_state
 
 
@@ -273,9 +279,13 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
     outputs = runner.capture_decode(decode_func, *(case[0] for case in cases))
     outputs = outputs if overlap else (outputs,)
     for state_info, _, _, _ in cases:
-        att_state = state_info.att_states[state_info.case.layer.decode_impl.state_key]
-        eager_meta = att_state.sched_meta_by_ratio[ratio]
-        capture_meta = att_state.capture_sched_meta_by_ratio[ratio]
+        case = state_info.case
+        backend = case.attention_backend_manager.get_backend(
+            role="main", phase="decode", logical_layer_id=case.layer.layer_num_
+        )
+        att_state = state_info.att_states[backend]
+        eager_meta = att_state.sched_meta
+        capture_meta = att_state.capture_sched_meta
         assert eager_meta.tile_scheduler_metadata.data_ptr() != capture_meta.tile_scheduler_metadata.data_ptr()
 
     # Reuse the same graph as lengths grow, shrink, and vary within the batch.
@@ -393,11 +403,14 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         atol=5e-4,
     )
     assert len(infer_state.prefill_cuda_graph_exe_list) == 3
-    previous_meta = infer_state.att_states[case.layer.prefill_impl.state_key].sched_meta_by_ratio[ratio]
+    backend = case.attention_backend_manager.get_backend(
+        role="main", phase="prefill", logical_layer_id=case.layer.layer_num_
+    )
+    previous_meta = infer_state.att_states[backend].sched_meta
     for length in (128, 64, 1, 64):
         q.mul_(1.25)
         infer_state = new_request(length)
-        current_meta = infer_state.att_states[case.layer.prefill_impl.state_key].sched_meta_by_ratio[ratio]
+        current_meta = infer_state.att_states[backend].sched_meta
         assert current_meta.tile_scheduler_metadata is None
         actual = runner.replay([q, q_lora, x], infer_state)[0]
         assert callback_states[-1] is infer_state

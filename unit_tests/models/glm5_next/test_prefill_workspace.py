@@ -1,4 +1,6 @@
+from typing import Any
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -29,18 +31,33 @@ def test_prefill_workspace_reservation(current_cuda_device, overlap, run_mode):
         config={"index_topk": 2048, "index_kpool": 4},
         att_state_role=f"workspace_test_{run_mode}_{overlap}",
     )
-    reserved = prefill_workspace.reserve_fp8_sparse_prefill_workspaces(model)
-    pointers = [{key: value.data_ptr() for key, value in buffers.items()} for buffers in reserved]
-    # Reserving again, as a second model role sharing the name would, returns the same storage.
-    again = prefill_workspace.reserve_fp8_sparse_prefill_workspaces(model)
+    reserve = prefill_workspace.reserve_fp8_sparse_prefill_workspaces
+    with patch.dict(prefill_workspace.PrefillAttBackend.get_workspace.__dict__, clear=True):
+        reserved = reserve(model=model)
+        pointers = [{key: value.data_ptr() for key, value in buffers.items()} for buffers in reserved]
+        again = reserve(model=model)
+        draft = reserve(
+            model=SimpleNamespace(
+                args=model.args,
+                batch_max_tokens=4,
+                max_req_num=model.max_req_num,
+                max_seq_length=model.max_seq_length,
+                config=model.config,
+                att_state_role="draft0",
+            )
+        )
     assert [{key: value.data_ptr() for key, value in buffers.items()} for buffers in again] == pointers
     assert len(reserved) == 1 + int(overlap)
     capacity = 8 if run_mode == "decode" else 34
     assert reserved[0]["gathered_kv"].shape == (capacity, 1, 512)
     assert reserved[0]["chunk_topk_indices"].shape == (8, 2176)
+    for key in ("gathered_kv", "chunk_topk_indices", "chunk_cache_seqlens"):
+        assert draft[0][key].data_ptr() == reserved[0][key].data_ptr()
 
     for views in reserved:
         torch.testing.assert_close(views["cu_seqlens_q"], torch.arange(9, dtype=torch.int32, device="cuda"))
+    for views in draft:
+        torch.testing.assert_close(views["cu_seqlens_q"], torch.arange(5, dtype=torch.int32, device="cuda"))
 
 
 def test_prefill_microbatches_use_independent_scratch_during_graph_replay(monkeypatch, current_cuda_device):
@@ -98,8 +115,10 @@ def test_glm_reserves_prefill_workspace_during_resource_preparation(monkeypatch,
 
     workspaces = [{"gathered_kv": object()}]
 
-    def reserve(prepared_model):
-        assert prepared_model is model
+    expected_model = model
+
+    def reserve(model: TpPartBaseModel):
+        assert model is expected_model
         calls.append("reserve_workspace")
         return workspaces
 
@@ -115,8 +134,8 @@ def test_sparse_layer_passes_each_microbatch_its_reserved_workspace():
     class CapturePrefill:
         state_key = object()
 
-        def forward(self, att_state, inputs, *, out):
-            return inputs.fp8_workspace
+        def prefill(self, att_state: Any, layer_inputs: Any, *, out: Any):
+            return layer_inputs.fp8_workspace
 
     impl = CapturePrefill()
     regions = [{"gathered_kv": torch.empty(1)} for _ in range(2)]
@@ -126,7 +145,8 @@ def test_sparse_layer_passes_each_microbatch_its_reserved_workspace():
     layer.softmax_scale = 1.0
     layer.network_config_ = {"index_topk": 1, "index_kpool": 1}
     layer.fp8_sparse_prefill_workspaces = regions
-    layer.prefill_impl = impl
+    layer.layer_num_ = 0
+    manager = SimpleNamespace(get_backend=lambda role, phase, logical_layer_id: impl)
     query = torch.zeros(1, 1, 1)
     layer.alloc_tensor = torch.empty
     layer.indexer = SimpleNamespace(_get_indices=lambda **kwargs: (None, None))
@@ -135,7 +155,9 @@ def test_sparse_layer_passes_each_microbatch_its_reserved_workspace():
     for slot in (0, 1, 0):
         state = SimpleNamespace(
             microbatch_index=slot,
-            att_states={impl.state_key: None},
+            att_state_role="main",
+            attention_backend_manager=manager,
+            att_states={impl: None},
             nsa_step=SimpleNamespace(q_kv_start_loc=None),
             get_topk_indices_params={"hidden_states": query, "q_lora": query},
         )

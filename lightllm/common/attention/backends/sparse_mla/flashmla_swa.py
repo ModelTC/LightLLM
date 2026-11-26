@@ -1,68 +1,72 @@
-"""FlashMLA sparse attention over a sliding-window cache plus an optional compressed cache (DeepSeek V4)."""
+"""FlashMLA 在滑动窗口缓存上执行稀疏注意力，并可选地使用压缩缓存（DeepSeek V4）。"""
+from collections.abc import Callable
+
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
-from lightllm.common.attention.backend import (
-    AttentionBackend,
-    AttentionBuildResources,
-    TensorAllocator,
-)
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from . import SWASparseMLALayerConfig, SWASparseMLALayerInputs
+from lightllm.common.attention.base_backend import PrefillAttBackend, DecodeAttBackend
+from . import SWASparseMLAAttConfig, SWASparseMLAAttInputs
 
 
 @dataclass(frozen=True)
 class FlashMLASWAAttState:
-    """FlashMLA scheduler metadata per compress ratio, filled on the step's first kernel call per ratio.
+    """每个实例服务一个压缩比。Decode 额外为 CUDA Graph 捕获准备一份独立的调度元数据。"""
 
-    A decode step also carries a second set used while a CUDA graph is captured, so warm-up runs do not
-    fill it and its planning kernels are recorded in the graph to run again on every replay.
-    """
-
-    sched_meta_by_ratio: dict
-    capture_sched_meta_by_ratio: Optional[dict] = None
+    sched_meta: object
+    capture_sched_meta: object | None = None
 
 
-class FlashMLASWABuildContext:
-    def __init__(self, *, compress_ratios: tuple, for_cuda_graph_capture: bool) -> None:
-        """compress_ratios lists the model's distinct ratios; for_cuda_graph_capture adds the capture set (decode)."""
-        self.compress_ratios = compress_ratios
-        self.for_cuda_graph_capture = for_cuda_graph_capture
+class FlashMLASWAPrefillBackend(PrefillAttBackend[SWASparseMLAAttConfig, FlashMLASWAAttState, SWASparseMLAAttInputs]):
+    def create_att_state(self, infer_state: InferStateInfo) -> FlashMLASWAAttState:
+        from flash_mla import get_mla_metadata
 
+        return FlashMLASWAAttState(sched_meta=get_mla_metadata()[0])
 
-class FlashMLASWAPrefillBackend(
-    AttentionBackend[SWASparseMLALayerConfig, FlashMLASWAAttState, SWASparseMLALayerInputs]
-):
-    def forward(
+    def prefill(
         self,
         att_state: FlashMLASWAAttState,
-        layer_inputs: SWASparseMLALayerInputs,
+        layer_inputs: SWASparseMLAAttInputs,
         *,
-        out: torch.Tensor,
-        alloc_func: TensorAllocator = torch.empty,
-    ) -> torch.Tensor:
-        """Fill and return out [rows, num_heads, head_dim_v], written by FlashMLA in place."""
+        out: torch.Tensor | None,
+        alloc_func: Callable[..., torch.Tensor] = torch.empty,
+    ):
+        return FlashMLASWAPrefillBackend._attention(
+            att_config=self.att_config, att_state=att_state, layer_inputs=layer_inputs, out=out
+        )
+
+    @staticmethod
+    def get_name() -> str:
+        return "flashmla_swa_sparse_mla_prefill"
+
+    @staticmethod
+    def _attention(
+        att_config: SWASparseMLAAttConfig,
+        att_state: FlashMLASWAAttState,
+        layer_inputs: SWASparseMLAAttInputs,
+        *,
+        out: torch.Tensor | None,
+    ):
+        """填充并返回 [行数, num_heads, head_dim_v]，由 FlashMLA 就地写入。"""
         import flash_mla
 
-        layer_config = self.layer_config
-        assert layer_inputs.q.shape[1] == layer_config.num_heads, "q does not match the layer_config"
-        assert (layer_inputs.compressed_cache is not None) == (layer_config.compress_ratio != 0)
-        assert (layer_inputs.attn_sink is not None) == layer_config.has_attn_sink
-        sched_meta_by_ratio = att_state.sched_meta_by_ratio
-        if att_state.capture_sched_meta_by_ratio is not None and torch.cuda.is_current_stream_capturing():
-            sched_meta_by_ratio = att_state.capture_sched_meta_by_ratio
+        assert layer_inputs.q.shape[1] == att_config.num_heads, "q does not match the att_config"
+        assert (layer_inputs.compressed_cache is not None) == (att_config.compress_ratio != 0)
+        assert (layer_inputs.attn_sink is not None) == att_config.has_attn_sink
+        sched_meta = att_state.sched_meta
+        if att_state.capture_sched_meta is not None and torch.cuda.is_current_stream_capturing():
+            sched_meta = att_state.capture_sched_meta
         flash_mla.flash_mla_with_kvcache(
             q=layer_inputs.q.unsqueeze(1),
             k_cache=layer_inputs.swa_cache,
             block_table=None,
             cache_seqlens=None,
-            head_dim_v=layer_config.head_dim_v,
-            tile_scheduler_metadata=sched_meta_by_ratio[layer_config.compress_ratio],
+            head_dim_v=att_config.head_dim_v,
+            tile_scheduler_metadata=sched_meta,
             num_splits=None,
-            softmax_scale=layer_config.softmax_scale,
+            softmax_scale=att_config.softmax_scale,
             causal=False,
             is_fp8_kvcache=True,
             indices=layer_inputs.swa_indices,
@@ -75,40 +79,26 @@ class FlashMLASWAPrefillBackend(
         )
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "flashmla_swa_sparse_mla_prefill"
 
-    build_context_type = FlashMLASWABuildContext
+class FlashMLASWADecodeBackend(DecodeAttBackend[SWASparseMLAAttConfig, FlashMLASWAAttState, SWASparseMLAAttInputs]):
+    def create_att_state(self, infer_state: InferStateInfo) -> FlashMLASWAAttState:
+        from flash_mla import get_mla_metadata
 
-    @classmethod
-    def build(cls, metadata: Optional[InferStateInfo], context: FlashMLASWABuildContext) -> FlashMLASWAAttState:
-        """The metadata is planned on the GPU at the first kernel call, so it does not depend on metadata."""
-        import flash_mla
+        # 捕获使用独立的元数据，让规划内核在每次 Graph 重放时运行。
+        return FlashMLASWAAttState(sched_meta=get_mla_metadata()[0], capture_sched_meta=get_mla_metadata()[0])
 
-        def new_set():
-            return {ratio: flash_mla.get_mla_metadata()[0] for ratio in context.compress_ratios}
-
-        return FlashMLASWAAttState(
-            sched_meta_by_ratio=new_set(),
-            capture_sched_meta_by_ratio=new_set() if context.for_cuda_graph_capture else None,
+    def decode(
+        self,
+        att_state: FlashMLASWAAttState,
+        layer_inputs: SWASparseMLAAttInputs,
+        *,
+        out: torch.Tensor | None,
+        alloc_func: Callable[..., torch.Tensor] = torch.empty,
+    ):
+        return FlashMLASWAPrefillBackend._attention(
+            att_config=self.att_config, att_state=att_state, layer_inputs=layer_inputs, out=out
         )
 
-    @classmethod
-    def create_build_context(cls, build_key: int, ctx: AttentionBuildResources) -> FlashMLASWABuildContext:
-        # Layers with one compress ratio share the scheduler metadata of their kernel calls.
-        return FlashMLASWABuildContext(compress_ratios=(build_key,), for_cuda_graph_capture=False)
-
-    @classmethod
-    def build_context_key(cls, layer_config: SWASparseMLALayerConfig) -> int:
-        return layer_config.compress_ratio
-
-
-class FlashMLASWADecodeBackend(FlashMLASWAPrefillBackend):
     @staticmethod
     def get_name() -> str:
         return "flashmla_swa_sparse_mla_decode"
-
-    @classmethod
-    def create_build_context(cls, build_key: int, ctx: AttentionBuildResources) -> FlashMLASWABuildContext:
-        return FlashMLASWABuildContext(compress_ratios=(build_key,), for_cuda_graph_capture=True)

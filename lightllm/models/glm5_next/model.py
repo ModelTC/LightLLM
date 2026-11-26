@@ -1,3 +1,7 @@
+from dataclasses import replace
+from lightllm.common.attention.backends.sparse_mla import SparseMLAAttConfig
+from lightllm.common.attention.backends.kda import KDAAttConfig
+from lightllm.common.attention.base_backend import AttentionBackend
 from lightllm.models.glm5_next.infer_struct import Glm5NextInferStateInfo
 import json
 import os
@@ -6,6 +10,8 @@ from typing import TYPE_CHECKING
 import torch
 import triton
 
+from lightllm.common.attention.backends.kda import selector as kda_selector
+from lightllm.common.attention.backends.sparse_mla import selector as sparse_mla_selector
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.distributed.communication_op import dist_group_manager
@@ -31,6 +37,66 @@ class Glm5NextTpPartModel(TpPartBaseModel):
     post_layer_infer_class = LlamaPostLayerInfer
     transformer_layer_infer_class = Glm5NextTransformerLayerInfer
     infer_state_class = Glm5NextInferStateInfo
+
+    @classmethod
+    def create_att_backends(cls, model: "Glm5NextTpPartModel") -> tuple[AttentionBackend, ...]:
+        linear_layers = [layer for layer in model.layers_infer if layer.is_linear_attention_layer]
+        full_layers = [layer for layer in model.layers_infer if not layer.is_linear_attention_layer]
+        backends = []
+        if linear_layers:
+            linear = model.config["linear_attn_config"]
+            assert linear["num_heads"] % model.tp_world_size_ == 0
+            config = KDAAttConfig(
+                num_heads=linear["num_heads"] // model.tp_world_size_,
+                head_dim=linear["head_dim"],
+                conv_kernel_size=linear["short_conv_kernel_size"],
+                lower_bound=linear.get("gate_lower_bound", -5.0),
+                dtype=model.data_type,
+                state_mtp_step=model.args.mtp_step,
+                replay=model.args.ssm_state_mode == "replay",
+                ssm_dtype=getattr(torch, model.args.linear_att_ssm_data_type),
+            )
+            prefill_config = replace(config, prefill_kernel=model.args.att_backend.get("kda.prefill", "auto"))
+            layer_ids = tuple(layer.layer_num_ for layer in linear_layers)
+            if config.replay:
+                prefill = kda_selector.select_kda_replay_prefill_backend(
+                    att_config=prefill_config, model=model, logical_layer_ids=layer_ids
+                )
+                decode = kda_selector.select_kda_replay_decode_backend(
+                    att_config=config, model=model, logical_layer_ids=layer_ids
+                )
+            else:
+                prefill = kda_selector.select_kda_prefill_backend(
+                    att_config=prefill_config, model=model, logical_layer_ids=layer_ids
+                )
+                decode = kda_selector.select_kda_decode_backend(
+                    att_config=config, model=model, logical_layer_ids=layer_ids
+                )
+            backends.extend((prefill, decode))
+        if full_layers:
+            config = SparseMLAAttConfig(
+                num_heads=model.config["num_attention_heads"] // model.tp_world_size_,
+                kv_lora_rank=model.config["kv_lora_rank"],
+                qk_rope_head_dim=0,
+                softmax_scale=model.config["qk_nope_head_dim"] ** -0.5,
+                dtype=model.data_type,
+                kv_cache_format="fp8_group64_e8m0" if model.args.llm_kv_type == "fp8kv_dsa" else "bf16",
+                topk=model.config["index_topk"],
+                kpool=model.config["index_kpool"],
+                causal=False,
+            )
+            layer_ids = tuple(layer.layer_num_ for layer in full_layers)
+            backends.append(
+                sparse_mla_selector.select_sparse_mla_prefill_backend(
+                    att_config=config, requested="flashmla_sparse", model=model, logical_layer_ids=layer_ids
+                )
+            )
+            backends.append(
+                sparse_mla_selector.select_sparse_mla_decode_backend(
+                    att_config=config, requested="flashmla_sparse", model=model, logical_layer_ids=layer_ids
+                )
+            )
+        return tuple(backends)
 
     @classmethod
     def create_bounded_att_states(

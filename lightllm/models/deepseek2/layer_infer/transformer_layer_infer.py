@@ -4,12 +4,9 @@ import torch
 import triton
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.common.attention.backends.mla import (
-    MLADecodeLayerConfig,
-    MLADecodeLayerInputs,
-    MLAPrefillLayerConfig,
-    MLAPrefillLayerInputs,
+    MLADecodeAttInputs,
+    MLAPrefillAttInputs,
 )
-from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig, attention_is_causal
 from lightllm.models.deepseek2.triton_kernel.sample_kv import sample_kv
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -87,21 +84,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             state_class=FullAttentionState,
         )
 
-    def attention_config(self, model) -> LayerAttentionConfig:
-        # Prefill attends over keys and values expanded from the latent cache; decode over the
-        # latent cache with absorbed queries.
-        common = dict(
-            num_heads=self.tp_q_head_num_,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            softmax_scale=self.softmax_scale,
-            dtype=model.data_type,
-            causal=attention_is_causal(model),
-        )
-        return LayerAttentionConfig(
-            MLAPrefillLayerConfig(qk_nope_head_dim=self.qk_nope_head_dim, v_head_dim=self.v_head_dim, **common),
-            MLADecodeLayerConfig(kv_lora_rank=self.kv_lora_rank, **common),
-        )
-
     def _context_attention_kernel(
         self,
         q: torch.Tensor,
@@ -114,9 +96,13 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state=infer_state,
             layer_weight=layer_weight,
         )
-        return self.prefill_impl.forward(
-            infer_state.att_states[self.prefill_impl.state_key],
-            MLAPrefillLayerInputs(q=q, k_nope=k_nope, k_rope=k_rope, v=v),
+        manager = infer_state.attention_backend_manager
+        backend = manager.get_backend(
+            role=infer_state.att_state_role, phase="prefill", logical_layer_id=self.layer_num_
+        )
+        return backend.prefill(
+            att_state=infer_state.att_states[backend],
+            layer_inputs=MLAPrefillAttInputs(q=q, k_nope=k_nope, k_rope=k_rope, v=v),
             out=self.alloc_tensor((q.shape[0], q.shape[1], v.shape[-1]), dtype=q.dtype, device=q.device),
             alloc_func=self.alloc_tensor,
         )
@@ -132,9 +118,11 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
         state = self._mla_state(infer_state.att_state_manager, infer_state.att_state_role)
         kv = state.get_layer_view(logical_layer_id=self.layer_num_)
-        return self.decode_impl.forward(
-            infer_state.att_states[self.decode_impl.state_key],
-            MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv),
+        manager = infer_state.attention_backend_manager
+        backend = manager.get_backend(role=infer_state.att_state_role, phase="decode", logical_layer_id=self.layer_num_)
+        return backend.decode(
+            att_state=infer_state.att_states[backend],
+            layer_inputs=MLADecodeAttInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv),
             out=self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device),
             alloc_func=self.alloc_tensor,
         )
@@ -391,7 +379,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # moe calu
         expected_m = triton.cdiv(
-            input_embdings.shape[0] * get_global_world_size() * self.num_experts_per_tok, self.n_routed_experts
+            x=input_embdings.shape[0] * get_global_world_size() * self.num_experts_per_tok, y=self.n_routed_experts
         )
         _0_moe_out = layer_weight.experts.decode_masked_group_gemm(
             _0_recv_x, _0_handle, input_embdings.dtype, expected_m

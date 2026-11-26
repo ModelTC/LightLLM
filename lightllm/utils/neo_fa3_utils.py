@@ -29,9 +29,9 @@ try:
     HAS_FLASH_ATTN_INTERFACE = True
 except ImportError as exc:
     warnings.warn(
-        f"Neo FA3 is unavailable: {exc}. "
+        message=f"Neo FA3 is unavailable: {exc}. "
         "Automatic Neo prefill selection will fall back to Triton. "
-        "To select Triton explicitly, use --llm_prefill_att_backend triton.\n" + NEO_FA3_INSTALL_HINT
+        "To select Triton explicitly, use --att_backend gqa.prefill=triton.\n" + NEO_FA3_INSTALL_HINT
     )
     flash_attn_with_kvcache_neo = None
     HAS_FLASH_ATTN_INTERFACE = False

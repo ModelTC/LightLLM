@@ -1,3 +1,5 @@
+from unit_tests.common.attention.backends.step_fixture import create_att_state
+from unit_tests.common.attention.backends.groups_runner import run_attention
 import json
 from types import SimpleNamespace
 
@@ -947,7 +949,7 @@ def test_swa_index_cuda_graph_reads_updated_private_pages(cache):
     indirect=["cache"],
 )
 def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, dspark):
-    from lightllm.common.attention.backends.sparse_mla import SWASparseMLALayerConfig, SWASparseMLALayerInputs
+    from lightllm.common.attention.backends.sparse_mla import SWASparseMLAAttConfig, SWASparseMLAAttInputs
     from lightllm.common.attention.backends.sparse_mla.flashmla_swa import FlashMLASWADecodeBackend
     from lightllm.models.deepseek_v4.config import create_attention_config
     from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
@@ -1003,15 +1005,14 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
         sliding_window=128,
     )
     swa_view = create_attention_config(model_config=model_config, model_logical_layer_ids=(2,)).create_swa_config()
-    layer_config = SWASparseMLALayerConfig(
+    att_config = SWASparseMLAAttConfig(
         num_heads=64, head_dim_v=512, softmax_scale=512 ** -0.5, dtype=torch.bfloat16, has_attn_sink=True
     )
-    impl = FlashMLASWADecodeBackend(layer_config)
-    builder = FlashMLASWADecodeBackend.create_build_context(impl.state_key[1], None)
+    impl = FlashMLASWADecodeBackend(att_config=att_config)
     attn_sink = torch.zeros(64, device="cuda")
 
     def decode(att_state, packed_kv, swa_indices, swa_lengths):
-        inputs = SWASparseMLALayerInputs(
+        inputs = SWASparseMLAAttInputs(
             q=q,
             swa_cache=swa_view.get_attention_view(packed_kv=packed_kv[0]),
             swa_indices=swa_indices,
@@ -1019,9 +1020,9 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
             attn_sink=attn_sink,
         )
         out = torch.empty((q.shape[0], 64, 512), dtype=q.dtype, device=q.device)
-        return impl.forward(att_state, inputs, out=out)
+        return run_attention(backend=impl, att_state=att_state, layer_inputs=inputs, out=out)
 
-    att_state = FlashMLASWADecodeBackend.build(None, builder)
+    att_state = create_att_state(backend=impl, infer_state=None)
     q = torch.randn((token_num, 64, 512), dtype=torch.bfloat16, device="cuda") * 0.1
     packed_kv = requests.get_att_input_params(2)
 
@@ -1038,7 +1039,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     with torch.cuda.graph(graph, stream=stream):
         actual = forward()
 
-    reference_att_state = FlashMLASWADecodeBackend.build(None, builder)
+    reference_att_state = create_att_state(backend=impl, infer_state=None)
     reference_kv = DeepseekV4InferStateInfo.get_att_kv(
         SimpleNamespace(
             req_manager=requests,

@@ -30,8 +30,7 @@ LightLLM 支持 GLM-4.7-Flash (glm4_moe_lite) 模型系列的部署，该模型�
         --tp 1 \
         --max_req_total_len 202752 \
         --chunked_prefill_size 8192 \
-        --llm_prefill_att_backend fa3 \
-        --llm_decode_att_backend flashinfer \
+        --att_backend mla.prefill=fa3 mla.decode=flashinfer \
         --graph_max_batch_size 512 \
         --tool_call_parser glm47 \
         --reasoning_parser glm45 \
@@ -45,8 +44,8 @@ LightLLM 支持 GLM-4.7-Flash (glm4_moe_lite) 模型系列的部署，该模型�
 - ``--tp 1``: 张量并行度（单 GPU）
 - ``--max_req_total_len 202752``: 最大请求总长度
 - ``--chunked_prefill_size 8192``: 预填充处理的分块大小
-- ``--llm_prefill_att_backend fa3``: 预填充阶段使用 FlashAttention3
-- ``--llm_decode_att_backend flashinfer``: 解码阶段使用 FlashInfer
+- ``--att_backend mla.prefill=fa3``: 预填充阶段使用 FlashAttention3
+- ``--att_backend mla.decode=flashinfer``: 解码阶段使用 FlashInfer
 - ``--graph_max_batch_size 512``: CUDA graph 最大批处理大小
 - ``--tool_call_parser glm47``: 使用 GLM-4.7 函数调用解析器
 - ``--reasoning_parser glm45``: 使用 GLM-4.5 推理解析器
@@ -64,8 +63,7 @@ MTP（多令牌预测）模式
         --tp 1 \
         --max_req_total_len 202752 \
         --chunked_prefill_size 8192 \
-        --llm_prefill_att_backend fa3 \
-        --llm_decode_att_backend flashinfer \
+        --att_backend mla.prefill=fa3 mla.decode=flashinfer \
         --graph_max_batch_size 512 \
         --tool_call_parser glm47 \
         --reasoning_parser glm45 \

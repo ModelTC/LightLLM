@@ -30,8 +30,7 @@ Recommended Launch Script (H200)
         --tp 1 \
         --max_req_total_len 202752 \
         --chunked_prefill_size 8192 \
-        --llm_prefill_att_backend fa3 \
-        --llm_decode_att_backend flashinfer \
+        --att_backend mla.prefill=fa3 mla.decode=flashinfer \
         --graph_max_batch_size 512 \
         --tool_call_parser glm47 \
         --reasoning_parser glm45 \
@@ -45,8 +44,8 @@ Recommended Launch Script (H200)
 - ``--tp 1``: Tensor parallelism degree (single GPU)
 - ``--max_req_total_len 202752``: Maximum total request length
 - ``--chunked_prefill_size 8192``: Chunk size for prefill processing
-- ``--llm_prefill_att_backend fa3``: Use FlashAttention3 for prefill
-- ``--llm_decode_att_backend flashinfer``: Use FlashInfer for decode
+- ``--att_backend mla.prefill=fa3``: Use FlashAttention3 for prefill
+- ``--att_backend mla.decode=flashinfer``: Use FlashInfer for decode
 - ``--graph_max_batch_size 512``: Maximum batch size for CUDA graph
 - ``--tool_call_parser glm47``: Use GLM-4.7 function calling parser
 - ``--reasoning_parser glm45``: Use GLM-4.5 reasoning parser
@@ -64,8 +63,7 @@ To enable MTP for speculative decoding, add the following parameters:
         --tp 1 \
         --max_req_total_len 202752 \
         --chunked_prefill_size 8192 \
-        --llm_prefill_att_backend fa3 \
-        --llm_decode_att_backend flashinfer \
+        --att_backend mla.prefill=fa3 mla.decode=flashinfer \
         --graph_max_batch_size 512 \
         --tool_call_parser glm47 \
         --reasoning_parser glm45 \

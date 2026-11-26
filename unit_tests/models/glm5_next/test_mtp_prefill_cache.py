@@ -4,6 +4,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from lightllm.common.attention.attention_backend_manager import AttentionBackendManager
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import WindowCompressorState, WindowCompressorStateConfig
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_state import (
@@ -89,8 +90,9 @@ def test_forward_uses_common_prefill(monkeypatch, tokens, mode):
     model.att_state_manager = object()
     model.hidden_collector_prototype = FinalHiddenCollector()
     model.return_all_prompt_logics = False
-    # The step's layers only write the cache, so the runtime builds no attention state.
-    model.attention_backend_manager = SimpleNamespace(has_attention=False, prepare=lambda infer_state: {})
+    # 步骤的层仅写入缓存，因此运行时不构建注意力状态。
+    model.attention_backend_manager = AttentionBackendManager()
+    model.attention_backend_manager.register_backends(role=model.att_state_role, backends=())
     model._select_mem_indexes = lambda model_input: torch.zeros_like(model_input.input_ids)
     batch = int(tokens > 0)
     model_input = ModelInput(

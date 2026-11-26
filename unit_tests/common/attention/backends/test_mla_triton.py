@@ -1,12 +1,15 @@
+from typing import Any
+from unit_tests.common.attention.backends.step_fixture import create_att_state
+from unit_tests.common.attention.backends.groups_runner import run_attention
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLADecodeLayerInputs
-from lightllm.common.attention.backends.mla import MLAPrefillLayerConfig, MLAPrefillLayerInputs
+from lightllm.common.attention.backends.mla import MLADecodeAttConfig, MLADecodeAttInputs
+from lightllm.common.attention.backends.mla import MLAPrefillAttConfig, MLAPrefillAttInputs
 from lightllm.common.attention.backends.mla.triton import TritonMLADecodeBackend, TritonMLAPrefillBackend
-from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
+from unit_tests.common.attention.backends.step_fixture import AttentionStepConfig, configure_attention_step
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 
 
@@ -18,21 +21,26 @@ DECODE_SCALE = 576 ** -0.5
 
 
 def decode_config(scale=DECODE_SCALE):
-    return MLADecodeLayerConfig(
+    return MLADecodeAttConfig(
         num_heads=16, kv_lora_rank=512, qk_rope_head_dim=64, softmax_scale=scale, dtype=torch.bfloat16
     )
 
 
 @pytest.fixture
 def decode_builder():
-    # One decode step builder serves the step's MLA layers.
-    return TritonMLADecodeBackend.create_build_context(TritonMLADecodeBackend.build_context_key(decode_config()), None)
+    # 一个解码步骤构建器服务于该步骤的MLA层。
+    return TritonMLADecodeBackend(decode_config())
 
 
 def decode(att_state, q_nope, q_rope, kv):
-    impl = TritonMLADecodeBackend(decode_config())
+    impl = TritonMLADecodeBackend(att_config=decode_config())
     out = torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
-    return impl.forward(att_state, MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv), out=out)
+    return run_attention(
+        backend=impl,
+        att_state=att_state,
+        layer_inputs=MLADecodeAttInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv),
+        out=out,
+    )
 
 
 def _decode_state(lengths, *, capture=False, replay=False):
@@ -66,7 +74,7 @@ def test_cached_prefill(nope_dim, v_dim):
     v = torch.randn((8, 8, v_dim), device="cuda", dtype=q.dtype)
     scale = 0.047
     out = torch.empty((5, 8, v_dim), device="cuda", dtype=q.dtype)
-    layer_config = MLAPrefillLayerConfig(
+    att_config = MLAPrefillAttConfig(
         num_heads=8,
         qk_nope_head_dim=nope_dim,
         qk_rope_head_dim=64,
@@ -74,10 +82,12 @@ def test_cached_prefill(nope_dim, v_dim):
         softmax_scale=scale,
         dtype=q.dtype,
     )
-    att_state = TritonMLAPrefillBackend.build(configure_attention_step(state, STEP_CONFIG), None)
-    actual = TritonMLAPrefillBackend(layer_config).forward(
+    att_state = create_att_state(
+        backend=TritonMLAPrefillBackend(att_config=att_config), infer_state=configure_attention_step(state, STEP_CONFIG)
+    )
+    actual = TritonMLAPrefillBackend(att_config=att_config).prefill(
         att_state,
-        MLAPrefillLayerInputs(q=q, k_nope=k_nope, k_rope=k_rope, v=v),
+        MLAPrefillAttInputs(q=q, k_nope=k_nope, k_rope=k_rope, v=v),
         out=out,
         # The expanded-key path also allocates scratch keys.
         alloc_func=lambda shape, **kw: torch.empty(shape, **kw),
@@ -95,7 +105,7 @@ def test_decode_plans_once_per_step_independent_of_query_layout(decode_builder):
     slots = torch.randperm(768, device="cuda", dtype=torch.int32).view(2, 384)
     state = _decode_state(lengths)
     state.req_manager = SimpleNamespace(req_to_token_indexs=slots)
-    att_state = TritonMLADecodeBackend.build(configure_attention_step(state, STEP_CONFIG), decode_builder)
+    att_state = create_att_state(backend=decode_builder, infer_state=configure_attention_step(state, STEP_CONFIG))
     kv = torch.randn((768, 1, 576), dtype=torch.bfloat16, device="cuda")
     scale = DECODE_SCALE
     # Layers may present the absorbed query with different strides; both reuse the step's args.
@@ -113,8 +123,8 @@ def test_decode_replay_rebuilds_captured_schedule(decode_builder):
     req_manager = SimpleNamespace(req_to_token_indexs=slots)
     state = _decode_state((7, 5), capture=True)
     state.req_manager = req_manager
-    att_state = TritonMLADecodeBackend.build(configure_attention_step(state, STEP_CONFIG), decode_builder)
-    captured_schedule = att_state.schedule
+    att_state = create_att_state(backend=decode_builder, infer_state=configure_attention_step(state, STEP_CONFIG))
+    captured_ptrs = (att_state.decode_att_block_seq.data_ptr(), att_state.mid_o_batch_start_index.data_ptr())
     kv = torch.randn((384, 1, 576), dtype=torch.bfloat16, device="cuda")
     # The model produces the absorbed query by transposing the head-major BMM output.
     q_nope = torch.randn((16, 2, 512), dtype=kv.dtype, device=kv.device).transpose(0, 1)
@@ -133,19 +143,23 @@ def test_decode_replay_rebuilds_captured_schedule(decode_builder):
     for lengths in [(7, 5), (150, 83)]:
         replay_state = _decode_state(lengths, replay=True)
         replay_state.req_manager = req_manager
-        replay_att_state = TritonMLADecodeBackend.build(
-            configure_attention_step(replay_state, STEP_CONFIG), decode_builder
+        replay_att_state = create_att_state(
+            backend=decode_builder, infer_state=configure_attention_step(replay_state, STEP_CONFIG)
         )
-        # Building the replay step's args rewrites the schedule the graph captured instead of making a new one.
-        assert replay_att_state.schedule is captured_schedule
-        state.copy_for_cuda_graph(replay_state)
+        assert replay_att_state.decode_att_block_seq.data_ptr() != captured_ptrs[0]
+        assert replay_att_state.mid_o_batch_start_index.data_ptr() != captured_ptrs[1]
+        state.copy_for_cuda_graph(new_infer_state=replay_state)
+        assert (
+            att_state.decode_att_block_seq.data_ptr(),
+            att_state.mid_o_batch_start_index.data_ptr(),
+        ) == captured_ptrs
         graph.replay()
         expected = _reference_decode(q, kv, slots, lengths, scale)
         torch.testing.assert_close(actual, expected.to(kv.dtype), rtol=0.02, atol=0.012)
         torch.testing.assert_close(second_layer, actual, rtol=0, atol=0)
 
 
-def test_decode_step_builder_keeps_one_graph_schedule_per_microbatch_and_batch_size(decode_builder):
+def test_decode_steps_own_their_split_tensors(decode_builder: Any):
     from unit_tests.common.attention.backends.step_fixture import make_infer_state
 
     def make_batch(lengths, microbatch_index=0, graph=True):
@@ -162,24 +176,24 @@ def test_decode_step_builder_keeps_one_graph_schedule_per_microbatch_and_batch_s
         )
 
     step_builder = decode_builder
-    first = TritonMLADecodeBackend.build(make_batch((7, 5)), step_builder).schedule
-    # Concurrent microbatches of microbatch overlap must not share captured buffers.
-    other_microbatch = TritonMLADecodeBackend.build(make_batch((7, 5), microbatch_index=1), step_builder).schedule
-    other_batch_size = TritonMLADecodeBackend.build(make_batch((7, 5, 3)), step_builder).schedule
-    assert first is not other_microbatch and first is not other_batch_size
-    starts = first.batch_start_index.clone()
-    assert TritonMLADecodeBackend.build(make_batch((150, 83)), step_builder).schedule is first
-    # Both length sets use 32-token blocks, so (7, 5) starts at [0, 1] and (150, 83) at [0, 5].
-    assert starts.tolist() == [0, 1] and first.batch_start_index.tolist() == [0, 5]
-    eager = [TritonMLADecodeBackend.build(make_batch((7, 5), graph=False), step_builder).schedule for _ in range(2)]
-    assert eager[0] is not eager[1] and all(first is not schedule for schedule in eager)
+    captured_batch = make_batch((7, 5))
+    first = create_att_state(backend=step_builder, infer_state=captured_batch)
+    other_microbatch = create_att_state(backend=step_builder, infer_state=make_batch((7, 5), microbatch_index=1))
+    other_batch_size = create_att_state(backend=step_builder, infer_state=make_batch((7, 5, 3)))
+    replay_batch = make_batch((150, 83))
+    replay = create_att_state(backend=step_builder, infer_state=replay_batch)
+    tensors = (first, other_microbatch, other_batch_size, replay)
+    assert len({state.mid_o_batch_start_index.data_ptr() for state in tensors}) == 4
+    assert first.mid_o_batch_start_index.tolist() == [0, 1]
+    captured_batch.copy_for_cuda_graph(new_infer_state=replay_batch)
+    assert first.mid_o_batch_start_index.tolist() == replay.mid_o_batch_start_index.tolist() == [0, 5]
 
 
 @pytest.mark.parametrize(
     "spec_cls,fields",
     [
-        ("MLAPrefillLayerConfig", dict(num_heads=8, qk_nope_head_dim=0, qk_rope_head_dim=64, v_head_dim=128)),
-        ("MLADecodeLayerConfig", dict(num_heads=16, kv_lora_rank=512, qk_rope_head_dim=-64)),
+        ("MLAPrefillAttConfig", dict(num_heads=8, qk_nope_head_dim=0, qk_rope_head_dim=64, v_head_dim=128)),
+        ("MLADecodeAttConfig", dict(num_heads=16, kv_lora_rank=512, qk_rope_head_dim=-64)),
     ],
 )
 def test_specs_reject_non_positive_dims(spec_cls, fields):

@@ -1,8 +1,7 @@
 import torch
 import triton
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
-from lightllm.common.attention.backends.sparse_mla import SWASparseMLALayerConfig, SWASparseMLALayerInputs
+from lightllm.common.attention.backends.sparse_mla import SWASparseMLAAttInputs
 from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_post_pre_norm, hc_pre_norm
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_sm100_mega_moe
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
@@ -295,8 +294,8 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         recv_x1, handle1, recv_weights1, dispatch_hook1 = experts.decode_dispatch_with_topk(x1, indices1, weights1)
 
         expected_m = triton.cdiv(
-            x0.shape[0] * get_global_world_size() * self.num_experts_per_tok,
-            layer_weight.n_routed_experts,
+            x=x0.shape[0] * get_global_world_size() * self.num_experts_per_tok,
+            y=layer_weight.n_routed_experts,
         )
         moe_out0 = experts.decode_masked_group_gemm(
             recv_x0,
@@ -502,7 +501,11 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         if out is None:
             out = self.alloc_tensor((q.shape[0], q.shape[1], self.v_head_dim), dtype=q.dtype, device=q.device)
         inputs = self._sparse_layer_inputs(q, meta, infer_state, layer_weight)
-        out = self.prefill_impl.forward(infer_state.att_states[self.prefill_impl.state_key], inputs, out=out)
+        manager = infer_state.attention_backend_manager
+        backend = manager.get_backend(
+            role=infer_state.att_state_role, phase="prefill", logical_layer_id=self.layer_num_
+        )
+        out = backend.prefill(att_state=infer_state.att_states[backend], layer_inputs=inputs, out=out)
         return out[:, : self.tp_q_head_num_]
 
     # ------------------------------------------------------------------ attention (decode)
@@ -519,19 +522,10 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         meta = self._compress_and_index(q_lora, x, infer_state, layer_weight)
         out = torch.empty((q.shape[0], q.shape[1], self.v_head_dim), dtype=q.dtype, device=q.device)
         inputs = self._sparse_layer_inputs(q, meta, infer_state, layer_weight)
-        out = self.decode_impl.forward(infer_state.att_states[self.decode_impl.state_key], inputs, out=out)
+        manager = infer_state.attention_backend_manager
+        backend = manager.get_backend(role=infer_state.att_state_role, phase="decode", logical_layer_id=self.layer_num_)
+        out = backend.decode(att_state=infer_state.att_states[backend], layer_inputs=inputs, out=out)
         return out[:, : self.tp_q_head_num_]
-
-    def attention_config(self, model) -> LayerAttentionConfig:
-        config = SWASparseMLALayerConfig(
-            num_heads=self.flashmla_q_head_num_,
-            head_dim_v=self.v_head_dim,
-            softmax_scale=self.softmax_scale,
-            dtype=model.data_type,
-            compress_ratio=self.compress_ratio,
-            has_attn_sink=True,
-        )
-        return LayerAttentionConfig(config, config)
 
     def _sparse_layer_inputs(self, q, meta, infer_state: DeepseekV4InferStateInfo, layer_weight):
         """FlashMLA views of the layer's packed caches, with the indexer's selection and the layer's sink."""
@@ -539,7 +533,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         compressed_cache = None
         if compressed_packed is not None:
             compressed_cache = self.compressed_cache_config.get_attention_view(packed_kv=compressed_packed)
-        return SWASparseMLALayerInputs(
+        return SWASparseMLAAttInputs(
             q=q,
             swa_cache=self.swa_cache_config.get_attention_view(packed_kv=swa_packed),
             swa_indices=meta["swa_indices"],

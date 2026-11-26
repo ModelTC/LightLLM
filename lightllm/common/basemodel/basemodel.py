@@ -8,7 +8,7 @@ import json
 import torch
 import torch.nn.functional as F
 import triton
-from typing import final, List, Optional, TYPE_CHECKING
+from typing import final, List, TYPE_CHECKING
 from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
@@ -43,7 +43,8 @@ from lightllm.utils.torch_memory_saver_utils import (
     TorchMemorySaverWrapper,
     MemoryTag,
 )
-from .attention_backend_manager import AttentionBackendManager
+from lightllm.common.attention.attention_backend_manager import AttentionBackendManager
+from lightllm.common.attention.base_backend import AttentionBackend
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -204,6 +205,16 @@ class TpPartBaseModel:
 
         return normalize_model_config(model_config)
 
+    @classmethod
+    def create_att_backends(cls, model: "TpPartBaseModel") -> tuple[AttentionBackend, ...]:
+        """Create this model's attention backends after KV cache allocation."""
+        raise NotImplementedError(f"{cls.__name__} does not implement create_att_backends")
+
+    @property
+    def requires_cpu_cache_sync(self) -> bool:
+        """Return whether this model must synchronize GPU transfers from the CPU cache before attention."""
+        return self.attention_backend_manager.requires_cpu_cache_sync(role=self.att_state_role)
+
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
             self.config = self.normalize_model_config(json.load(json_file))
@@ -327,39 +338,30 @@ class TpPartBaseModel:
         return
 
     def _init_attention(self):
-        """Create the model's AttentionBackendManager and bind each layer's implementations.
+        """Register this role's backends in the shared AttentionBackendManager.
 
         Runs after KV allocation and before warmup, so unsupported layer configs fail at load time.
         """
-        self.attention_backend_manager = backend_manager = AttentionBackendManager(self)
+        owner = self.main_model if self.is_mtp_draft_model else self
+        if getattr(owner, "attention_backend_manager", None) is None:
+            owner.attention_backend_manager = AttentionBackendManager()
+        self.attention_backend_manager = backend_manager = owner.attention_backend_manager
         role = self.att_state_role
         manager = self.att_state_manager
-        if not (manager.get_full_attention_states(role) or manager.get_bounded_attention_states(role)):
-            # FFN-only models have no attention to bind.
+        has_states = manager.get_full_attention_states(role) or manager.get_bounded_attention_states(role)
+        backends = self.create_att_backends(model=self) if has_states else ()
+        backend_manager.register_backends(role=role, backends=backends)
+        if not has_states:
             return
-        for layer in self.layers_infer:
-            config = layer.attention_config(self)
-            for phase in backend_manager.state_groups:
-                enabled = getattr(config, phase) is not None
-                required = phase in layer.attention_phases
-                if enabled != required:
-                    problem = "missing" if required else "unexpected"
-                    raise ValueError(f"{role} layer {layer.layer_num_}: {problem} {phase} attention configuration")
-            layer.prefill_impl, layer.decode_impl = backend_manager.bind(config)
-        for phase in backend_manager.state_groups:
-            backend_names = [backend.get_name() for backend in backend_manager.backends(phase)]
+        for phase in ("prefill", "decode"):
+            backend_names = [backend.get_name() for backend in backend_manager.get_backends(role=role, phase=phase)]
             logger.info(f"{role} {phase} attention backends: {backend_names}")
-
-    @property
-    def requires_cpu_cache_sync(self) -> bool:
-        """Whether some attention kernel of this model must not overlap CPU cache copies on the GPU."""
-        return self.attention_backend_manager.requires_cpu_cache_sync()
 
     def _align_decode_batch_size(self, batch_size: int) -> int:
         alignment = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
         if self.args.enable_tpsp_mix_mode:
             alignment = math.lcm(alignment, self.tp_world_size_)
-        return triton.cdiv(batch_size, alignment) * alignment
+        return triton.cdiv(x=batch_size, y=alignment) * alignment
 
     def _init_cudagraph(self):
         decode_tokens_per_request = self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
@@ -470,6 +472,7 @@ class TpPartBaseModel:
 
         infer_state.req_manager = self.req_manager
         infer_state.att_state_manager = self.att_state_manager
+        infer_state.attention_backend_manager = self.attention_backend_manager
 
         infer_state.mem_index = self._select_mem_indexes(model_input)
         infer_state.microbatch_index = microbatch_index
@@ -480,7 +483,7 @@ class TpPartBaseModel:
 
         infer_state.init_some_extra_state(self)
         if build_attention:
-            infer_state.att_states = self.attention_backend_manager.prepare(infer_state)
+            infer_state.att_states = self.attention_backend_manager.create_att_state(infer_state=infer_state)
         return infer_state
 
     def _create_padded_decode_model_input(self, model_input: ModelInput, new_batch_size: int):
@@ -631,7 +634,7 @@ class TpPartBaseModel:
         # TPSP 模式再将这个实际推理数量向上对齐到 TP world size 的整数倍。
         infer_handle_token_num = max(1, origin_handle_token_num)
         if self.args.enable_tpsp_mix_mode:
-            infer_handle_token_num = triton.cdiv(infer_handle_token_num, self.tp_world_size_) * self.tp_world_size_
+            infer_handle_token_num = triton.cdiv(x=infer_handle_token_num, y=self.tp_world_size_) * self.tp_world_size_
 
         if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=infer_handle_token_num):
             infer_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
@@ -820,11 +823,11 @@ class TpPartBaseModel:
         origin_handle_token_num1 = model_input1.input_ids.shape[0]
         infer_handle_token_num0 = max(
             self.tp_world_size_,
-            triton.cdiv(origin_handle_token_num0, self.tp_world_size_) * self.tp_world_size_,
+            triton.cdiv(x=origin_handle_token_num0, y=self.tp_world_size_) * self.tp_world_size_,
         )
         infer_handle_token_num1 = max(
             self.tp_world_size_,
-            triton.cdiv(origin_handle_token_num1, self.tp_world_size_) * self.tp_world_size_,
+            triton.cdiv(x=origin_handle_token_num1, y=self.tp_world_size_) * self.tp_world_size_,
         )
         origin_batch_size0 = model_input0.batch_size
         origin_batch_size1 = model_input1.batch_size
@@ -1045,7 +1048,7 @@ class TpPartBaseModel:
             dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int64, device="cuda")
             b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
             page_size = self.att_state_manager.full_att_allocator.page_size
-            alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
+            alloc_token_num = triton.cdiv(x=len(dummy_input_ids), y=page_size) * page_size
             mem_indexes = self.att_state_manager.full_att_allocator.alloc(alloc_token_num).cuda()
             self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
@@ -1126,7 +1129,7 @@ class TpPartBaseModel:
                 )
                 b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
                 page_size = self.att_state_manager.full_att_allocator.page_size
-                alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
+                alloc_token_num = triton.cdiv(x=len(dummy_input_ids), y=page_size) * page_size
                 mem_indexes = self.att_state_manager.full_att_allocator.alloc(alloc_token_num).cuda()
                 self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")

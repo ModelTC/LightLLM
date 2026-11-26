@@ -1,3 +1,4 @@
+from unit_tests.common.attention.backends.step_fixture import create_att_state
 import collections
 import inspect
 import math
@@ -10,9 +11,9 @@ from frozendict import frozendict
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
-from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+from lightllm.common.attention.backends.gqa import GQAAttConfig, GQAAttInputs
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend
-from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
+from unit_tests.common.attention.backends.step_fixture import AttentionStepConfig, configure_attention_step
 from lightllm.common.attention.kernels.gqa.bf16.decode import (
     gqa_flash_decoding as decode_module,
     gqa_flash_decoding_stage1 as stage1_module,
@@ -135,10 +136,10 @@ def test_state_retains_actual_length_before_graph_capture(monkeypatch, q_heads):
     infer_state.b_req_idx = torch.arange(2, dtype=torch.int32)
     infer_state.b_seq_len = torch.full((2,), 8193, dtype=torch.int32)
     step_config = AttentionStepConfig(cuda_graph_max_kv_seq_len=32768)
-    layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=2, head_dim=64, dtype=torch.float32)
-    builder = TritonGQADecodeBackend.create_build_context(TritonGQADecodeBackend.build_context_key(layer_config), None)
-    att_state = TritonGQADecodeBackend.build(configure_attention_step(infer_state, step_config), builder)
-    # Graph capture raises max_kv_seq_len only after the attention state are built.
+    att_config = GQAAttConfig(num_heads=q_heads, num_kv_heads=2, head_dim=64, dtype=torch.float32)
+    impl = TritonGQADecodeBackend(att_config=att_config)
+    att_state = create_att_state(backend=impl, infer_state=configure_attention_step(infer_state, step_config))
+    # 图捕获仅在注意力状态构建后才提升 max_kv_seq_len。
     infer_state.max_kv_seq_len = 32768
     calls = []
     if q_heads == 2:
@@ -150,8 +151,8 @@ def test_state_retains_actual_length_before_graph_capture(monkeypatch, q_heads):
             decode_module, "gqa_token_decode_attention_flash_decoding", lambda **kwargs: calls.append(kwargs)
         )
     q = torch.empty(2, q_heads, 64)
-    inputs = GQALayerInputs(q=q, k_cache=torch.empty(16, 2, 64), v_cache=torch.empty(16, 2, 64))
-    TritonGQADecodeBackend(layer_config).forward(att_state, inputs, out=torch.empty_like(q))
+    inputs = GQAAttInputs(q=q, k_cache=torch.empty(16, 2, 64), v_cache=torch.empty(16, 2, 64))
+    impl.decode(att_state, inputs, out=torch.empty_like(q))
     if q_heads == 2:
         assert calls[0]["max_kv_seq_len"] == 32768
     else:

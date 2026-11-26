@@ -309,12 +309,17 @@ def main():
         linear_att_hash_page_size=64,
         linear_att_page_block_num=1,
         linear_att_cache_size=16,
-        llm_prefill_att_backend=["fa3", "triton"],
-        llm_decode_att_backend=["fa3", "triton"],
         disable_cudagraph=False,
         pd_kv_page_size=2048,
     )
     parsed = parser.parse_args()
+    parsed.att_backend = {
+        "gqa.prefill": "fa3",
+        "gqa.decode": "fa3",
+        "gdn.prefill": "triton",
+        "gdn.decode": "triton",
+        **parsed.att_backend,
+    }
     if parsed.tp != 1 or parsed.dp != 1 or parsed.mtp_mode not in (None, "vanilla_with_att"):
         parser.error("this validation uses TP=1, DP=1 and optionally native vanilla_with_att MTP")
     with socket.socket() as port:

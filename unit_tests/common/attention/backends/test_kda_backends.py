@@ -8,9 +8,8 @@ from functools import partial
 import pytest
 import torch
 
-from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
+from lightllm.common.attention.backends.kda import KDAAttConfig, KDAAttInputs
 from lightllm.common.attention.backends.kda.triton import (
-    KDAPrefillBuildContext,
     ReplayKDADecodeBackend,
     ReplayKDAPrefillBackend,
     TritonKDADecodeBackend,
@@ -35,7 +34,14 @@ class KDAFamily:
     def __init__(self, mtp_step):
         self.shape = KDAShape()
         s = self.shape
-        self.config = KDALayerConfig(s.h, s.d, s.width, s.lower_bound, torch.bfloat16, state_mtp_step=mtp_step)
+        self.config = KDAAttConfig(
+            num_heads=s.h,
+            head_dim=s.d,
+            conv_kernel_size=s.width,
+            lower_bound=s.lower_bound,
+            dtype=torch.bfloat16,
+            state_mtp_step=mtp_step,
+        )
         self.params = {
             "conv_weight": torch.randn(s.conv_channels, s.width, device="cuda").mul_(0.3).bfloat16(),
             "A_log": torch.randn(s.h, device="cuda").mul_(0.5),
@@ -72,15 +78,17 @@ class KDAFamily:
         return tensors["mixed_qkv"][start:end], tensors["raw_gate"][start:end], tensors["raw_beta"][start:end]
 
     def layer_inputs(self, tensors, conv, ssm, replay_state):
-        return KDALayerInputs(
-            **tensors,
+        return KDAAttInputs(
+            mixed_qkv=tensors["mixed_qkv"],
+            raw_gate=tensors["raw_gate"],
+            raw_beta=tensors["raw_beta"],
             conv_weight=self.params["conv_weight"],
             A_log=self.params["A_log"],
             dt_bias=self.params["dt_bias"],
             conv_states=conv,
             ssm_states=ssm,
             replay_state=replay_state,
-            layer_num=0,
+            logic_layer_index=0,
         )
 
     def alloc_out(self, rows):
@@ -103,18 +111,14 @@ PREFILL_KERNELS = [
 def test_kda_prefill_then_speculative_decode_matches_reference(prefill, replay, mtp_step, dynamic):
     torch.manual_seed(13)
     family = KDAFamily(mtp_step)
-    family.config = dataclasses.replace(family.config, replay=replay)
+    family.config = dataclasses.replace(family.config, replay=replay, prefill_kernel=prefill)
     prefill_cls = ReplayKDAPrefillBackend if replay else TritonKDAPrefillBackend
     decode_cls = ReplayKDADecodeBackend if replay else TritonKDADecodeBackend
     run_prefill_then_decode(
-        family,
+        family=family,
         replay=replay,
         mtp_step=mtp_step,
         dynamic=dynamic,
         prefill_impl=prefill_cls(family.config),
         decode_impl=decode_cls(family.config),
-        prefill_builder=KDAPrefillBuildContext(
-            ssm_slots_per_request=1 if replay else mtp_step + 1,
-            flash_kda_fwd=_flash_kda_fwd() if prefill == "flashkda" else None,
-        ),
     )

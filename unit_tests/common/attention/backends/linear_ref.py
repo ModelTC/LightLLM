@@ -1,5 +1,8 @@
 """Sequential fp32 torch references for GDN and KDA, and a driver that runs a backend through
 prefill, speculative decode steps and acceptance commits the way the serving loop does."""
+from typing import Any
+from unit_tests.common.attention.backends.step_fixture import create_att_state
+
 
 from dataclasses import dataclass, field
 
@@ -183,11 +186,10 @@ def accepted_ssm(state, replay, reqs):
     return folded[0, req_t.long()]
 
 
-def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_impl, decode_impl, prefill_builder, seed=7):
-    """Prefill fresh and cached requests, then run speculative decode steps with acceptance commits, comparing
-    outputs and accepted conv/SSM state against the sequential reference after every step."""
-    from lightllm.common.attention.backends.gdn.triton import GDNDecodeBuildContext
-
+def run_prefill_then_decode(
+    family: Any, *, replay: Any, mtp_step: Any, dynamic: Any, prefill_impl: Any, decode_impl: Any, seed: Any = 7
+):
+    """prefill新的和已缓存的请求，然后运行带有接受提交的投机解码步骤，在每一步之后将输出和接受的卷积/SSM 状态与顺序参考进行比较。"""
     torch.manual_seed(seed)
     width = mtp_step + 1
     state = family.make_state(replay=replay, mtp_step=mtp_step)
@@ -209,9 +211,9 @@ def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_impl, 
     # Prefill.
     rows = sum(lengths)
     tensors = family.make_inputs(rows)
-    step = prefill_impl.build(prefill_batch(REQS, lengths, ready), prefill_builder)
+    step = create_att_state(backend=prefill_impl, infer_state=prefill_batch(REQS, lengths, ready))
     out = family.alloc_out(rows)
-    prefill_impl.forward(step, family.layer_inputs(_clones(tensors), conv, ssm, state if replay else None), out=out)
+    prefill_impl.prefill(step, family.layer_inputs(_clones(tensors), conv, ssm, state if replay else None), out=out)
     start = 0
     for i, (ref, n) in enumerate(zip(refs, lengths)):
         expected = ref.run(family.token_fn, *family.token_args(tensors, start, start + n))
@@ -219,17 +221,16 @@ def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_impl, 
         start += n
     _check_state(state, conv, replay, refs, "prefill")
 
-    # Decode.
-    builder = GDNDecodeBuildContext(replay=replay)
+    # 解码。
     steps = SPEC_STEPS[dynamic] if width > 1 else [([1, 1, 1], [1, 1, 1])] * 3
     for step_index, (step_lengths, accepted) in enumerate(steps):
         step_lengths = step_lengths if dynamic else [width] * len(REQS)
         batch = decode_batch(REQS, step_lengths, width, HOLD, state.mtp_state_index, dynamic=dynamic)
         tensors = family.make_inputs(batch.batch_size)
-        step = decode_impl.build(batch, builder)
+        step = create_att_state(backend=decode_impl, infer_state=batch)
         out = family.alloc_out(batch.batch_size)
-        # A replay decode impl advances the replay cursors itself after the last layer.
-        decode_impl.forward(step, family.layer_inputs(_clones(tensors), conv, ssm, state if replay else None), out=out)
+        # 一个重放解码实现会在最后一层之后自行推进重放游标。
+        decode_impl.decode(step, family.layer_inputs(_clones(tensors), conv, ssm, state if replay else None), out=out)
         start = 0
         for i, (ref, n) in enumerate(zip(refs, step_lengths)):
             expected = ref.run(family.token_fn, *family.token_args(tensors, start, start + n))

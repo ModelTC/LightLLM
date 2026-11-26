@@ -288,15 +288,6 @@ def get_diverse_max_batch_shared_group_size() -> int:
 
 
 @lru_cache(maxsize=None)
-def enable_triton_mtp_kernel() -> bool:
-    """
-    启用 Triton MTP 解码专用 kernel
-    通过启动参数 --mtp_step > 0 和 --llm_decode_att_backend=triton 控制
-    """
-    return (get_env_start_args().mtp_step > 0) and ("triton" in get_env_start_args().llm_decode_att_backend)
-
-
-@lru_cache(maxsize=None)
 def get_disk_cache_prompt_limit_length():
     return int(os.getenv("LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH", 2048))
 
@@ -321,9 +312,9 @@ def get_cache_placement_gpu_capacity_ratio() -> float:
 @lru_cache(maxsize=None)
 def enable_huge_page():
     """
-    大页模式：启动后可大幅缩短cpu kv cache加载时间
-    "sudo sed -i 's/^GRUB_CMDLINE_LINUX=\"/& default_hugepagesz=1G \
-        hugepagesz=1G hugepages={需要启用的大页容量}/' /etc/default/grub"
+    大页模式：启动后可大幅缩短CPU KV缓存加载时间
+    "sudo sed -i 's/^GRUB_CMDLINE_LINUX="/& default_hugepagesz=1G         hugepagesz=1G hugepages={需要启用的大页容量}/'
+    /etc/default/grub"
     "sudo update-grub"
     "sudo reboot"
     """

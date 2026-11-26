@@ -39,7 +39,7 @@ COMMON_ARGS=(
     "${MODEL_ARGS[@]}" --mtp_mode eagle_with_att --mtp_step 2
     --linear_att_cache_size 500
     --pd_trans_mode nixl --pd_kv_page_size 4096 --pd_master_ip 127.0.0.1 --pd_master_port "$PORT"
-    --llm_prefill_att_backend fa3 triton --llm_decode_att_backend fa3 triton
+    --att_backend gqa.prefill=fa3 gdn.prefill=triton gqa.decode=fa3 gdn.decode=triton
 )
 P_ARGS=(
     "${COMMON_ARGS[@]}" --run_mode prefill --tp "$PREFILL_TP"

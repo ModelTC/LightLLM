@@ -32,7 +32,7 @@ def test_compact_dynamic_mtp_model_input(monkeypatch):
                 "mtp_mode": "eagle3",
                 "mtp_dynamic_verify": True,
                 "mtp_step": 3,
-                "llm_decode_att_backend": "triton",
+                "att_backend": {"gqa.decode": "triton"},
             }
         ),
     )

@@ -1,9 +1,10 @@
+from unit_tests.common.attention.backends.groups_runner import run_attention
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
+from lightllm.common.attention.backends.kda import KDAAttConfig, KDAAttInputs
 from lightllm.common.attention.backends.kda.triton import KDAPrefillAttState, TritonKDAPrefillBackend
 from unit_tests.models.glm5_next.kda_test_utils import kda_params
 from lightllm.common.attention.kernels.gdn.causal_conv1d import causal_conv1d_fn
@@ -147,7 +148,11 @@ def test_backend_fused_conv_output_and_state(lengths):
         torch.randn(tokens, heads * 128, **opts) * 0.1,
         torch.randn(tokens, heads, **opts),
     )
-    impl = TritonKDAPrefillBackend(KDALayerConfig(heads, 128, 4, -5.0, torch.bfloat16))
+    impl = TritonKDAPrefillBackend(
+        att_config=KDAAttConfig(
+            num_heads=heads, head_dim=128, conv_kernel_size=4, lower_bound=-5.0, dtype=torch.bfloat16
+        )
+    )
     expected_conv, expected_ssm = conv_states.clone(), ssm_states.clone()
     q, k, v = reference(
         projection[:, :channels],
@@ -175,7 +180,23 @@ def test_backend_fused_conv_output_and_state(lengths):
     )
     expected_ssm[slots] = final_state.to(ssm_states.dtype)
     out = torch.empty(tokens, heads, 128, **opts)
-    actual = impl.forward(att_state, KDALayerInputs(**{k: v for k, v in params.items() if k != "state"}), out=out)
+    actual = run_attention(
+        backend=impl,
+        att_state=att_state,
+        layer_inputs=KDAAttInputs(
+            mixed_qkv={k: v for (k, v) in params.items() if k != "state"}["mixed_qkv"],
+            raw_gate={k: v for (k, v) in params.items() if k != "state"}["raw_gate"],
+            raw_beta={k: v for (k, v) in params.items() if k != "state"}["raw_beta"],
+            conv_weight={k: v for (k, v) in params.items() if k != "state"}["conv_weight"],
+            A_log={k: v for (k, v) in params.items() if k != "state"}["A_log"],
+            dt_bias={k: v for (k, v) in params.items() if k != "state"}["dt_bias"],
+            conv_states={k: v for (k, v) in params.items() if k != "state"}["conv_states"],
+            ssm_states={k: v for (k, v) in params.items() if k != "state"}.get("ssm_states", None),
+            replay_state={k: v for (k, v) in params.items() if k != "state"}.get("replay_state", None),
+            logic_layer_index={k: v for (k, v) in params.items() if k != "state"}.get("logic_layer_index", None),
+        ),
+        out=out,
+    )
     assert torch.equal(actual.view(torch.uint8), expected.view(actual.shape).view(torch.uint8))
     assert torch.equal(conv_states, expected_conv)
     assert torch.equal(ssm_states, expected_ssm)

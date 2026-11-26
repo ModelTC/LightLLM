@@ -1,15 +1,18 @@
-"""The CUDA graph contract every decode backend must keep (see AttentionBackend.build).
+"""CUDA graph replay updates derived tensors in the captured attention state.
 
 A captured graph reruns its kernels with the capture step's attention state, so a replay step can change
 only tensor contents. For each decode step builder this checks, with a capture step followed by a
 replay step of the same (microbatch, batch size) but different requests and lengths:
 
-1. every tensor the builder owns (any tensor that is not a batch's own) keeps its address and layout, and every
-   other object, such as a FlashInfer wrapper, is the captured one;
+1. captured tensors keep their address and layout while per-step derived tensors are copied before replay;
+   third-party wrappers retain their specialized resource management;
 2. those tensors hold the replay step's values, as an eager build of the same batch computes them;
 3. host scalars stay as captured, except fields documented as hints that never size a launch;
-4. the other microbatch's capture never shares storage with this one's.
+4. mutable tensors are isolated across microbatches; read-only constants may share storage.
 """
+from typing import Any
+from unit_tests.common.attention.backends.step_fixture import create_att_state
+
 
 import dataclasses
 
@@ -17,6 +20,7 @@ import pytest
 import torch
 
 from unit_tests.common.attention.backends.step_fixture import make_infer_state
+from lightllm.common.basemodel.infer_struct import GraphMode
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
@@ -76,88 +80,118 @@ def no_extra(step):
     return {}
 
 
-class PageTables:
-    """Caller-owned FA3 page-table storage per microbatch, like Fa3AttBackend.get_page_table_view."""
-
-    def __init__(self, page_size):
-        self.page_size = page_size
-        self.storage = [torch.empty(16 * MAX_LEN, dtype=torch.int32, device="cuda") for _ in range(2)]
-
-    def __call__(self, rows, max_kv_len, microbatch_index):
-        width = -(-max_kv_len // self.page_size)
-        return self.storage[microbatch_index][: rows * width].view(rows, width)
-
-
 def flashinfer_gqa():
     pytest.importorskip("flashinfer")
-    from lightllm.common.attention.backends.gqa.flashinfer import (
-        FlashInferGQABuilderConfig,
-        FlashInferGQADecodeBackend,
-    )
+    from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQADecodeBackend
 
-    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-    config = FlashInferGQABuilderConfig(8, 2, 64, 1, torch.bfloat16, torch.bfloat16)
-    return FlashInferGQADecodeBackend, FlashInferGQADecodeBackend.build_context_type(
-        config, workspace=lambda: workspace, max_seq_len=MAX_LEN, max_batch_size=8, device="cuda"
+    init = FlashInferGQADecodeBackend.RuntimeConfig(
+        max_seq_len=MAX_LEN, max_batch_size=8, workspace_bytes=128 * 1024 * 1024
     )
+    return FlashInferGQADecodeBackend(att_config=gqa_config(), runtime_config=init)
 
 
 def flashinfer_mla():
     pytest.importorskip("flashinfer")
-    from lightllm.common.attention.backends.mla.flashinfer import (
-        FlashInferMLABuilderConfig,
-        FlashInferMLADecodeBackend,
-    )
+    from lightllm.common.attention.backends.mla.flashinfer import FlashInferMLADecodeBackend
 
-    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-    config = FlashInferMLABuilderConfig(16, 128, 64, 128, 512, 1, torch.bfloat16, 0.1)
-    return FlashInferMLADecodeBackend, FlashInferMLADecodeBackend.build_context_type(
-        config, workspace=lambda: workspace, max_seq_len=MAX_LEN, max_batch_size=8, device="cuda"
-    )
+    init = FlashInferMLADecodeBackend.RuntimeConfig(max_seq_len=MAX_LEN, max_batch_size=8)
+    return FlashInferMLADecodeBackend(att_config=mla_config(), runtime_config=init)
 
 
 def fa3_gqa(page_size):
     def factory():
-        from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend
+        from lightllm.common.attention.backends.gqa.fa3 import FA3DecodeRuntimeConfig, FA3GQADecodeBackend
 
-        return FA3GQADecodeBackend, FA3GQADecodeBackend.build_context_type(
-            page_size=page_size, page_table_view=PageTables(page_size)
-        )
+        init = FA3DecodeRuntimeConfig(page_size=page_size, max_seq_len=MAX_LEN, max_decode_rows=16, microbatch_count=2)
+        return FA3GQADecodeBackend(att_config=gqa_config(), runtime_config=init)
 
     return factory
+
+
+def gqa_config(**kwargs: Any):
+    from lightllm.common.attention.backends.gqa import GQAAttConfig
+
+    return GQAAttConfig(
+        num_heads=kwargs.get("num_heads", 8),
+        num_kv_heads=kwargs.get("num_kv_heads", 2),
+        head_dim=kwargs.get("head_dim", 64),
+        dtype=kwargs.get("dtype", torch.bfloat16),
+        sliding_window=kwargs.get("sliding_window", (-1, -1)),
+        softmax_scale=kwargs.get("softmax_scale", None),
+        causal=kwargs.get("causal", True),
+        has_sinks=kwargs.get("has_sinks", False),
+        kv_quant=kwargs.get("kv_quant", None),
+        kv_quant_group_size=kwargs.get("kv_quant_group_size", None),
+        has_q_scale=kwargs.get("has_q_scale", False),
+        has_alibi=kwargs.get("has_alibi", False),
+        bidirectional_image_spans=kwargs.get("bidirectional_image_spans", False),
+    )
+
+
+def mla_config():
+    from lightllm.common.attention.backends.mla import MLADecodeAttConfig
+
+    return MLADecodeAttConfig(
+        num_heads=16, kv_lora_rank=512, qk_rope_head_dim=64, softmax_scale=0.1, dtype=torch.bfloat16
+    )
 
 
 def triton_gqa():
     from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend
 
-    return TritonGQADecodeBackend, TritonGQADecodeBackend.build_context_type()
+    return TritonGQADecodeBackend(att_config=gqa_config())
 
 
 def triton_quant_gqa_diverse():
     from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeBackend
 
-    return TritonQuantGQADecodeBackend, TritonQuantGQADecodeBackend.build_context_type(diverse=True)
+    return TritonQuantGQADecodeBackend(
+        att_config=gqa_config(kv_quant="int8_group", kv_quant_group_size=8),
+        runtime_config=TritonQuantGQADecodeBackend.RuntimeConfig(diverse_decode=True),
+    )
 
 
 def triton_mla():
     from lightllm.common.attention.backends.mla.triton import TritonMLADecodeBackend
 
-    return TritonMLADecodeBackend, TritonMLADecodeBackend.build_context_type(
-        num_heads=16, kv_lora_rank=512, qk_rope_head_dim=64, dtype=torch.bfloat16
-    )
+    return TritonMLADecodeBackend(att_config=mla_config())
 
 
 def fa3_sparse_mla():
+    from lightllm.common.attention.backends.sparse_mla import SparseMLAAttConfig
     from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend
 
-    return FA3SparseMLADecodeBackend, FA3SparseMLADecodeBackend.build_context_type(topk=64, kpool=4)
+    return FA3SparseMLADecodeBackend(
+        att_config=SparseMLAAttConfig(
+            num_heads=16,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            softmax_scale=0.1,
+            dtype=torch.bfloat16,
+            topk=64,
+            kpool=4,
+        )
+    )
 
 
 def recurrent(replay):
     def factory():
+        from lightllm.common.attention.backends.gdn import GDNAttConfig
+        from lightllm.common.attention.backends.gdn.replay import ReplayGDNDecodeBackend
         from lightllm.common.attention.backends.gdn.triton import TritonGDNDecodeBackend
 
-        return TritonGDNDecodeBackend, TritonGDNDecodeBackend.build_context_type(replay=replay)
+        config = GDNAttConfig(
+            num_k_heads=2,
+            num_v_heads=4,
+            head_k_dim=64,
+            head_v_dim=64,
+            conv_kernel_dim=4,
+            activation="silu",
+            dtype=torch.bfloat16,
+            replay=replay,
+        )
+        cls = ReplayGDNDecodeBackend if replay else TritonGDNDecodeBackend
+        return cls(config)
 
     return factory
 
@@ -196,10 +230,6 @@ def leaves(value, path=()):
             yield from leaves(item, (*path, index))
     else:
         yield path, value
-        # A wrapper object, such as FlashInfer's, keeps the index buffers its captured kernels read.
-        for name, item in sorted(vars(value).items()):
-            if name.endswith("_buf") and isinstance(item, torch.Tensor):
-                yield (*path, name), item
 
 
 def batch_storage(batch):
@@ -223,7 +253,7 @@ def owned_tensors(att_state, *batches):
     }
 
 
-VALID_PREFIX = {"_paged_kv_indices_buf": "_paged_kv_indptr_buf", "_kv_indices_buf": "_kv_indptr_buf"}
+VALID_PREFIX = {"kv_indices": "kv_starts"}
 
 
 def leading_block(tensor, shape):
@@ -247,24 +277,34 @@ def test_decode_step_builder_keeps_the_cuda_graph_contract(name, layout):
     token_map = torch.randperm(REQUESTS * MAX_LEN, device="cuda", dtype=torch.int32).view(REQUESTS, MAX_LEN)
     capture_step, replay_step = LAYOUTS[layout]
 
-    def build(step, *, capacity=CAPACITY, microbatch=0, step_builder=builder):
+    def build(
+        step: Any, *, capacity: Any = CAPACITY, microbatch: Any = 0, step_builder: Any = builder, replay: bool = False
+    ):
         batch = make_batch(token_map, step, layout, capacity=capacity, microbatch=microbatch, extra=extra)
-        backend, context = step_builder
-        return batch, backend.build(batch, context)
+        if replay:
+            batch.graph_mode = GraphMode.REPLAY
+        return batch, create_att_state(backend=step_builder, infer_state=batch)
 
     capture_batch, captured = build(capture_step)
     captured_leaves = dict(leaves(captured))
     captured_owned = owned_tensors(captured, capture_batch)
     captured_ptrs = {path: (t.data_ptr(), t.shape, t.stride()) for path, t in captured_owned.items()}
 
-    replay_batch, replayed = build(replay_step)
+    replay_batch, replayed = build(step=replay_step, replay=True)
+    capture_batch.copy_for_cuda_graph(new_infer_state=replay_batch)
     replayed_leaves = dict(leaves(replayed))
     assert replayed_leaves.keys() == captured_leaves.keys()
     for path, value in captured_leaves.items():
         new = replayed_leaves[path]
+        if path == ("wrapper",):
+            assert new is None
+            assert captured.wrapper is value
+            continue
         if path in captured_owned:
             # (1) The graph reads the captured address, so the replay's values must land there.
-            assert (new.data_ptr(), new.shape, new.stride()) == captured_ptrs[path], f"{name}: {path} moved on replay"
+            assert (value.data_ptr(), value.shape, value.stride()) == captured_ptrs[
+                path
+            ], f"{name}: {path} moved on replay"
         elif isinstance(value, torch.Tensor):
             continue
         elif isinstance(value, SCALARS):
@@ -277,7 +317,7 @@ def test_decode_step_builder_keeps_the_cuda_graph_contract(name, layout):
     # (2) The kept tensors hold what an eager build of the replay step computes.
     _, eager = build(replay_step, capacity=None, step_builder=factory())
     eager_leaves = dict(leaves(eager))
-    for path, kept in owned_tensors(replayed, capture_batch, replay_batch).items():
+    for path, kept in owned_tensors(captured, capture_batch, replay_batch).items():
         expected = eager_leaves[path]
         if isinstance(expected, torch.Tensor):
             kept, expected = valid_part(replayed_leaves, path, kept), valid_part(eager_leaves, path, expected)
@@ -288,9 +328,17 @@ def test_decode_step_builder_keeps_the_cuda_graph_contract(name, layout):
             )
 
     # (4) The other microbatch's graph keeps its own storage, and capturing it leaves this one's values.
-    snapshot = {path: t.clone() for path, t in owned_tensors(replayed, capture_batch, replay_batch).items()}
+    snapshot = {path: t.clone() for path, t in owned_tensors(captured, capture_batch, replay_batch).items()}
     other_batch, other = build(capture_step, microbatch=1)
     other_storage = {t.untyped_storage().data_ptr() for t in owned_tensors(other, other_batch).values()}
-    for path, t in owned_tensors(replayed, capture_batch, replay_batch).items():
-        assert t.untyped_storage().data_ptr() not in other_storage, f"{name}: {path} shared across microbatches"
+    constant_paths = set()
+    if name.startswith("fa3_gqa") and layout == "fixed_rows":
+        constant_paths.add(("cu_seqlens_q",))
+    if name.startswith("gdn_") and layout != "dynamic_rows":
+        constant_paths.add(("cu_seqlens",))
+    if name == "flashinfer_mla":
+        constant_paths.add(("q_indptr",))
+    for path, t in owned_tensors(captured, capture_batch, replay_batch).items():
+        if path not in constant_paths:
+            assert t.untyped_storage().data_ptr() not in other_storage, f"{name}: {path} shared across microbatches"
         torch.testing.assert_close(t, snapshot[path], rtol=0, atol=0)

@@ -1,9 +1,14 @@
+from lightllm.common.attention.backends.sparse_mla import SparseMLAAttConfig
+from lightllm.common.attention.base_backend import AttentionBackend
 from lightllm.models.glm5_next.infer_struct import Glm5NextInferStateInfo
 from typing import TYPE_CHECKING
 from copy import deepcopy
 import torch
 
+from lightllm.common.attention.backends.sparse_mla import selector as sparse_mla_selector
 from lightllm.common.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.batch_objs import ModelInput
+from lightllm.common.basemodel.infer_struct import GraphMode
 from lightllm.models.glm5_next.prefill_workspace import prepare_sparse_prefill_workspaces
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 from .layer_infer.post_layer_infer import Glm5NextMTPPostLayerInfer
@@ -28,6 +33,31 @@ class Glm5NextMTPModel(TpPartBaseModel):
     transformer_layer_infer_class = Glm5NextMTPTransformerLayerInfer
     infer_state_class = Glm5NextInferStateInfo
 
+    @classmethod
+    def create_att_backends(cls, model: "Glm5NextMTPModel") -> tuple[AttentionBackend, ...]:
+        if not model.layers_infer:
+            return ()
+        layer_ids = tuple(layer.layer_num_ for layer in model.layers_infer)
+        config = SparseMLAAttConfig(
+            num_heads=model.config["num_attention_heads"] // model.tp_world_size_,
+            kv_lora_rank=model.config["kv_lora_rank"],
+            qk_rope_head_dim=0,
+            softmax_scale=model.config["qk_nope_head_dim"] ** -0.5,
+            dtype=model.data_type,
+            kv_cache_format="fp8_group64_e8m0" if model.args.llm_kv_type == "fp8kv_dsa" else "bf16",
+            topk=model.config["index_topk"],
+            kpool=model.config["index_kpool"],
+            causal=False,
+        )
+        return (
+            sparse_mla_selector.select_sparse_mla_prefill_backend(
+                att_config=config, requested="flashmla_sparse", model=model, logical_layer_ids=layer_ids
+            ),
+            sparse_mla_selector.select_sparse_mla_decode_backend(
+                att_config=config, requested="flashmla_sparse", model=model, logical_layer_ids=layer_ids
+            ),
+        )
+
     def __init__(self, kvargs):
         self.main_model = kvargs.pop("main_model")
         self.mtp_previous_draft_models = kvargs.pop("mtp_previous_draft_models")
@@ -40,8 +70,19 @@ class Glm5NextMTPModel(TpPartBaseModel):
         # preceding draft output.
         return args.mtp_mode == "eagle_with_att" or (args.mtp_mode == "vanilla_with_att" and args.mtp_step == 1)
 
-    def _create_inferstate(self, model_input, microbatch_index=0, **kwargs):
-        infer_state = super()._create_inferstate(model_input, microbatch_index=microbatch_index, **kwargs)
+    def _create_inferstate(
+        self,
+        model_input: ModelInput,
+        microbatch_index: int = 0,
+        graph_mode: GraphMode = GraphMode.EAGER,
+        build_attention: bool = True,
+    ) -> Glm5NextInferStateInfo:
+        infer_state = super()._create_inferstate(
+            model_input=model_input,
+            microbatch_index=microbatch_index,
+            graph_mode=graph_mode,
+            build_attention=build_attention,
+        )
         # Keep the mode-specific marker on this model's infer state so the
         # generic BaseModel pipeline remains unchanged.
         infer_state.prefill_kv_only = infer_state.is_prefill and self._supports_prefill_kv_only()

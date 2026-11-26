@@ -1169,8 +1169,6 @@ def build_model_kvargs(args: SimpleNamespace, rank_id: int) -> Dict:
         "run_mode": "normal",
         "max_seq_length": args.max_req_total_len,
         "disable_cudagraph": args.disable_cudagraph,
-        "llm_prefill_att_backend": args.llm_prefill_att_backend,
-        "llm_decode_att_backend": args.llm_decode_att_backend,
         "vit_att_backend": args.vit_att_backend,
         "llm_kv_type": args.llm_kv_type,
         "llm_kv_quant_group_size": args.llm_kv_quant_group_size,

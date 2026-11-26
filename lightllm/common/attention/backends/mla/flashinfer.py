@@ -1,145 +1,87 @@
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Optional
+from collections.abc import Callable
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
+from functools import cached_property
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import torch
 import triton
 
-from lightllm.common.attention.backend import (
-    AttentionBackend,
-    AttentionBuildResources,
-    TensorAllocator,
-)
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from .. import keep_for_cuda_graph
+
+from lightllm.common.attention.base_backend import AttRuntimeConfig, DecodeAttBackend, PrefillAttBackend
+from lightllm.utils.dist_utils import get_current_device_id
 from ..flashinfer_env import set_flashinfer_envs
-from . import MLADecodeLayerConfig, MLADecodeLayerInputs, MLAPrefillLayerConfig, MLAPrefillLayerInputs
+from . import MLADecodeAttConfig, MLADecodeAttInputs, MLAPrefillAttConfig, MLAPrefillAttInputs
 
 if TYPE_CHECKING:
     from flashinfer.mla import BatchMLAPagedAttentionWrapper
     from flashinfer.prefill import BatchPrefillWithRaggedKVCacheWrapper
-
-
-@dataclass(frozen=True)
-class FlashInferMLABuilderConfig:
-    """Per-rank MLA configuration FlashInfer plans its wrappers for.
-
-    FlashInfer fixes head counts, dimensions, softmax_scale and dtypes when it plans a step, so a
-    step builder serves the layers whose layer configs match these values. Page index p addresses
-    cache slots [p * page_size, (p + 1) * page_size). Prefill uses qk_nope_head_dim and v_head_dim,
-    decode kv_lora_rank and page_size; a step builder created for one phase leaves the other
-    phase's fields None.
-    """
-
-    num_heads: int
-    qk_nope_head_dim: Optional[int]
-    qk_rope_head_dim: int
-    v_head_dim: Optional[int]
-    kv_lora_rank: Optional[int]
-    page_size: Optional[int]
-    dtype: torch.dtype
-    softmax_scale: float
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 
 @dataclass(frozen=True)
 class FlashInferMLAPrefillAttState:
-    """A planned causal ragged-KV wrapper over the step's expanded keys and values."""
+    """步骤的扩展键值上计划的因果稀疏 KV 封装对象。"""
 
     wrapper: "BatchPrefillWithRaggedKVCacheWrapper"
-    config: FlashInferMLABuilderConfig
 
 
 @dataclass(frozen=True)
 class FlashInferMLADecodeAttState:
-    """A planned paged MLA wrapper with one query row per request."""
+    """步骤的扩展键值上计划的分页 MLA 封装对象，每个请求一行查询。"""
 
-    wrapper: "BatchMLAPagedAttentionWrapper"
-    config: FlashInferMLABuilderConfig
-
-
-class FlashInferMLAPrefillBuildContext:
-    def __init__(self, config: FlashInferMLABuilderConfig, *, workspace: Callable[[], torch.Tensor]) -> None:
-        """workspace returns the caller-owned FlashInfer workspace."""
-        self.config = config
-        self.workspace = workspace
-
-
-class FlashInferMLADecodeBuildContext:
-    def __init__(
-        self,
-        config: FlashInferMLABuilderConfig,
-        *,
-        workspace: Callable[[], torch.Tensor],
-        max_seq_len: int,
-        max_batch_size: int,
-        device: torch.device,
-    ) -> None:
-        """workspace returns the caller-owned FlashInfer workspace; max_seq_len bounds request lengths.
-
-        Keeps one page-index buffer per microbatch for batches of up to max_batch_size requests.
-        """
-        self.config = config
-        self.workspace = workspace
-        self.max_pages_per_request = triton.cdiv(max_seq_len, config.page_size)
-        self.max_batch_size = max_batch_size
-        self._kv_indices = [
-            torch.empty(max_batch_size * self.max_pages_per_request, dtype=torch.int32, device=device) for _ in range(2)
-        ]
-        self._cuda_graph_wrappers: dict[tuple[int, int], "BatchMLAPagedAttentionWrapper"] = {}
-        self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
-
-
-def _check_config(layer_config, config: FlashInferMLABuilderConfig) -> None:
-    assert layer_config.num_heads == config.num_heads and layer_config.dtype == config.dtype
-    assert layer_config.qk_rope_head_dim == config.qk_rope_head_dim
-    assert (
-        layer_config.softmax_scale == config.softmax_scale
-    ), "attention state were planned with a different softmax_scale"
+    wrapper: "BatchMLAPagedAttentionWrapper | None"
+    kv_starts: torch.Tensor
+    kv_indices: torch.Tensor
+    q_indptr: torch.Tensor
 
 
 class FlashInferMLAPrefillBackend(
-    AttentionBackend[MLAPrefillLayerConfig, FlashInferMLAPrefillAttState, MLAPrefillLayerInputs]
+    PrefillAttBackend[MLAPrefillAttConfig, FlashInferMLAPrefillAttState, MLAPrefillAttInputs]
 ):
-    def __init__(self, layer_config: MLAPrefillLayerConfig) -> None:
-        super().__init__(layer_config)
-        if not layer_config.causal:
+    def __init__(
+        self,
+        att_config: MLAPrefillAttConfig,
+        *,
+        role: str = "main",
+        runtime_config: AttRuntimeConfig = AttRuntimeConfig(),
+    ) -> None:
+        super().__init__(att_config=att_config, role=role, runtime_config=runtime_config)
+        if not att_config.causal:
             raise NotImplementedError("FlashInfer MLA prefill supports only causal attention")
 
-    def forward(
+    def prefill(
         self,
         att_state: FlashInferMLAPrefillAttState,
-        layer_inputs: MLAPrefillLayerInputs,
+        layer_inputs: MLAPrefillAttInputs,
         *,
         out: torch.Tensor,
-        alloc_func: TensorAllocator = torch.empty,
+        alloc_func: Callable[..., torch.Tensor] = torch.empty,
     ) -> torch.Tensor:
-        """Fill and return out [query_tokens, num_heads, v_head_dim]; keys are expanded into alloc_func scratch."""
-        layer_config, config = self.layer_config, att_state.config
-        _check_config(layer_config, config)
-        assert (layer_config.qk_nope_head_dim, layer_config.v_head_dim) == (config.qk_nope_head_dim, config.v_head_dim)
+        """填充并返回 out [query_tokens, num_heads, v_head_dim]；keys 扩展到 alloc_func 临时缓冲区。"""
+        att_config = self.att_config
         q, k_nope = layer_inputs.q, layer_inputs.k_nope
-        nope_dim, heads = layer_config.qk_nope_head_dim, layer_config.num_heads
+        nope_dim, heads = att_config.qk_nope_head_dim, att_config.num_heads
         k = alloc_func((k_nope.shape[0], heads, q.shape[-1]), dtype=q.dtype, device=q.device)
         k[:, :, :nope_dim].copy_(k_nope)
         k[:, :, nope_dim:].copy_(layer_inputs.k_rope.expand(-1, heads, -1))
-        att_state.wrapper.run(q, k, layer_inputs.v, out=out)
+        att_state.wrapper.run(q=q, k=k, v=layer_inputs.v, out=out)
         return out
 
     @staticmethod
     def get_name() -> str:
         return "flashinfer_mla_prefill"
 
-    build_context_type = FlashInferMLAPrefillBuildContext
-
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: FlashInferMLAPrefillBuildContext) -> FlashInferMLAPrefillAttState:
-        """Plan a fresh wrapper for the step's query and kv offsets."""
-        import flashinfer
-
-        config = context.config
-        wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(context.workspace(), "NHD")
+    def create_att_state(self, infer_state: InferStateInfo) -> FlashInferMLAPrefillAttState:
+        """为步骤的 query 和 kv 偏移量规划一个新的封装对象。"""
+        config = self.att_config
+        wrapper = self._wrapper_class(
+            float_workspace_buffer=self.get_workspace(name="flashinfer_mla", role=self.role, numel=_WORKSPACE_BYTES),
+            kv_layout="NHD",
+        )
         wrapper.plan(
-            qo_indptr=metadata.b1_cu_q_seq_len.int(),
-            kv_indptr=metadata.b1_cu_kv_seq_len.int(),
+            qo_indptr=infer_state.b1_cu_q_seq_len.int(),
+            kv_indptr=infer_state.b1_cu_kv_seq_len.int(),
             num_qo_heads=config.num_heads,
             num_kv_heads=config.num_heads,
             head_dim_qk=config.qk_nope_head_dim + config.qk_rope_head_dim,
@@ -148,58 +90,62 @@ class FlashInferMLAPrefillBackend(
             causal=True,
             sm_scale=config.softmax_scale,
         )
-        return FlashInferMLAPrefillAttState(wrapper=wrapper, config=config)
+        return FlashInferMLAPrefillAttState(wrapper=wrapper)
 
-    @classmethod
-    def create_build_context(
-        cls, build_key: MLAPrefillLayerConfig, ctx: AttentionBuildResources
-    ) -> FlashInferMLAPrefillBuildContext:
+    @cached_property
+    def _wrapper_class(self):
         set_flashinfer_envs()
-        config = FlashInferMLABuilderConfig(
-            num_heads=build_key.num_heads,
-            qk_nope_head_dim=build_key.qk_nope_head_dim,
-            qk_rope_head_dim=build_key.qk_rope_head_dim,
-            v_head_dim=build_key.v_head_dim,
-            kv_lora_rank=None,
-            page_size=None,
-            dtype=build_key.dtype,
-            softmax_scale=build_key.softmax_scale,
-        )
-        return FlashInferMLAPrefillBuildContext(config, workspace=_workspace(ctx))
+        import flashinfer
+
+        return flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper
+
+
+class FlashInferMLADecodeBackend(DecodeAttBackend[MLADecodeAttConfig, FlashInferMLADecodeAttState, MLADecodeAttInputs]):
+    @dataclass(frozen=True)
+    class RuntimeConfig(AttRuntimeConfig):
+        page_size: int = 1
+        max_seq_len: int = 0
+        max_batch_size: int = 0
+        device: str | int = "cuda"
 
     @classmethod
-    def build_context_key(cls, layer_config: MLAPrefillLayerConfig):
-        # FlashInfer plans with every field but causal, which the impl requires.
-        return layer_config
+    def create_runtime_config(cls, model: "TpPartBaseModel") -> RuntimeConfig:
+        return replace(
+            cls.RuntimeConfig.from_model(model=model),
+            page_size=model.args.page_size,
+            max_seq_len=model.max_seq_length,
+            max_batch_size=model.graph_max_batch_size,
+            device=get_current_device_id(),
+        )
 
-
-class FlashInferMLADecodeBackend(
-    AttentionBackend[MLADecodeLayerConfig, FlashInferMLADecodeAttState, MLADecodeLayerInputs]
-):
-    def __init__(self, layer_config: MLADecodeLayerConfig) -> None:
-        super().__init__(layer_config)
-        # Each query row reads its own request prefix, which is causal across a request's rows.
-        if not layer_config.causal:
+    def __init__(
+        self,
+        att_config: MLADecodeAttConfig,
+        *,
+        role: str = "main",
+        runtime_config: RuntimeConfig = RuntimeConfig(),
+    ) -> None:
+        super().__init__(att_config=att_config, role=role, runtime_config=runtime_config)
+        # 每个 query 行读取其自身的请求前缀，该前缀在请求的行之间具有因果关系。
+        if not att_config.causal:
             raise NotImplementedError("FlashInfer MLA decode supports only causal attention")
 
-    def forward(
+    def decode(
         self,
         att_state: FlashInferMLADecodeAttState,
-        layer_inputs: MLADecodeLayerInputs,
+        layer_inputs: MLADecodeAttInputs,
         *,
         out: torch.Tensor,
-        alloc_func: TensorAllocator = torch.empty,
+        alloc_func: Callable[..., torch.Tensor] = torch.empty,
     ) -> torch.Tensor:
-        """Fill and return out with q_nope's shape; the planned workspace holds the scratch."""
-        layer_config, config = self.layer_config, att_state.config
-        _check_config(layer_config, config)
-        assert layer_config.kv_lora_rank == config.kv_lora_rank
-        kv, rank, page_size = layer_inputs.kv_cache, layer_config.kv_lora_rank, config.page_size
+        """填充并返回 out，其形状与 q_nope 相同；规划的工作区保留临时缓冲区。"""
+        att_config = self.att_config
+        kv, rank, page_size = layer_inputs.kv_cache, att_config.kv_lora_rank, self._page_size
         att_state.wrapper.run(
-            layer_inputs.q_nope,
-            layer_inputs.q_rope,
-            kv[:, :, :rank].view(-1, page_size, 1, rank),
-            kv[:, :, rank:].view(-1, page_size, 1, layer_config.qk_rope_head_dim),
+            q_nope=layer_inputs.q_nope,
+            q_pe=layer_inputs.q_rope,
+            ckv_cache=kv[:, :, :rank].view(-1, page_size, 1, rank),
+            kpe_cache=kv[:, :, rank:].view(-1, page_size, 1, att_config.qk_rope_head_dim),
             out=out,
             return_lse=False,
         )
@@ -209,120 +155,102 @@ class FlashInferMLADecodeBackend(
     def get_name() -> str:
         return "flashinfer_mla_decode"
 
-    build_context_type = FlashInferMLADecodeBuildContext
+    def create_att_state(self, infer_state: InferStateInfo) -> FlashInferMLADecodeAttState:
+        """规划步骤的封装对象；每个 query 行都是其自身的请求。
 
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: FlashInferMLADecodeBuildContext) -> FlashInferMLADecodeAttState:
-        """Plan the step's wrapper; every query row is its own request.
-
-        A CUDA graph step keeps one wrapper and its index buffers per (microbatch, metadata size).
-        The first build plans it on the host; replays rewrite the buffers in place and refill the
-        wrapper's plan tables on the GPU.
+        捕获状态持有 wrapper、页偏移和索引。重放步骤只生成动态页参数，
+        复制到捕获状态后再刷新 wrapper 的计划表。
         """
+        config = self.att_config
+        page_size = self._page_size
         import flashinfer
-        from lightllm.common.basemodel.triton_kernel.flashinfer_mla_plan import fill_mla_decode_plan_for_cuda_graph
         from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
         from lightllm.common.basemodel.triton_kernel.repack_kv_index import repack_kv_index
 
-        config, page_size = context.config, context.config.page_size
-        device = metadata.b_seq_len.device
-        # A partial final page still counts as one page.
-        b_page_len = (metadata.b_seq_len + (page_size - 1)) // page_size
+        device = infer_state.b_seq_len.device
+        # 部分最终页仍然算作一页。
+        b_page_len = (infer_state.b_seq_len + (page_size - 1)) // page_size
         kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
-        page_ids = metadata.batch_size * context.max_pages_per_request
-        if metadata.batch_size <= context.max_batch_size:
-            kv_indices = context._kv_indices[metadata.microbatch_index][:page_ids]
+        page_ids = infer_state.batch_size * triton.cdiv(x=self.runtime_config.max_seq_len, y=page_size)
+        if infer_state.batch_size <= self.runtime_config.max_batch_size:
+            kv_indices = self._kv_indices[infer_state.microbatch_index][:page_ids]
         else:
-            # Captured wrappers must read the fixed per-microbatch buffer.
-            assert not metadata.uses_cuda_graph, "CUDA graph batches must fit the page-index buffers"
+            # 捕获的封装对象必须读取固定的微批次缓冲区。
+            assert not infer_state.uses_cuda_graph, "CUDA graph batches must fit the page-index buffers"
             kv_indices = torch.empty(page_ids, dtype=torch.int32, device=device)
-        q_indptr = torch.arange(metadata.batch_size + 1, dtype=torch.int32, device=device)
-        key = (metadata.microbatch_index, metadata.batch_size)
-        if metadata.uses_cuda_graph:
-            store = context._cuda_graph_tensors
-            kv_starts = keep_for_cuda_graph(store, (*key, "kv_starts"), kv_starts)
-            q_indptr = store.setdefault((*key, "q_indptr"), q_indptr)
+        offsets = FlashInferMLADecodeBackend.create_att_state.__dict__.setdefault("_query_offsets", {})
+        offset_key = (device, infer_state.batch_size)
+        q_indptr = offsets.get(offset_key)
+        if q_indptr is None:
+            q_indptr = offsets.setdefault(
+                offset_key, torch.arange(end=infer_state.batch_size + 1, dtype=torch.int32, device=device)
+            )
         repack_kv_index(
-            req_to_token_indexs=metadata.req_to_token_indexs,
-            b_req_idx=metadata.b_req_idx,
-            b_token_len=metadata.b_seq_len,
+            req_to_token_indexs=infer_state.req_to_token_indexs,
+            b_req_idx=infer_state.b_req_idx,
+            b_token_len=infer_state.b_seq_len,
             b_page_start_loc=kv_starts[:-1],
-            max_token_len=metadata.max_kv_seq_len,
+            max_token_len=infer_state.max_kv_seq_len,
             out_page_indices=kv_indices,
             page_size=page_size,
         )
-        wrapper = context._cuda_graph_wrappers.get(key) if metadata.uses_cuda_graph else None
-        if wrapper is not None:
-            # Prefer the GPU-generated split plan for long decode; exact non-split for short decode.
-            fill_mla_decode_plan_for_cuda_graph(
-                decode_wrapper=wrapper,
-                kv_page_indptr=kv_starts,
-                kv_lens=metadata.b_seq_len,
-                batch_size=metadata.batch_size,
-                num_heads=config.num_heads,
-                max_kv_len=metadata.max_kv_seq_len,
+        if infer_state.graph_mode is GraphMode.REPLAY:
+            return FlashInferMLADecodeAttState(
+                wrapper=None, kv_starts=kv_starts, kv_indices=kv_indices, q_indptr=q_indptr
             )
-            return FlashInferMLADecodeAttState(wrapper=wrapper, config=config)
         wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(
-            context.workspace(),
+            float_workspace_buffer=self.get_workspace(name="flashinfer_mla", role=self.role, numel=_WORKSPACE_BYTES),
             use_cuda_graph=True,
             qo_indptr=q_indptr,
             kv_indices=kv_indices,
             kv_indptr=kv_starts,
-            kv_len_arr=metadata.b_seq_len,
+            kv_len_arr=infer_state.b_seq_len,
         )
         wrapper.plan(
-            q_indptr,
-            kv_starts,
-            kv_indices,
-            metadata.b_seq_len,
-            config.num_heads,
-            config.kv_lora_rank,
-            config.qk_rope_head_dim,
-            page_size,
-            # Each row is its own request, so causality across a request's rows comes from the lengths.
-            False,
-            config.softmax_scale,
-            config.dtype,
-            config.dtype,
+            qo_indptr=q_indptr,
+            kv_indptr=kv_starts,
+            kv_indices=kv_indices,
+            kv_len_arr=infer_state.b_seq_len,
+            num_heads=config.num_heads,
+            head_dim_ckv=config.kv_lora_rank,
+            head_dim_kpe=config.qk_rope_head_dim,
+            page_size=page_size,
+            # 每一行都是一个独立的请求，因此一个请求内行与行之间的因果关系来自于长度信息。
+            causal=False,
+            sm_scale=config.softmax_scale,
+            q_data_type=config.dtype,
+            kv_data_type=config.dtype,
         )
-        if metadata.uses_cuda_graph:
-            context._cuda_graph_wrappers[key] = wrapper
-        return FlashInferMLADecodeAttState(wrapper=wrapper, config=config)
+        return FlashInferMLADecodeAttState(
+            wrapper=wrapper, kv_starts=kv_starts, kv_indices=kv_indices, q_indptr=q_indptr
+        )
 
-    @classmethod
-    def create_build_context(
-        cls, build_key: MLADecodeLayerConfig, ctx: AttentionBuildResources
-    ) -> FlashInferMLADecodeBuildContext:
+    def refresh_cuda_graph_state(self, att_state: FlashInferMLADecodeAttState, infer_state: InferStateInfo) -> None:
+        """页偏移复制到捕获状态后，刷新其 wrapper 的 GPU 调度计划。"""
+        from lightllm.common.basemodel.triton_kernel.flashinfer_mla_plan import fill_mla_decode_plan_for_cuda_graph
+
+        fill_mla_decode_plan_for_cuda_graph(
+            decode_wrapper=att_state.wrapper,
+            kv_page_indptr=att_state.kv_starts,
+            kv_lens=infer_state.b_seq_len,
+            batch_size=infer_state.batch_size,
+            num_heads=self.att_config.num_heads,
+            max_kv_len=infer_state.max_kv_seq_len,
+        )
+
+    @cached_property
+    def _page_size(self) -> int:
+        if self.runtime_config.max_seq_len <= 0:
+            raise ValueError("max_seq_len must be positive before preparing FlashInfer state")
         set_flashinfer_envs()
-        config = FlashInferMLABuilderConfig(
-            num_heads=build_key.num_heads,
-            qk_nope_head_dim=None,
-            qk_rope_head_dim=build_key.qk_rope_head_dim,
-            v_head_dim=None,
-            kv_lora_rank=build_key.kv_lora_rank,
-            page_size=ctx.page_size,
-            dtype=build_key.dtype,
-            softmax_scale=build_key.softmax_scale,
-        )
-        return FlashInferMLADecodeBuildContext(
-            config,
-            workspace=_workspace(ctx),
-            max_seq_len=ctx.max_seq_len,
-            max_batch_size=ctx.max_cuda_graph_batch_size,
-            device=ctx.device,
-        )
+        return self.runtime_config.page_size
 
-    @classmethod
-    def build_context_key(cls, layer_config: MLADecodeLayerConfig):
-        # FlashInfer plans with every field but causal, which the impl requires.
-        return layer_config
+    @cached_property
+    def _kv_indices(self) -> list[torch.Tensor]:
+        config = self.runtime_config
+        pages_per_batch = config.max_batch_size * triton.cdiv(x=config.max_seq_len, y=config.page_size)
+        return [torch.empty(size=(pages_per_batch,), dtype=torch.int32, device=config.device) for _ in range(2)]
 
 
-# FlashInfer MLA's workspace has a fixed size, separate from the GQA one (--flashinfer_workspace_size).
+# FlashInfer MLA 的工作区具有固定大小，与 GQA 的工作区分开（--flashinfer_workspace_size）。
 _WORKSPACE_BYTES = 256 * 1024 * 1024
-
-
-def _workspace(ctx: AttentionBuildResources) -> Callable[[], torch.Tensor]:
-    # Allocated on first use, so prefill-only and decode-only nodes create it only when needed.
-    return lambda: ctx.get_workspace("flashinfer_mla", _WORKSPACE_BYTES, torch.int8)

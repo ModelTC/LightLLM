@@ -1,18 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 from lightllm.common.attention_state.full_att import FullAttentionState
 
 import torch
 
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
-from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
+from lightllm.common.attention.backends.kda import KDAAttInputs
 from lightllm.common.attention.backends.sparse_mla import (
-    SparseMLADecodeLayerInputs,
-    SparseMLALayerConfig,
-    SparseMLAPrefillLayerInputs,
+    SparseMLADecodeAttInputs,
+    SparseMLAPrefillAttInputs,
 )
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
@@ -76,27 +78,6 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 network_config=self.network_config_,
                 tp_world_size=self.tp_world_size_,
             )
-
-    def attention_config(self, model) -> LayerAttentionConfig:
-        if self.is_linear_attention_layer:
-            config = self._kda_config(model)
-            return LayerAttentionConfig(config, config)
-        # NoPE sparse MLA: absorbed queries attend to the indexer's selected latent slots, which it
-        # restricts to visible keys.
-        config = SparseMLALayerConfig(
-            num_heads=self.tp_q_head_num_,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_rope_head_dim=0,
-            softmax_scale=self.softmax_scale,
-            dtype=model.data_type,
-            kv_cache_format="fp8_group64_e8m0" if model.args.llm_kv_type == "fp8kv_dsa" else "bf16",
-            topk=self.network_config_["index_topk"],
-            kpool=self.network_config_["index_kpool"],
-            causal=False,
-        )
-        return LayerAttentionConfig(
-            config, config, prefill_implementation="flashmla_sparse", decode_implementation="flashmla_sparse"
-        )
 
     def _att_norm(self, input, infer_state, layer_weight):
         return layer_weight.att_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
@@ -233,7 +214,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
 
     def _context_attention_kernel(self, q, kv, infer_state, layer_weight, out=None):
         q_nope = self.alloc_tensor((q.shape[0], self.tp_q_head_num_, self.kv_lora_rank), dtype=q.dtype, device=q.device)
-        # Write [tokens, heads, latent] directly for sparse prefill attention.
+        # Write directly into [tokens, heads, latent] for sparse prefill attention.
         layer_weight.k_b_proj_.bmm(q.transpose(0, 1), out=q_nope.transpose(0, 1))
         q = q_nope
         topk_mem_indices, topk_indices = self.indexer._get_indices(
@@ -244,7 +225,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
-        inputs = SparseMLAPrefillLayerInputs(
+        inputs = SparseMLAPrefillAttInputs(
             q=q,
             kv_cache=self._sparse_kv_cache(infer_state),
             topk_mem_indices=topk_mem_indices,
@@ -257,9 +238,13 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 else None
             ),
         )
-        return self.prefill_impl.forward(
-            infer_state.att_states[self.prefill_impl.state_key],
-            inputs,
+        manager = infer_state.attention_backend_manager
+        backend = manager.get_backend(
+            role=infer_state.att_state_role, phase="prefill", logical_layer_id=self.layer_num_
+        )
+        return backend.prefill(
+            att_state=infer_state.att_states[backend],
+            layer_inputs=inputs,
             out=torch.empty((q.shape[0], q.shape[1], self.kv_lora_rank), dtype=q.dtype, device=q.device),
         )
 
@@ -336,15 +321,17 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
-        inputs = SparseMLADecodeLayerInputs(
+        inputs = SparseMLADecodeAttInputs(
             q_nope=q_nope,
             q_rope=q_nope[..., :0],
             kv_cache=self._sparse_kv_cache(infer_state),
             topk_mem_indices=topk_mem_indices,
         )
-        return self.decode_impl.forward(
-            infer_state.att_states[self.decode_impl.state_key],
-            inputs,
+        manager = infer_state.attention_backend_manager
+        backend = manager.get_backend(role=infer_state.att_state_role, phase="decode", logical_layer_id=self.layer_num_)
+        return backend.decode(
+            att_state=infer_state.att_states[backend],
+            layer_inputs=inputs,
             out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device),
         )
 
@@ -378,31 +365,13 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         raw_decay_gate, raw_output_gate = layer_weight.project_kda_fg_b(decay_gate_hidden, output_gate_hidden)
         return qkv, raw_decay_gate, beta_logits, raw_output_gate
 
-    def _kda_config(self, model) -> KDALayerConfig:
-        linear = self.network_config_["linear_attn_config"]
-        assert linear["num_heads"] % self.tp_world_size_ == 0
-        args = model.args
-        prefill_backends = args.llm_prefill_att_backend
-        return KDALayerConfig(
-            num_heads=self.tp_linear_num_heads,
-            head_dim=self.linear_head_dim,
-            conv_kernel_size=linear["short_conv_kernel_size"],
-            lower_bound=linear.get("gate_lower_bound", -5.0),
-            dtype=model.data_type,
-            state_mtp_step=args.mtp_step,
-            replay=args.ssm_state_mode == "replay",
-            ssm_dtype=getattr(torch, args.linear_att_ssm_data_type),
-            # The second --llm_prefill_att_backend value chooses FlashKDA for prefill.
-            prefill_kernel=prefill_backends[1] if len(prefill_backends) > 1 else "auto",
-        )
-
-    def _kda_layer_inputs(self, mixed_qkv, raw_gate, raw_beta, infer_state, layer_weight) -> KDALayerInputs:
+    def _kda_layer_inputs(self, mixed_qkv, raw_gate, raw_beta, infer_state, layer_weight) -> KDAAttInputs:
         """Gather the layer's KDA operands, parameters and recurrent state views."""
         state = infer_state.att_state_manager.get_state(
             model_role=infer_state.att_state_role, state_type_filter="kda", logical_layer_id=self.layer_num_
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=self.layer_num_)
-        return KDALayerInputs(
+        return KDAAttInputs(
             mixed_qkv=mixed_qkv,
             raw_gate=raw_gate,
             raw_beta=raw_beta,
@@ -411,20 +380,26 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             dt_bias=layer_weight.linear_dt_bias.weight,
             conv_states=conv_states,
             ssm_states=ssm_states,
-            replay_state=state if self.decode_impl.layer_config.replay else None,
-            layer_num=self.layer_num_,
+            replay_state=state,  # Used by replay decode.
+            logic_layer_index=self.layer_num_,
         )
 
-    def _kda_attention(self, inputs: KDALayerInputs, infer_state, *, prefill: bool, out=None) -> torch.Tensor:
+    def _kda_attention(
+        self, inputs: KDAAttInputs, infer_state: "InferStateInfo", *, prefill: bool, out: torch.Tensor | None = None
+    ) -> torch.Tensor:
         x = inputs.mixed_qkv
-        impl = self.prefill_impl if prefill else self.decode_impl
+        phase = "prefill" if prefill else "decode"
+        impl = infer_state.attention_backend_manager.get_backend(
+            role=infer_state.att_state_role, phase=phase, logical_layer_id=self.layer_num_
+        )
         if not prefill and out is None:
             out = self.alloc_tensor(
                 (x.shape[0], self.tp_linear_num_heads, self.linear_head_dim), dtype=x.dtype, device=x.device
             )
-        return impl.forward(
-            infer_state.att_states[impl.state_key],
-            inputs,
+        attention = impl.prefill if prefill else impl.decode
+        return attention(
+            att_state=infer_state.att_states[impl],
+            layer_inputs=inputs,
             out=out,
             alloc_func=self.alloc_tensor,
         )

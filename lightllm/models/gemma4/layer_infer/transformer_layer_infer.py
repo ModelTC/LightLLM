@@ -1,10 +1,8 @@
-from dataclasses import replace
 from lightllm.common.attention_state.full_att import FullAttentionState
 import math
 import torch
 import torch.nn as nn
 
-from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
@@ -172,15 +170,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
             return
         return super()._post_cache_kv(cache_kv, infer_state, layer_weight)
 
-    # ----- Attention kernels (sliding window + per-layer KV reshape) ---
-
-    def attention_config(self, model) -> LayerAttentionConfig:
-        window = (self.sliding_window_ - 1, 0) if self.is_sliding and self.sliding_window_ > 0 else (-1, -1)
-        decode = self._gqa_config(model, sliding_window=window)
-        prefill = replace(decode, bidirectional_image_spans=self.is_sliding)
-        return LayerAttentionConfig(
-            prefill=prefill, decode=decode, prefill_implementation="triton", decode_implementation="triton"
-        )
+    # Attention kernel (sliding window and per-layer KV reshape)
 
     def _gqa_kv_cache(self, state: FullAttentionState):
         # 直接用当前逻辑层号访问；共享层由 State 的 logical_layer_groups 映射到生产层的物理 KV。

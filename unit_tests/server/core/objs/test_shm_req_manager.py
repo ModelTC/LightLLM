@@ -19,12 +19,10 @@ def setup_env():
     monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: "test_shm_req_manager_service_0")
     original = os.environ.get("LIGHTLLM_START_ARGS")
     set_env_start_args(
-        EasyDict(
+        args=EasyDict(
             running_max_req_size=10,
             disable_chunked_prefill=True,
             mtp_step=0,
-            llm_prefill_att_backend=["None"],
-            llm_decode_att_backend=["None"],
             cpu_cache_token_page_size=256,
             enable_cpu_cache=False,
         )

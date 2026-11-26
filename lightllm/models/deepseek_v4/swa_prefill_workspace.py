@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import torch
 import triton
 
-from lightllm.utils.workspace_utils import get_gpu_workspace_buffer
+from lightllm.common.attention.base_backend import PrefillAttBackend
 
 
 @dataclass
@@ -41,7 +41,9 @@ def reserve_swa_prefill_workspace(model):
     page_token_num = config.page_token_size
     max_forward_tokens = max(model.batch_max_tokens, model.max_req_num) + 2 * model.tp_world_size_
     capacity = (
-        triton.cdiv(max_forward_tokens + model.max_req_num * (config.window_size + 2 * page_token_num), page_token_num)
+        triton.cdiv(
+            x=max_forward_tokens + model.max_req_num * (config.window_size + 2 * page_token_num), y=page_token_num
+        )
         * page_token_num
     )
     if model.args.run_mode == "decode":
@@ -54,9 +56,10 @@ def reserve_swa_prefill_workspace(model):
     # 物理行宽由 SWA 原子配置给出，这里仅决定 workspace 的 token 容量。
     slot_bytes = config.get_packed_kv_bytes(page_token_num) // page_token_num
     layer_count = len(config.logical_layer_ids)
-    buffer = get_gpu_workspace_buffer(
-        key_name=f"deepseek_v4_swa_prefill_{model.att_state_role}",
-        workspace_size=layer_count * token_num * slot_bytes,
+    buffer = PrefillAttBackend.get_workspace(
+        name="deepseek_v4_swa_prefill",
+        role=model.att_state_role,
+        numel=layer_count * token_num * slot_bytes,
         dtype=torch.uint8,
     )
     return buffer.view(layer_count, token_num, slot_bytes), capacity

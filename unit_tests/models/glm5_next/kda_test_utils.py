@@ -1,6 +1,7 @@
 """Build KDA layer inputs and attention the way GLM-5-Next layers do (see _kda_layer_inputs)."""
+from typing import Any
+from unit_tests.common.attention.backends.step_fixture import create_att_state
 
-from dataclasses import replace
 from types import SimpleNamespace
 
 import torch
@@ -9,7 +10,17 @@ from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
-def kda_params(conv_states, ssm_states, layer_weight, mixed_qkv, raw_gate, raw_beta, *, state=None, layer_num=0):
+def kda_params(
+    conv_states: Any,
+    ssm_states: Any,
+    layer_weight: Any,
+    mixed_qkv: Any,
+    raw_gate: Any,
+    raw_beta: Any,
+    *,
+    state: Any = None,
+    logic_layer_index: Any = 0,
+):
     return dict(
         mixed_qkv=mixed_qkv,
         raw_gate=raw_gate,
@@ -20,7 +31,7 @@ def kda_params(conv_states, ssm_states, layer_weight, mixed_qkv, raw_gate, raw_b
         conv_states=conv_states,
         ssm_states=ssm_states,
         state=state,
-        layer_num=layer_num,
+        logic_layer_index=logic_layer_index,
     )
 
 
@@ -52,22 +63,22 @@ def prefill_batch(max_q_seq_len, device="cpu"):
     )
 
 
-def kda_layer_config(
+def kda_att_config(
     *,
-    heads,
-    dim=128,
-    replay=False,
-    mtp_step=0,
-    prefill_kernel="triton",
-    ssm_dtype=torch.float32,
-    conv_kernel_size=4,
-    lower_bound=-5.0,
-    dtype=torch.bfloat16,
+    heads: Any,
+    dim: Any = 128,
+    replay: Any = False,
+    mtp_step: Any = 0,
+    prefill_kernel: Any = "triton",
+    ssm_dtype: Any = torch.float32,
+    conv_kernel_size: Any = 4,
+    lower_bound: Any = -5.0,
+    dtype: Any = torch.bfloat16,
 ):
-    """The config for the linear attention branch of a GLM-5 layer."""
-    from lightllm.common.attention.backends.kda import KDALayerConfig
+    """GLM-5 层线性注意力分支的配置。"""
+    from lightllm.common.attention.backends.kda import KDAAttConfig
 
-    return KDALayerConfig(
+    return KDAAttConfig(
         num_heads=heads,
         head_dim=dim,
         conv_kernel_size=conv_kernel_size,
@@ -86,22 +97,20 @@ class KDAAttention:
     step_config describes the model's decode rows; each step adds the role's recurrent state index.
     """
 
-    def __init__(self, layer_config, step_config=None):
+    def __init__(self, att_config: Any, step_config: Any = None, *, prefill_impl: Any = None, role: Any = "main"):
         from lightllm.common.attention.backends.kda import triton as kda
-        from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig
+        from unit_tests.common.attention.backends.step_fixture import AttentionStepConfig
 
-        self.layer_config = layer_config
         self.step_config = AttentionStepConfig() if step_config is None else step_config
-        replay = layer_config.replay
-        backends = {
-            "prefill": kda.ReplayKDAPrefillBackend if replay else kda.TritonKDAPrefillBackend,
-            "decode": kda.ReplayKDADecodeBackend if replay else kda.TritonKDADecodeBackend,
+        replay = att_config.replay
+        prefill_cls = kda.ReplayKDAPrefillBackend if replay else kda.TritonKDAPrefillBackend
+        decode_cls = kda.ReplayKDADecodeBackend if replay else kda.TritonKDADecodeBackend
+        self.impls = {
+            "prefill": prefill_impl if prefill_impl is not None else prefill_cls(att_config, role=role),
+            "decode": decode_cls(att_config, role=role),
         }
-        self.impls = {phase: backend(layer_config) for phase, backend in backends.items()}
-        self.step_builders = {
-            phase: impl.create_build_context(impl.state_key[1], None) for phase, impl in self.impls.items()
-        }
-        self.flash_kda_fwd = self.step_builders["prefill"].flash_kda_fwd
+        self.config = self.impls["prefill"].att_config
+        self.flash_kda_fwd = self.impls["prefill"]._flash_kda_fwd
 
     def create_att_prefill_state(self, infer):
         return KDAStep(self, infer, "prefill")
@@ -118,25 +127,18 @@ class KDAStep:
         self.att_state = None
 
     def init_state(self):
-        from lightllm.common.basemodel.attention_backend_manager import (
-            configure_attention_step,
-            recurrent_mtp_state_index,
-        )
+        from unit_tests.common.attention.backends.step_fixture import configure_attention_step
 
         infer, attention = self.infer, self.attention
-        index = None
-        if getattr(infer, "att_state_manager", None) is not None:
-            role = SimpleNamespace(att_state_manager=infer.att_state_manager, att_state_role=infer.att_state_role)
-            index = recurrent_mtp_state_index(role)
-        batch = configure_attention_step(infer, replace(attention.step_config, req_to_mtp_state_index=index))
-        self.att_state = attention.step_builders[self.phase].prepare(batch)
+        batch = configure_attention_step(infer_state=infer, step_config=attention.step_config)
+        self.att_state = create_att_state(backend=attention.impls[self.phase], infer_state=batch)
 
     def run(self, params, alloc_func=torch.empty):
-        """params is kda_params(...); returns [rows, num_heads, head_dim]."""
-        from lightllm.common.attention.backends.kda import KDALayerInputs
+        """params 是 kda_params(...); 返回 [rows, num_heads, head_dim]."""
+        from lightllm.common.attention.backends.kda import KDAAttInputs
 
-        config = self.attention.layer_config
-        inputs = KDALayerInputs(
+        config = self.attention.config
+        inputs = KDAAttInputs(
             mixed_qkv=params["mixed_qkv"],
             raw_gate=params["raw_gate"],
             raw_beta=params["raw_beta"],
@@ -146,8 +148,10 @@ class KDAStep:
             conv_states=params["conv_states"],
             ssm_states=params["ssm_states"],
             replay_state=params["state"] if config.replay else None,
-            layer_num=params["layer_num"],
+            logic_layer_index=params["logic_layer_index"],
         )
         x = inputs.mixed_qkv
         out = alloc_func((x.shape[0], config.num_heads, config.head_dim), dtype=x.dtype, device=x.device)
-        return self.attention.impls[self.phase].forward(self.att_state, inputs, out=out, alloc_func=alloc_func)
+        backend = self.attention.impls[self.phase]
+        attention = backend.prefill if self.phase == "prefill" else backend.decode
+        return attention(att_state=self.att_state, layer_inputs=inputs, out=out, alloc_func=alloc_func)

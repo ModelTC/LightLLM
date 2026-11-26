@@ -13,7 +13,7 @@ CALLER_GLOBS = (
     "lightllm/models/*/layer_infer/**/*.py",
     "lightllm/models/*/infer_struct.py",
     "lightllm/models/*/model.py",
-    "lightllm/common/basemodel/attention_backend_manager.py",
+    "lightllm/common/attention/attention_backend_manager.py",
     "lightllm/common/basemodel/layer_infer/**/*.py",
 )
 
@@ -32,10 +32,19 @@ ATTENTION_KERNEL_MODULES = re.compile(
 ALLOWED_CALLERS = {"lightllm/models/vit/layer_infer/transformer_layer_infer.py"}
 
 
-def imported_modules(path: pathlib.Path):
+def imported_modules(path: pathlib.Path, *, runtime_only: bool = False):
     tree = ast.parse(path.read_text(), filename=str(path))
     package = ".".join(path.relative_to(ROOT).with_suffix("").parts[:-1])
+    type_only = {
+        node
+        for guard in tree.body
+        if isinstance(guard, ast.If) and isinstance(guard.test, ast.Name) and guard.test.id == "TYPE_CHECKING"
+        for statement in guard.body
+        for node in ast.walk(statement)
+    }
     for node in ast.walk(tree):
+        if runtime_only and node in type_only:
+            continue
         if isinstance(node, ast.Import):
             for alias in node.names:
                 yield node.lineno, alias.name
@@ -62,8 +71,7 @@ def test_caller_globs_find_the_attention_callers():
         "lightllm/models/llama/layer_infer/transformer_layer_infer.py",
         "lightllm/models/deepseek2/layer_infer/transformer_layer_infer.py",
         "lightllm/models/qwen3next/layer_infer/transformer_layer_infer.py",
-        "lightllm/common/basemodel/attention_backend_manager.py",
-        "lightllm/common/basemodel/layer_infer/gqa_attention.py",
+        "lightllm/common/attention/attention_backend_manager.py",
     ):
         assert expected in found
 
@@ -96,7 +104,8 @@ def test_models_do_not_import_attention_kernels():
 
 
 # The backend layer knows nothing about models: models and lightllm.common.basemodel import it, not the
-# reverse. Generic Triton helpers that happen to live under basemodel/triton_kernel are allowed.
+# reverse. InferStateInfo and GraphMode define the input contract; generic Triton helpers under
+# basemodel/triton_kernel are also allowed.
 MODEL_SIDE_MODULES = re.compile(r"^lightllm\.(models|common\.basemodel)(\.|$)(?!triton_kernel(\.|$))")
 
 
@@ -106,9 +115,9 @@ MODEL_SIDE_MODULES = re.compile(r"^lightllm\.(models|common\.basemodel)(\.|$)(?!
         ("lightllm.models.llama.model", True),
         ("lightllm.common.basemodel", True),
         ("lightllm.common.basemodel.infer_struct", True),
-        ("lightllm.common.basemodel.attention_backend_manager", True),
+        ("lightllm.common.attention.attention_backend_manager", False),
         ("lightllm.common.basemodel.triton_kernel.fa3_utils", False),
-        ("lightllm.common.attention.backend", False),
+        ("lightllm.common.attention.base_backend", False),
     ],
 )
 def test_model_side_module_pattern(module, is_model_side):
@@ -121,7 +130,13 @@ def test_backend_layer_does_not_import_model_side_code():
     offenders = [
         f"{path.relative_to(ROOT)}:{lineno} imports {module}"
         for path in files
-        for lineno, module in imported_modules(path)
+        for lineno, module in imported_modules(path=path, runtime_only=True)
         if MODEL_SIDE_MODULES.match(module)
+        and module
+        not in (
+            "lightllm.common.basemodel.infer_struct",
+            "lightllm.common.basemodel.infer_struct.InferStateInfo",
+            "lightllm.common.basemodel.infer_struct.GraphMode",
+        )
     ]
-    assert not offenders, "lightllm.common.attention must not depend on models:\n" + "\n".join(offenders)
+    assert not offenders, "unexpected model-side imports at runtime:\n" + "\n".join(offenders)

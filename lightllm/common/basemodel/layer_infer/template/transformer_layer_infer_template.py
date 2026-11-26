@@ -1,11 +1,7 @@
 from lightllm.common.attention_state.full_att import FullAttentionState
-from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
-import os
 import torch
-import torch.distributed as dist
 from ..transformer_layer_infer import TransformerLayerInfer
 from ...infer_struct import InferStateInfo
-from lightllm.distributed import all_reduce
 from typing import Tuple
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
@@ -24,10 +20,6 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         self.head_dim_ = -1
         self.embed_dim_ = -1
         return
-
-    def attention_config(self, model) -> LayerAttentionConfig:
-        """Describe this layer's attention once the model's cache has been allocated."""
-        raise NotImplementedError(f"{type(self).__name__} does not implement attention_config")
 
     def _att_norm(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")

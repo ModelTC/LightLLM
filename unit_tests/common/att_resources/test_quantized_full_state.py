@@ -1,4 +1,7 @@
 from __future__ import annotations
+from unit_tests.common.attention.backends.step_fixture import create_att_state
+
+from unit_tests.common.attention.backends.groups_runner import run_attention
 
 from unit_tests.common.att_resources.model_helpers import bind_test_fp8_calibration
 
@@ -154,7 +157,8 @@ def test_quantized_cpu_pd_dp_and_token_copy_include_every_field(
         field.tensor[:, 0].fill_(i + 11)
     if device == "cuda":
         source.copy_full_att_tokens(
-            torch.tensor([0, 2], dtype=torch.long, device=device), torch.tensor([4, 5], dtype=torch.long, device=device)
+            torch.tensor([0, 2], dtype=torch.long, device=device),
+            torch.tensor([4, 5], dtype=torch.long, device=device),
         )
         assert_token_fields_equal(
             source=source,
@@ -334,10 +338,10 @@ def test_deferred_storage_preserves_real_fp8_calibration(kind: str):
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_int4_prefill_with_separate_storage(device, monkeypatch):
     from types import SimpleNamespace
-    from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+    from lightllm.common.attention.backends.gqa import GQAAttConfig, GQAAttInputs
     from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQAPrefillBackend
-    from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
-    from lightllm.common.attention.backends.gqa import gqa_kv_quant_fields
+    from unit_tests.common.attention.backends.step_fixture import configure_attention_step
+    from lightllm.common.attention.backends.gqa import get_gqa_kv_quant
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.common.basemodel.triton_kernel.kv_copy import ppl_int4kv_copy_kv
     from lightllm.common.attention.kernels.gqa.bf16.prefill import context_flashattention_nopad
@@ -372,13 +376,19 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
     owner.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(8, device=device).view(1, -1))
     owner.is_prefill, owner.batch_size = True, 1
     owner.b1_cu_q_seq_len = owner.b1_cu_kv_seq_len = torch.tensor([0, 2], dtype=torch.int32, device=device)
-    # The layer config a layer creates from the int4 cache, and the attention state of its group.
-    layer_config = GQALayerConfig(
-        num_heads=2, num_kv_heads=1, head_dim=64, dtype=torch.float32, **gqa_kv_quant_fields("int4kv", kv_scales, 64)
+    # 层从int4缓存创建的层配置及其组的注意力状态。
+    kv_quant, group_size, has_q_scale = get_gqa_kv_quant(llm_kv_type="int4kv", kv_scales=kv_scales, head_dim=64)
+    att_config = GQAAttConfig(
+        num_heads=2,
+        num_kv_heads=1,
+        head_dim=64,
+        dtype=torch.float32,
+        kv_quant=kv_quant,
+        kv_quant_group_size=group_size,
+        has_q_scale=has_q_scale,
     )
-    impl = TritonQuantGQAPrefillBackend(layer_config)
-    builder = TritonQuantGQAPrefillBackend.create_build_context(impl.state_key[1], None)
-    att_state = TritonQuantGQAPrefillBackend.build(configure_attention_step(owner), builder)
+    impl = TritonQuantGQAPrefillBackend(att_config=att_config)
+    att_state = create_att_state(backend=impl, infer_state=configure_attention_step(owner))
     if device == "cpu":
 
         def dequantize(**kwargs):
@@ -393,6 +403,6 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
         monkeypatch.setattr(ppl_int4kv_copy_kv, "dequantize_int4kv", dequantize)
         monkeypatch.setattr(context_flashattention_nopad, "context_attention_fwd_contiguous_kv", attention)
     q = torch.randn(2, 2, 64, device=device)
-    inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
-    output = impl.forward(att_state, inputs, out=torch.empty_like(q))
+    inputs = GQAAttInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
+    output = run_attention(backend=impl, att_state=att_state, layer_inputs=inputs, out=torch.empty_like(q))
     torch.testing.assert_close(output, torch.ones_like(q))

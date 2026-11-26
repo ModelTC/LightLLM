@@ -515,31 +515,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         only deepseekv3 model supported now.""",
     )
     parser.add_argument(
-        "--llm_prefill_att_backend",
-        type=str,
+        "--att_backend",
         nargs="+",
-        choices=["auto", "triton", "fa3", "flashinfer", "flashqla", "flashkda"],
-        default=["auto"],
-        help="""prefill attention kernel used in llm.
-                auto: automatically select best backend based on GPU and available packages
-                (priority: fa3 > flashinfer > triton)
-                for hybrid linear-attention models, the second value selects the linear-attention backend
-                (GDN priority: flashqla > triton; KDA auto: shape-dependent FlashKDA on Hopper with
-                BF16 state, otherwise Triton; explicit flashkda requires a compatible installation);
-                when omitted, it defaults to auto""",
-    )
-    parser.add_argument(
-        "--llm_decode_att_backend",
-        type=str,
-        nargs="+",
-        choices=["auto", "triton", "fa3", "flashinfer"],
-        default=["auto"],
-        help="""decode attention kernel used in llm.
-                auto: automatically select best backend based on GPU and available packages
-                (priority when mtp_step > 0: fa3 > flashinfer > triton;
-                otherwise: flashinfer > fa3 > triton)
-                for hybrid linear-attention models, the second value selects the linear-attention backend
-                (currently triton only); when omitted, it defaults to auto""",
+        action=_AttentionBackendOverrides,
+        default={},
+        metavar="FAMILY.PHASE=BACKEND",
+        help="Override attention backends, e.g. gqa.prefill=fa3 gdn.prefill=flashqla. Omitted entries use auto.",
     )
     parser.add_argument(
         "--flashinfer_workspace_size",
@@ -1093,3 +1074,28 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 def make_argument_parser() -> argparse.ArgumentParser:
     return add_cli_args(argparse.ArgumentParser())
+
+
+class _AttentionBackendOverrides(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: list[str],
+        option_string: str | None = None,
+    ):
+        from lightllm.server.attention_backend_options import validate_backend_overrides
+
+        overrides = dict(getattr(namespace, self.dest))
+        for value in values:
+            key, separator, backend = value.partition("=")
+            if not separator or not key or not backend:
+                raise argparse.ArgumentError(argument=self, message=f"expected FAMILY.PHASE=BACKEND, got {value!r}")
+            if key in overrides:
+                raise argparse.ArgumentError(argument=self, message=f"duplicate attention backend key {key!r}")
+            overrides[key] = backend
+        try:
+            validate_backend_overrides(overrides=overrides)
+        except ValueError as exc:
+            raise argparse.ArgumentError(argument=self, message=str(exc)) from exc
+        setattr(namespace, self.dest, overrides)

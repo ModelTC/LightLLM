@@ -559,28 +559,32 @@ Performance Optimization Parameters
 
     The inference backend will use microbatch overlap mode for decoding
 
-.. option:: --llm_prefill_att_backend
+.. option:: --att_backend
 
-    Set the attention backend for the prefill phase. For hybrid linear-attention models such as Qwen3.5,
-    the first value selects the full-attention backend and the optional second value selects the
-    linear-attention backend. If the second value is omitted, it defaults to ``auto``.
+    Override attention implementations by family and phase. Each entry has the format
+    ``family.phase=backend``. Separate entries with spaces:
 
-    Full-attention options:
+    .. code-block:: bash
 
-    * ``auto``: Automatically select the best backend (default), with priority fa3 > flashinfer > triton
-    * ``fa3``: Use Flash-Attention 3 backend
-    * ``flashinfer``: Use FlashInfer backend
-    * ``triton``: Use Triton backend
+        --att_backend gqa.prefill=fa3 gqa.decode=flashinfer gdn.prefill=flashqla
 
-    Linear-attention options for Qwen3.5:
+    You can repeat ``--att_backend`` to group entries. Repeated keys and unsupported values
+    are rejected. An implementation required by the model takes precedence over the override.
+    Omitted entries use ``auto``; omit the option entirely to use automatic selection everywhere.
 
-    * ``auto``: Automatically select the best backend (default), with priority flashqla > triton
-    * ``flashqla``: Use FlashQLA backend
-    * ``triton``: Use Triton backend
+    Supported families and implementations in addition to ``auto``:
 
-    Example: ``--llm_prefill_att_backend fa3 flashqla``.
+    * ``gqa`` and ``mla``: ``fa3``, ``flashinfer``, ``triton`` for both phases.
+    * ``sparse_mla`` and ``swa_sparse_mla``: ``flashmla_sparse`` for both phases. The KV cache
+      format determines the concrete sparse MLA implementation.
+    * ``gdn``: ``flashqla`` or ``triton`` for prefill, ``triton`` for decode.
+    * ``kda``: ``flashkda`` or ``triton`` for prefill, ``triton`` for decode.
 
-    Linear-attention options for GLM-5.3-Flash:
+    By default, GQA and MLA try FA3, FlashInfer and Triton in that order for prefill.
+    Decode tries FlashInfer first, or FA3 first when ``--mtp_step`` is greater than zero.
+    GDN prefill tries FlashQLA and then Triton.
+
+    For KDA prefill in models such as GLM-5.3-Flash:
 
     * ``auto`` (default): On Hopper with BF16 computation and BF16 recurrent state, use FlashKDA
       when installed and compatible. Select it for query chunks up to 8192 tokens with at least
@@ -600,7 +604,7 @@ Performance Optimization Parameters
 
         pip install --no-build-isolation git+https://github.com/MoonshotAI/FlashKDA.git
 
-    Select it with ``--llm_prefill_att_backend auto flashkda``. A missing or unloadable optional
+    Select it with ``--att_backend kda.prefill=flashkda``. A missing or unloadable optional
     package falls back to Triton in ``auto`` mode, and reports an installation error in explicit mode.
     FlashKDA uses BF16 internal recurrent updates even with FP32 state storage.
     Automatic selection therefore keeps FP32 state configurations on Triton.
@@ -609,26 +613,6 @@ Performance Optimization Parameters
     ``--llm_kv_type fp8kv_dsa`` independently controls the sparse-attention layers and can be used
     with FlashKDA. It does not quantize KDA inputs or recurrent state to FP8. KDA's persistent
     state layout is unchanged for decode, MTP, prefix-cache restore and PD transfer.
-
-.. option:: --llm_decode_att_backend
-
-    Set the attention backend for the decode phase. For hybrid linear-attention models such as Qwen3.5,
-    the first value selects the full-attention backend and the optional second value selects the
-    linear-attention backend. If the second value is omitted, it defaults to ``auto``.
-
-    Full-attention options:
-
-    * ``auto``: Automatically select the best backend (default), with priority fa3 > flashinfer > triton
-    * ``fa3``: Use Flash-Attention 3 backend
-    * ``flashinfer``: Use FlashInfer backend
-    * ``triton``: Use Triton backend
-
-    Linear-attention options for Qwen3.5:
-
-    * ``auto``: Automatically select the best backend (default; currently selects triton)
-    * ``triton``: Use Triton backend
-
-    Example: ``--llm_decode_att_backend flashinfer triton``.
 
 .. option:: --llm_kv_type
 

@@ -514,9 +514,9 @@ def test_shared_chunk_kernel_preserves_gdn_natural_log_decay():
 @pytest.mark.parametrize("heads", [16, 64, 128])
 def test_nope_attention_native_512_and_cuda_graph(heads):
     from lightllm.common.attention.backends.sparse_mla import (
-        SparseMLADecodeLayerInputs,
-        SparseMLALayerConfig,
-        SparseMLAPrefillLayerInputs,
+        SparseMLADecodeAttInputs,
+        SparseMLAAttConfig,
+        SparseMLAPrefillAttInputs,
     )
     from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend, FA3SparseMLADecodeAttState
     from lightllm.common.attention.backends.sparse_mla.flashmla import (
@@ -544,13 +544,13 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
         return torch.stack(expected)
 
     expected = reference()
-    layer_config = SparseMLALayerConfig(
+    att_config = SparseMLAAttConfig(
         num_heads=heads, kv_lora_rank=512, qk_rope_head_dim=0, softmax_scale=0.0625, dtype=torch.bfloat16
     )
-    prefill_impl = FlashMLASparsePrefillBackend(layer_config)
+    prefill_impl = FlashMLASparsePrefillBackend(att_config=att_config)
     prefill_args = FlashMLASparsePrefillAttState(mem_index=None, has_cached_prefix=False)
-    prefill_inputs = SparseMLAPrefillLayerInputs(q=q, kv_cache=kv, topk_mem_indices=indexes)
-    decode_impl = FA3SparseMLADecodeBackend(layer_config)
+    prefill_inputs = SparseMLAPrefillAttInputs(q=q, kv_cache=kv, topk_mem_indices=indexes)
+    decode_impl = FA3SparseMLADecodeBackend(att_config=att_config)
     cu_seqlens_k = torch.nn.functional.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
     decode_args = FA3SparseMLADecodeAttState(
         cache_seqlens=lengths,
@@ -559,13 +559,13 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
         max_seqlen_q=1,
         causal=False,
     )
-    decode_inputs = SparseMLADecodeLayerInputs(q_nope=q, q_rope=q[..., :0], kv_cache=kv, topk_mem_indices=indexes)
+    decode_inputs = SparseMLADecodeAttInputs(q_nope=q, q_rope=q[..., :0], kv_cache=kv, topk_mem_indices=indexes)
 
     def prefill():
-        return prefill_impl.forward(prefill_args, prefill_inputs, out=torch.empty_like(q))
+        return prefill_impl.prefill(prefill_args, prefill_inputs, out=torch.empty_like(q))
 
     def decode():
-        return decode_impl.forward(decode_args, decode_inputs, out=torch.empty_like(q))
+        return decode_impl.decode(decode_args, decode_inputs, out=torch.empty_like(q))
 
     torch.testing.assert_close(prefill().float(), expected, atol=0.012, rtol=0.015)
     torch.testing.assert_close(decode().float(), expected, atol=0.012, rtol=0.015)

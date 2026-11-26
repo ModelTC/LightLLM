@@ -45,8 +45,8 @@ def test_every_linear_execution_layer_can_split_its_gdn_projection(settings):
         linear_value_head_dim=48,
     )
     linear_layers = 0
-    for layer_num, kind in enumerate(kinds):
-        layer = SenseNovaLoopTransformerLayerInfer(layer_num, config)
+    for logic_layer_index, kind in enumerate(kinds):
+        layer = SenseNovaLoopTransformerLayerInfer(layer_num=logic_layer_index, network_config=config)
         assert layer.is_linear_attention_layer == (kind == "linear_attention")
         if not layer.is_linear_attention_layer:
             continue
@@ -55,8 +55,8 @@ def test_every_linear_execution_layer_can_split_its_gdn_projection(settings):
             name: getattr(layer, name, None)
             for name in ("tp_linear_num_v_heads", "linear_head_v_dim", "tp_linear_key_dim")
         }
-        assert dims == {"tp_linear_num_v_heads": 4, "linear_head_v_dim": 48, "tp_linear_key_dim": 64}, layer_num
-        # The layer splits the fused projection into the GDN layer inputs with these dims.
+        assert dims == {"tp_linear_num_v_heads": 4, "linear_head_v_dim": 48, "tp_linear_key_dim": 64}, logic_layer_index
+        # 层使用这些维度将融合投影拆分为 GDN 层的输入。
         qkv, value = 2 * 64 + 4 * 48, 4 * 48
         mixed = torch.arange(3 * (qkv + 2 * value + 2 * 4), dtype=torch.float32).view(3, -1)
         state = SimpleNamespace(get_layer_view=lambda logical_layer_id: ("conv", "ssm"))
@@ -68,7 +68,6 @@ def test_every_linear_execution_layer_can_split_its_gdn_projection(settings):
             linear_A_log=SimpleNamespace(weight=None),
             linear_dt_bias=SimpleNamespace(weight=None),
         )
-        layer.decode_impl = SimpleNamespace(layer_config=SimpleNamespace(replay=False))
         inputs = layer._gdn_layer_inputs(mixed, infer_state, weight)
         assert torch.equal(inputs.mixed_qkv, mixed[:, :qkv])
         assert torch.equal(inputs.z.reshape(3, -1), mixed[:, qkv : qkv + value])

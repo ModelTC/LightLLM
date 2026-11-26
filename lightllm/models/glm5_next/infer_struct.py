@@ -35,5 +35,5 @@ class Glm5NextInferStateInfo(InferStateInfo):
 
     def init_some_extra_state(self, model):
         super().init_some_extra_state(model)
-        if model.attention_backend_manager.has_attention:
+        if model.attention_backend_manager.has_attention(role=self.att_state_role):
             self.nsa_step = build_glm5_nsa_step(self)

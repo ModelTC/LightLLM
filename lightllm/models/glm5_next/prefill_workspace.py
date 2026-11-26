@@ -8,7 +8,7 @@ to sparse prefill layers through their model.
 import torch
 import triton
 
-from lightllm.utils.workspace_utils import get_gpu_workspace_buffer
+from lightllm.common.attention.base_backend import PrefillAttBackend
 
 # Cap each microbatch's BF16 KV workspace at 2 GiB (2097152 × 512 × 2 bytes).
 KV_GATHER_CHUNK_SIZE = 2097152
@@ -28,23 +28,26 @@ def reserve_fp8_sparse_prefill_workspaces(model) -> list[dict[str, torch.Tensor]
     """Reserve one workspace region per prefill microbatch for the FA3 sparse MLA kernel."""
     regions = 1 + int(model.args.enable_prefill_microbatch_overlap)
     q_token_capacity = model.batch_max_tokens
-    topk_size = triton.cdiv(model.config["index_topk"] + 3, 128) * 128
+    topk_size = triton.cdiv(x=model.config["index_topk"] + 3, y=128) * 128
     kv_token_capacity = min(KV_GATHER_CHUNK_SIZE, model.max_req_num * model.max_seq_length + q_token_capacity)
     if model.args.run_mode == "decode":
         kv_token_capacity = min(kv_token_capacity, q_token_capacity)
-    prefix = f"glm5_fp8_prefill_{model.att_state_role}"
-    gathered_kv = get_gpu_workspace_buffer(prefix + "_kv", regions * kv_token_capacity * 512, torch.bfloat16).view(
-        regions, kv_token_capacity, 1, 512
+    role = model.att_state_role
+    get_workspace = PrefillAttBackend.get_workspace
+    gathered_kv = get_workspace(
+        name="glm5_fp8_prefill_kv", role=role, numel=regions * kv_token_capacity * 512, dtype=torch.bfloat16
     )
-    chunk_topk_indices = get_gpu_workspace_buffer(
-        prefix + "_topk", regions * q_token_capacity * topk_size, torch.int32
+    gathered_kv = gathered_kv.view(regions, kv_token_capacity, 1, 512)
+    chunk_topk_indices = get_workspace(
+        name="glm5_fp8_prefill_topk", role=role, numel=regions * q_token_capacity * topk_size, dtype=torch.int32
     ).view(regions, q_token_capacity, topk_size)
-    chunk_cache_seqlens = get_gpu_workspace_buffer(prefix + "_seqlens", regions * q_token_capacity, torch.int32).view(
-        regions, q_token_capacity
-    )
-    cu_seqlens_q = get_gpu_workspace_buffer(prefix + "_cu_q", regions * (q_token_capacity + 1), torch.int32).view(
-        regions, q_token_capacity + 1
-    )
+    chunk_cache_seqlens = get_workspace(
+        name="glm5_fp8_prefill_seqlens", role=role, numel=regions * q_token_capacity, dtype=torch.int32
+    ).view(regions, q_token_capacity)
+    # Q offsets are written once per role. Keep them separate so roles with different capacities cannot overwrite them.
+    cu_seqlens_q = get_workspace(
+        name=f"glm5_fp8_prefill_cu_q_{role}", role=role, numel=regions * (q_token_capacity + 1), dtype=torch.int32
+    ).view(regions, q_token_capacity + 1)
     cu_seqlens_q.copy_(torch.arange(q_token_capacity + 1, dtype=torch.int32, device=cu_seqlens_q.device))
     return [
         {

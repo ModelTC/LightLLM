@@ -3,6 +3,7 @@
 The layer splits the fused qkv/beta/gate projection into column views, so the beta logits reach FlashKDA as a
 strided tensor, which its kernel rejects. The CUDA graph wrapper makes them contiguous; the eager path must too.
 """
+from unit_tests.common.attention.backends.step_fixture import create_att_state
 
 import json
 from dataclasses import asdict
@@ -30,7 +31,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 
 def _model(requested):
     model = type("Model", (), {})()
-    model.args = StartArgs(llm_prefill_att_backend=["auto", requested], linear_att_ssm_data_type="bfloat16")
+    model.args = StartArgs(att_backend={"kda.prefill": requested}, linear_att_ssm_data_type="bfloat16")
     model.data_type = torch.bfloat16
 
     return model
@@ -92,7 +93,8 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
     from lightllm.common.attention_state import AttentionStateManager
     from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig
     from lightllm.common.attention_state.bounded_att.kda.create_kda_state import create_kda_state
-    from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
+    from unit_tests.common.attention.backends.groups_runner import register_test_backends
+    from unit_tests.common.attention.backends.step_fixture import configure_attention_step
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from unit_tests.models.glm5_next.kda_test_utils import prepare_prefill_infer
 
@@ -115,16 +117,17 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
     infer.req_manager = SimpleNamespace(req_to_token_indexs=None)
     prepare_prefill_infer(infer)
     model = _model(requested)
-    from lightllm.common.attention import selector
+    from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 
-    spec = layer.attention_config(model)
-    prefill = selector.select(spec.prefill, "prefill", requested)
-    layer.prefill_impl = prefill.impl
-    layer.decode_impl = selector.select(spec.decode, "decode", "triton").impl
-    # The attention state the layer's group builds for this step.
-    builder = prefill.backend.create_build_context(prefill.impl.state_key[1], None)
-    att_state = prefill.backend.build(configure_attention_step(infer), builder)
-    infer.att_states = {layer.prefill_impl.state_key: att_state}
+    model.config = layer.network_config_
+    model.tp_world_size_ = layer.tp_world_size_
+    model.layers_infer = [layer]
+    model.att_state_role = "main"
+    model.is_mtp_draft_model = False
+    backend, _ = Glm5NextTpPartModel.create_att_backends(model=model)
+    infer.attention_backend_manager = register_test_backends(infer.att_state_role, layer.layer_num_, backend)
+    att_state = create_att_state(backend=backend, infer_state=configure_attention_step(infer))
+    infer.att_states = {backend: att_state}
     assert (att_state.flash_kda_fwd is not None) == (requested == "flashkda")
     if graph:
         capture = InferStateInfo()
@@ -135,13 +138,13 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
         fixed = layer._kda_prefill_cuda_graph_wrapper(mixed, gate, beta, capture, layer_weight)
         output = layer._kda_post(fixed, output_gate, infer, layer_weight)
         capture.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
-        forward = layer.prefill_impl.forward
+        forward = backend.prefill
 
         def check_destination(att_state, inputs, *, out, alloc_func):
             assert out.data_ptr() == fixed.data_ptr()
             return forward(att_state, inputs, out=out, alloc_func=alloc_func)
 
-        layer.prefill_impl.forward = check_destination
+        backend.prefill = check_destination
         capture.prefill_replay(infer)
     else:
         output = layer.context_attention_forward(hidden, infer, layer_weight)

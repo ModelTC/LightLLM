@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.basemodel.infer_struct import GraphMode
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_eagle.layer_infer.pre_layer_infer import Qwen3EaglePreLayerInfer
@@ -32,7 +33,9 @@ def test_qwen3_eagle_projects_concatenated_target_hiddens_before_inferstate(monk
     monkeypatch.setattr(
         LlamaTpPartModel,
         "_create_inferstate",
-        lambda self, model_input, microbatch_index=0: parent_calls.append((model_input, microbatch_index))
+        lambda self, model_input, microbatch_index, graph_mode, build_attention: parent_calls.append(
+            (model_input, microbatch_index, graph_mode, build_attention)
+        )
         or SimpleNamespace(model_input=model_input),
     )
     projected_hiddens = torch.empty((3, 4))
@@ -50,15 +53,19 @@ def test_qwen3_eagle_projects_concatenated_target_hiddens_before_inferstate(monk
         mtp_draft_input_hiddens=target_hiddens,
     )
 
-    infer_state = model._create_inferstate(model_input=model_input, microbatch_index=1)
+    infer_state = model._create_inferstate(
+        model_input=model_input, microbatch_index=1, graph_mode=GraphMode.REPLAY, build_attention=False
+    )
 
     assert projection_inputs == [target_hiddens]
     assert len(parent_calls) == 1
-    normalized_input, microbatch_index = parent_calls[0]
+    normalized_input, microbatch_index, graph_mode, build_attention = parent_calls[0]
     assert normalized_input is not model_input
     assert normalized_input.mtp_draft_input_hiddens is projected_hiddens
     assert model_input.mtp_draft_input_hiddens is target_hiddens
     assert microbatch_index == 1
+    assert graph_mode is GraphMode.REPLAY
+    assert build_attention is False
     assert infer_state.model_input is normalized_input
 
 
@@ -66,7 +73,7 @@ def test_qwen3_eagle_keeps_recursive_draft_hiddens_without_projection(monkeypatc
     monkeypatch.setattr(
         LlamaTpPartModel,
         "_create_inferstate",
-        lambda self, model_input, microbatch_index=0: model_input,
+        lambda self, model_input, microbatch_index, graph_mode, build_attention: model_input,
     )
     model = Qwen3EagleModel.__new__(Qwen3EagleModel)
     model.config = {"hidden_size": 4}

@@ -1,6 +1,6 @@
-"""Sparse MLA: absorbed MLA attention over the latent cache, restricted to each query's top-k cache slots.
+"""稀疏 MLA：在潜在缓存上吸收 MLA 注意力，限制为每个查询的 top-k 缓存槽。
 
-The indexer that selects the slots belongs to the model; this family takes its resolved indices.
+选择槽的索引器属于模型；这个家族接受其解析后的索引。
 """
 
 from dataclasses import dataclass
@@ -8,26 +8,26 @@ from typing import Optional
 
 import torch
 
-from .. import require_positive
-
 KV_CACHE_FORMATS = ("bf16", "fp8_ds_mla", "fp8_group64_e8m0")
 
 
 @dataclass(frozen=True)
-class SparseMLALayerConfig:
-    """Static configuration of sparse MLA layers over the compressed latent cache.
+class SparseMLAAttConfig:
+    """读取压缩 latent cache 的稀疏 MLA 静态层配置。
 
-    Head counts are per rank. Queries carry kv_lora_rank latent plus qk_rope_head_dim rotary
-    channels, like each cache row; the latent part supplies values. qk_rope_head_dim is 0 for NoPE
-    models (GLM-5). kv_cache_format is "bf16" (one [kv_lora_rank + qk_rope_head_dim] row per slot),
-    "fp8_ds_mla" (DeepSeek V3.2's packed FP8 rows with fp32 scales per 128 channels and a bf16
-    rotary part) or "fp8_group64_e8m0" (GLM-5's packed NoPE rows with E8M0 scales per 64 channels
-    followed by indexer fields).
+    注意力头数按 rank 计算。query 和缓存行都包含 kv_lora_rank 个 latent 通道和
+    qk_rope_head_dim 个 RoPE 通道，latent 部分提供 value。NoPE 模型（如 GLM-5）的
+    qk_rope_head_dim 为 0。kv_cache_format 支持以下格式。
 
-    topk is the indexer's selection width, the number of cache slots a query reads at most; None
-    when the layer's implementations do not need it. An indexer that scores pools of kpool keys
-    selects whole pools within the top-k width plus the newest, partial pool. causal=False lets each
-    query see all of its selected keys, as GLM-5's indexer already restricts them to visible keys.
+    - "bf16" 每槽存储一行 [kv_lora_rank + qk_rope_head_dim]。
+    - "fp8_ds_mla" 为 DeepSeek V3.2 的打包 FP8 行，每 128 个通道有一个 fp32 scale，
+      RoPE 部分以 bf16 存储。
+    - "fp8_group64_e8m0" 为 GLM-5 的打包 NoPE 行，每 64 个通道有一个 E8M0 scale，
+      后面跟索引器字段。
+
+    topk 是索引器为每个 query 选择缓存槽的上限，层实现无需此参数时为 None。
+    对每组 kpool 个 key 评分的索引器会在 top-k 宽度内选择整组，再纳入最新的未满组。
+    GLM-5 的索引器已经限制了 key 的可见性，因此 causal=False 时 query 可以读取全部选中的 key。
     """
 
     num_heads: int
@@ -41,9 +41,10 @@ class SparseMLALayerConfig:
     causal: bool = True
 
     def __post_init__(self) -> None:
-        require_positive(self, "num_heads", "kv_lora_rank", "kpool")
-        if self.topk is not None:
-            require_positive(self, "topk")
+        if self.num_heads <= 0 or self.kv_lora_rank <= 0 or self.kpool <= 0:
+            raise ValueError("num_heads, kv_lora_rank and kpool must be positive")
+        if self.topk is not None and self.topk <= 0:
+            raise ValueError("topk must be positive")
         if self.qk_rope_head_dim < 0:
             raise ValueError(f"qk_rope_head_dim must be >= 0, got {self.qk_rope_head_dim}")
         if self.kv_cache_format not in KV_CACHE_FORMATS:
@@ -51,14 +52,15 @@ class SparseMLALayerConfig:
 
 
 @dataclass(frozen=True)
-class SparseMLAPrefillLayerInputs:
-    """One layer's prefill operands.
+class SparseMLAPrefillAttInputs:
+    """单层 prefill 输入。
 
-    q is [query_tokens, num_heads, kv_lora_rank + qk_rope_head_dim]. topk_mem_indices is
-    [query_tokens, topk] cache slots, -1 for unused entries. An "fp8_ds_mla" cache also needs the
-    step's own keys in full precision: current_kv [new_tokens, 1, kv_lora_rank + qk_rope_head_dim]
-    and topk_indices, the same selection as positions in the step's ragged key layout, in which
-    q_kv_start_loc gives each query's request start ("fp8_group64_e8m0" only).
+    q 的形状为 [query_tokens, num_heads, kv_lora_rank + qk_rope_head_dim]。
+    topk_mem_indices 为 [query_tokens, topk] 的缓存槽号，未使用项为 -1。
+    "fp8_ds_mla" 还需要本步的全精度 current_kv，形状为
+    [new_tokens, 1, kv_lora_rank + qk_rope_head_dim]。topk_indices 表示同一组选中项
+    在本步变长 key 布局中的位置。q_kv_start_loc 给出每个 query 所属请求的起始位置，
+    仅用于 "fp8_group64_e8m0"。
     """
 
     q: torch.Tensor
@@ -71,9 +73,10 @@ class SparseMLAPrefillLayerInputs:
 
 
 @dataclass(frozen=True)
-class SparseMLADecodeLayerInputs:
-    """One layer's decode operands: q_nope [rows, num_heads, kv_lora_rank], q_rope [rows, num_heads,
-    qk_rope_head_dim], the cache and topk_mem_indices [rows, topk] cache slots (-1 unused)."""
+class SparseMLADecodeAttInputs:
+    """一层的解码操作数：q_nope [rows, num_heads, kv_lora_rank]，q_rope [rows, num_heads, qk_rope_head_dim]，缓存和
+    topk_mem_indices [rows, topk] 缓存槽位（-1 表示未使用）。
+    """
 
     q_nope: torch.Tensor
     q_rope: torch.Tensor
@@ -82,14 +85,12 @@ class SparseMLADecodeLayerInputs:
 
 
 @dataclass(frozen=True)
-class SWASparseMLALayerConfig:
-    """Static configuration of sparse MLA over a sliding-window cache plus an optional compressed cache
-    (DeepSeek V4).
+class SWASparseMLAAttConfig:
+    """稀疏 MLA 在滑动窗口缓存加上可选的压缩缓存（DeepSeek V4）上的静态配置。
 
-    num_heads is the per-rank head count padded to FlashMLA's 64-head tiles. Each query attends to
-    its selected sliding-window rows and, when compress_ratio is not 0, to selected rows of the cache
-    that compresses every compress_ratio tokens into one. has_attn_sink adds a learned sink logit per
-    head.
+    num_heads 是每个 rank 的注意力头数，按 FlashMLA 的 64 头分块补齐。
+    每个 query 读取选中的滑窗行。compress_ratio 非零时，它还读取选中的压缩缓存行，
+    每 compress_ratio 个 token 压缩成一行。has_attn_sink 为每个头添加一个学习得到的 sink logit。
     """
 
     num_heads: int
@@ -100,16 +101,17 @@ class SWASparseMLALayerConfig:
     has_attn_sink: bool = False
 
     def __post_init__(self) -> None:
-        require_positive(self, "num_heads", "head_dim_v")
+        if self.num_heads <= 0 or self.head_dim_v <= 0:
+            raise ValueError("num_heads and head_dim_v must be positive")
         if self.compress_ratio < 0:
             raise ValueError(f"compress_ratio must be >= 0, got {self.compress_ratio}")
 
 
 @dataclass(frozen=True)
-class SWASparseMLALayerInputs:
-    """One layer's operands: q [rows, num_heads, head_dim], FlashMLA attention views of the packed FP8
-    sliding-window cache and of the compressed cache (None without compression), per-row selected
-    indices with their valid lengths for each cache, and attn_sink [num_heads] when the layer has one."""
+class SWASparseMLAAttInputs:
+    """一层的操作数：q [rows, num_heads, head_dim]，FlashMLA 注意力视图的打包 FP8 滑动窗口缓存和压缩缓存（无压缩时为 None），每个缓存的选定行索引及其有效长度，以及当层有
+    sink 时的 attn_sink [num_heads]。
+    """
 
     q: torch.Tensor
     swa_cache: torch.Tensor

@@ -1,16 +1,14 @@
 from lightllm.common.attention_state.full_att import FullAttentionState
-from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 import torch
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.attention.backends.sparse_mla import (
-    SparseMLADecodeLayerInputs,
-    SparseMLALayerConfig,
-    SparseMLAPrefillLayerInputs,
+    SparseMLADecodeAttInputs,
+    SparseMLAPrefillAttInputs,
 )
 from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
@@ -32,19 +30,6 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
         )
         return
-
-    def attention_config(self, model) -> LayerAttentionConfig:
-        # Absorbed queries attend to the indexer's top-k slots of the latent cache in both phases.
-        config = SparseMLALayerConfig(
-            num_heads=self.tp_q_head_num_,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            softmax_scale=self.softmax_scale,
-            dtype=model.data_type,
-            kv_cache_format="fp8_ds_mla" if model.args.llm_kv_type == "fp8kv_dsa" else "bf16",
-            topk=self.index_topk,
-        )
-        return LayerAttentionConfig(config, config)
 
     def _get_qkv(
         self,
@@ -109,16 +94,20 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         del infer_state.get_topk_indices_params
 
         state = self._mla_state(infer_state.att_state_manager, infer_state.att_state_role)
-        inputs = SparseMLAPrefillLayerInputs(
+        inputs = SparseMLAPrefillAttInputs(
             q=q_all,
             kv_cache=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
             topk_mem_indices=topk_mem_indices,
             topk_indices=topk_indices,
             current_kv=kv,
         )
-        return self.prefill_impl.forward(
-            infer_state.att_states[self.prefill_impl.state_key],
-            inputs,
+        manager = infer_state.attention_backend_manager
+        backend = manager.get_backend(
+            role=infer_state.att_state_role, phase="prefill", logical_layer_id=self.layer_num_
+        )
+        return backend.prefill(
+            att_state=infer_state.att_states[backend],
+            layer_inputs=inputs,
             out=torch.empty(
                 (q_all.shape[0], q_all.shape[1], self.kv_lora_rank), dtype=q_all.dtype, device=q_all.device
             ),
@@ -145,15 +134,17 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         del infer_state.get_topk_indices_params
 
         state = self._mla_state(infer_state.att_state_manager, infer_state.att_state_role)
-        inputs = SparseMLADecodeLayerInputs(
+        inputs = SparseMLADecodeAttInputs(
             q_nope=q_nope,
             q_rope=q_rope,
             kv_cache=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
             topk_mem_indices=topk_mem_indices,
         )
-        return self.decode_impl.forward(
-            infer_state.att_states[self.decode_impl.state_key],
-            inputs,
+        manager = infer_state.attention_backend_manager
+        backend = manager.get_backend(role=infer_state.att_state_role, phase="decode", logical_layer_id=self.layer_num_)
+        return backend.decode(
+            att_state=infer_state.att_states[backend],
+            layer_inputs=inputs,
             out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device),
         )
 
@@ -187,7 +178,7 @@ class NsaInfer:
 
         if self.tp_world_size_ > 1:
             q_merge = torch.empty(
-                size=(self.tp_world_size_ * q.numel()),
+                size=((self.tp_world_size_ * q.numel(),)),
                 dtype=q.dtype,
                 device=q.device,
             )

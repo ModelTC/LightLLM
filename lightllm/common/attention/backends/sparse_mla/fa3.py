@@ -1,71 +1,60 @@
-"""FA3 sparse MLA: the top-k cache slots serve as a one-token-per-page page table.
+"""FA3 稀疏 MLA：顶部的 top-k 缓存槽作为每页一个 token 的页表。
 
-Decode covers bf16 caches, with or without rotary channels; prefill covers GLM-5's packed FP8 cache,
-which it dequantizes chunk by chunk.
+解码覆盖 bf16 缓存，带或不带旋转通道；prefill覆盖 GLM-5 的打包 FP8 缓存，
+它逐块反量化缓存。
 """
+from collections.abc import Callable
+
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 from dataclasses import dataclass
-from typing import NamedTuple, Optional
 
 import torch
 
-from lightllm.common.attention.backend import (
-    AttentionBackend,
-    AttentionBuildResources,
-    TensorAllocator,
-)
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from .. import keep_for_cuda_graph
-from . import SparseMLADecodeLayerInputs, SparseMLALayerConfig, SparseMLAPrefillLayerInputs
+from lightllm.common.attention.base_backend import AttRuntimeConfig, DecodeAttBackend, PrefillAttBackend
+from . import SparseMLADecodeAttInputs, SparseMLAAttConfig, SparseMLAPrefillAttInputs
 
 
 @dataclass(frozen=True)
 class FA3SparseMLADecodeAttState:
-    """cache_seqlens is the number of selected slots each request reads; cu_seqlens_k is its int32
-    prefix sum and cu_seqlens_q the int32 query offsets. causal is the kernel's mask mode, which
-    does not change one-row decode."""
+    """cache_seqlens 是每个请求读取的选定槽的数量；cu_seqlens_k 是其 int32 前缀和，cu_seqlens_q 是 int32 查询偏移量。causal 是内核的掩码模式，不会改变一行解码。"""
 
     cache_seqlens: torch.Tensor
     cu_seqlens_q: torch.Tensor
     cu_seqlens_k: torch.Tensor
     max_seqlen_q: int
-    causal: bool = True
-
-
-class FA3SparseMLADecodeBuildContext:
-    def __init__(self, *, topk: int, kpool: int = 1, causal: bool = True) -> None:
-        """topk is the indexer's selection width. An indexer that scores pools of kpool keys selects
-        whole pools within the top-k width plus the newest partial pool."""
-        self.topk = topk
-        self.kpool = kpool
-        self.causal = causal
-        self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
 
 
 class FA3SparseMLADecodeBackend(
-    AttentionBackend[SparseMLALayerConfig, FA3SparseMLADecodeAttState, SparseMLADecodeLayerInputs]
+    DecodeAttBackend[SparseMLAAttConfig, FA3SparseMLADecodeAttState, SparseMLADecodeAttInputs]
 ):
-    def __init__(self, layer_config: SparseMLALayerConfig) -> None:
-        super().__init__(layer_config)
-        if layer_config.kv_cache_format != "bf16":
+    def __init__(
+        self,
+        att_config: SparseMLAAttConfig,
+        *,
+        role: str = "main",
+        runtime_config: AttRuntimeConfig = AttRuntimeConfig(),
+    ) -> None:
+        super().__init__(att_config=att_config, role=role, runtime_config=runtime_config)
+        if att_config.kv_cache_format != "bf16":
             raise NotImplementedError("FA3 sparse MLA decode supports only the bf16 cache")
 
-    def forward(
+    def decode(
         self,
         att_state: FA3SparseMLADecodeAttState,
-        layer_inputs: SparseMLADecodeLayerInputs,
+        layer_inputs: SparseMLADecodeAttInputs,
         *,
         out: torch.Tensor,
-        alloc_func: TensorAllocator = torch.empty,
+        alloc_func: Callable[..., torch.Tensor] = torch.empty,
     ) -> torch.Tensor:
-        """Fill and return out with q_nope's shape."""
+        """用 q_nope 的形状填充并返回 out。"""
         from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
-        layer_config = self.layer_config
-        assert layer_inputs.q_nope.shape[1] == layer_config.num_heads, "q does not match the layer_config"
-        kv, rank, rope = layer_inputs.kv_cache, layer_config.kv_lora_rank, layer_config.qk_rope_head_dim
+        att_config = self.att_config
+        assert layer_inputs.q_nope.shape[1] == att_config.num_heads, "q does not match the att_config"
+        kv, rank, rope = layer_inputs.kv_cache, att_config.kv_lora_rank, att_config.qk_rope_head_dim
         if rope == 0:
-            # NoPE: only_qv attends with the latent query and cache alone.
+            # NoPE：only_qv 仅使用潜在查询和缓存进行注意力计算。
             flash_attn_with_kvcache(
                 q=None,
                 qv=layer_inputs.q_nope,
@@ -76,8 +65,8 @@ class FA3SparseMLADecodeBackend(
                 cu_seqlens_q=att_state.cu_seqlens_q,
                 cu_seqlens_k_new=att_state.cu_seqlens_k,
                 max_seqlen_q=att_state.max_seqlen_q,
-                softmax_scale=layer_config.softmax_scale,
-                causal=att_state.causal,
+                softmax_scale=att_config.softmax_scale,
+                causal=att_config.causal,
                 only_qv=True,
                 out=out,
             )
@@ -92,8 +81,8 @@ class FA3SparseMLADecodeBackend(
             cu_seqlens_q=att_state.cu_seqlens_q,
             cu_seqlens_k_new=att_state.cu_seqlens_k,
             max_seqlen_q=att_state.max_seqlen_q,
-            softmax_scale=layer_config.softmax_scale,
-            causal=att_state.causal,
+            softmax_scale=att_config.softmax_scale,
+            causal=att_config.causal,
             out=out,
         )
         return out
@@ -102,49 +91,25 @@ class FA3SparseMLADecodeBackend(
     def get_name() -> str:
         return "fa3_sparse_mla_decode"
 
-    build_context_type = FA3SparseMLADecodeBuildContext
-
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: FA3SparseMLADecodeBuildContext) -> FA3SparseMLADecodeAttState:
-        """A CUDA graph step keeps the length tensors per (microbatch, metadata size), rewritten in place."""
-        device, lengths, kpool = metadata.b_seq_len.device, metadata.b_seq_len, context.kpool
-        topk = torch.full((metadata.batch_size,), context.topk, dtype=lengths.dtype, device=device)
+    def create_att_state(self, infer_state: InferStateInfo) -> FA3SparseMLADecodeAttState:
+        """每步生成索引器对应的长度，replay 前更新捕获状态。"""
+        config = self.att_config
+        if config.topk is None:
+            raise ValueError("FA3 sparse MLA decode needs the layer config's topk")
+        device, lengths, kpool = infer_state.b_seq_len.device, infer_state.b_seq_len, config.kpool
         if kpool == 1:
-            cache_seqlens = torch.minimum(topk, lengths)
+            cache_seqlens = torch.clamp(input=lengths, max=config.topk)
         else:
-            cache_seqlens = torch.minimum(lengths // kpool * kpool, topk) + lengths % kpool
-        padded = torch.zeros(metadata.batch_size + 1, dtype=torch.int32, device=device)
+            cache_seqlens = torch.clamp(input=lengths // kpool * kpool, max=config.topk) + lengths % kpool
+        padded = torch.zeros(size=(infer_state.batch_size + 1,), dtype=torch.int32, device=device)
         padded[1:].copy_(cache_seqlens, non_blocking=True)
         cu_seqlens_k = padded.cumsum(dim=0, dtype=torch.int32)
-        if metadata.uses_cuda_graph:
-            key, store = (metadata.microbatch_index, metadata.batch_size), context._cuda_graph_tensors
-            cache_seqlens = keep_for_cuda_graph(store, (*key, "cache_seqlens"), cache_seqlens)
-            cu_seqlens_k = keep_for_cuda_graph(store, (*key, "cu_seqlens_k"), cu_seqlens_k)
         return FA3SparseMLADecodeAttState(
             cache_seqlens=cache_seqlens,
-            cu_seqlens_q=metadata.b1_cu_q_seq_len,
+            cu_seqlens_q=infer_state.b1_cu_q_seq_len,
             cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=metadata.max_q_seq_len,
-            causal=context.causal,
+            max_seqlen_q=infer_state.max_q_seq_len,
         )
-
-    @classmethod
-    def create_build_context(
-        cls, build_key: "_FA3DecodeKey", ctx: AttentionBuildResources
-    ) -> FA3SparseMLADecodeBuildContext:
-        if build_key.topk is None:
-            raise ValueError("FA3 sparse MLA decode needs the layer config's topk")
-        return FA3SparseMLADecodeBuildContext(**build_key._asdict())
-
-    @classmethod
-    def build_context_key(cls, layer_config: SparseMLALayerConfig) -> "_FA3DecodeKey":
-        return _FA3DecodeKey(layer_config.topk, layer_config.kpool, layer_config.causal)
-
-
-class _FA3DecodeKey(NamedTuple):
-    topk: Optional[int]
-    kpool: int
-    causal: bool
 
 
 @dataclass(frozen=True)
@@ -157,26 +122,32 @@ class FA3SparseMLAPrefillAttState:
 
 
 class FA3SparseMLAPrefillBackend(
-    AttentionBackend[SparseMLALayerConfig, FA3SparseMLAPrefillAttState, SparseMLAPrefillLayerInputs]
+    PrefillAttBackend[SparseMLAAttConfig, FA3SparseMLAPrefillAttState, SparseMLAPrefillAttInputs]
 ):
-    def __init__(self, layer_config: SparseMLALayerConfig) -> None:
-        super().__init__(layer_config)
-        if layer_config.kv_cache_format != "fp8_group64_e8m0" or layer_config.qk_rope_head_dim != 0:
+    def __init__(
+        self,
+        att_config: SparseMLAAttConfig,
+        *,
+        role: str = "main",
+        runtime_config: AttRuntimeConfig = AttRuntimeConfig(),
+    ) -> None:
+        super().__init__(att_config=att_config, role=role, runtime_config=runtime_config)
+        if att_config.kv_cache_format != "fp8_group64_e8m0" or att_config.qk_rope_head_dim != 0:
             raise NotImplementedError("FA3 sparse MLA prefill supports only the NoPE fp8_group64_e8m0 cache")
 
     @torch.no_grad()
-    def forward(
+    def prefill(
         self,
         att_state: FA3SparseMLAPrefillAttState,
-        layer_inputs: SparseMLAPrefillLayerInputs,
+        layer_inputs: SparseMLAPrefillAttInputs,
         *,
         out: torch.Tensor,
-        alloc_func: TensorAllocator = torch.empty,
+        alloc_func: Callable[..., torch.Tensor] = torch.empty,
     ) -> torch.Tensor:
-        """Fill and return out [query_tokens, num_heads, kv_lora_rank].
+        """填充并返回形状为 [query_tokens, num_heads, kv_lora_rank] 的 out。
 
-        The step's keys (cached history dequantized next to current_kv) are gathered in chunks into
-        the workspace; each chunk's partial attention merges into the output in FP32.
+        本步的 key 分块收集到工作区，其中包括 current_kv 和反量化后的历史缓存。
+        各分块的 attention 部分结果以 FP32 合并到输出。
         """
         import triton
         from sgl_kernel.flash_attn import flash_attn_with_kvcache
@@ -207,7 +178,7 @@ class FA3SparseMLAPrefillBackend(
         has_history = total_token_num > q_token_num
         if not has_history and prefill_cache_kv.stride(-1) != 1:
             prefill_cache_kv = prefill_cache_kv.contiguous()
-        # One chunk writes out directly; several merge their outputs in FP32 first.
+        # 一个块直接写入输出；多个块先在 FP32 中合并其输出。
         single_chunk = gather_chunk_size >= total_token_num
         output = softmax_lse = None
         for chunk_start in range(0, total_token_num, gather_chunk_size):
@@ -234,7 +205,7 @@ class FA3SparseMLAPrefillBackend(
                 )
                 chunk_kv = gathered_kv[:chunk_token_num].view(-1, 1, 1, 512)
             else:
-                # The step's own keys already form the complete request layout.
+                # 步骤的键已经形成了完整的请求布局。
                 chunk_kv = prefill_cache_kv[chunk_start : chunk_start + chunk_token_num].view(-1, 1, 1, 512)
             _compact_topk_indices_kernel[(q_token_num,)](
                 topk_indices,
@@ -249,7 +220,7 @@ class FA3SparseMLAPrefillBackend(
                 BLOCK=triton.next_power_of_2(topk_size),
             )
             chunk_output, chunk_softmax_lse, *_ = flash_attn_with_kvcache(
-                # only_qv ignores Q/K; these views avoid allocating placeholder tensors.
+                # only_qv 忽略 Q/K；这些视图避免分配占位张量。
                 q=q[..., :64],
                 k_cache=chunk_kv[..., :64],
                 qv=q,
@@ -258,7 +229,7 @@ class FA3SparseMLAPrefillBackend(
                 cache_seqlens=chunk_cache_seqlens,
                 cu_seqlens_q=cu_seqlens_q,
                 max_seqlen_q=1,
-                softmax_scale=self.layer_config.softmax_scale,
+                softmax_scale=self.att_config.softmax_scale,
                 causal=False,
                 only_qv=True,
                 num_splits=1,
@@ -268,9 +239,9 @@ class FA3SparseMLAPrefillBackend(
             if chunk_start == 0:
                 output, softmax_lse = chunk_output, chunk_softmax_lse
             else:
-                # Keep the online reduction in FP32 across all remaining chunks.
+                # 保持所有剩余块中的在线减少在 FP32 中进行。
                 output = output.float()
-                _merge_att_output_kernel[(q_token_num, triton.cdiv(q_head_num, 4))](
+                _merge_att_output_kernel[(q_token_num, triton.cdiv(x=q_head_num, y=4))](
                     output,
                     softmax_lse,
                     chunk_output,
@@ -290,8 +261,7 @@ class FA3SparseMLAPrefillBackend(
     def get_name() -> str:
         return "fa3_sparse_mla_prefill"
 
-    @classmethod
-    def build(cls, infer_state: InferStateInfo, context: None = None) -> FA3SparseMLAPrefillAttState:
+    def create_att_state(self, infer_state: InferStateInfo) -> FA3SparseMLAPrefillAttState:
         return FA3SparseMLAPrefillAttState(
             req_to_token_indexs=infer_state.req_to_token_indexs,
             b_req_idx=infer_state.b_req_idx,

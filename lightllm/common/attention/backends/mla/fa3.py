@@ -1,22 +1,24 @@
-"""FA3 MLA. Decode reuses the FA3 GQA decode step builder: its row grouping and page table are the same."""
+"""FA3 MLA。解码与 FA3 GQA 使用相同的行分组与页表填充函数。"""
+from collections.abc import Callable
+
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 
-from lightllm.common.attention.backend import (
-    AttentionBackend,
-    AttentionBuildResources,
-    TensorAllocator,
-)
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from ..gqa.fa3 import FA3GQADecodeAttState, FA3GQADecodeBuildContext, FA3PageTables, fa3_requires_cpu_cache_sync
-from . import MLADecodeLayerConfig, MLADecodeLayerInputs, MLAPrefillLayerConfig, MLAPrefillLayerInputs
+from lightllm.common.attention.base_backend import DecodeAttBackend, PrefillAttBackend
+from ..gqa.fa3 import FA3DecodeRuntimeConfig, FA3GQADecodeAttState, FA3GQADecodeBackend, FA3GQAPrefillBackend
+from . import MLADecodeAttConfig, MLADecodeAttInputs, MLAPrefillAttConfig, MLAPrefillAttInputs
+
+if TYPE_CHECKING:
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 
 @dataclass(frozen=True)
 class FA3MLAPrefillAttState:
-    """int32 cumulative query and kv offsets of the step's packed, expanded keys and values."""
+    """int32 累积查询和 kv 偏移量，用于步骤的打包和扩展键值。"""
 
     cu_seqlens_q: torch.Tensor
     cu_seqlens_k: torch.Tensor
@@ -24,24 +26,24 @@ class FA3MLAPrefillAttState:
     max_seqlen_k: int
 
 
-class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefillAttState, MLAPrefillLayerInputs]):
-    def forward(
+class FA3MLAPrefillBackend(PrefillAttBackend[MLAPrefillAttConfig, FA3MLAPrefillAttState, MLAPrefillAttInputs]):
+    def prefill(
         self,
         att_state: FA3MLAPrefillAttState,
-        layer_inputs: MLAPrefillLayerInputs,
+        layer_inputs: MLAPrefillAttInputs,
         *,
         out: torch.Tensor,
-        alloc_func: TensorAllocator = torch.empty,
+        alloc_func: Callable[..., torch.Tensor] = torch.empty,
     ) -> torch.Tensor:
-        """Fill and return out [query_tokens, num_heads, v_head_dim]; keys are expanded into alloc_func scratch.
+        """填充并返回 out [query_tokens, num_heads, v_head_dim]；键扩展到 alloc_func 临时缓冲区。
 
-        FA3 aligns the causal mask to each request's last key, so cached prefixes stay visible.
+        FA3 将因果掩码对齐到每个请求的最后一个键，因此已缓存前缀保持可见。
         """
         from lightllm.utils.sgl_utils import flash_attn_varlen_func
 
-        layer_config = self.layer_config
+        att_config = self.att_config
         q, k_nope = layer_inputs.q, layer_inputs.k_nope
-        nope_dim, heads = layer_config.qk_nope_head_dim, layer_config.num_heads
+        nope_dim, heads = att_config.qk_nope_head_dim, att_config.num_heads
         k = alloc_func((k_nope.shape[0], heads, q.shape[-1]), dtype=q.dtype, device=q.device)
         k[:, :, :nope_dim].copy_(k_nope)
         k[:, :, nope_dim:].copy_(layer_inputs.k_rope.expand(-1, heads, -1))
@@ -53,8 +55,8 @@ class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefill
             cu_seqlens_k=att_state.cu_seqlens_k,
             max_seqlen_q=att_state.max_seqlen_q,
             max_seqlen_k=att_state.max_seqlen_k,
-            softmax_scale=layer_config.softmax_scale,
-            causal=layer_config.causal,
+            softmax_scale=att_config.softmax_scale,
+            causal=att_config.causal,
             return_softmax_lse=False,
             out=out,
         )
@@ -64,40 +66,53 @@ class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefill
     def get_name() -> str:
         return "fa3_mla_prefill"
 
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: None = None) -> FA3MLAPrefillAttState:
+    def create_att_state(self, infer_state: InferStateInfo) -> FA3MLAPrefillAttState:
         assert (
-            metadata.b1_cu_q_seq_len is not None and metadata.b1_cu_kv_seq_len is not None
+            infer_state.b1_cu_q_seq_len is not None and infer_state.b1_cu_kv_seq_len is not None
         ), "prefill metadata fields required"
         return FA3MLAPrefillAttState(
-            cu_seqlens_q=metadata.b1_cu_q_seq_len.int(),
-            cu_seqlens_k=metadata.b1_cu_kv_seq_len.int(),
-            max_seqlen_q=metadata.max_q_seq_len,
-            max_seqlen_k=metadata.max_kv_seq_len,
+            cu_seqlens_q=infer_state.b1_cu_q_seq_len.int(),
+            cu_seqlens_k=infer_state.b1_cu_kv_seq_len.int(),
+            max_seqlen_q=infer_state.max_q_seq_len,
+            max_seqlen_k=infer_state.max_kv_seq_len,
         )
 
     @classmethod
     def requires_cpu_cache_sync(cls) -> bool:
-        return fa3_requires_cpu_cache_sync()
+        return FA3GQAPrefillBackend.fa3_requires_cpu_cache_sync()
 
 
-class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAttState, MLADecodeLayerInputs]):
-    def forward(
+class FA3MLADecodeBackend(DecodeAttBackend[MLADecodeAttConfig, FA3GQADecodeAttState, MLADecodeAttInputs]):
+    @classmethod
+    def create_runtime_config(cls, model: "TpPartBaseModel") -> FA3DecodeRuntimeConfig:
+        return FA3DecodeRuntimeConfig.from_model(model=model)
+
+    def __init__(
+        self,
+        att_config: MLADecodeAttConfig,
+        *,
+        role: str = "main",
+        runtime_config: FA3DecodeRuntimeConfig = FA3DecodeRuntimeConfig(),
+    ) -> None:
+        super().__init__(att_config=att_config, role=role, runtime_config=runtime_config)
+        self._page_tables: list[torch.Tensor] = []
+
+    def decode(
         self,
         att_state: FA3GQADecodeAttState,
-        layer_inputs: MLADecodeLayerInputs,
+        layer_inputs: MLADecodeAttInputs,
         *,
         out: torch.Tensor,
-        alloc_func: TensorAllocator = torch.empty,
+        alloc_func: Callable[..., torch.Tensor] = torch.empty,
     ) -> torch.Tensor:
-        """Fill and return out with q_nope's shape. The rotary part is FA3's q/k and the latent part its qv/v."""
+        """填充并返回 out，其形状与 q_nope 相同。旋转变量部分是 FA3 的 q/k，潜在部分是其 qv/v。"""
         from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 
-        layer_config = self.layer_config
-        kv, rank, page_size = layer_inputs.kv_cache, layer_config.kv_lora_rank, att_state.page_size
+        att_config = self.att_config
+        kv, rank, page_size = layer_inputs.kv_cache, att_config.kv_lora_rank, self.runtime_config.page_size
         flash_attn_with_kvcache(
             q=layer_inputs.q_rope,
-            k_cache=kv[:, :, rank:].view(-1, page_size, 1, layer_config.qk_rope_head_dim),
+            k_cache=kv[:, :, rank:].view(-1, page_size, 1, att_config.qk_rope_head_dim),
             v_cache=kv[:, :, :rank].view(-1, page_size, 1, rank),
             qv=layer_inputs.q_nope,
             page_table=att_state.page_table,
@@ -105,8 +120,8 @@ class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAtt
             cu_seqlens_q=att_state.cu_seqlens_q,
             cu_seqlens_k_new=att_state.cu_seqlens_k,
             max_seqlen_q=att_state.max_seqlen_q,
-            softmax_scale=layer_config.softmax_scale,
-            causal=layer_config.causal,
+            softmax_scale=att_config.softmax_scale,
+            causal=att_config.causal,
             window_size=(-1, -1),
             softcap=0.0,
             k_descale=None,
@@ -120,17 +135,14 @@ class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAtt
     def get_name() -> str:
         return "fa3_mla_decode"
 
-    build_context_type = FA3GQADecodeBuildContext
-
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: FA3GQADecodeBuildContext) -> FA3GQADecodeAttState:
-        return context.prepare(metadata)
-
-    @classmethod
-    def create_build_context(cls, build_key: None, ctx: AttentionBuildResources) -> FA3GQADecodeBuildContext:
-        # The latent cache is paged like an unquantized GQA cache.
-        return FA3GQADecodeBuildContext(page_size=ctx.page_size, page_table_view=FA3PageTables(ctx, ctx.page_size).view)
+    def create_att_state(self, infer_state: InferStateInfo) -> FA3GQADecodeAttState:
+        return FA3GQADecodeBackend.prepare_fa3_decode_state(
+            batch=infer_state,
+            config=self.runtime_config,
+            page_size=self.runtime_config.page_size,
+            page_tables=self._page_tables,
+        )
 
     @classmethod
     def requires_cpu_cache_sync(cls) -> bool:
-        return fa3_requires_cpu_cache_sync()
+        return FA3GQAPrefillBackend.fa3_requires_cpu_cache_sync()

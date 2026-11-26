@@ -22,8 +22,7 @@ command=(
     --linear_att_cache_size 2 --linear_att_ssm_data_type float32
     --graph_max_batch_size 1 --graph_max_len_in_batch "$CONTEXT_LENGTH"
     --llm_kv_type fp8kv_spt --kv_quant_calibration_config_path "$KV_CALIB"
-    --llm_prefill_att_backend flashinfer triton
-    --llm_decode_att_backend flashinfer triton
+    --att_backend gqa.prefill=flashinfer gdn.prefill=triton gqa.decode=flashinfer gdn.decode=triton
     --flashinfer_workspace_size 128
     --disable_vision --disable_audio
 )

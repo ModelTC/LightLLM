@@ -1,4 +1,9 @@
-"""Sparse MLA step builders: per-step lengths and the storage kept for CUDA graph replays."""
+from typing import Any
+from unit_tests.common.attention.backends.step_fixture import create_att_state
+from lightllm.common.attention.backends.sparse_mla import SparseMLAAttConfig
+
+"""稀疏MLA步骤构建器：每步长度和为CUDA图重放保留的存储。"""
+
 
 import pytest
 import torch
@@ -45,38 +50,43 @@ def assert_att_state(att_state, lengths, kpool):
 
 @pytest.mark.parametrize("kpool", [1, 4])
 def test_fa3_sparse_decode_lengths_follow_the_indexer_selection(kpool):
-    builder = FA3SparseMLADecodeBackend.build_context_type(topk=TOPK, kpool=kpool, causal=kpool == 1)
+    builder = make_backend(kpool=kpool, causal=kpool == 1)
     lengths = [1, 3, 5, 2047, 2048, 2049, 2051, 2052, 9000]
-    att_state = FA3SparseMLADecodeBackend.build(make_batch(lengths), builder)
+    att_state = create_att_state(backend=builder, infer_state=make_batch(lengths))
     assert_att_state(att_state, lengths, kpool)
-    assert att_state.causal == (kpool == 1) and att_state.max_seqlen_q == 1
+    assert builder.att_config.causal == (kpool == 1) and att_state.max_seqlen_q == 1
 
 
 @pytest.mark.parametrize("kpool", [1, 4])
 def test_fa3_sparse_decode_replay_rewrites_captured_storage_in_place(kpool):
-    builder = FA3SparseMLADecodeBackend.build_context_type(topk=TOPK, kpool=kpool)
+    builder = make_backend(kpool=kpool)
     captured_lengths = [7, 2049, 4096, 2]
-    captured = FA3SparseMLADecodeBackend.build(make_batch(captured_lengths, capacity=8192), builder)
+    captured_batch = make_batch(lengths=captured_lengths, capacity=8192)
+    captured = create_att_state(backend=builder, infer_state=captured_batch)
     assert_att_state(captured, captured_lengths, kpool)
     pointers = (captured.cache_seqlens.data_ptr(), captured.cu_seqlens_k.data_ptr())
 
     # A replay step of the same (microbatch, batch size) writes its lengths into the captured storage.
     replay_lengths = [3000, 5, 2051, 64]
-    replay = FA3SparseMLADecodeBackend.build(make_batch(replay_lengths, capacity=8192), builder)
-    assert (replay.cache_seqlens.data_ptr(), replay.cu_seqlens_k.data_ptr()) == pointers
+    replay_batch = make_batch(lengths=replay_lengths, capacity=8192)
+    replay = create_att_state(backend=builder, infer_state=replay_batch)
+    assert replay.cache_seqlens.data_ptr() != captured.cache_seqlens.data_ptr()
+    assert_att_state(att_state=captured, lengths=captured_lengths, kpool=kpool)
+    captured_batch.copy_for_cuda_graph(new_infer_state=replay_batch)
+    assert (captured.cache_seqlens.data_ptr(), captured.cu_seqlens_k.data_ptr()) == pointers
     assert_att_state(captured, replay_lengths, kpool)
 
-    # Eager steps never touch the captured storage.
-    eager = FA3SparseMLADecodeBackend.build(make_batch([1, 1, 1, 1]), builder)
+    # 即时步骤永远不会触碰捕获的存储。
+    eager = create_att_state(backend=builder, infer_state=make_batch([1, 1, 1, 1]))
     assert eager.cache_seqlens.data_ptr() not in pointers and eager.cu_seqlens_k.data_ptr() not in pointers
     assert_att_state(captured, replay_lengths, kpool)
 
 
 def test_fa3_sparse_decode_keeps_storage_per_microbatch_and_batch_size():
-    builder = FA3SparseMLADecodeBackend.build_context_type(topk=TOPK, kpool=4)
-    first = FA3SparseMLADecodeBackend.build(make_batch([9, 10], capacity=8192, microbatch=0), builder)
-    second = FA3SparseMLADecodeBackend.build(make_batch([2049, 4096], capacity=8192, microbatch=1), builder)
-    wider = FA3SparseMLADecodeBackend.build(make_batch([9, 10, 11], capacity=8192, microbatch=0), builder)
+    builder = make_backend(kpool=4)
+    first = create_att_state(backend=builder, infer_state=make_batch([9, 10], capacity=8192, microbatch=0))
+    second = create_att_state(backend=builder, infer_state=make_batch([2049, 4096], capacity=8192, microbatch=1))
+    wider = create_att_state(backend=builder, infer_state=make_batch([9, 10, 11], capacity=8192, microbatch=0))
     tensors = [t for att_state in (first, second, wider) for t in (att_state.cache_seqlens, att_state.cu_seqlens_k)]
     storage = {t.data_ptr() for t in tensors}
     assert len(storage) == 6
@@ -84,3 +94,17 @@ def test_fa3_sparse_decode_keeps_storage_per_microbatch_and_batch_size():
     assert_att_state(first, [9, 10], 4)
     assert_att_state(second, [2049, 4096], 4)
     assert_att_state(wider, [9, 10, 11], 4)
+
+
+def make_backend(kpool: Any, *, causal: Any = True):
+    config = SparseMLAAttConfig(
+        num_heads=16,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        softmax_scale=0.1,
+        dtype=torch.bfloat16,
+        topk=TOPK,
+        kpool=kpool,
+        causal=causal,
+    )
+    return FA3SparseMLADecodeBackend(att_config=config)

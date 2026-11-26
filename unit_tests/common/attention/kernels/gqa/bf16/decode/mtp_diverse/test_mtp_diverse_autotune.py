@@ -1,3 +1,4 @@
+from unit_tests.common.attention.backends.step_fixture import create_att_state
 import collections
 import inspect
 import json
@@ -11,9 +12,9 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel import cuda_graph as graph_module
-from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
-from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQADecodeBuildContext
-from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
+from lightllm.common.attention.backends.gqa import GQAAttConfig, GQAAttInputs
+from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend
+from unit_tests.common.attention.backends.step_fixture import AttentionStepConfig, configure_attention_step
 from lightllm.common.basemodel.triton_kernel import mtp_utils
 from lightllm.common.attention.kernels.gqa.bf16.decode.mtp_diverse import (
     mtp_diverse_attn as decode_module,
@@ -144,12 +145,7 @@ def test_decode_passes_saved_length_and_selected_block_n(monkeypatch):
     infer_state.total_token_num = int(inputs["b_seq_len"].sum())
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"], HOLD_REQUEST_ID=-1)
     monkeypatch.setattr(mtp_utils, "build_mtp_shared_group_markers", lambda *a, **kw: inputs["b_mark_shared_group"])
-    # Fixed-layout speculative decode: three rows per request.
-    att_state = TritonGQADecodeBackend.build(
-        configure_attention_step(infer_state, AttentionStepConfig(decode_rows_per_request=3)),
-        TritonGQADecodeBuildContext(),
-    )
-    infer_state.max_kv_seq_len = 32768
+    # 固定布局的投机解码：每个请求三行。
     calls = []
 
     def stage1(**kwargs):
@@ -159,9 +155,14 @@ def test_decode_passes_saved_length_and_selected_block_n(monkeypatch):
     monkeypatch.setattr(decode_module, "mtp_diverse_stage1_single_token", stage1)
     monkeypatch.setattr(decode_module, "mtp_diverse_stage2_single_token", lambda **kwargs: calls.append(kwargs))
     q, k = inputs["q"], inputs["k"]
-    layer_config = GQALayerConfig(num_heads=q.shape[1], num_kv_heads=k.shape[1], head_dim=q.shape[2], dtype=q.dtype)
-    layer_inputs = GQALayerInputs(q=q, k_cache=k, v_cache=inputs["v"])
-    TritonGQADecodeBackend(layer_config).forward(att_state, layer_inputs, out=torch.empty_like(q))
+    att_config = GQAAttConfig(num_heads=q.shape[1], num_kv_heads=k.shape[1], head_dim=q.shape[2], dtype=q.dtype)
+    layer_inputs = GQAAttInputs(q=q, k_cache=k, v_cache=inputs["v"])
+    impl = TritonGQADecodeBackend(att_config=att_config)
+    att_state = create_att_state(
+        backend=impl, infer_state=configure_attention_step(infer_state, AttentionStepConfig(decode_rows_per_request=3))
+    )
+    infer_state.max_kv_seq_len = 32768
+    impl.decode(att_state, layer_inputs, out=torch.empty_like(q))
     assert calls[0]["max_kv_len"] == 8193
     assert calls[0]["b_mark_shared_group"] is inputs["b_mark_shared_group"]
     assert calls[1]["block_n"] == 32

@@ -1,12 +1,13 @@
 from typing import TYPE_CHECKING
 import torch
-from typing import final
+from lightllm.common.attention.backends.mla import MLADecodeAttConfig, MLAPrefillAttConfig
+from lightllm.common.attention.base_backend import AttentionBackend
+from lightllm.common.attention.backends.mla import selector as mla_selector
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.distributed.communication_op import dist_group_manager
 
 logger = init_logger(__name__)
@@ -27,6 +28,44 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
 
     # infer state class
     infer_state_class = Deepseek2InferStateInfo
+
+    @classmethod
+    def create_att_backends(cls, model: "Deepseek2TpPartModel") -> tuple[AttentionBackend, ...]:
+        if not model.layers_infer:
+            return ()
+        layer_ids = tuple(layer.layer_num_ for layer in model.layers_infer)
+        config = model.config
+        softmax_scale = (config["qk_nope_head_dim"] + config["qk_rope_head_dim"]) ** -0.5
+        rope_scaling = config.get("rope_scaling")
+        if rope_scaling and rope_scaling.get("mscale_all_dim", 0):
+            from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
+
+            mscale = get_deepseek_mscale(scale=rope_scaling["factor"], mscale=rope_scaling["mscale_all_dim"])
+            softmax_scale *= mscale * mscale
+        causal = not model.is_mtp_draft_model or model.args.mtp_mode not in ("dspark", "dflash", "dflash2")
+        prefill_config = MLAPrefillAttConfig(
+            num_heads=config["num_attention_heads"] // model.tp_world_size_,
+            qk_nope_head_dim=config["qk_nope_head_dim"],
+            qk_rope_head_dim=config["qk_rope_head_dim"],
+            v_head_dim=config["v_head_dim"],
+            softmax_scale=softmax_scale,
+            dtype=model.data_type,
+            causal=causal,
+        )
+        decode_config = MLADecodeAttConfig(
+            num_heads=config["num_attention_heads"] // model.tp_world_size_,
+            kv_lora_rank=config["kv_lora_rank"],
+            qk_rope_head_dim=config["qk_rope_head_dim"],
+            softmax_scale=softmax_scale,
+            dtype=model.data_type,
+            causal=causal,
+        )
+        return (
+            mla_selector.select_mla_prefill_backend(
+                att_config=prefill_config, model=model, logical_layer_ids=layer_ids
+            ),
+            mla_selector.select_mla_decode_backend(att_config=decode_config, model=model, logical_layer_ids=layer_ids),
+        )
 
     def __init__(self, kvargs):
         super().__init__(kvargs)
