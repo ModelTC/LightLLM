@@ -940,6 +940,7 @@ def test_fp8_sparse_direct_decode_unknown_bound_fallback_and_strided_q(monkeypat
     original = flash_mla.flash_mla_with_kvcache
 
     def native(*args, **kwargs):
+        assert "out" not in kwargs
         calls.append(True)
         return original(*args, **kwargs)
 

@@ -227,8 +227,24 @@ def test_bf16_flashmla_prefill_output_and_peak(heads, strided, legacy, monkeypat
         assert storage[:, -1].isnan().all()
 
 
-def test_fp8_ds_mla_flashmla_decode_matches_reference_and_cuda_graph_replay():
-    pytest.importorskip("flash_mla")
+@pytest.fixture(params=["installed", "legacy_signature"])
+def flashmla_api(request, monkeypatch):
+    flash_mla = pytest.importorskip("flash_mla")
+    if request.param == "installed":
+        return
+
+    def without_out(kernel):
+        def legacy_kernel(**kwargs):
+            assert "out" not in kwargs
+            return kernel(**kwargs)
+
+        return legacy_kernel
+
+    for name in ("flash_mla_sparse_fwd", "flash_mla_with_kvcache"):
+        monkeypatch.setattr(flash_mla, name, without_out(getattr(flash_mla, name)))
+
+
+def test_fp8_ds_mla_flashmla_decode_matches_reference_and_cuda_graph_replay(flashmla_api):
     # FlashMLA's sparse FP8 decode runs 64-head tiles.
     attention = layer_attention(64, "fp8_ds_mla")
     assert attention.backend_name("decode") == "flashmla_sparse_mla_decode"
@@ -243,10 +259,8 @@ def test_fp8_ds_mla_flashmla_decode_matches_reference_and_cuda_graph_replay():
     [([0, 0], [40, 150]), ([100, 2100], [164, 2200])],
     ids=["no_cached_prefix", "cached_prefix"],
 )
-def test_fp8_ds_mla_flashmla_prefill_matches_reference(ready, ends):
+def test_fp8_ds_mla_flashmla_prefill_matches_reference(ready, ends, flashmla_api):
     """Cached history is read from the packed FP8 cache; the step's own keys come from current_kv in bf16."""
-    pytest.importorskip("flash_mla")
-
     heads = 64
     req_to_token = token_map(len(ends), seed=5)
     kv = torch.randn(SLOTS, 1, RANK + ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(6)) * 0.5

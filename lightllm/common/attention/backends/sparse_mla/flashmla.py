@@ -48,13 +48,18 @@ def _check_inputs(layer_config: SparseMLALayerConfig, q: torch.Tensor) -> None:
     assert q.shape[1] == layer_config.num_heads and q.dtype == layer_config.dtype, "q does not match the layer_config"
 
 
+@lru_cache(maxsize=2)
+def _supports_out(kernel) -> bool:
+    return "out" in signature(kernel).parameters
+
+
 @lru_cache(maxsize=1)
 def _bf16_prefill_out_kernel():
     try:
         from flash_mla import flash_mla_sparse_fwd
     except ImportError:
         return None
-    return flash_mla_sparse_fwd if "out" in signature(flash_mla_sparse_fwd).parameters else None
+    return flash_mla_sparse_fwd if _supports_out(flash_mla_sparse_fwd) else None
 
 
 def _bf16_prefill(q, kv, indices, softmax_scale, out):
@@ -132,9 +137,17 @@ class FlashMLASparsePrefillBackend(
             )
         if indices.ndim == 2:
             indices = indices.unsqueeze(1)
-        flash_mla_sparse_fwd(
-            q=q, kv=kv, indices=indices, sm_scale=layer_config.softmax_scale, d_v=layer_config.kv_lora_rank, out=out
+        out_kwargs = {"out": out} if _supports_out(flash_mla_sparse_fwd) else {}
+        result, _, _ = flash_mla_sparse_fwd(
+            q=q,
+            kv=kv,
+            indices=indices,
+            sm_scale=layer_config.softmax_scale,
+            d_v=layer_config.kv_lora_rank,
+            **out_kwargs,
         )
+        if not out_kwargs:
+            out.copy_(result)
         return out
 
     @staticmethod
@@ -200,9 +213,9 @@ class FlashMLASparseDecodeBackend(
             size=(packed.shape[0], 1, 1, packed.shape[-1]),
             stride=(packed.stride(0), packed.shape[-1], packed.shape[-1], packed.stride(-1)),
         )
-        # FlashMLA writes out in place unless it needs heads padded to its 64-head tile.
-        padded = q.shape[2] != heads
-        result, _ = flash_mla.flash_mla_with_kvcache(
+        kernel = flash_mla.flash_mla_with_kvcache
+        out_kwargs = {"out": out.unsqueeze(1)} if q.shape[2] == heads and _supports_out(kernel) else {}
+        result, _ = kernel(
             q=q,
             k_cache=kv,
             block_table=None,
@@ -213,9 +226,9 @@ class FlashMLASparseDecodeBackend(
             causal=False,
             is_fp8_kvcache=True,
             indices=indices,
-            out=None if padded else out.unsqueeze(1),
+            **out_kwargs,
         )
-        if padded:
+        if not out_kwargs:
             out.copy_(result[:, 0, :heads])
         return out
 
