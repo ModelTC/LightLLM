@@ -6,8 +6,8 @@ import torch
 
 from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from . import GDNLayerConfig, GDNLayerInputs
-from .triton import GDNDecodeAttState, GDNDecodeBuildContext, _mtp_conv, _pack_decode_inputs, _split_qkv
+from . import GDNLayerConfig, GDNLayerInputs, _split_qkv
+from .triton import GDNDecodeAttState, GDNDecodeBuildContext, _mtp_conv, _pack_decode_inputs
 
 
 class ReplayGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState, GDNLayerInputs]):

@@ -23,7 +23,7 @@ import lightllm.utils.backend_validator as backend_validator
 @pytest.mark.parametrize("use_out", [False, True])
 def test_prefill_output_storage_and_final_state_dtype(monkeypatch, cache_dtype, use_out):
     from lightllm.common.attention.backends.gdn import GDNLayerConfig, GDNLayerInputs
-    from lightllm.common.attention.backends.gdn.triton import GDNPrefillAttState, TritonGDNPrefillBackend
+    from lightllm.common.attention.backends.gdn.prefill import GDNPrefillAttState
     from lightllm.common.attention.kernels.gdn import causal_conv1d, fused_gdn_gating
 
     ssm_states = torch.zeros((1, 1, 2, 2), dtype=cache_dtype)

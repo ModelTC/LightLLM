@@ -12,10 +12,10 @@ from lightllm.common.attention.backends.gdn import GDNLayerConfig, GDNLayerInput
 from lightllm.common.attention.backends.gdn.replay import ReplayGDNDecodeBackend
 from lightllm.common.attention.backends.gdn.triton import (
     GDNDecodeBuildContext,
-    GDNPrefillBuildContext,
     TritonGDNDecodeBackend,
     TritonGDNPrefillBackend,
 )
+from lightllm.common.attention.backends.gdn.prefill import GDNPrefillBuildContext
 from lightllm.common.basemodel.infer_struct import GraphMode
 from unit_tests.common.attention.backends.linear_ref import (
     CAPACITY,

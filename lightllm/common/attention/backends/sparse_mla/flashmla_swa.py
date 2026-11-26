@@ -33,9 +33,9 @@ class FlashMLASWABuildContext:
         self.for_cuda_graph_capture = for_cuda_graph_capture
 
 
-class FlashMLASWAPrefillBackend(
-    AttentionBackend[SWASparseMLALayerConfig, FlashMLASWAAttState, SWASparseMLALayerInputs]
-):
+class _FlashMLASWABackend(AttentionBackend[SWASparseMLALayerConfig, FlashMLASWAAttState, SWASparseMLALayerInputs]):
+    for_cuda_graph_capture: bool
+
     def forward(
         self,
         att_state: FlashMLASWAAttState,
@@ -75,10 +75,6 @@ class FlashMLASWAPrefillBackend(
         )
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "flashmla_swa_sparse_mla_prefill"
-
     build_context_type = FlashMLASWABuildContext
 
     @classmethod
@@ -97,18 +93,24 @@ class FlashMLASWAPrefillBackend(
     @classmethod
     def create_build_context(cls, build_key: int, ctx: AttentionBuildResources) -> FlashMLASWABuildContext:
         # Layers with one compress ratio share the scheduler metadata of their kernel calls.
-        return FlashMLASWABuildContext(compress_ratios=(build_key,), for_cuda_graph_capture=False)
+        return FlashMLASWABuildContext(compress_ratios=(build_key,), for_cuda_graph_capture=cls.for_cuda_graph_capture)
 
     @classmethod
     def build_context_key(cls, layer_config: SWASparseMLALayerConfig) -> int:
         return layer_config.compress_ratio
 
 
-class FlashMLASWADecodeBackend(FlashMLASWAPrefillBackend):
+class FlashMLASWAPrefillBackend(_FlashMLASWABackend):
+    for_cuda_graph_capture = False
+
+    @staticmethod
+    def get_name() -> str:
+        return "flashmla_swa_sparse_mla_prefill"
+
+
+class FlashMLASWADecodeBackend(_FlashMLASWABackend):
+    for_cuda_graph_capture = True
+
     @staticmethod
     def get_name() -> str:
         return "flashmla_swa_sparse_mla_decode"
-
-    @classmethod
-    def create_build_context(cls, build_key: int, ctx: AttentionBuildResources) -> FlashMLASWABuildContext:
-        return FlashMLASWABuildContext(compress_ratios=(build_key,), for_cuda_graph_capture=True)

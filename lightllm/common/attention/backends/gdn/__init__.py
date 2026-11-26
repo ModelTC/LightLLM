@@ -68,3 +68,9 @@ class GDNLayerInputs:
     ssm_states: Optional[torch.Tensor] = None
     replay_state: Optional[object] = None
     layer_num: Optional[int] = None
+
+
+def _split_qkv(layer_config: GDNLayerConfig, mixed_qkv: torch.Tensor):
+    key_dim = layer_config.num_k_heads * layer_config.head_k_dim
+    value_dim = layer_config.num_v_heads * layer_config.head_v_dim
+    return torch.split(mixed_qkv, [key_dim, key_dim, value_dim], dim=-1)
