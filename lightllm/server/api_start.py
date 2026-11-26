@@ -375,6 +375,12 @@ def _launch_subprocesses(args: StartArgs):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
+    if args.llm_kv_type == "nvfp4kv":
+        assert args.kv_quant_calibration_config_path is None, "NVFP4 uses dynamic blocks and unit global scales"
+        assert args.data_type in ("fp16", "float16", "bf16", "bfloat16"), "NVFP4 requires float16 or bfloat16"
+        assert args.llm_prefill_att_backend[0] in ("auto", "triton", "fa3", "flashinfer")
+        assert args.llm_decode_att_backend[0] in ("auto", "triton", "fa3", "flashinfer")
+
     set_unique_server_name(args)
 
     # 确保单机上多实列不冲突

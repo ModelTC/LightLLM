@@ -5,6 +5,7 @@ import torch
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+from lightllm.common.basemodel.attention.nsa.nvfp4_glm5_next import NVFP4Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 from .layer_infer.post_layer_infer import Glm5NextMTPPostLayerInfer
 from .layer_infer.pre_layer_infer import Glm5NextMTPPreLayerInfer
@@ -109,9 +110,12 @@ class Glm5NextMTPModel(TpPartBaseModel):
                 latent_dim=config["kv_lora_rank"],
                 tp_rank=tp_rank,
                 tp_world_size=tp_world_size,
-                format="packed_group64_e8m0"
-                if args.llm_kv_type == "fp8kv_dsa"
-                else ("packed_fp16" if get_torch_dtype(args.data_type) == torch.float16 else "packed_bf16"),
+                format={"fp8kv_dsa": "packed_group64_e8m0", "nvfp4kv": "packed_nvfp4"}.get(
+                    args.llm_kv_type,
+                    "packed_fp16" if get_torch_dtype(args.data_type) == torch.float16 else "packed_bf16",
+                ),
+                rope_dim=0,
+                indexer_pool_size=config["index_kpool"],
             ),
             page_size=args.page_size,
             device="meta",
@@ -169,16 +173,21 @@ class Glm5NextMTPModel(TpPartBaseModel):
 
     def prepare_attention_states(self) -> None:
         super().prepare_attention_states()
-        if self.args.llm_kv_type == "fp8kv_dsa" and self.att_state_manager.get_full_attention_states(
+        if self.args.llm_kv_type == "fp8kv_dsa" and self.att_state_manager.has_full_attention_states(
             self.att_state_role
         ):
             # Reserve fixed scratch space before the shared KV capacity is profiled.
             Fp8Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
+        elif self.args.llm_kv_type == "nvfp4kv" and self.att_state_manager.has_full_attention_states(
+            self.att_state_role
+        ):
+            NVFP4Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
 
     def _init_att_backend(self):
-        backend_class = (
-            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
-        )
+        backend_class = {
+            "fp8kv_dsa": Fp8Glm5NextSparseAttBackend,
+            "nvfp4kv": NVFP4Glm5NextSparseAttBackend,
+        }.get(self.args.llm_kv_type, Glm5NextSparseAttBackend)
         self.prefill_att_backend = backend_class(model=self)
         self.decode_att_backend = self.prefill_att_backend
 

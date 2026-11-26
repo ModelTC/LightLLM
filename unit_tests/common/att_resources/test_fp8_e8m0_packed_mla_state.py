@@ -84,6 +84,7 @@ def test_factory_selects_independent_encoding_and_meta_geometry(pd_args: EasyDic
 def test_glm_main_and_draft_explicitly_select_encoding(draft: bool, kv_type: str) -> None:
     from lightllm.models.glm5_next.model import Glm5NextTpPartModel
     from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
+    from lightllm.common.attention_state.full_att.packed_mla.pooled_mla_state import PooledMLAState
 
     config = dict(
         num_hidden_layers=4,
@@ -107,7 +108,8 @@ def test_glm_main_and_draft_explicitly_select_encoding(draft: bool, kv_type: str
         tp_rank=1,
         tp_world_size=2,
     )
-    assert type(state) is (FP8E8M0PackedMLAState if kv_type == "fp8kv_dsa" else PackedMLAFullAttentionState)
+    assert type(state) is PooledMLAState
+    assert state.config.format == ("packed_group64_e8m0" if kv_type == "fp8kv_dsa" else "packed_bf16")
     assert state.config.logical_layer_groups == ((logical_ids[-1],),)
     assert state.storage is None
 

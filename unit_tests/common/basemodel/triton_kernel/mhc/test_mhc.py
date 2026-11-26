@@ -100,6 +100,41 @@ def test_empty_stream_expansion_and_contraction():
     torch.testing.assert_close(hc_contract(expanded, 4), embeddings)
 
 
+def test_mhc_offsets_above_int32_range():
+    if torch.cuda.mem_get_info()[0] < 32 * 1024 ** 3:
+        pytest.skip("Large-offset regression requires 32 GiB of available GPU memory")
+    streams, hidden = 4, 4096
+    boundary = 2 ** 31 // (streams * hidden)
+    tokens = boundary + 128
+    rows = torch.tensor([0, boundary - 1, boundary, tokens - 1], device="cuda")
+    x = torch.randn(tokens, streams * hidden, device="cuda", dtype=torch.bfloat16)
+    sample = x[rows]
+    fn = torch.randn(24, streams * hidden, device="cuda") * 0.005
+    scale = torch.randn(3, device="cuda")
+    base = torch.randn(24, device="cuda")
+    norm = torch.randn(hidden, device="cuda", dtype=torch.bfloat16)
+    expected = _hc_pre_reference(sample, fn, scale, base, streams, 1e-5, 1e-6, 20)
+    actual = hc_pre_norm(x, fn, scale, base, norm, streams, 1e-5, 1e-5, 1e-6, 20)
+    torch.testing.assert_close(actual[0][rows], rmsnorm_forward(expected[0], norm, 1e-5), atol=0.04, rtol=0.03)
+    for value, reference in zip(actual[1:], expected[1:]):
+        torch.testing.assert_close(value[rows], reference, atol=1e-4, rtol=1e-3)
+
+    updated = hc_post(actual[0], x, *actual[1:], streams)
+    updated_sample = updated[rows]
+    torch.testing.assert_close(
+        updated_sample,
+        _hc_post_reference(actual[0][rows], sample, actual[1][rows], actual[2][rows], streams),
+        atol=0.04,
+        rtol=0.02,
+    )
+    head_fn, head_scale, head_base = fn[:streams].contiguous(), scale[:1].contiguous(), base[:streams].contiguous()
+    head = hc_head(updated, head_fn, head_scale, head_base, streams, 1e-5, 1e-6)
+    inv_rms = torch.rsqrt(updated_sample.float().square().mean(-1, keepdim=True) + 1e-5)
+    gates = torch.sigmoid(F.linear(updated_sample.float(), head_fn) * inv_rms * head_scale + head_base) + 1e-6
+    expected_head = (updated_sample.view(len(rows), streams, hidden).float() * gates.unsqueeze(-1)).sum(1).bfloat16()
+    torch.testing.assert_close(head[rows], expected_head, atol=0.04, rtol=0.02)
+
+
 @pytest.mark.parametrize("missing", ["module", "kernel"])
 def test_mhc_reports_missing_deepgemm(monkeypatch, missing):
     monkeypatch.setattr(pre_norm, "LIGHTLLM_DISABLE_DEEPGEMM_MHC", False)

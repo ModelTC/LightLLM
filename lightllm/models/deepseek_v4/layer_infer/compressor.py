@@ -107,6 +107,7 @@ def fused_compress(
         infer_state.mem_index.reshape(-1) // compress_ratio,
         -1,
     )
+    nvfp4 = False
     if is_in_indexer:
         if out_buffer is None:
             out_buffer = torch.empty(
@@ -119,6 +120,7 @@ def fused_compress(
         compressed = infer_state.get_compressed_kv_state(logical_layer_id=layer_idx)
         out_page_size = compressed.config.block_token_size // compress_ratio
         out_buffer = compressed.get_layer_view(logical_layer_id=layer_idx).kv
+        nvfp4 = compressed.config.kv_format == "nvfp4_block16"
 
     if kv_score.shape[0] == 0:
         return out_buffer
@@ -186,6 +188,7 @@ def fused_compress(
             BYTES_PER_PAGE=out_buffer.stride(0),
             BLOCK=block_head,
             IS_IN_INDEXER=is_in_indexer,
+            NVFP4=nvfp4,
             num_warps=4,
         )
     else:
@@ -229,6 +232,7 @@ def fused_compress(
             BYTES_PER_PAGE=out_buffer.stride(0),
             BLOCK=block_head,
             IS_IN_INDEXER=is_in_indexer,
+            NVFP4=nvfp4,
             num_warps=4,
         )
 

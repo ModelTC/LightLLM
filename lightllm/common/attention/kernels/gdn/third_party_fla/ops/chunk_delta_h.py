@@ -84,6 +84,8 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
         boh = i_n * NT
+    bos = bos.to(tl.int64)
+    boh = boh.to(tl.int64)
 
     # [BK, BV]
     b_h1 = tl.zeros([64, BV], dtype=tl.float32)
@@ -102,7 +104,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     if SAVE_NEW_VALUE:
         v_new += ((bos * H + i_h) * V).to(tl.int64)
     stride_v = H * V
-    stride_h = H * K * V
+    stride_h = tl.cast(H * K * V, tl.int64)
     stride_k = Hg * K
     stride_w = H * K
     if USE_INITIAL_STATE:

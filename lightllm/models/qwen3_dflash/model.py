@@ -48,10 +48,11 @@ class Qwen3DFlashModel(LlamaTpPartModel):
 
     def _init_att_backend(self):
         super()._init_att_backend()
-        # FA3 is currently the only backend that supports non-causal block decode.
-        # TODO: Remove this restriction after Triton and FlashInfer support non-causal block decode.
-        if not isinstance(self.decode_att_backend, (Fa3AttBackend, Fp8Fa3AttBackend)):
-            raise NotImplementedError("Qwen3 DFlash decode requires FA3")
+        # Block proposals require a backend that explicitly supports non-causal decode.
+        if not isinstance(self.decode_att_backend, (Fa3AttBackend, Fp8Fa3AttBackend)) and not getattr(
+            self.decode_att_backend, "supports_parallel_block_decode", False
+        ):
+            raise NotImplementedError("Qwen3 DFlash decode requires FA3 or NVFP4 attention")
 
     def _init_infer_layer(self, start_layer_index=None):
         self.draft_layer_start = len(self.main_model.layers_infer)

@@ -21,8 +21,9 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
             state_class=FullAttentionState,
         )
         k, v = state.get_layer_view(logical_layer_id=self.layer_num_)
-        k = k.view(k.shape[0], self.tp_k_head_num_, self.head_dim_)
-        v = v.view(v.shape[0], self.tp_k_head_num_, self.head_dim_)
+        # Keep the physical row width, including NVFP4 data and block-scale bytes.
+        k = k.view(k.shape[0], self.tp_k_head_num_, -1)
+        v = v.view(v.shape[0], self.tp_k_head_num_, -1)
         q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         use_sliding_window = self.sliding_window_ > 0
         # DFlash2 attention is non-causal, so its local window must retain both

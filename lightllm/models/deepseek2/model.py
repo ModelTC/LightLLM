@@ -91,6 +91,8 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
             ),
             page_size=args.page_size,
             device="meta",
+            kv_type=args.llm_kv_type,
+            rope_dim=config["qk_rope_head_dim"],
         )
         return [state]
 

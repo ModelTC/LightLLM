@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from lightllm.common.attention_state.bounded_att.sliding_window.fp8_e8m0_swa_state import FP8E8M0SlidingWindowConfig
+from lightllm.common.attention_state.bounded_att.sliding_window.nvfp4_swa_state import NVFP4SlidingWindowConfig
 from lightllm.common.attention_state.full_att.compressed_att.compressed_att_state import CompressedAttentionConfig
 
 
@@ -16,7 +17,7 @@ class DSV4AttentionConfig:
     compress_ratios: tuple[int, ...]
     # 未编码的共享 KV 向量宽度，包含以 BF16 存储的 RoPE 部分。
     head_dim: int
-    # RoPE 特征宽度；其余特征按每 64 个元素一组编码为 FP8。
+    # 保留 BF16 的 RoPE 特征宽度；其余特征按 kv_format 编码。
     rope_head_dim: int
     # C4 indexer key 的特征宽度；每个 key 另有一个 FP32 scale。
     indexer_head_dim: int
@@ -25,6 +26,7 @@ class DSV4AttentionConfig:
     # 存储在各 TP rank 完整复制，只有 rank 0 向共享的 CPU/PD 区域写出。
     tp_rank: int = 0
     tp_world_size: int = 1
+    kv_format: str = "fp8_group64_e8m0"
 
     # 压缩 KV 按原始 token 的 256-token 块存储，KV 与 indexer 不得跨块拆开。
     compressed_kv_token_alignment: ClassVar[int] = 256
@@ -37,9 +39,12 @@ class DSV4AttentionConfig:
         assert self.indexer_head_dim > 0 and self.sliding_window > 0
         assert 0 <= self.tp_rank < self.tp_world_size
 
-    def create_swa_config(self) -> FP8E8M0SlidingWindowConfig:
+    def create_swa_config(self) -> FP8E8M0SlidingWindowConfig | NVFP4SlidingWindowConfig:
         """模型选择窗口及向量维度，具体编码和物理页布局由原子配置负责。"""
-        return FP8E8M0SlidingWindowConfig(
+        config_class = {"fp8_group64_e8m0": FP8E8M0SlidingWindowConfig, "nvfp4_block16": NVFP4SlidingWindowConfig}[
+            self.kv_format
+        ]
+        return config_class(
             logical_layer_ids=self.logical_layer_ids,
             window_size=self.sliding_window,
             kv_dim=self.head_dim,
@@ -61,6 +66,7 @@ class DSV4AttentionConfig:
             rope_dim=self.rope_head_dim,
             block_token_size=self.compressed_kv_token_alignment,
             indexer_dim=self.indexer_head_dim if compress_ratio == 4 else 0,
+            kv_format=self.kv_format,
             tp_rank=self.tp_rank,
             tp_world_size=self.tp_world_size,
         )
@@ -71,10 +77,13 @@ def create_attention_config(
     model_logical_layer_ids: tuple[int, ...],
     tp_rank: int = 0,
     tp_world_size: int = 1,
+    kv_type: str = "fp8kv_dsa",
 ) -> DSV4AttentionConfig:
+    kv_format = {"None": "fp8_group64_e8m0", "fp8kv_dsa": "fp8_group64_e8m0", "nvfp4kv": "nvfp4_block16"}[kv_type]
     ratios = model_config["compress_ratios"]
     return DSV4AttentionConfig(
         logical_layer_ids=model_logical_layer_ids,
+        kv_format=kv_format,
         compress_ratios=tuple(ratios[layer] if layer < len(ratios) else 0 for layer in model_logical_layer_ids),
         head_dim=model_config["head_dim"],
         rope_head_dim=model_config["qk_rope_head_dim"],

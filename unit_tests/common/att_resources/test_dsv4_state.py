@@ -12,6 +12,9 @@ from lightllm.common.attention_state.full_att.compressed_att.compressed_att_stat
 )
 from lightllm.common.attention_state.bounded_att import (
     BoundedAttentionState,
+    NVFP4SlidingWindowConfig,
+    NVFP4SlidingWindowState,
+    PackedSlidingWindowState,
     FP8E8M0SlidingWindowConfig,
     FP8E8M0SlidingWindowState,
     WindowCompressorStateConfig,
@@ -31,7 +34,7 @@ def make_config() -> DSV4AttentionConfig:
     )
 
 
-def make_full(ratio: int, device: str = "meta") -> CompressedAttentionState:
+def make_full(ratio: int, device: str = "meta", kv_format: str = "fp8_group64_e8m0") -> CompressedAttentionState:
     config = make_config()
     layout = CompressedAttentionConfig(
         logical_layer_groups=((5 if ratio == 4 else 8,),),
@@ -40,6 +43,7 @@ def make_full(ratio: int, device: str = "meta") -> CompressedAttentionState:
         rope_dim=config.rope_head_dim,
         block_token_size=config.compressed_kv_token_alignment,
         indexer_dim=config.indexer_head_dim if ratio == 4 else 0,
+        kv_format=kv_format,
     )
     return CompressedAttentionState(layout_config=layout, page_size=256, device=device)
 
@@ -209,11 +213,12 @@ def test_atomic_compressed_config_controls_layout(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("ratio", [4, 128])
-def test_pd_compressed_kv_preserves_partial_block(ratio: int, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("kv_format", ["fp8_group64_e8m0", "nvfp4_block16"])
+def test_pd_compressed_kv_preserves_partial_block(ratio: int, kv_format: str, monkeypatch: pytest.MonkeyPatch) -> None:
     from lightllm.utils.envs_utils import get_env_start_args
 
     monkeypatch.setattr(get_env_start_args(), "pd_kv_page_size", 256)
-    source, target = make_full(ratio=ratio, device="cuda"), make_full(ratio=ratio, device="cuda")
+    source, target = (make_full(ratio=ratio, device="cuda", kv_format=kv_format) for _ in range(2))
     source.allocate_storage(token_capacity=512)
     target.allocate_storage(token_capacity=512)
     source.storage.random_(0, 256)
@@ -230,11 +235,12 @@ def test_pd_compressed_kv_preserves_partial_block(ratio: int, monkeypatch: pytes
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("ratio", [4, 128])
-def test_compressed_cpu_and_token_copy(ratio: int, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("kv_format", ["fp8_group64_e8m0", "nvfp4_block16"])
+def test_compressed_cpu_and_token_copy(ratio: int, kv_format: str, monkeypatch: pytest.MonkeyPatch) -> None:
     from lightllm.utils.envs_utils import get_env_start_args
 
     monkeypatch.setattr(get_env_start_args(), "cpu_cache_token_page_size", 256)
-    source, target = make_full(ratio=ratio, device="cuda"), make_full(ratio=ratio, device="cuda")
+    source, target = (make_full(ratio=ratio, device="cuda", kv_format=kv_format) for _ in range(2))
     source.allocate_storage(token_capacity=512)
     target.allocate_storage(token_capacity=768)
     source.storage.random_(0, 256)
@@ -299,9 +305,11 @@ def test_compressed_token_copy_rejects_partial_blocks(ratio: int, token_count: i
 
 
 def make_atomic_state(kind: str, mtp_step: int = 0, device: str = "meta") -> BoundedAttentionState:
-    if kind == "swa":
-        return FP8E8M0SlidingWindowState(
-            config=FP8E8M0SlidingWindowConfig(logical_layer_ids=(2, 5), window_size=128, kv_dim=512, rope_dim=64),
+    if kind in ("swa", "swa_fp4"):
+        state_class = NVFP4SlidingWindowState if kind == "swa_fp4" else FP8E8M0SlidingWindowState
+        config_class = NVFP4SlidingWindowConfig if kind == "swa_fp4" else FP8E8M0SlidingWindowConfig
+        return state_class(
+            config=config_class(logical_layer_ids=(2, 5), window_size=128, kv_dim=512, rope_dim=64),
             request_capacity=3,
             mtp_step=mtp_step,
             device=device,
@@ -327,10 +335,10 @@ def make_atomic_state(kind: str, mtp_step: int = 0, device: str = "meta") -> Bou
 
 
 def runtime_buffer(state: BoundedAttentionState) -> torch.Tensor:
-    return state.swa_buffer if isinstance(state, FP8E8M0SlidingWindowState) else state.buffer
+    return state.swa_buffer if isinstance(state, PackedSlidingWindowState) else state.buffer
 
 
-@pytest.mark.parametrize("kind", ["swa", "kv_w8", "indexer_w8", "kv_w128", "generic_w12"])
+@pytest.mark.parametrize("kind", ["swa", "swa_fp4", "kv_w8", "indexer_w8", "kv_w128", "generic_w12"])
 def test_atomic_window_definitions(kind: str) -> None:
     source, target = make_atomic_state(kind), make_atomic_state(kind, mtp_step=5)
     assert source.get_pd_transfer_regions() == target.get_pd_transfer_regions()
@@ -351,12 +359,12 @@ def test_atomic_window_definitions(kind: str) -> None:
         assert source.swa_capacity_tokens == 128 and target.swa_capacity_tokens == 256
         for state in (source, target):
             attention_view = state.config.get_attention_view(packed_kv=state.get_layer_view(2))
-            assert attention_view.shape == (3 * state.swa_capacity_tokens // 128, 128, 1, 584)
+            assert attention_view.shape == (3 * state.swa_capacity_tokens // 128, 128, 1, state.config.kv_bytes)
             assert attention_view.stride(0) == state.config.get_packed_kv_bytes(128)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("kind", ["swa", "kv_w8", "indexer_w8", "kv_w128", "generic_w12"])
+@pytest.mark.parametrize("kind", ["swa", "swa_fp4", "kv_w8", "indexer_w8", "kv_w128", "generic_w12"])
 @pytest.mark.parametrize("length", [0, 1, 5, 127, 128, 129, 255, 260])
 @pytest.mark.parametrize("source_step,target_step", [(0, 5), (5, 0)])
 def test_atomic_pd_windows_ignore_mtp_capacity(kind: str, length: int, source_step: int, target_step: int) -> None:
@@ -369,7 +377,7 @@ def test_atomic_pd_windows_ignore_mtp_capacity(kind: str, length: int, source_st
     source.write_to_pd_page(req_idx=0, pd_page_buffers=pages, pd_page_index=1, state_token_len=length, layout=layout)
     target.read_from_pd_page(pd_page_buffers=pages, req_idx=1, pd_page_index=1, state_token_len=length, layout=layout)
     torch.cuda.synchronize()
-    if isinstance(source, FP8E8M0SlidingWindowState):
+    if isinstance(source, PackedSlidingWindowState):
         assert torch.equal(gather_swa_reference(source, 0, length), gather_swa_reference(target, 1, length))
     else:
         src, dst = runtime_buffer(source), runtime_buffer(target)
@@ -379,7 +387,7 @@ def test_atomic_pd_windows_ignore_mtp_capacity(kind: str, length: int, source_st
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("kind", ["swa", "kv_w8", "indexer_w8", "kv_w128", "generic_w12"])
+@pytest.mark.parametrize("kind", ["swa", "swa_fp4", "kv_w8", "indexer_w8", "kv_w128", "generic_w12"])
 def test_atomic_page_cpu_and_dp_roundtrip(kind: str) -> None:
     source = make_atomic_state(kind, mtp_step=3, device="cuda")
     target = make_atomic_state(kind, mtp_step=3, device="cuda")
@@ -422,7 +430,7 @@ def test_atomic_page_cpu_and_dp_roundtrip(kind: str) -> None:
     assert torch.equal(source.big_pages_pool.buffer[0], target.big_pages_pool.buffer[2])
     assert torch.equal(runtime_buffer(source)[:, 0], runtime_buffer(target)[:, 1])
     assert (pages[:2] == 53).all() and (pages[2, :64] == 53).all() and (pages[2, layout.byte_end :] == 53).all()
-    if isinstance(source, FP8E8M0SlidingWindowState):
+    if isinstance(source, PackedSlidingWindowState):
         assert torch.equal(gather_swa_reference(source, 0, 512), gather_swa_reference(target, 0, 512))
     else:
         for position in range(512 - source.config.overlap_tokens, 512):

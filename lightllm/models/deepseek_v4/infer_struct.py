@@ -3,7 +3,7 @@ from typing import Literal
 
 import torch
 from lightllm.common.basemodel import InferStateInfo
-from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState, WindowCompressorState
+from lightllm.common.attention_state.bounded_att import PackedSlidingWindowState, WindowCompressorState
 from lightllm.common.attention_state.full_att.compressed_att.compressed_att_state import (
     CompressedAttentionState,
     CompressedAttentionLayerView,
@@ -31,12 +31,12 @@ class DeepseekV4InferStateInfo(InferStateInfo):
     """
 
     @property
-    def swa_state(self) -> FP8E8M0SlidingWindowState:
+    def swa_state(self) -> PackedSlidingWindowState:
         return self.att_state_manager.get_state(
             model_role=self.att_state_role,
             state_type_filter="swa_",
             logical_layer_id=self.first_logical_layer_id,
-            state_class=FP8E8M0SlidingWindowState,
+            state_class=PackedSlidingWindowState,
         )
 
     def get_compressor_state(

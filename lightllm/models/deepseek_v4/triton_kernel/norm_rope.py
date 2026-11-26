@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 
 from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import _butterfly_stage
+from lightllm.common.basemodel.triton_kernel.kv_copy.packed_nvfp4 import store_packed_nvfp4
 from lightllm.utils.custom_kernel_utis import get_pdl_launch_kwargs
 
 
@@ -74,6 +75,7 @@ def _kv_norm_rope_to_swa_kernel(
     PAGE_BYTES: tl.constexpr,
     WRITE_SWA_RUNTIME: tl.constexpr,
     USE_PDL: tl.constexpr,
+    NVFP4: tl.constexpr = False,
 ):
     row = tl.program_id(0)
     dim = tl.arange(0, 512)
@@ -105,23 +107,37 @@ def _kv_norm_rope_to_swa_kernel(
         slot = tl.load(swa_write_slots + row) if destination == 0 else tl.load(swa_runtime_write_slots + row)
         slot = slot.to(tl.int64)
         valid_slot = True if destination == 0 else slot >= 0
-        page, offset = slot // SWA_PAGE_TOKEN_NUM, slot % SWA_PAGE_TOKEN_NUM
-        value_base = page * PAGE_BYTES + offset * 576
-        buffer = swa_kv_buffer if destination == 0 else req_to_swa
-        tl.store(
-            buffer.to(tl.pointer_type(tl.float8e4nv)) + value_base + groups[:, None] * 64 + cols[None, :],
-            quantized,
-            mask=(groups[:, None] < 7) & valid_slot,
-        )
-        tl.store(
-            buffer + page * PAGE_BYTES + SWA_PAGE_TOKEN_NUM * 576 + offset * 8 + groups,
-            exponent,
-            mask=(groups < 7) & valid_slot,
-        )
-        rope_ptr = tl.broadcast_to(
-            buffer.to(tl.pointer_type(tl.bfloat16)) + (value_base + 448) // 2 + cols[None, :], (8, 64)
-        )
-        tl.store(rope_ptr, rope, mask=(groups[:, None] == 7) & valid_slot)
+        if NVFP4:
+            store_packed_nvfp4(
+                x,
+                tl.reshape(rope, (512,)),
+                (swa_kv_buffer if destination == 0 else req_to_swa),
+                slot,
+                valid_slot,
+                512,
+                64,
+                SWA_PAGE_TOKEN_NUM,
+                PAGE_BYTES,
+                512,
+            )
+        else:
+            page, offset = slot // SWA_PAGE_TOKEN_NUM, slot % SWA_PAGE_TOKEN_NUM
+            value_base = page * PAGE_BYTES + offset * 576
+            buffer = swa_kv_buffer if destination == 0 else req_to_swa
+            tl.store(
+                buffer.to(tl.pointer_type(tl.float8e4nv)) + value_base + groups[:, None] * 64 + cols[None, :],
+                quantized,
+                mask=(groups[:, None] < 7) & valid_slot,
+            )
+            tl.store(
+                buffer + page * PAGE_BYTES + SWA_PAGE_TOKEN_NUM * 576 + offset * 8 + groups,
+                exponent,
+                mask=(groups < 7) & valid_slot,
+            )
+            rope_ptr = tl.broadcast_to(
+                buffer.to(tl.pointer_type(tl.bfloat16)) + (value_base + 448) // 2 + cols[None, :], (8, 64)
+            )
+            tl.store(rope_ptr, rope, mask=(groups[:, None] == 7) & valid_slot)
 
 
 @triton.jit
@@ -203,14 +219,15 @@ def fused_kv_norm_rope_to_swa(
     swa_page_token_num,
     swa_runtime_write_slots=None,
     req_to_swa=None,
+    kv_format="fp8_group64_e8m0",
 ):
     """将 BF16 KV [T, 512] 归一化、旋转并写入 packed SWA。
 
     swa_write_slots 对应当前 attention 使用的位置；swa_runtime_write_slots 将
     长 prefill 的尾部同时保留到 req_to_swa，值为 -1 时跳过该 token。
 
-    Each uint8 page stores 576 data bytes per slot followed by 8 scale bytes per
-    slot. NoPE uses FP8 with UE8M0 scales; the last 64 dimensions use BF16 RoPE.
+    Pages store KV data and scale regions separately. NoPE follows kv_format;
+    the last 64 dimensions retain BF16 RoPE for both encodings.
     """
     if kv.shape[0]:
         flat = swa_kv_buffer.view(-1)
@@ -228,6 +245,7 @@ def fused_kv_norm_rope_to_swa(
             SWA_PAGE_TOKEN_NUM=swa_page_token_num,
             PAGE_BYTES=swa_kv_buffer.shape[-1],
             WRITE_SWA_RUNTIME=swa_runtime_write_slots is not None,
+            NVFP4=kv_format == "nvfp4_block16",
             num_warps=1 if kv.shape[0] >= 512 else 8,
             num_stages=1,
             **get_pdl_launch_kwargs(kv.device),

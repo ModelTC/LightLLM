@@ -10,6 +10,11 @@ logger = init_logger(__name__)
 
 # Lazy backend class references by data type.
 data_type_to_backend = {
+    "nvfp4kv": {
+        "triton": "triton.nvfp4:NVFP4TritonAttBackend",
+        "fa3": "fa3.nvfp4:NVFP4Fa3AttBackend",
+        "flashinfer": "flashinfer.nvfp4:NVFP4FlashInferAttBackend",
+    },
     "None": {
         "triton": "triton.fp:TritonAttBackend",
         "fa3": "fa3.fp:Fa3AttBackend",
@@ -30,6 +35,7 @@ data_type_to_backend = {
 }
 
 mla_data_type_to_backend = {
+    "nvfp4kv": {"triton": "triton.nvfp4_mla:NVFP4MlaTritonAttBackend"},
     "None": {
         "triton": "triton.mla:MlaTritonAttBackend",
         "fa3": "fa3.mla:MlaFa3AttBackend",
@@ -51,7 +57,7 @@ neo_data_type_to_backend = {
     "None": {
         "triton": "triton.neo:NeoTritonAttBackend",
         "fa3": "fa3.neo:NeoFa3AttBackend",
-    }
+    },
 }
 
 

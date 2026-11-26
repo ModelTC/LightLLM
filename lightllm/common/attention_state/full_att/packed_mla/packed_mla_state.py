@@ -31,13 +31,15 @@ class PackedMLALogicalConfig:
     # 编码前的完整 latent 宽度；具体分块、scale 和 padding 由工厂转换。
     latent_dim: int
     # packed MLA 的逻辑格式；所有选项都包含 indexer。
-    format: Literal["packed_fp16", "packed_bf16", "packed_group128_fp8", "packed_group64_e8m0"]
+    format: Literal["packed_fp16", "packed_bf16", "packed_group128_fp8", "packed_group64_e8m0", "packed_nvfp4"]
     # indexer key 的逻辑宽度。
     indexer_dim: int = 128
     # latent 中保留原始 RoPE 精度的宽度；NoPE 宽度由 latent_dim - rope_dim 得到。
     rope_dim: int = 64
     tp_rank: int = 0
     tp_world_size: int = 1
+    # GLM K-pool stores one indexer entry per four page-aligned tokens.
+    indexer_pool_size: int = 1
 
     def __post_init__(self) -> None:
         assert self.logical_layer_groups and all(self.logical_layer_groups)
@@ -54,7 +56,9 @@ class PackedMLALogicalConfig:
             "packed_bf16",
             "packed_group128_fp8",
             "packed_group64_e8m0",
+            "packed_nvfp4",
         ), "unknown packed MLA logical format"
+        assert self.indexer_pool_size in (1, 4)
 
 
 @dataclass(frozen=True)
@@ -141,6 +145,7 @@ class PackedMLAAttentionConfig:
 class PackedMLALayerView:
     kv: torch.Tensor
     indexer_k: torch.Tensor
+    indexer_token_stride: int = 1
 
 
 class PackedMLAFullAttentionState(FullAttentionState):

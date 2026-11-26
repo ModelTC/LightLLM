@@ -25,7 +25,7 @@ def _hc_head_kernel(
     HC_EPS: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    token = tl.program_id(0)
+    token = tl.program_id(0).to(tl.int64)
     offsets = tl.arange(0, BLOCK_K)
     streams = tl.arange(0, STREAMS)
     squared = tl.zeros((BLOCK_K,), dtype=tl.float32)

@@ -1,4 +1,4 @@
-"""序列压缩后的历史 KV，采用 FP8/E8M0、BF16 RoPE 与可选 indexer 的 packed 编码。"""
+"""序列压缩后的 packed 历史 KV，保留 BF16 RoPE 与可选的 FP8 indexer。"""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from ...types import AxisMapping, TransferRegion
 from ..base_state import FullAttentionState
 from ..packed_mla.packed_transfer import transfer_packed_pages
 from ..dp_transfer import copy_packed_tokens
+from ...packed_kv_layout import PackedKVLayout
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
@@ -31,7 +32,7 @@ class CompressedAttentionConfig:
     compress_ratio: int
     # 每个压缩 KV 条目编码前的向量维度，包含末尾的 RoPE 部分；不是存储字节数。
     kv_dim: int
-    # 保留 BF16 的 RoPE 维度；其余维度按每 64 个元素一组编码为 FP8，scale 使用 E8M0。
+    # 保留 BF16 的 RoPE 维度；其余维度按 kv_format 编码。
     rope_dim: int
     # 每个物理块覆盖的原始 token 数，必须能被 compress_ratio 整除。
     # 块内先保存全部 KV 数据，再保存 scale 和可选 indexer；不能按单个压缩条目拆开搬运。
@@ -43,20 +44,22 @@ class CompressedAttentionConfig:
     tp_rank: int = 0
     # 当前模型 TP 组的 rank 数，只描述复制关系，不影响单个 rank 的存储字节数。
     tp_world_size: int = 1
+    kv_format: str = "fp8_group64_e8m0"
+
+    @property
+    def kv_layout(self) -> PackedKVLayout:
+        return PackedKVLayout(self.kv_dim, self.rope_dim, self.kv_format)
 
     @property
     def kv_entry_bytes(self) -> int:
         """单条压缩 KV 的数据与 scale 字节数，不包含块末尾 padding 或 indexer。"""
-        scale_count = (self.kv_dim - self.rope_dim) // 64
-        return self.kv_dim + self.rope_dim + (scale_count + 7) // 8 * 8
+        return self.kv_layout.entry_bytes
 
     @property
     def kv_block_bytes(self) -> int:
-        """块内 KV 数据及 E8M0 scale 区的字节跨度，包含数据行对齐，不包含 indexer。"""
+        """块内 KV 数据及 scale 区的字节跨度，包含对齐，不包含 indexer。"""
         entries = self.block_token_size // self.compress_ratio
-        # FP8 占一字节，BF16 RoPE 占两字节；每条目的 scale 区补齐到八字节。
-        data_bytes = self.kv_dim + self.rope_dim
-        return (entries * self.kv_entry_bytes + data_bytes - 1) // data_bytes * data_bytes
+        return self.kv_layout.packed_bytes(entries)
 
     @property
     def token_slot_bytes(self) -> int:
@@ -66,7 +69,7 @@ class CompressedAttentionConfig:
             entries = self.block_token_size // self.compress_ratio
             block_bytes += entries * (self.indexer_dim + torch.float32.itemsize)
         # 块既要能均摊到原始 token 索引域，也要保留 packed KV 数据行的对齐。
-        alignment = lcm(self.block_token_size, self.kv_dim + self.rope_dim)
+        alignment = lcm(self.block_token_size, self.kv_layout.alignment_bytes)
         return (block_bytes + alignment - 1) // alignment * alignment // self.block_token_size
 
     def get_attention_view(self, packed_kv: torch.Tensor) -> torch.Tensor:
@@ -78,7 +81,7 @@ class CompressedAttentionConfig:
         assert (
             self.compress_ratio > 0 and self.block_token_size > 0 and self.block_token_size % self.compress_ratio == 0
         )
-        assert self.kv_dim > self.rope_dim >= 0 and (self.kv_dim - self.rope_dim) % 64 == 0
+        PackedKVLayout(self.kv_dim, self.rope_dim, self.kv_format)
         assert self.indexer_dim >= 0 and 0 <= self.tp_rank < self.tp_world_size
         assert self.logical_layer_groups and all(self.logical_layer_groups), "storage layer groups must be nonempty"
         logical_layer_ids = [layer for group in self.logical_layer_groups for layer in group]
@@ -129,7 +132,7 @@ class CompressedAttentionState(FullAttentionState):
 
     def get_state_type(self) -> str:
         """返回序列压缩比例、FP8 分组及 E8M0 scale 编码对应的方案标记。"""
-        return f"compressed_c{self.config.compress_ratio}_fp8_group64_e8m0"
+        return f"compressed_c{self.config.compress_ratio}_{self.config.kv_format}"
 
     def allocate_storage(self, token_capacity: int) -> None:
         """按统一 token 容量分配本 State 的独立 KV 存储与 HOLD 页。"""
