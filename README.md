@@ -41,11 +41,12 @@ uv pip install .
 lightllm serve /models/my-model
 ```
 
-For CUDA 12.8 on Linux x86_64, download the `+cu128` wheel from the Native
-package CI artifact and run `uv pip install <wheel-path>`. The bundled installer
-requires `--profile cuda128` to select CUDA 12.8.
+Download and extract the `Native package` GitHub Actions artifact to install
+without a checkout. The experimental CUDA 12.8 profile requires driver
+580.95.05 or newer and explicit selection with `--profile cuda128`.
 
-On drivers 580.0 and newer, the bundled installer selects CUDA 13 by default:
+On drivers 580.0 and newer, the bundled installer selects CUDA 13 by default.
+Run it in the extracted bundle with a new venv path:
 
 ```bash
 python lightllm-install.py

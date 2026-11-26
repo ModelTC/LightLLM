@@ -60,9 +60,8 @@ jobs:
           PY
       - name: Install packaging tools
         run: python -m pip install uv==0.13.5
-      - name: Build sdist and wheel
+      - name: Build wheels
         run: |
-          uv build --sdist
           uv build --wheel
           LIGHTLLM_CUDA_PROFILE=cuda128 uv build --wheel
           LIGHTLLM_DOCKER_BUILD=1 uv build --wheel --out-dir "$RUNNER_TEMP/docker-wheel"
@@ -86,21 +85,43 @@ jobs:
           (dist / "installer-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
           (dist / "lightllm-install.py").write_bytes(Path("tools/install.py").read_bytes())
           PY
-      - name: Install wheel and check dependencies
+      - name: Run the bundled installer and check dependencies
         run: |
-          uv venv
-          uv pip install "dist/lightllm-$(cat VERSION)-py3-none-any.whl" pytest
+          mkdir -p "$RUNNER_TEMP/installer-bin" "$RUNNER_TEMP/installer-bundle"
+          printf '#!/bin/sh\nprintf "580.95.05\\n"\n' > "$RUNNER_TEMP/installer-bin/nvidia-smi"
+          chmod +x "$RUNNER_TEMP/installer-bin/nvidia-smi"
+          cp dist/* "$RUNNER_TEMP/installer-bundle/"
+          (
+            cd "$RUNNER_TEMP/installer-bundle"
+            export PATH="$RUNNER_TEMP/installer-bin:$PATH"
+            python lightllm-install.py --venv "$GITHUB_WORKSPACE/.venv" --python "${{ matrix.python-version }}"
+            python lightllm-install.py --profile cuda128 --venv "$RUNNER_TEMP/cuda128" --python "${{ matrix.python-version }}"
+          )
+          uv pip install --python .venv/bin/python pytest
           uv pip check
           uv pip freeze > dist/installed-py${{ matrix.python-version }}.txt
-          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/cuda128"
-          uv pip install --python "$RUNNER_TEMP/cuda128/bin/python" dist/*+cu128-*.whl
           uv pip check --python "$RUNNER_TEMP/cuda128/bin/python"
           uv pip freeze --python "$RUNNER_TEMP/cuda128/bin/python" > dist/installed-cu128-py${{ matrix.python-version }}.txt
-      - name: Check native ABI when CUDA is available
+      - name: Verify installed versions and check native ABI when CUDA is available
         run: |
-          for python in .venv/bin/python "$RUNNER_TEMP/cuda128/bin/python"; do
-            "$python" - <<'PY'
+          export LIGHTLLM_BUILD_VERSION="$(cat VERSION)"
+          cd "$RUNNER_TEMP"
+          for profile in cuda13 cuda128; do
+            target_python="$GITHUB_WORKSPACE/.venv/bin/python"
+            if [ "$profile" = cuda128 ]; then
+              target_python="$RUNNER_TEMP/cuda128/bin/python"
+            fi
+            "$target_python" - "$profile" <<'PY'
+          import os
+          import sys
+          from importlib.metadata import version
+
           import torch
+
+          cuda128 = sys.argv[1] == "cuda128"
+          expected_version = os.environ["LIGHTLLM_BUILD_VERSION"] + ("+cu128" if cuda128 else "")
+          assert version("lightllm") == expected_version, (sys.argv[1], version("lightllm"))
+          assert torch.version.cuda == ("12.8" if cuda128 else "13.0"), torch.version.cuda
           if torch.cuda.is_available():
               from sgl_kernel import causal_conv1d_fwd, causal_conv1d_update
           else:
@@ -115,7 +136,7 @@ jobs:
           export PATH="$GITHUB_WORKSPACE/.venv/bin:$PATH"
           cd "$RUNNER_TEMP"
           cuda128/bin/lightllm serve --help
-          cuda128/bin/python -c 'import cupy; import torch; import lightllm.server.api_start; assert torch.version.cuda == "12.8"'
+          cuda128/bin/python -c 'import cupy; import lightllm.server.api_start'
           lightllm --help
           lightllm serve --help
           lightllm serve --help-all

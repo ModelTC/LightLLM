@@ -179,27 +179,17 @@ def select_profile(profiles: list[Profile], driver: Version, forced: str | None 
     return max(automatic, key=lambda profile: profile.minimum_driver)
 
 
-def _target_python(venv: Path, requested: str | None) -> str:
-    if requested:
-        return requested
-    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    return str(python)
-
-
 def install(profile: Profile, venv: Path, python: str | None, dry_run: bool = False) -> list[list[str]]:
     uv = shutil.which("uv")
     if not uv:
         raise InstallerError("uv is required. Install it from https://docs.astral.sh/uv/")
-    # ``--python`` is a Python version used to create the venv. The package is
-    # always installed into that venv, so the pip target is stable and does not
-    # accidentally point at the installer process' interpreter.
-    target_python = _target_python(venv, None)
-    commands: list[list[str]] = []
-    if not venv.exists() and python is None:
-        commands.append([uv, "venv", "--python", profile.python or sys.executable, str(venv)])
-    elif not venv.exists():
-        commands.append([uv, "venv", "--python", python, str(venv)])
-    commands.append([uv, "pip", "install", "--python", target_python, "-r", profile.requirements, profile.wheel])
+    if venv.exists() or venv.is_symlink():
+        raise InstallerError(f"{venv} already exists. Choose a new --venv path.")
+    target_python = venv / "bin/python"
+    commands = [
+        [uv, "venv", "--python", python or profile.python or sys.executable, str(venv)],
+        [uv, "pip", "install", "--python", str(target_python), "-r", profile.requirements, profile.wheel],
+    ]
     if dry_run:
         return commands
     for command in commands:
@@ -219,8 +209,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Install LightLLM using the wheel matching the NVIDIA driver.")
     parser.add_argument("--manifest", default=_default_manifest(), help="local path or URL of the release manifest")
     parser.add_argument("--profile", help="force a profile instead of automatic driver selection")
-    parser.add_argument("--venv", type=Path, default=Path(".venv"), help="target uv virtual environment")
-    parser.add_argument("--python", dest="python_executable", help="Python version used to create the target venv")
+    parser.add_argument("--venv", type=Path, default=Path(".venv"), help="new uv virtual environment path")
+    parser.add_argument("--python", dest="python_executable", help="Python version or executable for the target venv")
     parser.add_argument("--dry-run", action="store_true", help="print commands without changing the environment")
     args = parser.parse_args(argv)
 
@@ -231,14 +221,11 @@ def main(argv: list[str] | None = None) -> int:
         manifest, source = _read_manifest(args.manifest)
         profiles = load_profiles(manifest, source)
         profile = select_profile(profiles, hardware.driver, args.profile)
-        if profile.python and not sys.version.startswith(profile.python) and args.python_executable is None:
-            print(f"uv will create the target environment with Python {profile.python} for profile {profile.name}")
-        python_version = args.python_executable or profile.python
         print(
             f"Detected {hardware.machine}, NVIDIA driver {'.'.join(map(str, hardware.driver.parts))}; "
             f"selected profile {profile.name}"
         )
-        commands = install(profile, args.venv, python_version, args.dry_run)
+        commands = install(profile, args.venv, args.python_executable, args.dry_run)
         for command in commands:
             print("$ " + " ".join(command))
         if not args.dry_run:

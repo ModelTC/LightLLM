@@ -38,7 +38,7 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
 
 解压 ``Native package`` CI 产物后，安装器用 ``nvidia-smi`` 检测 NVIDIA 驱动，
 并用 ``uv`` 安装对应的 LightLLM wheel。驱动从 580.0 起默认选择 ``cuda13``，
-驱动版本达到 570.124.06 即可显式选择 ``cuda128``。该配置已在 580.95.05 驱动上验证模型生成。
+实验性的 ``cuda128`` 要求驱动版本达到 580.95.05，并且必须显式选择。
 
 .. code-block:: console
 
@@ -49,6 +49,7 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
 可以使用 ``--dry-run`` 只查看选择结果和安装命令。需要使用 CUDA 12.8 时，
 运行 ``python lightllm-install.py --profile cuda128 --venv .venv-cu128``。
 安装器从 manifest 读取 wheel 和依赖文件的位置，支持本地路径和 HTTPS URL。
+两套配置默认使用 Python 3.12。每次安装都需要一个尚不存在的 ``--venv`` 路径。
 
 在 Linux x86_64 上，也可在新的 Python 虚拟环境中直接安装 ``+cu128`` wheel：
 
@@ -64,14 +65,10 @@ CUDA 12.8 wheel 固定使用 PyTorch 2.11.0、torchvision 0.26.0 的 CUDA 12.8 �
 
 .. code-block:: console
 
-    $ uv build --sdist
     $ uv build --wheel
     $ uv pip install dist/lightllm-1.2.0-py3-none-any.whl
 
-用 ``uv build --wheel`` 直接从源码目录构建 wheel。uv 解包源码包时会拒绝
-算子配置中带冒号的路径。
-包含本次修改的版本发布后，用户即可使用 ``uv pip install lightllm==<发布版本>``。
-已有的旧版 PyPI 包不一定包含这个命令入口和依赖声明。
+CI 交付 wheel，因为 uv 解包源码包时会拒绝算子配置中带冒号的路径。
 
 稳定版与 nightly
 ~~~~~~~~~~~~~~~~
@@ -83,14 +80,9 @@ CUDA 12.8 wheel 固定使用 PyTorch 2.11.0、torchvision 0.26.0 的 CUDA 12.8 �
 CUDA 13 和 CUDA 12.8 两套依赖配置。升级时同步更新固定版本的 PyTorch、Triton 和
 SGLang kernels，并在 GPU 上验证新组合。
 
-``Native package`` 工作流目前生成 wheel、源码包和完整安装版本记录，
-保存为 GitHub Actions artifacts，尚未自动上传 PyPI 或 nightly 索引。
-下载后可直接 ``uv pip install <wheel路径>``；包上传到索引后，可按实际版本安装：
-
-.. code-block:: console
-
-    $ uv pip install lightllm==1.2.0
-    $ uv pip install lightllm==1.2.1.dev1234
+稳定版和 nightly 均通过 ``Native package`` 工作流的 GitHub Actions artifacts 交付。
+产物包含 wheel、安装器、manifest 和完整安装版本记录。下载解压后可运行随包安装器，
+也可在新环境中用 ``uv pip install <wheel路径>`` 安装选定的 wheel。
 
 基础安装包含 PyTorch/Triton 算子及 Qwen3.5 线性注意力所需的 SGLang kernel。
 FlashInfer、独立 FlashMLA、DeepGEMM、DeepEP、

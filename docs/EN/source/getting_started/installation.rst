@@ -39,33 +39,33 @@ To deliver an installable artifact:
 
 .. code-block:: console
 
-    $ uv build --sdist
     $ uv build --wheel
     $ uv pip install dist/lightllm-1.2.0-py3-none-any.whl
 
-Build the wheel directly from the checkout with ``uv build --wheel``. uv's
-source archive extractor rejects colons in the bundled kernel configuration
-paths. After a release containing these changes is published, users can install
-its version with ``uv pip install lightllm==<release-version>``. Older PyPI
-releases do not necessarily contain this CLI or dependency metadata.
+The workflow distributes wheels because uv rejects colons in kernel
+configuration paths when extracting source archives.
 
-CUDA 12.8 on Linux x86_64
+Driver-aware installation
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Download and extract the ``Native package`` CI artifact. Install the
-``+cu128`` wheel into a fresh environment:
+Download and extract the ``Native package`` CI artifact. From the extracted
+directory, run:
 
 .. code-block:: console
 
-    $ uv venv --python 3.12
+    $ python lightllm-install.py
     $ source .venv/bin/activate
-    $ uv pip install ./lightllm-1.2.0+cu128-py3-none-any.whl
+    $ lightllm serve /models/my-model
 
-The wheel pins PyTorch 2.11.0 and torchvision 0.26.0 for CUDA 12.8,
-Triton 3.6.0, the SGLang 0.4.5 CUDA 12.9 kernel wheel and CuPy for CUDA 12.
+Both profiles default to Python 3.12. The installer requires a new
+``--venv`` path for each installation. Use ``--dry-run`` to inspect the selection
+and commands.
+
 The bundled ``lightllm-install.py`` selects ``cuda13`` on drivers 580.0 and
-newer. CUDA 12.8 requires explicit selection on all eligible drivers (570.124.06
-or newer). GPU generation was verified on driver 580.95.05. Run
+newer. The experimental CUDA 12.8 profile requires driver 580.95.05 or newer
+and explicit selection. Its PyTorch 2.11.0 and torchvision 0.26.0 builds use
+CUDA 12.8, while the SGLang 0.4.5 kernel wheel uses CUDA 12.9. The profile also
+pins Triton 3.6.0 and CuPy for CUDA 12. Run
 ``python lightllm-install.py --profile cuda128 --venv .venv-cu128`` to select
 CUDA 12.8 explicitly. To build that wheel from source, run
 ``LIGHTLLM_CUDA_PROFILE=cuda128 uv build --wheel``.
@@ -132,16 +132,10 @@ package the latest LightLLM code with the same CUDA 13 and CUDA 12.8 profiles as
 stable builds. Upgrade the pinned PyTorch, Triton and SGLang kernels together
 and validate the new combination on a GPU.
 
-The ``Native package`` workflow currently uploads wheels, source distributions
-and installed-version records as GitHub Actions artifacts. It does not yet
-publish to PyPI or a nightly index. Install downloaded wheels with
-``uv pip install <wheel-path>``. Once published to an index, select an actual
-released version, for example:
-
-.. code-block:: console
-
-    $ uv pip install lightllm==1.2.0
-    $ uv pip install lightllm==1.2.1.dev1234
+Both channels are delivered as ``Native package`` GitHub Actions artifacts.
+Each artifact contains the wheels, installer, manifest, and installed-version
+records. Use the bundled installer or install the selected wheel in a fresh
+environment with ``uv pip install <wheel-path>``.
 
 .. _build_from_docker:
 
