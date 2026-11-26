@@ -112,7 +112,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 - KV cache 由模型层在 attention 之前写入，不由 backend 写入。
 - attention state 显式传参，不经过全局 forward context；microbatch overlap 的两个并发步各自持有 attention state。
-- workspace 在进程内按 (设备, 名称, 大小, dtype) 共享（`lightllm/utils/workspace_utils.py` 的 `get_gpu_workspace_buffer`）。
+- workspace 在进程内按 (设备, 名称, dtype) 共享（`lightllm/utils/workspace_utils.py` 的 `get_gpu_workspace_buffer`）：不大于已有缓冲区的请求得到其前缀视图，因此草稿模型复用主模型的预留，不再各自分配。同一名称同一时刻只能有一个使用者，同时存活的缓冲区（如两个 microbatch 的区域）使用不同名称；GLM-5 的 FP8 prefill 区域按 microbatch 命名，DeepSeek V4 的 SWA 暂存区按每层布局命名。
 
 ## 4. 接口契约
 

@@ -43,6 +43,32 @@ def test_prefill_workspace_reservation(current_cuda_device, overlap, run_mode):
         torch.testing.assert_close(views["cu_seqlens_q"], torch.arange(9, dtype=torch.int32, device="cuda"))
 
 
+def test_draft_models_reuse_the_main_models_prefill_regions(current_cuda_device, monkeypatch):
+    from lightllm.utils import workspace_utils
+
+    monkeypatch.setattr(workspace_utils, "_workspace_buffers", {})
+
+    def model(role, batch_max_tokens):
+        return SimpleNamespace(
+            args=SimpleNamespace(enable_prefill_microbatch_overlap=True, run_mode="normal"),
+            batch_max_tokens=batch_max_tokens,
+            max_req_num=2,
+            max_seq_length=13,
+            config={"index_topk": 2048, "index_kpool": 4},
+            att_state_role=role,
+        )
+
+    main = prefill_workspace.reserve_fp8_sparse_prefill_workspaces(model("main", 8))
+    draft = prefill_workspace.reserve_fp8_sparse_prefill_workspaces(model("draft0", 4))
+    for main_region, draft_region in zip(main, draft):
+        for key in main_region:
+            # Each microbatch region of the draft is a prefix of the same region of the main model.
+            assert draft_region[key].data_ptr() == main_region[key].data_ptr(), key
+    assert main[0]["gathered_kv"].data_ptr() != main[1]["gathered_kv"].data_ptr()
+    assert draft[0]["chunk_topk_indices"].shape == (4, 2176)
+    torch.testing.assert_close(main[1]["cu_seqlens_q"], torch.arange(9, dtype=torch.int32, device="cuda"))
+
+
 def test_prefill_microbatches_use_independent_scratch_during_graph_replay(monkeypatch, current_cuda_device):
     monkeypatch.setattr(prefill_workspace, "KV_GATHER_CHUNK_SIZE", 7)
     backend = _make_workspace_backend(8, overlap=True)
@@ -53,7 +79,9 @@ def test_prefill_microbatches_use_independent_scratch_during_graph_replay(monkey
     first.check(first.run())
     second.check(second.run())
     pointers = [{key: value.data_ptr() for key, value in buffers.items()} for buffers in backend._prefill_workspaces]
-    assert all(pointers[0][key] != pointers[1][key] for key in pointers[0])
+    # Each microbatch writes its own scratch; the read-only query offsets are one shared arange.
+    assert all(pointers[0][key] != pointers[1][key] for key in pointers[0] if key != "cu_seqlens_q")
+    assert pointers[0]["cu_seqlens_q"] == pointers[1]["cu_seqlens_q"]
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Attention must not allocate a new prefill workspace")

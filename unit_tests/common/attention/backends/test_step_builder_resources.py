@@ -81,16 +81,22 @@ def test_flashinfer_gqa_builders_share_one_workspace_and_mla_has_its_own(monkeyp
     assert allocations[-1][3] == 1
 
 
-def test_workspace_key_includes_size_and_dtype(monkeypatch):
+def test_workspace_requests_of_one_name_share_the_largest_storage(monkeypatch):
     monkeypatch.setattr(workspace_utils, "get_current_device_id", lambda: 0)
-    monkeypatch.setattr(workspace_utils.torch, "empty", lambda *args, **kwargs: object())
+    monkeypatch.setattr(workspace_utils.torch, "empty", lambda size, dtype, device: torch.zeros(size, dtype=dtype))
     monkeypatch.setattr(workspace_utils, "_workspace_buffers", {})
     get = workspace_utils.get_gpu_workspace_buffer
 
+    large = get("shared", 2048)
+    assert get("shared", 2048) is large
+    # A smaller request, as a draft model's, is a prefix view of the existing storage.
     small = get("shared", 1024)
+    assert small.data_ptr() == large.data_ptr() and small.numel() == 1024
     assert get("shared", 1024) is small
-    assert get("shared", 2048) is not small
-    assert get("shared", 1024, dtype=torch.float16) is not small
+    # A larger request cannot reuse it, and other names and dtypes never share.
+    assert get("shared", 4096).data_ptr() != large.data_ptr()
+    assert get("shared", 1024, dtype=torch.float16).data_ptr() != large.data_ptr()
+    assert get("other", 1024).data_ptr() != large.data_ptr()
 
 
 @pytest.mark.parametrize("backend", [FA3GQAPrefillBackend, FA3GQADecodeBackend])

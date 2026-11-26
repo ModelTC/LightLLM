@@ -88,6 +88,42 @@ def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.Monke
         assert workspace.shape == (3, capacity + 128, 585)
 
 
+def test_draft_models_reuse_the_main_swa_workspace_of_the_same_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lightllm.utils import workspace_utils
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", str(torch.cuda.current_device()))
+    monkeypatch.setattr(workspace_utils, "_workspace_buffers", {})
+
+    def model(role, layers, batch_max_tokens=512):
+        return SimpleNamespace(
+            args=SimpleNamespace(run_mode="normal", enable_prefill_microbatch_overlap=False),
+            config=dict(
+                compress_ratios=[0, 4, 128],
+                head_dim=512,
+                qk_rope_head_dim=64,
+                index_head_dim=128,
+                sliding_window=128,
+            ),
+            layers_infer=[SimpleNamespace(layer_num_=layer) for layer in layers],
+            tp_rank_=0,
+            tp_world_size_=4,
+            batch_max_tokens=batch_max_tokens,
+            max_req_num=8,
+            att_state_role=role,
+        )
+
+    main, capacity = reserve_swa_prefill_workspace(model("main", range(3)))
+    draft, draft_capacity = reserve_swa_prefill_workspace(model("draft0", [0]))
+    # The one-layer draft stages into the main model's first layer slice.
+    assert draft_capacity == capacity and draft.shape == (1, *main.shape[1:])
+    assert draft.data_ptr() == main.data_ptr()
+    # A draft with another layout gets its own buffer instead of a misaligned view.
+    other, _ = reserve_swa_prefill_workspace(model("draft1", [0], batch_max_tokens=1024))
+    assert other.data_ptr() != main.data_ptr()
+
+
 def _pool(page_size, pages):
     stride = ((page_size * 584 + 575) // 576) * 576
     buffer = torch.zeros((pages, stride), dtype=torch.uint8, device="cuda")
