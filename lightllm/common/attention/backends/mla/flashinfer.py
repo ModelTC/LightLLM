@@ -99,8 +99,8 @@ def _check_config(layer_config, config: FlashInferMLABuilderConfig) -> None:
 class FlashInferMLAPrefillBackend(
     AttentionBackend[MLAPrefillLayerConfig, FlashInferMLAPrefillAttState, MLAPrefillLayerInputs]
 ):
-    def __init__(self, layer_config: MLAPrefillLayerConfig) -> None:
-        super().__init__(layer_config)
+    @classmethod
+    def _check_supported(cls, layer_config: MLAPrefillLayerConfig) -> None:
         if not layer_config.causal:
             raise NotImplementedError("FlashInfer MLA prefill supports only causal attention")
 
@@ -176,8 +176,8 @@ class FlashInferMLAPrefillBackend(
 class FlashInferMLADecodeBackend(
     AttentionBackend[MLADecodeLayerConfig, FlashInferMLADecodeAttState, MLADecodeLayerInputs]
 ):
-    def __init__(self, layer_config: MLADecodeLayerConfig) -> None:
-        super().__init__(layer_config)
+    @classmethod
+    def _check_supported(cls, layer_config: MLADecodeLayerConfig) -> None:
         # Each query row reads its own request prefix, which is causal across a request's rows.
         if not layer_config.causal:
             raise NotImplementedError("FlashInfer MLA decode supports only causal attention")

@@ -30,6 +30,9 @@ class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, TritonMLAP
         # 256-dim queries (GLM-4 MoE Lite: 192 nope + 64 rope) run the contiguous-KV GQA prefill kernel
         # over keys expanded per head.
         self.expands_keys = layer_config.qk_nope_head_dim + layer_config.qk_rope_head_dim == 256
+
+    @classmethod
+    def _check_supported(cls, layer_config: MLAPrefillLayerConfig) -> None:
         if not layer_config.causal:
             raise NotImplementedError("Triton MLA prefill supports only causal attention")
 
@@ -155,8 +158,8 @@ class TritonMLADecodeBuildContext:
 
 
 class TritonMLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, TritonMLADecodeAttState, MLADecodeLayerInputs]):
-    def __init__(self, layer_config: MLADecodeLayerConfig) -> None:
-        super().__init__(layer_config)
+    @classmethod
+    def _check_supported(cls, layer_config: MLADecodeLayerConfig) -> None:
         # Each query row reads its own request prefix, which is causal across a request's rows.
         if not layer_config.causal:
             raise NotImplementedError("Triton MLA decode supports only causal attention")

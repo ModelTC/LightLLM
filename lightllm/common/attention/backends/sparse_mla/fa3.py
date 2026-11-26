@@ -45,8 +45,8 @@ class FA3SparseMLADecodeBuildContext:
 class FA3SparseMLADecodeBackend(
     AttentionBackend[SparseMLALayerConfig, FA3SparseMLADecodeAttState, SparseMLADecodeLayerInputs]
 ):
-    def __init__(self, layer_config: SparseMLALayerConfig) -> None:
-        super().__init__(layer_config)
+    @classmethod
+    def _check_supported(cls, layer_config: SparseMLALayerConfig) -> None:
         if layer_config.kv_cache_format != "bf16":
             raise NotImplementedError("FA3 sparse MLA decode supports only the bf16 cache")
 
@@ -159,8 +159,8 @@ class FA3SparseMLAPrefillAttState:
 class FA3SparseMLAPrefillBackend(
     AttentionBackend[SparseMLALayerConfig, FA3SparseMLAPrefillAttState, SparseMLAPrefillLayerInputs]
 ):
-    def __init__(self, layer_config: SparseMLALayerConfig) -> None:
-        super().__init__(layer_config)
+    @classmethod
+    def _check_supported(cls, layer_config: SparseMLALayerConfig) -> None:
         if layer_config.kv_cache_format != "fp8_group64_e8m0" or layer_config.qk_rope_head_dim != 0:
             raise NotImplementedError("FA3 sparse MLA prefill supports only the NoPE fp8_group64_e8m0 cache")
 

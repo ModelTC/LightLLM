@@ -88,8 +88,8 @@ def _bf16_prefill(q, kv, indices, softmax_scale, out):
 class FlashMLASparsePrefillBackend(
     AttentionBackend[SparseMLALayerConfig, FlashMLASparsePrefillAttState, SparseMLAPrefillLayerInputs]
 ):
-    def __init__(self, layer_config: SparseMLALayerConfig) -> None:
-        super().__init__(layer_config)
+    @classmethod
+    def _check_supported(cls, layer_config: SparseMLALayerConfig) -> None:
         if layer_config.kv_cache_format not in ("bf16", "fp8_ds_mla"):
             raise NotImplementedError(f"FlashMLA sparse prefill does not support {layer_config.kv_cache_format!r}")
 
@@ -151,8 +151,8 @@ class FlashMLASparsePrefillBackend(
 class FlashMLASparseDecodeBackend(
     AttentionBackend[SparseMLALayerConfig, FlashMLASparseDecodeAttState, SparseMLADecodeLayerInputs]
 ):
-    def __init__(self, layer_config: SparseMLALayerConfig) -> None:
-        super().__init__(layer_config)
+    @classmethod
+    def _check_supported(cls, layer_config: SparseMLALayerConfig) -> None:
         if layer_config.kv_cache_format not in ("fp8_ds_mla", "fp8_group64_e8m0"):
             raise NotImplementedError("FlashMLA sparse decode supports only the packed FP8 caches")
 

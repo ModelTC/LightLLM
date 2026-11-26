@@ -139,8 +139,8 @@ def _mtp_conv(cfg: GDNLayerConfig, inputs: GDNLayerInputs, att_state: GDNDecodeA
 
 
 class TritonGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState, GDNLayerInputs]):
-    def __init__(self, layer_config: GDNLayerConfig) -> None:
-        super().__init__(layer_config)
+    @classmethod
+    def _check_supported(cls, layer_config: GDNLayerConfig) -> None:
         if layer_config.replay:
             raise NotImplementedError("Triton GDN decode updates native SSM states; replay state needs replay decode")
 

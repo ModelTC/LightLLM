@@ -123,7 +123,7 @@ class FlashInferGQADecodeBuildContext:
         )
 
 
-def _check_supported(layer_config: GQALayerConfig) -> None:
+def _check_gqa_config(layer_config: GQALayerConfig) -> None:
     if not (
         layer_config.causal
         and layer_config.sliding_window == (-1, -1)
@@ -173,9 +173,9 @@ def _run(
 
 
 class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQAPrefillAttState, GQALayerInputs]):
-    def __init__(self, layer_config: GQALayerConfig) -> None:
-        super().__init__(layer_config)
-        _check_supported(layer_config)
+    @classmethod
+    def _check_supported(cls, layer_config: GQALayerConfig) -> None:
+        _check_gqa_config(layer_config)
 
     def forward(
         self,
@@ -250,9 +250,9 @@ class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQA
 
 
 class FlashInferGQADecodeBackend(AttentionBackend[GQALayerConfig, FlashInferGQADecodeAttState, GQALayerInputs]):
-    def __init__(self, layer_config: GQALayerConfig) -> None:
-        super().__init__(layer_config)
-        _check_supported(layer_config)
+    @classmethod
+    def _check_supported(cls, layer_config: GQALayerConfig) -> None:
+        _check_gqa_config(layer_config)
 
     def forward(
         self,

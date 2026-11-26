@@ -78,8 +78,13 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
     """Prepare shared state once per step and run attention with each layer's operands."""
 
     def __init__(self, layer_config: LayerConfig) -> None:
+        self._check_supported(layer_config)
         self.layer_config = layer_config
         self._build_context: Any = _UNINITIALIZED
+
+    @classmethod
+    def _check_supported(cls, layer_config: LayerConfig) -> None:
+        """Raise NotImplementedError if this backend cannot run the layer config."""
 
     @cached_property
     def state_key(self) -> tuple:

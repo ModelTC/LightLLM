@@ -95,8 +95,11 @@ class TritonKDAPrefillBackend(AttentionBackend[KDALayerConfig, KDAPrefillAttStat
 
     def __init__(self, layer_config: KDALayerConfig) -> None:
         super().__init__(layer_config)
-        _check_state(layer_config, replay=False)
         _check_prefill_kernel(layer_config)
+
+    @classmethod
+    def _check_supported(cls, layer_config: KDALayerConfig) -> None:
+        _check_state(layer_config, replay=False)
 
     def forward(self, att_state, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
         from lightllm.common.attention.kernels.kda.causal_conv1d_qkv import causal_conv1d_qkv
@@ -139,8 +142,11 @@ class ReplayKDAPrefillBackend(AttentionBackend[KDALayerConfig, KDAPrefillAttStat
 
     def __init__(self, layer_config: KDALayerConfig) -> None:
         super().__init__(layer_config)
-        _check_state(layer_config, replay=True)
         _check_prefill_kernel(layer_config)
+
+    @classmethod
+    def _check_supported(cls, layer_config: KDALayerConfig) -> None:
+        _check_state(layer_config, replay=True)
 
     def forward(self, att_state, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
         cfg, inputs = self.layer_config, layer_inputs
@@ -212,8 +218,8 @@ def _conv_update(inputs: KDALayerInputs, att_state: GDNDecodeAttState):
 
 
 class TritonKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState, KDALayerInputs]):
-    def __init__(self, layer_config: KDALayerConfig) -> None:
-        super().__init__(layer_config)
+    @classmethod
+    def _check_supported(cls, layer_config: KDALayerConfig) -> None:
         _check_state(layer_config, replay=False)
 
     def forward(self, att_state, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
@@ -262,8 +268,8 @@ class TritonKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState,
 
 
 class ReplayKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState, KDALayerInputs]):
-    def __init__(self, layer_config: KDALayerConfig) -> None:
-        super().__init__(layer_config)
+    @classmethod
+    def _check_supported(cls, layer_config: KDALayerConfig) -> None:
         _check_state(layer_config, replay=True)
 
     def forward(self, att_state, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):

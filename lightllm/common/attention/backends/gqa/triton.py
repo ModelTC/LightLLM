@@ -48,7 +48,7 @@ class TritonGQADecodeBuildContext:
         self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
 
 
-def _check_supported(layer_config: GQALayerConfig) -> None:
+def _check_gqa_config(layer_config: GQALayerConfig) -> None:
     if layer_config.head_dim not in (16, 32, 64, 128, 256, 512):
         raise NotImplementedError(f"Triton GQA does not support head_dim={layer_config.head_dim}")
     # The Triton GQA kernels compute 1/sqrt(head_dim) themselves and only look left of the query.
@@ -103,10 +103,10 @@ class TritonGQAPrefillAttState:
 
 
 class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillAttState, GQALayerInputs]):
-    def __init__(self, layer_config: GQALayerConfig) -> None:
+    @classmethod
+    def _check_supported(cls, layer_config: GQALayerConfig) -> None:
         """Head dimensions 16, 32, 64, 128, 256 and 512 are supported, with softmax_scale 1/sqrt(head_dim)."""
-        super().__init__(layer_config)
-        _check_supported(layer_config)
+        _check_gqa_config(layer_config)
 
     def forward(
         self,
@@ -219,19 +219,23 @@ class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillA
 
 class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAttState, GQALayerInputs]):
     def __init__(self, layer_config: GQALayerConfig) -> None:
+        super().__init__(layer_config)
+        self.is_mha = layer_config.num_heads == layer_config.num_kv_heads
+
+    @classmethod
+    def _check_supported(cls, layer_config: GQALayerConfig) -> None:
         """Head dimensions 16, 32, 64, 128 and 256 are supported, plus 512 for GQA, with softmax_scale 1/sqrt(head_dim).
 
         GQA (num_heads > num_kv_heads) supports sliding windows (-1, -1) and (left, 0);
         MHA (num_heads == num_kv_heads) supports only (-1, -1).
         """
-        super().__init__(layer_config)
-        _check_supported(layer_config)
+        _check_gqa_config(layer_config)
         if layer_config.bidirectional_image_spans:
             raise NotImplementedError("bidirectional image spans apply to prefill only")
-        self.is_mha = layer_config.num_heads == layer_config.num_kv_heads
-        if self.is_mha and layer_config.head_dim == 512:
+        is_mha = layer_config.num_heads == layer_config.num_kv_heads
+        if is_mha and layer_config.head_dim == 512:
             raise NotImplementedError("Triton MHA decode does not support head_dim=512")
-        if self.is_mha and layer_config.sliding_window != (-1, -1):
+        if is_mha and layer_config.sliding_window != (-1, -1):
             raise NotImplementedError("sliding_window is not supported by the MHA decode kernel")
 
     def forward(

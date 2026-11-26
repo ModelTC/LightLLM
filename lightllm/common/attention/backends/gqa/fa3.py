@@ -136,7 +136,7 @@ class FA3GQADecodeBuildContext:
         return cu_seqlens_q.int(), cu_seqlens_k.int(), cache_seqlens, att_req_idx
 
 
-def _check_supported(layer_config: GQALayerConfig) -> None:
+def _check_gqa_config(layer_config: GQALayerConfig) -> None:
     if layer_config.dtype not in (torch.float16, torch.bfloat16) or layer_config.head_dim > 256:
         raise NotImplementedError(
             f"FA3 GQA supports FP16/BF16 with head_dim <= 256, got {layer_config.dtype}, {layer_config.head_dim}"
@@ -213,14 +213,14 @@ def _fp8_operands(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs, at
 
 
 class FA3GQAPrefillBackend(AttentionBackend[GQALayerConfig, FA3GQAPrefillAttState, GQALayerInputs]):
-    def __init__(self, layer_config: GQALayerConfig) -> None:
-        """Supports any scale, causal or non-causal attention, one- or two-sided windows and sinks.
+    """Supports any scale, causal or non-causal attention, one- or two-sided windows and sinks.
 
-        A per-head FP8 cache (kv_quant='fp8_per_head') supports the default scale without window or
-        sinks; q is quantized per KV head with the static q scale, or dynamically per request.
-        """
+    A per-head FP8 cache (kv_quant='fp8_per_head') supports the default scale without window or
+    sinks; q is quantized per KV head with the static q scale, or dynamically per request.
+    """
+
+    def __init__(self, layer_config: GQALayerConfig) -> None:
         super().__init__(layer_config)
-        _check_supported(layer_config)
         if layer_config.bidirectional_image_spans:
             from lightllm.utils.neo_fa3_utils import HAS_FLASH_ATTN_INTERFACE, NEO_FA3_INSTALL_HINT
 
@@ -228,6 +228,10 @@ class FA3GQAPrefillBackend(AttentionBackend[GQALayerConfig, FA3GQAPrefillAttStat
                 raise NotImplementedError(
                     "FA3 bidirectional image spans need FA3 with image_token_end support.\n" + NEO_FA3_INSTALL_HINT
                 )
+
+    @classmethod
+    def _check_supported(cls, layer_config: GQALayerConfig) -> None:
+        _check_gqa_config(layer_config)
 
     def forward(
         self,
@@ -353,14 +357,14 @@ class FA3GQAPrefillBackend(AttentionBackend[GQALayerConfig, FA3GQAPrefillAttStat
 
 
 class FA3GQADecodeBackend(AttentionBackend[GQALayerConfig, FA3GQADecodeAttState, GQALayerInputs]):
-    def __init__(self, layer_config: GQALayerConfig) -> None:
+    @classmethod
+    def _check_supported(cls, layer_config: GQALayerConfig) -> None:
         """Supports any scale, causal or non-causal attention, one- or two-sided windows and sinks.
 
         A per-head FP8 cache (kv_quant='fp8_per_head') supports the default scale without window or
         sinks; q is quantized per KV head with the static q scale, or dynamically per request.
         """
-        super().__init__(layer_config)
-        _check_supported(layer_config)
+        _check_gqa_config(layer_config)
         if layer_config.bidirectional_image_spans:
             raise NotImplementedError("bidirectional image spans apply to prefill only")
 

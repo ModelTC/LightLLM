@@ -118,7 +118,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 ### 4.1 LayerConfig 与 backend 构造
 
 - layer config 只描述层本身，不含任何每步数据。`require_positive` 等校验在 `__post_init__` 中执行。
-- backend 在构造时检查自身是否支持该 layer config，不支持时抛出 `NotImplementedError`。例如 Triton GQA 不支持非默认 scale、右侧窗口、sinks 和非因果；FA3 GQA 的 FP8 KV 只支持 BF16 模型；显式要求 FlashKDA 而它无法加载时，KDA prefill backend 拒绝该配置并给出安装方法。
+- `AttentionBackend.__init__` 调用子类的 `_check_supported(layer_config)`。配置不受支持时抛出 `NotImplementedError`。例如 Triton GQA 不支持非默认 scale、右侧窗口、sinks 和非因果，FA3 GQA 的 FP8 KV 只支持 BF16 模型。显式要求 FlashKDA 时，KDA prefill backend 也会在构造时检查 kernel 能否加载。
 - backend 只持有静态配置，相同 layer config 的所有层共用一个实例。
 - 模型层必须把模型要求的全部层属性（因果性、sinks、滑窗、量化方式等）写入 layer config，让 backend 拒绝无法执行的配置，而不是静默按默认行为计算。
 

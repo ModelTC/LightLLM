@@ -11,8 +11,8 @@ from .triton import GDNDecodeAttState, GDNDecodeBuildContext, _mtp_conv, _pack_d
 
 
 class ReplayGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState, GDNLayerInputs]):
-    def __init__(self, layer_config: GDNLayerConfig) -> None:
-        super().__init__(layer_config)
+    @classmethod
+    def _check_supported(cls, layer_config: GDNLayerConfig) -> None:
         if not layer_config.replay:
             raise NotImplementedError("replay GDN decode needs replay state")
 
