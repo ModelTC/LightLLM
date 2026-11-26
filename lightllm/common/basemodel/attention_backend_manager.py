@@ -1,12 +1,4 @@
-"""Bind each layer's attention implementations at load time and prepare shared states each step.
-
-In order of lifetime:
-
-- Binding: AttentionBackendManager.bind selects prefill and decode implementations from a LayerAttentionConfig.
-- Model facts, read once when the runtime is created: AttentionBuildResources for the backends'
-  build contexts, and AttentionStepConfig for describing steps.
-- Per step: AttentionBackendManager.prepare builds one attention state per state_key from InferStateInfo.
-"""
+"""Bind each layer's attention backends at load time and prepare shared states each step."""
 
 from __future__ import annotations
 
@@ -30,9 +22,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-# Binding
-
-
 @dataclass(frozen=True)
 class LayerAttentionConfig:
     """A layer's prefill and decode configuration, as returned by attention_config(model)."""
@@ -43,6 +32,72 @@ class LayerAttentionConfig:
     # Required implementation names override the CLI for their respective phases.
     prefill_implementation: Optional[str] = None
     decode_implementation: Optional[str] = None
+
+
+class AttentionBackendManager:
+    """Select layer backends and prepare one state per compatible group in each phase.
+
+    Layers reuse instances by full configuration and requested backend. Each phase's state
+    groups track the representative instance for each state_key.
+
+    Create it after the model's attention states and CUDA graph capacity are finalized.
+    """
+
+    def __init__(self, model: TpPartBaseModel):
+        self.args = model.args
+        self.resources = attention_build_resources(model)
+        self.step_config = attention_step_config(model)
+        self.state_groups: dict[str, dict[tuple, AttentionBackend]] = {phase: {} for phase in selector.PHASES}
+        self._impls: dict[tuple, AttentionBackend] = {}
+        if self.args.enable_ep_moe:
+            logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
+
+    def bind(self, config: LayerAttentionConfig) -> tuple[Optional[AttentionBackend], Optional[AttentionBackend]]:
+        """Return the layer's prefill and decode implementations."""
+        return (
+            self._select("prefill", config.prefill, config.prefill_implementation),
+            self._select("decode", config.decode, config.decode_implementation),
+        )
+
+    def prepare(self, infer_state: InferStateInfo) -> dict[tuple, Any]:
+        """Build this microbatch's state by state_key for the layers in its phase."""
+        phase = "prefill" if infer_state.is_prefill else "decode"
+        groups = self.state_groups[phase]
+        if not groups:
+            return {}
+        configure_attention_step(infer_state, self.step_config)
+        return {key: impl.prepare(infer_state, self.resources) for key, impl in groups.items()}
+
+    def backends(self, phase: str) -> list[type[AttentionBackend]]:
+        """Return the backend class of each state group in binding order."""
+        return [type(impl) for impl in self.state_groups[phase].values()]
+
+    @property
+    def has_attention(self) -> bool:
+        return any(self.state_groups.values())
+
+    def requires_cpu_cache_sync(self) -> bool:
+        return any(backend.requires_cpu_cache_sync() for phase in selector.PHASES for backend in self.backends(phase))
+
+    def _select(self, phase: str, layer_config: Any, implementation: Optional[str]) -> Optional[AttentionBackend]:
+        if layer_config is None:
+            return None
+        requested = implementation or requested_backend(self.args, phase, layer_config)
+        key = (phase, layer_config, requested)
+        if key not in self._impls:
+            selection = selector.select(
+                layer_config,
+                phase,
+                requested,
+                priority=selector.auto_priority(layer_config, phase, self.args.mtp_step),
+                excluded=("flashinfer",) if self.args.enable_ep_moe else (),
+            )
+            self.state_groups[phase].setdefault(selection.impl.state_key, selection.impl)
+            self._impls[key] = selection.impl
+        return self._impls[key]
+
+
+# Layer configuration and backend selection
 
 
 def attention_is_causal(model: TpPartBaseModel) -> bool:
@@ -57,7 +112,7 @@ def requested_backend(args, phase: str, layer_config: Any) -> str:
     return values[index] if index < len(values) else "auto"
 
 
-# Model facts, read once when the runtime is created
+# Resources for backend build contexts
 
 
 def attention_build_resources(model: TpPartBaseModel) -> AttentionBuildResources:
@@ -82,19 +137,7 @@ def attention_build_resources(model: TpPartBaseModel) -> AttentionBuildResources
     )
 
 
-def recurrent_mtp_state_index(model: TpPartBaseModel) -> Optional[torch.Tensor]:
-    """The slot of each request's last accepted speculative row in the role's recurrent (GDN or KDA) state.
-
-    None when the role has no recurrent state.
-    """
-    states = [
-        state
-        for state in model.att_state_manager.get_bounded_attention_states(model.att_state_role)
-        if getattr(state, "mtp_state_index", None) is not None
-    ]
-    if len(states) > 1:
-        raise ValueError(f"expected at most one recurrent state for {model.att_state_role}, got {len(states)}")
-    return states[0].mtp_state_index if states else None
+# Model-dependent fields of InferStateInfo
 
 
 @dataclass(frozen=True)
@@ -124,9 +167,6 @@ def attention_step_config(model: TpPartBaseModel) -> AttentionStepConfig:
     )
 
 
-# Per step
-
-
 def configure_attention_step(
     infer_state: InferStateInfo, step_config: AttentionStepConfig = AttentionStepConfig()
 ) -> InferStateInfo:
@@ -144,67 +184,16 @@ def configure_attention_step(
     return infer_state
 
 
-class AttentionBackendManager:
-    """A model's attention: binds each layer's implementations at load time and builds each step's states.
+def recurrent_mtp_state_index(model: TpPartBaseModel) -> Optional[torch.Tensor]:
+    """The slot of each request's last accepted speculative row in the role's recurrent (GDN or KDA) state.
 
-    bind() selects a layer's prefill and decode implementations and registers one representative per
-    distinct state_key and phase. prepare(infer_state) returns {state_key: att_state} for the step's
-    phase; the model stores it as infer_state.att_states, where each layer looks up impl.state_key.
-    A model without attention has a runtime with no state groups, whose prepare() returns {}.
-
-    Create it once the model's attention states and CUDA graph capacity are final: it keeps what
-    the steps need from the model, not the model itself.
+    None when the role has no recurrent state.
     """
-
-    def __init__(self, model: TpPartBaseModel):
-        self.args = model.args
-        self.resources = attention_build_resources(model)
-        self.step_config = attention_step_config(model)
-        self.state_groups: dict[str, dict[tuple, AttentionBackend]] = {phase: {} for phase in selector.PHASES}
-        # (phase, layer_config, requested name) -> impl, so layers with the same config share an impl.
-        self._impls: dict[tuple, AttentionBackend] = {}
-        if self.args.enable_ep_moe:
-            logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
-
-    def bind(self, config: LayerAttentionConfig) -> tuple[Optional[AttentionBackend], Optional[AttentionBackend]]:
-        """The layer's prefill and decode implementations."""
-        return (
-            self._select("prefill", config.prefill, config.prefill_implementation),
-            self._select("decode", config.decode, config.decode_implementation),
-        )
-
-    def _select(self, phase: str, layer_config: Any, implementation: Optional[str]) -> Optional[AttentionBackend]:
-        if layer_config is None:
-            return None
-        requested = implementation or requested_backend(self.args, phase, layer_config)
-        key = (phase, layer_config, requested)
-        if key not in self._impls:
-            selection = selector.select(
-                layer_config,
-                phase,
-                requested,
-                priority=selector.auto_priority(layer_config, phase, self.args.mtp_step),
-                excluded=("flashinfer",) if self.args.enable_ep_moe else (),
-            )
-            self.state_groups[phase].setdefault(selection.impl.state_key, selection.impl)
-            self._impls[key] = selection.impl
-        return self._impls[key]
-
-    def backends(self, phase: str) -> list[type[AttentionBackend]]:
-        """The backend of each state built in phase, in binding order."""
-        return [type(impl) for impl in self.state_groups[phase].values()]
-
-    @property
-    def has_attention(self) -> bool:
-        return any(self.state_groups.values())
-
-    def requires_cpu_cache_sync(self) -> bool:
-        return any(backend.requires_cpu_cache_sync() for phase in selector.PHASES for backend in self.backends(phase))
-
-    def prepare(self, infer_state: InferStateInfo) -> dict[tuple, Any]:
-        """Build one attention state per state_key of infer_state's phase, for this microbatch."""
-        groups = self.state_groups["prefill" if infer_state.is_prefill else "decode"]
-        if not groups:
-            return {}
-        configure_attention_step(infer_state, self.step_config)
-        return {key: impl.prepare(infer_state, self.resources) for key, impl in groups.items()}
+    states = [
+        state
+        for state in model.att_state_manager.get_bounded_attention_states(model.att_state_role)
+        if getattr(state, "mtp_state_index", None) is not None
+    ]
+    if len(states) > 1:
+        raise ValueError(f"expected at most one recurrent state for {model.att_state_role}, got {len(states)}")
+    return states[0].mtp_state_index if states else None
