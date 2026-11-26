@@ -76,7 +76,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=1212,
         help="when run_mode set to prefill or decode, you need set this pd_mater_port",
     )
-    parser.add_argument(
+    pd_allocation = parser.add_mutually_exclusive_group()
+    pd_allocation.add_argument(
+        "--pd_decode_allocation_policy",
+        choices=["early", "prefill_complete", "last_chunk"],
+        default="early",
+        help="On the PD master, submit the decode request after tokenization, after prefill completes, "
+        "or when the final prefill chunk is scheduled, respectively.",
+    )
+    pd_allocation.add_argument(
         "--pd_prefill_first",
         action="store_true",
         help=(

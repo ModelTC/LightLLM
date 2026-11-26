@@ -32,6 +32,31 @@ async def run_pd_pf_prefill_request(
         f"prefill-first stage=start, group_request_id={group_request_id}, "
         f"max_new_tokens={sampling_params.max_new_tokens}. infer first, do not wait for decode"
     )
+
+    async def report_ready():
+        req_status = manager.req_id_to_out_inf.get(group_request_id)
+        if req_status is None:
+            raise GenerationError(f"prefill-first request {group_request_id} disappeared before kv ready")
+        shm_req = req_status.group_req_objs.shm_req_objs[0]
+        prompt_ids = [int(token_id) for token_id in shm_req.shm_prompt_ids.arr[: shm_req.input_len]]
+        ready = PdPfPrefillKvReady(group_request_id=group_request_id, prompt_ids=prompt_ids)
+        await pd_upload_websocket.send(pickle.dumps((ObjType.PD_PF_PREFILL_KV_READY, ready)))
+        logger.info(
+            f"prefill-first stage=report-prefill-kv-ready, group_request_id={group_request_id}, "
+            f"prompt_len={len(prompt_ids)}"
+        )
+
+    prefill_finished = False
+
+    async def report_last_chunk():
+        while not prefill_finished:
+            status = manager.req_id_to_out_inf.get(group_request_id)
+            if status is not None and status.group_req_objs.shm_req_objs[0].pd_last_chunk_scheduled:
+                break
+            await asyncio.sleep(0.005)
+        await report_ready()
+
+    reporter = asyncio.create_task(report_last_chunk()) if sampling_params.pd_allocate_on_last_chunk else None
     try:
         # 1. 推理。pd_upload_websocket 置空，跳过老握手；token 转给 master，首 token 可先返回。
         async for sub_req_id, request_output, metadata, finish_status in manager.generate(
@@ -49,17 +74,12 @@ async def run_pd_pf_prefill_request(
         )
 
         # 2. 上报 PD_PF_PREFILL_KV_READY。只带 prompt ids，供 master 交给 decode 做 radix 匹配。
-        req_status = manager.req_id_to_out_inf.get(group_request_id)
-        if req_status is None:
-            raise GenerationError(f"prefill-first request {group_request_id} disappeared before kv ready")
-        shm_req = req_status.group_req_objs.shm_req_objs[0]
-        prompt_ids = [int(token_id) for token_id in shm_req.shm_prompt_ids.arr[: shm_req.input_len]]
-        ready = PdPfPrefillKvReady(group_request_id=group_request_id, prompt_ids=prompt_ids)
-        await pd_upload_websocket.send(pickle.dumps((ObjType.PD_PF_PREFILL_KV_READY, ready)))
-        logger.info(
-            f"prefill-first stage=report-prefill-kv-ready, group_request_id={group_request_id}, "
-            f"prompt_len={len(prompt_ids)}"
-        )
+        if reporter is None:
+            await report_ready()
+        else:
+            # A cache hit or a short forward may finish before the watcher observes scheduling.
+            prefill_finished = True
+            await reporter
 
         # 3. 等 decode KV 就绪。秒数比 master 等 upkv 多 30 秒，让 master 的 ABORT 通常先到。
         resource_wait_seconds = sampling_params.pd_node_resource_wait_timeout_seconds
@@ -142,4 +162,8 @@ async def run_pd_pf_prefill_request(
                 f"report prefill-first generate error failed, group_request_id: {group_request_id}, "
                 f"error: {type(report_error).__name__}: {report_error}"
             )
+    finally:
+        if reporter is not None:
+            reporter.cancel()
+            await asyncio.gather(reporter, return_exceptions=True)
     return

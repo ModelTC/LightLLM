@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import pickle
 from typing import TYPE_CHECKING, Any
 
@@ -34,11 +35,13 @@ class HttpPdPrefillFirstManagerHelper:
         request: Request,
         origin_request_id: int,
     ):
-        """Prefill 先算完，再让 decode 占页，然后通知 prefill：decode KV 已就绪。"""
+        """让 decode 在指定的 prefill 阶段占页，首 token 就绪后再交回传输端点。"""
         from lightllm.server.httpserver_for_pd_master.manager import ReqStatus
 
         group_request_id = sampling_params.group_request_id
         sampling_params.pd_prefill_first = True
+        last_chunk = self.args.pd_decode_allocation_policy == "last_chunk" and sampling_params.max_new_tokens > 1
+        sampling_params.pd_allocate_on_last_chunk = last_chunk
         # 多 worker 时每个 master 的节点 ID 不同。请求带上它，P/D 才把状态送回这次接住请求的 master。
         sampling_params.pd_master_node_id.initialize(self.args.pd_node_id)
         p_websocket = p_node.pick_websocket()
@@ -76,6 +79,7 @@ class HttpPdPrefillFirstManagerHelper:
             prefill_payload = pickle.dumps((ObjType.PD_PF_PREFILL_REQ, (prompt, sampling_params, multimodal_params)))
             self._reject_oversized_control_message(payload=prefill_payload, group_request_id=group_request_id)
             await p_websocket.send_bytes(prefill_payload)
+            deadline = asyncio.get_running_loop().time() + prefill_ready_timeout_seconds
             sampling_params.max_new_tokens = saved_max_new_tokens
             try:
                 await self._wait_for_event_or_disconnect(
@@ -93,43 +97,45 @@ class HttpPdPrefillFirstManagerHelper:
                 raise
             req_status.raise_if_error()
 
-            # 2. 等到 prefill 的那一个首 token，并改写它的结束状态。
-            first_token = await self._wait_prefill_first_token(
-                req_status=req_status,
-                request=request,
-                saved_max_new_tokens=saved_max_new_tokens,
-            )
-
             ready: PdPfPrefillKvReady = req_status.pf_prefill_kv_ready_event.ready
-            # 3. 首 token 已经结束就不再选 decode。stop / length 直接交回。
-            # error 和 abort 也是终态：继续选 decode 会先占页，生成器退出时才 abort。
-            _, _, _, first_finish_status = first_token
-            if first_finish_status.is_finished():
-                await self.abort(group_request_id=group_request_id, p_node=p_node, d_node=None)
+
+            async def submit_decode():
+                # TODO: 这里再次调用 select_p_d_node。round_robin 每次都会把 prefill 和 decode 的下标都加 1。
+                # 请求开始时已经选过一次，这次只用返回的 decode，prefill 下标仍被空走一步。
+                # 两台节点时，真正用到的 prefill 会固定在同一台，decode 固定在另一台。
+                async with self.pd_manager.selector.selection_lock:
+                    _, d_node, _ = await self.select_p_d_node(
+                        prompt=prompt,
+                        sampling_params=sampling_params,
+                        multimodal_params=multimodal_params,
+                    )
+                if d_node is None:
+                    raise ServerBusyError("pd prefill-first found no decode node")
+                d_websocket = d_node.pick_websocket()
+                if d_websocket is None:
+                    raise ServerBusyError("pd decode node has no live httpserver connection")
+                req_status.d_node = d_node
+                req_status.d_websocket = d_websocket
+
+                decode_payload = pickle.dumps((ObjType.REQ, (ready.prompt_ids, sampling_params, MultimodalParams())))
+                self._reject_oversized_control_message(payload=decode_payload, group_request_id=group_request_id)
+                await d_websocket.send_bytes(decode_payload)
+
+            if last_chunk:
+                await submit_decode()
+            try:
+                first_token = await asyncio.wait_for(
+                    self._wait_prefill_first_token(req_status, request, saved_max_new_tokens, origin_request_id),
+                    timeout=deadline - asyncio.get_running_loop().time() if last_chunk else None,
+                )
+            except asyncio.TimeoutError as exc:
+                raise ServerBusyError("final prefill chunk timed out after decode allocation") from exc
+            if first_token[3].is_finished():
+                await self.abort(group_request_id=group_request_id, p_node=p_node, d_node=req_status.d_node)
                 yield first_token
                 return
-
-            # 4. 选 decode，下发 REQ。首 token 在等 upkv 之前交出，客户端不必等 decode 占页。
-            # TODO: 这里再次调用 select_p_d_node。round_robin 每次都会把 prefill 和 decode 的下标都加 1。
-            # 请求开始时已经选过一次，这次只用返回的 decode，prefill 下标仍被空走一步。
-            # 两台节点时，真正用到的 prefill 会固定在同一台，decode 固定在另一台。
-            async with self.pd_manager.selector.selection_lock:
-                _, d_node, _ = await self.select_p_d_node(
-                    prompt=prompt,
-                    sampling_params=sampling_params,
-                    multimodal_params=multimodal_params,
-                )
-            if d_node is None:
-                raise ServerBusyError("pd prefill-first found no decode node")
-            d_websocket = d_node.pick_websocket()
-            if d_websocket is None:
-                raise ServerBusyError("pd decode node has no live httpserver connection")
-            req_status.d_node = d_node
-            req_status.d_websocket = d_websocket
-
-            decode_payload = pickle.dumps((ObjType.REQ, (ready.prompt_ids, sampling_params, MultimodalParams())))
-            self._reject_oversized_control_message(payload=decode_payload, group_request_id=group_request_id)
-            await d_websocket.send_bytes(decode_payload)
+            if not last_chunk:
+                await submit_decode()
 
             resource_wait_seconds = sampling_params.pd_node_resource_wait_timeout_seconds
             if resource_wait_seconds < 0:
@@ -219,9 +225,11 @@ class HttpPdPrefillFirstManagerHelper:
         req_status: Any,
         request: Request,
         saved_max_new_tokens: int,
+        origin_request_id: int,
     ):
-        # token 经转发队列送出，PD_PF_PREFILL_KV_READY 在推理返回后直接发送，谁先到不固定。
+        # 首 token 和 KV ready 走不同的通道，谁先到不固定。
         while True:
+            self.raise_if_request_stopped(origin_request_id)
             req_status.raise_if_error()
             if await request.is_disconnected():
                 raise ClientDisconnected(

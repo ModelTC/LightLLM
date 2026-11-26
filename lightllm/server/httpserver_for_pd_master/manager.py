@@ -608,7 +608,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
         sub_req_id_to_mtp_verify_step_num: Dict[int, int] = {}
 
         try:
-            if self.args.pd_prefill_first:
+            if self.args.pd_prefill_first or self.args.pd_decode_allocation_policy != "early":
                 token_stream = self.fetch_prefill_first_stream(
                     p_node=p_node,
                     prompt=prompt,

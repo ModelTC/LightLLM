@@ -46,7 +46,7 @@ class ObjType(enum.Enum):
     PD_UPLOAD_KV_STATUS = 9  # Decode 推理进程经 pd_report 上报 KV 握手信息。
     # 下面三条只用于 PD 分离的 Prefill 先推理模式。PF 是 PREFILL_FIRST 的简写。
     PD_PF_PREFILL_REQ = 10  # PD 分离的 Prefill 先推理模式：Master 让 prefill 先算，不等 decode 端点。
-    PD_PF_PREFILL_KV_READY = 11  # Prefill 的 KV 已算完并占住，上报 prompt ids。请求尚未结束。
+    PD_PF_PREFILL_KV_READY = 11  # Prefill 上报 prompt ids，允许 decode 占页。last_chunk 模式下此时仍在计算。
     PD_PF_DECODE_KV_READY = 12  # Decode 的 KV 页已备好，master 把端点交给 prefill，可以开始传输。
 
 

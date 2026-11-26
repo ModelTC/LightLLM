@@ -1,14 +1,16 @@
 """PD waits abort the current segment when its original choice is inactive."""
 
+from builtins import anext
 import asyncio
 import pickle
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from lightllm.server.core.objs import FinishStatus, SamplingParams, StartArgs
+from lightllm.server.httpserver.pd_pf_prefill_node import run_pd_pf_prefill_request
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, ReqStatus
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.server.pd_io_struct import ObjType, PD_Client_Obj, PDDecodeNodeInfo, PDUpKVStatus, PdPfPrefillKvReady
@@ -323,5 +325,130 @@ def test_existing_segment_preserves_failure_cleanup(failure):
                 pending.cancel()
                 await asyncio.gather(pending, return_exceptions=True)
             await session.stream.aclose()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+@pytest.mark.parametrize("policy", ["last_chunk", "prefill_complete"])
+def test_allocation_order_when_prefill_has_no_first_token_yet(policy):
+    async def run():
+        session = _Session()
+        session.manager.args.pd_decode_allocation_policy = policy
+        ready = asyncio.Event()
+        decode = asyncio.Event()
+        send_prefill = session.p_ws.send_bytes.side_effect
+        send_decode = session.d_ws.send_bytes.side_effect
+
+        async def hold_token(payload):
+            await send_prefill(payload)
+            if pickle.loads(payload)[0] == ObjType.PD_PF_PREFILL_REQ:
+                session.status.out_token_info_list.clear()
+                session.status.event.clear()
+                ready.set()
+
+        async def on_decode(payload):
+            await send_decode(payload)
+            if pickle.loads(payload)[0] == ObjType.REQ:
+                decode.set()
+
+        session.p_ws.send_bytes.side_effect = hold_token
+        session.d_ws.send_bytes.side_effect = on_decode
+        pending = asyncio.create_task(anext(session.stream))
+        await asyncio.wait_for(ready.wait(), timeout=2)
+        if policy == "last_chunk":
+            await asyncio.wait_for(decode.wait(), timeout=2)
+        else:
+            await asyncio.sleep(0)
+            assert not decode.is_set()
+        assert not pending.done()
+        assert not any(m[0] == ObjType.PD_PF_DECODE_KV_READY for m in session.messages["p"])
+        session.status.out_token_info_list.append(_token("first", 1, FinishStatus.FINISHED_LENGTH))
+        session.status.event.set()
+        assert (await asyncio.wait_for(pending, timeout=2))[1] == "first"
+        assert decode.is_set()
+        await session.stream.aclose()
+        session.assert_cleaned()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("scheduled", [True, False])
+def test_last_chunk_reports_prompt_once_and_transfers_only_after_prefill(scheduled):
+    async def run():
+        params = SamplingParams()
+        params.init(None, max_new_tokens=1)
+        params.group_request_id = GROUP_ID
+        params.pd_allocate_on_last_chunk = True
+        reported = asyncio.Event()
+        transfer = Mock()
+        shm_req = SimpleNamespace(
+            shm_prompt_ids=SimpleNamespace(arr=[11, 12, 0]),
+            input_len=2,
+            pd_last_chunk_scheduled=False,
+            sample_params=SimpleNamespace(pd_kv_trans_params=SimpleNamespace(set=transfer)),
+        )
+        requests = {GROUP_ID: SimpleNamespace(group_req_objs=SimpleNamespace(shm_req_objs=[shm_req]))}
+        transfer.side_effect = lambda payload: requests.pop(GROUP_ID)
+        decode_ready = asyncio.Event()
+        decode_ready.decode_node_info = SimpleNamespace(ready_kv_len=0)
+        decode_ready.set()
+
+        async def generate(**kwargs):
+            if scheduled:
+                shm_req.pd_last_chunk_scheduled = True
+                await reported.wait()
+                transfer.assert_not_called()
+            yield _token("first", 1, FinishStatus.FINISHED_LENGTH)
+
+        async def send(payload):
+            kind, ready = pickle.loads(payload)
+            assert kind == ObjType.PD_PF_PREFILL_KV_READY
+            assert ready.group_request_id == GROUP_ID and ready.prompt_ids == [11, 12]
+            reported.set()
+
+        manager = SimpleNamespace(
+            args=SimpleNamespace(run_mode="prefill"), req_id_to_out_inf=requests, generate=generate
+        )
+        ws = SimpleNamespace(send=AsyncMock(side_effect=send))
+        await run_pd_pf_prefill_request(
+            manager, "prompt", params, MultimodalParams(), asyncio.Queue(), ws, decode_ready
+        )
+        ws.send.assert_awaited_once()
+        transfer.assert_called_once()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_last_chunk_single_output_never_submits_decode():
+    async def run():
+        session = _Session()
+        session.manager.args.pd_decode_allocation_policy = "last_chunk"
+        session.params.max_new_tokens = 1
+        assert (await anext(session.stream))[3].is_finished_length()
+        assert not session.messages["p"][0][1][1].pd_allocate_on_last_chunk
+        assert not session.messages["d"]
+        await session.stream.aclose()
+        session.assert_cleaned(has_decode=False)
+
+    asyncio.run(run())
+
+
+def test_stop_during_last_chunk_releases_decode_reservation():
+    async def run():
+        session = _Session()
+        session.manager.args.pd_decode_allocation_policy = "last_chunk"
+        original_send = session.d_ws.send_bytes.side_effect
+
+        async def stop_before_first_token(payload):
+            await original_send(payload)
+            if pickle.loads(payload)[0] == ObjType.REQ:
+                session.status.out_token_info_list.clear()
+                await session.manager.stop_request(ORIGIN_ID)
+
+        session.d_ws.send_bytes.side_effect = stop_before_first_token
+        with pytest.raises(StopAsyncIteration):
+            await anext(session.stream)
+        session.assert_cleaned()
+        assert not any(m[0] == ObjType.PD_PF_DECODE_KV_READY for m in session.messages["p"])
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))

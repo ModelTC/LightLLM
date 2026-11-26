@@ -6,6 +6,28 @@ from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_con
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process
 
 
+def _patch_empty_input_context(monkeypatch):
+    mem_manager = SimpleNamespace(
+        HOLD_TOKEN_MEMINDEXES=(-1,),
+        alloc=lambda size: torch.empty((size,), dtype=torch.int32),
+    )
+    infer_context = SimpleNamespace(
+        args=SimpleNamespace(page_size=1, run_mode="normal"),
+        req_manager=SimpleNamespace(
+            HOLD_REQUEST_ID=-1,
+            mem_manager=mem_manager,
+            req_to_token_indexs=torch.zeros((16, 32), dtype=torch.int32),
+        ),
+        radix_cache=None,
+    )
+    monkeypatch.setattr(generic_pre_process, "g_infer_context", infer_context)
+    return infer_context
+
+
+def _patch_overlap_input_context(monkeypatch):
+    return _patch_empty_input_context(monkeypatch)
+
+
 def _make_prefill_req(req_idx: int, token_num: int):
     input_token_ids = [req_idx] * token_num
     return SimpleNamespace(
@@ -182,3 +204,21 @@ def test_overlap_decode_preserves_empty_microbatch():
     assert run_reqs1 == []
     assert model_input1.batch_size == 0
     assert model_input1.b_req_idx.shape == (0,)
+
+
+def test_only_selected_final_prefill_chunks_signal_decode_allocation(monkeypatch):
+    context = _patch_empty_input_context(monkeypatch)
+    context.args.run_mode = "prefill"
+    reqs = [_make_prefill_req(i, 8) for i in range(3)]
+    for i, req in enumerate(reqs):
+        req.shm_req = SimpleNamespace(
+            input_len=8, sample_params=SimpleNamespace(pd_allocate_on_last_chunk=i != 2), pd_last_chunk_scheduled=False
+        )
+    # The first request still has another chunk. The second resumes from a cached prefix.
+    reqs[0].get_chuncked_input_token_ids = lambda: [0] * 4
+    reqs[1].cur_kv_len = 6
+    generic_pre_process.prepare_prefill_inputs(reqs, is_chuncked_mode=True)
+    assert [req.shm_req.pd_last_chunk_scheduled for req in reqs] == [False, True, False]
+
+    generic_pre_process.prepare_prefill_inputs([reqs[0]], is_chuncked_mode=False)
+    assert reqs[0].shm_req.pd_last_chunk_scheduled
