@@ -10,7 +10,8 @@ import lightllm.common.basemodel.attention_backend_manager as attention_groups_m
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.gqa.fa3 import _group_rows
-from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQADecodeBuildContext
+from lightllm.common.attention.backends.gqa import GQALayerConfig
+from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 from lightllm.utils import envs_utils
@@ -80,6 +81,19 @@ def test_model_selects_dynamic_spec_layout(
         lambda: SimpleNamespace(mtp_mode=mtp_mode, mtp_dynamic_verify=dynamic_spec),
     )
     model = SimpleNamespace(
+        args=SimpleNamespace(
+            running_max_req_size=8,
+            mtp_step=draft_step,
+            enable_tpsp_mix_mode=False,
+            page_size=1,
+            enable_decode_microbatch_overlap=False,
+            flashinfer_workspace_size=64,
+            diverse_mode=False,
+            enable_ep_moe=False,
+        ),
+        max_seq_length=1024,
+        graph_max_batch_size=4,
+        tp_world_size_=1,
         is_mtp_draft_model=is_draft_model,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
         att_state_role="main",
@@ -87,7 +101,8 @@ def test_model_selects_dynamic_spec_layout(
         graph_max_len_in_batch=1024,
     )
 
-    assert attention_groups_module.attention_step_config(model).dynamic_decode_rows is expected
+    step_config = attention_groups_module.AttentionBackendManager(model).step_config
+    assert step_config["dynamic_decode_rows"] is expected
 
 
 @pytest.mark.parametrize(
@@ -125,9 +140,9 @@ def test_triton_mtp_decode_step_builds_group_markers():
         req_to_token_indexs=torch.zeros(8, 8, dtype=torch.int32), HOLD_REQUEST_ID=-1
     )
     # Fixed-layout speculative decode: three rows per request.
-    step_config = attention_groups_module.AttentionStepConfig(decode_rows_per_request=3)
-    batch = attention_groups_module.configure_attention_step(infer_state, step_config)
-    att_state = TritonGQADecodeBackend.build(batch, TritonGQADecodeBuildContext())
+    batch = attention_groups_module.configure_attention_step(infer_state, decode_rows_per_request=3)
+    config = GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16)
+    att_state = TritonGQADecodeBackend(config).build(batch)
 
     assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
 

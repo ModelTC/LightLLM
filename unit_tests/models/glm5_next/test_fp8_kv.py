@@ -17,7 +17,7 @@ from lightllm.common.attention.backends.sparse_mla import (
     SparseMLAPrefillLayerInputs,
 )
 from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLAPrefillBackend
-from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
+from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
 from lightllm.models.glm5_next.infer_struct import build_glm5_nsa_step
 from lightllm.common.attention.kernels.sparse_mla.fp8_group64_decode import (
     can_use_fp8_sparse_direct_decode,
@@ -61,10 +61,14 @@ def _layer_config(q, softmax_scale):
     )
 
 
-def _decode(att_state, q, kv, params):
-    """Run a GLM-5 layer's FP8 decode; params holds the indexer's topk_mem_indices and the softmax_scale."""
+def _decode(att_state, q, kv, params, direct_decode_bound=2051):
+    """Run a GLM-5 layer's FP8 decode; params holds the indexer's topk_mem_indices and the softmax_scale.
+
+    direct_decode_bound overrides the bound the backend takes from the layer config (2051 for topk 2048, kpool 4).
+    """
     q_nope, q_rope = q
     backend = FlashMLASparseDecodeBackend(_layer_config(q_nope, params["softmax_scale"]))
+    backend.direct_decode_bound = direct_decode_bound
     inputs = SparseMLADecodeLayerInputs(
         q_nope=q_nope, q_rope=q_rope, kv_cache=kv, topk_mem_indices=params["topk_mem_indices"]
     )
@@ -97,8 +101,8 @@ class _Fp8PrefillState:
 class _Fp8DecodeState:
     """GLM-5 FP8 decode with attention state built from the owner's capture flag.
 
-    The step builder records whether each step runs in a CUDA graph; building per call lets a test
-    toggle the owner's flag around a capture.
+    The backend's build records whether each step runs in a CUDA graph; building per call lets a test
+    toggle the owner's flag around a capture. bound is the backend's direct decode bound.
     """
 
     def __init__(self, owner, sched_meta=None, bound=None):
@@ -114,11 +118,9 @@ class _Fp8DecodeState:
 
     def decode_att(self, q, kv, params):
         att_state = FlashMLASparseDecodeAttState(
-            sched_meta=self.sched_meta,
-            uses_cuda_graph=self.owner.graph_mode is GraphMode.CAPTURE,
-            direct_decode_bound=self.bound,
+            sched_meta=self.sched_meta, uses_cuda_graph=self.owner.graph_mode is GraphMode.CAPTURE
         )
-        return _decode(att_state, q, kv, params)
+        return _decode(att_state, q, kv, params, direct_decode_bound=self.bound)
 
 
 class _Fp8SparseAttention:
@@ -127,25 +129,18 @@ class _Fp8SparseAttention:
 
     def __init__(self, model):
         self.model = model
-        self.step_config = AttentionStepConfig(cuda_graph_max_kv_seq_len=model.graph_max_len_in_batch)
+        self.step_config = dict(cuda_graph_max_kv_seq_len=model.graph_max_len_in_batch)
         self._prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(model)
-        ctx = SimpleNamespace()
         config = _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), 1.0)
-        self.prefill_step_builder = FA3SparseMLAPrefillBackend.create_build_context(None, ctx)
-        build_key = FlashMLASparseDecodeBackend.build_context_key(config)
-        self.decode_step_builder = FlashMLASparseDecodeBackend.create_build_context(build_key, ctx)
+        self.prefill_backend = FA3SparseMLAPrefillBackend(config)
+        self.decode_backend = FlashMLASparseDecodeBackend(config)
 
     def create_att_prefill_state(self, infer):
-        batch = configure_attention_step(infer, self.step_config)
-        return _Fp8PrefillState(
-            FA3SparseMLAPrefillBackend.build(batch, self.prefill_step_builder),
-            self._prefill_workspaces[batch.microbatch_index],
-        )
+        batch = configure_attention_step(infer, **self.step_config)
+        return _Fp8PrefillState(self.prefill_backend.build(batch), self._prefill_workspaces[batch.microbatch_index])
 
     def create_att_decode_state(self, infer):
-        att_state = FlashMLASparseDecodeBackend.build(
-            configure_attention_step(infer, self.step_config), self.decode_step_builder
-        )
+        att_state = self.decode_backend.build(configure_attention_step(infer, **self.step_config))
         return SimpleNamespace(decode_att=lambda q, kv, params: _decode(att_state, q, kv, params))
 
 
@@ -272,7 +267,7 @@ class _PrefillCase:
     ],
 )
 def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_type, expected):
-    from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager, attention_build_resources
+    from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
     from lightllm.models.glm5_next.model import Glm5NextTpPartModel
     from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
 
@@ -315,11 +310,11 @@ def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_t
     spec = model_class.transformer_layer_infer_class.attention_config(layer, model)
     layer.prefill_backend, layer.decode_backend = attention.bind(spec)
     assert layer.decode_backend.layer_config.causal is False
-    # The step builders can be created from the layer config and the model's context.
+    # The backends can be set up from the layer config and the model's resources.
     for phase, backend, name in zip(("prefill", "decode"), (layer.prefill_backend, layer.decode_backend), expected):
         (backend_cls,) = attention.backends(phase)
-        assert backend_cls.get_name() == name
-        backend_cls.create_build_context(backend.state_key[1], attention_build_resources(model))
+        assert backend_cls.name == name
+        backend.setup(attention.resources)
 
 
 def _dequantize_kv_cache(packed_kv):
@@ -755,8 +750,7 @@ def test_fp8_sparse_direct_decode_factory_bound_guard():
         config = dataclasses.replace(
             _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), 0.0625), topk=index_topk, kpool=index_kpool
         )
-        build_key = FlashMLASparseDecodeBackend.build_context_key(config)
-        return FlashMLASparseDecodeBackend.create_build_context(build_key, None).direct_decode_bound
+        return FlashMLASparseDecodeBackend(config).direct_decode_bound
 
     assert bound(index_topk=2048, index_kpool=4) == 2051
     assert bound(index_topk=2048, index_kpool=8) is None
@@ -871,9 +865,7 @@ def test_fp8_sparse_direct_decode_general_graph_factory_entry(monkeypatch, num_h
         indices[3, 64:128] = indices[3, :64]  # duplicates
     assert torch.equal(indices[:, 2051:], torch.full_like(indices[:, 2051:], -1))
     control = {"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
-    build_key = FlashMLASparseDecodeBackend.build_context_key(_layer_config(q, 0.0625))
-    bound = FlashMLASparseDecodeBackend.create_build_context(build_key, None)
-    assert bound.direct_decode_bound == 2051
+    assert FlashMLASparseDecodeBackend(_layer_config(q, 0.0625)).direct_decode_bound == 2051
     infer_state = _make_infer_state(graph_mode=GraphMode.EAGER)
     state = _Fp8DecodeState(infer_state, sched_meta=flash_mla.get_mla_metadata()[0], bound=2051)
     native_state_owner = _make_infer_state(graph_mode=GraphMode.EAGER)

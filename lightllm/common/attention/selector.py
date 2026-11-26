@@ -123,10 +123,10 @@ _REGISTRY: dict[type, Family] = {
     GDNLayerConfig: Family(
         {
             "prefill": {
-                "flashqla": (f"{_GDN}.flashqla:FlashQLAGDNPrefillBackend",),
+                "flashqla": (f"{_GDN}.triton:FlashQLAGDNPrefillBackend",),
                 "triton": (f"{_GDN}.triton:TritonGDNPrefillBackend",),
             },
-            "decode": {"triton": (f"{_GDN}.triton:TritonGDNDecodeBackend", f"{_GDN}.replay:ReplayGDNDecodeBackend")},
+            "decode": {"triton": (f"{_GDN}.triton:TritonGDNDecodeBackend", f"{_GDN}.triton:ReplayGDNDecodeBackend")},
         },
         priority={"prefill": ("flashqla", "triton"), "decode": ("triton",)},
         arg_index=1,
@@ -149,17 +149,6 @@ _REGISTRY: dict[type, Family] = {
 }
 
 
-@dataclass(frozen=True)
-class Selection:
-    backend_cls: type[AttentionBackend]
-    backend: AttentionBackend
-
-
-def _load(path: str) -> type[AttentionBackend]:
-    module_name, class_name = path.split(":")
-    return getattr(import_module(module_name), class_name)
-
-
 def _family(layer_config: Any) -> Family:
     family = _REGISTRY.get(type(layer_config))
     if family is None:
@@ -167,21 +156,15 @@ def _family(layer_config: Any) -> Family:
     return family
 
 
-def _phase_backends(layer_config: Any, phase: str) -> dict[str, tuple[str, ...]]:
-    backends = _family(layer_config).backends.get(phase)
-    if backends is None:
-        raise ValueError(f"{type(layer_config).__name__} has no {phase} attention implementations")
-    return backends
+def requested_backend(args, phase: str, layer_config: Any) -> str:
+    """The backend name the command line requests for layer_config's family in phase.
 
-
-def backend_names(layer_config: Any, phase: str) -> tuple[str, ...]:
-    """Names of the implementations registered for layer_config's family in this phase."""
-    return tuple(_phase_backends(layer_config, phase))
-
-
-def arg_index(layer_config: Any) -> int:
-    """Which value of --llm_{prefill,decode}_att_backend names the implementation of layer_config's family."""
-    return _family(layer_config).arg_index
+    Full-attention families read the first value of --llm_{prefill,decode}_att_backend and
+    linear-attention families the second.
+    """
+    index = _family(layer_config).arg_index
+    values = args.llm_prefill_att_backend if phase == "prefill" else args.llm_decode_att_backend
+    return values[index] if index < len(values) else "auto"
 
 
 def auto_priority(layer_config: Any, phase: str, mtp_step: int = 0) -> tuple[str, ...]:
@@ -207,27 +190,29 @@ def _construction_failures(reason: Optional[str]) -> list[str]:
 
 
 def _construct(
-    name: str, layer_config: Any, phase: str, *, agree: bool = False
-) -> tuple[Optional[Selection], list[str]]:
-    """Return the first backend under name whose constructor accepts layer_config, and why the others did not."""
+    paths: Sequence[str], layer_config: Any, *, agree: bool = False
+) -> tuple[Optional[AttentionBackend], list[str]]:
+    """Return the first backend in paths ("module:Class") whose constructor accepts layer_config, and why
+    the others did not."""
     reasons = []
-    for path in _phase_backends(layer_config, phase).get(name, ()):
-        reason = None
+    for path in paths:
+        reason = backend = None
         label = path
         try:
-            backend_cls = _load(path)
-            label = backend_cls.get_name()
-            selection = Selection(backend_cls, backend_cls(layer_config))
+            module_name, class_name = path.split(":")
+            backend_cls = getattr(import_module(module_name), class_name)
+            label = backend_cls.name
+            backend = backend_cls(layer_config)
         except (NotImplementedError, ImportError, OSError) as error:
             reason = f"{label}: {error}"
         failures = _construction_failures(reason) if agree else ([reason] if reason else [])
         if not failures:
-            return selection, reasons
+            return backend, reasons
         reasons.extend(failures)
     return None, reasons
 
 
-def default_validate(name: str) -> bool:
+def _validate_library(name: str) -> bool:
     from lightllm.utils.backend_validator import validate
 
     return validate(name)
@@ -240,9 +225,9 @@ def select(
     *,
     priority: Optional[Sequence[str]] = None,
     excluded: Sequence[str] = (),
-    validate: Callable[[str], bool] = default_validate,
-) -> Selection:
-    """Choose the backend for layers with layer_config in phase ("prefill" or "decode").
+    validate: Callable[[str], bool] = _validate_library,
+) -> AttentionBackend:
+    """Construct the backend for layers with layer_config in phase ("prefill" or "decode").
 
     requested is an implementation name or "auto". A named implementation that does not accept
     the layer config raises ValueError. "auto" takes the first name in priority (default
@@ -251,33 +236,36 @@ def select(
     """
     if phase not in PHASES:
         raise ValueError(f"phase must be one of {PHASES}, got {phase!r}")
-    names = backend_names(layer_config, phase)
+    family = _family(layer_config)
+    backends = family.backends.get(phase)
+    if backends is None:
+        raise ValueError(f"{type(layer_config).__name__} has no {phase} attention implementations")
     if requested != "auto":
-        if requested not in names:
+        if requested not in backends:
             raise ValueError(
-                f"{phase} attention {requested!r} is not available for {layer_config}; choose from {names}"
+                f"{phase} attention {requested!r} is not available for {layer_config}; choose from {tuple(backends)}"
             )
-        selection, reasons = _construct(requested, layer_config, phase)
-        if selection is None:
+        backend, reasons = _construct(backends[requested], layer_config)
+        if backend is None:
             raise ValueError(f"{phase} attention {requested!r} does not support {layer_config}: {'; '.join(reasons)}")
-        return selection
+        return backend
 
     priority = auto_priority(layer_config, phase) if priority is None else tuple(priority)
-    candidates = [name for name in priority if name in names and name not in excluded]
+    candidates = [name for name in priority if name in backends and name not in excluded]
     reasons = []
     fallback = None
     for name in dict.fromkeys([*candidates, "triton"]):
-        selection, failures = _construct(name, layer_config, phase, agree=True)
+        backend, failures = _construct(backends.get(name, ()), layer_config, agree=True)
         reasons.extend(failures)
-        if selection is None:
+        if backend is None:
             continue
         if name == "triton":
-            fallback = selection
+            fallback = backend
         if name not in candidates:
             continue
-        if name in _family(layer_config).unvalidated or validate(name):
+        if name in family.unvalidated or validate(name):
             logger.info(f"Auto-selected {name} for {phase} attention (validated)")
-            return selection
+            return backend
         reasons.append(f"{name}: validation failed")
     if fallback is None:
         raise ValueError(f"no {phase} attention implementation supports {layer_config}: {'; '.join(reasons)}")

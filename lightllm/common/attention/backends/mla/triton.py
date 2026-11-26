@@ -1,13 +1,9 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 import torch
 
-from lightllm.common.attention.backend import (
-    AttentionBackend,
-    AttentionBuildResources,
-    TensorAllocator,
-)
+from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from . import MLADecodeLayerInputs, MLADecodeLayerConfig, MLAPrefillLayerInputs, MLAPrefillLayerConfig
 
@@ -25,6 +21,8 @@ class TritonMLAPrefillAttState:
 
 
 class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, TritonMLAPrefillAttState, MLAPrefillLayerInputs]):
+    name = "triton_mla_prefill"
+
     def __init__(self, layer_config: MLAPrefillLayerConfig) -> None:
         super().__init__(layer_config)
         # 256-dim queries (GLM-4 MoE Lite: 192 nope + 64 rope) run the contiguous-KV GQA prefill kernel
@@ -103,12 +101,7 @@ class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, TritonMLAP
         )
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "triton_mla_prefill"
-
-    @classmethod
-    def build(cls, infer_state: InferStateInfo, context: None = None) -> TritonMLAPrefillAttState:
+    def build(self, infer_state: InferStateInfo) -> TritonMLAPrefillAttState:
         return TritonMLAPrefillAttState(
             b_q_start_loc=infer_state.b_q_start_loc,
             cu_kv_seq_len=infer_state.b1_cu_kv_seq_len,
@@ -122,42 +115,22 @@ class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, TritonMLAP
 class TritonMLADecodeAttState:
     """At decode, request i reads physical slots req_to_token_indexs[b_req_idx[i], :b_seq_len[i]].
 
-    The split schedule was built for the recorded head count, latent/rotary dims and dtype.
+    The split schedule was built for the layer config's head count, latent/rotary dims and dtype.
     """
 
     req_to_token_indexs: torch.Tensor
     b_req_idx: torch.Tensor
     b_seq_len: torch.Tensor
     schedule: "MLADecodeSchedule"
-    num_heads: int
-    kv_lora_rank: int
-    qk_rope_head_dim: int
-    dtype: torch.dtype
-
-
-class TritonMLADecodeBuildContext:
-    def __init__(self, *, num_heads: int, kv_lora_rank: int, qk_rope_head_dim: int, dtype: torch.dtype) -> None:
-        """Fix the layer group's per-rank configuration, which selects the split schedule's kernel config."""
-        self.num_heads = num_heads
-        self.kv_lora_rank = kv_lora_rank
-        self.qk_rope_head_dim = qk_rope_head_dim
-        self.dtype = dtype
-        self._cuda_graph_schedules: dict[tuple[int, int], "MLADecodeSchedule"] = {}
-
-    def _new_schedule(self, b_seq_len: torch.Tensor, tuning_seq_len: int) -> "MLADecodeSchedule":
-        from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding import plan_mla_decode_schedule
-
-        return plan_mla_decode_schedule(
-            b_seq_len=b_seq_len,
-            q_head_num=self.num_heads,
-            kv_lora_rank=self.kv_lora_rank,
-            q_rope_dim=self.qk_rope_head_dim,
-            dtype=self.dtype,
-            tuning_seq_len=tuning_seq_len,
-        )
 
 
 class TritonMLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, TritonMLADecodeAttState, MLADecodeLayerInputs]):
+    name = "triton_mla_decode"
+
+    def __init__(self, layer_config: MLADecodeLayerConfig) -> None:
+        super().__init__(layer_config)
+        self._graph_schedules: dict[tuple[int, int], "MLADecodeSchedule"] = {}
+
     @classmethod
     def _check_supported(cls, layer_config: MLADecodeLayerConfig) -> None:
         # Each query row reads its own request prefix, which is causal across a request's rows.
@@ -181,12 +154,6 @@ class TritonMLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, TritonMLADec
         )
 
         layer_config = self.layer_config
-        assert (att_state.num_heads, att_state.kv_lora_rank, att_state.qk_rope_head_dim, att_state.dtype) == (
-            layer_config.num_heads,
-            layer_config.kv_lora_rank,
-            layer_config.qk_rope_head_dim,
-            layer_config.dtype,
-        ), "attention state were built for a different MLA layer configuration"
         q_nope, q_rope = layer_inputs.q_nope, layer_inputs.q_rope
         assert (
             q_nope.shape[1:] == (layer_config.num_heads, layer_config.kv_lora_rank)
@@ -209,60 +176,47 @@ class TritonMLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, TritonMLADec
         )
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "triton_mla_decode"
-
-    build_context_type = TritonMLADecodeBuildContext
-
     @classmethod
-    def build(cls, metadata: InferStateInfo, context: TritonMLADecodeBuildContext) -> TritonMLADecodeAttState:
+    def group_key(cls, layer_config: MLADecodeLayerConfig):
+        # The split schedule's kernel config depends on these.
+        c = layer_config
+        return c.num_heads, c.kv_lora_rank, c.qk_rope_head_dim, c.dtype
+
+    def build(self, infer_state: InferStateInfo) -> TritonMLADecodeAttState:
         """Compute the split schedule from the current b_seq_len, shared by every layer of the step.
 
-        A CUDA graph step reuses one schedule per (microbatch, metadata size) and rewrites it in
-        place, so captured kernels read the replayed lengths' splits. Its kernel config is chosen
-        from the graph capacity, so capture and replay agree; eager steps use the average length.
+        A CUDA graph step reuses one schedule per (microbatch, batch size) and rewrites it in place, so
+        captured kernels read the replayed lengths' splits. Its kernel config is chosen from the graph
+        capacity, so capture and replay agree; eager steps use the average length.
         """
-        from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding import update_mla_decode_schedule
+        from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding import (
+            plan_mla_decode_schedule,
+            update_mla_decode_schedule,
+        )
 
-        if metadata.uses_cuda_graph:
-            key = (metadata.microbatch_index, metadata.batch_size)
-            schedule = context._cuda_graph_schedules.get(key)
-            if schedule is None:
-                schedule = context._new_schedule(metadata.b_seq_len, metadata.cuda_graph_max_kv_seq_len)
-                context._cuda_graph_schedules[key] = schedule
-            else:
-                update_mla_decode_schedule(schedule, metadata.b_seq_len)
+        key = (infer_state.microbatch_index, infer_state.batch_size)
+        schedule = self._graph_schedules.get(key) if infer_state.uses_cuda_graph else None
+        if schedule is not None:
+            update_mla_decode_schedule(schedule, infer_state.b_seq_len)
         else:
-            tuning_seq_len = metadata.total_token_num // metadata.batch_size
-            schedule = context._new_schedule(metadata.b_seq_len, tuning_seq_len)
+            c = self.layer_config
+            schedule = plan_mla_decode_schedule(
+                b_seq_len=infer_state.b_seq_len,
+                q_head_num=c.num_heads,
+                kv_lora_rank=c.kv_lora_rank,
+                q_rope_dim=c.qk_rope_head_dim,
+                dtype=c.dtype,
+                tuning_seq_len=(
+                    infer_state.cuda_graph_max_kv_seq_len
+                    if infer_state.uses_cuda_graph
+                    else infer_state.total_token_num // infer_state.batch_size
+                ),
+            )
+            if infer_state.uses_cuda_graph:
+                self._graph_schedules[key] = schedule
         return TritonMLADecodeAttState(
-            req_to_token_indexs=metadata.req_to_token_indexs,
-            b_req_idx=metadata.b_req_idx,
-            b_seq_len=metadata.b_seq_len,
+            req_to_token_indexs=infer_state.req_to_token_indexs,
+            b_req_idx=infer_state.b_req_idx,
+            b_seq_len=infer_state.b_seq_len,
             schedule=schedule,
-            num_heads=context.num_heads,
-            kv_lora_rank=context.kv_lora_rank,
-            qk_rope_head_dim=context.qk_rope_head_dim,
-            dtype=context.dtype,
         )
-
-    @classmethod
-    def create_build_context(
-        cls, build_key: "_TritonMLADecodeKey", ctx: AttentionBuildResources
-    ) -> TritonMLADecodeBuildContext:
-        return TritonMLADecodeBuildContext(**build_key._asdict())
-
-    @classmethod
-    def build_context_key(cls, layer_config: MLADecodeLayerConfig) -> "_TritonMLADecodeKey":
-        # The split schedule's kernel config depends on these.
-        return _TritonMLADecodeKey(
-            layer_config.num_heads, layer_config.kv_lora_rank, layer_config.qk_rope_head_dim, layer_config.dtype
-        )
-
-
-class _TritonMLADecodeKey(NamedTuple):
-    num_heads: int
-    kv_lora_rank: int
-    qk_rope_head_dim: int
-    dtype: torch.dtype

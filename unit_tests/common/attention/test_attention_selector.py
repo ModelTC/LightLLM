@@ -2,6 +2,7 @@
 
 import dataclasses
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -29,9 +30,9 @@ def recorder(passing=("fa3", "flashinfer", "triton")):
 @pytest.mark.parametrize("name", ["triton", "fa3", "flashinfer"])
 def test_named_implementation_is_used_without_validation(phase, name):
     validated, validate = recorder(passing=())
-    selection = selector.select(gqa(), phase, name, validate=validate)
-    assert selection.backend_cls.get_name() == f"{name}_gqa_{phase}"
-    assert selection.backend.layer_config == gqa()
+    backend = selector.select(gqa(), phase, name, validate=validate)
+    assert backend.name == f"{name}_gqa_{phase}"
+    assert backend.layer_config == gqa()
     assert validated == []
 
 
@@ -47,7 +48,7 @@ def test_unknown_implementation_name_raises():
 
 def test_one_name_covers_the_quantized_triton_backend():
     config = gqa(kv_quant="int8_group", kv_quant_group_size=8)
-    assert selector.select(config, "decode", "triton").backend_cls.get_name() == "triton_quant_gqa_decode"
+    assert selector.select(config, "decode", "triton").name == "triton_quant_gqa_decode"
 
 
 @pytest.mark.parametrize("phase", ["prefill", "decode"])
@@ -57,22 +58,22 @@ def test_triton_rejects_unsupported_head_dim_during_selection(phase):
         selector.select(config, phase, "triton")
     validated, validate = recorder()
     selected = selector.select(config, phase, "auto", priority=("triton", "fa3"), validate=validate)
-    assert selected.backend_cls.get_name() == f"fa3_gqa_{phase}"
+    assert selected.name == f"fa3_gqa_{phase}"
     assert validated == ["fa3"]
 
 
 def test_triton_512_head_dim_depends_on_decode_kernel():
     mha = gqa(head_dim=512, num_kv_heads=8)
-    assert selector.select(mha, "prefill", "triton").backend_cls.get_name() == "triton_gqa_prefill"
+    assert selector.select(mha, "prefill", "triton").name == "triton_gqa_prefill"
     with pytest.raises(ValueError, match="MHA decode does not support head_dim=512"):
         selector.select(mha, "decode", "triton")
-    assert selector.select(gqa(head_dim=512), "decode", "triton").backend_cls.get_name() == "triton_gqa_decode"
+    assert selector.select(gqa(head_dim=512), "decode", "triton").name == "triton_gqa_decode"
 
 
 @pytest.mark.parametrize("kind", ["int4_group", "int8_group"])
 def test_quantized_triton_checks_the_head_dims_of_each_kernel(kind):
     small = gqa(head_dim=32, kv_quant=kind, kv_quant_group_size=8)
-    assert selector.select(small, "decode", "triton").backend_cls.get_name() == "triton_quant_gqa_decode"
+    assert selector.select(small, "decode", "triton").name == "triton_quant_gqa_decode"
     with pytest.raises(ValueError, match="head dimensions"):
         selector.select(small, "prefill", "triton")
     for phase in ("prefill", "decode"):
@@ -82,42 +83,42 @@ def test_quantized_triton_checks_the_head_dims_of_each_kernel(kind):
 
 def test_auto_follows_priority_and_validates_only_implementations_that_accept_the_config():
     validated, validate = recorder()
-    assert selector.select(gqa(), "prefill", "auto", validate=validate).backend_cls.get_name() == "fa3_gqa_prefill"
+    assert selector.select(gqa(), "prefill", "auto", validate=validate).name == "fa3_gqa_prefill"
     assert validated == ["fa3"]
 
     # FA3 and FlashInfer reject an int8 cache, so neither is validated.
     validated, validate = recorder()
     config = gqa(kv_quant="int8_group", kv_quant_group_size=8)
-    selection = selector.select(config, "decode", "auto", validate=validate)
-    assert selection.backend_cls.get_name() == "triton_quant_gqa_decode"
+    backend = selector.select(config, "decode", "auto", validate=validate)
+    assert backend.name == "triton_quant_gqa_decode"
     assert validated == ["triton"]
 
 
 def test_auto_skips_unsupported_configs_and_failed_validation():
     # FlashInfer has no sliding window, so decode moves on to FA3.
     validated, validate = recorder()
-    selection = selector.select(gqa(sliding_window=(15, 0)), "decode", "auto", validate=validate)
-    assert selection.backend_cls.get_name() == "fa3_gqa_decode"
+    backend = selector.select(gqa(sliding_window=(15, 0)), "decode", "auto", validate=validate)
+    assert backend.name == "fa3_gqa_decode"
     assert validated == ["fa3"]
 
     validated, validate = recorder(passing=("triton",))
-    assert selector.select(gqa(), "decode", "auto", validate=validate).backend_cls.get_name() == "triton_gqa_decode"
+    assert selector.select(gqa(), "decode", "auto", validate=validate).name == "triton_gqa_decode"
     assert validated == ["flashinfer", "fa3", "triton"]
 
 
 def test_auto_honours_priority_and_exclusions():
     _, validate = recorder()
-    selection = selector.select(
+    backend = selector.select(
         gqa(), "decode", "auto", priority=selector.auto_priority(gqa(), "decode", 1), validate=validate
     )
-    assert selection.backend_cls.get_name() == "fa3_gqa_decode"
-    selection = selector.select(gqa(), "decode", "auto", excluded=("flashinfer",), validate=validate)
-    assert selection.backend_cls.get_name() == "fa3_gqa_decode"
+    assert backend.name == "fa3_gqa_decode"
+    backend = selector.select(gqa(), "decode", "auto", excluded=("flashinfer",), validate=validate)
+    assert backend.name == "fa3_gqa_decode"
 
 
 def test_auto_falls_back_to_triton_without_validation():
     validated, validate = recorder(passing=())
-    assert selector.select(gqa(), "prefill", "auto", validate=validate).backend_cls.get_name() == "triton_gqa_prefill"
+    assert selector.select(gqa(), "prefill", "auto", validate=validate).name == "triton_gqa_prefill"
     assert validated == ["fa3", "flashinfer", "triton"]
 
     # Only FA3 runs an FP8 per-head cache; without it nothing is left.
@@ -140,7 +141,7 @@ def test_auto_reports_all_rejected_backends():
 
 def _select_with_missing_flashqla(rank, store):
     from lightllm.common.attention.backends.gdn import GDNLayerConfig
-    from lightllm.common.attention.backends.gdn.flashqla import FlashQLAGDNPrefillBackend
+    from lightllm.common.attention.backends.gdn.triton import FlashQLAGDNPrefillBackend
 
     torch.distributed.init_process_group(
         "gloo", init_method=store, rank=rank, world_size=2, timeout=timedelta(seconds=20)
@@ -157,9 +158,9 @@ def _select_with_missing_flashqla(rank, store):
             return True
 
         config = GDNLayerConfig(2, 4, 64, 64, 4, "silu", torch.bfloat16)
-        with patch.object(FlashQLAGDNPrefillBackend, "chunk_gated_delta_rule", staticmethod(load_kernel)):
+        with patch.object(FlashQLAGDNPrefillBackend, "load_chunk_kernel", staticmethod(load_kernel)):
             choice = selector.select(config, "prefill", "auto", validate=validate)
-        assert choice.backend_cls.get_name() == "triton_gdn_prefill"
+        assert choice.name == "triton_gdn_prefill"
     finally:
         torch.distributed.destroy_process_group()
 
@@ -179,11 +180,11 @@ def test_mla_phases_have_their_own_layer_config_types():
     common = dict(num_heads=16, qk_rope_head_dim=64, softmax_scale=0.1, dtype=torch.bfloat16)
     prefill = MLAPrefillLayerConfig(qk_nope_head_dim=128, v_head_dim=128, **common)
     decode = MLADecodeLayerConfig(kv_lora_rank=512, **common)
-    assert selector.select(prefill, "prefill", "flashinfer").backend_cls.get_name() == "flashinfer_mla_prefill"
-    assert selector.select(decode, "decode", "fa3").backend_cls.get_name() == "fa3_mla_decode"
+    assert selector.select(prefill, "prefill", "flashinfer").name == "flashinfer_mla_prefill"
+    assert selector.select(decode, "decode", "fa3").name == "fa3_mla_decode"
     triton = selector.select(decode, "decode", "triton")
-    assert type(triton.backend) is triton.backend_cls
-    assert triton.backend.layer_config is decode
+    assert triton.name == "triton_mla_decode"
+    assert triton.layer_config is decode
     assert selector.auto_priority(decode, "decode", 1) == ("fa3", "flashinfer", "triton")
     with pytest.raises(ValueError, match="no decode attention implementations"):
         selector.select(prefill, "decode", "triton")
@@ -210,7 +211,7 @@ def test_sparse_mla_runs_flashmla_where_it_supports_the_cache_and_fa3_elsewhere(
         kv_cache_format=kv_cache_format,
         topk=2048,
     )
-    names = tuple(selector.select(config, phase, "flashmla_sparse").backend_cls.get_name() for phase in selector.PHASES)
+    names = tuple(selector.select(config, phase, "flashmla_sparse").name for phase in selector.PHASES)
     assert names == expected
     assert selector.auto_priority(config, "decode", 2) == ("flashmla_sparse",)
     with pytest.raises(ValueError, match="not available"):
@@ -222,17 +223,20 @@ def test_linear_attention_takes_triton_without_validation_and_follows_the_state_
     from lightllm.common.attention.backends.gdn import GDNLayerConfig
 
     config = GDNLayerConfig(2, 4, 64, 64, 4, "silu", torch.bfloat16, replay=replay)
-    assert selector.arg_index(config) == 1
+    # Linear families read the second value of --llm_{prefill,decode}_att_backend.
+    args = SimpleNamespace(llm_prefill_att_backend=["fa3", "triton"], llm_decode_att_backend=["fa3"])
+    assert selector.requested_backend(args, "prefill", config) == "triton"
+    assert selector.requested_backend(args, "decode", config) == "auto"
     validated, validate = recorder(passing=())
     # FlashQLA fails validation here; Triton is taken without validating it.
-    selection = selector.select(config, "prefill", "auto", validate=validate)
-    assert selection.backend_cls.get_name() == "triton_gdn_prefill"
+    backend = selector.select(config, "prefill", "auto", validate=validate)
+    assert backend.name == "triton_gdn_prefill"
     assert validated == (["flashqla"] if _imports("flash_qla") else [])
-    selection = selector.select(config, "decode", "auto", validate=validate)
-    assert selection.backend_cls.get_name() == decode
+    backend = selector.select(config, "decode", "auto", validate=validate)
+    assert backend.name == decode
     # Each decode backend runs over one kind of state.
     with pytest.raises(NotImplementedError, match="replay"):
-        selection.backend_cls(dataclasses.replace(config, replay=not replay))
+        type(backend)(dataclasses.replace(config, replay=not replay))
 
 
 def _imports(module):
@@ -249,10 +253,11 @@ def test_flashkda_names_the_kda_backends_of_the_state_kind(monkeypatch, name, re
     from lightllm.common.attention.backends.kda import KDALayerConfig
     from lightllm.common.attention.backends.kda import triton as kda_triton
 
-    monkeypatch.setattr(kda_triton, "_check_prefill_kernel", lambda layer_config: None)
+    # A requested FlashKDA must load at construction; pretend it does.
+    monkeypatch.setattr(kda_triton, "import_flash_kda_fwd", lambda: None)
     config = KDALayerConfig(4, 128, 4, -5.0, torch.bfloat16, replay=replay, prefill_kernel=name)
     expected = "replay_kda_prefill" if replay else "triton_kda_prefill"
-    assert selector.select(config, "prefill", name).backend_cls.get_name() == expected
+    assert selector.select(config, "prefill", name).name == expected
     with pytest.raises(ValueError, match="not available"):
         selector.select(config, "decode", "flashkda")
 
@@ -276,7 +281,7 @@ assert not backend_modules, backend_modules
 
 def test_a_named_implementation_loads_only_its_backends(monkeypatch):
     loaded = []
-    real_load = selector._load
-    monkeypatch.setattr(selector, "_load", lambda path: loaded.append(path) or real_load(path))
-    selector.select(gqa(), "decode", "fa3")
-    assert loaded == ["lightllm.common.attention.backends.gqa.fa3:FA3GQADecodeBackend"]
+    real_import = selector.import_module
+    monkeypatch.setattr(selector, "import_module", lambda name: loaded.append(name) or real_import(name))
+    assert selector.select(gqa(), "decode", "fa3").name == "fa3_gqa_decode"
+    assert loaded == ["lightllm.common.attention.backends.gqa.fa3"]

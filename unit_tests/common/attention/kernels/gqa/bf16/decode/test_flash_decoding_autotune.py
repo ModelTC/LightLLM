@@ -12,7 +12,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend
-from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
+from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
 from lightllm.common.attention.kernels.gqa.bf16.decode import (
     gqa_flash_decoding as decode_module,
     gqa_flash_decoding_stage1 as stage1_module,
@@ -134,10 +134,9 @@ def test_state_retains_actual_length_before_graph_capture(monkeypatch, q_heads):
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.empty(2, 32768, dtype=torch.int32))
     infer_state.b_req_idx = torch.arange(2, dtype=torch.int32)
     infer_state.b_seq_len = torch.full((2,), 8193, dtype=torch.int32)
-    step_config = AttentionStepConfig(cuda_graph_max_kv_seq_len=32768)
     layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=2, head_dim=64, dtype=torch.float32)
-    builder = TritonGQADecodeBackend.create_build_context(TritonGQADecodeBackend.build_context_key(layer_config), None)
-    att_state = TritonGQADecodeBackend.build(configure_attention_step(infer_state, step_config), builder)
+    backend = TritonGQADecodeBackend(layer_config)
+    att_state = backend.build(configure_attention_step(infer_state, cuda_graph_max_kv_seq_len=32768))
     # Graph capture raises max_kv_seq_len only after the attention state are built.
     infer_state.max_kv_seq_len = 32768
     calls = []
@@ -151,7 +150,7 @@ def test_state_retains_actual_length_before_graph_capture(monkeypatch, q_heads):
         )
     q = torch.empty(2, q_heads, 64)
     inputs = GQALayerInputs(q=q, k_cache=torch.empty(16, 2, 64), v_cache=torch.empty(16, 2, 64))
-    TritonGQADecodeBackend(layer_config).forward(att_state, inputs, out=torch.empty_like(q))
+    backend.forward(att_state, inputs, out=torch.empty_like(q))
     if q_heads == 2:
         assert calls[0]["max_kv_seq_len"] == 32768
     else:

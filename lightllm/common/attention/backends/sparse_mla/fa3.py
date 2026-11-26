@@ -5,50 +5,41 @@ which it dequantizes chunk by chunk.
 """
 
 from dataclasses import dataclass
-from typing import NamedTuple, Optional
-
 import torch
 
-from lightllm.common.attention.backend import (
-    AttentionBackend,
-    AttentionBuildResources,
-    TensorAllocator,
-)
+from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from .. import keep_for_cuda_graph
 from . import SparseMLADecodeLayerInputs, SparseMLALayerConfig, SparseMLAPrefillLayerInputs
 
 
 @dataclass(frozen=True)
 class FA3SparseMLADecodeAttState:
     """cache_seqlens is the number of selected slots each request reads; cu_seqlens_k is its int32
-    prefix sum and cu_seqlens_q the int32 query offsets. causal is the kernel's mask mode, which
-    does not change one-row decode."""
+    prefix sum and cu_seqlens_q the int32 query offsets."""
 
     cache_seqlens: torch.Tensor
     cu_seqlens_q: torch.Tensor
     cu_seqlens_k: torch.Tensor
     max_seqlen_q: int
-    causal: bool = True
-
-
-class FA3SparseMLADecodeBuildContext:
-    def __init__(self, *, topk: int, kpool: int = 1, causal: bool = True) -> None:
-        """topk is the indexer's selection width. An indexer that scores pools of kpool keys selects
-        whole pools within the top-k width plus the newest partial pool."""
-        self.topk = topk
-        self.kpool = kpool
-        self.causal = causal
-        self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
 
 
 class FA3SparseMLADecodeBackend(
     AttentionBackend[SparseMLALayerConfig, FA3SparseMLADecodeAttState, SparseMLADecodeLayerInputs]
 ):
+    """The layer config's causal is the kernel's mask mode, which does not change one-row decode."""
+
+    name = "fa3_sparse_mla_decode"
+
     @classmethod
     def _check_supported(cls, layer_config: SparseMLALayerConfig) -> None:
         if layer_config.kv_cache_format != "bf16":
             raise NotImplementedError("FA3 sparse MLA decode supports only the bf16 cache")
+        if layer_config.topk is None:
+            raise NotImplementedError("FA3 sparse MLA decode needs the layer config's topk")
+
+    @classmethod
+    def group_key(cls, layer_config: SparseMLALayerConfig):
+        return layer_config.topk, layer_config.kpool, layer_config.causal
 
     def forward(
         self,
@@ -77,7 +68,7 @@ class FA3SparseMLADecodeBackend(
                 cu_seqlens_k_new=att_state.cu_seqlens_k,
                 max_seqlen_q=att_state.max_seqlen_q,
                 softmax_scale=layer_config.softmax_scale,
-                causal=att_state.causal,
+                causal=layer_config.causal,
                 only_qv=True,
                 out=out,
             )
@@ -93,58 +84,32 @@ class FA3SparseMLADecodeBackend(
             cu_seqlens_k_new=att_state.cu_seqlens_k,
             max_seqlen_q=att_state.max_seqlen_q,
             softmax_scale=layer_config.softmax_scale,
-            causal=att_state.causal,
+            causal=layer_config.causal,
             out=out,
         )
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "fa3_sparse_mla_decode"
+    def build(self, infer_state: InferStateInfo) -> FA3SparseMLADecodeAttState:
+        """A CUDA graph step keeps the length tensors per (microbatch, batch size), rewritten in place.
 
-    build_context_type = FA3SparseMLADecodeBuildContext
-
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: FA3SparseMLADecodeBuildContext) -> FA3SparseMLADecodeAttState:
-        """A CUDA graph step keeps the length tensors per (microbatch, metadata size), rewritten in place."""
-        device, lengths, kpool = metadata.b_seq_len.device, metadata.b_seq_len, context.kpool
-        topk = torch.full((metadata.batch_size,), context.topk, dtype=lengths.dtype, device=device)
+        An indexer that scores pools of kpool keys selects whole pools within the top-k width plus the
+        newest partial pool.
+        """
+        lengths, topk, kpool = infer_state.b_seq_len, self.layer_config.topk, self.layer_config.kpool
+        topk = torch.full((infer_state.batch_size,), topk, dtype=lengths.dtype, device=lengths.device)
         if kpool == 1:
             cache_seqlens = torch.minimum(topk, lengths)
         else:
             cache_seqlens = torch.minimum(lengths // kpool * kpool, topk) + lengths % kpool
-        padded = torch.zeros(metadata.batch_size + 1, dtype=torch.int32, device=device)
+        padded = torch.zeros(infer_state.batch_size + 1, dtype=torch.int32, device=lengths.device)
         padded[1:].copy_(cache_seqlens, non_blocking=True)
         cu_seqlens_k = padded.cumsum(dim=0, dtype=torch.int32)
-        if metadata.uses_cuda_graph:
-            key, store = (metadata.microbatch_index, metadata.batch_size), context._cuda_graph_tensors
-            cache_seqlens = keep_for_cuda_graph(store, (*key, "cache_seqlens"), cache_seqlens)
-            cu_seqlens_k = keep_for_cuda_graph(store, (*key, "cu_seqlens_k"), cu_seqlens_k)
         return FA3SparseMLADecodeAttState(
-            cache_seqlens=cache_seqlens,
-            cu_seqlens_q=metadata.b1_cu_q_seq_len,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=metadata.max_q_seq_len,
-            causal=context.causal,
+            cache_seqlens=self._keep_for_graph(infer_state, "cache_seqlens", cache_seqlens),
+            cu_seqlens_q=infer_state.b1_cu_q_seq_len,
+            cu_seqlens_k=self._keep_for_graph(infer_state, "cu_seqlens_k", cu_seqlens_k),
+            max_seqlen_q=infer_state.max_q_seq_len,
         )
-
-    @classmethod
-    def create_build_context(
-        cls, build_key: "_FA3DecodeKey", ctx: AttentionBuildResources
-    ) -> FA3SparseMLADecodeBuildContext:
-        if build_key.topk is None:
-            raise ValueError("FA3 sparse MLA decode needs the layer config's topk")
-        return FA3SparseMLADecodeBuildContext(**build_key._asdict())
-
-    @classmethod
-    def build_context_key(cls, layer_config: SparseMLALayerConfig) -> "_FA3DecodeKey":
-        return _FA3DecodeKey(layer_config.topk, layer_config.kpool, layer_config.causal)
-
-
-class _FA3DecodeKey(NamedTuple):
-    topk: Optional[int]
-    kpool: int
-    causal: bool
 
 
 @dataclass(frozen=True)
@@ -159,6 +124,8 @@ class FA3SparseMLAPrefillAttState:
 class FA3SparseMLAPrefillBackend(
     AttentionBackend[SparseMLALayerConfig, FA3SparseMLAPrefillAttState, SparseMLAPrefillLayerInputs]
 ):
+    name = "fa3_sparse_mla_prefill"
+
     @classmethod
     def _check_supported(cls, layer_config: SparseMLALayerConfig) -> None:
         if layer_config.kv_cache_format != "fp8_group64_e8m0" or layer_config.qk_rope_head_dim != 0:
@@ -286,12 +253,7 @@ class FA3SparseMLAPrefillBackend(
             out.copy_(output)
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "fa3_sparse_mla_prefill"
-
-    @classmethod
-    def build(cls, infer_state: InferStateInfo, context: None = None) -> FA3SparseMLAPrefillAttState:
+    def build(self, infer_state: InferStateInfo) -> FA3SparseMLAPrefillAttState:
         return FA3SparseMLAPrefillAttState(
             req_to_token_indexs=infer_state.req_to_token_indexs,
             b_req_idx=infer_state.b_req_idx,

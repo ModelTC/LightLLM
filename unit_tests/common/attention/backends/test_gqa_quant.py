@@ -3,14 +3,10 @@
 import pytest
 import torch
 
-from unit_tests.common.attention.backends.step_fixture import make_infer_state
+from unit_tests.common.attention.backends.step_fixture import make_infer_state, make_resources
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
-from lightllm.common.attention.backends.gqa.flashinfer import (
-    FlashInferGQABuilderConfig,
-    FlashInferGQADecodeBackend,
-    FlashInferGQAPrefillBackend,
-)
+from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQADecodeBackend, FlashInferGQAPrefillBackend
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQAPrefillBackend
 from lightllm.common.attention.backends.gqa.triton_quant import (
     TritonQuantGQADecodeBackend,
@@ -157,10 +153,8 @@ def test_triton_group_quant_matches_dequantized_reference(bits, prefill):
     k, v, scales, k_ref, v_ref = group_cache(bits)
     token_map = torch.randperm(3 * CAP, device="cuda", dtype=torch.int32, generator=gen(0)).view(3, CAP)
     backend_cls = TritonQuantGQAPrefillBackend if prefill else TritonQuantGQADecodeBackend
-    att_state = backend_cls.build(
-        make_batch(token_map, prefill=prefill), None if prefill else backend_cls.build_context_type()
-    )
     backend = backend_cls(config(kv_quant=f"int{bits}_group", kv_quant_group_size=8))
+    att_state = backend.prepare(make_batch(token_map, prefill=prefill), make_resources())
     q = queries(prefill)
     out = torch.empty_like(q)
     assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out) is out
@@ -189,17 +183,11 @@ def test_fa3_fp8_per_head_matches_dequantized_reference(static_q, prefill):
     q_scale = torch.tensor([0.02, 0.03], device="cuda") if static_q else None
     token_map = torch.randperm(3 * CAP, device="cuda", dtype=torch.int32, generator=gen(0)).view(3, CAP)
     batch = make_batch(token_map, prefill=prefill)
-    if prefill:
-        backend_cls = FA3GQAPrefillBackend
-        att_state = backend_cls.build(batch, backend_cls.build_context_type(page_size=1))
-    else:
-        backend_cls = FA3GQADecodeBackend
-        storage = torch.empty(3 * CAP, dtype=torch.int32, device="cuda")
-        step_builder = backend_cls.build_context_type(
-            page_size=1, page_table_view=lambda rows, width, mb: storage[: rows * width].view(rows, width)
-        )
-        att_state = backend_cls.build(batch, step_builder)
+    backend_cls = FA3GQAPrefillBackend if prefill else FA3GQADecodeBackend
     backend = backend_cls(config(kv_quant="fp8_per_head", has_q_scale=static_q))
+    # An FP8 cache runs with single-token pages.
+    att_state = backend.prepare(batch, make_resources(page_size=16, max_seq_len=CAP, max_decode_rows=3))
+    assert att_state.page_size == 1
     q = queries(prefill)
     out = torch.empty_like(q)
     scales = GQAKVScales(k_scale=k_scale, v_scale=v_scale, q_scale=q_scale)
@@ -216,18 +204,12 @@ def test_flashinfer_fp8_per_tensor_matches_dequantized_reference(prefill):
     pytest.importorskip("flashinfer")
     k, v = fp8_cache()
     token_map = torch.randperm(3 * CAP, device="cuda", dtype=torch.int32, generator=gen(0)).view(3, CAP)
-    builder_config = FlashInferGQABuilderConfig(HEADS, KV_HEADS, DIM, 1, torch.bfloat16, torch.float8_e4m3fn)
-    workspace = torch.empty(32 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-    if prefill:
-        backend_cls = FlashInferGQAPrefillBackend
-        step_builder = backend_cls.build_context_type(builder_config, workspace=lambda: workspace, max_seq_len=CAP)
-    else:
-        backend_cls = FlashInferGQADecodeBackend
-        step_builder = backend_cls.build_context_type(
-            builder_config, workspace=lambda: workspace, max_seq_len=CAP, max_batch_size=3, device=torch.device("cuda")
-        )
-    att_state = backend_cls.build(make_batch(token_map, prefill=prefill), step_builder)
+    backend_cls = FlashInferGQAPrefillBackend if prefill else FlashInferGQADecodeBackend
     backend = backend_cls(config(kv_quant="fp8_per_tensor"))
+    resources = make_resources(page_size=16, max_seq_len=CAP, max_cuda_graph_batch_size=3)
+    att_state = backend.prepare(make_batch(token_map, prefill=prefill), resources)
+    # An FP8 cache runs with single-token pages.
+    assert att_state.page_size == 1
     q = queries(prefill)
     out = torch.empty_like(q)
     scales = GQAKVScales(k_scale=0.03, v_scale=0.05)
@@ -253,9 +235,8 @@ def test_unquantized_triton_rejects_a_quantized_cache(prefill):
     k, v, _, _, _ = group_cache(8)
     token_map = torch.randperm(3 * CAP, device="cuda", dtype=torch.int32, generator=gen(0)).view(3, CAP)
     backend_cls = TritonGQAPrefillBackend if prefill else TritonGQADecodeBackend
-    att_state = backend_cls.build(
-        make_batch(token_map, prefill=prefill), None if prefill else backend_cls.build_context_type()
-    )
+    backend = backend_cls(config())
+    att_state = backend.build(make_batch(token_map, prefill=prefill))
     q = queries(prefill)
     with pytest.raises(AssertionError, match="KV cache of q's dtype"):
-        backend_cls(config()).forward(att_state, GQALayerInputs(q, k, v), out=torch.empty_like(q))
+        backend.forward(att_state, GQALayerInputs(q, k, v), out=torch.empty_like(q))

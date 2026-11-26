@@ -8,19 +8,16 @@ import torch
 from lightllm.common.attention import selector
 from lightllm.common.attention.backend import AttentionBackend
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig
-from lightllm.common.attention.backends.gqa.fa3 import FA3PageTables
 from lightllm.common.basemodel import attention_backend_manager
 from lightllm.common.basemodel.attention_backend_manager import (
     AttentionBackendManager,
     LayerAttentionConfig,
-    AttentionStepConfig,
-    attention_build_resources,
     configure_attention_step,
 )
 from lightllm.common.attention.backends.gqa import gqa_kv_quant_fields
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from unit_tests.common.attention.backends.groups_runner import build_context
+from unit_tests.common.attention.backends.groups_runner import set_up
 
 
 def start_args(**overrides):
@@ -58,6 +55,10 @@ def fake_model(**args):
         att_state_role="main",
         att_state_manager=SimpleNamespace(get_bounded_attention_states=lambda role: ()),
     )
+
+
+def resources(model):
+    return AttentionBackendManager(model).resources
 
 
 def setup_model(model):
@@ -144,30 +145,28 @@ def test_sparse_mla_step_builders_follow_the_layer_selection():
     from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend
     from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparseDecodeBackend
 
-    ctx = attention_build_resources(fake_model())
-
     def config(**fields):
         fields = {"num_heads": 64, "kv_lora_rank": 512, "qk_rope_head_dim": 0, "softmax_scale": 0.1, **fields}
         return SparseMLALayerConfig(dtype=torch.bfloat16, **fields)
 
-    builder = build_context(FA3SparseMLADecodeBackend, config(topk=2048, kpool=4, causal=False), ctx)
-    assert (builder.topk, builder.kpool, builder.causal) == (2048, 4, False)
-    with pytest.raises(ValueError, match="topk"):
-        build_context(FA3SparseMLADecodeBackend, config(), ctx)
+    backend = FA3SparseMLADecodeBackend(config(topk=2048, kpool=4, causal=False))
+    assert backend.state_key[1] == (2048, 4, False)
+    with pytest.raises(NotImplementedError, match="topk"):
+        FA3SparseMLADecodeBackend(config())
     # 2048 pooled entries plus at most three kpool remainder entries bound the direct decode window.
     fp8 = dict(kv_cache_format="fp8_group64_e8m0", topk=2048)
-    assert build_context(FlashMLASparseDecodeBackend, config(kpool=4, **fp8), ctx).direct_decode_bound == 2051
-    assert build_context(FlashMLASparseDecodeBackend, config(kpool=1, **fp8), ctx).direct_decode_bound is None
+    assert FlashMLASparseDecodeBackend(config(kpool=4, **fp8)).direct_decode_bound == 2051
+    assert FlashMLASparseDecodeBackend(config(kpool=1, **fp8)).direct_decode_bound is None
 
 
 def test_layer_family_selects_its_command_line_argument():
+    from lightllm.common.attention.backends.gdn import GDNLayerConfig
+
     groups = setup_model(fake_model(llm_prefill_att_backend=["fa3", "flashqla"]))
-    assert attention_backend_manager.requested_backend(groups.args, "prefill", gqa()) == "fa3"
-    linear = SimpleNamespace()
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(selector, "arg_index", lambda layer_config: 1 if layer_config is linear else 0)
-        assert attention_backend_manager.requested_backend(groups.args, "prefill", linear) == "flashqla"
-        assert attention_backend_manager.requested_backend(groups.args, "decode", linear) == "auto"
+    assert selector.requested_backend(groups.args, "prefill", gqa()) == "fa3"
+    linear = GDNLayerConfig(2, 4, 64, 64, 4, "silu", torch.bfloat16)
+    assert selector.requested_backend(groups.args, "prefill", linear) == "flashqla"
+    assert selector.requested_backend(groups.args, "decode", linear) == "auto"
 
 
 @pytest.mark.parametrize("replay", [False, True])
@@ -177,6 +176,7 @@ def test_kda_prefill_step_builders_follow_the_layer_config(monkeypatch, replay, 
     from lightllm.common.attention.backends.kda import triton as kda_triton
 
     requests = []
+    monkeypatch.setattr(kda_triton, "import_flash_kda_fwd", lambda: "fwd")
     monkeypatch.setattr(
         kda_triton, "load_flash_kda_fwd", lambda requested, **kwargs: requests.append((requested, kwargs)) or "fwd"
     )
@@ -192,10 +192,20 @@ def test_kda_prefill_step_builders_follow_the_layer_config(monkeypatch, replay, 
         prefill_kernel=prefill_kernel,
     )
     backend = kda_triton.ReplayKDAPrefillBackend if replay else kda_triton.TritonKDAPrefillBackend
-    builder = build_context(backend, config, attention_build_resources(fake_model()))
-    assert builder.ssm_slots_per_request == (1 if replay else 3)
+    backend = set_up(backend, config, resources(fake_model()))
     assert requests == [(prefill_kernel, {"dtype": torch.bfloat16, "ssm_dtype": torch.bfloat16})]
-    assert builder.flash_kda_fwd == "fwd" and builder.max_flash_len == flash_len
+    assert backend.flash_kda_fwd == "fwd" and backend.max_flash_len == flash_len
+    req = torch.tensor([0, 1, 2])
+    att_state = backend.build(
+        SimpleNamespace(
+            b_req_idx=req,
+            b1_cu_q_seq_len=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+            b_ready_cache_len=torch.zeros(3, dtype=torch.int32),
+            max_q_seq_len=1,
+        )
+    )
+    assert att_state.ssm_idx.tolist() == (req * (1 if replay else 3)).tolist()
+    assert att_state.flash_kda_fwd == "fwd"
 
 
 class Built(SimpleNamespace):
@@ -224,25 +234,19 @@ class FakeImpl(AttentionBackend):
 created = []
 
 
-def fake_backend(name, *, sync=False):
+def fake_backend(backend_name, *, sync=False):
     class Backend(FakeImpl):
-        @staticmethod
-        def get_name():
-            return name
+        name = backend_name
 
-        build_context_type = FakeBuilder
+        def setup(self, resources):
+            created.append((backend_name, self.state_key[1]))
+            self.builder = FakeBuilder(backend_name)
 
-        @classmethod
-        def build(cls, metadata, context):
-            return context.build(metadata)
-
-        @classmethod
-        def create_build_context(cls, build_key, ctx):
-            created.append((name, build_key))
-            return FakeBuilder(name)
+        def build(self, infer_state):
+            return self.builder.build(infer_state)
 
         @classmethod
-        def build_context_key(cls, layer_config):
+        def group_key(cls, layer_config):
             return layer_config.key
 
         @classmethod
@@ -348,7 +352,7 @@ def test_layer_override_is_independent_for_identical_configs():
         pinned[1],
     )
     for phase in selector.PHASES:
-        assert [backend.get_name() for backend in backends(groups, phase)] == [
+        assert [backend.name for backend in backends(groups, phase)] == [
             f"triton_gqa_{phase}",
             f"fa3_gqa_{phase}",
         ]
@@ -407,7 +411,7 @@ def test_kv_quant_fields_reject_mismatched_caches():
 def test_step_builder_context_covers_speculative_and_padded_decode_rows():
     model = fake_model(mtp_step=2, enable_tpsp_mix_mode=True, enable_decode_microbatch_overlap=True, diverse_mode=True)
     model.tp_world_size_ = 4
-    ctx = attention_build_resources(model)
+    ctx = resources(model)
     # 8 running requests x 3 rows, padded to a multiple of the TP size.
     assert ctx.max_decode_rows == 24
     assert ctx.max_cuda_graph_batch_size == 4
@@ -415,29 +419,43 @@ def test_step_builder_context_covers_speculative_and_padded_decode_rows():
     assert ctx.workspace_bytes == 64 * 1024 * 1024
     assert ctx.diverse_decode
     model.graph_max_batch_size = 64
-    assert attention_build_resources(model).max_decode_rows == 64
+    assert resources(model).max_decode_rows == 64
 
 
-def test_fa3_page_tables_allocate_lazily_per_microbatch_and_check_capacity(monkeypatch):
+def test_fa3_decode_page_tables_allocate_lazily_per_microbatch_and_check_capacity(monkeypatch):
+    from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend
+    from lightllm.common.basemodel.triton_kernel import fa3_utils
+
     requests = []
 
     def get_workspace(name, numel, dtype):
         requests.append((name, numel, dtype))
         return torch.zeros(numel, dtype=dtype)
 
-    model = fake_model(enable_decode_microbatch_overlap=True)
-    ctx = attention_build_resources(model)
+    monkeypatch.setattr(fa3_utils, "page_table_copy", lambda **kwargs: None)
+    ctx = resources(fake_model(enable_decode_microbatch_overlap=True))
     ctx = type(ctx)(**{**vars(ctx), "get_workspace": get_workspace})
-    tables = FA3PageTables(ctx, page_size=16)
+    backend = set_up(FA3GQADecodeBackend, gqa(), ctx)
     assert requests == []
-    view = tables.view(rows=3, max_kv_len=100, microbatch_index=1)
+
+    def decode_step(rows, max_kv_len, microbatch_index):
+        state = step(prefill=False, batch_size=rows)
+        state.microbatch_index = microbatch_index
+        state.max_kv_seq_len = max_kv_len
+        state.b_seq_len.fill_(max_kv_len)
+        state.b1_cu_q_seq_len = torch.arange(rows + 1, dtype=torch.int32)
+        state.b1_cu_kv_seq_len = torch.arange(rows + 1, dtype=torch.int32) * max_kv_len
+        return configure_attention_step(state)
+
+    view = backend.build(decode_step(rows=3, max_kv_len=100, microbatch_index=1)).page_table
     assert view.shape == (3, 7) and view.is_contiguous()
     rows = max(ctx.max_decode_rows, ctx.max_cuda_graph_batch_size)
-    assert requests == [(f"fa3_page_table_{i}", rows * 64, torch.int32) for i in range(2)]
+    # Only the step's microbatch buffer is requested; the workspace shares it by name.
+    assert requests == [("fa3_page_table_1", rows * 64, torch.int32)]
     with pytest.raises(RuntimeError, match="batch size"):
-        tables.view(rows=rows + 1, max_kv_len=16, microbatch_index=0)
+        backend.build(decode_step(rows=rows + 1, max_kv_len=16, microbatch_index=0))
     with pytest.raises(RuntimeError, match="max KV sequence length"):
-        tables.view(rows=1, max_kv_len=ctx.max_seq_len + 1, microbatch_index=0)
+        backend.build(decode_step(rows=1, max_kv_len=ctx.max_seq_len + 1, microbatch_index=0))
 
 
 class FakeState:
@@ -477,7 +495,7 @@ def test_llama_layer_creates_its_attention_from_its_cache(runtime_start_args):
     layer.prefill_backend, layer.decode_backend = model.attention_backend_manager.bind(layer.attention_config(model))
     expected = gqa(kv_quant="int8_group", kv_quant_group_size=8)
     assert layer.prefill_backend.layer_config == layer.decode_backend.layer_config == expected
-    assert backends(model, "decode")[0].get_name() == "triton_quant_gqa_decode"
+    assert backends(model, "decode")[0].name == "triton_quant_gqa_decode"
 
 
 def test_only_prefill_attends_inside_image_spans(runtime_start_args):
@@ -576,7 +594,7 @@ def test_qwen3next_layers_split_into_full_and_linear_attention_groups(runtime_st
         2, 4, 64, 64, 4, "silu", torch.bfloat16, state_mtp_step=1, replay=ssm_state_mode == "replay"
     )
     assert linear.prefill_backend.layer_config == linear.decode_backend.layer_config == expected
-    assert {backend.get_name() for backend in backends(model, "decode")} == {
+    assert {backend.name for backend in backends(model, "decode")} == {
         "triton_gqa_decode",
         decode,
     }
@@ -591,17 +609,16 @@ def test_speculative_decode_batches_carry_the_recurrent_state_index(monkeypatch)
     model = fake_model(mtp_step=1)
     model.att_state_role = "main"
     model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: (object(), recurrent))
-    assert attention_backend_manager.recurrent_mtp_state_index(model) is index
     for rows, expected in ((1, None), (2, index)):
         model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _, rows=rows: rows - 1)
-        config = attention_backend_manager.attention_step_config(model)
-        assert config.decode_rows_per_request == rows and config.req_to_mtp_state_index is index
-        assert configure_attention_step(step(prefill=False), config).req_to_mtp_state_index is expected
+        config = AttentionBackendManager(model).step_config
+        assert config["decode_rows_per_request"] == rows and config["req_to_mtp_state_index"] is index
+        assert configure_attention_step(step(prefill=False), **config).req_to_mtp_state_index is expected
         # Prefill rows are never speculative.
-        assert configure_attention_step(step(prefill=True), config).req_to_mtp_state_index is None
+        assert configure_attention_step(step(prefill=True), **config).req_to_mtp_state_index is None
     model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: (recurrent, recurrent))
     with pytest.raises(ValueError, match="at most one recurrent state"):
-        attention_backend_manager.recurrent_mtp_state_index(model)
+        AttentionBackendManager(model)
 
 
 @pytest.mark.parametrize("dynamic", [False, True])
@@ -614,12 +631,15 @@ def test_step_config_is_read_from_the_model_once(monkeypatch, dynamic):
     model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: ())
     model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda is_draft: 2)
     runtime = AttentionBackendManager(model)
-    assert runtime.step_config == AttentionStepConfig(
-        decode_rows_per_request=3, dynamic_decode_rows=dynamic, cuda_graph_max_kv_seq_len=1024
+    assert runtime.step_config == dict(
+        decode_rows_per_request=3,
+        dynamic_decode_rows=dynamic,
+        req_to_mtp_state_index=None,
+        cuda_graph_max_kv_seq_len=1024,
     )
     # Steps read nothing more from the model.
     model.mtp_manager = model.graph_max_len_in_batch = None
-    metadata = configure_attention_step(step(prefill=False), runtime.step_config)
+    metadata = configure_attention_step(step(prefill=False), **runtime.step_config)
     assert (metadata.decode_rows_per_request, metadata.dynamic_decode_rows) == (3, dynamic)
 
 
@@ -627,10 +647,10 @@ def test_step_config_is_read_from_the_model_once(monkeypatch, dynamic):
 def test_only_cuda_graph_steps_carry_the_graph_kv_capacity(graph_mode):
     state = step(prefill=False)
     state.graph_mode = graph_mode
-    metadata = configure_attention_step(state, AttentionStepConfig(cuda_graph_max_kv_seq_len=512))
+    metadata = configure_attention_step(state, cuda_graph_max_kv_seq_len=512)
     assert metadata is state
     assert metadata.cuda_graph_max_kv_seq_len == (None if graph_mode is GraphMode.EAGER else 512)
     assert metadata.uses_cuda_graph == (graph_mode is not GraphMode.EAGER)
     if graph_mode is not GraphMode.EAGER:
         with pytest.raises(ValueError, match="kv length capacity"):
-            configure_attention_step(state, AttentionStepConfig())
+            configure_attention_step(state)

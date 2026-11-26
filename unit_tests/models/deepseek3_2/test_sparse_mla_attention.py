@@ -15,7 +15,6 @@ from lightllm.common.attention.backends.sparse_mla import (
     SparseMLALayerConfig,
     SparseMLAPrefillLayerInputs,
 )
-from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_prefill_params
@@ -35,7 +34,7 @@ SLOTS, MAX_LEN = 16384, 4096
 
 
 # The model's step config: graph steps cover MAX_LEN.
-STEP_CONFIG = AttentionStepConfig(cuda_graph_max_kv_seq_len=MAX_LEN)
+STEP_CONFIG = dict(cuda_graph_max_kv_seq_len=MAX_LEN)
 
 
 def layer_attention(heads, kv_cache_format):

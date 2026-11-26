@@ -54,8 +54,8 @@ GQA 层在 `attention_config()` 中声明 prefill 和 decode 的配置。Gemma4 
 
 运行时创建时从模型读取一次全部静态信息，之后不再持有模型：
 
-- `attention_build_resources(model)` 把模型的资源与容量写入 `AttentionBuildResources`，供 backend 创建构建上下文（第 3 节）。
-- `attention_step_config(model)` 生成冻结的 `AttentionStepConfig`，记录 decode 每请求行数、是否为 dynamic verify 布局、线性注意力的投机状态索引和 CUDA graph 的 KV 长度容量。`configure_attention_step` 根据当前阶段和 graph 模式把适用值写入 `InferStateInfo`。
+- `resources` 是模型的资源与容量（`AttentionBuildResources`），供 backend 的 `setup` 创建跨步存储（第 3 节）。
+- `step_config` 是 `configure_attention_step` 的关键字参数：decode 每请求行数、是否为 dynamic verify 布局、线性注意力的投机状态索引和 CUDA graph 的 KV 长度容量。`configure_attention_step` 根据当前阶段和 graph 模式把适用值写入 `InferStateInfo`。
 - 因此 graph 容量必须在 `_init_attention` 之前确定：`graph_max_len_in_batch` 的 MTP 余量调整在模型构造函数中完成，而不是在 `_init_cudagraph` 中。
 
 层的因果性（`attention_is_causal`）在绑定时写入 layer config。
@@ -80,9 +80,9 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 `AttentionBackend` 实例提供准备本步状态的 `prepare` 和计算本层输出的 `forward`。
 
-- `build_context_key(layer_config)` 声明哪些配置会改变本步准备工作。运行时用 `(backend 类, build_context_key)` 作为 `state_key`，prefill 和 decode 各有自己的状态表。
-- `prepare(infer_state, resources)` 首次调用时用 `create_build_context(build_key, resources)` 创建该组的上下文，并在后续步骤复用。`build_key` 就是分组时 `build_context_key(layer_config)` 的返回值。上下文所需的逐层参数必须包含在这个键中，模型级资源由 `resources` 提供。
-- `build(metadata, context)` 为当前 microbatch 生成一份 `AttState`。所有持有同一 `state_key` 的层直接使用它。
+- `group_key(layer_config)` 声明哪些配置会改变本步准备工作。运行时用 `(backend 类, group_key)` 作为 `state_key`，prefill 和 decode 各有自己的状态表。
+- `prepare(infer_state, resources)` 首次调用时执行 `setup(resources)`，在实例上创建该组跨步复用的存储，随后调用 `build(infer_state)`。`setup` 和 `build` 只能读取 `group_key` 包含的 layer config 字段，模型级资源由 `resources` 提供。
+- `build(infer_state)` 为当前 microbatch 生成一份 `AttState`。所有持有同一 `state_key` 的层直接使用它；`forward` 所需而 `setup` 才知道的值（如 page size）放在 `AttState` 中，因为只有组的代表实例执行过 `setup`。
 - `forward(att_state, layer_inputs, ...)` 使用实例持有的 `layer_config`，结合当前层的张量计算输出。
 - `requires_cpu_cache_sync()` 声明 CPU cache 搬运是否需要与该 backend 的计算同步。
 
@@ -96,13 +96,13 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 每步的主流程是 `InferStateInfo → backend.prepare → att_state → backend.forward`。模型为这一步提供请求长度和 KV 索引，各后端只在 `att_state` 中保留 kernel 所需的参数。
 
-模型的 `AttentionBuildResources` 只用于初始化。需要跨步保存页表、wrapper 或 CUDA graph 缓冲区的后端自行定义存储类型，兼容的层共享该对象；其余后端直接使用 `None`。
+模型的 `AttentionBuildResources` 只用于初始化。需要跨步保存页表、wrapper 或 CUDA graph 缓冲区的后端在 `setup` 中把它们放在组的代表实例上，不另设存储类型；其余后端不覆盖 `setup`。
 
 | 类型 | 生命周期 | 内容 |
 | --- | --- | --- |
 | `*LayerConfig` | 模型加载时确定 | 一层的静态配置：head 数、维度、dtype、scale、因果性、滑窗、sinks、KV 量化方式等。frozen dataclass，可哈希，构造时校验字段。 |
 | `AttentionBackend` | 模型加载时创建 | 每层持有各阶段的 backend，相同阶段与 layer config 的层共用同一实例。 |
-| `AttentionBuildResources` | 每个模型对象一份 | 模型提供给构建上下文的资源与容量，不含模型对象：设备、page size、最大序列长度、CUDA graph 最大 batch size、decode 行数上限（含 MTP 和 TPSP 对齐）、microbatch 数、共享 workspace 的大小与按名称共享的分配函数、decode batch 是否带 diverse 分组，以及模型预留的 prefill workspace。 |
+| `AttentionBuildResources` | 每个模型对象一份 | 模型提供给 backend `setup` 的资源与容量，不含模型对象：设备、page size、最大序列长度、CUDA graph 最大 batch size、decode 行数上限（含 MTP 和 TPSP 对齐）、microbatch 数、共享 workspace 的大小与按名称共享的分配函数、decode batch 是否带 diverse 分组，以及模型预留的 prefill workspace。 |
 | `InferStateInfo` | 每步一次 | 保存请求张量、累积偏移、prefill 的 cached prefix、投机解码的行布局、CUDA graph 容量和 microbatch 编号。 |
 | `att_state` | 属于当前 microbatch，兼容的层共用 | 层通过 `infer_state.att_states[backend.state_key]` 取出状态。各后端的状态只持有所需字段或预先准备的页表、索引和 wrapper。 |
 | `*LayerInputs` | 每次层调用 | 本层的张量：q、KV cache 视图、量化 scale、状态视图、稀疏索引等。 |
@@ -127,14 +127,14 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 - builder 直接读取模型为当前 microbatch 准备的 `InferStateInfo`。
 - `req_to_token_indexs[b_req_idx[i], pos]` 是请求 i 第 pos 个 token 的物理 cache 槽位。
 - decode 默认每个请求一行。投机解码时，固定布局下每个请求有 `decode_rows_per_request` 个连续行；dynamic verify 布局下行数可变，相同 `b_req_idx` 的连续行属于同一请求，`pad_req_idx` 的行是 padding，各自独立。
-- 线性注意力的投机解码行从请求最后一个被接受的行恢复状态；`req_to_mtp_state_index` 在运行时创建时从本角色的 recurrent 状态取得，存于 `AttentionStepConfig`，decode 行数大于 1 时写入 batch。
+- 线性注意力的投机解码行从请求最后一个被接受的行恢复状态；`req_to_mtp_state_index` 在 manager 创建时从本角色的 recurrent 状态取得，存于 `step_config`，decode 行数大于 1 时写入 batch。
 - `cuda_graph_max_kv_seq_len` 在捕获和 replay 步给出 graph 的长度容量，eager 步为 `None`；`uses_cuda_graph` 是唯一的 graph 开关。
 
 ### 4.3 AttentionBackend.build
 
-`backend.build(infer_state, context)` 对每个状态组每步执行一次，包括 CUDA graph 的捕获步和 replay 步，在第一层之前、捕获之外运行。`context` 保存跨步复用的配置或缓冲区，由 `build` 生成本步状态。约束：
+`backend.build(infer_state)` 对每个状态组每步执行一次，包括 CUDA graph 的捕获步和 replay 步，在第一层之前、捕获之外运行。跨步复用的缓冲区保存在组的代表实例上，由 `build` 生成本步状态。约束：
 
-1. **graph 步的派生状态按 `(microbatch_index, batch_size)` 保存并原地改写。** 使用 `keep_for_cuda_graph(store, key, value)`：第一次保存副本，之后 `copy_` 到同一地址。graph 捕获时读取的是这个地址；replay 步新建的张量 graph 看不到。microbatch overlap 的两个微批是不同的 graph，不能共享存储。
+1. **graph 步的派生状态按 `(microbatch_index, batch_size)` 保存并原地改写。** 使用 `self._keep_for_graph(infer_state, name, value)`：eager 步原样返回；graph 步第一次保存副本，之后 `copy_` 到同一地址。graph 捕获时读取的是这个地址；replay 步新建的张量 graph 看不到。microbatch overlap 的两个微批是不同的 graph，不能共享存储。
 2. **主机侧字段在 replay 时保持捕获时的值，且必须对每次 replay 有效。** 网格大小、scratch 大小和 kernel 配置被固化在 graph 中，graph 步应按容量而不是捕获步的实际长度确定。只用于选择 kernel 配置、kernel 自己在 GPU 上读取实际长度的字段称为 hint，可以取本步实际值，必须在 docstring 中注明。例如 Triton GQA decode 的 `kv_seq_len_bound` 是界，`max_kv_seq_len` 是 hint。
 3. **eager 步可以使用新分配的存储**，但固定大小的缓冲（如 FlashInfer 的页索引）应按容量预分配、按 microbatch 切片复用，避免每个 graph batch size 各保存一份。
 4. 第三方库的有状态对象（FlashInfer wrapper、FlashMLA scheduler metadata）按 `(microbatch_index, batch_size)` 保存；replay 步原地改写其缓冲并在 GPU 上或用 `fast_decode_plan` 重新规划，不能创建新对象。
@@ -167,16 +167,16 @@ backend.forward(att_state, layer_inputs, *, out, alloc_func=torch.empty) -> out
 
 ### 6.1 分组
 
-prefill、decode 各自按 `(backend, backend.build_context_key(layer_config))` 分组。例如，两层的 prefill 配置不同，但其 decode backend 和 构建键 相同，decode 时只准备一次参数。
+prefill、decode 各自按 `(backend 类, backend.group_key(layer_config))` 分组。例如，两层的 prefill 配置不同，但其 decode backend 和分组键相同，decode 时只准备一次参数。
 
 | 模型 | 组 | 说明 |
 | --- | --- | --- |
 | Llama 系 GQA | 1 | 所有层同一组。 |
-| Gemma4（Triton） | 1 | 滑窗层和全注意力层的 layer config 不同（head dim、滑窗、图像 span），但 Triton GQA 的 构建上下文 与 layer config 无关，因此共用一份 attention state。若改用 FlashInfer，会按 head dim 自动分成两组，各自 plan。 |
+| Gemma4（Triton） | 1 | 滑窗层和全注意力层的 layer config 不同（head dim、滑窗、图像 span），但 Triton GQA 的准备工作与 layer config 无关，因此共用一份 attention state。若改用 FlashInfer，会按 head dim 自动分成两组，各自 plan。 |
 | Qwen3-Next | 2 | GQA 全注意力层一组，GDN 层一组。 |
 | DeepSeek V2/V3（FA3 MLA） | 1 | |
 | GLM-5 | 2 | 稀疏 MLA 层一组，KDA 层一组。 |
-| DeepSeek V4 | 每个压缩比一组 | SWA 稀疏 MLA 的 构建上下文 依赖压缩比。 |
+| DeepSeek V4 | 每个压缩比一组 | SWA 稀疏 MLA 的 scheduler metadata 依赖压缩比。 |
 
 main 与 MTP draft 模型不共用组的 attention state。
 
@@ -201,42 +201,42 @@ sequenceDiagram
     participant B as AttentionBackend
     participant G as CUDA graph
     M->>M: 捕获步 _create_inferstate(graph_mode=CAPTURE)
-    M->>B: build(metadata, context)
+    M->>B: prepare(infer_state, resources)
     B-->>M: attention state（保存的地址）
     M->>A: 保存 att_states
     M->>G: 在 torch.cuda.graph 中运行各层 forward
     M->>M: replay 步 _create_inferstate(graph_mode=REPLAY)
-    M->>B: build(metadata, context)，原地更新张量 / wrapper
+    M->>B: prepare(infer_state, resources)，原地更新张量 / wrapper
     M->>G: copy_for_cuda_graph 把请求张量拷入捕获时的 InferStateInfo
     M->>G: graph.replay()
 ```
 
-`copy_for_cuda_graph` 在 replay 前刷新状态直接引用的 batch 张量（如 `b_seq_len`）。`backend.build` 原地刷新构建上下文持有的派生张量。
+`copy_for_cuda_graph` 在 replay 前刷新状态直接引用的 batch 张量（如 `b_seq_len`）。`backend.build` 原地刷新代表实例持有的派生张量。
 
 ## 8. 算法族概览
 
 | 族 | layer config | 实现 | 说明 |
 | --- | --- | --- | --- |
 | `gqa` | `GQALayerConfig` | `triton`、`triton_quant`（int8/int4 分组量化 KV）、`flashinfer`、`fa3` | 覆盖 MHA/MQA/GQA、自定义 scale、因果/非因果、单侧/双侧滑窗、sinks、ALiBi、FP8 KV（FlashInfer 按 tensor、FA3 按 head）、图像 span 内双向注意力；decode 支持三种投机解码布局。 |
-| `mla` | `MLAPrefillLayerConfig`、`MLADecodeLayerConfig` | `triton`、`flashinfer`、`fa3` | softmax scale（含 YaRN mscale）由模型层计算并写入 layer config。Triton decode 的 split 调度由 构建上下文 在第一层之前生成；GLM 256 维 prefill 使用专用 kernel。 |
-| `sparse_mla` | `SparseMLALayerConfig`、`SWASparseMLALayerConfig` | `fa3`、`flashmla`、`flashmla_swa` | DeepSeek V3.2、GLM-5、DeepSeek V4。top-k、kpool 等 构建上下文 依赖的参数在 layer config 中。top-k 索引由模型层的 indexer 计算并通过 layer inputs 传入；indexer 元数据（如 `Glm5NextInferStateInfo.nsa_step`）属于模型，保存在各模型的 `InferStateInfo` 子类上。 |
+| `mla` | `MLAPrefillLayerConfig`、`MLADecodeLayerConfig` | `triton`、`flashinfer`、`fa3` | softmax scale（含 YaRN mscale）由模型层计算并写入 layer config。Triton decode 的 split 调度由 `build` 在第一层之前生成；GLM 256 维 prefill 使用专用 kernel。 |
+| `sparse_mla` | `SparseMLALayerConfig`、`SWASparseMLALayerConfig` | `fa3`、`flashmla`、`flashmla_swa` | DeepSeek V3.2、GLM-5、DeepSeek V4。top-k、kpool 等 `build` 依赖的参数在 layer config 中。top-k 索引由模型层的 indexer 计算并通过 layer inputs 传入；indexer 元数据（如 `Glm5NextInferStateInfo.nsa_step`）属于模型，保存在各模型的 `InferStateInfo` 子类上。 |
 | `gdn` | `GDNLayerConfig` | `triton`、`flashqla`（prefill）、`replay` | Gated DeltaNet（Qwen3-Next 等）。 |
-| `kda` | `KDALayerConfig` | `triton`（prefill 可按步选择 FlashKDA）、`replay` | Kimi Delta Attention（GLM-5-Next 线性层）。FlashKDA 由 `backends/kda/flashkda.py` 加载。 |
+| `kda` | `KDALayerConfig` | `triton`（prefill 可按步选择 FlashKDA）、`replay` | Kimi Delta Attention（GLM-5-Next 线性层）。FlashKDA 由 `backends/kda/triton.py` 加载。 |
 
 ## 9. 目录和代码组织
 
 ```text
 lightllm/common/attention/          # 不知道模型的存在
 ├── backend.py                      # 公共接口和类型：AttentionBackend、AttentionBuildResources
-├── selector.py                     # (LayerConfig, 阶段, 名称) → backend 类与实例
+├── selector.py                     # (LayerConfig, 阶段, 名称) → backend 实例
 ├── backends/
-│   ├── __init__.py                 # keep_for_cuda_graph、require_positive
+│   ├── __init__.py                 # require_positive、set_flashinfer_envs
 │   └── <family>/
 │       ├── __init__.py             # 该族的 LayerConfig 与 LayerInputs
-│       └── <backend>.py               # AttState、BuildContext、Backend
+│       └── <backend>.py            # AttState、Backend
 └── kernels/<family>/               # Triton kernel 与封装
 lightllm/common/basemodel/
-├── attention_backend_manager.py    # AttentionBackendManager、AttentionStepConfig、configure_attention_step、attention_build_resources
+├── attention_backend_manager.py    # AttentionBackendManager、LayerAttentionConfig、configure_attention_step
 ├── basemodel.py                    # _init_attention、_create_inferstate
 └── infer_struct.py                 # GraphMode、当前 microbatch 的 att_states
 ```
@@ -246,7 +246,7 @@ lightllm/common/basemodel/
 ## 10. 新增实现
 
 1. 若是新算法族，在 `backends/<family>/__init__.py` 定义 layer config（frozen、构造时校验）和 layer inputs，并写清张量布局。
-2. 在 `backends/<family>/<backend>.py` 定义 backend、构建上下文和本步状态。backend 构造时检查配置，类方法 `build` 遵守第 4.3 节的约束，实例方法 `forward` 读取当前层的输入。
+2. 在 `backends/<family>/<backend>.py` 定义 backend 和本步状态。backend 构造时检查配置，`group_key` 列出准备工作读取的配置字段，需要跨步存储时覆盖 `setup`，`build` 遵守第 4.3 节的约束，`forward` 读取当前层的输入。与已有 backend 只差少量行为的实现（如 replay 状态、另一种 prefill kernel）以子类表达，不复制整个类。
 3. 在 `selector.py` 的注册表中登记该实现的名称、backend 和 `auto` 优先级。
 4. 模型层在 `attention_config()` 中返回两个阶段的配置。逐层数据在模型层解析后通过 layer inputs 传入。
 
@@ -254,8 +254,8 @@ lightllm/common/basemodel/
 
 - backend 与独立的 torch 参考实现对比（量化路径对比反量化后的参考，容差需说明来源），覆盖 cached prefix、各 decode 布局和该实现声明支持的层属性。
 - 不支持的 layer config 在构造时被拒绝；选择器测试覆盖 `auto` 跳过不支持的配置、显式指定不支持时报错。
-- 新的 decode 构建上下文 加入 `unit_tests/common/attention/backends/test_step_builder_graph_contract.py`：同一 `(microbatch, batch size)` 的捕获步与 replay 步保持地址和布局、值等于 eager 构造、主机字段除 hint 外不变、不同 microbatch 不共享存储。
-- 在 `unit_tests/common/basemodel/test_attention_backend_manager.py` 中验证新的 `build_context_key`。键相同的层共用 attention state，PD 节点只创建所需阶段的上下文。
+- 新的 decode backend 加入 `unit_tests/common/attention/backends/test_step_builder_graph_contract.py`：同一 `(microbatch, batch size)` 的捕获步与 replay 步保持地址和布局、值等于 eager 构造、主机字段除 hint 外不变、不同 microbatch 不共享存储。
+- 在 `unit_tests/common/basemodel/test_attention_backend_manager.py` 中验证新的 `group_key`。键相同的层共用 attention state，PD 节点只为所需阶段执行 `setup`。
 - 至少一个测试通过 LightLLM 的 `CudaGraph.capture_decode` / `replay` 在长度变化后 replay。
 - 重构已有路径时，用相同输入与改动前对比各层输出逐位一致；有意改变行为的修复单独提交并附回归测试。
 

@@ -1,18 +1,13 @@
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
 import torch
 import triton
 
-from lightllm.common.attention.backend import (
-    AttentionBackend,
-    AttentionBuildResources,
-    TensorAllocator,
-)
+from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.utils.envs_utils import enable_env_vars
 from lightllm.utils.log_utils import init_logger
-from .. import keep_for_cuda_graph
 from . import GQALayerConfig, GQALayerInputs
 
 logger = init_logger(__name__)
@@ -55,52 +50,48 @@ class FA3GQADecodeAttState:
     page_size: int
 
 
-class FA3GQAPrefillBuildContext:
-    def __init__(self, *, page_size: int) -> None:
-        self.page_size = page_size
+def fa3_requires_cpu_cache_sync() -> bool:
+    # 设为 1 / TRUE / ON 时，FA3 与 CPU cache 搬运在 GPU 上互相等待。
+    return enable_env_vars("LIGHTLLM_FA3_CPU_CACHE_SYNC")
 
 
-class FA3GQADecodeBuildContext:
-    def __init__(self, *, page_size: int, page_table_view: Callable[[int, int, int], torch.Tensor]) -> None:
-        """page_table_view(rows, max_kv_len, microbatch_index) returns a [rows, pages] view of
-        caller-owned page-table storage, the same storage for the same arguments."""
-        self.page_size = page_size
-        self.page_table_view = page_table_view
-        self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
-
-
-def build_fa3_decode_state(batch: InferStateInfo, context: FA3GQADecodeBuildContext) -> FA3GQADecodeAttState:
+def build_fa3_decode_state(backend: AttentionBackend, infer_state: InferStateInfo) -> FA3GQADecodeAttState:
     """Group query rows into attention requests and fill their page-table rows.
 
-    A CUDA graph step uses a page table as wide as the graph capacity and keeps every
-    derived tensor at a fixed address per (microbatch, batch size), rewriting them in place
-    on replay steps.
+    backend's setup set page_size and resources. The page table is a view of one fixed buffer per
+    microbatch, shared by name with every FA3 decode backend of the process and allocated on first
+    use, so a prefill-only node never allocates it. A CUDA graph step uses a page table as wide as the
+    graph capacity and keeps every derived tensor at a fixed address per (microbatch, batch size),
+    rewriting them in place on replay steps.
     """
     from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 
-    cu_seqlens_q, cu_seqlens_k, cache_seqlens, att_req_idx = _group_rows(batch)
-    width = batch.cuda_graph_max_kv_seq_len if batch.uses_cuda_graph else batch.max_kv_seq_len
-    page_table = context.page_table_view(att_req_idx.shape[0], width, batch.microbatch_index)
+    resources, page_size = backend.resources, backend.page_size
+    cu_seqlens_q, cu_seqlens_k, cache_seqlens, att_req_idx = _group_rows(infer_state)
+    rows = att_req_idx.shape[0]
+    width = infer_state.cuda_graph_max_kv_seq_len if infer_state.uses_cuda_graph else infer_state.max_kv_seq_len
+    if rows > resources.max_decode_rows:
+        raise RuntimeError(f"FA3 attention batch size {rows} exceeds page-table capacity {resources.max_decode_rows}")
+    if width > resources.max_seq_len:
+        raise RuntimeError(f"FA3 max KV sequence length {width} exceeds page-table capacity {resources.max_seq_len}")
+    numel = resources.max_decode_rows * triton.cdiv(resources.max_seq_len, page_size)
+    buffer = resources.get_workspace(f"fa3_page_table_{infer_state.microbatch_index}", numel, torch.int32)
+    max_pages = triton.cdiv(width, page_size)
+    page_table = buffer[: rows * max_pages].view(rows, max_pages)
     page_table_copy(
-        page_table=page_table[:, : triton.cdiv(batch.max_kv_seq_len, context.page_size)],
-        req_to_token_indexs=batch.req_to_token_indexs,
+        page_table=page_table[:, : triton.cdiv(infer_state.max_kv_seq_len, page_size)],
+        req_to_token_indexs=infer_state.req_to_token_indexs,
         b_req_idx=att_req_idx,
-        page_size=context.page_size,
+        page_size=page_size,
     )
-    if batch.uses_cuda_graph:
-        key = (batch.microbatch_index, batch.batch_size)
-        store = context._cuda_graph_tensors
-        cu_seqlens_q = keep_for_cuda_graph(store, (*key, "cu_seqlens_q"), cu_seqlens_q)
-        cu_seqlens_k = keep_for_cuda_graph(store, (*key, "cu_seqlens_k"), cu_seqlens_k)
-        cache_seqlens = keep_for_cuda_graph(store, (*key, "cache_seqlens"), cache_seqlens)
     return FA3GQADecodeAttState(
         page_table=page_table,
-        cache_seqlens=cache_seqlens,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_k=cu_seqlens_k,
-        max_seqlen_q=batch.decode_rows_per_request,
-        max_seqlen_k=batch.max_kv_seq_len,
-        page_size=context.page_size,
+        cache_seqlens=backend._keep_for_graph(infer_state, "cache_seqlens", cache_seqlens),
+        cu_seqlens_q=backend._keep_for_graph(infer_state, "cu_seqlens_q", cu_seqlens_q),
+        cu_seqlens_k=backend._keep_for_graph(infer_state, "cu_seqlens_k", cu_seqlens_k),
+        max_seqlen_q=infer_state.decode_rows_per_request,
+        max_seqlen_k=infer_state.max_kv_seq_len,
+        page_size=page_size,
     )
 
 
@@ -220,6 +211,8 @@ class FA3GQAPrefillBackend(AttentionBackend[GQALayerConfig, FA3GQAPrefillAttStat
     sinks; q is quantized per KV head with the static q scale, or dynamically per request.
     """
 
+    name = "fa3_gqa_prefill"
+
     def __init__(self, layer_config: GQALayerConfig) -> None:
         super().__init__(layer_config)
         if layer_config.bidirectional_image_spans:
@@ -233,6 +226,22 @@ class FA3GQAPrefillBackend(AttentionBackend[GQALayerConfig, FA3GQAPrefillAttStat
     @classmethod
     def _check_supported(cls, layer_config: GQALayerConfig) -> None:
         _check_gqa_config(layer_config)
+
+    @classmethod
+    def group_key(cls, layer_config: GQALayerConfig):
+        return layer_config.kv_quant
+
+    @classmethod
+    def requires_cpu_cache_sync(cls) -> bool:
+        return fa3_requires_cpu_cache_sync()
+
+    def setup(self, resources: AttentionBuildResources) -> None:
+        self.resources = resources
+        self.page_size = resources.page_size
+        if self.layer_config.kv_quant is not None:
+            # TODO: use the cache's page size once FP8 FA3 supports multi-token pages.
+            logger.warning(f"FP8 FA3 temporarily uses page size 1 with model page_size={resources.page_size}")
+            self.page_size = 1
 
     def forward(
         self,
@@ -312,59 +321,37 @@ class FA3GQAPrefillBackend(AttentionBackend[GQALayerConfig, FA3GQAPrefillAttStat
         )
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "fa3_gqa_prefill"
-
-    build_context_type = FA3GQAPrefillBuildContext
-
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: FA3GQAPrefillBuildContext) -> FA3GQAPrefillAttState:
+    def build(self, infer_state: InferStateInfo) -> FA3GQAPrefillAttState:
         """Build a fresh page table for the step's requests."""
         from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 
         page_table = torch.empty(
-            (metadata.batch_size, triton.cdiv(metadata.max_kv_seq_len, context.page_size)),
+            (infer_state.batch_size, triton.cdiv(infer_state.max_kv_seq_len, self.page_size)),
             dtype=torch.int32,
-            device=metadata.b_seq_len.device,
+            device=infer_state.b_seq_len.device,
         )
         page_table_copy(
             page_table=page_table,
-            req_to_token_indexs=metadata.req_to_token_indexs,
-            b_req_idx=metadata.b_req_idx,
-            page_size=context.page_size,
+            req_to_token_indexs=infer_state.req_to_token_indexs,
+            b_req_idx=infer_state.b_req_idx,
+            page_size=self.page_size,
         )
         return FA3GQAPrefillAttState(
             page_table=page_table,
-            cache_seqlens=metadata.b_seq_len,
-            cu_seqlens_q=metadata.b1_cu_q_seq_len.int(),
-            cu_seqlens_k=metadata.b1_cu_kv_seq_len.int(),
-            max_seqlen_q=metadata.max_q_seq_len,
-            page_size=context.page_size,
-            b_image_token_end=metadata.b_image_token_end,
+            cache_seqlens=infer_state.b_seq_len,
+            cu_seqlens_q=infer_state.b1_cu_q_seq_len.int(),
+            cu_seqlens_k=infer_state.b1_cu_kv_seq_len.int(),
+            max_seqlen_q=infer_state.max_q_seq_len,
+            page_size=self.page_size,
+            b_image_token_end=infer_state.b_image_token_end,
         )
 
-    @classmethod
-    def create_build_context(cls, build_key: Optional[str], ctx: AttentionBuildResources) -> FA3GQAPrefillBuildContext:
-        return FA3GQAPrefillBuildContext(page_size=fa3_page_size(build_key, ctx))
 
-    @classmethod
-    def build_context_key(cls, layer_config: GQALayerConfig):
-        return layer_config.kv_quant
+class FA3GQADecodeBackend(FA3GQAPrefillBackend):
+    name = "fa3_gqa_decode"
 
-    @classmethod
-    def requires_cpu_cache_sync(cls) -> bool:
-        return fa3_requires_cpu_cache_sync()
-
-
-class FA3GQADecodeBackend(AttentionBackend[GQALayerConfig, FA3GQADecodeAttState, GQALayerInputs]):
     @classmethod
     def _check_supported(cls, layer_config: GQALayerConfig) -> None:
-        """Supports any scale, causal or non-causal attention, one- or two-sided windows and sinks.
-
-        A per-head FP8 cache (kv_quant='fp8_per_head') supports the default scale without window or
-        sinks; q is quantized per KV head with the static q scale, or dynamically per request.
-        """
         _check_gqa_config(layer_config)
         if layer_config.bidirectional_image_spans:
             raise NotImplementedError("bidirectional image spans apply to prefill only")
@@ -421,69 +408,5 @@ class FA3GQADecodeBackend(AttentionBackend[GQALayerConfig, FA3GQADecodeAttState,
         )
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "fa3_gqa_decode"
-
-    build_context_type = FA3GQADecodeBuildContext
-
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: FA3GQADecodeBuildContext) -> FA3GQADecodeAttState:
-        return build_fa3_decode_state(metadata, context)
-
-    @classmethod
-    def create_build_context(cls, build_key: Optional[str], ctx: AttentionBuildResources) -> FA3GQADecodeBuildContext:
-        page_size = fa3_page_size(build_key, ctx)
-        return FA3GQADecodeBuildContext(page_size=page_size, page_table_view=FA3PageTables(ctx, page_size).view)
-
-    @classmethod
-    def build_context_key(cls, layer_config: GQALayerConfig):
-        return layer_config.kv_quant
-
-    @classmethod
-    def requires_cpu_cache_sync(cls) -> bool:
-        return fa3_requires_cpu_cache_sync()
-
-
-def fa3_page_size(kv_quant: Optional[str], ctx: AttentionBuildResources) -> int:
-    """The page size FA3 runs with for this layer config: the cache's, except 1 for an FP8 cache."""
-    if kv_quant is None:
-        return ctx.page_size
-    # TODO: use the cache's page size once FP8 FA3 supports multi-token pages.
-    logger.warning(f"FP8 FA3 temporarily uses page size 1 with model page_size={ctx.page_size}")
-    return 1
-
-
-class FA3PageTables:
-    """Fixed page-table storage for FA3 decode, one buffer per microbatch, allocated on first use.
-
-    Each buffer holds ctx.max_decode_rows rows of pages for ctx.max_seq_len tokens and is shared
-    by name with every FA3 decode step builder of the process.
-    """
-
-    def __init__(self, ctx: AttentionBuildResources, page_size: int) -> None:
-        self.ctx = ctx
-        self.page_size = page_size
-        self._buffers: Optional[list[torch.Tensor]] = None
-
-    def view(self, rows: int, max_kv_len: int, microbatch_index: int) -> torch.Tensor:
-        """Return a contiguous [rows, pages] view of microbatch_index's buffer."""
-        ctx = self.ctx
-        if self._buffers is None:
-            # Allocated lazily, so a prefill-only node never allocates decode-only storage.
-            numel = ctx.max_decode_rows * triton.cdiv(ctx.max_seq_len, self.page_size)
-            self._buffers = [
-                ctx.get_workspace(f"fa3_page_table_{index}", numel, torch.int32)
-                for index in range(ctx.microbatch_count)
-            ]
-        if rows > ctx.max_decode_rows:
-            raise RuntimeError(f"FA3 attention batch size {rows} exceeds page-table capacity {ctx.max_decode_rows}")
-        if max_kv_len > ctx.max_seq_len:
-            raise RuntimeError(f"FA3 max KV sequence length {max_kv_len} exceeds page-table capacity {ctx.max_seq_len}")
-        max_pages = triton.cdiv(max_kv_len, self.page_size)
-        return self._buffers[microbatch_index][: rows * max_pages].view(rows, max_pages)
-
-
-def fa3_requires_cpu_cache_sync() -> bool:
-    # 设为 1 / TRUE / ON 时，FA3 与 CPU cache 搬运在 GPU 上互相等待。
-    return enable_env_vars("LIGHTLLM_FA3_CPU_CACHE_SYNC")
+    def build(self, infer_state: InferStateInfo) -> FA3GQADecodeAttState:
+        return build_fa3_decode_state(self, infer_state)

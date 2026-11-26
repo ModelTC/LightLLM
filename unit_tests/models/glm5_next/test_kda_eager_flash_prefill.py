@@ -118,12 +118,10 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
     from lightllm.common.attention import selector
 
     spec = layer.attention_config(model)
-    prefill = selector.select(spec.prefill, "prefill", requested)
-    layer.prefill_backend = prefill.backend
-    layer.decode_backend = selector.select(spec.decode, "decode", "triton").backend
-    # The attention state the layer's group builds for this step.
-    builder = prefill.backend_cls.create_build_context(prefill.backend.state_key[1], None)
-    att_state = prefill.backend_cls.build(configure_attention_step(infer), builder)
+    layer.prefill_backend = selector.select(spec.prefill, "prefill", requested)
+    layer.decode_backend = selector.select(spec.decode, "decode", "triton")
+    # The attention state the layer's group prepares for this step.
+    att_state = layer.prefill_backend.prepare(configure_attention_step(infer), None)
     infer.att_states = {layer.prefill_backend.state_key: att_state}
     assert (att_state.flash_kda_fwd is not None) == (requested == "flashkda")
     if graph:

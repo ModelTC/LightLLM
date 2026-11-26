@@ -191,17 +191,17 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     spec = layer.attention_config(model)
     prefill = selector.select(spec.prefill, "prefill", spec.prefill_backend_name)
     decode = selector.select(spec.decode, "decode", spec.decode_backend_name)
-    assert (prefill.backend_cls, decode.backend_cls) == (FlashMLASparsePrefillBackend, FA3SparseMLADecodeBackend)
-    layer.prefill_backend, layer.decode_backend = prefill.backend, decode.backend
-    # The attention state the group's step builders would build for this batch.
+    assert (type(prefill), type(decode)) == (FlashMLASparsePrefillBackend, FA3SparseMLADecodeBackend)
+    layer.prefill_backend, layer.decode_backend = prefill, decode
+    # The attention state the group's backends would build for this batch.
     prefill_att_state = FlashMLASparsePrefillAttState(mem_index=None, has_cached_prefix=False)
     decode_att_state = FA3SparseMLADecodeAttState(
         cache_seqlens=lengths,
         cu_seqlens_q=state.b1_cu_q_seq_len,
         cu_seqlens_k=F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0)),
         max_seqlen_q=1,
-        causal=False,
     )
+    assert decode.layer_config.causal is False
     projected = torch.bmm(q.transpose(0, 1), kv_b.view(4, 256, 512)[:, :128]).transpose(0, 1)
     expected = []
     for row, length in enumerate(lengths.tolist()):

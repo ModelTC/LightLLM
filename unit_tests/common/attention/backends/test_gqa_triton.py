@@ -9,7 +9,7 @@ from lightllm.common.attention.backend import TensorAllocator
 from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQAPrefillBackend
-from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
+from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 
 
@@ -52,6 +52,11 @@ def reference(q, k, v, token_map, req_ids, lengths, ready, window):
     return torch.cat(outputs)
 
 
+def _decode_backend() -> TritonGQADecodeBackend:
+    """A decode backend for building attention state; Triton decode state does not depend on the layer config."""
+    return TritonGQADecodeBackend(GQALayerConfig(num_heads=4, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16))
+
+
 def make_batch(token_map, req_ids, lengths, **kwargs) -> InferStateInfo:
     return make_infer_state(
         req_to_token_indexs=token_map,
@@ -82,7 +87,7 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
     layer_config = GQALayerConfig(
         num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=dtype, sliding_window=window
     )
-    att_state = TritonGQAPrefillBackend.build(
+    att_state = TritonGQAPrefillBackend(layer_config).build(
         make_batch(
             token_map,
             req_ids,
@@ -108,9 +113,7 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
         lengths += 1
         q = torch.randn(3, q_heads + 1, 64, device="cuda", dtype=dtype)[:, :q_heads]
         q_before = q.clone()
-        att_state = TritonGQADecodeBackend.build(
-            make_batch(token_map, req_ids, lengths), TritonGQADecodeBackend.build_context_type()
-        )
+        att_state = _decode_backend().build(make_batch(token_map, req_ids, lengths))
         out = torch.empty(3, q_heads + 1, 64, device=q.device, dtype=q.dtype)[:, :q_heads]
         backend = TritonGQADecodeBackend(layer_config)
         assert (
@@ -136,15 +139,12 @@ def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
     owner.max_kv_seq_len = 33
     token_map = torch.randperm(2 * 512, device="cuda", dtype=torch.int32).view(2, 512)
     owner.req_manager = SimpleNamespace(req_to_token_indexs=token_map)
-    step_config = AttentionStepConfig(cuda_graph_max_kv_seq_len=512)
     layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16)
     backend = TritonGQADecodeBackend(layer_config)
     # As in the serving decode path, the capture flag is set before the attention state are built and
     # capture raises max_kv_seq_len to the graph capacity only afterwards.
     owner.graph_mode = GraphMode.CAPTURE
-    att_state = TritonGQADecodeBackend.build(
-        configure_attention_step(owner, step_config), backend.create_build_context(backend.state_key[1], None)
-    )
+    att_state = backend.build(configure_attention_step(owner, cuda_graph_max_kv_seq_len=512))
     owner.max_kv_seq_len = 512
     q = torch.randn(2, q_heads, 64, device="cuda", dtype=torch.bfloat16)
     kv = torch.randn(1024, 2 * kv_heads, 64, device="cuda", dtype=q.dtype)
@@ -184,9 +184,7 @@ def test_list_sliding_window_matches_tuple():
     token_map = torch.arange(64, device="cuda", dtype=torch.int32).view(2, 32)
     lengths = torch.tensor([5, 9], device="cuda", dtype=torch.int32)
     req_ids = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
-    att_state = TritonGQADecodeBackend.build(
-        make_batch(token_map, req_ids, lengths), TritonGQADecodeBackend.build_context_type()
-    )
+    att_state = _decode_backend().build(make_batch(token_map, req_ids, lengths))
     backend = TritonGQADecodeBackend(layer_config)
     out = backend.forward(att_state, GQALayerInputs(q=q, k_cache=kv[:, :4], v_cache=kv[:, 4:]), out=torch.empty_like(q))
     expected = reference(q, kv[:, :4], kv[:, 4:], token_map, req_ids, lengths, [4, 8], (-1, -1))
@@ -213,11 +211,9 @@ def test_graph_decode_bounds_lengths_by_capacity():
     lengths = torch.tensor([33, 17], device="cuda", dtype=torch.int32)
     req_ids = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
     token_map = torch.zeros(2, 512, device="cuda", dtype=torch.int32)
-    step_builder = TritonGQADecodeBackend.build_context_type()
-    eager = TritonGQADecodeBackend.build(make_batch(token_map, req_ids, lengths), step_builder)
-    graph = TritonGQADecodeBackend.build(
-        make_batch(token_map, req_ids, lengths, cuda_graph_max_kv_seq_len=512), step_builder
-    )
+    backend = _decode_backend()
+    eager = backend.build(make_batch(token_map, req_ids, lengths))
+    graph = backend.build(make_batch(token_map, req_ids, lengths, cuda_graph_max_kv_seq_len=512))
     assert (eager.kv_seq_len_bound, eager.max_kv_seq_len) == (33, 33)
     assert (graph.kv_seq_len_bound, graph.max_kv_seq_len) == (512, 33)
 
@@ -275,7 +271,7 @@ def test_speculative_decode_rows_share_request_kv(q_heads, kv_heads, window, hea
     k, v = kv[:, :kv_heads], kv[:, kv_heads:]
     q = torch.randn(6, q_heads, head_dim, device="cuda", dtype=torch.bfloat16)
     batch = make_batch(token_map, req_ids, lengths, b1_cu_kv_seq_len=None, decode_rows_per_request=2, pad_req_idx=pad)
-    att_state = TritonGQADecodeBackend.build(batch, TritonGQADecodeBackend.build_context_type())
+    att_state = _decode_backend().build(batch)
     assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 0, 2, 1, 1]
     layer_config = GQALayerConfig(
         num_heads=q_heads, num_kv_heads=kv_heads, head_dim=head_dim, dtype=torch.bfloat16, sliding_window=window
@@ -289,12 +285,12 @@ def test_speculative_decode_rows_share_request_kv(q_heads, kv_heads, window, hea
 def test_speculative_decode_groups_are_kept_per_microbatch_and_batch_size():
     token_map = torch.zeros(8, 512, device="cuda", dtype=torch.int32)
     lengths = torch.tensor([5, 6, 5, 6], device="cuda", dtype=torch.int32)
-    step_builder = TritonGQADecodeBackend.build_context_type()
+    backend = _decode_backend()
 
     def build(req_ids, **kwargs):
         req_ids = torch.tensor(req_ids, device="cuda", dtype=torch.int32)
         batch = make_batch(token_map, req_ids, lengths, decode_rows_per_request=2, pad_req_idx=7, **kwargs)
-        return TritonGQADecodeBackend.build(batch, step_builder)
+        return backend.build(batch)
 
     captured = build([1, 1, 2, 2], cuda_graph_max_kv_seq_len=512)
     assert captured.b_mark_shared_group.cpu().tolist() == [0, 2, 0, 2]
@@ -347,7 +343,7 @@ def test_alibi_prefill_and_decode_match_reference():
     )
     out = torch.empty_like(q)
     TritonGQAPrefillBackend(layer_config).forward(
-        TritonGQAPrefillBackend.build(batch),
+        TritonGQAPrefillBackend(layer_config).build(batch),
         GQALayerInputs(q=q, k_cache=k, v_cache=v, alibi_slopes=slopes),
         out=out,
     )
@@ -356,9 +352,7 @@ def test_alibi_prefill_and_decode_match_reference():
 
     q = torch.randn(3, heads, 64, device="cuda", dtype=torch.bfloat16)
     cu_kv = torch.tensor([0, *lengths.tolist()], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
-    att_state = TritonGQADecodeBackend.build(
-        make_batch(token_map, req_ids, lengths, b1_cu_kv_seq_len=cu_kv), TritonGQADecodeBackend.build_context_type()
-    )
+    att_state = _decode_backend().build(make_batch(token_map, req_ids, lengths, b1_cu_kv_seq_len=cu_kv))
     out = torch.empty_like(q)
     TritonGQADecodeBackend(layer_config).forward(
         att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, alibi_slopes=slopes), out=out
@@ -445,7 +439,7 @@ def test_bidirectional_image_spans_prefill_matches_reference(window, head_dim, s
     )
     out = torch.empty_like(q)
     TritonGQAPrefillBackend(layer_config).forward(
-        TritonGQAPrefillBackend.build(batch),
+        TritonGQAPrefillBackend(layer_config).build(batch),
         GQALayerInputs(q=q, k_cache=k, v_cache=v),
         out=out,
     )

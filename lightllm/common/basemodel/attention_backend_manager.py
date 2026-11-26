@@ -44,12 +44,47 @@ class AttentionBackendManager:
     """
 
     def __init__(self, model: TpPartBaseModel):
-        self.args = model.args
-        self.resources = attention_build_resources(model)
-        self.step_config = attention_step_config(model)
+        args = self.args = model.args
+        # Dynamic verification may keep the target row and all MTP draft rows for every running
+        # request. TPSP and CUDA graphs may pad that physical batch further.
+        max_decode_rows = args.running_max_req_size * (args.mtp_step + 1)
+        if args.enable_tpsp_mix_mode:
+            max_decode_rows = triton.cdiv(max_decode_rows, model.tp_world_size_) * model.tp_world_size_
+        self.resources = AttentionBuildResources(
+            device=get_current_device_id(),
+            page_size=args.page_size,
+            # max_seq_length is max_req_total_len plus the MTP headroom reserved at model init.
+            max_seq_len=model.max_seq_length,
+            max_cuda_graph_batch_size=model.graph_max_batch_size,
+            max_decode_rows=max(max_decode_rows, model.graph_max_batch_size),
+            microbatch_count=2 if args.enable_decode_microbatch_overlap else 1,
+            workspace_bytes=args.flashinfer_workspace_size * 1024 * 1024,
+            get_workspace=get_gpu_workspace_buffer,
+            diverse_decode=args.diverse_mode,
+        )
+
+        rows = model.mtp_manager.get_decode_draft_step(model.is_mtp_draft_model) + 1
+        # The slot of each request's last accepted speculative row in the role's recurrent (GDN or
+        # KDA) state; None when the role has no recurrent state.
+        recurrent = [
+            state.mtp_state_index
+            for state in model.att_state_manager.get_bounded_attention_states(model.att_state_role)
+            if getattr(state, "mtp_state_index", None) is not None
+        ]
+        if len(recurrent) > 1:
+            raise ValueError(f"expected at most one recurrent state for {model.att_state_role}, got {len(recurrent)}")
+        # The model-dependent keyword arguments of configure_attention_step.
+        self.step_config = dict(
+            decode_rows_per_request=rows,
+            # Only the main model verifies a varying number of draft rows per request.
+            dynamic_decode_rows=rows > 1 and not model.is_mtp_draft_model and get_env_start_args().mtp_dynamic_verify,
+            req_to_mtp_state_index=recurrent[0] if recurrent else None,
+            cuda_graph_max_kv_seq_len=model.graph_max_len_in_batch,
+        )
+
         self.state_groups: dict[str, dict[tuple, AttentionBackend]] = {phase: {} for phase in selector.PHASES}
         self._backends: dict[tuple, AttentionBackend] = {}
-        if self.args.enable_ep_moe:
+        if args.enable_ep_moe:
             logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
 
     def bind(self, config: LayerAttentionConfig) -> tuple[Optional[AttentionBackend], Optional[AttentionBackend]]:
@@ -61,11 +96,10 @@ class AttentionBackendManager:
 
     def prepare(self, infer_state: InferStateInfo) -> dict[tuple, Any]:
         """Build this microbatch's state by state_key for the layers in its phase."""
-        phase = "prefill" if infer_state.is_prefill else "decode"
-        groups = self.state_groups[phase]
+        groups = self.state_groups["prefill" if infer_state.is_prefill else "decode"]
         if not groups:
             return {}
-        configure_attention_step(infer_state, self.step_config)
+        configure_attention_step(infer_state, **self.step_config)
         return {key: backend.prepare(infer_state, self.resources) for key, backend in groups.items()}
 
     def backends(self, phase: str) -> list[type[AttentionBackend]]:
@@ -77,27 +111,26 @@ class AttentionBackendManager:
         return any(self.state_groups.values())
 
     def requires_cpu_cache_sync(self) -> bool:
-        return any(backend.requires_cpu_cache_sync() for phase in selector.PHASES for backend in self.backends(phase))
+        return any(
+            backend.requires_cpu_cache_sync() for groups in self.state_groups.values() for backend in groups.values()
+        )
 
     def _select(self, phase: str, layer_config: Any, backend_name: Optional[str]) -> Optional[AttentionBackend]:
         if layer_config is None:
             return None
-        requested = backend_name or requested_backend(self.args, phase, layer_config)
+        requested = backend_name or selector.requested_backend(self.args, phase, layer_config)
         key = (phase, layer_config, requested)
         if key not in self._backends:
-            selection = selector.select(
+            backend = selector.select(
                 layer_config,
                 phase,
                 requested,
                 priority=selector.auto_priority(layer_config, phase, self.args.mtp_step),
                 excluded=("flashinfer",) if self.args.enable_ep_moe else (),
             )
-            self.state_groups[phase].setdefault(selection.backend.state_key, selection.backend)
-            self._backends[key] = selection.backend
+            self.state_groups[phase].setdefault(backend.state_key, backend)
+            self._backends[key] = backend
         return self._backends[key]
-
-
-# Layer configuration and backend selection
 
 
 def attention_is_causal(model: TpPartBaseModel) -> bool:
@@ -105,95 +138,28 @@ def attention_is_causal(model: TpPartBaseModel) -> bool:
     return not model.is_mtp_draft_model or get_env_start_args().mtp_mode not in ("dspark", "dflash", "dflash2")
 
 
-def requested_backend(args, phase: str, layer_config: Any) -> str:
-    """The backend name the command line requests for layer_config's family in phase."""
-    index = selector.arg_index(layer_config)
-    values = args.llm_prefill_att_backend if phase == "prefill" else args.llm_decode_att_backend
-    return values[index] if index < len(values) else "auto"
-
-
-# Resources for backend build contexts
-
-
-def attention_build_resources(model: TpPartBaseModel) -> AttentionBuildResources:
-    args = model.args
-    # Dynamic verification may keep the target row and all MTP draft rows for every running
-    # request. TPSP and CUDA graphs may pad that physical batch further.
-    max_decode_rows = args.running_max_req_size * (args.mtp_step + 1)
-    if args.enable_tpsp_mix_mode:
-        tp_size = model.tp_world_size_
-        max_decode_rows = triton.cdiv(max_decode_rows, tp_size) * tp_size
-    return AttentionBuildResources(
-        device=get_current_device_id(),
-        page_size=args.page_size,
-        # max_seq_length is max_req_total_len plus the MTP headroom reserved at model init.
-        max_seq_len=model.max_seq_length,
-        max_cuda_graph_batch_size=model.graph_max_batch_size,
-        max_decode_rows=max(max_decode_rows, model.graph_max_batch_size),
-        microbatch_count=2 if args.enable_decode_microbatch_overlap else 1,
-        workspace_bytes=args.flashinfer_workspace_size * 1024 * 1024,
-        get_workspace=get_gpu_workspace_buffer,
-        diverse_decode=args.diverse_mode,
-    )
-
-
-# Model-dependent fields of InferStateInfo
-
-
-@dataclass(frozen=True)
-class AttentionStepConfig:
-    """What a model's steps share when describing themselves to the backends."""
-
-    # Query rows of each request in decode steps; above 1 with speculative decoding.
-    decode_rows_per_request: int = 1
-    # Decode steps pack a varying number of speculative rows per request (dynamic verify).
-    dynamic_decode_rows: bool = False
-    # Linear attention: recurrent_mtp_state_index; None without recurrent state.
-    req_to_mtp_state_index: Optional[torch.Tensor] = None
-    # KV length capacity of the model's CUDA graphs; required for capture and replay steps.
-    cuda_graph_max_kv_seq_len: Optional[int] = None
-
-
-def attention_step_config(model: TpPartBaseModel) -> AttentionStepConfig:
-    """Read the step facts from a model whose CUDA graph capacity is final."""
-    rows = model.mtp_manager.get_decode_draft_step(model.is_mtp_draft_model) + 1
-    # Only the main model verifies a varying number of draft rows per request.
-    dynamic = rows > 1 and not model.is_mtp_draft_model and get_env_start_args().mtp_dynamic_verify
-    return AttentionStepConfig(
-        decode_rows_per_request=rows,
-        dynamic_decode_rows=dynamic,
-        req_to_mtp_state_index=recurrent_mtp_state_index(model),
-        cuda_graph_max_kv_seq_len=model.graph_max_len_in_batch,
-    )
-
-
 def configure_attention_step(
-    infer_state: InferStateInfo, step_config: AttentionStepConfig = AttentionStepConfig()
+    infer_state: InferStateInfo,
+    *,
+    decode_rows_per_request: int = 1,
+    dynamic_decode_rows: bool = False,
+    req_to_mtp_state_index: Optional[torch.Tensor] = None,
+    cuda_graph_max_kv_seq_len: Optional[int] = None,
 ) -> InferStateInfo:
-    """Set model-dependent attention inputs on the existing step."""
-    if infer_state.uses_cuda_graph and step_config.cuda_graph_max_kv_seq_len is None:
+    """Set the model-dependent attention inputs on the existing step.
+
+    decode_rows_per_request is the query rows of each request in decode steps, above 1 with speculative
+    decoding; dynamic_decode_rows says decode steps pack a varying number of speculative rows per request
+    (dynamic verify). req_to_mtp_state_index is the linear-attention recurrent state slot of each request's
+    last accepted row, None without recurrent state. cuda_graph_max_kv_seq_len is the KV length capacity of
+    the model's CUDA graphs, required for capture and replay steps.
+    """
+    if infer_state.uses_cuda_graph and cuda_graph_max_kv_seq_len is None:
         raise ValueError(f"a {infer_state.graph_mode.value} step needs the CUDA graph kv length capacity")
     decode = not infer_state.is_prefill
-    rows = step_config.decode_rows_per_request if decode else 1
+    rows = decode_rows_per_request if decode else 1
     infer_state.decode_rows_per_request = rows
-    infer_state.dynamic_decode_rows = decode and step_config.dynamic_decode_rows
-    infer_state.req_to_mtp_state_index = step_config.req_to_mtp_state_index if rows > 1 else None
-    infer_state.cuda_graph_max_kv_seq_len = (
-        step_config.cuda_graph_max_kv_seq_len if infer_state.uses_cuda_graph else None
-    )
+    infer_state.dynamic_decode_rows = decode and dynamic_decode_rows
+    infer_state.req_to_mtp_state_index = req_to_mtp_state_index if rows > 1 else None
+    infer_state.cuda_graph_max_kv_seq_len = cuda_graph_max_kv_seq_len if infer_state.uses_cuda_graph else None
     return infer_state
-
-
-def recurrent_mtp_state_index(model: TpPartBaseModel) -> Optional[torch.Tensor]:
-    """The slot of each request's last accepted speculative row in the role's recurrent (GDN or KDA) state.
-
-    None when the role has no recurrent state.
-    """
-    states = [
-        state
-        for state in model.att_state_manager.get_bounded_attention_states(model.att_state_role)
-        if getattr(state, "mtp_state_index", None) is not None
-    ]
-    if len(states) > 1:
-        raise ValueError(f"expected at most one recurrent state for {model.att_state_role}, got {len(states)}")
-    return states[0].mtp_state_index if states else None

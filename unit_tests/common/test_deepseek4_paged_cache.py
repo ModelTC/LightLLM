@@ -949,6 +949,7 @@ def test_swa_index_cuda_graph_reads_updated_private_pages(cache):
 def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, dspark):
     from lightllm.common.attention.backends.sparse_mla import SWASparseMLALayerConfig, SWASparseMLALayerInputs
     from lightllm.common.attention.backends.sparse_mla.flashmla_swa import FlashMLASWADecodeBackend
+    from lightllm.common.basemodel.infer_struct import GraphMode
     from lightllm.models.deepseek_v4.config import create_attention_config
     from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
     from lightllm.models.deepseek_v4.triton_kernel.build_dspark_swa_indices import build_dspark_swa_indices
@@ -1007,7 +1008,8 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
         num_heads=64, head_dim_v=512, softmax_scale=512 ** -0.5, dtype=torch.bfloat16, has_attn_sink=True
     )
     impl = FlashMLASWADecodeBackend(layer_config)
-    builder = FlashMLASWADecodeBackend.create_build_context(impl.state_key[1], None)
+    # An eager step's scheduler metadata, filled on its first kernel call.
+    eager_step = SimpleNamespace(graph_mode=GraphMode.EAGER)
     attn_sink = torch.zeros(64, device="cuda")
 
     def decode(att_state, packed_kv, swa_indices, swa_lengths):
@@ -1021,7 +1023,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
         out = torch.empty((q.shape[0], 64, 512), dtype=q.dtype, device=q.device)
         return impl.forward(att_state, inputs, out=out)
 
-    att_state = FlashMLASWADecodeBackend.build(None, builder)
+    att_state = impl.build(eager_step)
     q = torch.randn((token_num, 64, 512), dtype=torch.bfloat16, device="cuda") * 0.1
     packed_kv = requests.get_att_input_params(2)
 
@@ -1038,7 +1040,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     with torch.cuda.graph(graph, stream=stream):
         actual = forward()
 
-    reference_att_state = FlashMLASWADecodeBackend.build(None, builder)
+    reference_att_state = impl.build(eager_step)
     reference_kv = DeepseekV4InferStateInfo.get_att_kv(
         SimpleNamespace(
             req_manager=requests,

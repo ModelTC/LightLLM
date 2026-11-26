@@ -1,20 +1,64 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """KDA implementations: chunked prefill (Triton, or FlashKDA for short steps) and decode over native or
-replay recurrent state. Decode rows group into requests with the GDN decode step builder."""
+replay recurrent state. Decode rows group into requests like GDN decode."""
 
 from dataclasses import dataclass
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, Optional
 
 import torch
 
-from lightllm.common.attention.backend import (
-    AttentionBackend,
-    AttentionBuildResources,
-    TensorAllocator,
-)
+from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from ..gdn.triton import GDNDecodeAttState, GDNDecodeBuildContext, build_gdn_decode_state
+from lightllm.utils.log_utils import init_logger
+from ..gdn.triton import GDNDecodeAttState, build_recurrent_decode_state
 from . import KDALayerConfig, KDALayerInputs
-from .flashkda import load_flash_kda_fwd
+
+logger = init_logger(__name__)
+
+
+def import_flash_kda_fwd() -> Callable:
+    """Import FlashKDA's fwd; the ImportError says how to install it."""
+    try:
+        from flash_kda import fwd
+    except (ImportError, OSError) as exc:
+        raise ImportError(
+            "The flashkda prefill backend requires FlashKDA. Install it with "
+            "`pip install --no-build-isolation git+https://github.com/MoonshotAI/FlashKDA.git` "
+            "and build it for the current GPU and PyTorch/CUDA versions."
+        ) from exc
+    return fwd
+
+
+def load_flash_kda_fwd(requested: str, *, dtype: torch.dtype, ssm_dtype: torch.dtype) -> Optional[Callable]:
+    """Return FlashKDA's fwd for the requested prefill provider, or None to use Triton.
+
+    requested is "auto", "flashkda" or "triton". "auto" uses FlashKDA only for BF16 models with a
+    BF16 SSM state on SM90 when it loads; "flashkda" raises if it cannot be loaded.
+    """
+    if requested == "triton":
+        return None
+    if requested not in ("auto", "flashkda"):
+        raise ValueError(f"Unsupported KDA prefill backend: {requested}; use auto, triton, or flashkda")
+    if requested == "auto" and (
+        dtype != torch.bfloat16
+        or ssm_dtype != torch.bfloat16
+        or torch.version.hip is not None
+        or not torch.cuda.is_available()
+        or torch.cuda.get_device_capability() != (9, 0)
+    ):
+        return None
+    try:
+        fwd = import_flash_kda_fwd()
+    except ImportError as exc:
+        if requested == "auto":
+            logger.info("KDA prefill uses Triton because FlashKDA could not be loaded: %s", exc.__cause__)
+            return None
+        raise
+    logger.info(
+        "KDA prefill attention backend: %s.", "automatic FlashKDA/Triton" if requested == "auto" else "flashkda"
+    )
+    return fwd
 
 
 @dataclass(frozen=True)
@@ -30,43 +74,6 @@ class KDAPrefillAttState:
     b_ready_cache_len: torch.Tensor
     max_q_seq_len: int
     flash_kda_fwd: Optional[Callable]
-
-
-class KDAPrefillBuildContext:
-    def __init__(
-        self,
-        *,
-        ssm_slots_per_request: int,
-        flash_kda_fwd: Optional[Callable] = None,
-        max_flash_len: Optional[int] = None,
-    ) -> None:
-        """flash_kda_fwd is FlashKDA's kernel when it may run; steps whose longest request exceeds
-        max_flash_len (None: no limit) use Triton instead."""
-        self.ssm_slots_per_request = ssm_slots_per_request
-        self.flash_kda_fwd = flash_kda_fwd
-        self.max_flash_len = max_flash_len
-
-
-def _build_kda_prefill_state(batch: InferStateInfo, context: KDAPrefillBuildContext) -> KDAPrefillAttState:
-    req = batch.b_req_idx
-    flash = context.flash_kda_fwd
-    if flash is not None and context.max_flash_len is not None and batch.max_q_seq_len > context.max_flash_len:
-        flash = None
-    cu = batch.b1_cu_q_seq_len
-    return KDAPrefillAttState(
-        conv_idx=req,
-        ssm_idx=req * context.ssm_slots_per_request,
-        cu_seqlens_q=cu,
-        cu_seqlens=cu.to(torch.int64).contiguous() if flash is not None else cu,
-        b_ready_cache_len=batch.b_ready_cache_len,
-        max_q_seq_len=batch.max_q_seq_len,
-        flash_kda_fwd=flash,
-    )
-
-
-def _conv_states(cfg: KDALayerConfig, inputs: KDALayerInputs):
-    # Prefill uses only the kernel window; speculative columns follow it.
-    return inputs.conv_states[..., : cfg.conv_kernel_size - 1]
 
 
 def _prefill(cfg: KDALayerConfig, att_state: KDAPrefillAttState, inputs: KDALayerInputs, q, k, v, qk_normalized, out):
@@ -91,16 +98,41 @@ def _prefill(cfg: KDALayerConfig, att_state: KDAPrefillAttState, inputs: KDALaye
     return result.squeeze(0) if out is None else out
 
 
+def _check_state(cls, layer_config: KDALayerConfig) -> None:
+    if layer_config.replay != cls.replay:
+        state = "replay" if layer_config.replay else "native"
+        raise NotImplementedError(f"{cls.name} does not run over {state} state")
+
+
 class TritonKDAPrefillBackend(AttentionBackend[KDALayerConfig, KDAPrefillAttState, KDALayerInputs]):
     """Prefill over native state: the fused conv emits q/k/v (L2-normalized unless FlashKDA runs)."""
 
+    name = "triton_kda_prefill"
+    # Which state layout the backend runs over; see KDALayerConfig.replay.
+    replay = False
+    _check_supported = classmethod(_check_state)
+
     def __init__(self, layer_config: KDALayerConfig) -> None:
         super().__init__(layer_config)
-        _check_prefill_kernel(layer_config)
+        # A requested FlashKDA must load when the model loads, not on the first prefill step.
+        if layer_config.prefill_kernel == "flashkda":
+            try:
+                import_flash_kda_fwd()
+            except ImportError as e:
+                raise NotImplementedError(str(e)) from e
 
     @classmethod
-    def _check_supported(cls, layer_config: KDALayerConfig) -> None:
-        _check_state(layer_config, replay=False)
+    def group_key(cls, layer_config: KDALayerConfig):
+        c = layer_config
+        return c.replay, c.state_mtp_step, c.prefill_kernel, c.num_heads, c.dtype, c.ssm_dtype
+
+    def setup(self, resources: AttentionBuildResources) -> None:
+        c = self.layer_config
+        self.flash_kda_fwd = load_flash_kda_fwd(c.prefill_kernel, dtype=c.dtype, ssm_dtype=c.ssm_dtype)
+        # Automatic selection keeps FlashKDA to the step lengths it was validated on.
+        self.max_flash_len = None
+        if c.prefill_kernel == "auto":
+            self.max_flash_len = 2048 if c.num_heads < 16 else 8192
 
     def forward(self, att_state, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
         from lightllm.common.attention.kernels.kda.causal_conv1d_qkv import causal_conv1d_qkv
@@ -110,7 +142,8 @@ class TritonKDAPrefillBackend(AttentionBackend[KDALayerConfig, KDAPrefillAttStat
         q, k, v = causal_conv1d_qkv(
             inputs.mixed_qkv,
             inputs.conv_weight,
-            _conv_states(cfg, inputs),
+            # Prefill uses only the kernel window; speculative columns follow it.
+            inputs.conv_states[..., : cfg.conv_kernel_size - 1],
             att_state.cu_seqlens_q,
             att_state.conv_idx,
             att_state.b_ready_cache_len,
@@ -119,39 +152,32 @@ class TritonKDAPrefillBackend(AttentionBackend[KDALayerConfig, KDAPrefillAttStat
         )
         return _prefill(cfg, att_state, inputs, q, k, v, qk_normalized=not flash, out=out)
 
-    @staticmethod
-    def get_name() -> str:
-        return "triton_kda_prefill"
-
-    build_context_type = KDAPrefillBuildContext
-
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: KDAPrefillBuildContext) -> KDAPrefillAttState:
-        return _build_kda_prefill_state(metadata, context)
-
-    @classmethod
-    def create_build_context(cls, build_key: "_PrefillKey", ctx: AttentionBuildResources) -> KDAPrefillBuildContext:
-        return _create_prefill_step_builder(build_key)
-
-    @classmethod
-    def build_context_key(cls, layer_config: KDALayerConfig):
-        return _prefill_build_context_key(layer_config)
+    def build(self, infer_state: InferStateInfo) -> KDAPrefillAttState:
+        req, cu = infer_state.b_req_idx, infer_state.b1_cu_q_seq_len
+        flash = self.flash_kda_fwd
+        if flash is not None and self.max_flash_len is not None and infer_state.max_q_seq_len > self.max_flash_len:
+            flash = None
+        return KDAPrefillAttState(
+            conv_idx=req,
+            ssm_idx=req * (1 if self.layer_config.replay else self.layer_config.state_mtp_step + 1),
+            cu_seqlens_q=cu,
+            cu_seqlens=cu.to(torch.int64).contiguous() if flash is not None else cu,
+            b_ready_cache_len=infer_state.b_ready_cache_len,
+            max_q_seq_len=infer_state.max_q_seq_len,
+            flash_kda_fwd=flash,
+        )
 
 
-class ReplayKDAPrefillBackend(AttentionBackend[KDALayerConfig, KDAPrefillAttState, KDALayerInputs]):
+class ReplayKDAPrefillBackend(TritonKDAPrefillBackend):
     """Prefill over replay state, which keeps raw q/k: the fused conv runs only for FlashKDA with width 4."""
 
-    def __init__(self, layer_config: KDALayerConfig) -> None:
-        super().__init__(layer_config)
-        _check_prefill_kernel(layer_config)
-
-    @classmethod
-    def _check_supported(cls, layer_config: KDALayerConfig) -> None:
-        _check_state(layer_config, replay=True)
+    name = "replay_kda_prefill"
+    replay = True
 
     def forward(self, att_state, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
         cfg, inputs = self.layer_config, layer_inputs
-        conv_states = _conv_states(cfg, inputs)
+        # Prefill uses only the kernel window; speculative columns follow it.
+        conv_states = inputs.conv_states[..., : cfg.conv_kernel_size - 1]
         if att_state.flash_kda_fwd is not None and cfg.conv_kernel_size == 4:
             from lightllm.common.attention.kernels.kda.causal_conv1d_qkv import causal_conv1d_qkv
 
@@ -183,24 +209,6 @@ class ReplayKDAPrefillBackend(AttentionBackend[KDALayerConfig, KDAPrefillAttStat
             )
         return _prefill(cfg, att_state, inputs, q, k, v, qk_normalized=False, out=out)
 
-    @staticmethod
-    def get_name() -> str:
-        return "replay_kda_prefill"
-
-    build_context_type = KDAPrefillBuildContext
-
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: KDAPrefillBuildContext) -> KDAPrefillAttState:
-        return _build_kda_prefill_state(metadata, context)
-
-    @classmethod
-    def create_build_context(cls, build_key: "_PrefillKey", ctx: AttentionBuildResources) -> KDAPrefillBuildContext:
-        return _create_prefill_step_builder(build_key)
-
-    @classmethod
-    def build_context_key(cls, layer_config: KDALayerConfig):
-        return _prefill_build_context_key(layer_config)
-
 
 def _conv_update(inputs: KDALayerInputs, att_state: GDNDecodeAttState):
     from lightllm.common.attention.kernels.gdn.causal_conv1d import causal_conv1d_update
@@ -219,9 +227,13 @@ def _conv_update(inputs: KDALayerInputs, att_state: GDNDecodeAttState):
 
 
 class TritonKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState, KDALayerInputs]):
+    name = "triton_kda_decode"
+    replay = False
+    _check_supported = classmethod(_check_state)
+
     @classmethod
-    def _check_supported(cls, layer_config: KDALayerConfig) -> None:
-        _check_state(layer_config, replay=False)
+    def group_key(cls, layer_config: KDALayerConfig):
+        return layer_config.replay
 
     def forward(self, att_state, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
         """Fill and return out [rows, num_heads, head_dim]; update the conv and SSM states in place."""
@@ -249,29 +261,13 @@ class TritonKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState,
         )
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "triton_kda_decode"
-
-    build_context_type = GDNDecodeBuildContext
-
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
-        return build_gdn_decode_state(metadata, context)
-
-    @classmethod
-    def create_build_context(cls, build_key: bool, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:
-        return GDNDecodeBuildContext(replay=build_key)
-
-    @classmethod
-    def build_context_key(cls, layer_config: KDALayerConfig):
-        return layer_config.replay
+    def build(self, infer_state: InferStateInfo) -> GDNDecodeAttState:
+        return build_recurrent_decode_state(self, infer_state)
 
 
-class ReplayKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState, KDALayerInputs]):
-    @classmethod
-    def _check_supported(cls, layer_config: KDALayerConfig) -> None:
-        _check_state(layer_config, replay=True)
+class ReplayKDADecodeBackend(TritonKDADecodeBackend):
+    name = "replay_kda_decode"
+    replay = True
 
     def forward(self, att_state, layer_inputs, *, out, alloc_func: TensorAllocator = torch.empty):
         """Fill and return out [rows, num_heads, head_dim]; update the conv state and append history.
@@ -311,71 +307,3 @@ class ReplayKDADecodeBackend(AttentionBackend[KDALayerConfig, GDNDecodeAttState,
         )
         state.finish_decode_token(inputs.layer_num, att_state.conv_idx, att_state.cu_seqlens)
         return out
-
-    @staticmethod
-    def get_name() -> str:
-        return "replay_kda_decode"
-
-    build_context_type = GDNDecodeBuildContext
-
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
-        return build_gdn_decode_state(metadata, context)
-
-    @classmethod
-    def create_build_context(cls, build_key: bool, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:
-        return GDNDecodeBuildContext(replay=build_key)
-
-    @classmethod
-    def build_context_key(cls, layer_config: KDALayerConfig):
-        return layer_config.replay
-
-
-def _check_state(layer_config: KDALayerConfig, *, replay: bool) -> None:
-    if layer_config.replay != replay:
-        state = "replay" if layer_config.replay else "native"
-        raise NotImplementedError(f"this KDA implementation does not run over {state} state")
-
-
-def _check_prefill_kernel(layer_config: KDALayerConfig) -> None:
-    # A requested FlashKDA must load when the model loads, not on the first prefill step.
-    if layer_config.prefill_kernel == "flashkda":
-        from .flashkda import import_flash_kda_fwd
-
-        try:
-            import_flash_kda_fwd()
-        except ImportError as e:
-            raise NotImplementedError(str(e)) from e
-
-
-class _PrefillKey(NamedTuple):
-    replay: bool
-    state_mtp_step: int
-    prefill_kernel: str
-    num_heads: int
-    dtype: torch.dtype
-    ssm_dtype: torch.dtype
-
-
-def _create_prefill_step_builder(build_key: _PrefillKey) -> KDAPrefillBuildContext:
-    flash_kda_fwd = load_flash_kda_fwd(build_key.prefill_kernel, dtype=build_key.dtype, ssm_dtype=build_key.ssm_dtype)
-    # Automatic selection keeps FlashKDA to the step lengths it was validated on.
-    max_flash_len = None
-    if build_key.prefill_kernel == "auto":
-        max_flash_len = 2048 if build_key.num_heads < 16 else 8192
-    return KDAPrefillBuildContext(
-        ssm_slots_per_request=1 if build_key.replay else build_key.state_mtp_step + 1,
-        flash_kda_fwd=flash_kda_fwd,
-        max_flash_len=max_flash_len,
-    )
-
-
-def _prefill_build_context_key(layer_config: KDALayerConfig) -> _PrefillKey:
-    return _PrefillKey(
-        layer_config.replay,
-        layer_config.state_mtp_step,
-        layer_config.prefill_kernel,
-        layer_config.num_heads,
-        layer_config.dtype,
-        layer_config.ssm_dtype,
-    )

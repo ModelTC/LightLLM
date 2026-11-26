@@ -7,11 +7,7 @@ from typing import Optional
 
 import torch
 
-from lightllm.common.attention.backend import (
-    AttentionBackend,
-    AttentionBuildResources,
-    TensorAllocator,
-)
+from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from . import SparseMLADecodeLayerInputs, SparseMLALayerConfig, SparseMLAPrefillLayerInputs
 
@@ -27,25 +23,10 @@ class FlashMLASparsePrefillAttState:
 
 @dataclass(frozen=True)
 class FlashMLASparseDecodeAttState:
-    """FlashMLA's tile scheduler metadata, filled on the step's first kernel call.
-
-    direct_decode_bound, when set, bounds the valid entries of every top-k row, which lets small
-    CUDA graph steps over the "fp8_group64_e8m0" cache use a direct Triton kernel.
-    """
+    """FlashMLA's tile scheduler metadata, filled on the step's first kernel call."""
 
     sched_meta: object
     uses_cuda_graph: bool = False
-    direct_decode_bound: Optional[int] = None
-
-
-class FlashMLASparseDecodeBuildContext:
-    def __init__(self, *, direct_decode_bound: Optional[int] = None) -> None:
-        self.direct_decode_bound = direct_decode_bound
-        self._cuda_graph_sched_meta: dict[tuple[int, int], object] = {}
-
-
-def _check_inputs(layer_config: SparseMLALayerConfig, q: torch.Tensor) -> None:
-    assert q.shape[1] == layer_config.num_heads and q.dtype == layer_config.dtype, "q does not match the layer_config"
 
 
 @lru_cache(maxsize=2)
@@ -93,6 +74,8 @@ def _bf16_prefill(q, kv, indices, softmax_scale, out):
 class FlashMLASparsePrefillBackend(
     AttentionBackend[SparseMLALayerConfig, FlashMLASparsePrefillAttState, SparseMLAPrefillLayerInputs]
 ):
+    name = "flashmla_sparse_mla_prefill"
+
     @classmethod
     def _check_supported(cls, layer_config: SparseMLALayerConfig) -> None:
         if layer_config.kv_cache_format not in ("bf16", "fp8_ds_mla"):
@@ -112,7 +95,9 @@ class FlashMLASparsePrefillBackend(
         some request has a cached prefix, the selected history is dequantized next to them.
         """
         layer_config, q = self.layer_config, layer_inputs.q
-        _check_inputs(layer_config, q)
+        assert (
+            q.shape[1] == layer_config.num_heads and q.dtype == layer_config.dtype
+        ), "q does not match the layer_config"
         output_shape = (q.shape[0], q.shape[1], layer_config.kv_lora_rank)
         if layer_config.kv_cache_format == "bf16":
             if out is None:
@@ -158,20 +143,25 @@ class FlashMLASparsePrefillBackend(
             out.copy_(result)
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "flashmla_sparse_mla_prefill"
-
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: None = None) -> FlashMLASparsePrefillAttState:
+    def build(self, infer_state: InferStateInfo) -> FlashMLASparsePrefillAttState:
         return FlashMLASparsePrefillAttState(
-            mem_index=metadata.mem_index, has_cached_prefix=(metadata.max_cache_len or 0) > 0
+            mem_index=infer_state.mem_index, has_cached_prefix=(infer_state.max_cache_len or 0) > 0
         )
 
 
 class FlashMLASparseDecodeBackend(
     AttentionBackend[SparseMLALayerConfig, FlashMLASparseDecodeAttState, SparseMLADecodeLayerInputs]
 ):
+    """direct_decode_bound, when set, bounds the valid entries of every top-k row, which lets small
+    CUDA graph steps over the "fp8_group64_e8m0" cache use a direct Triton kernel."""
+
+    name = "flashmla_sparse_mla_decode"
+
+    def __init__(self, layer_config: SparseMLALayerConfig) -> None:
+        super().__init__(layer_config)
+        self.direct_decode_bound = self.group_key(layer_config)
+        self._graph_sched_meta: dict[tuple[int, int], object] = {}
+
     @classmethod
     def _check_supported(cls, layer_config: SparseMLALayerConfig) -> None:
         if layer_config.kv_cache_format not in ("fp8_ds_mla", "fp8_group64_e8m0"):
@@ -189,24 +179,24 @@ class FlashMLASparseDecodeBackend(
         import flash_mla
 
         layer_config = self.layer_config
-        _check_inputs(layer_config, layer_inputs.q_nope)
+        q_nope = layer_inputs.q_nope
+        assert q_nope.shape[1] == layer_config.num_heads and q_nope.dtype == layer_config.dtype, "q does not match"
         indices = layer_inputs.topk_mem_indices
         if indices.ndim == 2:
             indices = indices.unsqueeze(1)
         assert indices.shape[1] == 1, "FlashMLA sparse decode expects one query row per request"
         packed = layer_inputs.kv_cache
-        heads = layer_inputs.q_nope.shape[1]
+        heads = q_nope.shape[1]
         if layer_config.kv_cache_format == "fp8_group64_e8m0":
             from lightllm.common.attention.kernels.sparse_mla import fp8_group64_decode
             from lightllm.common.attention.kernels.sparse_mla.pad_query_heads import pad_query_heads
 
-            q_nope = layer_inputs.q_nope
             if fp8_group64_decode.can_use_fp8_sparse_direct_decode(
                 q_nope,
                 packed,
                 indices,
                 layer_config.kv_lora_rank,
-                att_state.direct_decode_bound,
+                self.direct_decode_bound,
                 is_cuda_graph_capture=att_state.uses_cuda_graph,
             ):
                 fp8_group64_decode.fp8_sparse_direct_decode(
@@ -215,7 +205,7 @@ class FlashMLASparseDecodeBackend(
                 return out
             q = pad_query_heads(q_nope, is_cuda_graph_capture=att_state.uses_cuda_graph)
         else:
-            q = torch.cat([layer_inputs.q_nope, layer_inputs.q_rope], dim=-1).unsqueeze(1).contiguous()
+            q = torch.cat([q_nope, layer_inputs.q_rope], dim=-1).unsqueeze(1).contiguous()
         kv = torch.as_strided(
             packed,
             size=(packed.shape[0], 1, 1, packed.shape[-1]),
@@ -240,43 +230,23 @@ class FlashMLASparseDecodeBackend(
             out.copy_(result[:, 0, :heads])
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "flashmla_sparse_mla_decode"
-
-    build_context_type = FlashMLASparseDecodeBuildContext
-
     @classmethod
-    def build(cls, metadata: InferStateInfo, context: FlashMLASparseDecodeBuildContext) -> FlashMLASparseDecodeAttState:
-        """A CUDA graph step keeps the captured scheduler metadata per (microbatch, metadata size)."""
+    def group_key(cls, layer_config: SparseMLALayerConfig) -> Optional[int]:
+        """The direct decode bound: 2048 pooled entries plus at most three kpool remainder entries fit
+        the 2112 rounded direct window."""
+        if (layer_config.topk, layer_config.kpool) == (2048, 4):
+            return layer_config.topk + layer_config.kpool - 1
+        return None
+
+    def build(self, infer_state: InferStateInfo) -> FlashMLASparseDecodeAttState:
+        """A CUDA graph step keeps the captured scheduler metadata per (microbatch, batch size)."""
         import flash_mla
 
-        if metadata.uses_cuda_graph:
-            key = (metadata.microbatch_index, metadata.batch_size)
-            if key not in context._cuda_graph_sched_meta:
-                context._cuda_graph_sched_meta[key] = flash_mla.get_mla_metadata()[0]
-            sched_meta = context._cuda_graph_sched_meta[key]
+        if infer_state.uses_cuda_graph:
+            key = (infer_state.microbatch_index, infer_state.batch_size)
+            if key not in self._graph_sched_meta:
+                self._graph_sched_meta[key] = flash_mla.get_mla_metadata()[0]
+            sched_meta = self._graph_sched_meta[key]
         else:
             sched_meta = flash_mla.get_mla_metadata()[0]
-        return FlashMLASparseDecodeAttState(
-            sched_meta=sched_meta,
-            uses_cuda_graph=metadata.uses_cuda_graph,
-            direct_decode_bound=context.direct_decode_bound,
-        )
-
-    @classmethod
-    def create_build_context(
-        cls, build_key: Optional[int], ctx: AttentionBuildResources
-    ) -> FlashMLASparseDecodeBuildContext:
-        return FlashMLASparseDecodeBuildContext(direct_decode_bound=build_key)
-
-    @classmethod
-    def build_context_key(cls, layer_config: SparseMLALayerConfig) -> Optional[int]:
-        return _direct_decode_bound(layer_config)
-
-
-def _direct_decode_bound(layer_config: SparseMLALayerConfig) -> Optional[int]:
-    # 2048 pooled entries plus at most three kpool remainder entries fit the 2112 rounded direct window.
-    if (layer_config.topk, layer_config.kpool) == (2048, 4):
-        return layer_config.topk + layer_config.kpool - 1
-    return None
+        return FlashMLASparseDecodeAttState(sched_meta=sched_meta, uses_cuda_graph=infer_state.uses_cuda_graph)

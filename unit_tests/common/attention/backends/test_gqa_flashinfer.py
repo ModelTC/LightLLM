@@ -6,13 +6,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from unit_tests.common.attention.backends.step_fixture import make_infer_state
+from unit_tests.common.attention.backends.step_fixture import make_infer_state, make_resources
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
-from lightllm.common.attention.backends.gqa.flashinfer import (
-    FlashInferGQABuilderConfig,
-    FlashInferGQADecodeBackend,
-    FlashInferGQAPrefillBackend,
-)
+from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQADecodeBackend, FlashInferGQAPrefillBackend
 from unit_tests.common.attention.backends.groups_runner import GroupsRunner
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
@@ -78,27 +74,23 @@ def test_prefill_decode(dtype, q_heads, kv_heads, page_size, cached):
     kv = torch.randn(3 * 512, 2 * kv_heads, 64, device="cuda", dtype=dtype)
     k, v = kv[:, :kv_heads], kv[:, kv_heads:]
     before, q_before = kv.clone(), q.clone()
-    workspace = torch.empty(32 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-    config = FlashInferGQABuilderConfig(q_heads, kv_heads, 64, page_size, dtype, dtype)
+    resources = make_resources(page_size=page_size, max_cuda_graph_batch_size=3)
     layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=dtype)
 
-    step_builder = FlashInferGQAPrefillBackend.build_context_type(config, workspace=lambda: workspace, max_seq_len=512)
-    att_state = FlashInferGQAPrefillBackend.build(make_batch(token_map, req_ids, lengths, query_lengths), step_builder)
-    out = torch.empty_like(q)
     backend = FlashInferGQAPrefillBackend(layer_config)
+    att_state = backend.prepare(make_batch(token_map, req_ids, lengths, query_lengths), resources)
+    assert att_state.page_size == page_size
+    out = torch.empty_like(q)
     assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k, v, token_map, req_ids, lengths, ready), atol=0.02, rtol=0.02
     )
     torch.testing.assert_close(q, q_before, atol=0, rtol=0)
 
-    step_builder = FlashInferGQADecodeBackend.build_context_type(
-        config, workspace=lambda: workspace, max_seq_len=512, max_batch_size=3, device=torch.device("cuda")
-    )
-    att_state = FlashInferGQADecodeBackend.build(make_batch(token_map, req_ids, lengths), step_builder)
+    backend = FlashInferGQADecodeBackend(layer_config)
+    att_state = backend.prepare(make_batch(token_map, req_ids, lengths), resources)
     q = torch.randn(3, q_heads, 64, device="cuda", dtype=dtype)
     out = torch.empty_like(q)
-    backend = FlashInferGQADecodeBackend(layer_config)
     assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     expected = reference(q, k, v, token_map, req_ids, lengths, [x - 1 for x in lengths])
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
@@ -119,8 +111,8 @@ def test_fp8_prefill_decode(q_heads, kv_heads, page_size):
     encoded = (kv / torch.tensor([k_scale, v_scale], device="cuda")[None, :, None, None]).to(torch.float8_e4m3fn)
     k, v = encoded[:, 0].view(torch.uint8), encoded[:, 1].view(torch.uint8)
     k_ref, v_ref = encoded[:, 0].float() * k_scale, encoded[:, 1].float() * v_scale
-    workspace = torch.empty(32 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-    config = FlashInferGQABuilderConfig(q_heads, kv_heads, 64, page_size, torch.bfloat16, torch.float8_e4m3fn)
+    # The cache's pages hold page_size slots; FP8 FlashInfer runs with single-token pages.
+    resources = make_resources(page_size=page_size, max_cuda_graph_batch_size=3)
     layer_config = GQALayerConfig(
         num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16, kv_quant="fp8_per_tensor"
     )
@@ -128,56 +120,36 @@ def test_fp8_prefill_decode(q_heads, kv_heads, page_size):
 
     query_lengths = [n - r for n, r in zip(lengths, ready)]
     q = torch.randn(sum(query_lengths), q_heads, 64, device="cuda", generator=generator).bfloat16()
-    att_state = FlashInferGQAPrefillBackend.build(
-        make_batch(token_map, req_ids, lengths, query_lengths),
-        FlashInferGQAPrefillBackend.build_context_type(config, workspace=lambda: workspace, max_seq_len=512),
-    )
+    backend = FlashInferGQAPrefillBackend(layer_config)
+    att_state = backend.prepare(make_batch(token_map, req_ids, lengths, query_lengths), resources)
+    assert att_state.page_size == 1
     out = torch.empty_like(q)
-    FlashInferGQAPrefillBackend(layer_config).forward(
-        att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out
-    )
+    backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
     expected = reference(q, k_ref, v_ref, token_map, req_ids, lengths, ready)
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
 
-    att_state = FlashInferGQADecodeBackend.build(
-        make_batch(token_map, req_ids, lengths),
-        FlashInferGQADecodeBackend.build_context_type(
-            config, workspace=lambda: workspace, max_seq_len=512, max_batch_size=3, device=torch.device("cuda")
-        ),
-    )
+    backend = FlashInferGQADecodeBackend(layer_config)
+    att_state = backend.prepare(make_batch(token_map, req_ids, lengths), resources)
     q = torch.randn(3, q_heads, 64, device="cuda", generator=generator).bfloat16()
     out = torch.empty_like(q)
-    FlashInferGQADecodeBackend(layer_config).forward(
-        att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out
-    )
+    backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
     expected = reference(q, k_ref, v_ref, token_map, req_ids, lengths, [x - 1 for x in lengths])
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
 
 
-def test_decode_step_builder_keeps_one_graph_wrapper_per_microbatch_and_batch_size():
+def test_decode_keeps_one_graph_wrapper_per_microbatch_and_batch_size():
     token_map = paged_token_map(2, 16, seed=1)
-    workspace = torch.empty(32 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-    config = FlashInferGQABuilderConfig(8, 2, 64, 16, torch.bfloat16, torch.bfloat16)
-    step_builder = FlashInferGQADecodeBackend.build_context_type(
-        config, workspace=lambda: workspace, max_seq_len=512, max_batch_size=2, device=torch.device("cuda")
-    )
-    captured = FlashInferGQADecodeBackend.build(
-        make_batch(token_map, [0, 1], [33, 17], graph_capacity=512), step_builder
-    ).wrapper
-    assert (
-        FlashInferGQADecodeBackend.build(
-            make_batch(token_map, [0, 1], [300, 257], graph_capacity=512), step_builder
-        ).wrapper
-        is captured
-    )
-    other = FlashInferGQADecodeBackend.build(
-        make_batch(token_map, [0, 1], [33, 17], graph_capacity=512, microbatch_index=1), step_builder
-    ).wrapper
+    backend = FlashInferGQADecodeBackend(GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16))
+    resources = make_resources(page_size=16, max_cuda_graph_batch_size=2)
+
+    def wrapper(*args, **kwargs):
+        return backend.prepare(make_batch(token_map, *args, **kwargs), resources).wrapper
+
+    captured = wrapper([0, 1], [33, 17], graph_capacity=512)
+    assert wrapper([0, 1], [300, 257], graph_capacity=512) is captured
+    other = wrapper([0, 1], [33, 17], graph_capacity=512, microbatch_index=1)
     assert other is not captured
-    eager = [
-        FlashInferGQADecodeBackend.build(make_batch(token_map, [0, 1], [33, 17]), step_builder).wrapper
-        for _ in range(2)
-    ]
+    eager = [wrapper([0, 1], [33, 17]) for _ in range(2)]
     assert eager[0] is not eager[1] and all(wrapper is not captured for wrapper in eager)
 
 

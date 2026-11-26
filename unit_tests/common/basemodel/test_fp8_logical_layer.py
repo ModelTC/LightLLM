@@ -8,11 +8,7 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeAttState, FA3GQAPrefillAttState
-from lightllm.common.attention.backends.gqa.flashinfer import (
-    FlashInferGQABuilderConfig,
-    FlashInferGQADecodeAttState,
-    FlashInferGQAPrefillAttState,
-)
+from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQAAttState
 from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
@@ -57,7 +53,6 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     import lightllm.utils.sgl_utils as sgl_utils
     from lightllm.common.basemodel.triton_kernel.quantization import q_per_head_fp8_quant
 
-    head_num, head_dim = state.config.head_num, state.config.head_dim
     if backend_name == "fa3":
         state.q_scales[0].fill_(3)
         state.q_scales[1].fill_(7)
@@ -101,9 +96,7 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
             calls.append(operation)
             out.copy_(q)
 
-        config = FlashInferGQABuilderConfig(head_num, head_num, head_dim, 1, torch.bfloat16, torch.float8_e4m3fn)
-        att_state_cls = FlashInferGQAPrefillAttState if operation == "prefill" else FlashInferGQADecodeAttState
-        att_state = att_state_cls(wrapper=SimpleNamespace(run=run), config=config)
+        att_state = FlashInferGQAAttState(wrapper=SimpleNamespace(run=run), page_size=1)
         kv_type = "fp8kv_spt"
 
     # The layer creates its attention as the model loads it: kv_quant and the static q scale come

@@ -6,14 +6,14 @@ import torch
 from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLADecodeLayerInputs
 from lightllm.common.attention.backends.mla import MLAPrefillLayerConfig, MLAPrefillLayerInputs
 from lightllm.common.attention.backends.mla.triton import TritonMLADecodeBackend, TritonMLAPrefillBackend
-from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
+from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 # The model's step config: graph steps cover 192 kv tokens.
-STEP_CONFIG = AttentionStepConfig(cuda_graph_max_kv_seq_len=192)
+STEP_CONFIG = dict(cuda_graph_max_kv_seq_len=192)
 DECODE_SCALE = 576 ** -0.5
 
 
@@ -24,9 +24,9 @@ def decode_config(scale=DECODE_SCALE):
 
 
 @pytest.fixture
-def decode_builder():
-    # One decode step builder serves the step's MLA layers.
-    return TritonMLADecodeBackend.create_build_context(TritonMLADecodeBackend.build_context_key(decode_config()), None)
+def decode_backend():
+    # One decode backend builds the state of the step's MLA layers.
+    return TritonMLADecodeBackend(decode_config())
 
 
 def decode(att_state, q_nope, q_rope, kv):
@@ -74,8 +74,9 @@ def test_cached_prefill(nope_dim, v_dim):
         softmax_scale=scale,
         dtype=q.dtype,
     )
-    att_state = TritonMLAPrefillBackend.build(configure_attention_step(state, STEP_CONFIG), None)
-    actual = TritonMLAPrefillBackend(layer_config).forward(
+    backend = TritonMLAPrefillBackend(layer_config)
+    att_state = backend.build(configure_attention_step(state, **STEP_CONFIG))
+    actual = backend.forward(
         att_state,
         MLAPrefillLayerInputs(q=q, k_nope=k_nope, k_rope=k_rope, v=v),
         out=out,
@@ -90,12 +91,12 @@ def test_cached_prefill(nope_dim, v_dim):
         torch.testing.assert_close(out[i], expected.to(q.dtype), atol=0.012, rtol=0.02)
 
 
-def test_decode_plans_once_per_step_independent_of_query_layout(decode_builder):
+def test_decode_plans_once_per_step_independent_of_query_layout(decode_backend):
     lengths = (7, 300)
     slots = torch.randperm(768, device="cuda", dtype=torch.int32).view(2, 384)
     state = _decode_state(lengths)
     state.req_manager = SimpleNamespace(req_to_token_indexs=slots)
-    att_state = TritonMLADecodeBackend.build(configure_attention_step(state, STEP_CONFIG), decode_builder)
+    att_state = decode_backend.build(configure_attention_step(state, **STEP_CONFIG))
     kv = torch.randn((768, 1, 576), dtype=torch.bfloat16, device="cuda")
     scale = DECODE_SCALE
     # Layers may present the absorbed query with different strides; both reuse the step's args.
@@ -108,12 +109,12 @@ def test_decode_plans_once_per_step_independent_of_query_layout(decode_builder):
         torch.testing.assert_close(actual, expected.to(kv.dtype), rtol=0.02, atol=0.012)
 
 
-def test_decode_replay_rebuilds_captured_schedule(decode_builder):
+def test_decode_replay_rebuilds_captured_schedule(decode_backend):
     slots = torch.randperm(384, device="cuda", dtype=torch.int32).view(2, 192)
     req_manager = SimpleNamespace(req_to_token_indexs=slots)
     state = _decode_state((7, 5), capture=True)
     state.req_manager = req_manager
-    att_state = TritonMLADecodeBackend.build(configure_attention_step(state, STEP_CONFIG), decode_builder)
+    att_state = decode_backend.build(configure_attention_step(state, **STEP_CONFIG))
     captured_schedule = att_state.schedule
     kv = torch.randn((384, 1, 576), dtype=torch.bfloat16, device="cuda")
     # The model produces the absorbed query by transposing the head-major BMM output.
@@ -133,9 +134,7 @@ def test_decode_replay_rebuilds_captured_schedule(decode_builder):
     for lengths in [(7, 5), (150, 83)]:
         replay_state = _decode_state(lengths, replay=True)
         replay_state.req_manager = req_manager
-        replay_att_state = TritonMLADecodeBackend.build(
-            configure_attention_step(replay_state, STEP_CONFIG), decode_builder
-        )
+        replay_att_state = decode_backend.build(configure_attention_step(replay_state, **STEP_CONFIG))
         # Building the replay step's args rewrites the schedule the graph captured instead of making a new one.
         assert replay_att_state.schedule is captured_schedule
         state.copy_for_cuda_graph(replay_state)
@@ -145,7 +144,7 @@ def test_decode_replay_rebuilds_captured_schedule(decode_builder):
         torch.testing.assert_close(second_layer, actual, rtol=0, atol=0)
 
 
-def test_decode_step_builder_keeps_one_graph_schedule_per_microbatch_and_batch_size(decode_builder):
+def test_decode_keeps_one_graph_schedule_per_microbatch_and_batch_size(decode_backend):
     from unit_tests.common.attention.backends.step_fixture import make_infer_state
 
     def make_batch(lengths, microbatch_index=0, graph=True):
@@ -161,17 +160,16 @@ def test_decode_step_builder_keeps_one_graph_schedule_per_microbatch_and_batch_s
             microbatch_index=microbatch_index,
         )
 
-    step_builder = decode_builder
-    first = TritonMLADecodeBackend.build(make_batch((7, 5)), step_builder).schedule
+    first = decode_backend.build(make_batch((7, 5))).schedule
     # Concurrent microbatches of microbatch overlap must not share captured buffers.
-    other_microbatch = TritonMLADecodeBackend.build(make_batch((7, 5), microbatch_index=1), step_builder).schedule
-    other_batch_size = TritonMLADecodeBackend.build(make_batch((7, 5, 3)), step_builder).schedule
+    other_microbatch = decode_backend.build(make_batch((7, 5), microbatch_index=1)).schedule
+    other_batch_size = decode_backend.build(make_batch((7, 5, 3))).schedule
     assert first is not other_microbatch and first is not other_batch_size
     starts = first.batch_start_index.clone()
-    assert TritonMLADecodeBackend.build(make_batch((150, 83)), step_builder).schedule is first
+    assert decode_backend.build(make_batch((150, 83))).schedule is first
     # Both length sets use 32-token blocks, so (7, 5) starts at [0, 1] and (150, 83) at [0, 5].
     assert starts.tolist() == [0, 1] and first.batch_start_index.tolist() == [0, 5]
-    eager = [TritonMLADecodeBackend.build(make_batch((7, 5), graph=False), step_builder).schedule for _ in range(2)]
+    eager = [decode_backend.build(make_batch((7, 5), graph=False)).schedule for _ in range(2)]
     assert eager[0] is not eager[1] and all(first is not schedule for schedule in eager)
 
 

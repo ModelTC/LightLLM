@@ -13,11 +13,9 @@ from lightllm.common.attention.backends.gqa.fa3 import (
     FA3GQAPrefillAttState,
 )
 from lightllm.common.attention.backends.gqa.flashinfer import (
-    FlashInferGQABuilderConfig,
+    FlashInferGQAAttState,
     FlashInferGQADecodeBackend,
-    FlashInferGQADecodeAttState,
     FlashInferGQAPrefillBackend,
-    FlashInferGQAPrefillAttState,
 )
 from lightllm.common.attention.backends.gqa import gqa_kv_quant_fields
 
@@ -90,8 +88,6 @@ def fp8_attention(
             observed.update(k_scale=k_scale, v_scale=v_scale)
             out.copy_(q)
 
-        config = FlashInferGQABuilderConfig(heads, heads, head_dim, 1, torch.bfloat16, torch.float8_e4m3fn)
-        att_state_cls = FlashInferGQAPrefillAttState if prefill else FlashInferGQADecodeAttState
-        att_state = att_state_cls(wrapper=SimpleNamespace(run=run), config=config)
+        att_state = FlashInferGQAAttState(wrapper=SimpleNamespace(run=run), page_size=1)
         backend = FlashInferGQAPrefillBackend if prefill else FlashInferGQADecodeBackend
         return FP8Attention(backend, "fp8kv_spt", att_state)

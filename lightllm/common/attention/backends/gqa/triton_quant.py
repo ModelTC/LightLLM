@@ -5,13 +5,8 @@ from typing import Optional
 
 import torch
 
-from lightllm.common.attention.backend import (
-    AttentionBackend,
-    AttentionBuildResources,
-    TensorAllocator,
-)
+from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from .. import keep_for_cuda_graph
 from . import GQALayerConfig, GQALayerInputs
 
 _KINDS = ("int8_group", "int4_group")
@@ -55,13 +50,6 @@ class TritonQuantGQADecodeAttState:
     b_mark_shared_group: Optional[torch.Tensor] = None
 
 
-class TritonQuantGQADecodeBuildContext:
-    def __init__(self, *, diverse: bool = False) -> None:
-        """diverse=True builds the shared-prefix groups for the int8 diverse-sampling decode kernel."""
-        self.diverse = diverse
-        self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
-
-
 def _check_gqa_config(layer_config: GQALayerConfig, head_dims: tuple[int, ...]) -> None:
     if layer_config.kv_quant not in _KINDS:
         raise NotImplementedError(f"Triton quantized GQA supports kv_quant {_KINDS}, got {layer_config.kv_quant!r}")
@@ -96,6 +84,8 @@ def _cache_operands(layer_config: GQALayerConfig, layer_inputs: GQALayerInputs):
 
 
 class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantGQAPrefillAttState, GQALayerInputs]):
+    name = "triton_quant_gqa_prefill"
+
     @classmethod
     def _check_supported(cls, layer_config: GQALayerConfig) -> None:
         _check_gqa_config(layer_config, (64, 128, 256))
@@ -150,30 +140,32 @@ class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantG
         )
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "triton_quant_gqa_prefill"
-
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: None = None) -> TritonQuantGQAPrefillAttState:
+    def build(self, infer_state: InferStateInfo) -> TritonQuantGQAPrefillAttState:
         assert (
-            metadata.b_q_start_loc is not None and metadata.b_ready_cache_len is not None
-        ), "prefill metadata fields required"
-        b_seq_len = metadata.b_seq_len
+            infer_state.b_q_start_loc is not None and infer_state.b_ready_cache_len is not None
+        ), "prefill fields required"
+        b_seq_len = infer_state.b_seq_len
         return TritonQuantGQAPrefillAttState(
-            req_to_token_indexs=metadata.req_to_token_indexs,
-            b_req_idx=metadata.b_req_idx,
+            req_to_token_indexs=infer_state.req_to_token_indexs,
+            b_req_idx=infer_state.b_req_idx,
             b_seq_len=b_seq_len,
-            b_q_start_loc=metadata.b_q_start_loc,
-            b_ready_cache_len=metadata.b_ready_cache_len,
+            b_q_start_loc=infer_state.b_q_start_loc,
+            b_ready_cache_len=infer_state.b_ready_cache_len,
             b_kv_start_loc=torch.cumsum(b_seq_len, dim=0, dtype=b_seq_len.dtype) - b_seq_len,
-            max_q_seq_len=metadata.max_q_seq_len,
-            max_kv_seq_len=metadata.max_kv_seq_len,
-            total_token_num=metadata.total_token_num,
+            max_q_seq_len=infer_state.max_q_seq_len,
+            max_kv_seq_len=infer_state.max_kv_seq_len,
+            total_token_num=infer_state.total_token_num,
         )
 
 
 class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQADecodeAttState, GQALayerInputs]):
+    name = "triton_quant_gqa_decode"
+
+    def __init__(self, layer_config: GQALayerConfig) -> None:
+        super().__init__(layer_config)
+        # Build the shared-prefix groups of the int8 diverse-sampling decode kernel (set up from resources).
+        self.diverse = False
+
     @classmethod
     def _check_supported(cls, layer_config: GQALayerConfig) -> None:
         _check_gqa_config(layer_config, (16, 32, 64, 128, 256))
@@ -226,46 +218,36 @@ class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQ
 
         return token_decode_attention_flash_decoding(**common, max_kv_seq_len=att_state.max_kv_seq_len)
 
-    @staticmethod
-    def get_name() -> str:
-        return "triton_quant_gqa_decode"
-
-    build_context_type = TritonQuantGQADecodeBuildContext
-
     @classmethod
-    def build(cls, metadata: InferStateInfo, context: TritonQuantGQADecodeBuildContext) -> TritonQuantGQADecodeAttState:
+    def group_key(cls, layer_config: GQALayerConfig):
+        return layer_config.kv_quant
+
+    def setup(self, resources: AttentionBuildResources) -> None:
+        # Only the int8 decode kernel has a diverse-sampling variant.
+        self.diverse = resources.diverse_decode and self.layer_config.kv_quant == "int8_group"
+
+    def build(self, infer_state: InferStateInfo) -> TritonQuantGQADecodeAttState:
         """A CUDA graph step bounds lengths by the graph capacity and keeps the group tensors per
-        (microbatch, metadata size), rewriting them in place on replay."""
-        bound = metadata.cuda_graph_max_kv_seq_len if metadata.uses_cuda_graph else metadata.max_kv_seq_len
+        (microbatch, batch size), rewriting them in place on replay."""
+        bound = infer_state.cuda_graph_max_kv_seq_len if infer_state.uses_cuda_graph else infer_state.max_kv_seq_len
         b_shared_seq_len = b_mark_shared_group = None
-        if context.diverse:
+        if self.diverse:
             from lightllm.common.basemodel.triton_kernel.diverse_utils import build_diverse_shared_group_markers
 
-            assert metadata.b_shared_seq_len is not None and metadata.b_shared_radix_node_id is not None
+            assert infer_state.b_shared_seq_len is not None and infer_state.b_shared_radix_node_id is not None
             b_mark_shared_group = build_diverse_shared_group_markers(
-                b_shared_radix_node_id=metadata.b_shared_radix_node_id
+                b_shared_radix_node_id=infer_state.b_shared_radix_node_id
             )
             # A one-row group has no cross-request prefix sharing to accelerate.
-            b_shared_seq_len = torch.where(b_mark_shared_group == 1, 0, metadata.b_shared_seq_len)
-            if metadata.uses_cuda_graph:
-                key, store = (metadata.microbatch_index, metadata.batch_size), context._cuda_graph_tensors
-                b_mark_shared_group = keep_for_cuda_graph(store, (*key, "mark"), b_mark_shared_group)
-                b_shared_seq_len = keep_for_cuda_graph(store, (*key, "shared_len"), b_shared_seq_len)
+            b_shared_seq_len = torch.where(b_mark_shared_group == 1, 0, infer_state.b_shared_seq_len)
+            b_mark_shared_group = self._keep_for_graph(infer_state, "mark", b_mark_shared_group)
+            b_shared_seq_len = self._keep_for_graph(infer_state, "shared_len", b_shared_seq_len)
         return TritonQuantGQADecodeAttState(
-            req_to_token_indexs=metadata.req_to_token_indexs,
-            b_req_idx=metadata.b_req_idx,
-            b_seq_len=metadata.b_seq_len,
+            req_to_token_indexs=infer_state.req_to_token_indexs,
+            b_req_idx=infer_state.b_req_idx,
+            b_seq_len=infer_state.b_seq_len,
             kv_seq_len_bound=bound,
-            max_kv_seq_len=metadata.max_kv_seq_len,
+            max_kv_seq_len=infer_state.max_kv_seq_len,
             b_shared_seq_len=b_shared_seq_len,
             b_mark_shared_group=b_mark_shared_group,
         )
-
-    @classmethod
-    def create_build_context(cls, build_key: str, ctx: AttentionBuildResources) -> TritonQuantGQADecodeBuildContext:
-        # Only the int8 decode kernel has a diverse-sampling variant.
-        return TritonQuantGQADecodeBuildContext(diverse=ctx.diverse_decode and build_key == "int8_group")
-
-    @classmethod
-    def build_context_key(cls, layer_config: GQALayerConfig):
-        return layer_config.kv_quant

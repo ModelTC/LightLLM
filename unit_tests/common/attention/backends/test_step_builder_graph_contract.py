@@ -1,10 +1,10 @@
 """The CUDA graph contract every decode backend must keep (see AttentionBackend.build).
 
 A captured graph reruns its kernels with the capture step's attention state, so a replay step can change
-only tensor contents. For each decode step builder this checks, with a capture step followed by a
+only tensor contents. For each decode backend this checks, with a capture step followed by a
 replay step of the same (microbatch, batch size) but different requests and lengths:
 
-1. every tensor the builder owns (any tensor that is not a batch's own) keeps its address and layout, and every
+1. every tensor the backend owns (any tensor that is not a batch's own) keeps its address and layout, and every
    other object, such as a FlashInfer wrapper, is the captured one;
 2. those tensors hold the replay step's values, as an eager build of the same batch computes them;
 3. host scalars stay as captured, except fields documented as hints that never size a launch;
@@ -16,7 +16,10 @@ import dataclasses
 import pytest
 import torch
 
-from unit_tests.common.attention.backends.step_fixture import make_infer_state
+from lightllm.common.attention.backends.gqa import GQALayerConfig
+from lightllm.common.attention.backends.mla import MLADecodeLayerConfig
+from unit_tests.common.attention.backends.groups_runner import set_up
+from unit_tests.common.attention.backends.step_fixture import make_infer_state, make_resources
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
@@ -76,53 +79,38 @@ def no_extra(step):
     return {}
 
 
-class PageTables:
-    """Caller-owned FA3 page-table storage per microbatch, like Fa3AttBackend.get_page_table_view."""
+def ready(backend_cls, layer_config, **resources):
+    """A backend set up as a state group's first prepare sets it up."""
+    fields = dict(max_seq_len=MAX_LEN, max_cuda_graph_batch_size=8, max_decode_rows=8)
+    return set_up(backend_cls, layer_config, make_resources(**{**fields, **resources}))
 
-    def __init__(self, page_size):
-        self.page_size = page_size
-        self.storage = [torch.empty(16 * MAX_LEN, dtype=torch.int32, device="cuda") for _ in range(2)]
 
-    def __call__(self, rows, max_kv_len, microbatch_index):
-        width = -(-max_kv_len // self.page_size)
-        return self.storage[microbatch_index][: rows * width].view(rows, width)
+def gqa_config(**fields):
+    return GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16, **fields)
+
+
+MLA_DECODE = dict(num_heads=16, kv_lora_rank=512, qk_rope_head_dim=64, softmax_scale=0.1, dtype=torch.bfloat16)
 
 
 def flashinfer_gqa():
     pytest.importorskip("flashinfer")
-    from lightllm.common.attention.backends.gqa.flashinfer import (
-        FlashInferGQABuilderConfig,
-        FlashInferGQADecodeBackend,
-    )
+    from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQADecodeBackend
 
-    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-    config = FlashInferGQABuilderConfig(8, 2, 64, 1, torch.bfloat16, torch.bfloat16)
-    return FlashInferGQADecodeBackend, FlashInferGQADecodeBackend.build_context_type(
-        config, workspace=lambda: workspace, max_seq_len=MAX_LEN, max_batch_size=8, device="cuda"
-    )
+    return ready(FlashInferGQADecodeBackend, gqa_config(), page_size=1)
 
 
 def flashinfer_mla():
     pytest.importorskip("flashinfer")
-    from lightllm.common.attention.backends.mla.flashinfer import (
-        FlashInferMLABuilderConfig,
-        FlashInferMLADecodeBackend,
-    )
+    from lightllm.common.attention.backends.mla.flashinfer import FlashInferMLADecodeBackend
 
-    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-    config = FlashInferMLABuilderConfig(16, 128, 64, 128, 512, 1, torch.bfloat16, 0.1)
-    return FlashInferMLADecodeBackend, FlashInferMLADecodeBackend.build_context_type(
-        config, workspace=lambda: workspace, max_seq_len=MAX_LEN, max_batch_size=8, device="cuda"
-    )
+    return ready(FlashInferMLADecodeBackend, MLADecodeLayerConfig(**MLA_DECODE), page_size=1)
 
 
 def fa3_gqa(page_size):
     def factory():
         from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend
 
-        return FA3GQADecodeBackend, FA3GQADecodeBackend.build_context_type(
-            page_size=page_size, page_table_view=PageTables(page_size)
-        )
+        return ready(FA3GQADecodeBackend, gqa_config(), page_size=page_size)
 
     return factory
 
@@ -130,39 +118,41 @@ def fa3_gqa(page_size):
 def triton_gqa():
     from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend
 
-    return TritonGQADecodeBackend, TritonGQADecodeBackend.build_context_type()
+    return ready(TritonGQADecodeBackend, gqa_config())
 
 
 def triton_quant_gqa_diverse():
     from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeBackend
 
-    return TritonQuantGQADecodeBackend, TritonQuantGQADecodeBackend.build_context_type(diverse=True)
+    config = gqa_config(kv_quant="int8_group", kv_quant_group_size=8)
+    return ready(TritonQuantGQADecodeBackend, config, diverse_decode=True)
 
 
 def triton_mla():
     from lightllm.common.attention.backends.mla.triton import TritonMLADecodeBackend
 
-    return TritonMLADecodeBackend, TritonMLADecodeBackend.build_context_type(
-        num_heads=16, kv_lora_rank=512, qk_rope_head_dim=64, dtype=torch.bfloat16
-    )
+    return ready(TritonMLADecodeBackend, MLADecodeLayerConfig(**MLA_DECODE))
 
 
 def fa3_sparse_mla():
+    from lightllm.common.attention.backends.sparse_mla import SparseMLALayerConfig
     from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend
 
-    return FA3SparseMLADecodeBackend, FA3SparseMLADecodeBackend.build_context_type(topk=64, kpool=4)
+    return ready(FA3SparseMLADecodeBackend, SparseMLALayerConfig(**MLA_DECODE, topk=64, kpool=4))
 
 
 def recurrent(replay):
     def factory():
-        from lightllm.common.attention.backends.gdn.triton import TritonGDNDecodeBackend
+        from lightllm.common.attention.backends.gdn import GDNLayerConfig
+        from lightllm.common.attention.backends.gdn.triton import ReplayGDNDecodeBackend, TritonGDNDecodeBackend
 
-        return TritonGDNDecodeBackend, TritonGDNDecodeBackend.build_context_type(replay=replay)
+        config = GDNLayerConfig(2, 2, 16, 16, 4, "silu", torch.bfloat16, state_mtp_step=2, replay=replay)
+        return ready(ReplayGDNDecodeBackend if replay else TritonGDNDecodeBackend, config)
 
     return factory
 
 
-# (builder factory, layouts it serves, batch fields it needs, attention state scalars that are only hints).
+# (backend factory, layouts it serves, batch fields it needs, attention state scalars that are only hints).
 # Hints select kernel configs or bound nothing a replay reads: kernels read actual lengths on the GPU.
 # FlashInfer page-index buffers are valid only up to their indptr's last entry.
 CASES = {
@@ -211,7 +201,7 @@ def batch_storage(batch):
 
 
 def owned_tensors(att_state, *batches):
-    """The tensors of attention state the builder owns, as opposed to the batches' own tensors.
+    """The tensors of attention state the backend owns, as opposed to the batches' own tensors.
 
     Attention state may keep the capture batch's tensors; the caller rewrites those before each replay.
     """
@@ -241,16 +231,15 @@ PARAMS = [(name, layout) for name, (_, layouts, _, _) in CASES.items() for layou
 
 
 @pytest.mark.parametrize("name,layout", PARAMS, ids=[f"{name}-{layout}" for name, layout in PARAMS])
-def test_decode_step_builder_keeps_the_cuda_graph_contract(name, layout):
+def test_decode_backend_keeps_the_cuda_graph_contract(name, layout):
     factory, _, extra, hints = CASES[name]
-    builder = factory()
+    backend = factory()
     token_map = torch.randperm(REQUESTS * MAX_LEN, device="cuda", dtype=torch.int32).view(REQUESTS, MAX_LEN)
     capture_step, replay_step = LAYOUTS[layout]
 
-    def build(step, *, capacity=CAPACITY, microbatch=0, step_builder=builder):
+    def build(step, *, capacity=CAPACITY, microbatch=0, builder=backend):
         batch = make_batch(token_map, step, layout, capacity=capacity, microbatch=microbatch, extra=extra)
-        backend, context = step_builder
-        return batch, backend.build(batch, context)
+        return batch, builder.build(batch)
 
     capture_batch, captured = build(capture_step)
     captured_leaves = dict(leaves(captured))
@@ -275,7 +264,7 @@ def test_decode_step_builder_keeps_the_cuda_graph_contract(name, layout):
             assert new is value, f"{name}: {path} is a new object on replay"
 
     # (2) The kept tensors hold what an eager build of the replay step computes.
-    _, eager = build(replay_step, capacity=None, step_builder=factory())
+    _, eager = build(replay_step, capacity=None, builder=factory())
     eager_leaves = dict(leaves(eager))
     for path, kept in owned_tensors(replayed, capture_batch, replay_batch).items():
         expected = eager_leaves[path]

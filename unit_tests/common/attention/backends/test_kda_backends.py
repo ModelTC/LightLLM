@@ -1,4 +1,4 @@
-"""KDA backends at the step-builder/backend level against a sequential fp32 reference: native and replay
+"""KDA backends against a sequential fp32 reference: native and replay
 prefill (Triton or FlashKDA), then native and replay decode with and without speculative rows."""
 
 import dataclasses
@@ -10,7 +10,6 @@ import torch
 
 from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
 from lightllm.common.attention.backends.kda.triton import (
-    KDAPrefillBuildContext,
     ReplayKDADecodeBackend,
     ReplayKDAPrefillBackend,
     TritonKDADecodeBackend,
@@ -111,10 +110,7 @@ def test_kda_prefill_then_speculative_decode_matches_reference(prefill, replay, 
         replay=replay,
         mtp_step=mtp_step,
         dynamic=dynamic,
-        prefill_backend=prefill_cls(family.config),
+        # A requested FlashKDA runs on every prefill step; "triton" never uses it.
+        prefill_backend=prefill_cls(dataclasses.replace(family.config, prefill_kernel=prefill)),
         decode_backend=decode_cls(family.config),
-        prefill_builder=KDAPrefillBuildContext(
-            ssm_slots_per_request=1 if replay else mtp_step + 1,
-            flash_kda_fwd=_flash_kda_fwd() if prefill == "flashkda" else None,
-        ),
     )

@@ -1,7 +1,7 @@
-"""GLM-5 FP8 sparse decode through the serving path: InferStateInfo -> step builder.
+"""GLM-5 FP8 sparse decode through the serving path: InferStateInfo -> decode backend build.
 
-Unlike test_fp8_kv.py, the attention state here come from the layer group's step builder, so these tests cover how
-the builder marks CUDA graph steps (which picks the direct Triton decode for small graph workloads) and keeps
+Unlike test_fp8_kv.py, the attention state here come from the layer group's backend, so these tests cover how
+its build marks CUDA graph steps (which picks the direct Triton decode for small graph workloads) and keeps
 FlashMLA's scheduler metadata per (microbatch, batch size) for replays.
 """
 
@@ -12,7 +12,7 @@ import torch
 
 from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparseDecodeBackend
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
-from lightllm.common.basemodel.attention_backend_manager import AttentionStepConfig, configure_attention_step
+from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 
@@ -28,16 +28,14 @@ SLOTS, TOPK_WIDTH, SCALE = 8192, 2176, 0.0625
 
 
 def make_backend():
-    """A GLM-5 FP8 layer group's decode step builder, with the model's step config."""
+    """A GLM-5 FP8 layer group's decode backend, with the model's step config."""
     pytest.importorskip("flash_mla")
     from unit_tests.models.glm5_next.test_fp8_kv import _layer_config
 
     config = _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), SCALE)
     return SimpleNamespace(
-        step_config=AttentionStepConfig(cuda_graph_max_kv_seq_len=SLOTS),
-        decode_step_builder=FlashMLASparseDecodeBackend.create_build_context(
-            FlashMLASparseDecodeBackend.build_context_key(config), None
-        ),
+        step_config=dict(cuda_graph_max_kv_seq_len=SLOTS),
+        decode_backend=FlashMLASparseDecodeBackend(config),
     )
 
 
@@ -70,9 +68,7 @@ def init_decode_state(backend, infer):
     """Prepare the attention state of one decode microbatch."""
     from unit_tests.models.glm5_next.test_fp8_kv import _decode
 
-    att_state = FlashMLASparseDecodeBackend.build(
-        configure_attention_step(infer, backend.step_config), backend.decode_step_builder
-    )
+    att_state = backend.decode_backend.build(configure_attention_step(infer, **backend.step_config))
     return SimpleNamespace(att_state=att_state, decode_att=lambda q, kv, params: _decode(att_state, q, kv, params))
 
 
@@ -117,7 +113,7 @@ def capture(run):
     [(4, 64, False), (2, 16, True)],
     ids=["flashmla_graph", "direct_graph"],
 )
-def test_fp8_decode_graph_replays_steps_built_by_the_step_builder(monkeypatch, batch, heads, direct):
+def test_fp8_decode_graph_replays_steps_built_by_the_backend(monkeypatch, batch, heads, direct):
     from lightllm.common.attention.kernels.sparse_mla import fp8_group64_decode
 
     backend = make_backend()
@@ -145,7 +141,7 @@ def test_fp8_decode_graph_replays_steps_built_by_the_step_builder(monkeypatch, b
 
     def eager(lengths):
         state = init_decode_state(backend, make_infer(lengths))
-        assert not state.att_state.uses_cuda_graph and state.att_state.direct_decode_bound == 2051
+        assert not state.att_state.uses_cuda_graph and backend.decode_backend.direct_decode_bound == 2051
         return run(state).clone()
 
     eager_first = eager(first)

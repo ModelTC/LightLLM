@@ -341,7 +341,7 @@ class TpPartBaseModel:
             config = layer.attention_config(self)
             layer.prefill_backend, layer.decode_backend = backend_manager.bind(config)
         for phase in backend_manager.state_groups:
-            backend_names = [backend.get_name() for backend in backend_manager.backends(phase)]
+            backend_names = [backend.name for backend in backend_manager.backends(phase)]
             logger.info(f"{role} {phase} attention backends: {backend_names}")
 
     @property

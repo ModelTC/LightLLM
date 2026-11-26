@@ -1,19 +1,120 @@
-"""Triton GDN implementations and decode state preparation."""
+"""GDN implementations: chunked prefill (Triton or FlashQLA) and decode over native or replay recurrent state.
+
+Replay decode appends rows to a per-layer history that the replay kernel reads from each request's
+cursor, instead of updating SSM states every token. Prefill is the regular chunked prefill with one
+SSM slot per request.
+"""
 
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
 
-from lightllm.common.attention.backend import (
-    AttentionBackend,
-    AttentionBuildResources,
-    TensorAllocator,
-)
+from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from .. import keep_for_cuda_graph
 from . import GDNLayerConfig, GDNLayerInputs, _split_qkv
-from .prefill import GDNPrefillBackend
+
+
+@dataclass(frozen=True)
+class GDNPrefillAttState:
+    """Packed prefill: request i's tokens start at cu_seqlens[i]; its conv state is slot conv_idx[i] and
+    its SSM state slot ssm_idx[i]; has_initial_state[i] says whether it continues earlier tokens."""
+
+    conv_idx: torch.Tensor
+    ssm_idx: torch.Tensor
+    cu_seqlens: torch.Tensor
+    has_initial_state: torch.Tensor
+
+
+class TritonGDNPrefillBackend(AttentionBackend[GDNLayerConfig, GDNPrefillAttState, GDNLayerInputs]):
+    name = "triton_gdn_prefill"
+
+    def __init__(self, layer_config: GDNLayerConfig) -> None:
+        super().__init__(layer_config)
+        # Resolve the chunk kernel at model load so auto-selection can skip unavailable backends.
+        try:
+            self.chunk_gated_delta_rule = self.load_chunk_kernel()
+        except Exception as e:
+            raise NotImplementedError(f"{type(self).__name__} cannot load its chunk kernel: {e!r}") from e
+
+    @staticmethod
+    def load_chunk_kernel():
+        from lightllm.common.attention.kernels.gdn.third_party_fla.ops.chunk import chunk_gated_delta_rule
+
+        return chunk_gated_delta_rule
+
+    @classmethod
+    def group_key(cls, layer_config: GDNLayerConfig):
+        return layer_config.replay, layer_config.state_mtp_step
+
+    def forward(
+        self,
+        att_state: GDNPrefillAttState,
+        layer_inputs: GDNLayerInputs,
+        *,
+        out: Optional[torch.Tensor],
+        alloc_func: TensorAllocator = torch.empty,
+    ) -> torch.Tensor:
+        """Return the chunk output, copying into out if supplied, and update the conv and SSM states in place."""
+        from lightllm.common.attention.kernels.gdn.causal_conv1d import causal_conv1d_fn
+        from lightllm.common.attention.kernels.gdn.fused_gdn_gating import fused_gdn_gating
+
+        cfg, inputs = self.layer_config, layer_inputs
+        g, beta = fused_gdn_gating(inputs.A_log, inputs.a, inputs.b, inputs.dt_bias)
+        conv_states = inputs.conv_states
+        if cfg.state_mtp_step > 0:
+            conv_states = conv_states[:, :, : -cfg.state_mtp_step]
+        mixed_qkv = causal_conv1d_fn(
+            inputs.mixed_qkv.transpose(0, 1),
+            inputs.conv_weight,
+            bias=inputs.conv_bias,
+            query_start_loc=att_state.cu_seqlens,
+            cache_indices=att_state.conv_idx,
+            has_initial_state=att_state.has_initial_state,
+            conv_states=conv_states,
+            activation=cfg.activation,
+        ).transpose(0, 1)
+        query, key, value = _split_qkv(cfg, mixed_qkv)
+        tokens = query.shape[0]
+        ssm_states = inputs.ssm_states
+        core, last_state = self.chunk_gated_delta_rule(
+            q=query.view(1, tokens, cfg.num_k_heads, cfg.head_k_dim),
+            k=key.view(1, tokens, cfg.num_k_heads, cfg.head_k_dim),
+            v=value.view(1, tokens, cfg.num_v_heads, cfg.head_v_dim),
+            g=g.unsqueeze(0),
+            beta=beta.unsqueeze(0),
+            initial_state=ssm_states[att_state.ssm_idx],
+            output_final_state=True,
+            cu_seqlens=att_state.cu_seqlens,
+            use_qk_l2norm_in_kernel=True,
+        )
+        # The chunk kernel accumulates in float32; index_put does not convert dtypes implicitly.
+        ssm_states[att_state.ssm_idx] = last_state.to(ssm_states.dtype, copy=False)
+        output = core.view(tokens, cfg.num_v_heads, cfg.head_v_dim)
+        if out is None:
+            return output
+        out.copy_(output)
+        return out
+
+    def build(self, infer_state: InferStateInfo) -> GDNPrefillAttState:
+        req, c = infer_state.b_req_idx, self.layer_config
+        ssm_slots_per_request = 1 if c.replay else c.state_mtp_step + 1
+        return GDNPrefillAttState(
+            conv_idx=req,
+            ssm_idx=req * ssm_slots_per_request if ssm_slots_per_request != 1 else req,
+            cu_seqlens=infer_state.b1_cu_q_seq_len,
+            has_initial_state=infer_state.b_ready_cache_len > 0,
+        )
+
+
+class FlashQLAGDNPrefillBackend(TritonGDNPrefillBackend):
+    name = "flashqla_gdn_prefill"
+
+    @staticmethod
+    def load_chunk_kernel():
+        from flash_qla import chunk_gated_delta_rule
+
+        return chunk_gated_delta_rule
 
 
 @dataclass(frozen=True)
@@ -34,17 +135,14 @@ class GDNDecodeAttState:
     draft_step: int
 
 
-class GDNDecodeBuildContext:
-    def __init__(self, *, replay: bool) -> None:
-        """replay selects replay state, which keeps one SSM slot per request and needs cu_seqlens."""
-        self.replay = replay
-        self._cuda_graph_tensors: dict[tuple, torch.Tensor] = {}
+def build_recurrent_decode_state(backend: AttentionBackend, infer_state: InferStateInfo) -> GDNDecodeAttState:
+    """Group decode rows into requests for a GDN or KDA decode backend (its layer config has replay).
 
-
-def build_gdn_decode_state(infer_state: InferStateInfo, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
-    """A CUDA graph step keeps derived tensors per (microbatch, batch size), rewritten in place."""
+    A CUDA graph step keeps derived tensors per (microbatch, batch size), rewritten in place.
+    """
     from lightllm.common.attention.kernels.gdn.mtp_state_params import build_dynamic_mtp_linear_att_state_params
 
+    replay = backend.layer_config.replay
     req, device = infer_state.b_req_idx, infer_state.b_req_idx.device
     width = infer_state.decode_rows_per_request
     derived = {}
@@ -52,7 +150,7 @@ def build_gdn_decode_state(infer_state: InferStateInfo, context: GDNDecodeBuildC
         conv_idx = ssm_idx = req
         accepted = None
         cu = None
-        if context.replay:
+        if replay:
             derived["cu"] = cu = torch.arange(req.numel() + 1, dtype=torch.int32, device=device)
     else:
         assert infer_state.req_to_mtp_state_index is not None, "speculative GDN decode needs req_to_mtp_state_index"
@@ -71,7 +169,7 @@ def build_gdn_decode_state(infer_state: InferStateInfo, context: GDNDecodeBuildC
             cu = torch.arange(0, infer_state.batch_size + 1, width, dtype=torch.int32, device=device)
             conv_idx = req.view(-1, width)[:, 0].contiguous()
             accepted = infer_state.req_to_mtp_state_index[conv_idx] + 1
-        if context.replay:
+        if replay:
             ssm_idx = conv_idx
         else:
             # Each request owns width consecutive recurrent-state slots.
@@ -79,27 +177,14 @@ def build_gdn_decode_state(infer_state: InferStateInfo, context: GDNDecodeBuildC
             ssm_idx = (conv_idx * width).view(-1, 1) + offsets
         derived.update(cu=cu, conv_idx=conv_idx, accepted=accepted, ssm_idx=ssm_idx)
     if infer_state.uses_cuda_graph and derived:
-        key, store = (infer_state.microbatch_index, infer_state.batch_size), context._cuda_graph_tensors
-        kept = {name: keep_for_cuda_graph(store, (*key, name), value) for name, value in derived.items()}
+        kept = {name: backend._keep_for_graph(infer_state, name, value) for name, value in derived.items()}
         cu = kept.get("cu", cu)
         conv_idx = kept.get("conv_idx", conv_idx)
         accepted = kept.get("accepted", accepted)
-        ssm_idx = kept["conv_idx"] if context.replay and "conv_idx" in kept else kept.get("ssm_idx", ssm_idx)
+        ssm_idx = kept["conv_idx"] if replay and "conv_idx" in kept else kept.get("ssm_idx", ssm_idx)
     return GDNDecodeAttState(
         conv_idx=conv_idx, ssm_idx=ssm_idx, cu_seqlens=cu, num_accepted_tokens=accepted, draft_step=width - 1
     )
-
-
-class TritonGDNPrefillBackend(GDNPrefillBackend):
-    @staticmethod
-    def chunk_gated_delta_rule():
-        from lightllm.common.attention.kernels.gdn.third_party_fla.ops.chunk import chunk_gated_delta_rule
-
-        return chunk_gated_delta_rule
-
-    @staticmethod
-    def get_name() -> str:
-        return "triton_gdn_prefill"
 
 
 def _pack_decode_inputs(cfg: GDNLayerConfig, inputs: GDNLayerInputs, conv_idx: torch.Tensor):
@@ -140,10 +225,19 @@ def _mtp_conv(cfg: GDNLayerConfig, inputs: GDNLayerInputs, att_state: GDNDecodeA
 
 
 class TritonGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState, GDNLayerInputs]):
+    name = "triton_gdn_decode"
+    # Which state layout the backend runs over; see GDNLayerConfig.replay.
+    replay = False
+
     @classmethod
     def _check_supported(cls, layer_config: GDNLayerConfig) -> None:
-        if layer_config.replay:
-            raise NotImplementedError("Triton GDN decode updates native SSM states; replay state needs replay decode")
+        if layer_config.replay != cls.replay:
+            state = "replay" if layer_config.replay else "native"
+            raise NotImplementedError(f"{cls.name} does not run over {state} state")
+
+    @classmethod
+    def group_key(cls, layer_config: GDNLayerConfig):
+        return layer_config.replay
 
     def forward(
         self,
@@ -201,20 +295,55 @@ class TritonGDNDecodeBackend(AttentionBackend[GDNLayerConfig, GDNDecodeAttState,
             )
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "triton_gdn_decode"
+    def build(self, infer_state: InferStateInfo) -> GDNDecodeAttState:
+        return build_recurrent_decode_state(self, infer_state)
 
-    build_context_type = GDNDecodeBuildContext
 
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: GDNDecodeBuildContext) -> GDNDecodeAttState:
-        return build_gdn_decode_state(metadata, context)
+class ReplayGDNDecodeBackend(TritonGDNDecodeBackend):
+    name = "replay_gdn_decode"
+    replay = True
 
-    @classmethod
-    def create_build_context(cls, build_key: bool, ctx: AttentionBuildResources) -> GDNDecodeBuildContext:
-        return GDNDecodeBuildContext(replay=build_key)
+    def forward(
+        self,
+        att_state: GDNDecodeAttState,
+        layer_inputs: GDNLayerInputs,
+        *,
+        out: torch.Tensor,
+        alloc_func: TensorAllocator = torch.empty,
+    ) -> torch.Tensor:
+        """Fill and return out [rows, num_v_heads, head_v_dim]; update the conv state and append history.
 
-    @classmethod
-    def build_context_key(cls, layer_config: GDNLayerConfig):
-        return layer_config.replay
+        Every layer reads the cursors of the step's start; the last layer's call advances them.
+        """
+        from lightllm.common.attention.kernels.gdn.replayssm.replay_gdn import replay
+
+        cfg, inputs = self.layer_config, layer_inputs
+        assert inputs.replay_state is not None and inputs.layer_num is not None, "replay decode needs replay_state"
+        if att_state.draft_step == 0:
+            query, key, value, a, b = _pack_decode_inputs(cfg, inputs, att_state.conv_idx)
+            query = query.view(query.shape[0], cfg.num_k_heads, cfg.head_k_dim)
+            key = key.view(key.shape[0], cfg.num_k_heads, cfg.head_k_dim)
+            value = value.view(value.shape[0], cfg.num_v_heads, cfg.head_v_dim)
+        else:
+            query, key, value = _split_qkv(cfg, _mtp_conv(cfg, inputs, att_state))
+            query = query.view(-1, cfg.num_k_heads, cfg.head_k_dim)
+            key = key.view(-1, cfg.num_k_heads, cfg.head_k_dim)
+            value = value.view(-1, cfg.num_v_heads, cfg.head_v_dim)
+            a, b = inputs.a, inputs.b
+        state = inputs.replay_state
+        replay(
+            state,
+            state.storage_layer(inputs.layer_num),
+            query,
+            key,
+            value,
+            a,
+            b,
+            inputs.A_log,
+            inputs.dt_bias,
+            att_state.conv_idx,
+            att_state.cu_seqlens,
+            out=out.view(value.shape),
+        )
+        state.finish_decode_token(inputs.layer_num, att_state.conv_idx, att_state.cu_seqlens)
+        return out

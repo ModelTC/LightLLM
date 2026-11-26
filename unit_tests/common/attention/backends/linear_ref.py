@@ -183,13 +183,12 @@ def accepted_ssm(state, replay, reqs):
     return folded[0, req_t.long()]
 
 
-def run_prefill_then_decode(
-    family, *, replay, mtp_step, dynamic, prefill_backend, decode_backend, prefill_builder, seed=7
-):
+def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_backend, decode_backend, seed=7):
     """Prefill fresh and cached requests, then run speculative decode steps with acceptance commits, comparing
-    outputs and accepted conv/SSM state against the sequential reference after every step."""
-    from lightllm.common.attention.backends.gdn.triton import GDNDecodeBuildContext
+    outputs and accepted conv/SSM state against the sequential reference after every step.
 
+    The backends prepare their states as a model's state groups do; linear backends need no model resources.
+    """
     torch.manual_seed(seed)
     width = mtp_step + 1
     state = family.make_state(replay=replay, mtp_step=mtp_step)
@@ -211,7 +210,7 @@ def run_prefill_then_decode(
     # Prefill.
     rows = sum(lengths)
     tensors = family.make_inputs(rows)
-    step = prefill_backend.build(prefill_batch(REQS, lengths, ready), prefill_builder)
+    step = prefill_backend.prepare(prefill_batch(REQS, lengths, ready), None)
     out = family.alloc_out(rows)
     prefill_backend.forward(step, family.layer_inputs(_clones(tensors), conv, ssm, state if replay else None), out=out)
     start = 0
@@ -222,13 +221,12 @@ def run_prefill_then_decode(
     _check_state(state, conv, replay, refs, "prefill")
 
     # Decode.
-    builder = GDNDecodeBuildContext(replay=replay)
     steps = SPEC_STEPS[dynamic] if width > 1 else [([1, 1, 1], [1, 1, 1])] * 3
     for step_index, (step_lengths, accepted) in enumerate(steps):
         step_lengths = step_lengths if dynamic else [width] * len(REQS)
         batch = decode_batch(REQS, step_lengths, width, HOLD, state.mtp_state_index, dynamic=dynamic)
         tensors = family.make_inputs(batch.batch_size)
-        step = decode_backend.build(batch, builder)
+        step = decode_backend.prepare(batch, None)
         out = family.alloc_out(batch.batch_size)
         # A replay decode backend advances the replay cursors itself after the last layer.
         decode_backend.forward(

@@ -1,5 +1,4 @@
-"""GDN backends at the step-builder/backend level against a sequential fp32 reference, and the decode step
-builder's CUDA graph storage."""
+"""GDN backends against a sequential fp32 reference, and the decode backends' CUDA graph storage."""
 
 from copy import copy
 from dataclasses import replace
@@ -9,9 +8,9 @@ import pytest
 import torch
 
 from lightllm.common.attention.backends.gdn import GDNLayerConfig, GDNLayerInputs
-from lightllm.common.attention.backends.gdn.replay import ReplayGDNDecodeBackend
 from lightllm.common.attention.backends.gdn.triton import (
-    GDNDecodeBuildContext,
+    FlashQLAGDNPrefillBackend,
+    ReplayGDNDecodeBackend,
     TritonGDNDecodeBackend,
     TritonGDNPrefillBackend,
 )
@@ -105,10 +104,7 @@ def test_gdn_prefill_then_speculative_decode_matches_reference(prefill, replay, 
     # FlashQLA's chunk kernel supports only 128-dim key heads, as in Qwen3-Next.
     family = GDNFamily(mtp_step, GDNShape(dk=128, dv=128) if prefill == "flashqla" else None)
     family.config = replace(family.config, replay=replay)
-    if prefill == "flashqla":
-        from lightllm.common.attention.backends.gdn.flashqla import FlashQLAGDNPrefillBackend as prefill_cls
-    else:
-        prefill_cls = TritonGDNPrefillBackend
+    prefill_cls = FlashQLAGDNPrefillBackend if prefill == "flashqla" else TritonGDNPrefillBackend
     decode_cls = ReplayGDNDecodeBackend if replay else TritonGDNDecodeBackend
     run_prefill_then_decode(
         family,
@@ -117,7 +113,6 @@ def test_gdn_prefill_then_speculative_decode_matches_reference(prefill, replay, 
         dynamic=dynamic,
         prefill_backend=prefill_cls(family.config),
         decode_backend=decode_cls(family.config),
-        prefill_builder=1 if replay else mtp_step + 1,
     )
 
 
@@ -142,22 +137,21 @@ FIELDS = ("conv_idx", "ssm_idx", "cu_seqlens", "num_accepted_tokens")
 
 @pytest.mark.parametrize("replay", [False, True], ids=["native", "replay"])
 @pytest.mark.parametrize("dynamic", [False, True], ids=["fixed", "dynamic"])
-def test_decode_step_builder_rewrites_graph_storage_in_place_per_microbatch(replay, dynamic):
+def test_decode_backend_rewrites_graph_storage_in_place_per_microbatch(replay, dynamic):
     backend_cls = ReplayGDNDecodeBackend if replay else TritonGDNDecodeBackend
-    builder = GDNDecodeBuildContext(replay=replay)
-    first = backend_cls.build(
-        _graph_batch([2, 0, 3], [1, 2, 0], dynamic=dynamic, microbatch_index=0, lengths=[3, 1, 2]), builder
-    )
+    config = GDNLayerConfig(2, 2, 16, 16, 4, "silu", torch.bfloat16, state_mtp_step=2, replay=replay)
+    backend = backend_cls(config)
+    first = backend.build(_graph_batch([2, 0, 3], [1, 2, 0], dynamic=dynamic, microbatch_index=0, lengths=[3, 1, 2]))
     captured = {name: getattr(first, name) for name in FIELDS}
     ptrs = {name: t.data_ptr() for name, t in captured.items()}
 
     # A replay of the same graph: same microbatch and batch size, different requests and acceptance.
     batch = _graph_batch([1, 3, 2], [2, 0, 1], dynamic=dynamic, microbatch_index=0, lengths=[2, 3, 1])
-    replayed = backend_cls.build(batch, builder)
+    replayed = backend.build(batch)
     eager_batch = copy(batch)
     eager_batch.graph_mode = GraphMode.EAGER
     eager_batch.cuda_graph_max_kv_seq_len = None
-    eager = backend_cls.build(eager_batch, GDNDecodeBuildContext(replay=replay))
+    eager = backend_cls(config).build(eager_batch)
     for name in FIELDS:
         kept = getattr(replayed, name)
         assert kept.data_ptr() == ptrs[name], f"{name} moved between graph steps"
@@ -167,25 +161,22 @@ def test_decode_step_builder_rewrites_graph_storage_in_place_per_microbatch(repl
 
     # The other microbatch of an overlapped step has its own storage, and building it leaves microbatch 0 alone.
     before = {name: getattr(replayed, name).clone() for name in FIELDS}
-    other = backend_cls.build(
-        _graph_batch([0, 2, 3], [0, 0, 2], dynamic=dynamic, microbatch_index=1, lengths=[1, 2, 3]), builder
-    )
+    other = backend.build(_graph_batch([0, 2, 3], [0, 0, 2], dynamic=dynamic, microbatch_index=1, lengths=[1, 2, 3]))
     for name in FIELDS:
         assert getattr(other, name).data_ptr() != ptrs[name], f"{name} shared across microbatches"
         assert torch.equal(getattr(replayed, name), before[name]), f"{name} of microbatch 0 overwritten"
 
 
 def test_replay_decode_without_speculation_keeps_its_row_offsets():
-    builder = GDNDecodeBuildContext(replay=True)
+    config = GDNLayerConfig(2, 2, 16, 16, 4, "silu", torch.bfloat16, replay=True)
+    backend = ReplayGDNDecodeBackend(config)
     batch = decode_batch([2, 0, 3], [1, 1, 1], 1, HOLD, None, dynamic=False, graph=True)
-    first = ReplayGDNDecodeBackend.build(batch, builder)
-    again = ReplayGDNDecodeBackend.build(
-        decode_batch([1, 3, 2], [1, 1, 1], 1, HOLD, None, dynamic=False, graph=True), builder
-    )
+    first = backend.build(batch)
+    again = backend.build(decode_batch([1, 3, 2], [1, 1, 1], 1, HOLD, None, dynamic=False, graph=True))
     assert again.cu_seqlens.data_ptr() == first.cu_seqlens.data_ptr()
     assert torch.equal(again.cu_seqlens, torch.arange(4, dtype=torch.int32, device="cuda"))
     # Native state needs no derived tensors: the graph reads b_req_idx, which the caller rewrites in place.
-    native = TritonGDNDecodeBackend.build(batch, GDNDecodeBuildContext(replay=False))
+    native = TritonGDNDecodeBackend(replace(config, replay=False)).build(batch)
     assert native.conv_idx is batch.b_req_idx and native.cu_seqlens is None
 
 

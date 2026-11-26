@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from unit_tests.common.attention.backends.step_fixture import make_infer_state
+from unit_tests.common.attention.backends.step_fixture import make_infer_state, make_resources
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
@@ -71,18 +71,6 @@ def make_batch(token_map, req_ids, lengths, query_lengths=None, **kwargs):
         pad_req_idx=PAD,
         **kwargs,
     )
-
-
-class _PageTables:
-    """Caller-owned page-table storage with the view contract of Fa3AttBackend.get_page_table_view."""
-
-    def __init__(self, page_size: int) -> None:
-        self.page_size = page_size
-        self.storage = [torch.empty(64 * 512, dtype=torch.int32, device="cuda") for _ in range(2)]
-
-    def __call__(self, rows: int, max_kv_len: int, microbatch_index: int) -> torch.Tensor:
-        pages = (max_kv_len + self.page_size - 1) // self.page_size
-        return self.storage[microbatch_index][: rows * pages].view(rows, pages)
 
 
 def make_cache(kv_heads, dtype, seed):
@@ -153,9 +141,9 @@ def test_prefill(page_size, causal, window, sinks, cached):
         has_sinks=sinks,
     )
     batch = make_batch(token_map, req_ids, lengths, query_lengths, b_ready_cache_len=torch.tensor(ready).cuda())
-    att_state = FA3GQAPrefillBackend.build(batch, FA3GQAPrefillBackend.build_context_type(page_size=page_size))
-    out = torch.empty_like(q)
     backend = FA3GQAPrefillBackend(layer_config)
+    att_state = backend.prepare(batch, make_resources(page_size=page_size))
+    out = torch.empty_like(q)
     assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sink_logits), out=out) is out
     rows = [(r, pos + 1, n) for r, n, c in zip(req_ids, lengths, ready) for pos in range(c, n)]
     expected = reference(q, k, v, token_map, rows, causal=causal, window=window, sinks=sink_logits)
@@ -182,12 +170,14 @@ def test_fp8_prefill(static_q):
         has_q_scale=static_q,
     )
     batch = make_batch(token_map, req_ids, lengths, query_lengths, b_ready_cache_len=torch.tensor(ready).cuda())
-    att_state = FA3GQAPrefillBackend.build(batch, FA3GQAPrefillBackend.build_context_type(page_size=1))
+    backend = FA3GQAPrefillBackend(layer_config)
+    att_state = backend.prepare(batch, make_resources(page_size=16))
+    assert att_state.page_size == 1, "an FP8 cache runs with single-token pages"
     out = torch.empty_like(q)
     layer_inputs = GQALayerInputs(
         q=q, k_cache=k, v_cache=v, kv_scales=GQAKVScales(k_scale=k_scale, v_scale=v_scale, q_scale=q_scale)
     )
-    assert FA3GQAPrefillBackend(layer_config).forward(att_state, layer_inputs, out=out) is out
+    assert backend.forward(att_state, layer_inputs, out=out) is out
     # Dynamic q scales are per prefill request.
     starts = [0, *torch.tensor(query_lengths).cumsum(0).tolist()]
     q_ref = fp8_round_q(q, kv_heads, [list(range(s, e)) for s, e in zip(starts, starts[1:])], q_scale)
@@ -242,10 +232,9 @@ def test_decode_layouts(layout, sinks, page_size):
     batch = make_batch(
         token_map, req_ids, lengths, decode_rows_per_request=rows_per_request, dynamic_decode_rows=dynamic
     )
-    step_builder = FA3GQADecodeBackend.build_context_type(page_size=page_size, page_table_view=_PageTables(page_size))
-    att_state = FA3GQADecodeBackend.build(batch, step_builder)
-    out = torch.empty_like(q)
     backend = FA3GQADecodeBackend(layer_config)
+    att_state = backend.prepare(batch, make_resources(page_size=page_size))
+    out = torch.empty_like(q)
     assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, sinks=sink_logits), out=out) is out
     keep = [i for i, r in enumerate(req_ids) if r != PAD]
     expected = reference(q, k, v, token_map, decode_rows(req_ids, lengths, True), sinks=sink_logits)
@@ -269,11 +258,10 @@ def test_decode_non_causal(layout, window):
     batch = make_batch(
         token_map, req_ids, lengths, decode_rows_per_request=rows_per_request, dynamic_decode_rows=dynamic
     )
-    att_state = FA3GQADecodeBackend.build(
-        batch, FA3GQADecodeBackend.build_context_type(page_size=page_size, page_table_view=_PageTables(page_size))
-    )
+    backend = FA3GQADecodeBackend(layer_config)
+    att_state = backend.prepare(batch, make_resources(page_size=page_size))
     out = torch.empty_like(q)
-    FA3GQADecodeBackend(layer_config).forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out)
+    backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out)
     keep = [i for i, r in enumerate(req_ids) if r != PAD]
     expected = reference(q, k, v, token_map, decode_rows(req_ids, lengths, False), causal=False, window=window)
     torch.testing.assert_close(out[keep].float(), expected[keep], atol=0.02, rtol=0.02)
@@ -300,27 +288,28 @@ def test_fp8_decode_layouts(layout, static_q):
     batch = make_batch(
         token_map, req_ids, lengths, decode_rows_per_request=rows_per_request, dynamic_decode_rows=dynamic
     )
-    att_state = FA3GQADecodeBackend.build(
-        batch, FA3GQADecodeBackend.build_context_type(page_size=1, page_table_view=_PageTables(1))
-    )
+    backend = FA3GQADecodeBackend(layer_config)
+    att_state = backend.prepare(batch, make_resources(page_size=16))
+    assert att_state.page_size == 1, "an FP8 cache runs with single-token pages"
     out = torch.empty_like(q)
     layer_inputs = GQALayerInputs(
         q=q, k_cache=k, v_cache=v, kv_scales=GQAKVScales(k_scale=k_scale, v_scale=v_scale, q_scale=q_scale)
     )
-    assert FA3GQADecodeBackend(layer_config).forward(att_state, layer_inputs, out=out) is out
+    assert backend.forward(att_state, layer_inputs, out=out) is out
     q_ref = fp8_round_q(q, kv_heads, decode_groups(req_ids, rows_per_request, dynamic), q_scale)
     keep = [i for i, r in enumerate(req_ids) if r != PAD]
     expected = reference(q_ref, k_ref, v_ref, token_map, decode_rows(req_ids, lengths, True))
     torch.testing.assert_close(out[keep].float(), expected[keep], atol=FP8_TOL, rtol=FP8_TOL)
 
 
-def test_decode_step_builder_keeps_graph_tensors_per_microbatch_and_batch_size():
+def test_decode_keeps_graph_tensors_per_microbatch_and_batch_size():
     token_map = paged_token_map(8, 16, seed=4)
-    step_builder = FA3GQADecodeBackend.build_context_type(page_size=16, page_table_view=_PageTables(16))
+    backend = FA3GQADecodeBackend(GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16))
+    resources = make_resources(page_size=16)
     req_ids = [2, 2, 0, 0]
 
     def build(lengths, microbatch_index=0, graph=True):
-        return FA3GQADecodeBackend.build(
+        return backend.prepare(
             make_batch(
                 token_map,
                 req_ids,
@@ -329,7 +318,7 @@ def test_decode_step_builder_keeps_graph_tensors_per_microbatch_and_batch_size()
                 cuda_graph_max_kv_seq_len=512 if graph else None,
                 microbatch_index=microbatch_index,
             ),
-            step_builder,
+            resources,
         )
 
     captured = build([33, 34, 9, 10])
@@ -473,7 +462,7 @@ def test_layer_group_replays_dynamic_verify_layout_through_cuda_graph(start_args
     model = _Model(args, 16, rows_per_request=3)
     config = gqa_config(kv_quant="fp8_per_head") if fp8 else gqa_config()
     runner = GroupsRunner(model, config, config)
-    assert model.attention_backend_manager.step_config.dynamic_decode_rows
+    assert model.attention_backend_manager.step_config["dynamic_decode_rows"]
     token_map = paged_token_map(8, 16, seed=7)
     generator = torch.Generator(device="cuda").manual_seed(9)
     q = torch.randn(6, 8, 64, device="cuda", generator=generator).bfloat16()

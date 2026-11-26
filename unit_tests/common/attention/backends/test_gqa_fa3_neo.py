@@ -9,8 +9,9 @@ import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
-from lightllm.common.attention.backends.gqa.fa3 import FA3GQAPrefillBackend, FA3GQAPrefillBuildContext
+from lightllm.common.attention.backends.gqa.fa3 import FA3GQAPrefillBackend
 from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
+from unit_tests.common.attention.backends.step_fixture import make_resources
 from lightllm.utils import neo_fa3_utils, sgl_utils
 
 
@@ -88,8 +89,10 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
     infer_state.b_image_token_end = image_ends
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token_indexs)
     infer_state.is_prefill = True
-    att_state = FA3GQAPrefillBackend.build(
-        configure_attention_step(infer_state), FA3GQAPrefillBuildContext(page_size=page_size)
+    # Prefill state does not depend on the image spans, so a text layer's backend builds it.
+    text_layer = GQALayerConfig(num_heads=2, num_kv_heads=1, head_dim=16, dtype=torch.bfloat16)
+    att_state = FA3GQAPrefillBackend(text_layer).prepare(
+        configure_attention_step(infer_state), make_resources(page_size=page_size)
     )
 
     q = torch.randn(3, 2, 16, device="cuda", dtype=torch.bfloat16)

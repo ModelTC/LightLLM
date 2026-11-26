@@ -165,13 +165,13 @@ def test_automatic_dispatch_accounts_for_heads_and_length(flash_module, heads, l
     model.config["linear_attn_config"]["num_heads"] = 64
     model.tp_world_size_ = 64 // heads
     attention = kda_attention(model)
-    att_state = attention.backends["prefill"].build(prefill_batch(length), attention.step_builders["prefill"])
+    att_state = attention.backends["prefill"].build(prefill_batch(length))
     assert (att_state.flash_kda_fwd is flash_module.fwd) == uses_flash
 
 
 def test_explicit_flashkda_overrides_performance_policy(flash_module):
     attention = kda_attention(make_model())
-    att_state = attention.backends["prefill"].build(prefill_batch(32768), attention.step_builders["prefill"])
+    att_state = attention.backends["prefill"].build(prefill_batch(32768))
     assert att_state.flash_kda_fwd is flash_module.fwd
 
 

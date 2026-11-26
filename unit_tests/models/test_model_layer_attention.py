@@ -301,7 +301,7 @@ def test_glm5_kda_layers_follow_the_linear_backend_and_state_mode(
     from lightllm.common.attention.backends.kda import triton as kda_triton
     from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 
-    monkeypatch.setattr(kda_triton, "_check_prefill_kernel", lambda layer_config: None)
+    monkeypatch.setattr(kda_triton, "import_flash_kda_fwd", lambda: None)
     layer = Glm5NextTransformerLayerInfer.__new__(Glm5NextTransformerLayerInfer)
     layer.is_linear_attention_layer = True
     layer.tp_world_size_, layer.tp_linear_num_heads, layer.linear_head_dim = 1, 4, 128

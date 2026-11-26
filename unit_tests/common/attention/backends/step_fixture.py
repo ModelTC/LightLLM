@@ -1,6 +1,35 @@
 from types import SimpleNamespace
 
+import torch
+
+from lightllm.common.attention.backend import AttentionBuildResources
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
+
+
+def make_resources(**overrides) -> AttentionBuildResources:
+    """Model-wide resources for setting up a backend outside a model, on the current CUDA device.
+
+    get_workspace returns the same tensor for the same arguments, like the serving workspace store.
+    """
+    workspaces = {}
+
+    def get_workspace(name, numel, dtype):
+        key = (name, numel, dtype)
+        if key not in workspaces:
+            workspaces[key] = torch.empty(numel, dtype=dtype, device="cuda")
+        return workspaces[key]
+
+    fields = dict(
+        device=torch.cuda.current_device(),
+        page_size=1,
+        max_seq_len=512,
+        max_cuda_graph_batch_size=8,
+        max_decode_rows=8,
+        microbatch_count=2,
+        workspace_bytes=32 * 1024 * 1024,
+        get_workspace=get_workspace,
+    )
+    return AttentionBuildResources(**{**fields, **overrides})
 
 
 def make_infer_state(

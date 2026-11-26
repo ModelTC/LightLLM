@@ -1,22 +1,12 @@
-"""FA3 MLA. Decode reuses the FA3 GQA decode step builder: its row grouping and page table are the same."""
+"""FA3 MLA. Decode reuses the FA3 GQA decode state: its row grouping and page table are the same."""
 
 from dataclasses import dataclass
 
 import torch
 
-from lightllm.common.attention.backend import (
-    AttentionBackend,
-    AttentionBuildResources,
-    TensorAllocator,
-)
+from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from ..gqa.fa3 import (
-    FA3GQADecodeAttState,
-    FA3GQADecodeBuildContext,
-    FA3PageTables,
-    build_fa3_decode_state,
-    fa3_requires_cpu_cache_sync,
-)
+from ..gqa.fa3 import FA3GQADecodeAttState, build_fa3_decode_state, fa3_requires_cpu_cache_sync
 from . import MLADecodeLayerConfig, MLADecodeLayerInputs, MLAPrefillLayerConfig, MLAPrefillLayerInputs
 
 
@@ -31,6 +21,12 @@ class FA3MLAPrefillAttState:
 
 
 class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefillAttState, MLAPrefillLayerInputs]):
+    name = "fa3_mla_prefill"
+
+    @classmethod
+    def requires_cpu_cache_sync(cls) -> bool:
+        return fa3_requires_cpu_cache_sync()
+
     def forward(
         self,
         att_state: FA3MLAPrefillAttState,
@@ -66,28 +62,30 @@ class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefill
         )
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "fa3_mla_prefill"
-
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: None = None) -> FA3MLAPrefillAttState:
+    def build(self, infer_state: InferStateInfo) -> FA3MLAPrefillAttState:
         assert (
-            metadata.b1_cu_q_seq_len is not None and metadata.b1_cu_kv_seq_len is not None
-        ), "prefill metadata fields required"
+            infer_state.b1_cu_q_seq_len is not None and infer_state.b1_cu_kv_seq_len is not None
+        ), "prefill fields required"
         return FA3MLAPrefillAttState(
-            cu_seqlens_q=metadata.b1_cu_q_seq_len.int(),
-            cu_seqlens_k=metadata.b1_cu_kv_seq_len.int(),
-            max_seqlen_q=metadata.max_q_seq_len,
-            max_seqlen_k=metadata.max_kv_seq_len,
+            cu_seqlens_q=infer_state.b1_cu_q_seq_len.int(),
+            cu_seqlens_k=infer_state.b1_cu_kv_seq_len.int(),
+            max_seqlen_q=infer_state.max_q_seq_len,
+            max_seqlen_k=infer_state.max_kv_seq_len,
         )
+
+
+class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAttState, MLADecodeLayerInputs]):
+    name = "fa3_mla_decode"
 
     @classmethod
     def requires_cpu_cache_sync(cls) -> bool:
         return fa3_requires_cpu_cache_sync()
 
+    def setup(self, resources: AttentionBuildResources) -> None:
+        # The latent cache is paged like an unquantized GQA cache.
+        self.resources = resources
+        self.page_size = resources.page_size
 
-class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAttState, MLADecodeLayerInputs]):
     def forward(
         self,
         att_state: FA3GQADecodeAttState,
@@ -122,21 +120,5 @@ class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAtt
         )
         return out
 
-    @staticmethod
-    def get_name() -> str:
-        return "fa3_mla_decode"
-
-    build_context_type = FA3GQADecodeBuildContext
-
-    @classmethod
-    def build(cls, metadata: InferStateInfo, context: FA3GQADecodeBuildContext) -> FA3GQADecodeAttState:
-        return build_fa3_decode_state(metadata, context)
-
-    @classmethod
-    def create_build_context(cls, build_key: None, ctx: AttentionBuildResources) -> FA3GQADecodeBuildContext:
-        # The latent cache is paged like an unquantized GQA cache.
-        return FA3GQADecodeBuildContext(page_size=ctx.page_size, page_table_view=FA3PageTables(ctx, ctx.page_size).view)
-
-    @classmethod
-    def requires_cpu_cache_sync(cls) -> bool:
-        return fa3_requires_cpu_cache_sync()
+    def build(self, infer_state: InferStateInfo) -> FA3GQADecodeAttState:
+        return build_fa3_decode_state(self, infer_state)
