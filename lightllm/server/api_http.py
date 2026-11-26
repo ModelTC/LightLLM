@@ -129,9 +129,6 @@ class G_Objs:
 
 g_objs = G_Objs()
 
-app = FastAPI()
-g_objs.app = app
-
 
 class _AccessLogMiddleware:
     def __init__(self, app):
@@ -173,7 +170,13 @@ class _AccessLogMiddleware:
                 reset_http_request_id(token)
 
 
-app.add_middleware(_AccessLogMiddleware)
+class _LightLLMApp(FastAPI):
+    def build_middleware_stack(self):
+        return _AccessLogMiddleware(super().build_middleware_stack())
+
+
+app = _LightLLMApp()
+g_objs.app = app
 
 
 @app.exception_handler(ServerBusyError)

@@ -39,7 +39,27 @@ def test_shared_dp_rows_are_aggregated_without_tp_multiplier(counters):
     first.add(512, 4)
     second.add(256, 2)
     assert counters.totals() == (768, 6)
-    assert counters.storage.arr.tolist() == [[512, 4, 0, 0, 0], [256, 2, 0, 0, 0]]
+    assert counters.storage.arr[:, :5].tolist() == [[512, 4, 0, 0, 0], [256, 2, 0, 0, 0]]
+
+
+def test_speculation_defers_a_partial_row_to_the_next_window(counters):
+    counters.mtp_enabled = True
+    throughput = engine_stats.EngineThroughput(counters)
+    first = counters.storage.arr[0]
+    first[5] = 1
+    first[2] = 4
+    engine_stats.EngineCounters(2, 1).add_speculation(1, 2, 1)
+
+    partial = throughput.snapshot()
+    assert partial["mtp_acceptance_pct"] == 50
+    assert partial["mtp_rounds"] == 1
+
+    first[3:5] = (4, 2)
+    first[5] = 2
+    complete = throughput.snapshot()
+    assert complete["mtp_acceptance_pct"] == 100
+    assert complete["mtp_rounds"] == 2
+    assert complete["mtp_accepted_tokens"] == 4
 
 
 def test_speculation_aggregates_dp_window_deltas_and_excludes_idle(monkeypatch, counters):
@@ -297,6 +317,7 @@ def test_router_first_burst_excludes_initial_idle(monkeypatch, counters, node_ra
     logger = Mock()
     monkeypatch.setattr(manager, "init_logger", lambda name: logger)
     router = manager.RouterManager.__new__(manager.RouterManager)
+    router.metric_client = Mock()
     router.engine_counters = counters
     router.service_ready = SimpleNamespace(
         get_value=lambda: int(readiness != "never" and (readiness != "drop" or now[0] < 6))
@@ -430,6 +451,7 @@ def test_router_statistics_wait_for_readiness_and_emit_once_per_node(
     logger = Mock()
     monkeypatch.setattr(router, "init_logger", lambda name: logger)
     manager = router.RouterManager.__new__(router.RouterManager)
+    manager.metric_client = Mock()
     manager.engine_counters = counters
     manager.running_batch = None
     manager.schedule_new_batch = SimpleNamespace(reqs=[Mock() for _ in range(staged)]) if staged else None
@@ -486,10 +508,10 @@ def test_real_shared_counter_owner_and_worker_rows(monkeypatch):
             worker = engine_stats.EngineCounters(2, rank)
             workers.append(worker)
             assert isinstance(worker.storage, ShmArray)
-            assert worker.storage.shape == (2, 5)
+            assert worker.storage.shape == (2, 6)
             worker.add(10 + rank, 2 + rank)
             worker.add_speculation(rank, rank + 1, 1)
-        assert owner.storage.arr.tolist() == [[10, 2, 0, 1, 1], [11, 3, 1, 2, 1]]
+        assert owner.storage.arr[:, :5].tolist() == [[10, 2, 0, 1, 1], [11, 3, 1, 2, 1]]
         assert owner.totals() == (21, 5)
         assert owner.speculation_totals() == (1, 3, 2)
     finally:

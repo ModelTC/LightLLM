@@ -133,25 +133,47 @@ class SubmoduleManager:
         started = float(os.getenv("LIGHTLLM_SERVICE_START_TIME", str(time.monotonic())))
         self.readiness_stop.clear()
 
+        def configure_tls(session):
+            import ssl
+            from requests.adapters import HTTPAdapter
+
+            context = ssl.create_default_context(cafile=tls_config.certfile)
+            context.check_hostname = False
+            context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+            client_cert = os.getenv("LIGHTLLM_READINESS_CLIENT_CERT")
+            if client_cert:
+                context.load_cert_chain(client_cert, os.getenv("LIGHTLLM_READINESS_CLIENT_KEY"))
+            adapter = HTTPAdapter()
+            adapter.init_poolmanager(1, 1, ssl_context=context, assert_hostname=False)
+            session.mount("https://", adapter)
+            session.verify = tls_config.certfile
+
         def monitor():
             state = ServiceReadiness(ready_flag, args, address, started)
+            tls_pending = tls_config is not None
+            tls_error_logged = False
             with requests.Session() as session:
                 session.trust_env = False
-                if tls_config:
-                    import ssl
-                    from requests.adapters import HTTPAdapter
-
-                    context = ssl.create_default_context(cafile=tls_config.certfile)
-                    context.check_hostname = False
-                    context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
-                    client_cert = os.getenv("LIGHTLLM_READINESS_CLIENT_CERT")
-                    if client_cert:
-                        context.load_cert_chain(client_cert, os.getenv("LIGHTLLM_READINESS_CLIENT_KEY"))
-                    adapter = HTTPAdapter()
-                    adapter.init_poolmanager(1, 1, ssl_context=context, assert_hostname=False)
-                    session.mount("https://", adapter)
-                    session.verify = tls_config.certfile
                 while not self.readiness_stop.is_set() and http_server_process.poll() is None:
+                    if tls_pending:
+                        try:
+                            configure_tls(session)
+                        except (OSError, ValueError) as error:
+                            if not tls_error_logged:
+                                logger.error(
+                                    "event=service.probe_failed address=%s reason=probe_tls_config_failed error=%s",
+                                    address,
+                                    error,
+                                    extra={
+                                        "event": "service.probe_failed",
+                                        "address": address,
+                                        "reason": "probe_tls_config_failed",
+                                    },
+                                )
+                                tls_error_logged = True
+                            self.readiness_stop.wait(0.5)
+                            continue
+                        tls_pending = False
                     reason = None
                     try:
                         response = session.get(address + "/readiness", timeout=1)

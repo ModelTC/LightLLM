@@ -1,6 +1,7 @@
 """CPU-only cumulative engine counters and monotonic reporting windows."""
 
 import time
+import atomics
 import numpy as np
 
 from lightllm.server.core.objs.shm_array import ShmArray
@@ -14,7 +15,7 @@ class EngineCounters:
     """
 
     def __init__(self, dp_size, dp_rank=None, *, owner=False, mtp_enabled=False):
-        self.storage = ShmArray("engine_token_counters", (dp_size, 5), np.int64)
+        self.storage = ShmArray("engine_token_counters", (dp_size, 6), np.int64)
         if owner:
             self.storage.create_shm()
             self.storage.arr.fill(0)
@@ -22,6 +23,7 @@ class EngineCounters:
             self.storage.link_shm()
         self.dp_rank = dp_rank
         self.mtp_enabled = mtp_enabled
+        self._speculation_snapshot = np.zeros((dp_size, 3), dtype=np.int64)
 
     def add(self, prefill_tokens=0, output_tokens=0):
         row = self.storage.arr[self.dp_rank]
@@ -32,10 +34,23 @@ class EngineCounters:
         return tuple(int(value) for value in self.storage.arr[:, :2].sum(axis=0))
 
     def add_speculation(self, accepted, verified, rounds):
-        self.storage.arr[self.dp_rank, 2:] += (accepted, verified, rounds)
+        row = self.storage.arr[self.dp_rank]
+        with atomics.atomicview(row[5:].view(np.uint8), atype=atomics.UINT) as version:
+            version.inc()
+            row[2:5] += (accepted, verified, rounds)
+            version.inc()
 
     def speculation_totals(self):
-        return tuple(int(value) for value in self.storage.arr[:, 2:].sum(axis=0))
+        """Keep the previous complete row if a writer overlaps the snapshot."""
+        for rank, row in enumerate(self.storage.arr):
+            with atomics.atomicview(row[5:].view(np.uint8), atype=atomics.UINT) as version:
+                before = version.load()
+                if before % 2:
+                    continue
+                values = row[2:5].copy()
+                if before == version.fetch_add(0):
+                    self._speculation_snapshot[rank] = values
+        return tuple(int(value) for value in self._speculation_snapshot.sum(axis=0))
 
 
 class EngineThroughput:
@@ -45,7 +60,7 @@ class EngineThroughput:
         self.counters = counters
         self.completed = 0
         self.last_prefill, self.last_output = counters.totals()
-        self.last_speculation = counters.speculation_totals()
+        self.last_speculation = counters.speculation_totals() if counters.mtp_enabled else (0, 0, 0)
         self.last_completed = 0
         self.last_time = time.monotonic()
 
@@ -61,7 +76,7 @@ class EngineThroughput:
             self.last_prefill,
             self.last_output,
             self.last_completed,
-        ) or self.counters.speculation_totals() != self.last_speculation
+        ) or (self.counters.mtp_enabled and self.counters.speculation_totals() != self.last_speculation)
 
     def resume(self, since=None):
         """Start a new busy window without losing tokens from a short burst."""
@@ -79,8 +94,8 @@ class EngineThroughput:
             output_tok_s=round(counts[1] / elapsed, 2) if elapsed > 0 else 0.0,
             completed_req_s=round(counts[2] / elapsed, 2) if elapsed > 0 else 0.0,
         )
-        speculation = self.counters.speculation_totals()
         if self.counters.mtp_enabled:
+            speculation = self.counters.speculation_totals()
             accepted, verified, rounds = (cur - prev for cur, prev in zip(speculation, self.last_speculation))
             result.update(
                 mtp_accepted_tokens=accepted,
@@ -91,7 +106,7 @@ class EngineThroughput:
                 mtp_accepted_tok_s=round(accepted / elapsed, 2) if elapsed > 0 else 0.0,
                 mtp_verified_draft_tok_s=round(verified / elapsed, 2) if elapsed > 0 else 0.0,
             )
-        self.last_speculation = speculation
+            self.last_speculation = speculation
         self.last_prefill, self.last_output, self.last_completed = prefill, output, self.completed
         self.last_time = now
         return result

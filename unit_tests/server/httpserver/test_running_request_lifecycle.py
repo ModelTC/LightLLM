@@ -338,7 +338,7 @@ def test_prefill_assignment_wait_encloses_master_budget(resource_wait: int, expe
 def test_prefill_upload_preserves_int64_multimodal_prompt_ids():
     async def run():
         manager = _make_manager(NodeRole.P)
-        multimodal_token_id = 2**32
+        multimodal_token_id = 2 ** 32
         manager._encode.return_value = [10, multimodal_token_id, 12]
         websocket = AsyncMock()
         pd_event = asyncio.Event()

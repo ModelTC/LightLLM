@@ -4,6 +4,7 @@ import asyncio
 from unittest.mock import Mock
 
 import pytest
+from fastapi.testclient import TestClient
 
 from lightllm.server import api_http
 from lightllm.server.health_monitor import manager as health
@@ -44,6 +45,23 @@ def test_access_middleware_does_not_swallow_failure(monkeypatch):
     with pytest.raises(RuntimeError, match="request failed"):
         asyncio.run(api_http._AccessLogMiddleware(app)({"type": "http", "method": "GET", "path": "/fail"}, None, None))
     assert access.call_args.args[:3] == ("GET", "/fail", 500)
+
+
+def test_unhandled_http_error_returns_logged_request_id(monkeypatch):
+    access = Mock()
+    monkeypatch.setattr(api_http, "log_http_access", access)
+    app = api_http._LightLLMApp()
+
+    @app.get("/fail")
+    def fail():
+        raise RuntimeError("request failed")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/fail")
+
+    assert response.status_code == 500
+    assert access.call_args.args[:3] == ("GET", "/fail", 500)
+    assert response.headers["X-Request-ID"] == access.call_args.kwargs["http_request_id"]
 
 
 def test_healthy_checks_are_silent_and_recovery_is_logged_once(monkeypatch):

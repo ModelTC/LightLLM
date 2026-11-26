@@ -572,7 +572,7 @@ def test_readiness_monitor_tls(monkeypatch, tmp_path):
         worker.join()
 
 
-@pytest.mark.parametrize("identity", [None, "separate", "combined"])
+@pytest.mark.parametrize("identity", [None, "separate", "combined", "missing_key"])
 def test_readiness_monitor_mutual_tls(monkeypatch, tmp_path, identity):
     import ssl
     import subprocess
@@ -609,9 +609,12 @@ def test_readiness_monitor_mutual_tls(monkeypatch, tmp_path, identity):
     )
     monkeypatch.delenv("LIGHTLLM_READINESS_CLIENT_CERT", raising=False)
     monkeypatch.delenv("LIGHTLLM_READINESS_CLIENT_KEY", raising=False)
-    if identity == "separate":
+    if identity in ("separate", "missing_key"):
         monkeypatch.setenv("LIGHTLLM_READINESS_CLIENT_CERT", str(tmp_path / "client.pem"))
-        monkeypatch.setenv("LIGHTLLM_READINESS_CLIENT_KEY", str(tmp_path / "client.key"))
+        key_path = tmp_path / "client.key"
+        monkeypatch.setenv("LIGHTLLM_READINESS_CLIENT_KEY", str(key_path))
+        if identity == "missing_key":
+            saved_key_path = key_path.rename(tmp_path / "saved.key")
     elif identity == "combined":
         combined = tmp_path / "identity.pem"
         combined.write_bytes((tmp_path / "client.pem").read_bytes() + (tmp_path / "client.key").read_bytes())
@@ -657,7 +660,16 @@ def test_readiness_monitor_mutual_tls(monkeypatch, tmp_path, identity):
     monkeypatch.setattr(shm_port_args, "get_shm_port_args", lambda: SimpleNamespace(port=8000))
     monkeypatch.setattr(requests, "Session", lambda: session)
     monkeypatch.setattr(start_utils.threading, "Thread", lambda target, **kw: SimpleNamespace(start=target))
-    monkeypatch.setattr(manager.readiness_stop, "wait", lambda timeout: manager.readiness_stop.set())
+
+    def wait_for_probe(timeout):
+        if identity == "missing_key" and wait.call_count <= 2:
+            if wait.call_count == 2:
+                saved_key_path.rename(key_path)
+        else:
+            manager.readiness_stop.set()
+
+    wait = Mock(side_effect=wait_for_probe)
+    monkeypatch.setattr(manager.readiness_stop, "wait", wait)
     session.get.side_effect = probe
     args = SimpleNamespace(run_mode="normal", host="0.0.0.0", model_name="test", hypercorn_config=str(config))
     manager.start_readiness_monitor(FakeHttpServerProcess(), args)
@@ -668,3 +680,7 @@ def test_readiness_monitor_mutual_tls(monkeypatch, tmp_path, identity):
         assert logger.warning.call_args.kwargs["extra"]["reason"] == "probe_tls_failed"
     else:
         logger.warning.assert_not_called()
+    if identity == "missing_key":
+        logger.error.assert_called_once()
+        assert logger.error.call_args.kwargs["extra"]["reason"] == "probe_tls_config_failed"
+        assert wait.call_count == 3
