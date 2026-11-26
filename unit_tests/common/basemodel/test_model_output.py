@@ -9,7 +9,7 @@ from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferDecodeAt
 from lightllm.common.basemodel.attention.flashinfer.utils import should_init_decode_wrapper
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
-from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 
 
 def test_decode_unpad_slices_spec_output_with_logits():
@@ -114,7 +114,7 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
 
         model._create_padded_decode_model_input = pad_once
 
-        graph_flags_at_att_init = []
+        graph_modes_at_att_init = []
         executions = []
 
         def create_infer_state(model_input):
@@ -123,16 +123,13 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
                 b_seq_len=model_input.b_seq_len,
                 mem_index=torch.empty((model_input.batch_size,), dtype=torch.int32),
                 init_some_extra_state=lambda _: None,
-                is_cuda_graph_capture=False,
-                is_cuda_graph_replay=False,
+                graph_mode=GraphMode.EAGER,
             )
-            infer_state.init_att_state = lambda: graph_flags_at_att_init.append(
-                (infer_state.is_cuda_graph_capture, infer_state.is_cuda_graph_replay)
-            )
+            infer_state.init_att_state = lambda: graph_modes_at_att_init.append(infer_state.graph_mode)
             return infer_state
 
         def execute(mode, infer_state):
-            executions.append((mode, infer_state.is_cuda_graph_capture, infer_state.is_cuda_graph_replay))
+            executions.append((mode, infer_state.graph_mode))
             return ModelOutput(logits=torch.ones((infer_state.b_req_idx.shape[0], 4)))
 
         model._create_inferstate = create_infer_state
@@ -150,13 +147,12 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
 
         output = model._decode(_create_empty_decode_input())
 
-        expected_replay = graph_batch_size is not None and not need_capture
         expected_mode = "eager"
         if graph_batch_size is not None:
             expected_mode = "capture" if need_capture else "replay"
         assert pad_batch_sizes == [expected_batch_size]
-        assert graph_flags_at_att_init == [(need_capture, expected_replay)]
-        assert executions == [(expected_mode, need_capture, expected_replay)]
+        assert graph_modes_at_att_init == [GraphMode(expected_mode)]
+        assert executions == [(expected_mode, GraphMode(expected_mode))]
         assert output.logits.shape == (0, 4)
 
 
@@ -180,9 +176,6 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
     initializations = []
     executions = []
 
-    def graph_flags(state):
-        return state.is_cuda_graph_capture, state.is_cuda_graph_replay
-
     class DecodeState(FlashInferDecodeAttState):
         def init_state(self):
             infer_state = self.infer_state
@@ -191,7 +184,7 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
             if should_init_decode_wrapper(infer_state):
                 self.decode_wrapper = object()
             initializations.append(
-                (infer_state.microbatch_index, graph_flags(infer_state), self.decode_wrapper is not None)
+                (infer_state.microbatch_index, infer_state.graph_mode, self.decode_wrapper is not None)
             )
 
     def create_state(model_input, microbatch_index=0):
@@ -214,18 +207,18 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
         # Eager and capture execute attention using these newly prepared states.
         assert state.decode_att_state.decode_wrapper is not None
         assert infer_state1.decode_att_state.decode_wrapper is not None
-        executions.append(("forward", graph_flags(state), graph_flags(infer_state1)))
+        executions.append(("forward", state.graph_mode, infer_state1.graph_mode))
         return outputs(state, infer_state1)
 
     def capture(func, state, infer_state1):
-        executions.append(("capture", graph_flags(state), graph_flags(infer_state1)))
+        executions.append(("capture", state.graph_mode, infer_state1.graph_mode))
         return func(state, infer_state1)
 
     def replay(state, infer_state1):
         # Replay uses graph-owned wrappers, so temporary states need none.
         assert state.decode_att_state.decode_wrapper is None
         assert infer_state1.decode_att_state.decode_wrapper is None
-        executions.append(("replay", graph_flags(state), graph_flags(infer_state1)))
+        executions.append(("replay", state.graph_mode, infer_state1.graph_mode))
         return outputs(state, infer_state1)
 
     model._create_inferstate = create_state
@@ -251,10 +244,10 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
 
     result = model._microbatch_overlap_decode_cuda(*inputs)
 
-    expected_flags = {"eager": (False, False), "capture": (True, False), "replay": (False, True)}[expected_mode]
-    assert initializations == [(index, expected_flags, expected_mode != "replay") for index in (0, 1)]
+    expected_graph_mode = GraphMode(expected_mode)
+    assert initializations == [(index, expected_graph_mode, expected_mode != "replay") for index in (0, 1)]
     expected_execution = {"eager": ["forward"], "capture": ["capture", "forward"], "replay": ["replay"]}[expected_mode]
-    assert executions == [(mode, expected_flags, expected_flags) for mode in expected_execution]
+    assert executions == [(mode, expected_graph_mode, expected_graph_mode) for mode in expected_execution]
     for output, model_input in zip(result, inputs):
         torch.testing.assert_close(output.logits, torch.stack((model_input.b_req_idx, model_input.b_seq_len), dim=1))
 

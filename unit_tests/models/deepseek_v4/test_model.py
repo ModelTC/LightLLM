@@ -3,13 +3,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.basemodel.infer_struct import GraphMode
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
 
 
 @pytest.mark.parametrize("capture", [False, True], ids=["eager", "capture"])
 @pytest.mark.parametrize("draft", [False, True], ids=["main", "dspark"])
-def test_pre_layer_decode_uses_current_graph_flag(monkeypatch: pytest.MonkeyPatch, capture: bool, draft: bool) -> None:
+def test_pre_layer_decode_uses_current_graph_mode(monkeypatch: pytest.MonkeyPatch, capture: bool, draft: bool) -> None:
     from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
     from lightllm.models.deepseek_v4.layer_infer import pre_layer_infer
     from lightllm.models.deepseek_v4_dspark.layer_infer.pre_layer_infer import DeepseekV4DSparkPreLayerInfer
@@ -18,7 +19,7 @@ def test_pre_layer_decode_uses_current_graph_flag(monkeypatch: pytest.MonkeyPatc
     layer = layer_class.__new__(layer_class)
     layer.hc_mult = 4
     state = DeepseekV4InferStateInfo()
-    state.is_cuda_graph_capture = capture
+    state.graph_mode = GraphMode.CAPTURE if capture else GraphMode.EAGER
     hidden = torch.ones((1, 8))
     state.mtp_draft_input_hiddens = hidden
     monkeypatch.setattr(pre_layer_infer.LlamaMultimodalPreLayerInfer, "token_forward", lambda *args: hidden)

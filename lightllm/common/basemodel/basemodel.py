@@ -12,7 +12,7 @@ from typing import final, List, TYPE_CHECKING
 from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
-from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
@@ -696,25 +696,23 @@ class TpPartBaseModel:
             batch_size=infer_batch_size,
             max_len_in_batch=infer_max_kv_seq_len,
         )
-        need_capture = False
+        graph_mode = GraphMode.EAGER
         if use_cuda_graph:
             infer_batch_size = self.graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
-            need_capture = self.graph.need_capture(infer_batch_size)
+            graph_mode = GraphMode.CAPTURE if self.graph.need_capture(infer_batch_size) else GraphMode.REPLAY
 
         model_input = self._create_padded_decode_model_input(model_input=model_input, new_batch_size=infer_batch_size)
         infer_state = self._create_inferstate(model_input)
         # attention backend 会根据执行方式准备 capture、replay 或 eager 状态，
         # 因此必须在 init_att_state 之前完成赋值。
-        infer_state.is_cuda_graph_capture = need_capture
-        infer_state.is_cuda_graph_replay = use_cuda_graph and not need_capture
+        infer_state.graph_mode = graph_mode
         infer_state.init_some_extra_state(self)
         infer_state.init_att_state()
 
-        if use_cuda_graph:
-            if need_capture:
-                model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
-            else:
-                model_output: ModelOutput = self.graph.replay(infer_state)
+        if graph_mode is GraphMode.CAPTURE:
+            model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
+        elif graph_mode is GraphMode.REPLAY:
+            model_output = self.graph.replay(infer_state)
         else:
             model_output = self._token_forward(infer_state)
 
@@ -809,7 +807,7 @@ class TpPartBaseModel:
         del post_output
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
-        if infer_state.is_cuda_graph_capture:
+        if infer_state.graph_mode is GraphMode.CAPTURE:
             model_output.to_no_ref_tensor()
 
         return model_output
@@ -914,22 +912,20 @@ class TpPartBaseModel:
 
         if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
             infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)
-            need_capture = self.graph.need_capture(infer_batch_size)
+            graph_mode = GraphMode.CAPTURE if self.graph.need_capture(infer_batch_size) else GraphMode.REPLAY
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
-            infer_state0.is_cuda_graph_capture = need_capture
-            infer_state0.is_cuda_graph_replay = not need_capture
+            infer_state0.graph_mode = graph_mode
             infer_state0.init_some_extra_state(self)
             infer_state0.init_att_state()
 
             infer_state1 = self._create_inferstate(padded_model_input1, 1)
-            infer_state1.is_cuda_graph_capture = need_capture
-            infer_state1.is_cuda_graph_replay = not need_capture
+            infer_state1.graph_mode = graph_mode
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
-            if need_capture:
+            if graph_mode is GraphMode.CAPTURE:
                 model_output0, model_output1 = self.graph.capture_decode(
                     self._overlap_tpsp_token_forward,
                     infer_state0,
@@ -1057,7 +1053,7 @@ class TpPartBaseModel:
         model_output1 = self._create_model_output(post_output1, infer_state1)
         del post_output, post_output1
 
-        if infer_state.is_cuda_graph_capture:
+        if infer_state.graph_mode is GraphMode.CAPTURE:
             model_output.to_no_ref_tensor()
             model_output1.to_no_ref_tensor()
 
