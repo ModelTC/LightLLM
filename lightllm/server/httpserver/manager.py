@@ -484,7 +484,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     # will be released after prefill.
                     img_tokens = sum([img.token_num for img in multimodal_params.images])
                     img_len = len(multimodal_params.images)
-                    kv_pages = self.past_kv_cache_client.allocate_pages(
+                    kv_pages = await self.past_kv_cache_client.allocate_pages(
                         req_obj.request_id, req_obj.input_len, img_tokens, img_len
                     )
 
@@ -565,7 +565,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
             if sampling_params.img_gen_prefill:
                 # 预分配了 kv cache 的请求，在异常情况下需要主动释放 kv cache 资源
-                self.past_kv_cache_client.free_pages_by_req_id(group_request_id)
+                await self.past_kv_cache_client.free_pages_by_req_id(group_request_id)
 
             await self.abort(group_request_id)
 
@@ -593,7 +593,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             ret = None
             async for sub_req_id, _, metadata, finish_status in self.generate(prompt, sample, multimodal, request):
                 if not ret:
-                    kv_cache_item: PastKVCacheItem = self.past_kv_cache_client.get_pages_by_req_id(sub_req_id)
+                    kv_cache_item: PastKVCacheItem = await self.past_kv_cache_client.get_pages_by_req_id(sub_req_id)
                     if kv_cache_item is None:
                         raise Exception(f"kv_cache_pages is None for sub_req_id {sub_req_id}")
                     metadata["kv_cache_item"] = kv_cache_item
@@ -711,9 +711,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
             return []
 
         finally:
-            self.req_id_to_x2i_reqs.pop(x2i_req_id, None)
+            if 'x2i_req_id' in locals():
+                self.req_id_to_x2i_reqs.pop(x2i_req_id, None)
             for req_id in generate_req_ids:
-                self.past_kv_cache_client.free_pages_by_req_id(req_id)
+                await self.past_kv_cache_client.free_pages_by_req_id(req_id)
 
     def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
         image_tokens = 0
@@ -1202,7 +1203,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
                 # early free
                 for req_id in status.req_ids:
-                    self.past_kv_cache_client.free_pages_by_req_id(req_id)
+                    await self.past_kv_cache_client.free_pages_by_req_id(req_id)
 
                 if isinstance(recv_obj, X2IResponse):
                     status = self.req_id_to_x2i_reqs[recv_obj.request_id]

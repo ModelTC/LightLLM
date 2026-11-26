@@ -1,3 +1,4 @@
+import asyncio
 import ctypes
 import torch
 import numpy as np
@@ -31,8 +32,8 @@ class PastKVCacheClient(object):
         self.token_page_size: int = self.kv_cache_tensor_meta.token_page_size
         self.allocated_pages_dict: dict[int, PastKVCacheItem] = {}
         self.free_pages: List[int] = list(range(self.page_num))
-        self.lock = Lock()
-        self.cond = Condition(self.lock)
+        self.lock = asyncio.Lock()
+        self.cond = asyncio.Condition(self.lock)
         logger.info(f"PastKVCacheClient init, page num: {self.page_num}")
 
         if not only_create_meta_data:
@@ -43,7 +44,7 @@ class PastKVCacheClient(object):
                 self.attach_shm_handle = self._attach_shm_cpu_kv_cache()
         return
 
-    def allocate_pages(self, req_id: int, need_tokens: int, img_tokens: int = 0, img_len: int = 0) -> List[int]:
+    async def allocate_pages(self, req_id: int, need_tokens: int, img_tokens: int = 0, img_len: int = 0) -> List[int]:
         need_pages = (need_tokens + self.token_page_size - 1) // self.token_page_size
         if need_pages > self.page_num:
             logger.error(
@@ -52,9 +53,9 @@ class PastKVCacheClient(object):
             )
             raise ValueError(f"error allocate pages for request {req_id} with {need_tokens} tokens")
 
-        with self.cond:
+        async with self.cond:
             while len(self.free_pages) < need_pages:
-                self.cond.wait()
+                await self.cond.wait()
 
             page_indexes, self.free_pages = self.free_pages[:need_pages], self.free_pages[need_pages:]
             self.allocated_pages_dict[req_id] = PastKVCacheItem(
@@ -63,15 +64,15 @@ class PastKVCacheClient(object):
 
             return page_indexes
 
-    def free_pages_by_req_id(self, req_id: int):
-        with self.cond:
+    async def free_pages_by_req_id(self, req_id: int):
+        async with self.cond:
             item = self.allocated_pages_dict.pop(req_id, None)
             if item is not None:
                 self.free_pages.extend(item.page_indexes)
                 self.cond.notify_all()
 
-    def get_pages_by_req_id(self, req_id: int) -> Optional[List[int]]:
-        with self.lock:
+    async def get_pages_by_req_id(self, req_id: int) -> Optional[List[int]]:
+        async with self.lock:
             item = self.allocated_pages_dict.get(req_id, None)
             return item
 
