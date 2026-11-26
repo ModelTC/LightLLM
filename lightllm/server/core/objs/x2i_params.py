@@ -112,6 +112,7 @@ class X2IParams(ctypes.Structure):
         self.r_width = _get("r_width", -1)
         self.r_height = _get("r_height", -1)
         self.steps = _get("steps", X2IParams._steps)
+        self.num_loops = kwargs.get("num_loops")
         self.guidance_scale = _get("guidance_scale", X2IParams._guidance_scale)
         self.image_guidance_scale = _get("image_guidance_scale", X2IParams._image_guidance_scale)
         self.seed = _get("seed", X2IParams._seed)
@@ -144,6 +145,7 @@ class X2IParams(ctypes.Structure):
             "r_width": image_config.width,
             "r_height": image_config.height,
             "output_format": OutputFormatType.from_str(image_config.image_type),
+            "num_loops": image_config.num_loops,
         }
         if image_config.steps is not None:
             kwargs["steps"] = image_config.steps

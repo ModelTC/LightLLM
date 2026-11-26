@@ -276,6 +276,7 @@ class LightX2VServer:
             save_result_path="",
             task="i2i" if is_edit else "t2i",
             size=[param.height, param.width],
+            num_loops=getattr(param, "num_loops", None),
         )
 
         # 保存当前 RNG state，供同一 session 下一张图使用
