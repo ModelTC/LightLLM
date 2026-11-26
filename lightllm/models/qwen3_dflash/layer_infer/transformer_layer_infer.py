@@ -18,8 +18,6 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
     Only decode attends; its attention is non-causal, which only FA3 supports so far.
     """
 
-    attention_phases = ("decode",)
-
     def attention_config(self, model) -> LayerAttentionConfig:
         return LayerAttentionConfig(prefill=None, decode=self._gqa_config(model))
 

@@ -204,8 +204,11 @@ def test_dflash_decode_needs_an_implementation_of_non_causal_attention(monkeypat
     monkeypatch.setattr(attention_backend_manager, "get_env_start_args", lambda: SimpleNamespace(mtp_mode="dflash"))
     net = dict(num_attention_heads=H, num_key_value_heads=2, hidden_size=H * D, head_dim=D, rms_norm_eps=1e-6)
     layer = Qwen3DFlashTransformerLayerInfer(0, net)
+    model = make_model(FakeState(2), backend="triton", draft=True)
+    layer_config = layer.attention_config(model)
+    assert layer_config.prefill is None
+    assert layer_config.decode == config(causal=False)
     with pytest.raises(ValueError, match="does not support"):
-        model = make_model(FakeState(2), backend="triton", draft=True)
         bind_layers(model, layer)
 
 

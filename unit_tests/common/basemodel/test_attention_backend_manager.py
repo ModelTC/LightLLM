@@ -518,8 +518,6 @@ def test_models_with_attention_states_create_their_layers_attention():
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
     class Layer:
-        attention_phases = ("decode",)
-
         def __init__(self):
             self.models = []
 
@@ -546,23 +544,6 @@ def test_models_with_attention_states_create_their_layers_attention():
     # A draft without attention states (FFN-only) binds no layers and builds no attention state.
     states.clear()
     model._init_attention()
-    assert not model.attention_backend_manager.has_attention
-
-
-@pytest.mark.parametrize(
-    "required,spec,error",
-    [
-        (("prefill", "decode"), LayerAttentionConfig(None, gqa()), "missing prefill"),
-        (("prefill", "decode"), LayerAttentionConfig(gqa(), None), "missing decode"),
-        (("decode",), LayerAttentionConfig(gqa(), gqa()), "unexpected prefill"),
-    ],
-)
-def test_model_rejects_phase_config_that_disagrees_with_layer_execution(required, spec, error):
-    model = model_with_state(FakeState())
-    model.att_state_manager.get_full_attention_states = lambda role: (object(),)
-    model.layers_infer = [SimpleNamespace(layer_num_=7, attention_phases=required, attention_config=lambda model: spec)]
-    with pytest.raises(ValueError, match=f"draft0 layer 7: {error} attention configuration"):
-        TpPartBaseModel._init_attention(model)
     assert not model.attention_backend_manager.has_attention
 
 

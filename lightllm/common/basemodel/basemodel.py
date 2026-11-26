@@ -339,12 +339,6 @@ class TpPartBaseModel:
             return
         for layer in self.layers_infer:
             config = layer.attention_config(self)
-            for phase in backend_manager.state_groups:
-                enabled = getattr(config, phase) is not None
-                required = phase in layer.attention_phases
-                if enabled != required:
-                    problem = "missing" if required else "unexpected"
-                    raise ValueError(f"{role} layer {layer.layer_num_}: {problem} {phase} attention configuration")
             layer.prefill_backend, layer.decode_backend = backend_manager.bind(config)
         for phase in backend_manager.state_groups:
             backend_names = [backend.get_name() for backend in backend_manager.backends(phase)]

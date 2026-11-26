@@ -233,15 +233,23 @@ def flashmla_api(request, monkeypatch):
     if request.param == "installed":
         return
 
-    def without_out(kernel):
+    sparse_result = SimpleNamespace(output=None)
+
+    def without_out(kernel, *, track_output=False):
         def legacy_kernel(**kwargs):
             assert "out" not in kwargs
-            return kernel(**kwargs)
+            result = kernel(**kwargs)
+            if track_output:
+                sparse_result.output = result[0]
+            return result
 
         return legacy_kernel
 
     for name in ("flash_mla_sparse_fwd", "flash_mla_with_kvcache"):
-        monkeypatch.setattr(flash_mla, name, without_out(getattr(flash_mla, name)))
+        monkeypatch.setattr(
+            flash_mla, name, without_out(getattr(flash_mla, name), track_output=name == "flash_mla_sparse_fwd")
+        )
+    return sparse_result
 
 
 def test_fp8_ds_mla_flashmla_decode_matches_reference_and_cuda_graph_replay(flashmla_api):
@@ -259,7 +267,8 @@ def test_fp8_ds_mla_flashmla_decode_matches_reference_and_cuda_graph_replay(flas
     [([0, 0], [40, 150]), ([100, 2100], [164, 2200])],
     ids=["no_cached_prefix", "cached_prefix"],
 )
-def test_fp8_ds_mla_flashmla_prefill_matches_reference(ready, ends, flashmla_api):
+@pytest.mark.parametrize("use_destination", [False, True], ids=["native_output", "destination"])
+def test_fp8_ds_mla_flashmla_prefill_matches_reference(ready, ends, flashmla_api, use_destination):
     """Cached history is read from the packed FP8 cache; the step's own keys come from current_kv in bf16."""
     heads = 64
     req_to_token = token_map(len(ends), seed=5)
@@ -317,7 +326,11 @@ def test_fp8_ds_mla_flashmla_prefill_matches_reference(ready, ends, flashmla_api
         topk_indices=topk_indices,
         current_kv=current_kv,
     )
-    out = torch.empty((rows, heads, RANK), device="cuda", dtype=q.dtype)
-    out = attention.run("prefill", attention.att_state(infer, STEP_CONFIG), inputs, out=out)
+    destination = torch.empty((rows, heads, RANK), device="cuda", dtype=q.dtype) if use_destination else None
+    out = attention.run("prefill", attention.att_state(infer, STEP_CONFIG), inputs, out=destination)
+    if destination is not None:
+        assert out is destination
+    elif flashmla_api is not None:
+        assert out is flashmla_api.output
     assert out.shape == (rows, heads, RANK)
     torch.testing.assert_close(out.float(), torch.stack(expected), atol=0.02, rtol=0.02)

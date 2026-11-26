@@ -103,17 +103,20 @@ class FlashMLASparsePrefillBackend(
         att_state: FlashMLASparsePrefillAttState,
         layer_inputs: SparseMLAPrefillLayerInputs,
         *,
-        out: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
         alloc_func: TensorAllocator = torch.empty,
     ) -> torch.Tensor:
-        """Fill and return out [query_tokens, num_heads, kv_lora_rank].
+        """Return [query_tokens, num_heads, kv_lora_rank], filling out if supplied.
 
         A packed FP8 cache is not read directly: the step's own keys come from current_kv and, when
         some request has a cached prefix, the selected history is dequantized next to them.
         """
         layer_config, q = self.layer_config, layer_inputs.q
         _check_inputs(layer_config, q)
+        output_shape = (q.shape[0], q.shape[1], layer_config.kv_lora_rank)
         if layer_config.kv_cache_format == "bf16":
+            if out is None:
+                out = alloc_func(output_shape, dtype=q.dtype, device=q.device)
             kv, indices = layer_inputs.kv_cache, layer_inputs.topk_mem_indices
             if indices.ndim == 2:
                 indices = indices.unsqueeze(1)
@@ -137,7 +140,10 @@ class FlashMLASparsePrefillBackend(
             )
         if indices.ndim == 2:
             indices = indices.unsqueeze(1)
-        out_kwargs = {"out": out} if _supports_out(flash_mla_sparse_fwd) else {}
+        supports_out = _supports_out(flash_mla_sparse_fwd)
+        if supports_out and out is None:
+            out = alloc_func(output_shape, dtype=q.dtype, device=q.device)
+        out_kwargs = {"out": out} if supports_out else {}
         result, _, _ = flash_mla_sparse_fwd(
             q=q,
             kv=kv,
@@ -146,7 +152,9 @@ class FlashMLASparsePrefillBackend(
             d_v=layer_config.kv_lora_rank,
             **out_kwargs,
         )
-        if not out_kwargs:
+        if out is None:
+            return result
+        if not supports_out:
             out.copy_(result)
         return out
 

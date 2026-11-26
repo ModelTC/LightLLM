@@ -119,9 +119,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         return self.prefill_backend.forward(
             infer_state.att_states[self.prefill_backend.state_key],
             inputs,
-            out=torch.empty(
-                (q_all.shape[0], q_all.shape[1], self.kv_lora_rank), dtype=q_all.dtype, device=q_all.device
-            ),
+            out=out,
         )
 
     def _token_attention_kernel(
