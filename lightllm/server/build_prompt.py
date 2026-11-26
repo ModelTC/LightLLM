@@ -184,6 +184,8 @@ async def build_prompt_from_image_request(request: Union[ImageGenerationRequest,
             user_content = request.prompt
         kwargs = {"conversation": [{"role": "user", "content": user_content}]}
         kwargs.update(**chat_template_kwargs)
+        kwargs["neo_image_request"] = True
+        kwargs["neo_image_thinking"] = bool(kwargs.get("enable_thinking", False))
         # logger.info(f"kwargs: {kwargs}")
 
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True)

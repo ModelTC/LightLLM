@@ -77,8 +77,9 @@ class NeoModelBase:
         )
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        table_dtype = torch.float32 if getattr(self, "native_und_rope", False) else self.data_type
+        self._cos_cached = torch.cos(freqs).to(table_dtype).cuda()
+        self._sin_cached = torch.sin(freqs).to(table_dtype).cuda()
         return
 
     def _init_to_get_hw_rotary(self, default_base=10000):
@@ -117,8 +118,9 @@ class NeoModelBase:
         )
         freqs = torch.outer(t, inv_freq)
 
-        self._hw_cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._hw_sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        table_dtype = torch.float32 if getattr(self, "native_und_rope", False) else self.data_type
+        self._hw_cos_cached = torch.cos(freqs).to(table_dtype).cuda()
+        self._hw_sin_cached = torch.sin(freqs).to(table_dtype).cuda()
         return
 
 
@@ -149,6 +151,8 @@ class NeoTpPartModel(NeoModelBase, Qwen3TpPartModel):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
             all_config = json.load(json_file)
             self.config = all_config["llm_config"]
+            self.image_position_scale = int(all_config.get("image_position_scale", 1))
+            self.native_und_rope = "NeoPatchEmbeddings" in all_config.get("vision_config", {}).get("architectures", [])
         # rename keys
         repair_config(self.config, same_names=["num_attention_heads", "n_head"])
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])

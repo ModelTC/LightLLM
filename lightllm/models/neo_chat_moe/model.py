@@ -37,15 +37,17 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
     def __init__(self, tokenizer, model_cfg, **kwargs):
         super().__init__(tokenizer)
         self.tokenizer = tokenizer
-        self.min_pixel = model_cfg.get("vision_config").get("min_pixels")
-        self.max_pixel = model_cfg.get("vision_config").get("max_pixels")
+        self.min_pixel = model_cfg.get("vision_config").get("min_pixels", model_cfg.get("min_pixels"))
+        self.max_pixel = model_cfg.get("vision_config").get("max_pixels", model_cfg.get("max_pixels"))
         self.patch_size = model_cfg.get("vision_config").get("patch_size")
         self.downsample_ratio = model_cfg.get("vision_config").get("downsample_ratio")
 
-        self.image_token_id = model_cfg.get("image_token_id")
-        self.image_start_tag = IMG_START_TOKEN
+        self.image_token_id = model_cfg.get("img_context_token_id", model_cfg.get("image_token_id"))
+        start_id = model_cfg.get("img_start_token_id")
+        self.image_start_tag = tokenizer.convert_ids_to_tokens(start_id) if start_id is not None else IMG_START_TOKEN
         self.image_start_id = tokenizer.convert_tokens_to_ids(self.image_start_tag)
-        self.image_end_tag = IMG_END_TOKEN
+        end_id = model_cfg.get("img_end_token_id")
+        self.image_end_tag = tokenizer.convert_ids_to_tokens(end_id) if end_id is not None else IMG_END_TOKEN
         self.image_end_id = tokenizer.convert_tokens_to_ids(self.image_end_tag)
         self.image_tag = IMG_TOKEN
 
@@ -98,7 +100,7 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
     # only change the impl of the encode func:
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
         # TEXT<image>TEXT<image>TEXT --> TEXT<img></img>TEXT<img></img>TEXT
-        image_tokens = IMG_START_TOKEN + IMG_END_TOKEN
+        image_tokens = self.image_start_tag + self.image_end_tag
         if multimodal_params is None:
             add_special_tokens = kwargs.get("add_special_tokens", True)
             return self.tokenizer.encode(prompt, add_special_tokens=add_special_tokens)
@@ -138,7 +140,7 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
             conversation=[{"role": "user", "content": msg}], tokenize=False, add_generation_prompt=True, add_default_system=False,
         )
 
-        return prompt + thinking_content + IMG_START_TOKEN
+        return prompt + thinking_content + self.image_start_tag
 
     def fix_prompt(self, prompt: str, img_len: int):
         prompt_img_len = prompt.count(IMG_TOKEN)
@@ -150,7 +152,7 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
     def get_query_for_it2i(self, prompt: str):
         image_len = prompt.count(IMG_TOKEN)
         # query_condition = self._build_t2i_query(prompt, thinking_content="<think>\n\n</think>\n\n")
-        query_condition = prompt + IMG_START_TOKEN if not prompt.endswith(IMG_START_TOKEN) else prompt
+        query_condition = prompt + self.image_start_tag if not prompt.endswith(self.image_start_tag) else prompt
         query_text_uncondition = self._build_t2i_query(IMG_TOKEN * image_len)
         question_img_uncondition = self._build_t2i_query("")
         return query_condition, query_text_uncondition, question_img_uncondition
@@ -158,7 +160,7 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
     def get_query_for_t2i(self, prompt: str, input_image_num: int = 0):
         # prompt is already applied
         image_len = prompt.count(IMG_TOKEN)
-        query_condition = prompt + IMG_START_TOKEN if not prompt.endswith(IMG_START_TOKEN) else prompt
+        query_condition = prompt + self.image_start_tag if not prompt.endswith(self.image_start_tag) else prompt
         query_uncondition = self._build_t2i_query(
             IMG_TOKEN * input_image_num, thinking_content=IMG_TOKEN * (image_len - input_image_num)
         )

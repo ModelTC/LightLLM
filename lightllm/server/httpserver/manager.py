@@ -659,11 +659,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     con_gen = await generation_wrapper(prompt_condition, sample_params, multimodal_params, request)
                     generation_params.update_t2i(con_gen, None)
 
-                if input_image_num > 0:
-                    # for it2i, the output image size is the same as the input image size
-                    generation_params.update_hw(
-                        multimodal_params.images[0].image_w, multimodal_params.images[0].image_h, min_pixels, max_pixels
-                    )
+            if input_image_num > 0:
+                # for it2i, the output image size is the same as the input image size
+                generation_params.update_hw(
+                    multimodal_params.images[0].image_w, multimodal_params.images[0].image_h, min_pixels, max_pixels
+                )
             # use the first request id as the gen image request id
             x2i_req_id = generate_req_ids[0]
             generation_params.request_id = x2i_req_id
