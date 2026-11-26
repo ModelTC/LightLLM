@@ -22,6 +22,8 @@ from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICach
 from lightllm.utils.shm_port_args import get_shm_port_args
 from ..past_kv_cache_client import PastKVCacheClient
 from ..rng_state_cache import RngStateCache
+from .barrier import SharedWords, atomic_store_release, futex_wake, wait_until_at_least
+
 
 logger = init_logger(__name__)
 
@@ -69,7 +71,7 @@ _origin_run_infer_step = None
 
 
 def _run_infer_step(self, step_index: int, infer_steps: int) -> None:
-    if self.cancel_func():
+    if self.cancel_func(step_index):
         return
     return _origin_run_infer_step(self, step_index, infer_steps)
 
@@ -118,6 +120,7 @@ class LightX2VServer:
         # 各 worker 各自维护一份；由于本进程是单 stream 的串行 _process，且任务通过 broadcast
         # 同步，因此各 rank 之间的 RNG 演进保持一致。
         self.rng_state_cache = RngStateCache()
+        self.cancel_state = SharedWords("x2i_cancel_state")
 
     def _init_pipeline(self):
         os.environ["MASTER_ADDR"] = "127.0.0.1"
@@ -148,6 +151,7 @@ class LightX2VServer:
 
             try:
                 if self.rank == 0:
+                    self.cancel_state.reset()
                     param: X2IParams = await self.task_socket.recv_pyobj()
                     if self.world_size > 1:
                         dist.broadcast_object_list([param], src=0, group=self.task_dist_group)
@@ -174,9 +178,27 @@ class LightX2VServer:
                     await self.result_socket.send_pyobj(X2IResponse(request_id=param.request_id, images=None))
 
     async def _process(self, param: X2IParams):
+        def check_cancel(step: int):
+            # Rank 0 acts as the leader:
+            # 1. Read the latest cancellation state from the HTTP request.
+            # 2. Publish the state for the current step by updating snapshot_seq.
+            # 3. Wake up all follower ranks waiting for this step.
+            if self.rank == 0:
+                self.cancel_state.snapshot.value = int(self.x2i_http_request_state.is_cancel(param.request_id))
+                atomic_store_release(self.cancel_state.snapshot_seq, step + 2)
+                futex_wake(self.cancel_state.snapshot_seq, self.world_size - 1)
+            else:
+                # Follower ranks wait until the leader publishes the cancellation
+                # state for the current step, then read the shared snapshot.
+                wait_until_at_least(self.cancel_state.snapshot_seq, step + 2)
+            return self.cancel_state.snapshot.value == 1
+
         # check cancle first
-        if self.x2i_http_request_state.is_cancel(param.request_id):
+        if check_cancel(-1):
             logger.info(f"req:{param.request_id}/{param.session_id} canceled before generate.")
+            # need a sync op to prevent rank0 update the state before other ranks consume it.
+            # there's a sync gather in normal step
+            dist.barrier(group=self.task_dist_group)
             return []
 
         is_t2i = param.past_kvcache_img.is_empty()
@@ -249,7 +271,7 @@ class LightX2VServer:
                 )
         logger.info(f"seed: {seed} param.seed: {param.seed} first_image: {param.first_image} session_id: {session_id}")
         self.pipe.runner.set_resolution(param.r_width, param.r_height)
-        self.pipe.runner.set_check_cancel(lambda: self.x2i_http_request_state.is_cancel(param.request_id))
+        self.pipe.runner.set_check_cancel(check_cancel)
         image = self.pipe.generate(
             seed=seed,
             save_result_path="",

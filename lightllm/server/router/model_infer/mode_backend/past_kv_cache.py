@@ -10,6 +10,7 @@ from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu_for_x2i
 from lightllm.server.core.objs.token_chunck_hash_list import LIGHTLLM_TOKEN_HASH_LIST_SIZE
+from lightllm.server.core.objs import FinishStatus
 
 from lightllm.utils.log_utils import init_logger
 
@@ -68,6 +69,8 @@ class PastKVCacheModule(object):
 
                 # filter out aborted reqs when the trans task is not started, otherwise wait the trans task to finish.
                 if req.infer_aborted and req.past_kv_cache_task_status.is_not_started():
+                    # reset no finish, let filter set the shm status
+                    req.finish_status.set_status(FinishStatus.NO_FINISH)
                     true_finished_reqs.append(req)
                     continue
 

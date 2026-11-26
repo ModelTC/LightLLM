@@ -711,7 +711,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
             return []
 
         finally:
-            self.req_id_to_x2i_reqs.pop(x2i_req_id, None)
+            if 'x2i_req_id' in locals():
+                self.req_id_to_x2i_reqs.pop(x2i_req_id, None)
             for req_id in generate_req_ids:
                 await self.past_kv_cache_client.free_pages_by_req_id(req_id)
 
