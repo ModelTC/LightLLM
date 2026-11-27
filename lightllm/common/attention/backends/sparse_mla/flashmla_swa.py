@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class FlashMLASWAAttState:
+class FlashMLASWAMetadata:
     """FlashMLA scheduler metadata of the group's compress ratio, filled on the step's first kernel call.
 
     A step being captured also carries a second one, so warm-up runs do not fill it and its planning
@@ -27,61 +27,61 @@ class FlashMLASWAAttState:
 
 
 class FlashMLASWAPrefillBackend(
-    AttentionBackend[SWASparseMLALayerConfig, FlashMLASWAAttState, SWASparseMLALayerInputs]
+    AttentionBackend[SWASparseMLALayerConfig, FlashMLASWAMetadata, SWASparseMLALayerInputs]
 ):
     name = "flashmla_swa_sparse_mla_prefill"
     phase = "prefill"
 
     @classmethod
-    def group_key(cls, layer_config: SWASparseMLALayerConfig) -> int:
+    def metadata_config_key(cls, layer_config: SWASparseMLALayerConfig) -> int:
         # Layers with one compress ratio share the scheduler metadata of their kernel calls.
         return layer_config.compress_ratio
 
-    def build(self, infer_state: InferStateInfo) -> FlashMLASWAAttState:
+    def build_att_metadata(self, infer_state: InferStateInfo) -> FlashMLASWAMetadata:
         """Prepare scheduler objects whose GPU planning runs at the first kernel call."""
         import flash_mla
 
         will_capture = infer_state.graph_mode is GraphMode.CAPTURE
-        return FlashMLASWAAttState(
+        return FlashMLASWAMetadata(
             sched_meta=flash_mla.get_mla_metadata()[0],
             capture_sched_meta=flash_mla.get_mla_metadata()[0] if will_capture else None,
         )
 
     def forward(
         self,
-        att_state: FlashMLASWAAttState,
+        att_metadata: FlashMLASWAMetadata,
         layer_inputs: SWASparseMLALayerInputs,
         *,
         out: torch.Tensor,
         alloc_func: TensorAllocator = torch.empty,
     ) -> torch.Tensor:
-        """Fill and return out [rows, num_heads, head_dim_v], written by FlashMLA in place."""
+        """Fill and return out [rows, num_heads, v_head_dim], written by FlashMLA in place."""
         import flash_mla
 
         layer_config = self.layer_config
         assert layer_inputs.q.shape[1] == layer_config.num_heads, "q does not match the layer_config"
         assert (layer_inputs.compressed_cache is not None) == (layer_config.compress_ratio != 0)
-        assert (layer_inputs.attn_sink is not None) == layer_config.has_attn_sink
-        sched_meta = att_state.sched_meta
-        if att_state.capture_sched_meta is not None and torch.cuda.is_current_stream_capturing():
-            sched_meta = att_state.capture_sched_meta
+        assert (layer_inputs.sink_logits is not None) == layer_config.has_sinks
+        sched_meta = att_metadata.sched_meta
+        if att_metadata.capture_sched_meta is not None and torch.cuda.is_current_stream_capturing():
+            sched_meta = att_metadata.capture_sched_meta
         flash_mla.flash_mla_with_kvcache(
             q=layer_inputs.q.unsqueeze(1),
             k_cache=layer_inputs.swa_cache,
             block_table=None,
             cache_seqlens=None,
-            head_dim_v=layer_config.head_dim_v,
+            head_dim_v=layer_config.v_head_dim,
             tile_scheduler_metadata=sched_meta,
             num_splits=None,
             softmax_scale=layer_config.softmax_scale,
             causal=False,
             is_fp8_kvcache=True,
             indices=layer_inputs.swa_indices,
-            attn_sink=layer_inputs.attn_sink,
+            attn_sink=layer_inputs.sink_logits,
             topk_length=layer_inputs.swa_lengths,
             extra_k_cache=layer_inputs.compressed_cache,
-            extra_indices_in_kvcache=layer_inputs.extra_indices,
-            extra_topk_length=layer_inputs.extra_lengths,
+            extra_indices_in_kvcache=layer_inputs.compressed_indices,
+            extra_topk_length=layer_inputs.compressed_lengths,
             out=out.unsqueeze(1),
         )
         return out

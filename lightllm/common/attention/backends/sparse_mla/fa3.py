@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class FA3SparseMLAPrefillAttState:
+class FA3SparseMLAPrefillMetadata:
     """The step's requests: request i's keys start at cu_kv_seq_len[i] of the step's ragged key layout and
     its queries at cu_q_seq_len[i]; total_token_num is the number of keys over all requests."""
 
@@ -32,7 +32,7 @@ class FA3SparseMLAPrefillAttState:
 
 
 @dataclass(frozen=True)
-class FA3SparseMLADecodeAttState:
+class FA3SparseMLADecodeMetadata:
     """cache_seqlens is the number of selected slots each request reads; cu_seqlens_k is its int32
     prefix sum and cu_seqlens_q the int32 query offsets."""
 
@@ -43,7 +43,7 @@ class FA3SparseMLADecodeAttState:
 
 
 class FA3SparseMLAPrefillBackend(
-    AttentionBackend[SparseMLALayerConfig, FA3SparseMLAPrefillAttState, SparseMLAPrefillLayerInputs]
+    AttentionBackend[SparseMLALayerConfig, FA3SparseMLAPrefillMetadata, SparseMLAPrefillLayerInputs]
 ):
     name = "fa3_sparse_mla_prefill"
     phase = "prefill"
@@ -53,8 +53,8 @@ class FA3SparseMLAPrefillBackend(
         if layer_config.kv_cache_format != "fp8_group64_e8m0" or layer_config.qk_rope_head_dim != 0:
             raise NotImplementedError("FA3 sparse MLA prefill supports only the NoPE fp8_group64_e8m0 cache")
 
-    def build(self, infer_state: InferStateInfo) -> FA3SparseMLAPrefillAttState:
-        return FA3SparseMLAPrefillAttState(
+    def build_att_metadata(self, infer_state: InferStateInfo) -> FA3SparseMLAPrefillMetadata:
+        return FA3SparseMLAPrefillMetadata(
             req_to_token_indexs=infer_state.req_to_token_indexs,
             b_req_idx=infer_state.b_req_idx,
             total_token_num=infer_state.total_token_num,
@@ -65,7 +65,7 @@ class FA3SparseMLAPrefillBackend(
     @torch.no_grad()
     def forward(
         self,
-        att_state: FA3SparseMLAPrefillAttState,
+        att_metadata: FA3SparseMLAPrefillMetadata,
         layer_inputs: SparseMLAPrefillLayerInputs,
         *,
         out: torch.Tensor,
@@ -85,13 +85,13 @@ class FA3SparseMLAPrefillBackend(
         )
 
         q, packed_kv = layer_inputs.q, layer_inputs.kv_cache
-        current_kv, topk_indices = layer_inputs.current_kv, layer_inputs.topk_indices
-        assert current_kv is not None and topk_indices is not None and layer_inputs.q_kv_start_loc is not None
+        current_kv, topk_token_positions = layer_inputs.current_kv, layer_inputs.topk_token_positions
+        assert current_kv is not None and topk_token_positions is not None and layer_inputs.q_kv_start_loc is not None
         buffers = layer_inputs.fp8_workspace
         if buffers is None:
             raise ValueError("FA3 sparse MLA prefill requires the reserved FP8 workspace")
         q_token_num, q_head_num, _ = q.shape
-        topk_size = topk_indices.shape[1]
+        topk_size = topk_token_positions.shape[1]
         assert q_token_num <= buffers["chunk_cache_seqlens"].numel()
         assert topk_size <= buffers["chunk_topk_indices"].shape[1]
 
@@ -102,8 +102,8 @@ class FA3SparseMLAPrefillBackend(
         chunk_cache_seqlens = buffers["chunk_cache_seqlens"][:q_token_num]
         cu_seqlens_q = buffers["cu_seqlens_q"][: q_token_num + 1]
 
-        req_to_token_indexs, b_req_idx = att_state.req_to_token_indexs, att_state.b_req_idx
-        total_token_num = att_state.total_token_num
+        req_to_token_indexs, b_req_idx = att_metadata.req_to_token_indexs, att_metadata.b_req_idx
+        total_token_num = att_metadata.total_token_num
         has_history = total_token_num > q_token_num
         if not has_history and current_kv.stride(-1) != 1:
             current_kv = current_kv.contiguous()
@@ -121,8 +121,8 @@ class FA3SparseMLAPrefillBackend(
                     gathered_kv,
                     req_to_token_indexs,
                     b_req_idx,
-                    att_state.cu_kv_seq_len,
-                    att_state.cu_q_seq_len,
+                    att_metadata.cu_kv_seq_len,
+                    att_metadata.cu_q_seq_len,
                     chunk_start,
                     chunk_token_num,
                     packed_kv.stride(0),
@@ -139,14 +139,14 @@ class FA3SparseMLAPrefillBackend(
                 # The step's own keys already form the complete request layout.
                 chunk_kv = current_kv[chunk_start : chunk_start + chunk_token_num].view(-1, 1, 1, 512)
             _compact_topk_indices_kernel[(q_token_num,)](
-                topk_indices,
+                topk_token_positions,
                 layer_inputs.q_kv_start_loc,
                 chunk_topk_indices,
                 chunk_cache_seqlens,
                 chunk_start,
                 chunk_start + chunk_token_num,
-                topk_indices.stride(0),
-                topk_indices.stride(1),
+                topk_token_positions.stride(0),
+                topk_token_positions.stride(1),
                 TOPK=topk_size,
                 BLOCK=triton.next_power_of_2(topk_size),
             )
@@ -190,7 +190,7 @@ class FA3SparseMLAPrefillBackend(
 
 
 class FA3SparseMLADecodeBackend(
-    AttentionBackend[SparseMLALayerConfig, FA3SparseMLADecodeAttState, SparseMLADecodeLayerInputs]
+    AttentionBackend[SparseMLALayerConfig, FA3SparseMLADecodeMetadata, SparseMLADecodeLayerInputs]
 ):
     """The layer config's causal is the kernel's mask mode, which does not change one-row decode."""
 
@@ -205,10 +205,10 @@ class FA3SparseMLADecodeBackend(
             raise NotImplementedError("FA3 sparse MLA decode needs the layer config's topk")
 
     @classmethod
-    def group_key(cls, layer_config: SparseMLALayerConfig):
+    def metadata_config_key(cls, layer_config: SparseMLALayerConfig):
         return layer_config.topk, layer_config.kpool, layer_config.causal
 
-    def build(self, infer_state: InferStateInfo) -> FA3SparseMLADecodeAttState:
+    def build_att_metadata(self, infer_state: InferStateInfo) -> FA3SparseMLADecodeMetadata:
         """A CUDA graph step keeps the length tensors per (microbatch, batch size), rewritten in place.
 
         An indexer that scores pools of kpool keys selects whole pools within the top-k width plus the
@@ -223,16 +223,16 @@ class FA3SparseMLADecodeBackend(
         padded = torch.zeros(infer_state.batch_size + 1, dtype=torch.int32, device=lengths.device)
         padded[1:].copy_(cache_seqlens, non_blocking=True)
         cu_seqlens_k = padded.cumsum(dim=0, dtype=torch.int32)
-        return FA3SparseMLADecodeAttState(
-            cache_seqlens=self.keep_for_graph(infer_state, "cache_seqlens", cache_seqlens),
+        return FA3SparseMLADecodeMetadata(
+            cache_seqlens=self.update_graph_tensor(infer_state, "cache_seqlens", cache_seqlens),
             cu_seqlens_q=infer_state.b1_cu_q_seq_len,
-            cu_seqlens_k=self.keep_for_graph(infer_state, "cu_seqlens_k", cu_seqlens_k),
+            cu_seqlens_k=self.update_graph_tensor(infer_state, "cu_seqlens_k", cu_seqlens_k),
             max_seqlen_q=infer_state.max_q_seq_len,
         )
 
     def forward(
         self,
-        att_state: FA3SparseMLADecodeAttState,
+        att_metadata: FA3SparseMLADecodeMetadata,
         layer_inputs: SparseMLADecodeLayerInputs,
         *,
         out: torch.Tensor,
@@ -245,11 +245,11 @@ class FA3SparseMLADecodeBackend(
         assert q_nope.shape[1] == config.num_heads, "q does not match the layer_config"
         kv, rank, rope = layer_inputs.kv_cache, config.kv_lora_rank, config.qk_rope_head_dim
         selected = dict(
-            page_table=layer_inputs.topk_mem_indices,
-            cache_seqlens=att_state.cache_seqlens,
-            cu_seqlens_q=att_state.cu_seqlens_q,
-            cu_seqlens_k_new=att_state.cu_seqlens_k,
-            max_seqlen_q=att_state.max_seqlen_q,
+            page_table=layer_inputs.topk_cache_indices,
+            cache_seqlens=att_metadata.cache_seqlens,
+            cu_seqlens_q=att_metadata.cu_seqlens_q,
+            cu_seqlens_k_new=att_metadata.cu_seqlens_k,
+            max_seqlen_q=att_metadata.max_seqlen_q,
             softmax_scale=config.softmax_scale,
             causal=config.causal,
             out=out,

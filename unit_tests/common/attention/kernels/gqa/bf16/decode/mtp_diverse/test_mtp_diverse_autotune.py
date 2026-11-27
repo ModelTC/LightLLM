@@ -147,8 +147,8 @@ def test_decode_passes_saved_length_and_selected_block_n(monkeypatch):
     q, k = inputs["q"], inputs["k"]
     layer_config = GQALayerConfig(num_heads=q.shape[1], num_kv_heads=k.shape[1], head_dim=q.shape[2], dtype=q.dtype)
     backend = TritonGQADecodeBackend(layer_config)
-    infer_state.decode_rows_per_request = 3
-    att_state = backend.build(infer_state)
+    infer_state.max_decode_rows_per_request = 3
+    att_state = backend.build_att_metadata(infer_state)
     infer_state.max_kv_seq_len = 32768
     calls = []
 

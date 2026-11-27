@@ -74,7 +74,7 @@ def test_ffn_only_draft_has_no_state_or_attention(monkeypatch: pytest.MonkeyPatc
     assert state.att_state_manager is resources
     assert state.is_draft_model
     assert state.req_manager is draft.req_manager
-    assert state.att_states == {}
+    assert state.att_metadata == {}
     if not prefill:
         state.copy_for_cuda_graph(draft._create_inferstate(model_input))
 

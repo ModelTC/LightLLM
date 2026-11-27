@@ -76,7 +76,7 @@ def test_prefill_microbatches_use_independent_scratch_during_graph_replay(monkey
     first = _PrefillCase([15], [3], 8, backend=backend)
     second = _PrefillCase([17], [3], 8, backend=backend)
     second.infer_state.microbatch_index = 1
-    _, second.att_state = second.new_state()
+    _, second.att_metadata = second.new_state()
     first.check(first.run())
     second.check(second.run())
     pointers = [{key: value.data_ptr() for key, value in buffers.items()} for buffers in backend._prefill_workspaces]
@@ -142,7 +142,7 @@ def test_glm_reserves_prefill_workspace_during_resource_preparation(monkeypatch,
 
 def test_sparse_layer_passes_each_microbatch_its_reserved_workspace():
     class CapturePrefill:
-        state_key = object()
+        metadata_group_key = object()
 
         def forward(self, att_state, inputs, *, out):
             return inputs.fp8_workspace
@@ -166,8 +166,8 @@ def test_sparse_layer_passes_each_microbatch_its_reserved_workspace():
             microbatch_index=slot,
             att_state_role="main",
             attention_backend_manager=SimpleNamespace(get_backend=lambda role, phase, layer_id: backend),
-            att_states={backend.state_key: None},
-            nsa_step=SimpleNamespace(q_kv_start_loc=None),
+            att_metadata={backend.metadata_group_key: None},
+            nsa_metadata=SimpleNamespace(q_kv_start_loc=None),
             get_topk_indices_params={"hidden_states": query, "q_lora": query},
         )
         assert layer._context_attention_kernel(query, query, state, weights) is regions[slot]

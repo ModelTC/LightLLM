@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class FlashMLASparsePrefillAttState:
+class FlashMLASparsePrefillMetadata:
     """mem_index holds the cache slots of the step's new tokens; has_cached_prefix says whether any
     request reads keys from earlier steps."""
 
@@ -26,7 +26,7 @@ class FlashMLASparsePrefillAttState:
 
 
 @dataclass(frozen=True)
-class FlashMLASparseDecodeAttState:
+class FP8SparseMLADecodeMetadata:
     """FlashMLA's tile scheduler metadata, filled on the step's first kernel call."""
 
     sched_meta: object
@@ -48,7 +48,7 @@ def _bf16_prefill_out_kernel():
     return flash_mla_sparse_fwd if _supports_out(flash_mla_sparse_fwd) else None
 
 
-def _with_row_axis(indices: torch.Tensor) -> torch.Tensor:
+def _as_flashmla_indices(indices: torch.Tensor) -> torch.Tensor:
     """FlashMLA reads top-k indices as [rows, 1, topk]."""
     return indices.unsqueeze(1) if indices.ndim == 2 else indices
 
@@ -82,7 +82,7 @@ def _bf16_prefill(q, kv, indices, softmax_scale, out):
 
 
 class FlashMLASparsePrefillBackend(
-    AttentionBackend[SparseMLALayerConfig, FlashMLASparsePrefillAttState, SparseMLAPrefillLayerInputs]
+    AttentionBackend[SparseMLALayerConfig, FlashMLASparsePrefillMetadata, SparseMLAPrefillLayerInputs]
 ):
     name = "flashmla_sparse_mla_prefill"
     phase = "prefill"
@@ -92,14 +92,14 @@ class FlashMLASparsePrefillBackend(
         if layer_config.kv_cache_format not in ("bf16", "fp8_ds_mla"):
             raise NotImplementedError(f"FlashMLA sparse prefill does not support {layer_config.kv_cache_format!r}")
 
-    def build(self, infer_state: InferStateInfo) -> FlashMLASparsePrefillAttState:
-        return FlashMLASparsePrefillAttState(
+    def build_att_metadata(self, infer_state: InferStateInfo) -> FlashMLASparsePrefillMetadata:
+        return FlashMLASparsePrefillMetadata(
             mem_index=infer_state.mem_index, has_cached_prefix=(infer_state.max_cache_len or 0) > 0
         )
 
     def forward(
         self,
-        att_state: FlashMLASparsePrefillAttState,
+        att_metadata: FlashMLASparsePrefillMetadata,
         layer_inputs: SparseMLAPrefillLayerInputs,
         *,
         out: Optional[torch.Tensor] = None,
@@ -117,23 +117,23 @@ class FlashMLASparsePrefillBackend(
         if config.kv_cache_format == "bf16":
             if out is None:
                 out = alloc_func(output_shape, dtype=q.dtype, device=q.device)
-            indices = _with_row_axis(layer_inputs.topk_mem_indices)
+            indices = _as_flashmla_indices(layer_inputs.topk_cache_indices)
             return _bf16_prefill(q, layer_inputs.kv_cache, indices, config.softmax_scale, out)
 
         from flash_mla import flash_mla_sparse_fwd
 
         current_kv = layer_inputs.current_kv
-        assert current_kv is not None and layer_inputs.topk_indices is not None
-        kv, indices = current_kv, layer_inputs.topk_indices
-        if att_state.has_cached_prefix:
+        assert current_kv is not None and layer_inputs.topk_ragged_indices is not None
+        kv, indices = current_kv, layer_inputs.topk_ragged_indices
+        if att_metadata.has_cached_prefix:
             from lightllm.common.basemodel.triton_kernel.kv_copy.prefill_compact_kv_flashmla_fp8 import (
                 get_prefill_kv_cache_and_remap_indices_triton,
             )
 
             kv, indices = get_prefill_kv_cache_and_remap_indices_triton(
                 packed_kv=layer_inputs.kv_cache,
-                topk_mem_indices=layer_inputs.topk_mem_indices,
-                prefill_mem_index=att_state.mem_index,
+                topk_mem_indices=layer_inputs.topk_cache_indices,
+                prefill_mem_index=att_metadata.mem_index,
                 prefill_cache_kv=current_kv,
                 prefill_dtype=current_kv.dtype,
             )
@@ -144,7 +144,7 @@ class FlashMLASparsePrefillBackend(
         result, _, _ = flash_mla_sparse_fwd(
             q=q,
             kv=kv,
-            indices=_with_row_axis(indices),
+            indices=_as_flashmla_indices(indices),
             sm_scale=config.softmax_scale,
             d_v=config.kv_lora_rank,
             **({"out": out} if supports_out else {}),
@@ -156,18 +156,18 @@ class FlashMLASparsePrefillBackend(
         return out
 
 
-class FlashMLASparseDecodeBackend(
-    AttentionBackend[SparseMLALayerConfig, FlashMLASparseDecodeAttState, SparseMLADecodeLayerInputs]
+class FP8SparseMLADecodeBackend(
+    AttentionBackend[SparseMLALayerConfig, FP8SparseMLADecodeMetadata, SparseMLADecodeLayerInputs]
 ):
-    """direct_decode_bound, when set, bounds the valid entries of every top-k row, which lets small
+    """direct_decode_topk_bound, when set, bounds the valid entries of every top-k row, which lets small
     CUDA graph steps over the "fp8_group64_e8m0" cache use a direct Triton kernel."""
 
-    name = "flashmla_sparse_mla_decode"
+    name = "fp8_sparse_mla_decode"
     phase = "decode"
 
     def __init__(self, layer_config: SparseMLALayerConfig) -> None:
         super().__init__(layer_config)
-        self.direct_decode_bound = self.group_key(layer_config)
+        self.direct_decode_topk_bound = self.metadata_config_key(layer_config)
         self._graph_sched_meta: dict[tuple[int, int], object] = {}
 
     @classmethod
@@ -176,14 +176,14 @@ class FlashMLASparseDecodeBackend(
             raise NotImplementedError("FlashMLA sparse decode supports only the packed FP8 caches")
 
     @classmethod
-    def group_key(cls, layer_config: SparseMLALayerConfig) -> Optional[int]:
+    def metadata_config_key(cls, layer_config: SparseMLALayerConfig) -> Optional[int]:
         """The direct decode bound: 2048 pooled entries plus at most three kpool remainder entries fit
         the 2112 rounded direct window."""
         if (layer_config.topk, layer_config.kpool) == (2048, 4):
             return layer_config.topk + layer_config.kpool - 1
         return None
 
-    def build(self, infer_state: InferStateInfo) -> FlashMLASparseDecodeAttState:
+    def build_att_metadata(self, infer_state: InferStateInfo) -> FP8SparseMLADecodeMetadata:
         """A CUDA graph step keeps the captured scheduler metadata per (microbatch, batch size)."""
         import flash_mla
 
@@ -194,11 +194,11 @@ class FlashMLASparseDecodeBackend(
             sched_meta = self._graph_sched_meta[key]
         else:
             sched_meta = flash_mla.get_mla_metadata()[0]
-        return FlashMLASparseDecodeAttState(sched_meta=sched_meta, uses_cuda_graph=infer_state.uses_cuda_graph)
+        return FP8SparseMLADecodeMetadata(sched_meta=sched_meta, uses_cuda_graph=infer_state.uses_cuda_graph)
 
     def forward(
         self,
-        att_state: FlashMLASparseDecodeAttState,
+        att_metadata: FP8SparseMLADecodeMetadata,
         layer_inputs: SparseMLADecodeLayerInputs,
         *,
         out: torch.Tensor,
@@ -209,7 +209,7 @@ class FlashMLASparseDecodeBackend(
 
         config, q_nope, packed = self.layer_config, layer_inputs.q_nope, layer_inputs.kv_cache
         assert q_nope.shape[1] == config.num_heads and q_nope.dtype == config.dtype, "q does not match the layer_config"
-        indices = _with_row_axis(layer_inputs.topk_mem_indices)
+        indices = _as_flashmla_indices(layer_inputs.topk_cache_indices)
         assert indices.shape[1] == 1, "FlashMLA sparse decode expects one query row per request"
         heads = q_nope.shape[1]
 
@@ -222,12 +222,12 @@ class FlashMLASparseDecodeBackend(
                 packed,
                 indices,
                 config.kv_lora_rank,
-                self.direct_decode_bound,
-                is_cuda_graph_capture=att_state.uses_cuda_graph,
+                self.direct_decode_topk_bound,
+                is_cuda_graph_capture=att_metadata.uses_cuda_graph,
             ):
                 fp8_group64_decode.fp8_sparse_direct_decode(q_nope, packed, indices, config.softmax_scale, out=out)
                 return out
-            q = pad_query_heads(q_nope, is_cuda_graph_capture=att_state.uses_cuda_graph)
+            q = pad_query_heads(q_nope, is_cuda_graph_capture=att_metadata.uses_cuda_graph)
         else:
             q = torch.cat([q_nope, layer_inputs.q_rope], dim=-1).unsqueeze(1).contiguous()
 
@@ -246,7 +246,7 @@ class FlashMLASparseDecodeBackend(
             block_table=None,
             cache_seqlens=None,
             head_dim_v=config.kv_lora_rank,
-            tile_scheduler_metadata=att_state.sched_meta,
+            tile_scheduler_metadata=att_metadata.sched_meta,
             softmax_scale=config.softmax_scale,
             causal=False,
             is_fp8_kvcache=True,

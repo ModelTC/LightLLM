@@ -59,23 +59,23 @@ def test_int8kv_decode_backend_rebuilds_diverse_metadata(monkeypatch):
     monkeypatch.setattr(diverse_utils, "get_diverse_max_batch_shared_group_size", lambda: 3)
     backend = _diverse_backend()
 
-    att_state = backend.build(_batch([8, 8, 5, 0], [10, 10, 20, -1]))
+    att_metadata = backend.build_att_metadata(_batch([8, 8, 5, 0], [10, 10, 20, -1]))
 
-    assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
-    assert att_state.b_shared_seq_len.cpu().tolist() == [8, 8, 0, 0]
+    assert att_metadata.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
+    assert att_metadata.b_shared_seq_len.cpu().tolist() == [8, 8, 0, 0]
 
 
 def test_int8kv_decode_backend_keeps_graph_metadata_per_microbatch_and_batch_size(monkeypatch):
     monkeypatch.setattr(diverse_utils, "get_diverse_max_batch_shared_group_size", lambda: 3)
     backend = _diverse_backend()
-    captured = backend.build(_batch([8, 8, 5, 0], [10, 10, 20, -1], graph_capacity=64))
-    replayed = backend.build(_batch([4, 4, 4, 4], [7, 7, 7, 9], graph_capacity=64))
+    captured = backend.build_att_metadata(_batch([8, 8, 5, 0], [10, 10, 20, -1], graph_capacity=64))
+    replayed = backend.build_att_metadata(_batch([4, 4, 4, 4], [7, 7, 7, 9], graph_capacity=64))
     # Replays rewrite the captured tensors in place, so the graph reads the new groups.
     assert replayed.b_mark_shared_group is captured.b_mark_shared_group
     assert replayed.b_shared_seq_len is captured.b_shared_seq_len
     assert captured.b_mark_shared_group.cpu().tolist() == [0, 0, 3, 1]
     assert captured.b_shared_seq_len.cpu().tolist() == [4, 4, 4, 0]
-    other = backend.build(_batch([8, 8, 5, 0], [10, 10, 20, -1], graph_capacity=64, microbatch_index=1))
+    other = backend.build_att_metadata(_batch([8, 8, 5, 0], [10, 10, 20, -1], graph_capacity=64, microbatch_index=1))
     assert other.b_mark_shared_group is not captured.b_mark_shared_group
-    eager = backend.build(_batch([8, 8, 5, 0], [10, 10, 20, -1]))
+    eager = backend.build_att_metadata(_batch([8, 8, 5, 0], [10, 10, 20, -1]))
     assert eager.b_mark_shared_group is not captured.b_mark_shared_group

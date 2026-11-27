@@ -20,8 +20,8 @@ class KDALayerConfig:
     """Static configuration of KDA layers, per rank.
 
     q, k and v each have num_heads heads of head_dim; conv_kernel_size is the conv width. Decay gates
-    are clamped below at lower_bound. state_mtp_step is the speculative depth of the state layout
-    (native SSM states keep state_mtp_step + 1 slots per request). replay=True selects replay state:
+    are clamped below at gate_lower_bound. state_draft_capacity is the speculative depth of the state layout
+    (native SSM states keep state_draft_capacity + 1 slots per request). use_ssm_replay=True selects SSM replay state:
     one SSM slot per request, and decode appends history to KDALayerInputs.replay_state. ssm_dtype is
     the dtype of the SSM state.
 
@@ -33,17 +33,17 @@ class KDALayerConfig:
     num_heads: int
     head_dim: int
     conv_kernel_size: int
-    lower_bound: float
+    gate_lower_bound: float
     dtype: torch.dtype
-    state_mtp_step: int = 0
-    replay: bool = False
+    state_draft_capacity: int = 0
+    use_ssm_replay: bool = False
     ssm_dtype: torch.dtype = torch.float32
     prefill_kernel: str = "triton"
 
     def __post_init__(self) -> None:
         require_positive(self, "num_heads", "head_dim", "conv_kernel_size")
-        if self.state_mtp_step < 0:
-            raise ValueError("state_mtp_step must be >= 0")
+        if self.state_draft_capacity < 0:
+            raise ValueError("state_draft_capacity must be >= 0")
         if self.prefill_kernel not in PREFILL_KERNELS:
             raise ValueError(f"prefill_kernel must be one of {PREFILL_KERNELS}, got {self.prefill_kernel!r}")
 
@@ -55,8 +55,8 @@ class KDALayerInputs:
     mixed_qkv is [tokens, 3 * num_heads * head_dim] before the conv; raw_gate [tokens, num_heads *
     head_dim] and raw_beta [tokens, num_heads] are the raw decay and beta inputs. conv_weight is the
     merged q/k/v conv weight, A_log and dt_bias the gate parameters. conv_states and ssm_states are the
-    layer's state views, updated in place; a replay-mode decode appends history through replay_state
-    and its storage layer for layer_num instead.
+    layer's state views, updated in place; a SSM replay decode appends history through replay_state
+    and its storage layer for logical_layer_id instead.
     """
 
     mixed_qkv: torch.Tensor
@@ -68,4 +68,4 @@ class KDALayerInputs:
     conv_states: torch.Tensor
     ssm_states: Optional[torch.Tensor] = None
     replay_state: Optional[object] = None
-    layer_num: Optional[int] = None
+    logical_layer_id: Optional[int] = None

@@ -10,7 +10,7 @@ import triton
 
 from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
 from lightllm.utils.envs_utils import get_env_start_args
-from .. import set_flashinfer_envs
+from .. import configure_flashinfer_jit_arch
 from . import GQALayerConfig, GQALayerInputs
 
 if TYPE_CHECKING:
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class FlashInferGQAAttState:
+class FlashInferGQAMetadata:
     """A wrapper planned for the step over the paged cache: NHD, packed and causal in prefill, tensor-core
     with one query per batch row in decode. Page index p addresses cache slots [p * page_size, (p + 1) * page_size).
     """
@@ -53,21 +53,21 @@ def _page_metadata(infer_state: InferStateInfo, page_size: int, kv_indices: torc
 
     # A partial final page still counts as one page.
     b_page_len = (infer_state.b_seq_len + (page_size - 1)) // page_size
-    kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
+    page_indptr, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
     kv_last_page_len = infer_state.b_seq_len - (b_page_len - 1) * page_size
     repack_kv_index(
         req_to_token_indexs=infer_state.req_to_token_indexs,
         b_req_idx=infer_state.b_req_idx,
         b_token_len=infer_state.b_seq_len,
-        b_page_start_loc=kv_starts[:-1],
+        b_page_start_loc=page_indptr[:-1],
         max_token_len=infer_state.max_kv_seq_len,
         out_page_indices=kv_indices,
         page_size=page_size,
     )
-    return kv_starts, kv_last_page_len
+    return page_indptr, kv_last_page_len
 
 
-class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQAAttState, GQALayerInputs]):
+class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQAMetadata, GQALayerInputs]):
     name = "flashinfer_gqa_prefill"
     phase = "prefill"
 
@@ -76,7 +76,7 @@ class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQA
         _check_gqa_config(layer_config)
 
     @classmethod
-    def group_key(cls, layer_config: GQALayerConfig):
+    def metadata_config_key(cls, layer_config: GQALayerConfig):
         # The wrappers are planned for these fields.
         c = layer_config
         return c.num_heads, c.num_kv_heads, c.head_dim, c.dtype, c.kv_quant
@@ -85,7 +85,7 @@ class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQA
         workspace_bytes = get_env_start_args().flashinfer_workspace_size * 1024 * 1024
         if workspace_bytes <= 0:
             raise ValueError("the FlashInfer workspace size (--flashinfer_workspace_size) must be positive")
-        set_flashinfer_envs()
+        configure_flashinfer_jit_arch()
         config = self.layer_config
         fp8 = config.kv_quant == "fp8_per_tensor"
         # TODO: use the cache's page size once FP8 FlashInfer supports multi-token pages.
@@ -95,10 +95,10 @@ class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQA
         self._plan_args = (config.num_heads, config.num_kv_heads, config.head_dim, self.page_size)
         self._dtypes = dict(q_data_type=config.dtype, kv_data_type=torch.float8_e4m3fn if fp8 else config.dtype)
         self.workspace = infer_state.attention_backend_manager.get_workspace(
-            "flashinfer_fp", workspace_bytes, torch.int8
+            "flashinfer_gqa", workspace_bytes, torch.int8
         )
 
-    def build(self, infer_state: InferStateInfo) -> FlashInferGQAAttState:
+    def build_att_metadata(self, infer_state: InferStateInfo) -> FlashInferGQAMetadata:
         """Build and plan a prefill wrapper for the step's packed queries and paged cache."""
         import flashinfer
 
@@ -106,17 +106,17 @@ class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQA
         kv_indices = torch.empty(
             infer_state.batch_size * self.max_pages_per_request, dtype=torch.int32, device=infer_state.b_seq_len.device
         )
-        kv_starts, kv_last_page_len = _page_metadata(infer_state, self.page_size, kv_indices)
+        page_indptr, kv_last_page_len = _page_metadata(infer_state, self.page_size, kv_indices)
         wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
             self.workspace,
             qo_indptr_buf=q_starts,
-            paged_kv_indptr_buf=kv_starts,
+            paged_kv_indptr_buf=page_indptr,
             paged_kv_indices_buf=kv_indices,
             paged_kv_last_page_len_buf=kv_last_page_len,
         )
         wrapper.plan(
             q_starts,
-            kv_starts,
+            page_indptr,
             kv_indices,
             kv_last_page_len,
             *self._plan_args,
@@ -125,11 +125,11 @@ class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQA
             logits_soft_cap=0.0,
             **self._dtypes,
         )
-        return FlashInferGQAAttState(wrapper=wrapper, page_size=self.page_size)
+        return FlashInferGQAMetadata(wrapper=wrapper, page_size=self.page_size)
 
     def forward(
         self,
-        att_state: FlashInferGQAAttState,
+        att_metadata: FlashInferGQAMetadata,
         layer_inputs: GQALayerInputs,
         *,
         out: torch.Tensor,
@@ -137,7 +137,7 @@ class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQA
     ) -> torch.Tensor:
         """Fill and return out with q's shape, dtype and device.
 
-        Q/out are contiguous FP16/BF16 tensors on the device of the cache and att_state. Cache slots
+        Q/out are contiguous FP16/BF16 tensors on the device of the cache and att_metadata. Cache slots
         form complete pages; the slot stride may include padding (including K/V slices of shared
         storage). Q/K/V are read-only; out must not overlap them or the attention state's buffers. Scratch is
         the planned wrapper's workspace, so forward does not call alloc_func. Decode has one query per
@@ -149,12 +149,12 @@ class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQA
             config.kv_quant is not None
         ), "kv_scales must be given exactly when the layer_config has kv_quant"
         k, v = layer_inputs.k_cache, layer_inputs.v_cache
-        k = k.view(-1, att_state.page_size, k.shape[1], k.shape[2])
-        v = v.view(-1, att_state.page_size, v.shape[1], v.shape[2])
+        k = k.view(-1, att_metadata.page_size, k.shape[1], k.shape[2])
+        v = v.view(-1, att_metadata.page_size, v.shape[1], v.shape[2])
         if scales is None:
-            att_state.wrapper.run(q=layer_inputs.q, paged_kv_cache=(k, v), out=out)
+            att_metadata.wrapper.run(q=layer_inputs.q, paged_kv_cache=(k, v), out=out)
         else:
-            att_state.wrapper.run(
+            att_metadata.wrapper.run(
                 q=layer_inputs.q,
                 paged_kv_cache=(k.view(torch.float8_e4m3fn), v.view(torch.float8_e4m3fn)),
                 k_scale=scales.k_scale,
@@ -171,14 +171,14 @@ class FlashInferGQADecodeBackend(FlashInferGQAPrefillBackend):
     def init_runtime(self, infer_state: InferStateInfo) -> None:
         """Keep one page-index buffer per microbatch for batches of up to the CUDA graph batch size."""
         super().init_runtime(infer_state)
-        self.max_batch_size = infer_state.max_cuda_graph_batch_size
-        numel = self.max_batch_size * self.max_pages_per_request
-        self._kv_indices = [
+        self.max_graph_batch_size = infer_state.max_cuda_graph_batch_size
+        numel = self.max_graph_batch_size * self.max_pages_per_request
+        self._page_indices = [
             torch.empty(numel, dtype=torch.int32, device=infer_state.b_seq_len.device) for _ in range(2)
         ]
         self._graph_wrappers: dict[tuple[int, int], tuple] = {}
 
-    def build(self, infer_state: InferStateInfo) -> FlashInferGQAAttState:
+    def build_att_metadata(self, infer_state: InferStateInfo) -> FlashInferGQAMetadata:
         """Build the attention state, planning FlashInfer's decode wrapper for this step.
 
         Each row is planned as its own request, so speculative decode rows need no regrouping. A
@@ -189,20 +189,20 @@ class FlashInferGQADecodeBackend(FlashInferGQAPrefillBackend):
         import flashinfer
         from flashinfer.decode import fast_decode_plan
 
-        page_ids = infer_state.batch_size * self.max_pages_per_request
-        if infer_state.batch_size <= self.max_batch_size:
-            kv_indices = self._kv_indices[infer_state.microbatch_index][:page_ids]
+        page_indices_capacity = infer_state.batch_size * self.max_pages_per_request
+        if infer_state.batch_size <= self.max_graph_batch_size:
+            kv_indices = self._page_indices[infer_state.microbatch_index][:page_indices_capacity]
         else:
             # Captured wrappers must read the fixed per-microbatch buffer.
             assert not infer_state.uses_cuda_graph, "CUDA graph batches must fit the page-index buffers"
-            kv_indices = torch.empty(page_ids, dtype=torch.int32, device=infer_state.b_seq_len.device)
-        kv_starts, kv_last_page_len = _page_metadata(infer_state, self.page_size, kv_indices)
+            kv_indices = torch.empty(page_indices_capacity, dtype=torch.int32, device=infer_state.b_seq_len.device)
+        page_indptr, kv_last_page_len = _page_metadata(infer_state, self.page_size, kv_indices)
 
         key = (infer_state.microbatch_index, infer_state.batch_size)
         captured = self._graph_wrappers.get(key) if infer_state.uses_cuda_graph else None
         if captured is not None:
             wrapper, captured_starts, captured_last_page_len = captured
-            captured_starts.copy_(kv_starts)
+            captured_starts.copy_(page_indptr)
             captured_last_page_len.copy_(kv_last_page_len)
             pages_per_request = triton.cdiv(infer_state.max_kv_seq_len, self.page_size)
             uniform_kv_indptr_cpu = (
@@ -218,18 +218,18 @@ class FlashInferGQADecodeBackend(FlashInferGQAPrefillBackend):
                 non_blocking=True,
                 global_override_indptr_cpu=uniform_kv_indptr_cpu,
             )
-            return FlashInferGQAAttState(wrapper=wrapper, page_size=self.page_size)
+            return FlashInferGQAMetadata(wrapper=wrapper, page_size=self.page_size)
 
         wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
             self.workspace,
             "NHD",
             use_cuda_graph=True,
             use_tensor_cores=True,
-            paged_kv_indptr_buffer=kv_starts,
+            paged_kv_indptr_buffer=page_indptr,
             paged_kv_indices_buffer=kv_indices,
             paged_kv_last_page_len_buffer=kv_last_page_len,
         )
-        wrapper.plan(kv_starts, kv_indices, kv_last_page_len, *self._plan_args, **self._dtypes, non_blocking=True)
+        wrapper.plan(page_indptr, kv_indices, kv_last_page_len, *self._plan_args, **self._dtypes, non_blocking=True)
         if infer_state.uses_cuda_graph:
-            self._graph_wrappers[key] = (wrapper, kv_starts, kv_last_page_len)
-        return FlashInferGQAAttState(wrapper=wrapper, page_size=self.page_size)
+            self._graph_wrappers[key] = (wrapper, page_indptr, kv_last_page_len)
+        return FlashInferGQAMetadata(wrapper=wrapper, page_size=self.page_size)

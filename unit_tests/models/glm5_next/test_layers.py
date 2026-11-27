@@ -8,10 +8,10 @@ import torch
 import torch.nn.functional as F
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend, FA3SparseMLADecodeAttState
+from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend, FA3SparseMLADecodeMetadata
 from lightllm.common.attention.backends.sparse_mla.flashmla import (
     FlashMLASparsePrefillBackend,
-    FlashMLASparsePrefillAttState,
+    FlashMLASparsePrefillMetadata,
 )
 from lightllm.common.attention import selector
 from lightllm.common.quantization import Quantcfg
@@ -180,7 +180,7 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     state.att_state_manager = SimpleNamespace(
         get_state=lambda **kwargs: SimpleNamespace(get_layer_view=lambda logical_layer_id: SimpleNamespace(kv=kv))
     )
-    state.nsa_step = SimpleNamespace(q_kv_start_loc=None)
+    state.nsa_metadata = SimpleNamespace(q_kv_start_loc=None)
     state.b1_cu_q_seq_len = torch.arange(4, device="cuda", dtype=torch.int32)
     state.max_q_seq_len = 1
 
@@ -195,8 +195,8 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     backends = {"prefill": prefill, "decode": decode}
     state.attention_backend_manager = SimpleNamespace(get_backend=lambda role, phase, layer_id: backends[phase])
     # The attention state the group's backends would build for this batch.
-    prefill_att_state = FlashMLASparsePrefillAttState(mem_index=None, has_cached_prefix=False)
-    decode_att_state = FA3SparseMLADecodeAttState(
+    prefill_att_state = FlashMLASparsePrefillMetadata(mem_index=None, has_cached_prefix=False)
+    decode_att_state = FA3SparseMLADecodeMetadata(
         cache_seqlens=lengths,
         cu_seqlens_q=state.b1_cu_q_seq_len,
         cu_seqlens_k=F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0)),
@@ -210,10 +210,10 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
         scores = projected[row].float() @ keys.T * config["qk_nope_head_dim"] ** -0.5
         expected.append(scores.softmax(-1) @ keys)
     expected = torch.stack(expected)
-    state.att_states = {prefill.state_key: prefill_att_state}
+    state.att_metadata = {prefill.metadata_group_key: prefill_att_state}
     prefill = layer._context_attention_kernel(q, None, state, weight)
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
-    state.att_states = {decode.state_key: decode_att_state}
+    state.att_metadata = {decode.metadata_group_key: decode_att_state}
     decode = layer._token_attention_kernel(q, state, weight)
     for output in (prefill, decode):
         torch.testing.assert_close(output.float(), expected, atol=1e-3, rtol=0.015)
@@ -379,7 +379,7 @@ def test_mtp_pre_layer_applies_main_norm_before_hidden_fusion(config, monkeypatc
         main_norm_weight_=norms[0],
         enorm_weight_=norms[1],
         hnorm_weight_=norms[2],
-        eh_proj_weight_=SimpleNamespace(mm=lambda x: x @ projection),
+        eh_proj_weight_=SimpleNamespace(mm=lambda input_tensor: input_tensor @ projection),
     )
     state = SimpleNamespace(mtp_draft_input_hiddens=hidden.clone())
     monkeypatch.setattr(LlamaMultimodalPreLayerInfer, method, lambda self, ids, state, weight: embeddings.clone())

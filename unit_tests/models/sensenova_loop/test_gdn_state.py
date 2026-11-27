@@ -43,7 +43,7 @@ def test_gdn_decode_keeps_logical_layer_state(
     layers = tuple(i for i, kind in enumerate(kinds) if kind == "linear_attention")
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
     # The GDN layers' attention: Triton prefill and decode over native state.
-    layer_config = GDNLayerConfig(1, 2, 32, 32, 4, "silu", dtype, state_mtp_step=mtp_step)
+    layer_config = GDNLayerConfig(1, 2, 32, 32, 4, "silu", dtype, state_draft_capacity=mtp_step)
     prefill_backend = selector.select(layer_config, "prefill", "triton")
     decode_backend = selector.select(layer_config, "decode", "triton")
     layout = ConvSSMStateConfig(layers, 1, 2, 32, 32, 3, dtype, torch.float32)
@@ -121,7 +121,7 @@ def test_gdn_decode_keeps_logical_layer_state(
 
     def build_attention_states(backend):
         # The attention state the layers' group prepares for this step.
-        infer.att_states = {backend.state_key: backend.create_att_state(infer)}
+        infer.att_metadata = {backend.metadata_group_key: backend.create_att_metadata(infer)}
 
     if device == "cuda":
         infer.b1_cu_q_seq_len = torch.tensor([0, 5], device=device, dtype=torch.int32)
@@ -134,7 +134,7 @@ def test_gdn_decode_keeps_logical_layer_state(
     infer.batch_size = mtp_step + 1
     infer.b_req_idx = infer.b_req_idx.repeat(infer.batch_size)
     infer.is_prefill = False
-    infer.decode_rows_per_request = mtp_step + 1
+    infer.max_decode_rows_per_request = mtp_step + 1
     infer.req_to_mtp_state_index = resource.mtp_state_index if mtp_step else None
     infer.b_seq_len = torch.ones_like(infer.b_req_idx)
     untouched = [i for i in range(len(layers)) if i != storage_layer]

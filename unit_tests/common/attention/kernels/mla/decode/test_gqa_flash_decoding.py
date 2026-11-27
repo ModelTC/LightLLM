@@ -54,7 +54,7 @@ def test_gqa_flash_decoding(batch, seqlen, heads, nope_head, rope_head):
     )
     backend = TritonMLADecodeBackend(layer_config)
     # Every request has N_CTX tokens, so the eager tuning length (the average) is N_CTX.
-    att_state = backend.build(
+    att_state = backend.build_att_metadata(
         make_infer_state(
             req_to_token_indexs=req_to_token_indexs,
             b_req_idx=b_req_idx,

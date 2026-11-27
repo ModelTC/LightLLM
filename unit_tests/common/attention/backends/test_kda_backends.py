@@ -9,11 +9,11 @@ import pytest
 import torch
 
 from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
-from lightllm.common.attention.backends.kda.triton import (
+from lightllm.common.attention.backends.kda.recurrent import (
     ReplayKDADecodeBackend,
     ReplayKDAPrefillBackend,
     TritonKDADecodeBackend,
-    TritonKDAPrefillBackend,
+    KDAPrefillBackend,
 )
 from unit_tests.common.attention.backends.linear_ref import CAPACITY, KDAShape, kda_token, run_prefill_then_decode
 
@@ -34,7 +34,7 @@ class KDAFamily:
     def __init__(self, mtp_step):
         self.shape = KDAShape()
         s = self.shape
-        self.config = KDALayerConfig(s.h, s.d, s.width, s.lower_bound, torch.bfloat16, state_mtp_step=mtp_step)
+        self.config = KDALayerConfig(s.h, s.d, s.width, s.lower_bound, torch.bfloat16, state_draft_capacity=mtp_step)
         self.params = {
             "conv_weight": torch.randn(s.conv_channels, s.width, device="cuda").mul_(0.3).bfloat16(),
             "A_log": torch.randn(s.h, device="cuda").mul_(0.5),
@@ -79,7 +79,7 @@ class KDAFamily:
             conv_states=conv,
             ssm_states=ssm,
             replay_state=replay_state,
-            layer_num=0,
+            logical_layer_id=0,
         )
 
     def alloc_out(self, rows):
@@ -102,8 +102,8 @@ PREFILL_KERNELS = [
 def test_kda_prefill_then_speculative_decode_matches_reference(prefill, replay, mtp_step, dynamic):
     torch.manual_seed(13)
     family = KDAFamily(mtp_step)
-    family.config = dataclasses.replace(family.config, replay=replay)
-    prefill_cls = ReplayKDAPrefillBackend if replay else TritonKDAPrefillBackend
+    family.config = dataclasses.replace(family.config, use_ssm_replay=replay)
+    prefill_cls = ReplayKDAPrefillBackend if replay else KDAPrefillBackend
     decode_cls = ReplayKDADecodeBackend if replay else TritonKDADecodeBackend
     run_prefill_then_decode(
         family,

@@ -86,7 +86,7 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
     layer_config = GQALayerConfig(
         num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=dtype, sliding_window=window
     )
-    att_state = TritonGQAPrefillBackend(layer_config).build(
+    att_metadata = TritonGQAPrefillBackend(layer_config).build_att_metadata(
         make_batch(
             token_map,
             req_ids,
@@ -98,7 +98,7 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
     )
     out = torch.empty(q.shape[0], q_heads + 1, 64, device=q.device, dtype=q.dtype)[:, :q_heads]
     backend = TritonGQAPrefillBackend(layer_config)
-    assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
+    assert backend.forward(att_metadata, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k, v, token_map, req_ids, lengths, ready, window), atol=0.02, rtol=0.02
     )
@@ -112,11 +112,12 @@ def test_prefill_decode(dtype, q_heads, kv_heads, window, cached):
         lengths += 1
         q = torch.randn(3, q_heads + 1, 64, device="cuda", dtype=dtype)[:, :q_heads]
         q_before = q.clone()
-        att_state = _decode_backend().build(make_batch(token_map, req_ids, lengths))
+        att_metadata = _decode_backend().build_att_metadata(make_batch(token_map, req_ids, lengths))
         out = torch.empty(3, q_heads + 1, 64, device=q.device, dtype=q.dtype)[:, :q_heads]
         backend = TritonGQADecodeBackend(layer_config)
         assert (
-            backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out, alloc_func=allocate) is out
+            backend.forward(att_metadata, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out, alloc_func=allocate)
+            is out
         )
         torch.testing.assert_close(
             out.float(),
@@ -144,7 +145,7 @@ def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
     # capture raises max_kv_seq_len to the graph capacity only afterwards.
     owner.graph_mode = GraphMode.CAPTURE
     owner.cuda_graph_max_kv_seq_len = 512
-    att_state = backend.build(owner)
+    att_metadata = backend.build_att_metadata(owner)
     owner.max_kv_seq_len = 512
     q = torch.randn(2, q_heads, 64, device="cuda", dtype=torch.bfloat16)
     kv = torch.randn(1024, 2 * kv_heads, 64, device="cuda", dtype=q.dtype)
@@ -152,7 +153,7 @@ def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
 
     def forward() -> torch.Tensor:
         out = allocator(q.shape, dtype=q.dtype, device=q.device)
-        return backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out, alloc_func=allocator)
+        return backend.forward(att_metadata, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out, alloc_func=allocator)
 
     forward()
     torch.cuda.synchronize()
@@ -166,7 +167,7 @@ def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
         expected = reference(q, k, v, token_map, owner.b_req_idx, owner.b_seq_len, [x - 1 for x in lengths], (-1, -1))
         torch.testing.assert_close(actual.float(), expected, atol=0.02, rtol=0.02)
     # The attention state keep the capture step's actual length as the config hint and the capacity as the bound.
-    assert (att_state.max_kv_seq_len, att_state.kv_seq_len_bound) == (33, 512)
+    assert (att_metadata.max_kv_seq_len, att_metadata.kv_seq_len_bound) == (33, 512)
     # Attention state do not keep the step's InferStateInfo alive.
     owner_ref = weakref.ref(owner)
     del owner
@@ -184,9 +185,11 @@ def test_list_sliding_window_matches_tuple():
     token_map = torch.arange(64, device="cuda", dtype=torch.int32).view(2, 32)
     lengths = torch.tensor([5, 9], device="cuda", dtype=torch.int32)
     req_ids = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
-    att_state = _decode_backend().build(make_batch(token_map, req_ids, lengths))
+    att_metadata = _decode_backend().build_att_metadata(make_batch(token_map, req_ids, lengths))
     backend = TritonGQADecodeBackend(layer_config)
-    out = backend.forward(att_state, GQALayerInputs(q=q, k_cache=kv[:, :4], v_cache=kv[:, 4:]), out=torch.empty_like(q))
+    out = backend.forward(
+        att_metadata, GQALayerInputs(q=q, k_cache=kv[:, :4], v_cache=kv[:, 4:]), out=torch.empty_like(q)
+    )
     expected = reference(q, kv[:, :4], kv[:, 4:], token_map, req_ids, lengths, [4, 8], (-1, -1))
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
 
@@ -212,8 +215,8 @@ def test_graph_decode_bounds_lengths_by_capacity():
     req_ids = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
     token_map = torch.zeros(2, 512, device="cuda", dtype=torch.int32)
     backend = _decode_backend()
-    eager = backend.build(make_batch(token_map, req_ids, lengths))
-    graph = backend.build(make_batch(token_map, req_ids, lengths, cuda_graph_max_kv_seq_len=512))
+    eager = backend.build_att_metadata(make_batch(token_map, req_ids, lengths))
+    graph = backend.build_att_metadata(make_batch(token_map, req_ids, lengths, cuda_graph_max_kv_seq_len=512))
     assert (eager.kv_seq_len_bound, eager.max_kv_seq_len) == (33, 33)
     assert (graph.kv_seq_len_bound, graph.max_kv_seq_len) == (512, 33)
 
@@ -270,14 +273,16 @@ def test_speculative_decode_rows_share_request_kv(q_heads, kv_heads, window, hea
     kv = torch.randn(8 * 512, 2 * kv_heads, head_dim, device="cuda", dtype=torch.bfloat16)
     k, v = kv[:, :kv_heads], kv[:, kv_heads:]
     q = torch.randn(6, q_heads, head_dim, device="cuda", dtype=torch.bfloat16)
-    batch = make_batch(token_map, req_ids, lengths, b1_cu_kv_seq_len=None, decode_rows_per_request=2, pad_req_idx=pad)
-    att_state = _decode_backend().build(batch)
-    assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 0, 2, 1, 1]
+    batch = make_batch(
+        token_map, req_ids, lengths, b1_cu_kv_seq_len=None, max_decode_rows_per_request=2, pad_req_idx=pad
+    )
+    att_metadata = _decode_backend().build_att_metadata(batch)
+    assert att_metadata.b_mark_shared_group.cpu().tolist() == [0, 2, 0, 2, 1, 1]
     layer_config = GQALayerConfig(
         num_heads=q_heads, num_kv_heads=kv_heads, head_dim=head_dim, dtype=torch.bfloat16, sliding_window=window
     )
     out = torch.empty_like(q)
-    TritonGQADecodeBackend(layer_config).forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out)
+    TritonGQADecodeBackend(layer_config).forward(att_metadata, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out)
     expected = reference(q, k, v, token_map, req_ids, lengths, (lengths - 1).tolist(), window)
     torch.testing.assert_close(out[:4].float(), expected[:4], atol=0.02, rtol=0.02)
 
@@ -289,8 +294,8 @@ def test_speculative_decode_groups_are_kept_per_microbatch_and_batch_size():
 
     def build(req_ids, **kwargs):
         req_ids = torch.tensor(req_ids, device="cuda", dtype=torch.int32)
-        batch = make_batch(token_map, req_ids, lengths, decode_rows_per_request=2, pad_req_idx=7, **kwargs)
-        return backend.build(batch)
+        batch = make_batch(token_map, req_ids, lengths, max_decode_rows_per_request=2, pad_req_idx=7, **kwargs)
+        return backend.build_att_metadata(batch)
 
     captured = build([1, 1, 2, 2], cuda_graph_max_kv_seq_len=512)
     assert captured.b_mark_shared_group.cpu().tolist() == [0, 2, 0, 2]
@@ -343,7 +348,7 @@ def test_alibi_prefill_and_decode_match_reference():
     )
     out = torch.empty_like(q)
     TritonGQAPrefillBackend(layer_config).forward(
-        TritonGQAPrefillBackend(layer_config).build(batch),
+        TritonGQAPrefillBackend(layer_config).build_att_metadata(batch),
         GQALayerInputs(q=q, k_cache=k, v_cache=v, alibi_slopes=slopes),
         out=out,
     )
@@ -352,10 +357,10 @@ def test_alibi_prefill_and_decode_match_reference():
 
     q = torch.randn(3, heads, 64, device="cuda", dtype=torch.bfloat16)
     cu_kv = torch.tensor([0, *lengths.tolist()], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
-    att_state = _decode_backend().build(make_batch(token_map, req_ids, lengths, b1_cu_kv_seq_len=cu_kv))
+    att_metadata = _decode_backend().build_att_metadata(make_batch(token_map, req_ids, lengths, b1_cu_kv_seq_len=cu_kv))
     out = torch.empty_like(q)
     TritonGQADecodeBackend(layer_config).forward(
-        att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, alibi_slopes=slopes), out=out
+        att_metadata, GQALayerInputs(q=q, k_cache=k, v_cache=v, alibi_slopes=slopes), out=out
     )
     expected = alibi_reference(q, k, v, token_map, req_ids, lengths, (lengths - 1).tolist(), slopes)
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
@@ -439,7 +444,7 @@ def test_bidirectional_image_spans_prefill_matches_reference(window, head_dim, s
     )
     out = torch.empty_like(q)
     TritonGQAPrefillBackend(layer_config).forward(
-        TritonGQAPrefillBackend(layer_config).build(batch),
+        TritonGQAPrefillBackend(layer_config).build_att_metadata(batch),
         GQALayerInputs(q=q, k_cache=k, v_cache=v),
         out=out,
     )

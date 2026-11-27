@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class TritonMLAPrefillAttState:
+class TritonMLAPrefillMetadata:
     """Packed prefill: request i's queries start at b_q_start_loc[i], its keys and values at
     cu_kv_seq_len[i], and b_ready_cache_len[i] of its b_seq_len[i] keys were cached before the step."""
 
@@ -34,7 +34,7 @@ class TritonMLAPrefillAttState:
 
 
 @dataclass(frozen=True)
-class TritonMLADecodeAttState:
+class TritonMLADecodeMetadata:
     """At decode, request i reads physical slots req_to_token_indexs[b_req_idx[i], :b_seq_len[i]].
 
     The split schedule was built for the layer config's head count, latent/rotary dims and dtype.
@@ -46,7 +46,7 @@ class TritonMLADecodeAttState:
     schedule: "MLADecodeSchedule"
 
 
-class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, TritonMLAPrefillAttState, MLAPrefillLayerInputs]):
+class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, TritonMLAPrefillMetadata, MLAPrefillLayerInputs]):
     name = "triton_mla_prefill"
     phase = "prefill"
 
@@ -55,8 +55,8 @@ class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, TritonMLAP
         if not layer_config.causal:
             raise NotImplementedError("Triton MLA prefill supports only causal attention")
 
-    def build(self, infer_state: InferStateInfo) -> TritonMLAPrefillAttState:
-        return TritonMLAPrefillAttState(
+    def build_att_metadata(self, infer_state: InferStateInfo) -> TritonMLAPrefillMetadata:
+        return TritonMLAPrefillMetadata(
             b_q_start_loc=infer_state.b_q_start_loc,
             cu_kv_seq_len=infer_state.b1_cu_kv_seq_len,
             b_seq_len=infer_state.b_seq_len,
@@ -66,7 +66,7 @@ class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, TritonMLAP
 
     def forward(
         self,
-        att_state: TritonMLAPrefillAttState,
+        att_metadata: TritonMLAPrefillMetadata,
         layer_inputs: MLAPrefillLayerInputs,
         *,
         out: torch.Tensor,
@@ -96,11 +96,11 @@ class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, TritonMLAP
                 expand_mla_keys(layer_inputs, alloc_func),
                 layer_inputs.v,
                 out,
-                att_state.b_q_start_loc,
-                att_state.cu_kv_seq_len,
-                att_state.b_seq_len,
-                att_state.max_q_seq_len,
-                att_state.b_ready_cache_len,
+                att_metadata.b_q_start_loc,
+                att_metadata.cu_kv_seq_len,
+                att_metadata.b_seq_len,
+                att_metadata.max_q_seq_len,
+                att_metadata.b_ready_cache_len,
                 softmax_scale=config.softmax_scale,
             )
         else:
@@ -115,17 +115,17 @@ class TritonMLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, TritonMLAP
                 k_rope=layer_inputs.k_rope,
                 v=layer_inputs.v,
                 o=out,
-                b_start_loc=att_state.b_q_start_loc,
-                b_kv_start_loc=att_state.cu_kv_seq_len,
-                b_seq_len=att_state.b_seq_len,
-                b_prompt_cache_len=att_state.b_ready_cache_len,
-                max_input_len=att_state.max_q_seq_len,
+                b_start_loc=att_metadata.b_q_start_loc,
+                b_kv_start_loc=att_metadata.cu_kv_seq_len,
+                b_seq_len=att_metadata.b_seq_len,
+                b_prompt_cache_len=att_metadata.b_ready_cache_len,
+                max_input_len=att_metadata.max_q_seq_len,
                 softmax_scale=config.softmax_scale,
             )
         return out
 
 
-class TritonMLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, TritonMLADecodeAttState, MLADecodeLayerInputs]):
+class TritonMLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, TritonMLADecodeMetadata, MLADecodeLayerInputs]):
     name = "triton_mla_decode"
     phase = "decode"
 
@@ -140,12 +140,12 @@ class TritonMLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, TritonMLADec
             raise NotImplementedError("Triton MLA decode supports only causal attention")
 
     @classmethod
-    def group_key(cls, layer_config: MLADecodeLayerConfig):
+    def metadata_config_key(cls, layer_config: MLADecodeLayerConfig):
         # The split schedule's kernel config depends on these.
         c = layer_config
         return c.num_heads, c.kv_lora_rank, c.qk_rope_head_dim, c.dtype
 
-    def build(self, infer_state: InferStateInfo) -> TritonMLADecodeAttState:
+    def build_att_metadata(self, infer_state: InferStateInfo) -> TritonMLADecodeMetadata:
         """Compute the split schedule from the current b_seq_len, shared by every layer of the step.
 
         A CUDA graph step reuses one schedule per (microbatch, batch size) and rewrites it in place, so
@@ -178,7 +178,7 @@ class TritonMLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, TritonMLADec
             if infer_state.uses_cuda_graph:
                 self._graph_schedules[key] = schedule
 
-        return TritonMLADecodeAttState(
+        return TritonMLADecodeMetadata(
             req_to_token_indexs=infer_state.req_to_token_indexs,
             b_req_idx=infer_state.b_req_idx,
             b_seq_len=infer_state.b_seq_len,
@@ -187,7 +187,7 @@ class TritonMLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, TritonMLADec
 
     def forward(
         self,
-        att_state: TritonMLADecodeAttState,
+        att_metadata: TritonMLADecodeMetadata,
         layer_inputs: MLADecodeLayerInputs,
         *,
         out: torch.Tensor,
@@ -211,11 +211,11 @@ class TritonMLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, TritonMLADec
             q_rope=q_rope,
             kv_nope=kv[:, :, :rank],
             kv_rope=kv[:, :, rank:],
-            req_to_token_indexs=att_state.req_to_token_indexs,
-            b_req_idx=att_state.b_req_idx,
-            b_seq_len=att_state.b_seq_len,
+            req_to_token_indexs=att_metadata.req_to_token_indexs,
+            b_req_idx=att_metadata.b_req_idx,
+            b_seq_len=att_metadata.b_seq_len,
             softmax_scale=config.softmax_scale,
-            schedule=att_state.schedule,
+            schedule=att_metadata.schedule,
             out=out,
             alloc_tensor_func=alloc_func,
         )

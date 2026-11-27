@@ -69,7 +69,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             conv_states=conv_states,
             ssm_states=ssm_states,
             replay_state=state,
-            layer_num=self.layer_num_,
+            logical_layer_id=self.layer_num_,
         )
 
     def _gdn_attention(
@@ -84,7 +84,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
                 (z.shape[0], self.tp_linear_num_v_heads, self.linear_head_v_dim), dtype=z.dtype, device=z.device
             )
         return backend.forward(
-            infer_state.att_states[backend.state_key],
+            infer_state.att_metadata[backend.metadata_group_key],
             inputs,
             out=out,
             alloc_func=self.alloc_tensor,
@@ -255,7 +255,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         _o = tensor_to_no_ref_tensor(o)
 
         def gdn_prefill_func(new_infer_state: "Qwen3NextInferStateInfo"):
-            # 通过 new_infer_state.att_states 读取 model._create_inferstate() 为本步构造的
+            # 通过 new_infer_state.att_metadata 读取 model._create_inferstate() 为本步构造的
             # attention state（含 padding 请求的 buffer idx），而不是 capture 时的 attention state。
             inputs = self._gdn_layer_inputs(_mixed_qkvzba, new_infer_state, layer_weight)
             self._gdn_attention(inputs, new_infer_state, prefill=True, out=_o)
@@ -273,13 +273,13 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_config = GDNLayerConfig(
             num_k_heads=config["linear_num_key_heads"] // tp_world_size,
             num_v_heads=config["linear_num_value_heads"] // tp_world_size,
-            head_k_dim=config["linear_key_head_dim"],
-            head_v_dim=config["linear_value_head_dim"],
-            conv_kernel_dim=config["linear_conv_kernel_dim"],
+            k_head_dim=config["linear_key_head_dim"],
+            v_head_dim=config["linear_value_head_dim"],
+            conv_kernel_size=config["linear_conv_kernel_dim"],
             activation=config["hidden_act"],
             dtype=model.data_type,
-            state_mtp_step=model.args.mtp_step,
-            replay=model.args.ssm_state_mode == "replay",
+            state_draft_capacity=model.args.mtp_step,
+            use_ssm_replay=model.args.ssm_state_mode == "replay",
         )
         return LayerAttentionConfig(layer_config, layer_config)
 

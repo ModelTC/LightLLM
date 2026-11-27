@@ -7,8 +7,8 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeAttState, FA3GQAPrefillAttState
-from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQAAttState
+from lightllm.common.attention.backends.gqa.fa3 import FA3DecodeMetadata, FA3GQAPrefillMetadata
+from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQAMetadata
 from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
@@ -71,9 +71,9 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
 
         monkeypatch.setattr(q_per_head_fp8_quant, "q_per_head_static_fp8_quant", quantize)
         monkeypatch.setattr(sgl_utils, "flash_attn_with_kvcache", attend)
-        att_state_cls = FA3GQAPrefillAttState if operation == "prefill" else FA3GQADecodeAttState
+        metadata_cls = FA3GQAPrefillMetadata if operation == "prefill" else FA3DecodeMetadata
         extra = {} if operation == "prefill" else {"max_seqlen_k": 1}
-        att_state = att_state_cls(
+        att_metadata = metadata_cls(
             page_table=None,
             cache_seqlens=infer.b_seq_len,
             cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
@@ -96,7 +96,7 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
             calls.append(operation)
             out.copy_(q)
 
-        att_state = FlashInferGQAAttState(wrapper=SimpleNamespace(run=run), page_size=1)
+        att_metadata = FlashInferGQAMetadata(wrapper=SimpleNamespace(run=run), page_size=1)
         kv_type = "fp8kv_spt"
 
     # The layer creates its attention as the model loads it: kv_quant and the static q scale come
@@ -135,7 +135,7 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     infer.attention_backend_manager = AttentionBackendManager()
     infer.attention_backend_manager.register_backends(model)
     backend = infer.attention_backend_manager.get_backend(role, operation, logical_layer_id)
-    infer.att_states = {backend.state_key: att_state}
+    infer.att_metadata = {backend.metadata_group_key: att_metadata}
     q = torch.ones((1, state.config.head_num, state.config.head_dim), dtype=torch.bfloat16)
     if operation == "prefill":
         output = layer._context_attention_kernel(

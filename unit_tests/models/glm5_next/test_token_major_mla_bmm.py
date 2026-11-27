@@ -27,8 +27,8 @@ def make_projection(layer, heads: int, inner: int, cols: int, dtype: torch.dtype
             att_state_role="main",
             att_state_manager=Mock(),
             attention_backend_manager=SimpleNamespace(get_backend=lambda role, phase, layer_id: backend),
-            att_states={backend.state_key: None},
-            nsa_step=SimpleNamespace(q_kv_start_loc=None),
+            att_metadata={backend.metadata_group_key: None},
+            nsa_metadata=SimpleNamespace(q_kv_start_loc=None),
         )
         weight = SimpleNamespace(k_b_proj_=projection)
 

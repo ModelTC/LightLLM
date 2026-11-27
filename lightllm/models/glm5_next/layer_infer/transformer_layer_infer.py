@@ -96,7 +96,10 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             causal=False,
         )
         return LayerAttentionConfig(
-            config, config, prefill_backend_name="flashmla_sparse", decode_backend_name="flashmla_sparse"
+            config,
+            config,
+            prefill_backend_name="fa3" if config.kv_cache_format == "fp8_group64_e8m0" else "flashmla",
+            decode_backend_name="flashmla" if config.kv_cache_format == "fp8_group64_e8m0" else "fa3",
         )
 
     def _att_norm(self, input, infer_state, layer_weight):
@@ -237,21 +240,21 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         # Write [tokens, heads, latent] directly for sparse prefill attention.
         layer_weight.k_b_proj_.bmm(q.transpose(0, 1), out=q_nope.transpose(0, 1))
         q = q_nope
-        topk_mem_indices, topk_indices = self.indexer._get_indices(
+        topk_cache_indices, topk_token_positions = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            nsa_step=infer_state.nsa_step,
+            nsa_metadata=infer_state.nsa_metadata,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
         inputs = SparseMLAPrefillLayerInputs(
             q=q,
             kv_cache=self._sparse_kv_cache(infer_state),
-            topk_mem_indices=topk_mem_indices,
-            topk_indices=topk_indices,
+            topk_cache_indices=topk_cache_indices,
+            topk_token_positions=topk_token_positions,
             current_kv=kv,
-            q_kv_start_loc=infer_state.nsa_step.q_kv_start_loc,
+            q_kv_start_loc=infer_state.nsa_metadata.q_kv_start_loc,
             fp8_workspace=(
                 self.fp8_sparse_prefill_workspaces[infer_state.microbatch_index]
                 if self.fp8_sparse_prefill_workspaces is not None
@@ -262,7 +265,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.att_state_role, "prefill", self.layer_num_
         )
         return backend.forward(
-            infer_state.att_states[backend.state_key],
+            infer_state.att_metadata[backend.metadata_group_key],
             inputs,
             out=torch.empty((q.shape[0], q.shape[1], self.kv_lora_rank), dtype=q.dtype, device=q.device),
         )
@@ -332,11 +335,11 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         if self.is_linear_attention_layer:
             raise AssertionError("KDA uses its dedicated backend")
         q_nope = layer_weight.k_b_proj_.bmm(q.transpose(0, 1)).transpose(0, 1)
-        topk_mem_indices, _ = self.indexer._get_indices(
+        topk_cache_indices, _ = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            nsa_step=infer_state.nsa_step,
+            nsa_metadata=infer_state.nsa_metadata,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
@@ -344,13 +347,13 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             q_nope=q_nope,
             q_rope=q_nope[..., :0],
             kv_cache=self._sparse_kv_cache(infer_state),
-            topk_mem_indices=topk_mem_indices,
+            topk_cache_indices=topk_cache_indices,
         )
         backend = infer_state.attention_backend_manager.get_backend(
             infer_state.att_state_role, "decode", self.layer_num_
         )
         return backend.forward(
-            infer_state.att_states[backend.state_key],
+            infer_state.att_metadata[backend.metadata_group_key],
             inputs,
             out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device),
         )
@@ -393,13 +396,13 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             num_heads=self.tp_linear_num_heads,
             head_dim=self.linear_head_dim,
             conv_kernel_size=linear["short_conv_kernel_size"],
-            lower_bound=linear.get("gate_lower_bound", -5.0),
+            gate_lower_bound=linear.get("gate_lower_bound", -5.0),
             dtype=model.data_type,
-            state_mtp_step=args.mtp_step,
-            replay=args.ssm_state_mode == "replay",
+            state_draft_capacity=args.mtp_step,
+            use_ssm_replay=args.ssm_state_mode == "replay",
             ssm_dtype=getattr(torch, args.linear_att_ssm_data_type),
             # The requested KDA prefill implementation (kda.prefill) chooses whether prefill runs FlashKDA.
-            prefill_kernel=selector.requested_backend(args, "prefill", "kda"),
+            prefill_kernel=selector.requested_backend_name(args, "prefill", "kda"),
         )
 
     def _kda_layer_inputs(self, mixed_qkv, raw_gate, raw_beta, infer_state, layer_weight) -> KDALayerInputs:
@@ -418,7 +421,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             conv_states=conv_states,
             ssm_states=ssm_states,
             replay_state=state,
-            layer_num=self.layer_num_,
+            logical_layer_id=self.layer_num_,
         )
 
     def _kda_attention(self, inputs: KDALayerInputs, infer_state, *, prefill: bool, out=None) -> torch.Tensor:
@@ -431,7 +434,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 (x.shape[0], self.tp_linear_num_heads, self.linear_head_dim), dtype=x.dtype, device=x.device
             )
         return backend.forward(
-            infer_state.att_states[backend.state_key],
+            infer_state.att_metadata[backend.metadata_group_key],
             inputs,
             out=out,
             alloc_func=self.alloc_tensor,

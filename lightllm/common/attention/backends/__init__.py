@@ -10,7 +10,7 @@ def require_positive(layer_config: object, *fields: str) -> None:
         raise ValueError(f"{type(layer_config).__name__} fields must be positive, got {invalid}")
 
 
-def set_flashinfer_envs() -> None:
+def configure_flashinfer_jit_arch() -> None:
     """Point FlashInfer's JIT compilation at the current device's architecture."""
     major, minor = torch.cuda.get_device_capability()
     arch = f"{major}.{minor}"

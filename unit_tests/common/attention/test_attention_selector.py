@@ -219,7 +219,7 @@ def test_every_registered_backend_runs_in_the_phase_it_is_registered_for():
     from importlib import import_module
 
     for family in selector._REGISTRY.values():
-        for phase, implementations in family.backends.items():
+        for phase, implementations in family.backend_paths.items():
             for paths in implementations.values():
                 for path in paths:
                     module_name, class_name = path.split(":")
@@ -232,7 +232,7 @@ def test_every_registered_backend_runs_in_the_phase_it_is_registered_for():
 
 def test_a_backend_registered_for_the_other_phase_is_rejected(monkeypatch):
     family = selector._REGISTRY[GQALayerConfig]
-    swapped = dataclasses.replace(family, backends={"decode": family.backends["prefill"]})
+    swapped = dataclasses.replace(family, backend_paths={"decode": family.backend_paths["prefill"]})
     monkeypatch.setitem(selector._REGISTRY, GQALayerConfig, swapped)
     with pytest.raises(TypeError, match="triton_gqa_prefill is a prefill backend, registered for decode"):
         selector.select(gqa(), "decode", "triton")
@@ -263,9 +263,9 @@ def test_mla_phases_have_their_own_layer_config_types():
     "kv_cache_format, rope, expected",
     [
         ("bf16", 64, ("flashmla_sparse_mla_prefill", "fa3_sparse_mla_decode")),
-        ("fp8_ds_mla", 64, ("flashmla_sparse_mla_prefill", "flashmla_sparse_mla_decode")),
+        ("fp8_ds_mla", 64, ("flashmla_sparse_mla_prefill", "fp8_sparse_mla_decode")),
         ("bf16", 0, ("flashmla_sparse_mla_prefill", "fa3_sparse_mla_decode")),
-        ("fp8_group64_e8m0", 0, ("fa3_sparse_mla_prefill", "flashmla_sparse_mla_decode")),
+        ("fp8_group64_e8m0", 0, ("fa3_sparse_mla_prefill", "fp8_sparse_mla_decode")),
     ],
 )
 def test_sparse_mla_runs_flashmla_where_it_supports_the_cache_and_fa3_elsewhere(kv_cache_format, rope, expected):
@@ -283,8 +283,18 @@ def test_sparse_mla_runs_flashmla_where_it_supports_the_cache_and_fa3_elsewhere(
     names = tuple(selector.select(config, phase, "flashmla_sparse").name for phase in selector.PHASES)
     assert names == expected
     assert selector.auto_priority(config, "decode", 2) == ("flashmla_sparse",)
-    with pytest.raises(ValueError, match="not available"):
-        selector.select(config, "decode", "fa3")
+    # Explicit providers preserve the same choice when supported and never switch libraries.
+    for phase, expected_name in zip(selector.PHASES, expected):
+        provider = "fa3" if expected_name.startswith("fa3") else "flashmla"
+        assert selector.select(config, phase, provider).name == expected_name
+        other = "flashmla" if provider == "fa3" else "fa3"
+        with pytest.raises(ValueError, match="does not support"):
+            selector.select(config, phase, other)
+    validated, validate = recorder(passing=("flashmla_sparse",))
+    assert (
+        tuple(selector.select(config, phase, "auto", validate=validate).name for phase in selector.PHASES) == expected
+    )
+    assert validated == ["flashmla_sparse", "flashmla_sparse"]
 
 
 def test_att_backend_names_each_family_and_phase_and_wins_over_the_deprecated_flags():
@@ -296,12 +306,24 @@ def test_att_backend_names_each_family_and_phase_and_wins_over_the_deprecated_fl
         llm_prefill_att_backend=["fa3", "triton"],
         llm_decode_att_backend=["fa3"],
     )
-    assert selector.requested_backend(args, "prefill", gqa()) == "flashinfer"
-    assert selector.requested_backend(args, "prefill", gdn) == "flashqla"
+    assert selector.requested_backend_name(args, "prefill", gqa()) == "flashinfer"
+    assert selector.requested_backend_name(args, "prefill", gdn) == "flashqla"
     # Keys --att_backend leaves out fall back to the deprecated positional flags, then to auto.
-    assert selector.requested_backend(args, "decode", "gqa") == "fa3"
-    assert selector.requested_backend(args, "decode", "gdn") == "auto"
-    assert selector.requested_backend(args, "prefill", "mla") == "fa3"
+    assert selector.requested_backend_name(args, "decode", "gqa") == "fa3"
+    assert selector.requested_backend_name(args, "decode", "gdn") == "auto"
+    assert selector.requested_backend_name(args, "prefill", "mla") == "fa3"
+
+
+@pytest.mark.parametrize("phase", selector.PHASES)
+def test_swa_sparse_mla_accepts_explicit_flashmla_and_the_legacy_alias(phase):
+    from lightllm.common.attention.backends.sparse_mla import SWASparseMLALayerConfig
+
+    config = SWASparseMLALayerConfig(64, 512, 0.1, torch.bfloat16)
+    explicit = selector.select(config, phase, "flashmla")
+    legacy = selector.select(config, phase, "flashmla_sparse")
+    assert type(explicit) is type(legacy)
+    with pytest.raises(ValueError, match="not available"):
+        selector.select(config, phase, "fa3")
 
 
 def test_att_backend_choices_come_from_the_registry():
@@ -309,7 +331,7 @@ def test_att_backend_choices_come_from_the_registry():
     assert choices["gqa.decode"] == ("auto", "triton", "fa3", "flashinfer")
     assert choices["gdn.prefill"] == ("auto", "flashqla", "triton")
     assert choices["kda.prefill"] == ("auto", "triton", "flashkda")
-    assert choices["sparse_mla.decode"] == ("auto", "flashmla_sparse")
+    assert choices["sparse_mla.decode"] == ("auto", "flashmla", "fa3", "flashmla_sparse")
     assert set(choices) == {
         f"{family}.{phase}" for family in ("gqa", "mla", "sparse_mla", "gdn", "kda") for phase in selector.PHASES
     }
@@ -338,11 +360,11 @@ def test_att_backend_cli_collects_entries_and_rejects_bad_ones():
 def test_linear_attention_takes_triton_without_validation_and_follows_the_state_kind(replay, decode):
     from lightllm.common.attention.backends.gdn import GDNLayerConfig
 
-    config = GDNLayerConfig(2, 4, 64, 64, 4, "silu", torch.bfloat16, replay=replay)
+    config = GDNLayerConfig(2, 4, 64, 64, 4, "silu", torch.bfloat16, use_ssm_replay=replay)
     # Linear families read the second value of the deprecated --llm_{prefill,decode}_att_backend flags.
     args = SimpleNamespace(llm_prefill_att_backend=["fa3", "triton"], llm_decode_att_backend=["fa3"])
-    assert selector.requested_backend(args, "prefill", config) == "triton"
-    assert selector.requested_backend(args, "decode", config) == "auto"
+    assert selector.requested_backend_name(args, "prefill", config) == "triton"
+    assert selector.requested_backend_name(args, "decode", config) == "auto"
     validated, validate = recorder(passing=())
     # FlashQLA fails validation here; Triton is taken without validating it.
     backend = selector.select(config, "prefill", "auto", validate=validate)
@@ -352,7 +374,7 @@ def test_linear_attention_takes_triton_without_validation_and_follows_the_state_
     assert backend.name == decode
     # Each decode backend runs over one kind of state.
     with pytest.raises(NotImplementedError, match="replay"):
-        type(backend)(dataclasses.replace(config, replay=not replay))
+        type(backend)(dataclasses.replace(config, use_ssm_replay=not replay))
 
 
 def _imports(module):
@@ -367,12 +389,12 @@ def _imports(module):
 @pytest.mark.parametrize("replay", [False, True])
 def test_flashkda_names_the_kda_backends_of_the_state_kind(monkeypatch, name, replay):
     from lightllm.common.attention.backends.kda import KDALayerConfig
-    from lightllm.common.attention.backends.kda import triton as kda_triton
+    from lightllm.common.attention.backends.kda import recurrent as kda_recurrent
 
     # A requested FlashKDA must load at construction; pretend it does.
-    monkeypatch.setattr(kda_triton, "import_flash_kda_fwd", lambda: None)
-    config = KDALayerConfig(4, 128, 4, -5.0, torch.bfloat16, replay=replay, prefill_kernel=name)
-    expected = "replay_kda_prefill" if replay else "triton_kda_prefill"
+    monkeypatch.setattr(kda_recurrent, "import_flash_kda_fwd", lambda: None)
+    config = KDALayerConfig(4, 128, 4, -5.0, torch.bfloat16, use_ssm_replay=replay, prefill_kernel=name)
+    expected = "replay_kda_prefill" if replay else "kda_prefill"
     assert selector.select(config, "prefill", name).name == expected
     with pytest.raises(ValueError, match="not available"):
         selector.select(config, "decode", "flashkda")

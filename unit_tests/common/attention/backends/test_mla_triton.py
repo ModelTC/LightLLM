@@ -26,10 +26,10 @@ def decode_backend():
     return TritonMLADecodeBackend(decode_config())
 
 
-def decode(att_state, q_nope, q_rope, kv):
+def decode(att_metadata, q_nope, q_rope, kv):
     backend = TritonMLADecodeBackend(decode_config())
     out = torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
-    return backend.forward(att_state, MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv), out=out)
+    return backend.forward(att_metadata, MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv), out=out)
 
 
 def _decode_state(lengths, *, capture=False, replay=False):
@@ -73,9 +73,9 @@ def test_cached_prefill(nope_dim, v_dim):
         dtype=q.dtype,
     )
     backend = TritonMLAPrefillBackend(layer_config)
-    att_state = backend.build(state)
+    att_metadata = backend.build_att_metadata(state)
     actual = backend.forward(
-        att_state,
+        att_metadata,
         MLAPrefillLayerInputs(q=q, k_nope=k_nope, k_rope=k_rope, v=v),
         out=out,
         # The expanded-key path also allocates scratch keys.
@@ -94,7 +94,7 @@ def test_decode_plans_once_per_step_independent_of_query_layout(decode_backend):
     slots = torch.randperm(768, device="cuda", dtype=torch.int32).view(2, 384)
     state = _decode_state(lengths)
     state.req_manager = SimpleNamespace(req_to_token_indexs=slots)
-    att_state = decode_backend.build(state)
+    att_metadata = decode_backend.build_att_metadata(state)
     kv = torch.randn((768, 1, 576), dtype=torch.bfloat16, device="cuda")
     scale = DECODE_SCALE
     # Layers may present the absorbed query with different strides; both reuse the step's args.
@@ -103,7 +103,7 @@ def test_decode_plans_once_per_step_independent_of_query_layout(decode_backend):
     q_rope = torch.randn((2, 16, 192), dtype=kv.dtype, device="cuda")[..., -64:]
     expected = _reference_decode(torch.cat((q_transposed, q_rope), dim=-1), kv, slots, lengths, scale)
     for q_nope in (q_transposed, q_contiguous):
-        actual = decode(att_state, q_nope, q_rope, kv)
+        actual = decode(att_metadata, q_nope, q_rope, kv)
         torch.testing.assert_close(actual, expected.to(kv.dtype), rtol=0.02, atol=0.012)
 
 
@@ -112,8 +112,8 @@ def test_decode_replay_rebuilds_captured_schedule(decode_backend):
     req_manager = SimpleNamespace(req_to_token_indexs=slots)
     state = _decode_state((7, 5), capture=True)
     state.req_manager = req_manager
-    att_state = decode_backend.build(state)
-    captured_schedule = att_state.schedule
+    att_metadata = decode_backend.build_att_metadata(state)
+    captured_schedule = att_metadata.schedule
     kv = torch.randn((384, 1, 576), dtype=torch.bfloat16, device="cuda")
     # The model produces the absorbed query by transposing the head-major BMM output.
     q_nope = torch.randn((16, 2, 512), dtype=kv.dtype, device=kv.device).transpose(0, 1)
@@ -122,7 +122,7 @@ def test_decode_replay_rebuilds_captured_schedule(decode_backend):
     scale = DECODE_SCALE
 
     def run():
-        return decode(att_state, q_nope, q_rope, kv)
+        return decode(att_metadata, q_nope, q_rope, kv)
 
     run()
     graph = torch.cuda.CUDAGraph()
@@ -132,7 +132,7 @@ def test_decode_replay_rebuilds_captured_schedule(decode_backend):
     for lengths in [(7, 5), (150, 83)]:
         replay_state = _decode_state(lengths, replay=True)
         replay_state.req_manager = req_manager
-        replay_att_state = decode_backend.build(replay_state)
+        replay_att_state = decode_backend.build_att_metadata(replay_state)
         # Building the replay step's args rewrites the schedule the graph captured instead of making a new one.
         assert replay_att_state.schedule is captured_schedule
         state.copy_for_cuda_graph(replay_state)
@@ -158,16 +158,16 @@ def test_decode_keeps_one_graph_schedule_per_microbatch_and_batch_size(decode_ba
             microbatch_index=microbatch_index,
         )
 
-    first = decode_backend.build(make_batch((7, 5))).schedule
+    first = decode_backend.build_att_metadata(make_batch((7, 5))).schedule
     # Concurrent microbatches of microbatch overlap must not share captured buffers.
-    other_microbatch = decode_backend.build(make_batch((7, 5), microbatch_index=1)).schedule
-    other_batch_size = decode_backend.build(make_batch((7, 5, 3))).schedule
+    other_microbatch = decode_backend.build_att_metadata(make_batch((7, 5), microbatch_index=1)).schedule
+    other_batch_size = decode_backend.build_att_metadata(make_batch((7, 5, 3))).schedule
     assert first is not other_microbatch and first is not other_batch_size
     starts = first.batch_start_index.clone()
-    assert decode_backend.build(make_batch((150, 83))).schedule is first
+    assert decode_backend.build_att_metadata(make_batch((150, 83))).schedule is first
     # Both length sets use 32-token blocks, so (7, 5) starts at [0, 1] and (150, 83) at [0, 5].
     assert starts.tolist() == [0, 1] and first.batch_start_index.tolist() == [0, 5]
-    eager = [decode_backend.build(make_batch((7, 5), graph=False)).schedule for _ in range(2)]
+    eager = [decode_backend.build_att_metadata(make_batch((7, 5), graph=False)).schedule for _ in range(2)]
     assert eager[0] is not eager[1] and all(first is not schedule for schedule in eager)
 
 

@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
-from lightllm.common.attention.backends.kda.triton import KDAPrefillAttState, TritonKDAPrefillBackend
+from lightllm.common.attention.backends.kda.recurrent import KDAPrefillMetadata, KDAPrefillBackend
 from unit_tests.models.glm5_next.kda_test_utils import kda_params
 from lightllm.common.attention.kernels.gdn.causal_conv1d import causal_conv1d_fn
 from lightllm.common.attention.kernels.kda.causal_conv1d_qkv import (
@@ -125,11 +125,11 @@ def test_backend_fused_conv_output_and_state(lengths):
     cu_seqlens = torch.tensor([0, *lengths], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
     b_ready_cache_len = torch.arange(len(lengths), device="cuda", dtype=torch.int32) % 2 * 7
     slots = torch.arange(1, len(lengths) + 1, device="cuda", dtype=torch.int32)
-    att_state = KDAPrefillAttState(
+    att_metadata = KDAPrefillMetadata(
         conv_idx=slots,
         ssm_idx=slots,
-        cu_seqlens_q=cu_seqlens,
-        cu_seqlens=cu_seqlens,
+        conv_cu_seqlens=cu_seqlens,
+        attn_cu_seqlens=cu_seqlens,
         b_ready_cache_len=b_ready_cache_len,
         max_q_seq_len=max(lengths),
         flash_kda_fwd=None,
@@ -147,7 +147,7 @@ def test_backend_fused_conv_output_and_state(lengths):
         torch.randn(tokens, heads * 128, **opts) * 0.1,
         torch.randn(tokens, heads, **opts),
     )
-    backend = TritonKDAPrefillBackend(KDALayerConfig(heads, 128, 4, -5.0, torch.bfloat16))
+    backend = KDAPrefillBackend(KDALayerConfig(heads, 128, 4, -5.0, torch.bfloat16))
     expected_conv, expected_ssm = conv_states.clone(), ssm_states.clone()
     q, k, v = reference(
         projection[:, :channels],
@@ -175,7 +175,7 @@ def test_backend_fused_conv_output_and_state(lengths):
     )
     expected_ssm[slots] = final_state.to(ssm_states.dtype)
     out = torch.empty(tokens, heads, 128, **opts)
-    actual = backend.forward(att_state, KDALayerInputs(**{k: v for k, v in params.items() if k != "state"}), out=out)
+    actual = backend.forward(att_metadata, KDALayerInputs(**{k: v for k, v in params.items() if k != "state"}), out=out)
     assert torch.equal(actual.view(torch.uint8), expected.view(actual.shape).view(torch.uint8))
     assert torch.equal(conv_states, expected_conv)
     assert torch.equal(ssm_states, expected_ssm)

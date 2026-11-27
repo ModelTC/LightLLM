@@ -100,7 +100,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         q_all = torch.cat([q_nope, q_rope], dim=-1)
 
         # 计算 topk indices
-        topk_mem_indices, topk_indices = self.indexer._get_indices(
+        topk_cache_indices, topk_ragged_indices = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
@@ -112,15 +112,15 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         inputs = SparseMLAPrefillLayerInputs(
             q=q_all,
             kv_cache=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
-            topk_mem_indices=topk_mem_indices,
-            topk_indices=topk_indices,
+            topk_cache_indices=topk_cache_indices,
+            topk_ragged_indices=topk_ragged_indices,
             current_kv=kv,
         )
         backend = infer_state.attention_backend_manager.get_backend(
             infer_state.att_state_role, "prefill", self.layer_num_
         )
         return backend.forward(
-            infer_state.att_states[backend.state_key],
+            infer_state.att_metadata[backend.metadata_group_key],
             inputs,
             out=out,
         )
@@ -137,7 +137,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
 
         # 计算 topk mem indices
-        topk_mem_indices, _ = self.indexer._get_indices(
+        topk_cache_indices, _ = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
@@ -150,13 +150,13 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             q_nope=q_nope,
             q_rope=q_rope,
             kv_cache=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
-            topk_mem_indices=topk_mem_indices,
+            topk_cache_indices=topk_cache_indices,
         )
         backend = infer_state.attention_backend_manager.get_backend(
             infer_state.att_state_role, "decode", self.layer_num_
         )
         return backend.forward(
-            infer_state.att_states[backend.state_key],
+            infer_state.att_metadata[backend.metadata_group_key],
             inputs,
             out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device),
         )
@@ -222,8 +222,8 @@ class NsaInfer:
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
         weights = weights.unsqueeze(-1) * q_scale
 
-        ks = infer_state.nsa_ks
-        ke = infer_state.nsa_ke
+        ks = infer_state.nsa_key_starts
+        ke = infer_state.nsa_key_ends
         lengths = infer_state.nsa_lengths
 
         if infer_state.is_prefill:

@@ -50,7 +50,7 @@ def kda_attention(model) -> KDAAttention:
 
 
 def flash_kda_fwd(model):
-    """The FlashKDA kernel the KDA prefill step builder of model's layers loads, or None for Triton."""
+    """The FlashKDA kernel the KDA prefill backend of model's layers loads, or None for Triton."""
     return kda_attention(model).flash_kda_fwd
 
 
@@ -70,7 +70,7 @@ def test_flashkda_selected_for_native_and_replay(flash_module, mode):
     model.args.ssm_state_mode = mode
     attention = kda_attention(model)
     assert attention.flash_kda_fwd is flash_module.fwd
-    assert attention.layer_config.num_heads == 2 and attention.layer_config.replay == (mode == "replay")
+    assert attention.layer_config.num_heads == 2 and attention.layer_config.use_ssm_replay == (mode == "replay")
 
 
 @pytest.mark.parametrize("backends", [["auto"], ["auto", "auto"], ["auto", "triton"]])
@@ -142,15 +142,15 @@ def test_prefill_metadata_is_rebuilt_for_each_forward(flash_module, mode):
     prepare_prefill_infer(infer)
     att = backend.create_att_prefill_state(infer)
     att.init_state()
-    first_cu = att.att_state.cu_seqlens
-    assert att.att_state.flash_kda_fwd is flash_module.fwd
+    first_cu = att.att_metadata.attn_cu_seqlens
+    assert att.att_metadata.flash_kda_fwd is flash_module.fwd
     assert first_cu.dtype == torch.int64
     torch.testing.assert_close(first_cu, infer.b1_cu_q_seq_len.long())
     infer.b1_cu_q_seq_len = torch.tensor([0, 2049, 2050], dtype=torch.int32)
     infer.max_q_seq_len = 2049
     att.init_state()
-    assert att.att_state.flash_kda_fwd is None
-    assert att.att_state.cu_seqlens is infer.b1_cu_q_seq_len
+    assert att.att_metadata.flash_kda_fwd is None
+    assert att.att_metadata.attn_cu_seqlens is infer.b1_cu_q_seq_len
     torch.testing.assert_close(first_cu, torch.tensor([0, 65, 68], dtype=torch.int64))
 
 
@@ -166,14 +166,14 @@ def test_automatic_dispatch_accounts_for_heads_and_length(flash_module, heads, l
     model.config["linear_attn_config"]["num_heads"] = 64
     model.tp_world_size_ = 64 // heads
     attention = kda_attention(model)
-    att_state = attention.backends["prefill"].build(prefill_batch(length))
-    assert (att_state.flash_kda_fwd is flash_module.fwd) == uses_flash
+    att_metadata = attention.backends["prefill"].build_att_metadata(prefill_batch(length))
+    assert (att_metadata.flash_kda_fwd is flash_module.fwd) == uses_flash
 
 
 def test_explicit_flashkda_overrides_performance_policy(flash_module):
     attention = kda_attention(make_model())
-    att_state = attention.backends["prefill"].build(prefill_batch(32768))
-    assert att_state.flash_kda_fwd is flash_module.fwd
+    att_metadata = attention.backends["prefill"].build_att_metadata(prefill_batch(32768))
+    assert att_metadata.flash_kda_fwd is flash_module.fwd
 
 
 def test_fp8_sparse_kv_does_not_change_kda_selection(flash_module):
@@ -464,7 +464,7 @@ def test_flashkda_backend_continues_cached_prefill(cuda_flashkda, mode, state_dt
         att.init_state()
         att_ref.init_state()
         if requested == "auto":
-            assert (att.att_state.flash_kda_fwd is not None) == (max(lengths) <= 2048)
+            assert (att.att_metadata.flash_kda_fwd is not None) == (max(lengths) <= 2048)
         mixed_qkv = torch.randn(sum(lengths), channels + heads + 256, **opts)[:, :channels]
         params = kda_params(conv, ssm, layer_weight, mixed_qkv, inputs["raw_g"], inputs["raw_beta"])
         reference_params = kda_params(
@@ -485,7 +485,7 @@ def test_flashkda_backend_continues_cached_prefill(cuda_flashkda, mode, state_dt
         for current in (infer, infer_ref):
             current.b_ready_cache_len += torch.tensor(lengths, device="cuda", dtype=torch.int32)
     untouched = torch.ones(ssm.shape[0], device="cuda", dtype=torch.bool)
-    untouched[att.att_state.ssm_idx] = False
+    untouched[att.att_metadata.ssm_idx] = False
     torch.testing.assert_close(ssm[untouched], before[untouched], rtol=0, atol=0)
 
 

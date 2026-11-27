@@ -13,8 +13,8 @@ class Deepseek3_2InferStateInfo(Deepseek2InferStateInfo):
 
     def __init__(self):
         super().__init__()
-        self.nsa_ks: torch.Tensor = None
-        self.nsa_ke: torch.Tensor = None
+        self.nsa_key_starts: torch.Tensor = None
+        self.nsa_key_ends: torch.Tensor = None
         self.nsa_lengths: torch.Tensor = None
         self.nsa_ragged_mem_index: torch.Tensor = None
 
@@ -37,7 +37,7 @@ class Deepseek3_2InferStateInfo(Deepseek2InferStateInfo):
         if ragged_mem_index is None:
             ragged_mem_index = torch.empty(self.total_token_num, dtype=torch.int32, device=get_current_device_id())
         self.nsa_ragged_mem_index = ragged_mem_index
-        self.nsa_ks, self.nsa_ke, self.nsa_lengths = gen_nsa_ks_ke(
+        self.nsa_key_starts, self.nsa_key_ends, self.nsa_lengths = gen_nsa_ks_ke(
             b_seq_len=self.b_seq_len,
             b_q_seq_len=self.b_q_seq_len,
             b_req_idx=self.b_req_idx,

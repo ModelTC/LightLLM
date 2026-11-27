@@ -505,7 +505,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         backend = infer_state.attention_backend_manager.get_backend(
             infer_state.att_state_role, "prefill", self.layer_num_
         )
-        out = backend.forward(infer_state.att_states[backend.state_key], inputs, out=out)
+        out = backend.forward(infer_state.att_metadata[backend.metadata_group_key], inputs, out=out)
         return out[:, : self.tp_q_head_num_]
 
     # ------------------------------------------------------------------ attention (decode)
@@ -525,17 +525,17 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         backend = infer_state.attention_backend_manager.get_backend(
             infer_state.att_state_role, "decode", self.layer_num_
         )
-        out = backend.forward(infer_state.att_states[backend.state_key], inputs, out=out)
+        out = backend.forward(infer_state.att_metadata[backend.metadata_group_key], inputs, out=out)
         return out[:, : self.tp_q_head_num_]
 
     def attention_config(self, model) -> LayerAttentionConfig:
         config = SWASparseMLALayerConfig(
             num_heads=self.flashmla_q_head_num_,
-            head_dim_v=self.v_head_dim,
+            v_head_dim=self.v_head_dim,
             softmax_scale=self.softmax_scale,
             dtype=model.data_type,
             compress_ratio=self.compress_ratio,
-            has_attn_sink=True,
+            has_sinks=True,
         )
         return LayerAttentionConfig(config, config)
 
@@ -551,9 +551,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             swa_indices=meta["swa_indices"],
             swa_lengths=meta["swa_lengths"],
             compressed_cache=compressed_cache,
-            extra_indices=meta.get("extra_indices"),
-            extra_lengths=meta.get("extra_lengths"),
-            attn_sink=layer_weight.attn_sink_.weight,
+            compressed_indices=meta.get("extra_indices"),
+            compressed_lengths=meta.get("extra_lengths"),
+            sink_logits=layer_weight.attn_sink_.weight,
         )
 
     # ------------------------------------------------------------------ moe

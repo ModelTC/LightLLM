@@ -91,7 +91,7 @@ def test_forward_uses_common_prefill(monkeypatch, tokens, mode):
     model.return_all_prompt_logics = False
     # The step's layers only write the cache, so the runtime builds no attention state.
     model.attention_backend_manager = SimpleNamespace(
-        has_attention=lambda role: False, create_att_state=lambda infer_state: {}
+        has_attention=lambda role: False, create_att_metadata=lambda infer_state: {}
     )
     model._select_mem_indexes = lambda model_input: torch.zeros_like(model_input.input_ids)
     batch = int(tokens > 0)
@@ -253,7 +253,7 @@ def test_cache_only_matches_full_prefill_cache_writes(monkeypatch, kv_type, requ
         b1_cu_q_seq_len=torch.tensor([0, *q_lengths], device="cuda", dtype=torch.int32).cumsum(0).int(),
         max_q_seq_len=max(q_lengths),
         max_kv_seq_len=2048,
-        nsa_step=SimpleNamespace(q_kv_seq_len=lengths, q_req_idx=None),
+        nsa_metadata=SimpleNamespace(q_kv_seq_len=lengths, q_req_idx=None),
         req_manager=SimpleNamespace(req_to_token_indexs=None),
     )
     # Top-k outputs are discarded here; run the normal projections and cache writers.
@@ -262,7 +262,7 @@ def test_cache_only_matches_full_prefill_cache_writes(monkeypatch, kv_type, requ
     _, kv = layer._get_qkv(layer._att_norm(hidden, infer, weights), infer, weights)
     layer._post_cache_kv(kv, infer, weights)
     layer.indexer._get_indices(
-        **infer.get_topk_indices_params, infer_state=infer, nsa_step=infer.nsa_step, layer_weight=weights
+        **infer.get_topk_indices_params, infer_state=infer, nsa_metadata=infer.nsa_metadata, layer_weight=weights
     )
     expected = [s.clone() for s in stores]
     assert not torch.equal(initial[2], expected[2])

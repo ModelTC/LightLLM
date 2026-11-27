@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.models.glm5_next.infer_struct import build_glm5_nsa_step
+from lightllm.models.glm5_next.infer_struct import build_glm5_nsa_metadata
+from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
 from lightllm.models.glm5_next import prefill_workspace
@@ -102,7 +103,7 @@ def test_decode_aliases_infer_state_without_ragged_allocation(monkeypatch):
     infer.b_req_idx = tensor([2, 2, 0, 3, 3])
     infer.b_seq_len = tensor([999999, 1000000, 65536, 2, 2])
     # The indexer's decode metadata aliases the request tensors, so CUDA graph replays read updated values.
-    step = build_glm5_nsa_step(infer)
+    step = build_glm5_nsa_metadata(infer)
     assert step.q_kv_seq_len is infer.b_seq_len
     assert step.q_req_idx is infer.b_req_idx
     assert step.q_kv_start_loc is None
@@ -177,6 +178,7 @@ def test_fp8_prefill_reads_request_table_without_ragged_buffer(monkeypatch, quer
             "max_seq_length": max(seqs),
             "graph_max_len_in_batch": max(seqs),
             "att_state_role": "indices_test",
+            "attention_backend_manager": AttentionBackendManager(),
             "config": {"index_topk": 2048, "index_kpool": 4},
             "args": SimpleNamespace(enable_prefill_microbatch_overlap=False, run_mode="normal"),
         },
@@ -187,7 +189,7 @@ def test_fp8_prefill_reads_request_table_without_ragged_buffer(monkeypatch, quer
         "topk_indices": topk,
         "topk_mem_indices": topk_mem,
         "prefill_cache_kv": prefill_kv,
-        "q_kv_start_loc": build_glm5_nsa_step(infer).q_kv_start_loc,
+        "q_kv_start_loc": build_glm5_nsa_metadata(infer).q_kv_start_loc,
         "softmax_scale": 512 ** -0.5,
     }
 

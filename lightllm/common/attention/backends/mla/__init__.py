@@ -59,7 +59,7 @@ class MLADecodeLayerConfig:
 
     Head counts are per rank. The absorbed query has kv_lora_rank latent channels plus
     qk_rope_head_dim rotary channels, matching each cache row. causal applies when speculative
-    decoding gives a request several query rows (see InferStateInfo.decode_rows_per_request).
+    decoding gives a request several query rows (see InferStateInfo.max_decode_rows_per_request).
     """
 
     num_heads: int

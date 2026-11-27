@@ -18,7 +18,7 @@ from lightllm.common.attention.backends.sparse_mla import (
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_prefill_params
-from unit_tests.common.attention.backends.groups_runner import LayerAttention
+from unit_tests.common.attention.backends.attention_runner import LayerAttention
 
 pytestmark = [
     pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required"),
@@ -79,7 +79,7 @@ def make_infer(req_to_token, lengths, *, capture=False, replay=False, microbatch
 
 
 def decode_att_state(attention, infer):
-    return attention.att_state(infer)
+    return attention.create_att_metadata(infer)
 
 
 def select(req_to_token, lengths, out, seed):
@@ -143,10 +143,10 @@ def check_decode_and_graph(attention, cache, reference_cache, heads):
     indices = select(req_to_token, first, torch.empty((4, TOPK), device="cuda", dtype=torch.int32), seed=10)
     q_nope = torch.randn(4, heads, RANK, device="cuda", dtype=torch.bfloat16, generator=gen(1)) * 0.5
     q_rope = torch.randn(4, heads, ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(2)) * 0.5
-    inputs = SparseMLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=cache, topk_mem_indices=indices)
+    inputs = SparseMLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=cache, topk_cache_indices=indices)
 
-    def run(att_state):
-        return attention.run("decode", att_state, inputs, out=torch.empty_like(q_nope))
+    def run(att_metadata):
+        return attention.run("decode", att_metadata, inputs, out=torch.empty_like(q_nope))
 
     def reference():
         q = torch.cat((q_nope, q_rope), dim=-1)
@@ -205,8 +205,8 @@ def test_bf16_flashmla_prefill_output_and_peak(heads, strided, legacy, monkeypat
     out = storage[:, :heads]
     config = SparseMLALayerConfig(heads, RANK, ROPE, SCALE, query.dtype, topk=TOPK)
     backend = flashmla.FlashMLASparsePrefillBackend(config)
-    state = flashmla.FlashMLASparsePrefillAttState(None, False)
-    inputs = SparseMLAPrefillLayerInputs(q=query, kv_cache=cache, topk_mem_indices=indices)
+    state = flashmla.FlashMLASparsePrefillMetadata(None, False)
+    inputs = SparseMLAPrefillLayerInputs(q=query, kv_cache=cache, topk_cache_indices=indices)
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     before = torch.cuda.memory_allocated()
@@ -251,7 +251,7 @@ def flashmla_api(request, monkeypatch):
 def test_fp8_ds_mla_flashmla_decode_matches_reference_and_cuda_graph_replay(flashmla_api):
     # FlashMLA's sparse FP8 decode runs 64-head tiles.
     attention = layer_attention(64, "fp8_ds_mla")
-    assert attention.backend_name("decode") == "flashmla_sparse_mla_decode"
+    assert attention.backend_name("decode") == "fp8_sparse_mla_decode"
 
     kv = torch.randn(SLOTS, 1, RANK + ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(0)) * 0.5
     packed = write_fp8_ds_mla(kv)
@@ -318,12 +318,12 @@ def test_fp8_ds_mla_flashmla_prefill_matches_reference(ready, ends, flashmla_api
     inputs = SparseMLAPrefillLayerInputs(
         q=q,
         kv_cache=packed,
-        topk_mem_indices=topk_mem_indices,
-        topk_indices=topk_indices,
+        topk_cache_indices=topk_mem_indices,
+        topk_ragged_indices=topk_indices,
         current_kv=current_kv,
     )
     destination = torch.empty((rows, heads, RANK), device="cuda", dtype=q.dtype) if use_destination else None
-    out = attention.run("prefill", attention.att_state(infer), inputs, out=destination)
+    out = attention.run("prefill", attention.create_att_metadata(infer), inputs, out=destination)
     if destination is not None:
         assert out is destination
     elif flashmla_api is not None:

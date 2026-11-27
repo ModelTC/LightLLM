@@ -9,8 +9,8 @@ import triton
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
 from lightllm.common.attention.backends.sparse_mla.flashmla import (
-    FlashMLASparseDecodeBackend,
-    FlashMLASparseDecodeAttState,
+    FP8SparseMLADecodeBackend,
+    FP8SparseMLADecodeMetadata,
 )
 from lightllm.common.attention.backends.sparse_mla import (
     SparseMLADecodeLayerInputs,
@@ -18,7 +18,7 @@ from lightllm.common.attention.backends.sparse_mla import (
     SparseMLAPrefillLayerInputs,
 )
 from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLAPrefillBackend
-from lightllm.models.glm5_next.infer_struct import build_glm5_nsa_step
+from lightllm.models.glm5_next.infer_struct import build_glm5_nsa_metadata
 from lightllm.common.attention.kernels.sparse_mla.fp8_group64_decode import (
     can_use_fp8_sparse_direct_decode,
     fp8_sparse_direct_decode,
@@ -61,41 +61,43 @@ def _layer_config(q, softmax_scale):
     )
 
 
-def _decode(att_state, q, kv, params, direct_decode_bound=2051):
+def _decode(att_metadata, q, kv, params, direct_decode_topk_bound=2051):
     """Run a GLM-5 layer's FP8 decode; params holds the indexer's topk_mem_indices and the softmax_scale.
 
-    direct_decode_bound overrides the bound the backend takes from the layer config (2051 for topk 2048, kpool 4).
+    direct_decode_topk_bound overrides the bound the backend takes from the layer config (2051 for topk 2048, kpool 4).
     """
     q_nope, q_rope = q
-    backend = FlashMLASparseDecodeBackend(_layer_config(q_nope, params["softmax_scale"]))
-    backend.direct_decode_bound = direct_decode_bound
+    backend = FP8SparseMLADecodeBackend(_layer_config(q_nope, params["softmax_scale"]))
+    backend.direct_decode_topk_bound = direct_decode_topk_bound
     inputs = SparseMLADecodeLayerInputs(
-        q_nope=q_nope, q_rope=q_rope, kv_cache=kv, topk_mem_indices=params["topk_mem_indices"]
+        q_nope=q_nope, q_rope=q_rope, kv_cache=kv, topk_cache_indices=params["topk_mem_indices"]
     )
-    return backend.forward(att_state, inputs, out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device))
+    return backend.forward(
+        att_metadata, inputs, out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
+    )
 
 
 class _Fp8PrefillState:
     """One prefill step's attention: its attention state and the model's indexer metadata."""
 
-    def __init__(self, att_state, workspace):
-        self.att_state = att_state
+    def __init__(self, att_metadata, workspace):
+        self.att_metadata = att_metadata
         self.workspace = workspace
-        self.nsa_step = None
+        self.nsa_metadata = None
 
     def prefill_att(self, q, kv, params):
         backend = FA3SparseMLAPrefillBackend(_layer_config(q, params["softmax_scale"]))
         inputs = SparseMLAPrefillLayerInputs(
             q=q,
             kv_cache=kv,
-            topk_mem_indices=params["topk_mem_indices"],
-            topk_indices=params.get("topk_indices"),
+            topk_cache_indices=params["topk_mem_indices"],
+            topk_token_positions=params.get("topk_indices"),
             current_kv=params.get("prefill_cache_kv"),
             q_kv_start_loc=params.get("q_kv_start_loc"),
             fp8_workspace=self.workspace,
         )
         out = torch.empty((q.shape[0], q.shape[1], 512), dtype=q.dtype, device=q.device)
-        return backend.forward(self.att_state, inputs, out=out)
+        return backend.forward(self.att_metadata, inputs, out=out)
 
 
 class _Fp8DecodeState:
@@ -117,10 +119,10 @@ class _Fp8DecodeState:
         return self.owner
 
     def decode_att(self, q, kv, params):
-        att_state = FlashMLASparseDecodeAttState(
+        att_metadata = FP8SparseMLADecodeMetadata(
             sched_meta=self.sched_meta, uses_cuda_graph=self.owner.graph_mode is GraphMode.CAPTURE
         )
-        return _decode(att_state, q, kv, params, direct_decode_bound=self.bound)
+        return _decode(att_metadata, q, kv, params, direct_decode_topk_bound=self.bound)
 
 
 class _Fp8SparseAttention:
@@ -132,15 +134,15 @@ class _Fp8SparseAttention:
         self._prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(model)
         config = _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), 1.0)
         self.prefill_backend = FA3SparseMLAPrefillBackend(config)
-        self.decode_backend = FlashMLASparseDecodeBackend(config)
+        self.decode_backend = FP8SparseMLADecodeBackend(config)
 
     def create_att_prefill_state(self, infer):
-        att_state = self.prefill_backend.build(infer)
-        return _Fp8PrefillState(att_state, self._prefill_workspaces[infer.microbatch_index])
+        att_metadata = self.prefill_backend.build_att_metadata(infer)
+        return _Fp8PrefillState(att_metadata, self._prefill_workspaces[infer.microbatch_index])
 
     def create_att_decode_state(self, infer):
-        att_state = self.decode_backend.build(infer)
-        return SimpleNamespace(decode_att=lambda q, kv, params: _decode(att_state, q, kv, params))
+        att_metadata = self.decode_backend.build_att_metadata(infer)
+        return SimpleNamespace(decode_att=lambda q, kv, params: _decode(att_metadata, q, kv, params))
 
 
 def _make_workspace_backend(batch_max_tokens, overlap=False):
@@ -206,7 +208,7 @@ class _PrefillCase:
             mem_index=torch.empty(queries, device=device, dtype=torch.int32),
         )
         self.backend = backend or _make_workspace_backend(queries)
-        _, self.att_state = self.new_state()
+        _, self.att_metadata = self.new_state()
         self.control = {
             "topk_indices": self.topk_indices,
             "topk_mem_indices": self.topk_mem_indices,
@@ -222,7 +224,7 @@ class _PrefillCase:
             infer = self.infer_state
         state = self.backend.create_att_prefill_state(infer)
         # The model's per-step NSA metadata, which it passes with each layer's indices.
-        state.nsa_step = build_glm5_nsa_step(infer)
+        state.nsa_metadata = build_glm5_nsa_metadata(infer)
         return infer, state
 
     def refresh(self):
@@ -235,8 +237,8 @@ class _PrefillCase:
 
     def run(self, state=None):
         self.refresh()
-        active = self.att_state if state is None else state
-        self.control["q_kv_start_loc"] = active.nsa_step.q_kv_start_loc
+        active = self.att_metadata if state is None else state
+        self.control["q_kv_start_loc"] = active.nsa_metadata.q_kv_start_loc
         return active.prefill_att(self.q, self.packed_kv[..., :584], self.control)
 
     def check(self, actual):
@@ -263,7 +265,7 @@ class _PrefillCase:
     "kv_type, expected",
     [
         ("None", ("flashmla_sparse_mla_prefill", "fa3_sparse_mla_decode")),
-        ("fp8kv_dsa", ("fa3_sparse_mla_prefill", "flashmla_sparse_mla_decode")),
+        ("fp8kv_dsa", ("fa3_sparse_mla_prefill", "fp8_sparse_mla_decode")),
     ],
 )
 def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_type, expected):
@@ -316,7 +318,7 @@ def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_t
     assert attention.get_backend(role, "decode", 0).layer_config.causal is False
     # Sparse backends need no model capacities during init_runtime.
     for phase, name in zip(("prefill", "decode"), expected):
-        (group,) = attention.state_groups[role][phase].values()
+        (group,) = attention.group_backends[role][phase].values()
         assert group.name == name
         attention.get_backend(role, phase, 0).init_runtime(InferStateInfo())
 
@@ -606,7 +608,7 @@ def test_fp8_prefill_graph_with_empty_requests_and_changing_boundaries():
     case.infer_state.b1_cu_q_seq_len.copy_(replacement.infer_state.b1_cu_q_seq_len)
     case.infer_state.position_ids.copy_(replacement.infer_state.position_ids)
     for name in ("q_kv_seq_len", "q_req_idx", "q_kv_start_loc"):
-        getattr(case.att_state.nsa_step, name).copy_(getattr(replacement.att_state.nsa_step, name))
+        getattr(case.att_metadata.nsa_metadata, name).copy_(getattr(replacement.att_metadata.nsa_metadata, name))
     graph.replay()
     case.check(output)
 
@@ -755,7 +757,7 @@ def test_fp8_sparse_direct_decode_factory_bound_guard():
         config = dataclasses.replace(
             _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), 0.0625), topk=index_topk, kpool=index_kpool
         )
-        return FlashMLASparseDecodeBackend(config).direct_decode_bound
+        return FP8SparseMLADecodeBackend(config).direct_decode_topk_bound
 
     assert bound(index_topk=2048, index_kpool=4) == 2051
     assert bound(index_topk=2048, index_kpool=8) is None
@@ -870,7 +872,7 @@ def test_fp8_sparse_direct_decode_general_graph_factory_entry(monkeypatch, num_h
         indices[3, 64:128] = indices[3, :64]  # duplicates
     assert torch.equal(indices[:, 2051:], torch.full_like(indices[:, 2051:], -1))
     control = {"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
-    assert FlashMLASparseDecodeBackend(_layer_config(q, 0.0625)).direct_decode_bound == 2051
+    assert FP8SparseMLADecodeBackend(_layer_config(q, 0.0625)).direct_decode_topk_bound == 2051
     infer_state = _make_infer_state(graph_mode=GraphMode.EAGER)
     state = _Fp8DecodeState(infer_state, sched_meta=flash_mla.get_mla_metadata()[0], bound=2051)
     native_state_owner = _make_infer_state(graph_mode=GraphMode.EAGER)
@@ -1173,12 +1175,12 @@ def test_indexer_metadata_is_built_with_the_step_attention(prefill):
             att_state_role="main", attention_backend_manager=SimpleNamespace(has_attention=lambda role: False)
         )
     )
-    assert state.nsa_step is None
+    assert state.nsa_metadata is None
     state.init_some_extra_state(
         SimpleNamespace(
             att_state_role="main", attention_backend_manager=SimpleNamespace(has_attention=lambda role: True)
         )
     )
-    assert torch.equal(state.nsa_step.q_req_idx, torch.tensor([1, 1, 1, 0, 0] if prefill else [1, 0]).cuda().int())
+    assert torch.equal(state.nsa_metadata.q_req_idx, torch.tensor([1, 1, 1, 0, 0] if prefill else [1, 0]).cuda().int())
     if prefill:
-        assert state.nsa_step.q_kv_start_loc.tolist() == [0, 0, 0, 3, 3]
+        assert state.nsa_metadata.q_kv_start_loc.tolist() == [0, 0, 0, 3, 3]

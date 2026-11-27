@@ -41,7 +41,7 @@ class GQALayerConfig:
     a list loaded from a JSON model config compares equal to the tuple forms above.
 
     has_sinks=True adds one learned sink logit per query head to every softmax, supplied per
-    layer as GQALayerInputs.sinks.
+    layer as GQALayerInputs.sink_logits.
 
     kv_quant names how the cache stores K/V; None stores them in dtype. The quantized kinds are
     "fp8_per_tensor" and "fp8_per_head" (FP8 E4M3 with one static scale per layer or per KV
@@ -109,7 +109,7 @@ class GQALayerInputs:
 
     q is [total_query_tokens, num_heads, head_dim] in prefill, packed in batch order, or
     [decode_rows, num_heads, head_dim] in decode, one row per batch row (see
-    InferStateInfo.decode_rows_per_request).
+    InferStateInfo.max_decode_rows_per_request).
 
     k_cache/v_cache are already populated per-layer physical cache views of shape
     [cache_slots, num_kv_heads, head_dim], stored as the layer config's kv_quant: dtype, FP8 E4M3
@@ -117,7 +117,7 @@ class GQALayerInputs:
     Each implementation's attention state address their first dimension. The caller owns and populates
     the cache, including the current queries' KV; backends do not write q or K/V.
 
-    sinks is the layer's [num_heads] sink logits in q's dtype when the layer_config has has_sinks, else None.
+    sink_logits is the layer's [num_heads] sink logits in q's dtype when the layer_config has has_sinks, else None.
     kv_scales holds the cache's scales when the layer_config has kv_quant, else None.
     alibi_slopes is the layer's float32 [num_heads] ALiBi slopes when the layer_config has has_alibi, else None.
     """
@@ -125,7 +125,7 @@ class GQALayerInputs:
     q: torch.Tensor
     k_cache: torch.Tensor
     v_cache: torch.Tensor
-    sinks: Optional[torch.Tensor] = None
+    sink_logits: Optional[torch.Tensor] = None
     kv_scales: Optional[GQAKVScales] = None
     alibi_slopes: Optional[torch.Tensor] = None
 

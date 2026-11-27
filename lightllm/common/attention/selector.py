@@ -2,7 +2,7 @@
 
 Implementations are named as on the command line, --att_backend FAMILY.PHASE=NAME (for example
 gqa.prefill=fa3 or gdn.prefill=flashqla): "triton", "fa3", "flashinfer" for GQA and MLA,
-"flashmla_sparse" for sparse MLA, and "triton", "flashqla" or "flashkda" for linear attention. One
+"flashmla" or "fa3" for sparse MLA, and "triton", "flashqla" or "flashkda" for linear attention. One
 name can cover several backends of a family, such as the plain and quantized-KV Triton GQA backends;
 the first whose constructor accepts the layer config is used.
 """
@@ -40,15 +40,15 @@ class Family:
     # The family's name in --att_backend keys ("gqa" in gqa.prefill=fa3); layer config types of one
     # algorithm, such as MLA's prefill and decode configs, share it.
     name: str
-    # phase -> implementation name -> backends ("module:Class"), tried in order.
-    backends: dict[str, dict[str, tuple[str, ...]]]
+    # phase -> implementation name -> backend_paths ("module:Class"), tried in order.
+    backend_paths: dict[str, dict[str, tuple[str, ...]]]
     # phase -> auto-selection order, best first.
     priority: dict[str, tuple[str, ...]] = field(default_factory=lambda: dict(DEFAULT_PRIORITY))
     # The value of the deprecated --llm_{prefill,decode}_att_backend flags that names its
     # implementation: 0 for full-attention families, 1 for linear-attention families.
-    arg_index: int = 0
+    legacy_arg_index: int = 0
     # Names "auto" takes without validating the library.
-    unvalidated: tuple[str, ...] = ()
+    skip_validation: tuple[str, ...] = ()
 
 
 _GQA = "lightllm.common.attention.backends.gqa"
@@ -56,8 +56,8 @@ _MLA = "lightllm.common.attention.backends.mla"
 _SPARSE = "lightllm.common.attention.backends.sparse_mla"
 _GDN = "lightllm.common.attention.backends.gdn"
 _KDA = "lightllm.common.attention.backends.kda"
-# Sparse MLA has one name: each phase runs FlashMLA where it supports the cache format and FA3
-# elsewhere, and auto-selection validates FlashMLA's sparse kernels.
+# Keep the legacy mixed-provider selection and its validation behavior for auto.
+# Explicit flashmla/fa3 selections below never switch between FlashMLA and FA3.
 _SPARSE_PRIORITY = {"prefill": ("flashmla_sparse",), "decode": ("flashmla_sparse",)}
 
 _REGISTRY: dict[type, Family] = {
@@ -106,16 +106,20 @@ _REGISTRY: dict[type, Family] = {
         "sparse_mla",
         {
             "prefill": {
+                "flashmla": (f"{_SPARSE}.flashmla:FlashMLASparsePrefillBackend",),
+                "fa3": (f"{_SPARSE}.fa3:FA3SparseMLAPrefillBackend",),
                 "flashmla_sparse": (
                     f"{_SPARSE}.flashmla:FlashMLASparsePrefillBackend",
                     f"{_SPARSE}.fa3:FA3SparseMLAPrefillBackend",
-                )
+                ),
             },
             "decode": {
+                "flashmla": (f"{_SPARSE}.flashmla:FP8SparseMLADecodeBackend",),
+                "fa3": (f"{_SPARSE}.fa3:FA3SparseMLADecodeBackend",),
                 "flashmla_sparse": (
                     f"{_SPARSE}.fa3:FA3SparseMLADecodeBackend",
-                    f"{_SPARSE}.flashmla:FlashMLASparseDecodeBackend",
-                )
+                    f"{_SPARSE}.flashmla:FP8SparseMLADecodeBackend",
+                ),
             },
         },
         priority=_SPARSE_PRIORITY,
@@ -123,12 +127,16 @@ _REGISTRY: dict[type, Family] = {
     SWASparseMLALayerConfig: Family(
         "sparse_mla",
         {
-            "prefill": {"flashmla_sparse": (f"{_SPARSE}.flashmla_swa:FlashMLASWAPrefillBackend",)},
-            "decode": {"flashmla_sparse": (f"{_SPARSE}.flashmla_swa:FlashMLASWADecodeBackend",)},
+            "prefill": {
+                name: (f"{_SPARSE}.flashmla_swa:FlashMLASWAPrefillBackend",) for name in ("flashmla", "flashmla_sparse")
+            },
+            "decode": {
+                name: (f"{_SPARSE}.flashmla_swa:FlashMLASWADecodeBackend",) for name in ("flashmla", "flashmla_sparse")
+            },
         },
         priority=_SPARSE_PRIORITY,
     ),
-    # Linear attention: native or replay state, chosen by the layer config's replay.
+    # Linear attention: native or replay state, chosen by the layer config's use_ssm_replay.
     GDNLayerConfig: Family(
         "gdn",
         {
@@ -139,8 +147,8 @@ _REGISTRY: dict[type, Family] = {
             "decode": {"triton": (f"{_GDN}.triton:TritonGDNDecodeBackend", f"{_GDN}.triton:ReplayGDNDecodeBackend")},
         },
         priority={"prefill": ("flashqla", "triton"), "decode": ("triton",)},
-        arg_index=1,
-        unvalidated=("triton",),
+        legacy_arg_index=1,
+        skip_validation=("triton",),
     ),
     # FlashKDA is a fast path of the KDA prefill implementations, chosen by the layer config's
     # prefill_kernel; "flashkda" therefore names the same backends as "triton".
@@ -148,14 +156,16 @@ _REGISTRY: dict[type, Family] = {
         "kda",
         {
             "prefill": {
-                name: (f"{_KDA}.triton:TritonKDAPrefillBackend", f"{_KDA}.triton:ReplayKDAPrefillBackend")
+                name: (f"{_KDA}.recurrent:KDAPrefillBackend", f"{_KDA}.recurrent:ReplayKDAPrefillBackend")
                 for name in ("triton", "flashkda")
             },
-            "decode": {"triton": (f"{_KDA}.triton:TritonKDADecodeBackend", f"{_KDA}.triton:ReplayKDADecodeBackend")},
+            "decode": {
+                "triton": (f"{_KDA}.recurrent:TritonKDADecodeBackend", f"{_KDA}.recurrent:ReplayKDADecodeBackend")
+            },
         },
         priority={"prefill": ("triton",), "decode": ("triton",)},
-        arg_index=1,
-        unvalidated=("triton",),
+        legacy_arg_index=1,
+        skip_validation=("triton",),
     ),
 }
 
@@ -165,22 +175,22 @@ class BackendSelector:
 
     def __init__(self, args):
         self.args = args
-        self._backends: dict[tuple, AttentionBackend] = {}
+        self._selection_cache: dict[tuple, AttentionBackend] = {}
         if args.enable_ep_moe:
             logger.info("Expert parallelism with MoE enabled, excluding flashinfer from auto-selection")
 
-    def select(self, layer_config: Any, phase: str, required_backend: Optional[str] = None) -> AttentionBackend:
-        requested = required_backend or requested_backend(self.args, phase, layer_config)
-        key = (phase, layer_config, requested)
-        if key not in self._backends:
-            self._backends[key] = select(
+    def select(self, layer_config: Any, phase: str, required_backend_name: Optional[str] = None) -> AttentionBackend:
+        backend_name = required_backend_name or requested_backend_name(self.args, phase, layer_config)
+        key = (phase, layer_config, backend_name)
+        if key not in self._selection_cache:
+            self._selection_cache[key] = select(
                 layer_config,
                 phase,
-                requested,
+                backend_name,
                 priority=auto_priority(layer_config, phase, self.args.mtp_step),
                 excluded=("flashinfer",) if self.args.enable_ep_moe else (),
             )
-        return self._backends[key]
+        return self._selection_cache[key]
 
 
 def _named_family(name: str) -> Family:
@@ -197,7 +207,7 @@ def _family(layer_config: Any) -> Family:
     return family
 
 
-def requested_backend(args, phase: str, family: Any) -> str:
+def requested_backend_name(args, phase: str, family: Any) -> str:
     """The implementation the command line requests for a family in phase.
 
     family is a family name ("gqa", "kda", ...) or a layer config of the family. --att_backend
@@ -209,14 +219,14 @@ def requested_backend(args, phase: str, family: Any) -> str:
     if override is not None:
         return override
     values = (args.llm_prefill_att_backend if phase == "prefill" else args.llm_decode_att_backend) or ()
-    return values[family.arg_index] if family.arg_index < len(values) else "auto"
+    return values[family.legacy_arg_index] if family.legacy_arg_index < len(values) else "auto"
 
 
 def backend_choices() -> dict[str, tuple[str, ...]]:
     """The names --att_backend accepts for each FAMILY.PHASE key, "auto" first."""
     choices: dict[str, dict[str, None]] = {}
     for family in _REGISTRY.values():
-        for phase, implementations in family.backends.items():
+        for phase, implementations in family.backend_paths.items():
             names = choices.setdefault(f"{family.name}.{phase}", {"auto": None})
             names.update(dict.fromkeys(implementations))
     return {key: tuple(names) for key, names in sorted(choices.items())}
@@ -243,7 +253,7 @@ def auto_priority(layer_config: Any, phase: str, mtp_step: int = 0) -> tuple[str
     return priority
 
 
-def _construction_failures(reason: Optional[str]) -> list[str]:
+def _gather_construction_failures(reason: Optional[str]) -> list[str]:
     """Agree on each candidate before any rank enters the validation broadcast."""
     if not dist.is_initialized() or dist.get_world_size() == 1:
         return [reason] if reason else []
@@ -255,7 +265,7 @@ def _construction_failures(reason: Optional[str]) -> list[str]:
 
 
 def _construct(
-    paths: Sequence[str], layer_config: Any, phase: str, *, agree: bool = False
+    paths: Sequence[str], layer_config: Any, phase: str, *, sync_across_ranks: bool = False
 ) -> tuple[Optional[AttentionBackend], list[str]]:
     """Return the first backend in paths ("module:Class") whose constructor accepts layer_config, and why
     the others did not. A backend registered for a phase it does not run in raises TypeError."""
@@ -272,7 +282,7 @@ def _construct(
             backend = backend_cls(layer_config)
         except (NotImplementedError, ImportError, OSError) as error:
             reason = f"{label}: {error}"
-        failures = _construction_failures(reason) if agree else ([reason] if reason else [])
+        failures = _gather_construction_failures(reason) if sync_across_ranks else ([reason] if reason else [])
         if not failures:
             return backend, reasons
         reasons.extend(failures)
@@ -282,7 +292,7 @@ def _construct(
 def select(
     layer_config: Any,
     phase: str,
-    requested: str,
+    backend_name: str,
     *,
     priority: Optional[Sequence[str]] = None,
     excluded: Sequence[str] = (),
@@ -290,7 +300,7 @@ def select(
 ) -> AttentionBackend:
     """Construct the backend for layers with layer_config in phase ("prefill" or "decode").
 
-    requested is an implementation name or "auto". A named implementation that does not accept
+    backend_name is an implementation name or "auto". A named implementation that does not accept
     the layer config raises ValueError. "auto" takes the first name in priority (default
     auto_priority(layer_config, phase)) outside excluded whose constructor accepts the layer config and
     whose library passes validate(name); if none does, it falls back to Triton without validation.
@@ -298,25 +308,28 @@ def select(
     if phase not in PHASES:
         raise ValueError(f"phase must be one of {PHASES}, got {phase!r}")
     family = _family(layer_config)
-    backends = family.backends.get(phase)
-    if backends is None:
+    backend_paths = family.backend_paths.get(phase)
+    if backend_paths is None:
         raise ValueError(f"{type(layer_config).__name__} has no {phase} attention implementations")
-    if requested != "auto":
-        if requested not in backends:
+    if backend_name != "auto":
+        if backend_name not in backend_paths:
             raise ValueError(
-                f"{phase} attention {requested!r} is not available for {layer_config}; choose from {tuple(backends)}"
+                f"{phase} attention {backend_name!r} is not available for {layer_config}; "
+                f"choose from {tuple(backend_paths)}"
             )
-        backend, reasons = _construct(backends[requested], layer_config, phase)
+        backend, reasons = _construct(backend_paths[backend_name], layer_config, phase)
         if backend is None:
-            raise ValueError(f"{phase} attention {requested!r} does not support {layer_config}: {'; '.join(reasons)}")
+            raise ValueError(
+                f"{phase} attention {backend_name!r} does not support {layer_config}: {'; '.join(reasons)}"
+            )
         return backend
 
     priority = auto_priority(layer_config, phase) if priority is None else tuple(priority)
-    candidates = [name for name in priority if name in backends and name not in excluded]
+    candidates = [name for name in priority if name in backend_paths and name not in excluded]
     reasons = []
     fallback = None
     for name in dict.fromkeys([*candidates, "triton"]):
-        backend, failures = _construct(backends.get(name, ()), layer_config, phase, agree=True)
+        backend, failures = _construct(backend_paths.get(name, ()), layer_config, phase, sync_across_ranks=True)
         reasons.extend(failures)
         if backend is None:
             continue
@@ -324,7 +337,7 @@ def select(
             fallback = backend
         if name not in candidates:
             continue
-        if name in family.unvalidated or validate(name):
+        if name in family.skip_validation or validate(name):
             logger.info(f"Auto-selected {name} for {phase} attention (validated)")
             return backend
         reasons.append(f"{name}: validation failed")

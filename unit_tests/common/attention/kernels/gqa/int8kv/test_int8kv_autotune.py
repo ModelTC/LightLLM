@@ -155,7 +155,7 @@ def test_decode_passes_saved_length_to_stage1(monkeypatch):
     )
     layer_inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
     backend = TritonQuantGQADecodeBackend(layer_config)
-    att_state = backend.build(infer_state)
+    att_state = backend.build_att_metadata(infer_state)
     infer_state.max_kv_seq_len = 32768
     calls = []
     monkeypatch.setattr(decode_module, "flash_decode_stage1", lambda **kwargs: calls.append(kwargs))

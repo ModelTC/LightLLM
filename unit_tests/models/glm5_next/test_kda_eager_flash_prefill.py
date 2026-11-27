@@ -120,9 +120,9 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
     backend = selector.select(spec.prefill, "prefill", requested)
     infer.attention_backend_manager = SimpleNamespace(get_backend=lambda role, phase, layer_id: backend)
     # The attention state the layer's group prepares for this step.
-    att_state = backend.create_att_state(infer)
-    infer.att_states = {backend.state_key: att_state}
-    assert (att_state.flash_kda_fwd is not None) == (requested == "flashkda")
+    att_metadata = backend.create_att_metadata(infer)
+    infer.att_metadata = {backend.metadata_group_key: att_metadata}
+    assert (att_metadata.flash_kda_fwd is not None) == (requested == "flashkda")
     if graph:
         capture = InferStateInfo()
         capture.mem_pool = torch.cuda.graph_pool_handle()
@@ -134,9 +134,9 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
         capture.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
         forward = backend.forward
 
-        def check_destination(att_state, inputs, *, out, alloc_func):
+        def check_destination(att_metadata, inputs, *, out, alloc_func):
             assert out.data_ptr() == fixed.data_ptr()
-            return forward(att_state, inputs, out=out, alloc_func=alloc_func)
+            return forward(att_metadata, inputs, out=out, alloc_func=alloc_func)
 
         backend.forward = check_destination
         capture.prefill_replay(infer)

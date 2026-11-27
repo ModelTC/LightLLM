@@ -9,7 +9,7 @@ import torch
 import triton
 
 from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
-from .. import set_flashinfer_envs
+from .. import configure_flashinfer_jit_arch
 from . import (
     MLADecodeLayerConfig,
     MLADecodeLayerInputs,
@@ -28,7 +28,7 @@ _WORKSPACE_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True)
-class FlashInferMLADecodeAttState:
+class FlashInferMLADecodeMetadata:
     """A planned paged MLA wrapper with one query row per request; page index p addresses cache slots
     [p * page_size, (p + 1) * page_size)."""
 
@@ -50,17 +50,17 @@ class FlashInferMLAPrefillBackend(
             raise NotImplementedError("FlashInfer MLA prefill supports only causal attention")
 
     @classmethod
-    def group_key(cls, layer_config: MLAPrefillLayerConfig):
+    def metadata_config_key(cls, layer_config: MLAPrefillLayerConfig):
         # FlashInfer plans with every field but causal, which the backend requires.
         return layer_config
 
     def init_runtime(self, infer_state: InferStateInfo) -> None:
-        set_flashinfer_envs()
+        configure_flashinfer_jit_arch()
         self.workspace = infer_state.attention_backend_manager.get_workspace(
             "flashinfer_mla", _WORKSPACE_BYTES, torch.int8
         )
 
-    def build(self, infer_state: InferStateInfo) -> "BatchPrefillWithRaggedKVCacheWrapper":
+    def build_att_metadata(self, infer_state: InferStateInfo) -> "BatchPrefillWithRaggedKVCacheWrapper":
         """Plan a fresh wrapper for the step's query and kv offsets."""
         import flashinfer
 
@@ -81,19 +81,19 @@ class FlashInferMLAPrefillBackend(
 
     def forward(
         self,
-        att_state: "BatchPrefillWithRaggedKVCacheWrapper",
+        att_metadata: "BatchPrefillWithRaggedKVCacheWrapper",
         layer_inputs: MLAPrefillLayerInputs,
         *,
         out: torch.Tensor,
         alloc_func: TensorAllocator = torch.empty,
     ) -> torch.Tensor:
         """Fill and return out [query_tokens, num_heads, v_head_dim]; keys are expanded into alloc_func scratch."""
-        att_state.run(layer_inputs.q, expand_mla_keys(layer_inputs, alloc_func), layer_inputs.v, out=out)
+        att_metadata.run(layer_inputs.q, expand_mla_keys(layer_inputs, alloc_func), layer_inputs.v, out=out)
         return out
 
 
 class FlashInferMLADecodeBackend(
-    AttentionBackend[MLADecodeLayerConfig, FlashInferMLADecodeAttState, MLADecodeLayerInputs]
+    AttentionBackend[MLADecodeLayerConfig, FlashInferMLADecodeMetadata, MLADecodeLayerInputs]
 ):
     name = "flashinfer_mla_decode"
     phase = "decode"
@@ -105,26 +105,26 @@ class FlashInferMLADecodeBackend(
             raise NotImplementedError("FlashInfer MLA decode supports only causal attention")
 
     @classmethod
-    def group_key(cls, layer_config: MLADecodeLayerConfig):
+    def metadata_config_key(cls, layer_config: MLADecodeLayerConfig):
         # FlashInfer plans with every field but causal, which the backend requires.
         return layer_config
 
     def init_runtime(self, infer_state: InferStateInfo) -> None:
         """Keep one page-index buffer per microbatch for batches of up to the CUDA graph batch size."""
-        set_flashinfer_envs()
+        configure_flashinfer_jit_arch()
         self.workspace = infer_state.attention_backend_manager.get_workspace(
             "flashinfer_mla", _WORKSPACE_BYTES, torch.int8
         )
         self.page_size = infer_state.page_size
         self.max_pages_per_request = triton.cdiv(infer_state.model_max_seq_len, self.page_size)
-        self.max_batch_size = infer_state.max_cuda_graph_batch_size
-        numel = self.max_batch_size * self.max_pages_per_request
-        self._kv_indices = [
+        self.max_graph_batch_size = infer_state.max_cuda_graph_batch_size
+        numel = self.max_graph_batch_size * self.max_pages_per_request
+        self._page_indices = [
             torch.empty(numel, dtype=torch.int32, device=infer_state.b_seq_len.device) for _ in range(2)
         ]
         self._graph_wrappers: dict[tuple[int, int], "BatchMLAPagedAttentionWrapper"] = {}
 
-    def build(self, infer_state: InferStateInfo) -> FlashInferMLADecodeAttState:
+    def build_att_metadata(self, infer_state: InferStateInfo) -> FlashInferMLADecodeMetadata:
         """Plan the step's wrapper; every query row is its own request.
 
         A CUDA graph step keeps one wrapper and its index buffers per (microbatch, batch size).
@@ -140,17 +140,17 @@ class FlashInferMLADecodeBackend(
         device = infer_state.b_seq_len.device
         # A partial final page still counts as one page.
         b_page_len = (infer_state.b_seq_len + (page_size - 1)) // page_size
-        kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
-        page_ids = infer_state.batch_size * self.max_pages_per_request
-        if infer_state.batch_size <= self.max_batch_size:
-            kv_indices = self._kv_indices[infer_state.microbatch_index][:page_ids]
+        page_indptr, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
+        page_indices_capacity = infer_state.batch_size * self.max_pages_per_request
+        if infer_state.batch_size <= self.max_graph_batch_size:
+            kv_indices = self._page_indices[infer_state.microbatch_index][:page_indices_capacity]
         else:
             # Captured wrappers must read the fixed per-microbatch buffer.
             assert not infer_state.uses_cuda_graph, "CUDA graph batches must fit the page-index buffers"
-            kv_indices = torch.empty(page_ids, dtype=torch.int32, device=device)
+            kv_indices = torch.empty(page_indices_capacity, dtype=torch.int32, device=device)
         q_indptr = torch.arange(infer_state.batch_size + 1, dtype=torch.int32, device=device)
         key = (infer_state.microbatch_index, infer_state.batch_size)
-        kv_starts = self.keep_for_graph(infer_state, "kv_starts", kv_starts)
+        page_indptr = self.update_graph_tensor(infer_state, "page_indptr", page_indptr)
         if infer_state.uses_cuda_graph:
             # The row offsets are constant, so the captured tensor needs no rewrite.
             q_indptr = self._graph_tensors.setdefault((*key, "q_indptr"), q_indptr)
@@ -158,7 +158,7 @@ class FlashInferMLADecodeBackend(
             req_to_token_indexs=infer_state.req_to_token_indexs,
             b_req_idx=infer_state.b_req_idx,
             b_token_len=infer_state.b_seq_len,
-            b_page_start_loc=kv_starts[:-1],
+            b_page_start_loc=page_indptr[:-1],
             max_token_len=infer_state.max_kv_seq_len,
             out_page_indices=kv_indices,
             page_size=page_size,
@@ -168,24 +168,24 @@ class FlashInferMLADecodeBackend(
             # Prefer the GPU-generated split plan for long decode; exact non-split for short decode.
             fill_mla_decode_plan_for_cuda_graph(
                 decode_wrapper=wrapper,
-                kv_page_indptr=kv_starts,
+                kv_page_indptr=page_indptr,
                 kv_lens=infer_state.b_seq_len,
                 batch_size=infer_state.batch_size,
                 num_heads=config.num_heads,
                 max_kv_len=infer_state.max_kv_seq_len,
             )
-            return FlashInferMLADecodeAttState(wrapper=wrapper, page_size=page_size)
+            return FlashInferMLADecodeMetadata(wrapper=wrapper, page_size=page_size)
         wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(
             self.workspace,
             use_cuda_graph=True,
             qo_indptr=q_indptr,
             kv_indices=kv_indices,
-            kv_indptr=kv_starts,
+            kv_indptr=page_indptr,
             kv_len_arr=infer_state.b_seq_len,
         )
         wrapper.plan(
             q_indptr,
-            kv_starts,
+            page_indptr,
             kv_indices,
             infer_state.b_seq_len,
             config.num_heads,
@@ -200,11 +200,11 @@ class FlashInferMLADecodeBackend(
         )
         if infer_state.uses_cuda_graph:
             self._graph_wrappers[key] = wrapper
-        return FlashInferMLADecodeAttState(wrapper=wrapper, page_size=page_size)
+        return FlashInferMLADecodeMetadata(wrapper=wrapper, page_size=page_size)
 
     def forward(
         self,
-        att_state: FlashInferMLADecodeAttState,
+        att_metadata: FlashInferMLADecodeMetadata,
         layer_inputs: MLADecodeLayerInputs,
         *,
         out: torch.Tensor,
@@ -212,8 +212,8 @@ class FlashInferMLADecodeBackend(
     ) -> torch.Tensor:
         """Fill and return out with q_nope's shape; the planned workspace holds the scratch."""
         config = self.layer_config
-        kv, rank, page_size = layer_inputs.kv_cache, config.kv_lora_rank, att_state.page_size
-        att_state.wrapper.run(
+        kv, rank, page_size = layer_inputs.kv_cache, config.kv_lora_rank, att_metadata.page_size
+        att_metadata.wrapper.run(
             layer_inputs.q_nope,
             layer_inputs.q_rope,
             kv[:, :, :rank].view(-1, page_size, 1, rank),

@@ -8,12 +8,12 @@ import torch
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import (
     FA3GQADecodeBackend,
-    FA3GQADecodeAttState,
+    FA3DecodeMetadata,
     FA3GQAPrefillBackend,
-    FA3GQAPrefillAttState,
+    FA3GQAPrefillMetadata,
 )
 from lightllm.common.attention.backends.gqa.flashinfer import (
-    FlashInferGQAAttState,
+    FlashInferGQAMetadata,
     FlashInferGQADecodeBackend,
     FlashInferGQAPrefillBackend,
 )
@@ -23,8 +23,8 @@ from lightllm.common.attention.backends.gqa import gqa_kv_quant_fields
 class FP8Attention:
     """One phase of FP8 GQA attention over given attention state; call run(q, k, v, kv_scales, alloc_func)."""
 
-    def __init__(self, backend, kv_type: str, att_state) -> None:
-        self.backend, self.kv_type, self.att_state = backend, kv_type, att_state
+    def __init__(self, backend, kv_type: str, att_metadata) -> None:
+        self.backend, self.kv_type, self.att_metadata = backend, kv_type, att_metadata
 
     def run(self, *, q, k, v, kv_scales, alloc_func=torch.empty):
         # The layer config a layer creates from its cache scales when the model loads.
@@ -38,7 +38,7 @@ class FP8Attention:
         backend = self.backend(layer_config)
         inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
         out = alloc_func(q.shape, dtype=q.dtype, device=q.device)
-        return backend.forward(self.att_state, inputs, out=out, alloc_func=alloc_func)
+        return backend.forward(self.att_metadata, inputs, out=out, alloc_func=alloc_func)
 
 
 def fp8_attention(
@@ -71,8 +71,8 @@ def fp8_attention(
 
         monkeypatch.setattr(q_per_head_fp8_quant, "q_per_head_static_fp8_quant", quantize)
         monkeypatch.setattr(sgl_utils, "flash_attn_with_kvcache", attend)
-        att_state_cls, extra = (FA3GQAPrefillAttState, {}) if prefill else (FA3GQADecodeAttState, {"max_seqlen_k": 1})
-        att_state = att_state_cls(
+        metadata_cls, extra = (FA3GQAPrefillMetadata, {}) if prefill else (FA3DecodeMetadata, {"max_seqlen_k": 1})
+        att_metadata = metadata_cls(
             page_table=None,
             cache_seqlens=torch.ones(requests, dtype=torch.int32),
             cu_seqlens_q=torch.arange(requests + 1, dtype=torch.int32),
@@ -81,13 +81,13 @@ def fp8_attention(
             page_size=1,
             **extra,
         )
-        return FP8Attention(FA3GQAPrefillBackend if prefill else FA3GQADecodeBackend, "fp8kv_sph", att_state)
+        return FP8Attention(FA3GQAPrefillBackend if prefill else FA3GQADecodeBackend, "fp8kv_sph", att_metadata)
     else:
 
         def run(q, paged_kv_cache, k_scale, v_scale, out):
             observed.update(k_scale=k_scale, v_scale=v_scale)
             out.copy_(q)
 
-        att_state = FlashInferGQAAttState(wrapper=SimpleNamespace(run=run), page_size=1)
+        att_metadata = FlashInferGQAMetadata(wrapper=SimpleNamespace(run=run), page_size=1)
         backend = FlashInferGQAPrefillBackend if prefill else FlashInferGQADecodeBackend
-        return FP8Attention(backend, "fp8kv_spt", att_state)
+        return FP8Attention(backend, "fp8kv_spt", att_metadata)

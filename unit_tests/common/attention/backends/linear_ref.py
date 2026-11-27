@@ -115,8 +115,8 @@ def decode_batch(reqs, lengths, width, hold, req_to_mtp_state_index, *, dynamic,
         batch_size=b_req_idx.numel(),
         max_kv_seq_len=64,
         total_token_num=64 * b_req_idx.numel(),
-        decode_rows_per_request=width,
-        dynamic_decode_rows=dynamic and width > 1,
+        max_decode_rows_per_request=width,
+        is_dynamic_verify=dynamic and width > 1,
         pad_req_idx=hold,
         b_mtp_index=torch.tensor(mtp_index, dtype=torch.int32, device="cuda"),
         req_to_mtp_state_index=req_to_mtp_state_index if width > 1 else None,
@@ -210,7 +210,7 @@ def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_backen
     # Prefill.
     rows = sum(lengths)
     tensors = family.make_inputs(rows)
-    step = prefill_backend.create_att_state(prefill_batch(REQS, lengths, ready))
+    step = prefill_backend.create_att_metadata(prefill_batch(REQS, lengths, ready))
     out = family.alloc_out(rows)
     prefill_backend.forward(step, family.layer_inputs(_clones(tensors), conv, ssm, state if replay else None), out=out)
     start = 0
@@ -226,7 +226,7 @@ def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_backen
         step_lengths = step_lengths if dynamic else [width] * len(REQS)
         batch = decode_batch(REQS, step_lengths, width, HOLD, state.mtp_state_index, dynamic=dynamic)
         tensors = family.make_inputs(batch.batch_size)
-        step = decode_backend.create_att_state(batch)
+        step = decode_backend.create_att_metadata(batch)
         out = family.alloc_out(batch.batch_size)
         # A replay decode backend advances the replay cursors itself after the last layer.
         decode_backend.forward(

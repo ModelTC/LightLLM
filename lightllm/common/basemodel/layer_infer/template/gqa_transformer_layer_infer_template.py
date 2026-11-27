@@ -62,11 +62,11 @@ class GQATransformerLayerInferTpl(TransformerLayerInferTpl):
             k_cache=keys,
             v_cache=values,
             kv_scales=state.get_layer_kv_scales(self.layer_num_),
-            sinks=self._gqa_sinks(layer_weight),
+            sink_logits=self._gqa_sinks(layer_weight),
             alibi_slopes=self._gqa_alibi_slopes(layer_weight),
         )
         output = backend.forward(
-            infer_state.att_states[backend.state_key],
+            infer_state.att_metadata[backend.metadata_group_key],
             inputs,
             out=self.alloc_tensor(query.shape, dtype=query.dtype, device=query.device),
             alloc_func=self.alloc_tensor,

@@ -1,6 +1,6 @@
 """Drive a model's Triton MLA layer group through LightLLM's own CudaGraph capture and replay.
 
-Unlike the step-builder tests that capture with torch.cuda.graph directly, these go through
+Unlike the backend metadata tests that capture with torch.cuda.graph directly, these go through
 CudaGraph.capture_decode (warmup on a shallow InferStateInfo copy, graph memory pool) and
 CudaGraph.replay (copy_for_cuda_graph into the captured state), with and without decode
 microbatch overlap.
@@ -17,7 +17,7 @@ from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLADeco
 from lightllm.common.attention.backends.mla import MLAPrefillLayerConfig
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
-from unit_tests.common.attention.backends.groups_runner import GroupsRunner
+from unit_tests.common.attention.backends.attention_runner import ModelAttentionRunner
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -30,7 +30,7 @@ SCALE = (LATENT + ROPE) ** -0.5
 def start_args(monkeypatch):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
-    def configure(overlap: bool) -> GroupsRunner:
+    def configure(overlap: bool) -> ModelAttentionRunner:
         """The MLA layers' group of a model running Triton attention."""
         args = {f.name: getattr(StartArgs(), f.name) for f in dataclasses.fields(StartArgs)}
         args.update(enable_decode_microbatch_overlap=overlap, enable_torch_memory_saver=False)
@@ -49,7 +49,7 @@ def start_args(monkeypatch):
         )
         common = dict(num_heads=HEADS, qk_rope_head_dim=ROPE, softmax_scale=SCALE, dtype=torch.bfloat16)
         prefill = MLAPrefillLayerConfig(qk_nope_head_dim=128, v_head_dim=128, **common)
-        return GroupsRunner(model, prefill, MLADecodeLayerConfig(kv_lora_rank=LATENT, **common))
+        return ModelAttentionRunner(model, prefill, MLADecodeLayerConfig(kv_lora_rank=LATENT, **common))
 
     yield configure
     get_env_start_args.cache_clear()
@@ -84,7 +84,7 @@ class _Microbatch:
         state.b_seq_len = torch.tensor(lengths, device="cuda", dtype=torch.int32)
         state.max_kv_seq_len, state.total_token_num = max(lengths), sum(lengths)
         state.req_manager = SimpleNamespace(req_to_token_indexs=self.token_map)
-        runner.step(state)
+        runner.prepare_att_metadata(state)
         self.runner = runner
         return state
 
@@ -94,7 +94,7 @@ class _Microbatch:
         for q_nope in self.q_nope:
             inputs = MLADecodeLayerInputs(q_nope=q_nope, q_rope=self.q_rope, kv_cache=self.kv)
             out = torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
-            outputs.append(backend.forward(state.att_states[backend.state_key], inputs, out=out))
+            outputs.append(backend.forward(state.att_metadata[backend.metadata_group_key], inputs, out=out))
         return outputs
 
     def check(self, outputs, lengths) -> None:

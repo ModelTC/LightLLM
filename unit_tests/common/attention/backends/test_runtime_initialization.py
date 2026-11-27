@@ -16,12 +16,12 @@ from lightllm.common.attention.backends.mla.fa3 import FA3MLADecodeBackend
 from lightllm.common.attention.backends.mla.flashinfer import FlashInferMLADecodeBackend, FlashInferMLAPrefillBackend
 from lightllm.common.basemodel import attention_backend_manager
 from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
-from unit_tests.common.attention.backends.groups_runner import init_backend
+from unit_tests.common.attention.backends.attention_runner import init_backend
 from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.gqa import flashinfer as gqa_flashinfer
 
 
-def context(monkeypatch, **overrides):
+def make_step_state(monkeypatch, **overrides):
     monkeypatch.setattr(attention_backend_manager, "get_current_device_id", lambda: 0)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
     monkeypatch.setattr(gqa_flashinfer, "get_env_start_args", lambda: SimpleNamespace(flashinfer_workspace_size=512))
@@ -36,7 +36,7 @@ def gqa(**fields) -> GQALayerConfig:
 MLA_COMMON = dict(num_heads=16, qk_rope_head_dim=64, softmax_scale=0.1, dtype=torch.bfloat16)
 
 
-def test_flashinfer_gqa_builders_share_one_workspace_and_mla_has_its_own(monkeypatch):
+def test_flashinfer_gqa_backends_share_one_workspace_and_mla_has_its_own(monkeypatch):
     allocations = []
     current_device_id = 0
 
@@ -46,19 +46,19 @@ def test_flashinfer_gqa_builders_share_one_workspace_and_mla_has_its_own(monkeyp
         return workspace
 
     monkeypatch.setattr(attention_backend_manager.torch, "empty", fake_empty)
-    ctx = context(monkeypatch)
+    infer_state = make_step_state(monkeypatch)
     # The manager shares workspaces within one device.
     monkeypatch.setattr(attention_backend_manager, "get_current_device_id", lambda: current_device_id)
 
-    fp = init_backend(FlashInferGQAPrefillBackend, gqa(), ctx).workspace
-    fp8 = init_backend(FlashInferGQAPrefillBackend, gqa(kv_quant="fp8_per_tensor"), ctx).workspace
+    fp = init_backend(FlashInferGQAPrefillBackend, gqa(), infer_state).workspace
+    fp8 = init_backend(FlashInferGQAPrefillBackend, gqa(kv_quant="fp8_per_tensor"), infer_state).workspace
     mla_config = MLAPrefillLayerConfig(qk_nope_head_dim=128, v_head_dim=128, **MLA_COMMON)
-    mla = init_backend(FlashInferMLAPrefillBackend, mla_config, ctx).workspace
+    mla = init_backend(FlashInferMLAPrefillBackend, mla_config, infer_state).workspace
 
     assert fp8 is fp and mla is not fp
     assert [allocation[1] for allocation in allocations] == [512 * 1024 * 1024, 256 * 1024 * 1024]
     current_device_id = 1
-    assert init_backend(FlashInferGQAPrefillBackend, gqa(), ctx).workspace is not fp
+    assert init_backend(FlashInferGQAPrefillBackend, gqa(), infer_state).workspace is not fp
     assert allocations[-1][3] == 1
 
 
@@ -87,29 +87,29 @@ def test_workspace_requests_of_one_name_share_the_largest_storage(monkeypatch):
 
 @pytest.mark.parametrize("backend", [FA3GQAPrefillBackend, FA3GQADecodeBackend])
 def test_fa3_gqa_pages_like_the_cache_except_fp8_which_uses_single_token_pages(monkeypatch, backend):
-    ctx = context(monkeypatch)
-    assert init_backend(backend, gqa(), ctx).page_size == 16
+    infer_state = make_step_state(monkeypatch)
+    assert init_backend(backend, gqa(), infer_state).page_size == 16
     with patch.object(gqa_fa3.logger, "warning") as warning:
-        assert init_backend(backend, gqa(kv_quant="fp8_per_head"), ctx).page_size == 1
+        assert init_backend(backend, gqa(kv_quant="fp8_per_head"), infer_state).page_size == 1
     warning.assert_called_once()
 
 
 def test_flashinfer_pages_like_the_cache_except_fp8_which_uses_single_token_pages(monkeypatch):
-    ctx = context(monkeypatch)
-    assert init_backend(FlashInferGQADecodeBackend, gqa(), ctx).page_size == 16
-    assert init_backend(FlashInferGQADecodeBackend, gqa(kv_quant="fp8_per_tensor"), ctx).page_size == 1
+    infer_state = make_step_state(monkeypatch)
+    assert init_backend(FlashInferGQADecodeBackend, gqa(), infer_state).page_size == 16
+    assert init_backend(FlashInferGQADecodeBackend, gqa(kv_quant="fp8_per_tensor"), infer_state).page_size == 1
 
 
 def test_mla_decode_pages_like_the_cache(monkeypatch):
-    ctx = context(monkeypatch)
+    infer_state = make_step_state(monkeypatch)
     config = MLADecodeLayerConfig(kv_lora_rank=512, **MLA_COMMON)
-    assert init_backend(FA3MLADecodeBackend, config, ctx).page_size == 16
-    assert init_backend(FlashInferMLADecodeBackend, config, ctx).page_size == 16
+    assert init_backend(FA3MLADecodeBackend, config, infer_state).page_size == 16
+    assert init_backend(FlashInferMLADecodeBackend, config, infer_state).page_size == 16
 
 
 @pytest.mark.parametrize("backend_cls", [FA3GQADecodeBackend, FlashInferGQADecodeBackend])
 def test_init_runtime_does_not_retain_the_step(monkeypatch, backend_cls):
-    step = context(monkeypatch)
+    step = make_step_state(monkeypatch)
     monkeypatch.setattr(step.attention_backend_manager, "get_workspace", lambda *args: torch.empty(1))
     step_ref = weakref.ref(step)
     backend = init_backend(backend_cls, gqa(), step)
@@ -120,7 +120,7 @@ def test_init_runtime_does_not_retain_the_step(monkeypatch, backend_cls):
 
 @pytest.mark.parametrize("workspace_mb", [0, -1])
 def test_flashinfer_rejects_invalid_workspace_size_before_allocation(monkeypatch, workspace_mb):
-    step = context(monkeypatch)
+    step = make_step_state(monkeypatch)
     monkeypatch.setattr(
         gqa_flashinfer, "get_env_start_args", lambda: SimpleNamespace(flashinfer_workspace_size=workspace_mb)
     )

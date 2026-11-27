@@ -481,8 +481,8 @@ class TpPartBaseModel:
                 infer_state.cuda_graph_max_kv_seq_len = self.graph_max_len_in_batch
             if not infer_state.is_prefill:
                 rows = self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
-                infer_state.decode_rows_per_request = rows
-                infer_state.dynamic_decode_rows = (
+                infer_state.max_decode_rows_per_request = rows
+                infer_state.is_dynamic_verify = (
                     rows > 1 and not self.is_mtp_draft_model and self.args.mtp_dynamic_verify
                 )
                 if rows > 1:
@@ -494,7 +494,7 @@ class TpPartBaseModel:
                         ),
                         None,
                     )
-            infer_state.att_states = self.attention_backend_manager.create_att_state(infer_state)
+            infer_state.att_metadata = self.attention_backend_manager.create_att_metadata_by_group(infer_state)
         return infer_state
 
     def _create_padded_decode_model_input(self, model_input: ModelInput, new_batch_size: int):

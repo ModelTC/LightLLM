@@ -54,17 +54,20 @@ class SparseMLALayerConfig:
 class SparseMLAPrefillLayerInputs:
     """One layer's prefill operands.
 
-    q is [query_tokens, num_heads, kv_lora_rank + qk_rope_head_dim]. topk_mem_indices is
-    [query_tokens, topk] cache slots, -1 for unused entries. An "fp8_ds_mla" cache also needs the
-    step's own keys in full precision: current_kv [new_tokens, 1, kv_lora_rank + qk_rope_head_dim]
-    and topk_indices, the same selection as positions in the step's ragged key layout, in which
-    q_kv_start_loc gives each query's request start ("fp8_group64_e8m0" only).
+    q is [query_tokens, num_heads, kv_lora_rank + qk_rope_head_dim]. topk_cache_indices is
+    [query_tokens, topk] physical cache slots, -1 for unused entries. FP8 prefill also takes
+    current_kv [new_tokens, 1, kv_lora_rank + qk_rope_head_dim] in full precision.
+
+    For "fp8_ds_mla", topk_ragged_indices addresses the concatenated request keys, including cached
+    prefixes. For "fp8_group64_e8m0", topk_token_positions is relative to each request; q_kv_start_loc
+    gives each query's request start in the concatenated keys. These coordinates are not interchangeable.
     """
 
     q: torch.Tensor
     kv_cache: torch.Tensor
-    topk_mem_indices: torch.Tensor
-    topk_indices: Optional[torch.Tensor] = None
+    topk_cache_indices: torch.Tensor
+    topk_ragged_indices: Optional[torch.Tensor] = None
+    topk_token_positions: Optional[torch.Tensor] = None
     current_kv: Optional[torch.Tensor] = None
     q_kv_start_loc: Optional[torch.Tensor] = None
     fp8_workspace: Optional[dict[str, torch.Tensor]] = None
@@ -73,12 +76,12 @@ class SparseMLAPrefillLayerInputs:
 @dataclass(frozen=True)
 class SparseMLADecodeLayerInputs:
     """One layer's decode operands: q_nope [rows, num_heads, kv_lora_rank], q_rope [rows, num_heads,
-    qk_rope_head_dim], the cache and topk_mem_indices [rows, topk] cache slots (-1 unused)."""
+    qk_rope_head_dim], the cache and topk_cache_indices [rows, topk] cache slots (-1 unused)."""
 
     q_nope: torch.Tensor
     q_rope: torch.Tensor
     kv_cache: torch.Tensor
-    topk_mem_indices: torch.Tensor
+    topk_cache_indices: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -88,19 +91,19 @@ class SWASparseMLALayerConfig:
 
     num_heads is the per-rank head count padded to FlashMLA's 64-head tiles. Each query attends to
     its selected sliding-window rows and, when compress_ratio is not 0, to selected rows of the cache
-    that compresses every compress_ratio tokens into one. has_attn_sink adds a learned sink logit per
+    that compresses every compress_ratio tokens into one. has_sinks adds a learned sink logit per
     head.
     """
 
     num_heads: int
-    head_dim_v: int
+    v_head_dim: int
     softmax_scale: float
     dtype: torch.dtype
     compress_ratio: int = 0
-    has_attn_sink: bool = False
+    has_sinks: bool = False
 
     def __post_init__(self) -> None:
-        require_positive(self, "num_heads", "head_dim_v")
+        require_positive(self, "num_heads", "v_head_dim")
         if self.compress_ratio < 0:
             raise ValueError(f"compress_ratio must be >= 0, got {self.compress_ratio}")
 
@@ -109,13 +112,13 @@ class SWASparseMLALayerConfig:
 class SWASparseMLALayerInputs:
     """One layer's operands: q [rows, num_heads, head_dim], FlashMLA attention views of the packed FP8
     sliding-window cache and of the compressed cache (None without compression), per-row selected
-    indices with their valid lengths for each cache, and attn_sink [num_heads] when the layer has one."""
+    indices with their valid lengths for each cache, and sink_logits [num_heads] when the layer has one."""
 
     q: torch.Tensor
     swa_cache: torch.Tensor
     swa_indices: torch.Tensor
     swa_lengths: torch.Tensor
     compressed_cache: Optional[torch.Tensor] = None
-    extra_indices: Optional[torch.Tensor] = None
-    extra_lengths: Optional[torch.Tensor] = None
-    attn_sink: Optional[torch.Tensor] = None
+    compressed_indices: Optional[torch.Tensor] = None
+    compressed_lengths: Optional[torch.Tensor] = None
+    sink_logits: Optional[torch.Tensor] = None

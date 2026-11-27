@@ -17,7 +17,7 @@ _KINDS = ("int8_group", "int4_group")
 
 
 @dataclass(frozen=True)
-class TritonQuantGQAPrefillAttState:
+class TritonQuantGQAPrefillMetadata:
     """Attention state for packed prefill queries with request tensors from InferStateInfo.
 
     Prefill dequantizes every request's KV into contiguous scratch first: request i's tokens land at
@@ -37,8 +37,8 @@ class TritonQuantGQAPrefillAttState:
 
 
 @dataclass(frozen=True)
-class TritonQuantGQADecodeAttState:
-    """Attention state for one query per batch row; lengths follow TritonGQADecodeAttState.
+class TritonQuantGQADecodeMetadata:
+    """Attention state for one query per batch row; lengths follow TritonGQADecodeMetadata.
 
     With diverse sampling (int8 only), b_mark_shared_group marks the rows that start a group of
     rows sharing a prefix, and b_shared_seq_len gives each row's shared prefix length (0 for a
@@ -86,7 +86,7 @@ def _quantized_cache(config: GQALayerConfig, layer_inputs: GQALayerInputs):
     return k, scales.k_scale, layer_inputs.v_cache, scales.v_scale
 
 
-class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantGQAPrefillAttState, GQALayerInputs]):
+class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantGQAPrefillMetadata, GQALayerInputs]):
     name = "triton_quant_gqa_prefill"
     phase = "prefill"
 
@@ -94,9 +94,9 @@ class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantG
     def _check_supported(cls, layer_config: GQALayerConfig) -> None:
         _check_gqa_config(layer_config, (64, 128, 256))
 
-    def build(self, infer_state: InferStateInfo) -> TritonQuantGQAPrefillAttState:
+    def build_att_metadata(self, infer_state: InferStateInfo) -> TritonQuantGQAPrefillMetadata:
         b_seq_len = infer_state.b_seq_len
-        return TritonQuantGQAPrefillAttState(
+        return TritonQuantGQAPrefillMetadata(
             req_to_token_indexs=infer_state.req_to_token_indexs,
             b_req_idx=infer_state.b_req_idx,
             b_seq_len=b_seq_len,
@@ -110,7 +110,7 @@ class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantG
 
     def forward(
         self,
-        att_state: TritonQuantGQAPrefillAttState,
+        att_metadata: TritonQuantGQAPrefillMetadata,
         layer_inputs: GQALayerInputs,
         *,
         out: torch.Tensor,
@@ -128,7 +128,7 @@ class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantG
 
         config, q = self.layer_config, layer_inputs.q
         k, k_scale, v, v_scale = _quantized_cache(config, layer_inputs)
-        shape = (att_state.total_token_num, config.num_kv_heads, config.head_dim)
+        shape = (att_metadata.total_token_num, config.num_kv_heads, config.head_dim)
         k_dequant = alloc_func(shape, dtype=q.dtype, device=q.device)
         v_dequant = alloc_func(shape, dtype=q.dtype, device=q.device)
         dequant(
@@ -136,13 +136,13 @@ class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantG
             k_scale=k_scale,
             v=v,
             v_scale=v_scale,
-            req_to_token_indexs=att_state.req_to_token_indexs,
-            b_seq_len=att_state.b_seq_len,
-            b_req_idx=att_state.b_req_idx,
-            b_kv_start_loc=att_state.b_kv_start_loc,
+            req_to_token_indexs=att_metadata.req_to_token_indexs,
+            b_seq_len=att_metadata.b_seq_len,
+            b_req_idx=att_metadata.b_req_idx,
+            b_kv_start_loc=att_metadata.b_kv_start_loc,
             k_out=k_dequant,
             v_out=v_dequant,
-            max_len_in_batch=att_state.max_kv_seq_len,
+            max_len_in_batch=att_metadata.max_kv_seq_len,
             quant_group_size=config.kv_quant_group_size,
         )
         context_attention_fwd_contiguous_kv(
@@ -150,16 +150,16 @@ class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantG
             k=k_dequant,
             v=v_dequant,
             o=out,
-            b_start_loc=att_state.b_q_start_loc,
-            b_kv_start_loc=att_state.b_kv_start_loc,
-            b_seq_len=att_state.b_seq_len,
-            max_q_input_len=att_state.max_q_seq_len,
-            b_prompt_cache_len=att_state.b_ready_cache_len,
+            b_start_loc=att_metadata.b_q_start_loc,
+            b_kv_start_loc=att_metadata.b_kv_start_loc,
+            b_seq_len=att_metadata.b_seq_len,
+            max_q_input_len=att_metadata.max_q_seq_len,
+            b_prompt_cache_len=att_metadata.b_ready_cache_len,
         )
         return out
 
 
-class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQADecodeAttState, GQALayerInputs]):
+class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQADecodeMetadata, GQALayerInputs]):
     name = "triton_quant_gqa_decode"
     phase = "decode"
     # Whether build prepares the shared-prefix groups of the int8 diverse-sampling kernel; set by init_runtime.
@@ -170,14 +170,14 @@ class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQ
         _check_gqa_config(layer_config, (16, 32, 64, 128, 256))
 
     @classmethod
-    def group_key(cls, layer_config: GQALayerConfig):
+    def metadata_config_key(cls, layer_config: GQALayerConfig):
         return layer_config.kv_quant
 
     def init_runtime(self, infer_state: InferStateInfo) -> None:
         # Only the int8 decode kernel has a diverse-sampling variant.
         self.diverse = infer_state.diverse_decode and self.layer_config.kv_quant == "int8_group"
 
-    def build(self, infer_state: InferStateInfo) -> TritonQuantGQADecodeAttState:
+    def build_att_metadata(self, infer_state: InferStateInfo) -> TritonQuantGQADecodeMetadata:
         """A CUDA graph step bounds lengths by the graph capacity and keeps the group tensors per
         (microbatch, batch size), rewriting them in place on replay."""
         b_shared_seq_len = b_mark_shared_group = None
@@ -190,10 +190,10 @@ class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQ
             )
             # A one-row group has no cross-request prefix sharing to accelerate.
             b_shared_seq_len = torch.where(b_mark_shared_group == 1, 0, infer_state.b_shared_seq_len)
-            b_mark_shared_group = self.keep_for_graph(infer_state, "mark", b_mark_shared_group)
-            b_shared_seq_len = self.keep_for_graph(infer_state, "shared_len", b_shared_seq_len)
+            b_mark_shared_group = self.update_graph_tensor(infer_state, "mark", b_mark_shared_group)
+            b_shared_seq_len = self.update_graph_tensor(infer_state, "shared_len", b_shared_seq_len)
 
-        return TritonQuantGQADecodeAttState(
+        return TritonQuantGQADecodeMetadata(
             req_to_token_indexs=infer_state.req_to_token_indexs,
             b_req_idx=infer_state.b_req_idx,
             b_seq_len=infer_state.b_seq_len,
@@ -207,7 +207,7 @@ class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQ
 
     def forward(
         self,
-        att_state: TritonQuantGQADecodeAttState,
+        att_metadata: TritonQuantGQADecodeMetadata,
         layer_inputs: GQALayerInputs,
         *,
         out: torch.Tensor,
@@ -218,9 +218,9 @@ class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQ
         k, k_scale, v, v_scale = _quantized_cache(config, layer_inputs)
         operands = dict(
             q=layer_inputs.q,
-            req_to_token_indexs=att_state.req_to_token_indexs,
-            b_req_idx=att_state.b_req_idx,
-            b_seq_len=att_state.b_seq_len,
+            req_to_token_indexs=att_metadata.req_to_token_indexs,
+            b_req_idx=att_metadata.b_req_idx,
+            b_seq_len=att_metadata.b_seq_len,
             cache_k=k,
             cache_k_scale=k_scale,
             cache_v=v,
@@ -229,7 +229,7 @@ class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQ
             alloc_tensor_func=alloc_func,
         )
 
-        if att_state.b_mark_shared_group is not None:
+        if att_metadata.b_mark_shared_group is not None:
             assert config.kv_quant == "int8_group", "diverse decode supports only int8 caches"
             from lightllm.common.attention.kernels.gqa.int8kv.int8kv_flash_decoding_diverse import (
                 token_decode_attention_flash_decoding,
@@ -237,21 +237,21 @@ class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQ
 
             token_decode_attention_flash_decoding(
                 **operands,
-                b_shared_seq_len=att_state.b_shared_seq_len,
-                b_mark_shared_group=att_state.b_mark_shared_group,
+                b_shared_seq_len=att_metadata.b_shared_seq_len,
+                b_mark_shared_group=att_metadata.b_mark_shared_group,
                 # Scratch size and launch grid must cover every length a replay may bring.
-                max_kv_seq_len=att_state.kv_seq_len_bound,
+                max_kv_seq_len=att_metadata.kv_seq_len_bound,
             )
         elif config.kv_quant == "int8_group":
             from lightllm.common.attention.kernels.gqa.int8kv.int8kv_flash_decoding import (
                 token_decode_attention_flash_decoding,
             )
 
-            token_decode_attention_flash_decoding(**operands, max_len_in_batch=att_state.max_kv_seq_len)
+            token_decode_attention_flash_decoding(**operands, max_len_in_batch=att_metadata.max_kv_seq_len)
         else:
             from lightllm.common.attention.kernels.gqa.int4kv.ppl_int4kv_flash_decoding import (
                 token_decode_attention_flash_decoding,
             )
 
-            token_decode_attention_flash_decoding(**operands, max_kv_seq_len=att_state.max_kv_seq_len)
+            token_decode_attention_flash_decoding(**operands, max_kv_seq_len=att_metadata.max_kv_seq_len)
         return out

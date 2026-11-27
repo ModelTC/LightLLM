@@ -8,10 +8,10 @@ import torch
 from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
 import torch.nn.functional as F
 
-from unit_tests.common.attention.backends.step_fixture import make_infer_state
+from unit_tests.common.attention.backends.step_fixture import configure_infer_state, make_infer_state
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQADecodeBackend, FlashInferGQAPrefillBackend
-from unit_tests.common.attention.backends.groups_runner import GroupsRunner
+from unit_tests.common.attention.backends.attention_runner import ModelAttentionRunner
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.utils.envs_utils import get_env_start_args
 
@@ -85,22 +85,24 @@ def test_prefill_decode(dtype, q_heads, kv_heads, page_size, cached):
     layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=dtype)
 
     backend = FlashInferGQAPrefillBackend(layer_config)
-    att_state = backend.create_att_state(
-        make_infer_state(make_batch(token_map, req_ids, lengths, query_lengths), **batch_fields)
+    att_metadata = backend.create_att_metadata(
+        configure_infer_state(make_batch(token_map, req_ids, lengths, query_lengths), **batch_fields)
     )
-    assert att_state.page_size == page_size
+    assert att_metadata.page_size == page_size
     out = torch.empty_like(q)
-    assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
+    assert backend.forward(att_metadata, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k, v, token_map, req_ids, lengths, ready), atol=0.02, rtol=0.02
     )
     torch.testing.assert_close(q, q_before, atol=0, rtol=0)
 
     backend = FlashInferGQADecodeBackend(layer_config)
-    att_state = backend.create_att_state(make_infer_state(make_batch(token_map, req_ids, lengths), **batch_fields))
+    att_metadata = backend.create_att_metadata(
+        configure_infer_state(make_batch(token_map, req_ids, lengths), **batch_fields)
+    )
     q = torch.randn(3, q_heads, 64, device="cuda", dtype=dtype)
     out = torch.empty_like(q)
-    assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
+    assert backend.forward(att_metadata, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
     expected = reference(q, k, v, token_map, req_ids, lengths, [x - 1 for x in lengths])
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
     torch.testing.assert_close(kv, before, atol=0, rtol=0)
@@ -132,20 +134,22 @@ def test_fp8_prefill_decode(q_heads, kv_heads, page_size):
     query_lengths = [n - r for n, r in zip(lengths, ready)]
     q = torch.randn(sum(query_lengths), q_heads, 64, device="cuda", generator=generator).bfloat16()
     backend = FlashInferGQAPrefillBackend(layer_config)
-    att_state = backend.create_att_state(
-        make_infer_state(make_batch(token_map, req_ids, lengths, query_lengths), **batch_fields)
+    att_metadata = backend.create_att_metadata(
+        configure_infer_state(make_batch(token_map, req_ids, lengths, query_lengths), **batch_fields)
     )
-    assert att_state.page_size == 1
+    assert att_metadata.page_size == 1
     out = torch.empty_like(q)
-    backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
+    backend.forward(att_metadata, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
     expected = reference(q, k_ref, v_ref, token_map, req_ids, lengths, ready)
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
 
     backend = FlashInferGQADecodeBackend(layer_config)
-    att_state = backend.create_att_state(make_infer_state(make_batch(token_map, req_ids, lengths), **batch_fields))
+    att_metadata = backend.create_att_metadata(
+        configure_infer_state(make_batch(token_map, req_ids, lengths), **batch_fields)
+    )
     q = torch.randn(3, q_heads, 64, device="cuda", generator=generator).bfloat16()
     out = torch.empty_like(q)
-    backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
+    backend.forward(att_metadata, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
     expected = reference(q, k_ref, v_ref, token_map, req_ids, lengths, [x - 1 for x in lengths])
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
 
@@ -156,8 +160,8 @@ def test_decode_keeps_one_graph_wrapper_per_microbatch_and_batch_size():
     batch_fields = dict(attention_backend_manager=AttentionBackendManager(), page_size=16, max_cuda_graph_batch_size=2)
 
     def wrapper(*args, **kwargs):
-        return backend.create_att_state(
-            make_infer_state(make_batch(token_map, *args, **kwargs), **batch_fields)
+        return backend.create_att_metadata(
+            configure_infer_state(make_batch(token_map, *args, **kwargs), **batch_fields)
         ).wrapper
 
     captured = wrapper([0, 1], [33, 17], graph_capacity=512)
@@ -242,7 +246,7 @@ class _Microbatch:
         state.b_seq_len = torch.tensor(lengths, device="cuda", dtype=torch.int32)
         state.max_kv_seq_len, state.total_token_num = max(lengths), sum(lengths)
         state.req_manager = SimpleNamespace(req_to_token_indexs=self.token_map)
-        self.runner.step(state)
+        self.runner.prepare_att_metadata(state)
         return state
 
     def forward(self, state):
@@ -259,7 +263,7 @@ def test_layer_group_replays_through_cuda_graph(start_args, overlap, page_size):
     from lightllm.common.basemodel.cuda_graph import CudaGraph
 
     config = GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16)
-    runner = GroupsRunner(_Model(start_args(overlap=overlap), page_size), config, config)
+    runner = ModelAttentionRunner(_Model(start_args(overlap=overlap), page_size), config, config)
     graph = CudaGraph(2, 2, 2, max_batch_size=2, max_len_in_batch=512)
     mbs = [_Microbatch(runner, page_size, torch.bfloat16, seed) for seed in (2, 3)]
     if overlap:

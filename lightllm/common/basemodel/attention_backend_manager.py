@@ -1,4 +1,4 @@
-"""Register each model role's layer backends at load time and prepare their shared states each step."""
+"""Register each model role's layer backends at load time and prepare their shared metadata each step."""
 
 from __future__ import annotations
 
@@ -34,21 +34,21 @@ class LayerAttentionConfig:
 
 
 class AttentionBackendManager:
-    """Register each model role's layer backends and prepare their shared states each step.
+    """Register each model role's layer backends and prepare their shared metadata each step.
 
     The main model creates one manager and its drafts share it, as with AttentionStateManager. Roles
     (main, draft0 .. draft35) keep their own backends: identical layer configs share an instance within
     a role, never across roles, because each instance owns its role's cross-step storage. Each phase's
-    state groups hold the representative instance of each state_key.
+    metadata groups hold the representative instance of each metadata_group_key.
     """
 
     def __init__(self):
         # (device, name, dtype) -> requested size -> buffer, shared by main and drafts.
         self._workspace_buffers: dict[tuple, dict[int, torch.Tensor]] = {}
         self._workspace_lock = threading.Lock()
-        # By role and phase: the backend that builds each state_key's state.
-        self.state_groups: dict[str, dict[str, dict[tuple, AttentionBackend]]] = {}
-        self._backends: dict[tuple[str, str, int], AttentionBackend] = {}
+        # By role and phase: the backend that builds each metadata_group_key's metadata.
+        self.group_backends: dict[str, dict[str, dict[tuple, AttentionBackend]]] = {}
+        self._layer_backends: dict[tuple[str, str, int], AttentionBackend] = {}
 
     def register_backends(self, model: TpPartBaseModel) -> None:
         """Select the backends of the model's layers from their attention_config and register them.
@@ -57,25 +57,25 @@ class AttentionBackendManager:
         load time. A role without attention states (FFN-only drafts) registers no backends.
         """
         role = model.att_state_role
-        if role in self.state_groups:
+        if role in self.group_backends:
             raise RuntimeError(f"attention backends of {role} are already registered")
         args = model.args
         states = model.att_state_manager
-        groups = self.state_groups[role] = {phase: {} for phase in selector.PHASES}
+        groups = self.group_backends[role] = {phase: {} for phase in selector.PHASES}
         if not (states.get_full_attention_states(role) or states.get_bounded_attention_states(role)):
             return
         selection = selector.BackendSelector(args)
         for layer in model.layers_infer:
             config = layer.attention_config(model)
-            for phase, layer_config, required_backend in (
+            for phase, layer_config, required_backend_name in (
                 ("prefill", config.prefill, config.prefill_backend_name),
                 ("decode", config.decode, config.decode_backend_name),
             ):
                 if layer_config is None:
                     continue
-                backend = selection.select(layer_config, phase, required_backend)
-                self._backends[role, phase, layer.layer_num_] = backend
-                groups[phase].setdefault(backend.state_key, backend)
+                backend = selection.select(layer_config, phase, required_backend_name)
+                self._layer_backends[role, phase, layer.layer_num_] = backend
+                groups[phase].setdefault(backend.metadata_group_key, backend)
 
         for phase, phase_groups in groups.items():
             if phase_groups:
@@ -84,7 +84,7 @@ class AttentionBackendManager:
 
     def get_backend(self, model_role: str, phase: str, logical_layer_id: int) -> AttentionBackend:
         """The backend that runs the layer in this phase."""
-        return self._backends[model_role, phase, logical_layer_id]
+        return self._layer_backends[model_role, phase, logical_layer_id]
 
     def get_workspace(self, name: str, numel: int, dtype: torch.dtype = torch.int8) -> torch.Tensor:
         """Return shared storage on the current device, keeping repeated requests at one address.
@@ -107,21 +107,21 @@ class AttentionBackendManager:
                 buffers[numel] = buffer
             return buffer
 
-    def create_att_state(self, infer_state: InferStateInfo) -> dict[tuple, Any]:
-        """Build this microbatch's state by state_key for the layers of its role and phase."""
+    def create_att_metadata_by_group(self, infer_state: InferStateInfo) -> dict[tuple, Any]:
+        """Build this microbatch's metadata by metadata_group_key for the layers of its role and phase."""
         role = infer_state.att_state_role
-        groups = self.state_groups[role]["prefill" if infer_state.is_prefill else "decode"]
+        groups = self.group_backends[role]["prefill" if infer_state.is_prefill else "decode"]
         if not groups:
             return {}
-        return {key: backend.create_att_state(infer_state) for key, backend in groups.items()}
+        return {key: backend.create_att_metadata(infer_state) for key, backend in groups.items()}
 
     def has_attention(self, model_role: str) -> bool:
-        return any(self.state_groups[model_role].values())
+        return any(self.group_backends[model_role].values())
 
     @property
     def requires_cpu_cache_sync(self) -> bool:
         """Whether some registered backend must not overlap CPU cache copies on the GPU."""
-        return any(backend.requires_cpu_cache_sync for backend in self._backends.values())
+        return any(backend.requires_cpu_cache_sync for backend in self._layer_backends.values())
 
 
 def attention_is_causal(model: TpPartBaseModel) -> bool:

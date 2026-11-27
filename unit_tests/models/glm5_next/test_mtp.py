@@ -235,8 +235,8 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
     manager = SimpleNamespace(HOLD_REQUEST_ID=3, req_to_token_indexs=None)
     infer = InferStateInfo()
     infer.is_prefill = False
-    infer.decode_rows_per_request = mtp_step + 1
-    infer.dynamic_decode_rows = dynamic
+    infer.max_decode_rows_per_request = mtp_step + 1
+    infer.is_dynamic_verify = dynamic
     infer.req_to_mtp_state_index = selected.mtp_state_index if mtp_step else None
     infer.batch_size = tokens
     infer.b_req_idx = torch.tensor(request_rows, device="cuda", dtype=torch.int32)

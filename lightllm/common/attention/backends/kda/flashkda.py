@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Load FlashKDA's prefill kernel for the KDA prefill step builder, or fall back to Triton."""
+"""Load FlashKDA's prefill kernel for the KDA prefill backend, or fall back to Triton."""
 
 from typing import Callable, Optional
 

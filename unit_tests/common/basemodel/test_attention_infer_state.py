@@ -48,15 +48,15 @@ def make_model(monkeypatch):
 
         def record_inputs(infer):
             return (
-                infer.decode_rows_per_request,
-                infer.dynamic_decode_rows,
+                infer.max_decode_rows_per_request,
+                infer.is_dynamic_verify,
                 infer.req_to_mtp_state_index,
                 infer.cuda_graph_max_kv_seq_len,
             )
 
-        backend = SimpleNamespace(create_att_state=record_inputs)
+        backend = SimpleNamespace(create_att_metadata=record_inputs)
         for phase in ("prefill", "decode"):
-            model.attention_backend_manager.state_groups[role][phase] = {("inputs",): backend}
+            model.attention_backend_manager.group_backends[role][phase] = {("inputs",): backend}
         return model
 
     return create
@@ -89,7 +89,7 @@ def test_model_prepares_decode_layout(make_model, mode, role, mtp_step, rows, dy
 
     expected_rows = 1 if prefill else rows
     expected_dynamic = not prefill and role == "main" and rows > 1 and dynamic
-    assert infer.att_states[("inputs",)] == (expected_rows, expected_dynamic, None, None)
+    assert infer.att_metadata[("inputs",)] == (expected_rows, expected_dynamic, None, None)
 
 
 def test_recurrent_decode_reads_each_roles_live_acceptance_index(make_model):
@@ -118,17 +118,17 @@ def test_recurrent_decode_reads_each_roles_live_acceptance_index(make_model):
     for model in models:
         role = model.att_state_role
         backend = TritonGDNDecodeBackend(GDNLayerConfig(2, 4, 64, 64, 4, "silu", torch.bfloat16))
-        manager.state_groups[role]["decode"] = {backend.state_key: backend}
+        manager.group_backends[role]["decode"] = {backend.metadata_group_key: backend}
         for _ in range(2):
             infer = model._create_inferstate(model_input)
             index = recurrent[role].mtp_state_index
             assert infer.req_to_mtp_state_index is index
             torch.testing.assert_close(
-                infer.att_states[backend.state_key].num_accepted_tokens, index[torch.tensor([2, 4])] + 1
+                infer.att_metadata[backend.metadata_group_key].num_accepted_tokens, index[torch.tensor([2, 4])] + 1
             )
             index.copy_((index + 1) % 3)
         prefill = model._create_inferstate(_make_prefill_input([10, 11], 0, False))
-        assert prefill.att_states[("inputs",)] == (1, False, None, None)
+        assert prefill.att_metadata[("inputs",)] == (1, False, None, None)
         model.args.mtp_mode = None
         assert model._create_inferstate(model_input).req_to_mtp_state_index is None
 
@@ -149,7 +149,7 @@ def test_model_supplies_graph_capacity_before_building_attention(make_model, gra
     model = make_model()
     model_input = _make_prefill_input([10, 11], 0, False) if prefill else _make_decode_input()
     infer = model._create_inferstate(model_input, graph_mode=graph_mode)
-    assert infer.att_states[("inputs",)][3] == (None if graph_mode is GraphMode.EAGER else 512)
+    assert infer.att_metadata[("inputs",)][3] == (None if graph_mode is GraphMode.EAGER else 512)
     model.graph_max_len_in_batch = None
     if graph_mode is GraphMode.EAGER:
         assert model._create_inferstate(model_input).cuda_graph_max_kv_seq_len is None
@@ -162,15 +162,15 @@ def test_model_supplies_graph_capacity_before_building_attention(make_model, gra
 def test_steps_without_attention_skip_preparation(make_model, build_attention):
     model = make_model()
     if build_attention:
-        model.attention_backend_manager.state_groups["main"] = {"prefill": {}, "decode": {}}
+        model.attention_backend_manager.group_backends["main"] = {"prefill": {}, "decode": {}}
     model.mtp_manager = None
     model.graph_max_len_in_batch = None
     infer = model._create_inferstate(
         _make_decode_input(), graph_mode=GraphMode.CAPTURE, build_attention=build_attention
     )
-    assert infer.att_states == {}
-    assert infer.decode_rows_per_request == 1
-    assert not infer.dynamic_decode_rows
+    assert infer.att_metadata == {}
+    assert infer.max_decode_rows_per_request == 1
+    assert not infer.is_dynamic_verify
     assert infer.req_to_mtp_state_index is None
     assert infer.cuda_graph_max_kv_seq_len is None
 
@@ -194,8 +194,8 @@ def test_model_supplies_capacities_before_init_runtime(make_model, role, graph_b
         assert infer.max_decode_rows == max(24, graph_batch)
         assert infer.diverse_decode
 
-    model.attention_backend_manager.state_groups[role]["decode"] = {
-        ("capacities",): SimpleNamespace(create_att_state=check)
+    model.attention_backend_manager.group_backends[role]["decode"] = {
+        ("capacities",): SimpleNamespace(create_att_metadata=check)
     }
     for graph_mode in GraphMode:
         model._create_inferstate(_make_decode_input(), graph_mode=graph_mode)

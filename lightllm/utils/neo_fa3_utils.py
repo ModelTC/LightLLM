@@ -26,7 +26,7 @@ try:
     if "image_token_end" not in _sig.parameters:
         raise ImportError("flash_attn_interface is missing image_token_end support (need the Neo build)")
 
-    HAS_FLASH_ATTN_INTERFACE = True
+    HAS_NEO_FA3 = True
 except ImportError as exc:
     warnings.warn(
         f"Neo FA3 is unavailable: {exc}. "
@@ -34,4 +34,4 @@ except ImportError as exc:
         "To select Triton explicitly, use --att_backend gqa.prefill=triton.\n" + NEO_FA3_INSTALL_HINT
     )
     flash_attn_with_kvcache_neo = None
-    HAS_FLASH_ATTN_INTERFACE = False
+    HAS_NEO_FA3 = False

@@ -202,7 +202,7 @@ def _build_inputs(
 
 def _fa3_prefill_with_image_end(inputs: dict) -> torch.Tensor:
     """Drive ``flash_attn_with_kvcache`` with the same prefill semantics as
-    ``Fa3PrefillAttState._nomarl_prefill_att`` plus an optional
+    ``Fa3PrefillMetadata._nomarl_prefill_att`` plus an optional
     ``image_token_end`` kwarg for image-token bidirectional attention.
     """
     q = inputs["q"]

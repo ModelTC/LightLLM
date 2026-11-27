@@ -1005,7 +1005,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     )
     swa_view = create_attention_config(model_config=model_config, model_logical_layer_ids=(2,)).create_swa_config()
     layer_config = SWASparseMLALayerConfig(
-        num_heads=64, head_dim_v=512, softmax_scale=512 ** -0.5, dtype=torch.bfloat16, has_attn_sink=True
+        num_heads=64, v_head_dim=512, softmax_scale=512 ** -0.5, dtype=torch.bfloat16, has_sinks=True
     )
     impl = FlashMLASWADecodeBackend(layer_config)
     # An eager step's scheduler metadata, filled on its first kernel call.
@@ -1018,12 +1018,12 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
             swa_cache=swa_view.get_attention_view(packed_kv=packed_kv[0]),
             swa_indices=swa_indices,
             swa_lengths=swa_lengths,
-            attn_sink=attn_sink,
+            sink_logits=attn_sink,
         )
         out = torch.empty((q.shape[0], 64, 512), dtype=q.dtype, device=q.device)
         return impl.forward(att_state, inputs, out=out)
 
-    att_state = impl.build(eager_step)
+    att_state = impl.build_att_metadata(eager_step)
     q = torch.randn((token_num, 64, 512), dtype=torch.bfloat16, device="cuda") * 0.1
     packed_kv = requests.get_att_input_params(2)
 
@@ -1040,7 +1040,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     with torch.cuda.graph(graph, stream=stream):
         actual = forward()
 
-    reference_att_state = impl.build(eager_step)
+    reference_att_state = impl.build_att_metadata(eager_step)
     reference_kv = DeepseekV4InferStateInfo.get_att_kv(
         SimpleNamespace(
             req_manager=requests,

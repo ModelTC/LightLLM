@@ -18,7 +18,7 @@ import torch
 
 from lightllm.common.attention.backends.gqa import GQALayerConfig
 from lightllm.common.attention.backends.mla import MLADecodeLayerConfig
-from unit_tests.common.attention.backends.groups_runner import init_backend
+from unit_tests.common.attention.backends.attention_runner import init_backend
 from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
 from unit_tests.common.attention.backends.step_fixture import make_infer_state
 
@@ -63,9 +63,9 @@ def make_batch(token_map, step, layout, *, capacity, microbatch, extra):
         req_to_mtp_state_index=torch.arange(REQUESTS, device=device, dtype=torch.int32) % 2,
     )
     if layout == "fixed_rows":
-        fields.update(decode_rows_per_request=2)
+        fields.update(max_decode_rows_per_request=2)
     elif layout == "dynamic_rows":
-        fields.update(decode_rows_per_request=3, dynamic_decode_rows=True, b_mtp_index=as_tensor(mtp_index))
+        fields.update(max_decode_rows_per_request=3, is_dynamic_verify=True, b_mtp_index=as_tensor(mtp_index))
     return make_infer_state(**{**fields, **extra(step)})
 
 
@@ -84,7 +84,7 @@ def no_extra(step):
 
 
 def ready(backend_cls, layer_config, **fields_override):
-    """A backend set up as its state group's first create_att_state sets it up."""
+    """A backend set up as its state group's first create_att_metadata sets it up."""
     fields = dict(model_max_seq_len=MAX_LEN, max_cuda_graph_batch_size=8, max_decode_rows=8)
     return init_backend(
         backend_cls,
@@ -154,7 +154,7 @@ def recurrent(replay):
         from lightllm.common.attention.backends.gdn import GDNLayerConfig
         from lightllm.common.attention.backends.gdn.triton import ReplayGDNDecodeBackend, TritonGDNDecodeBackend
 
-        config = GDNLayerConfig(2, 2, 16, 16, 4, "silu", torch.bfloat16, state_mtp_step=2, replay=replay)
+        config = GDNLayerConfig(2, 2, 16, 16, 4, "silu", torch.bfloat16, state_draft_capacity=2, use_ssm_replay=replay)
         return ready(ReplayGDNDecodeBackend if replay else TritonGDNDecodeBackend, config)
 
     return factory
@@ -208,7 +208,7 @@ def batch_storage(batch):
     }
 
 
-def owned_tensors(att_state, *batches):
+def owned_tensors(att_metadata, *batches):
     """The tensors of attention state the backend owns, as opposed to the batches' own tensors.
 
     Attention state may keep the capture batch's tensors; the caller rewrites those before each replay.
@@ -216,7 +216,7 @@ def owned_tensors(att_state, *batches):
     caller = set().union(*map(batch_storage, batches))
     return {
         path: t
-        for path, t in leaves(att_state)
+        for path, t in leaves(att_metadata)
         if isinstance(t, torch.Tensor) and t.untyped_storage().data_ptr() not in caller
     }
 
@@ -246,13 +246,13 @@ def test_decode_backend_keeps_the_cuda_graph_contract(name, layout):
     capture_step, replay_step = LAYOUTS[layout]
     managers = {}
 
-    def build(step, *, capacity=CAPACITY, microbatch=0, builder=backend):
+    def build(step, *, capacity=CAPACITY, microbatch=0, backend=backend):
         batch = make_batch(token_map, step, layout, capacity=capacity, microbatch=microbatch, extra=extra)
         # The eager reference has its own manager so it cannot overwrite the captured page table.
-        if builder not in managers:
-            managers[builder] = AttentionBackendManager()
-        batch.attention_backend_manager = managers[builder]
-        return batch, builder.build(batch)
+        if backend not in managers:
+            managers[backend] = AttentionBackendManager()
+        batch.attention_backend_manager = managers[backend]
+        return batch, backend.build_att_metadata(batch)
 
     capture_batch, captured = build(capture_step)
     captured_leaves = dict(leaves(captured))
@@ -277,7 +277,7 @@ def test_decode_backend_keeps_the_cuda_graph_contract(name, layout):
             assert new is value, f"{name}: {path} is a new object on replay"
 
     # (2) The kept tensors hold what an eager build of the replay step computes.
-    _, eager = build(replay_step, capacity=None, builder=factory())
+    _, eager = build(replay_step, capacity=None, backend=factory())
     eager_leaves = dict(leaves(eager))
     for path, kept in owned_tensors(replayed, capture_batch, replay_batch).items():
         expected = eager_leaves[path]

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class TritonGQAPrefillAttState:
+class TritonGQAPrefillMetadata:
     """Packed prefill queries: request i's queries start at b_q_start_loc[i] and follow its
     b_ready_cache_len[i] cached tokens. The image-span bounds are per query token (see
     InferStateInfo.b_image_token_end) and only read by layers with bidirectional image spans."""
@@ -35,7 +35,7 @@ class TritonGQAPrefillAttState:
 
 
 @dataclass(frozen=True)
-class TritonGQADecodeAttState:
+class TritonGQADecodeMetadata:
     """Attention state for one query per request, in b_req_idx order.
 
     Index tensors follow InferStateInfo's layout and device.
@@ -102,7 +102,7 @@ def _check_inputs(config: GQALayerConfig, layer_inputs: GQALayerInputs) -> None:
     assert (layer_inputs.alibi_slopes is not None) == config.has_alibi, "alibi_slopes must match has_alibi"
 
 
-class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillAttState, GQALayerInputs]):
+class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillMetadata, GQALayerInputs]):
     name = "triton_gqa_prefill"
     phase = "prefill"
 
@@ -111,8 +111,8 @@ class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillA
         """Head dimensions 16, 32, 64, 128, 256 and 512 are supported, with softmax_scale 1/sqrt(head_dim)."""
         _check_gqa_config(layer_config)
 
-    def build(self, infer_state: InferStateInfo) -> TritonGQAPrefillAttState:
-        return TritonGQAPrefillAttState(
+    def build_att_metadata(self, infer_state: InferStateInfo) -> TritonGQAPrefillMetadata:
+        return TritonGQAPrefillMetadata(
             b_req_idx=infer_state.b_req_idx,
             b_q_start_loc=infer_state.b_q_start_loc,
             b_seq_len=infer_state.b_seq_len,
@@ -125,7 +125,7 @@ class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillA
 
     def forward(
         self,
-        att_state: TritonGQAPrefillAttState,
+        att_metadata: TritonGQAPrefillMetadata,
         layer_inputs: GQALayerInputs,
         *,
         out: torch.Tensor,
@@ -137,7 +137,7 @@ class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillA
         unit head-dimension stride and non-overlapping token/head strides that
         may include padding. K/V may be disjoint slices of shared storage;
         arbitrary strided layouts are not supported. The caller must make q.device
-        the current CUDA device. out must not alias layer_inputs or att_state tensors.
+        the current CUDA device. out must not alias layer_inputs or att_metadata tensors.
         Prefill needs no scratch and does not call alloc_func.
         """
         config = self.layer_config
@@ -145,19 +145,19 @@ class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillA
         q, k, v = layer_inputs.q, layer_inputs.k_cache, layer_inputs.v_cache
 
         if config.bidirectional_image_spans:
-            assert att_state.b_image_token_end is not None, "bidirectional image spans need b_image_token_end"
+            assert att_metadata.b_image_token_end is not None, "bidirectional image spans need b_image_token_end"
             args = (
                 q,
                 k,
                 v,
                 out,
-                att_state.b_req_idx,
-                att_state.b_q_start_loc,
-                att_state.b_seq_len,
-                att_state.b_ready_cache_len,
-                att_state.max_q_seq_len,
-                att_state.req_to_token_indexs,
-                att_state.b_image_token_end,
+                att_metadata.b_req_idx,
+                att_metadata.b_q_start_loc,
+                att_metadata.b_seq_len,
+                att_metadata.b_ready_cache_len,
+                att_metadata.max_q_seq_len,
+                att_metadata.req_to_token_indexs,
+                att_metadata.b_image_token_end,
             )
             if config.sliding_window == (-1, -1):
                 from lightllm.common.attention.kernels.gqa.bf16.prefill.context_attention_fwd_neo import (
@@ -171,9 +171,9 @@ class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillA
                 )
 
                 # A span may reach back past the window, so the kernel also needs each span's start.
-                assert att_state.b_image_token_start is not None, "windowed image spans need b_image_token_start"
+                assert att_metadata.b_image_token_start is not None, "windowed image spans need b_image_token_start"
                 context_attention_fwd_gemma4_mm(
-                    *args, att_state.b_image_token_start, sliding_window=config.sliding_window
+                    *args, att_metadata.b_image_token_start, sliding_window=config.sliding_window
                 )
         elif config.has_alibi:
             from lightllm.common.attention.kernels.gqa.alibi.context_flashattention_nopad import (
@@ -185,13 +185,13 @@ class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillA
                 k,
                 v,
                 out,
-                att_state.b_req_idx,
+                att_metadata.b_req_idx,
                 layer_inputs.alibi_slopes,
-                att_state.b_q_start_loc,
-                att_state.b_seq_len,
-                att_state.b_ready_cache_len,
-                att_state.max_q_seq_len,
-                att_state.req_to_token_indexs,
+                att_metadata.b_q_start_loc,
+                att_metadata.b_seq_len,
+                att_metadata.b_ready_cache_len,
+                att_metadata.max_q_seq_len,
+                att_metadata.req_to_token_indexs,
             )
         else:
             from lightllm.common.attention.kernels.gqa.bf16.prefill.context_flashattention_nopad import (
@@ -203,18 +203,18 @@ class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillA
                 k=k,
                 v=v,
                 o=out,
-                b_req_idx=att_state.b_req_idx,
-                b_start_loc=att_state.b_q_start_loc,
-                b_seq_len=att_state.b_seq_len,
-                b_prompt_cache_len=att_state.b_ready_cache_len,
-                max_input_len=att_state.max_q_seq_len,
-                req_to_token_indexs=att_state.req_to_token_indexs,
+                b_req_idx=att_metadata.b_req_idx,
+                b_start_loc=att_metadata.b_q_start_loc,
+                b_seq_len=att_metadata.b_seq_len,
+                b_prompt_cache_len=att_metadata.b_ready_cache_len,
+                max_input_len=att_metadata.max_q_seq_len,
+                req_to_token_indexs=att_metadata.req_to_token_indexs,
                 sliding_window=config.sliding_window,
             )
         return out
 
 
-class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAttState, GQALayerInputs]):
+class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeMetadata, GQALayerInputs]):
     name = "triton_gqa_decode"
     phase = "decode"
 
@@ -234,7 +234,7 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
             if layer_config.sliding_window != (-1, -1):
                 raise NotImplementedError("sliding_window is not supported by the MHA decode kernel")
 
-    def build(self, infer_state: InferStateInfo) -> TritonGQADecodeAttState:
+    def build_att_metadata(self, infer_state: InferStateInfo) -> TritonGQADecodeMetadata:
         """Kernels read the request tensors directly; a CUDA graph step bounds lengths by the graph
         capacity and keeps the speculative-decode groups per (microbatch, batch size)."""
         if infer_state.uses_cuda_graph:
@@ -244,14 +244,14 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
             bound, total_bound = infer_state.max_kv_seq_len, infer_state.total_token_num
 
         markers = None
-        if infer_state.decode_rows_per_request > 1:
+        if infer_state.max_decode_rows_per_request > 1:
             from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
 
             markers = build_mtp_shared_group_markers(infer_state.b_req_idx, hold_req_id=infer_state.pad_req_idx)
-            markers = self.keep_for_graph(infer_state, "mtp_groups", markers)
+            markers = self.update_graph_tensor(infer_state, "mtp_groups", markers)
 
         cu_kv = infer_state.b1_cu_kv_seq_len
-        return TritonGQADecodeAttState(
+        return TritonGQADecodeMetadata(
             req_to_token_indexs=infer_state.req_to_token_indexs,
             b_req_idx=infer_state.b_req_idx,
             b_seq_len=infer_state.b_seq_len,
@@ -264,7 +264,7 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
 
     def forward(
         self,
-        att_state: TritonGQADecodeAttState,
+        att_metadata: TritonGQADecodeMetadata,
         layer_inputs: GQALayerInputs,
         *,
         out: torch.Tensor,
@@ -276,7 +276,7 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
         unit head-dimension stride and non-overlapping token/head strides that
         may include padding. K/V may be disjoint slices of shared storage;
         arbitrary strided layouts are not supported. The caller must make q.device
-        the current CUDA device. out must not alias layer_inputs or att_state tensors.
+        the current CUDA device. out must not alias layer_inputs or att_metadata tensors.
         K and V must have identical strides.
         Scratch uses alloc_func on q.device. A serving allocator with a cache
         scoped to one device must be used only on that device.
@@ -285,12 +285,14 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
         _check_inputs(config, layer_inputs)
         q, k, v = layer_inputs.q, layer_inputs.k_cache, layer_inputs.v_cache
         request_tensors = dict(
-            req_to_token_indexs=att_state.req_to_token_indexs,
-            b_req_idx=att_state.b_req_idx,
-            b_seq_len=att_state.b_seq_len,
+            req_to_token_indexs=att_metadata.req_to_token_indexs,
+            b_req_idx=att_metadata.b_req_idx,
+            b_seq_len=att_metadata.b_seq_len,
         )
         shares_kv_groups = (
-            att_state.b_mark_shared_group is not None and config.sliding_window == (-1, -1) and config.head_dim <= 256
+            att_metadata.b_mark_shared_group is not None
+            and config.sliding_window == (-1, -1)
+            and config.head_dim <= 256
         )
 
         if config.has_alibi:
@@ -304,13 +306,13 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
                 v,
                 out,
                 layer_inputs.alibi_slopes,
-                att_state.req_to_token_indexs,
-                att_state.b_req_idx,
-                att_state.b_kv_start_loc,
-                att_state.b_seq_len,
+                att_metadata.req_to_token_indexs,
+                att_metadata.b_req_idx,
+                att_metadata.b_kv_start_loc,
+                att_metadata.b_seq_len,
                 # Scratch and launch sizes must cover every length a replay may bring.
-                att_state.kv_seq_len_bound,
-                att_state.total_token_bound,
+                att_metadata.kv_seq_len_bound,
+                att_metadata.total_token_bound,
                 alloc_tensor_func=alloc_func,
             )
         elif shares_kv_groups:
@@ -323,12 +325,12 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
                 q=q,
                 k=k,
                 v=v,
-                Req_to_tokens=att_state.req_to_token_indexs,
-                B_req_idx=att_state.b_req_idx,
-                b_seq_len=att_state.b_seq_len,
-                b_mark_shared_group=att_state.b_mark_shared_group,
+                Req_to_tokens=att_metadata.req_to_token_indexs,
+                B_req_idx=att_metadata.b_req_idx,
+                b_seq_len=att_metadata.b_seq_len,
+                b_mark_shared_group=att_metadata.b_mark_shared_group,
                 # Only selects kernel configs; the kernel reads actual lengths on the GPU.
-                max_kv_len=att_state.max_kv_seq_len,
+                max_kv_len=att_metadata.max_kv_seq_len,
                 out=out,
                 alloc_tensor_func=alloc_func,
             )
@@ -343,7 +345,7 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
                 cache_v=v,
                 **request_tensors,
                 # Scratch size and launch grid must cover every length a replay may bring.
-                max_kv_seq_len=att_state.kv_seq_len_bound,
+                max_kv_seq_len=att_metadata.kv_seq_len_bound,
                 out=out,
                 alloc_tensor_func=alloc_func,
             )
@@ -358,7 +360,7 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
                 cache_v=v,
                 **request_tensors,
                 # Only selects a kernel config; the GQA kernel reads actual lengths on the GPU.
-                max_len_in_batch=att_state.max_kv_seq_len,
+                max_len_in_batch=att_metadata.max_kv_seq_len,
                 out=out,
                 alloc_tensor_func=alloc_func,
                 sliding_window=config.sliding_window,

@@ -1,20 +1,20 @@
-"""Attention backends and the inputs to create_att_state and forward.
+"""Attention backends and the inputs to create_att_metadata and forward.
 
 Each type is named for how long it lives:
 
 - LayerConfig: one layer's static attention configuration, fixed when the model loads. An
   AttentionBackend instance holds this config.
 - InferStateInfo: request layout and KV cache indices for one forward step.
-- AttState: the attention state shared by compatible layers in one microbatch. Backends that
-  prepare page tables, recurrent indices or wrappers keep them on their state.
+- AttentionMetadata: the attention metadata shared by compatible layers in one microbatch. Backends that
+  prepare page tables, recurrent indices or wrappers keep them in their metadata.
 - LayerInputs: one layer call's tensors.
 
-In each phase, one backend instance creates the state for the layers whose state_key matches: the
-backend class plus group_key(layer_config). That instance sets up its storage on first use and
+In each phase, one backend instance creates metadata for the layers whose metadata_group_key matches: the
+backend class plus metadata_config_key(layer_config). That instance sets up its storage on first use and
 keeps the storage CUDA graphs read.
 
-Attention states are built every step, including CUDA graph replay steps. The caller writes the KV cache
-before attention and passes the attention state explicitly rather than through a global forward context.
+Attention metadata is built every step, including CUDA graph replay steps. The caller writes the KV cache
+before attention and passes the attention metadata explicitly rather than through a global forward context.
 """
 
 import enum
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 LayerConfig = TypeVar("LayerConfig")
-AttState = TypeVar("AttState")
+AttentionMetadata = TypeVar("AttentionMetadata")
 LayerInputs = TypeVar("LayerInputs")
 
 
@@ -55,8 +55,8 @@ class TensorAllocator(Protocol):
         ...
 
 
-class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
-    """Prepare shared state once per step and run attention with each layer's operands."""
+class AttentionBackend(ABC, Generic[LayerConfig, AttentionMetadata, LayerInputs]):
+    """Prepare shared metadata once per step and run attention with each layer's operands."""
 
     # The backend's name in logs and selection errors.
     name: ClassVar[str]
@@ -77,29 +77,29 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
         """Raise NotImplementedError if this backend cannot run the layer config."""
 
     @classmethod
-    def group_key(cls, layer_config: LayerConfig) -> Any:
-        """The layer config fields that init_runtime and build read; layers with equal keys share one state."""
+    def metadata_config_key(cls, layer_config: LayerConfig) -> Any:
+        """Config fields read by init_runtime and build_att_metadata; equal keys share metadata."""
         return None
 
     @cached_property
-    def state_key(self) -> tuple:
-        return type(self), self.group_key(self.layer_config)
+    def metadata_group_key(self) -> tuple:
+        return type(self), self.metadata_config_key(self.layer_config)
 
-    def create_att_state(self, infer_state: "InferStateInfo") -> AttState:
-        """Create this phase's shared state for one microbatch, setting up storage on first use."""
+    def create_att_metadata(self, infer_state: "InferStateInfo") -> AttentionMetadata:
+        """Create this phase's shared metadata for one microbatch, setting up storage on first use."""
         if not self._runtime_initialized:
             self.init_runtime(infer_state)
             self._runtime_initialized = True
-        return self.build(infer_state)
+        return self.build_att_metadata(infer_state)
 
     def init_runtime(self, infer_state: "InferStateInfo") -> None:
         """Initialize storage on first use; retain needed values and buffers, never the step itself."""
 
     @abstractmethod
-    def build(self, infer_state: "InferStateInfo") -> AttState:
-        """Prepare state once per compatible set of layers before capture or replay.
+    def build_att_metadata(self, infer_state: "InferStateInfo") -> AttentionMetadata:
+        """Prepare metadata once per compatible set of layers before capture or replay.
 
-        Read only the layer config fields in group_key. Replay reads captured addresses and launch
+        Read only the layer config fields in metadata_config_key. Replay reads captured addresses and launch
         parameters: keep graph storage for each (microbatch, batch size), update its contents in
         place and size launches for graph capacity.
         """
@@ -107,7 +107,7 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
     @abstractmethod
     def forward(
         self,
-        att_state: AttState,
+        att_metadata: AttentionMetadata,
         layer_inputs: LayerInputs,
         *,
         out: torch.Tensor,
@@ -119,7 +119,7 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
         no out parameter, it needs padded heads, or partial results merge at higher precision first.
         """
 
-    def keep_for_graph(self, infer_state: "InferStateInfo", name: str, value: torch.Tensor) -> torch.Tensor:
+    def update_graph_tensor(self, infer_state: "InferStateInfo", name: str, value: torch.Tensor) -> torch.Tensor:
         """Return value, or for a CUDA graph step its copy at a fixed address per (microbatch, batch size).
 
         The first call for a key keeps a clone; later calls copy value into it in place, so tensors a

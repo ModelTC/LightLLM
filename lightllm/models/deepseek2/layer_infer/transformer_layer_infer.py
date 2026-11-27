@@ -118,7 +118,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.att_state_role, "prefill", self.layer_num_
         )
         return backend.forward(
-            infer_state.att_states[backend.state_key],
+            infer_state.att_metadata[backend.metadata_group_key],
             MLAPrefillLayerInputs(q=q, k_nope=k_nope, k_rope=k_rope, v=v),
             out=self.alloc_tensor((q.shape[0], q.shape[1], v.shape[-1]), dtype=q.dtype, device=q.device),
             alloc_func=self.alloc_tensor,
@@ -139,7 +139,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.att_state_role, "decode", self.layer_num_
         )
         return backend.forward(
-            infer_state.att_states[backend.state_key],
+            infer_state.att_metadata[backend.metadata_group_key],
             MLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=kv),
             out=self.alloc_tensor(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device),
             alloc_func=self.alloc_tensor,

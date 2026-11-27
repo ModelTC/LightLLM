@@ -185,7 +185,7 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
         # A backend whose replay reuses graph-owned wrappers prepares none for replay steps.
         decode_wrapper = None if graph_mode is GraphMode.REPLAY else object()
         initializations.append((microbatch_index, graph_mode, decode_wrapper is not None))
-        state.att_states = {"group": SimpleNamespace(decode_wrapper=decode_wrapper)}
+        state.att_metadata = {"group": SimpleNamespace(decode_wrapper=decode_wrapper)}
         return state
 
     def outputs(state, state1):
@@ -193,8 +193,8 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
 
     def forward(state, infer_state1):
         # Eager and capture execute attention using these newly prepared states.
-        assert state.att_states["group"].decode_wrapper is not None
-        assert infer_state1.att_states["group"].decode_wrapper is not None
+        assert state.att_metadata["group"].decode_wrapper is not None
+        assert infer_state1.att_metadata["group"].decode_wrapper is not None
         executions.append(("forward", state.graph_mode, infer_state1.graph_mode))
         return outputs(state, infer_state1)
 
@@ -204,8 +204,8 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
 
     def replay(state, infer_state1):
         # Replay uses graph-owned wrappers, so temporary states need none.
-        assert state.att_states["group"].decode_wrapper is None
-        assert infer_state1.att_states["group"].decode_wrapper is None
+        assert state.att_metadata["group"].decode_wrapper is None
+        assert infer_state1.att_metadata["group"].decode_wrapper is None
         executions.append(("replay", state.graph_mode, infer_state1.graph_mode))
         return outputs(state, infer_state1)
 

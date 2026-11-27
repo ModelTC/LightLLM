@@ -518,10 +518,10 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
         SparseMLALayerConfig,
         SparseMLAPrefillLayerInputs,
     )
-    from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend, FA3SparseMLADecodeAttState
+    from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend, FA3SparseMLADecodeMetadata
     from lightllm.common.attention.backends.sparse_mla.flashmla import (
         FlashMLASparsePrefillBackend,
-        FlashMLASparsePrefillAttState,
+        FlashMLASparsePrefillMetadata,
     )
 
     if torch.cuda.get_device_capability()[0] != 9:
@@ -554,17 +554,17 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
         causal=False,
     )
     prefill_backend = FlashMLASparsePrefillBackend(layer_config)
-    prefill_args = FlashMLASparsePrefillAttState(mem_index=None, has_cached_prefix=False)
-    prefill_inputs = SparseMLAPrefillLayerInputs(q=q, kv_cache=kv, topk_mem_indices=indexes)
+    prefill_args = FlashMLASparsePrefillMetadata(mem_index=None, has_cached_prefix=False)
+    prefill_inputs = SparseMLAPrefillLayerInputs(q=q, kv_cache=kv, topk_cache_indices=indexes)
     decode_backend = FA3SparseMLADecodeBackend(layer_config)
     cu_seqlens_k = torch.nn.functional.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
-    decode_args = FA3SparseMLADecodeAttState(
+    decode_args = FA3SparseMLADecodeMetadata(
         cache_seqlens=lengths,
         cu_seqlens_q=torch.arange(10, dtype=torch.int32, device="cuda"),
         cu_seqlens_k=cu_seqlens_k,
         max_seqlen_q=1,
     )
-    decode_inputs = SparseMLADecodeLayerInputs(q_nope=q, q_rope=q[..., :0], kv_cache=kv, topk_mem_indices=indexes)
+    decode_inputs = SparseMLADecodeLayerInputs(q_nope=q, q_rope=q[..., :0], kv_cache=kv, topk_cache_indices=indexes)
 
     def prefill():
         return prefill_backend.forward(prefill_args, prefill_inputs, out=torch.empty_like(q))

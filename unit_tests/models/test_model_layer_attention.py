@@ -68,7 +68,7 @@ def config(**fields) -> GQALayerConfig:
 
 def layer_backend(model, layer, phase):
     """The layer's registered backend in phase, or None if it does not attend in phase."""
-    return model.attention_backend_manager._backends.get((model.att_state_role, phase, layer.layer_num_))
+    return model.attention_backend_manager._layer_backends.get((model.att_state_role, phase, layer.layer_num_))
 
 
 def layer_configs(model, layer):
@@ -92,7 +92,7 @@ def decode_inputs(monkeypatch, model, layer, weights):
         att_state_manager=model.att_state_manager,
         attention_backend_manager=model.attention_backend_manager,
         att_state_role=model.att_state_role,
-        att_states={backend.state_key: state},
+        att_metadata={backend.metadata_group_key: state},
     )
     query = torch.empty(3, layer.tp_q_head_num_ * layer.head_dim_)
     result = layer._token_attention_kernel(query, infer_state, weights)
@@ -147,7 +147,9 @@ def test_gemma4_sliding_and_full_layers_share_one_triton_group(runtime_start_arg
     window = dict(num_heads=4, head_dim=256, sliding_window=(47, 0))
     assert layer_configs(model, sliding) == (config(**window, bidirectional_image_spans=True), config(**window))
     assert layer_configs(model, full) == (config(num_heads=4, num_kv_heads=1, head_dim=512),) * 2
-    assert all(len(model.attention_backend_manager.state_groups["main"][phase]) == 1 for phase in ("prefill", "decode"))
+    assert all(
+        len(model.attention_backend_manager.group_backends["main"][phase]) == 1 for phase in ("prefill", "decode")
+    )
 
 
 def test_gpt_oss_layers_have_sinks_and_sliding_layers_a_window(runtime_start_args, monkeypatch):
@@ -170,7 +172,7 @@ def test_gpt_oss_layers_have_sinks_and_sliding_layers_a_window(runtime_start_arg
     assert layer_configs(model, full) == (config(has_sinks=True),) * 2
     sinks = torch.ones(H)
     weights = SimpleNamespace(attn_sinks=SimpleNamespace(weight=sinks))
-    assert decode_inputs(monkeypatch, model, full, weights).sinks is sinks
+    assert decode_inputs(monkeypatch, model, full, weights).sink_logits is sinks
 
 
 def test_neo_layers_attend_inside_image_spans_in_prefill_only(runtime_start_args):
@@ -297,7 +299,9 @@ def test_glm5_sparse_spec_describes_the_cache_without_a_workspace(kv_type, expec
     spec = layer.attention_config(model)
     assert spec.prefill == spec.decode
     assert spec.prefill.kv_cache_format == expected_format
-    assert spec.prefill_backend_name == spec.decode_backend_name == "flashmla_sparse"
+    assert (spec.prefill_backend_name, spec.decode_backend_name) == (
+        ("fa3", "flashmla") if kv_type == "fp8kv_dsa" else ("flashmla", "fa3")
+    )
 
 
 @pytest.mark.parametrize("prefill_backends, prefill_kernel", [(["auto"], "auto"), (["fa3", "flashkda"], "flashkda")])
@@ -306,10 +310,10 @@ def test_glm5_kda_layers_follow_the_linear_backend_and_state_mode(
     runtime_start_args, monkeypatch, prefill_backends, prefill_kernel, ssm_state_mode
 ):
     from lightllm.common.attention.backends.kda import KDALayerConfig
-    from lightllm.common.attention.backends.kda import triton as kda_triton
+    from lightllm.common.attention.backends.kda import recurrent as kda_recurrent
     from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 
-    monkeypatch.setattr(kda_triton, "import_flash_kda_fwd", lambda: None)
+    monkeypatch.setattr(kda_recurrent, "import_flash_kda_fwd", lambda: None)
     layer = Glm5NextTransformerLayerInfer.__new__(Glm5NextTransformerLayerInfer)
     layer.layer_num_ = 0
     layer.is_linear_attention_layer = True
@@ -325,7 +329,7 @@ def test_glm5_kda_layers_follow_the_linear_backend_and_state_mode(
         4,
         -5.0,
         torch.bfloat16,
-        replay=ssm_state_mode == "replay",
+        use_ssm_replay=ssm_state_mode == "replay",
         ssm_dtype=torch.bfloat16,
         prefill_kernel=prefill_kernel,
     )

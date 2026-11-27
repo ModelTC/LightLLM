@@ -84,16 +84,16 @@ def test_triton_mtp_decode_step_builds_group_markers():
         req_to_token_indexs=torch.zeros(8, 8, dtype=torch.int32), HOLD_REQUEST_ID=-1
     )
     # Fixed-layout speculative decode: three rows per request.
-    infer_state.decode_rows_per_request = 3
+    infer_state.max_decode_rows_per_request = 3
     config = GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16)
-    att_state = TritonGQADecodeBackend(config).build(infer_state)
+    att_metadata = TritonGQADecodeBackend(config).build_att_metadata(infer_state)
 
-    assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
+    assert att_metadata.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_fa3_gqa_decode_step_builder_groups_dynamic_rows():
-    # FA3 GQA and MLA decode share this step builder.
+def test_fa3_gqa_decode_metadata_groups_dynamic_rows():
+    # FA3 GQA and MLA decode share this metadata preparation.
     batch = make_infer_state(
         req_to_token_indexs=torch.zeros((8, 4), dtype=torch.int32, device="cuda"),
         b_req_idx=torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda"),
@@ -101,8 +101,8 @@ def test_fa3_gqa_decode_step_builder_groups_dynamic_rows():
         batch_size=4,
         max_kv_seq_len=4,
         total_token_num=11,
-        decode_rows_per_request=3,
-        dynamic_decode_rows=True,
+        max_decode_rows_per_request=3,
+        is_dynamic_verify=True,
         pad_req_idx=-1,
     )
 

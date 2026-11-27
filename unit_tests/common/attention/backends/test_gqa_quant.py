@@ -5,7 +5,7 @@ import torch
 
 from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
 
-from unit_tests.common.attention.backends.step_fixture import make_infer_state
+from unit_tests.common.attention.backends.step_fixture import configure_infer_state, make_infer_state
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
 from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQADecodeBackend, FlashInferGQAPrefillBackend
@@ -158,12 +158,14 @@ def test_triton_group_quant_matches_dequantized_reference(bits, prefill):
     token_map = torch.randperm(3 * CAP, device="cuda", dtype=torch.int32, generator=gen(0)).view(3, CAP)
     backend_cls = TritonQuantGQAPrefillBackend if prefill else TritonQuantGQADecodeBackend
     backend = backend_cls(config(kv_quant=f"int{bits}_group", kv_quant_group_size=8))
-    att_state = backend.create_att_state(
-        make_infer_state(make_batch(token_map, prefill=prefill), attention_backend_manager=AttentionBackendManager())
+    att_metadata = backend.create_att_metadata(
+        configure_infer_state(
+            make_batch(token_map, prefill=prefill), attention_backend_manager=AttentionBackendManager()
+        )
     )
     q = queries(prefill)
     out = torch.empty_like(q)
-    assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out) is out
+    assert backend.forward(att_metadata, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out) is out
     torch.testing.assert_close(
         out.float(), reference(q, k_ref, v_ref, token_map, prefill=prefill), atol=0.03, rtol=0.03
     )
@@ -192,8 +194,8 @@ def test_fa3_fp8_per_head_matches_dequantized_reference(static_q, prefill):
     backend_cls = FA3GQAPrefillBackend if prefill else FA3GQADecodeBackend
     backend = backend_cls(config(kv_quant="fp8_per_head", has_q_scale=static_q))
     # An FP8 cache runs with single-token pages.
-    att_state = backend.create_att_state(
-        make_infer_state(
+    att_metadata = backend.create_att_metadata(
+        configure_infer_state(
             batch,
             attention_backend_manager=AttentionBackendManager(),
             page_size=16,
@@ -201,11 +203,11 @@ def test_fa3_fp8_per_head_matches_dequantized_reference(static_q, prefill):
             max_decode_rows=3,
         )
     )
-    assert att_state.page_size == 1
+    assert att_metadata.page_size == 1
     q = queries(prefill)
     out = torch.empty_like(q)
     scales = GQAKVScales(k_scale=k_scale, v_scale=v_scale, q_scale=q_scale)
-    backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
+    backend.forward(att_metadata, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
     k_ref = k.view(torch.float8_e4m3fn).float() * k_scale[None, :, None]
     v_ref = v.view(torch.float8_e4m3fn).float() * v_scale[None, :, None]
     # q is quantized to FP8 as well, so compare against the full-precision reference loosely.
@@ -226,13 +228,15 @@ def test_flashinfer_fp8_per_tensor_matches_dequantized_reference(prefill):
         model_max_seq_len=CAP,
         max_cuda_graph_batch_size=3,
     )
-    att_state = backend.create_att_state(make_infer_state(make_batch(token_map, prefill=prefill), **batch_fields))
+    att_metadata = backend.create_att_metadata(
+        configure_infer_state(make_batch(token_map, prefill=prefill), **batch_fields)
+    )
     # An FP8 cache runs with single-token pages.
-    assert att_state.page_size == 1
+    assert att_metadata.page_size == 1
     q = queries(prefill)
     out = torch.empty_like(q)
     scales = GQAKVScales(k_scale=0.03, v_scale=0.05)
-    backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
+    backend.forward(att_metadata, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
     k_ref, v_ref = k.view(torch.float8_e4m3fn).float() * 0.03, v.view(torch.float8_e4m3fn).float() * 0.05
     torch.testing.assert_close(
         out.float(), reference(q, k_ref, v_ref, token_map, prefill=prefill), atol=0.03, rtol=0.03
@@ -255,7 +259,7 @@ def test_unquantized_triton_rejects_a_quantized_cache(prefill):
     token_map = torch.randperm(3 * CAP, device="cuda", dtype=torch.int32, generator=gen(0)).view(3, CAP)
     backend_cls = TritonGQAPrefillBackend if prefill else TritonGQADecodeBackend
     backend = backend_cls(config())
-    att_state = backend.build(make_batch(token_map, prefill=prefill))
+    att_metadata = backend.build_att_metadata(make_batch(token_map, prefill=prefill))
     q = queries(prefill)
     with pytest.raises(AssertionError, match="KV cache of q's dtype"):
-        backend.forward(att_state, GQALayerInputs(q, k, v), out=torch.empty_like(q))
+        backend.forward(att_metadata, GQALayerInputs(q, k, v), out=torch.empty_like(q))

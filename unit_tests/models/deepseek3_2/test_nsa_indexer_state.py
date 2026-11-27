@@ -46,7 +46,7 @@ def test_indexer_metadata_matches_gen_nsa_ks_ke(prefill):
     s = make_state(prefill, lengths, [9, 40, 2] if prefill else [1, 1, 1])
     s._init_nsa_indexer_state(model)
     ks, ke, lens, ragged = expected(s, s.input_ids.shape[0] if prefill else 3)
-    for actual, ref in ((s.nsa_ks, ks), (s.nsa_ke, ke), (s.nsa_lengths, lens)):
+    for actual, ref in ((s.nsa_key_starts, ks), (s.nsa_key_ends, ke), (s.nsa_lengths, lens)):
         torch.testing.assert_close(actual, ref, rtol=0, atol=0)
     torch.testing.assert_close(s.nsa_ragged_mem_index[: s.total_token_num], ragged, rtol=0, atol=0)
 

@@ -115,8 +115,8 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, pa
     infer_state.b1_cu_q_seq_len = torch.tensor([0, 1, 2], dtype=torch.int32)
     infer_state.b1_cu_kv_seq_len = torch.tensor([0, 4096, 4096 + actual_kv_len], dtype=torch.int32)
     layer_config = GQALayerConfig(num_heads=4, num_kv_heads=2, head_dim=8, dtype=torch.bfloat16)
-    impl = FA3GQADecodeBackend(layer_config)
-    impl.page_size = page_size
+    backend = FA3GQADecodeBackend(layer_config)
+    backend.page_size = page_size
     infer_state.max_decode_rows = 2
     infer_state.model_max_seq_len = graph_capacity
     infer_state.attention_backend_manager = SimpleNamespace(
@@ -125,7 +125,7 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, pa
     copy_calls = []
     monkeypatch.setattr(fa3_utils, "page_table_copy", lambda **kwargs: copy_calls.append(kwargs))
     infer_state.cuda_graph_max_kv_seq_len = graph_capacity
-    att_state = impl.build(infer_state)
+    att_metadata = backend.build_att_metadata(infer_state)
     # 模拟 CudaGraph._capture_decode 对 infer_state 的修改。
     infer_state.max_kv_seq_len = graph_capacity
     calls = []
@@ -137,7 +137,7 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, pa
     monkeypatch.setattr(sgl_utils, "flash_attn_with_kvcache_autotune", attention)
     q = torch.empty(2, 4, 8, dtype=torch.bfloat16)
     cache = torch.empty(page_size, 2, 8, dtype=torch.bfloat16)
-    impl.forward(att_state, GQALayerInputs(q=q, k_cache=cache, v_cache=cache), out=torch.empty_like(q))
+    backend.forward(att_metadata, GQALayerInputs(q=q, k_cache=cache, v_cache=cache), out=torch.empty_like(q))
     assert calls[0]["max_seqlen_k"] == actual_kv_len
     assert calls[0]["page_table"].shape == (2, 32768 // page_size)
 

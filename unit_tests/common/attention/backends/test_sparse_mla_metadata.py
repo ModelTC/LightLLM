@@ -19,11 +19,11 @@ TOPK = 2048
 def test_flashmla_swa_allocates_separate_metadata_only_for_capture(monkeypatch):
     monkeypatch.setitem(sys.modules, "flash_mla", SimpleNamespace(get_mla_metadata=lambda: (object(), None)))
     config = SWASparseMLALayerConfig(
-        num_heads=64, head_dim_v=512, softmax_scale=0.1, dtype=torch.bfloat16, compress_ratio=4
+        num_heads=64, v_head_dim=512, softmax_scale=0.1, dtype=torch.bfloat16, compress_ratio=4
     )
     backend = FlashMLASWADecodeBackend(config)
     for mode in (GraphMode.EAGER, GraphMode.CAPTURE, GraphMode.REPLAY):
-        state = backend.build(SimpleNamespace(graph_mode=mode))
+        state = backend.build_att_metadata(SimpleNamespace(graph_mode=mode))
         if mode is GraphMode.CAPTURE:
             assert state.capture_sched_meta is not state.sched_meta
         else:
@@ -70,47 +70,49 @@ def expected_lengths(lengths, kpool):
     return as_tensor(selected), as_tensor(prefix)
 
 
-def assert_att_state(att_state, lengths, kpool):
+def assert_att_state(att_metadata, lengths, kpool):
     cache_seqlens, cu_seqlens_k = expected_lengths(lengths, kpool)
-    assert att_state.cu_seqlens_k.dtype == torch.int32
-    torch.testing.assert_close(att_state.cache_seqlens.int(), cache_seqlens, rtol=0, atol=0)
-    torch.testing.assert_close(att_state.cu_seqlens_k, cu_seqlens_k, rtol=0, atol=0)
+    assert att_metadata.cu_seqlens_k.dtype == torch.int32
+    torch.testing.assert_close(att_metadata.cache_seqlens.int(), cache_seqlens, rtol=0, atol=0)
+    torch.testing.assert_close(att_metadata.cu_seqlens_k, cu_seqlens_k, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("kpool", [1, 4])
 def test_fa3_sparse_decode_lengths_follow_the_indexer_selection(kpool):
     lengths = [1, 3, 5, 2047, 2048, 2049, 2051, 2052, 9000]
-    att_state = fa3_decode(kpool, causal=kpool == 1).build(make_batch(lengths))
-    assert_att_state(att_state, lengths, kpool)
-    assert att_state.max_seqlen_q == 1
+    att_metadata = fa3_decode(kpool, causal=kpool == 1).build_att_metadata(make_batch(lengths))
+    assert_att_state(att_metadata, lengths, kpool)
+    assert att_metadata.max_seqlen_q == 1
 
 
 @pytest.mark.parametrize("kpool", [1, 4])
 def test_fa3_sparse_decode_replay_rewrites_captured_storage_in_place(kpool):
     backend = fa3_decode(kpool)
     captured_lengths = [7, 2049, 4096, 2]
-    captured = backend.build(make_batch(captured_lengths, capacity=8192))
+    captured = backend.build_att_metadata(make_batch(captured_lengths, capacity=8192))
     assert_att_state(captured, captured_lengths, kpool)
     pointers = (captured.cache_seqlens.data_ptr(), captured.cu_seqlens_k.data_ptr())
 
     # A replay step of the same (microbatch, batch size) writes its lengths into the captured storage.
     replay_lengths = [3000, 5, 2051, 64]
-    replay = backend.build(make_batch(replay_lengths, capacity=8192))
+    replay = backend.build_att_metadata(make_batch(replay_lengths, capacity=8192))
     assert (replay.cache_seqlens.data_ptr(), replay.cu_seqlens_k.data_ptr()) == pointers
     assert_att_state(captured, replay_lengths, kpool)
 
     # Eager steps never touch the captured storage.
-    eager = backend.build(make_batch([1, 1, 1, 1]))
+    eager = backend.build_att_metadata(make_batch([1, 1, 1, 1]))
     assert eager.cache_seqlens.data_ptr() not in pointers and eager.cu_seqlens_k.data_ptr() not in pointers
     assert_att_state(captured, replay_lengths, kpool)
 
 
 def test_fa3_sparse_decode_keeps_storage_per_microbatch_and_batch_size():
     backend = fa3_decode(kpool=4)
-    first = backend.build(make_batch([9, 10], capacity=8192, microbatch=0))
-    second = backend.build(make_batch([2049, 4096], capacity=8192, microbatch=1))
-    wider = backend.build(make_batch([9, 10, 11], capacity=8192, microbatch=0))
-    tensors = [t for att_state in (first, second, wider) for t in (att_state.cache_seqlens, att_state.cu_seqlens_k)]
+    first = backend.build_att_metadata(make_batch([9, 10], capacity=8192, microbatch=0))
+    second = backend.build_att_metadata(make_batch([2049, 4096], capacity=8192, microbatch=1))
+    wider = backend.build_att_metadata(make_batch([9, 10, 11], capacity=8192, microbatch=0))
+    tensors = [
+        t for att_metadata in (first, second, wider) for t in (att_metadata.cache_seqlens, att_metadata.cu_seqlens_k)
+    ]
     storage = {t.data_ptr() for t in tensors}
     assert len(storage) == 6
     # Building microbatch 1 must not overwrite the lengths microbatch 0's graph reads.

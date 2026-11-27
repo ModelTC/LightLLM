@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import torch
 
 from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
-from ..gqa.fa3 import FA3GQADecodeAttState, build_fa3_decode_state, FA3_CPU_CACHE_SYNC
+from ..gqa.fa3 import FA3DecodeMetadata, build_fa3_decode_metadata, FA3_CPU_CACHE_SYNC
 from . import (
     MLADecodeLayerConfig,
     MLADecodeLayerInputs,
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class FA3MLAPrefillAttState:
+class FA3MLAPrefillMetadata:
     """int32 cumulative query and kv offsets of the step's packed, expanded keys and values."""
 
     cu_seqlens_q: torch.Tensor
@@ -32,13 +32,13 @@ class FA3MLAPrefillAttState:
     max_seqlen_k: int
 
 
-class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefillAttState, MLAPrefillLayerInputs]):
+class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefillMetadata, MLAPrefillLayerInputs]):
     name = "fa3_mla_prefill"
     phase = "prefill"
     requires_cpu_cache_sync = FA3_CPU_CACHE_SYNC
 
-    def build(self, infer_state: InferStateInfo) -> FA3MLAPrefillAttState:
-        return FA3MLAPrefillAttState(
+    def build_att_metadata(self, infer_state: InferStateInfo) -> FA3MLAPrefillMetadata:
+        return FA3MLAPrefillMetadata(
             cu_seqlens_q=infer_state.b1_cu_q_seq_len.int(),
             cu_seqlens_k=infer_state.b1_cu_kv_seq_len.int(),
             max_seqlen_q=infer_state.max_q_seq_len,
@@ -47,7 +47,7 @@ class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefill
 
     def forward(
         self,
-        att_state: FA3MLAPrefillAttState,
+        att_metadata: FA3MLAPrefillMetadata,
         layer_inputs: MLAPrefillLayerInputs,
         *,
         out: torch.Tensor,
@@ -64,10 +64,10 @@ class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefill
             q=layer_inputs.q,
             k=expand_mla_keys(layer_inputs, alloc_func),
             v=layer_inputs.v,
-            cu_seqlens_q=att_state.cu_seqlens_q,
-            cu_seqlens_k=att_state.cu_seqlens_k,
-            max_seqlen_q=att_state.max_seqlen_q,
-            max_seqlen_k=att_state.max_seqlen_k,
+            cu_seqlens_q=att_metadata.cu_seqlens_q,
+            cu_seqlens_k=att_metadata.cu_seqlens_k,
+            max_seqlen_q=att_metadata.max_seqlen_q,
+            max_seqlen_k=att_metadata.max_seqlen_k,
             softmax_scale=config.softmax_scale,
             causal=config.causal,
             return_softmax_lse=False,
@@ -76,7 +76,7 @@ class FA3MLAPrefillBackend(AttentionBackend[MLAPrefillLayerConfig, FA3MLAPrefill
         return out
 
 
-class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAttState, MLADecodeLayerInputs]):
+class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3DecodeMetadata, MLADecodeLayerInputs]):
     name = "fa3_mla_decode"
     phase = "decode"
     requires_cpu_cache_sync = FA3_CPU_CACHE_SYNC
@@ -85,12 +85,12 @@ class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAtt
         # The latent cache is paged like an unquantized GQA cache.
         self.page_size = infer_state.page_size
 
-    def build(self, infer_state: InferStateInfo) -> FA3GQADecodeAttState:
-        return build_fa3_decode_state(self, infer_state)
+    def build_att_metadata(self, infer_state: InferStateInfo) -> FA3DecodeMetadata:
+        return build_fa3_decode_metadata(self, infer_state)
 
     def forward(
         self,
-        att_state: FA3GQADecodeAttState,
+        att_metadata: FA3DecodeMetadata,
         layer_inputs: MLADecodeLayerInputs,
         *,
         out: torch.Tensor,
@@ -100,17 +100,17 @@ class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAtt
         from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 
         config = self.layer_config
-        kv, rank, page_size = layer_inputs.kv_cache, config.kv_lora_rank, att_state.page_size
+        kv, rank, page_size = layer_inputs.kv_cache, config.kv_lora_rank, att_metadata.page_size
         flash_attn_with_kvcache(
             q=layer_inputs.q_rope,
             k_cache=kv[:, :, rank:].view(-1, page_size, 1, config.qk_rope_head_dim),
             v_cache=kv[:, :, :rank].view(-1, page_size, 1, rank),
             qv=layer_inputs.q_nope,
-            page_table=att_state.page_table,
-            cache_seqlens=att_state.cache_seqlens,
-            cu_seqlens_q=att_state.cu_seqlens_q,
-            cu_seqlens_k_new=att_state.cu_seqlens_k,
-            max_seqlen_q=att_state.max_seqlen_q,
+            page_table=att_metadata.page_table,
+            cache_seqlens=att_metadata.cache_seqlens,
+            cu_seqlens_q=att_metadata.cu_seqlens_q,
+            cu_seqlens_k_new=att_metadata.cu_seqlens_k,
+            max_seqlen_q=att_metadata.max_seqlen_q,
             softmax_scale=config.softmax_scale,
             causal=config.causal,
             window_size=(-1, -1),

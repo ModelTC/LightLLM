@@ -18,7 +18,7 @@ from lightllm.common.attention.backends.sparse_mla import SparseMLALayerConfig
 from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLAPrefillBackend
 
 
-class _AttState:
+class _AttMetadata:
     def __init__(self, positions):
         self.positions = positions
 
@@ -39,7 +39,7 @@ def no_cycle_gc():
 def _runtime(groups: dict) -> AttentionBackendManager:
     """A manager whose main role has the given state groups per phase, without registering layers."""
     runtime = AttentionBackendManager()
-    runtime.state_groups["main"] = {"prefill": {}, "decode": {}, **groups}
+    runtime.group_backends["main"] = {"prefill": {}, "decode": {}, **groups}
     return runtime
 
 
@@ -49,17 +49,17 @@ def _create_state(is_prefill):
     owner.position_ids = torch.arange(4)
     owner.b_req_idx = owner.position_ids
     owner.req_manager = SimpleNamespace(req_to_token_indexs=None)
-    backend = SimpleNamespace(create_att_state=lambda metadata: _AttState(metadata.b_req_idx))
+    backend = SimpleNamespace(create_att_metadata=lambda metadata: _AttMetadata(metadata.b_req_idx))
     phase = "prefill" if is_prefill else "decode"
     runtime = _runtime({phase: {"group": backend}})
-    owner.att_states = runtime.create_att_state(owner)
+    owner.att_metadata = runtime.create_att_metadata_by_group(owner)
     return owner
 
 
 @pytest.mark.parametrize("is_prefill", [False, True])
-def test_att_state_do_not_keep_their_infer_state_alive(no_cycle_gc, is_prefill):
+def test_att_metadata_does_not_keep_their_infer_state_alive(no_cycle_gc, is_prefill):
     owner = _create_state(is_prefill)
-    att_state = owner.att_states["group"]
+    att_metadata = owner.att_metadata["group"]
     owner_ref = weakref.ref(owner)
     tensor_ref = weakref.ref(owner.position_ids)
 
@@ -67,17 +67,17 @@ def test_att_state_do_not_keep_their_infer_state_alive(no_cycle_gc, is_prefill):
     del owner
     assert owner_ref() is None
     assert tensor_ref() is not None
-    att_state_ref = weakref.ref(att_state)
-    del att_state
-    assert att_state_ref() is None
+    metadata_ref = weakref.ref(att_metadata)
+    del att_metadata
+    assert metadata_ref() is None
     assert tensor_ref() is None
 
 
-def test_infer_state_without_attention_builds_no_att_state():
+def test_infer_state_without_attention_builds_no_att_metadata():
     owner = InferStateInfo()
     owner.is_prefill = False
-    owner.att_states = _runtime({}).create_att_state(owner)
-    assert owner.att_states == {}
+    owner.att_metadata = _runtime({}).create_att_metadata_by_group(owner)
+    assert owner.att_metadata == {}
 
 
 @pytest.mark.parametrize(
@@ -99,13 +99,13 @@ def test_prefill_backend_state_outlives_step(no_cycle_gc, backend_cls, config, f
     tensor = torch.arange(4)
     setattr(owner, field, tensor)
     backend = backend_cls(config)
-    runtime = _runtime({"prefill": {backend.state_key: backend}})
-    owner.att_states = runtime.create_att_state(owner)
-    att_state = owner.att_states[backend.state_key]
+    runtime = _runtime({"prefill": {backend.metadata_group_key: backend}})
+    owner.att_metadata = runtime.create_att_metadata_by_group(owner)
+    att_metadata = owner.att_metadata[backend.metadata_group_key]
     owner_ref = weakref.ref(owner)
     del owner
     assert owner_ref() is None
-    assert getattr(att_state, field) is tensor
+    assert getattr(att_metadata, field) is tensor
 
 
 def test_decode_graph_replay_preserves_capture_buffers_and_owner_lifetime(no_cycle_gc):
@@ -129,7 +129,7 @@ def test_decode_graph_replay_preserves_capture_buffers_and_owner_lifetime(no_cyc
     assert replay_calls == [True]
     # Replay copies the step's tensors into the captured state's, which its attention state read.
     assert captured_ref().position_ids.data_ptr() == capture_positions_ptr
-    assert captured_ref().att_states["group"].positions is captured_ref().position_ids
+    assert captured_ref().att_metadata["group"].positions is captured_ref().position_ids
     torch.testing.assert_close(captured_ref().position_ids, runtime.position_ids)
 
     del runtime

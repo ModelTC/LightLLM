@@ -10,10 +10,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparseDecodeBackend
+from lightllm.common.attention.backends.sparse_mla.flashmla import FP8SparseMLADecodeBackend
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
+from unit_tests.models.glm5_next.test_fp8_kv import _decode
 
 pytestmark = [
     pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
@@ -32,9 +33,7 @@ def make_backend():
     from unit_tests.models.glm5_next.test_fp8_kv import _layer_config
 
     config = _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), SCALE)
-    return SimpleNamespace(
-        decode_backend=FlashMLASparseDecodeBackend(config),
-    )
+    return FP8SparseMLADecodeBackend(config)
 
 
 def gen(seed):
@@ -61,14 +60,6 @@ def make_infer(lengths, *, capture=False, replay=False, microbatch=0):
         infer.position_ids,
     ) = gen_decode_params(infer.b_seq_len)
     return infer
-
-
-def init_decode_state(backend, infer):
-    """Prepare the attention state of one decode microbatch."""
-    from unit_tests.models.glm5_next.test_fp8_kv import _decode
-
-    att_state = backend.decode_backend.build(infer)
-    return SimpleNamespace(att_state=att_state, decode_att=lambda q, kv, params: _decode(att_state, q, kv, params))
 
 
 def select(lengths, out, seed):
@@ -136,11 +127,11 @@ def test_fp8_decode_graph_replays_steps_built_by_the_backend(monkeypatch, batch,
     control = {"topk_mem_indices": indices, "softmax_scale": SCALE, "kv_lora_rank": 512}
 
     def run(state):
-        return state.decode_att((q, q[..., :0]), packed[..., :584], control)
+        return _decode(state, (q, q[..., :0]), packed[..., :584], control)
 
     def eager(lengths):
-        state = init_decode_state(backend, make_infer(lengths))
-        assert not state.att_state.uses_cuda_graph and backend.decode_backend.direct_decode_bound == 2051
+        state = backend.create_att_metadata(make_infer(lengths))
+        assert not state.uses_cuda_graph and backend.direct_decode_topk_bound == 2051
         return run(state).clone()
 
     eager_first = eager(first)
@@ -149,8 +140,8 @@ def test_fp8_decode_graph_replays_steps_built_by_the_backend(monkeypatch, batch,
     assert direct_calls == []
 
     graph_infer = make_infer(first, capture=True)
-    graph_state = init_decode_state(backend, graph_infer)
-    assert graph_state.att_state.uses_cuda_graph
+    graph_state = backend.create_att_metadata(graph_infer)
+    assert graph_state.uses_cuda_graph
     graph, graph_out = capture(lambda: run(graph_state))
     assert (True in direct_calls) == direct
     graph.replay()
@@ -159,9 +150,9 @@ def test_fp8_decode_graph_replays_steps_built_by_the_backend(monkeypatch, batch,
     select(second, indices, seed=20)
     q.normal_(generator=gen(2))
     replay_infer = make_infer(second, replay=True)
-    replay_state = init_decode_state(backend, replay_infer)
+    replay_state = backend.create_att_metadata(replay_infer)
     # A replay step's state carries the scheduler metadata the graph captured.
-    assert replay_state.att_state.sched_meta is graph_state.att_state.sched_meta
+    assert replay_state.sched_meta is graph_state.sched_meta
     graph_infer.copy_for_cuda_graph(replay_infer)
     graph.replay()
     replayed = graph_out.clone()
@@ -174,7 +165,7 @@ def test_fp8_decode_scheduler_metadata_is_kept_per_microbatch_and_batch_size():
     backend = make_backend()
 
     def sched_meta(lengths, **kwargs):
-        return init_decode_state(backend, make_infer(lengths, **kwargs)).att_state.sched_meta
+        return backend.create_att_metadata(make_infer(lengths, **kwargs)).sched_meta
 
     captured = sched_meta([9, 10], capture=True)
     assert sched_meta([3000, 1], replay=True) is captured

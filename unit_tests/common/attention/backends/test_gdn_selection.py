@@ -23,7 +23,7 @@ import lightllm.utils.backend_validator as backend_validator
 @pytest.mark.parametrize("use_out", [False, True])
 def test_prefill_output_storage_and_final_state_dtype(monkeypatch, cache_dtype, use_out):
     from lightllm.common.attention.backends.gdn import GDNLayerConfig, GDNLayerInputs
-    from lightllm.common.attention.backends.gdn.triton import GDNPrefillAttState
+    from lightllm.common.attention.backends.gdn.triton import GDNPrefillMetadata
     from lightllm.common.attention.kernels.gdn import causal_conv1d, fused_gdn_gating
 
     ssm_states = torch.zeros((1, 1, 2, 2), dtype=cache_dtype)
@@ -37,9 +37,9 @@ def test_prefill_output_storage_and_final_state_dtype(monkeypatch, cache_dtype, 
     layer_config = GDNLayerConfig(
         num_k_heads=1,
         num_v_heads=1,
-        head_k_dim=2,
-        head_v_dim=2,
-        conv_kernel_dim=2,
+        k_head_dim=2,
+        v_head_dim=2,
+        conv_kernel_size=2,
         activation="silu",
         dtype=cache_dtype,
     )
@@ -57,12 +57,12 @@ def test_prefill_output_storage_and_final_state_dtype(monkeypatch, cache_dtype, 
         ssm_states=ssm_states,
     )
     index = torch.tensor([0], dtype=torch.int64)
-    att_state = GDNPrefillAttState(
+    att_metadata = GDNPrefillMetadata(
         conv_idx=index, ssm_idx=index, cu_seqlens=torch.tensor([0, 1], dtype=torch.int32), has_initial_state=index > 0
     )
     out = torch.full((1, 1, 2), float("nan"), dtype=cache_dtype) if use_out else None
 
-    result = TritonGDNPrefillBackend(layer_config).forward(att_state, layer_inputs, out=out)
+    result = TritonGDNPrefillBackend(layer_config).forward(att_metadata, layer_inputs, out=out)
 
     assert result.data_ptr() == (out if use_out else core).data_ptr()
     assert torch.equal(result, core.squeeze(0))
@@ -80,8 +80,8 @@ def _decode_batch(b_req_idx, *, rows=1, dynamic=False, req_to_mtp_state_index=No
         batch_size=b_req_idx.shape[0],
         max_kv_seq_len=1,
         total_token_num=b_req_idx.shape[0],
-        decode_rows_per_request=rows,
-        dynamic_decode_rows=dynamic,
+        max_decode_rows_per_request=rows,
+        is_dynamic_verify=dynamic,
         pad_req_idx=hold,
         b_mtp_index=torch.zeros_like(b_req_idx),
         req_to_mtp_state_index=req_to_mtp_state_index,
@@ -90,11 +90,11 @@ def _decode_batch(b_req_idx, *, rows=1, dynamic=False, req_to_mtp_state_index=No
 
 def test_decode_uses_request_slots_without_speculation():
     b_req_idx = torch.tensor([2, 4], dtype=torch.int32)
-    att_state = TritonGDNDecodeBackend(gdn_config()).build(_decode_batch(b_req_idx))
+    att_metadata = TritonGDNDecodeBackend(gdn_config()).build_att_metadata(_decode_batch(b_req_idx))
 
-    assert att_state.conv_idx is b_req_idx and att_state.ssm_idx is b_req_idx
-    assert att_state.cu_seqlens is None and att_state.num_accepted_tokens is None
-    replay_args = ReplayGDNDecodeBackend(gdn_config(replay=True)).build(_decode_batch(b_req_idx))
+    assert att_metadata.conv_idx is b_req_idx and att_metadata.ssm_idx is b_req_idx
+    assert att_metadata.cu_seqlens is None and att_metadata.num_accepted_tokens is None
+    replay_args = ReplayGDNDecodeBackend(gdn_config(use_ssm_replay=True)).build_att_metadata(_decode_batch(b_req_idx))
     torch.testing.assert_close(replay_args.cu_seqlens, torch.tensor([0, 1, 2], dtype=torch.int32))
 
 
@@ -103,15 +103,15 @@ def test_decode_groups_fixed_speculative_rows():
     req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
     batch = _decode_batch(b_req_idx, rows=3, req_to_mtp_state_index=req_to_mtp_state_index)
 
-    att_state = TritonGDNDecodeBackend(gdn_config()).build(batch)
+    att_metadata = TritonGDNDecodeBackend(gdn_config()).build_att_metadata(batch)
 
-    torch.testing.assert_close(att_state.cu_seqlens, torch.tensor([0, 3, 6], dtype=torch.int32))
-    torch.testing.assert_close(att_state.conv_idx, torch.tensor([2, 4], dtype=torch.int32))
-    torch.testing.assert_close(att_state.num_accepted_tokens, torch.tensor([2, 3], dtype=torch.int32))
-    torch.testing.assert_close(att_state.ssm_idx, torch.tensor([[6, 7, 8], [12, 13, 14]], dtype=torch.int32))
-    assert att_state.draft_step == 2
+    torch.testing.assert_close(att_metadata.cu_seqlens, torch.tensor([0, 3, 6], dtype=torch.int32))
+    torch.testing.assert_close(att_metadata.conv_idx, torch.tensor([2, 4], dtype=torch.int32))
+    torch.testing.assert_close(att_metadata.num_accepted_tokens, torch.tensor([2, 3], dtype=torch.int32))
+    torch.testing.assert_close(att_metadata.ssm_idx, torch.tensor([[6, 7, 8], [12, 13, 14]], dtype=torch.int32))
+    assert att_metadata.max_draft_tokens == 2
     # Replay state keeps one SSM slot per request.
-    replay_args = ReplayGDNDecodeBackend(gdn_config(replay=True)).build(batch)
+    replay_args = ReplayGDNDecodeBackend(gdn_config(use_ssm_replay=True)).build_att_metadata(batch)
     torch.testing.assert_close(replay_args.ssm_idx, torch.tensor([2, 4], dtype=torch.int32))
 
 
@@ -132,13 +132,13 @@ def test_decode_groups_dynamic_speculative_rows(monkeypatch):
     monkeypatch.setattr(mtp_state_params, "build_dynamic_mtp_linear_att_state_params", build_params)
     batch = _decode_batch(b_req_idx, rows=3, dynamic=True, req_to_mtp_state_index=req_to_mtp_state_index, hold=5)
 
-    att_state = TritonGDNDecodeBackend(gdn_config()).build(batch)
+    att_metadata = TritonGDNDecodeBackend(gdn_config()).build_att_metadata(batch)
 
-    assert att_state.cu_seqlens is expected_cu_q_seq_len
-    assert att_state.conv_idx is expected_conv_buffer_idx
-    assert att_state.num_accepted_tokens is expected_num_accepted_tokens
+    assert att_metadata.cu_seqlens is expected_cu_q_seq_len
+    assert att_metadata.conv_idx is expected_conv_buffer_idx
+    assert att_metadata.num_accepted_tokens is expected_num_accepted_tokens
     torch.testing.assert_close(
-        att_state.ssm_idx,
+        att_metadata.ssm_idx,
         torch.tensor([[6, 7, 8], [12, 13, 14], [15, 16, 17], [15, 16, 17], [15, 16, 17]], dtype=torch.int32),
     )
     assert len(build_calls) == 1
@@ -180,7 +180,7 @@ def test_auto_selection_falls_back_to_triton_when_flashqla_fails_validation(monk
 @pytest.mark.parametrize("replay, decode", [(False, "triton_gdn_decode"), (True, "replay_gdn_decode")])
 def test_replay_state_selects_replay_decode(monkeypatch, replay, decode):
     monkeypatch.setitem(sys.modules, "flash_qla", SimpleNamespace(chunk_gated_delta_rule=None))
-    config = gdn_config(replay=replay)
+    config = gdn_config(use_ssm_replay=replay)
     assert selector.select(config, "prefill", "flashqla").name == "flashqla_gdn_prefill"
     assert selector.select(config, "decode", "triton").name == decode
 
@@ -188,9 +188,9 @@ def test_replay_state_selects_replay_decode(monkeypatch, replay, decode):
 def test_linear_layers_read_the_second_backend_value():
     args = SimpleNamespace(llm_prefill_att_backend=["fa3", "triton"], llm_decode_att_backend=["flashinfer", "triton"])
     for phase in ("prefill", "decode"):
-        assert selector.requested_backend(args, phase, gdn_config()) == "triton"
+        assert selector.requested_backend_name(args, phase, gdn_config()) == "triton"
     args.llm_prefill_att_backend = ["fa3"]
-    assert selector.requested_backend(args, "prefill", gdn_config()) == "auto"
+    assert selector.requested_backend_name(args, "prefill", gdn_config()) == "auto"
 
 
 def test_flashqla_validation_loads_linear_cache_config(monkeypatch):

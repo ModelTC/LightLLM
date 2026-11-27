@@ -23,9 +23,9 @@ class InferStateInfo:
     """
 
     def __init__(self):
-        # 用 backend.state_key 保存当前 microbatch 跨层共享的参数。
-        # attention state 不持有 InferStateInfo，因此不会形成引用环。
-        self.att_states: dict = {}
+        # 用 backend.metadata_group_key 保存当前 microbatch 跨层共享的参数。
+        # attention metadata 不持有 InferStateInfo，因此不会形成引用环。
+        self.att_metadata: dict = {}
 
         self.input_ids: torch.Tensor = None
         self.batch_size: int = None
@@ -71,8 +71,8 @@ class InferStateInfo:
         self.max_cuda_graph_batch_size: int = None
         self.max_decode_rows: int = None
         self.diverse_decode: bool = False
-        self.decode_rows_per_request: int = 1
-        self.dynamic_decode_rows: bool = False
+        self.max_decode_rows_per_request: int = 1
+        self.is_dynamic_verify: bool = False
         self.req_to_mtp_state_index: Optional[torch.Tensor] = None
         self.dist_group: CustomProcessGroup = None
 

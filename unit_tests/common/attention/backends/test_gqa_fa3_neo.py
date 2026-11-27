@@ -12,7 +12,7 @@ from lightllm.common.basemodel.attention_backend_manager import AttentionBackend
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQAPrefillBackend
-from unit_tests.common.attention.backends.step_fixture import make_infer_state
+from unit_tests.common.attention.backends.step_fixture import configure_infer_state, make_infer_state
 from lightllm.utils import neo_fa3_utils, sgl_utils
 
 
@@ -37,7 +37,7 @@ def test_recognizes_neo_interface_without_replacing_regular_fa3(monkeypatch):
     regular_attention = sgl_utils.flash_attn_with_kvcache
     module = _load_neo(monkeypatch, neo_attention)
 
-    assert module.HAS_FLASH_ATTN_INTERFACE
+    assert module.HAS_NEO_FA3
     assert module.flash_attn_with_kvcache_neo is neo_attention
     assert sgl_utils.flash_attn_with_kvcache is regular_attention
 
@@ -54,7 +54,7 @@ def test_unavailable_neo_interface_provides_source_install_instructions(monkeypa
     with pytest.warns(UserWarning, match="Neo FA3 is unavailable") as warnings:
         module = _load_neo(monkeypatch, attention_func)
 
-    assert not module.HAS_FLASH_ATTN_INTERFACE
+    assert not module.HAS_NEO_FA3
     assert module.flash_attn_with_kvcache_neo is None
     message = str(warnings[0].message)
     assert "https://github.com/WANDY666/flash-attention.git" in message
@@ -92,8 +92,8 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
     infer_state.is_prefill = True
     # Prefill state does not depend on the image spans, so a text layer's backend builds it.
     text_layer = GQALayerConfig(num_heads=2, num_kv_heads=1, head_dim=16, dtype=torch.bfloat16)
-    att_state = FA3GQAPrefillBackend(text_layer).create_att_state(
-        make_infer_state(infer_state, attention_backend_manager=AttentionBackendManager(), page_size=page_size)
+    att_metadata = FA3GQAPrefillBackend(text_layer).create_att_metadata(
+        configure_infer_state(infer_state, attention_backend_manager=AttentionBackendManager(), page_size=page_size)
     )
 
     q = torch.randn(3, 2, 16, device="cuda", dtype=torch.bfloat16)
@@ -117,18 +117,18 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
         assert "image_token_tag" not in kwargs
         return output
 
-    monkeypatch.setattr(neo_fa3_utils, "HAS_FLASH_ATTN_INTERFACE", True)
+    monkeypatch.setattr(neo_fa3_utils, "HAS_NEO_FA3", True)
     monkeypatch.setattr(neo_fa3_utils, "flash_attn_with_kvcache_neo", neo_attention)
     layer_config = GQALayerConfig(
         num_heads=2, num_kv_heads=1, head_dim=16, dtype=torch.bfloat16, bidirectional_image_spans=True
     )
     backend = FA3GQAPrefillBackend(layer_config)
-    actual = backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=torch.empty_like(q))
+    actual = backend.forward(att_metadata, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=torch.empty_like(q))
     torch.testing.assert_close(actual, output, rtol=0, atol=0)
 
 
 def test_prefill_missing_extension_reports_install_instructions(monkeypatch):
-    monkeypatch.setattr(neo_fa3_utils, "HAS_FLASH_ATTN_INTERFACE", False)
+    monkeypatch.setattr(neo_fa3_utils, "HAS_NEO_FA3", False)
     layer_config = GQALayerConfig(
         num_heads=2, num_kv_heads=1, head_dim=16, dtype=torch.bfloat16, bidirectional_image_spans=True
     )
