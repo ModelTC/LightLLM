@@ -14,7 +14,7 @@ from lightllm.server.router.model_infer.mode_backend.pd import nccl_kv_transport
 
 def test_page_events_are_recorded_after_send_and_receive(monkeypatch: pytest.MonkeyPatch):
     page_buffers = module.torch.empty(size=(2, 8), dtype=module.torch.uint8, device="cpu")
-    transporter = SimpleNamespace(kv_move_buffer=page_buffers, args=SimpleNamespace(pd_detail_log=False))
+    transporter = SimpleNamespace(kv_move_buffer=page_buffers)
     peer = module._NcclPeer(transporter, "remote")
     stream = object()
     operations = []
@@ -64,7 +64,6 @@ def test_receive_waits_for_record_to_return(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(module.torch.cuda, "Event", lambda: event)
     transporter = SimpleNamespace(
         kv_move_buffer=module.torch.empty(size=(1, 8), dtype=module.torch.uint8),
-        args=SimpleNamespace(pd_detail_log=False),
     )
     peer = module._NcclPeer(transporter, "remote")
     monkeypatch.setattr(peer, "_ensure_comm", lambda is_server: SimpleNamespace(recv=Mock()))

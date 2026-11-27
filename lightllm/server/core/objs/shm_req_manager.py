@@ -113,8 +113,6 @@ class ShmReqManager:
             self.alloc_state_shm.arr[req_index_in_mem] = 0
             self.linked_req_manager.free(req_index_in_mem)
 
-        if np.sum(self.alloc_state_shm.arr) == 0 and self.linked_req_manager.test_is_full():
-            logger.info("all shm req has been release ok")
         return
 
     async def async_release_req_index(self, req_index_in_mem):

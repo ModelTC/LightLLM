@@ -107,12 +107,19 @@ def record_request_mtp_metrics(
     accept_lengths = accept_lengths_cpu.tolist()
     assert len(accept_lengths) == len(decode_reqs)
     verify_count_by_req_idx = Counter(req.req_idx for req in verify_run_reqs)
+    accepted_drafts = verified_drafts = rounds = 0
     for req, accept_len in zip(decode_reqs, accept_lengths):
         req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
         verify_token_num = verify_count_by_req_idx[req.req_idx]
         if verify_token_num > 0:
             req.update_mtp_verify_token_num(verify_token_num=verify_token_num)
             req.update_mtp_verify_step_num(verify_step_num=1)
+        if verify_token_num > 1:
+            accepted_drafts += accept_len - 1
+            verified_drafts += verify_token_num - 1
+            rounds += 1
+    if backend.engine_counters is not None:
+        backend.engine_counters.add_speculation(accepted_drafts, verified_drafts, rounds)
 
 
 __all__ = [

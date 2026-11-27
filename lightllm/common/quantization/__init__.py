@@ -76,9 +76,9 @@ class Quantcfg:
                 layer_quant_cfg["fused_moe"] = target
 
         source = "startup arguments" if self.start_args_expert_dtype is not None else "model config"
-        logger.info(
+        logger.debug(
             f"select fused_moe quant way from {source} expert_dtype=`{expert_dtype}`: {target}; "
-            "priority is startup arguments > quant_cfg > model config."
+            "priority is startup arguments > quant_cfg > model config.",
         )
 
     def _mapping_quant_method(self):
@@ -93,14 +93,14 @@ class Quantcfg:
                     self.quant_type = "fp8w8a8-b128-deepgemm"
                 else:
                     self.quant_type = "fp8w8a8-b128-vllm"
-                logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
+                logger.debug("select fp8w8a8-b128 quant way: %s", self.quant_type)
             self._mapping_expert_quant_method()
 
         elif self.hf_quantization_method == "awq":
             self.quant_type = "awq"
             if is_awq_marlin_compatible(self.hf_quantization_config):
                 self.quant_type = "awq_marlin"
-            logger.info(f"select awq quant way: {self.quant_type}")
+            logger.debug("select awq quant way: %s", self.quant_type)
         else:
             # TODO: more quant method
             pass

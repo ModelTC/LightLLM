@@ -69,7 +69,7 @@ class MetricServer(rpyc.Service):
             try:
                 self.monitor.push_metrices()
                 if time_counter >= 60:
-                    logger.info("push metrices success")
+                    logger.debug("push metrices success")
                     time_counter = 0
             except:
                 pass

@@ -14,7 +14,7 @@ from .decode_req import DecodeReq
 from ..tokenizer import get_tokenizer
 import pickle
 import time
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_debug_event, DebugStatsLogger
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
 
@@ -34,7 +34,7 @@ class DeTokenizationManager:
 
         self.pub_to_httpserver = context.socket(zmq.PUB)
         self.pub_to_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{ports.http_server_port}")
-        logger.info(f"pub_to_httpserver sendhwm {self.pub_to_httpserver.getsockopt(zmq.SNDHWM)}")
+        logger.debug(f"pub_to_httpserver sendhwm {self.pub_to_httpserver.getsockopt(zmq.SNDHWM)}")
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
         self.all_special_ids = set(self.tokenizer.all_special_ids)
         self.req_id_to_out: Dict[int, DecodeReq] = {}
@@ -56,6 +56,7 @@ class DeTokenizationManager:
         return
 
     def handle_loop(self):
+        slow_stats = DebugStatsLogger(logger, "detoken.slow_batches")
         try:
             recv_max_count = 128
             while True:
@@ -76,9 +77,10 @@ class DeTokenizationManager:
                 exist_need_detoken = self.gen_token_out()
                 cost_time = (time.time() - start_time) * 1000
                 if cost_time > 50:
-                    logger.info(f"detokenize batch cost time {cost_time} ms")
+                    slow_stats.add(duration_ms_total=cost_time)
 
                 if not exist_need_detoken:
+                    slow_stats.flush()
                     time.sleep(0.002)
 
         except Exception as e:
@@ -124,7 +126,12 @@ class DeTokenizationManager:
 
         for decode_req in finished_reqs:
             decode_req.req.can_released_mark = True
-            logger.debug(f"detoken release req id {decode_req.req.request_id}")
+            log_debug_event(
+                logger,
+                "detoken.completed",
+                request_id=decode_req.req.request_id,
+                output_tokens=len(decode_req.output_ids),
+            )
             self.shm_req_manager.put_back_req_obj(decode_req.req)
             self.req_id_to_out.pop(decode_req.request_id, None)
         return

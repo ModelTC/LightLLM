@@ -82,7 +82,7 @@ class CudaGraph:
             max_batch_size=self.max_batch_size,
             tp_world_size=self.tp_world_size,
         )
-        logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
+        logger.debug("CUDA graph batch_sizes=%s", self.cuda_graph_batch_sizes)
 
     def can_run(self, batch_size, max_len_in_batch):
         return batch_size <= self.max_batch_size and max_len_in_batch <= self.graph_max_len_in_batch
@@ -182,7 +182,7 @@ class CudaGraph:
         if not self.capture_infer_cost:
             return
 
-        dist.barrier(group=dist.group.WORLD)
+        dist.barrier(group=dist.group.WORLD, device_ids=[torch.cuda.current_device()])
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         graph_obj.replay()
@@ -251,7 +251,7 @@ class CudaGraph:
 
     @torch.no_grad()
     def warmup(self, model):
-        logger.info("Begin capture cudagraph, use the --disable_cudagraph to disable it.")
+        logger.debug("Begin capture cudagraph, use the --disable_cudagraph to disable it.")
         # for typing easy
         from .basemodel import TpPartBaseModel
 
@@ -300,14 +300,14 @@ class CudaGraph:
                     del locals()[var_name]
             torch.cuda.empty_cache()
 
-        logger.info(
+        logger.debug(
             f"Capture cudagraph success, batch_size <={self.max_batch_size} "
-            f"and max_len_in_batch <= {self.graph_max_len_in_batch} will infer with cudagraph."
+            f"and max_len_in_batch <= {self.graph_max_len_in_batch} will infer with cudagraph.",
         )
 
     @torch.no_grad()
     def warmup_overlap(self, model):
-        logger.info("Begin capture overlap cudagraph, use the --disable_cudagraph to disable it.")
+        logger.debug("Begin capture overlap cudagraph, use the --disable_cudagraph to disable it.")
         # for typing easy
         from .basemodel import TpPartBaseModel
 
@@ -365,7 +365,7 @@ class CudaGraph:
                     del locals()[var_name]
             torch.cuda.empty_cache()
 
-        logger.info(
+        logger.debug(
             f"Capture overlap cudagraph success, batch_size <={self.max_batch_size} "
-            f"and max_len_in_batch <= {self.graph_max_len_in_batch} will infer with cudagraph."
+            f"and max_len_in_batch <= {self.graph_max_len_in_batch} will infer with cudagraph.",
         )

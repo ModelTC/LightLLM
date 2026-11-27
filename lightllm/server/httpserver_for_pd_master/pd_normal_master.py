@@ -14,6 +14,7 @@ from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus, PD_Client_Obj
 from lightllm.utils.error_utils import ClientDisconnected, RequestStopped, ServerBusyError
+from lightllm.utils.log_utils import get_http_request_id
 
 if TYPE_CHECKING:
     from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, ReqStatus
@@ -48,7 +49,8 @@ class HttpPdNormalManagerHelper:
 
         old_max_new_tokens = sampling_params.max_new_tokens
         sampling_params.max_new_tokens = 1
-        prefill_payload = pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params)))
+        log_metadata = {"http_request_id": request.headers.get("X-Request-Id") or get_http_request_id()}
+        prefill_payload = pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params), log_metadata))
         self._reject_oversized_control_message(payload=prefill_payload, group_request_id=group_request_id)
         await p_websocket.send_bytes(prefill_payload)
 
@@ -71,7 +73,9 @@ class HttpPdNormalManagerHelper:
             logger.debug(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
             sampling_params.max_new_tokens = old_max_new_tokens
-            decode_payload = pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
+            decode_payload = pickle.dumps(
+                (ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams()), log_metadata)
+            )
             self._reject_oversized_control_message(payload=decode_payload, group_request_id=group_request_id)
             await d_websocket.send_bytes(decode_payload)
 

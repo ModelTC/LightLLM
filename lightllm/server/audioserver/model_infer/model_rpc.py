@@ -61,11 +61,7 @@ class AudioModelRpcServer(rpyc.Service):
             )
             self._init_taskes()
         except Exception as e:
-            print("#" * 16)
-            print("load model error:", str(e), e, type(e))
-            import traceback
-
-            traceback.print_exc()
+            logger.exception("Model loading failed")
             raise e
 
         set_random_seed(2147483647)
@@ -88,7 +84,7 @@ class AudioModelRpcServer(rpyc.Service):
             return
         latency = time.time() - audio.start_time
         if latency > 0.02:
-            logger.info(f"{stage} latency {latency:.4f} seconds for audio with md5 {audio.md5}")
+            logger.debug(f"{stage} latency {latency:.4f} seconds for audio with md5 {audio.md5}")
         audio.start_time = time.time()
 
     def _init_taskes(self):

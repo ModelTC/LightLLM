@@ -129,7 +129,7 @@ def fix_accept(self):
         return
 
     sock.setblocking(True)
-    self.logger.info(f"accepted {addrinfo} with fd {sock.fileno()}")
+    self.logger.debug(f"accepted {addrinfo} with fd {sock.fileno()}")
     self.clients.add(sock)
     self._accept_method(sock)
 

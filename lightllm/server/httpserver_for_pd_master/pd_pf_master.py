@@ -14,7 +14,7 @@ from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus, PD_Client_Obj, PdPfPrefillKvReady
 from lightllm.utils.error_utils import ClientDisconnected, RequestStopped, ServerBusyError
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import get_http_request_id, init_logger
 
 if TYPE_CHECKING:
     from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
@@ -73,7 +73,10 @@ class HttpPdPrefillFirstManagerHelper:
                 f"negative resource_wait_seconds uses a 180s resource budget; otherwise two resource-wait budgets "
                 f"plus 15s margin, floored at 180s. another 180s is added for the prefill compute itself"
             )
-            prefill_payload = pickle.dumps((ObjType.PD_PF_PREFILL_REQ, (prompt, sampling_params, multimodal_params)))
+            log_metadata = {"http_request_id": request.headers.get("X-Request-Id") or get_http_request_id()}
+            prefill_payload = pickle.dumps(
+                (ObjType.PD_PF_PREFILL_REQ, (prompt, sampling_params, multimodal_params), log_metadata)
+            )
             self._reject_oversized_control_message(payload=prefill_payload, group_request_id=group_request_id)
             await p_websocket.send_bytes(prefill_payload)
             sampling_params.max_new_tokens = saved_max_new_tokens
@@ -127,7 +130,9 @@ class HttpPdPrefillFirstManagerHelper:
             req_status.d_node = d_node
             req_status.d_websocket = d_websocket
 
-            decode_payload = pickle.dumps((ObjType.REQ, (ready.prompt_ids, sampling_params, MultimodalParams())))
+            decode_payload = pickle.dumps(
+                (ObjType.REQ, (ready.prompt_ids, sampling_params, MultimodalParams()), log_metadata)
+            )
             self._reject_oversized_control_message(payload=decode_payload, group_request_id=group_request_id)
             await d_websocket.send_bytes(decode_payload)
 

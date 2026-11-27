@@ -11,7 +11,7 @@ logger = init_logger(__name__)
 class PDPrefillQueue(BaseQueue):
     def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
         super().__init__(args, router, dp_index, dp_size_in_node)
-        logger.info(
+        logger.debug(
             "PD prefill requests normally generate only one output token; "
             "estimate peak KV usage by summing each request's a_len + b_len, "
             "including page alignment, MTP and asynchronous exit reserves"
@@ -87,7 +87,6 @@ class PDPrefillQueue(BaseQueue):
         return new_batch
 
     def _calcu_batch_token_load_batch_not_none(self, current_batch: Batch):
-
         estimated_peak_token_num = self._caclu_batch_estimated_peak_token_num(current_batch)
 
         return (estimated_peak_token_num, estimated_peak_token_num / self.max_total_tokens)

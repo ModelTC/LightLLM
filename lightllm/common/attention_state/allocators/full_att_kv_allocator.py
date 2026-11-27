@@ -83,8 +83,6 @@ class FullAttKVAllocator:
             destination.numpy()[:] = page_starts
         self._mark_start = page_start
         self._shared_can_use_token_num.set_value(self.can_use_mem_size)
-        if self.can_use_mem_size == self.size:
-            logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
 
     def free_all(self) -> None:
         torch.arange(0, self.size, self.page_size, out=self._mem_state)

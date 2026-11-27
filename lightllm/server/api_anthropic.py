@@ -32,7 +32,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_debug_event
 
 from .api_errors import is_rate_limit_error
 
@@ -968,7 +968,7 @@ async def _openai_sse_to_anthropic_events(
             try:
                 chunk = json.loads(payload)
             except Exception:
-                logger.debug("Skipping non-JSON SSE payload: %r", payload)
+                log_debug_event(logger, "sse.payload_skipped", payload_chars=len(payload), reason="invalid_json")
                 continue
 
             if "error" in chunk and "choices" not in chunk:

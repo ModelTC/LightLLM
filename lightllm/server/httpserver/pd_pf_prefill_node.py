@@ -11,7 +11,7 @@ from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.server.pd_io_struct import ObjType, PdPfPrefillKvReady
 from lightllm.utils.error_utils import GenerationError, ServerBusyError
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, reset_http_request_id, set_http_request_id
 
 logger = init_logger(__name__)
 
@@ -24,10 +24,12 @@ async def run_pd_pf_prefill_request(
     forwarding_queue,
     pd_upload_websocket,
     decode_kv_ready_event: asyncio.Event,
+    http_request_id: str | None = None,
 ) -> None:
     """在这条 master 连接上跑完一次 PD 分离的 Prefill 先推理模式，直到 KV 不再由本请求占着。"""
     group_request_id = sampling_params.group_request_id
     sampling_params.pd_prefill_first = True
+    context_token = set_http_request_id(http_request_id or "-")
     logger.info(
         f"prefill-first stage=start, group_request_id={group_request_id}, "
         f"max_new_tokens={sampling_params.max_new_tokens}. infer first, do not wait for decode"
@@ -142,4 +144,6 @@ async def run_pd_pf_prefill_request(
                 f"report prefill-first generate error failed, group_request_id: {group_request_id}, "
                 f"error: {type(report_error).__name__}: {report_error}"
             )
+    finally:
+        reset_http_request_id(context_token)
     return

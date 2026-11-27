@@ -8,6 +8,7 @@ class MovingAverage:
     def __init__(self):
         self.total = 0.0
         self.count = 0
+        self._last_logged_count = 0
         self.last_time = time.time()
 
     def add(self, value):
@@ -20,6 +21,7 @@ class MovingAverage:
         return self.total / self.count
 
     def print_log(self, log_str):
-        if time.time() - self.last_time >= 30:
-            logger.info(f"{log_str}: {self.average()} ms")
+        if self.count > self._last_logged_count and time.time() - self.last_time >= 30:
+            logger.debug("event=request.latency kind=%r samples=%s mean_ms=%.3f", log_str, self.count, self.average())
+            self._last_logged_count = self.count
             self.last_time = time.time()

@@ -52,6 +52,6 @@ def calcu_embed_cache_meta() -> "EmbedCacheMeta":
     )
     embed_cache_meta_data.token_num = token_num
 
-    logger.info(f"embed cache token num: {embed_cache_meta_data.token_num}")
+    logger.debug(f"embed cache token num: {embed_cache_meta_data.token_num}")
 
     return embed_cache_meta_data

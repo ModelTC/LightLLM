@@ -52,7 +52,7 @@ def make_task(request_id, page, empty=False):
 def make_module(*tasks):
     module = decode_trans_process._DecodeTransModule.__new__(decode_trans_process._DecodeTransModule)
     module.device_id = 0
-    module.args = SimpleNamespace(pd_node_id=2, pd_detail_log=False)
+    module.args = SimpleNamespace(pd_node_id=2)
     module.waiting_dict_lock = threading.Lock()
     module.waiting_dict = {task.get_key(): task for task in tasks}
     module.transporter = SimpleNamespace(

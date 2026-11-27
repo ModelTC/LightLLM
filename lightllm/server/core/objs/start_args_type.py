@@ -16,6 +16,7 @@ class StartArgs:
     httpserver_workers: int = field(default=1)
     disable_delay_response_start: bool = field(default=False)
     hypercorn_config: Optional[str] = field(default=None)
+    log_config: Optional[str] = field(default=None)
     zmq_mode: str = field(
         default="ipc:///tmp/",
         metadata={"help": "use socket mode or ipc mode, only can be set in ['tcp://', 'ipc:///tmp/']"},
@@ -98,8 +99,6 @@ class StartArgs:
     nccl_port: int = field(default=None)
     use_config_server_to_init_nccl: bool = field(default=False)
     trust_remote_code: bool = field(default=False)
-    detail_log: bool = field(default=False)
-    pd_detail_log: bool = field(default=False)
     router_token_ratio: float = field(default=None)
     router_max_wait_tokens: int = field(default=1)
     disable_aggressive_schedule: bool = field(default=False)

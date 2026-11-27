@@ -2,9 +2,11 @@ import os
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import gc
+import time
 import copy
 import math
 import json
+import logging
 import torch
 import torch.nn.functional as F
 import triton
@@ -24,7 +26,7 @@ from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, progress_enabled
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 from lightllm.utils.envs_utils import (
     get_env_start_args,
@@ -184,17 +186,22 @@ class TpPartBaseModel:
         self._check_mem_size()
         self._init_att_backend()
         self._init_att_backend1()
-        self._init_hidden_collector()
-        role = self.att_state_role
-        logger.info(
-            f"{role} prefill/decode attention: {type(self.prefill_att_backend).__name__} / "
-            f"{type(self.decode_att_backend).__name__}"
+
+        backends = {
+            "role": self.att_state_role,
+            "prefill": self.prefill_att_backend.__class__.__name__,
+            "decode": self.decode_att_backend.__class__.__name__,
+            "linear_prefill": self.prefill_att_backend1.__class__.__name__ if self.prefill_att_backend1 else None,
+            "linear_decode": self.decode_att_backend1.__class__.__name__ if self.decode_att_backend1 else None,
+        }
+        logger.log(
+            logging.INFO if self.tp_rank_ == 0 else logging.DEBUG,
+            "event=backend.selected %s",
+            " ".join(f"{k}={v}" for k, v in backends.items() if v is not None),
+            extra={"event": "backend.selected", **backends},
         )
-        if self.prefill_att_backend1 is not None:
-            logger.info(
-                f"{role} prefill/decode attention1: {type(self.prefill_att_backend1).__name__} / "
-                f"{type(self.decode_att_backend1).__name__}"
-            )
+
+        self._init_hidden_collector()
 
         self._autotune_warmup()
         self._init_padded_req()
@@ -233,7 +240,7 @@ class TpPartBaseModel:
 
     def _init_quant(self):
         self.quant_cfg = Quantcfg(self.config, self.quant_type, self.quant_cfg_path, self.expert_dtype)
-        logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
+        logger.debug("Initial quantization method: %s", self.quant_cfg.quant_type)
 
     def _init_weights(self, start_layer_index=0):
         self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, network_config=self.config)
@@ -720,7 +727,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -1064,15 +1070,15 @@ class TpPartBaseModel:
     def _check_max_len_infer(self):
         disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
         if disable_check_max_len_infer:
-            logger.info("disable_check_max_len_infer is true")
+            logger.debug("disable_check_max_len_infer is true")
             return
 
         # 做一次 同步
-        torch.distributed.barrier()
+        torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
 
         # 模拟最大长度进行 prefill，观察是否出现 OOM
         try:
-            logger.info("begin check max_len infer")
+            logger.debug("Checking maximum batch token capacity")
             dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int64, device="cuda")
             b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
             page_size = self.att_state_manager.full_att_allocator.page_size
@@ -1112,7 +1118,7 @@ class TpPartBaseModel:
             prob_out = None
             self.req_manager.free_all()
             self.att_state_manager.full_att_allocator.free_all()
-            logger.info(f"check max_len {self.batch_max_tokens} infer ok")
+            logger.debug("Batch token capacity check passed: batch_max_tokens=%s", self.batch_max_tokens)
         except (RuntimeError, torch.OutOfMemoryError) as e:
             logger.exception(str(e))
             exception_str = (
@@ -1135,7 +1141,7 @@ class TpPartBaseModel:
     @post_empty_cache
     def _autotune_warmup(self):
         Autotuner.start_autotune_warmup(AutotuneKernelType.GENERAL)
-        torch.distributed.barrier()
+        torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
 
         warmup_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096]
 
@@ -1148,7 +1154,12 @@ class TpPartBaseModel:
 
         layer_num_bak = self.layers_num
         self.layers_num = self.autotune_layers()
-        for input_len in tqdm(warmup_lengths, desc="warming up"):
+        started = time.monotonic()
+        level = logging.INFO if self.tp_rank_ == 0 else logging.DEBUG
+        logger.log(
+            level, "event=model.warmup_started shapes=%s", len(warmup_lengths), extra={"event": "model.warmup_started"}
+        )
+        for input_len in tqdm(warmup_lengths, desc="warming up", disable=not progress_enabled()):
             try:
                 rand_gen = torch.Generator(device="cuda")
                 rand_gen.manual_seed(input_len)
@@ -1203,8 +1214,15 @@ class TpPartBaseModel:
                 gc.collect()
                 torch.cuda.empty_cache()
         self.layers_num = layer_num_bak
-        torch.distributed.barrier()
+        torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
         Autotuner.end_autotune_warmup()
+        duration_s = round(time.monotonic() - started, 3)
+        logger.log(
+            level,
+            "event=model.warmup_completed duration_s=%.3f",
+            duration_s,
+            extra={"event": "model.warmup_completed", "duration_s": duration_s},
+        )
 
     @final
     @torch.no_grad()
@@ -1213,7 +1231,7 @@ class TpPartBaseModel:
         对 padded 所使用的req 进行初始化， 目前有非常多的地方需要使用，所以将其初始化固定为固定流程
         """
         # 做一次 同步
-        torch.distributed.barrier()
+        torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
 
         # prefill init padding req.
         prefill_input_len = 1

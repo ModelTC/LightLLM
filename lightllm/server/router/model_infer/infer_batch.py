@@ -15,7 +15,7 @@ from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import (
     HybridAttPagedRadixCache,
     HybridAttPagedTreeNode,
 )
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_debug_event
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.envs_utils import get_env_start_args, enable_thinking_budget
 from lightllm.utils.multimodal_chunk_utils import adjust_mm_chunk_end, get_mm_input_spans
@@ -342,12 +342,13 @@ class InferenceContext:
         self.infer_req_ids = [_id for _id in self.infer_req_ids if _id not in finished_req_ids_set]
 
         if self.radix_cache is not None and len(self.infer_req_ids) == 0:
-            logger.debug(
-                f"free a batch state:\n"
-                f"radix refed token num {self.radix_cache.get_refed_tokens_num()}\n"
-                f"radix hold token num {self.radix_cache.get_tree_total_tokens_num()}\n"
-                f"KV allocator available tokens {self.att_state_manager.full_att_allocator.can_use_mem_size}\n"
-                f"KV allocator total tokens {self.att_state_manager.full_att_allocator.size}\n"
+            log_debug_event(
+                logger,
+                "cache.idle",
+                referenced_tokens=self.radix_cache.get_refed_tokens_num(),
+                cached_tokens=self.radix_cache.get_tree_total_tokens_num(),
+                free_tokens=self.att_state_manager.full_att_allocator.can_use_mem_size,
+                leader_only=True,
             )
 
     def filter_reqs(self, finished_reqs: List["InferReq"]):
@@ -369,7 +370,7 @@ class InferenceContext:
                 req.paused = True
                 if is_master_in_dp:
                     req.shm_req.is_paused = True
-                    logger.debug(f"infer paused req id {req.req_id}")
+                    log_debug_event(logger, "request.paused", request_id=req.req_id, leader_only=True)
 
             if free_token_index:
                 self.att_state_manager.full_att_allocator.free(torch.cat(free_token_index))
@@ -396,7 +397,7 @@ class InferenceContext:
                 req.paused = False
                 if is_master_in_dp:
                     req.shm_req.is_paused = False
-                    logger.debug(f"infer recover paused req id {req.req_id}")
+                    log_debug_event(logger, "request.resumed", request_id=req.req_id, leader_only=True)
                 can_alloc_token_num -= alloc_token_num
         return
 
@@ -539,6 +540,7 @@ class InferReq:
         # cur_kv_len is the logical length already written; hold_kv_len is the
         # page-aligned physical capacity owned by this request.
         self.hold_kv_len = 0
+        self.prefill_tokens = 0
 
         # 请求需要被暂停
         self.wait_pause = False
@@ -1024,9 +1026,10 @@ class InferReqUpdatePack:
     类绑定相关处理参数，实现解耦和延迟处理。
     """
 
-    def __init__(self, req_obj: InferReq, output_len: int):
+    def __init__(self, req_obj: InferReq, output_len: int, prefill_tokens: int = 0):
         self.req_obj = req_obj
         self.output_len = output_len
+        self.prefill_tokens = prefill_tokens
 
     def handle(
         self,

@@ -19,7 +19,13 @@ from ..tokenizer import get_tokenizer
 from ..httpserver.req_id_generator_client import ReqIDGenerator
 from ..httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from fastapi import Request
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import (
+    request_finish_fields,
+    init_logger,
+    log_request_summary,
+    get_http_request_id,
+    log_debug_event,
+)
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
@@ -264,6 +270,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
         has_yielded_result = False
 
         while True:
+            summary_state = {}
             try:
                 generator = self._generate_one_attempt(
                     prompt,
@@ -273,6 +280,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     start_time,
                     origin_request_id,
                     input_token_num,
+                    summary_state=summary_state,
                 )
                 async with aclosing(generator):
                     async for result in generator:
@@ -282,22 +290,26 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
             except ServerBusyError:
                 # 关闭节点自限流时，不启用与该策略配套的 busy 重试，直接透传异常。
                 if not self.enable_pd_node_self_request_limit:
+                    if not summary_state.get("logged"):
+                        log_request_summary(origin_request_id, status="busy", timing_scope="end_to_end")
                     raise
 
                 # 已向客户端输出 token 后不能从头生成，否则会产生重复内容。
                 elapsed_seconds = time.monotonic() - retry_start_time
                 if has_yielded_result or elapsed_seconds >= self.pd_node_busy_retry_timeout_seconds:
+                    if not summary_state.get("logged"):
+                        log_request_summary(origin_request_id, status="busy", timing_scope="end_to_end")
                     raise
 
                 # 发起下一次尝试前检查客户端连接，避免为已断开的请求继续占用 P/D 节点资源。
                 if await request.is_disconnected():
                     disconnect_reason = "_generate_one busy retry check network disconnected"
-                    logger.warning(f"group_request_id: {origin_request_id} {disconnect_reason}")
+                    logger.debug(f"group_request_id: {origin_request_id} {disconnect_reason}")
                     raise ClientDisconnected(
                         group_request_id=origin_request_id,
                         reason=disconnect_reason,
                     )
-                logger.warning(
+                logger.debug(
                     f"group_request_id: {origin_request_id} PD node is busy, retrying with another node; "
                     f"elapsed: {elapsed_seconds:.3f}s, retry timeout: "
                     f"{self.pd_node_busy_retry_timeout_seconds}s"
@@ -312,6 +324,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
         start_time: float,
         origin_request_id: int,
         input_token_num: int,
+        summary_state: Optional[dict] = None,
     ):
         """执行一次完整的单 choice 生成尝试。
 
@@ -323,6 +336,10 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
         p_node = None
         d_node = None
         pending_prefill_load_chars = None
+        results_generator = None
+        summary_state = summary_state if summary_state is not None else {}
+        if not hasattr(self, "_summary_states"):
+            self._summary_states = {}
         self.active_req_ids.add(origin_request_id)
 
         try:
@@ -373,7 +390,13 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
                 sampling_params.group_request_id = block_group_request_id
-                logger.debug(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
+                log_debug_event(
+                    logger,
+                    "request.segment_started",
+                    request_id=block_group_request_id,
+                    parent_request_id=origin_request_id,
+                    segment_index=segment_index,
+                )
                 sampling_params.max_new_tokens = remaining_max_new_tokens
                 # high_priority_request 只影响 HTTP 资源申请和 Router 等待队列：首段仅在
                 # 输入达到长度门槛、预计 cache 命中率高于 0.8 且命中记录仍有效时提升；
@@ -392,6 +415,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
 
                 # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。
+                summary_state.clear()
                 block_prompt = prompt + "".join(history_gen_token_strs)
                 if segment_index > 0:
                     pending_prefill_load_chars = len(block_prompt)
@@ -415,6 +439,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     sampling_params.constraint_out_params.pd_previous_output_len = max(
                         0, block_token_num - input_token_num
                     )
+                self._summary_states[origin_request_id] = summary_state
                 results_generator = self._wait_to_token_package(
                     p_node,
                     d_node,
@@ -423,7 +448,8 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     sampling_params,
                     multimodal_params,
                     request,
-                    origin_request_id,
+                    origin_request_id=origin_request_id,
+                    summary_state=summary_state,
                 )
                 raw_finish_status = FinishStatus()
                 async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
@@ -433,6 +459,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     if origin_request_id not in self.active_req_ids:
                         await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
                         # 关闭分段生成器，执行其 finally 中的总结日志和指标记录。
+                        summary_state["stop"] = True
                         await results_generator.aclose()
                         return
                     # PD 分离模式下 metadata 中的 token 序号可能不准确，按实际产出计数。
@@ -470,6 +497,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
                     yield origin_request_id, request_output, metadata, raw_finish_status
 
+                await results_generator.aclose()
                 await self.remove_req(group_request_id=block_group_request_id)
                 segment_index += 1
                 # 只有 PD Decode 容量不足产生的内部分段需要续跑；其他状态都结束整个请求。
@@ -477,10 +505,18 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     break
 
         except (ClientDisconnected, BaseException) as e:
-            logger.error(f"has exception {str(e)}")
-
-            if isinstance(e, ClientDisconnected):
-                logger.warning(f"group_request_id: {origin_request_id} {e.reason}")
+            if results_generator is not None:
+                summary_state["error"] = e
+                await results_generator.aclose()
+            cancelled = isinstance(e, (ClientDisconnected, asyncio.CancelledError, GeneratorExit))
+            # Busy attempts can be retried by the outer generator; they are decisions, not final failures.
+            if not isinstance(e, ServerBusyError) and not summary_state.get("logged"):
+                log_request_summary(
+                    origin_request_id,
+                    status="cancelled" if cancelled else "timeout" if isinstance(e, asyncio.TimeoutError) else "error",
+                    timing_scope="end_to_end",
+                    error_type=type(e).__name__,
+                )
 
             try:
                 await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
@@ -489,6 +525,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
             raise e
 
         finally:
+            self._summary_states.pop(origin_request_id, None)
             self.active_req_ids.discard(origin_request_id)
             if p_node is not None and pending_prefill_load_chars is not None:
                 dispatched_prompt_chars = pending_prefill_load_chars
@@ -548,7 +585,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
             # 专用异常由调用方捕获，abort 当前分段并正常结束该 choice。
             self.raise_if_request_stopped(origin_request_id)
             if await request.is_disconnected():
-                logger.warning(f"group_request_id: {group_request_id} {disconnect_reason}")
+                logger.debug(f"group_request_id: {group_request_id} {disconnect_reason}")
                 raise ClientDisconnected(
                     group_request_id=group_request_id,
                     reason=disconnect_reason,
@@ -567,14 +604,8 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                 continue
 
     async def _log_req_header(self, request: Request, group_request_id: int):
-        x_request_id = request.headers.get("X-Request-Id", "")
-        x_session_id = request.headers.get("X-Session-Id", "")
-        format_in_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(
-            f"received req X-Request-Id:{x_request_id} "
-            f"X-Session-Id:{x_session_id} start_time:{format_in_time} "
-            f"lightllm_req_id:{group_request_id} "
-        )
+        x_request_id = request.headers.get("X-Request-Id") or get_http_request_id()
+        log_debug_event(logger, "request.received", request_id=group_request_id, http_request_id=x_request_id)
         return
 
     def _reject_oversized_control_message(self, payload: bytes, group_request_id: int) -> None:
@@ -594,16 +625,19 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
         multimodal_params: MultimodalParams,
         request: Request,
         origin_request_id: int,
+        summary_state: Optional[dict] = None,
     ):
         if sampling_params.disable_prompt_cache:
             assert False, "pd mode dont support set disable_prompt_cache to True"
 
+        summary_state = summary_state if summary_state is not None else {}
         out_token_counter = 0
         first_token_cost_ms = float("inf")
         prompt_cache_len = 0
         group_request_id = sampling_params.group_request_id
         unfinished_count = sampling_params.best_of
         is_first_token = True
+        finish_reasons = set()
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
         sub_req_id_to_mtp_verify_step_num: Dict[int, int] = {}
 
@@ -644,38 +678,69 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     self.first_time_costs.add(first_token_cost_ms)
 
                 self.latest_success_infer_time = time.time()
+                if finish_status.is_finished():
+                    reason = (
+                        "pd_capacity"
+                        if finish_status.is_finished_pd_decode_capacity()
+                        else finish_status.get_finish_reason()
+                    )
+                    finish_reasons.add(reason)
                 yield sub_req_id, out_str, metadata, finish_status
                 if finish_status.is_finished():
                     unfinished_count -= 1
                 if unfinished_count == 0:
                     break
 
+        except BaseException as error:
+            error = summary_state.get("error", error)
+            if summary_state.get("stop"):
+                finish_reasons = {"stop"}
+            elif not isinstance(error, GeneratorExit) or not finish_reasons:
+                interrupted = isinstance(error, (ClientDisconnected, asyncio.CancelledError, GeneratorExit))
+                finish_reasons.add(
+                    "busy" if isinstance(error, ServerBusyError) else "abort" if interrupted else "error"
+                )
+            raise
         finally:
             # 分段可能因 stop、容量切换或取消而提前关闭，已有输出也需要记录总结。
+            if summary_state.get("stop"):
+                finish_reasons = {"stop"}
+                if not out_token_counter:
+                    log_request_summary(
+                        origin_request_id,
+                        **request_finish_fields(finish_reasons),
+                        x_request_id=request.headers.get("X-Request-Id") or get_http_request_id(),
+                        output_tokens=0,
+                        timing_scope="end_to_end",
+                    )
+                    summary_state["logged"] = True
             if out_token_counter:
                 total_cost_time_ms = (time.time() - start_time) * 1000
                 mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
                 self.per_token_costs.add(mean_per_token_cost_time_ms)
                 headers = request.headers if request is not None else {}
-                x_request_id = headers.get("X-Request-Id", "")
-                x_session_id = headers.get("X-Session-Id", "")
+                x_request_id = headers.get("X-Request-Id") or get_http_request_id()
                 prompt_cache_ratio = prompt_cache_len / max(prompt_tokens, 1)
                 mtp_total_verify_steps = sum(sub_req_id_to_mtp_verify_step_num.values())
                 if mtp_total_verify_steps <= 0:
                     mtp_total_verify_steps = out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())
                 mtp_avg_token_per_step = out_token_counter / max(mtp_total_verify_steps, 1)
-                format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-                logger.info(
-                    f"X-Request-Id:{x_request_id} "
-                    f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
-                    f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
-                    f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
-                    f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
-                    f"prompt_token_num:{prompt_tokens} "
-                    f"prompt_cache_len:{prompt_cache_len} "
-                    f"prompt_cache_ratio:{prompt_cache_ratio} "
-                    f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
+                terminal = request_finish_fields(finish_reasons) if finish_reasons else {"status": "cancelled"}
+                log_request_summary(
+                    group_request_id,
+                    **terminal,
+                    x_request_id=x_request_id,
+                    prompt_tokens=prompt_tokens,
+                    output_tokens=out_token_counter,
+                    timing_scope="end_to_end",
+                    ttft_ms=round(first_token_cost_ms, 3),
+                    duration_ms=round(total_cost_time_ms, 3),
+                    cache_tokens=prompt_cache_len,
+                    cache_ratio=prompt_cache_ratio,
+                    mtp_enabled=bool(self.args.mtp_step),
+                    mtp_avg_token_per_step=mtp_avg_token_per_step,
                 )
+                summary_state["logged"] = True
                 self.metric_client.histogram_observe("lightllm_request_inference_duration", total_cost_time_ms / 1000.0)
                 self.metric_client.histogram_observe(
                     "lightllm_request_mean_time_per_token_duration", mean_per_token_cost_time_ms / 1000.0
@@ -689,6 +754,9 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
 
     async def stop_request(self, request_id: int):
         """标记指定子请求停止，由生成循环恢复后 abort 当前分段并清理资源。"""
+        state = getattr(self, "_summary_states", {}).get(request_id)
+        if state is not None:
+            state["stop"] = True
         self.active_req_ids.discard(request_id)
 
     def raise_if_request_stopped(self, origin_request_id: int) -> None:
@@ -699,7 +767,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
     async def abort(
         self, group_request_id, p_node: Optional[PD_Client_Obj] = None, d_node: Optional[PD_Client_Obj] = None
     ):
-        logger.warning(f"aborted group_request_id {group_request_id}")
+        logger.debug(f"aborted group_request_id {group_request_id}")
         payload = pickle.dumps((ObjType.ABORT, group_request_id))
         try:
             req_status = self.req_id_to_out_inf.pop(group_request_id)
@@ -905,12 +973,6 @@ class PDManager:
             is_ready = (
                 prefill_node_count == expected_prefill_node_count and decode_node_count == expected_decode_node_count
             )
-            if not is_ready:
-                logger.warning(
-                    f"PD nodes are not ready: current_prefill={prefill_node_count}, "
-                    f"expected_prefill={expected_prefill_node_count}, current_decode={decode_node_count}, "
-                    f"expected_decode={expected_decode_node_count}"
-                )
             return is_ready
         except ValueError:
             logger.warning(
