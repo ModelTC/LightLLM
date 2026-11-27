@@ -106,7 +106,6 @@ class Req(ctypes.Structure):
         ("input_len", ctypes.c_int),
         ("alloc_shm_numpy_len", ctypes.c_int),
         ("shm_infer_released", ctypes.c_bool),  # 推理进程用于标记请求对象已经被推理进程释放，router进程得到信息后亦可释放shm req对象
-        ("pd_last_chunk_scheduled", ctypes.c_bool),
         ("shm_cur_kv_len", ctypes.c_int),  # 推理进程记录自己当前占用kv 显存长度
         ("shm_cur_output_len", ctypes.c_int),  # 推理进程记录自己输出长度的计数
         # candetoken_out_len 推理进程修改这个数据，让detokenization进程知道需要detoken的长度，
@@ -200,7 +199,6 @@ class Req(ctypes.Structure):
             self.sample_params = SamplingParams()
             self.sample_params.init(tokenizer=tokenizer, **sample_param)
         self.out_tokens_queue = CircularQueue()
-        self.pd_last_chunk_scheduled = False
         self.input_len = len(prompt_ids)
         self.alloc_shm_numpy_len = self.input_len + self.sample_params.max_new_tokens + 1024  # + 1024 for safe
         self.create_logprobs_shm_array()

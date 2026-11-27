@@ -560,6 +560,8 @@ class InferReq:
         self.pd_task_success_num: int = 0
         self.pd_task_failed_num: int = 0
         self.pd_trans_device_id: int = -1
+        # 本进程是否已经把最后一段 prefill 的 prompt 上报给 pd_report。只在上报的 rank 上置位。
+        self.pd_prefill_kv_ready_reported: bool = False
 
         # hybrid checkpoint 槽位：prefill 到达边界后保存运行态，供请求释放时插入 radix cache。
         # 方便被后续的请求使用，因为这种资源是有限的，也可能不存在的情况，申请不到时, 为None，则这种小块对应长度的 kv 无法

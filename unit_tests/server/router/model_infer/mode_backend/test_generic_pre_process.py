@@ -36,6 +36,7 @@ def _make_prefill_req(req_idx: int, token_num: int):
         cur_kv_len=0,
         hold_kv_len=token_num,
         multimodal_params={"images": [], "audios": []},
+        pd_prefill_kv_ready_reported=False,
         get_chuncked_input_token_ids=lambda: input_token_ids,
         get_input_token_ids=lambda: input_token_ids,
         get_cur_total_len=lambda: token_num,
@@ -212,17 +213,15 @@ def test_only_selected_final_prefill_chunks_signal_decode_allocation(monkeypatch
     context.args.run_mode = "prefill"
     reqs = [_make_prefill_req(i, 8) for i in range(3)]
     for i, req in enumerate(reqs):
-        req.shm_req = SimpleNamespace(
-            input_len=8, sample_params=SimpleNamespace(pd_prefill_first=i != 2), pd_last_chunk_scheduled=False
-        )
+        req.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=i != 2))
     # The first request still has another chunk. The second resumes from a cached prefix.
     reqs[0].get_chuncked_input_token_ids = lambda: [0] * 4
     reqs[1].cur_kv_len = 6
     generic_pre_process.prepare_prefill_inputs(reqs, is_chuncked_mode=True)
-    assert [req.shm_req.pd_last_chunk_scheduled for req in reqs] == [False, True, False]
+    assert [req.pd_prefill_kv_ready_reported for req in reqs] == [False, True, False]
 
     generic_pre_process.prepare_prefill_inputs([reqs[0]], is_chuncked_mode=False)
-    assert reqs[0].shm_req.pd_last_chunk_scheduled
+    assert reqs[0].pd_prefill_kv_ready_reported
 
 
 def test_last_chunk_is_reported_once_by_dp_rank0(monkeypatch):
@@ -233,33 +232,27 @@ def test_last_chunk_is_reported_once_by_dp_rank0(monkeypatch):
     monkeypatch.setattr(generic_pre_process, "push_prefill_first_kv_ready", lambda req: reported.append(req))
     req = _make_prefill_req(req_idx=1, token_num=8)
     req.cur_kv_len = 6
-    req.shm_req = SimpleNamespace(
-        input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True), pd_last_chunk_scheduled=False
-    )
+    req.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True))
 
     generic_pre_process.prepare_prefill_inputs([req], is_chuncked_mode=True)
     generic_pre_process.prepare_prefill_inputs([req], is_chuncked_mode=True)
 
     assert reported == [req]
-    assert req.shm_req.pd_last_chunk_scheduled is True
+    assert req.pd_prefill_kv_ready_reported is True
 
     context.backend = SimpleNamespace(rank_in_dp=1)
     other = _make_prefill_req(req_idx=2, token_num=8)
     other.cur_kv_len = 6
-    other.shm_req = SimpleNamespace(
-        input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True), pd_last_chunk_scheduled=False
-    )
+    other.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True))
     generic_pre_process.prepare_prefill_inputs([other], is_chuncked_mode=True)
     assert reported == [req]
-    assert other.shm_req.pd_last_chunk_scheduled is False
+    assert other.pd_prefill_kv_ready_reported is False
 
 
 def test_decode_node_does_not_signal_last_chunk(monkeypatch):
     context = _patch_empty_input_context(monkeypatch)
     context.args.run_mode = "decode"
     req = _make_prefill_req(0, 8)
-    req.shm_req = SimpleNamespace(
-        input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True), pd_last_chunk_scheduled=False
-    )
+    req.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True))
     generic_pre_process.prepare_prefill_inputs([req], is_chuncked_mode=False)
-    assert req.shm_req.pd_last_chunk_scheduled is False
+    assert req.pd_prefill_kv_ready_reported is False

@@ -39,10 +39,10 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
 
         seq_len = len(input_token_ids)
         if pd_prefill and req.shm_req.sample_params.pd_prefill_first and seq_len == req.shm_req.input_len:
-            # 只由本 DP 组的 rank 0 上报一次。其他 rank 不写这个标记，避免抢在 rank 0 前面把它置上。
+            # 只由本 DP 组的 rank 0 上报一次。标记在本进程的请求上，其他 rank 不写。
             backend = g_infer_context.backend
-            if (backend is None or backend.rank_in_dp == 0) and not req.shm_req.pd_last_chunk_scheduled:
-                req.shm_req.pd_last_chunk_scheduled = True
+            if (backend is None or backend.rank_in_dp == 0) and not req.pd_prefill_kv_ready_reported:
+                req.pd_prefill_kv_ready_reported = True
                 if backend is not None:
                     push_prefill_first_kv_ready(req=req)
         input_token_len = seq_len - req.cur_kv_len
