@@ -162,7 +162,9 @@ def test_decode_reads_the_acceptance_index_of_its_role(monkeypatch, role: str):
     model, infer_state = _speculative_decode(
         draft_step=2, b_req_idx=b_req_idx, req_to_mtp_state_index=req_to_mtp_state_index, role=role
     )
-    step_config = attention_backend_manager.AttentionBackendManager(model).step_config
+    manager = attention_backend_manager.AttentionBackendManager()
+    manager.register_backends(model)
+    step_config = manager.step_configs[role]
     assert step_config["req_to_mtp_state_index"] is req_to_mtp_state_index
     batch = attention_backend_manager.configure_attention_step(infer_state, **step_config)
     att_state = TritonGDNDecodeBackend(gdn_config()).build(batch)
@@ -313,6 +315,7 @@ def _speculative_decode(*, draft_step, b_req_idx, req_to_mtp_state_index, role="
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
         att_state_role=role,
         graph_max_len_in_batch=8,
+        layers_infer=[],
     )
     infer_state = InferStateInfo()
     infer_state.batch_size = b_req_idx.shape[0]

@@ -97,11 +97,15 @@ def test_model_selects_dynamic_spec_layout(
         is_mtp_draft_model=is_draft_model,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
         att_state_role="main",
-        att_state_manager=SimpleNamespace(get_bounded_attention_states=lambda role: ()),
+        att_state_manager=SimpleNamespace(
+            get_full_attention_states=lambda role: (), get_bounded_attention_states=lambda role: ()
+        ),
         graph_max_len_in_batch=1024,
     )
 
-    step_config = attention_groups_module.AttentionBackendManager(model).step_config
+    manager = attention_groups_module.AttentionBackendManager()
+    manager.register_backends(model)
+    step_config = manager.step_configs["main"]
     assert step_config["dynamic_decode_rows"] is expected
 
 

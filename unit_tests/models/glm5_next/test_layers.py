@@ -192,7 +192,8 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     prefill = selector.select(spec.prefill, "prefill", spec.prefill_backend_name)
     decode = selector.select(spec.decode, "decode", spec.decode_backend_name)
     assert (type(prefill), type(decode)) == (FlashMLASparsePrefillBackend, FA3SparseMLADecodeBackend)
-    layer.prefill_backend, layer.decode_backend = prefill, decode
+    backends = {"prefill": prefill, "decode": decode}
+    state.attention_backend_manager = SimpleNamespace(get_backend=lambda role, phase, layer_id: backends[phase])
     # The attention state the group's backends would build for this batch.
     prefill_att_state = FlashMLASparsePrefillAttState(mem_index=None, has_cached_prefix=False)
     decode_att_state = FA3SparseMLADecodeAttState(
@@ -209,10 +210,10 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
         scores = projected[row].float() @ keys.T * config["qk_nope_head_dim"] ** -0.5
         expected.append(scores.softmax(-1) @ keys)
     expected = torch.stack(expected)
-    state.att_states = {layer.prefill_backend.state_key: prefill_att_state}
+    state.att_states = {prefill.state_key: prefill_att_state}
     prefill = layer._context_attention_kernel(q, None, state, weight)
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
-    state.att_states = {layer.decode_backend.state_key: decode_att_state}
+    state.att_states = {decode.state_key: decode_att_state}
     decode = layer._token_attention_kernel(q, state, weight)
     for output in (prefill, decode):
         torch.testing.assert_close(output.float(), expected, atol=1e-3, rtol=0.015)
@@ -495,7 +496,7 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
     # NoPE state initialization must not require a model-owned RoPE cache.
     for model in (main, *drafts):
         # The runtime is not initialized, so the step builds no attention metadata.
-        model.attention_backend_manager = SimpleNamespace(has_attention=False)
+        model.attention_backend_manager = SimpleNamespace(has_attention=lambda role: False)
         state = model.infer_state_class()
         state.is_prefill = True
         state.input_ids = torch.zeros(3, device="cuda", dtype=torch.int64)

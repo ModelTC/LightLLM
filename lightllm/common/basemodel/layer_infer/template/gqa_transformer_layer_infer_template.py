@@ -51,7 +51,8 @@ class GQATransformerLayerInferTpl(TransformerLayerInferTpl):
     def _gqa_alibi_slopes(self, layer_weight):
         return None
 
-    def _gqa_attention(self, backend, q, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
+    def _gqa_attention(self, phase, q, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
+        backend = infer_state.attention_backend_manager.get_backend(infer_state.att_state_role, phase, self.layer_num_)
         state = self._gqa_cache_state(infer_state.att_state_manager, infer_state.att_state_role)
         keys, values = self._gqa_kv_cache(state)
         config = backend.layer_config
@@ -73,7 +74,7 @@ class GQATransformerLayerInferTpl(TransformerLayerInferTpl):
         return output.view(q.shape)
 
     def _context_attention_kernel(self, q, kv, infer_state: InferStateInfo, layer_weight, out=None) -> torch.Tensor:
-        return self._gqa_attention(self.prefill_backend, q, infer_state, layer_weight)
+        return self._gqa_attention("prefill", q, infer_state, layer_weight)
 
     def _token_attention_kernel(self, q, infer_state: InferStateInfo, layer_weight, out=None) -> torch.Tensor:
-        return self._gqa_attention(self.decode_backend, q, infer_state, layer_weight)
+        return self._gqa_attention("decode", q, infer_state, layer_weight)

@@ -80,7 +80,7 @@ def no_extra(step):
 
 
 def ready(backend_cls, layer_config, **resources):
-    """A backend set up as a state group's first prepare sets it up."""
+    """A backend set up as its state group's first create_att_state sets it up."""
     fields = dict(max_seq_len=MAX_LEN, max_cuda_graph_batch_size=8, max_decode_rows=8)
     return set_up(backend_cls, layer_config, make_resources(**{**fields, **resources}))
 

@@ -131,8 +131,10 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     layer.tp_q_head_num_ = layer.tp_k_head_num_ = state.config.head_num
     layer.head_dim_ = state.config.head_dim
     layer.alloc_tensor = lambda shape, dtype, device: torch.empty(shape, dtype=dtype, device="cpu")
-    layer.prefill_backend, layer.decode_backend = AttentionBackendManager(model).bind(layer.attention_config(model))
-    backend = layer.prefill_backend if operation == "prefill" else layer.decode_backend
+    model.layers_infer = [layer]
+    infer.attention_backend_manager = AttentionBackendManager()
+    infer.attention_backend_manager.register_backends(model)
+    backend = infer.attention_backend_manager.get_backend(role, operation, logical_layer_id)
     infer.att_states = {backend.state_key: att_state}
     q = torch.ones((1, state.config.head_num, state.config.head_dim), dtype=torch.bfloat16)
     if operation == "prefill":

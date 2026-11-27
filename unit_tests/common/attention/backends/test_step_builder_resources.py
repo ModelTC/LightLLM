@@ -42,9 +42,13 @@ def context(monkeypatch, **overrides):
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
         att_state_role="main",
-        att_state_manager=SimpleNamespace(get_bounded_attention_states=lambda role: ()),
+        att_state_manager=SimpleNamespace(
+            get_full_attention_states=lambda role: (), get_bounded_attention_states=lambda role: ()
+        ),
     )
-    return dataclasses.replace(AttentionBackendManager(model).resources, device="cpu", **overrides)
+    manager = AttentionBackendManager()
+    manager.register_backends(model)
+    return dataclasses.replace(manager.resources["main"], device="cpu", **overrides)
 
 
 def gqa(**fields) -> GQALayerConfig:

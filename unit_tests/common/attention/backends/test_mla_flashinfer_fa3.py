@@ -126,7 +126,7 @@ def test_prefill_with_cached_prefix_matches_reference(backend):
         backend = FA3MLAPrefillBackend(prefill_config())
     inputs = prefill_inputs(lengths, ready)
     out = torch.empty(inputs.q.shape[0], 16, V_DIM, device="cuda", dtype=torch.bfloat16)
-    assert backend.forward(backend.prepare(batch, resources(page_size=1)), inputs, out=out) is out
+    assert backend.forward(backend.create_att_state(batch, resources(page_size=1)), inputs, out=out) is out
     expected = prefill_reference(inputs.q, inputs.k_nope, inputs.k_rope, inputs.v, lengths, ready)
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
 
@@ -146,7 +146,7 @@ def test_decode_matches_reference(backend, page_size):
     q_nope = torch.randn(4, 16, RANK, device="cuda", dtype=torch.bfloat16, generator=gen(2))
     q_rope = torch.randn(4, 16, ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(3))
     out = torch.empty_like(q_nope)
-    att_state = backend.prepare(batch, resources(page_size))
+    att_state = backend.create_att_state(batch, resources(page_size))
     backend.forward(att_state, MLADecodeLayerInputs(q_nope, q_rope, cache), out=out)
     expected = decode_reference(q_nope, q_rope, cache, token_map, req_ids, lengths)
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
@@ -179,7 +179,7 @@ def test_flashinfer_decode_graph_replays_refill_the_captured_plan(lengths, num_h
 
     # The caller rewrites the captured step's b_seq_len in place before each replay.
     captured_batch = graph_batch([2] * batch_size)
-    att_state = backend.prepare(captured_batch, backend_resources)
+    att_state = backend.create_att_state(captured_batch, backend_resources)
     graph_out = torch.empty_like(q_nope)
     backend.forward(att_state, inputs, out=graph_out)
     torch.cuda.synchronize()
@@ -192,12 +192,12 @@ def test_flashinfer_decode_graph_replays_refill_the_captured_plan(lengths, num_h
     eager_resources = resources(page_size, max_seq_len=padded)
     for replay_lengths in (lengths, [1] * batch_size, lengths):
         replay_batch = graph_batch(replay_lengths)
-        assert backend.prepare(replay_batch, backend_resources).wrapper is att_state.wrapper
+        assert backend.create_att_state(replay_batch, backend_resources).wrapper is att_state.wrapper
         captured_batch.b_seq_len.copy_(replay_batch.b_seq_len)
         graph.replay()
         expected = torch.empty_like(q_nope)
         backend.forward(
-            eager_backend.prepare(make_batch(token_map, req_ids, replay_lengths), eager_resources),
+            eager_backend.create_att_state(make_batch(token_map, req_ids, replay_lengths), eager_resources),
             inputs,
             out=expected,
         )
@@ -211,7 +211,7 @@ def test_flashinfer_decode_keeps_one_graph_wrapper_per_microbatch_and_batch_size
     backend, backend_resources = FlashInferMLADecodeBackend(decode_config()), resources()
 
     def wrapper(*args, **kwargs):
-        return backend.prepare(make_batch(token_map, *args, **kwargs), backend_resources).wrapper
+        return backend.create_att_state(make_batch(token_map, *args, **kwargs), backend_resources).wrapper
 
     captured = wrapper([0, 1], [33, 17], capacity=512)
     assert wrapper([0, 1], [300, 257], capacity=512) is captured
@@ -231,7 +231,9 @@ def test_flashinfer_decode_shares_one_page_index_buffer_per_microbatch():
     token_map = paged_token_map(8, 16, 512)
     backend, backend_resources = FlashInferMLADecodeBackend(decode_config()), resources()
     buffers = [
-        backend.prepare(make_batch(token_map, [0], [33], microbatch=mb), backend_resources).wrapper._kv_indices_buf
+        backend.create_att_state(
+            make_batch(token_map, [0], [33], microbatch=mb), backend_resources
+        ).wrapper._kv_indices_buf
         for mb in (0, 1)
     ]
     assert buffers[0].data_ptr() != buffers[1].data_ptr()
@@ -241,11 +243,11 @@ def test_flashinfer_decode_shares_one_page_index_buffer_per_microbatch():
             for capacity in (None, 512):
                 batch = make_batch(token_map, req_ids, [33] * batch_size, capacity=capacity, microbatch=microbatch)
                 assert (
-                    backend.prepare(batch, backend_resources).wrapper._kv_indices_buf.data_ptr()
+                    backend.create_att_state(batch, backend_resources).wrapper._kv_indices_buf.data_ptr()
                     == buffers[microbatch].data_ptr()
                 )
     with pytest.raises(AssertionError, match="CUDA graph batches must fit"):
-        backend.prepare(
+        backend.create_att_state(
             make_batch(paged_token_map(9, 16, 512), list(range(9)), [33] * 9, capacity=512), backend_resources
         )
 
@@ -261,7 +263,7 @@ def test_fa3_decode_groups_speculative_rows_of_a_request():
     q_rope = torch.randn(4, 16, ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(3))
     out = torch.empty_like(q_nope)
     backend.forward(
-        backend.prepare(make_batch(token_map, req_ids, lengths, rows=2), resources()),
+        backend.create_att_state(make_batch(token_map, req_ids, lengths, rows=2), resources()),
         MLADecodeLayerInputs(q_nope, q_rope, cache),
         out=out,
     )

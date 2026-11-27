@@ -163,7 +163,9 @@ def test_backend_allocates_all_roles_before_warmup(
                             )
                             is state
                         )
-        model.attention_backend_manager = SimpleNamespace(has_attention=False, requires_cpu_cache_sync=False)
+        model.attention_backend_manager = SimpleNamespace(
+            has_attention=lambda role: False, requires_cpu_cache_sync=False
+        )
         model.backends_bound = True
 
     def warmup(model: TpPartBaseModel):

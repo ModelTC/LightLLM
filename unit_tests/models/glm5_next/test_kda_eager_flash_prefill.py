@@ -118,11 +118,11 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
     from lightllm.common.attention import selector
 
     spec = layer.attention_config(model)
-    layer.prefill_backend = selector.select(spec.prefill, "prefill", requested)
-    layer.decode_backend = selector.select(spec.decode, "decode", "triton")
+    backend = selector.select(spec.prefill, "prefill", requested)
+    infer.attention_backend_manager = SimpleNamespace(get_backend=lambda role, phase, layer_id: backend)
     # The attention state the layer's group prepares for this step.
-    att_state = layer.prefill_backend.prepare(configure_attention_step(infer), None)
-    infer.att_states = {layer.prefill_backend.state_key: att_state}
+    att_state = backend.create_att_state(configure_attention_step(infer), None)
+    infer.att_states = {backend.state_key: att_state}
     assert (att_state.flash_kda_fwd is not None) == (requested == "flashkda")
     if graph:
         capture = InferStateInfo()
@@ -133,13 +133,13 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
         fixed = layer._kda_prefill_cuda_graph_wrapper(mixed, gate, beta, capture, layer_weight)
         output = layer._kda_post(fixed, output_gate, infer, layer_weight)
         capture.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
-        forward = layer.prefill_backend.forward
+        forward = backend.forward
 
         def check_destination(att_state, inputs, *, out, alloc_func):
             assert out.data_ptr() == fixed.data_ptr()
             return forward(att_state, inputs, out=out, alloc_func=alloc_func)
 
-        layer.prefill_backend.forward = check_destination
+        backend.forward = check_destination
         capture.prefill_replay(infer)
     else:
         output = layer.context_attention_forward(hidden, infer, layer_weight)

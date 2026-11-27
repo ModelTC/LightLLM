@@ -105,6 +105,8 @@ def test_gdn_decode_keeps_logical_layer_state(
 
     infer = InferStateInfo()
     infer.att_state_manager, infer.att_state_role = resources, "main"
+    backends = {"prefill": prefill_backend, "decode": decode_backend}
+    infer.attention_backend_manager = SimpleNamespace(get_backend=lambda role, phase, layer_id: backends[phase])
     infer.b_req_idx = torch.tensor([1], device=device, dtype=torch.int32)
     infer.req_manager = SimpleNamespace(req_to_token_indexs=torch.zeros(3, 8, device=device, dtype=torch.int32))
     # The model layer resolves its state views and parameters by logical layer.
@@ -115,7 +117,6 @@ def test_gdn_decode_keeps_logical_layer_state(
         32,
         32,
     )
-    layer.prefill_backend, layer.decode_backend = prefill_backend, decode_backend
     layer.alloc_tensor = lambda shape, dtype=None, device=None, **_: torch.empty(shape, dtype=dtype, device=device)
     mixed_dim = 2 * 32 + 2 * 64 + 2 * 2
 
@@ -124,7 +125,7 @@ def test_gdn_decode_keeps_logical_layer_state(
         batch = configure_attention_step(
             infer, decode_rows_per_request=mtp_step + 1, req_to_mtp_state_index=resource.mtp_state_index
         )
-        infer.att_states = {backend.state_key: backend.prepare(batch, None)}
+        infer.att_states = {backend.state_key: backend.create_att_state(batch, None)}
 
     if device == "cuda":
         infer.b1_cu_q_seq_len = torch.tensor([0, 5], device=device, dtype=torch.int32)

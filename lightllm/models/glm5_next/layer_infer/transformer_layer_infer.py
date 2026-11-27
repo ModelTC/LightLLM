@@ -258,8 +258,11 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 else None
             ),
         )
-        return self.prefill_backend.forward(
-            infer_state.att_states[self.prefill_backend.state_key],
+        backend = infer_state.attention_backend_manager.get_backend(
+            infer_state.att_state_role, "prefill", self.layer_num_
+        )
+        return backend.forward(
+            infer_state.att_states[backend.state_key],
             inputs,
             out=torch.empty((q.shape[0], q.shape[1], self.kv_lora_rank), dtype=q.dtype, device=q.device),
         )
@@ -343,8 +346,11 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             kv_cache=self._sparse_kv_cache(infer_state),
             topk_mem_indices=topk_mem_indices,
         )
-        return self.decode_backend.forward(
-            infer_state.att_states[self.decode_backend.state_key],
+        backend = infer_state.attention_backend_manager.get_backend(
+            infer_state.att_state_role, "decode", self.layer_num_
+        )
+        return backend.forward(
+            infer_state.att_states[backend.state_key],
             inputs,
             out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device),
         )
@@ -411,13 +417,15 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             dt_bias=layer_weight.linear_dt_bias.weight,
             conv_states=conv_states,
             ssm_states=ssm_states,
-            replay_state=state if self.decode_backend.layer_config.replay else None,
+            replay_state=state,
             layer_num=self.layer_num_,
         )
 
     def _kda_attention(self, inputs: KDALayerInputs, infer_state, *, prefill: bool, out=None) -> torch.Tensor:
         x = inputs.mixed_qkv
-        backend = self.prefill_backend if prefill else self.decode_backend
+        backend = infer_state.attention_backend_manager.get_backend(
+            infer_state.att_state_role, "prefill" if prefill else "decode", self.layer_num_
+        )
         if not prefill and out is None:
             out = self.alloc_tensor(
                 (x.shape[0], self.tp_linear_num_heads, self.linear_head_dim), dtype=x.dtype, device=x.device

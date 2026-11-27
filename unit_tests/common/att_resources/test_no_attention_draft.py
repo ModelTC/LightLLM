@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -35,6 +36,7 @@ def draft_model(mode: str):
     main.args, main.config = draft.args, dict(draft.config, num_hidden_layers=2)
     main.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(2)]
     main.att_state_manager = resources
+    main.attention_backend_manager = AttentionBackendManager()
     draft.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
     draft.main_model, draft.mtp_previous_draft_models = main, []
     return draft, resources
@@ -50,7 +52,9 @@ def test_ffn_only_draft_has_no_state_or_attention(monkeypatch: pytest.MonkeyPatc
     draft.max_seq_length, draft.graph_max_batch_size, draft.graph_max_len_in_batch = 64, 1, 64
     draft.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda is_draft: 0)
     draft._init_attention()
-    assert not draft.attention_backend_manager.has_attention
+    # The draft shares the main model's manager and registers no backends in it.
+    assert draft.attention_backend_manager is draft.main_model.attention_backend_manager
+    assert not draft.attention_backend_manager.has_attention("draft0")
     assert draft.att_state_manager is resources
     assert not hasattr(draft, "full_att_state")
     assert not resources.get_full_attention_states("draft0")

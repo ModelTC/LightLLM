@@ -58,6 +58,7 @@ def make_model(state, backend="fa3", draft=False):
 
 def bind_layers(model, *layers):
     model.layers_infer = layers
+    model.attention_backend_manager = attention_backend_manager.AttentionBackendManager()
     TpPartBaseModel._init_attention(model)
 
 
@@ -65,13 +66,18 @@ def config(**fields) -> GQALayerConfig:
     return GQALayerConfig(**{"num_heads": H, "num_kv_heads": 2, "head_dim": D, "dtype": torch.bfloat16, **fields})
 
 
-def layer_configs(layer):
-    prefill = None if layer.prefill_backend is None else layer.prefill_backend.layer_config
-    return prefill, layer.decode_backend.layer_config
+def layer_backend(model, layer, phase):
+    """The layer's registered backend in phase, or None if it does not attend in phase."""
+    return model.attention_backend_manager._backends.get((model.att_state_role, phase, layer.layer_num_))
+
+
+def layer_configs(model, layer):
+    prefill = layer_backend(model, layer, "prefill")
+    return (None if prefill is None else prefill.layer_config), layer_backend(model, layer, "decode").layer_config
 
 
 def decode_inputs(monkeypatch, model, layer, weights):
-    backend = layer.decode_backend
+    backend = layer_backend(model, layer, "decode")
     state = object()
     captured = []
 
@@ -84,6 +90,7 @@ def decode_inputs(monkeypatch, model, layer, weights):
     monkeypatch.setattr(layer, "alloc_tensor", torch.empty)
     infer_state = SimpleNamespace(
         att_state_manager=model.att_state_manager,
+        attention_backend_manager=model.attention_backend_manager,
         att_state_role=model.att_state_role,
         att_states={backend.state_key: state},
     )
@@ -101,8 +108,8 @@ def test_bloom_layers_run_alibi_on_triton_whatever_the_command_line_asks(runtime
     layer = BloomTransformerLayerInfer(0, {"num_attention_heads": H, "n_embed": H * D, "layer_norm_epsilon": 1e-5})
     model = make_model(FakeState(H))
     bind_layers(model, layer)
-    assert layer_configs(layer) == (config(num_kv_heads=H, has_alibi=True),) * 2
-    assert type(layer.decode_backend).__name__ == "TritonGQADecodeBackend"
+    assert layer_configs(model, layer) == (config(num_kv_heads=H, has_alibi=True),) * 2
+    assert type(layer_backend(model, layer, "decode")).__name__ == "TritonGQADecodeBackend"
     slopes = torch.ones(H)
     assert decode_inputs(monkeypatch, model, layer, SimpleNamespace(tp_alibi=slopes)).alibi_slopes is slopes
 
@@ -113,8 +120,8 @@ def test_starcoder_layers_run_multi_query_attention_without_alibi(runtime_start_
     layer = StarcoderTransformerLayerInfer(0, {"num_attention_heads": H, "n_embed": H * D, "layer_norm_epsilon": 1e-5})
     model = make_model(FakeState(1))
     bind_layers(model, layer)
-    assert layer_configs(layer) == (config(num_kv_heads=1),) * 2
-    assert type(layer.decode_backend).__name__ == "FA3GQADecodeBackend"
+    assert layer_configs(model, layer) == (config(num_kv_heads=1),) * 2
+    assert type(layer_backend(model, layer, "decode")).__name__ == "FA3GQADecodeBackend"
     assert decode_inputs(monkeypatch, model, layer, SimpleNamespace()).alibi_slopes is None
 
 
@@ -138,9 +145,9 @@ def test_gemma4_sliding_and_full_layers_share_one_triton_group(runtime_start_arg
     sliding, full = (Gemma4TransformerLayerInfer(i, net) for i in range(2))
     bind_layers(model, sliding, full)
     window = dict(num_heads=4, head_dim=256, sliding_window=(47, 0))
-    assert layer_configs(sliding) == (config(**window, bidirectional_image_spans=True), config(**window))
-    assert layer_configs(full) == (config(num_heads=4, num_kv_heads=1, head_dim=512),) * 2
-    assert all(len(model.attention_backend_manager.state_groups[phase]) == 1 for phase in ("prefill", "decode"))
+    assert layer_configs(model, sliding) == (config(**window, bidirectional_image_spans=True), config(**window))
+    assert layer_configs(model, full) == (config(num_heads=4, num_kv_heads=1, head_dim=512),) * 2
+    assert all(len(model.attention_backend_manager.state_groups["main"][phase]) == 1 for phase in ("prefill", "decode"))
 
 
 def test_gpt_oss_layers_have_sinks_and_sliding_layers_a_window(runtime_start_args, monkeypatch):
@@ -159,8 +166,8 @@ def test_gpt_oss_layers_have_sinks_and_sliding_layers_a_window(runtime_start_arg
     model = make_model(FakeState(2))
     sliding, full = (GptOssTransformerLayerInfer(i, net) for i in range(2))
     bind_layers(model, sliding, full)
-    assert layer_configs(sliding) == (config(has_sinks=True, sliding_window=(127, 0)),) * 2
-    assert layer_configs(full) == (config(has_sinks=True),) * 2
+    assert layer_configs(model, sliding) == (config(has_sinks=True, sliding_window=(127, 0)),) * 2
+    assert layer_configs(model, full) == (config(has_sinks=True),) * 2
     sinks = torch.ones(H)
     weights = SimpleNamespace(attn_sinks=SimpleNamespace(weight=sinks))
     assert decode_inputs(monkeypatch, model, full, weights).sinks is sinks
@@ -173,7 +180,7 @@ def test_neo_layers_attend_inside_image_spans_in_prefill_only(runtime_start_args
     layer = NeoChatTransformerLayerInfer(0, net)
     model = make_model(FakeState(2), backend="triton")
     bind_layers(model, layer)
-    assert layer_configs(layer) == (config(bidirectional_image_spans=True), config())
+    assert layer_configs(model, layer) == (config(bidirectional_image_spans=True), config())
 
 
 @pytest.mark.parametrize("sliding_window, expected", [(0, (-1, -1)), (40, (39, 39))])
@@ -194,8 +201,8 @@ def test_dflash_layers_attend_only_in_decode_and_not_causally(monkeypatch, slidi
     layer = Qwen3DFlash2TransformerLayerInfer(0, net)
     model = make_model(FakeState(2), draft=True)
     bind_layers(model, layer)
-    assert layer_configs(layer) == (None, config(causal=False, sliding_window=expected))
-    assert type(layer.decode_backend).__name__ == "FA3GQADecodeBackend"
+    assert layer_configs(model, layer) == (None, config(causal=False, sliding_window=expected))
+    assert type(layer_backend(model, layer, "decode")).__name__ == "FA3GQADecodeBackend"
 
 
 def test_dflash_decode_needs_an_implementation_of_non_causal_attention(monkeypatch):
@@ -244,13 +251,13 @@ def test_deepseek2_layers_attend_over_expanded_keys_in_prefill_and_the_latent_ca
     layers = [Deepseek2TransformerLayerInfer(i, net) for i in range(2)]
     bind_layers(model, *layers)
     common = dict(num_heads=16, qk_rope_head_dim=64, softmax_scale=scale, dtype=torch.bfloat16)
-    assert layer_configs(layers[0]) == (
+    assert layer_configs(model, layers[0]) == (
         MLAPrefillLayerConfig(qk_nope_head_dim=128, v_head_dim=128, **common),
         MLADecodeLayerConfig(kv_lora_rank=512, **common),
     )
     # FlashInfer plans with the layers' softmax scale, which they all share.
-    assert layers[0].prefill_backend is layers[1].prefill_backend
-    assert layers[0].decode_backend is layers[1].decode_backend
+    for phase in ("prefill", "decode"):
+        assert layer_backend(model, layers[0], phase) is layer_backend(model, layers[1], phase)
 
 
 @pytest.mark.parametrize("kv_type, kv_cache_format", [("None", "bf16"), ("fp8kv_dsa", "fp8_ds_mla")])
@@ -259,6 +266,7 @@ def test_deepseek_v32_layers_attend_to_the_indexer_selection(runtime_start_args,
     from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
 
     layer = Deepseek3_2TransformerLayerInfer.__new__(Deepseek3_2TransformerLayerInfer)
+    layer.layer_num_ = 0
     layer.tp_q_head_num_, layer.kv_lora_rank, layer.qk_rope_head_dim = 64, 512, 64
     layer.softmax_scale, layer.index_topk = 0.1, 2048
     # Sparse MLA has one implementation name; auto-selection would validate it.
@@ -274,7 +282,7 @@ def test_deepseek_v32_layers_attend_to_the_indexer_selection(runtime_start_args,
         kv_cache_format=kv_cache_format,
         topk=2048,
     )
-    assert layer_configs(layer) == (expected, expected)
+    assert layer_configs(model, layer) == (expected, expected)
 
 
 @pytest.mark.parametrize("kv_type, expected_format", [("None", "bf16"), ("fp8kv_dsa", "fp8_group64_e8m0")])
@@ -303,6 +311,7 @@ def test_glm5_kda_layers_follow_the_linear_backend_and_state_mode(
 
     monkeypatch.setattr(kda_triton, "import_flash_kda_fwd", lambda: None)
     layer = Glm5NextTransformerLayerInfer.__new__(Glm5NextTransformerLayerInfer)
+    layer.layer_num_ = 0
     layer.is_linear_attention_layer = True
     layer.tp_world_size_, layer.tp_linear_num_heads, layer.linear_head_dim = 1, 4, 128
     layer.network_config_ = {"linear_attn_config": {"num_heads": 4, "head_dim": 128, "short_conv_kernel_size": 4}}
@@ -320,4 +329,4 @@ def test_glm5_kda_layers_follow_the_linear_backend_and_state_mode(
         ssm_dtype=torch.bfloat16,
         prefill_kernel=prefill_kernel,
     )
-    assert layer_configs(layer) == (expected, expected)
+    assert layer_configs(model, layer) == (expected, expected)

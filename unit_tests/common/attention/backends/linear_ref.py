@@ -210,7 +210,7 @@ def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_backen
     # Prefill.
     rows = sum(lengths)
     tensors = family.make_inputs(rows)
-    step = prefill_backend.prepare(prefill_batch(REQS, lengths, ready), None)
+    step = prefill_backend.create_att_state(prefill_batch(REQS, lengths, ready), None)
     out = family.alloc_out(rows)
     prefill_backend.forward(step, family.layer_inputs(_clones(tensors), conv, ssm, state if replay else None), out=out)
     start = 0
@@ -226,7 +226,7 @@ def run_prefill_then_decode(family, *, replay, mtp_step, dynamic, prefill_backen
         step_lengths = step_lengths if dynamic else [width] * len(REQS)
         batch = decode_batch(REQS, step_lengths, width, HOLD, state.mtp_state_index, dynamic=dynamic)
         tensors = family.make_inputs(batch.batch_size)
-        step = decode_backend.prepare(batch, None)
+        step = decode_backend.create_att_state(batch, None)
         out = family.alloc_out(batch.batch_size)
         # A replay decode backend advances the replay cursors itself after the last layer.
         decode_backend.forward(

@@ -17,11 +17,11 @@
 
 ```mermaid
 flowchart TD
-    Layer[模型层 layer infer] -->|attention_config| Manager[model.attention_backend_manager]
-    Manager -->|bind：绑定 prefill_backend 和 decode_backend| Layer
-    Infer[model._create_inferstate] -->|prepare| Batch[InferStateInfo]
-    Batch --> Manager
-    Manager -->|每个 state_key 一次 backend.prepare| AttState[infer_state.att_states]
+    Layer[模型层 layer infer] -->|attention_config| Manager[AttentionBackendManager]
+    Manager -->|get_backend：按角色、阶段和逻辑层取 backend| Layer
+    Infer[model._create_inferstate] --> Batch[InferStateInfo]
+    Batch -->|create_att_state| Manager
+    Manager -->|每个 state_key 一次 backend.create_att_state| AttState[infer_state.att_states]
     Layer -->|写 KV cache / 解析逐层数据| State[AttentionStateManager]
     AttState -->|按 backend 取本步参数| Layer
     Layer -->|forward| Impl[backend 实例]
@@ -38,38 +38,37 @@ flowchart TD
 - 在调用 attention 之前把本层的 K/V 写入 KV cache。
 - 每次调用时解析 KV 量化 scale（`state.get_layer_kv_scales(layer)`）、线性注意力的 conv/SSM 状态视图、稀疏注意力的 top-k 索引和融合投影，构造族的 `LayerInputs`，用当前 backend 对应的 attention state 直接调用 `forward`。
 
-GQA 层继承 `GQATransformerLayerInferTpl`（Llama、Bloom 及其派生模型），由它统一提供声明和调用：`attention_config()` 在两个阶段使用同一 GQA 配置，`_context_attention_kernel` / `_token_attention_kernel` 调用绑定的 backend。通用的 `TransformerLayerInferTpl` 不假定 attention 类型。模型只覆盖与自身相关的部分：`_gqa_config(model, **fields)` 追加层属性，`_gqa_sinks` / `_gqa_alibi_slopes` 提供逐层权重（GPT-OSS 的 sinks、Bloom 的 ALiBi 斜率），`_gqa_kv_cache` 按本层的 head 布局切出 KV 视图（Gemma4、DFlash2）。Gemma4 在滑窗层的 prefill 配置中开启图像区间内双向 attention，DFlash 只声明 decode 配置。执行时，层从 KV 视图和权重组装 `GQALayerInputs`，连同当前步的 attention state 传给后端的 `forward()`。
+GQA 层继承 `GQATransformerLayerInferTpl`（Llama、Bloom 及其派生模型），由它统一提供声明和调用：`attention_config()` 在两个阶段使用同一 GQA 配置，`_context_attention_kernel` / `_token_attention_kernel` 从 manager 取本层的 backend 并调用。通用的 `TransformerLayerInferTpl` 不假定 attention 类型。模型只覆盖与自身相关的部分：`_gqa_config(model, **fields)` 追加层属性，`_gqa_sinks` / `_gqa_alibi_slopes` 提供逐层权重（GPT-OSS 的 sinks、Bloom 的 ALiBi 斜率），`_gqa_kv_cache` 按本层的 head 布局切出 KV 视图（Gemma4、DFlash2）。Gemma4 在滑窗层的 prefill 配置中开启图像区间内双向 attention，DFlash 只声明 decode 配置。执行时，层从 KV 视图和权重组装 `GQALayerInputs`，连同当前步的 attention state 传给后端的 `forward()`。
 
 模型层不直接调用 attention kernel。`unit_tests/common/attention/test_attention_call_sites.py` 检查 layer infer、infer state、model 和 `attention_backend_manager.py` 不导入 attention kernel 模块（视觉编码器除外，它在单张图像内计算 attention，不使用 KV cache），并检查 `lightllm/common/attention/**` 在运行时不导入模型侧代码：backend 只在 `TYPE_CHECKING` 下为注解引用 `InferStateInfo`，运行时需要的 `GraphMode` 定义在 `lightllm/common/attention/backend.py`，由 `infer_struct` 转导出。
 
 ### 2.2 模型初始化与每步参数
 
-主模型和每个 MTP 草稿模型在各自的 `_init_attention` 中初始化层，因为各模型的 CUDA graph 上限和缓存布局不同。
+`AttentionBackendManager` 与 `AttentionStateManager` 的组织方式一致：主模型在 `prepare_attention_states` 中创建两个 manager，MTP 草稿模型引用同一实例；manager 内按模型角色（`att_state_role`，即 `main`、`draft0` … `draft35`）区分各模型，层按 `(角色, 阶段, 逻辑层号)` 查找 backend，与按 `(角色, 状态类型, 逻辑层号)` 查找 State 对应。
 
-`_init_attention` 为每个模型创建 `model.attention_backend_manager`（`AttentionBackendManager`）。纯 FFN 模型的 manager 没有绑定层，`has_attention` 为假。绑定前用层的 `attention_phases` 检查 `LayerAttentionConfig` 是否覆盖实际运行阶段。普通层需要两个阶段，DFlash 层只需要 decode。
+- `register_backends(model)` 在 `init_runtime` 的 `_init_attention` 中为本角色调用一次，同一角色重复登记时报错。它从模型读取一次本角色的 `resources` 与 `step_config`，再对每层调用 `attention_config(model)`，为每个阶段独立选择实现。同一角色内阶段、layer config 和请求的 backend 都相同的层共用实例；不同角色不共用实例，因为实例持有本角色的跨步存储和 CUDA graph 张量。某阶段的 layer config 为 `None` 时该层在此阶段不登记，例如 DFlash 草稿层只在 decode 计算。每个阶段的每个 `state_key` 由第一个选出的实例负责创建状态。没有 attention State 的角色（纯 FFN 草稿模型）不登记 backend，`has_attention(role)` 为假。
+- `get_backend(model_role, phase, logical_layer_id)` 返回该层在该阶段的 backend，层在每次调用 attention 时查找。
+- `create_att_state(infer_state)` 在每个 microbatch 对 `infer_state.att_state_role` 本阶段各组的代表实例调用一次 `backend.create_att_state`，返回 `{state_key: att_state}`。没有状态组的阶段返回空字典。
+- `requires_cpu_cache_sync`：是否有任一角色登记的实现不能与 CPU cache 搬运在 GPU 上并行。
 
-- `bind(spec)` 为每个阶段独立选择实现，然后将两个 backend 赋给层。阶段、layer config 和请求的 backend 都相同的层复用 backend。某阶段的 layer config 为 `None` 时，该阶段返回 `None`，例如 DFlash 草稿层只在 decode 计算。每个阶段的每个 `state_key` 由第一个绑定的 backend 负责准备状态。
-- `prepare(infer_state)` 在每个 microbatch 对本阶段各组的代表实例调用一次 `backend.prepare`，返回 `{state_key: att_state}`。没有状态组的阶段返回空字典。
-- `requires_cpu_cache_sync`：是否有已绑定的实现不能与 CPU cache 搬运在 GPU 上并行。
+`register_backends` 从模型读取一次本角色的全部静态信息，之后不再持有模型：
 
-运行时创建时从模型读取一次全部静态信息，之后不再持有模型：
-
-- `resources` 是模型的资源与容量（`AttentionBuildResources`），供 backend 的 `setup` 创建跨步存储（第 3 节）。
-- `step_config` 是 `configure_attention_step` 的关键字参数：decode 每请求行数、是否为 dynamic verify 布局、线性注意力的投机状态索引和 CUDA graph 的 KV 长度容量。`configure_attention_step` 根据当前阶段和 graph 模式把适用值写入 `InferStateInfo`。
+- `resources[role]` 是该模型的资源与容量（`AttentionBuildResources`），供 backend 的 `setup` 创建跨步存储（第 3 节）。
+- `step_configs[role]` 是 `configure_attention_step` 的关键字参数：decode 每请求行数、是否为 dynamic verify 布局、线性注意力的投机状态索引和 CUDA graph 的 KV 长度容量。`configure_attention_step` 根据当前阶段和 graph 模式把适用值写入 `InferStateInfo`。
 - 因此 graph 容量必须在 `_init_attention` 之前确定：`graph_max_len_in_batch` 的 MTP 余量调整在模型构造函数中完成，而不是在 `_init_cudagraph` 中。
 
-层的因果性（`attention_is_causal`）在绑定时写入 layer config。
+层的因果性（`attention_is_causal`）在 `attention_config` 中写入 layer config。
 
-每步只有一个入口。`model._create_inferstate(model_input, microbatch_index, graph_mode=...)` 填充请求字段，调用 `init_some_extra_state` 生成索引张量，再执行 `infer_state.att_states = model.attention_backend_manager.prepare(infer_state)`，返回完整的状态。`graph_mode`（`GraphMode.EAGER`、`CAPTURE`、`REPLAY`）在创建时传入并保存在 `infer_state.graph_mode` 上，backend 据此准备 eager、捕获和 replay 步。只写 KV cache 的步骤（DSpark 的 KV-only 提交）传 `build_attention=False`。
+每步只有一个入口。`model._create_inferstate(model_input, microbatch_index, graph_mode=...)` 填充请求字段（包括 `att_state_manager` 与 `attention_backend_manager`），调用 `init_some_extra_state` 生成索引张量，再执行 `infer_state.att_states = model.attention_backend_manager.create_att_state(infer_state)`，返回完整的状态。`graph_mode`（`GraphMode.EAGER`、`CAPTURE`、`REPLAY`）在创建时传入并保存在 `infer_state.graph_mode` 上，backend 据此准备 eager、捕获和 replay 步。只写 KV cache 的步骤（DSpark 的 KV-only 提交）传 `build_attention=False`。
 
 ### 2.3 模型层直接调用 backend
 
 ```python
-# 加载时
-config = layer.attention_config(model)
-layer.prefill_backend, layer.decode_backend = model.attention_backend_manager.bind(config)
+# 加载时（_init_attention）
+model.attention_backend_manager.register_backends(model)  # 调用每层的 attention_config(model)
 # 每次调用
-o = layer.decode_backend.forward(infer_state.att_states[layer.decode_backend.state_key], GQALayerInputs(...), out=..., alloc_func=...)
+backend = infer_state.attention_backend_manager.get_backend(infer_state.att_state_role, "decode", self.layer_num_)
+o = backend.forward(infer_state.att_states[backend.state_key], GQALayerInputs(...), out=..., alloc_func=...)
 ```
 
 MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常相同。输出 `out` 由调用方分配，`alloc_func` 语义见第 4.4 节。
@@ -78,11 +77,11 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 ### 2.4 Backend 层
 
-`AttentionBackend` 实例提供准备本步状态的 `prepare` 和计算本层输出的 `forward`。
+`AttentionBackend` 实例提供创建本步状态的 `create_att_state` 和计算本层输出的 `forward`。
 
 - 类属性 `name` 是实现名，`phase` 是运行阶段（`"prefill"` 或 `"decode"`）。选择器只把 backend 绑定到它声明的阶段，注册表登记到错误阶段时抛出 `TypeError`。
 - `group_key(layer_config)` 声明哪些配置会改变本步准备工作。运行时用 `(backend 类, group_key)` 作为 `state_key`，prefill 和 decode 各有自己的状态表。
-- `prepare(infer_state, resources)` 首次调用时执行 `setup(resources)`，在实例上创建该组跨步复用的存储，随后调用 `build(infer_state)`。`setup` 和 `build` 只能读取 `group_key` 包含的 layer config 字段，模型级资源由 `resources` 提供。
+- `create_att_state(infer_state, resources)` 首次调用时执行 `setup(resources)`，在实例上创建该组跨步复用的存储，随后调用 `build(infer_state)`。`setup` 和 `build` 只能读取 `group_key` 包含的 layer config 字段，模型级资源由 `resources` 提供。
 - `build(infer_state)` 为当前 microbatch 生成一份 `AttState`。所有持有同一 `state_key` 的层直接使用它；`forward` 所需而 `setup` 才知道的值（如 page size）放在 `AttState` 中，因为只有组的代表实例执行过 `setup`。
 - `forward(att_state, layer_inputs, ...)` 使用实例持有的 `layer_config`，结合当前层的张量计算输出。
 - 类属性 `requires_cpu_cache_sync` 声明 CPU cache 搬运是否需要与该 backend 的计算同步。
@@ -95,7 +94,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 ## 3. 类型及其生命周期
 
-每步的主流程是 `InferStateInfo → backend.prepare → att_state → backend.forward`。模型为这一步提供请求长度和 KV 索引，各后端只在 `att_state` 中保留 kernel 所需的参数。
+每步的主流程是 `InferStateInfo → backend.create_att_state → att_state → backend.forward`。模型为这一步提供请求长度和 KV 索引，各后端只在 `att_state` 中保留 kernel 所需的参数。
 
 模型的 `AttentionBuildResources` 只用于初始化。需要跨步保存页表、wrapper 或 CUDA graph 缓冲区的后端在 `setup` 中把它们放在组的代表实例上，不另设存储类型；其余后端不覆盖 `setup`。
 
@@ -128,7 +127,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 - builder 直接读取模型为当前 microbatch 准备的 `InferStateInfo`。
 - `req_to_token_indexs[b_req_idx[i], pos]` 是请求 i 第 pos 个 token 的物理 cache 槽位。
 - decode 默认每个请求一行。投机解码时，固定布局下每个请求有 `decode_rows_per_request` 个连续行；dynamic verify 布局下行数可变，相同 `b_req_idx` 的连续行属于同一请求，`pad_req_idx` 的行是 padding，各自独立。
-- 线性注意力的投机解码行从请求最后一个被接受的行恢复状态；`req_to_mtp_state_index` 在 manager 创建时从本角色的 recurrent 状态取得，存于 `step_config`，decode 行数大于 1 时写入 batch。
+- 线性注意力的投机解码行从请求最后一个被接受的行恢复状态；`req_to_mtp_state_index` 在登记本角色时从它的 recurrent 状态取得，存于 `step_configs[role]`，decode 行数大于 1 时写入 batch。
 - `cuda_graph_max_kv_seq_len` 在捕获和 replay 步给出 graph 的长度容量，eager 步为 `None`；`uses_cuda_graph` 是唯一的 graph 开关。
 
 ### 4.3 AttentionBackend.build
@@ -187,11 +186,11 @@ main 与 MTP draft 模型不共用组的 attention state。
 
 1. 构造各层。
 2. `prepare_attention_states` 与 KV 容量 profiling。GLM-5 及其 MTP 草稿模型在这一步按 prefill microbatch 预留 FP8 KV 反量化 workspace。稀疏注意力层将当前 microbatch 的 workspace 作为 `SparseMLAPrefillLayerInputs.fp8_workspace` 传给 FA3。
-3. `init_runtime` 中的 `_init_attention` 创建 `AttentionBackendManager`，调用每层的 `attention_config()`，绑定两个阶段的 backend 并登记各状态组的代表实例，随后执行 warmup 和 CUDA graph 捕获。
+3. `init_runtime` 中的 `_init_attention` 调用共享 manager 的 `register_backends(model)`：调用每层的 `attention_config()`，按本角色登记两个阶段的 backend 和各状态组的代表实例，随后执行 warmup 和 CUDA graph 捕获。
 
 layer config 在 KV 分配之后确定，因为 KV head 数、量化 KV 的 group size 和是否有静态 q scale 都来自该层的 attention state。
 
-每步由 `_create_inferstate` 创建完整的状态，其中 `attention_backend_manager.prepare` 为本阶段的每个 `state_key` 准备一份状态。microbatch overlap 的两个 `InferStateInfo` 各自持有 `att_states`。
+每步由 `_create_inferstate` 创建完整的状态，其中 `attention_backend_manager.create_att_state` 为本角色本阶段的每个 `state_key` 创建一份状态。microbatch overlap 的两个 `InferStateInfo` 各自持有 `att_states`。
 
 ## 7. CUDA Graph 时序
 
@@ -202,12 +201,12 @@ sequenceDiagram
     participant B as AttentionBackend
     participant G as CUDA graph
     M->>M: 捕获步 _create_inferstate(graph_mode=CAPTURE)
-    M->>B: prepare(infer_state, resources)
+    M->>B: create_att_state(infer_state, resources)
     B-->>M: attention state（保存的地址）
     M->>A: 保存 att_states
     M->>G: 在 torch.cuda.graph 中运行各层 forward
     M->>M: replay 步 _create_inferstate(graph_mode=REPLAY)
-    M->>B: prepare(infer_state, resources)，原地更新张量 / wrapper
+    M->>B: create_att_state(infer_state, resources)，原地更新张量 / wrapper
     M->>G: copy_for_cuda_graph 把请求张量拷入捕获时的 InferStateInfo
     M->>G: graph.replay()
 ```

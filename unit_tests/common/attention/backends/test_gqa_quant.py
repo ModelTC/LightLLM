@@ -154,7 +154,7 @@ def test_triton_group_quant_matches_dequantized_reference(bits, prefill):
     token_map = torch.randperm(3 * CAP, device="cuda", dtype=torch.int32, generator=gen(0)).view(3, CAP)
     backend_cls = TritonQuantGQAPrefillBackend if prefill else TritonQuantGQADecodeBackend
     backend = backend_cls(config(kv_quant=f"int{bits}_group", kv_quant_group_size=8))
-    att_state = backend.prepare(make_batch(token_map, prefill=prefill), make_resources())
+    att_state = backend.create_att_state(make_batch(token_map, prefill=prefill), make_resources())
     q = queries(prefill)
     out = torch.empty_like(q)
     assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out) is out
@@ -186,7 +186,7 @@ def test_fa3_fp8_per_head_matches_dequantized_reference(static_q, prefill):
     backend_cls = FA3GQAPrefillBackend if prefill else FA3GQADecodeBackend
     backend = backend_cls(config(kv_quant="fp8_per_head", has_q_scale=static_q))
     # An FP8 cache runs with single-token pages.
-    att_state = backend.prepare(batch, make_resources(page_size=16, max_seq_len=CAP, max_decode_rows=3))
+    att_state = backend.create_att_state(batch, make_resources(page_size=16, max_seq_len=CAP, max_decode_rows=3))
     assert att_state.page_size == 1
     q = queries(prefill)
     out = torch.empty_like(q)
@@ -207,7 +207,7 @@ def test_flashinfer_fp8_per_tensor_matches_dequantized_reference(prefill):
     backend_cls = FlashInferGQAPrefillBackend if prefill else FlashInferGQADecodeBackend
     backend = backend_cls(config(kv_quant="fp8_per_tensor"))
     resources = make_resources(page_size=16, max_seq_len=CAP, max_cuda_graph_batch_size=3)
-    att_state = backend.prepare(make_batch(token_map, prefill=prefill), resources)
+    att_state = backend.create_att_state(make_batch(token_map, prefill=prefill), resources)
     # An FP8 cache runs with single-token pages.
     assert att_state.page_size == 1
     q = queries(prefill)

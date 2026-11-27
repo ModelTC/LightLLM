@@ -15,7 +15,7 @@ from lightllm.common.basemodel.attention_backend_manager import (
 
 
 def set_up(backend_cls, layer_config, resources):
-    """A backend for layer_config whose storage is set up from resources, as a state group's first prepare does."""
+    """A backend for layer_config whose storage is set up from resources, as its first create_att_state does."""
     backend = backend_cls(layer_config)
     backend.setup(resources)
     return backend
@@ -24,21 +24,27 @@ def set_up(backend_cls, layer_config, resources):
 class GroupsRunner:
     """model needs what model initialization reads (args, capacities, mtp_manager, is_mtp_draft_model).
 
-    A model without att_state_manager is given one with no recurrent state.
+    The runner registers one layer (logical layer 0) with these configs. A model without
+    att_state_manager is given one with an attention state and no recurrent state.
     """
 
     def __init__(self, model, prefill_config: Any, decode_config: Any) -> None:
         self.model = model
         if not hasattr(model, "att_state_manager"):
             model.att_state_role = "main"
-            model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: ())
-        model.attention_backend_manager = AttentionBackendManager(model)
-        self.prefill_backend, self.decode_backend = model.attention_backend_manager.bind(
-            LayerAttentionConfig(prefill_config, decode_config)
+            model.att_state_manager = SimpleNamespace(
+                get_full_attention_states=lambda role: (object(),), get_bounded_attention_states=lambda role: ()
+            )
+        config = LayerAttentionConfig(prefill_config, decode_config)
+        model.layers_infer = [SimpleNamespace(layer_num_=0, attention_config=lambda model: config)]
+        manager = model.attention_backend_manager = AttentionBackendManager()
+        manager.register_backends(model)
+        self.prefill_backend, self.decode_backend = (
+            manager.get_backend(model.att_state_role, phase, 0) for phase in ("prefill", "decode")
         )
 
     def step(self, infer_state) -> None:
-        infer_state.att_states = self.model.attention_backend_manager.prepare(infer_state)
+        infer_state.att_states = self.model.attention_backend_manager.create_att_state(infer_state)
 
     def run_gqa(
         self,
@@ -75,7 +81,7 @@ class LayerAttention:
         """Prepare the backend state for this microbatch; step_config holds configure_attention_step's keywords."""
         phase = "prefill" if infer_state.is_prefill else "decode"
         batch = configure_attention_step(infer_state, **(step_config or {}))
-        return self.backends[phase].prepare(batch, self.ctx)
+        return self.backends[phase].create_att_state(batch, self.ctx)
 
     def run(self, phase: str, att_state, layer_inputs, *, out: torch.Tensor, alloc_func=torch.empty) -> torch.Tensor:
         return self.backends[phase].forward(att_state, layer_inputs, out=out, alloc_func=alloc_func)

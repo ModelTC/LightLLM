@@ -13,10 +13,6 @@ from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 class TransformerLayerInferTpl(TransformerLayerInfer):
     """ """
 
-    # Bound by the model once its cache is allocated, from attention_config(model).
-    prefill_backend = None
-    decode_backend = None
-
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         # need to set by subclass

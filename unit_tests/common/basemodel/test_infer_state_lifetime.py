@@ -37,11 +37,11 @@ def no_cycle_gc():
 
 
 def _runtime(groups: dict) -> AttentionBackendManager:
-    """A runtime with the given state groups per phase, without binding layers."""
-    runtime = AttentionBackendManager.__new__(AttentionBackendManager)
-    runtime.step_config = {}
-    runtime.resources = None
-    runtime.state_groups = {"prefill": {}, "decode": {}, **groups}
+    """A manager whose main role has the given state groups per phase, without registering layers."""
+    runtime = AttentionBackendManager()
+    runtime.step_configs["main"] = {}
+    runtime.resources["main"] = None
+    runtime.state_groups["main"] = {"prefill": {}, "decode": {}, **groups}
     return runtime
 
 
@@ -51,10 +51,10 @@ def _create_state(is_prefill):
     owner.position_ids = torch.arange(4)
     owner.b_req_idx = owner.position_ids
     owner.req_manager = SimpleNamespace(req_to_token_indexs=None)
-    backend = SimpleNamespace(prepare=lambda metadata, resources: _AttState(metadata.b_req_idx))
+    backend = SimpleNamespace(create_att_state=lambda metadata, resources: _AttState(metadata.b_req_idx))
     phase = "prefill" if is_prefill else "decode"
     runtime = _runtime({phase: {"group": backend}})
-    owner.att_states = runtime.prepare(owner)
+    owner.att_states = runtime.create_att_state(owner)
     return owner
 
 
@@ -78,7 +78,7 @@ def test_att_state_do_not_keep_their_infer_state_alive(no_cycle_gc, is_prefill):
 def test_infer_state_without_attention_builds_no_att_state():
     owner = InferStateInfo()
     owner.is_prefill = False
-    owner.att_states = _runtime({}).prepare(owner)
+    owner.att_states = _runtime({}).create_att_state(owner)
     assert owner.att_states == {}
 
 
@@ -102,7 +102,7 @@ def test_prefill_backend_state_outlives_step(no_cycle_gc, backend_cls, config, f
     setattr(owner, field, tensor)
     backend = backend_cls(config)
     runtime = _runtime({"prefill": {backend.state_key: backend}})
-    owner.att_states = runtime.prepare(owner)
+    owner.att_states = runtime.create_att_state(owner)
     att_state = owner.att_states[backend.state_key]
     owner_ref = weakref.ref(owner)
     del owner

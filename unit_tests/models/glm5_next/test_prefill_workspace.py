@@ -154,7 +154,7 @@ def test_sparse_layer_passes_each_microbatch_its_reserved_workspace():
     layer.softmax_scale = 1.0
     layer.network_config_ = {"index_topk": 1, "index_kpool": 1}
     layer.fp8_sparse_prefill_workspaces = regions
-    layer.prefill_backend = backend
+    layer.layer_num_ = 0
     query = torch.zeros(1, 1, 1)
     layer.alloc_tensor = torch.empty
     layer.indexer = SimpleNamespace(_get_indices=lambda **kwargs: (None, None))
@@ -163,6 +163,8 @@ def test_sparse_layer_passes_each_microbatch_its_reserved_workspace():
     for slot in (0, 1, 0):
         state = SimpleNamespace(
             microbatch_index=slot,
+            att_state_role="main",
+            attention_backend_manager=SimpleNamespace(get_backend=lambda role, phase, layer_id: backend),
             att_states={backend.state_key: None},
             nsa_step=SimpleNamespace(q_kv_start_loc=None),
             get_topk_indices_params={"hidden_states": query, "q_lora": query},

@@ -1,4 +1,4 @@
-"""Attention backends and the inputs to prepare and forward.
+"""Attention backends and the inputs to create_att_state and forward.
 
 Each type is named for how long it lives:
 
@@ -9,7 +9,7 @@ Each type is named for how long it lives:
   prepare page tables, recurrent indices or wrappers keep them on their state.
 - LayerInputs: one layer call's tensors.
 
-In each phase, one backend instance prepares state for the layers whose state_key matches: the
+In each phase, one backend instance creates the state for the layers whose state_key matches: the
 backend class plus group_key(layer_config). That instance sets up its storage on first use and
 keeps the storage CUDA graphs read.
 
@@ -113,8 +113,8 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
     def state_key(self) -> tuple:
         return type(self), self.group_key(self.layer_config)
 
-    def prepare(self, infer_state: "InferStateInfo", resources: AttentionBuildResources) -> AttState:
-        """Prepare this phase's shared state for one microbatch, setting up storage on first use."""
+    def create_att_state(self, infer_state: "InferStateInfo", resources: AttentionBuildResources) -> AttState:
+        """Create this phase's shared state for one microbatch, setting up storage on first use."""
         if not self._is_set_up:
             self.setup(resources)
             self._is_set_up = True

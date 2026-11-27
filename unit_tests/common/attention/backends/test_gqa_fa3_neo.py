@@ -91,7 +91,7 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
     infer_state.is_prefill = True
     # Prefill state does not depend on the image spans, so a text layer's backend builds it.
     text_layer = GQALayerConfig(num_heads=2, num_kv_heads=1, head_dim=16, dtype=torch.bfloat16)
-    att_state = FA3GQAPrefillBackend(text_layer).prepare(
+    att_state = FA3GQAPrefillBackend(text_layer).create_att_state(
         configure_attention_step(infer_state), make_resources(page_size=page_size)
     )
 

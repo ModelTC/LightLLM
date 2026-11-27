@@ -148,10 +148,13 @@ class TpPartBaseModel:
         assert getattr(self, "att_state_manager", None) is None, "resources already initialized"
         if self.is_mtp_draft_model:
             self.att_state_manager = self.main_model.att_state_manager
+            self.attention_backend_manager = self.main_model.attention_backend_manager
             assert not self.att_state_manager._state_registration_finished, "State registration is already finished"
             assert (
                 self.max_req_num + 1 == self.att_state_manager._request_capacity
             ), "models must share the request domain"
+        else:
+            self.attention_backend_manager = AttentionBackendManager()
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             if not self.is_mtp_draft_model:
                 self.att_state_manager = AttentionStateManager(request_capacity=self.max_req_num + 1)
@@ -327,22 +330,12 @@ class TpPartBaseModel:
         return
 
     def _init_attention(self):
-        """Create the model's AttentionBackendManager and bind each layer's implementations.
-
-        Runs after KV allocation and before warmup, so unsupported layer configs fail at load time.
-        """
-        self.attention_backend_manager = backend_manager = AttentionBackendManager(self)
+        """Register this role's layer backends in the shared AttentionBackendManager."""
         role = self.att_state_role
-        manager = self.att_state_manager
-        if not (manager.get_full_attention_states(role) or manager.get_bounded_attention_states(role)):
-            # FFN-only models have no attention to bind.
-            return
-        for layer in self.layers_infer:
-            config = layer.attention_config(self)
-            layer.prefill_backend, layer.decode_backend = backend_manager.bind(config)
-        for phase in backend_manager.state_groups:
-            backend_names = [backend.name for backend in backend_manager.state_groups[phase].values()]
-            logger.info(f"{role} {phase} attention backends: {backend_names}")
+        self.attention_backend_manager.register_backends(self)
+        for phase, groups in self.attention_backend_manager.state_groups[role].items():
+            if groups:
+                logger.info(f"{role} {phase} attention backends: {[backend.name for backend in groups.values()]}")
 
     def _align_decode_batch_size(self, batch_size: int) -> int:
         alignment = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
@@ -459,6 +452,7 @@ class TpPartBaseModel:
 
         infer_state.req_manager = self.req_manager
         infer_state.att_state_manager = self.att_state_manager
+        infer_state.attention_backend_manager = self.attention_backend_manager
 
         infer_state.mem_index = self._select_mem_indexes(model_input)
         infer_state.microbatch_index = microbatch_index
@@ -469,7 +463,7 @@ class TpPartBaseModel:
 
         infer_state.init_some_extra_state(self)
         if build_attention:
-            infer_state.att_states = self.attention_backend_manager.prepare(infer_state)
+            infer_state.att_states = self.attention_backend_manager.create_att_state(infer_state)
         return infer_state
 
     def _create_padded_decode_model_input(self, model_input: ModelInput, new_batch_size: int):

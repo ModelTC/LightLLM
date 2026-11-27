@@ -295,11 +295,12 @@ def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_t
     model.graph_max_batch_size = 4
     model.graph_max_len_in_batch = model.max_seq_length = 128
     model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda is_draft: 0)
-    model.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: ())
+    model.att_state_manager = SimpleNamespace(
+        get_full_attention_states=lambda role: (object(),), get_bounded_attention_states=lambda role: ()
+    )
     model.max_req_num = 2
     model.batch_max_tokens = 4
     model.mtp_previous_draft_models = []
-    attention = AttentionBackendManager(model)
     layer = SimpleNamespace(
         is_linear_attention_layer=False,
         tp_q_head_num_=64,
@@ -308,13 +309,16 @@ def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_t
         network_config_=model.config,
     )
     spec = model_class.transformer_layer_infer_class.attention_config(layer, model)
-    layer.prefill_backend, layer.decode_backend = attention.bind(spec)
-    assert layer.decode_backend.layer_config.causal is False
+    model.layers_infer = [SimpleNamespace(layer_num_=0, attention_config=lambda model: spec)]
+    attention = AttentionBackendManager()
+    attention.register_backends(model)
+    role = model.att_state_role
+    assert attention.get_backend(role, "decode", 0).layer_config.causal is False
     # The backends can be set up from the layer config and the model's resources.
-    for phase, backend, name in zip(("prefill", "decode"), (layer.prefill_backend, layer.decode_backend), expected):
-        (group,) = attention.state_groups[phase].values()
+    for phase, name in zip(("prefill", "decode"), expected):
+        (group,) = attention.state_groups[role][phase].values()
         assert group.name == name
-        backend.setup(attention.resources)
+        attention.get_backend(role, phase, 0).setup(attention.resources[role])
 
 
 def _dequantize_kv_cache(packed_kv):
@@ -1163,9 +1167,17 @@ def test_indexer_metadata_is_built_with_the_step_attention(prefill):
     state.input_ids = torch.arange(5 if prefill else 2, device="cuda")
     state.b_ready_cache_len = torch.zeros_like(state.b_seq_len)
     # A model without attention builds no indexer metadata.
-    state.init_some_extra_state(SimpleNamespace(attention_backend_manager=SimpleNamespace(has_attention=False)))
+    state.init_some_extra_state(
+        SimpleNamespace(
+            att_state_role="main", attention_backend_manager=SimpleNamespace(has_attention=lambda role: False)
+        )
+    )
     assert state.nsa_step is None
-    state.init_some_extra_state(SimpleNamespace(attention_backend_manager=SimpleNamespace(has_attention=True)))
+    state.init_some_extra_state(
+        SimpleNamespace(
+            att_state_role="main", attention_backend_manager=SimpleNamespace(has_attention=lambda role: True)
+        )
+    )
     assert torch.equal(state.nsa_step.q_req_idx, torch.tensor([1, 1, 1, 0, 0] if prefill else [1, 0]).cuda().int())
     if prefill:
         assert state.nsa_step.q_kv_start_loc.tolist() == [0, 0, 0, 3, 3]
