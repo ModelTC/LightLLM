@@ -15,7 +15,6 @@ exec /opt/conda/bin/python -u -m "${LIGHTLLM_SERVER_MODULE:-lightllm.server.api_
     --model_dir "$MODEL_DIR" \
     --model_name DeepSeek-V4.1-Flash-FP8 \
     --run_mode prefill \
-    --pd_decode_allocation_policy "$PD_DECODE_ALLOCATION_POLICY" \
     --pd_trans_mode nixl \
     --pd_kv_page_size 2048 \
     --pd_kv_page_num 8 \
@@ -36,7 +35,7 @@ exec /opt/conda/bin/python -u -m "${LIGHTLLM_SERVER_MODULE:-lightllm.server.api_
     --running_max_req_size 512 \
     --max_req_total_len "$MAX_REQ_TOTAL_LEN" \
     --mtp_mode dspark \
-    --mtp_step "$MTP_STEP" \
+    --mtp_step 4 \
     --mtp_draft_model_dir "$MTP_DRAFT_MODEL_DIR" \
     --disable_audio \
     --batch_max_tokens 8192 \
@@ -49,7 +48,7 @@ exec /opt/conda/bin/python -u -m "${LIGHTLLM_SERVER_MODULE:-lightllm.server.api_
     --enable_dp_prompt_cache_fetch \
     --cpu_cache_storage_size 512 \
     --enable_disk_cache \
-    --disk_cache_storage_size 4608 \
+    --disk_cache_storage_size 5120 \
     --cache_placement_strategy legacy \
     --dp_balancer cache_aware \
     --disk_cache_dir /root/.cache/lightllm-dsv41-opt/pd_disk_cache_v41_b128_256k_20261118 \

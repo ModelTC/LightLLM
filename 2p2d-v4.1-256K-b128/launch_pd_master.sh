@@ -7,7 +7,6 @@ exec /opt/conda/bin/python -u -m lightllm.server.api_server \
     --model_dir "$MODEL_DIR" \
     --model_name DeepSeek-V4.1-Flash-FP8 \
     --run_mode pd_master \
-    --pd_decode_allocation_policy "$PD_DECODE_ALLOCATION_POLICY" \
     --disable_pd_cache_high_priority \
     --pd_master_mode "$PD_MASTER_MODE" \
     --pd_trans_mode nixl \

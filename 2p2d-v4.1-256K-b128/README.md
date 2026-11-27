@@ -1,4 +1,4 @@
-# 在四台新 H100 节点部署 DeepSeek-V4.1-Flash-1017-FP8
+# 256K · 2P2D · DeepSeek-V4.1-Flash-1017-FP8
 
 这套服务需要四台各有 8 张 H100 的节点。两台组成一个 16-rank 的 Prefill 组，两台组成一个 16-rank 的 Decode 组。PD master 与 P0 同机。客户端访问 P0 的 60011 端口。
 
@@ -9,7 +9,22 @@
 | D0 | Decode | D rank 0 | 8121 |
 | D1 | Decode | D rank 1 | 8121 |
 
-目录名保留了历史的 `256K`。当前默认上下文是 **1,048,576 tokens**。P 和 D 都用 DeepEP V2、NIXL 和 DSpark5。P 用 `hrrn_resume`，chunk 为 8192。D 用动态验证和 FlashInfer 采样，每台最多 1024 个请求，每 rank 最多 128 个请求、768 行验证输入。P/D 的 `mem_fraction` 分别为 0.75/0.77。三端使用 `last_chunk`，P 调度到最后一个 prefill chunk 时才申请 D 端 KV。
+本目录复现 11 月 23 日的 256K 报告。P0（兼 master）、P1、D0、D1 的地址分别为 `10.119.21.142`、`10.119.29.200`、`10.119.20.61`、`10.119.20.128`。三端上下文均为 262144，P/D 使用 DSpark 固定 4 步、DeepEP V2 和 NIXL。P 使用 HRRN resume、8192-token chunk。D 使用 FlashInfer 采样、768 个请求槽、1024 batch tokens、最大 graph batch 96，P/D 的显存比例均为 0.75。按该报告保留旧版 KV 分配时机，不传 `last_chunk`，也不启用动态验证。该回放为 80%、seed `6XzQ8`、30 分钟，P50 OTPS 为 61.2 tok/s。[256K 2P2D 基线报告](http://10.9.66.47:5174/spaces/default/env/v41-58e80-msw/reports?region=ms-01-tech-cci&taskId=dbb0f907-01e5-438a-a8a4-2ca10f388ec7)
+
+复现旧报告需同时使用对应的归档 D 源码，其中包含提前提交下一轮 target、FlashMLA planner 等优化。H200-34 上的运行清单位于 `/mnt/vqa/wanzihao/v41-1017-fp8-1x32-20261112/humming/b128-optimization-20261119/expert-routing-diagnosis-20261121/dspark4-fixed-flashinfer-reset-p-20261123/source-manifest.json`。
+
+## 256K 压测经验
+
+这份 Flash-Lite 回放建议保留提前分配 D 端 KV 的策略。在同一版 `e3c4fd173`、同四台机器、DSpark 固定 4 步下，只切换 KV 分配时机。两轮均使用 80% 数据、seed `6XzQ8`、1× 回放速率、1000 VU，统计前 30 分钟内成功完成的请求。
+
+| 256K 2P2D | 总 TPM（输入＋输出） | 输出 TPM | 完成请求数 | TTFT P90 | OTPS P50 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `early` | 80,595,217 | 1,523,080 | 46,835 | 15.72 s | 48.18 tok/s |
+| `last_chunk` | 56,472,194 | 1,127,545 | 32,937 | 55.79 s | 85.97 tok/s |
+
+等到最后一个 prefill chunk 再分配 D 端 KV，**总 TPM 下降 29.9%，输出 TPM 下降 26.0%**。虽然单请求 OTPS P50 上升，同一时间内成功完成的请求减少了 29.7%。表中 TPM 按成功请求的 token 总数除以 30 分钟计算。H200-34 上两轮的原始记录分别位于 `/mnt/vqa/wanzihao/v41-1017-fp8-1x32-20261112/20261126-2p2d-e3c4fd173-256k-lastchunk/aligned-original/result.json` 和 `../ab-only-lastchunk/result.json`（相对前一文件所在目录）。
+
+1M 报告采用 4P2D、SenseNova Chat 和 `last_chunk`，拓扑、数据集和回放速率都与上表不同。复现时使用各自目录的配置。[1M 4P2D 报告](http://10.9.66.47:5174/spaces/default/env/v41-58e80-msw/reports?region=ms-01-tech-cci&taskId=8c8a4f2f-cc59-474c-85ab-d38e6b767857)
 
 ## 1. 准备机器、模型和运行环境
 
@@ -17,19 +32,23 @@
 - 四台使用相同的已验证 V4.1 H100 运行环境。launcher 调用 `/opt/conda/bin/python`，依赖包括匹配的 CUDA、NCCL、NVSHMEM、DeepEP V2、DeepGEMM、NIXL、Humming、FlashInfer 和 P 的 `light_mem`。如已验证环境另有 `deps/` 覆盖包，也要按相同版本部署到相应节点。模型权重和源码归档需要单独准备。
 - 在四台的相同绝对路径挂载转换好的 **1017-FP8 b128** checkpoint，主模型和 DSpark 草稿均从该目录读取。保留 tokenizer、encoding、视觉配置和完整权重分片。
 - 四台之间需具备可用的 NCCL、DeepEP 和 NIXL 网络。除表中 HTTP 端口外，P 组用 28793、D 组用 28901 建组；PD master 的多个 HTTP worker 还会发布各自的连接端口。容器网络须能让对端直连这些地址。
-- 每台 P 的 CPU KV 配额是 **512 GiB**，另需给模型加载、Engram、进程和系统留内存。每台 P 的磁盘缓存配额是 **4608 GiB**。将 `--disk_cache_dir` 放在有足够可用空间的本地盘；新部署使用独立、可写的缓存目录。
+- 每台 P 的 CPU KV 配额是 **512 GiB**，另需给模型加载、Engram、进程和系统留内存。每台 P 的磁盘缓存配额是 **5120 GiB**。将 `--disk_cache_dir` 放在有足够可用空间的本地盘；新部署使用独立、可写的缓存目录。
 
 ## 2. 在控制机准备一份部署副本
 
-以下控制机命令在同一个 Bash 会话运行。起点是包含本 README 和三个 launcher 的目录。四台节点统一从 `6f3cb3c4b` 打包源码。这个版本包含延迟分配 D 端 KV 的 `last_chunk` 策略，以及 prefill 和 candidate indexer 的 Triton 内核复用优化。
+在原节点复用 `config.txt` 指定的各角色 `source` 和 `deps` 时，把本目录的配置和三个启动脚本放在一起即可。迁到新集群时，分别从以下原角色目录取得 `source/` 和 `deps/` 的实际内容（如是符号链接，复制目标内容）。P0 上 master 和 prefill 各有一套源码。
+
+| 角色 | 原节点运行目录 |
+| --- | --- |
+| master | `/root/lightllm-v41-fixed-decode-20261121/master` |
+| prefill | `/root/lightllm-v41-d-graph8-mtp4-20261122/P` |
+| decode | `/root/lightllm-v41-d-graph8-mtp4-flashinfer-i64-20261123/D` |
+
+在控制机从本目录准备配置副本。
 
 ```bash
-set -euo pipefail
-REPO=/mtc/wanzihao/lightllm-ds4-v41
 DEPLOY=$(mktemp -d)
 cp config.txt launch_pd_master.sh launch_prefill.sh launch_decode.sh "$DEPLOY/"
-SOURCE_COMMIT=$(git -C "$REPO" rev-parse --verify '6f3cb3c4bab009c12056304c02d2a1ec63ebe8b8^{commit}')
-git -C "$REPO" archive --format=tar.gz -o "$DEPLOY/source.tar.gz" "$SOURCE_COMMIT"
 ```
 
 编辑 **`$DEPLOY/config.txt`**。下表中的 P0、P1、D0、D1 都替换成服务内网 IP，SSH 别名只用于登录。
@@ -41,22 +60,20 @@ git -C "$REPO" archive --format=tar.gz -o "$DEPLOY/source.tar.gz" "$SOURCE_COMMI
 | `LIGHTLLM_FIXED_DECODE_HOSTS` | `D0_IP,D1_IP`，用逗号分隔 |
 | `NO_PROXY` | 将旧四机 IP 替换成新四机 IP，保留 localhost、127.0.0.1 和原有代理例外 |
 | `MODEL_DIR` | 四机均可读的 checkpoint 绝对路径；`MTP_DRAFT_MODEL_DIR` 继续引用它 |
-| `RUN_DIR` | 为使用下面的命令，将开头按角色选择旧目录的整个 `case ... esac` 替换为一行 `export RUN_DIR="/srv/lightllm-v41"`。保留下方配置角色环境变量的第二个 `case` |
+| `RUN_DIR` | 分别设为 `/srv/lightllm-v41/master`、`/srv/lightllm-v41/prefill`、`/srv/lightllm-v41/decode`，匹配节点上各自的源码和依赖目录 |
 | `SOURCE_DIR`、`LOG_DIR` | 分别使用现有的 `$RUN_DIR/source`、`$RUN_DIR/service` |
 
-在 **`$DEPLOY/launch_prefill.sh`** 中设置新机实际的 `--disk_cache_dir`。确认运行账号能写 `/srv/lightllm-v41`、缓存及编译目录。默认使用 1M 时清除外部遗留的 `MAX_REQ_TOTAL_LEN` 覆盖。
+在 **`$DEPLOY/launch_prefill.sh`** 中设置新机实际的 `--disk_cache_dir`。确认运行账号能写 `/srv/lightllm-v41`、缓存及编译目录。历史配置中的 NO_PROXY 沿用了早期 P1 地址；迁移时按实际节点填写。
 
 ## 3. 分发文件并做启动前检查
 
-在控制机执行。下面选用新的运行目录；如果该目录已有服务，先选另一个空目录，并同步修改配置和下文命令。
+将各角色的源码及依赖放入上表配置的 `$RUN_DIR/source` 和 `$RUN_DIR/deps`。在新集群的控制机上分发配置和启动脚本。
 
 ```bash
 cd "$DEPLOY"
-sha256sum config.txt launch_pd_master.sh launch_prefill.sh launch_decode.sh source.tar.gz > SHA256SUMS
 for host in v41-p0 v41-p1 v41-d0 v41-d1; do
-    ssh "$host" 'test ! -e /srv/lightllm-v41 && mkdir -p /srv/lightllm-v41/{launch,source,service,deps}'
-    scp config.txt launch_*.sh source.tar.gz SHA256SUMS "$host:/srv/lightllm-v41/launch/"
-    ssh "$host" 'cd /srv/lightllm-v41/launch && sha256sum -c SHA256SUMS && tar -xzf source.tar.gz -C ../source'
+    ssh "$host" 'mkdir -p /srv/lightllm-v41/{launch,service}'
+    scp config.txt launch_*.sh "$host:/srv/lightllm-v41/launch/"
 done
 ```
 
@@ -79,11 +96,9 @@ import json, os, sys
 from pathlib import Path
 import lightllm, torch, deep_ep, deep_gemm
 from nixl._api import nixl_agent
-from lightllm.server.api_cli import make_argument_parser
 
 source = Path(os.environ["SOURCE_DIR"]).resolve()
 assert Path(lightllm.__file__).resolve().parent.parent == source
-assert "--pd_decode_allocation_policy" in make_argument_parser().format_help()
 assert torch.cuda.device_count() == 8 and callable(deep_ep.ElasticBuffer)
 if sys.argv[1] == "prefill":
     import humming

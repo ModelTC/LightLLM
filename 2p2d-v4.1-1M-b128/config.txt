@@ -1,0 +1,64 @@
+case "${1:-master}" in
+    master) export RUN_DIR="/root/v41-4p2d-e3c4fd173-lastchunk-1126-snova120/master" ;;
+    prefill) export RUN_DIR="/root/v41-4p2d-e3c4fd173-lastchunk-1126-snova120/prefill" ;;
+    decode) export RUN_DIR="/root/v41-4p2d-e3c4fd173-lastchunk-1126-snova120/decode" ;;
+esac
+export SOURCE_DIR="$RUN_DIR/releases/e3c4fd173c4dec7c104f8df5114d1a5e7ab8618f/source"
+export LOG_DIR="$RUN_DIR/service"
+export MODEL_DIR="/mnt/openrouter/model-weights/DeepSeek-V4.1-Flash-1017-FP8"
+export MTP_DRAFT_MODEL_DIR="$MODEL_DIR"
+export PD_MASTER_IP="10.119.18.206"
+export PD_MASTER_PORT=60011
+export PD_MASTER_MODE=4p2d
+export PD_DECODE_ALLOCATION_POLICY=last_chunk
+export LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS=120
+case "${2:-1}" in
+    1) export PREFILL_NCCL_HOST="10.119.18.206" ;;
+    2) export PREFILL_NCCL_HOST="10.119.23.185" ;;
+    *) echo "Prefill group must be 1 or 2" >&2; return 2 ;;
+esac
+export DECODE_NCCL_HOST="10.119.20.61"
+export MAX_REQ_TOTAL_LEN="${MAX_REQ_TOTAL_LEN:-1048576}"
+MTP_STEP=5
+export PATH="/opt/conda/bin:/usr/local/cuda-13.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PYTHONPATH="$SOURCE_DIR:$RUN_DIR/deps"
+export PYTHONDONTWRITEBYTECODE=1
+export HUMMING_CACHE_DIR="/root/.cache/lightllm-dsv41-opt/humming"
+export HUMMING_MAX_PARALLEL_BUILD_WORKERS=4
+unset LIGHTLLM_WEIGHT_CACHE_DIR
+export LOADWORKER=16
+export OMP_NUM_THREADS=4
+export LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1
+export LIGHTLLM_PROFILER_WITH_STACK=0
+export LIGHTLLM_PROFILER_RECORD_SHAPES=0
+export LIGHTLLM_TOKEN_HASH_LIST_SIZE=4096
+export LIGHTLLM_MODEL_INFER_RECURSION_LIMIT=5000
+export LIGHTLLM_USE_UE8M0_SCALES=1
+export LIGHTLLM_DSV4_THINKING_EFFORT=high
+export DSV4_SWA_FULL_TOKENS_RATIO=0.05
+export EP_NCCL_ROOT_DIR="/opt/conda/lib/python3.10/site-packages/nvidia/nccl"
+export LD_LIBRARY_PATH="$EP_NCCL_ROOT_DIR/lib:/opt/conda/lib/python3.10/site-packages/nvidia/nvshmem/lib:${LD_LIBRARY_PATH:-}"
+export UCX_IB_ALLOC="mmap,heap"
+export NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE=384
+export NVSHMEM_QP_DEPTH=2048
+export TRITON_CACHE_DIR="/root/.cache/lightllm-dsv41-opt/triton"
+export LIGHTLLM_AUTOTUNE_CACHE_DIR="/root/.cache/lightllm-dsv41-opt/autotune"
+export LIGHTLLM_ENGRAM_CACHE_DIR="/root/.cache/lightllm-dsv41-opt/engram"
+export LIGHTLLM_TRACE_DIR="$LOG_DIR/traces"
+export NO_PROXY="127.0.0.1,localhost,10.119.18.206,10.119.29.200,10.119.20.61,10.119.20.128,10.119.23.185,10.119.23.182${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="$NO_PROXY"
+case "${1:-master}" in
+    master)
+        export LIGHTLLM_FIXED_DECODE_HOSTS="10.119.20.61,10.119.20.128"
+        ;;
+    prefill)
+        export LIGHTLLM_DSV41_BF16_PREFILL=1
+        ;;
+    decode)
+        export LIGHTLLM_DSV4_DECODE_COMBINE_OVERLAP=1
+        export PYTORCH_CUDA_ALLOC_CONF=graph_capture_record_stream_reuse:True
+        export LIGHTLLM_DSV41_FAST_FLASHMLA_PLAN=1
+        export LIGHTLLM_DSPARK_QUEUE_NEXT_TARGET="${LIGHTLLM_DSPARK_QUEUE_NEXT_TARGET:-1}"
+        ;;
+esac
+cd "$SOURCE_DIR"
