@@ -37,17 +37,6 @@ class DSV4AttentionConfig:
         assert self.indexer_head_dim > 0 and self.sliding_window > 0
         assert 0 <= self.tp_rank < self.tp_world_size
 
-    def create_swa_config(self) -> FP8E8M0SlidingWindowConfig:
-        """模型选择窗口及向量维度，具体编码和物理页布局由原子配置负责。"""
-        return FP8E8M0SlidingWindowConfig(
-            logical_layer_ids=self.logical_layer_ids,
-            window_size=self.sliding_window,
-            kv_dim=self.head_dim,
-            rope_dim=self.rope_head_dim,
-            tp_rank=self.tp_rank,
-            tp_world_size=self.tp_world_size,
-        )
-
     def create_compressed_config(self, compress_ratio: int) -> CompressedAttentionConfig:
         """按模型层组合创建一种压缩历史配置，供 State 创建和 backend 使用。"""
         return CompressedAttentionConfig(
@@ -64,6 +53,22 @@ class DSV4AttentionConfig:
             tp_rank=self.tp_rank,
             tp_world_size=self.tp_world_size,
         )
+
+
+def create_swa_config(
+    model_config: dict[str, object],
+    model_logical_layer_ids: tuple[int, ...],
+    tp_rank: int = 0,
+    tp_world_size: int = 1,
+) -> FP8E8M0SlidingWindowConfig:
+    return FP8E8M0SlidingWindowConfig(
+        logical_layer_ids=model_logical_layer_ids,
+        window_size=model_config["sliding_window"],
+        kv_dim=model_config["head_dim"],
+        rope_dim=model_config["qk_rope_head_dim"],
+        tp_rank=tp_rank,
+        tp_world_size=tp_world_size,
+    )
 
 
 def create_attention_config(

@@ -114,6 +114,9 @@ def _hc_pre_norm_kernel(
     BLOCK_SPLITS: tl.constexpr,
     BLOCK_H: tl.constexpr,
     UNROLL_SINKHORN: tl.constexpr = True,
+    previous_pre=None,
+    next_pre=None,
+    SHIFT_PRE: tl.constexpr = False,
 ):
     """Fuse split reduction, Sinkhorn, stream mixing and sublayer RMSNorm."""
     token = tl.program_id(0)
@@ -138,6 +141,10 @@ def _hc_pre_norm_kernel(
         UNROLL_SINKHORN,
     )
     tl.store(post + token * STREAMS + tl.arange(0, STREAMS), post_values)
+    if SHIFT_PRE:
+        offsets = token * STREAMS + tl.arange(0, STREAMS)
+        tl.store(next_pre + offsets, pre_values)
+        pre_values = tl.load(previous_pre + offsets)
     tl.store(
         residual_mix + token * STREAMS * STREAMS + tl.arange(0, STREAMS * STREAMS),
         tl.reshape(matrix, (STREAMS * STREAMS,)),
@@ -254,6 +261,8 @@ def _finish_pre_norm(
     sinkhorn_iters,
     post_multiplier,
     run_config=None,
+    previous_pre=None,
+    next_pre=None,
 ):
     tokens, flattened_hidden = x.shape
     hidden = flattened_hidden // streams
@@ -289,6 +298,9 @@ def _finish_pre_norm(
         BLOCK_H=triton.next_power_of_2(hidden),
         UNROLL_SINKHORN=run_config.get("unroll_sinkhorn", True) if run_config else True,
         num_warps=run_config["num_warps"] if run_config else 4,
+        previous_pre=previous_pre,
+        next_pre=next_pre,
+        SHIFT_PRE=previous_pre is not None,
     )
     return layer_input, residual_mix, post
 
@@ -391,6 +403,18 @@ def _hc_post_pre_norm_decode(
     return x, updated, mix, post
 
 
+def _project_pre_norm_inputs(x: torch.Tensor, fn: torch.Tensor, streams: int) -> tuple[torch.Tensor, torch.Tensor]:
+    assert streams == 4, "the fused mHC kernel is specialized for four streams"
+    if not LIGHTLLM_DISABLE_DEEPGEMM_MHC:
+        return _hc_prenorm_projection(x, fn)
+
+    # PyTorch produces one complete partition: [1, T, M] and [1, T].
+    x_fp32 = x.float()
+    gemm_partial = (x_fp32 @ fn.T).unsqueeze(0)
+    sqrsum_partial = x_fp32.square().sum(dim=-1).unsqueeze(0)
+    return gemm_partial, sqrsum_partial
+
+
 def hc_pre_norm(
     x: torch.Tensor,
     fn: torch.Tensor,
@@ -403,7 +427,7 @@ def hc_pre_norm(
     hc_eps: float,
     sinkhorn_iters: int,
     post_multiplier: float = 2.0,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """将 mHC pre-mixing 与紧随其后的子层 RMSNorm 融合。
 
     T = tokens，S = streams，H = 单条 stream 的 hidden size，M = 2 * S + S * S。
@@ -431,15 +455,7 @@ def hc_pre_norm(
     LIGHTLLM_DISABLE_DEEPGEMM_MHC=1 禁用 DeepGEMM，改用 PyTorch 计算投影与平方和。
     """
 
-    assert streams == 4, "the fused mHC kernel is specialized for four streams"
-    if LIGHTLLM_DISABLE_DEEPGEMM_MHC:
-        # PyTorch produces one complete partition: [1, T, M] and [1, T].
-        x_fp32 = x.float()
-        gemm_partial = (x_fp32 @ fn.T).unsqueeze(0)
-        sqrsum_partial = x_fp32.square().sum(dim=-1).unsqueeze(0)
-    else:
-        gemm_partial, sqrsum_partial = _hc_prenorm_projection(x, fn)
-
+    gemm_partial, sqrsum_partial = _project_pre_norm_inputs(x, fn, streams)
     return _finish_pre_norm(
         x,
         gemm_partial,
@@ -454,6 +470,48 @@ def hc_pre_norm(
         sinkhorn_iters,
         post_multiplier,
     )
+
+
+def shifted_hc_pre_norm(
+    x: torch.Tensor,
+    fn: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    norm_weight: torch.Tensor,
+    streams: int,
+    rms_eps: float,
+    norm_eps: float,
+    hc_eps: float,
+    sinkhorn_iters: int,
+    *,
+    previous_pre: torch.Tensor,
+    post_multiplier: float = 2.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """用上一子层的 pre 系数混合 streams，并为下一子层计算新的 pre 系数。
+
+    previous_pre 是连续的 fp32 [T, S] 张量。其他输入与 hc_pre_norm 相同。
+    返回 (layer_input, residual_mix, post_mix, next_pre)，其中 next_pre 为 fp32 [T, S]。
+    """
+    # TODO: Fuse projection, square-sum accumulation and stream mixing to share one read of x.
+    gemm_partial, sqrsum_partial = _project_pre_norm_inputs(x, fn, streams)
+    next_pre = torch.empty_like(previous_pre)
+    layer_input, residual_mix, post_mix = _finish_pre_norm(
+        x,
+        gemm_partial,
+        sqrsum_partial,
+        scale,
+        base,
+        norm_weight,
+        streams,
+        rms_eps,
+        norm_eps,
+        hc_eps,
+        sinkhorn_iters,
+        post_multiplier,
+        previous_pre=previous_pre,
+        next_pre=next_pre,
+    )
+    return layer_input, residual_mix, post_mix, next_pre
 
 
 def hc_post_pre_norm(

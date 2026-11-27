@@ -5,6 +5,8 @@ import numpy as np
 import pytest
 import torch
 
+from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+
 from unit_tests.common.dsv4_test_utils import DeepseekV4MemoryManager, DeepseekV4CacheConfig, DeepseekV4ReqManager
 from unit_tests.common.req_token_index_test_utils import attach_req_token_index
 from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
@@ -53,6 +55,7 @@ def cache(monkeypatch, tmp_path, request):
                 "model_dir": str(tmp_path),
                 "penalty_counter_mode": "cpu_counter",
                 "output_constraint_mode": "none",
+                "disable_thinking_budget": True,
                 "mtp_step": mtp_step,
                 "mtp_dynamic_verify": False,
                 "enable_ep_moe": False,
@@ -440,7 +443,6 @@ def test_speculative_retry_reuses_swa_without_freeing_token_pages(cache):
 @pytest.mark.parametrize("model_kind", ["target", "mtp", "dspark"])
 def test_model_selects_held_slots_without_allocating_swa(cache, model_kind):
     from lightllm.common.basemodel.batch_objs import ModelInput
-    from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
     from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
     from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
 
@@ -523,7 +525,8 @@ def test_prefill_checkpoint_reads_precede_window_retention(cache):
     _write_swa(requests, 2, req, positions, packed.flip(0))
     _finish_prefill(requests, [req])
     # Reuse the scratch: only fixed request windows and CPU snapshots remain.
-    requests._test_backend.get_swa_prefill_workspace(requests._test_backend.model)[0].zero_()
+    backend = requests._test_backend
+    backend.get_swa_prefill_workspace(backend.model, requests.swa_state.config)[0].zero_()
     requests.save_state(_checkpoint_req(req, 2048), index, states)
     saved_swa = states.get_state_cache(index)[0]
     torch.testing.assert_close(saved_swa[0].cuda(), packed[-requests.sliding_window :], rtol=0, atol=0)
@@ -986,26 +989,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
         else:
             build_swa_indices(req_idx, query_positions, requests, indices, lengths, write_slots)
 
-    backend = attention.DeepseekV4FlashMlaFp8SparseAttBackend(
-        type(
-            "Model",
-            (),
-            {
-                "config": dict(
-                    num_attention_heads=64,
-                    compress_ratios=[0, 0, 0],
-                    head_dim=512,
-                    qk_rope_head_dim=64,
-                    index_head_dim=128,
-                    sliding_window=128,
-                ),
-                "layers_infer": [SimpleNamespace(layer_num_=2)],
-                "tp_rank_": 0,
-                "tp_world_size_": 1,
-                "req_manager": requests,
-            },
-        )()
-    )
+    backend = requests._test_backend
     state_info = SimpleNamespace(mem_manager=manager)
     state = backend.create_att_decode_state(state_info)
     state.init_state()
@@ -1437,6 +1421,7 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
     )
     model = type("TestModel", (), {})()
     vars(model).update(
+        att_state_manager=requests.memory.manager,
         config=config,
         batch_max_tokens=3,
         max_req_num=requests.max_request_num,
@@ -1502,7 +1487,6 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
 
 
 def test_empty_dspark_commit_is_local_but_proposal_keeps_common_padding_path(monkeypatch):
-    from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
     from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
 
     model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
@@ -2016,9 +2000,9 @@ def test_full_batch_unaligned_prefill_workspace_is_bounded_and_private(cache, mt
     first = (ready - requests.sliding_window + 1) // page_token_num * page_token_num
     end = ready + chunk_tokens
     required = request_count * ((end + page_token_num - 1) // page_token_num * page_token_num - first)
-    requests._test_backend = _test_backend(requests, request_count * chunk_tokens)
+    backend = requests._test_backend = _test_backend(requests, request_count * chunk_tokens)
     requests._test_prefill_states = {}
-    workspace, capacity = requests._test_backend.get_swa_prefill_workspace(requests._test_backend.model)
+    workspace, capacity = backend.get_swa_prefill_workspace(backend.model, requests.swa_state.config)
     assert capacity >= required
     assert workspace.untyped_storage().data_ptr() != requests.req_to_swa.untyped_storage().data_ptr()
     workspace[:, capacity : 2 * capacity].fill_(173)

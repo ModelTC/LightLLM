@@ -67,6 +67,7 @@ def cache(monkeypatch):
         __hash__ = object.__hash__
 
     model = TestModel(
+        att_state_manager=manager,
         config=config,
         tp_rank_=0,
         tp_world_size_=1,
@@ -104,22 +105,29 @@ def test_backend_reads_owned_state_views(cache):
     manager, window, backend = cache
     infer = make_infer(manager, window)
     assert infer.swa_state is window
+    assert backend.swa_config is window.config
     infer.is_prefill = False
     for layer in range(3):
         swa, compressed = backend.get_att_input_params(infer, layer)
         assert swa.shape[1] == 74880
         assert (compressed is None) == (layer == 2)
         if layer != 2:
+            config = infer.get_compressed_kv_state(layer).config
+            assert backend.compressed_configs[config.compress_ratio] is config
             assert compressed.data_ptr() == infer.get_compressed_kv_view(layer).kv.data_ptr()
 
 
 @pytest.mark.parametrize("ratio,layer,is_indexer", [(4, 0, False), (4, 0, True), (128, 1, False)])
 def test_real_compressor_continues_after_checkpoint_restore(cache, ratio, layer, is_indexer):
     from lightllm.models.deepseek_v4.layer_infer.compressor import fused_compress
+    from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 
     manager, window, _ = cache
     length, boundary = 1024, 512
     head_dim = 128 if is_indexer else 512
+    workspace = DeepseekV4Workspace(SimpleNamespace(tp_world_size_=1, batch_max_tokens=length))
+    if ratio == 128:
+        workspace.c128_compress_scratch = torch.empty((1, length, head_dim), dtype=torch.float32, device="cuda")
     scores = torch.randn((length, head_dim * (4 if ratio == 4 else 2)), device="cuda")
     cos = torch.ones((length, 32), device="cuda")
     sin, weight = torch.zeros_like(cos), torch.ones(head_dim, device="cuda")
@@ -127,6 +135,7 @@ def test_real_compressor_continues_after_checkpoint_restore(cache, ratio, layer,
 
     def compress(req_idx, start, end, decode=False):
         infer = make_infer(manager, window)
+        infer.dsv4_workspace = workspace
         positions = torch.arange(start, end, dtype=torch.int32, device="cuda")
         width = end - start
         infer.mem_index, infer.position_ids, infer.is_prefill = slots[req_idx][start:end], positions, not decode
@@ -228,12 +237,22 @@ def test_long_prefill_keeps_swa_prefix_and_runtime_tail(cache):
 
 
 @pytest.mark.parametrize("draft_kind", ["mtp", "dspark"])
-def test_models_prepare_owned_states_in_one_manager(cache, draft_kind):
+def test_models_prepare_owned_states_in_one_manager(cache, draft_kind, monkeypatch):
     from contextlib import nullcontext
     from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
     from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
 
     _, _, backend = cache
+    backend_class = type(backend)
+    reserve_workspace = backend_class.get_swa_prefill_workspace
+    reserved_layouts = {}
+
+    def reserve_owned_workspace(model, swa_config):
+        assert model.att_state_manager.full_att_allocator is None
+        reserved_layouts[model.att_state_role] = swa_config
+        return reserve_workspace(model, swa_config)
+
+    monkeypatch.setattr(backend_class, "get_swa_prefill_workspace", staticmethod(reserve_owned_workspace))
     config = dict(
         backend.model.config,
         compress_ratios=[4, 128, 0, 0, 0],
@@ -274,6 +293,7 @@ def test_models_prepare_owned_states_in_one_manager(cache, draft_kind):
         drafts.append(draft)
     manager = main.att_state_manager
     assert all(model.att_state_manager is manager for model in drafts)
+    assert set(reserved_layouts) == {model.att_state_role for model in (main, *drafts)}
     manager.finish_state_registration()
     manager.allocate_storage(token_capacity=8192, page_size=256, big_page_tokens=2048, small_page_capacity=2)
     assert len(manager.get_full_attention_states()) == 2
@@ -281,7 +301,11 @@ def test_models_prepare_owned_states_in_one_manager(cache, draft_kind):
     for model in (main, *drafts):
         states = manager.get_bounded_attention_states(model.att_state_role)
         state = next(item for item in states if isinstance(item, FP8E8M0SlidingWindowState))
+        assert state.config == reserved_layouts[model.att_state_role]
+        model_backend = backend_class(model)
+        assert model_backend.swa_config is state.config
         assert state.config.logical_layer_ids == tuple(layer.layer_num_ for layer in model.layers_infer)
         assert state.swa_buffer.is_cuda
         if model is not main:
             assert len(states) == 1
+            assert model_backend.compressed_configs == {}

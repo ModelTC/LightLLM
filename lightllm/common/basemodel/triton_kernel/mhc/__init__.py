@@ -21,6 +21,7 @@ fn: [M, K]，scale: [3]，base: [M] 为可学习参数。
    合并结果先转 bf16，再在 H 维做带 norm_weight 的 RMSNorm。
    投影和平方和默认由 DeepGEMM 计算；LIGHTLLM_DISABLE_DEEPGEMM_MHC=1 改用 PyTorch。
    两种后端共用后续的 Triton 融合 kernel。
+   shifted_hc_pre_norm 使用上一子层的 pre 合并 streams，并额外返回本层生成的 pre。
 
 3. hc_post：用子层输出 y [T, H] 更新残差：
        out[t, j, h] = post_mix[t, j] * y[t, h] + sum_i residual_mix[t, i, j] * R[t, i, h]
@@ -41,14 +42,16 @@ GENERAL warmup 阶段搜索配置，之后按 GPU、Triton 版本、hidden 和 t
 
 from .head import hc_head
 from .post import hc_post
-from .pre_norm import hc_post_pre_norm, hc_pre_norm
-from .streams import hc_contract, hc_expand
+from .pre_norm import hc_post_pre_norm, hc_pre_norm, shifted_hc_pre_norm
+from .streams import hc_combine, hc_contract, hc_expand
 
 __all__ = [
+    "hc_combine",
     "hc_contract",
     "hc_expand",
     "hc_head",
     "hc_post",
     "hc_post_pre_norm",
     "hc_pre_norm",
+    "shifted_hc_pre_norm",
 ]

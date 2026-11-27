@@ -1,5 +1,5 @@
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 import torch
@@ -51,6 +51,9 @@ class ModelInput:
     # mtp_draft_input_hiddens 用于模型 mtp 模式下
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+
+    # (request slot, position, token ID) rows for cached predecessors of the first new token.
+    token_lookback: list[tuple[int, int, int]] = field(default_factory=list)
 
     def to_cuda(self):
         self.check_input()

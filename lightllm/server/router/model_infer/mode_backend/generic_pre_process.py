@@ -1,13 +1,14 @@
 import torch
 import numpy as np
 from typing import List, Tuple
-from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
+from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.common.basemodel.batch_objs import ModelInput
 
 INT64_MAX = torch.iinfo(torch.int64).max
 
 
 def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> Tuple[ModelInput, List[InferReq]]:
+    token_lookback = []
     run_reqs = []
     total_token_num = 0
     total_input_token_num = 0
@@ -22,6 +23,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     b_is_decode_req = []
 
     for req in req_objs:
+        token_lookback.extend(req.take_token_lookback())
         run_reqs.append(req)
         batch_multimodal_params.append(req.multimodal_params)
         b_req_idx.append(req.req_idx)
@@ -81,6 +83,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_is_decode_req=b_is_decode_req,
         b_ready_cache_len=b_ready_cache_len,
         b_prefill_start_loc=b_prefill_start_loc,
+        token_lookback=token_lookback,
         is_prefill=True,
         b_prefill_has_output_cpu=b_prefill_has_output,
         multimodal_params=batch_multimodal_params,
@@ -90,6 +93,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
 
 
 def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[InferReq]]:
+    token_lookback = []
     run_reqs: List[InferReq] = []
     total_token_num = 0
     b_req_idx = []
@@ -98,6 +102,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     b_q_seq_len = []
     multimodal_params = []
     for req in req_objs:
+        token_lookback.extend(req.take_token_lookback())
         run_reqs.append(req)
         b_req_idx.append(req.req_idx)
         seq_len = req.get_cur_total_len()
@@ -147,6 +152,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_position_delta=b_position_delta,
         b_shared_seq_len=b_shared_seq_len,
         b_shared_radix_node_id=b_shared_radix_node_id,
+        token_lookback=token_lookback,
         is_prefill=False,
         multimodal_params=multimodal_params,
     )

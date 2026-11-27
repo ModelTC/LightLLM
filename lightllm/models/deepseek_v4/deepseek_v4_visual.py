@@ -16,7 +16,9 @@ from torch import nn
 from lightllm.models.deepseek_v4.image_processor import (
     IMAGE,
     build_canonical_image_block,
+    get_image_grid,
     load_image,
+    rgb_normalization_table,
 )
 from lightllm.server.embed_cache.utils import get_shm_name_data, read_shm
 from lightllm.server.multimodal_params import ImageItem
@@ -24,10 +26,10 @@ from lightllm.server.visualserver import get_vit_attn_backend
 
 
 @lru_cache(8)
-def get_vision_cos_sin(n_h: int, n_w: int, dim: int, theta: float):
-    inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-    hpos = torch.arange(n_h).unsqueeze(1).expand(n_h, n_w)
-    wpos = torch.arange(n_w).unsqueeze(0).expand(n_h, n_w)
+def get_vision_cos_sin(n_h: int, n_w: int, dim: int, theta: float, device=None):
+    inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
+    hpos = torch.arange(n_h, device=device).unsqueeze(1).expand(n_h, n_w)
+    wpos = torch.arange(n_w, device=device).unsqueeze(0).expand(n_h, n_w)
     freqs = torch.stack([hpos, wpos], dim=-1).reshape(-1, 2, 1).float() * inv_freq
     freqs = freqs.flatten(1)
     return freqs.cos().unsqueeze(1), freqs.sin().unsqueeze(1)
@@ -128,11 +130,13 @@ class ViT(nn.Module):
         self.blocks = nn.ModuleList([Block(args) for _ in range(args.vision_n_layers)])
         self.norm = RMSNorm(args.vision_dim)
 
+    def get_rope(self, n_h, n_w, device):
+        cos, sin = get_vision_cos_sin(n_h, n_w, self.rope_dim, self.rope_theta)
+        return cos.to(device), sin.to(device)
+
     def forward(self, patches: torch.Tensor, n_h: int, n_w: int) -> torch.Tensor:
         x = self.patch_embed(patches)
-        cos, sin = get_vision_cos_sin(n_h, n_w, self.rope_dim, self.rope_theta)
-        cos = cos.to(device=x.device)
-        sin = sin.to(device=x.device)
+        cos, sin = self.get_rope(n_h, n_w, x.device)
         cu_seqlens = torch.tensor([0, x.shape[0]], dtype=torch.int32, device=x.device)
         for block in self.blocks:
             x = block(x, cos, sin, cu_seqlens)
@@ -160,15 +164,19 @@ class DeepseekV4VisionModel(nn.Module):
 
     _WEIGHT_PREFIXES = ("vision.", "aligner.", "image_")
 
+    vit_class = ViT
+    get_image_grid = staticmethod(get_image_grid)
+    # Table indices follow the image processor's token types. IMAGE rows are replaced by patch embeddings.
+    sentinel_names = ("image_start", "image_pad", "image_pad", "image_newline", "image_end")
+
     def __init__(self, kvargs, **config):
         super().__init__()
+        self.register_buffer("_rgb_lookup", rgb_normalization_table(), persistent=False)
         self.config = SimpleNamespace(**config)
-        self.vision = ViT(self.config)
+        self.vision = self.vit_class(self.config)
         self.aligner = Aligner(self.config)
-        self.image_start = nn.Parameter(torch.empty(self.config.hidden_size, dtype=torch.bfloat16))
-        self.image_end = nn.Parameter(torch.empty(self.config.hidden_size, dtype=torch.bfloat16))
-        self.image_newline = nn.Parameter(torch.empty(self.config.hidden_size, dtype=torch.bfloat16))
-        self.image_pad = nn.Parameter(torch.empty(self.config.hidden_size, dtype=torch.bfloat16))
+        for name in dict.fromkeys(self.sentinel_names):
+            setattr(self, name, nn.Parameter(torch.empty(self.config.hidden_size, dtype=torch.bfloat16)))
 
     def load_model(self, weight_dir):
         index_path = os.path.join(weight_dir, "model.safetensors.index.json")
@@ -188,27 +196,32 @@ class DeepseekV4VisionModel(nn.Module):
         self.load_state_dict(state_dict)
         return self
 
+    @staticmethod
+    def build_image_block(row_major_embeds, n_llm_h, n_llm_w, sentinel_table):
+        types, perm = build_canonical_image_block(n_llm_h, n_llm_w)
+        types = types.to(device=row_major_embeds.device)
+        block = sentinel_table[types]
+        block[types == IMAGE] = row_major_embeds[perm.to(device=row_major_embeds.device)]
+        return block
+
     @torch.inference_mode()
     def encode(self, images: List[ImageItem]):
         blocks = []
         uuids = []
         valid_ids = []
         valid_start = 0
-        sentinel_table = torch.stack(
-            [
-                self.image_start,
-                self.image_pad,
-                self.image_pad,
-                self.image_newline,
-                self.image_end,
-            ]
-        )
+        sentinel_table = torch.stack([getattr(self, name) for name in self.sentinel_names])
 
         for image_item in images:
             uuids.append(image_item.uuid)
             image_data = read_shm(get_shm_name_data(image_item.uuid))
             with Image.open(BytesIO(image_data)) as image:
-                patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w = load_image(image, self.config)
+                patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w = load_image(
+                    image,
+                    self.config,
+                    self.get_image_grid,
+                    rgb_lookup=self._rgb_lookup if self._rgb_lookup.is_cuda else None,
+                )
 
             patches = patches.to(device=self.image_start.device, non_blocking=True)
             row_major_embeds = self.aligner(
@@ -216,10 +229,7 @@ class DeepseekV4VisionModel(nn.Module):
                 n_vit_h,
                 n_vit_w,
             )
-            types, perm = build_canonical_image_block(n_llm_h, n_llm_w)
-            types = types.to(device=row_major_embeds.device)
-            block = sentinel_table[types]
-            block[types == IMAGE] = row_major_embeds[perm.to(device=row_major_embeds.device)]
+            block = self.build_image_block(row_major_embeds, n_llm_h, n_llm_w, sentinel_table)
             blocks.append(block)
 
             valid_end = valid_start + block.shape[0]

@@ -14,6 +14,8 @@ from lightllm.server.router.model_infer.req_token_index import (
     create_req_token_index,
 )
 from lightllm.server.router.model_infer.mode_backend import base_backend
+from lightllm.server.router.model_infer.mode_backend import generic_pre_process
+from lightllm.server.embed_cache.utils import MULTIMODAL_TOKEN_ID_START
 
 
 class _Counter:
@@ -174,6 +176,7 @@ def _make_scheduler_req(manager, req_idx, current, total):
     req = SimpleNamespace(
         req_idx=req_idx,
         cur_kv_len=current,
+        cur_output_len=1,
         hold_kv_len=0,
         mtp_step=0,
         filter_mark=False,
@@ -183,6 +186,7 @@ def _make_scheduler_req(manager, req_idx, current, total):
         finish_status=SimpleNamespace(is_finished=lambda: False),
         is_slave_req=lambda: False,
         get_cur_total_len=total,
+        take_token_lookback=lambda: (),
         get_chuncked_input_token_len=total,
     )
     _attach_token_index(manager, req)
@@ -237,6 +241,35 @@ def test_decode_scheduler_publishes_batched_request_table(monkeypatch):
     assert allocations == [12]
     torch.cuda.synchronize()
     assert manager.req_to_token_indexs[0, :16].tolist() == list(range(16))
+
+
+def test_last_image_slot_uses_prompt_id_in_mixed_prefill(monkeypatch):
+    manager, _, backend, _ = _make_scheduler(monkeypatch, page_size=4, available=32)
+    backend.args.enable_prefill_decode_mixed = True
+    image = list(range(MULTIMODAL_TOKEN_ID_START, MULTIMODAL_TOKEN_ID_START + 3))
+    reqs = []
+    for index, (tokens, output_len) in enumerate((([1, 2, *image], 0), ([1, *image, 42], 0), ([1, *image, 43], 1))):
+        req = _make_scheduler_req(manager, index, 4, lambda: 5)
+        req.cur_output_len = output_len
+        req.shm_req.input_len = 5 - output_len
+        req.shm_req.shm_prompt_ids = SimpleNamespace(arr=tokens)
+        req.args.chunked_prefill_size = 4
+        req.mm_input_spans = []
+        req.multimodal_params = {
+            "images": [{"token_id": image[0], "token_num": len(image), "start_idx": tokens.index(image[0])}],
+            "audios": [],
+        }
+        req.get_chuncked_input_token_ids = MethodType(InferReq.get_chuncked_input_token_ids, req)
+        req.alloc_kv_mem(4)
+        reqs.append(req)
+    backend._filter_not_ready_reqs = lambda req_ids: reqs
+
+    prefill, decode, token_count = backend._get_classed_reqs(req_ids=[0, 1, 2])
+    assert not decode and token_count == 3
+    inputs, _ = generic_pre_process.prepare_prefill_inputs(prefill, is_chuncked_mode=True)
+    assert inputs.b_req_idx.tolist() == [0, 1, 2]
+    assert inputs.input_ids.tolist() == [image[-1], 42, 43]
+    assert inputs.b_is_decode_req.tolist() == [False, True, True]
 
 
 @pytest.mark.parametrize("page_size, expected_alloc_token_num", [(1, 9), (3, 9), (4, 12), (7, 14), (8, 8)])

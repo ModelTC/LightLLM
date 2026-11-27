@@ -57,6 +57,7 @@ class StartArgs:
                 "deepseekv31",
                 "deepseekv32",
                 "deepseekv4",
+                "deepseekv41",
                 "glm47",
                 "kimi_k2",
                 "qwen3_coder",

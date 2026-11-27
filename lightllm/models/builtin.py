@@ -24,6 +24,13 @@ ModelRegistry.register(
     is_multimodal=True,
     condition=lambda cfg: cfg.get("vision_n_layers", 0) > 0,
 )
+ModelRegistry.register("deepseek_v41", "lightllm.models.deepseek_v41.model:DeepseekV41TpPartModel")
+ModelRegistry.register(
+    "deepseek_v41",
+    "lightllm.models.deepseek_v41.model:DeepseekV41VisionTpPartModel",
+    is_multimodal=True,
+    condition=lambda cfg: (cfg.get("vision_config") or {}).get("num_hidden_layers", 0) > 0,
+)
 ModelRegistry.register("gemma3", "lightllm.models.gemma3.model:Gemma3TpPartModel")
 ModelRegistry.register("gemma4", "lightllm.models.gemma4.model:Gemma4TpPartModel", is_multimodal=True)
 ModelRegistry.register("gemma", "lightllm.models.gemma_2b.model:Gemma_2bTpPartModel")

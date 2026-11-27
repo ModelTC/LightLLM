@@ -71,6 +71,7 @@ def reqs_for(count, step):
             get_cur_total_len=lambda: 125,
             multimodal_params={"images": [], "audios": []},
             get_radix_cache_shared_len=lambda: 0,
+            take_token_lookback=lambda: (),
             shared_kv_node=None,
         )
         for i in range(count)
