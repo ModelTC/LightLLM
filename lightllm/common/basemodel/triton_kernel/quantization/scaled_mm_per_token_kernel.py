@@ -284,6 +284,50 @@ fp8_scaled_mm_per_token = scaled_mm_per_token
 int8_scaled_mm_per_token = scaled_mm_per_token
 
 
+@triton.jit
+def _int8_split_k(
+    activation, weight, partials, rows: tl.constexpr, width: tl.constexpr, depth: tl.constexpr, chunk: tl.constexpr
+):
+    split = tl.program_id(1)
+    row = tl.arange(0, 16)
+    col = tl.program_id(0) * 64 + tl.arange(0, 64)
+    inner = split * chunk + tl.arange(0, 128)
+    acc = tl.full((16, 64), 0, tl.int32)
+    for offset in range(chunk // 128):
+        index = inner + offset * 128
+        lhs = tl.load(
+            activation + row[:, None] * depth + index[None, :],
+            (row[:, None] < rows) & (index[None, :] < depth),
+            0,
+        )
+        rhs = tl.load(weight + col[None, :] * depth + index[:, None], index[:, None] < depth, 0)
+        acc = tl.dot(lhs, rhs, acc, out_dtype=tl.int32)
+    tl.store(partials + (split * rows + row[:, None]) * width + col[None, :], acc, row[:, None] < rows)
+
+
+@triton.jit
+def _int8_split_k_reduce(
+    partials, activation_scale, weight_scale, out, rows: tl.constexpr, width: tl.constexpr, splits: tl.constexpr
+):
+    index = tl.program_id(0) * 128 + tl.arange(0, 128)
+    split = tl.arange(0, triton.next_power_of_2(splits))
+    acc = tl.load(partials + split[:, None] * rows * width + index[None, :], split[:, None] < splits, 0)
+    row_scale = tl.load(activation_scale + index // width)
+    col_scale = tl.load(weight_scale + index % width)
+    tl.store(out + index, tl.sum(acc, 0).to(tl.float32) * row_scale * col_scale)
+
+
+def int8_scaled_mm_split_k(activation, weight, activation_scale, weight_scale, out):
+    rows, depth = activation.shape
+    width = weight.shape[1]
+    chunk = 2048 if width >= 6144 or (rows > 8 and width == depth == 4096) else 1024
+    splits = triton.cdiv(depth, chunk)
+    partials = torch.empty((splits, rows, width), device=activation.device, dtype=torch.int32)
+    _int8_split_k[(width // 64, splits)](activation, weight, partials, rows, width, depth, chunk)
+    _int8_split_k_reduce[(rows * width // 128,)](partials, activation_scale, weight_scale, out, rows, width, splits)
+    return out
+
+
 if __name__ == "__main__":
     import time
     import os
