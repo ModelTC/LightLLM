@@ -92,8 +92,7 @@ class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQA
         # The arguments every plan of this group shares.
         self._plan_args = (config.num_heads, config.num_kv_heads, config.head_dim, self.page_size)
         self._dtypes = dict(q_data_type=config.dtype, kv_data_type=torch.float8_e4m3fn if fp8 else config.dtype)
-        # Allocated on first use, so prefill-only and decode-only nodes create it only when needed.
-        self._workspace = lambda: resources.get_workspace("flashinfer_fp", resources.workspace_bytes, torch.int8)
+        self.workspace = resources.get_workspace("flashinfer_fp", resources.workspace_bytes, torch.int8)
 
     def build(self, infer_state: InferStateInfo) -> FlashInferGQAAttState:
         """Build and plan a prefill wrapper for the step's packed queries and paged cache."""
@@ -105,7 +104,7 @@ class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQA
         )
         kv_starts, kv_last_page_len = _page_metadata(infer_state, self.page_size, kv_indices)
         wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
-            self._workspace(),
+            self.workspace,
             qo_indptr_buf=q_starts,
             paged_kv_indptr_buf=kv_starts,
             paged_kv_indices_buf=kv_indices,
@@ -216,7 +215,7 @@ class FlashInferGQADecodeBackend(FlashInferGQAPrefillBackend):
             return FlashInferGQAAttState(wrapper=wrapper, page_size=self.page_size)
 
         wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
-            self._workspace(),
+            self.workspace,
             "NHD",
             use_cuda_graph=True,
             use_tensor_cores=True,

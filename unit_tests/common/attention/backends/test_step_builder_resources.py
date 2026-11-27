@@ -11,10 +11,9 @@ from lightllm.common.attention.backends.gqa import GQALayerConfig
 from lightllm.common.attention.backends.gqa import fa3 as gqa_fa3
 from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
 from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQADecodeBackend, FlashInferGQAPrefillBackend
-from lightllm.common.attention.backends.mla import MLADecodeLayerConfig
+from lightllm.common.attention.backends.mla import MLADecodeLayerConfig, MLAPrefillLayerConfig
 from lightllm.common.attention.backends.mla.fa3 import FA3MLADecodeBackend
-from lightllm.common.attention.backends.mla import flashinfer as mla_flashinfer
-from lightllm.common.attention.backends.mla.flashinfer import FlashInferMLADecodeBackend
+from lightllm.common.attention.backends.mla.flashinfer import FlashInferMLADecodeBackend, FlashInferMLAPrefillBackend
 from lightllm.common.basemodel import attention_backend_manager
 from lightllm.utils import workspace_utils
 from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
@@ -70,14 +69,15 @@ def test_flashinfer_gqa_builders_share_one_workspace_and_mla_has_its_own(monkeyp
     # The context's workspaces come from the process-wide store, keyed by the current device.
     monkeypatch.setattr(workspace_utils, "get_current_device_id", lambda: current_device_id)
 
-    fp = set_up(FlashInferGQAPrefillBackend, gqa(), ctx)._workspace()
-    fp8 = set_up(FlashInferGQAPrefillBackend, gqa(kv_quant="fp8_per_tensor"), ctx)._workspace()
-    mla = mla_flashinfer._workspace(ctx)
+    fp = set_up(FlashInferGQAPrefillBackend, gqa(), ctx).workspace
+    fp8 = set_up(FlashInferGQAPrefillBackend, gqa(kv_quant="fp8_per_tensor"), ctx).workspace
+    mla_config = MLAPrefillLayerConfig(qk_nope_head_dim=128, v_head_dim=128, **MLA_COMMON)
+    mla = set_up(FlashInferMLAPrefillBackend, mla_config, ctx).workspace
 
     assert fp8 is fp and mla is not fp
     assert [allocation[1] for allocation in allocations] == [512 * 1024 * 1024, 256 * 1024 * 1024]
     current_device_id = 1
-    assert set_up(FlashInferGQAPrefillBackend, gqa(), ctx)._workspace() is not fp
+    assert set_up(FlashInferGQAPrefillBackend, gqa(), ctx).workspace is not fp
     assert allocations[-1][3] == 1
 
 

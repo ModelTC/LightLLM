@@ -36,11 +36,6 @@ class FlashInferMLADecodeAttState:
     page_size: int
 
 
-def _workspace(resources: AttentionBuildResources) -> torch.Tensor:
-    # Allocated on first use, so prefill-only and decode-only nodes create it only when needed.
-    return resources.get_workspace("flashinfer_mla", _WORKSPACE_BYTES, torch.int8)
-
-
 class FlashInferMLAPrefillBackend(
     AttentionBackend[MLAPrefillLayerConfig, "BatchPrefillWithRaggedKVCacheWrapper", MLAPrefillLayerInputs]
 ):
@@ -61,14 +56,14 @@ class FlashInferMLAPrefillBackend(
 
     def setup(self, resources: AttentionBuildResources) -> None:
         set_flashinfer_envs()
-        self.resources = resources
+        self.workspace = resources.get_workspace("flashinfer_mla", _WORKSPACE_BYTES, torch.int8)
 
     def build(self, infer_state: InferStateInfo) -> "BatchPrefillWithRaggedKVCacheWrapper":
         """Plan a fresh wrapper for the step's query and kv offsets."""
         import flashinfer
 
         config = self.layer_config
-        wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(_workspace(self.resources), "NHD")
+        wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(self.workspace, "NHD")
         wrapper.plan(
             qo_indptr=infer_state.b1_cu_q_seq_len.int(),
             kv_indptr=infer_state.b1_cu_kv_seq_len.int(),
@@ -115,7 +110,7 @@ class FlashInferMLADecodeBackend(
     def setup(self, resources: AttentionBuildResources) -> None:
         """Keep one page-index buffer per microbatch for batches of up to the CUDA graph batch size."""
         set_flashinfer_envs()
-        self.resources = resources
+        self.workspace = resources.get_workspace("flashinfer_mla", _WORKSPACE_BYTES, torch.int8)
         self.page_size = resources.page_size
         self.max_pages_per_request = triton.cdiv(resources.max_seq_len, self.page_size)
         self.max_batch_size = resources.max_cuda_graph_batch_size
@@ -175,7 +170,7 @@ class FlashInferMLADecodeBackend(
             )
             return FlashInferMLADecodeAttState(wrapper=wrapper, page_size=page_size)
         wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(
-            _workspace(self.resources),
+            self.workspace,
             use_cuda_graph=True,
             qo_indptr=q_indptr,
             kv_indices=kv_indices,
