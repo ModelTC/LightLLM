@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.basemodel.triton_kernel.ragged_topk import _load_exact_topk, try_exact_topk
 from lightllm.models.glm5_next.indexer import Glm5NextNsaInfer
 
 
@@ -90,6 +91,7 @@ def test_topk_without_flashinfer(indexer, monkeypatch, pools):
         return original_import(name, globals, locals, fromlist, level)
 
     monkeypatch.setattr(builtins, "__import__", import_without_flashinfer)
+    monkeypatch.setattr("lightllm.common.basemodel.triton_kernel.ragged_topk._load_exact_topk", lambda: None)
     logits = torch.randint(0, 8, (4, pools + 128), device="cuda").float()[:, :pools]
     lengths = torch.tensor([0, 511, pools // 2, pools - 1], device="cuda", dtype=torch.int32)
     indices = torch.empty(4, 512, device="cuda", dtype=torch.int32)
@@ -124,6 +126,19 @@ def test_topk_2048_with_concentrated_candidates(indexer, width):
     lengths = torch.tensor([width, 1023], device="cuda", dtype=torch.int32)
     indices = torch.empty(2, 2048, device="cuda", dtype=torch.int32)
     indexer.select_topk_indices(logits, lengths, indices)
+    _assert_topk(logits, lengths, indices)
+
+
+def test_standalone_topk_excludes_invalid_nan_and_keeps_valid_negative_inf():
+    if torch.cuda.get_device_capability() != (9, 0) or _load_exact_topk() is None:
+        pytest.skip("Standalone Hopper Top-K is unavailable")
+
+    logits = torch.full((2, 8192), -torch.inf, device="cuda")
+    logits[:, :17] = 1
+    lengths = torch.tensor([8189, 127], device="cuda", dtype=torch.int32)
+    logits.masked_fill_(torch.arange(8192, device="cuda")[None, :] >= lengths[:, None], torch.nan)
+    indices = torch.empty(2, 512, device="cuda", dtype=torch.int32)
+    assert try_exact_topk(logits, lengths, indices)
     _assert_topk(logits, lengths, indices)
 
 

@@ -6,7 +6,7 @@ import triton
 import triton.language as tl
 
 from lightllm.utils.custom_kernel_utis import get_pdl_launch_kwargs
-from lightllm.common.basemodel.triton_kernel.ragged_topk import ragged_topk, use_page_table_topk
+from lightllm.common.basemodel.triton_kernel.ragged_topk import ragged_topk, try_exact_topk, use_page_table_topk
 
 
 @triton.jit
@@ -106,10 +106,10 @@ def indexer_topk(scores, valid_lengths, page_table, compressed_kv_indices, page_
     scores: FP32 [T, width] with contiguous columns; valid_lengths: int32 [T].
     page_table and outputs use int32, with contiguous output entries per query.
     Dense rows use a Triton page transform. Tiny short-row batches fuse
-    pairwise rank selection and page mapping. FlashInfer fuses selection and
-    mapping for supported shapes. The remaining shapes select ragged Top-K
-    indices before mapping them with Triton. Output ordering is unspecified
-    and padding is -1.
+    pairwise rank selection and page mapping. The standalone SGLang kernel
+    and FlashInfer fuse selection and mapping for supported shapes. The
+    remaining shapes select ragged Top-K indices before mapping them with
+    Triton. Output ordering is unspecified and padding is -1.
     """
     if scores.shape[0] == 0:
         return
@@ -152,6 +152,8 @@ def indexer_topk(scores, valid_lengths, page_table, compressed_kv_indices, page_
             num_stages=1,
             **get_pdl_launch_kwargs(scores.device),
         )
+    elif try_exact_topk(scores, valid_lengths, compressed_kv_indices, page_table, page_size, out_logical_indices):
+        return
     elif (
         use_page_table_topk(scores, topk) and logical_indices.is_contiguous() and compressed_kv_indices.is_contiguous()
     ):

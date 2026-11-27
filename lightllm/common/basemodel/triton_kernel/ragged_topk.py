@@ -1,8 +1,56 @@
+from functools import lru_cache
+from pathlib import Path
+
 import torch
 import triton
 import triton.language as tl
 
 from lightllm.utils.sgl_utils import sgl_ops
+
+
+@lru_cache(maxsize=1)
+def _load_exact_topk():
+    path = Path("/opt/lightllm-topk/topk.so")
+    if not path.is_file():
+        return None
+
+    from tvm_ffi import load_module
+
+    return load_module(str(path))
+
+
+def try_exact_topk(scores, lengths, out, page_table=None, page_size=1, raw_out=None):
+    rows, width = scores.shape
+    if (
+        not rows
+        or not 4096 <= width <= 8192
+        or width % 4
+        or out.shape[1] not in (128, 512, 2048)
+        or not scores.is_cuda
+        or scores.dtype != torch.float32
+        or scores.stride(1) != 1
+        or scores.stride(0) % 4
+        or scores.storage_offset() % 4
+        or lengths.dtype != torch.int32
+        or out.dtype != torch.int32
+        or not out.is_contiguous()
+    ):
+        return False
+    if page_table is not None and (
+        page_size <= 0 or page_size & (page_size - 1) or page_table.dtype != torch.int32 or page_table.stride(1) != 1
+    ):
+        return False
+    if raw_out is not None and (not raw_out.is_contiguous() or raw_out.dtype != torch.int32):
+        return False
+    kernel = _load_exact_topk()
+    if kernel is None or torch.cuda.get_device_capability(scores.device) != (9, 0):
+        return False
+
+    lengths = lengths.contiguous()
+    metadata = lengths.new_empty((rows + 1, 2))
+    kernel.plan(lengths, metadata, -1)
+    kernel.select_topk(scores, lengths, page_table, out, page_size, metadata, raw_out)
+    return True
 
 
 @triton.jit
@@ -264,6 +312,8 @@ def ragged_topk(scores, lengths, out):
         return
     if width <= count and scores.is_cuda:
         _single_block_radix_topk(scores, lengths, out)
+        return
+    if try_exact_topk(scores, lengths, out):
         return
     if (
         width >= 65536

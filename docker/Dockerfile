@@ -157,3 +157,18 @@ RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ]; then \
       cp LICENSE /opt/lightllm-marlin/LICENSE; \
       cd / && rm -rf /tmp/sglang-marlin; \
     fi
+
+ARG RAGGED_TOPK_REF=4f1fa3ad050c095825434436e65d65e037c23b1c
+RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ]; then \
+      set -e; \
+      mkdir /tmp/sglang-topk && cd /tmp/sglang-topk; \
+      git init -q; \
+      git remote add origin https://github.com/sgl-project/sglang.git; \
+      git fetch --depth=1 --filter=blob:none origin "${RAGGED_TOPK_REF}"; \
+      git checkout FETCH_HEAD -- LICENSE python/sglang/kernels/jit/include \
+        python/sglang/kernels/jit/csrc/deepseek_v4/topk_v2.cuh; \
+      python /lightllm/tools/build_ragged_topk.py \
+        /tmp/sglang-topk/python/sglang/kernels/jit /opt/lightllm-topk; \
+      cp LICENSE /opt/lightllm-topk/LICENSE; \
+      cd / && rm -rf /tmp/sglang-topk; \
+    fi
