@@ -8,10 +8,10 @@ from lightllm.common.quantization.quantize_method import WeightPack
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_marlin_repacking_merged_awq_projection(dtype):
+@pytest.mark.parametrize("widths,tokens", [((192, 64, 64), 17), ((512, 256, 256), 128), ((512, 256, 256), 129)])
+def test_marlin_repacking_merged_awq_projection(dtype, widths, tokens):
     torch.manual_seed(12)
     height = 256
-    widths = (192, 64, 64)
     width = sum(widths)
     packed = torch.randint(-(2 ** 31), 2 ** 31 - 1, (height, width // 8), dtype=torch.int32, device="cuda")
     zeros = torch.randint_like(packed[: height // 128], -(2 ** 31), 2 ** 31 - 1)
@@ -23,12 +23,12 @@ def test_marlin_repacking_merged_awq_projection(dtype):
     values = ((packed[..., None] >> shifts) & 15).view(height // 128, 128, width)
     decoded_zeros = ((zeros[..., None] >> shifts) & 15).view(height // 128, width)
     reference_weight = ((values - decoded_zeros[:, None]).float() * scales.float()[:, None]).view(height, width)
-    activations = torch.randn(17, height, device="cuda", dtype=dtype)
+    activations = torch.randn(tokens, height, device="cuda", dtype=dtype)
     expected = activations.float() @ reference_weight
     original_ptr = packed.data_ptr()
     prepare_awq(pack)
     assert pack.weight.data_ptr() == original_ptr
-    out = torch.empty(17, width, dtype=dtype, device="cuda")
+    out = torch.empty(tokens, width, dtype=dtype, device="cuda")
     assert dense_awq_marlin(activations, pack, out) is out
     relative_error = (out.float() - expected).norm() / expected.norm()
     assert relative_error < 0.008

@@ -1,0 +1,31 @@
+diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin/gptq_marlin.cuh b/python/sglang/jit_kernel/csrc/gemm/marlin/gptq_marlin.cuh
+--- a/python/sglang/jit_kernel/csrc/gemm/marlin/gptq_marlin.cuh
++++ b/python/sglang/jit_kernel/csrc/gemm/marlin/gptq_marlin.cuh
+@@ -442,13 +442,15 @@ exec_config_t determine_exec_config(
+     bool has_zp,
+     bool is_zp_float,
+     int max_shared_mem,
+-    int sms) {
++    int sms,
++    bool prefer_n64) {
+   exec_config_t exec_cfg = exec_config_t{1, thread_config_t{-1, -1, -1}};
+   thread_config_t* thread_configs = thread_m_blocks > 1 ? large_batch_thread_configs : small_batch_thread_configs;
+   int thread_configs_size = thread_m_blocks > 1 ? sizeof(large_batch_thread_configs) / sizeof(thread_config_t)
+                                                 : sizeof(small_batch_thread_configs) / sizeof(thread_config_t);
+
++  const int start = prefer_n64 ? thread_configs_size - 1 : 0;
+   for (int i = 0; i < thread_configs_size; i++) {
+-    thread_config_t th_config = thread_configs[i];
++    thread_config_t th_config = thread_configs[(i + start) % thread_configs_size];
+
+     if (!is_valid_config(
+@@ -647,7 +649,8 @@ void marlin_mm(
+           has_zp,
+           is_zp_float,
+           max_shared_mem,
+-          sms);
++          sms,
++          prob_m <= 128 && prob_n >= 1024 && prob_n <= 5120);
+       thread_tfg = exec_cfg.tb_cfg;
+       if (thread_tfg.thread_k == -1 && max_thread_m_blocks > 1) {
+         max_thread_m_blocks--;

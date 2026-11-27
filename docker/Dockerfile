@@ -152,6 +152,7 @@ RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ]; then \
       git fetch --depth=1 --filter=blob:none https://github.com/sgl-project/sglang.git "${AWQ_MARLIN_REF}"; \
       git checkout FETCH_HEAD -- LICENSE python/sglang/jit_kernel/include \
         python/sglang/jit_kernel/csrc/gemm/marlin python/sglang/jit_kernel/csrc/gemm/marlin_moe; \
+      git apply /lightllm/tools/awq_marlin_hopper.patch; \
       python /lightllm/tools/build_awq_marlin.py \
         /tmp/sglang-marlin/python/sglang/jit_kernel /opt/lightllm-marlin; \
       cp LICENSE /opt/lightllm-marlin/LICENSE; \
