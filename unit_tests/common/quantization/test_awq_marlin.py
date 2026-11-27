@@ -36,7 +36,7 @@ def test_marlin_repacking_merged_awq_projection(dtype, widths, tokens):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("tokens,experts", [(95, 8), (96, 8), (128, 8), (128, 32)])
+@pytest.mark.parametrize("tokens,experts", [(48, 8), (64, 32), (95, 8), (96, 8), (128, 8), (128, 32)])
 def test_moe_marlin_awq_reduction(dtype, tokens, experts):
     torch.manual_seed(12)
     hidden, intermediate = 2048, 768
@@ -62,15 +62,19 @@ def test_moe_marlin_awq_reduction(dtype, tokens, experts):
     logits = torch.randn(tokens, experts, device="cuda")
     logits[:, 0] += 6
     scores, ids = logits.softmax(dim=-1).topk(2)
-    ids = ids.int()
-    expected = torch.empty(tokens, 2, hidden, device="cuda", dtype=dtype)
-    for expert in range(experts):
-        rows, slots = (ids == expert).nonzero(as_tuple=True)
-        projected = (inputs[rows].float() @ dense_gate[expert]).to(dtype)
-        gated, values = projected.chunk(2, dim=-1)
-        activated = (torch.nn.functional.silu(gated.float()) * values.float()).to(dtype)
-        expected[rows, slots] = ((activated.float() @ dense_down[expert]) * scores[rows, slots, None]).to(dtype)
-    expected = expected.float().sum(dim=1).to(dtype).float()
+    ids = ids.to(torch.int32)
+
+    def reference():
+        expected = torch.empty(tokens, 2, hidden, device="cuda", dtype=dtype)
+        for expert in range(experts):
+            rows, slots = (ids == expert).nonzero(as_tuple=True)
+            projected = (inputs[rows].float() @ dense_gate[expert]).to(dtype)
+            gated, values = projected.chunk(2, dim=-1)
+            activated = (torch.nn.functional.silu(gated.float()) * values.float()).to(dtype)
+            expected[rows, slots] = ((activated.float() @ dense_down[expert]) * scores[rows, slots, None]).to(dtype)
+        return expected.float().sum(dim=1).to(dtype).float()
+
+    expected = reference()
     actual = moe_awq_marlin(inputs.clone(), gate, down, scores, ids, None, None, False)
     assert (actual.float() - expected).norm() / expected.norm() < 0.012
 
@@ -81,3 +85,19 @@ def test_moe_marlin_awq_reduction(dtype, tokens, experts):
         for _ in range(100):
             graph.replay()
             assert torch.equal(replayed, actual)
+
+    if tokens in (48, 64):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            replayed = moe_awq_marlin(inputs.clone(), gate, down, scores, ids, None, None, False)
+        for replay in range(24):
+            inputs.normal_()
+            logits.normal_()
+            logits[:, replay % experts] += 6
+            next_scores, next_ids = logits.softmax(dim=-1).topk(2)
+            scores.copy_(next_scores)
+            ids.copy_(next_ids)
+            graph.replay()
+            expected = reference()
+            tolerance = 0.002 if dtype == torch.float16 else 0.01
+            assert (replayed.float() - expected).norm() / expected.norm() < tolerance

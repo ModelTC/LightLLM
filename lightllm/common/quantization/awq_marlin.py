@@ -115,10 +115,7 @@ def moe_awq_marlin(inputs, gate, down, route_weights, route_ids, alpha, limit, c
     if tokens == 0:
         return inputs
     experts, hidden, intermediate = gate.weight.shape[0], inputs.shape[-1], down.weight.shape[-2] * 16
-    block = next((block for block in (8, 16, 32, 48, 64) if tokens * topk / experts / block < 0.9), 64)
-    use_fp32_reduce = tokens >= 96
-    if use_fp32_reduce:
-        block = max(block, 32)
+    block = next((block for block in (32, 48, 64) if tokens * topk / experts / block < 0.9), 64)
     if topk == 2 and experts == 8 and 128 <= tokens <= 256 and hidden == 2048 and intermediate == 768:
         block = 32
     routes = route_ids.numel()
@@ -136,9 +133,7 @@ def moe_awq_marlin(inputs, gate, down, route_weights, route_ids, alpha, limit, c
     empty_int = torch.empty(0, dtype=torch.int32, device=device)
     max_blocks = _sm_count(device) * 4
     locks = torch.zeros(max_blocks, dtype=torch.int32, device=device)
-    scratch = torch.empty(
-        max_blocks * max(block, 16) * 256 if use_fp32_reduce else 0, dtype=torch.float32, device=device
-    )
+    scratch = torch.empty(max_blocks * block * 256, dtype=torch.float32, device=device)
     kernel = _load_module(f"moe_{_KERNEL_DTYPE[inputs.dtype]}").moe_wna16_marlin_gemm
 
     def gemm(activation, pack, width, route_count, apply_route_weight):
@@ -174,8 +169,8 @@ def moe_awq_marlin(inputs, gate, down, route_weights, route_ids, alpha, limit, c
             True,
             pack.weight_scale.shape[1],
             128 if pack.weight_scale.shape[1] > 1 else -1,
-            not use_fp32_reduce,
-            use_fp32_reduce,
+            False,
+            True,
             False,
         )
         return out
