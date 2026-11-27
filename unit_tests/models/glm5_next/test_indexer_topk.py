@@ -118,7 +118,7 @@ def test_topk_when_row_width_fits(indexer, width):
     assert (output[:, 1::2] == -2).all()
 
 
-@pytest.mark.parametrize("width", [4096, 8192])
+@pytest.mark.parametrize("width", [4096, 8192, 12288, 16384])
 def test_topk_2048_with_concentrated_candidates(indexer, width):
     logits = torch.linspace(1.0, 1.01, width, device="cuda").repeat(2, 1)
     lengths = torch.tensor([width, 1023], device="cuda", dtype=torch.int32)

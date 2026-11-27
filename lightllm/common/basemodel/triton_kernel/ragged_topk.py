@@ -250,6 +250,13 @@ def _single_block_radix_topk(scores, lengths, out):
     )
 
 
+def use_page_table_topk(scores, count):
+    width = scores.shape[1]
+    return scores.stride(1) == 1 and (
+        (2048 < width < 65536 and count <= 512) or (8192 <= width <= 16384 and count == 2048)
+    )
+
+
 def ragged_topk(scores, lengths, out):
     rows, width = scores.shape
     count = out.shape[1]
@@ -297,7 +304,7 @@ def ragged_topk(scores, lengths, out):
         if selected.shape[1] < count:
             out[:, selected.shape[1] :].fill_(-1)
     else:
-        if 2048 < width < 65536 and count <= 512 and scores.stride(1) == 1 and out.is_contiguous():
+        if use_page_table_topk(scores, count) and out.is_contiguous():
             identity_page = torch.zeros((rows, 1), dtype=torch.int32, device=scores.device)
             top_k_page_table_transform(
                 scores, identity_page, lengths.contiguous(), count, page_size=triton.next_power_of_2(width), out=out

@@ -6,7 +6,7 @@ import triton
 import triton.language as tl
 
 from lightllm.utils.custom_kernel_utis import get_pdl_launch_kwargs
-from lightllm.common.basemodel.triton_kernel.ragged_topk import ragged_topk
+from lightllm.common.basemodel.triton_kernel.ragged_topk import ragged_topk, use_page_table_topk
 
 
 @triton.jit
@@ -153,10 +153,7 @@ def indexer_topk(scores, valid_lengths, page_table, compressed_kv_indices, page_
             **get_pdl_launch_kwargs(scores.device),
         )
     elif (
-        2048 < scores.shape[1] < 65536
-        and topk <= 512
-        and logical_indices.is_contiguous()
-        and compressed_kv_indices.is_contiguous()
+        use_page_table_topk(scores, topk) and logical_indices.is_contiguous() and compressed_kv_indices.is_contiguous()
     ):
         from flashinfer import top_k_page_table_transform
 

@@ -319,3 +319,14 @@ def test_topk_uses_configured_output_capacity(topk, width):
     raw = torch.empty_like(out)
     indexer_topk.indexer_topk(scores, lengths, pages, out, 64, raw)
     assert_topk(scores, lengths, pages, out, raw, 64)
+
+
+@pytest.mark.parametrize("width", [8192, 12288, 16384])
+def test_topk_2048_writes_paged_and_raw_indices(width):
+    scores = torch.linspace(1.0, 1.01, width, device="cuda").repeat(2, 1).flip(1)
+    lengths = torch.tensor([width, 1023], dtype=torch.int32, device="cuda")
+    pages = torch.randint(0, 1000, (2, (width + 63) // 64), dtype=torch.int32, device="cuda")
+    out = torch.empty((2, 2048), dtype=torch.int32, device="cuda")
+    raw = torch.empty_like(out)
+    indexer_topk.indexer_topk(scores, lengths, pages, out, 64, raw)
+    assert_topk(scores, lengths, pages, out, raw, 64)
