@@ -8,7 +8,6 @@ import torch
 from frozendict import frozendict
 
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
-from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
 from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils import sgl_utils
@@ -125,7 +124,8 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, pa
     )
     copy_calls = []
     monkeypatch.setattr(fa3_utils, "page_table_copy", lambda **kwargs: copy_calls.append(kwargs))
-    att_state = impl.build(configure_attention_step(infer_state, cuda_graph_max_kv_seq_len=graph_capacity))
+    infer_state.cuda_graph_max_kv_seq_len = graph_capacity
+    att_state = impl.build(infer_state)
     # 模拟 CudaGraph._capture_decode 对 infer_state 的修改。
     infer_state.max_kv_seq_len = graph_capacity
     calls = []

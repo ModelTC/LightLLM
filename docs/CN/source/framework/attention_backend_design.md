@@ -46,20 +46,20 @@ GQA 层继承 `GQATransformerLayerInferTpl`（Llama、Bloom 及其派生模型�
 
 `AttentionBackendManager` 与 `AttentionStateManager` 的组织方式一致：主模型在 `prepare_attention_states` 中创建两个 manager，MTP 草稿模型引用同一实例；manager 内按模型角色（`att_state_role`，即 `main`、`draft0` … `draft35`）区分各模型，层按 `(角色, 阶段, 逻辑层号)` 查找 backend，与按 `(角色, 状态类型, 逻辑层号)` 查找 State 对应。
 
-- `register_backends(model)` 在 `init_runtime` 的 `_init_attention` 中为本角色调用一次，同一角色重复登记时报错。它从模型读取一次本角色的 `resources` 与 `step_config`，再对每层调用 `attention_config(model)`，为每个阶段独立选择实现。同一角色内阶段、layer config 和请求的 backend 都相同的层共用实例；不同角色不共用实例，因为实例持有本角色的跨步存储和 CUDA graph 张量。某阶段的 layer config 为 `None` 时该层在此阶段不登记，例如 DFlash 草稿层只在 decode 计算。每个阶段的每个 `state_key` 由第一个选出的实例负责创建状态。没有 attention State 的角色（纯 FFN 草稿模型）不登记 backend，`has_attention(role)` 为假。
+- `register_backends(model)` 在 `init_runtime` 的 `_init_attention` 中为本角色调用一次，同一角色重复登记时报错。它从模型取得本角色的构建资源，再对每层调用 `attention_config(model)`，为每个阶段独立选择实现。同一角色内阶段、layer config 和请求的 backend 都相同的层共用实例；不同角色不共用实例，因为实例持有本角色的跨步存储和 CUDA graph 张量。某阶段的 layer config 为 `None` 时该层在此阶段不登记，例如 DFlash 草稿层只在 decode 计算。每个阶段的每个 `state_key` 由第一个选出的实例负责创建状态。没有 attention State 的角色（纯 FFN 草稿模型）不登记 backend，`has_attention(role)` 为假。
 - `get_backend(model_role, phase, logical_layer_id)` 返回该层在该阶段的 backend，层在每次调用 attention 时查找。
 - `create_att_state(infer_state)` 在每个 microbatch 对 `infer_state.att_state_role` 本阶段各组的代表实例调用一次 `backend.create_att_state`，返回 `{state_key: att_state}`。没有状态组的阶段返回空字典。
 - `requires_cpu_cache_sync`：是否有任一角色登记的实现不能与 CPU cache 搬运在 GPU 上并行。
 
-`register_backends` 从模型读取一次本角色的全部静态信息，之后不再持有模型：
+`register_backends` 从模型取得本角色的构建资源，之后不再持有模型：
 
 - `resources[role]` 是该模型的资源与容量（`AttentionBuildResources`），供 backend 的 `setup` 创建跨步存储（第 3 节）。
-- `step_configs[role]` 是 `configure_attention_step` 的关键字参数：decode 每请求行数、是否为 dynamic verify 布局、线性注意力的投机状态索引和 CUDA graph 的 KV 长度容量。`configure_attention_step` 根据当前阶段和 graph 模式把适用值写入 `InferStateInfo`。
-- 因此 graph 容量必须在 `_init_attention` 之前确定：`graph_max_len_in_batch` 的 MTP 余量调整在模型构造函数中完成，而不是在 `_init_cudagraph` 中。
+- 每步所需的 decode 行数、dynamic verify 布局、投机状态索引和 CUDA graph KV 长度容量由模型在 `_create_inferstate` 中直接写入 `InferStateInfo`，manager 只分派到本角色、本阶段的 backend。
+- `graph_max_len_in_batch` 的 MTP 余量调整在模型构造函数中完成，首次准备 graph 步之前就已确定。
 
 层的因果性（`attention_is_causal`）在 `attention_config` 中写入 layer config。
 
-每步只有一个入口。`model._create_inferstate(model_input, microbatch_index, graph_mode=...)` 填充请求字段（包括 `att_state_manager` 与 `attention_backend_manager`），调用 `init_some_extra_state` 生成索引张量，再执行 `infer_state.att_states = model.attention_backend_manager.create_att_state(infer_state)`，返回完整的状态。`graph_mode`（`GraphMode.EAGER`、`CAPTURE`、`REPLAY`）在创建时传入并保存在 `infer_state.graph_mode` 上，backend 据此准备 eager、捕获和 replay 步。只写 KV cache 的步骤（DSpark 的 KV-only 提交）传 `build_attention=False`。
+每步只有一个入口。`model._create_inferstate(model_input, microbatch_index, graph_mode=...)` 填充请求字段（包括 `att_state_manager` 与 `attention_backend_manager`），调用 `init_some_extra_state` 生成索引张量，然后从 `MtpManager` 取得 decode 每请求行数、从模型参数判断 dynamic verify 布局、从本角色的 recurrent State 取得投机状态索引，并在 graph 步检查和填入 KV 长度容量，最后调用 `attention_backend_manager.create_att_state(infer_state)`，返回完整的状态。`graph_mode`（`GraphMode.EAGER`、`CAPTURE`、`REPLAY`）在创建时传入并保存在 `infer_state.graph_mode` 上，backend 据此准备 eager、捕获和 replay 步。只写 KV cache 的步骤（DSpark 的 KV-only 提交）传 `build_attention=False`；这些步骤和没有 attention backend 的角色都跳过 attention 字段准备与状态构建。
 
 ### 2.3 模型层直接调用 backend
 
@@ -127,7 +127,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 - builder 直接读取模型为当前 microbatch 准备的 `InferStateInfo`。
 - `req_to_token_indexs[b_req_idx[i], pos]` 是请求 i 第 pos 个 token 的物理 cache 槽位。
 - decode 默认每个请求一行。投机解码时，固定布局下每个请求有 `decode_rows_per_request` 个连续行；dynamic verify 布局下行数可变，相同 `b_req_idx` 的连续行属于同一请求，`pad_req_idx` 的行是 padding，各自独立。
-- 线性注意力的投机解码行从请求最后一个被接受的行恢复状态；`req_to_mtp_state_index` 在登记本角色时从它的 recurrent 状态取得，存于 `step_configs[role]`，decode 行数大于 1 时写入 batch。
+- 线性注意力的投机解码行从请求最后一个被接受的行恢复状态；模型在 `_init_attention` 检查每个角色最多只有一个带投机状态索引的 recurrent State。每步 decode 行数大于 1 时，`_create_inferstate` 将本角色 State 的 `mtp_state_index` 引用直接写入 `req_to_mtp_state_index`；prefill 和单行 decode 保持为 `None`。
 - `cuda_graph_max_kv_seq_len` 在捕获和 replay 步给出 graph 的长度容量，eager 步为 `None`；`uses_cuda_graph` 是唯一的 graph 开关。
 
 ### 4.3 AttentionBackend.build
@@ -236,7 +236,7 @@ lightllm/common/attention/          # 不知道模型的存在
 │       └── <backend>.py            # AttState、Backend
 └── kernels/<family>/               # Triton kernel 与封装
 lightllm/common/basemodel/
-├── attention_backend_manager.py    # AttentionBackendManager、LayerAttentionConfig、configure_attention_step
+├── attention_backend_manager.py    # AttentionBackendManager、LayerAttentionConfig
 ├── basemodel.py                    # _init_attention、_create_inferstate
 └── infer_struct.py                 # GraphMode、当前 microbatch 的 att_states
 ```

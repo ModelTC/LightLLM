@@ -33,10 +33,6 @@ RANK, ROPE, TOPK, SCALE = 512, 64, 2048, 1 / 24
 SLOTS, MAX_LEN = 16384, 4096
 
 
-# The model's step config: graph steps cover MAX_LEN.
-STEP_CONFIG = dict(cuda_graph_max_kv_seq_len=MAX_LEN)
-
-
 def layer_attention(heads, kv_cache_format):
     """Attention matching a DeepSeek V3.2 layer's sparse MLA spec."""
     config = SparseMLALayerConfig(
@@ -70,6 +66,7 @@ def make_infer(req_to_token, lengths, *, capture=False, replay=False, microbatch
     infer.max_q_seq_len = 1
     infer.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token, HOLD_REQUEST_ID=len(lengths) + 1)
     infer.graph_mode = GraphMode.CAPTURE if capture else GraphMode.REPLAY if replay else GraphMode.EAGER
+    infer.cuda_graph_max_kv_seq_len = MAX_LEN if infer.uses_cuda_graph else None
     infer.microbatch_index = microbatch
     (
         infer.b_q_seq_len,
@@ -82,7 +79,7 @@ def make_infer(req_to_token, lengths, *, capture=False, replay=False, microbatch
 
 
 def decode_att_state(attention, infer):
-    return attention.att_state(infer, STEP_CONFIG)
+    return attention.att_state(infer)
 
 
 def select(req_to_token, lengths, out, seed):
@@ -326,7 +323,7 @@ def test_fp8_ds_mla_flashmla_prefill_matches_reference(ready, ends, flashmla_api
         current_kv=current_kv,
     )
     destination = torch.empty((rows, heads, RANK), device="cuda", dtype=q.dtype) if use_destination else None
-    out = attention.run("prefill", attention.att_state(infer, STEP_CONFIG), inputs, out=destination)
+    out = attention.run("prefill", attention.att_state(infer), inputs, out=destination)
     if destination is not None:
         assert out is destination
     elif flashmla_api is not None:

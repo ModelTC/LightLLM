@@ -83,17 +83,12 @@ def kda_layer_config(
 
 
 class KDAAttention:
-    """A KDA layer's attention outside a model: the set-up backends its layer group uses.
+    """A KDA layer's attention outside a model: the set-up backends its layer group uses."""
 
-    step_config holds configure_attention_step's keywords for the model's decode rows; each step adds
-    the role's recurrent state index.
-    """
-
-    def __init__(self, layer_config, step_config=None):
+    def __init__(self, layer_config):
         from lightllm.common.attention.backends.kda import triton as kda
 
         self.layer_config = layer_config
-        self.step_config = {} if step_config is None else step_config
         replay = layer_config.replay
         backend_classes = {
             "prefill": kda.ReplayKDAPrefillBackend if replay else kda.TritonKDAPrefillBackend,
@@ -119,18 +114,7 @@ class KDAStep:
         self.att_state = None
 
     def init_state(self):
-        from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
-
-        infer, attention = self.infer, self.attention
-        index = None
-        if getattr(infer, "att_state_manager", None) is not None:
-            # The role's recurrent state index, as AttentionBackendManager reads it.
-            states = infer.att_state_manager.get_bounded_attention_states(infer.att_state_role)
-            indices = [state.mtp_state_index for state in states if getattr(state, "mtp_state_index", None) is not None]
-            assert len(indices) <= 1
-            index = indices[0] if indices else None
-        batch = configure_attention_step(infer, **{**attention.step_config, "req_to_mtp_state_index": index})
-        self.att_state = attention.backends[self.phase].build(batch)
+        self.att_state = self.attention.backends[self.phase].build(self.infer)
 
     def run(self, params, alloc_func=torch.empty):
         """params is kda_params(...); returns [rows, num_heads, head_dim]."""

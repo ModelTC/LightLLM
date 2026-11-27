@@ -12,7 +12,6 @@ import torch
 
 from lightllm.common.attention.backends.sparse_mla.flashmla import FlashMLASparseDecodeBackend
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
-from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
 
@@ -28,13 +27,12 @@ SLOTS, TOPK_WIDTH, SCALE = 8192, 2176, 0.0625
 
 
 def make_backend():
-    """A GLM-5 FP8 layer group's decode backend, with the model's step config."""
+    """A GLM-5 FP8 layer group's decode backend."""
     pytest.importorskip("flash_mla")
     from unit_tests.models.glm5_next.test_fp8_kv import _layer_config
 
     config = _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), SCALE)
     return SimpleNamespace(
-        step_config=dict(cuda_graph_max_kv_seq_len=SLOTS),
         decode_backend=FlashMLASparseDecodeBackend(config),
     )
 
@@ -53,6 +51,7 @@ def make_infer(lengths, *, capture=False, replay=False, microbatch=0):
     infer.max_q_seq_len = 1
     infer.req_manager = SimpleNamespace(req_to_token_indexs=None, HOLD_REQUEST_ID=len(lengths) + 1)
     infer.graph_mode = GraphMode.CAPTURE if capture else GraphMode.REPLAY if replay else GraphMode.EAGER
+    infer.cuda_graph_max_kv_seq_len = SLOTS if infer.uses_cuda_graph else None
     infer.microbatch_index = microbatch
     (
         infer.b_q_seq_len,
@@ -68,7 +67,7 @@ def init_decode_state(backend, infer):
     """Prepare the attention state of one decode microbatch."""
     from unit_tests.models.glm5_next.test_fp8_kv import _decode
 
-    att_state = backend.decode_backend.build(configure_attention_step(infer, **backend.step_config))
+    att_state = backend.decode_backend.build(infer)
     return SimpleNamespace(att_state=att_state, decode_att=lambda q, kv, params: _decode(att_state, q, kv, params))
 
 

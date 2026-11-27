@@ -10,7 +10,6 @@ from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerInputs
 from lightllm.common.basemodel.attention_backend_manager import (
     AttentionBackendManager,
     LayerAttentionConfig,
-    configure_attention_step,
 )
 
 
@@ -22,7 +21,7 @@ def set_up(backend_cls, layer_config, resources):
 
 
 class GroupsRunner:
-    """model needs what model initialization reads (args, capacities, mtp_manager, is_mtp_draft_model).
+    """model needs what model initialization reads (args and capacities).
 
     The runner registers one layer (logical layer 0) with these configs. A model without
     att_state_manager is given one with an attention state and no recurrent state.
@@ -77,11 +76,10 @@ class LayerAttention:
     def backend_name(self, phase: str) -> str:
         return self.backends[phase].name
 
-    def att_state(self, infer_state, step_config: Optional[dict] = None) -> Any:
-        """Prepare the backend state for this microbatch; step_config holds configure_attention_step's keywords."""
+    def att_state(self, infer_state) -> Any:
+        """Build attention state from the microbatch's prepared inputs."""
         phase = "prefill" if infer_state.is_prefill else "decode"
-        batch = configure_attention_step(infer_state, **(step_config or {}))
-        return self.backends[phase].create_att_state(batch, self.ctx)
+        return self.backends[phase].create_att_state(infer_state, self.ctx)
 
     def run(self, phase: str, att_state, layer_inputs, *, out: torch.Tensor, alloc_func=torch.empty) -> torch.Tensor:
         return self.backends[phase].forward(att_state, layer_inputs, out=out, alloc_func=alloc_func)

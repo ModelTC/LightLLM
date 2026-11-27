@@ -332,10 +332,13 @@ class TpPartBaseModel:
     def _init_attention(self):
         """Register this role's layer backends in the shared AttentionBackendManager."""
         role = self.att_state_role
+        recurrent_count = sum(
+            getattr(state, "mtp_state_index", None) is not None
+            for state in self.att_state_manager.get_bounded_attention_states(role)
+        )
+        if recurrent_count > 1:
+            raise ValueError(f"expected at most one recurrent state for {role}, got {recurrent_count}")
         self.attention_backend_manager.register_backends(self)
-        for phase, groups in self.attention_backend_manager.state_groups[role].items():
-            if groups:
-                logger.info(f"{role} {phase} attention backends: {[backend.name for backend in groups.values()]}")
 
     def _align_decode_batch_size(self, batch_size: int) -> int:
         alignment = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
@@ -462,7 +465,26 @@ class TpPartBaseModel:
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
 
         infer_state.init_some_extra_state(self)
-        if build_attention:
+        if build_attention and self.attention_backend_manager.has_attention(infer_state.att_state_role):
+            if infer_state.uses_cuda_graph:
+                if self.graph_max_len_in_batch is None:
+                    raise ValueError(f"a {graph_mode.value} step needs the CUDA graph kv length capacity")
+                infer_state.cuda_graph_max_kv_seq_len = self.graph_max_len_in_batch
+            if not infer_state.is_prefill:
+                rows = self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
+                infer_state.decode_rows_per_request = rows
+                infer_state.dynamic_decode_rows = (
+                    rows > 1 and not self.is_mtp_draft_model and self.args.mtp_dynamic_verify
+                )
+                if rows > 1:
+                    infer_state.req_to_mtp_state_index = next(
+                        (
+                            state.mtp_state_index
+                            for state in self.att_state_manager.get_bounded_attention_states(infer_state.att_state_role)
+                            if getattr(state, "mtp_state_index", None) is not None
+                        ),
+                        None,
+                    )
             infer_state.att_states = self.attention_backend_manager.create_att_state(infer_state)
         return infer_state
 

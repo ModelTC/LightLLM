@@ -372,13 +372,16 @@ class _Model:
         self.max_seq_length = self.graph_max_len_in_batch = 512
         self.tp_world_size_ = 1
         self.is_mtp_draft_model = False
-        self.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _: rows_per_request - 1)
+        self.rows_per_request = rows_per_request
 
 
 def _decode_state(runner, token_map, req_ids, lengths, microbatch_index=0, *, capture=False, replay=False):
     s = InferStateInfo()
     s.is_prefill = False
     s.graph_mode = GraphMode.CAPTURE if capture else GraphMode.REPLAY if replay else GraphMode.EAGER
+    s.cuda_graph_max_kv_seq_len = 512 if s.uses_cuda_graph else None
+    s.decode_rows_per_request = runner.model.rows_per_request
+    s.dynamic_decode_rows = runner.model.args.mtp_dynamic_verify
     s.input_ids = torch.zeros(len(lengths), device="cuda", dtype=torch.int64)
     s.batch_size, s.microbatch_index = len(lengths), microbatch_index
     s.b_req_idx = torch.tensor(req_ids, device="cuda", dtype=torch.int32)
@@ -462,7 +465,6 @@ def test_layer_group_replays_dynamic_verify_layout_through_cuda_graph(start_args
     model = _Model(args, 16, rows_per_request=3)
     config = gqa_config(kv_quant="fp8_per_head") if fp8 else gqa_config()
     runner = GroupsRunner(model, config, config)
-    assert model.attention_backend_manager.step_configs["main"]["dynamic_decode_rows"]
     token_map = paged_token_map(8, 16, seed=7)
     generator = torch.Generator(device="cuda").manual_seed(9)
     q = torch.randn(6, 8, 64, device="cuda", generator=generator).bfloat16()

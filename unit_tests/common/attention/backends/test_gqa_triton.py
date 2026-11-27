@@ -9,7 +9,6 @@ from lightllm.common.attention.backend import TensorAllocator
 from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton import TritonGQADecodeBackend, TritonGQAPrefillBackend
-from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 
 
@@ -144,7 +143,8 @@ def test_decode_graph_built_from_the_step(q_heads, kv_heads, allocator):
     # As in the serving decode path, the capture flag is set before the attention state are built and
     # capture raises max_kv_seq_len to the graph capacity only afterwards.
     owner.graph_mode = GraphMode.CAPTURE
-    att_state = backend.build(configure_attention_step(owner, cuda_graph_max_kv_seq_len=512))
+    owner.cuda_graph_max_kv_seq_len = 512
+    att_state = backend.build(owner)
     owner.max_kv_seq_len = 512
     q = torch.randn(2, q_heads, 64, device="cuda", dtype=torch.bfloat16)
     kv = torch.randn(1024, 2 * kv_heads, 64, device="cuda", dtype=q.dtype)

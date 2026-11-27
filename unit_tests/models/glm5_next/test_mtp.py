@@ -203,10 +203,8 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
             expected.append(output.reshape(1, heads, dim))
             expected_ssm[req * width + token] = state[0]
             row += 1
-    # Decode rows group by the model's speculative depth.
-    step_config = dict(decode_rows_per_request=mtp_step + 1, dynamic_decode_rows=dynamic)
     layer_config = kda_layer_config(heads=heads, dim=dim, replay=mode == "replay", mtp_step=mtp_step)
-    backend = KDAAttention(layer_config, step_config)
+    backend = KDAAttention(layer_config)
     resources = AttentionStateManager(request_capacity=4)
     config = ConvSSMStateConfig(
         logical_layer_ids=(0,),
@@ -237,6 +235,9 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
     manager = SimpleNamespace(HOLD_REQUEST_ID=3, req_to_token_indexs=None)
     infer = InferStateInfo()
     infer.is_prefill = False
+    infer.decode_rows_per_request = mtp_step + 1
+    infer.dynamic_decode_rows = dynamic
+    infer.req_to_mtp_state_index = selected.mtp_state_index if mtp_step else None
     infer.batch_size = tokens
     infer.b_req_idx = torch.tensor(request_rows, device="cuda", dtype=torch.int32)
     infer.b_seq_len = torch.ones(tokens, device="cuda", dtype=torch.int32)

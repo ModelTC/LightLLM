@@ -7,7 +7,6 @@ from lightllm.common.attention import selector
 from lightllm.common.attention.backends.gdn import GDNLayerConfig
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerInfer
 from lightllm.models.sensenova_loop.config import get_loop_layer_indices, get_loop_layer_types
@@ -122,10 +121,7 @@ def test_gdn_decode_keeps_logical_layer_state(
 
     def build_attention_states(backend):
         # The attention state the layers' group prepares for this step.
-        batch = configure_attention_step(
-            infer, decode_rows_per_request=mtp_step + 1, req_to_mtp_state_index=resource.mtp_state_index
-        )
-        infer.att_states = {backend.state_key: backend.create_att_state(batch, None)}
+        infer.att_states = {backend.state_key: backend.create_att_state(infer, None)}
 
     if device == "cuda":
         infer.b1_cu_q_seq_len = torch.tensor([0, 5], device=device, dtype=torch.int32)
@@ -138,6 +134,8 @@ def test_gdn_decode_keeps_logical_layer_state(
     infer.batch_size = mtp_step + 1
     infer.b_req_idx = infer.b_req_idx.repeat(infer.batch_size)
     infer.is_prefill = False
+    infer.decode_rows_per_request = mtp_step + 1
+    infer.req_to_mtp_state_index = resource.mtp_state_index if mtp_step else None
     infer.b_seq_len = torch.ones_like(infer.b_req_idx)
     untouched = [i for i in range(len(layers)) if i != storage_layer]
     for _ in range(2):

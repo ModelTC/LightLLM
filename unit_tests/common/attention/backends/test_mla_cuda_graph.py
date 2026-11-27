@@ -77,6 +77,7 @@ class _Microbatch:
         state = InferStateInfo()
         state.is_prefill = False
         state.graph_mode = GraphMode.CAPTURE if capture else GraphMode.REPLAY if replay else GraphMode.EAGER
+        state.cuda_graph_max_kv_seq_len = CAPACITY if state.uses_cuda_graph else None
         state.input_ids = torch.zeros(BATCH, device="cuda", dtype=torch.int64)
         state.batch_size, state.microbatch_index = BATCH, microbatch_index
         state.b_req_idx = torch.arange(BATCH, device="cuda", dtype=torch.int32)

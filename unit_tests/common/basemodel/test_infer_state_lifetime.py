@@ -39,7 +39,6 @@ def no_cycle_gc():
 def _runtime(groups: dict) -> AttentionBackendManager:
     """A manager whose main role has the given state groups per phase, without registering layers."""
     runtime = AttentionBackendManager()
-    runtime.step_configs["main"] = {}
     runtime.resources["main"] = None
     runtime.state_groups["main"] = {"prefill": {}, "decode": {}, **groups}
     return runtime

@@ -92,7 +92,6 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
     from lightllm.common.attention_state import AttentionStateManager
     from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig
     from lightllm.common.attention_state.bounded_att.kda.create_kda_state import create_kda_state
-    from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from unit_tests.models.glm5_next.kda_test_utils import prepare_prefill_infer
 
@@ -121,7 +120,7 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
     backend = selector.select(spec.prefill, "prefill", requested)
     infer.attention_backend_manager = SimpleNamespace(get_backend=lambda role, phase, layer_id: backend)
     # The attention state the layer's group prepares for this step.
-    att_state = backend.create_att_state(configure_attention_step(infer), None)
+    att_state = backend.create_att_state(infer, None)
     infer.att_states = {backend.state_key: att_state}
     assert (att_state.flash_kda_fwd is not None) == (requested == "flashkda")
     if graph:

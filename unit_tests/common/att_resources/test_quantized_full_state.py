@@ -336,7 +336,6 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
     from types import SimpleNamespace
     from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
     from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQAPrefillBackend
-    from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
     from lightllm.common.attention.backends.gqa import gqa_kv_quant_fields
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.common.basemodel.triton_kernel.kv_copy import ppl_int4kv_copy_kv
@@ -377,7 +376,7 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
         num_heads=2, num_kv_heads=1, head_dim=64, dtype=torch.float32, **gqa_kv_quant_fields("int4kv", kv_scales, 64)
     )
     backend = TritonQuantGQAPrefillBackend(layer_config)
-    att_state = backend.create_att_state(configure_attention_step(owner), None)
+    att_state = backend.create_att_state(owner, None)
     if device == "cpu":
 
         def dequantize(**kwargs):

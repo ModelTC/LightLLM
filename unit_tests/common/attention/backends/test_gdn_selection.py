@@ -13,10 +13,6 @@ from lightllm.common.attention.backends.gdn.triton import (
     TritonGDNDecodeBackend,
     TritonGDNPrefillBackend,
 )
-from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.basemodel import attention_backend_manager
-from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.attention.kernels.gdn.third_party_fla.ops.chunk as fla_chunk
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.server.api_cli import make_argument_parser
@@ -152,26 +148,6 @@ def test_decode_groups_dynamic_speculative_rows(monkeypatch):
     assert build_calls[0]["hold_req_id"] == 5
 
 
-@pytest.mark.parametrize("role", ["main", "draft0"])
-def test_decode_reads_the_acceptance_index_of_its_role(monkeypatch, role: str):
-    monkeypatch.setattr(
-        attention_backend_manager, "get_env_start_args", lambda: SimpleNamespace(mtp_dynamic_verify=False)
-    )
-    b_req_idx = torch.tensor([2, 2, 2, 4, 4, 4], dtype=torch.int32)
-    req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
-    model, infer_state = _speculative_decode(
-        draft_step=2, b_req_idx=b_req_idx, req_to_mtp_state_index=req_to_mtp_state_index, role=role
-    )
-    manager = attention_backend_manager.AttentionBackendManager()
-    manager.register_backends(model)
-    step_config = manager.step_configs[role]
-    assert step_config["req_to_mtp_state_index"] is req_to_mtp_state_index
-    batch = attention_backend_manager.configure_attention_step(infer_state, **step_config)
-    att_state = TritonGDNDecodeBackend(gdn_config()).build(batch)
-
-    torch.testing.assert_close(att_state.num_accepted_tokens, torch.tensor([2, 3], dtype=torch.int32))
-
-
 def test_triton_prefill_uses_the_in_tree_chunk_kernel():
     assert TritonGDNPrefillBackend(gdn_config()).chunk_gated_delta_rule is fla_chunk.chunk_gated_delta_rule
 
@@ -293,57 +269,3 @@ def test_cli_accepts_linear_backend_at_index_one():
 
     assert args.llm_prefill_att_backend == ["fa3", "flashqla"]
     assert args.llm_decode_att_backend == ["flashinfer", "triton"]
-
-
-def _speculative_decode(*, draft_step, b_req_idx, req_to_mtp_state_index, role="main"):
-    """A model of role whose GDN state keeps req_to_mtp_state_index, and a decode step of b_req_idx rows."""
-    model = SimpleNamespace(
-        args=SimpleNamespace(
-            running_max_req_size=8,
-            mtp_step=draft_step,
-            enable_tpsp_mix_mode=False,
-            page_size=1,
-            enable_decode_microbatch_overlap=False,
-            flashinfer_workspace_size=0,
-            diverse_mode=False,
-            enable_ep_moe=False,
-        ),
-        max_seq_length=8,
-        graph_max_batch_size=8,
-        tp_world_size_=1,
-        is_mtp_draft_model=False,
-        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
-        att_state_role=role,
-        graph_max_len_in_batch=8,
-        layers_infer=[],
-    )
-    infer_state = InferStateInfo()
-    infer_state.batch_size = b_req_idx.shape[0]
-    infer_state.b_req_idx = b_req_idx
-    infer_state.b_mtp_index = torch.zeros_like(b_req_idx)
-    infer_state.req_manager = SimpleNamespace(
-        HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1, req_to_token_indexs=torch.zeros((8, 4), dtype=torch.int32)
-    )
-    request_capacity = req_to_mtp_state_index.numel()
-    resources = AttentionStateManager(request_capacity=request_capacity)
-    config = ConvSSMStateConfig(
-        logical_layer_ids=(3,),
-        global_k_heads=1,
-        global_v_heads=1,
-        key_dim=2,
-        value_dim=2,
-        conv_width=2,
-        conv_dtype=torch.float32,
-        ssm_dtype=torch.float32,
-    )
-    for model_role in ("main", "draft0"):
-        linear = GDNState(config, request_capacity=request_capacity, mtp_step=draft_step, device="meta")
-        linear.mtp_state_index = (
-            req_to_mtp_state_index if model_role == role else torch.zeros_like(req_to_mtp_state_index)
-        )
-        resources.register_state(model_role, linear)
-    resources.finish_state_registration()
-    model.att_state_manager = resources
-    infer_state.is_prefill = False
-    infer_state.b_seq_len = torch.ones_like(b_req_idx)
-    return model, infer_state

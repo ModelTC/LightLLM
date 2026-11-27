@@ -12,10 +12,9 @@ from lightllm.common.basemodel import attention_backend_manager
 from lightllm.common.basemodel.attention_backend_manager import (
     AttentionBackendManager,
     LayerAttentionConfig,
-    configure_attention_step,
 )
 from lightllm.common.attention.backends.gqa import gqa_kv_quant_fields
-from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from unit_tests.common.attention.backends.groups_runner import set_up
 
 
@@ -472,7 +471,7 @@ def test_fa3_decode_page_tables_allocate_lazily_per_microbatch_and_check_capacit
         state.b_seq_len.fill_(max_kv_len)
         state.b1_cu_q_seq_len = torch.arange(rows + 1, dtype=torch.int32)
         state.b1_cu_kv_seq_len = torch.arange(rows + 1, dtype=torch.int32) * max_kv_len
-        return configure_attention_step(state)
+        return state
 
     view = backend.build(decode_step(rows=3, max_kv_len=100, microbatch_index=1)).page_table
     assert view.shape == (3, 7) and view.is_contiguous()
@@ -629,60 +628,3 @@ def test_qwen3next_layers_split_into_full_and_linear_attention_groups(runtime_st
         "triton_gqa_decode",
         decode,
     }
-
-
-def test_speculative_decode_batches_carry_the_recurrent_state_index(monkeypatch):
-    monkeypatch.setattr(
-        attention_backend_manager, "get_env_start_args", lambda: SimpleNamespace(mtp_dynamic_verify=False)
-    )
-    index = torch.arange(8, dtype=torch.int32)
-    recurrent = SimpleNamespace(mtp_state_index=index)
-    model = fake_model(mtp_step=1)
-    model.att_state_role = "main"
-    model.att_state_manager = SimpleNamespace(
-        get_full_attention_states=lambda role: (), get_bounded_attention_states=lambda role: (object(), recurrent)
-    )
-    for rows, expected in ((1, None), (2, index)):
-        model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _, rows=rows: rows - 1)
-        config = registered(model).step_configs["main"]
-        assert config["decode_rows_per_request"] == rows and config["req_to_mtp_state_index"] is index
-        assert configure_attention_step(step(prefill=False), **config).req_to_mtp_state_index is expected
-        # Prefill rows are never speculative.
-        assert configure_attention_step(step(prefill=True), **config).req_to_mtp_state_index is None
-    model.att_state_manager.get_bounded_attention_states = lambda role: (recurrent, recurrent)
-    with pytest.raises(ValueError, match="at most one recurrent state"):
-        registered(model)
-
-
-@pytest.mark.parametrize("dynamic", [False, True])
-def test_step_config_is_read_from_the_model_once(monkeypatch, dynamic):
-    monkeypatch.setattr(
-        attention_backend_manager, "get_env_start_args", lambda: SimpleNamespace(mtp_dynamic_verify=dynamic)
-    )
-    model = fake_model(mtp_step=2)
-    model.att_state_role = "main"
-    model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda is_draft: 2)
-    step_config = registered(model).step_configs["main"]
-    assert step_config == dict(
-        decode_rows_per_request=3,
-        dynamic_decode_rows=dynamic,
-        req_to_mtp_state_index=None,
-        cuda_graph_max_kv_seq_len=1024,
-    )
-    # Steps read nothing more from the model.
-    model.mtp_manager = model.graph_max_len_in_batch = None
-    metadata = configure_attention_step(step(prefill=False), **step_config)
-    assert (metadata.decode_rows_per_request, metadata.dynamic_decode_rows) == (3, dynamic)
-
-
-@pytest.mark.parametrize("graph_mode", list(GraphMode))
-def test_only_cuda_graph_steps_carry_the_graph_kv_capacity(graph_mode):
-    state = step(prefill=False)
-    state.graph_mode = graph_mode
-    metadata = configure_attention_step(state, cuda_graph_max_kv_seq_len=512)
-    assert metadata is state
-    assert metadata.cuda_graph_max_kv_seq_len == (None if graph_mode is GraphMode.EAGER else 512)
-    assert metadata.uses_cuda_graph == (graph_mode is not GraphMode.EAGER)
-    if graph_mode is not GraphMode.EAGER:
-        with pytest.raises(ValueError, match="kv length capacity"):
-            configure_attention_step(state)

@@ -50,66 +50,6 @@ def test_qwen3_eagle_uses_layers_checkpoint_prefix():
 
 
 @pytest.mark.parametrize(
-    "mtp_mode, is_draft_model, draft_step, dynamic_spec, expected",
-    [
-        ("dspark", False, 7, True, True),
-        ("dspark", True, 7, True, False),
-        ("dflash", False, 7, True, True),
-        ("dflash", True, 7, True, False),
-        ("dflash2", False, 7, False, False),
-        ("dflash2", True, 7, False, False),
-        ("dflash2", False, 7, True, True),
-        ("dflash2", True, 7, True, False),
-        ("vanilla_with_att", True, 7, True, False),
-        ("vanilla_with_att", True, 0, True, False),
-        ("eagle3", True, 0, True, False),
-        ("eagle3", False, 7, True, True),
-        ("eagle3", False, 7, False, False),
-    ],
-)
-def test_model_selects_dynamic_spec_layout(
-    monkeypatch,
-    mtp_mode,
-    is_draft_model,
-    draft_step,
-    dynamic_spec,
-    expected,
-):
-    monkeypatch.setattr(
-        attention_groups_module,
-        "get_env_start_args",
-        lambda: SimpleNamespace(mtp_mode=mtp_mode, mtp_dynamic_verify=dynamic_spec),
-    )
-    model = SimpleNamespace(
-        args=SimpleNamespace(
-            running_max_req_size=8,
-            mtp_step=draft_step,
-            enable_tpsp_mix_mode=False,
-            page_size=1,
-            enable_decode_microbatch_overlap=False,
-            flashinfer_workspace_size=64,
-            diverse_mode=False,
-            enable_ep_moe=False,
-        ),
-        max_seq_length=1024,
-        graph_max_batch_size=4,
-        tp_world_size_=1,
-        is_mtp_draft_model=is_draft_model,
-        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
-        att_state_role="main",
-        att_state_manager=SimpleNamespace(
-            get_full_attention_states=lambda role: (), get_bounded_attention_states=lambda role: ()
-        ),
-        graph_max_len_in_batch=1024,
-    )
-
-    manager = attention_groups_module.AttentionBackendManager()
-    manager.register_backends(model)
-    step_config = manager.step_configs["main"]
-    assert step_config["dynamic_decode_rows"] is expected
-
-
-@pytest.mark.parametrize(
     "mtp_mode, is_draft_model, expected",
     [
         (None, False, True),
@@ -144,9 +84,9 @@ def test_triton_mtp_decode_step_builds_group_markers():
         req_to_token_indexs=torch.zeros(8, 8, dtype=torch.int32), HOLD_REQUEST_ID=-1
     )
     # Fixed-layout speculative decode: three rows per request.
-    batch = attention_groups_module.configure_attention_step(infer_state, decode_rows_per_request=3)
+    infer_state.decode_rows_per_request = 3
     config = GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16)
-    att_state = TritonGQADecodeBackend(config).build(batch)
+    att_state = TritonGQADecodeBackend(config).build(infer_state)
 
     assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
 

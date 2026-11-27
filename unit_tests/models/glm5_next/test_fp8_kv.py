@@ -17,7 +17,6 @@ from lightllm.common.attention.backends.sparse_mla import (
     SparseMLAPrefillLayerInputs,
 )
 from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLAPrefillBackend
-from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
 from lightllm.models.glm5_next.infer_struct import build_glm5_nsa_step
 from lightllm.common.attention.kernels.sparse_mla.fp8_group64_decode import (
     can_use_fp8_sparse_direct_decode,
@@ -129,18 +128,17 @@ class _Fp8SparseAttention:
 
     def __init__(self, model):
         self.model = model
-        self.step_config = dict(cuda_graph_max_kv_seq_len=model.graph_max_len_in_batch)
         self._prefill_workspaces = reserve_fp8_sparse_prefill_workspaces(model)
         config = _layer_config(torch.empty(1, 64, 512, dtype=torch.bfloat16), 1.0)
         self.prefill_backend = FA3SparseMLAPrefillBackend(config)
         self.decode_backend = FlashMLASparseDecodeBackend(config)
 
     def create_att_prefill_state(self, infer):
-        batch = configure_attention_step(infer, **self.step_config)
-        return _Fp8PrefillState(self.prefill_backend.build(batch), self._prefill_workspaces[batch.microbatch_index])
+        att_state = self.prefill_backend.build(infer)
+        return _Fp8PrefillState(att_state, self._prefill_workspaces[infer.microbatch_index])
 
     def create_att_decode_state(self, infer):
-        att_state = self.decode_backend.build(configure_attention_step(infer, **self.step_config))
+        att_state = self.decode_backend.build(infer)
         return SimpleNamespace(decode_att=lambda q, kv, params: _decode(att_state, q, kv, params))
 
 
@@ -623,6 +621,7 @@ def test_fp8_one_query_prefill_and_decode_read_their_own_kv_sources():
     decode_infer = _make_infer_state(**vars(case.infer_state))
     decode_infer.is_prefill = False
     decode_infer.graph_mode = GraphMode.CAPTURE
+    decode_infer.cuda_graph_max_kv_seq_len = case.backend.model.graph_max_len_in_batch
     decode_state = case.backend.create_att_decode_state(decode_infer)
     control = {
         "topk_mem_indices": case.topk_mem_indices,

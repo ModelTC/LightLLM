@@ -13,7 +13,6 @@ from lightllm.common.attention.backends.gqa import GQAKVScales
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeBackend
-from lightllm.common.basemodel.attention_backend_manager import configure_attention_step
 from lightllm.common.attention.kernels.gqa.int4kv import (
     int4kv_flash_decoding_stage1 as stage1_module,
     ppl_int4kv_flash_decoding as decode_module,
@@ -156,7 +155,7 @@ def test_decode_passes_saved_length_to_stage1(monkeypatch):
     )
     layer_inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
     backend = TritonQuantGQADecodeBackend(layer_config)
-    att_state = backend.build(configure_attention_step(infer_state))
+    att_state = backend.build(infer_state)
     infer_state.max_kv_seq_len = 32768
     calls = []
     monkeypatch.setattr(stage1_module, "int4kv_flash_decode_stage1", lambda **kwargs: calls.append(kwargs))
