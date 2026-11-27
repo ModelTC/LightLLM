@@ -36,10 +36,10 @@ def test_marlin_repacking_merged_awq_projection(dtype, widths, tokens):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("tokens", [95, 96, 128])
-def test_moe_marlin_awq_reduction(dtype, tokens):
+@pytest.mark.parametrize("tokens,experts", [(95, 8), (96, 8), (128, 8), (128, 32)])
+def test_moe_marlin_awq_reduction(dtype, tokens, experts):
     torch.manual_seed(12)
-    experts, hidden, intermediate = 8, 2048, 768
+    hidden, intermediate = 2048, 768
     shifts = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7], device="cuda", dtype=torch.int32) * 4
 
     def make_weights(height, width):
@@ -59,9 +59,10 @@ def test_moe_marlin_awq_reduction(dtype, tokens):
     gate, dense_gate = make_weights(hidden, 2 * intermediate)
     down, dense_down = make_weights(intermediate, hidden)
     inputs = torch.randn(tokens, hidden, device="cuda", dtype=dtype)
-    offsets = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
-    ids = (torch.arange(tokens, device="cuda", dtype=torch.int32)[:, None] + offsets) % experts
-    scores = torch.tensor([0.375, 0.625], device="cuda").expand(tokens, -1)
+    logits = torch.randn(tokens, experts, device="cuda")
+    logits[:, 0] += 6
+    scores, ids = logits.softmax(dim=-1).topk(2)
+    ids = ids.int()
     expected = torch.empty(tokens, 2, hidden, device="cuda", dtype=dtype)
     for expert in range(experts):
         rows, slots = (ids == expert).nonzero(as_tuple=True)
@@ -72,3 +73,11 @@ def test_moe_marlin_awq_reduction(dtype, tokens):
     expected = expected.float().sum(dim=1).to(dtype).float()
     actual = moe_awq_marlin(inputs.clone(), gate, down, scores, ids, None, None, False)
     assert (actual.float() - expected).norm() / expected.norm() < 0.012
+
+    if experts == 32:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            replayed = moe_awq_marlin(inputs.clone(), gate, down, scores, ids, None, None, False)
+        for _ in range(100):
+            graph.replay()
+            assert torch.equal(replayed, actual)
