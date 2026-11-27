@@ -71,7 +71,12 @@ async def run_pd_pf_prefill_request(
             f"ready_kv_len={decode_node_info.ready_kv_len}. transfer starts at the unmatched span"
         )
 
-        # 3. 端点已在收到通知时写入共享内存。等到传输完成、请求离开。KV 由推理进程在结束路径释放。
+        # 3. 把这次会话留在 pd_loop 的 generation_tasks 里，直到请求离开 req_id_to_out_inf。
+        # 端点在收到通知时已经写入共享内存，这里不再等写入。推理进程还握着 Req 引用时，
+        # can_release() 要求 ref_count == 1，回收循环也不会提前拿走 req_status，KV 仍由推理进程占用。
+        # 和 master 的连接断开时，pd_loop 只 abort 当时还留在 generation_tasks 里的请求。
+        # 传输未完成就从这里返回的话，请求仍在 req_id_to_out_inf 中，但已经不在那份名单里，
+        # 这次断连不会给它发 abort，KV 会一直占到传输超时。
         while group_request_id in manager.req_id_to_out_inf:
             await asyncio.sleep(0.1)
         logger.info(f"prefill-first stage=request-left, group_request_id={group_request_id}")
