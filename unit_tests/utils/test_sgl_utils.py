@@ -1,4 +1,3 @@
-import weakref
 import collections
 import inspect
 import math
@@ -8,8 +7,7 @@ import pytest
 import torch
 from frozendict import frozendict
 
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.fa3 import fp as fa3_module
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
 from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
 from lightllm.utils import sgl_utils
@@ -99,46 +97,47 @@ def test_fa3_runtime_matches_cached_config_by_actual_length(monkeypatch):
 
 @pytest.mark.parametrize("page_size, actual_kv_len", [(1, 8192), (16, 8191), (256, 8192)])
 def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, page_size, actual_kv_len):
-    graph = SimpleNamespace(can_run=lambda **kwargs: True, graph_max_len_in_batch=32768)
-    model = SimpleNamespace(
-        graph=graph,
-        req_manager=SimpleNamespace(req_to_token_indexs=torch.zeros(2, 8192, dtype=torch.int32)),
-        is_mtp_draft_model=False,
-        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
-    )
+    from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+    from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend
+    from lightllm.common.basemodel.triton_kernel import fa3_utils
+    from lightllm.utils import sgl_utils
+
+    graph_capacity = 32768
     infer_state = InferStateInfo()
+    infer_state.is_prefill = False
+    infer_state.graph_mode = GraphMode.CAPTURE
     infer_state.batch_size = 2
     infer_state.max_kv_seq_len = actual_kv_len
     infer_state.microbatch_index = 0
+    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.zeros(2, 8192, dtype=torch.int32))
     infer_state.b_req_idx = torch.tensor([0, 1], dtype=torch.int32)
     infer_state.b_seq_len = torch.tensor([4096, actual_kv_len], dtype=torch.int32)
     infer_state.b1_cu_q_seq_len = torch.tensor([0, 1, 2], dtype=torch.int32)
     infer_state.b1_cu_kv_seq_len = torch.tensor([0, 4096, 4096 + actual_kv_len], dtype=torch.int32)
-    state = fa3_module.Fa3DecodeAttState(
-        backend=SimpleNamespace(
-            model=model,
-            infer_page_size=page_size,
-            uses_causal_attention=lambda: True,
-            uses_dynamic_spec_verify_layout=lambda: False,
-            get_page_table_view=lambda att_batch_size, max_kv_len, microbatch_index: torch.zeros(
-                att_batch_size, math.ceil(max_kv_len / page_size), dtype=torch.int32
-            ),
-        ),
-        _infer_state_weak_ref=weakref.ref(infer_state),
+    layer_config = GQALayerConfig(num_heads=4, num_kv_heads=2, head_dim=8, dtype=torch.bfloat16)
+    impl = FA3GQADecodeBackend(layer_config)
+    impl.page_size = page_size
+    impl.resources = SimpleNamespace(
+        max_decode_rows=2,
+        max_seq_len=graph_capacity,
+        get_workspace=lambda name, numel, dtype: torch.zeros(numel, dtype=dtype),
     )
     copy_calls = []
-    monkeypatch.setattr(fa3_module, "page_table_copy", lambda **kwargs: copy_calls.append(kwargs))
-    state.init_state()
+    monkeypatch.setattr(fa3_utils, "page_table_copy", lambda **kwargs: copy_calls.append(kwargs))
+    infer_state.cuda_graph_max_kv_seq_len = graph_capacity
+    att_state = impl.build(infer_state)
     # 模拟 CudaGraph._capture_decode 对 infer_state 的修改。
-    state.infer_state.max_kv_seq_len = graph.graph_max_len_in_batch
+    infer_state.max_kv_seq_len = graph_capacity
     calls = []
 
     def attention(**kwargs):
         calls.append(kwargs)
-        return kwargs["q"]
+        return kwargs["out"]
 
-    monkeypatch.setattr(fa3_module, "flash_attn_with_kvcache_autotune", attention)
-    state.decode_att(torch.empty(2, 4, 8), torch.empty(page_size, 2, 8), torch.empty(page_size, 2, 8))
+    monkeypatch.setattr(sgl_utils, "flash_attn_with_kvcache_autotune", attention)
+    q = torch.empty(2, 4, 8, dtype=torch.bfloat16)
+    cache = torch.empty(page_size, 2, 8, dtype=torch.bfloat16)
+    impl.forward(att_state, GQALayerInputs(q=q, k_cache=cache, v_cache=cache), out=torch.empty_like(q))
     assert calls[0]["max_seqlen_k"] == actual_kv_len
     assert calls[0]["page_table"].shape == (2, 32768 // page_size)
 

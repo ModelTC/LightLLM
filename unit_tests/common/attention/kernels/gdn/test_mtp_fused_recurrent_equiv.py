@@ -165,3 +165,32 @@ def test_variable_length_cu_seqlens(seed):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_writes_into_the_callers_out():
+    torch.manual_seed(7)
+    batch, seqlen, H, HV, K, V = 3, 3, 2, 8, 64, 64
+    tokens = batch * seqlen
+    q, k = (torch.randn(1, tokens, H, K, device="cuda", dtype=torch.bfloat16) for _ in range(2))
+    v = torch.randn(1, tokens, HV, V, device="cuda", dtype=torch.bfloat16)
+    # Distinct slots per request, so the in-place state updates do not race.
+    ssm_idx = torch.randperm(32, device="cuda", dtype=torch.int32)[: batch * seqlen].view(batch, seqlen)
+    state = torch.randn(32, HV, K, V, device="cuda", dtype=torch.bfloat16)
+    common = dict(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens=torch.arange(batch + 1, device="cuda", dtype=torch.long) * seqlen,
+        ssm_state_indices=ssm_idx,
+        ssm_state_write_indices=ssm_idx,
+        num_accepted_tokens=torch.tensor([1, 2, 3], device="cuda", dtype=torch.int32),
+        A_log=torch.randn(HV, device="cuda") * 0.1,
+        dt_bias=torch.randn(HV, device="cuda") * 0.1,
+        a_raw=torch.randn(tokens, HV, device="cuda", dtype=torch.bfloat16),
+        b_raw=torch.randn(tokens, HV, device="cuda", dtype=torch.bfloat16),
+    )
+    own_state, out_state = state.clone(), state.clone()
+    own, _ = mtp_fused_recurrent_gated_delta_rule(initial_state=own_state, **common)
+    out = torch.empty_like(v)
+    assert mtp_fused_recurrent_gated_delta_rule(initial_state=out_state, out=out, **common)[0] is out
+    assert torch.equal(out, own) and torch.equal(out_state, own_state)

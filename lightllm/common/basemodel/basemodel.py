@@ -8,7 +8,7 @@ import json
 import torch
 import torch.nn.functional as F
 import triton
-from typing import final, List, TYPE_CHECKING
+from typing import final, List, Optional, TYPE_CHECKING
 from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
@@ -43,8 +43,7 @@ from lightllm.utils.torch_memory_saver_utils import (
     TorchMemorySaverWrapper,
     MemoryTag,
 )
-from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
-from .attention import BaseAttBackend
+from .attention_backend_manager import AttentionBackendManager
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -93,6 +92,9 @@ class TpPartBaseModel:
         self.graph_max_batch_size *= self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
 
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
+        # When graph covers the configured request length, it must also cover MTP's internal token margin.
+        if self.args.mtp_mode is not None and self.graph_max_len_in_batch >= self.args.max_req_total_len:
+            self.graph_max_len_in_batch = max(self.graph_max_len_in_batch, self.max_seq_length)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
         self.quant_type = kvargs.get("quant_type", "none")
         self.quant_cfg_path = kvargs.get("quant_cfg", None)
@@ -146,10 +148,13 @@ class TpPartBaseModel:
         assert getattr(self, "att_state_manager", None) is None, "resources already initialized"
         if self.is_mtp_draft_model:
             self.att_state_manager = self.main_model.att_state_manager
+            self.attention_backend_manager = self.main_model.attention_backend_manager
             assert not self.att_state_manager._state_registration_finished, "State registration is already finished"
             assert (
                 self.max_req_num + 1 == self.att_state_manager._request_capacity
             ), "models must share the request domain"
+        else:
+            self.attention_backend_manager = AttentionBackendManager()
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             if not self.is_mtp_draft_model:
                 self.att_state_manager = AttentionStateManager(request_capacity=self.max_req_num + 1)
@@ -182,20 +187,8 @@ class TpPartBaseModel:
         """Initialize this model's backends, warmup and graphs after shared allocation."""
         self.req_manager.bind_hold_page(self.att_state_manager.full_att_allocator.hold_token_indices)
         self._check_mem_size()
-        self._init_att_backend()
-        self._init_att_backend1()
+        self._init_attention()
         self._init_hidden_collector()
-        role = self.att_state_role
-        logger.info(
-            f"{role} prefill/decode attention: {type(self.prefill_att_backend).__name__} / "
-            f"{type(self.decode_att_backend).__name__}"
-        )
-        if self.prefill_att_backend1 is not None:
-            logger.info(
-                f"{role} prefill/decode attention1: {type(self.prefill_att_backend1).__name__} / "
-                f"{type(self.decode_att_backend1).__name__}"
-            )
-
         self._autotune_warmup()
         self._init_padded_req()
         self._init_cudagraph()
@@ -336,21 +329,16 @@ class TpPartBaseModel:
         self.vocab_size = self.config["vocab_size"]
         return
 
-    def _init_att_backend(self):
+    def _init_attention(self):
+        """Register this role's layer backends in the shared AttentionBackendManager."""
         role = self.att_state_role
-        if not self.att_state_manager.get_full_attention_states(role):
-            # FFN-only and linear-only models do not need a full-attention backend.
-            self.prefill_att_backend = self.decode_att_backend = None
-            return
-        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(index=0)(model=self)
-        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0)(model=self)
-        return
-
-    def _init_att_backend1(self):
-        # self.prefill_att_backend1 是给后续有模型支持不同层用不同的att模块时，保留的扩展。
-        self.prefill_att_backend1: BaseAttBackend = None
-        self.decode_att_backend1: BaseAttBackend = None
-        return
+        recurrent_count = sum(
+            getattr(state, "mtp_state_index", None) is not None
+            for state in self.att_state_manager.get_bounded_attention_states(role)
+        )
+        if recurrent_count > 1:
+            raise ValueError(f"expected at most one recurrent state for {role}, got {recurrent_count}")
+        self.attention_backend_manager.register_backends(self)
 
     def _align_decode_batch_size(self, batch_size: int) -> int:
         alignment = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
@@ -359,10 +347,6 @@ class TpPartBaseModel:
         return triton.cdiv(batch_size, alignment) * alignment
 
     def _init_cudagraph(self):
-        # When graph covers the configured request length, it must also cover MTP's internal token margin.
-        if self.args.mtp_mode is not None and self.graph_max_len_in_batch >= self.args.max_req_total_len:
-            self.graph_max_len_in_batch = max(self.graph_max_len_in_batch, self.max_seq_length)
-
         decode_tokens_per_request = self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
         cuda_graph_grow_step_size = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
         self.graph = (
@@ -428,8 +412,20 @@ class TpPartBaseModel:
             b_seq_len=model_input.b_seq_len,
         )
 
-    def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
+    def _create_inferstate(
+        self,
+        model_input: ModelInput,
+        microbatch_index: int = 0,
+        graph_mode: GraphMode = GraphMode.EAGER,
+        build_attention: bool = True,
+    ) -> InferStateInfo:
+        """Create the step's InferStateInfo with its index tensors and attention states.
+
+        graph_mode says how the step runs, since backends prepare graph capture, replay and eager
+        steps differently. build_attention=False is for steps whose layers only write the KV cache.
+        """
         infer_state = self.infer_state_class()
+        infer_state.graph_mode = graph_mode
         infer_state.hidden_collector = self.hidden_collector_prototype.new_instance()
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
@@ -459,6 +455,7 @@ class TpPartBaseModel:
 
         infer_state.req_manager = self.req_manager
         infer_state.att_state_manager = self.att_state_manager
+        infer_state.attention_backend_manager = self.attention_backend_manager
 
         infer_state.mem_index = self._select_mem_indexes(model_input)
         infer_state.microbatch_index = microbatch_index
@@ -467,27 +464,28 @@ class TpPartBaseModel:
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
 
-        if infer_state.is_prefill:
-            infer_state.prefill_att_state = (
-                self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
-                if self.prefill_att_backend is not None
-                else None
-            )
-            if self.prefill_att_backend1 is not None:
-                infer_state.prefill_att_state1 = self.prefill_att_backend1.create_att_prefill_state(
-                    infer_state=infer_state
+        infer_state.init_some_extra_state(self)
+        if build_attention and self.attention_backend_manager.has_attention(infer_state.att_state_role):
+            if infer_state.uses_cuda_graph:
+                if self.graph_max_len_in_batch is None:
+                    raise ValueError(f"a {graph_mode.value} step needs the CUDA graph kv length capacity")
+                infer_state.cuda_graph_max_kv_seq_len = self.graph_max_len_in_batch
+            if not infer_state.is_prefill:
+                rows = self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
+                infer_state.decode_rows_per_request = rows
+                infer_state.dynamic_decode_rows = (
+                    rows > 1 and not self.is_mtp_draft_model and self.args.mtp_dynamic_verify
                 )
-        else:
-            infer_state.decode_att_state = (
-                self.decode_att_backend.create_att_decode_state(infer_state=infer_state)
-                if self.decode_att_backend is not None
-                else None
-            )
-            if self.decode_att_backend1 is not None:
-                infer_state.decode_att_state1 = self.decode_att_backend1.create_att_decode_state(
-                    infer_state=infer_state
-                )
-
+                if rows > 1:
+                    infer_state.req_to_mtp_state_index = next(
+                        (
+                            state.mtp_state_index
+                            for state in self.att_state_manager.get_bounded_attention_states(infer_state.att_state_role)
+                            if getattr(state, "mtp_state_index", None) is not None
+                        ),
+                        None,
+                    )
+            infer_state.att_states = self.attention_backend_manager.create_att_state(infer_state)
         return infer_state
 
     def _create_padded_decode_model_input(self, model_input: ModelInput, new_batch_size: int):
@@ -653,8 +651,6 @@ class TpPartBaseModel:
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
 
-        infer_state.init_some_extra_state(self)
-        infer_state.init_att_state()
         model_output = self._context_forward(infer_state=infer_state)
 
         model_output = self._create_unpad_prefill_model_output(
@@ -702,17 +698,12 @@ class TpPartBaseModel:
             graph_mode = GraphMode.CAPTURE if self.graph.need_capture(infer_batch_size) else GraphMode.REPLAY
 
         model_input = self._create_padded_decode_model_input(model_input=model_input, new_batch_size=infer_batch_size)
-        infer_state = self._create_inferstate(model_input)
-        # attention backend 会根据执行方式准备 capture、replay 或 eager 状态，
-        # 因此必须在 init_att_state 之前完成赋值。
-        infer_state.graph_mode = graph_mode
-        infer_state.init_some_extra_state(self)
-        infer_state.init_att_state()
+        infer_state = self._create_inferstate(model_input, graph_mode=graph_mode)
 
         if graph_mode is GraphMode.CAPTURE:
             model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
         elif graph_mode is GraphMode.REPLAY:
-            model_output = self.graph.replay(infer_state)
+            model_output: ModelOutput = self.graph.replay(infer_state)
         else:
             model_output = self._token_forward(infer_state)
 
@@ -720,7 +711,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -852,12 +842,7 @@ class TpPartBaseModel:
         )
 
         infer_state0 = self._create_inferstate(model_input0, 0)
-        infer_state0.init_some_extra_state(self)
-        infer_state0.init_att_state()
-
         infer_state1 = self._create_inferstate(model_input1, 1)
-        infer_state1.init_some_extra_state(self)
-        infer_state1.init_att_state()
 
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
@@ -912,20 +897,14 @@ class TpPartBaseModel:
 
         if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
             infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)
-            graph_mode = GraphMode.CAPTURE if self.graph.need_capture(infer_batch_size) else GraphMode.REPLAY
+            need_capture = self.graph.need_capture(infer_batch_size)
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
-            infer_state0 = self._create_inferstate(padded_model_input0, 0)
-            infer_state0.graph_mode = graph_mode
-            infer_state0.init_some_extra_state(self)
-            infer_state0.init_att_state()
+            graph_mode = GraphMode.CAPTURE if need_capture else GraphMode.REPLAY
+            infer_state0 = self._create_inferstate(padded_model_input0, 0, graph_mode=graph_mode)
+            infer_state1 = self._create_inferstate(padded_model_input1, 1, graph_mode=graph_mode)
 
-            infer_state1 = self._create_inferstate(padded_model_input1, 1)
-            infer_state1.graph_mode = graph_mode
-            infer_state1.init_some_extra_state(self)
-            infer_state1.init_att_state()
-
-            if graph_mode is GraphMode.CAPTURE:
+            if need_capture:
                 model_output0, model_output1 = self.graph.capture_decode(
                     self._overlap_tpsp_token_forward,
                     infer_state0,
@@ -943,12 +922,7 @@ class TpPartBaseModel:
             model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(model_input0, 0)
-            infer_state0.init_some_extra_state(self)
-            infer_state0.init_att_state()
-
             infer_state1 = self._create_inferstate(model_input1, 1)
-            infer_state1.init_some_extra_state(self)
-            infer_state1.init_att_state()
 
             model_output0, model_output1 = self._overlap_tpsp_token_forward(infer_state0, infer_state1=infer_state1)
             model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)

@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -35,6 +36,7 @@ def draft_model(mode: str):
     main.args, main.config = draft.args, dict(draft.config, num_hidden_layers=2)
     main.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(2)]
     main.att_state_manager = resources
+    main.attention_backend_manager = AttentionBackendManager()
     draft.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
     draft.main_model, draft.mtp_previous_draft_models = main, []
     return draft, resources
@@ -42,12 +44,17 @@ def draft_model(mode: str):
 
 @pytest.mark.parametrize("mode", ["vanilla_no_att", "eagle_no_att"])
 @pytest.mark.parametrize("prefill", [False, True])
-def test_ffn_only_draft_has_no_state_or_attention_backend(monkeypatch: pytest.MonkeyPatch, mode: str, prefill: bool):
+def test_ffn_only_draft_has_no_state_or_attention(monkeypatch: pytest.MonkeyPatch, mode: str, prefill: bool):
     draft, resources = draft_model(mode)
     draft.prepare_attention_states()
     resources.finish_state_registration()
-    draft._init_att_backend()
-    draft._init_att_backend1()
+    # What the attention runtime reads from the model.
+    draft.max_seq_length, draft.graph_max_batch_size, draft.graph_max_len_in_batch = 64, 1, 64
+    draft.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda is_draft: 0)
+    draft._init_attention()
+    # The draft shares the main model's manager and registers no backends in it.
+    assert draft.attention_backend_manager is draft.main_model.attention_backend_manager
+    assert not draft.attention_backend_manager.has_attention("draft0")
     assert draft.att_state_manager is resources
     assert not hasattr(draft, "full_att_state")
     assert not resources.get_full_attention_states("draft0")
@@ -57,16 +64,17 @@ def test_ffn_only_draft_has_no_state_or_attention_backend(monkeypatch: pytest.Mo
     draft.return_all_prompt_logics = False
     draft.hidden_collector_prototype = SimpleNamespace(new_instance=lambda: None)
     draft.req_manager = object()
-    draft._select_mem_indexes = lambda value: torch.zeros(value.batch_size, dtype=torch.int32)
+    draft._select_mem_indexes = lambda value: torch.zeros(value.batch_size, dtype=torch.int32, device="cuda")
     monkeypatch.setattr("lightllm.common.basemodel.basemodel.dist_group_manager.get_group", lambda index: None)
     model_input = _make_prefill_input([10, 11], req_idx=0, is_decode_req=False) if prefill else _make_decode_input()
+    # Creating the step state derives its index tensors on the GPU.
+    model_input.to_cuda()
     state = draft._create_inferstate(model_input)
     assert not hasattr(state, "full_att_state")
     assert state.att_state_manager is resources
     assert state.is_draft_model
-    assert state.prefill_att_state is None and state.decode_att_state is None
     assert state.req_manager is draft.req_manager
-    state.init_att_state()
+    assert state.att_states == {}
     if not prefill:
         state.copy_for_cuda_graph(draft._create_inferstate(model_input))
 

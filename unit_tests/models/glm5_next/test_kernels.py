@@ -50,10 +50,12 @@ def test_kda_chunk_and_decode_match_recurrence(tokens):
         out, state = _reference_kda(q[0, i], k[0, i], v[0, i], gate[0, i], beta[0, i], a, bias, state)
         expected.append(out)
     expected = torch.stack(expected).unsqueeze(0)
+    values = v.clone()
+    destination = torch.empty_like(values) if tokens > 64 else None
     actual, final = chunk_kda_with_fused_gate(
         q=q,
         k=k,
-        v=v.clone(),
+        v=values,
         raw_g=gate,
         beta=beta.float().sigmoid(),
         A_log=a,
@@ -63,7 +65,11 @@ def test_kda_chunk_and_decode_match_recurrence(tokens):
         use_qk_l2norm_in_kernel=True,
         cu_seqlens=torch.tensor([0, tokens], dtype=torch.int32, device="cuda"),
         safe_gate=True,
+        out=destination,
     )
+    assert actual is (values if destination is None else destination)
+    if destination is not None:
+        assert torch.equal(values, v)
     torch.testing.assert_close(actual.float(), expected, atol=4e-3, rtol=3e-2)
     torch.testing.assert_close(final[0], state, atol=8e-3, rtol=3e-2)
     # Reuse a nonzero request slot; the neighboring requests must stay intact.
@@ -85,6 +91,14 @@ def test_kda_chunk_and_decode_match_recurrence(tokens):
         torch.testing.assert_close(out[0, 0].float(), expected[0, i], atol=2e-3, rtol=1e-2)
     torch.testing.assert_close(states[2], state, atol=2e-5, rtol=2e-4)
     assert torch.equal(states[[0, 1, 3]], unchanged)
+    # Writing into the caller's out gives the same output and state.
+    step = (q[:, :1], k[:, :1], v[:, :1], gate[:, :1].reshape(1, 1, -1), beta[:, :1], a, bias.flatten())
+    index = torch.tensor([2], device="cuda", dtype=torch.int32)
+    own_states, out_states = states.clone(), states.clone()
+    own, _ = fused_recurrent_kda(*step, own_states, index)
+    out = torch.empty_like(v[:, :1])
+    assert fused_recurrent_kda(*step, out_states, index, out=out)[0] is out
+    assert torch.equal(out, own) and torch.equal(out_states, own_states)
 
 
 @pytest.mark.parametrize("seq_lens", [(65,), (3, 65, 129)])
@@ -499,8 +513,16 @@ def test_shared_chunk_kernel_preserves_gdn_natural_log_decay():
 
 @pytest.mark.parametrize("heads", [16, 64, 128])
 def test_nope_attention_native_512_and_cuda_graph(heads):
-    from lightllm.common.basemodel.attention.base_att import AttControl
-    from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparsePrefillState, Glm5NextSparseDecodeState
+    from lightllm.common.attention.backends.sparse_mla import (
+        SparseMLADecodeLayerInputs,
+        SparseMLALayerConfig,
+        SparseMLAPrefillLayerInputs,
+    )
+    from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend, FA3SparseMLADecodeAttState
+    from lightllm.common.attention.backends.sparse_mla.flashmla import (
+        FlashMLASparsePrefillBackend,
+        FlashMLASparsePrefillAttState,
+    )
 
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("FA3 NoPE requires Hopper")
@@ -522,34 +544,47 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
         return torch.stack(expected)
 
     expected = reference()
-    control = AttControl(
-        nsa_prefill_dict={"topk_mem_indices": indexes, "softmax_scale": 0.0625, "kv_lora_rank": kv.shape[-1]}
+    layer_config = SparseMLALayerConfig(
+        num_heads=heads,
+        kv_lora_rank=512,
+        qk_rope_head_dim=0,
+        softmax_scale=0.0625,
+        dtype=torch.bfloat16,
+        topk=indexes.shape[1],
+        causal=False,
     )
-    prefill_state = Glm5NextSparsePrefillState()
-    prefill = prefill_state._nsa_prefill_att(q, kv, control)
-    torch.testing.assert_close(prefill.float(), expected, atol=0.012, rtol=0.015)
-    infer_state = InferStateInfo()
-    infer_state.b1_cu_q_seq_len = torch.arange(10, dtype=torch.int32, device="cuda")
-    infer_state.max_q_seq_len = 1
-    decode = Glm5NextSparseDecodeState(
-        _infer_state_weak_ref=weakref.ref(infer_state),
-        nsa_cache_seqlens=lengths,
-        nsa_cu_seqlens_k_new=torch.nn.functional.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0)),
+    prefill_backend = FlashMLASparsePrefillBackend(layer_config)
+    prefill_args = FlashMLASparsePrefillAttState(mem_index=None, has_cached_prefix=False)
+    prefill_inputs = SparseMLAPrefillLayerInputs(q=q, kv_cache=kv, topk_mem_indices=indexes)
+    decode_backend = FA3SparseMLADecodeBackend(layer_config)
+    cu_seqlens_k = torch.nn.functional.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
+    decode_args = FA3SparseMLADecodeAttState(
+        cache_seqlens=lengths,
+        cu_seqlens_q=torch.arange(10, dtype=torch.int32, device="cuda"),
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=1,
     )
-    control.nsa_decode_dict = control.nsa_prefill_dict
-    out = decode._nsa_decode_att((q, q[..., :0]), kv, control)
-    torch.testing.assert_close(out.float(), expected, atol=0.012, rtol=0.015)
+    decode_inputs = SparseMLADecodeLayerInputs(q_nope=q, q_rope=q[..., :0], kv_cache=kv, topk_mem_indices=indexes)
+
+    def prefill():
+        return prefill_backend.forward(prefill_args, prefill_inputs, out=torch.empty_like(q))
+
+    def decode():
+        return decode_backend.forward(decode_args, decode_inputs, out=torch.empty_like(q))
+
+    torch.testing.assert_close(prefill().float(), expected, atol=0.012, rtol=0.015)
+    torch.testing.assert_close(decode().float(), expected, atol=0.012, rtol=0.015)
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        prefill_state._nsa_prefill_att(q, kv, control)
-        decode._nsa_decode_att((q, q[..., :0]), kv, control)
+        prefill()
+        decode()
     torch.cuda.current_stream().wait_stream(stream)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        graph_prefill = prefill_state._nsa_prefill_att(q, kv, control)
-        graph_decode = decode._nsa_decode_att((q, q[..., :0]), kv, control)
+        graph_prefill = prefill()
+        graph_decode = decode()
     graph.replay()
     torch.testing.assert_close(graph_prefill.float(), expected, atol=0.012, rtol=0.015)
     torch.testing.assert_close(graph_decode.float(), expected, atol=0.012, rtol=0.015)
@@ -557,7 +592,7 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
     q.normal_()
     packed.normal_()
     lengths.copy_(lengths.roll(1))
-    decode.nsa_cu_seqlens_k_new[1:].copy_(lengths.cumsum(0, dtype=torch.int32))
+    cu_seqlens_k[1:].copy_(lengths.cumsum(0, dtype=torch.int32))
     indexes.random_(0, 4096)
     indexes.masked_fill_(offsets[None, :] >= lengths[:, None], -1)
     graph.replay()

@@ -13,6 +13,7 @@ from unit_tests.common.att_resources.test_bounded_state import make_state
 from unit_tests.common.att_resources.test_window_compressor_state import make_window
 from unit_tests.common.att_resources.test_capacity import definition
 from unit_tests.common.att_resources.model_helpers import replace_logical_layer_groups
+from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.basemodel.layer_infer.transformer_layer_infer import TransformerLayerInfer
@@ -69,7 +70,7 @@ def test_query_selects_role_and_scheme_and_preserves_shared_layers(role: str, mo
     model.mtp_previous_draft_models = []
     model.max_req_num = 0
     model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
-    model.main_model = SimpleNamespace(att_state_manager=manager)
+    model.main_model = SimpleNamespace(att_state_manager=manager, attention_backend_manager=AttentionBackendManager())
     monkeypatch.setattr("lightllm.common.basemodel.basemodel.AttentionStateManager", lambda request_capacity: manager)
     model.config, model.args = {}, SimpleNamespace(mtp_mode=None)
     model.tp_rank_, model.tp_world_size_ = 0, 1

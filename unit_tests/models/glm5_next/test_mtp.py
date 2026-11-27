@@ -1,4 +1,3 @@
-import weakref
 import pytest
 import torch
 
@@ -145,11 +144,7 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
 def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mode, mtp_step):
     from types import SimpleNamespace
 
-    from lightllm.common.basemodel.attention.base_att import AttControl
-    from lightllm.common.basemodel.attention.linear.kda import KDADecodeAttState
-    from lightllm.common.basemodel.attention.linear.replay_kda import (
-        ReplayKDADecodeAttState,
-    )
+    from unit_tests.models.glm5_next.kda_test_utils import KDAAttention, kda_layer_config, kda_params
     from lightllm.common.attention_state.bounded_att.kda.replay_kda_state import (
         ReplayKDAState,
     )
@@ -208,15 +203,8 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
             expected.append(output.reshape(1, heads, dim))
             expected_ssm[req * width + token] = state[0]
             row += 1
-    backend = SimpleNamespace(
-        mtp_step=mtp_step,
-        tp_num_heads=heads,
-        head_dim=dim,
-        tp_hidden_size=hidden,
-        lower_bound=-5.0,
-        uses_dynamic_spec_verify_layout=lambda: dynamic,
-        split_qkv=lambda x: x.split(hidden, -1),
-    )
+    layer_config = kda_layer_config(heads=heads, dim=dim, replay=mode == "replay", mtp_step=mtp_step)
+    backend = KDAAttention(layer_config)
     resources = AttentionStateManager(request_capacity=4)
     config = ConvSSMStateConfig(
         logical_layer_ids=(0,),
@@ -244,10 +232,15 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
             selected = linear
         resources.register_state(model_role, linear)
     resources.finish_state_registration()
-    manager = SimpleNamespace(HOLD_REQUEST_ID=3)
+    manager = SimpleNamespace(HOLD_REQUEST_ID=3, req_to_token_indexs=None)
     infer = InferStateInfo()
+    infer.is_prefill = False
+    infer.decode_rows_per_request = mtp_step + 1
+    infer.dynamic_decode_rows = dynamic
+    infer.req_to_mtp_state_index = selected.mtp_state_index if mtp_step else None
     infer.batch_size = tokens
     infer.b_req_idx = torch.tensor(request_rows, device="cuda", dtype=torch.int32)
+    infer.b_seq_len = torch.ones(tokens, device="cuda", dtype=torch.int32)
     infer.b_mtp_index = torch.tensor(offsets, device="cuda", dtype=torch.int32)
     infer.req_manager = manager
     infer.att_state_manager = resources
@@ -257,24 +250,10 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
         linear_A_log=SimpleNamespace(weight=a),
         linear_dt_bias=SimpleNamespace(weight=bias),
     )
-    decode_cls = ReplayKDADecodeAttState if mode == "replay" else KDADecodeAttState
-    state = decode_cls(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
+    state = backend.create_att_decode_state(infer)
     state.init_state()
-    actual = state.decode_att(
-        None,
-        None,
-        None,
-        AttControl(
-            linear_att_decode=True,
-            linear_att_decode_dict=dict(
-                layer_weight=weight,
-                layer_num=0,
-                mixed_qkv=mixed,
-                raw_gate=gate,
-                raw_beta=beta,
-            ),
-        ),
-    )
+    conv_view, ssm_view = selected.get_layer_view(logical_layer_id=0)
+    actual = state.run(kda_params(conv_view, ssm_view, weight, mixed, gate, beta, state=selected))
     torch.testing.assert_close(
         actual.reshape(tokens, heads, dim)[:row],
         torch.cat(expected),

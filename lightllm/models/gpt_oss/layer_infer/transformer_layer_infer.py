@@ -1,8 +1,7 @@
-from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 from lightllm.models.gpt_oss.layer_weights.transformer_layer_weight import GptOssTransformerLayerWeight
-from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer, LlamaInferStateInfo
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -59,73 +58,11 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
         hidden_states = hidden_states.view(num_tokens, hidden_dim)
         return self._tpsp_reduce(input=hidden_states, infer_state=infer_state)
 
-    def _context_attention_kernel(
-        self,
-        q: torch.Tensor,
-        kv,
-        infer_state: LlamaInferStateInfo,
-        layer_weight: GptOssTransformerLayerWeight,
-        out=None,
-    ):
-        if self.network_config_["layer_types"][self.layer_num_] == "sliding_attention":
-            window_size = (self.sliding_window - 1, 0)
-            use_sliding_window = True
-        else:
-            window_size = (-1, -1)
-            use_sliding_window = False
+    def attention_config(self, model) -> LayerAttentionConfig:
+        is_sliding = self.network_config_["layer_types"][self.layer_num_] == "sliding_attention"
+        window = (self.sliding_window - 1, 0) if is_sliding else (-1, -1)
+        config = self._gqa_config(model, has_sinks=True, sliding_window=window)
+        return LayerAttentionConfig(prefill=config, decode=config)
 
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
-        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = infer_state.prefill_att_state.prefill_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            att_control=AttControl(
-                use_sliding_window=use_sliding_window,
-                sliding_window=window_size,
-                use_att_sink=True,
-                sink_weight=layer_weight.attn_sinks.weight,
-            ),
-            alloc_func=self.alloc_tensor,
-        )
-        o_tensor = o_tensor.view(q.shape)
-        return o_tensor
-
-    def _token_attention_kernel(
-        self, q: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: GptOssTransformerLayerWeight, out=None
-    ):
-        if self.network_config_["layer_types"][self.layer_num_] == "sliding_attention":
-            window_size = (self.sliding_window - 1, 0)
-            use_sliding_window = True
-        else:
-            window_size = (-1, -1)
-            use_sliding_window = False
-
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
-        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = infer_state.decode_att_state.decode_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            att_control=AttControl(
-                use_sliding_window=use_sliding_window,
-                sliding_window=window_size,
-                use_att_sink=True,
-                sink_weight=layer_weight.attn_sinks.weight,
-            ),
-            alloc_func=self.alloc_tensor,
-        )
-        o_tensor = o_tensor.view(q.shape)
-        return o_tensor
+    def _gqa_sinks(self, layer_weight: GptOssTransformerLayerWeight):
+        return layer_weight.attn_sinks.weight

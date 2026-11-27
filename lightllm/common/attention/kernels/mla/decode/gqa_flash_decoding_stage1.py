@@ -160,6 +160,107 @@ def _fwd_kernel_flash_decode_stage1_padding(
     return
 
 
+def _stage1_launch_args(
+    in_block_seq,
+    q_nope,
+    q_rope,
+    kv_nope,
+    kv_rope,
+    Req_to_tokens,
+    B_req_idx,
+    B_Seqlen,
+    mid_out,
+    mid_out_logsumexp,
+    softmax_scale,
+    num_sm,
+    run_config,
+):
+    q_nope_dim = q_nope.shape[-1]
+    q_rope_dim = q_rope.shape[-1]
+    assert q_nope_dim == kv_nope.shape[-1]
+    assert q_rope_dim == kv_rope.shape[-1]
+    assert q_nope_dim in {16, 32, 64, 128, 256, 512}
+    assert q_rope_dim in {16, 32, 64, 128, 256}
+    assert kv_nope.shape[1] == 1
+
+    Q_HEAD_NUM = run_config["BLOCK_Q_HEAD"]
+    q_head_num = q_nope.shape[1]
+    args = (
+        q_nope,
+        q_rope,
+        kv_nope,
+        kv_rope,
+        softmax_scale,
+        Req_to_tokens,
+        B_req_idx,
+        B_Seqlen,
+        mid_out,
+        mid_out_logsumexp,
+        *Req_to_tokens.stride(),
+        *q_nope.stride(),
+        *q_rope.stride(),
+        *kv_nope.stride(),
+        *kv_rope.stride(),
+        *mid_out.stride(),
+        *mid_out_logsumexp.stride(),
+        in_block_seq,
+    )
+    kwargs = dict(
+        num_sm=num_sm,
+        head_group_num=triton.cdiv(q_head_num, Q_HEAD_NUM),
+        head_num=q_head_num,
+        batch_size=B_req_idx.shape[0],
+        Q_HEAD_NUM=Q_HEAD_NUM,
+        BLOCK_DMODEL=q_nope_dim,
+        BLOCK_ROPE_DMODEL=q_rope_dim,
+        BLOCK_N=run_config["BLOCK_N"],
+        NEED_HEAD_MASK=(q_head_num % Q_HEAD_NUM) != 0,
+        NUM_STAGES=run_config["stage1_num_stages"],
+        num_warps=run_config["stage1_num_warps"],
+        num_stages=1,
+    )
+    return args, kwargs
+
+
+@torch.no_grad()
+def flash_decode_stage1_vsm_count(
+    batch_size: int,
+    q_head_num: int,
+    kv_lora_rank: int,
+    q_rope_dim: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    **run_config,
+) -> int:
+    """Return the persistent grid size from stage 1's occupancy, compiling without launching.
+
+    The probe uses canonical contiguous operands, so the result depends only on the layer
+    configuration and run_config, never on a particular layer's tensor strides.
+    """
+    q_nope = torch.empty((batch_size, q_head_num, kv_lora_rank), dtype=dtype, device=device)
+    q_rope = torch.empty((batch_size, q_head_num, q_rope_dim), dtype=dtype, device=device)
+    kv = torch.empty((1, 1, kv_lora_rank + q_rope_dim), dtype=dtype, device=device)
+    seq_meta = torch.empty((batch_size,), dtype=torch.int32, device=device)
+    args, kwargs = _stage1_launch_args(
+        in_block_seq=torch.empty((1,), dtype=torch.int64, device=device),
+        q_nope=q_nope,
+        q_rope=q_rope,
+        kv_nope=kv[:, :, :kv_lora_rank],
+        kv_rope=kv[:, :, kv_lora_rank:],
+        Req_to_tokens=torch.empty((1, 1), dtype=torch.int32, device=device),
+        B_req_idx=seq_meta,
+        B_Seqlen=seq_meta,
+        mid_out=torch.empty((q_head_num, 0, kv_lora_rank), dtype=torch.float32, device=device),
+        mid_out_logsumexp=torch.empty((q_head_num, 0), dtype=torch.float32, device=device),
+        softmax_scale=1.0,
+        num_sm=1,
+        run_config=run_config,
+    )
+    kernel = _fwd_kernel_flash_decode_stage1_padding.warmup(*args, **kwargs, grid=(1,))
+    kernel._init_handles()
+    return calcu_kernel_best_vsm_count(kernel, num_warps=run_config["stage1_num_warps"])
+
+
 @torch.no_grad()
 def flash_decode_stage1(
     in_block_seq: torch.Tensor,
@@ -173,102 +274,24 @@ def flash_decode_stage1(
     mid_out,
     mid_out_logsumexp,
     softmax_scale,
-    get_sm_count: bool = False,
+    num_sm: int,
     **run_config,
 ):
-    if run_config:
-        Q_HEAD_NUM = run_config["BLOCK_Q_HEAD"]
-        BLOCK_N = run_config["BLOCK_N"]
-        num_warps = run_config["stage1_num_warps"]
-        num_stages = run_config["stage1_num_stages"]
-
-    # shape constraints
-    q_nope_dim = q_nope.shape[-1]
-    q_rope_dim = q_rope.shape[-1]
-
-    assert q_nope_dim == kv_nope.shape[-1]
-    assert q_rope_dim == kv_rope.shape[-1]
-    assert q_nope_dim in {16, 32, 64, 128, 256, 512}
-    assert q_rope_dim in {16, 32, 64, 128, 256}
-    assert kv_nope.shape[1] == 1
-
-    batch_size, q_head_num = B_req_idx.shape[0], q_nope.shape[1]
-    head_group_num = triton.cdiv(q_head_num, Q_HEAD_NUM)
-    NEED_HEAD_MASK = (q_head_num % Q_HEAD_NUM) != 0
-
-    kernel = _fwd_kernel_flash_decode_stage1_padding.warmup(
+    """Launch num_sm persistent programs; in_block_seq must have been computed for the same num_sm."""
+    assert num_sm * 4 + B_req_idx.shape[0] <= mid_out.shape[1]
+    args, kwargs = _stage1_launch_args(
+        in_block_seq,
         q_nope,
         q_rope,
         kv_nope,
         kv_rope,
-        softmax_scale,
         Req_to_tokens,
         B_req_idx,
         B_Seqlen,
         mid_out,
         mid_out_logsumexp,
-        *Req_to_tokens.stride(),
-        *q_nope.stride(),
-        *q_rope.stride(),
-        *kv_nope.stride(),
-        *kv_rope.stride(),
-        *mid_out.stride(),
-        *mid_out_logsumexp.stride(),
-        in_block_seq,
-        num_sm=1,
-        head_group_num=head_group_num,
-        head_num=q_head_num,
-        batch_size=batch_size,
-        Q_HEAD_NUM=Q_HEAD_NUM,
-        BLOCK_DMODEL=q_nope_dim,
-        BLOCK_ROPE_DMODEL=q_rope_dim,
-        BLOCK_N=BLOCK_N,
-        NEED_HEAD_MASK=NEED_HEAD_MASK,
-        NUM_STAGES=num_stages,
-        num_warps=num_warps,
-        num_stages=1,
-        grid=(1,),
-    )
-
-    kernel._init_handles()
-    num_sm = calcu_kernel_best_vsm_count(kernel, num_warps=num_warps)
-    grid = (num_sm,)
-    if get_sm_count:
-        return num_sm
-
-    assert num_sm * 4 + batch_size <= mid_out.shape[1]
-
-    _fwd_kernel_flash_decode_stage1_padding[grid](
-        q_nope,
-        q_rope,
-        kv_nope,
-        kv_rope,
         softmax_scale,
-        Req_to_tokens,
-        B_req_idx,
-        B_Seqlen,
-        mid_out,
-        mid_out_logsumexp,
-        *Req_to_tokens.stride(),
-        *q_nope.stride(),
-        *q_rope.stride(),
-        *kv_nope.stride(),
-        *kv_rope.stride(),
-        *mid_out.stride(),
-        *mid_out_logsumexp.stride(),
-        in_block_seq,
-        num_sm=num_sm,
-        head_group_num=head_group_num,
-        head_num=q_head_num,
-        batch_size=batch_size,
-        Q_HEAD_NUM=Q_HEAD_NUM,
-        BLOCK_DMODEL=q_nope_dim,
-        BLOCK_ROPE_DMODEL=q_rope_dim,
-        BLOCK_N=BLOCK_N,
-        NEED_HEAD_MASK=NEED_HEAD_MASK,
-        NUM_STAGES=num_stages,
-        num_warps=num_warps,
-        num_stages=1,
+        num_sm,
+        run_config,
     )
-
-    return
+    _fwd_kernel_flash_decode_stage1_padding[(num_sm,)](*args, **kwargs)

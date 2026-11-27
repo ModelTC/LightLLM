@@ -6,7 +6,6 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
-from lightllm.common.basemodel.attention.base_att import AttControl
 
 
 @pytest.mark.parametrize("kv_type", ["None", "int4kv", "int8kv", "fp8kv_spt", "fp8kv_sph"])
@@ -60,7 +59,7 @@ def test_gqa_layouts_coexist_and_match_across_tp_and_registration_order(kv_type,
 
 @pytest.mark.parametrize("prefill", [False, True])
 def test_fa3_reads_descale_for_each_head_layout(prefill, monkeypatch):
-    from lightllm.common.basemodel.attention.fa3 import fp8 as fa3_fp8
+    from unit_tests.common.att_resources.fp8_attention_helpers import fp8_attention
 
     manager = AttentionStateManager(request_capacity=2)
     for layer, heads in enumerate((2, 4)):
@@ -80,31 +79,24 @@ def test_fa3_reads_descale_for_each_head_layout(prefill, monkeypatch):
         b_seq_len=torch.ones(2, dtype=torch.int32),
         max_q_seq_len=1,
     )
-    cls = fa3_fp8.Fp8Fa3PrefillAttState if prefill else fa3_fp8.Fp8Fa3DecodeAttState
-    parent = fa3_fp8.Fa3PrefillAttState if prefill else fa3_fp8.Fa3DecodeAttState
-    monkeypatch.setattr(parent, "init_state", lambda self: None)
-    monkeypatch.setattr(fa3_fp8, "q_per_head_static_fp8_quant", lambda q, scales: q)
     observed = {}
-
-    def attend(**kwargs):
-        observed.update(kwargs)
-        return kwargs["q"]
-
-    monkeypatch.setattr(fa3_fp8, "flash_attn_with_kvcache", attend)
-    att = cls(backend=None, _infer_state_weak_ref=lambda: infer)
-    att.b_att_seq_len = torch.ones(3, dtype=torch.int32)
-    att.page_table = att.cu_seqlens_q = att.cu_seqlens_k = None
-    att.decode_max_q_seq_len = 1
-    att.causal = True
-    att.init_state()
-    batch_size = infer.b_seq_len.shape[0] if prefill else att.b_att_seq_len.shape[0]
+    # The attention state group decode rows into 3 attention requests; prefill has one per batch row.
+    batch_size = infer.b_seq_len.shape[0] if prefill else 3
     for state in manager.get_full_attention_states("main"):
         heads = state.config.head_num
         layer = state.config.logical_layer_groups[0][0]
-        q = k = v = torch.zeros((2, heads, state.config.head_dim))
+        q = k = v = torch.zeros((2, heads, state.config.head_dim), dtype=torch.bfloat16)
         observed.clear()
-        run = att.prefill_att if prefill else att.decode_att
-        run(q=q, k=k, v=v, att_control=AttControl(logical_layer_id=layer))
+        att = fp8_attention(
+            monkeypatch,
+            kind="static_head",
+            prefill=prefill,
+            observed=observed,
+            heads=heads,
+            head_dim=state.config.head_dim,
+            requests=batch_size,
+        )
+        att.run(q=q, k=k, v=v, kv_scales=state.get_layer_kv_scales(layer))
         row = state.scales[0]
         k_descale = observed["k_descale"]
         v_descale = observed["v_descale"]

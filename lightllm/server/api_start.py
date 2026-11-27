@@ -183,19 +183,16 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
+    if args.llm_prefill_att_backend != ["auto"] or args.llm_decode_att_backend != ["auto"]:
+        logger.warning(
+            "--llm_prefill_att_backend and --llm_decode_att_backend are deprecated; use --att_backend "
+            "FAMILY.PHASE=BACKEND (for example gqa.prefill=fa3 gdn.prefill=flashqla)"
+        )
+
     if args.enable_ep_moe:
-        allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla", "flashkda"}
-        for backend in args.llm_prefill_att_backend:
-            assert backend in allowed_ep_prefill_att_backends, (
-                "When --enable_ep_moe is enabled, --llm_prefill_att_backend must be one of "
-                f"{sorted(allowed_ep_prefill_att_backends)}; flashinfer is not supported."
-            )
-        allowed_ep_decode_att_backends = {"auto", "fa3", "triton"}
-        for backend in args.llm_decode_att_backend:
-            assert backend in allowed_ep_decode_att_backends, (
-                "When --enable_ep_moe is enabled, --llm_decode_att_backend must be one of "
-                f"{sorted(allowed_ep_decode_att_backends)}; flashinfer is not supported."
-            )
+        # Expert parallelism runs without FlashInfer attention.
+        requested = [*args.att_backend.values(), *args.llm_prefill_att_backend, *args.llm_decode_att_backend]
+        assert "flashinfer" not in requested, "When --enable_ep_moe is enabled, flashinfer attention is not supported."
 
     if args.page_size < 1:
         raise ValueError(f"--page_size must be >= 1, got {args.page_size}")

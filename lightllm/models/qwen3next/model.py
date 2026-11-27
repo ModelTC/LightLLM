@@ -136,20 +136,3 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     def _init_config(self):
         super()._init_config()
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
-
-    def _init_att_backend1(self):
-        role = self.att_state_role
-        if not self.att_state_manager.get_bounded_attention_states(role):
-            self.prefill_att_backend1 = None
-            self.decode_att_backend1 = None
-            return
-        from lightllm.common.basemodel.attention.create_linear_utils import (
-            get_gdn_linear_prefill_att_backend_class,
-            get_gdn_linear_decode_att_backend_class,
-        )
-
-        linear_prefill_att_backend_class = get_gdn_linear_prefill_att_backend_class(index=1)
-        linear_decode_att_backend_class = get_gdn_linear_decode_att_backend_class(index=1)
-        self.prefill_att_backend1 = linear_prefill_att_backend_class(model=self)
-        self.decode_att_backend1 = linear_decode_att_backend_class(model=self)
-        return

@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.linear.replay_gdn_decode import get_configs
+from lightllm.common.attention.kernels.gdn.replayssm.replay_gdn import get_configs
 from unit_tests.common.attention.kernels.gdn.replayssm.replay_history import (
     accept_replay_window,
     attach_replay_history as ReplaySSMExecutor,

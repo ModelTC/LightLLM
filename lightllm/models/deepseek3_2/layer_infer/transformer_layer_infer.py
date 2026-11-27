@@ -1,17 +1,26 @@
 from lightllm.common.attention_state.full_att import FullAttentionState
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 import torch
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.attention.backends.sparse_mla import (
+    SparseMLADecodeLayerInputs,
+    SparseMLALayerConfig,
+    SparseMLAPrefillLayerInputs,
+)
 from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
 from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import all_gather_into_tensor
+
+
+if TYPE_CHECKING:
+    from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2InferStateInfo
 
 
 class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
@@ -23,6 +32,19 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
         )
         return
+
+    def attention_config(self, model) -> LayerAttentionConfig:
+        # Absorbed queries attend to the indexer's top-k slots of the latent cache in both phases.
+        config = SparseMLALayerConfig(
+            num_heads=self.tp_q_head_num_,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            softmax_scale=self.softmax_scale,
+            dtype=model.data_type,
+            kv_cache_format="fp8_ds_mla" if model.args.llm_kv_type == "fp8kv_dsa" else "bf16",
+            topk=self.index_topk,
+        )
+        return LayerAttentionConfig(config, config)
 
     def _get_qkv(
         self,
@@ -78,41 +100,30 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         q_all = torch.cat([q_nope, q_rope], dim=-1)
 
         # 计算 topk indices
-        att_state = infer_state.prefill_att_state
         topk_mem_indices, topk_indices = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=att_state,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
 
-        # Use NSA backend for attention computation
-        att_control = AttControl(
-            nsa_prefill=True,
-            nsa_prefill_dict={
-                "topk_mem_indices": topk_mem_indices,
-                "topk_indices": topk_indices,
-                "prefill_cache_kv": kv,
-                "softmax_scale": self.softmax_scale,
-                "kv_lora_rank": self.kv_lora_rank,
-            },
-        )
-
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="mla",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        mla_out = infer_state.prefill_att_state.prefill_att(
+        state = self._mla_state(infer_state.att_state_manager, infer_state.att_state_role)
+        inputs = SparseMLAPrefillLayerInputs(
             q=q_all,
-            k=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
-            v=None,
-            att_control=att_control,
+            kv_cache=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
+            topk_mem_indices=topk_mem_indices,
+            topk_indices=topk_indices,
+            current_kv=kv,
         )
-        return mla_out
+        backend = infer_state.attention_backend_manager.get_backend(
+            infer_state.att_state_role, "prefill", self.layer_num_
+        )
+        return backend.forward(
+            infer_state.att_states[backend.state_key],
+            inputs,
+            out=out,
+        )
 
     def _token_attention_kernel(
         self,
@@ -126,41 +137,29 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
 
         # 计算 topk mem indices
-        att_state = infer_state.decode_att_state
         topk_mem_indices, _ = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
-            att_state=att_state,
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
 
-        # Use NSA backend for attention computation
-        att_control = AttControl(
-            nsa_decode=True,
-            nsa_decode_dict={
-                "layer_index": self.layer_num_,
-                "topk_mem_indices": topk_mem_indices,
-                "softmax_scale": self.softmax_scale,
-                "kv_lora_rank": self.kv_lora_rank,
-                "qk_rope_head_dim": self.qk_rope_head_dim,
-            },
+        state = self._mla_state(infer_state.att_state_manager, infer_state.att_state_role)
+        inputs = SparseMLADecodeLayerInputs(
+            q_nope=q_nope,
+            q_rope=q_rope,
+            kv_cache=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
+            topk_mem_indices=topk_mem_indices,
         )
-
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="mla",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
+        backend = infer_state.attention_backend_manager.get_backend(
+            infer_state.att_state_role, "decode", self.layer_num_
         )
-        o_tensor = infer_state.decode_att_state.decode_att(
-            q=(q_nope, q_rope),
-            k=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
-            v=None,
-            att_control=att_control,
+        return backend.forward(
+            infer_state.att_states[backend.state_key],
+            inputs,
+            out=torch.empty(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device),
         )
-        return o_tensor
 
 
 class NsaInfer:
@@ -185,11 +184,9 @@ class NsaInfer:
         self,
         hidden_states: torch.Tensor,
         q_lora: torch.Tensor,
-        infer_state: Deepseek2InferStateInfo,
-        att_state: Any,
+        infer_state: "Deepseek3_2InferStateInfo",
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ):
-
         q, k = self._get_q_k_bf16(hidden_states, q_lora, infer_state, layer_weight)
 
         if self.tp_world_size_ > 1:
@@ -225,9 +222,9 @@ class NsaInfer:
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
         weights = weights.unsqueeze(-1) * q_scale
 
-        ks = att_state.ks
-        ke = att_state.ke
-        lengths = att_state.lengths
+        ks = infer_state.nsa_ks
+        ke = infer_state.nsa_ke
+        lengths = infer_state.nsa_lengths
 
         if infer_state.is_prefill:
             mtp_step = 0
@@ -269,7 +266,7 @@ class NsaInfer:
 
         b_topk_mem_index = trans_topk_index_to_mem_index(
             topk_index=b_topk_index,
-            ragged_mem_index=att_state.ragged_mem_index,
+            ragged_mem_index=infer_state.nsa_ragged_mem_index,
         )
 
         return b_topk_mem_index, b_topk_index

@@ -163,8 +163,9 @@ def test_backend_allocates_all_roles_before_warmup(
                             )
                             is state
                         )
-        model.prefill_att_backend = model.decode_att_backend = object()
-        model.prefill_att_backend1 = model.decode_att_backend1 = None
+        model.attention_backend_manager = SimpleNamespace(
+            has_attention=lambda role: False, requires_cpu_cache_sync=False
+        )
         model.backends_bound = True
 
     def warmup(model: TpPartBaseModel):
@@ -203,8 +204,8 @@ def test_backend_allocates_all_roles_before_warmup(
         model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
         if index:
             model.main_model, model.mtp_previous_draft_models = models[0], models[1:].copy()
-        model._init_att_backend = lambda model=model: mark_backends(model)
-        model._init_att_backend1 = lambda: None
+        # The layers are stand-ins, so creating their Attention is stubbed.
+        model._init_attention = lambda model=model: mark_backends(model)
         model._init_hidden_collector = lambda: None
         model._autotune_warmup = lambda model=model: warmup(model)
         model._init_padded_req = lambda model=model: padded.add(id(model))

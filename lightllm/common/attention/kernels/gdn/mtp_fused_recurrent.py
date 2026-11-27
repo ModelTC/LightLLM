@@ -219,6 +219,8 @@ def rebuild_inputs(
     ssm_state_write_indices = ssm_state_indices.to(dtype=ssm_state_write_indices.dtype)
     num_accepted_tokens = torch.ones_like(num_accepted_tokens)
 
+    # 调优写 kernel 自己分配的 scratch 输出，不写调用方的 out。
+    kwargs.pop("out", None)
     # 直接复用 initial_state，不新建或 clone 状态池，避免服务显存紧张时因额外分配触发 OOM。
     # benchmark 会原地覆盖池内前 num_tokens 个槽且不恢复；只能在启动阶段使用，
     # 此时这些槽中不能有需要保留的请求状态。这里只重建分组和索引，不初始化状态数值。
@@ -269,6 +271,7 @@ def mtp_fused_recurrent_gated_delta_rule(
     a_raw: torch.Tensor,
     b_raw: torch.Tensor,
     run_config: Optional[dict] = None,
+    out: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused recurrent gated delta rule with fused gating (GDN layer).
 
@@ -290,6 +293,7 @@ def mtp_fused_recurrent_gated_delta_rule(
         a_raw: ``[T, HV]`` raw alpha.
         b_raw: ``[T, HV]`` raw beta.
         run_config: Optional ``BV``, ``num_warps`` and ``num_stages`` configuration.
+        out: Optional contiguous ``[1, T, HV, V]`` tensor of q's dtype to write ``o`` into.
 
     Returns:
         ``(o, final_state)`` where ``o`` is ``[1, T, HV, V]`` and
@@ -318,7 +322,13 @@ def mtp_fused_recurrent_gated_delta_rule(
     num_stages = run_config["num_stages"]
     NV = triton.cdiv(V, BV)
 
-    o = q.new_empty(v.shape)
+    if out is None:
+        o = q.new_empty(v.shape)
+    else:
+        assert (
+            out.shape == v.shape and out.dtype == q.dtype and out.is_contiguous()
+        ), "out must be contiguous, shaped like v"
+        o = out
     final_state = initial_state
 
     stride_init_state_token = initial_state.stride(0)

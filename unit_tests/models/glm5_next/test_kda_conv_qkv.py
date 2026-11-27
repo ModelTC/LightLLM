@@ -1,11 +1,11 @@
-import weakref
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.common.basemodel.attention.linear import kda as backend_module
+from lightllm.common.attention.backends.kda import KDALayerConfig, KDALayerInputs
+from lightllm.common.attention.backends.kda.triton import KDAPrefillAttState, TritonKDAPrefillBackend
+from unit_tests.models.glm5_next.kda_test_utils import kda_params
 from lightllm.common.attention.kernels.gdn.causal_conv1d import causal_conv1d_fn
 from lightllm.common.attention.kernels.kda.causal_conv1d_qkv import (
     causal_conv1d_qkv,
@@ -122,53 +122,42 @@ def test_backend_fused_conv_output_and_state(lengths):
     weight = torch.randn(channels, 4, **opts) * 0.125
     conv_states = torch.randn(4, channels, 4, **opts)
     ssm_states = torch.randn(4, heads, 128, 128, device="cuda") * 0.01
-    linear_state = SimpleNamespace(get_layer_view=lambda **kwargs: (conv_states, ssm_states))
-    infer_state = type("State", (), {})()
-    infer_state.att_state_manager = SimpleNamespace(get_state=lambda **kwargs: linear_state)
-    infer_state.att_state_role = "main"
-    infer_state.b1_cu_q_seq_len = torch.tensor([0, *lengths], device="cuda", dtype=torch.int32).cumsum(
-        0, dtype=torch.int32
-    )
-    infer_state.b_ready_cache_len = torch.arange(len(lengths), device="cuda", dtype=torch.int32) % 2 * 7
-    infer_state.max_q_seq_len = max(lengths)
-    backend = SimpleNamespace(
-        head_dim=128,
-        tp_num_heads=heads,
-        tp_hidden_size=heads * 128,
-        conv_kernel_size=4,
-        lower_bound=-5.0,
+    cu_seqlens = torch.tensor([0, *lengths], device="cuda", dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    b_ready_cache_len = torch.arange(len(lengths), device="cuda", dtype=torch.int32) % 2 * 7
+    slots = torch.arange(1, len(lengths) + 1, device="cuda", dtype=torch.int32)
+    att_state = KDAPrefillAttState(
+        conv_idx=slots,
+        ssm_idx=slots,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens=cu_seqlens,
+        b_ready_cache_len=b_ready_cache_len,
+        max_q_seq_len=max(lengths),
         flash_kda_fwd=None,
     )
-    att = backend_module.KDAPrefillAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer_state))
-    att.b_conv_buffer_idx = torch.arange(1, len(lengths) + 1, device="cuda", dtype=torch.int32)
-    att.b_ssm_buffer_idx = att.b_conv_buffer_idx
-    att.cu_seqlens = infer_state.b1_cu_q_seq_len
     layer_weight = SimpleNamespace(
         get_merged_kda_conv_weight=lambda: weight,
         linear_A_log=SimpleNamespace(weight=torch.zeros(heads, device="cuda")),
         linear_dt_bias=SimpleNamespace(weight=torch.zeros(heads * 128, device="cuda")),
     )
-    control = AttControl(
-        linear_att_prefill=True,
-        linear_att_prefill_dict=dict(
-            layer_weight=layer_weight,
-            layer_num=0,
-            mixed_qkv=projection[:, :channels],
-            raw_gate=torch.randn(tokens, heads * 128, **opts) * 0.1,
-            raw_beta=torch.randn(tokens, heads, **opts),
-        ),
+    params = kda_params(
+        conv_states,
+        ssm_states,
+        layer_weight,
+        projection[:, :channels],
+        torch.randn(tokens, heads * 128, **opts) * 0.1,
+        torch.randn(tokens, heads, **opts),
     )
+    backend = TritonKDAPrefillBackend(KDALayerConfig(heads, 128, 4, -5.0, torch.bfloat16))
     expected_conv, expected_ssm = conv_states.clone(), ssm_states.clone()
     q, k, v = reference(
         projection[:, :channels],
         weight,
         expected_conv[..., :3],
-        infer_state.b1_cu_q_seq_len,
-        att.b_conv_buffer_idx,
-        infer_state.b_ready_cache_len > 0,
+        cu_seqlens,
+        slots,
+        b_ready_cache_len > 0,
         heads,
     )
-    params = control.linear_att_prefill_dict
     expected, final_state = chunk_kda_with_fused_gate(
         q=q,
         k=k,
@@ -177,15 +166,16 @@ def test_backend_fused_conv_output_and_state(lengths):
         beta=params["raw_beta"].float().sigmoid().view(1, tokens, heads),
         A_log=layer_weight.linear_A_log.weight,
         g_bias=layer_weight.linear_dt_bias.weight,
-        initial_state=ssm_states[att.b_ssm_buffer_idx].contiguous(),
+        initial_state=ssm_states[slots].contiguous(),
         output_final_state=True,
         use_qk_l2norm_in_kernel=False,
-        cu_seqlens=infer_state.b1_cu_q_seq_len,
+        cu_seqlens=cu_seqlens,
         safe_gate=True,
         lower_bound=-5.0,
     )
-    expected_ssm[att.b_ssm_buffer_idx] = final_state.to(ssm_states.dtype)
-    actual = att.prefill_att(None, None, None, att_control=control)
-    assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+    expected_ssm[slots] = final_state.to(ssm_states.dtype)
+    out = torch.empty(tokens, heads, 128, **opts)
+    actual = backend.forward(att_state, KDALayerInputs(**{k: v for k, v in params.items() if k != "state"}), out=out)
+    assert torch.equal(actual.view(torch.uint8), expected.view(actual.shape).view(torch.uint8))
     assert torch.equal(conv_states, expected_conv)
     assert torch.equal(ssm_states, expected_ssm)

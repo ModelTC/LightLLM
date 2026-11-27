@@ -1,4 +1,3 @@
-import weakref
 import collections
 import inspect
 import json
@@ -10,8 +9,10 @@ import torch
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from lightllm.common.attention.backends.gqa import GQAKVScales
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.triton.int4kv import Int4kvTritonDecodeAttState
+from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs
+from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeBackend
 from lightllm.common.attention.kernels.gqa.int4kv import (
     int4kv_flash_decoding_stage1 as stage1_module,
     ppl_int4kv_flash_decoding as decode_module,
@@ -141,20 +142,29 @@ def test_decode_passes_saved_length_to_stage1(monkeypatch):
     infer_state.b_req_idx = inputs["B_req_idx"]
     infer_state.b_seq_len = inputs["B_Seqlen"]
     infer_state.req_manager = SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"])
-    state = Int4kvTritonDecodeAttState(
-        backend=SimpleNamespace(),
-        _infer_state_weak_ref=weakref.ref(infer_state),
+    infer_state.is_prefill = False
+    q, k, v = inputs["q"], inputs["k"], inputs["v"]
+    kv_scales = GQAKVScales(k_scale=inputs["k_scale"], v_scale=inputs["v_scale"])
+    layer_config = GQALayerConfig(
+        num_heads=q.shape[1],
+        num_kv_heads=k.shape[1],
+        head_dim=q.shape[2],
+        dtype=q.dtype,
+        kv_quant="int4_group",
+        kv_quant_group_size=q.shape[2] // kv_scales.k_scale.shape[-1],
     )
-    state.init_state()
-    state.infer_state.max_kv_seq_len = 32768
+    layer_inputs = GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=kv_scales)
+    backend = TritonQuantGQADecodeBackend(layer_config)
+    att_state = backend.build(infer_state)
+    infer_state.max_kv_seq_len = 32768
     calls = []
     monkeypatch.setattr(stage1_module, "int4kv_flash_decode_stage1", lambda **kwargs: calls.append(kwargs))
     stage2 = inspect.getmodule(flash_decode_stage2)
     monkeypatch.setattr(stage2, "flash_decode_stage2", lambda *args: None)
-    state.decode_att(
-        inputs["q"],
-        (inputs["k"], inputs["k_scale"]),
-        (inputs["v"], inputs["v_scale"]),
+    backend.forward(
+        att_state,
+        layer_inputs,
+        out=torch.empty_like(q),
         alloc_func=lambda shape, dtype, device: torch.empty(shape, dtype=dtype),
     )
     assert calls[0]["max_kv_seq_len"] == 8193

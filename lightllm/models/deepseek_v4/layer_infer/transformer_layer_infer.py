@@ -1,7 +1,8 @@
 import torch
 import triton
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
+from lightllm.common.attention.backends.sparse_mla import SWASparseMLALayerConfig, SWASparseMLALayerInputs
 from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_post_pre_norm, hc_pre_norm
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_sm100_mega_moe
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
@@ -353,8 +354,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
 
         state = infer_state.swa_state
-        att_state = infer_state.prefill_att_state if infer_state.is_prefill else infer_state.decode_att_state
-        swa, _ = att_state.backend.get_att_input_params(infer_state, self.layer_num_)
+        swa, _ = infer_state.get_att_kv(self.layer_num_)
         # 一次完成 RMSNorm、RoPE、FP8 打包和 SWA 写入。
         fused_kv_norm_rope_to_swa(
             kv=kv,
@@ -499,24 +499,14 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         out=None,
     ):
         meta = self._compress_and_index(q_lora, x, infer_state, layer_weight)
-        att_control = AttControl(
-            nsa_prefill=True,
-            nsa_prefill_dict={
-                "compress_ratio": self.compress_ratio,
-                "head_dim_v": self.v_head_dim,
-                "softmax_scale": self.softmax_scale,
-                "attn_sink": layer_weight.attn_sink_.weight,
-                **meta,
-            },
+        if out is None:
+            out = self.alloc_tensor((q.shape[0], q.shape[1], self.v_head_dim), dtype=q.dtype, device=q.device)
+        inputs = self._sparse_layer_inputs(q, meta, infer_state, layer_weight)
+        backend = infer_state.attention_backend_manager.get_backend(
+            infer_state.att_state_role, "prefill", self.layer_num_
         )
-        return infer_state.prefill_att_state.prefill_att(
-            q=q,
-            k=infer_state.prefill_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
-            v=None,
-            att_control=att_control,
-            alloc_func=self.alloc_tensor,
-            out=out,
-        )
+        out = backend.forward(infer_state.att_states[backend.state_key], inputs, out=out)
+        return out[:, : self.tp_q_head_num_]
 
     # ------------------------------------------------------------------ attention (decode)
     def token_attention_forward(
@@ -530,21 +520,40 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         self, q, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
         meta = self._compress_and_index(q_lora, x, infer_state, layer_weight)
-        att_control = AttControl(
-            nsa_decode=True,
-            nsa_decode_dict={
-                "compress_ratio": self.compress_ratio,
-                "head_dim_v": self.v_head_dim,
-                "softmax_scale": self.softmax_scale,
-                "attn_sink": layer_weight.attn_sink_.weight,
-                **meta,
-            },
+        out = torch.empty((q.shape[0], q.shape[1], self.v_head_dim), dtype=q.dtype, device=q.device)
+        inputs = self._sparse_layer_inputs(q, meta, infer_state, layer_weight)
+        backend = infer_state.attention_backend_manager.get_backend(
+            infer_state.att_state_role, "decode", self.layer_num_
         )
-        return infer_state.decode_att_state.decode_att(
+        out = backend.forward(infer_state.att_states[backend.state_key], inputs, out=out)
+        return out[:, : self.tp_q_head_num_]
+
+    def attention_config(self, model) -> LayerAttentionConfig:
+        config = SWASparseMLALayerConfig(
+            num_heads=self.flashmla_q_head_num_,
+            head_dim_v=self.v_head_dim,
+            softmax_scale=self.softmax_scale,
+            dtype=model.data_type,
+            compress_ratio=self.compress_ratio,
+            has_attn_sink=True,
+        )
+        return LayerAttentionConfig(config, config)
+
+    def _sparse_layer_inputs(self, q, meta, infer_state: DeepseekV4InferStateInfo, layer_weight):
+        """FlashMLA views of the layer's packed caches, with the indexer's selection and the layer's sink."""
+        swa_packed, compressed_packed = infer_state.get_att_kv(self.layer_num_)
+        compressed_cache = None
+        if compressed_packed is not None:
+            compressed_cache = self.compressed_cache_config.get_attention_view(packed_kv=compressed_packed)
+        return SWASparseMLALayerInputs(
             q=q,
-            k=infer_state.decode_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
-            v=None,
-            att_control=att_control,
+            swa_cache=self.swa_cache_config.get_attention_view(packed_kv=swa_packed),
+            swa_indices=meta["swa_indices"],
+            swa_lengths=meta["swa_lengths"],
+            compressed_cache=compressed_cache,
+            extra_indices=meta.get("extra_indices"),
+            extra_lengths=meta.get("extra_lengths"),
+            attn_sink=layer_weight.attn_sink_.weight,
         )
 
     # ------------------------------------------------------------------ moe

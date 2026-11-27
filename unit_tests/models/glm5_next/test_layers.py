@@ -8,7 +8,12 @@ import torch
 import torch.nn.functional as F
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparsePrefillState, Glm5NextSparseDecodeState
+from lightllm.common.attention.backends.sparse_mla.fa3 import FA3SparseMLADecodeBackend, FA3SparseMLADecodeAttState
+from lightllm.common.attention.backends.sparse_mla.flashmla import (
+    FlashMLASparsePrefillBackend,
+    FlashMLASparsePrefillAttState,
+)
+from lightllm.common.attention import selector
 from lightllm.common.quantization import Quantcfg
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
@@ -175,14 +180,29 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     state.att_state_manager = SimpleNamespace(
         get_state=lambda **kwargs: SimpleNamespace(get_layer_view=lambda logical_layer_id: SimpleNamespace(kv=kv))
     )
-    state.prefill_att_state = Glm5NextSparsePrefillState()
+    state.nsa_step = SimpleNamespace(q_kv_start_loc=None)
     state.b1_cu_q_seq_len = torch.arange(4, device="cuda", dtype=torch.int32)
     state.max_q_seq_len = 1
-    state.decode_att_state = Glm5NextSparseDecodeState(
-        _infer_state_weak_ref=weakref.ref(state),
-        nsa_cache_seqlens=lengths,
-        nsa_cu_seqlens_k_new=F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0)),
+
+    model = SimpleNamespace(
+        data_type=torch.bfloat16,
+        args=SimpleNamespace(llm_kv_type="None"),
     )
+    spec = layer.attention_config(model)
+    prefill = selector.select(spec.prefill, "prefill", spec.prefill_backend_name)
+    decode = selector.select(spec.decode, "decode", spec.decode_backend_name)
+    assert (type(prefill), type(decode)) == (FlashMLASparsePrefillBackend, FA3SparseMLADecodeBackend)
+    backends = {"prefill": prefill, "decode": decode}
+    state.attention_backend_manager = SimpleNamespace(get_backend=lambda role, phase, layer_id: backends[phase])
+    # The attention state the group's backends would build for this batch.
+    prefill_att_state = FlashMLASparsePrefillAttState(mem_index=None, has_cached_prefix=False)
+    decode_att_state = FA3SparseMLADecodeAttState(
+        cache_seqlens=lengths,
+        cu_seqlens_q=state.b1_cu_q_seq_len,
+        cu_seqlens_k=F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0)),
+        max_seqlen_q=1,
+    )
+    assert decode.layer_config.causal is False
     projected = torch.bmm(q.transpose(0, 1), kv_b.view(4, 256, 512)[:, :128]).transpose(0, 1)
     expected = []
     for row, length in enumerate(lengths.tolist()):
@@ -190,8 +210,10 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
         scores = projected[row].float() @ keys.T * config["qk_nope_head_dim"] ** -0.5
         expected.append(scores.softmax(-1) @ keys)
     expected = torch.stack(expected)
+    state.att_states = {prefill.state_key: prefill_att_state}
     prefill = layer._context_attention_kernel(q, None, state, weight)
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
+    state.att_states = {decode.state_key: decode_att_state}
     decode = layer._token_attention_kernel(q, state, weight)
     for output in (prefill, decode):
         torch.testing.assert_close(output.float(), expected, atol=1e-3, rtol=0.015)
@@ -461,18 +483,20 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
     for step, draft in enumerate(drafts):
         draft.prepare_attention_states()
         assert draft.att_state_manager is main.att_state_manager
-        draft._init_att_backend1()
         state = getattr(draft.att_state_manager, f"draft{step}_mla_packed_bf16_state")
         assert state is not main.att_state_manager.main_mla_packed_bf16_state
         assert not hasattr(draft, "full_att_state")
         assert state.storage is None
         assert state.config.logical_layer_groups == ((4 + step,),)
         assert state.state_name == f"draft{step}_mla_packed_bf16_state"
-        assert draft.prefill_att_backend1 is None and draft.decode_att_backend1 is None
+        # The native draft has no KDA layers, so it keeps no KDA state.
+        assert not hasattr(draft.att_state_manager, f"draft{step}_kda_conv_bf16_ssm_fp32_state")
         assert getattr(draft.att_state_manager, f"draft{step}_compressor_indexer_w4_s4_bf16_state").buffer.is_cuda
 
     # NoPE state initialization must not require a model-owned RoPE cache.
     for model in (main, *drafts):
+        # The runtime is not initialized, so the step builds no attention metadata.
+        model.attention_backend_manager = SimpleNamespace(has_attention=lambda role: False)
         state = model.infer_state_class()
         state.is_prefill = True
         state.input_ids = torch.zeros(3, device="cuda", dtype=torch.int64)

@@ -20,7 +20,10 @@ class Gemma4InferStateInfo(InferStateInfo):
         # 对应一个请求 token list 为 [t, t, i, i, t] 的一个token序列，
         # 则对应的 b_image_token_end 为 [0, 0, 4, 4, 0],
         # image token 可以看到自己当前这个token以及后面的 image token。
+        # b_image_token_start 是 image token 所在 image 的起始位置（文本 token 为 0），
+        # sliding window 层用它让 image token 看到整段 image，即使超出窗口。
         self.b_image_token_end = None
+        self.b_image_token_start = None
 
     def init_some_extra_state(self, model):
         super().init_some_extra_state(model)
@@ -45,6 +48,7 @@ class Gemma4InferStateInfo(InferStateInfo):
     def _build_b_image_token_end(self):
         device = self.position_ids.device
         self.b_image_token_end = torch.zeros(self.position_ids.shape[0], dtype=torch.int32, device=device)
+        self.b_image_token_start = torch.zeros_like(self.b_image_token_end)
 
         if not self.multimodal_params:
             return
@@ -75,4 +79,5 @@ class Gemma4InferStateInfo(InferStateInfo):
             b_ready_cache_len=self.b_ready_cache_len,
             b_q_seq_len=self.b_q_seq_len,
             b_image_token_end=self.b_image_token_end,
+            b_image_token_start=self.b_image_token_start,
         )

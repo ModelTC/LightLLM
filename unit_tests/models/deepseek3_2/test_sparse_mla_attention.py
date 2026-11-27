@@ -1,0 +1,332 @@
+"""DeepSeek V3.2 sparse MLA layers' attention, against a torch reference.
+
+A bf16 cache runs FA3 decode with rotary channels; the FP8 cache runs FlashMLA over DeepSeek's packed
+"fp8_ds_mla" rows (512 FP8 latent channels, four fp32 scales per 128 channels and 64 bf16 rotary channels).
+CUDA graph steps rebuild their attention state on replay, so a replay with new lengths and indices must match eager.
+"""
+
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from lightllm.common.attention.backends.sparse_mla import (
+    SparseMLADecodeLayerInputs,
+    SparseMLALayerConfig,
+    SparseMLAPrefillLayerInputs,
+)
+from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
+from lightllm.common.basemodel.triton_kernel.gen_decode_params import gen_decode_params
+from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_prefill_params
+from unit_tests.common.attention.backends.groups_runner import LayerAttention
+
+pytestmark = [
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required"),
+    pytest.mark.skipif(
+        torch.cuda.is_available() and torch.cuda.get_device_capability()[0] != 9,
+        reason="FA3 and FlashMLA sparse kernels target Hopper",
+    ),
+]
+
+# softmax_scale = (kv_lora_rank + qk_rope_head_dim) ** -0.5
+RANK, ROPE, TOPK, SCALE = 512, 64, 2048, 1 / 24
+SLOTS, MAX_LEN = 16384, 4096
+
+
+def layer_attention(heads, kv_cache_format):
+    """Attention matching a DeepSeek V3.2 layer's sparse MLA spec."""
+    config = SparseMLALayerConfig(
+        num_heads=heads,
+        kv_lora_rank=RANK,
+        qk_rope_head_dim=ROPE,
+        softmax_scale=SCALE,
+        dtype=torch.bfloat16,
+        kv_cache_format=kv_cache_format,
+        topk=TOPK,
+    )
+    return LayerAttention(config, config, "flashmla_sparse")
+
+
+def gen(seed):
+    return torch.Generator(device="cuda").manual_seed(seed)
+
+
+def token_map(requests, seed=0):
+    slots = torch.randperm(SLOTS, device="cuda", dtype=torch.int32, generator=gen(seed))
+    return slots[: requests * MAX_LEN].view(requests, MAX_LEN)
+
+
+def make_infer(req_to_token, lengths, *, capture=False, replay=False, microbatch=0):
+    infer = InferStateInfo()
+    infer.is_prefill = False
+    infer.batch_size = len(lengths)
+    infer.b_req_idx = torch.arange(len(lengths), device="cuda", dtype=torch.int32)
+    infer.b_seq_len = torch.tensor(lengths, device="cuda", dtype=torch.int32)
+    infer.max_kv_seq_len, infer.total_token_num = max(lengths), sum(lengths)
+    infer.max_q_seq_len = 1
+    infer.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token, HOLD_REQUEST_ID=len(lengths) + 1)
+    infer.graph_mode = GraphMode.CAPTURE if capture else GraphMode.REPLAY if replay else GraphMode.EAGER
+    infer.cuda_graph_max_kv_seq_len = MAX_LEN if infer.uses_cuda_graph else None
+    infer.microbatch_index = microbatch
+    (
+        infer.b_q_seq_len,
+        infer.b1_cu_q_seq_len,
+        infer.b_kv_seq_len,
+        infer.b1_cu_kv_seq_len,
+        infer.position_ids,
+    ) = gen_decode_params(infer.b_seq_len)
+    return infer
+
+
+def decode_att_state(attention, infer):
+    return attention.att_state(infer)
+
+
+def select(req_to_token, lengths, out, seed):
+    """Each row selects min(length, TOPK) distinct visible cache slots, then -1 padding."""
+    out.fill_(-1)
+    for row, length in enumerate(lengths):
+        count = min(length, TOPK)
+        positions = torch.randperm(length, device="cuda", generator=gen(seed + row))[:count]
+        out[row, :count] = req_to_token[row, positions]
+    return out
+
+
+def attend(q_row, keys, scale=SCALE):
+    """q_row [heads, 576] over keys [selected, 576]; values are the latent part of each key."""
+    keys = keys.float()
+    return (q_row.float() @ keys.T * scale).softmax(-1) @ keys[:, :RANK]
+
+
+def write_fp8_ds_mla(kv):
+    from lightllm.common.basemodel.triton_kernel.kv_copy.destindex_copy_kv_flashmla_fp8 import (
+        destindex_copy_kv_flashmla_fp8,
+    )
+
+    packed = torch.zeros(kv.shape[0], 1, 656, device="cuda", dtype=torch.uint8)
+    destindex_copy_kv_flashmla_fp8(
+        KV_nope=kv[..., :RANK],
+        KV_rope=kv[..., RANK:],
+        DestLoc=torch.arange(kv.shape[0], device="cuda"),
+        O_nope=packed[..., :RANK].view(torch.float8_e4m3fn),
+        O_scale=packed[..., RANK : RANK + 16].view(torch.float32),
+        O_rope=packed[..., RANK + 16 :].view(torch.bfloat16),
+    )
+    return packed
+
+
+def dequantize_fp8_ds_mla(packed):
+    latent = packed[:, 0, :RANK].view(torch.float8_e4m3fn).float().view(-1, 4, 128)
+    scales = packed[:, 0, RANK : RANK + 16].view(torch.float32).view(-1, 4, 1)
+    rope = packed[:, 0, RANK + 16 :].view(torch.bfloat16).float()
+    return torch.cat(((latent * scales).view(-1, RANK), rope), dim=-1)
+
+
+def capture(run):
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        run()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = run()
+    return graph, output
+
+
+def check_decode_and_graph(attention, cache, reference_cache, heads):
+    """Eager decode matches the reference; a graph captured for one step replays another step correctly."""
+    req_to_token = token_map(4)
+    # Every row selects at least as many keys on replay, so stale captured lengths would read valid but too few
+    # entries and fail the comparison instead of faulting on -1 padding.
+    first, second = [100, 3000, 2048, 7], [4096, 2100, 2049, 2000]
+    indices = select(req_to_token, first, torch.empty((4, TOPK), device="cuda", dtype=torch.int32), seed=10)
+    q_nope = torch.randn(4, heads, RANK, device="cuda", dtype=torch.bfloat16, generator=gen(1)) * 0.5
+    q_rope = torch.randn(4, heads, ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(2)) * 0.5
+    inputs = SparseMLADecodeLayerInputs(q_nope=q_nope, q_rope=q_rope, kv_cache=cache, topk_mem_indices=indices)
+
+    def run(att_state):
+        return attention.run("decode", att_state, inputs, out=torch.empty_like(q_nope))
+
+    def reference():
+        q = torch.cat((q_nope, q_rope), dim=-1)
+        return torch.stack([attend(q[row], reference_cache[ids[ids >= 0].long()]) for row, ids in enumerate(indices)])
+
+    def eager(lengths):
+        return run(decode_att_state(attention, make_infer(req_to_token, lengths))).clone()
+
+    first_eager = eager(first)
+    torch.testing.assert_close(first_eager.float(), reference(), atol=0.02, rtol=0.02)
+
+    graph_infer = make_infer(req_to_token, first, capture=True)
+    graph_att_state = decode_att_state(attention, graph_infer)
+    graph, graph_out = capture(lambda: run(graph_att_state))
+    graph.replay()
+    assert torch.equal(graph_out, first_eager)
+
+    # Replay prepares its own state before copying request tensors into the captured buffers.
+    select(req_to_token, second, indices, seed=20)
+    q_nope.normal_(generator=gen(3)).mul_(0.5)
+    replay_infer = make_infer(req_to_token, second, replay=True)
+    decode_att_state(attention, replay_infer)
+    graph_infer.copy_for_cuda_graph(replay_infer)
+    graph.replay()
+    replayed = graph_out.clone()
+    assert torch.equal(replayed, eager(second))
+    torch.testing.assert_close(replayed.float(), reference(), atol=0.02, rtol=0.02)
+
+
+def test_bf16_fa3_decode_with_rope_matches_reference_and_cuda_graph_replay():
+    pytest.importorskip("sgl_kernel.flash_attn")
+    attention = layer_attention(16, "bf16")
+    assert attention.backend_name("decode") == "fa3_sparse_mla_decode"
+
+    kv = torch.randn(SLOTS, 1, RANK + ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(0)) * 0.5
+    check_decode_and_graph(attention, kv, kv[:, 0].float(), heads=16)
+
+
+@pytest.mark.parametrize(
+    "heads, strided, legacy", [(64, False, False), (8, False, False), (64, True, False), (64, False, True)]
+)
+def test_bf16_flashmla_prefill_output_and_peak(heads, strided, legacy, monkeypatch, record_property):
+    from lightllm.common.attention.backends.sparse_mla import flashmla
+
+    if legacy:
+        monkeypatch.setattr(flashmla, "_bf16_prefill_out_kernel", lambda: None)
+    elif heads == 64 and not strided and flashmla._bf16_prefill_out_kernel() is None:
+        pytest.skip("FlashMLA with out support is required")
+    rows = 512
+    query = torch.randn(rows, heads, RANK + ROPE, dtype=torch.bfloat16, device="cuda", generator=gen(21))
+    cache = torch.randn(32, 1, RANK + ROPE, dtype=query.dtype, device="cuda", generator=gen(22))
+    slots = torch.arange(rows, device="cuda", dtype=torch.int32) % cache.shape[0]
+    indices = torch.full((rows, TOPK), -1, device="cuda", dtype=torch.int32)
+    indices[:, 0] = slots
+    storage = torch.full((rows, heads + int(strided), RANK), torch.nan, dtype=query.dtype, device="cuda")
+    out = storage[:, :heads]
+    config = SparseMLALayerConfig(heads, RANK, ROPE, SCALE, query.dtype, topk=TOPK)
+    backend = flashmla.FlashMLASparsePrefillBackend(config)
+    state = flashmla.FlashMLASparsePrefillAttState(None, False)
+    inputs = SparseMLAPrefillLayerInputs(q=query, kv_cache=cache, topk_mem_indices=indices)
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    before = torch.cuda.memory_allocated()
+    assert backend.forward(state, inputs, out=out) is out
+    torch.cuda.synchronize()
+    scratch = torch.cuda.max_memory_allocated() - before
+    record_property("peak_bytes_including_output", scratch + out.numel() * out.element_size())
+    if heads == 64 and not strided and not legacy:
+        assert scratch < out.numel() * out.element_size()
+    else:
+        assert scratch < rows * 64 * RANK * query.element_size()
+    torch.testing.assert_close(out, cache[slots.long(), :, :RANK].expand_as(out))
+    if strided:
+        assert storage[:, -1].isnan().all()
+
+
+@pytest.fixture(params=["installed", "legacy_signature"])
+def flashmla_api(request, monkeypatch):
+    flash_mla = pytest.importorskip("flash_mla")
+    if request.param == "installed":
+        return
+
+    sparse_result = SimpleNamespace(output=None)
+
+    def without_out(kernel, *, track_output=False):
+        def legacy_kernel(**kwargs):
+            assert "out" not in kwargs
+            result = kernel(**kwargs)
+            if track_output:
+                sparse_result.output = result[0]
+            return result
+
+        return legacy_kernel
+
+    for name in ("flash_mla_sparse_fwd", "flash_mla_with_kvcache"):
+        monkeypatch.setattr(
+            flash_mla, name, without_out(getattr(flash_mla, name), track_output=name == "flash_mla_sparse_fwd")
+        )
+    return sparse_result
+
+
+def test_fp8_ds_mla_flashmla_decode_matches_reference_and_cuda_graph_replay(flashmla_api):
+    # FlashMLA's sparse FP8 decode runs 64-head tiles.
+    attention = layer_attention(64, "fp8_ds_mla")
+    assert attention.backend_name("decode") == "flashmla_sparse_mla_decode"
+
+    kv = torch.randn(SLOTS, 1, RANK + ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(0)) * 0.5
+    packed = write_fp8_ds_mla(kv)
+    check_decode_and_graph(attention, packed, dequantize_fp8_ds_mla(packed), heads=64)
+
+
+@pytest.mark.parametrize(
+    "ready, ends",
+    [([0, 0], [40, 150]), ([100, 2100], [164, 2200])],
+    ids=["no_cached_prefix", "cached_prefix"],
+)
+@pytest.mark.parametrize("use_destination", [False, True], ids=["native_output", "destination"])
+def test_fp8_ds_mla_flashmla_prefill_matches_reference(ready, ends, flashmla_api, use_destination):
+    """Cached history is read from the packed FP8 cache; the step's own keys come from current_kv in bf16."""
+    heads = 64
+    req_to_token = token_map(len(ends), seed=5)
+    kv = torch.randn(SLOTS, 1, RANK + ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(6)) * 0.5
+    packed = write_fp8_ds_mla(kv)
+    history = dequantize_fp8_ds_mla(packed)
+    q_lens = [end - start for start, end in zip(ready, ends)]
+    rows = sum(q_lens)
+
+    infer = InferStateInfo()
+    infer.is_prefill = True
+    infer.batch_size = len(ends)
+    infer.b_req_idx = torch.arange(len(ends), device="cuda", dtype=torch.int32)
+    infer.b_seq_len = torch.tensor(ends, device="cuda", dtype=torch.int32)
+    infer.b_ready_cache_len = torch.tensor(ready, device="cuda", dtype=torch.int32)
+    infer.max_kv_seq_len, infer.total_token_num, infer.max_cache_len = max(ends), sum(ends), max(ready)
+    infer.max_q_seq_len = max(q_lens)
+    infer.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token, HOLD_REQUEST_ID=len(ends) + 1)
+    infer.input_ids = torch.zeros(rows, device="cuda", dtype=torch.int64)
+    (
+        infer.b_q_seq_len,
+        infer.b1_cu_q_seq_len,
+        infer.b_kv_seq_len,
+        infer.b1_cu_kv_seq_len,
+        infer.position_ids,
+    ) = gen_prefill_params(input_token_num=rows, b_ready_cache_len=infer.b_ready_cache_len, b_seq_len=infer.b_seq_len)
+    infer.b_q_start_loc = infer.b1_cu_q_seq_len[:-1]
+    infer.mem_index = torch.cat([req_to_token[req, start:end] for req, (start, end) in enumerate(zip(ready, ends))])
+    # The step's keys in full precision, deliberately different from what the FP8 cache holds for those slots.
+    current_kv = torch.randn(rows, 1, RANK + ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(7)) * 0.5
+
+    topk_mem_indices = torch.full((rows, TOPK), -1, device="cuda", dtype=torch.int32)
+    topk_indices = torch.full((rows, TOPK), -1, device="cuda", dtype=torch.int32)
+    q = torch.randn(rows, heads, RANK + ROPE, device="cuda", dtype=torch.bfloat16, generator=gen(8)) * 0.5
+    expected, row, step_offset = [], 0, 0
+    for req, (start, end) in enumerate(zip(ready, ends)):
+        for position in range(start, end):
+            count = min(position + 1, TOPK)
+            selected = torch.randperm(position + 1, device="cuda", generator=gen(100 + row))[:count]
+            topk_mem_indices[row, :count] = req_to_token[req, selected]
+            # Without cached history every selected key is one of the step's own keys, in ragged step order.
+            topk_indices[row, :count] = (step_offset + selected - start).int()
+            from_step = selected >= start
+            keys = history[req_to_token[req, selected].long()]
+            keys[from_step] = current_kv[step_offset + selected[from_step] - start, 0].float()
+            expected.append(attend(q[row], keys))
+            row += 1
+        step_offset += end - start
+
+    attention = layer_attention(heads, "fp8_ds_mla")
+    inputs = SparseMLAPrefillLayerInputs(
+        q=q,
+        kv_cache=packed,
+        topk_mem_indices=topk_mem_indices,
+        topk_indices=topk_indices,
+        current_kv=current_kv,
+    )
+    destination = torch.empty((rows, heads, RANK), device="cuda", dtype=q.dtype) if use_destination else None
+    out = attention.run("prefill", attention.att_state(infer), inputs, out=destination)
+    if destination is not None:
+        assert out is destination
+    elif flashmla_api is not None:
+        assert out is flashmla_api.output
+    assert out.shape == (rows, heads, RANK)
+    torch.testing.assert_close(out.float(), torch.stack(expected), atol=0.02, rtol=0.02)

@@ -20,10 +20,15 @@ def make_projection(layer, heads: int, inner: int, cols: int, dtype: torch.dtype
         layer.layer_num_ = 0
         layer.softmax_scale = inner ** -0.5
         layer.indexer = SimpleNamespace(_get_indices=lambda **kwargs: (None, None))
+        # Attention returns the projected query it receives.
+        backend = Mock()
+        backend.forward.side_effect = lambda att_state, layer_inputs, **kwargs: layer_inputs.q
         state = SimpleNamespace(
             att_state_role="main",
             att_state_manager=Mock(),
-            prefill_att_state=SimpleNamespace(prefill_att=lambda **kwargs: kwargs["q"]),
+            attention_backend_manager=SimpleNamespace(get_backend=lambda role, phase, layer_id: backend),
+            att_states={backend.state_key: None},
+            nsa_step=SimpleNamespace(q_kv_start_loc=None),
         )
         weight = SimpleNamespace(k_b_proj_=projection)
 

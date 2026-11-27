@@ -1,3 +1,4 @@
+from lightllm.models.glm5_next.infer_struct import Glm5NextInferStateInfo
 import json
 import os
 from typing import TYPE_CHECKING
@@ -6,7 +7,6 @@ import torch
 import triton
 
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
@@ -30,6 +30,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
     pre_layer_infer_class = Glm5NextPreLayerInfer
     post_layer_infer_class = LlamaPostLayerInfer
     transformer_layer_infer_class = Glm5NextTransformerLayerInfer
+    infer_state_class = Glm5NextInferStateInfo
 
     @classmethod
     def create_bounded_att_states(
@@ -156,14 +157,10 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         return [state]
 
     def prepare_attention_states(self) -> None:
-        super().prepare_attention_states()
-        if self.args.llm_kv_type == "fp8kv_dsa" and self.att_state_manager.get_full_attention_states(
-            self.att_state_role
-        ):
-            from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+        from lightllm.models.glm5_next.prefill_workspace import prepare_sparse_prefill_workspaces
 
-            # Reserve fixed scratch space before the shared KV capacity is profiled.
-            Fp8Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
+        super().prepare_attention_states()
+        prepare_sparse_prefill_workspaces(self)
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json")) as f:
@@ -192,26 +189,6 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.kv_lora_rank = self.config["kv_lora_rank"]
         self.v_head_dim = self.config.get("v_head_dim", self.qk_nope_head_dim)
         self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
-
-    def _init_att_backend(self):
-        from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import (
-            Fp8Glm5NextSparseAttBackend,
-        )
-
-        backend_class = (
-            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
-        )
-        self.prefill_att_backend = backend_class(model=self)
-        self.decode_att_backend = self.prefill_att_backend
-
-    def _init_att_backend1(self):
-        from lightllm.common.basemodel.attention.create_linear_utils import (
-            get_kda_linear_att_backend_class,
-        )
-
-        backend_cls = get_kda_linear_att_backend_class()
-        self.prefill_att_backend1 = backend_cls(model=self)
-        self.decode_att_backend1 = self.prefill_att_backend1
 
     def _init_custom(self):
         triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))

@@ -8,8 +8,9 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
-from lightllm.common.basemodel.attention.base_att import AttControl
-from typing import Tuple
+from lightllm.common.attention.backends.gdn import GDNLayerConfig, GDNLayerInputs
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
+from typing import Optional, Tuple
 from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
 from lightllm.distributed import all_reduce
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -37,7 +38,57 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         num_full_attention_layers = network_config["full_attention_interval"]
         self.is_linear_attention_layer = (layer_num + 1) % num_full_attention_layers != 0
+        # Per-rank GDN dimensions for splitting the fused input projection. Set them on every layer:
+        # subclasses such as SenseNova Loop re-derive which layers are linear from layer_types.
+        if "linear_num_value_heads" in network_config:
+            self.tp_linear_num_v_heads = network_config["linear_num_value_heads"] // self.tp_world_size_
+            self.linear_head_v_dim = network_config["linear_value_head_dim"]
+            self.tp_linear_key_dim = (
+                network_config["linear_num_key_heads"] * network_config["linear_key_head_dim"] // self.tp_world_size_
+            )
         return
+
+    def _gdn_layer_inputs(self, mixed_qkvzba, infer_state, layer_weight) -> GDNLayerInputs:
+        """Split the fused projection and gather the layer's parameters and GDN state views."""
+        qkv_dim = self.tp_linear_key_dim * 2 + self.tp_linear_num_v_heads * self.linear_head_v_dim
+        z_end = qkv_dim + self.tp_linear_num_v_heads * self.linear_head_v_dim
+        b_end = z_end + self.tp_linear_num_v_heads
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role, state_type_filter="gdn", logical_layer_id=self.layer_num_
+        )
+        conv_states, ssm_states = state.get_layer_view(logical_layer_id=self.layer_num_)
+        return GDNLayerInputs(
+            mixed_qkv=mixed_qkvzba[:, :qkv_dim],
+            z=mixed_qkvzba[:, qkv_dim:z_end].view(-1, self.tp_linear_num_v_heads, self.linear_head_v_dim),
+            b=mixed_qkvzba[:, z_end:b_end],
+            a=mixed_qkvzba[:, b_end:],
+            conv_weight=layer_weight.linear_conv1d.mm_param.weight,
+            conv_bias=layer_weight.linear_conv1d.bias,
+            A_log=layer_weight.linear_A_log.weight,
+            dt_bias=layer_weight.linear_dt_bias.weight,
+            conv_states=conv_states,
+            ssm_states=ssm_states,
+            replay_state=state,
+            layer_num=self.layer_num_,
+        )
+
+    def _gdn_attention(
+        self, inputs: GDNLayerInputs, infer_state, *, prefill: bool, out: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        backend = infer_state.attention_backend_manager.get_backend(
+            infer_state.att_state_role, "prefill" if prefill else "decode", self.layer_num_
+        )
+        if not prefill and out is None:
+            z = inputs.z
+            out = self.alloc_tensor(
+                (z.shape[0], self.tp_linear_num_v_heads, self.linear_head_v_dim), dtype=z.dtype, device=z.device
+            )
+        return backend.forward(
+            infer_state.att_states[backend.state_key],
+            inputs,
+            out=out,
+            alloc_func=self.alloc_tensor,
+        )
 
     def _bind_func(self):
         super()._bind_func()
@@ -184,8 +235,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        backend = infer_state.prefill_att_state1.backend
-
         mixed_qkvzba = mixed_qkvzba.contiguous()
         _mixed_qkvzba = tensor_to_no_ref_tensor(mixed_qkvzba)
         pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
@@ -196,43 +245,43 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         # We avoid a dry-run because FlashQLA may do host-side syncs while
         # preparing varlen chunk metadata, which is illegal during capture.
         num_tokens = mixed_qkvzba.shape[0]
-        o_shape = (num_tokens, backend.tp_num_v_heads, backend.head_v_dim)
+        o_shape = (num_tokens, self.tp_linear_num_v_heads, self.linear_head_v_dim)
         o_dtype = mixed_qkvzba.dtype
         o_device = mixed_qkvzba.device
-        z_shape = o_shape
 
         infer_state.prefill_cuda_graph_create_graph_obj()
         infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
         o = torch.empty(o_shape, dtype=o_dtype, device=o_device)
         _o = tensor_to_no_ref_tensor(o)
-        z = torch.empty(z_shape, dtype=o_dtype, device=o_device)
-        _z = tensor_to_no_ref_tensor(z)
 
         def gdn_prefill_func(new_infer_state: "Qwen3NextInferStateInfo"):
-            # 与 Llama/FA3 一致：通过 new_infer_state.prefill_att_state1 进入，
-            # 使用 runtime 上 init_att_state() 更新过的 buffer idx，而不是
-            # capture 时闭包住的 graph prefill_att_state1。
-            tmp_o, tmp_z = new_infer_state.prefill_att_state1.prefill_att(
-                q=None,
-                k=None,
-                v=None,
-                att_control=AttControl(
-                    linear_att_prefill=True,
-                    linear_att_prefill_dict={
-                        "mixed_qkvzba": _mixed_qkvzba,
-                        "layer_weight": layer_weight,
-                        "layer_num": self.layer_num_,
-                    },
-                ),
-                alloc_func=self.alloc_tensor,
-            )
-            tmp_o = tmp_o.view(_o.shape)
-            _o.copy_(tmp_o)
-            _z.copy_(tmp_z)
-            return
+            # 通过 new_infer_state.att_states 读取 model._create_inferstate() 为本步构造的
+            # attention state（含 padding 请求的 buffer idx），而不是 capture 时的 attention state。
+            inputs = self._gdn_layer_inputs(_mixed_qkvzba, new_infer_state, layer_weight)
+            self._gdn_attention(inputs, new_infer_state, prefill=True, out=_o)
 
         infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=gdn_prefill_func, after_graph=pre_capture_graph)
-        return o, z
+        # The gate is a slice of the captured projection, which replays refill.
+        z = mixed_qkvzba[:, 2 * self.tp_linear_key_dim + self.tp_linear_num_v_heads * self.linear_head_v_dim :]
+        z = z[:, : self.tp_linear_num_v_heads * self.linear_head_v_dim]
+        return o, z.view(-1, self.tp_linear_num_v_heads, self.linear_head_v_dim)
+
+    def attention_config(self, model) -> LayerAttentionConfig:
+        if not self.is_linear_attention_layer:
+            return super().attention_config(model)
+        config, tp_world_size = self.network_config_, self.tp_world_size_
+        layer_config = GDNLayerConfig(
+            num_k_heads=config["linear_num_key_heads"] // tp_world_size,
+            num_v_heads=config["linear_num_value_heads"] // tp_world_size,
+            head_k_dim=config["linear_key_head_dim"],
+            head_v_dim=config["linear_value_head_dim"],
+            conv_kernel_dim=config["linear_conv_kernel_dim"],
+            activation=config["hidden_act"],
+            dtype=model.data_type,
+            state_mtp_step=model.args.mtp_step,
+            replay=model.args.ssm_state_mode == "replay",
+        )
+        return LayerAttentionConfig(layer_config, layer_config)
 
     def context_attention_forward(
         self,
@@ -249,20 +298,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         if torch.cuda.is_current_stream_capturing():
             core_attn_out, z = self._linear_prefill_cuda_graph_wrapper(mixed_qkvzba, infer_state, layer_weight)
         else:
-            core_attn_out, z = infer_state.prefill_att_state1.prefill_att(
-                q=None,
-                k=None,
-                v=None,
-                att_control=AttControl(
-                    linear_att_prefill=True,
-                    linear_att_prefill_dict={
-                        "mixed_qkvzba": mixed_qkvzba,
-                        "layer_weight": layer_weight,
-                        "layer_num": self.layer_num_,
-                    },
-                ),
-                alloc_func=self.alloc_tensor,
-            )
+            inputs = self._gdn_layer_inputs(mixed_qkvzba, infer_state, layer_weight)
+            z = inputs.z
+            core_attn_out = self._gdn_attention(inputs, infer_state, prefill=True)
 
         gdn_out = self._linear_post(core_attn_out, z, layer_weight)
 
@@ -280,20 +318,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             return super().token_attention_forward(input_embdings, infer_state, layer_weight)
 
         mixed_qkvzba = self._linear_in_proj(input_embdings, layer_weight)
-        core_attn_out, z = infer_state.decode_att_state1.decode_att(
-            q=None,
-            k=None,
-            v=None,
-            att_control=AttControl(
-                linear_att_decode=True,
-                linear_att_decode_dict={
-                    "mixed_qkvzba": mixed_qkvzba,
-                    "layer_weight": layer_weight,
-                    "layer_num": self.layer_num_,
-                },
-            ),
-            alloc_func=self.alloc_tensor,
-        )
+        inputs = self._gdn_layer_inputs(mixed_qkvzba, infer_state, layer_weight)
+        z = inputs.z
+        core_attn_out = self._gdn_attention(inputs, infer_state, prefill=False)
         gdn_out = self._linear_post(core_attn_out, z, layer_weight)
 
         if self.tp_world_size_ > 1:
@@ -316,7 +343,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> torch.Tensor:
         num_tokens = z.shape[0]
         core_attn_out = core_attn_out.view(-1, core_attn_out.shape[-1])
-        z = z.contiguous().view(-1, z.shape[-1])
+        # z is a strided slice of the input projection; the gated norm reads it as [tokens, heads, dim]
+        # through its strides, so it needs no contiguous copy.
+        z = z.view(num_tokens, -1, core_attn_out.shape[-1])
         norm_out = layer_weight.linear_norm(core_attn_out, z, self.eps_)
         core_attn_out = norm_out.view(num_tokens, -1)
         output = layer_weight.linear_out_proj.mm(core_attn_out)

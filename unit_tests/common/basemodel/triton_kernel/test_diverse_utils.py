@@ -1,15 +1,12 @@
-import weakref
-from types import SimpleNamespace
-
 import pytest
 import torch
 
 if not torch.cuda.is_available():
     pytest.skip("requires CUDA", allow_module_level=True)
 
-from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.triton import int8kv as int8kv_module
-from lightllm.common.basemodel.attention.triton.int8kv import Int8kvTritonDecodeAttState
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
+from lightllm.common.attention.backends.gqa import GQALayerConfig
+from lightllm.common.attention.backends.gqa.triton_quant import TritonQuantGQADecodeBackend
 from lightllm.common.basemodel.triton_kernel import diverse_utils
 
 
@@ -33,16 +30,52 @@ def test_build_diverse_shared_group_markers(monkeypatch, node_ids, expected_mark
     assert markers.cpu().tolist() == expected_markers
 
 
-def test_int8kv_decode_state_rebuilds_diverse_metadata(monkeypatch):
-    monkeypatch.setattr(int8kv_module, "enable_diverse_mode_gqa_decode_fast_kernel", lambda: True)
+def _batch(shared_len, node_ids, *, graph_capacity=None, microbatch_index=0):
+    rows = len(shared_len)
+    return make_infer_state(
+        req_to_token_indexs=torch.zeros(rows, 8, dtype=torch.int32, device="cuda"),
+        b_req_idx=torch.arange(rows, dtype=torch.int32, device="cuda"),
+        b_seq_len=torch.full((rows,), 8, dtype=torch.int32, device="cuda"),
+        batch_size=rows,
+        max_kv_seq_len=8,
+        total_token_num=8 * rows,
+        b_shared_seq_len=torch.tensor(shared_len, dtype=torch.int32, device="cuda"),
+        b_shared_radix_node_id=torch.tensor(node_ids, dtype=torch.int64, device="cuda"),
+        cuda_graph_max_kv_seq_len=graph_capacity,
+        microbatch_index=microbatch_index,
+    )
+
+
+def _diverse_backend() -> TritonQuantGQADecodeBackend:
+    config = GQALayerConfig(
+        num_heads=8, num_kv_heads=2, head_dim=128, dtype=torch.bfloat16, kv_quant="int8_group", kv_quant_group_size=8
+    )
+    backend = TritonQuantGQADecodeBackend(config)
+    backend.diverse = True
+    return backend
+
+
+def test_int8kv_decode_backend_rebuilds_diverse_metadata(monkeypatch):
     monkeypatch.setattr(diverse_utils, "get_diverse_max_batch_shared_group_size", lambda: 3)
-    infer_state = InferStateInfo()
-    infer_state.max_kv_seq_len = 8192
-    infer_state.b_shared_seq_len = torch.tensor([8, 8, 5, 0], dtype=torch.int32, device="cuda")
-    infer_state.b_shared_radix_node_id = torch.tensor([10, 10, 20, -1], dtype=torch.int64, device="cuda")
-    state = Int8kvTritonDecodeAttState(backend=SimpleNamespace(), _infer_state_weak_ref=weakref.ref(infer_state))
+    backend = _diverse_backend()
 
-    state.init_state()
+    att_state = backend.build(_batch([8, 8, 5, 0], [10, 10, 20, -1]))
 
-    assert state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
-    assert state.b_shared_seq_len.cpu().tolist() == [8, 8, 0, 0]
+    assert att_state.b_mark_shared_group.cpu().tolist() == [0, 2, 1, 1]
+    assert att_state.b_shared_seq_len.cpu().tolist() == [8, 8, 0, 0]
+
+
+def test_int8kv_decode_backend_keeps_graph_metadata_per_microbatch_and_batch_size(monkeypatch):
+    monkeypatch.setattr(diverse_utils, "get_diverse_max_batch_shared_group_size", lambda: 3)
+    backend = _diverse_backend()
+    captured = backend.build(_batch([8, 8, 5, 0], [10, 10, 20, -1], graph_capacity=64))
+    replayed = backend.build(_batch([4, 4, 4, 4], [7, 7, 7, 9], graph_capacity=64))
+    # Replays rewrite the captured tensors in place, so the graph reads the new groups.
+    assert replayed.b_mark_shared_group is captured.b_mark_shared_group
+    assert replayed.b_shared_seq_len is captured.b_shared_seq_len
+    assert captured.b_mark_shared_group.cpu().tolist() == [0, 0, 3, 1]
+    assert captured.b_shared_seq_len.cpu().tolist() == [4, 4, 4, 0]
+    other = backend.build(_batch([8, 8, 5, 0], [10, 10, 20, -1], graph_capacity=64, microbatch_index=1))
+    assert other.b_mark_shared_group is not captured.b_mark_shared_group
+    eager = backend.build(_batch([8, 8, 5, 0], [10, 10, 20, -1]))
+    assert eager.b_mark_shared_group is not captured.b_mark_shared_group

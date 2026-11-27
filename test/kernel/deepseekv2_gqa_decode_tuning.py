@@ -4,7 +4,10 @@ import os
 import torch.multiprocessing as mp
 from typing import List
 from lightllm.utils.log_utils import init_logger
-from lightllm.models.deepseek2.triton_kernel.gqa_flash_decoding import gqa_token_decode_attention_flash_decoding
+from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding import (
+    gqa_token_decode_attention_flash_decoding,
+    plan_mla_decode_schedule,
+)
 from lightllm.utils.watchdog_utils import Watchdog
 
 logger = init_logger(__name__)
@@ -78,41 +81,39 @@ def test_decode_attentions(
         else:
             return tensor_dict[shape]
 
-    gqa_token_decode_attention_flash_decoding(
-        q_nope,
-        q_rope,
-        kv_nope,
-        kv_rope,
-        infer_state,
-        q_nope_shape[1],
-        q_nope_shape[2],
-        q_rope_shape[2],
-        None,
-        0.01,
-        out=o_tensor,
-        alloc_tensor_func=inner_alloc_func,
+    # The schedule depends only on the lengths, so one schedule serves every input tuple.
+    schedule = plan_mla_decode_schedule(
+        b_seq_len=infer_state.b_seq_len,
+        q_head_num=q_nope_shape[1],
+        kv_lora_rank=q_nope_shape[2],
+        q_rope_dim=q_rope_shape[2],
+        dtype=dtype,
+        tuning_seq_len=test_seq_len,
         **run_config,
     )
+
+    def decode(q_nope, q_rope, kv_nope, kv_rope, o_tensor):
+        gqa_token_decode_attention_flash_decoding(
+            q_nope=q_nope,
+            q_rope=q_rope,
+            kv_nope=kv_nope,
+            kv_rope=kv_rope,
+            req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
+            b_req_idx=infer_state.b_req_idx,
+            b_seq_len=infer_state.b_seq_len,
+            softmax_scale=0.01,
+            schedule=schedule,
+            out=o_tensor,
+            alloc_tensor_func=inner_alloc_func,
+        )
+
+    decode(q_nope, q_rope, kv_nope, kv_rope, o_tensor)
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         for index in range(test_count):
             q_nope, q_rope, kv_buffer, kv_nope, kv_rope, o_tensor = input_tuples[index]
-            gqa_token_decode_attention_flash_decoding(
-                q_nope,
-                q_rope,
-                kv_nope,
-                kv_rope,
-                infer_state,
-                q_nope_shape[1],
-                q_nope_shape[2],
-                q_rope_shape[2],
-                None,
-                0.01,
-                out=o_tensor,
-                alloc_tensor_func=inner_alloc_func,
-                **run_config,
-            )
+            decode(q_nope, q_rope, kv_nope, kv_rope, o_tensor)
 
     graph.replay()
 
@@ -294,7 +295,9 @@ if __name__ == "__main__":
     torch.multiprocessing.set_start_method("spawn")
 
     from lightllm.utils.tuning_utils import mp_tuning
-    from lightllm.models.deepseek2.triton_kernel.gqa_flash_decoding_config import MlaDecodeAttentionKernelConfig
+    from lightllm.common.attention.kernels.mla.decode.gqa_flash_decoding_config import (
+        MlaDecodeAttentionKernelConfig,
+    )
 
     q_head_num = 16
     q_head_dim = 512

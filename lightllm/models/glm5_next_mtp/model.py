@@ -1,10 +1,10 @@
+from lightllm.models.glm5_next.infer_struct import Glm5NextInferStateInfo
 from typing import TYPE_CHECKING
 from copy import deepcopy
 import torch
 
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
-from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+from lightllm.models.glm5_next.prefill_workspace import prepare_sparse_prefill_workspaces
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 from .layer_infer.post_layer_infer import Glm5NextMTPPostLayerInfer
 from .layer_infer.pre_layer_infer import Glm5NextMTPPreLayerInfer
@@ -26,6 +26,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
     pre_layer_infer_class = Glm5NextMTPPreLayerInfer
     post_layer_infer_class = Glm5NextMTPPostLayerInfer
     transformer_layer_infer_class = Glm5NextMTPTransformerLayerInfer
+    infer_state_class = Glm5NextInferStateInfo
 
     def __init__(self, kvargs):
         self.main_model = kvargs.pop("main_model")
@@ -39,8 +40,8 @@ class Glm5NextMTPModel(TpPartBaseModel):
         # preceding draft output.
         return args.mtp_mode == "eagle_with_att" or (args.mtp_mode == "vanilla_with_att" and args.mtp_step == 1)
 
-    def _create_inferstate(self, model_input, microbatch_index=0):
-        infer_state = super()._create_inferstate(model_input, microbatch_index=microbatch_index)
+    def _create_inferstate(self, model_input, microbatch_index=0, **kwargs):
+        infer_state = super()._create_inferstate(model_input, microbatch_index=microbatch_index, **kwargs)
         # Keep the mode-specific marker on this model's infer state so the
         # generic BaseModel pipeline remains unchanged.
         infer_state.prefill_kv_only = infer_state.is_prefill and self._supports_prefill_kv_only()
@@ -169,18 +170,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
 
     def prepare_attention_states(self) -> None:
         super().prepare_attention_states()
-        if self.args.llm_kv_type == "fp8kv_dsa" and self.att_state_manager.get_full_attention_states(
-            self.att_state_role
-        ):
-            # Reserve fixed scratch space before the shared KV capacity is profiled.
-            Fp8Glm5NextSparseAttBackend.allocate_prefill_workspaces(self)
-
-    def _init_att_backend(self):
-        backend_class = (
-            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
-        )
-        self.prefill_att_backend = backend_class(model=self)
-        self.decode_att_backend = self.prefill_att_backend
+        prepare_sparse_prefill_workspaces(self)
 
     def autotune_layers(self):
         return 1

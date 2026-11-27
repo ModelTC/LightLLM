@@ -59,7 +59,7 @@ P_COMMON_ARGS=(
   --pd_kv_page_size 4096
   --pd_master_ip "${PD_MASTER_IP}"
   --pd_master_port "${PORT}"
-  --llm_prefill_att_backend fa3 flashqla
+  --att_backend gqa.prefill=fa3 gdn.prefill=flashqla
 )
 
 D_COMMON_ARGS=(

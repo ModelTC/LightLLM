@@ -19,14 +19,10 @@ from lightllm.models.deepseek_v4.layer_infer.post_layer_infer import (
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
     DeepseekV4TransformerLayerInfer,
 )
-from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
-from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import (
-    DSV4_NSA_BACKENDS,
-    DeepseekV4FlashMlaFp8SparseAttBackend,
-)
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
 from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+from lightllm.models.deepseek_v4.swa_prefill_workspace import reserve_swa_prefill_workspace
 from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 from lightllm.models.llama.yarn_rotary_utils import (
     find_correction_range,
@@ -198,7 +194,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     def prepare_attention_states(self) -> None:
         super().prepare_attention_states()
         # 在统一容量规划前预留长 prefill 的 SWA 临时区，避免 KV 分配挤占计算所需空间。
-        DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(self)
+        reserve_swa_prefill_workspace(self)
 
     def _init_quant(self):
         if not self.is_mtp_draft_model:
@@ -209,18 +205,31 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         config = dict(self.config, n_layer=len(self.config["compress_ratios"]))
         self.quant_cfg = Quantcfg(config, self.quant_type, self.quant_cfg_path, self.expert_dtype)
 
-    def _init_att_backend(self):
+    def _init_attention(self):
         args = get_env_start_args()
         if args.llm_kv_type == "None":
             args.llm_kv_type = "fp8kv_dsa"
         # TODO: 支持其他 kv type
         if args.llm_kv_type != "fp8kv_dsa":
             raise RuntimeError("DeepSeek-V4 requires llm_kv_type=fp8kv_dsa for packed FlashMLA sparse attention")
-        self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0, backend_map=DSV4_NSA_BACKENDS)(model=self)
-        self.decode_att_backend = get_nsa_decode_att_backend_class(index=0, backend_map=DSV4_NSA_BACKENDS)(model=self)
+        from lightllm.models.deepseek_v4.config import create_attention_config
 
-        tp_q_head_num = self.prefill_att_backend.tp_q_head_num
-        padded_q_head_num = self.prefill_att_backend.padded_q_head_num
+        config = create_attention_config(
+            model_config=self.config,
+            model_logical_layer_ids=tuple(layer.layer_num_ for layer in self.layers_infer),
+            tp_rank=self.tp_rank_,
+            tp_world_size=self.tp_world_size_,
+        )
+        # The layers read their packed caches through these FlashMLA views.
+        self.swa_cache_config = config.create_swa_config()
+        self.compressed_cache_configs = {
+            ratio: config.create_compressed_config(compress_ratio=ratio)
+            for ratio in dict.fromkeys(config.compress_ratios)
+            if ratio
+        }
+        tp_q_head_num = self.config["num_attention_heads"] // self.tp_world_size_
+        # Sparse FlashMLA uses 64-head tiles; TP can leave fewer local Q heads.
+        padded_q_head_num = ((tp_q_head_num + 63) // 64) * 64
         if not self.is_mtp_draft_model:
             # Drafts share this buffer after the main model has captured its CUDA graphs.
             self.dsv4_workspace.init_flashmla_prefill_q(
@@ -231,7 +240,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             )
         for layer_infer in self.layers_infer:
             layer_infer.flashmla_q_head_num_ = padded_q_head_num
-        return
+            layer_infer.swa_cache_config = self.swa_cache_config
+            layer_infer.compressed_cache_config = self.compressed_cache_configs.get(layer_infer.compress_ratio)
+        super()._init_attention()
 
     def _init_custom(self):
         self._init_to_get_rotary()
