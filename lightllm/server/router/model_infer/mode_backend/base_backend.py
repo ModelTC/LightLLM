@@ -23,6 +23,8 @@ from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.core.objs.io_objs import AbortedReqCmd, PdPfDecodeKvReadyCmd
 from lightllm.server.embed_cache.utils import MULTIMODAL_TOKEN_ID_START
+from lightllm.server.pd_io_struct import PdPfPrefillKvReady
+from lightllm.server.pd_report.ipc import ReportIpc
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
@@ -832,6 +834,8 @@ class ModeBackend:
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
+                    # 已经选进本轮 prefill，后面一定会执行。最后一段在这里上报。
+                    self._report_prefill_first_last_chunk(req_obj=req_obj)
                 elif wait_pause_count < pause_max_req_num:
                     req_obj.wait_pause = True
                     wait_pause_count += 1
@@ -890,6 +894,38 @@ class ModeBackend:
 
         self._copy_req_token_indexes_to_gpu(prefill_reqs + decode_reqs)
         return prefill_reqs, decode_reqs, prefill_tokens
+
+    def _report_prefill_first_last_chunk(self, req_obj: InferReq) -> None:
+        """选进本轮 prefill 且这段会算完 prompt 时，由本 DP 组的 master 上报一次。
+
+        标记写在本进程的请求上，其他 rank 不写。预算不够没被选中的请求不会进到这里。
+        """
+        if self.args.run_mode != "prefill":
+            return
+        if not req_obj.shm_req.sample_params.pd_prefill_first:
+            return
+        if self.disable_chunked_prefill:
+            scheduled_len = req_obj.get_cur_total_len()
+        else:
+            scheduled_len = req_obj.get_chuncked_input_token_len()
+        if scheduled_len != req_obj.shm_req.input_len:
+            return
+        if not self.is_master_in_dp or hasattr(req_obj, "pd_prefill_kv_ready_reported"):
+            return
+        req_obj.pd_prefill_kv_ready_reported = True
+        if not hasattr(self, "pd_prefill_kv_ready_push"):
+            setattr(self, "pd_prefill_kv_ready_push", ReportIpc.Push())
+        ready = PdPfPrefillKvReady(
+            group_request_id=int(req_obj.shm_req.sample_params.group_request_id),
+            prompt_ids=[int(token_id) for token_id in req_obj.shm_req.get_prompt_ids()],
+            pd_master_node_id=int(req_obj.sampling_param.pd_master_node_id),
+        )
+        self.pd_prefill_kv_ready_push.send(message=ready)
+        self.logger.debug(
+            f"prefill-first stage=report-prefill-kv-ready, group_request_id={ready.group_request_id}, "
+            f"prompt_len={len(ready.prompt_ids)}"
+        )
+        return
 
     def _copy_req_token_indexes_to_gpu(self, run_reqs: List[InferReq]):
         """选择本批请求；索引对象统一管理上传区间、提交进度和流依赖。"""

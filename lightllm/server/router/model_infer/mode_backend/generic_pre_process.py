@@ -1,8 +1,7 @@
 import torch
 import numpy as np
 from typing import List, Tuple
-from lightllm.server.pd_report.prefill_kv_ready import push_prefill_first_kv_ready
-from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
+from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.common.basemodel.batch_objs import ModelInput
 
 INT64_MAX = torch.iinfo(torch.int64).max
@@ -10,7 +9,6 @@ INT64_MAX = torch.iinfo(torch.int64).max
 
 def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> Tuple[ModelInput, List[InferReq]]:
     token_lookback = []
-    pd_prefill = g_infer_context.args.run_mode == "prefill"
     run_reqs = []
     total_token_num = 0
     total_input_token_num = 0
@@ -38,13 +36,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_prefill_has_output.append(False if len(input_token_ids) < req.get_cur_total_len() else True)
 
         seq_len = len(input_token_ids)
-        if pd_prefill and req.shm_req.sample_params.pd_prefill_first and seq_len == req.shm_req.input_len:
-            # 只由本 DP 组的 rank 0 上报一次。标记在本进程的请求上，其他 rank 不写。
-            backend = g_infer_context.backend
-            if (backend is None or backend.rank_in_dp == 0) and not req.pd_prefill_kv_ready_reported:
-                req.pd_prefill_kv_ready_reported = True
-                if backend is not None:
-                    push_prefill_first_kv_ready(req=req)
         input_token_len = seq_len - req.cur_kv_len
 
         input_id = input_token_ids[req.cur_kv_len :]

@@ -2,8 +2,10 @@ from types import SimpleNamespace
 
 import numpy as np
 import torch
+from lightllm.server.pd_io_struct import PdPfPrefillKvReady
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process
+from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 
 
 def _patch_empty_input_context(monkeypatch):
@@ -13,7 +15,6 @@ def _patch_empty_input_context(monkeypatch):
     )
     infer_context = SimpleNamespace(
         args=SimpleNamespace(page_size=1, run_mode="normal"),
-        backend=None,
         req_manager=SimpleNamespace(
             HOLD_REQUEST_ID=-1,
             mem_manager=mem_manager,
@@ -21,7 +22,6 @@ def _patch_empty_input_context(monkeypatch):
         ),
         radix_cache=None,
     )
-    monkeypatch.setattr(generic_pre_process, "g_infer_context", infer_context)
     return infer_context
 
 
@@ -36,7 +36,6 @@ def _make_prefill_req(req_idx: int, token_num: int):
         cur_kv_len=0,
         hold_kv_len=token_num,
         multimodal_params={"images": [], "audios": []},
-        pd_prefill_kv_ready_reported=False,
         get_chuncked_input_token_ids=lambda: input_token_ids,
         get_input_token_ids=lambda: input_token_ids,
         get_cur_total_len=lambda: token_num,
@@ -208,51 +207,85 @@ def test_overlap_decode_preserves_empty_microbatch():
     assert model_input1.b_req_idx.shape == (0,)
 
 
+class _ReadyPush:
+    def __init__(self) -> None:
+        self.sent = []
+
+    def send(self, message) -> None:
+        self.sent.append(message)
+
+
+def _report_backend(run_mode: str, is_master_in_dp: bool, disable_chunked_prefill: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        args=SimpleNamespace(run_mode=run_mode),
+        is_master_in_dp=is_master_in_dp,
+        disable_chunked_prefill=disable_chunked_prefill,
+        logger=SimpleNamespace(debug=lambda *args, **kwargs: None),
+    )
+
+
+def _attach_prompt(req, group_request_id: int, prompt_ids: list, pd_master_node_id: int) -> None:
+    req.shm_req.get_prompt_ids = lambda: prompt_ids
+    req.shm_req.sample_params.group_request_id = group_request_id
+    req.sampling_param = SimpleNamespace(pd_master_node_id=pd_master_node_id)
+
+
 def test_only_selected_final_prefill_chunks_signal_decode_allocation(monkeypatch):
-    context = _patch_empty_input_context(monkeypatch)
-    context.args.run_mode = "prefill"
+    monkeypatch.setattr(
+        "lightllm.server.router.model_infer.mode_backend.base_backend.ReportIpc.Push",
+        _ReadyPush,
+    )
+    backend = _report_backend(run_mode="prefill", is_master_in_dp=True, disable_chunked_prefill=False)
     reqs = [_make_prefill_req(i, 8) for i in range(3)]
     for i, req in enumerate(reqs):
         req.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=i != 2))
+        req.get_chuncked_input_token_len = lambda: 8
+        _attach_prompt(req, group_request_id=i, prompt_ids=[i], pd_master_node_id=7)
     # The first request still has another chunk. The second resumes from a cached prefix.
-    reqs[0].get_chuncked_input_token_ids = lambda: [0] * 4
+    reqs[0].get_chuncked_input_token_len = lambda: 4
     reqs[1].cur_kv_len = 6
-    generic_pre_process.prepare_prefill_inputs(reqs, is_chuncked_mode=True)
-    assert [req.pd_prefill_kv_ready_reported for req in reqs] == [False, True, False]
+    for req in reqs:
+        ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
+    assert [hasattr(req, "pd_prefill_kv_ready_reported") for req in reqs] == [False, True, False]
 
-    generic_pre_process.prepare_prefill_inputs([reqs[0]], is_chuncked_mode=False)
-    assert reqs[0].pd_prefill_kv_ready_reported
+    backend.disable_chunked_prefill = True
+    ModeBackend._report_prefill_first_last_chunk(backend, req_obj=reqs[0])
+    assert hasattr(reqs[0], "pd_prefill_kv_ready_reported")
 
 
 def test_last_chunk_is_reported_once_by_dp_rank0(monkeypatch):
-    context = _patch_empty_input_context(monkeypatch)
-    context.args.run_mode = "prefill"
-    context.backend = SimpleNamespace(rank_in_dp=0)
-    reported = []
-    monkeypatch.setattr(generic_pre_process, "push_prefill_first_kv_ready", lambda req: reported.append(req))
+    monkeypatch.setattr(
+        "lightllm.server.router.model_infer.mode_backend.base_backend.ReportIpc.Push",
+        _ReadyPush,
+    )
+    backend = _report_backend(run_mode="prefill", is_master_in_dp=True, disable_chunked_prefill=False)
     req = _make_prefill_req(req_idx=1, token_num=8)
     req.cur_kv_len = 6
     req.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True))
+    req.get_chuncked_input_token_len = lambda: 8
+    _attach_prompt(req, group_request_id=9, prompt_ids=[3, 4], pd_master_node_id=100)
 
-    generic_pre_process.prepare_prefill_inputs([req], is_chuncked_mode=True)
-    generic_pre_process.prepare_prefill_inputs([req], is_chuncked_mode=True)
+    ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
+    ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
 
-    assert reported == [req]
-    assert req.pd_prefill_kv_ready_reported is True
+    assert backend.pd_prefill_kv_ready_push.sent == [
+        PdPfPrefillKvReady(group_request_id=9, prompt_ids=[3, 4], pd_master_node_id=100)
+    ]
+    assert hasattr(req, "pd_prefill_kv_ready_reported")
 
-    context.backend = SimpleNamespace(rank_in_dp=1)
+    backend.is_master_in_dp = False
     other = _make_prefill_req(req_idx=2, token_num=8)
     other.cur_kv_len = 6
     other.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True))
-    generic_pre_process.prepare_prefill_inputs([other], is_chuncked_mode=True)
-    assert reported == [req]
-    assert other.pd_prefill_kv_ready_reported is False
+    other.get_chuncked_input_token_len = lambda: 8
+    ModeBackend._report_prefill_first_last_chunk(backend, req_obj=other)
+    assert len(backend.pd_prefill_kv_ready_push.sent) == 1
+    assert not hasattr(other, "pd_prefill_kv_ready_reported")
 
 
-def test_decode_node_does_not_signal_last_chunk(monkeypatch):
-    context = _patch_empty_input_context(monkeypatch)
-    context.args.run_mode = "decode"
+def test_decode_node_does_not_signal_last_chunk():
+    backend = _report_backend(run_mode="decode", is_master_in_dp=True, disable_chunked_prefill=True)
     req = _make_prefill_req(0, 8)
     req.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True))
-    generic_pre_process.prepare_prefill_inputs([req], is_chuncked_mode=False)
-    assert req.pd_prefill_kv_ready_reported is False
+    ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
+    assert not hasattr(req, "pd_prefill_kv_ready_reported")

@@ -104,26 +104,6 @@ def test_pd_report_connects_with_protocol_ping(monkeypatch):
     assert seen["ping_timeout"] == 60
 
 
-def test_push_prefill_first_kv_ready_sends_prompt():
-    from lightllm.server.pd_report import prefill_kv_ready
-
-    sent = []
-    prefill_kv_ready._prefill_kv_ready_push = SimpleNamespace(send=lambda message: sent.append(message))
-    req = SimpleNamespace(
-        shm_req=SimpleNamespace(
-            sample_params=SimpleNamespace(group_request_id=9),
-            get_prompt_ids=lambda: [3, 4],
-        ),
-        sampling_param=SimpleNamespace(pd_master_node_id=100),
-    )
-    try:
-        prefill_kv_ready.push_prefill_first_kv_ready(req=req)
-    finally:
-        prefill_kv_ready._prefill_kv_ready_push = None
-
-    assert sent == [PdPfPrefillKvReady(group_request_id=9, prompt_ids=[3, 4], pd_master_node_id=100)]
-
-
 def test_pd_report_routes_prefill_kv_ready_by_master_id():
     manager = PdReportManager(args=SimpleNamespace(), pull=None)
     manager._queues[100] = asyncio.Queue()
