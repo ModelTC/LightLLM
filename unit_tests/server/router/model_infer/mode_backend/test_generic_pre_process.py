@@ -2,7 +2,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import torch
-from lightllm.server.pd_io_struct import PdPfPrefillKvReady
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -225,7 +224,8 @@ def _report_backend(run_mode: str, is_master_in_dp: bool, disable_chunked_prefil
 
 
 def _attach_prompt(req, group_request_id: int, prompt_ids: list, pd_master_node_id: int) -> None:
-    req.shm_req.get_prompt_ids = lambda: prompt_ids
+    prompt_buffer = np.array(prompt_ids, dtype=np.int64)
+    req.shm_req.get_prompt_ids_numpy = lambda: prompt_buffer
     req.shm_req.sample_params.group_request_id = group_request_id
     req.sampling_param = SimpleNamespace(pd_master_node_id=pd_master_node_id)
 
@@ -263,14 +263,14 @@ def test_last_chunk_is_reported_once_by_dp_rank0(monkeypatch):
     req.cur_kv_len = 6
     req.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True))
     req.get_chuncked_input_token_len = lambda: 8
-    _attach_prompt(req, group_request_id=9, prompt_ids=[3, 4], pd_master_node_id=100)
+    _attach_prompt(req, group_request_id=9, prompt_ids=[-(2 ** 63), 2 ** 63 - 1], pd_master_node_id=100)
 
     ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
     ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
 
-    assert backend.pd_prefill_kv_ready_push.sent == [
-        PdPfPrefillKvReady(group_request_id=9, pd_master_node_id=100, prompt_ids=[3, 4])
-    ]
+    (report,) = backend.pd_prefill_kv_ready_push.sent
+    assert (report.group_request_id, report.pd_master_node_id) == (9, 100)
+    assert report.prompt_ids is req.shm_req.get_prompt_ids_numpy()
     assert hasattr(req, "pd_prefill_kv_ready_reported")
 
     backend.is_master_in_dp = False

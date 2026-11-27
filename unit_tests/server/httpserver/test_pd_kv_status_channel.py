@@ -5,9 +5,13 @@ import pickle
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import numpy as np
+
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus, PdPfPrefillKvReady
+from lightllm.server.pd_report.ipc import ReportIpc
 from lightllm.server.pd_report.manager import PdReportManager
+from lightllm.server.pd_report.manager import logger as pd_report_logger
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_trans_process
 
 
@@ -104,14 +108,55 @@ def test_pd_report_connects_with_protocol_ping(monkeypatch):
     assert seen["ping_timeout"] == 60
 
 
-def test_pd_report_routes_prefill_kv_ready_by_master_id():
+def test_local_report_ipc_carries_prefill_prompt_array_and_decode_status(tmp_path, monkeypatch):
+    address = f"ipc://{tmp_path / 'report.sock'}"
+    monkeypatch.setattr("lightllm.server.pd_report.ipc.get_pd_report_ipc_address", lambda: address)
+
+    async def run():
+        pull = ReportIpc.Pull(address=address)
+        push = ReportIpc.Push()
+        pull.bind()
+        try:
+            prompt_ids = np.array([-(2 ** 63), 2 ** 40, 2 ** 63 - 1], dtype=np.int64)
+            expected = prompt_ids.copy()
+            ready = PdPfPrefillKvReady(group_request_id=9, pd_master_node_id=100, prompt_ids=prompt_ids)
+            decode_status = PDUpKVStatus(8, 200, b"metadata")
+            push.send(ready)
+            prompt_ids.fill(0)
+            push.send(decode_status)
+
+            received = await pull.recv()
+            assert isinstance(received, PdPfPrefillKvReady)
+            assert (received.group_request_id, received.pd_master_node_id) == (9, 100)
+            assert received.prompt_ids.dtype == np.int64
+            np.testing.assert_array_equal(received.prompt_ids, expected)
+            assert await pull.recv() == decode_status
+        finally:
+            push.close()
+            pull.close()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=5))
+
+
+def test_pd_report_routes_prefill_kv_ready_by_master_id(caplog, monkeypatch):
+    monkeypatch.setattr(pd_report_logger, "handlers", [caplog.handler])
+    caplog.set_level("INFO", logger=pd_report_logger.name)
     manager = PdReportManager(args=SimpleNamespace(), pull=None)
     manager._queues[100] = asyncio.Queue()
-    ready = PdPfPrefillKvReady(group_request_id=9, pd_master_node_id=100, prompt_ids=[1, 2])
+    ready = PdPfPrefillKvReady(
+        group_request_id=9, pd_master_node_id=100, prompt_ids=np.array([9876543, 8765432], dtype=np.int64)
+    )
 
     _deliver(manager, [ready])
 
-    assert manager._queues[100].get_nowait() == (ObjType.PD_PF_PREFILL_KV_READY, ready)
+    kind, received = manager._queues[100].get_nowait()
+    assert kind == ObjType.PD_PF_PREFILL_KV_READY
+    assert received is ready
+    log = caplog.text
+    assert "pd report queued PD_PF_PREFILL_KV_READY for master 100" in log
+    assert "group_request_id=9, prompt_len=2" in log
+    assert "9876543" not in log
+    assert "8765432" not in log
 
 
 def test_pd_report_routes_the_handshake_by_master_id():

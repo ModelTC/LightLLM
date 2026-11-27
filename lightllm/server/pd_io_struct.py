@@ -4,6 +4,9 @@ import time
 import copy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+import numpy as np
+
 from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 
 from lightllm.utils.log_utils import init_logger
@@ -50,7 +53,7 @@ class ObjType(enum.Enum):
     PD_PF_DECODE_KV_READY = 12  # Decode 的 KV 页已备好，master 把端点交给 prefill，可以开始传输。
 
 
-@dataclass
+@dataclass(eq=False)
 class PdPfPrefillKvReady:
     """PD_PF_PREFILL_KV_READY 的载荷。PF 是 PREFILL_FIRST，只用于 PD 分离的 Prefill 先推理模式。
 
@@ -60,7 +63,10 @@ class PdPfPrefillKvReady:
 
     group_request_id: int
     pd_master_node_id: int
-    prompt_ids: List[int]
+    prompt_ids: np.ndarray
+
+    def __repr__(self) -> str:
+        return f"PdPfPrefillKvReady(group_request_id={self.group_request_id}, prompt_len={len(self.prompt_ids)})"
 
 
 @dataclass

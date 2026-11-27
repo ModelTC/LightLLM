@@ -7,6 +7,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import numpy as np
 import pytest
 
 from lightllm.server.core.objs import FinishStatus, SamplingParams, StartArgs
@@ -92,7 +93,9 @@ class _Session:
         if message[0] == ObjType.PD_PF_PREFILL_REQ:
             self.status = self.manager.req_id_to_out_inf[GROUP_ID]
             self.status.pf_prefill_kv_ready_event.ready = PdPfPrefillKvReady(
-                group_request_id=GROUP_ID, pd_master_node_id=self.manager.args.pd_node_id, prompt_ids=[1, 2]
+                group_request_id=GROUP_ID,
+                pd_master_node_id=self.manager.args.pd_node_id,
+                prompt_ids=np.array([1, 2], dtype=np.int64),
             )
             if not self.hold_prefill_ready:
                 self.status.pf_prefill_kv_ready_event.set()
@@ -364,6 +367,9 @@ def test_decode_is_reserved_before_the_prefill_token_arrives():
         pending = asyncio.create_task(anext(session.stream))
         await asyncio.wait_for(ready.wait(), timeout=2)
         await asyncio.wait_for(decode.wait(), timeout=2)
+        decode_prompt = session.messages["d"][0][1][0]
+        assert decode_prompt.dtype == np.int64
+        np.testing.assert_array_equal(decode_prompt, [1, 2])
         assert not pending.done()
 
         async def endpoint_sent():

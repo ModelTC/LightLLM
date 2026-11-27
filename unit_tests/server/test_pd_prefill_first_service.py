@@ -11,6 +11,7 @@ import json
 import pickle
 
 import httpx
+import numpy as np
 import pytest
 import websockets
 from prometheus_client.parser import text_string_to_metric_families
@@ -266,7 +267,9 @@ class PrefillFirstPeers:
             )
             return
         ready = PdPfPrefillKvReady(
-            group_request_id=group_request_id, pd_master_node_id=master_id, prompt_ids=list(prompt_ids)
+            group_request_id=group_request_id,
+            pd_master_node_id=master_id,
+            prompt_ids=np.asarray(prompt_ids, dtype=np.int64),
         )
         token = _token_message(
             mode="prefill",

@@ -915,9 +915,10 @@ class ModeBackend:
         req_obj.pd_prefill_kv_ready_reported = True
         if not hasattr(self, "pd_prefill_kv_ready_push"):
             setattr(self, "pd_prefill_kv_ready_push", ReportIpc.Push())
+        # ReportIpc pickles the view synchronously into its own bytes before the request slot can be reused.
         ready = PdPfPrefillKvReady(
             group_request_id=int(req_obj.shm_req.sample_params.group_request_id),
-            prompt_ids=[int(token_id) for token_id in req_obj.shm_req.get_prompt_ids()],
+            prompt_ids=req_obj.shm_req.get_prompt_ids_numpy(),
             pd_master_node_id=int(req_obj.sampling_param.pd_master_node_id),
         )
         self.pd_prefill_kv_ready_push.send(message=ready)
