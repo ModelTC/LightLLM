@@ -1,0 +1,11 @@
+torch @ https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl#sha256=72d53f3176a69cc20710c4ecb95f7dc4c6ba10c4e4eda45b8396ee79ee40f75a ; python_version == "3.10"
+torch @ https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp311-cp311-manylinux_2_28_x86_64.whl#sha256=c9a7ca4c74fae10a58e6175b4b2cea953f9322bb6562bbf339ad6a05f52190ad ; python_version == "3.11"
+torch @ https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=d252cf975fb18c94a85336323ad425f473df56dab35a44b00399bd70c7a3b997 ; python_version == "3.12"
+torch @ https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp313-cp313-manylinux_2_28_x86_64.whl#sha256=db964b33c55035a72ab3e2162287af8f1cc276039c65d015740cc88c26dcedf7 ; python_version == "3.13"
+torchvision @ https://download-r2.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl#sha256=f44bfc61b9be80bcf52a762d34da363cea3125d10c01f37e271583803c7bb97b ; python_version == "3.10"
+torchvision @ https://download-r2.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp311-cp311-manylinux_2_28_x86_64.whl#sha256=8f2629d056570c929b0a1d5473d9cb0320b90bda1764bda353553a72cc6b2069 ; python_version == "3.11"
+torchvision @ https://download-r2.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=ccf26b4b659cfce6f2208cb8326071d51c70219a34856dfdf468d1e19af52c0d ; python_version == "3.12"
+torchvision @ https://download-r2.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp313-cp313-manylinux_2_28_x86_64.whl#sha256=cb1f6184a7ba30fba40580e1a01a6604a86c55e79fdda187f40116ee680441ec ; python_version == "3.13"
+triton==3.6.0
+sglang-kernel @ https://github.com/sgl-project/whl/releases/download/v0.4.5/sglang_kernel-0.4.5%2Bcu129-cp310-abi3-manylinux2014_x86_64.whl#sha256=aa09af4599121558f813e7089caa9d4ff43e7a31b3794c0e48523085484484f6
+cupy-cuda12x==14.2.0

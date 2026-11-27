@@ -148,4 +148,4 @@ RUN if [ "${ENABLE_NIXL}" = "1" ]; then \
     fi
 
 COPY . /lightllm
-RUN pip install -e /lightllm --no-cache-dir
+RUN LIGHTLLM_DOCKER_BUILD=1 pip install -e /lightllm --no-cache-dir --no-deps

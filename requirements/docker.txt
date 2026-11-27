@@ -1,0 +1,12 @@
+pyzmq
+uvloop
+transformers
+einops
+packaging
+rpyc
+ninja
+safetensors
+triton
+orjson
+apache-tvm-ffi==0.1.11
+xgrammar>=0.2.8,<0.3

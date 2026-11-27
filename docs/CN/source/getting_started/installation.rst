@@ -9,8 +9,125 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
 ------------
 
 * 操作系统: Linux
-* Python: 3.10
-* GPU: 计算能力 7.0 以上 (e.g., V100, T4, RTX20xx, A100, L4, H100, 等等.)
+* Python: 3.10–3.13（下方原生安装推荐使用 3.12）
+* 默认原生运行环境需要 NVIDIA GPU 和兼容 CUDA 13.0 的驱动。
+  具体硬件支持还取决于模型及所选算子。
+
+使用 uv 原生安装
+-----------------
+
+在本版本源码目录中执行：
+
+.. code-block:: console
+
+    $ uv venv --python 3.12
+    $ source .venv/bin/activate
+    $ uv pip install .
+    $ lightllm serve /models/my-model
+
+安装包已经声明 PyTorch、Transformers、HTTP 服务、XGrammar 及 SGLang kernel 等运行依赖，
+无需先安装 ``requirements.txt``。开发时可使用 ``uv pip install -e .``。
+默认的 PyTorch 2.14.1 Linux wheel 使用 CUDA 13.0；安装 Python 包不会安装 GPU 驱动。
+首次启动建议选择 LightLLM 支持、单卡显存可容纳的非量化模型。
+
+``lightllm serve --help`` 显示常用参数，``--help-all`` 显示完整参数。
+原有服务参数及默认值均保留，包括 ``--model_dir``，原 Python 模块启动入口也仍然可用。
+
+驱动感知安装器
+~~~~~~~~~~~~~~~~
+
+解压 ``Native package`` CI 产物后，安装器用 ``nvidia-smi`` 检测 NVIDIA 驱动，
+并用 ``uv`` 安装对应的 LightLLM wheel。驱动从 580.0 起默认选择 ``cuda13``，
+实验性的 ``cuda128`` 要求驱动版本达到 580.95.05，并且必须显式选择。
+
+.. code-block:: console
+
+    $ python lightllm-install.py
+    $ source .venv/bin/activate
+    $ lightllm serve /models/my-model
+
+可以使用 ``--dry-run`` 只查看选择结果和安装命令。需要使用 CUDA 12.8 时，
+运行 ``python lightllm-install.py --profile cuda128 --venv .venv-cu128``。
+安装器从 manifest 读取 wheel 和依赖文件的位置，支持本地路径和 HTTPS URL。
+两套配置默认使用 Python 3.12。每次安装都需要一个尚不存在的 ``--venv`` 路径。
+
+在 Linux x86_64 上，也可在新的 Python 虚拟环境中直接安装 ``+cu128`` wheel：
+
+.. code-block:: console
+
+    $ uv pip install ./lightllm-1.2.0+cu128-py3-none-any.whl
+
+CUDA 12.8 wheel 固定使用 PyTorch 2.11.0、torchvision 0.26.0 的 CUDA 12.8 构建，
+以及 Triton 3.6.0、SGLang 0.4.5 的 CUDA 12.9 内核和 CUDA 12 版 CuPy。
+从源码构建时运行 ``LIGHTLLM_CUDA_PROFILE=cuda128 uv build --wheel``。
+
+交付安装包：
+
+.. code-block:: console
+
+    $ uv build --wheel
+    $ uv pip install dist/lightllm-1.2.0-py3-none-any.whl
+
+CI 交付 wheel，因为 uv 解包源码包时会拒绝算子配置中带冒号的路径。
+
+稳定版与 nightly
+~~~~~~~~~~~~~~~~
+
+两个通道都安装 ``lightllm``，并使用相同的 ``lightllm serve`` 入口。
+稳定版由与 ``VERSION`` 一致的 ``vX.Y.Z`` 标签构建；主分支的每日构建和手动
+``nightly`` 构建使用下一补丁版本的开发版本号，例如 ``1.2.1.dev1234``，
+其中 ``1234`` 是 CI 构建编号。nightly 打包最新的 LightLLM 代码，与稳定版共用
+CUDA 13 和 CUDA 12.8 两套依赖配置。升级时同步更新固定版本的 PyTorch、Triton 和
+SGLang kernels，并在 GPU 上验证新组合。
+
+稳定版和 nightly 均通过 ``Native package`` 工作流的 GitHub Actions artifacts 交付。
+产物包含 wheel、安装器、manifest 和完整安装版本记录。下载解压后可运行随包安装器，
+也可在新环境中用 ``uv pip install <wheel路径>`` 安装选定的 wheel。
+
+基础安装包含 PyTorch/Triton 算子及 Qwen3.5 线性注意力所需的 SGLang kernel。
+FlashInfer、独立 FlashMLA、DeepGEMM、DeepEP、
+NIXL、LightMem 及 vLLM 量化算子仍需要额外安装兼容的构建产物；
+AWQ 和部分 FP8 模型也依赖这些额外算子。请参照对应模型或部署指南，
+现有 Docker 构建包含更多此类扩展。根目录 ``requirements.txt`` 用于镜像和开发环境。
+Docker 在该环境中编译扩展，最后使用镜像专用的依赖声明安装 LightLLM，保留已安装的版本。
+原生安装以安装包内的依赖声明为准。
+
+MUSA 等厂商运行环境需要使用对应的 PyTorch 和 Triton 构建。
+按照平台指南准备好依赖后，使用 ``uv pip install --no-deps .`` 保留厂商运行环境。
+默认原生依赖集面向 NVIDIA CUDA，不会自动解决所有硬件平台的依赖差异。
+
+原生依赖版本
+~~~~~~~~~~~~
+
+``requirements/runtime.txt`` 定义共用依赖。``requirements/cuda13.txt``
+固定默认 CUDA 13 运行环境的核心版本：
+
+.. list-table::
+   :header-rows: 1
+
+   * - 组件
+     - 版本
+   * - PyTorch / torchvision
+     - 2.14.1 / 0.29.1
+   * - Triton / SGLang kernel
+     - 3.8.0 / 0.4.10
+   * - CuPy CUDA 13 / Transformers
+     - 14.2.0 / 5.20.2
+   * - XGrammar / TVM FFI
+     - 0.2.8 / 0.1.12
+   * - LiteLLM
+     - 1.106.2（小于 1.107）
+
+PyTorch、torchvision、Triton 和 SGLang kernel 需要成组升级：PyTorch 约束 Triton，
+SGLang kernel 0.4.10 要求 PyTorch 2.14.1。更新依赖后应在新环境中检查安装、
+实际模型启动、文本和图像请求，以及结构化输出；依赖解析成功不代表 GPU 算子兼容。
+调优配置按 Triton 版本和 GPU 区分；升级后需要重新测量性能，必要时重新调优。
+TVM FFI 0.1.12 满足可选 TileLang 0.1.15 的 ``<0.1.13`` 约束；
+LiteLLM 1.106.2 要求 ``filelock<4``、``huggingface-hub<2``。
+其余依赖使用兼容范围，由 uv 解析；Python 3.12 可使用 Librosa 1.0、Pillow 13、
+WebSockets 17，较旧 Python 自动选择支持的版本。
+交付时可用 ``uv pip freeze`` 记录完整环境版本。根目录的旧镜像依赖独立维护，
+不要在这个原生环境中叠加安装 ``requirements.txt``。
 
 .. _build_from_docker:
 
@@ -84,21 +201,4 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
     $ pip install -r requirements-musa.txt
     $
     $ # 安装lightllm
-    $ python setup.py install
-
-使用 uv 安装
-----------------
-
-也可以使用 `uv <https://docs.astral.sh/uv/>`_ 安装 Lightllm：
-
-.. code-block:: console
-
-    $ # 创建 Python 3.10 虚拟环境
-    $ uv venv --python 3.10
-    $ source .venv/bin/activate
-    $
-    $ # 安装 Lightllm 依赖 (CUDA 13.0)
-    $ uv pip install -r requirements.txt --torch-backend=cu130
-    $
-    $ # 安装 Lightllm
-    $ uv pip install -e .
+    $ pip install --no-deps .
