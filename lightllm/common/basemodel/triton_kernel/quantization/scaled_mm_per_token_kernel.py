@@ -33,6 +33,7 @@ def _scaled_mm_per_token(
     out_desc: "tl.core.tensor_descriptor",
     Ascale,
     Bscale,
+    bias,
     M,
     N,
     K,
@@ -45,6 +46,7 @@ def _scaled_mm_per_token(
     USE_TMA: tl.constexpr,
     B_IS_TRANS: tl.constexpr,
     B_SCALE_IS_TENSOR: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
     NEED_N_MASK: tl.constexpr,
     NEED_K_MASK: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -106,6 +108,8 @@ def _scaled_mm_per_token(
 
     acc = acc.to(tl.float32)
     acc = acc * a_s[:, None] * b_s[None, :]
+    if HAS_BIAS:
+        acc += tl.load(bias + offs_bn).to(tl.float32)[None, :]
 
     acc = acc.to(out.dtype.element_ty)
 
@@ -176,6 +180,7 @@ def scaled_mm_per_token(
     out_dtype: torch.dtype,
     out: torch.Tensor,
     run_config=None,
+    bias: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """w8a8 per-token quantization mm (supports fp8 and int8).
 
@@ -259,6 +264,7 @@ def scaled_mm_per_token(
         out_desc=out_desc,
         Ascale=Ascale,
         Bscale=Bscale,
+        bias=bias,
         M=M,
         N=N,
         K=K,
@@ -271,9 +277,11 @@ def scaled_mm_per_token(
         USE_TMA=support_tma,
         B_IS_TRANS=B_is_trans,
         B_SCALE_IS_TENSOR=B_SCALE_IS_TENSOR,
+        HAS_BIAS=bias is not None,
         NEED_N_MASK=NEED_N_MASK,
         NEED_K_MASK=NEED_K_MASK,
         ACC_DTYPE=ACC_DTYPE,
+        enable_fp_fusion=bias is None,
         **run_config,
     )
 
@@ -317,11 +325,13 @@ def _int8_split_k_reduce(
     partials,
     activation_scale,
     weight_scale,
+    bias,
     out,
     rows: tl.constexpr,
     width: tl.constexpr,
     splits: tl.constexpr,
     block: tl.constexpr,
+    has_bias: tl.constexpr,
 ):
     index = tl.program_id(0) * block + tl.arange(0, block)
     split = tl.arange(0, triton.next_power_of_2(splits))
@@ -333,10 +343,13 @@ def _int8_split_k_reduce(
     )
     row_scale = tl.load(activation_scale + index // width, valid, 0)
     col_scale = tl.load(weight_scale + index % width, valid, 0)
-    tl.store(out + index, tl.sum(acc, 0).to(tl.float32) * row_scale * col_scale, valid)
+    result = tl.sum(acc, 0).to(tl.float32) * row_scale * col_scale
+    if has_bias:
+        result += tl.load(bias + index % width, valid, 0).to(tl.float32)
+    tl.store(out + index, result, valid)
 
 
-def int8_scaled_mm_split_k(activation, weight, activation_scale, weight_scale, out):
+def int8_scaled_mm_split_k(activation, weight, activation_scale, weight_scale, out, bias=None):
     rows, depth = activation.shape
     width = weight.shape[1]
     narrow_tile = rows > 8 and width <= 4096 and depth <= 5120
@@ -349,7 +362,17 @@ def int8_scaled_mm_split_k(activation, weight, activation_scale, weight_scale, o
         activation, weight, partials, rows, width, depth, chunk, block_n, num_warps=2 if narrow_tile else 4
     )
     _int8_split_k_reduce[(triton.cdiv(rows * width, reduce_block),)](
-        partials, activation_scale, weight_scale, out, rows, width, splits, reduce_block
+        partials,
+        activation_scale,
+        weight_scale,
+        bias,
+        out,
+        rows,
+        width,
+        splits,
+        reduce_block,
+        bias is not None,
+        enable_fp_fusion=bias is None,
     )
     return out
 

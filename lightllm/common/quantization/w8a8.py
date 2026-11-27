@@ -132,7 +132,7 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         n = qweight.shape[1]
         if (
             out is not None
-            and bias is None
+            and (bias is None or (bias.shape == (n,) and bias.dtype == input_tensor.dtype and bias.is_contiguous()))
             and input_tensor.dtype in (torch.float16, torch.bfloat16)
             and qweight.T.is_contiguous()
             and weight_scale.numel() == n
@@ -150,10 +150,10 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
                 and n % 128 == 0
                 and depth % 128 == 0
             ):
-                return int8_scaled_mm_split_k(x_q, qweight, x_scale, weight_scale, out)
+                return int8_scaled_mm_split_k(x_q, qweight, x_scale, weight_scale, out, bias)
             if n == depth == 4096 and 256 <= m <= 640 and m % 64 == 0 and triton_support_tensor_descriptor():
                 return int8_scaled_mm_per_token(
-                    x_q, qweight, x_scale, weight_scale, out.dtype, out, run_config=_INT8_HOPPER_4096_CONFIG
+                    x_q, qweight, x_scale, weight_scale, out.dtype, out, run_config=_INT8_HOPPER_4096_CONFIG, bias=bias
                 )
         result = _sgl_scaled_mm(
             getattr(sgl_ops, "int8_scaled_mm", None), x_q, qweight, x_scale, weight_scale, input_tensor.dtype, out, bias
