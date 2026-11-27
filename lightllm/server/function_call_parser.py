@@ -2006,42 +2006,62 @@ class DeepSeekV41Detector(DeepSeekV32Detector):
         super().__init__()
         self.bot_token = f"<{self.dsml_token}calls>"
         self.eot_token = f"</{self.dsml_token}calls>"
+        self.current_tool_id = 0
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
-        # Buffer a calls block so parameter additions never invalidate already emitted JSON.
+        # Buffer each invoke until its arguments can be emitted as complete JSON.
         self._buffer += new_text
-        normal_text, calls = "", []
+        normal_parts, calls = [], []
         while self._buffer:
-            start = self._buffer.find(self.bot_token)
-            if start == -1:
-                partial = self._ends_with_partial_token(self._buffer, self.bot_token)
-                normal_text += self._buffer[:-partial] if partial else self._buffer
-                self._buffer = self._buffer[-partial:] if partial else ""
-                break
-            normal_text += self._buffer[:start]
-            self._buffer = self._buffer[start:]
-            end = self._buffer.find(self.eot_token)
-            if end == -1:
+            if not self._in_function_calls:
+                start = self._buffer.find(self.bot_token)
+                if start == -1:
+                    partial = self._ends_with_partial_token(self._buffer, self.bot_token)
+                    normal_parts.append(self._buffer[:-partial] if partial else self._buffer)
+                    self._buffer = self._buffer[-partial:] if partial else ""
+                    break
+                normal_parts.append(self._buffer[:start])
+                self._buffer = self._buffer[start + len(self.bot_token) :]
+                self._in_function_calls = True
+
+            block_end = self._buffer.find(self.eot_token)
+            body_end = len(self._buffer) if block_end == -1 else block_end
+            invoke = None
+            if self._buffer.find(self.invoke_end_token, 0, body_end) != -1:
+                invoke = self.invoke_regex.search(self._buffer, 0, body_end)
+            if invoke is not None:
+                name, body = invoke.groups()
+                if name in self._get_tool_indices(tools):
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            name=None if self.current_tool_name_sent else name,
+                            parameters=self._dsml_params_to_json(self.param_regex.findall(body)),
+                        )
+                    )
+                    self.current_tool_id += 1
+                else:
+                    logger.warning(f"Model attempted to call undefined function: {name}")
+                self.current_tool_name_sent = False
+                self._buffer = self._buffer[invoke.end() :]
+                continue
+
+            if block_end != -1:
+                if self.current_tool_name_sent:
+                    self.current_tool_id += 1
+                self.current_tool_name_sent = False
+                self._in_function_calls = False
+                self._buffer = self._buffer[block_end + len(self.eot_token) :]
+                continue
+
+            if not self.current_tool_name_sent:
                 match = self.partial_invoke_regex.search(self._buffer)
-                if match and not self.current_tool_name_sent and match.group(1) in self._get_tool_indices(tools):
-                    if self.current_tool_id == -1:
-                        self.current_tool_id = 0
+                if match and match.group(1) in self._get_tool_indices(tools):
                     calls.append(ToolCallItem(tool_index=self.current_tool_id, name=match.group(1), parameters=""))
                     self.current_tool_name_sent = True
-                break
-            end += len(self.eot_token)
-            parsed = self.detect_and_parse(self._buffer[:end], tools)
-            if self.current_tool_id == -1:
-                self.current_tool_id = 0
-            for index, item in enumerate(parsed.calls):
-                item.tool_index = self.current_tool_id
-                if index == 0 and self.current_tool_name_sent:
-                    item.name = None
-                calls.append(item)
-                self.current_tool_id += 1
-            self.current_tool_name_sent = False
-            self._buffer = self._buffer[end:]
-        return StreamingParseResult(normal_text=normal_text, calls=calls)
+            break
+
+        return StreamingParseResult(normal_text="".join(normal_parts), calls=calls)
 
 
 class FunctionCallParser:
