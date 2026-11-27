@@ -286,13 +286,20 @@ int8_scaled_mm_per_token = scaled_mm_per_token
 
 @triton.jit
 def _int8_split_k(
-    activation, weight, partials, rows: tl.constexpr, width: tl.constexpr, depth: tl.constexpr, chunk: tl.constexpr
+    activation,
+    weight,
+    partials,
+    rows: tl.constexpr,
+    width: tl.constexpr,
+    depth: tl.constexpr,
+    chunk: tl.constexpr,
+    block_n: tl.constexpr,
 ):
     split = tl.program_id(1)
     row = tl.arange(0, 16)
-    col = tl.program_id(0) * 64 + tl.arange(0, 64)
+    col = tl.program_id(0) * block_n + tl.arange(0, block_n)
     inner = split * chunk + tl.arange(0, 128)
-    acc = tl.full((16, 64), 0, tl.int32)
+    acc = tl.full((16, block_n), 0, tl.int32)
     for offset in range(chunk // 128):
         index = inner + offset * 128
         lhs = tl.load(
@@ -307,24 +314,43 @@ def _int8_split_k(
 
 @triton.jit
 def _int8_split_k_reduce(
-    partials, activation_scale, weight_scale, out, rows: tl.constexpr, width: tl.constexpr, splits: tl.constexpr
+    partials,
+    activation_scale,
+    weight_scale,
+    out,
+    rows: tl.constexpr,
+    width: tl.constexpr,
+    splits: tl.constexpr,
+    block: tl.constexpr,
 ):
-    index = tl.program_id(0) * 128 + tl.arange(0, 128)
+    index = tl.program_id(0) * block + tl.arange(0, block)
     split = tl.arange(0, triton.next_power_of_2(splits))
-    acc = tl.load(partials + split[:, None] * rows * width + index[None, :], split[:, None] < splits, 0)
-    row_scale = tl.load(activation_scale + index // width)
-    col_scale = tl.load(weight_scale + index % width)
-    tl.store(out + index, tl.sum(acc, 0).to(tl.float32) * row_scale * col_scale)
+    valid = index < rows * width
+    acc = tl.load(
+        partials + split[:, None] * rows * width + index[None, :],
+        (split[:, None] < splits) & valid[None, :],
+        0,
+    )
+    row_scale = tl.load(activation_scale + index // width, valid, 0)
+    col_scale = tl.load(weight_scale + index % width, valid, 0)
+    tl.store(out + index, tl.sum(acc, 0).to(tl.float32) * row_scale * col_scale, valid)
 
 
 def int8_scaled_mm_split_k(activation, weight, activation_scale, weight_scale, out):
     rows, depth = activation.shape
     width = weight.shape[1]
-    chunk = 2048 if width >= 6144 or (rows > 8 and width == depth == 4096) else 1024
+    narrow_tile = rows > 8 and width <= 4096 and depth <= 5120
+    chunk = 2048 if width >= 6144 else 1024
+    block_n = 32 if narrow_tile else 64
+    reduce_block = 256 if narrow_tile else 128
     splits = triton.cdiv(depth, chunk)
     partials = torch.empty((splits, rows, width), device=activation.device, dtype=torch.int32)
-    _int8_split_k[(width // 64, splits)](activation, weight, partials, rows, width, depth, chunk)
-    _int8_split_k_reduce[(rows * width // 128,)](partials, activation_scale, weight_scale, out, rows, width, splits)
+    _int8_split_k[(width // block_n, splits)](
+        activation, weight, partials, rows, width, depth, chunk, block_n, num_warps=2 if narrow_tile else 4
+    )
+    _int8_split_k_reduce[(triton.cdiv(rows * width, reduce_block),)](
+        partials, activation_scale, weight_scale, out, rows, width, splits, reduce_block
+    )
     return out
 
 
