@@ -23,9 +23,6 @@ class StartArgs:
     pd_master_ip: str = field(default="0.0.0.0")
     pd_master_port: int = field(default=1212)
     pd_master_mode: str = field(default="elastic")
-    pd_decode_allocation_policy: str = field(
-        default="early", metadata={"choices": ["early", "prefill_complete", "last_chunk"]}
-    )
     pd_prefill_first: bool = field(default=False)
     use_dp_split_mode_connect_pd_master: bool = field(default=False)
     disable_pd_node_self_request_limit: bool = field(default=False)

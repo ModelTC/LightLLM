@@ -212,7 +212,7 @@ def test_only_selected_final_prefill_chunks_signal_decode_allocation(monkeypatch
     reqs = [_make_prefill_req(i, 8) for i in range(3)]
     for i, req in enumerate(reqs):
         req.shm_req = SimpleNamespace(
-            input_len=8, sample_params=SimpleNamespace(pd_allocate_on_last_chunk=i != 2), pd_last_chunk_scheduled=False
+            input_len=8, sample_params=SimpleNamespace(pd_prefill_first=i != 2), pd_last_chunk_scheduled=False
         )
     # The first request still has another chunk. The second resumes from a cached prefix.
     reqs[0].get_chuncked_input_token_ids = lambda: [0] * 4
@@ -222,3 +222,14 @@ def test_only_selected_final_prefill_chunks_signal_decode_allocation(monkeypatch
 
     generic_pre_process.prepare_prefill_inputs([reqs[0]], is_chuncked_mode=False)
     assert reqs[0].shm_req.pd_last_chunk_scheduled
+
+
+def test_decode_node_does_not_signal_last_chunk(monkeypatch):
+    context = _patch_empty_input_context(monkeypatch)
+    context.args.run_mode = "decode"
+    req = _make_prefill_req(0, 8)
+    req.shm_req = SimpleNamespace(
+        input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True), pd_last_chunk_scheduled=False
+    )
+    generic_pre_process.prepare_prefill_inputs([req], is_chuncked_mode=False)
+    assert req.shm_req.pd_last_chunk_scheduled is False

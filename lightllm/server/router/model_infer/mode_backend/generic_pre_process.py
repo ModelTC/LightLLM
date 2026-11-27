@@ -37,7 +37,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_prefill_has_output.append(False if len(input_token_ids) < req.get_cur_total_len() else True)
 
         seq_len = len(input_token_ids)
-        if pd_prefill and req.shm_req.sample_params.pd_allocate_on_last_chunk and seq_len == req.shm_req.input_len:
+        if pd_prefill and req.shm_req.sample_params.pd_prefill_first and seq_len == req.shm_req.input_len:
             req.shm_req.pd_last_chunk_scheduled = True
         input_token_len = seq_len - req.cur_kv_len
 

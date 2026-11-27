@@ -22,8 +22,11 @@ ORIGIN_ID = 80
 SIBLING_ID = 81
 
 
-def _token(text, count, finish=FinishStatus.NO_FINISH):
-    return GROUP_ID, text, {"id": count, "count_output_tokens": count}, FinishStatus(finish)
+def _token(text, count, finish=FinishStatus.NO_FINISH, node_mode=None):
+    metadata = {"id": count, "count_output_tokens": count}
+    if node_mode is not None:
+        metadata["node_mode"] = node_mode
+    return GROUP_ID, text, metadata, FinishStatus(finish)
 
 
 class _Session:
@@ -88,7 +91,9 @@ class _Session:
             self.status.pf_prefill_kv_ready_event.ready = PdPfPrefillKvReady(GROUP_ID, [1, 2])
             if not self.hold_prefill_ready:
                 self.status.pf_prefill_kv_ready_event.set()
-            self.status.out_token_info_list.append(_token("hello", 1, FinishStatus.FINISHED_LENGTH))
+            self.status.out_token_info_list.append(
+                _token("hello", 1, FinishStatus.FINISHED_LENGTH, node_mode="prefill")
+            )
             self.status.event.set()
         elif message[0] == ObjType.REQ:
             self.status = self.manager.req_id_to_out_inf[GROUP_ID]
@@ -329,11 +334,9 @@ def test_existing_segment_preserves_failure_cleanup(failure):
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
-@pytest.mark.parametrize("policy", ["last_chunk", "prefill_complete"])
-def test_allocation_order_when_prefill_has_no_first_token_yet(policy):
+def test_decode_is_reserved_before_the_prefill_token_arrives():
     async def run():
         session = _Session()
-        session.manager.args.pd_decode_allocation_policy = policy
         ready = asyncio.Event()
         decode = asyncio.Event()
         send_prefill = session.p_ws.send_bytes.side_effect
@@ -355,14 +358,16 @@ def test_allocation_order_when_prefill_has_no_first_token_yet(policy):
         session.d_ws.send_bytes.side_effect = on_decode
         pending = asyncio.create_task(anext(session.stream))
         await asyncio.wait_for(ready.wait(), timeout=2)
-        if policy == "last_chunk":
-            await asyncio.wait_for(decode.wait(), timeout=2)
-        else:
-            await asyncio.sleep(0)
-            assert not decode.is_set()
+        await asyncio.wait_for(decode.wait(), timeout=2)
         assert not pending.done()
-        assert not any(m[0] == ObjType.PD_PF_DECODE_KV_READY for m in session.messages["p"])
-        session.status.out_token_info_list.append(_token("first", 1, FinishStatus.FINISHED_LENGTH))
+
+        async def endpoint_sent():
+            while not any(m[0] == ObjType.PD_PF_DECODE_KV_READY for m in session.messages["p"]):
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(endpoint_sent(), timeout=2)
+        assert not pending.done()
+        session.status.out_token_info_list.append(_token("first", 1, FinishStatus.FINISHED_LENGTH, node_mode="prefill"))
         session.status.event.set()
         assert (await asyncio.wait_for(pending, timeout=2))[1] == "first"
         assert decode.is_set()
@@ -372,13 +377,33 @@ def test_allocation_order_when_prefill_has_no_first_token_yet(policy):
     asyncio.run(run())
 
 
+def test_prefill_token_is_taken_when_decode_output_is_ahead():
+    async def run():
+        session = _Session()
+        send_prefill = session.p_ws.send_bytes.side_effect
+
+        async def put_decode_token_first(payload):
+            await send_prefill(payload)
+            if pickle.loads(payload)[0] == ObjType.PD_PF_PREFILL_REQ:
+                session.status.out_token_info_list.insert(0, _token("skip", 1, node_mode="decode"))
+
+        session.p_ws.send_bytes.side_effect = put_decode_token_first
+        first = await anext(session.stream)
+        assert first[1] == "hello"
+        assert not first[3].is_finished()
+        assert [item[1] for item in session.status.out_token_info_list] == ["skip"]
+        await session.stream.aclose()
+        session.assert_cleaned()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
 @pytest.mark.parametrize("scheduled", [True, False])
 def test_last_chunk_reports_prompt_once_and_transfers_only_after_prefill(scheduled):
     async def run():
         params = SamplingParams()
         params.init(None, max_new_tokens=1)
         params.group_request_id = GROUP_ID
-        params.pd_allocate_on_last_chunk = True
         reported = asyncio.Event()
         transfer = Mock()
         shm_req = SimpleNamespace(
@@ -422,10 +447,9 @@ def test_last_chunk_reports_prompt_once_and_transfers_only_after_prefill(schedul
 def test_last_chunk_single_output_never_submits_decode():
     async def run():
         session = _Session()
-        session.manager.args.pd_decode_allocation_policy = "last_chunk"
         session.params.max_new_tokens = 1
         assert (await anext(session.stream))[3].is_finished_length()
-        assert not session.messages["p"][0][1][1].pd_allocate_on_last_chunk
+        assert session.messages["p"][0][1][1].pd_prefill_first
         assert not session.messages["d"]
         await session.stream.aclose()
         session.assert_cleaned(has_decode=False)
@@ -436,7 +460,6 @@ def test_last_chunk_single_output_never_submits_decode():
 def test_stop_during_last_chunk_releases_decode_reservation():
     async def run():
         session = _Session()
-        session.manager.args.pd_decode_allocation_policy = "last_chunk"
         original_send = session.d_ws.send_bytes.side_effect
 
         async def stop_before_first_token(payload):
@@ -450,5 +473,60 @@ def test_stop_during_last_chunk_releases_decode_reservation():
             await anext(session.stream)
         session.assert_cleaned()
         assert not any(m[0] == ObjType.PD_PF_DECODE_KV_READY for m in session.messages["p"])
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def _hold_token_until_decode(session):
+    ready = asyncio.Event()
+    decode = asyncio.Event()
+    send_prefill = session.p_ws.send_bytes.side_effect
+    send_decode = session.d_ws.send_bytes.side_effect
+
+    async def hold_token(payload):
+        await send_prefill(payload)
+        if pickle.loads(payload)[0] == ObjType.PD_PF_PREFILL_REQ:
+            session.status.out_token_info_list.clear()
+            session.status.event.clear()
+            ready.set()
+
+    async def on_decode(payload):
+        await send_decode(payload)
+        if pickle.loads(payload)[0] == ObjType.REQ:
+            decode.set()
+
+    session.p_ws.send_bytes.side_effect = hold_token
+    session.d_ws.send_bytes.side_effect = on_decode
+    return ready, decode
+
+
+def test_finished_first_token_after_reservation_skips_transfer():
+    async def run():
+        session = _Session()
+        _, decode = _hold_token_until_decode(session)
+        pending = asyncio.create_task(anext(session.stream))
+        await asyncio.wait_for(decode.wait(), timeout=2)
+        session.status.out_token_info_list.append(_token("end", 1, FinishStatus.FINISHED_STOP, node_mode="prefill"))
+        session.status.event.set()
+        item = await asyncio.wait_for(pending, timeout=2)
+        assert item[1] == "end"
+        assert item[3].is_finished()
+        await session.stream.aclose()
+        session.assert_cleaned()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_disconnect_after_reservation_aborts_decode():
+    async def run():
+        session = _Session()
+        _, decode = _hold_token_until_decode(session)
+        pending = asyncio.create_task(anext(session.stream))
+        await asyncio.wait_for(decode.wait(), timeout=2)
+        session.request.is_disconnected = AsyncMock(return_value=True)
+        session.status.event.set()
+        with pytest.raises(ClientDisconnected):
+            await pending
+        session.assert_cleaned()
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))

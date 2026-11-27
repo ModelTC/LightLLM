@@ -284,8 +284,8 @@ class PrefillFirstPeers:
         else:
             self.prefill_sends.append(ObjType.PD_PF_PREFILL_KV_READY)
             await self._send(websocket=websocket, message=kv_ready)
-            if params.pd_allocate_on_last_chunk:
-                # Hold the P token until D has reserved pages and reported its endpoint.
+            if params.pd_prefill_first:
+                # 最后一段上报之后，master 才会给 decode 占页。占页完成前先按住首 token。
                 await _wait_until(lambda: group_request_id in self.upkv_sent)
             self.prefill_sends.append(ObjType.TOKEN_PACKS)
             await self._send(websocket=websocket, message=token)
@@ -337,7 +337,7 @@ class PrefillFirstPeers:
                 message=(ObjType.PD_UPLOAD_GENERATE_ERROR, group_request_id, segment.decode_error),
             )
             return
-        if params.pd_allocate_on_last_chunk:
+        if params.pd_prefill_first and int(params.max_new_tokens) > 1:
             await _wait_until(lambda: any(item[1] == group_request_id for item in self.kv_ready))
         for text, finish, count in segment.steps():
             await self._send(
@@ -358,7 +358,6 @@ def _params_view(params):
     return {
         "max_new_tokens": int(params.max_new_tokens),
         "pd_prefill_first": bool(params.pd_prefill_first),
-        "pd_allocate_on_last_chunk": bool(params.pd_allocate_on_last_chunk),
         "pd_master_node_id": int(params.pd_master_node_id.get()),
         "group_request_id": int(params.group_request_id),
         "infer_high_priority": int(params.infer_high_priority),
@@ -1010,7 +1009,7 @@ def test_last_chunk_reserves_decode_pages_before_prefill_returns_its_token(tmp_p
             response = await _generate(client=client, url=master.public_url)
             _assert_ok(response, ["hello world"])
             assert len(peers.decode_reqs) == len(peers.kv_ready) == 1
-            assert peers.prefill_reqs[0]["params"]["pd_allocate_on_last_chunk"]
+            assert peers.prefill_reqs[0]["params"]["pd_prefill_first"]
 
-    with running_pd_master(tmp_path, extra_args=["--pd_decode_allocation_policy", "last_chunk"]) as master:
+    with running_pd_master(tmp_path, extra_args=["--pd_prefill_first"]) as master:
         _run(master, scenario)

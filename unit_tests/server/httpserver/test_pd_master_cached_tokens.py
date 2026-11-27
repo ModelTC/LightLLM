@@ -33,7 +33,6 @@ def _make_manager(monkeypatch):
         select_p_d_node_strategy="cache_aware",
         pd_master_mode="elastic",
         pd_prefill_first=False,
-        pd_decode_allocation_policy="early",
     )
     mgr.enable_pd_node_self_request_limit = True
     mgr.pd_node_resource_wait_timeout_seconds = -1

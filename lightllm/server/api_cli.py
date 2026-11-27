@@ -76,20 +76,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=1212,
         help="when run_mode set to prefill or decode, you need set this pd_mater_port",
     )
-    pd_allocation = parser.add_mutually_exclusive_group()
-    pd_allocation.add_argument(
-        "--pd_decode_allocation_policy",
-        choices=["early", "prefill_complete", "last_chunk"],
-        default="early",
-        help="On the PD master, submit the decode request after tokenization, after prefill completes, "
-        "or when the final prefill chunk is scheduled, respectively.",
-    )
-    pd_allocation.add_argument(
+    parser.add_argument(
         "--pd_prefill_first",
         action="store_true",
         help=(
             "PD disaggregation prefill-first mode. Enable it only on the PD master. "
-            "Prefill computes and samples the first token before decode allocates KV pages. "
+            "Decode reserves KV pages when prefill schedules the final prompt chunk. "
+            "KV transfer starts after prefill finishes and decode reports its endpoint. "
+            "A single-output request finishes on prefill and skips decode allocation. "
             "On a full cache match, prefill still sends the last reserved token."
         ),
     )
