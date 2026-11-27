@@ -21,7 +21,6 @@ CALLER_GLOBS = (
 ATTENTION_KERNEL_MODULES = re.compile(
     r"^("
     r"lightllm\.common\.attention\.kernels(\..*)?"
-    r"|lightllm\.common\.basemodel\.triton_kernel\.alibi_att(\..*)?"
     r"|lightllm\.models\.[a-z0-9_]+\.triton_kernel\."
     r"(context_flashattention\w*|token_attention\w*|token_flashattention\w*|\w*flash_decoding\w*)"
     r"|flash_attn_interface|sgl_kernel\.flash_attn|flashinfer\.(decode|prefill|mla)|flash_mla|flash_kda|fla\.ops.*"
@@ -96,7 +95,6 @@ def test_caller_globs_find_the_attention_callers():
         ("lightllm.common.attention.backends.gqa.triton", False),
         ("lightllm.models.llama.triton_kernel.token_attention_nopad_att1", True),
         ("lightllm.models.llama.triton_kernel.rotary_emb", False),
-        ("lightllm.common.basemodel.triton_kernel.alibi_att.context_flashattention_nopad", True),
         ("lightllm.common.basemodel.triton_kernel.destindex_copy_kv", False),
         ("flash_attn_interface", True),
         ("flashinfer.mla", True),

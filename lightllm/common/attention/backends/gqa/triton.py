@@ -176,7 +176,7 @@ class TritonGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonGQAPrefillA
                     *args, att_state.b_image_token_start, sliding_window=config.sliding_window
                 )
         elif config.has_alibi:
-            from lightllm.common.basemodel.triton_kernel.alibi_att.context_flashattention_nopad import (
+            from lightllm.common.attention.kernels.gqa.alibi.context_flashattention_nopad import (
                 context_attention_fwd as alibi_context_attention_fwd,
             )
 
@@ -294,7 +294,7 @@ class TritonGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonGQADecodeAtt
         )
 
         if config.has_alibi:
-            from lightllm.common.basemodel.triton_kernel.alibi_att.token_flashattention_nopad import (
+            from lightllm.common.attention.kernels.gqa.alibi.token_flashattention_nopad import (
                 token_attention_fwd,
             )
 
