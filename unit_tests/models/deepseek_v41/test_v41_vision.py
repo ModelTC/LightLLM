@@ -1,7 +1,9 @@
+import copy
 import importlib.util
 import io
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -106,6 +108,40 @@ def test_vision_config_registry_and_tokenizer_preserve_row_major_positions(confi
     assert ids == [7] * prefix_len + list(range(1000, 1010)) + [8]
     assert image.start_idx == prefix_len
     assert ids[image.start_idx : image.start_idx + image.token_num] == list(range(1000, 1010))
+
+
+@pytest.mark.parametrize(
+    "effort,expected_effort", [("medium", "low"), ("minimal", "high"), ("xhigh", "high"), (42, 42)]
+)
+def test_chat_template_keeps_blocks_and_adapts_effort(config, tmp_path, monkeypatch, effort, expected_effort):
+    encode_tokens = Mock(return_value=[10, 63, 11])
+    hf_tokenizer = SimpleNamespace(convert_tokens_to_ids=lambda _: 63, encode=encode_tokens)
+    tokenizer = DeepSeekV41Tokenizer(hf_tokenizer, str(tmp_path), config)
+    render = Mock(return_value="rendered prompt")
+    monkeypatch.setattr(tokenizer, "_get_encoding_module", lambda: SimpleNamespace(encode_messages=render))
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Before"},
+                {"type": "image_url", "image_url": {"url": "unused.png"}},
+                {"type": "text", "text": "After"},
+            ],
+        }
+    ]
+    original = copy.deepcopy(messages)
+
+    assert tokenizer.apply_chat_template(messages=messages, tokenize=True, reasoning_effort=effort) == [10, 63, 11]
+    render.assert_called_once_with(
+        original,
+        thinking_mode="thinking",
+        reasoning_effort=expected_effort,
+        add_default_bos_token=True,
+        drop_thinking=True,
+    )
+    assert render.call_args.args[0] is not messages
+    encode_tokens.assert_called_once_with("rendered prompt", add_special_tokens=False)
+    assert messages == original
 
 
 def test_visual_weight_loading_and_encode_without_image_padding(config, tmp_path, monkeypatch):

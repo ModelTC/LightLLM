@@ -11,7 +11,6 @@ class DeepSeekV4Tokenizer:
     # chat_template_kwargs={"thinking": true}. It has no Jinja chat_template string,
     # so advertise thinking support explicitly for tokenizer_supports_force_thinking().
     supports_thinking = True
-    supports_content_blocks = False
     image_token_alignment = 4
 
     def __init__(self, tokenizer, model_dir, model_config=None):
@@ -105,10 +104,39 @@ class DeepSeekV4Tokenizer:
         self._encoding_module = module
         return module
 
-    def apply_chat_template(
+    def apply_chat_template(self, conversation=None, messages=None, *args, **kwargs):
+        msgs = self._copy_chat_messages(conversation, messages)
+        for msg in msgs:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            parts = []
+            has_image = False
+            for part in content:
+                if part["type"] == "text":
+                    parts.append(part.get("text") or "")
+                elif part["type"] in ("image_url", "image"):
+                    has_image = True
+                    parts.append("<｜deepseek_image｜>")
+                else:
+                    raise ValueError(f"Unsupported DeepSeek-V4 content type: {part['type']}")
+            # V4 Vision-Exp's checkpoint encoder inserts image placeholders from structured blocks.
+            if has_image and callable(getattr(self._get_encoding_module(), "process_image_messages", None)):
+                continue
+            msg["content"] = "".join(parts)
+        return self._render_chat_template(msgs, *args, **kwargs)
+
+    @staticmethod
+    def _copy_chat_messages(conversation, messages):
+        msgs = conversation if conversation is not None else messages
+        if msgs is None:
+            raise ValueError("Either 'conversation' or 'messages' must be provided")
+        return copy.deepcopy(msgs)
+
+    def _render_chat_template(
         self,
-        conversation=None,
-        messages=None,
+        msgs,
+        /,
         tools=None,
         tokenize=False,
         add_generation_prompt=True,
@@ -116,49 +144,21 @@ class DeepSeekV4Tokenizer:
         enable_thinking=None,
         **kwargs,
     ):
-        msgs = conversation if conversation is not None else messages
-        if msgs is None:
-            raise ValueError("Either 'conversation' or 'messages' must be provided")
-
-        msgs = copy.deepcopy(msgs)
-
         # build_prompt normalizes tool arguments to dicts. The DSML encoder needs
         # JSON strings to encode each named argument separately.
         for msg in msgs:
-            content = msg.get("content")
-            if isinstance(content, list) and not self.supports_content_blocks:
-                parts = []
-                for part in content:
-                    if part["type"] == "text":
-                        parts.append(part.get("text") or "")
-                    elif part["type"] in ("image_url", "image"):
-                        parts.append("<｜deepseek_image｜>")
-                    else:
-                        raise ValueError(f"Unsupported DeepSeek-V4 content type: {part['type']}")
-                msg["content"] = "".join(parts)
             for tc in msg.get("tool_calls") or []:
                 fn = tc.get("function")
                 if isinstance(fn, dict) and isinstance(fn.get("arguments"), dict):
                     fn["arguments"] = json.dumps(fn["arguments"], ensure_ascii=False)
 
         if tools:
-            wrapped_tools = []
-            for tool in tools:
-                if "function" in tool:
-                    wrapped_tools.append(tool)
-                else:
-                    wrapped_tools.append({"type": "function", "function": tool})
-
-            injected = False
-            for msg in msgs:
-                if msg.get("role") == "system":
-                    existing = msg.get("tools") or []
-                    msg["tools"] = existing + wrapped_tools
-                    injected = True
-                    break
-
-            if not injected:
+            wrapped_tools = [tool if "function" in tool else {"type": "function", "function": tool} for tool in tools]
+            system_message = next((msg for msg in msgs if msg.get("role") == "system"), None)
+            if system_message is None:
                 msgs.insert(0, {"role": "system", "content": "", "tools": wrapped_tools})
+            else:
+                system_message["tools"] = (system_message.get("tools") or []) + wrapped_tools
 
         effort = kwargs.get("reasoning_effort")
         if thinking is None:

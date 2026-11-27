@@ -30,9 +30,6 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             setattr(cls, "_prefill_aux_stream", stream)
         return stream
 
-    q_head_norm = True
-    kv_bf16_rounding = False
-
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.eps_ = network_config["rms_norm_eps"]
@@ -373,7 +370,6 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             swa_kv_buffer=swa,
             swa_page_token_num=state.config.page_token_size,
             req_to_swa=state.get_layer_view(logical_layer_id=self.layer_num_),
-            bf16_rounding=self.kv_bf16_rounding,
         )
 
     def _get_qkv(
@@ -409,7 +405,6 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             self.eps_,
             self.freqs_cis,
             infer_state.position_ids,
-            apply_norm=self.q_head_norm,
         )
         return q
 

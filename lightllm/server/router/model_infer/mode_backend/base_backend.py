@@ -216,6 +216,7 @@ class ModeBackend:
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
             cache_placement_controller=cache_placement_controller,
+            engram_lookback_depth=getattr(self.model, "engram_lookback_depth", 0),
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:

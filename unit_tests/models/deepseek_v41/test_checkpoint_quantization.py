@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 import torch
 
@@ -7,6 +10,37 @@ pytestmark = [
     pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
     pytest.mark.usefixtures("runtime_start_args"),
 ]
+
+
+def test_v41_workspace_skips_v4_compressor_scratch(monkeypatch):
+    from lightllm.models.deepseek_v41.model import DeepseekV41TpPartModel, dist_group_manager
+
+    init_rotary = Mock()
+    init_deepep = Mock()
+    quant_methods = ["fp4"]
+    monkeypatch.setattr(dist_group_manager, "get_moe_quant_methods", Mock(return_value=quant_methods))
+    monkeypatch.setattr(dist_group_manager, "new_deepep_group", init_deepep)
+    model = SimpleNamespace(
+        _init_to_get_rotary=init_rotary,
+        tp_world_size_=2,
+        batch_max_tokens=129,
+        trans_layers_weight=[],
+        config=dict(n_routed_experts=8, hidden_size=512, num_experts_per_tok=2, moe_intermediate_size=256),
+    )
+
+    DeepseekV41TpPartModel._init_custom(model)
+
+    init_rotary.assert_called_once_with()
+    assert model.dsv4_workspace.token_capacity == 130
+    assert model.dsv4_workspace.c128_compress_scratch is None
+    assert model.dsv4_workspace.c4_prefill_aux is None
+    init_deepep.assert_called_once_with(
+        n_routed_experts=8,
+        hidden_size=512,
+        expert_quant_method_names=quant_methods,
+        num_experts_per_tok=2,
+        moe_intermediate_size=256,
+    )
 
 
 def test_v41_b128_checkpoint_uses_existing_fp8_quant_methods():
@@ -70,7 +104,8 @@ def test_block32_fp8_loader_and_native_gemm(scale_first, tokens):
     qa, _, sa, _, _ = method._dynamic_quant_input(x, pack, use_custom_tensor_mananger=False)
     torch.testing.assert_close(qa.float(), qx.float(), atol=0, rtol=0)
     torch.testing.assert_close(sa, sx, atol=0, rtol=0)
-    out = torch.empty(tokens, 64, device="cuda", dtype=torch.float32)
+    buffer = torch.full((tokens, 128), float("nan"), device="cuda", dtype=torch.float32)
+    out = buffer[:, :64]
     actual = method.apply(x, pack, out=out, use_custom_tensor_mananger=False)
     assert actual is out
     _assert_native_fp8_gemm_accuracy(actual, expected)
@@ -86,3 +121,4 @@ def test_block32_fp8_loader_and_native_gemm(scale_first, tokens):
             run_config=dict(BLOCK_M=64, BLOCK_N=64, BLOCK_K=tile_k, GROUP_M=8, num_warps=4, num_stages=3),
         )
         _assert_native_fp8_gemm_accuracy(out, expected)
+    assert buffer[:, 64:].isnan().all()

@@ -2,7 +2,6 @@
 
 import math
 import mmap
-import weakref
 from contextlib import nullcontext
 from filelock import FileLock
 import numpy as np
@@ -13,6 +12,7 @@ from triton.language.extra import libdevice
 
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.distributed.communication_op import all_reduce
+from lightllm.utils.cuda_host_memory import register_cpu_tensor_storage
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_size
 from lightllm.utils.shm_utils import create_or_link_shm
@@ -20,7 +20,7 @@ from lightllm.utils.shm_utils import create_or_link_shm
 logger = init_logger(__name__)
 
 
-def build_compressed_token_map(tokenizer):
+def _build_compressed_token_id_map(tokenizer):
     from tokenizers import Regex, normalizers
 
     normalizer = normalizers.Sequence(
@@ -35,307 +35,424 @@ def build_compressed_token_map(tokenizer):
             normalizers.Replace("\ue000", " "),
         ]
     )
-    backend = tokenizer.backend_tokenizer
-    vocabulary, mapping = {}, []
-    for token in range(len(tokenizer)):
-        text = backend.decode([token], skip_special_tokens=False)
-        key = backend.id_to_token(token) if "\ufffd" in text else normalizer.normalize_str(text) or text
-        mapping.append(vocabulary.setdefault(key, len(vocabulary)))
-    return mapping, len(vocabulary)
+    backend_tokenizer = tokenizer.backend_tokenizer
+    normalized_text_to_id = {}
+    token_id_to_compressed_id = []
+    for token_id in range(len(tokenizer)):
+        decoded_text = backend_tokenizer.decode([token_id], skip_special_tokens=False)
+        if "\ufffd" in decoded_text:
+            # Incomplete byte sequences can decode to the same replacement character.
+            normalized_text = backend_tokenizer.id_to_token(token_id)
+        else:
+            normalized_text = normalizer.normalize_str(decoded_text) or decoded_text
+        compressed_id = normalized_text_to_id.setdefault(normalized_text, len(normalized_text_to_id))
+        token_id_to_compressed_id.append(compressed_id)
+    return token_id_to_compressed_id, len(normalized_text_to_id)
 
 
 class EngramHasher:
-    def __init__(self, config, tokenizer, token_slots):
-        mapping, size = build_compressed_token_map(tokenizer)
-        assert size == config["engram_compressed_vocab_size"], (size, config["engram_compressed_vocab_size"])
-        self.token_map = torch.tensor(mapping, dtype=torch.int64, device="cuda")
-        self.has_vision = config.get("vision_n_layers", 0) > 0
-        self.pad = mapping[config["engram_pad_token_id"]]
-        self.history = torch.zeros(token_slots, dtype=torch.int64, device="cuda")
-        self.order = config["engram_max_ngram_size"]
-        primes, offsets, multipliers, used = [], [], [], set()
-        bound = max(1, (np.iinfo(np.int64).max // size) // 2)
-        for lid in config["engram_layer_ids"]:
-            generator = np.random.default_rng(10007 * lid)
-            multipliers.append(generator.integers(0, bound, size=self.order, dtype=np.int64) * 2 + 1)
-            layer_primes = []
-            for _ in range(self.order - 1):
-                prime = config["engram_vocab_size"] - 1
-                for _ in range(config["engram_n_heads"]):
-                    prime += 1
-                    while prime in used or prime < 2 or any(prime % d == 0 for d in range(2, math.isqrt(prime) + 1)):
-                        prime += 1
-                    used.add(prime)
-                    layer_primes.append(prime)
-            primes.append(layer_primes)
-            offsets.append(np.cumsum([0, *layer_primes[:-1]]))
-        self.primes = torch.tensor(primes, device="cuda")
-        self.offsets = torch.tensor(np.asarray(offsets), device="cuda")
-        self.multipliers = torch.tensor(np.asarray(multipliers), device="cuda")
-        self.heads = config["engram_n_heads"]
-
-    def _map_token_ids(self, ids):
-        if self.has_vision:
-            # Image cache IDs are out of vocabulary and break the n-gram history.
-            return torch.where(
-                ids < self.token_map.numel(), self.token_map[ids.clamp_max(self.token_map.numel() - 1)], -1
-            )
-        return self.token_map[ids]
-
-    def restore_history(self, lookback, req_manager):
-        rows = torch.tensor(
-            [
-                (req, start - len(ids) + offset, token)
-                for req, start, ids in lookback
-                for offset, token in enumerate(ids)
-            ],
-            dtype=torch.int64,
-            device=self.history.device,
+    def __init__(self, config, tokenizer, num_kv_token_slots):
+        token_id_to_compressed_id, compressed_vocab_size = _build_compressed_token_id_map(tokenizer)
+        expected_compressed_vocab_size = config["engram_compressed_vocab_size"]
+        assert compressed_vocab_size == expected_compressed_vocab_size, (
+            compressed_vocab_size,
+            expected_compressed_vocab_size,
         )
-        slots = req_manager.req_to_token_indexs[rows[:, 0], rows[:, 1]].long()
-        self.history[slots] = self._map_token_ids(rows[:, 2])
+        self.token_id_to_compressed_id = torch.tensor(token_id_to_compressed_id, dtype=torch.int64, device="cuda")
+        self.has_vision = config.get("vision_n_layers", 0) > 0
+        self.compressed_pad_token_id = token_id_to_compressed_id[config["engram_pad_token_id"]]
+        # One compressed token ID per physical KV slot on this rank, including the HOLD page.
+        self.compressed_token_ids_by_slot = torch.zeros(num_kv_token_slots, dtype=torch.int64, device="cuda")
+        self.max_ngram_size = config["engram_max_ngram_size"]
+        self.num_hash_heads = config["engram_n_heads"]
+        bucket_counts_by_layer = []
+        row_offsets_by_layer = []
+        hash_multipliers_by_layer = []
+        used_bucket_counts = set()
+        min_head_bucket_count = config["engram_vocab_size"]
+        multiplier_sample_limit = max(1, (np.iinfo(np.int64).max // compressed_vocab_size) // 2)
+        for layer_id in config["engram_layer_ids"]:
+            # Reproduce the layer-specific odd multipliers used to address the checkpoint table.
+            layer_rng = np.random.default_rng(10007 * layer_id)
+            multiplier_samples = layer_rng.integers(
+                0, multiplier_sample_limit, size=self.max_ngram_size, dtype=np.int64
+            )
+            hash_multipliers_by_layer.append(multiplier_samples * 2 + 1)
+            layer_bucket_counts = []
+            # Every hash head uses a distinct prime as its bucket count.
+            for _ in range(self.max_ngram_size - 1):
+                candidate_bucket_count = min_head_bucket_count - 1
+                for _ in range(self.num_hash_heads):
+                    candidate_bucket_count += 1
+                    while (
+                        candidate_bucket_count in used_bucket_counts
+                        or candidate_bucket_count < 2
+                        or any(
+                            candidate_bucket_count % divisor == 0
+                            for divisor in range(2, math.isqrt(candidate_bucket_count) + 1)
+                        )
+                    ):
+                        candidate_bucket_count += 1
+                    used_bucket_counts.add(candidate_bucket_count)
+                    layer_bucket_counts.append(candidate_bucket_count)
+            bucket_counts_by_layer.append(layer_bucket_counts)
+            # Each hash head owns a consecutive range of rows in the layer's embedding table.
+            row_offsets_by_layer.append(np.cumsum([0, *layer_bucket_counts[:-1]]))
+        self.head_bucket_counts = torch.tensor(bucket_counts_by_layer, device="cuda")
+        self.head_row_offsets = torch.tensor(np.asarray(row_offsets_by_layer), device="cuda")
+        self.hash_multipliers = torch.tensor(np.asarray(hash_multipliers_by_layer), device="cuda")
 
-    def __call__(self, state):
-        count = state.input_ids.numel()
-        layers, columns = self.primes.shape
-        # All rows must reach history before other CTAs read their predecessors:
-        # a prefill chunk or MTP verification can contain several rows per request.
-        _store_engram_tokens[(triton.cdiv(count, 256),)](
-            state.input_ids,
-            state.mem_index,
-            self.token_map,
-            self.history,
-            count,
-            self.token_map.numel(),
+    def restore_token_history(self, history_rows: list[tuple[int, int, int]], request_to_kv_slots: torch.Tensor):
+        history_entries = torch.tensor(history_rows, dtype=torch.int64, device="cpu", pin_memory=True).to(
+            self.compressed_token_ids_by_slot.device, non_blocking=True
+        )
+        num_entries = len(history_rows)
+        _restore_cached_token_history_kernel[(triton.cdiv(num_entries, 128),)](
+            history_entries,
+            request_to_kv_slots,
+            self.token_id_to_compressed_id,
+            self.compressed_token_ids_by_slot,
+            num_entries,
+            request_to_kv_slots.stride(0),
+            self.token_id_to_compressed_id.numel(),
+            self.has_vision,
+            128,
+        )
+
+    def compute_embedding_row_ids(self, infer_state):
+        """Record current tokens and return [tokens, Engram layers, n-gram orders * heads] row IDs."""
+        num_tokens = infer_state.input_ids.numel()
+        num_layers, num_hash_columns = self.head_bucket_counts.shape
+        # Finish the history writes before reading predecessors. A prefill chunk
+        # or MTP verification can contain several tokens from one request.
+        _store_compressed_token_history_kernel[(triton.cdiv(num_tokens, 256),)](
+            infer_state.input_ids,
+            infer_state.mem_index,
+            self.token_id_to_compressed_id,
+            self.compressed_token_ids_by_slot,
+            num_tokens,
+            self.token_id_to_compressed_id.numel(),
             self.has_vision,
             256,
         )
-        out = torch.empty((count, layers, columns), dtype=torch.int64, device=state.input_ids.device)
-        _engram_hash[(triton.cdiv(count, 16), layers)](
-            state.position_ids,
-            state.dsv4_sparse_req_idx,
-            state.req_manager.req_to_token_indexs,
-            self.history,
-            self.multipliers,
-            self.primes,
-            self.offsets,
-            out,
-            count,
-            state.req_manager.req_to_token_indexs.stride(0),
-            self.pad,
-            self.order,
-            self.heads,
-            layers,
-            16,
-            triton.next_power_of_2(self.heads),
+        embedding_row_ids = torch.empty(
+            (num_tokens, num_layers, num_hash_columns), dtype=torch.int64, device=infer_state.input_ids.device
         )
-        return out
+        request_to_kv_slots = infer_state.req_manager.req_to_token_indexs
+        _compute_engram_embedding_row_ids_kernel[(triton.cdiv(num_tokens, 16), num_layers)](
+            infer_state.position_ids,
+            infer_state.dsv4_sparse_req_idx,
+            request_to_kv_slots,
+            self.compressed_token_ids_by_slot,
+            self.hash_multipliers,
+            self.head_bucket_counts,
+            self.head_row_offsets,
+            embedding_row_ids,
+            num_tokens,
+            request_to_kv_slots.stride(0),
+            self.compressed_pad_token_id,
+            self.max_ngram_size,
+            self.num_hash_heads,
+            num_layers,
+            16,
+            triton.next_power_of_2(self.num_hash_heads),
+        )
+        return embedding_row_ids
 
 
 @triton.jit
-def _store_engram_tokens(
-    IDS, SLOTS, TOKEN_MAP, HISTORY, N, VOCAB: tl.constexpr, VISION: tl.constexpr, BLOCK: tl.constexpr
+def _load_compressed_token_ids(
+    token_id_to_compressed_id, token_ids, valid_rows, VOCAB_SIZE: tl.constexpr, HAS_VISION: tl.constexpr
 ):
-    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    valid = row < N
-    token = tl.load(IDS + row, valid, 0)
-    slot = tl.load(SLOTS + row, valid, 0).to(tl.int64)
-    mapped = tl.load(TOKEN_MAP + token, valid & (token < VOCAB) if VISION else valid, -1)
-    tl.store(HISTORY + slot, mapped, valid)
+    # Image cache IDs are outside the text vocabulary and interrupt the n-gram.
+    valid_text = valid_rows & (token_ids < VOCAB_SIZE) if HAS_VISION else valid_rows
+    return tl.load(token_id_to_compressed_id + token_ids, valid_text, -1)
 
 
 @triton.jit
-def _engram_hash(
-    POSITIONS,
-    REQS,
-    REQ_TO_TOKEN,
-    HISTORY,
-    MULTIPLIERS,
-    PRIMES,
-    OFFSETS,
-    OUT,
-    N,
-    REQ_STRIDE: tl.constexpr,
-    PAD: tl.constexpr,
-    ORDER: tl.constexpr,
-    HEADS: tl.constexpr,
-    LAYERS: tl.constexpr,
-    BLOCK_T: tl.constexpr,
-    BLOCK_H: tl.constexpr,
+def _restore_cached_token_history_kernel(
+    history_entries,
+    request_to_kv_slots,
+    token_id_to_compressed_id,
+    compressed_token_ids_by_slot,
+    num_entries,
+    REQUEST_SLOT_ROW_STRIDE: tl.constexpr,
+    VOCAB_SIZE: tl.constexpr,
+    HAS_VISION: tl.constexpr,
+    TOKEN_BLOCK_SIZE: tl.constexpr,
 ):
-    row = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
-    layer = tl.program_id(1)
-    head = tl.arange(0, BLOCK_H)
-    valid = row < N
-    position = tl.load(POSITIONS + row, valid, 0)
-    req = tl.load(REQS + row, valid, 0).to(tl.int64)
-    blocked = tl.full((BLOCK_T,), False, tl.int1)
-    rolling = tl.full((BLOCK_T,), 0, tl.int64)
-    columns: tl.constexpr = (ORDER - 1) * HEADS
-    for shift in tl.static_range(ORDER):
-        slot = tl.load(REQ_TO_TOKEN + req * REQ_STRIDE + tl.maximum(position - shift, 0), valid, 0).to(tl.int64)
-        source = tl.load(HISTORY + slot, valid, 0)
-        blocked = blocked | (position < shift) | (source == -1)
-        token = tl.where(blocked, PAD, source)
-        multiplier = tl.load(MULTIPLIERS + layer * ORDER + shift)
-        rolling = rolling ^ (token * multiplier)
-        if shift > 0:
-            col = (shift - 1) * HEADS + head
-            prime = tl.load(PRIMES + layer * columns + col, head < HEADS, 1)
-            offset = tl.load(OFFSETS + layer * columns + col, head < HEADS, 0)
-            hashed = rolling[:, None] % prime[None, :] + offset[None, :]
+    row = tl.program_id(0) * TOKEN_BLOCK_SIZE + tl.arange(0, TOKEN_BLOCK_SIZE)
+    valid_row = row < num_entries
+    entry = history_entries + row * 3
+    request_slot = tl.load(entry, valid_row, 0)
+    position = tl.load(entry + 1, valid_row, 0)
+    token_id = tl.load(entry + 2, valid_row, 0)
+    kv_slot = tl.load(request_to_kv_slots + request_slot * REQUEST_SLOT_ROW_STRIDE + position, valid_row, 0)
+    compressed_id = _load_compressed_token_ids(token_id_to_compressed_id, token_id, valid_row, VOCAB_SIZE, HAS_VISION)
+    # Requests sharing a cached prefix may restore the same slot and token ID.
+    tl.atomic_xchg(compressed_token_ids_by_slot + kv_slot, compressed_id, sem="relaxed", mask=valid_row)
+
+
+@triton.jit
+def _store_compressed_token_history_kernel(
+    input_token_ids,
+    kv_slots,
+    token_id_to_compressed_id,
+    compressed_token_ids_by_slot,
+    num_tokens,
+    VOCAB_SIZE: tl.constexpr,
+    HAS_VISION: tl.constexpr,
+    TOKEN_BLOCK_SIZE: tl.constexpr,
+):
+    token_row = tl.program_id(0) * TOKEN_BLOCK_SIZE + tl.arange(0, TOKEN_BLOCK_SIZE)
+    valid_row = token_row < num_tokens
+    token_id = tl.load(input_token_ids + token_row, valid_row, 0)
+    kv_slot = tl.load(kv_slots + token_row, valid_row, 0).to(tl.int64)
+    compressed_id = _load_compressed_token_ids(token_id_to_compressed_id, token_id, valid_row, VOCAB_SIZE, HAS_VISION)
+    tl.store(compressed_token_ids_by_slot + kv_slot, compressed_id, valid_row)
+
+
+@triton.jit
+def _compute_engram_embedding_row_ids_kernel(
+    position_ids,
+    request_ids,
+    request_to_kv_slots,
+    compressed_token_ids_by_slot,
+    hash_multipliers,
+    head_bucket_counts,
+    head_row_offsets,
+    embedding_row_ids,
+    num_tokens,
+    REQUEST_SLOT_ROW_STRIDE: tl.constexpr,
+    COMPRESSED_PAD_TOKEN_ID: tl.constexpr,
+    MAX_NGRAM_SIZE: tl.constexpr,
+    NUM_HASH_HEADS: tl.constexpr,
+    NUM_HASH_LAYERS: tl.constexpr,
+    TOKEN_BLOCK_SIZE: tl.constexpr,
+    HEAD_BLOCK_SIZE: tl.constexpr,
+):
+    token_row = tl.program_id(0) * TOKEN_BLOCK_SIZE + tl.arange(0, TOKEN_BLOCK_SIZE)
+    layer_index = tl.program_id(1)
+    head_index = tl.arange(0, HEAD_BLOCK_SIZE)
+    valid_row = token_row < num_tokens
+    valid_head = head_index < NUM_HASH_HEADS
+    token_position = tl.load(position_ids + token_row, valid_row, 0)
+    request_id = tl.load(request_ids + token_row, valid_row, 0).to(tl.int64)
+    pad_remaining_history = tl.full((TOKEN_BLOCK_SIZE,), False, tl.int1)
+    rolling_hash = tl.full((TOKEN_BLOCK_SIZE,), 0, tl.int64)
+    NUM_HASH_COLUMNS: tl.constexpr = (MAX_NGRAM_SIZE - 1) * NUM_HASH_HEADS
+    for lookback_distance in tl.static_range(MAX_NGRAM_SIZE):
+        history_position = tl.maximum(token_position - lookback_distance, 0)
+        history_kv_slot = tl.load(
+            request_to_kv_slots + request_id * REQUEST_SLOT_ROW_STRIDE + history_position, valid_row, 0
+        ).to(tl.int64)
+        history_token_id = tl.load(compressed_token_ids_by_slot + history_kv_slot, valid_row, 0)
+        pad_remaining_history |= (token_position < lookback_distance) | (history_token_id == -1)
+        compressed_id = tl.where(pad_remaining_history, COMPRESSED_PAD_TOKEN_ID, history_token_id)
+        multiplier = tl.load(hash_multipliers + layer_index * MAX_NGRAM_SIZE + lookback_distance)
+        rolling_hash = rolling_hash ^ (compressed_id * multiplier)
+        if lookback_distance > 0:
+            hash_column = (lookback_distance - 1) * NUM_HASH_HEADS + head_index
+            head_offset = layer_index * NUM_HASH_COLUMNS + hash_column
+            bucket_count = tl.load(head_bucket_counts + head_offset, valid_head, 1)
+            row_offset = tl.load(head_row_offsets + head_offset, valid_head, 0)
+            row_ids = rolling_hash[:, None] % bucket_count[None, :] + row_offset[None, :]
             tl.store(
-                OUT + row[:, None] * LAYERS * columns + layer * columns + col[None, :],
-                hashed,
-                valid[:, None] & (head[None, :] < HEADS),
+                embedding_row_ids + token_row[:, None] * NUM_HASH_LAYERS * NUM_HASH_COLUMNS + head_offset[None, :],
+                row_ids,
+                valid_row[:, None] & valid_head[None, :],
             )
 
 
 @triton.jit
-def _gather_table(
-    IDS, TABLE, SCALE, OUT, START: tl.constexpr, END: tl.constexpr, DIM: tl.constexpr, BLOCK: tl.constexpr
+def _lookup_fp8_embedding_shard_kernel(
+    embedding_row_ids,
+    fp8_weights,
+    e8m0_scale_exponents,
+    output_embeddings,
+    SHARD_ROW_START: tl.constexpr,
+    SHARD_ROW_END: tl.constexpr,
+    EMBEDDING_DIM: tl.constexpr,
+    BLOCK_EMBEDDING: tl.constexpr,
 ):
-    row = tl.program_id(0)
-    index = tl.load(IDS + row)
-    valid = (index >= START) & (index < END)
-    col = tl.arange(0, BLOCK)
-    value = tl.load(TABLE + (index - START) * DIM + col, valid & (col < DIM), 0.0).to(tl.float32)
-    exponent = tl.load(SCALE + (index - START) * (DIM // 32) + col // 32, valid & (col < DIM), 0).to(tl.uint32)
-    scale = (exponent << 23).to(tl.float32, bitcast=True)
-    tl.store(OUT + row * DIM + col, value * scale, col < DIM)
+    output_row = tl.program_id(0)
+    embedding_row_id = tl.load(embedding_row_ids + output_row)
+    row_in_shard = (embedding_row_id >= SHARD_ROW_START) & (embedding_row_id < SHARD_ROW_END)
+    shard_row = embedding_row_id - SHARD_ROW_START
+    embedding_column = tl.arange(0, BLOCK_EMBEDDING)
+    valid_column = embedding_column < EMBEDDING_DIM
+    fp8_value = tl.load(
+        fp8_weights + shard_row * EMBEDDING_DIM + embedding_column, row_in_shard & valid_column, 0.0
+    ).to(tl.float32)
+    # Each E8M0 scale covers 32 consecutive embedding values.
+    scale_exponent = tl.load(
+        e8m0_scale_exponents + shard_row * (EMBEDDING_DIM // 32) + embedding_column // 32,
+        row_in_shard & valid_column,
+        0,
+    ).to(tl.uint32)
+    scale = (scale_exponent << 23).to(tl.float32, bitcast=True)
+    tl.store(output_embeddings + output_row * EMBEDDING_DIM + embedding_column, fp8_value * scale, valid_column)
 
 
 class EngramEmbeddingWeight(BaseWeightTpl):
     """One row-sharded FP8 table in pinned host memory; the GPU reads it through UVA."""
 
-    def __init__(self, prefix, rows, dim):
+    def __init__(self, weight_prefix, num_embeddings, embedding_dim):
         super().__init__()
-        self.prefix, self.dim = prefix, dim
-        self.part_rows = (rows + self.tp_world_size_ - 1) // self.tp_world_size_
-        self.start = self.tp_rank_ * self.part_rows
-        self.end = min(rows, self.start + self.part_rows)
+        self.weight_prefix = weight_prefix
+        self.embedding_dim = embedding_dim
+        self._shard_row_capacity = (num_embeddings + self.tp_world_size_ - 1) // self.tp_world_size_
+        self._shard_row_start = self.tp_rank_ * self._shard_row_capacity
+        self._shard_row_end = min(num_embeddings, self._shard_row_start + self._shard_row_capacity)
         self._create_weight()
 
     def _create_weight(self):
-        weight_bytes = self.part_rows * self.dim
-        scale_bytes = self.part_rows * (self.dim // 32)
+        weight_bytes = self._shard_row_capacity * self.embedding_dim
+        scale_bytes = self._shard_row_capacity * (self.embedding_dim // 32)
         logger.info(
-            f"Allocating {self.prefix}: TP rank {self.tp_rank_}, "
+            f"Allocating {self.weight_prefix}: TP rank {self.tp_rank_}, "
             f"pinned table {(weight_bytes + scale_bytes) / 2**30:.2f} GiB"
         )
         table_bytes = weight_bytes + scale_bytes
+        self._host_shm = None
         if get_dp_size() > 1:
             # DP ranks on this node read the same TP shard; pin one physical table per node.
-            self._host_shm = create_or_link_shm(f"{self.prefix}_tp{self.tp_rank_}", table_bytes + 2)
+            self._host_shm = create_or_link_shm(f"{self.weight_prefix}_tp{self.tp_rank_}", table_bytes + 2)
             self._host_mapping = self._host_shm._mmap
-            self.loaded = np.ndarray((2,), dtype=np.uint8, buffer=self._host_mapping, offset=table_bytes)
+            self._loaded_components = np.ndarray((2,), dtype=np.uint8, buffer=self._host_mapping, offset=table_bytes)
             self._load_lock = FileLock(f"/tmp/{self._host_shm.name}.load.lock")
         else:
             self._host_mapping = mmap.mmap(-1, table_bytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
-            self.loaded = [False, False]
+            self._loaded_components = [False, False]
             self._load_lock = nullcontext()
         self._host_mapping.madvise(mmap.MADV_HUGEPAGE)
-        storage = torch.frombuffer(self._host_mapping, dtype=torch.uint8, count=table_bytes)
-        self.weight = storage[:weight_bytes].view(torch.float8_e4m3fn).view(self.part_rows, self.dim)
-        self.scale = storage[weight_bytes:].view(torch.float8_e8m0fnu).view(self.part_rows, self.dim // 32)
-        self._host_registration = None
+        host_storage = torch.frombuffer(self._host_mapping, dtype=torch.uint8, count=table_bytes)
+        if self._host_shm is not None:
+            # SharedMemory closes the mapping when its owner is released.
+            host_storage.untyped_storage()._shared_memory_owner = self._host_shm
+        self._host_fp8_weights = (
+            host_storage[:weight_bytes].view(torch.float8_e4m3fn).view(self._shard_row_capacity, self.embedding_dim)
+        )
+        self._host_e8m0_scales = (
+            host_storage[weight_bytes:]
+            .view(torch.float8_e8m0fnu)
+            .view(self._shard_row_capacity, self.embedding_dim // 32)
+        )
 
     def load_hf_weights(self, weights):
-        for i, (suffix, target) in enumerate((("weight", self.weight), ("scale", self.scale))):
-            name = f"{self.prefix}.{suffix}"
-            if name in weights:
+        shard_components = (("weight", self._host_fp8_weights), ("scale", self._host_e8m0_scales))
+        for component_index, (suffix, host_tensor) in enumerate(shard_components):
+            checkpoint_name = f"{self.weight_prefix}.{suffix}"
+            if checkpoint_name in weights:
                 with self._load_lock:
-                    if not self.loaded[i]:
-                        target[: self.end - self.start].copy_(weights[name][self.start : self.end])
-                        self.loaded[i] = True
+                    if not self._loaded_components[component_index]:
+                        host_tensor[: self._shard_row_end - self._shard_row_start].copy_(
+                            weights[checkpoint_name][self._shard_row_start : self._shard_row_end]
+                        )
+                        self._loaded_components[component_index] = True
 
     def verify_load(self):
-        if not all(self.loaded):
+        if not all(self._loaded_components):
             return False
-        if self._host_registration is None:
-            from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
-
-            # The HF loader has populated both regions before pinning their contiguous mapping.
-            runtime = torch.cuda.cudart()
-            address = self.weight.data_ptr()
-            torch.cuda.check_error(runtime.cudaHostRegister(address, self.weight.nbytes + self.scale.nbytes, 3))
-            self._host_registration = weakref.finalize(self, runtime.cudaHostUnregister, address)
-            self.device_weight = get_accelerator_view_from_cpu_tensor(self.weight)
-            self.device_scale = get_accelerator_view_from_cpu_tensor(self.scale)
+        # Weight and scale are views of one contiguous host storage.
+        register_cpu_tensor_storage(self._host_fp8_weights)
         return True
 
-    def lookup(self, indices, group):
-        indices = indices.contiguous()
-        out = torch.empty((*indices.shape, self.dim), dtype=torch.bfloat16, device=indices.device)
-        _gather_table[(indices.numel(),)](
-            indices,
-            self.device_weight,
-            self.device_scale.view(torch.uint8),
-            out,
-            self.start,
-            self.end,
-            self.dim,
-            triton.next_power_of_2(self.dim),
+    def lookup_rows(self, embedding_row_ids, tp_group):
+        """Look up [tokens, heads across n-gram orders] row IDs and concatenate each token's embeddings."""
+        embedding_row_ids = embedding_row_ids.contiguous()
+        embeddings = torch.empty(
+            (*embedding_row_ids.shape, self.embedding_dim), dtype=torch.bfloat16, device=embedding_row_ids.device
+        )
+        _lookup_fp8_embedding_shard_kernel[(embedding_row_ids.numel(),)](
+            embedding_row_ids,
+            self._host_fp8_weights,
+            self._host_e8m0_scales.view(torch.uint8),
+            embeddings,
+            self._shard_row_start,
+            self._shard_row_end,
+            self.embedding_dim,
+            triton.next_power_of_2(self.embedding_dim),
         )
         if self.tp_world_size_ > 1:
-            all_reduce(out, group=group)
-        return out.flatten(1)
+            all_reduce(embeddings, group=tp_group)
+        return embeddings.flatten(1)
 
 
 @triton.jit
-def _engram_gate(
-    STREAMS,
-    KV,
-    Q,
-    K,
-    MASK,
-    OUT,
-    STREAM_STRIDE: tl.constexpr,
-    KV_STRIDE: tl.constexpr,
-    OUT_STRIDE: tl.constexpr,
-    MULT: tl.constexpr,
-    DIM: tl.constexpr,
-    EPS: tl.constexpr,
-    HAS_MASK: tl.constexpr,
-    BLOCK: tl.constexpr,
+def _add_gated_engram_value_kernel(
+    residual_streams,
+    projected_key_value,
+    query_norm_weights,
+    key_norm_weights,
+    text_token_mask,
+    output_streams,
+    RESIDUAL_TOKEN_STRIDE: tl.constexpr,
+    KEY_VALUE_TOKEN_STRIDE: tl.constexpr,
+    OUTPUT_TOKEN_STRIDE: tl.constexpr,
+    NUM_STREAMS: tl.constexpr,
+    HIDDEN_SIZE: tl.constexpr,
+    RMS_NORM_EPS: tl.constexpr,
+    HAS_TEXT_TOKEN_MASK: tl.constexpr,
+    BLOCK_HIDDEN: tl.constexpr,
 ):
-    row, stream = tl.program_id(0).to(tl.int64), tl.program_id(1)
-    col = tl.arange(0, BLOCK)
-    valid = col < DIM
-    h = tl.load(STREAMS + row * STREAM_STRIDE + stream * DIM + col, valid, 0).to(tl.float32)
-    key = tl.load(KV + row * KV_STRIDE + stream * DIM + col, valid, 0).to(tl.float32)
-    q = tl.load(Q + stream * DIM + col, valid, 0).to(tl.float32)
-    k = tl.load(K + stream * DIM + col, valid, 0).to(tl.float32)
-    dot = tl.sum(h * key * q * k, 0)
-    dot *= tl.rsqrt(tl.sum(h * h, 0) / DIM + EPS) * tl.rsqrt(tl.sum(key * key, 0) / DIM + EPS) * DIM ** -0.5
-    gate = tl.sigmoid(libdevice.copysign(tl.sqrt(tl.maximum(tl.abs(dot), 1e-6)), dot))
-    if HAS_MASK:
-        gate = tl.where(tl.load(MASK + row), gate, 0.0)
-    value = tl.load(KV + row * KV_STRIDE + MULT * DIM + col, valid, 0).to(tl.float32)
-    tl.store(OUT + row * OUT_STRIDE + stream * DIM + col, h + gate * value, valid)
+    token_row = tl.program_id(0).to(tl.int64)
+    stream_id = tl.program_id(1)
+    hidden_column = tl.arange(0, BLOCK_HIDDEN)
+    valid_column = hidden_column < HIDDEN_SIZE
+    stream_column = stream_id * HIDDEN_SIZE + hidden_column
+    residual = tl.load(residual_streams + token_row * RESIDUAL_TOKEN_STRIDE + stream_column, valid_column, 0).to(
+        tl.float32
+    )
+    memory_key = tl.load(projected_key_value + token_row * KEY_VALUE_TOKEN_STRIDE + stream_column, valid_column, 0).to(
+        tl.float32
+    )
+    query_norm_weight = tl.load(query_norm_weights + stream_column, valid_column, 0).to(tl.float32)
+    key_norm_weight = tl.load(key_norm_weights + stream_column, valid_column, 0).to(tl.float32)
+    weighted_dot = tl.sum(residual * memory_key * query_norm_weight * key_norm_weight, 0)
+    query_inv_rms = tl.rsqrt(tl.sum(residual * residual, 0) / HIDDEN_SIZE + RMS_NORM_EPS)
+    key_inv_rms = tl.rsqrt(tl.sum(memory_key * memory_key, 0) / HIDDEN_SIZE + RMS_NORM_EPS)
+    weighted_dot *= query_inv_rms * key_inv_rms * HIDDEN_SIZE ** -0.5
+    gate_weight = tl.sigmoid(libdevice.copysign(tl.sqrt(tl.maximum(tl.abs(weighted_dot), 1e-6)), weighted_dot))
+    if HAS_TEXT_TOKEN_MASK:
+        gate_weight = tl.where(tl.load(text_token_mask + token_row), gate_weight, 0.0)
+    # The value is shared by all streams and follows their keys in the projection.
+    shared_memory_value = tl.load(
+        projected_key_value + token_row * KEY_VALUE_TOKEN_STRIDE + NUM_STREAMS * HIDDEN_SIZE + hidden_column,
+        valid_column,
+        0,
+    ).to(tl.float32)
+    tl.store(
+        output_streams + token_row * OUTPUT_TOKEN_STRIDE + stream_column,
+        residual + gate_weight * shared_memory_value,
+        valid_column,
+    )
 
 
-def engram_forward(streams, indices, weight, eps, group, token_mask=None):
-    embedded = weight.engram_embed_.lookup(indices, group)
-    kv = weight.engram_wkv_.mm(embedded)
-    mult, dim = streams.shape[-2:]
-    out = torch.empty(streams.shape, dtype=streams.dtype, device=streams.device)
-    _engram_gate[(streams.shape[0], mult)](
-        streams,
-        kv,
-        weight.engram_q_.weight,
-        weight.engram_k_.weight,
-        token_mask,
-        out,
-        streams.stride(0),
-        kv.stride(0),
-        out.stride(0),
-        mult,
-        dim,
-        eps,
-        token_mask is not None,
-        triton.next_power_of_2(dim),
+def apply_engram_to_streams(
+    residual_streams, embedding_row_ids, layer_weight, rms_norm_eps, tp_group, text_token_mask=None
+):
+    """Look up n-gram embeddings and add a gated memory value to each residual stream."""
+    embeddings = layer_weight.engram_embed_.lookup_rows(embedding_row_ids, tp_group)
+    projected_key_value = layer_weight.engram_wkv_.mm(embeddings)
+    num_streams, hidden_size = residual_streams.shape[-2:]
+    output_streams = torch.empty(residual_streams.shape, dtype=residual_streams.dtype, device=residual_streams.device)
+    _add_gated_engram_value_kernel[(residual_streams.shape[0], num_streams)](
+        residual_streams,
+        projected_key_value,
+        layer_weight.engram_q_.weight,
+        layer_weight.engram_k_.weight,
+        text_token_mask,
+        output_streams,
+        residual_streams.stride(0),
+        projected_key_value.stride(0),
+        output_streams.stride(0),
+        num_streams,
+        hidden_size,
+        rms_norm_eps,
+        text_token_mask is not None,
+        triton.next_power_of_2(hidden_size),
         num_warps=4,
         enable_fp_fusion=False,
     )
-    return out
+    return output_streams

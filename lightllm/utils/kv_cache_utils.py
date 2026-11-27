@@ -8,6 +8,7 @@ import concurrent.futures
 import numpy as np
 import triton
 from functools import lru_cache
+from lightllm.utils.cuda_host_memory import register_host_memory, unregister_host_memory
 from lightllm.utils.envs_utils import (
     get_env_start_args,
     enable_huge_page,
@@ -173,12 +174,8 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
         offset += seg_len
 
     cuda = ctypes.CDLL("/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so")
-    cuda.cudaHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
-    cuda.cudaHostRegister.restype = ctypes.c_int
     cuda.cudaHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
     cuda.cudaHostGetDevicePointer.restype = ctypes.c_int
-
-    cudaHostRegisterFlag = 3
 
     device_id = get_current_device_id()
     torch.cuda.set_device(device_id)
@@ -187,25 +184,41 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
     def _register_one_segment(task: Tuple[int, int]):
         offset, seg_len = task
         torch.cuda.set_device(device_id)
-        ptr = ctypes.c_void_p(shm_ptr + offset)
-        r = cuda.cudaHostRegister(ptr, ctypes.c_size_t(seg_len), cudaHostRegisterFlag)
-        if r != 0:
-            raise Exception(f"cudaHostRegister failed with error code {r}, prefer to use hugetlb")
-        return
+        address = shm_ptr + offset
+        try:
+            register_host_memory(address, seg_len)
+        except RuntimeError as exc:
+            raise RuntimeError("Failed to register CPU KV cache memory. Check HugeTLB availability.") from exc
+        return address
 
-    # worker_num的数值需要与_pre_warm_memory一致，不然会丢失warmup的效果
-    if tasks:
-        worker_num = min(8, len(tasks))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_num) as executor:
-            futures = [executor.submit(_register_one_segment, task) for task in tasks]
-            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=desc):
-                future.result()
+    futures = []
+    try:
+        # Keep the worker count consistent with _pre_warm_memory.
+        if tasks:
+            worker_num = min(8, len(tasks))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=worker_num) as executor:
+                for task in tasks:
+                    futures.append(executor.submit(_register_one_segment, task))
+                for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=desc):
+                    future.result()
 
-    device_ptr = ctypes.c_void_p()
-    host_ptr = ctypes.c_void_p(shm_ptr)
-    res = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
-    if res != 0:
-        raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
+        device_ptr = ctypes.c_void_p()
+        host_ptr = ctypes.c_void_p(shm_ptr)
+        result = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
+        if result != 0:
+            raise RuntimeError(f"cudaHostGetDevicePointer failed with error code {result}")
+    except BaseException:
+        # The executor has joined all workers. Undo completed registrations before a retry.
+        for future in futures:
+            if future.cancelled() or future.exception() is not None:
+                continue
+            address = future.result()
+            try:
+                unregister_host_memory(address)
+            except Exception:
+                logger.exception(f"Failed to unregister CPU KV cache segment at address {address}")
+        raise
+
     logger.info(f"cudaHostGetDevicePointer success, host_ptr={host_ptr.value}, device_ptr={device_ptr.value}")
     return device_ptr.value
 

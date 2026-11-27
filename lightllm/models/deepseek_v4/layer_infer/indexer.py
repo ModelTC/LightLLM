@@ -171,7 +171,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             )
             return slots.unsqueeze(1), lengths
 
-        paged_meta = infer_state.get_indexer_metadata(self.layer_idx_, c4_cap)
+        paged_meta = infer_state.get_c4_indexer_metadata(c4_cap)
         page_size = (
             infer_state.get_compressed_kv_state(logical_layer_id=self.layer_idx_).config.block_token_size
             // self.compress_ratio

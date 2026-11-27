@@ -4,7 +4,6 @@ from lightllm.models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
 
 
 class DeepSeekV41Tokenizer(DeepSeekV4Tokenizer):
-    supports_content_blocks = True
     image_token_alignment = 1
 
     def __init__(self, tokenizer, model_dir, model_config):
@@ -13,14 +12,15 @@ class DeepSeekV41Tokenizer(DeepSeekV4Tokenizer):
         config.setdefault("vision_n_layers", self.vision_config.get("num_hidden_layers", 0))
         super().__init__(tokenizer, model_dir, config)
 
-    def apply_chat_template(self, *args, **kwargs):
+    def apply_chat_template(self, conversation=None, messages=None, *args, **kwargs):
         # Accept legacy OpenAI effort names at the model's tokenizer boundary.
         effort = kwargs.get("reasoning_effort")
         if effort == "medium":
             kwargs["reasoning_effort"] = "low"
         elif effort in ("minimal", "xhigh"):
             kwargs["reasoning_effort"] = "high"
-        return super().apply_chat_template(*args, **kwargs)
+        msgs = self._copy_chat_messages(conversation, messages)
+        return self._render_chat_template(msgs, *args, **kwargs)
 
     def get_image_token_length(self, img):
         from .image_processor import get_image_grid

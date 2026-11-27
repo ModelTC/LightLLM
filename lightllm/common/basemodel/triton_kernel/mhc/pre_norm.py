@@ -454,6 +454,8 @@ def hc_pre_norm(
         gemm_partial = (x_fp32 @ fn.T).unsqueeze(0)
         sqrsum_partial = x_fp32.square().sum(dim=-1).unsqueeze(0)
     else:
+        # TODO: With previous_pre, fuse projection, square-sum accumulation,
+        # and stream mixing so they share one read of x.
         gemm_partial, sqrsum_partial = _hc_prenorm_projection(x, fn)
 
     return _finish_pre_norm(

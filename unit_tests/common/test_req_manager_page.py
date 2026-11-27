@@ -186,6 +186,7 @@ def _make_scheduler_req(manager, req_idx, current, total):
         finish_status=SimpleNamespace(is_finished=lambda: False),
         is_slave_req=lambda: False,
         get_cur_total_len=total,
+        get_token_lookback=lambda: (),
         get_chuncked_input_token_len=total,
     )
     _attach_token_index(manager, req)
@@ -245,9 +246,6 @@ def test_decode_scheduler_publishes_batched_request_table(monkeypatch):
 def test_last_image_slot_uses_prompt_id_in_mixed_prefill(monkeypatch):
     manager, _, backend, _ = _make_scheduler(monkeypatch, page_size=4, available=32)
     backend.args.enable_prefill_decode_mixed = True
-    monkeypatch.setattr(
-        generic_pre_process.g_infer_context, "backend", SimpleNamespace(model=SimpleNamespace(token_lookback_depth=0))
-    )
     image = list(range(MULTIMODAL_TOKEN_ID_START, MULTIMODAL_TOKEN_ID_START + 3))
     reqs = []
     for index, (tokens, output_len) in enumerate((([1, 2, *image], 0), ([1, *image, 42], 0), ([1, *image, 43], 1))):

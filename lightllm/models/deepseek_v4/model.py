@@ -26,7 +26,6 @@ from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import (
 )
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
 from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post
-from .config import DSV4AttentionConfig
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 from lightllm.models.llama.yarn_rotary_utils import (
@@ -77,7 +76,6 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     post_layer_infer_class = DeepseekV4PostLayerInfer
     transformer_layer_infer_class = DeepseekV4TransformerLayerInfer
 
-    attention_config_class = DSV4AttentionConfig
     infer_state_class = DeepseekV4InferStateInfo
 
     def _verify_params(self):
@@ -109,16 +107,19 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         from lightllm.common.attention_state.full_att.compressed_att.create_compressed_att_state import (
             create_compressed_att_state,
         )
+        from .config import create_attention_config
 
         assert args.llm_kv_type in ("None", "fp8kv_dsa"), f"unsupported V4 KV encoding: {args.llm_kv_type}"
-        config = cls.attention_config_class.from_model_config(
+        config = create_attention_config(
             model_config=model_config,
             model_logical_layer_ids=model_logical_layer_ids,
             tp_rank=tp_rank,
             tp_world_size=tp_world_size,
         )
         states = []
-        for ratio in sorted(set(config.compress_ratios) - {0}):
+        for ratio in (4, 128):
+            if ratio not in config.compress_ratios:
+                continue
             states.append(
                 create_compressed_att_state(
                     config=config.create_compressed_config(compress_ratio=ratio),
@@ -141,11 +142,13 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     ) -> list[BoundedAttentionState]:
         """创建本模型的 SWA/compressor 请求运行态，大小页容量由管理器后续确定。"""
         from lightllm.common.attention_state.bounded_att import (
+            WindowCompressorStateConfig,
             create_window_compressor_state,
             create_sliding_window_state,
         )
+        from .config import create_attention_config
 
-        config = cls.attention_config_class.from_model_config(
+        config = create_attention_config(
             model_config=model_config,
             model_logical_layer_ids=model_logical_layer_ids,
             tp_rank=tp_rank,
@@ -159,18 +162,52 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
                 device=device,
             )
         ]
-        for compressor in config.compressor_configs():
-            states.append(
-                create_window_compressor_state(
-                    config=compressor, request_capacity=request_capacity, mtp_step=args.mtp_step, device=device
-                )
+        # 模型决定窗口组合：CSA 使用 W8/S4，HCA 使用 W128/S128；State 本身不识别 C4/C128。
+        for ratio, window_size in ((4, 8), (128, 128)):
+            layers = tuple(
+                layer
+                for layer, compress_ratio in zip(model_logical_layer_ids, config.compress_ratios)
+                if compress_ratio == ratio
             )
+            if not layers:
+                continue
+            targets = (
+                (("kv", config.head_dim), ("indexer", config.indexer_head_dim))
+                if ratio == 4
+                else (("kv", config.head_dim),)
+            )
+            for target, head_dim in targets:
+                states.append(
+                    create_window_compressor_state(
+                        config=WindowCompressorStateConfig(
+                            logical_layer_ids=layers,
+                            window_size=window_size,
+                            compress_stride=ratio,
+                            candidate_dim=head_dim * (2 if window_size > ratio else 1),
+                            target=target,
+                            tp_rank=tp_rank,
+                            tp_world_size=tp_world_size,
+                        ),
+                        request_capacity=request_capacity,
+                        mtp_step=args.mtp_step,
+                        device=device,
+                    )
+                )
         return states
 
     def prepare_attention_states(self) -> None:
+        from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState
+
         super().prepare_attention_states()
+        role_prefix = f"{self.att_state_role}_"
+        # 共享管理器尚未结束注册，直接读取本角色刚注册的 SWA state。
+        (swa_state,) = (
+            state
+            for name, state in vars(self.att_state_manager).items()
+            if name.startswith(role_prefix) and isinstance(state, FP8E8M0SlidingWindowState)
+        )
         # 在统一容量规划前预留长 prefill 的 SWA 临时区，避免 KV 分配挤占计算所需空间。
-        DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(self)
+        DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(self, swa_state.config)
 
     def _init_quant(self):
         if not self.is_mtp_draft_model:

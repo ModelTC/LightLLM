@@ -1,5 +1,6 @@
 import copy
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -77,3 +78,60 @@ def test_reasoning_effort_uses_encoder_modes(tokenizer, kwargs, thinking):
 def test_unknown_reasoning_effort_is_not_silently_replaced(tokenizer):
     with pytest.raises(AssertionError, match="Invalid reasoning effort: low"):
         tokenizer.apply_chat_template(messages=[{"role": "user", "content": "hello"}], reasoning_effort="low")
+
+
+def test_chat_template_forwards_tools_and_encoder_options(tokenizer, monkeypatch):
+    render = Mock(return_value="rendered prompt")
+    monkeypatch.setattr(tokenizer, "_get_encoding_module", lambda: SimpleNamespace(encode_messages=render))
+    messages = [
+        {"role": "system", "content": "Use tools."},
+        {"role": "user", "content": [{"type": "text", "text": "Look up 上海."}]},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"type": "function", "function": {"name": "lookup", "arguments": {"city": "上海"}}}],
+        },
+    ]
+    original = copy.deepcopy(messages)
+    tool = {"name": "lookup", "parameters": {"type": "object"}}
+
+    prompt = tokenizer.apply_chat_template(
+        conversation=messages,
+        tools=[tool],
+        thinking=False,
+        reasoning_effort="high",
+        add_default_bos_token=False,
+        drop_thinking=False,
+    )
+    assert prompt == "rendered prompt"
+
+    expected = copy.deepcopy(original)
+    expected[0]["tools"] = [{"type": "function", "function": tool}]
+    expected[1]["content"] = "Look up 上海."
+    expected[2]["tool_calls"][0]["function"]["arguments"] = '{"city": "上海"}'
+    render.assert_called_once_with(
+        expected, thinking_mode="chat", reasoning_effort="high", add_default_bos_token=False, drop_thinking=False
+    )
+    assert messages == original
+
+
+def test_v4_vision_encoder_receives_structured_images(tokenizer, monkeypatch):
+    render = Mock(return_value=f"before{IMAGE_TOKEN}after")
+    encoder = SimpleNamespace(encode_messages=render, process_image_messages=lambda messages: messages)
+    monkeypatch.setattr(tokenizer, "_get_encoding_module", lambda: encoder)
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "one"}, {"type": "text", "text": "two"}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "before"},
+                {"type": "image_url", "image_url": {"url": "image"}},
+                {"type": "text", "text": "after"},
+            ],
+        },
+    ]
+    original = copy.deepcopy(messages)
+
+    assert tokenizer.apply_chat_template(messages=messages) == f"before{IMAGE_TOKEN}after"
+    assert render.call_args.args[0] == [{"role": "user", "content": "onetwo"}, original[1]]
+    assert messages == original

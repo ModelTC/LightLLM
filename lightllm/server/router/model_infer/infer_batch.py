@@ -5,7 +5,7 @@ import pickle
 
 from sortedcontainers import SortedDict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Any, Union
+from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Any, Union, Sequence
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.utils.infer_utils import mark_start, mark_end
@@ -46,6 +46,7 @@ class InferenceContext:
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
     cache_placement_controller: Optional[CachePlacementController] = None
     output_constraint_state_factory: Optional["OutputConstraintStateFactory"] = None
+    engram_lookback_depth: int = 0
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     is_hybrid_att_model: bool = False  # 使用大小页 checkpoint 的混合 attention 模型。
@@ -58,6 +59,7 @@ class InferenceContext:
         shm_req_manager: ShmReqManager,
         vocab_size: int,
         cache_placement_controller: Optional[CachePlacementController] = None,
+        engram_lookback_depth: int = 0,
     ):
         self.args = get_env_start_args()
         self.backend: ModeBackend = backend
@@ -67,6 +69,7 @@ class InferenceContext:
         self.radix_cache = radix_cache
         self.shm_req_manager = shm_req_manager
         self.cache_placement_controller = cache_placement_controller
+        self.engram_lookback_depth = engram_lookback_depth
 
         self.requests_mapping = {}
         self.infer_req_ids = []
@@ -834,13 +837,19 @@ class InferReq:
     def get_input_token_ids(self):
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
 
-    def get_token_lookback(self, depth):
-        if self.token_history_ready:
-            return None
+    def get_token_lookback(self) -> Sequence[tuple[int, int, int]]:
+        """Take (request slot, position, token ID) rows for the cached prefix tail."""
+        depth = g_infer_context.engram_lookback_depth
+        if not depth or self.token_history_ready:
+            return ()
+        # Later forwards use the history written by this request's first forward.
         self.token_history_ready = True
-        start = self.cur_kv_len
-        if start:
-            return self.req_idx, start, self.get_input_token_ids()[max(0, start - depth) : start].tolist()
+        cached_prefix_len = self.cur_kv_len
+        if not cached_prefix_len:
+            return ()
+        start = max(0, cached_prefix_len - depth)
+        token_ids = self.get_input_token_ids()[start:cached_prefix_len].tolist()
+        return [(self.req_idx, position, token_id) for position, token_id in enumerate(token_ids, start)]
 
     def get_chuncked_input_token_ids(self):
         chunked_start = self.cur_kv_len

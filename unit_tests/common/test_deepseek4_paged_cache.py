@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from lightllm.models.deepseek_v4.config import DSV4AttentionConfig
+from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 
 from unit_tests.common.dsv4_test_utils import DeepseekV4MemoryManager, DeepseekV4CacheConfig, DeepseekV4ReqManager
 from unit_tests.common.req_token_index_test_utils import attach_req_token_index
@@ -251,7 +251,6 @@ def _test_backend(requests, token_capacity=8192):
     from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DeepseekV4FlashMlaFp8SparseAttBackend
 
     model = type("TestModel", (), {})()
-    model.attention_config_class = DSV4AttentionConfig
     model.req_manager = requests
     model.att_state_manager = requests.memory.manager
     model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(requests.cache_config.layer_num)]
@@ -444,7 +443,6 @@ def test_speculative_retry_reuses_swa_without_freeing_token_pages(cache):
 @pytest.mark.parametrize("model_kind", ["target", "mtp", "dspark"])
 def test_model_selects_held_slots_without_allocating_swa(cache, model_kind):
     from lightllm.common.basemodel.batch_objs import ModelInput
-    from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
     from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
     from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
 
@@ -527,7 +525,8 @@ def test_prefill_checkpoint_reads_precede_window_retention(cache):
     _write_swa(requests, 2, req, positions, packed.flip(0))
     _finish_prefill(requests, [req])
     # Reuse the scratch: only fixed request windows and CPU snapshots remain.
-    requests._test_backend.get_swa_prefill_workspace(requests._test_backend.model)[0].zero_()
+    backend = requests._test_backend
+    backend.get_swa_prefill_workspace(backend.model, requests.swa_state.config)[0].zero_()
     requests.save_state(_checkpoint_req(req, 2048), index, states)
     saved_swa = states.get_state_cache(index)[0]
     torch.testing.assert_close(saved_swa[0].cuda(), packed[-requests.sliding_window :], rtol=0, atol=0)
@@ -990,27 +989,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
         else:
             build_swa_indices(req_idx, query_positions, requests, indices, lengths, write_slots)
 
-    backend = attention.DeepseekV4FlashMlaFp8SparseAttBackend(
-        type(
-            "Model",
-            (),
-            {
-                "attention_config_class": DSV4AttentionConfig,
-                "config": dict(
-                    num_attention_heads=64,
-                    compress_ratios=[0, 0, 0],
-                    head_dim=512,
-                    qk_rope_head_dim=64,
-                    index_head_dim=128,
-                    sliding_window=128,
-                ),
-                "layers_infer": [SimpleNamespace(layer_num_=2)],
-                "tp_rank_": 0,
-                "tp_world_size_": 1,
-                "req_manager": requests,
-            },
-        )()
-    )
+    backend = requests._test_backend
     state_info = SimpleNamespace(mem_manager=manager)
     state = backend.create_att_decode_state(state_info)
     state.init_state()
@@ -1281,6 +1260,7 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     state.att_state_manager = requests.memory.manager
     state.att_state_role = "main"
     state.first_logical_layer_id = 0
+    state.first_c4_logical_layer_id = 0
     state.is_prefill = mode != "decode"
     state.microbatch_index, state.max_kv_seq_len = 0, 4096
     state.b_req_idx = torch.tensor([req_idx] if state.is_prefill else [req_idx] * tokens, device="cuda")
@@ -1305,7 +1285,7 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         select()
-        state.indexer_metadata = None
+        state.c4_indexer_metadata = None
     torch.cuda.current_stream().wait_stream(stream)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=stream):
@@ -1317,7 +1297,7 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     graph.replay()
     actual = captured.clone()
     actual_lengths = captured_lengths.clone()
-    state.indexer_metadata = None
+    state.c4_indexer_metadata = None
     eager, eager_lengths = select()
     torch.testing.assert_close(actual.sort(dim=-1).values, eager.sort(dim=-1).values, rtol=0, atol=0)
     torch.testing.assert_close(actual_lengths, eager_lengths, rtol=0, atol=0)
@@ -1362,6 +1342,7 @@ def test_forward_indices_are_isolated_and_graph_inputs_refresh(cache, is_prefill
         state.att_state_manager = requests.memory.manager
         state.att_state_role = "main"
         state.first_logical_layer_id = 0
+        state.first_c4_logical_layer_id = 0
         state.batch_size = 2
         state.max_kv_seq_len = max(lengths)
         state.input_ids = torch.zeros(2, dtype=torch.int64, device="cuda")
@@ -1440,7 +1421,7 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
     )
     model = type("TestModel", (), {})()
     vars(model).update(
-        attention_config_class=DSV4AttentionConfig,
+        att_state_manager=requests.memory.manager,
         config=config,
         batch_max_tokens=3,
         max_req_num=requests.max_request_num,
@@ -1471,6 +1452,7 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
     state.att_state_manager = requests.memory.manager
     state.att_state_role = "main"
     state.first_logical_layer_id = 0
+    state.first_c4_logical_layer_id = 0
     if state.is_prefill:
         state.batch_size = 1
         state.input_ids = torch.ones(3, dtype=torch.int64, device="cuda")
@@ -1505,7 +1487,6 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
 
 
 def test_empty_dspark_commit_is_local_but_proposal_keeps_common_padding_path(monkeypatch):
-    from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
     from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
 
     model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
@@ -1897,6 +1878,7 @@ def test_image_metadata_and_embeddings_preserve_canonical_cache(cache, prefix_le
     state.att_state_manager = requests.memory.manager
     state.att_state_role = "main"
     state.first_logical_layer_id = 0
+    state.first_c4_logical_layer_id = 0
     state.input_ids = torch.tensor(input_ids[ready:], dtype=torch.int64, device="cuda")
     state.b_req_idx = torch.tensor([req_idx], dtype=torch.int32, device="cuda")
     state.b_seq_len = torch.tensor([len(input_ids)], dtype=torch.int32, device="cuda")
@@ -1958,6 +1940,7 @@ def test_prefill_metadata_does_not_read_cuda_scalars(cache, padding_tokens):
     infer_state.att_state_manager = requests.memory.manager
     infer_state.att_state_role = "main"
     infer_state.first_logical_layer_id = 0
+    infer_state.first_c4_logical_layer_id = 0
     infer_state.mem_manager = manager
     infer_state.input_ids = torch.ones(5, dtype=torch.int64, device="cuda")
     infer_state.b_req_idx = torch.tensor(req_ids, dtype=torch.int32, device="cuda")
@@ -2017,9 +2000,9 @@ def test_full_batch_unaligned_prefill_workspace_is_bounded_and_private(cache, mt
     first = (ready - requests.sliding_window + 1) // page_token_num * page_token_num
     end = ready + chunk_tokens
     required = request_count * ((end + page_token_num - 1) // page_token_num * page_token_num - first)
-    requests._test_backend = _test_backend(requests, request_count * chunk_tokens)
+    backend = requests._test_backend = _test_backend(requests, request_count * chunk_tokens)
     requests._test_prefill_states = {}
-    workspace, capacity = requests._test_backend.get_swa_prefill_workspace(requests._test_backend.model)
+    workspace, capacity = backend.get_swa_prefill_workspace(backend.model, requests.swa_state.config)
     assert capacity >= required
     assert workspace.untyped_storage().data_ptr() != requests.req_to_swa.untyped_storage().data_ptr()
     workspace[:, capacity : 2 * capacity].fill_(173)

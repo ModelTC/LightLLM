@@ -13,9 +13,6 @@ def _destindex_copy_indexer_k_kernel(
     indexer_k_scale,
     indexer_k_stride0,
     indexer_k_stride1,
-    freqs_cis,
-    APPLY_ROPE: tl.constexpr,
-    ROUND_SCALE_TO_POWER_OF_TWO: tl.constexpr,
     FP8_MIN: tl.constexpr,
     FP8_MAX: tl.constexpr,
     AMAX_MIN: tl.constexpr,
@@ -37,20 +34,9 @@ def _destindex_copy_indexer_k_kernel(
 
     offs_d = tl.arange(0, HEAD_DIM)
     vals = tl.load(indexer_k + cur_index * indexer_k_stride0 + offs_d * indexer_k_stride1).to(tl.float32)
-    if APPLY_ROPE:
-        pair = tl.arange(0, HEAD_DIM // 2)
-        real, imag = tl.split(tl.reshape(vals, (HEAD_DIM // 2, 2)))
-        pos = position - COMPRESS_RATIO + 1
-        freq = freqs_cis + pos * 64 + (pair - (HEAD_DIM - 64) // 2) * 2
-        cos = tl.load(freq, pair >= (HEAD_DIM - 64) // 2, 1.0)
-        sin = tl.load(freq + 1, pair >= (HEAD_DIM - 64) // 2, 0.0)
-        vals = tl.reshape(tl.join(real * cos - imag * sin, real * sin + imag * cos), (HEAD_DIM,))
-        vals = vals.to(tl.bfloat16).to(tl.float32)
     amax = tl.maximum(tl.max(tl.abs(vals), axis=0), AMAX_MIN)
     # Each indexer key carries one FP32 quantization scale in the page tail.
     scale = amax / FP8_MAX
-    if ROUND_SCALE_TO_POWER_OF_TWO:
-        scale = tl.exp2(tl.ceil(tl.log2(scale)))
     k_fp8 = tl.clamp(vals / scale, min=FP8_MIN, max=FP8_MAX).to(tl.float8e4nv)
 
     data_base = page * BYTES_PER_PAGE + token_in_page * HEAD_DIM
@@ -67,15 +53,11 @@ def destindex_copy_indexer_k(
     position_ids: torch.Tensor,
     indexer_k_buffer: torch.Tensor,
     page_size: int,
-    compress_ratio: int = 4,
-    freqs_cis: torch.Tensor = None,
-    round_scale_to_power_of_two: bool = False,
 ):
-    """Write closed compression groups to packed FP8 indexer K pages.
+    """按 mem_index 写入 C4 indexer K，仅处理 position_ids 中已闭合的压缩组。
 
-    indexer_k: [T, head_dim] BF16; indexer_k_buffer: [page, bytes] uint8.
-    Each page contains FP8 data followed by FP32 scales.
-    Passing freqs_cis applies RoPE before quantization.
+    indexer_k: [token, head_dim] BF16；indexer_k_buffer: [page, bytes] uint8，
+    来自 get_indexer_k_buffer，每页依次保存 FP8 K 和 FP32 scale。
     """
     token_num = mem_index.shape[0]
     if token_num == 0:
@@ -92,18 +74,14 @@ def destindex_copy_indexer_k(
         indexer_k_buffer.view(torch.float32),
         indexer_k.stride(0),
         indexer_k.stride(1),
-        None if freqs_cis is None else torch.view_as_real(freqs_cis).flatten(-2),
-        APPLY_ROPE=freqs_cis is not None,
-        ROUND_SCALE_TO_POWER_OF_TWO=round_scale_to_power_of_two,
         FP8_MIN=torch.finfo(torch.float8_e4m3fn).min,
         FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
         AMAX_MIN=1e-4,
         HEAD_DIM=head_dim,
-        COMPRESS_RATIO=compress_ratio,
+        COMPRESS_RATIO=4,
         PAGE_SIZE=page_size,
         BYTES_PER_PAGE=bytes_per_page,
         num_warps=1,
         num_stages=1,
-        enable_fp_fusion=freqs_cis is None,
     )
     return

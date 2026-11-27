@@ -4,7 +4,6 @@
 from dataclasses import dataclass
 from typing import ClassVar
 
-from lightllm.common.attention_state.bounded_att import WindowCompressorStateConfig
 from lightllm.common.attention_state.bounded_att.sliding_window.fp8_e8m0_swa_state import FP8E8M0SlidingWindowConfig
 from lightllm.common.attention_state.full_att.compressed_att.compressed_att_state import CompressedAttentionConfig
 
@@ -30,12 +29,10 @@ class DSV4AttentionConfig:
     # 压缩 KV 按原始 token 的 256-token 块存储，KV 与 indexer 不得跨块拆开。
     compressed_kv_token_alignment: ClassVar[int] = 256
 
-    supported_compress_ratios: ClassVar = (0, 4, 128)
-
     def __post_init__(self) -> None:
         assert self.logical_layer_ids and len(set(self.logical_layer_ids)) == len(self.logical_layer_ids)
         assert len(self.logical_layer_ids) == len(self.compress_ratios)
-        assert all(ratio in self.supported_compress_ratios for ratio in self.compress_ratios)
+        assert all(ratio in (0, 4, 128) for ratio in self.compress_ratios)
         assert self.head_dim > self.rope_head_dim > 0 and (self.head_dim - self.rope_head_dim) % 64 == 0
         assert self.indexer_head_dim > 0 and self.sliding_window > 0
         assert 0 <= self.tp_rank < self.tp_world_size
@@ -68,43 +65,21 @@ class DSV4AttentionConfig:
             tp_world_size=self.tp_world_size,
         )
 
-    @classmethod
-    def from_model_config(
-        cls,
-        model_config: dict[str, object],
-        model_logical_layer_ids: tuple[int, ...],
-        tp_rank: int = 0,
-        tp_world_size: int = 1,
-        **kwargs,
-    ):
-        ratios = model_config["compress_ratios"]
-        return cls(
-            **kwargs,
-            logical_layer_ids=model_logical_layer_ids,
-            compress_ratios=tuple(ratios[layer] if layer < len(ratios) else 0 for layer in model_logical_layer_ids),
-            head_dim=model_config["head_dim"],
-            rope_head_dim=model_config["qk_rope_head_dim"],
-            indexer_head_dim=model_config["index_head_dim"],
-            sliding_window=model_config["sliding_window"],
-            tp_rank=tp_rank,
-            tp_world_size=tp_world_size,
-        )
 
-    def compressor_configs(self):
-        for ratio, window_size in ((4, 8), (128, 128)):
-            layers = tuple(layer for layer, r in zip(self.logical_layer_ids, self.compress_ratios) if r == ratio)
-            if not layers:
-                continue
-            targets = (
-                (("kv", self.head_dim), ("indexer", self.indexer_head_dim)) if ratio == 4 else (("kv", self.head_dim),)
-            )
-            for target, head_dim in targets:
-                yield WindowCompressorStateConfig(
-                    logical_layer_ids=layers,
-                    window_size=window_size,
-                    compress_stride=ratio,
-                    candidate_dim=head_dim * (2 if window_size > ratio else 1),
-                    target=target,
-                    tp_rank=self.tp_rank,
-                    tp_world_size=self.tp_world_size,
-                )
+def create_attention_config(
+    model_config: dict[str, object],
+    model_logical_layer_ids: tuple[int, ...],
+    tp_rank: int = 0,
+    tp_world_size: int = 1,
+) -> DSV4AttentionConfig:
+    ratios = model_config["compress_ratios"]
+    return DSV4AttentionConfig(
+        logical_layer_ids=model_logical_layer_ids,
+        compress_ratios=tuple(ratios[layer] if layer < len(ratios) else 0 for layer in model_logical_layer_ids),
+        head_dim=model_config["head_dim"],
+        rope_head_dim=model_config["qk_rope_head_dim"],
+        indexer_head_dim=model_config["index_head_dim"],
+        sliding_window=model_config["sliding_window"],
+        tp_rank=tp_rank,
+        tp_world_size=tp_world_size,
+    )

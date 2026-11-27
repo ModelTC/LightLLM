@@ -448,19 +448,17 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         qweight = weight_pack.weight.t()
         weight_scale = weight_pack.weight_scale.t()
-        input_scale = None  # dynamic quantization for input tensor
-        m, k = input_tensor.shape
+        m, _ = input_tensor.shape
         n = qweight.shape[1]
         alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
-        if input_scale is None:
-            qinput_tensor, input_scale = per_token_group_quant_fp8(
-                input_tensor,
-                self.block_size,
-                eps=self.activation_quant_eps,
-                dtype=qweight.dtype,
-                alloc_func=alloc_func,
-                use_ue8m0_scales=self.use_ue8m0_scales,
-            )
+        qinput_tensor, input_scale = per_token_group_quant_fp8(
+            input_tensor,
+            self.block_size,
+            eps=self.activation_quant_eps,
+            dtype=qweight.dtype,
+            alloc_func=alloc_func,
+            use_ue8m0_scales=self.use_ue8m0_scales,
+        )
         if out is None:
             out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         return qinput_tensor, qweight, input_scale, weight_scale, out

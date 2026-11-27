@@ -5,6 +5,8 @@ import torch
 import triton
 import flash_mla as flashmla
 
+from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState
+from lightllm.common.attention_state.full_att.compressed_att.compressed_att_state import CompressedAttentionState
 
 from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
 
@@ -19,37 +21,37 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
 
-        config = model.attention_config_class.from_model_config(
-            model_config=model.config,
-            model_logical_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),
-            tp_rank=model.tp_rank_,
-            tp_world_size=model.tp_world_size_,
-        )
         self.tp_q_head_num = model.config["num_attention_heads"] // model.tp_world_size_
         # Sparse FlashMLA uses 64-head tiles; TP can leave fewer local Q heads.
         self.padded_q_head_num = ((self.tp_q_head_num + 63) // 64) * 64
-        self.compress_ratios = tuple(dict.fromkeys(config.compress_ratios))
-        self.layer_compress_ratios = dict(zip(config.logical_layer_ids, config.compress_ratios))
-        self.swa_config = config.create_swa_config()
+        manager = model.att_state_manager
+        role = model.att_state_role
+        (swa_state,) = (
+            state
+            for state in manager.get_bounded_attention_states(role)
+            if isinstance(state, FP8E8M0SlidingWindowState)
+        )
+        self.swa_config = swa_state.config
         self.compressed_configs = {
-            ratio: config.create_compressed_config(compress_ratio=ratio) for ratio in self.compress_ratios if ratio
+            state.config.compress_ratio: state.config
+            for state in manager.get_full_attention_states(role)
+            if isinstance(state, CompressedAttentionState)
         }
+        self.layer_compress_ratios = dict.fromkeys(self.swa_config.logical_layer_ids, 0)
+        for ratio, config in self.compressed_configs.items():
+            for layer_group in config.logical_layer_groups:
+                self.layer_compress_ratios.update(dict.fromkeys(layer_group, ratio))
+        self.compress_ratios = tuple(dict.fromkeys(self.layer_compress_ratios.values()))
 
     @classmethod
-    def get_swa_prefill_workspace(cls, model):
+    def get_swa_prefill_workspace(cls, model, swa_config):
         """由 backend 复用计算临时区；模型在 KV 容量评估前调用，以计入实际显存占用。"""
 
-        config = model.attention_config_class.from_model_config(
-            model_config=model.config,
-            model_logical_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),
-            tp_rank=model.tp_rank_,
-            tp_world_size=model.tp_world_size_,
-        ).create_swa_config()
-        page_token_num = config.page_token_size
+        page_token_num = swa_config.page_token_size
         max_forward_tokens = max(model.batch_max_tokens, model.max_req_num) + 2 * model.tp_world_size_
         capacity = (
             triton.cdiv(
-                max_forward_tokens + model.max_req_num * (config.window_size + 2 * page_token_num), page_token_num
+                max_forward_tokens + model.max_req_num * (swa_config.window_size + 2 * page_token_num), page_token_num
             )
             * page_token_num
         )
@@ -61,8 +63,8 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         # 每个 microbatch 使用独立临时区；最后一页留给 HOLD 请求。
         token_num = regions * capacity + page_token_num
         # 物理行宽由 SWA 原子配置给出，backend 仅决定 workspace 的 token 容量。
-        slot_bytes = config.get_packed_kv_bytes(page_token_num) // page_token_num
-        layer_count = len(config.logical_layer_ids)
+        slot_bytes = swa_config.get_packed_kv_bytes(page_token_num) // page_token_num
+        layer_count = len(swa_config.logical_layer_ids)
         buffer = cls.get_gpu_workspace_buffer(
             key_name=f"deepseek_v4_swa_prefill_{model.att_state_role}",
             workspace_size=layer_count * token_num * slot_bytes,
@@ -137,7 +139,7 @@ class _PrefillAttState(BasePrefillAttState):
         from lightllm.models.deepseek_v4.triton_kernel.swa_cache import prepare_swa_prefill_workspace
 
         swa_state = infer_state.swa_state
-        self.swa_buffer, capacity = self.backend.get_swa_prefill_workspace(self.backend.model)
+        self.swa_buffer, capacity = self.backend.get_swa_prefill_workspace(self.backend.model, swa_state.config)
         self.HOLD_SWA_SLOT = self.swa_buffer.shape[1] - swa_state.config.page_token_size
         self.prefill_token_ranges = torch.zeros(
             (swa_state.request_capacity, 2), dtype=torch.int32, device=self.swa_buffer.device

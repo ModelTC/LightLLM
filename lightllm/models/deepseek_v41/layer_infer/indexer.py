@@ -3,16 +3,15 @@ import torch
 import triton
 
 from lightllm.common.basemodel import BaseLayerInfer
-from lightllm.models.deepseek_v4.triton_kernel.destindex_copy_indexer_k import destindex_copy_indexer_k
-from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_q_indexer_rope_hadamard_quant
+from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
 from ..triton_kernel.attention import (
     candidate_indexer_logits,
     gather_indexer_k,
     select_indexer_candidates,
-    select_indexer_topk,
+    select_indexer_topk_slots,
     select_paged_topk,
 )
-from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
+from ..triton_kernel.indexer import rotate_and_cache_indexer_keys, rotate_and_quantize_indexer_queries
 
 
 class DeepseekV41IndexInfer(BaseLayerInfer):
@@ -31,15 +30,14 @@ class DeepseekV41IndexInfer(BaseLayerInfer):
 
     def write_indexer_k(self, latent, infer_state, layer_weight):
         key = layer_weight.idx_k_norm_(layer_weight.idx_wk_.mm(latent), eps=self.eps)
-        destindex_copy_indexer_k(
+        rotate_and_cache_indexer_keys(
             key,
+            self.freqs_cis,
             infer_state.mem_index,
             infer_state.position_ids,
             infer_state.get_compressed_kv_view(self.layer_idx_).indexer_k,
+            self.compress_ratio,
             infer_state.get_compressed_kv_state(self.layer_idx_).config.block_token_size // self.compress_ratio,
-            compress_ratio=self.compress_ratio,
-            freqs_cis=self.freqs_cis,
-            round_scale_to_power_of_two=True,
         )
 
     def build_metadata(self, x, q_lora, infer_state, layer_weight):
@@ -58,16 +56,14 @@ class DeepseekV41IndexInfer(BaseLayerInfer):
         query = layer_weight.idx_wq_b_.mm(q_lora).view(tokens, self.index_n_heads, self.index_head_dim)
         weights = self.alloc_tensor((tokens, self.index_n_heads), dtype=torch.float32, device=x.device)
         weights = layer_weight.idx_weights_proj_.mm(x, out=weights)
-        query, weights = fused_q_indexer_rope_hadamard_quant(
+        query, weights = rotate_and_quantize_indexer_queries(
             query,
             weights,
             self.indexer_weight_scale,
             self.freqs_cis,
             infer_state.position_ids,
-            q_fp8=self.alloc_tensor(query.shape, torch.float8_e4m3fn, device=x.device),
-            weights_out=self.alloc_tensor((tokens, self.index_n_heads, 1), torch.float32, device=x.device),
-            apply_hadamard=False,
-            round_scale_to_power_of_two=True,
+            query_fp8_out=self.alloc_tensor(query.shape, torch.float8_e4m3fn, device=x.device),
+            scaled_head_weights_out=self.alloc_tensor((tokens, self.index_n_heads, 1), torch.float32, device=x.device),
         )
         return query, weights.squeeze(-1)
 
@@ -161,7 +157,7 @@ class DeepseekV41IndexInfer(BaseLayerInfer):
                 select_indexer_candidates(logits, valid, infer_state.candidate_block_indices[rows])
             if self.index_topk != 512 and candidates is None:
                 row_pages = pages if page_rows is None else pages[page_rows.long()]
-                select_indexer_topk(logits, valid, row_pages, slots[rows], lengths[rows], 64, None, None)
+                select_indexer_topk_slots(logits, valid, row_pages, slots[rows], lengths[rows], 64, None, None)
             else:
                 select_paged_topk(logits, valid, pages, slots[rows], lengths[rows], candidates, page_rows=page_rows)
         return slots.unsqueeze(1), lengths
