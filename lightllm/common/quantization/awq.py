@@ -2,6 +2,7 @@ import torch
 from typing import Optional, Tuple, List
 
 from lightllm.common.basemodel.triton_kernel.quantization.awq_gemm import awq_gemm
+from lightllm.common.quantization.awq_marlin import can_prepare_awq, dense_awq_marlin, is_marlin_packed, prepare_awq
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.quantization.registry import QUANTMETHODS
 
@@ -24,6 +25,15 @@ class AWQW4A16QuantizationMethod(QuantizationMethod):
     def quantize(self, weight: torch.Tensor, output: WeightPack):
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
+    def prepare_dense_weight(self, pack: WeightPack):
+        if not is_marlin_packed(pack) and can_prepare_awq(pack, "dense"):
+            prepare_awq(pack)
+
+    def prepare_moe_weights(self, gate: WeightPack, down: WeightPack):
+        if not is_marlin_packed(gate) and can_prepare_awq(gate, "moe") and can_prepare_awq(down, "moe"):
+            prepare_awq(gate)
+            prepare_awq(down)
+
     def apply(
         self,
         input_tensor: torch.Tensor,
@@ -33,9 +43,12 @@ class AWQW4A16QuantizationMethod(QuantizationMethod):
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        result = awq_gemm(
-            input_tensor, weight_pack.weight, weight_pack.weight_scale, weight_pack.weight_zero_point, out
-        )
+        if is_marlin_packed(weight_pack):
+            result = dense_awq_marlin(input_tensor, weight_pack, out)
+        else:
+            result = awq_gemm(
+                input_tensor, weight_pack.weight, weight_pack.weight_scale, weight_pack.weight_zero_point, out
+            )
         if bias is not None:
             result.add_(bias)
         return result

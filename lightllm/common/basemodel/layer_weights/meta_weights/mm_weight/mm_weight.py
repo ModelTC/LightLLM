@@ -8,6 +8,7 @@ from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_m
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.common.quantization import Quantcfg
+from lightllm.common.quantization.awq import AWQW4A16QuantizationMethod
 from lightllm.common.quantization.no_quant import NoQuantization
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.log_utils import init_logger
@@ -161,6 +162,8 @@ class MMWeightTpl(BaseWeightTpl):
         bias_load_ok = True if self.bias is None else all(sub_bias.load_ok for sub_bias in self.bias_list)
         if not (mm_param_load_ok and bias_load_ok):
             logger.warning(f"mm_param_load_ok: {self.mm_param_list[0].load_ok}")
+        elif isinstance(self.quant_method, AWQW4A16QuantizationMethod):
+            self.quant_method.prepare_dense_weight(self.mm_param)
         return mm_param_load_ok and bias_load_ok
 
     def _get_tp_dim(self, dim: int) -> int:

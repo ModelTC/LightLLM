@@ -90,6 +90,10 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         )
 
         if self.quant_method.method_name == "awq":
+            from lightllm.common.quantization.awq_marlin import is_marlin_packed, moe_awq_marlin
+
+            if is_marlin_packed(w13):
+                return moe_awq_marlin(input_tensor, w13, w2, topk_weights, topk_ids, alpha, limit, clamp_up_add_one)
             return fused_experts_impl(
                 hidden_states=input_tensor,
                 w1=w13_weight,

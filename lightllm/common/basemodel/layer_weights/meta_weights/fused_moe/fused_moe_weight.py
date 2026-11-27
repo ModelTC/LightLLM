@@ -363,7 +363,10 @@ class FusedMoeWeight(BaseWeightTpl):
         e_score_correction_bias_load_ok = (
             True if self.e_score_correction_bias is None else getattr(self.e_score_correction_bias, "load_ok", False)
         )
-        return weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
+        loaded = weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
+        if loaded and not self.enable_ep_moe and self.quant_method.method_name == "awq":
+            self.quant_method.prepare_moe_weights(self.w13, self.w2)
+        return loaded
 
     def _create_weight(self):
         intermediate_size = self.split_inter_size

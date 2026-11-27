@@ -745,7 +745,7 @@ Quantization Parameters
          - Triton
        * - ``awq``
          - INT4 weight-only; group size comes from the checkpoint
-         - Triton or SGL dequantization with PyTorch matmul
+         - Standalone Marlin for compatible Hopper weights when available, otherwise Triton or SGL dequantization with PyTorch matmul
        * - ``awq_marlin``
          - Legacy alias for ``awq``
          - Same as ``awq``

@@ -682,7 +682,7 @@ PD 分离模式参数
          - Triton
        * - ``awq``
          - INT4 weight-only；group size 由 checkpoint 提供
-         - Triton 或 SGL 反量化加 PyTorch 矩阵乘法
+         - Hopper 上兼容的权重使用独立 Marlin 算子，其余使用 Triton 或 SGL 反量化加 PyTorch 矩阵乘法
        * - ``awq_marlin``
          - ``awq`` 的旧别名
          - 同 ``awq``

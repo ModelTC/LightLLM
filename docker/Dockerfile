@@ -11,6 +11,7 @@ ARG DEEPGEMM_REF=891d57b4db1071624b5c8fa0d1e51cb317fa709f
 ARG DEEPEP_REF=60d44037a702f651a6e18bd4aea65ed8409051c2
 ARG DEEPEP_NCCL_VERSION=2.30.4
 ARG FLASHQLA_VERSION=0.1.2
+ARG AWQ_MARLIN_REF=53318911cab4e721d62c4c7678caad79b251fcf3
 ARG TARGETPLATFORM
 ARG ENABLE_DEEPEP=1
 ARG ENABLE_NIXL=1
@@ -143,3 +144,16 @@ RUN if [ "${ENABLE_NIXL}" = "1" ]; then \
 
 COPY . /lightllm
 RUN pip install -e /lightllm --no-cache-dir
+
+RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ]; then \
+      set -e; \
+      mkdir /tmp/sglang-marlin && cd /tmp/sglang-marlin; \
+      git init -q; \
+      git fetch --depth=1 --filter=blob:none https://github.com/sgl-project/sglang.git "${AWQ_MARLIN_REF}"; \
+      git checkout FETCH_HEAD -- LICENSE python/sglang/jit_kernel/include \
+        python/sglang/jit_kernel/csrc/gemm/marlin python/sglang/jit_kernel/csrc/gemm/marlin_moe; \
+      python /lightllm/tools/build_awq_marlin.py \
+        /tmp/sglang-marlin/python/sglang/jit_kernel /opt/lightllm-marlin; \
+      cp LICENSE /opt/lightllm-marlin/LICENSE; \
+      cd / && rm -rf /tmp/sglang-marlin; \
+    fi
