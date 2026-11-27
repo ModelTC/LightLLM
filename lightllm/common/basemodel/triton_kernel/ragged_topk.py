@@ -265,7 +265,7 @@ def ragged_topk(scores, lengths, out):
         return
     if (
         count == 2048
-        and width <= 8192
+        and width <= 4096
         and scores.is_contiguous()
         and out.is_contiguous()
         and scores.dtype == torch.float32

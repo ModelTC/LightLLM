@@ -105,6 +105,15 @@ def test_topk_with_empty_row(indexer):
     _assert_topk(logits, lengths, indices)
 
 
+@pytest.mark.parametrize("width", [4096, 8192])
+def test_topk_2048_with_concentrated_candidates(indexer, width):
+    logits = torch.linspace(1.0, 1.01, width, device="cuda").repeat(2, 1)
+    lengths = torch.tensor([width, 1023], device="cuda", dtype=torch.int32)
+    indices = torch.empty(2, 2048, device="cuda", dtype=torch.int32)
+    indexer.select_topk_indices(logits, lengths, indices)
+    _assert_topk(logits, lengths, indices)
+
+
 @pytest.mark.parametrize("mtp_size", [1, 3, 6])
 @pytest.mark.parametrize("max_pools", [1024, 262144])
 def test_paged_decode_matches_nonpaged_with_graph_and_mtp(indexer, monkeypatch, mtp_size, max_pools):
