@@ -823,6 +823,10 @@ class ModeBackend:
                 if req_obj.is_slave_req():
                     continue
 
+                # 折叠时 KV 长度先更新，首 token 的后处理可能尚未完成。
+                if self.args.run_mode == "prefill" and req_obj.cur_kv_len == req_obj.shm_req.input_len:
+                    continue
+
                 # 计算预算按本轮实际处理的 token 数累计，KV 预算按需要额外分配的页容量扣减。
                 token_num, alloc_token_num = req_obj.prefill_need_token_num(
                     is_chuncked_prefill=not self.disable_chunked_prefill

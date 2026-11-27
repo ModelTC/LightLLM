@@ -10,21 +10,27 @@ import gc
 import pickle
 import weakref
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 
+from lightllm.server.core.objs import FinishStatus
 from lightllm.server.core.objs.io_objs import AbortedReqCmd, PdPfDecodeKvReadyCmd
 from lightllm.server.core.objs.pd_kv_trans_params import PDKVTransParamObj
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo
 from lightllm.server.router.manager import RouterManager
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.server.router.model_infer.mode_backend import base_backend
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_impl import PDDecodeNode
 from lightllm.server.router.model_infer.mode_backend.pd.helper import iter_kv_spans, submit_prefill_first_tasks_if_ready
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl.prefill_impl import (
     PDChunkedPrefillForPrefillNode,
+)
+from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl.prefill_impl_for_dp import (
+    PDDPChunkedForPrefillNode,
 )
 
 
@@ -234,6 +240,54 @@ def test_12_filter_does_not_hold_an_old_mode_finished_request(monkeypatch):
     _install_mapping(monkeypatch, req)
     ready = _prefill_backend(queue=SimpleNamespace(put=lambda _task: None))._filter_not_ready_reqs([3])
     assert ready == [req]
+
+
+@pytest.mark.parametrize("backend_cls", [PDChunkedPrefillForPrefillNode, PDDPChunkedForPrefillNode])
+def test_prefill_overlap_skips_completed_prompt_before_post_handle(monkeypatch, runtime_start_args, backend_cls):
+    monkeypatch.setattr(base_backend, "ShmReqManager", Mock())
+    backend = backend_cls(info_queue=Mock())
+    assert backend.support_overlap
+    backend.args = SimpleNamespace(run_mode="prefill", enable_cpu_cache=False, enable_prefill_decode_mixed=False)
+    backend.is_master_in_dp = True
+    backend.disable_chunked_prefill = False
+    backend.batch_max_tokens = 16
+    backend._timer_merge_radix_tree = Mock()
+    backend._copy_req_token_indexes_to_gpu = Mock()
+    backend._report_prefill_first_last_chunk = Mock()
+    backend.prefill_queue_strategy = SimpleNamespace(reorder=lambda reqs, **_: reqs)
+
+    finished_prompt = _req(req_id=1, input_len=4, cur_kv_len=3)
+    pending_tail = _req(req_id=2, input_len=4, cur_kv_len=3)
+    for req in (finished_prompt, pending_tail):
+        req.filter_mark = req.wait_pause = req.paused = False
+        req.finish_status = FinishStatus()
+        req.is_slave_req = lambda: False
+        req.prefill_need_token_num = Mock(return_value=(1, 0))
+        req.alloc_kv_mem = Mock()
+    finished_prompt.cur_output_len = 0
+    finished_prompt.get_cur_total_len = lambda: finished_prompt.shm_req.input_len + finished_prompt.cur_output_len
+    finished_prompt.get_chuncked_input_token_len = lambda: finished_prompt.shm_req.input_len
+    _install_mapping(monkeypatch, finished_prompt, pending_tail)
+    monkeypatch.setattr(g_infer_context, "get_can_alloc_token_num", lambda: 16)
+    monkeypatch.setattr(g_infer_context, "cache_placement_controller", Mock())
+    monkeypatch.setattr(g_infer_context, "filter_reqs", Mock())
+    monkeypatch.setattr(g_infer_context, "pause_reqs", Mock())
+
+    backend._pre_post_handle([finished_prompt], is_chuncked_mode=True)
+    assert finished_prompt.cur_output_len == 1
+    assert not finished_prompt.finish_status.is_finished()
+
+    assert backend._get_classed_reqs(req_ids=[1, 2], no_decode=backend.classed_req_no_decode) == ([pending_tail], [], 1)
+    finished_prompt.prefill_need_token_num.assert_not_called()
+    finished_prompt.alloc_kv_mem.assert_not_called()
+    backend._report_prefill_first_last_chunk.assert_called_once_with(req_obj=pending_tail)
+
+    finished_prompt.cpu_cache_offload_task_status = SimpleNamespace(is_not_started=lambda: True)
+    finished_prompt.finish_status.set_status(FinishStatus.FINISHED_LENGTH)
+    assert backend._get_classed_reqs(req_ids=[1], no_decode=backend.classed_req_no_decode) == ([], [], 0)
+    assert finished_prompt.filter_mark
+    assert backend._get_classed_reqs(req_ids=[1], no_decode=backend.classed_req_no_decode) == ([], [], 0)
+    g_infer_context.filter_reqs.assert_called_with(finished_reqs=[finished_prompt])
 
 
 def test_13_filter_keeps_an_in_progress_prefill_first_request_schedulable(monkeypatch):

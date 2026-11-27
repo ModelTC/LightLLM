@@ -11,7 +11,6 @@ logger = init_logger(__name__)
 class PDDPChunkedForPrefillNode(DPChunkedPrefillBackend):
     def __init__(self, info_queue: mp.Queue) -> None:
         super().__init__()
-        self.support_overlap = False
         self.info_queue: mp.Queue = info_queue
         self.classed_req_no_decode = True
         self.pd_prefill_chunked_handle_func = self._prefill_chuncked_handle_func
