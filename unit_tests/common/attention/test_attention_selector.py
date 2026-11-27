@@ -2,6 +2,7 @@
 
 import dataclasses
 from datetime import timedelta
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -24,6 +25,51 @@ def recorder(passing=("fa3", "flashinfer", "triton")):
         return name in passing
 
     return validated, validate
+
+
+def test_selector_reuses_instances_by_resolved_name_phase_and_config():
+    args = SimpleNamespace(
+        att_backend={"gqa.decode": "triton"},
+        llm_prefill_att_backend=["triton"],
+        llm_decode_att_backend=["fa3"],
+        mtp_step=0,
+        enable_ep_moe=False,
+    )
+    selection = selector.BackendSelector(args)
+    config = gqa()
+    decode = selection.select(config, "decode")
+
+    assert decode.name == "triton_gqa_decode"
+    assert selection.select(gqa(), "decode") is decode
+    assert selection.select(config, "decode", "triton") is decode
+    assert selection.select(config, "decode", "fa3").name == "fa3_gqa_decode"
+    assert selection.select(config, "prefill") is not decode
+    assert selection.select(gqa(head_dim=128), "decode") is not decode
+    assert selector.BackendSelector(args).select(config, "decode") is not decode
+
+
+@pytest.mark.parametrize(
+    "mtp_step,ep,expected",
+    [(0, False, "flashinfer"), (2, False, "fa3"), (0, True, "fa3"), (2, True, "fa3")],
+)
+def test_selector_applies_model_policy_to_auto(monkeypatch, mtp_step, ep, expected):
+    args = SimpleNamespace(
+        llm_prefill_att_backend=["auto"],
+        llm_decode_att_backend=["auto"],
+        mtp_step=mtp_step,
+        enable_ep_moe=ep,
+    )
+    validated, validate = recorder()
+    monkeypatch.setattr(selector, "select", partial(selector.select, validate=validate))
+    selection = selector.BackendSelector(args)
+
+    backend = selection.select(gqa(), "decode")
+    assert backend.name == f"{expected}_gqa_decode"
+    assert selection.select(gqa(), "decode") is backend
+    assert validated == [expected]
+    # Explicit requirements still take precedence over automatic selection policy.
+    assert selection.select(gqa(), "decode", "flashinfer").name == "flashinfer_gqa_decode"
+    assert validated == [expected]
 
 
 @pytest.mark.parametrize("phase", selector.PHASES)

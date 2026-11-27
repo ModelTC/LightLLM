@@ -160,6 +160,29 @@ _REGISTRY: dict[type, Family] = {
 }
 
 
+class BackendSelector:
+    """Select and reuse backend instances while registering one model role."""
+
+    def __init__(self, args):
+        self.args = args
+        self._backends: dict[tuple, AttentionBackend] = {}
+        if args.enable_ep_moe:
+            logger.info("Expert parallelism with MoE enabled, excluding flashinfer from auto-selection")
+
+    def select(self, layer_config: Any, phase: str, required_backend: Optional[str] = None) -> AttentionBackend:
+        requested = required_backend or requested_backend(self.args, phase, layer_config)
+        key = (phase, layer_config, requested)
+        if key not in self._backends:
+            self._backends[key] = select(
+                layer_config,
+                phase,
+                requested,
+                priority=auto_priority(layer_config, phase, self.args.mtp_step),
+                excluded=("flashinfer",) if self.args.enable_ep_moe else (),
+            )
+        return self._backends[key]
+
+
 def _named_family(name: str) -> Family:
     for family in _REGISTRY.values():
         if family.name == name:

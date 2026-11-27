@@ -80,29 +80,18 @@ class AttentionBackendManager:
         groups = self.state_groups[role] = {phase: {} for phase in selector.PHASES}
         if not (states.get_full_attention_states(role) or states.get_bounded_attention_states(role)):
             return
-        if args.enable_ep_moe:
-            logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
-        selected: dict[tuple, AttentionBackend] = {}
+        selection = selector.BackendSelector(args)
         for layer in model.layers_infer:
             config = layer.attention_config(model)
-            for phase in selector.PHASES:
-                layer_config = getattr(config, phase)
+            for phase, layer_config, required_backend in (
+                ("prefill", config.prefill, config.prefill_backend_name),
+                ("decode", config.decode, config.decode_backend_name),
+            ):
                 if layer_config is None:
                     continue
-                requested = getattr(config, f"{phase}_backend_name") or selector.requested_backend(
-                    args, phase, layer_config
-                )
-                key = (phase, layer_config, requested)
-                if key not in selected:
-                    backend = selected[key] = selector.select(
-                        layer_config,
-                        phase,
-                        requested,
-                        priority=selector.auto_priority(layer_config, phase, args.mtp_step),
-                        excluded=("flashinfer",) if args.enable_ep_moe else (),
-                    )
-                    groups[phase].setdefault(backend.state_key, backend)
-                self._backends[role, phase, layer.layer_num_] = selected[key]
+                backend = selection.select(layer_config, phase, required_backend)
+                self._backends[role, phase, layer.layer_num_] = backend
+                groups[phase].setdefault(backend.state_key, backend)
 
         for phase, phase_groups in groups.items():
             if phase_groups:

@@ -46,7 +46,7 @@ GQA 层继承 `GQATransformerLayerInferTpl`（Llama、Bloom 及其派生模型�
 
 `AttentionBackendManager` 与 `AttentionStateManager` 的组织方式一致：主模型在 `prepare_attention_states` 中创建两个 manager，MTP 草稿模型引用同一实例；manager 内按模型角色（`att_state_role`，即 `main`、`draft0` … `draft35`）区分各模型，层按 `(角色, 阶段, 逻辑层号)` 查找 backend，与按 `(角色, 状态类型, 逻辑层号)` 查找 State 对应。
 
-- `register_backends(model)` 在 `init_runtime` 的 `_init_attention` 中为本角色调用一次，同一角色重复登记时报错。它从模型取得本角色的构建资源，再对每层调用 `attention_config(model)`，为每个阶段独立选择实现。同一角色内阶段、layer config 和请求的 backend 都相同的层共用实例；不同角色不共用实例，因为实例持有本角色的跨步存储和 CUDA graph 张量。某阶段的 layer config 为 `None` 时该层在此阶段不登记，例如 DFlash 草稿层只在 decode 计算。每个阶段的每个 `state_key` 由第一个选出的实例负责创建状态。没有 attention State 的角色（纯 FFN 草稿模型）不登记 backend，`has_attention(role)` 为假。
+- `register_backends(model)` 在 `init_runtime` 的 `_init_attention` 中为本角色调用一次，同一角色重复登记时报错。它从模型取得本角色的构建资源，再对每层调用 `attention_config(model)`，显式遍历 prefill 和 decode 配置，交给本次注册独有的 `BackendSelector(args)` 选择和复用 backend。selector 集中处理层指定名称、CLI、auto 优先级和 EP 排除规则，manager 保存层绑定和状态分组。同一角色内阶段、layer config 和最终请求的 backend 名称都相同的层共用实例；不同角色不共用实例，因为实例持有本角色的跨步存储和 CUDA graph 张量。某阶段的 layer config 为 `None` 时该层在此阶段不登记，例如 DFlash 草稿层只在 decode 计算。每个阶段的每个 `state_key` 由第一个选出的实例负责创建状态。没有 attention State 的角色（纯 FFN 草稿模型）不登记 backend，`has_attention(role)` 为假。
 - `get_backend(model_role, phase, logical_layer_id)` 返回该层在该阶段的 backend，层在每次调用 attention 时查找。
 - `create_att_state(infer_state)` 在每个 microbatch 对 `infer_state.att_state_role` 本阶段各组的代表实例调用一次 `backend.create_att_state`，返回 `{state_key: att_state}`。没有状态组的阶段返回空字典。
 - `requires_cpu_cache_sync`：是否有任一角色登记的实现不能与 CPU cache 搬运在 GPU 上并行。
@@ -160,7 +160,7 @@ backend.forward(att_state, layer_inputs, *, out, alloc_func=torch.empty) -> out
 - `--llm_kv_type` 决定 layer config 的 `kv_quant`，选择器只在接受该量化方式的实现中挑选。
 - `auto` 按优先级依次尝试：backend 能以该 layer config 构造（不抛出 `NotImplementedError`），且第三方库通过 `validate()`。先构造再验证，因为验证要启动子进程。都不满足时退回 Triton（不验证）。例如 Neo 的图像 span 不被 FlashInfer 支持，会被自动跳过。
 - 显式指定的实现不存在或不支持该配置时，在模型加载时抛出 `ValueError`，并列出各 backend 拒绝的原因。
-- EP MoE 排除 FlashInfer；有 MTP 时 decode 优先 FA3。
+- `auto` 选择时，EP MoE 排除 FlashInfer；有 MTP 时 decode 优先 FA3。显式指定的实现不受这两条自动选择规则影响。
 - 层可以用 `LayerAttentionConfig.prefill_backend_name` 和 `decode_backend_name` 分别指定实现。Bloom 和 Gemma4 的 GQA 层在两个阶段都指定 `triton`。GLM-5 和 MTP 草稿模型只在稀疏 MLA 分支指定 `flashmla_sparse`，KDA 分支使用命令行的 `kda.prefill` / `kda.decode`。
 
 ## 6. 分组与时序
@@ -228,7 +228,7 @@ sequenceDiagram
 ```text
 lightllm/common/attention/          # 不知道模型的存在
 ├── backend.py                      # 公共接口和类型：AttentionBackend、AttentionBuildResources
-├── selector.py                     # (LayerConfig, 阶段, 名称) → backend 实例
+├── selector.py                     # BackendSelector：选择规则与角色内的 backend 实例复用
 ├── backends/
 │   ├── __init__.py                 # require_positive、set_flashinfer_envs
 │   └── <family>/
